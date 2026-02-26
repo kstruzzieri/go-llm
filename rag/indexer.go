@@ -19,6 +19,12 @@ type Indexer struct {
 	chunker Chunker
 }
 
+// atomicSourceReplacer is an optional store capability for transactional
+// source replacement during re-indexing.
+type atomicSourceReplacer interface {
+	ReplaceSource(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64) error
+}
+
 // IndexerOption configures an Indexer.
 type IndexerOption func(*Indexer)
 
@@ -50,10 +56,30 @@ func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption)
 	return idx
 }
 
+func (idx *Indexer) replaceSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64) error {
+	if replacer, ok := idx.store.(atomicSourceReplacer); ok {
+		return replacer.ReplaceSource(ctx, path, chunks, embeddings)
+	}
+
+	// Best-effort fallback for custom stores that do not implement atomic replace.
+	// This preserves backwards compatibility with existing VectorStore
+	// implementations but is not transactional across delete + store.
+	if err := idx.store.DeleteBySource(ctx, path); err != nil {
+		return fmt.Errorf("delete old chunks: %w", err)
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	if err := idx.store.Store(ctx, chunks, embeddings); err != nil {
+		return fmt.Errorf("store chunks: %w", err)
+	}
+	return nil
+}
+
 // IndexFile indexes a single file: reads, chunks, embeds, and stores it.
-// Re-indexing is atomic: old chunks are only deleted after new chunks are
-// fully prepared (chunked + embedded). If embedding fails, existing data
-// is preserved.
+// Existing data is preserved if chunking or embedding fails.
+// If the underlying store supports atomic source replacement (SQLiteStore does),
+// re-indexing is transactional across delete + store.
 func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -62,6 +88,9 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 
 	content := string(data)
 	if content == "" {
+		if err := idx.replaceSource(ctx, path, nil, nil); err != nil {
+			return fmt.Errorf("rag: clear chunks for empty file %q: %w", path, err)
+		}
 		return nil
 	}
 
@@ -71,6 +100,9 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 		return fmt.Errorf("rag: chunk %q: %w", path, err)
 	}
 	if len(chunks) == 0 {
+		if err := idx.replaceSource(ctx, path, nil, nil); err != nil {
+			return fmt.Errorf("rag: clear chunks for %q with no chunk output: %w", path, err)
+		}
 		return nil
 	}
 
@@ -86,15 +118,9 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
 	}
 
-	// Step 3: Only now that we have new data ready, delete old and store new.
-	// Delete + Store should ideally be in a transaction; the SQLiteStore
-	// handles this via INSERT OR REPLACE, so we delete first then store.
-	if err := idx.store.DeleteBySource(ctx, path); err != nil {
-		return fmt.Errorf("rag: delete old chunks for %q: %w", path, err)
-	}
-
-	if err := idx.store.Store(ctx, chunks, embeddings); err != nil {
-		return fmt.Errorf("rag: store chunks for %q: %w", path, err)
+	// Step 3: Replace old chunks with new ones.
+	if err := idx.replaceSource(ctx, path, chunks, embeddings); err != nil {
+		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 
 	return nil

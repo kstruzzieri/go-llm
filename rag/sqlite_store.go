@@ -66,8 +66,7 @@ func initSchema(db *sql.DB) error {
 	return nil
 }
 
-// Store saves chunks with their embeddings to SQLite.
-func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]float64) error {
+func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 	if len(chunks) != len(embeddings) {
 		return fmt.Errorf("rag: store: chunks/embeddings length mismatch (%d vs %d)", len(chunks), len(embeddings))
 	}
@@ -84,16 +83,13 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 			return fmt.Errorf("rag: store: embedding dimension mismatch at index %d (expected %d, got %d)", i, dim, len(emb))
 		}
 	}
+	return nil
+}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("rag: begin transaction: %w", err)
-	}
-	defer tx.Rollback()
-
+func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64) error {
 	stmt, err := tx.PrepareContext(ctx,
 		`INSERT OR REPLACE INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}
@@ -113,9 +109,64 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 			return fmt.Errorf("rag: insert chunk %q: %w", chunk.ID, err)
 		}
 	}
+	return nil
+}
+
+// Store saves chunks with their embeddings to SQLite.
+func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]float64) error {
+	if err := validateStoreInputs(chunks, embeddings); err != nil {
+		return err
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("rag: begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+
+	if err := s.insertChunksTx(ctx, tx, chunks, embeddings); err != nil {
+		return err
+	}
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("rag: commit: %w", err)
+	}
+	return nil
+}
+
+// ReplaceSource atomically replaces all chunks for a source path.
+// If insertion fails, the delete is rolled back and existing data is preserved.
+func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64) error {
+	if err := validateStoreInputs(chunks, embeddings); err != nil {
+		return fmt.Errorf("rag: replace source %q: %w", source, err)
+	}
+	for i, chunk := range chunks {
+		if chunk.Source != source {
+			return fmt.Errorf("rag: replace source %q: chunk %d has source %q", source, i, chunk.Source)
+		}
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("rag: replace source %q: begin transaction: %w", source, err)
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
+		return fmt.Errorf("rag: replace source %q: delete existing chunks: %w", source, err)
+	}
+
+	if len(chunks) > 0 {
+		if err := s.insertChunksTx(ctx, tx, chunks, embeddings); err != nil {
+			return fmt.Errorf("rag: replace source %q: %w", source, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rag: replace source %q: commit: %w", source, err)
 	}
 	return nil
 }

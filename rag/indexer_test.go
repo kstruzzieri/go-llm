@@ -177,6 +177,45 @@ func TestIndexerPreservesDataOnEmbedFailure(t *testing.T) {
 	}
 }
 
+func TestIndexerReindexEmptyFileRemovesChunks(t *testing.T) {
+	srv := newMockEmbedServer(4)
+	defer srv.Close()
+
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	idx := NewIndexer(client, store, WithEmbeddingModel("test-embed"))
+
+	tmpDir := t.TempDir()
+	file := filepath.Join(tmpDir, "main.go")
+	if err := os.WriteFile(file, []byte("package main\n\nfunc main() {}\n"), 0644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	if err := idx.IndexFile(context.Background(), file); err != nil {
+		t.Fatalf("initial IndexFile() error: %v", err)
+	}
+
+	statsBefore, _ := store.Stats(context.Background())
+	if statsBefore.TotalChunks == 0 {
+		t.Fatal("expected chunks after initial indexing")
+	}
+
+	if err := os.WriteFile(file, []byte(""), 0644); err != nil {
+		t.Fatalf("truncate file: %v", err)
+	}
+
+	if err := idx.IndexFile(context.Background(), file); err != nil {
+		t.Fatalf("re-index empty file error: %v", err)
+	}
+
+	statsAfter, _ := store.Stats(context.Background())
+	if statsAfter.TotalChunks != 0 {
+		t.Errorf("expected 0 chunks after re-indexing empty file, got %d", statsAfter.TotalChunks)
+	}
+}
+
 func TestIndexerDuplicateContentDifferentPositions(t *testing.T) {
 	srv := newMockEmbedServer(4)
 	defer srv.Close()

@@ -173,3 +173,46 @@ func TestSQLiteStoreUpsert(t *testing.T) {
 		t.Errorf("expected content %q, got %q", "updated", results[0].Chunk.Content)
 	}
 }
+
+func TestSQLiteStoreReplaceSourceRollsBackOnInsertFailure(t *testing.T) {
+	vs := newTestStore(t)
+	store, ok := vs.(*SQLiteStore)
+	if !ok {
+		t.Fatal("expected *SQLiteStore")
+	}
+	ctx := context.Background()
+
+	// Seed existing data for the source.
+	initial := []Chunk{
+		{ID: "c1", Content: "original", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	if err := store.Store(ctx, initial, [][]float64{{1.0}}); err != nil {
+		t.Fatalf("seed Store() error: %v", err)
+	}
+
+	// NaN fails JSON marshaling, forcing ReplaceSource to error after DELETE has run.
+	replacement := []Chunk{
+		{ID: "c2", Content: "replacement", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	err := store.ReplaceSource(ctx, "a.go", replacement, [][]float64{{math.NaN()}})
+	if err == nil {
+		t.Fatal("expected ReplaceSource() to fail on NaN embedding")
+	}
+
+	// Existing data should still be present because delete+insert is transactional.
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats() error: %v", err)
+	}
+	if stats.TotalChunks != 1 {
+		t.Fatalf("expected 1 chunk after failed replace, got %d", stats.TotalChunks)
+	}
+
+	results, err := store.Search(ctx, []float64{1.0}, 1)
+	if err != nil {
+		t.Fatalf("Search() error: %v", err)
+	}
+	if len(results) != 1 || results[0].Chunk.Content != "original" {
+		t.Fatalf("expected original chunk to remain after failed replace, got %#v", results)
+	}
+}
