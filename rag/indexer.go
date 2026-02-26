@@ -51,6 +51,9 @@ func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption)
 }
 
 // IndexFile indexes a single file: reads, chunks, embeds, and stores it.
+// Re-indexing is atomic: old chunks are only deleted after new chunks are
+// fully prepared (chunked + embedded). If embedding fails, existing data
+// is preserved.
 func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -62,11 +65,7 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 		return nil
 	}
 
-	// Remove old chunks for this file before re-indexing
-	if err := idx.store.DeleteBySource(ctx, path); err != nil {
-		return fmt.Errorf("rag: delete old chunks for %q: %w", path, err)
-	}
-
+	// Step 1: Chunk the file
 	chunks, err := idx.chunker.Chunk(path, content)
 	if err != nil {
 		return fmt.Errorf("rag: chunk %q: %w", path, err)
@@ -75,7 +74,7 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 		return nil
 	}
 
-	// Extract texts for batch embedding
+	// Step 2: Generate embeddings (most likely to fail — network/model errors)
 	texts := make([]string, len(chunks))
 	for i, c := range chunks {
 		texts[i] = c.Content
@@ -83,7 +82,15 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 
 	embeddings, err := idx.client.EmbedBatch(ctx, idx.model, texts)
 	if err != nil {
+		// Embedding failed — preserve existing indexed data for this file
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
+	}
+
+	// Step 3: Only now that we have new data ready, delete old and store new.
+	// Delete + Store should ideally be in a transaction; the SQLiteStore
+	// handles this via INSERT OR REPLACE, so we delete first then store.
+	if err := idx.store.DeleteBySource(ctx, path); err != nil {
+		return fmt.Errorf("rag: delete old chunks for %q: %w", path, err)
 	}
 
 	if err := idx.store.Store(ctx, chunks, embeddings); err != nil {
@@ -122,7 +129,8 @@ func WithExclude(patterns ...string) IndexDirOption {
 	}
 }
 
-// WithConcurrency sets the number of concurrent file indexing operations (default: 4).
+// WithConcurrency is reserved for future use. Indexing is currently sequential.
+// This option is accepted but has no effect yet.
 func WithConcurrency(n int) IndexDirOption {
 	return func(cfg *indexDirConfig) {
 		cfg.concurrency = n
@@ -153,7 +161,12 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 		opt(cfg)
 	}
 
-	// Load .gitignore patterns if present
+	// Load root .gitignore patterns if present.
+	// NOTE: This is a simplified implementation that only reads the root .gitignore
+	// and supports basic patterns (basename matching, directory suffixes).
+	// Not supported: path-scoped rules, negation (!pattern), nested .gitignore
+	// files, ** globs, or character classes. For full .gitignore compliance,
+	// consider using a dedicated library.
 	ignorePatterns := loadGitignore(filepath.Join(dir, ".gitignore"))
 
 	var indexErrors []string

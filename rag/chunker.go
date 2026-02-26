@@ -95,14 +95,20 @@ func (sw *SlidingWindowChunker) Chunk(source string, content string) ([]Chunk, e
 			text := buf.String()
 			chunks = append(chunks, makeChunk(source, text, startLine, lineNum, ""))
 			buf.Reset()
-			// Backtrack for overlap
-			overlapStart := findOverlapStart(lines, lineNum, sw.overlap)
-			startLine = overlapStart + 1
-			for j := overlapStart; j <= i; j++ {
-				if buf.Len() > 0 {
-					buf.WriteString("\n")
+
+			if sw.overlap > 0 {
+				// Backtrack for overlap
+				overlapStart := findOverlapStart(lines, lineNum, sw.overlap)
+				startLine = overlapStart + 1
+				for j := overlapStart; j <= i; j++ {
+					if buf.Len() > 0 {
+						buf.WriteString("\n")
+					}
+					buf.WriteString(lines[j])
 				}
-				buf.WriteString(lines[j])
+			} else {
+				// No overlap — next chunk starts fresh at the next line
+				startLine = lineNum + 1
 			}
 		}
 	}
@@ -128,9 +134,11 @@ func findOverlapStart(lines []string, currentLine int, overlapChars int) int {
 }
 
 // makeChunk creates a Chunk with a deterministic ID.
+// startLine is included in the ID to distinguish identical content at different
+// positions within the same file.
 func makeChunk(source, content string, startLine, endLine int, lang string) Chunk {
 	return Chunk{
-		ID:        chunkID(source, content),
+		ID:        chunkID(source, content, startLine),
 		Content:   content,
 		Source:    source,
 		StartLine: startLine,
@@ -140,8 +148,10 @@ func makeChunk(source, content string, startLine, endLine int, lang string) Chun
 	}
 }
 
-// chunkID generates a deterministic ID from source and content.
-func chunkID(source, content string) string {
-	h := sha256.Sum256([]byte(source + "\x00" + content))
+// chunkID generates a deterministic ID from source, content, and position.
+// Including startLine ensures that identical text at different positions in the
+// same file produces distinct IDs.
+func chunkID(source, content string, startLine int) string {
+	h := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", source, startLine, content)))
 	return fmt.Sprintf("%x", h[:12])
 }

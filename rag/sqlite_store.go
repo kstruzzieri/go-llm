@@ -17,17 +17,25 @@ type SQLiteStore struct {
 }
 
 // NewSQLiteStore creates a vector store backed by SQLite.
-// Use ":memory:" for dbPath to create an in-memory database.
+// Use ":memory:" for dbPath to create an in-memory database (for testing).
 func NewSQLiteStore(dbPath string) (VectorStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("rag: open sqlite: %w", err)
 	}
 
-	// Enable WAL mode for better concurrent read performance
-	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("rag: set WAL mode: %w", err)
+	if dbPath == ":memory:" {
+		// In-memory databases: constrain to exactly 1 connection.
+		// With database/sql's connection pool, multiple connections to :memory:
+		// each create a separate database, causing missing schema/data.
+		db.SetMaxOpenConns(1)
+	} else {
+		// File-backed databases: enable WAL mode for better concurrent read performance.
+		// WAL is not meaningful for :memory: databases.
+		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("rag: set WAL mode: %w", err)
+		}
 	}
 
 	if err := initSchema(db); err != nil {

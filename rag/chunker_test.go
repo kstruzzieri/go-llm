@@ -188,20 +188,57 @@ func TestDetectLanguage(t *testing.T) {
 }
 
 func TestChunkIDDeterministic(t *testing.T) {
-	id1 := chunkID("file.go", "hello world")
-	id2 := chunkID("file.go", "hello world")
+	id1 := chunkID("file.go", "hello world", 1)
+	id2 := chunkID("file.go", "hello world", 1)
 	if id1 != id2 {
 		t.Errorf("chunkID not deterministic: %q != %q", id1, id2)
 	}
 
-	id3 := chunkID("file.go", "different content")
+	id3 := chunkID("file.go", "different content", 1)
 	if id1 == id3 {
 		t.Error("different content should produce different IDs")
 	}
 
-	id4 := chunkID("other.go", "hello world")
+	id4 := chunkID("other.go", "hello world", 1)
 	if id1 == id4 {
 		t.Error("different source should produce different IDs")
+	}
+}
+
+func TestChunkIDIncludesPosition(t *testing.T) {
+	// Same source and content at different positions must produce different IDs
+	id1 := chunkID("file.go", "return nil", 10)
+	id2 := chunkID("file.go", "return nil", 50)
+	if id1 == id2 {
+		t.Error("identical content at different positions should produce different IDs")
+	}
+}
+
+func TestSlidingWindowChunkerZeroOverlap(t *testing.T) {
+	sw, err := NewSlidingWindowChunker(50, 0)
+	if err != nil {
+		t.Fatalf("NewSlidingWindowChunker() error: %v", err)
+	}
+
+	// 5 lines of 15 chars each = 75 chars + 4 newlines = 79 chars
+	// With maxSize=50, should produce 2 chunks with NO overlapping content
+	content := "aaaaaaaaaaaaaaa\nbbbbbbbbbbbbbbb\nccccccccccccccc\nddddddddddddddd\neeeeeeeeeeeeeee"
+	chunks, err := sw.Chunk("test.txt", content)
+	if err != nil {
+		t.Fatalf("Chunk() error: %v", err)
+	}
+	if len(chunks) < 2 {
+		t.Fatalf("expected at least 2 chunks, got %d", len(chunks))
+	}
+
+	// Verify no content overlap between consecutive chunks
+	for i := 1; i < len(chunks); i++ {
+		prev := chunks[i-1]
+		curr := chunks[i]
+		if curr.StartLine <= prev.EndLine {
+			t.Errorf("chunk %d (lines %d-%d) overlaps with chunk %d (lines %d-%d)",
+				i, curr.StartLine, curr.EndLine, i-1, prev.StartLine, prev.EndLine)
+		}
 	}
 }
 

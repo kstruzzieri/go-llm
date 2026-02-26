@@ -133,6 +133,78 @@ func TestIndexerContextCancellation(t *testing.T) {
 	}
 }
 
+func TestIndexerPreservesDataOnEmbedFailure(t *testing.T) {
+	// First, index successfully with a working server
+	goodSrv := newMockEmbedServer(4)
+	defer goodSrv.Close()
+
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+
+	goodClient := ollama.NewClient(ollama.WithBaseURL(goodSrv.URL))
+	idx := NewIndexer(goodClient, store, WithEmbeddingModel("test-embed"))
+
+	testFile := filepath.Join("..", "testdata", "sample.go")
+	if err := idx.IndexFile(context.Background(), testFile); err != nil {
+		t.Fatalf("initial IndexFile() error: %v", err)
+	}
+
+	statsBefore, _ := store.Stats(context.Background())
+	if statsBefore.TotalChunks == 0 {
+		t.Fatal("expected chunks after initial indexing")
+	}
+
+	// Now try to re-index with a broken embed server
+	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"model not found"}`))
+	}))
+	defer badSrv.Close()
+
+	badClient := ollama.NewClient(ollama.WithBaseURL(badSrv.URL))
+	badIdx := NewIndexer(badClient, store, WithEmbeddingModel("nonexistent"))
+
+	err := badIdx.IndexFile(context.Background(), testFile)
+	if err == nil {
+		t.Fatal("expected error from broken embed server")
+	}
+
+	// Old data should still be intact
+	statsAfter, _ := store.Stats(context.Background())
+	if statsAfter.TotalChunks != statsBefore.TotalChunks {
+		t.Errorf("embed failure changed chunk count from %d to %d — data was lost",
+			statsBefore.TotalChunks, statsAfter.TotalChunks)
+	}
+}
+
+func TestIndexerDuplicateContentDifferentPositions(t *testing.T) {
+	srv := newMockEmbedServer(4)
+	defer srv.Close()
+
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	chunker, _ := NewSlidingWindowChunker(30, 0)
+	idx := NewIndexer(client, store, WithChunker(chunker), WithEmbeddingModel("test"))
+
+	// Create a file with duplicate lines that will end up in different chunks
+	tmpDir := t.TempDir()
+	content := "return nil\nreturn nil\nreturn nil\nreturn nil\nreturn nil\n"
+	os.WriteFile(filepath.Join(tmpDir, "dup.go"), []byte(content), 0644)
+
+	if err := idx.IndexFile(context.Background(), filepath.Join(tmpDir, "dup.go")); err != nil {
+		t.Fatalf("IndexFile() error: %v", err)
+	}
+
+	stats, _ := store.Stats(context.Background())
+	// With duplicate content at different positions, we should still get
+	// multiple chunks stored (not collapsed into one)
+	if stats.TotalChunks < 2 {
+		t.Errorf("expected multiple chunks for duplicate content, got %d", stats.TotalChunks)
+	}
+}
+
 func TestIndexerWithCustomChunker(t *testing.T) {
 	srv := newMockEmbedServer(4)
 	defer srv.Close()

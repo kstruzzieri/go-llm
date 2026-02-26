@@ -137,6 +137,10 @@ func (c *Client) doStream(ctx context.Context, path string, body any, fn func(js
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
+	// Increase buffer to 1MB to handle large streaming responses.
+	// The default 64KB limit can be exceeded by models returning large
+	// JSON chunks (e.g., long completions in a single streaming frame).
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
