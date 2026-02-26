@@ -1,1 +1,0 @@
-Review the current implementation plan and update it with the current status. Mark completed items, note any blockers or deviations, and identify the next steps to be worked on.
