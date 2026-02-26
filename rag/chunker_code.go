@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -41,14 +42,20 @@ func (c *codeChunker) Chunk(source string, content string) ([]Chunk, error) {
 
 	if lang == "" {
 		// Fall back to sliding window for unknown file types
-		sw := NewSlidingWindowChunker(c.maxSize, c.overlap)
+		sw, err := NewSlidingWindowChunker(c.maxSize, c.overlap)
+		if err != nil {
+			return nil, fmt.Errorf("rag: create fallback chunker for %q: %w", source, err)
+		}
 		return sw.Chunk(source, content)
 	}
 
 	chunks := c.splitByBoundaries(source, content, lang)
 	if len(chunks) == 0 {
 		// No boundaries found, fall back to sliding window
-		sw := NewSlidingWindowChunker(c.maxSize, c.overlap)
+		sw, err := NewSlidingWindowChunker(c.maxSize, c.overlap)
+		if err != nil {
+			return nil, fmt.Errorf("rag: create fallback chunker for %q: %w", source, err)
+		}
 		return sw.Chunk(source, content)
 	}
 

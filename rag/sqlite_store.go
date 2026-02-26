@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"math"
 	"sort"
-	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -63,6 +62,19 @@ func initSchema(db *sql.DB) error {
 func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]float64) error {
 	if len(chunks) != len(embeddings) {
 		return fmt.Errorf("rag: store: chunks/embeddings length mismatch (%d vs %d)", len(chunks), len(embeddings))
+	}
+	if len(chunks) == 0 {
+		return nil
+	}
+	// Validate all embeddings have the same dimension
+	dim := len(embeddings[0])
+	if dim == 0 {
+		return fmt.Errorf("rag: store: embedding dimension is 0")
+	}
+	for i, emb := range embeddings {
+		if len(emb) != dim {
+			return fmt.Errorf("rag: store: embedding dimension mismatch at index %d (expected %d, got %d)", i, dim, len(emb))
+		}
 	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -215,25 +227,4 @@ func cosineSimilarity(a, b []float64) float64 {
 	return dot / mag
 }
 
-// detectLanguageFromPath is a helper for the store to tag chunks.
-func detectLanguageFromPath(path string) string {
-	ext := ""
-	for i := len(path) - 1; i >= 0; i-- {
-		if path[i] == '.' {
-			ext = strings.ToLower(path[i:])
-			break
-		}
-	}
-	switch ext {
-	case ".go":
-		return "go"
-	case ".py":
-		return "python"
-	case ".ts", ".tsx":
-		return "typescript"
-	case ".js", ".jsx":
-		return "javascript"
-	default:
-		return ""
-	}
-}
+// detectLanguageFromPath is available in chunker_code.go as detectLanguage.

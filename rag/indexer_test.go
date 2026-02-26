@@ -141,7 +141,7 @@ func TestIndexerWithCustomChunker(t *testing.T) {
 	store, _ := NewSQLiteStore(":memory:")
 	defer store.Close()
 
-	chunker := NewSlidingWindowChunker(50, 10)
+	chunker, _ := NewSlidingWindowChunker(50, 10)
 	idx := NewIndexer(client, store, WithChunker(chunker))
 
 	testFile := filepath.Join("..", "testdata", "sample.go")

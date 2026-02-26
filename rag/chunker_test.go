@@ -7,8 +7,26 @@ import (
 	"testing"
 )
 
+func TestSlidingWindowChunkerInvalidConfig(t *testing.T) {
+	_, err := NewSlidingWindowChunker(0, 0)
+	if err == nil {
+		t.Error("expected error for maxSize=0")
+	}
+	_, err = NewSlidingWindowChunker(100, -1)
+	if err == nil {
+		t.Error("expected error for negative overlap")
+	}
+	_, err = NewSlidingWindowChunker(100, 100)
+	if err == nil {
+		t.Error("expected error for overlap >= maxSize")
+	}
+}
+
 func TestSlidingWindowChunker(t *testing.T) {
-	sw := NewSlidingWindowChunker(100, 20)
+	sw, err := NewSlidingWindowChunker(100, 20)
+	if err != nil {
+		t.Fatalf("NewSlidingWindowChunker() error: %v", err)
+	}
 
 	content := strings.Repeat("line of text\n", 20)
 	chunks, err := sw.Chunk("test.txt", content)
@@ -34,7 +52,7 @@ func TestSlidingWindowChunker(t *testing.T) {
 }
 
 func TestSlidingWindowChunkerEmpty(t *testing.T) {
-	sw := NewSlidingWindowChunker(100, 20)
+	sw, _ := NewSlidingWindowChunker(100, 20)
 	chunks, err := sw.Chunk("empty.txt", "")
 	if err != nil {
 		t.Fatalf("Chunk() error: %v", err)
@@ -45,7 +63,7 @@ func TestSlidingWindowChunkerEmpty(t *testing.T) {
 }
 
 func TestSlidingWindowChunkerSmallContent(t *testing.T) {
-	sw := NewSlidingWindowChunker(1000, 100)
+	sw, _ := NewSlidingWindowChunker(1000, 100)
 	chunks, err := sw.Chunk("small.txt", "short text")
 	if err != nil {
 		t.Fatalf("Chunk() error: %v", err)
@@ -135,7 +153,7 @@ func TestCodeChunkerFallsBackToSlidingWindow(t *testing.T) {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	chunker := NewCodeChunker(WithMaxChunkSize(200))
+	chunker := NewCodeChunker(WithMaxChunkSize(300), WithOverlap(50))
 	chunks, err := chunker.Chunk("plain.txt", string(content))
 	if err != nil {
 		t.Fatalf("Chunk() error: %v", err)

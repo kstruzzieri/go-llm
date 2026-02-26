@@ -156,9 +156,12 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 	// Load .gitignore patterns if present
 	ignorePatterns := loadGitignore(filepath.Join(dir, ".gitignore"))
 
-	return filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+	var indexErrors []string
+
+	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return nil // skip files we can't read
+			indexErrors = append(indexErrors, fmt.Sprintf("cannot access %q: %v", path, err))
+			return nil // continue indexing other files
 		}
 
 		if ctx.Err() != nil {
@@ -188,8 +191,20 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			return nil
 		}
 
-		return idx.IndexFile(ctx, path)
+		if err := idx.IndexFile(ctx, path); err != nil {
+			indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, err))
+		}
+		return nil
 	})
+
+	if walkErr != nil {
+		return fmt.Errorf("rag: walk directory %q: %w", dir, walkErr)
+	}
+	if len(indexErrors) > 0 {
+		return fmt.Errorf("rag: index directory %q completed with %d errors: %s",
+			dir, len(indexErrors), strings.Join(indexErrors, "; "))
+	}
+	return nil
 }
 
 // loadGitignore reads patterns from a .gitignore file.

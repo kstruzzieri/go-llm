@@ -8,6 +8,7 @@ import (
 	"strings"
 )
 
+
 // Chunk represents a segment of text suitable for embedding.
 type Chunk struct {
 	ID        string            // deterministic hash of content + source
@@ -55,21 +56,21 @@ func WithLanguage(lang string) ChunkerOption {
 }
 
 // NewSlidingWindowChunker creates a chunker that splits on character boundaries
-// with overlapping windows.
-func NewSlidingWindowChunker(maxSize, overlap int) *SlidingWindowChunker {
+// with overlapping windows. Returns an error if maxSize is <= 0 or overlap >= maxSize.
+func NewSlidingWindowChunker(maxSize, overlap int) (*SlidingWindowChunker, error) {
 	if maxSize <= 0 {
-		maxSize = 1500
+		return nil, fmt.Errorf("rag: maxSize must be > 0, got %d", maxSize)
 	}
 	if overlap < 0 {
-		overlap = 0
+		return nil, fmt.Errorf("rag: overlap must be >= 0, got %d", overlap)
 	}
 	if overlap >= maxSize {
-		overlap = maxSize / 4
+		return nil, fmt.Errorf("rag: overlap (%d) must be less than maxSize (%d)", overlap, maxSize)
 	}
 	return &SlidingWindowChunker{
 		maxSize: maxSize,
 		overlap: overlap,
-	}
+	}, nil
 }
 
 // Chunk splits content into overlapping sliding window chunks.

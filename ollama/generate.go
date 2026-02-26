@@ -8,6 +8,12 @@ import (
 
 // Generate sends a non-streaming text generation request and returns the full response.
 func (c *Client) Generate(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
+	if req.Model == "" {
+		return nil, fmt.Errorf("ollama: generate: model name is required")
+	}
+	if req.Prompt == "" {
+		return nil, fmt.Errorf("ollama: generate: prompt is required")
+	}
 	req.Stream = false
 	var resp GenerateResponse
 	if err := c.doJSON(ctx, "POST", "/api/generate", req, &resp); err != nil {
@@ -20,6 +26,15 @@ func (c *Client) Generate(ctx context.Context, req GenerateRequest) (*GenerateRe
 // The final chunk will have Done=true and include timing statistics.
 // If fn returns an error, streaming stops and that error is returned.
 func (c *Client) GenerateStream(ctx context.Context, req GenerateRequest, fn func(GenerateResponse) error) error {
+	if req.Model == "" {
+		return fmt.Errorf("ollama: generate stream: model name is required")
+	}
+	if req.Prompt == "" {
+		return fmt.Errorf("ollama: generate stream: prompt is required")
+	}
+	if fn == nil {
+		return fmt.Errorf("ollama: generate stream: callback function is required")
+	}
 	req.Stream = true
 	return c.doStream(ctx, "/api/generate", req, func(raw json.RawMessage) error {
 		var resp GenerateResponse
