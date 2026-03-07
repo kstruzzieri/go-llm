@@ -16,6 +16,11 @@ const (
 	defaultMaxTokens   = 128
 	defaultNumCtx      = 2048
 	defaultTemperature = 0.2
+
+	// fimTokenOverhead accounts for the 3 FIM special tokens in the context budget.
+	fimTokenOverhead = 3
+	// prefixBudgetPercent is the percentage of available context allocated to prefix.
+	prefixBudgetPercent = 75
 )
 
 // FIMRequest represents a Fill-in-the-Middle completion request.
@@ -98,13 +103,37 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 }
 
 // buildRequest constructs an Ollama GenerateRequest with FIM prompt format.
+// It enforces the context window budget by truncating prefix and suffix to fit
+// within num_ctx, reserving space for generation tokens and FIM special tokens.
 func (p *Provider) buildRequest(req FIMRequest) ollama.GenerateRequest {
 	maxTokens := req.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = defaultMaxTokens
 	}
 
-	prompt := fimPrefix + req.Prefix + fimSuffix + req.Suffix + fimMiddle
+	// Budget the context window: total - generation - FIM overhead
+	availableCtx := defaultNumCtx - maxTokens - fimTokenOverhead
+	if availableCtx < 0 {
+		availableCtx = 0
+	}
+	prefixBudget := availableCtx * prefixBudgetPercent / 100
+	suffixBudget := availableCtx - prefixBudget
+
+	// Reallocate unused budget: if one side is short, give its spare to the other
+	prefixTokens := EstimateTokens(req.Prefix)
+	suffixTokens := EstimateTokens(req.Suffix)
+	if prefixTokens < prefixBudget {
+		suffixBudget += prefixBudget - prefixTokens
+		prefixBudget = prefixTokens
+	} else if suffixTokens < suffixBudget {
+		prefixBudget += suffixBudget - suffixTokens
+		suffixBudget = suffixTokens
+	}
+
+	prefix := TruncateToTokens(req.Prefix, prefixBudget)
+	suffix := TruncateSuffixToTokens(req.Suffix, suffixBudget)
+
+	prompt := fimPrefix + prefix + fimSuffix + suffix + fimMiddle
 
 	return ollama.GenerateRequest{
 		Model:  p.model,
