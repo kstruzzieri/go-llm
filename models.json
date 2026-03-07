@@ -1,0 +1,50 @@
+{
+  "ollama": {
+    "base_url": "http://localhost:11434",
+    "timeout": "5m"
+  },
+  "models": {
+    "general": {
+      "name": "qwen3.5:27b",
+      "description": "General purpose — reasoning, conversation, multimodal (vision)",
+      "type": "dense",
+      "parameters": "27B",
+      "context_window": 256000
+    },
+    "fast": {
+      "name": "qwen3.5:35b-a3b",
+      "description": "MoE model — fast inference, agent/tool use, multimodal",
+      "type": "moe",
+      "parameters": "35B total / 3B active",
+      "context_window": 256000
+    },
+    "coding": {
+      "name": "qwen3-coder-next:latest",
+      "description": "Dedicated coding model — code generation, review, completion",
+      "type": "dense",
+      "parameters": "~32B",
+      "context_window": 131072
+    },
+    "lightweight": {
+      "name": "qwen3:8b",
+      "description": "Small and fast — simple tasks, low resource usage",
+      "type": "dense",
+      "parameters": "8B",
+      "context_window": 32768
+    },
+    "embedding": {
+      "name": "qwen3-embedding:8b",
+      "description": "Embedding model for RAG vector search",
+      "type": "embedding",
+      "parameters": "8B",
+      "dimensions": 4096
+    }
+  },
+  "defaults": {
+    "chat": "general",
+    "completion": "coding",
+    "embedding": "embedding",
+    "agent": "fast",
+    "analysis": "general"
+  }
+}
