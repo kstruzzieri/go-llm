@@ -4,7 +4,7 @@
 
 `go-llm` is a shared Go module providing Ollama LLM integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage.
 
-**Consumers:** Arc IDE (custom Wails IDE), Flux ML (Wails ML dev environment), Quantum Trader (Go+Python trading platform)
+**Consumers:** Firn IDE (custom Wails IDE), Flux ML (Wails ML dev environment), Quantum Trader (Go+Python trading platform)
 
 ## Architecture
 

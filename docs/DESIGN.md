@@ -1,13 +1,13 @@
 # Shared Go LLM Module — Design Document
 
 **Date:** 2026-02-25
-**Consumers:** Arc IDE, Flux ML, (future: Quantum Trader Go API)
+**Consumers:** Firn IDE, Flux ML, (future: Quantum Trader Go API)
 
 ---
 
 ## Overview
 
-A shared Go module providing Ollama integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage. Both Arc IDE and Flux ML are Wails apps that already use SQLite (Flux directly, Arc can add it), making this a natural shared dependency.
+A shared Go module providing Ollama integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage. Both Firn IDE and Flux ML are Wails apps that already use SQLite (Flux directly, Firn can add it), making this a natural shared dependency.
 
 ## Repository Structure
 
@@ -66,7 +66,7 @@ module github.com/kstruzzieri/go-llm
 Consumers reference it via local replace directives during development:
 
 ```go
-// arc-ide/go.mod
+// firn-ide/go.mod
 require github.com/kstruzzieri/go-llm v0.0.0
 replace github.com/kstruzzieri/go-llm => ../../go-llm
 
@@ -175,7 +175,7 @@ func (c *Client) IsAvailable(ctx context.Context) bool
 ```
 
 **Key design decisions:**
-- Streaming is first-class — both Arc IDE (inline completion) and Flux (live analysis) need it
+- Streaming is first-class — both Firn IDE (inline completion) and Flux (live analysis) need it
 - Context cancellation everywhere — user switches files mid-completion, cancel immediately
 - No global state — multiple clients can coexist (different timeout configs for completion vs analysis)
 
@@ -245,7 +245,7 @@ type StoreStats struct {
 // Uses the sqlite-vec extension if available, falls back to brute-force cosine.
 //
 // Why SQLite:
-// - Both Arc IDE and Flux ML already use or can trivially add SQLite
+// - Both Firn IDE and Flux ML already use or can trivially add SQLite
 // - Zero server dependency (unlike ChromaDB, Qdrant)
 // - Embedded, single-file, cross-platform
 // - For codebases < 100k chunks, brute-force cosine is fast enough (~50ms)
@@ -310,7 +310,7 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string
 
 ### `completion/` — IDE Completion Helpers
 
-Specifically for Arc IDE's inline code completion:
+Specifically for Firn IDE's inline code completion:
 
 ```go
 package completion
@@ -400,10 +400,10 @@ type AnomalyInfo struct {
 
 ## Integration Points
 
-### Arc IDE
+### Firn IDE
 
 ```go
-// arc-ide/internal/llm/service.go
+// firn-ide/internal/llm/service.go
 package llm
 
 import (
@@ -557,7 +557,7 @@ That's it. The Ollama client is pure `net/http`. Embeddings math is `math` stdli
 
 ### Phase 3: IDE Integration (Week 2)
 1. `completion/inline.go` — FIM completion
-2. Arc IDE `internal/llm/service.go` — Wails facade
+2. Firn IDE `internal/llm/service.go` — Wails facade
 3. Frontend bindings + CodeMirror integration
 4. Chat panel component
 

@@ -44,7 +44,7 @@ rag.NewIndexer(client, store, rag.WithEmbeddingModel("qwen3-embedding:8b"))
 completion.NewProvider(client, "qwen3-coder-next")
 ```
 
-Consumer applications (Arc IDE, Flux ML) can load `models.json` to make model selection user-configurable, but go-llm itself treats model names as plain strings.
+Consumer applications (Firn IDE, Flux ML) can load `models.json` to make model selection user-configurable, but go-llm itself treats model names as plain strings.
 
 ### Choosing a Model
 
@@ -205,6 +205,6 @@ go-llm/
 
 ## Consumers
 
-- **Arc IDE** — custom Wails IDE with code completion and chat
+- **Firn IDE** — custom Wails IDE with code completion and chat
 - **Flux ML** — Wails ML development environment
 - **Quantum Trader** — Go+Python trading platform with ML analysis
