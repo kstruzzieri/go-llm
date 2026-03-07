@@ -4,7 +4,7 @@ A guide to setting up and using go-llm with your local Ollama models.
 
 ## Prerequisites
 
-1. **Go 1.23+** installed
+1. **Go 1.24+** installed
 2. **Ollama** running locally — [install](https://ollama.com/download)
 3. Required models pulled (see [Model Configuration](#model-configuration))
 
