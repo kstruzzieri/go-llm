@@ -35,24 +35,16 @@ ollama pull qwen3-embedding:8b
 
 ## Model Configuration
 
-go-llm uses `models.json` at the project root to define available models and their roles. Users can modify this file to swap models without changing code.
+The `models.json` file at the project root is a **reference document** listing recommended models and their roles. It is not read by the library at runtime -- model names are passed explicitly when constructing clients, indexers, and retrievers:
 
-```json
-{
-  "models": {
-    "general": { "name": "qwen3.5:27b" },
-    "fast":    { "name": "qwen3.5:35b-a3b" },
-    "coding":  { "name": "qwen3-coder-next:latest" },
-    "embedding": { "name": "qwen3-embedding:8b" }
-  },
-  "defaults": {
-    "chat": "general",
-    "completion": "coding",
-    "embedding": "embedding",
-    "agent": "fast"
-  }
-}
+```go
+// Model names are explicit in your code
+client.Chat(ctx, ollama.ChatRequest{Model: "qwen3.5:27b", ...})
+rag.NewIndexer(client, store, rag.WithEmbeddingModel("qwen3-embedding:8b"))
+completion.NewProvider(client, "qwen3-coder-next")
 ```
+
+Consumer applications (Arc IDE, Flux ML) can load `models.json` to make model selection user-configurable, but go-llm itself treats model names as plain strings.
 
 ### Choosing a Model
 
@@ -66,18 +58,17 @@ go-llm uses `models.json` at the project root to define available models and the
 
 ### Swapping Models
 
-To use different models (e.g., Llama, Mistral, DeepSeek), edit `models.json`:
+To use different models (e.g., Llama, Mistral, DeepSeek), change the model name strings in your code:
 
-```json
-{
-  "models": {
-    "general": { "name": "llama3.3:70b" },
-    "coding":  { "name": "deepseek-coder-v3:33b" }
-  }
-}
+```go
+// Before
+client.Chat(ctx, ollama.ChatRequest{Model: "qwen3.5:27b", ...})
+
+// After
+client.Chat(ctx, ollama.ChatRequest{Model: "llama3.3:70b", ...})
 ```
 
-No code changes needed — just pull the models and update the config.
+Just pull the new model (`ollama pull llama3.3:70b`) and update the model name.
 
 ## Quick Start
 
@@ -199,7 +190,7 @@ go-llm/
 │   └── retriever.go   # Query embedding + context building
 ├── completion/    # IDE inline completions (planned)
 ├── analysis/      # Domain analysis helpers (planned)
-├── models.json    # Model configuration (user-editable)
+├── models.json    # Model reference (not loaded at runtime)
 └── docs/          # Documentation
 ```
 
