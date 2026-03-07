@@ -52,3 +52,29 @@ func TestTruncateToTokens(t *testing.T) {
 		})
 	}
 }
+
+func TestTruncateSuffixToTokens(t *testing.T) {
+	tests := []struct {
+		name      string
+		input     string
+		maxTokens int
+		want      string
+	}{
+		{name: "empty string", input: "", maxTokens: 10, want: ""},
+		{name: "zero tokens", input: "hello", maxTokens: 0, want: ""},
+		{name: "negative tokens", input: "hello", maxTokens: -1, want: ""},
+		{name: "within budget", input: "abcd", maxTokens: 1, want: "abcd"},
+		{name: "exact fit", input: "abcdefgh", maxTokens: 2, want: "abcdefgh"},
+		{name: "truncates to first chars", input: "0123456789abcd", maxTokens: 2, want: "01234567"},
+		{name: "single token budget", input: "hello world", maxTokens: 1, want: "hell"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := TruncateSuffixToTokens(tt.input, tt.maxTokens)
+			if got != tt.want {
+				t.Errorf("TruncateSuffixToTokens(%q, %d) = %q, want %q", tt.input, tt.maxTokens, got, tt.want)
+			}
+		})
+	}
+}

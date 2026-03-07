@@ -25,3 +25,17 @@ func TruncateToTokens(text string, maxTokens int) string {
 	}
 	return text[len(text)-maxChars:]
 }
+
+// TruncateSuffixToTokens truncates text to fit within the given token budget,
+// keeping the first (nearest to cursor) content. This is useful for suffix
+// context where the code immediately after the cursor is most relevant.
+func TruncateSuffixToTokens(text string, maxTokens int) string {
+	if maxTokens <= 0 {
+		return ""
+	}
+	maxChars := maxTokens * 4
+	if len(text) <= maxChars {
+		return text
+	}
+	return text[:maxChars]
+}

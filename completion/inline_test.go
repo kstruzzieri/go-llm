@@ -229,6 +229,64 @@ func TestCompleteModelOptions(t *testing.T) {
 	provider.Complete(context.Background(), FIMRequest{Prefix: "code"})
 }
 
+func TestCompleteContextTruncation(t *testing.T) {
+	// Create prefix and suffix that far exceed the context window budget.
+	// With num_ctx=2048, num_predict=128, FIM overhead=3, available=1917 tokens.
+	// At ~4 chars/token, that's ~7668 chars total (5748 prefix + 1920 suffix).
+	longPrefix := strings.Repeat("a", 30000) // way over budget
+	longSuffix := strings.Repeat("z", 10000) // way over budget
+
+	var capturedPrompt string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.GenerateRequest
+		json.NewDecoder(r.Body).Decode(&req)
+		capturedPrompt = req.Prompt
+
+		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	provider := NewProvider(client, "test-model")
+	provider.Complete(context.Background(), FIMRequest{
+		Prefix: longPrefix,
+		Suffix: longSuffix,
+	})
+
+	// The prompt should be much shorter than the raw inputs.
+	// Raw would be 40000+ chars; truncated should fit within budget.
+	// Available = 2048 - 128 - 3 = 1917 tokens * 4 chars = 7668 chars max for prefix+suffix.
+	// Plus FIM tokens themselves (~42 chars for the 3 token strings).
+	maxExpectedLen := 7668 + len("<|fim_prefix|>") + len("<|fim_suffix|>") + len("<|fim_middle|>")
+	if len(capturedPrompt) > maxExpectedLen {
+		t.Errorf("prompt length %d exceeds budget %d", len(capturedPrompt), maxExpectedLen)
+	}
+
+	// Verify prefix was truncated to keep the END (most recent code)
+	if !strings.HasSuffix(capturedPrompt, "<|fim_middle|>") {
+		t.Error("prompt should end with FIM middle token")
+	}
+	// The prefix portion should end with 'a's (kept from the end of longPrefix)
+	prefixStart := len("<|fim_prefix|>")
+	suffixTokenIdx := strings.Index(capturedPrompt, "<|fim_suffix|>")
+	truncatedPrefix := capturedPrompt[prefixStart:suffixTokenIdx]
+	if len(truncatedPrefix) >= len(longPrefix) {
+		t.Error("prefix should have been truncated")
+	}
+
+	// Verify suffix was truncated to keep the BEGINNING (nearest to cursor)
+	middleTokenIdx := strings.Index(capturedPrompt, "<|fim_middle|>")
+	truncatedSuffix := capturedPrompt[suffixTokenIdx+len("<|fim_suffix|>") : middleTokenIdx]
+	if len(truncatedSuffix) >= len(longSuffix) {
+		t.Error("suffix should have been truncated")
+	}
+	// Suffix should start with 'z's (kept from the beginning of longSuffix)
+	if len(truncatedSuffix) > 0 && truncatedSuffix[0] != 'z' {
+		t.Errorf("truncated suffix should start with 'z', got %q", truncatedSuffix[0:1])
+	}
+}
+
 func TestCompleteCustomMaxTokens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
