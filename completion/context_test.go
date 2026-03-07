@@ -41,6 +41,9 @@ func TestTruncateToTokens(t *testing.T) {
 		{name: "exact fit", input: "abcdefgh", maxTokens: 2, want: "abcdefgh"},
 		{name: "truncates to last chars", input: "0123456789abcd", maxTokens: 2, want: "6789abcd"},
 		{name: "single token budget", input: "hello world", maxTokens: 1, want: "orld"},
+		// "ab" + "世" (3 bytes) + "界" (3 bytes) = 8 bytes. Budget=1 token=4 bytes.
+		// Cut at byte 4 lands mid-rune in "界", so advance to byte 5 → keep "界".
+		{name: "utf8 rune boundary", input: "ab世界", maxTokens: 1, want: "界"},
 	}
 
 	for _, tt := range tests {
@@ -67,6 +70,9 @@ func TestTruncateSuffixToTokens(t *testing.T) {
 		{name: "exact fit", input: "abcdefgh", maxTokens: 2, want: "abcdefgh"},
 		{name: "truncates to first chars", input: "0123456789abcd", maxTokens: 2, want: "01234567"},
 		{name: "single token budget", input: "hello world", maxTokens: 1, want: "hell"},
+		// "世界abc" = 6+3 = 9 bytes. Budget=1 token=4 bytes.
+		// Cut at byte 4 would split "界" (bytes 3-5), so walk back to byte 3 → keep "世".
+		{name: "utf8 rune boundary", input: "世界abc", maxTokens: 1, want: "世"},
 	}
 
 	for _, tt := range tests {

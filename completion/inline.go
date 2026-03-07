@@ -119,6 +119,17 @@ func (p *Provider) buildRequest(req FIMRequest) ollama.GenerateRequest {
 	prefixBudget := availableCtx * prefixBudgetPercent / 100
 	suffixBudget := availableCtx - prefixBudget
 
+	// Reallocate unused budget: if one side is short, give its spare to the other
+	prefixTokens := EstimateTokens(req.Prefix)
+	suffixTokens := EstimateTokens(req.Suffix)
+	if prefixTokens < prefixBudget {
+		suffixBudget += prefixBudget - prefixTokens
+		prefixBudget = prefixTokens
+	} else if suffixTokens < suffixBudget {
+		prefixBudget += suffixBudget - suffixTokens
+		suffixBudget = suffixTokens
+	}
+
 	prefix := TruncateToTokens(req.Prefix, prefixBudget)
 	suffix := TruncateSuffixToTokens(req.Suffix, suffixBudget)
 
