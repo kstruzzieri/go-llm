@@ -3,10 +3,13 @@ package rag
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -263,5 +266,138 @@ func TestIndexerWithCustomChunker(t *testing.T) {
 	stats, _ := store.Stats(context.Background())
 	if stats.TotalChunks == 0 {
 		t.Error("expected chunks with custom chunker")
+	}
+}
+
+// newCountingEmbedServer returns a mock server that counts embed requests.
+func newCountingEmbedServer(dim int, counter *atomic.Int32) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/embed" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		counter.Add(1)
+		emb := make([]float64, dim)
+		emb[0] = 0.5
+		resp := ollama.EmbedResponse{Embeddings: [][]float64{emb}}
+		json.NewEncoder(w).Encode(resp)
+	}))
+}
+
+func TestIndexerConcurrentIndexDirectory(t *testing.T) {
+	var reqCount atomic.Int32
+	srv := newCountingEmbedServer(4, &reqCount)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+
+	idx := NewIndexer(client, store)
+
+	tmpDir := t.TempDir()
+	numFiles := 10
+	for i := 0; i < numFiles; i++ {
+		name := fmt.Sprintf("file%d.go", i)
+		content := fmt.Sprintf("package main\n\nfunc F%d() {}\n", i)
+		os.WriteFile(filepath.Join(tmpDir, name), []byte(content), 0644)
+	}
+
+	err := idx.IndexDirectory(context.Background(), tmpDir, WithConcurrency(3))
+	if err != nil {
+		t.Fatalf("IndexDirectory() error: %v", err)
+	}
+
+	stats, _ := store.Stats(context.Background())
+	if stats.TotalSources != numFiles {
+		t.Errorf("expected %d sources, got %d", numFiles, stats.TotalSources)
+	}
+	if int(reqCount.Load()) < numFiles {
+		t.Errorf("expected at least %d embed requests, got %d", numFiles, reqCount.Load())
+	}
+}
+
+func TestIndexerConcurrencyValidation(t *testing.T) {
+	srv := newMockEmbedServer(4)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+
+	idx := NewIndexer(client, store)
+
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+
+	// WithConcurrency(0) should not panic or deadlock — clamped to 1
+	if err := idx.IndexDirectory(context.Background(), tmpDir, WithConcurrency(0)); err != nil {
+		t.Fatalf("IndexDirectory with concurrency 0: %v", err)
+	}
+
+	// WithConcurrency(-1) should also work
+	if err := idx.IndexDirectory(context.Background(), tmpDir, WithConcurrency(-1)); err != nil {
+		t.Fatalf("IndexDirectory with concurrency -1: %v", err)
+	}
+}
+
+func TestIndexerConcurrentErrorAggregation(t *testing.T) {
+	// Server that always fails embedding
+	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error":"model not found"}`))
+	}))
+	defer failSrv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(failSrv.URL))
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+
+	idx := NewIndexer(client, store)
+
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("package b\n\nfunc B() {}\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "c.go"), []byte("package c\n\nfunc C() {}\n"), 0644)
+
+	err := idx.IndexDirectory(context.Background(), tmpDir, WithConcurrency(2))
+	if err == nil {
+		t.Fatal("expected error when all files fail embedding")
+	}
+
+	errMsg := err.Error()
+	if !strings.Contains(errMsg, "3 errors") {
+		t.Errorf("expected '3 errors' in message, got: %s", errMsg)
+	}
+}
+
+func TestIndexerConcurrentPartialFailure(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("test requires non-root user for permission-based errors")
+	}
+
+	srv := newMockEmbedServer(4)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+
+	idx := NewIndexer(client, store)
+
+	tmpDir := t.TempDir()
+	os.WriteFile(filepath.Join(tmpDir, "good.go"), []byte("package good\n\nfunc Good() {}\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "bad.go"), []byte("package bad\n"), 0644)
+	os.Chmod(filepath.Join(tmpDir, "bad.go"), 0000)
+
+	err := idx.IndexDirectory(context.Background(), tmpDir)
+	if err == nil {
+		t.Fatal("expected error for unreadable file")
+	}
+
+	// Good file should still be indexed despite bad file failure
+	stats, _ := store.Stats(context.Background())
+	if stats.TotalChunks == 0 {
+		t.Error("expected good file to be indexed despite bad file failure")
 	}
 }
