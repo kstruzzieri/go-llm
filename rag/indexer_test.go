@@ -387,8 +387,15 @@ func TestIndexerConcurrentPartialFailure(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	os.WriteFile(filepath.Join(tmpDir, "good.go"), []byte("package good\n\nfunc Good() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "bad.go"), []byte("package bad\n"), 0644)
-	os.Chmod(filepath.Join(tmpDir, "bad.go"), 0000)
+
+	badFile := filepath.Join(tmpDir, "bad.go")
+	os.WriteFile(badFile, []byte("package bad\n"), 0644)
+	os.Chmod(badFile, 0000)
+
+	// Verify the chmod actually prevents reading on this platform.
+	if _, err := os.ReadFile(badFile); err == nil {
+		t.Skip("platform does not enforce POSIX file permissions")
+	}
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err == nil {
