@@ -276,6 +276,9 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 		return fmt.Errorf("rag: index directory %q completed with %d errors: %s",
 			dir, len(indexErrors), strings.Join(indexErrors, "; "))
 	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("rag: index directory %q: %w", dir, ctx.Err())
+	}
 	return nil
 }
 
