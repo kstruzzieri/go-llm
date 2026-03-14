@@ -7,16 +7,22 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"golang.org/x/sync/errgroup"
 )
 
 // Indexer coordinates chunking, embedding, and storing documents.
+// Store writes are serialized internally via mutex, so multiple goroutines
+// may call IndexFile concurrently provided the injected Chunker and
+// VectorStore implementations are themselves safe for concurrent use.
 type Indexer struct {
 	client  *ollama.Client
 	model   string
 	store   VectorStore
 	chunker Chunker
+	storeMu sync.Mutex
 }
 
 // atomicSourceReplacer is an optional store capability for transactional
@@ -57,6 +63,9 @@ func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption)
 }
 
 func (idx *Indexer) replaceSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64) error {
+	idx.storeMu.Lock()
+	defer idx.storeMu.Unlock()
+
 	if replacer, ok := idx.store.(atomicSourceReplacer); ok {
 		return replacer.ReplaceSource(ctx, path, chunks, embeddings)
 	}
@@ -155,8 +164,8 @@ func WithExclude(patterns ...string) IndexDirOption {
 	}
 }
 
-// WithConcurrency is reserved for future use. Indexing is currently sequential.
-// This option is accepted but has no effect yet.
+// WithConcurrency sets the maximum number of files to index in parallel.
+// Defaults to 4. Values less than 1 are clamped to 1.
 func WithConcurrency(n int) IndexDirOption {
 	return func(cfg *indexDirConfig) {
 		cfg.concurrency = n
@@ -173,6 +182,7 @@ type IndexStatus struct {
 }
 
 // IndexDirectory indexes all supported files in a directory tree.
+// Files are processed concurrently (default: 4 workers).
 // It respects .gitignore patterns and can be cancelled via context.
 func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...IndexDirOption) error {
 	cfg := &indexDirConfig{
@@ -186,6 +196,9 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 	for _, opt := range opts {
 		opt(cfg)
 	}
+	if cfg.concurrency < 1 {
+		cfg.concurrency = 1
+	}
 
 	// Load root .gitignore patterns if present.
 	// NOTE: This is a simplified implementation that only reads the root .gitignore
@@ -195,19 +208,20 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 	// consider using a dedicated library.
 	ignorePatterns := loadGitignore(filepath.Join(dir, ".gitignore"))
 
-	var indexErrors []string
+	// Phase 1: Walk and collect eligible file paths.
+	var files []string
+	var walkErrors []string
 
 	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			indexErrors = append(indexErrors, fmt.Sprintf("cannot access %q: %v", path, err))
-			return nil // continue indexing other files
+			walkErrors = append(walkErrors, fmt.Sprintf("cannot access %q: %v", path, err))
+			return nil
 		}
 
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 
-		// Skip excluded directories
 		if info.IsDir() {
 			name := info.Name()
 			for _, excl := range cfg.exclude {
@@ -218,30 +232,54 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			return nil
 		}
 
-		// Check file extension
 		ext := strings.ToLower(filepath.Ext(path))
 		if !cfg.extensions[ext] {
 			return nil
 		}
 
-		// Check gitignore patterns
 		relPath, _ := filepath.Rel(dir, path)
 		if isIgnored(relPath, ignorePatterns) {
 			return nil
 		}
 
-		if err := idx.IndexFile(ctx, path); err != nil {
-			indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, err))
-		}
+		files = append(files, path)
 		return nil
 	})
 
 	if walkErr != nil {
 		return fmt.Errorf("rag: walk directory %q: %w", dir, walkErr)
 	}
+
+	// Phase 2: Index files concurrently.
+	var (
+		mu          sync.Mutex
+		indexErrors = append([]string{}, walkErrors...)
+	)
+
+	var g errgroup.Group
+	g.SetLimit(cfg.concurrency)
+
+	for _, path := range files {
+		if ctx.Err() != nil {
+			break
+		}
+		g.Go(func() error {
+			if err := idx.IndexFile(ctx, path); err != nil {
+				mu.Lock()
+				indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, err))
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+	g.Wait()
+
 	if len(indexErrors) > 0 {
 		return fmt.Errorf("rag: index directory %q completed with %d errors: %s",
 			dir, len(indexErrors), strings.Join(indexErrors, "; "))
+	}
+	if ctx.Err() != nil {
+		return fmt.Errorf("rag: index directory %q: %w", dir, ctx.Err())
 	}
 	return nil
 }

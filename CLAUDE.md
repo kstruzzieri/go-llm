@@ -25,8 +25,9 @@ module github.com/kstruzzieri/go-llm
 
 ## Dependencies
 
-Keep minimal. Only allowed external dependency:
+Keep minimal. Allowed external dependencies:
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
+- `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
 
 Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc.)
 
