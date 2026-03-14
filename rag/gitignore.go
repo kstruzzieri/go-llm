@@ -2,6 +2,8 @@ package rag
 
 import (
 	"bufio"
+	"errors"
+	"io/fs"
 	"os"
 	"path" // intentionally path (not path/filepath): matching uses slash-normalized strings
 	"strings"
@@ -76,7 +78,7 @@ func parsePattern(line string) (gitignorePattern, bool) {
 	dirOnly := false
 	if strings.HasSuffix(line, "/") {
 		dirOnly = true
-		line = strings.TrimRight(line, "/")
+		line = strings.TrimSuffix(line, "/")
 	}
 
 	// Rules 6-9: anchoring
@@ -188,7 +190,7 @@ func newGitignoreMatcher() *gitignoreMatcher {
 func (m *gitignoreMatcher) addFromFile(filePath string, baseDir string) error {
 	f, err := os.Open(filePath)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil
 		}
 		return err

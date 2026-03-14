@@ -246,16 +246,16 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			return nil
 		}
 
-		// Gitignore check (before extension filter)
+		ext := strings.ToLower(filepath.Ext(path))
+		if !cfg.extensions[ext] {
+			return nil
+		}
+
+		// Gitignore check (after cheap extension filter)
 		// filepath.Rel cannot fail here: both paths originate from the same filepath.Walk root.
 		relPath, _ := filepath.Rel(dir, path)
 		relPath = filepath.ToSlash(relPath)
 		if ignore.isIgnored(relPath, false) {
-			return nil
-		}
-
-		ext := strings.ToLower(filepath.Ext(path))
-		if !cfg.extensions[ext] {
 			return nil
 		}
 
@@ -300,5 +300,3 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 	}
 	return nil
 }
-
-
