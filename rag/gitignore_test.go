@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"os"
 	"testing"
 )
 
@@ -150,5 +151,200 @@ func TestGlobMatch(t *testing.T) {
 				t.Errorf("globMatch(%q, %q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestGitignoreMatcherIsIgnored(t *testing.T) {
+	tests := []struct {
+		name  string
+		rules []struct {
+			baseDir  string
+			patterns []string
+		}
+		path  string
+		isDir bool
+		want  bool
+	}{
+		// Basic ignore
+		{
+			name: "simple glob match",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"*.log"}},
+			},
+			path: "app.log", isDir: false, want: true,
+		},
+		{
+			name: "no match",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"*.log"}},
+			},
+			path: "app.go", isDir: false, want: false,
+		},
+
+		// Unanchored matches at any depth
+		{
+			name: "unanchored deep match",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"*.log"}},
+			},
+			path: "a/b/app.log", isDir: false, want: true,
+		},
+
+		// Anchored matches only at scope level
+		{
+			name: "anchored match",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"src/foo"}},
+			},
+			path: "src/foo", isDir: false, want: true,
+		},
+		{
+			name: "anchored no match elsewhere",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"src/foo"}},
+			},
+			path: "lib/src/foo", isDir: false, want: false,
+		},
+
+		// Negation
+		{
+			name: "negation un-ignores",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"*.log", "!important.log"}},
+			},
+			path: "important.log", isDir: false, want: false,
+		},
+		{
+			name: "negation does not affect others",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"*.log", "!important.log"}},
+			},
+			path: "debug.log", isDir: false, want: true,
+		},
+
+		// Directory-only
+		{
+			name: "dir-only matches dir",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"build/"}},
+			},
+			path: "build", isDir: true, want: true,
+		},
+		{
+			name: "dir-only skips file",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"build/"}},
+			},
+			path: "build", isDir: false, want: false,
+		},
+
+		// Nested .gitignore scoping
+		{
+			name: "nested rule applies within scope",
+			rules: []struct{ baseDir string; patterns []string }{
+				{"src", []string{"*.tmp"}},
+			},
+			path: "src/cache.tmp", isDir: false, want: true,
+		},
+		{
+			name: "nested rule does NOT affect sibling",
+			rules: []struct{ baseDir string; patterns []string }{
+				{"src", []string{"*.tmp"}},
+			},
+			path: "lib/cache.tmp", isDir: false, want: false,
+		},
+
+		// Leading **/ pattern
+		{
+			name: "leading doublestar",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"**/test"}},
+			},
+			path: "a/b/test", isDir: false, want: true,
+		},
+		{
+			name: "leading doublestar root",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"**/test"}},
+			},
+			path: "test", isDir: false, want: true,
+		},
+
+		// Last rule wins across files
+		{
+			name: "nested negation overrides parent",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"*.gen.go"}},
+				{"src", []string{"!important.gen.go"}},
+			},
+			path: "src/important.gen.go", isDir: false, want: false,
+		},
+		{
+			name: "nested re-ignore after parent negation",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"*.log", "!*.log"}},
+				{"src", []string{"*.log"}},
+			},
+			path: "src/debug.log", isDir: false, want: true,
+		},
+
+		// Leading slash anchoring
+		{
+			name: "leading slash root only",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"/build"}},
+			},
+			path: "build", isDir: false, want: true,
+		},
+		{
+			name: "leading slash no deep match",
+			rules: []struct{ baseDir string; patterns []string }{
+				{".", []string{"/build"}},
+			},
+			path: "src/build", isDir: false, want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			m := newGitignoreMatcher()
+			for _, r := range tt.rules {
+				for _, line := range r.patterns {
+					pat, ok := parsePattern(line)
+					if ok {
+						m.rules = append(m.rules, matchRule{pattern: pat, baseDir: r.baseDir})
+					}
+				}
+			}
+			got := m.isIgnored(tt.path, tt.isDir)
+			if got != tt.want {
+				t.Errorf("isIgnored(%q, isDir=%v) = %v, want %v", tt.path, tt.isDir, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestGitignoreMatcherAddFromFile(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Write a .gitignore file
+	gitignorePath := tmpDir + "/.gitignore"
+	content := "*.log\n# comment\n!important.log\nbuild/\n"
+	os.WriteFile(gitignorePath, []byte(content), 0644)
+
+	m := newGitignoreMatcher()
+	err := m.addFromFile(gitignorePath, ".")
+	if err != nil {
+		t.Fatalf("addFromFile() error: %v", err)
+	}
+
+	if len(m.rules) != 3 { // *.log, !important.log, build/
+		t.Errorf("expected 3 rules, got %d", len(m.rules))
+	}
+
+	// Missing file returns nil error
+	err = m.addFromFile(tmpDir+"/nonexistent", ".")
+	if err != nil {
+		t.Errorf("missing file should return nil, got: %v", err)
 	}
 }

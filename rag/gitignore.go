@@ -172,6 +172,71 @@ func globMatch(pattern, name string) bool {
 	return matched
 }
 
-// Suppress unused import warnings — these are used by later functions in this file.
-var _ = bufio.NewScanner
-var _ = os.Open
+// newGitignoreMatcher creates an empty matcher.
+func newGitignoreMatcher() *gitignoreMatcher {
+	return &gitignoreMatcher{}
+}
+
+// addFromFile parses a .gitignore file and appends its rules scoped to baseDir.
+// baseDir must be slash-normalized and repo-relative (e.g., "." for root, "src" for src/).
+// Returns nil if the file doesn't exist. Other read errors are returned.
+func (m *gitignoreMatcher) addFromFile(filePath string, baseDir string) error {
+	f, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		pat, ok := parsePattern(scanner.Text())
+		if !ok {
+			continue
+		}
+		m.rules = append(m.rules, matchRule{
+			pattern: pat,
+			baseDir: baseDir,
+		})
+	}
+	return scanner.Err()
+}
+
+// isIgnored checks if a slash-normalized repo-relative path should be ignored.
+// isDir indicates whether the path is a directory (for directory-only patterns).
+// Last matching rule wins — this is how negation works.
+func (m *gitignoreMatcher) isIgnored(relPath string, isDir bool) bool {
+	ignored := false
+	for _, rule := range m.rules {
+		// Directory-only patterns don't match files
+		if rule.pattern.dirOnly && !isDir {
+			continue
+		}
+
+		// Scope: pattern only applies to paths within baseDir
+		var matchPath string
+		if rule.baseDir == "." || rule.baseDir == "" {
+			matchPath = relPath
+		} else {
+			if !strings.HasPrefix(relPath, rule.baseDir+"/") {
+				continue
+			}
+			matchPath = relPath[len(rule.baseDir)+1:]
+		}
+
+		matched := false
+		if rule.pattern.anchored {
+			matched = globMatch(rule.pattern.pattern, matchPath)
+		} else {
+			// Unanchored: match against basename
+			matched = globMatch(rule.pattern.pattern, path.Base(matchPath))
+		}
+
+		if matched {
+			ignored = !rule.pattern.negation
+		}
+	}
+	return ignored
+}
