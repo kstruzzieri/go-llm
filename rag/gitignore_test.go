@@ -82,3 +82,73 @@ func TestParsePattern(t *testing.T) {
 		})
 	}
 }
+
+func TestGlobMatch(t *testing.T) {
+	tests := []struct {
+		pattern string
+		path    string
+		want    bool
+	}{
+		// Simple globs (no **)
+		{"*.log", "app.log", true},
+		{"*.log", "app.txt", false},
+		{"*.log", "dir/app.log", false}, // * does not match /
+		{"?.go", "a.go", true},
+		{"?.go", "ab.go", false},
+		{"[Mm]akefile", "Makefile", true},
+		{"[Mm]akefile", "makefile", true},
+		{"[Mm]akefile", "xakefile", false},
+		{"foo", "foo", true},
+		{"foo", "bar", false},
+
+		// Leading **/
+		{"**/foo", "foo", true},           // zero dirs
+		{"**/foo", "a/foo", true},         // one dir
+		{"**/foo", "a/b/foo", true},       // two dirs
+		{"**/foo", "a/b/c/foo", true},     // three dirs
+		{"**/foo", "bar", false},          // no match
+		{"**/*.go", "main.go", true},      // zero dirs with glob
+		{"**/*.go", "src/main.go", true},  // one dir with glob
+		{"**/*.go", "src/main.py", false}, // wrong ext
+
+		// Trailing /**
+		{"abc/**", "abc/x", true},
+		{"abc/**", "abc/x/y/z", true},
+		{"abc/**", "abc", false},    // dir itself not matched
+		{"abc/**", "abcd/x", false}, // not a prefix match
+
+		// Middle /**/
+		{"a/**/b", "a/b", true},       // zero dirs
+		{"a/**/b", "a/x/b", true},     // one dir
+		{"a/**/b", "a/x/y/b", true},   // two dirs
+		{"a/**/b", "a/x/y/z/b", true}, // three dirs
+		{"a/**/b", "b", false},        // missing prefix
+		{"a/**/b", "a/b/c", false},    // trailing mismatch
+		{"a/**/*.go", "a/main.go", true},
+		{"a/**/*.go", "a/b/c/main.go", true},
+		{"a/**/*.go", "a/b/c/main.py", false},
+
+		// Standalone **
+		{"**", "anything", true},
+		{"**", "a/b/c", true},
+
+		// No wildcards (literal)
+		{"src/foo", "src/foo", true},
+		{"src/foo", "src/bar", false},
+
+		// Malformed pattern
+		{"[unclosed", "x", false},
+
+		// Edge: empty path
+		{"*", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.pattern+"_vs_"+tt.path, func(t *testing.T) {
+			got := globMatch(tt.pattern, tt.path)
+			if got != tt.want {
+				t.Errorf("globMatch(%q, %q) = %v, want %v", tt.pattern, tt.path, got, tt.want)
+			}
+		})
+	}
+}

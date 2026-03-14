@@ -104,7 +104,74 @@ func parsePattern(line string) (gitignorePattern, bool) {
 	}, true
 }
 
+// globMatch matches a slash-normalized path against a gitignore glob pattern
+// with ** support. Returns false for malformed patterns.
+func globMatch(pattern, name string) bool {
+	if name == "" {
+		return false
+	}
+
+	// Standalone **
+	if pattern == "**" {
+		return true
+	}
+
+	// Leading **/
+	if strings.HasPrefix(pattern, "**/") {
+		rest := pattern[3:]
+		// Try matching the rest against the full name and every suffix
+		if globMatch(rest, name) {
+			return true
+		}
+		for i := 0; i < len(name); i++ {
+			if name[i] == '/' && i+1 < len(name) {
+				if globMatch(rest, name[i+1:]) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// Trailing /**
+	if strings.HasSuffix(pattern, "/**") {
+		prefix := pattern[:len(pattern)-3]
+		return strings.HasPrefix(name, prefix+"/")
+	}
+
+	// Middle /**/
+	if idx := strings.Index(pattern, "/**/"); idx >= 0 {
+		before := pattern[:idx]
+		after := pattern[idx+4:]
+
+		// Path must start with before + /
+		if !strings.HasPrefix(name, before+"/") {
+			return false
+		}
+		remaining := name[len(before)+1:]
+
+		// Try matching after against remaining and every suffix
+		if globMatch(after, remaining) {
+			return true
+		}
+		for i := 0; i < len(remaining); i++ {
+			if remaining[i] == '/' && i+1 < len(remaining) {
+				if globMatch(after, remaining[i+1:]) {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	// No ** — use path.Match for slash-aware globbing
+	matched, err := path.Match(pattern, name)
+	if err != nil {
+		return false
+	}
+	return matched
+}
+
 // Suppress unused import warnings — these are used by later functions in this file.
-var _ = path.Match
 var _ = bufio.NewScanner
 var _ = os.Open
