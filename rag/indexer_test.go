@@ -703,3 +703,35 @@ func TestIndexerGitignoreAlreadyIndexedFileSurvives(t *testing.T) {
 		t.Errorf("expected 2 sources still (already-indexed data preserved), got %d", statsAfter.TotalSources)
 	}
 }
+
+func TestIndexerGitignoreNegationInsideIgnoredDir(t *testing.T) {
+	srv := newMockEmbedServer(4)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, _ := NewSQLiteStore(":memory:")
+	defer store.Close()
+	idx := NewIndexer(client, store)
+
+	tmpDir := t.TempDir()
+
+	// Ignore build/ directory, then try to un-ignore a file inside it.
+	// The negation cannot work because SkipDir prevents the walk from reaching the file.
+	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n!build/keep.go\n"), 0644)
+
+	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	os.MkdirAll(filepath.Join(tmpDir, "build"), 0755)
+	os.WriteFile(filepath.Join(tmpDir, "build", "keep.go"), []byte("package build\n"), 0644)
+	os.WriteFile(filepath.Join(tmpDir, "build", "other.go"), []byte("package build\n"), 0644)
+
+	err := idx.IndexDirectory(context.Background(), tmpDir)
+	if err != nil {
+		t.Fatalf("IndexDirectory() error: %v", err)
+	}
+
+	stats, _ := store.Stats(context.Background())
+	// Only main.go — build/ dir is skipped entirely, negation of build/keep.go has no effect
+	if stats.TotalSources != 1 {
+		t.Errorf("expected 1 source (cannot un-ignore file inside ignored dir), got %d", stats.TotalSources)
+	}
+}

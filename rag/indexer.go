@@ -229,6 +229,7 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			}
 
 			// Second-pass: gitignore check
+			// filepath.Rel cannot fail here: both paths originate from the same filepath.Walk root.
 			relDir, _ := filepath.Rel(dir, path)
 			relDir = filepath.ToSlash(relDir)
 			if relDir != "." && ignore.isIgnored(relDir, true) {
@@ -246,6 +247,7 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 		}
 
 		// Gitignore check (before extension filter)
+		// filepath.Rel cannot fail here: both paths originate from the same filepath.Walk root.
 		relPath, _ := filepath.Rel(dir, path)
 		relPath = filepath.ToSlash(relPath)
 		if ignore.isIgnored(relPath, false) {

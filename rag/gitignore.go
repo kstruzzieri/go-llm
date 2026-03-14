@@ -3,7 +3,7 @@ package rag
 import (
 	"bufio"
 	"os"
-	"path"
+	"path" // intentionally path (not path/filepath): matching uses slash-normalized strings
 	"strings"
 )
 
@@ -51,6 +51,8 @@ func parsePattern(line string) (gitignorePattern, bool) {
 	}
 
 	// Rule 2: trailing spaces (unless escaped with \)
+	// Note: handles a single escaped trailing space (foo\ ). Multiple consecutive
+	// escaped trailing spaces (foo\ \ ) are not supported — exceedingly rare in practice.
 	for strings.HasSuffix(line, " ") && !strings.HasSuffix(line, `\ `) {
 		line = line[:len(line)-1]
 	}
@@ -106,6 +108,9 @@ func parsePattern(line string) (gitignorePattern, bool) {
 
 // globMatch matches a slash-normalized path against a gitignore glob pattern
 // with ** support. Returns false for malformed patterns.
+// Note: recursion depth is bounded by the number of ** segments in the pattern
+// times the number of / segments in the path. For real .gitignore patterns
+// (typically 1-2 ** segments) this is trivially small.
 func globMatch(pattern, name string) bool {
 	if name == "" {
 		return false
