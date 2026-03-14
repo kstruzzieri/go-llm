@@ -28,7 +28,7 @@ A self-contained gitignore matching engine with unexported types.
 // gitignorePattern represents a single parsed .gitignore rule.
 type gitignorePattern struct {
     original string // raw line from .gitignore (for debugging)
-    pattern  string // cleaned pattern (no leading !, no trailing /)
+    pattern  string // cleaned pattern (no leading !, no leading /, no trailing /)
     negation bool   // starts with ! -> un-ignores a previously ignored path
     dirOnly  bool   // ends with / -> only matches directories
     anchored bool   // contains / (other than trailing) -> match against full path
@@ -62,6 +62,7 @@ func (m *gitignoreMatcher) addFromFile(path string, baseDir string)
 func (m *gitignoreMatcher) isIgnored(relPath string, isDir bool) bool
 
 // globMatch matches a path against a gitignore glob pattern with ** support.
+// Returns false for malformed patterns (e.g., unclosed character classes).
 func globMatch(pattern, path string) bool
 ```
 
@@ -79,9 +80,11 @@ The walk phase gains gitignore awareness:
 1. Create `gitignoreMatcher` at start
 2. Load root `.gitignore` immediately
 3. During `filepath.Walk`:
-   - For each directory: check if ignored (SkipDir), check for nested `.gitignore` (append scoped rules)
-   - For each file: check if ignored, then check extension filter
+   - For each directory: (a) check `WithExclude` first, (b) check gitignore → SkipDir if ignored, (c) if NOT skipped, look for `.gitignore` inside and append scoped rules
+   - For each file: check if ignored by gitignore, then check extension filter
 4. Gitignore check runs AFTER `WithExclude` (hardcoded excludes) but BEFORE extension filtering
+
+**Note:** When a directory is skipped (via `WithExclude` or gitignore), its entire subtree — including any nested `.gitignore` files — is never visited. This matches git's behavior and is correct: if a directory is ignored, its contents and ignore rules are irrelevant.
 
 ## Pattern Parsing Rules
 
@@ -89,10 +92,12 @@ From `man gitignore`:
 
 1. Blank lines and comments (`#`) are skipped
 2. Trailing spaces are stripped (unless escaped with `\`)
-3. Leading `!` marks a negation pattern (un-ignores), then stripped
-4. Trailing `/` marks directory-only match, then stripped
-5. Pattern contains `/` (other than trailing) means anchored (match against relative path from `.gitignore` location)
-6. No `/` in pattern means unanchored (match against basename anywhere in the tree)
+3. Leading `\` escapes special characters: `\#` is a literal `#` (not a comment), `\!` is a literal `!` (not a negation)
+4. Leading `!` marks a negation pattern (un-ignores), then stripped
+5. Trailing `/` marks directory-only match, then stripped
+6. Leading `/` anchors the pattern to the `.gitignore` directory scope, then stripped. Example: `/build` matches only `build` at the `.gitignore` root, not `src/build`
+7. Pattern contains `/` (other than leading or trailing) means anchored (match against relative path from `.gitignore` location)
+8. No `/` in pattern means unanchored (match against basename anywhere in the tree)
 
 ## Glob Matching
 
@@ -103,11 +108,29 @@ Custom `globMatch` function extending `filepath.Match` with `**` support:
 | `*` | matches anything except `/` | `*.log` matches `app.log` |
 | `?` | matches single char except `/` | `?.go` matches `a.go` |
 | `[abc]` | character class | `[Mm]akefile` |
-| `**/` | leading — match in all directories | `**/logs` matches `a/logs`, `a/b/logs` |
+| `**/` | leading — match in all directories (including root) | `**/logs` matches `logs`, `a/logs`, `a/b/logs` |
 | `/**` | trailing — match everything inside | `abc/**` matches all under `abc/` |
 | `/**/` | middle — zero or more directories | `a/**/b` matches `a/b`, `a/x/b`, `a/x/y/b` |
 
-Implementation: split pattern on `/**/` segments and match each segment against path components recursively. For leading `**/`, match against all possible suffixes. For trailing `/**`, match prefix against path prefix.
+Implementation: split pattern on `/**/` segments and match each segment against path components recursively. For leading `**/`, strip it and attempt matching against every possible suffix of the path (including the full path for zero-directory match). For trailing `/**`, match the prefix against the path prefix. Malformed patterns (e.g., unclosed `[` brackets) return `false` (no match) rather than propagating an error — this is consistent with the "skip malformed patterns" error handling policy.
+
+### Worked examples for `globMatch`
+
+**Example 1: `**/test` matching `a/b/test`**
+1. Detect leading `**/` → strip, pattern becomes `test`
+2. Try suffix `a/b/test` → match `test` against `a/b/test`? No
+3. Try suffix `b/test` → match `test` against `b/test`? No
+4. Try suffix `test` → match `test` against `test`? Yes → return true
+
+**Example 2: `a/**/b` matching `a/x/y/b`**
+1. Split on `/**/` → segments: `["a", "b"]`
+2. Match segment `a` against path prefix → `a` matches, remaining path: `x/y/b`
+3. Match segment `b` against all suffixes of remaining: `x/y/b`, `y/b`, `b` → `b` matches → return true
+
+**Example 3: `a/**/b` matching `a/b` (zero intermediary directories)**
+1. Split on `/**/` → segments: `["a", "b"]`
+2. Match segment `a` against path prefix → `a` matches, remaining path: `b`
+3. Match segment `b` against remaining: `b` → matches → return true
 
 ## Match Precedence
 
@@ -141,7 +164,9 @@ Unit tests for the pattern matching engine in isolation:
 - Negation detection (`!pattern`)
 - Directory-only detection (`pattern/`)
 - Anchored vs unanchored detection (`src/foo` vs `foo`)
+- Leading `/` anchoring and stripping (`/build` → anchored, pattern `build`)
 - Trailing space stripping
+- Backslash escaping (`\#not-a-comment`, `\!literal-bang`)
 
 **Glob matching (`**` support):**
 - Leading `**/logs` matches `logs`, `a/logs`, `a/b/logs`
@@ -160,6 +185,10 @@ Unit tests for the pattern matching engine in isolation:
 **Anchored vs unanchored:**
 - `foo` matches `foo`, `a/foo`, `a/b/foo` (unanchored)
 - `src/foo` matches only `src/foo` (anchored)
+- `/build` matches only `build` at root (leading-slash anchoring)
+
+**`**` zero-directory edge case:**
+- `a/**/b` matches `a/b` (zero intermediary directories)
 
 ### Updated: `rag/indexer_test.go`
 
@@ -167,10 +196,12 @@ Integration tests with temp directories and nested `.gitignore` files:
 
 - Nested `.gitignore` scoping (root + subdirectory patterns both respected)
 - Negation in subdirectory un-ignores a file
+- Overlapping nested rules: nested `.gitignore` re-ignores something parent negated (last-rule-wins across files)
 - Directory skip (`build/` prevents walking entire subtree)
 - `WithExclude` takes priority over `.gitignore` negation
 - No `.gitignore` present (same behavior as before)
 - Path-scoped rules (`src/generated/` only ignores that specific path)
+- Nested `.gitignore` scoping does NOT affect sibling directories (e.g., `src/.gitignore` with `*.log` does NOT ignore `lib/debug.log`)
 
 ### Existing tests
 
