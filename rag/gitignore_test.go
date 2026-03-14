@@ -118,6 +118,14 @@ func TestGlobMatch(t *testing.T) {
 		{"abc/**", "abc", false},    // dir itself not matched
 		{"abc/**", "abcd/x", false}, // not a prefix match
 
+		// Trailing /** with glob prefix
+		{"build-*/**", "build-debug/output.go", true},
+		{"build-*/**", "build-debug/sub/output.go", true},
+		{"build-*/**", "other/output.go", false},
+		{"[Tt]mp/**", "Tmp/cache.dat", true},
+		{"[Tt]mp/**", "tmp/cache.dat", true},
+		{"[Tt]mp/**", "xmp/cache.dat", false},
+
 		// Middle /**/
 		{"a/**/b", "a/b", true},       // zero dirs
 		{"a/**/b", "a/x/b", true},     // one dir
@@ -128,6 +136,11 @@ func TestGlobMatch(t *testing.T) {
 		{"a/**/*.go", "a/main.go", true},
 		{"a/**/*.go", "a/b/c/main.go", true},
 		{"a/**/*.go", "a/b/c/main.py", false},
+
+		// Middle /**/ with glob prefix
+		{"build-*/**/output.go", "build-debug/output.go", true},
+		{"build-*/**/output.go", "build-debug/sub/deep/output.go", true},
+		{"build-*/**/output.go", "other/output.go", false},
 
 		// Standalone **
 		{"**", "anything", true},

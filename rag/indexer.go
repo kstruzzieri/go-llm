@@ -200,14 +200,16 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 	}
 
 	// Load .gitignore patterns. Nested .gitignore files are loaded during walk.
+	// Read errors are collected as walk errors (best-effort), matching the
+	// behavior for nested .gitignore files.
 	ignore := newGitignoreMatcher()
+	var walkErrors []string
 	if err := ignore.addFromFile(filepath.Join(dir, ".gitignore"), "."); err != nil {
-		return fmt.Errorf("rag: read root .gitignore in %q: %w", dir, err)
+		walkErrors = append(walkErrors, fmt.Sprintf("read root .gitignore in %q: %v", dir, err))
 	}
 
 	// Phase 1: Walk and collect eligible file paths.
 	var files []string
-	var walkErrors []string
 
 	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {

@@ -143,7 +143,17 @@ func globMatch(pattern, name string) bool {
 	// Trailing /**
 	if strings.HasSuffix(pattern, "/**") {
 		prefix := pattern[:len(pattern)-3]
-		return strings.HasPrefix(name, prefix+"/")
+		// The prefix may contain globs (e.g., "build-*/**"), so we must
+		// glob-match each possible directory prefix of the path.
+		for i := 0; i < len(name); i++ {
+			if name[i] == '/' {
+				matched, _ := path.Match(prefix, name[:i])
+				if matched {
+					return true
+				}
+			}
+		}
+		return false
 	}
 
 	// Middle /**/
@@ -151,20 +161,24 @@ func globMatch(pattern, name string) bool {
 		before := pattern[:idx]
 		after := pattern[idx+4:]
 
-		// Path must start with before + /
-		if !strings.HasPrefix(name, before+"/") {
-			return false
-		}
-		remaining := name[len(before)+1:]
-
-		// Try matching after against remaining and every suffix
-		if globMatch(after, remaining) {
-			return true
-		}
-		for i := 0; i < len(remaining); i++ {
-			if remaining[i] == '/' && i+1 < len(remaining) {
-				if globMatch(after, remaining[i+1:]) {
-					return true
+		// The before segment may contain globs, so try glob-matching it
+		// against each possible directory prefix of the path.
+		for i := 0; i < len(name); i++ {
+			if name[i] == '/' {
+				matched, _ := path.Match(before, name[:i])
+				if matched {
+					remaining := name[i+1:]
+					// Try matching after against remaining and every suffix
+					if globMatch(after, remaining) {
+						return true
+					}
+					for j := 0; j < len(remaining); j++ {
+						if remaining[j] == '/' && j+1 < len(remaining) {
+							if globMatch(after, remaining[j+1:]) {
+								return true
+							}
+						}
+					}
 				}
 			}
 		}
