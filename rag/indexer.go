@@ -14,7 +14,9 @@ import (
 )
 
 // Indexer coordinates chunking, embedding, and storing documents.
-// It is safe for concurrent use; store writes are serialized internally.
+// Store writes are serialized internally via mutex, so multiple goroutines
+// may call IndexFile concurrently provided the injected Chunker and
+// VectorStore implementations are themselves safe for concurrent use.
 type Indexer struct {
 	client  *ollama.Client
 	model   string
