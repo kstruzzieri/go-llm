@@ -143,12 +143,12 @@ func globMatch(pattern, name string) bool {
 	// Trailing /**
 	if strings.HasSuffix(pattern, "/**") {
 		prefix := pattern[:len(pattern)-3]
-		// The prefix may contain globs (e.g., "build-*/**"), so we must
-		// glob-match each possible directory prefix of the path.
+		// The prefix may contain globs or even /**/ (e.g., "build-*/**",
+		// "a/**/b/**"), so use globMatch recursively for each possible
+		// directory prefix of the path.
 		for i := 0; i < len(name); i++ {
 			if name[i] == '/' {
-				matched, _ := path.Match(prefix, name[:i])
-				if matched {
+				if globMatch(prefix, name[:i]) {
 					return true
 				}
 			}

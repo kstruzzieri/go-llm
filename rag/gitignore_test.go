@@ -126,6 +126,13 @@ func TestGlobMatch(t *testing.T) {
 		{"[Tt]mp/**", "tmp/cache.dat", true},
 		{"[Tt]mp/**", "xmp/cache.dat", false},
 
+		// Trailing /** with /**/ in the prefix
+		{"a/**/b/**", "a/b/out.go", true},         // zero dirs in /**/
+		{"a/**/b/**", "a/x/y/b/out.go", true},     // multiple dirs in /**/
+		{"a/**/b/**", "a/x/y/b/d/e/f.go", true},   // deep under b/
+		{"a/**/b/**", "a/b", false},                // b itself not matched (no trailing content)
+		{"a/**/b/**", "other/b/out.go", false},     // wrong prefix
+
 		// Middle /**/
 		{"a/**/b", "a/b", true},       // zero dirs
 		{"a/**/b", "a/x/b", true},     // one dir
