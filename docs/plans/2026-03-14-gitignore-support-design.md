@@ -15,6 +15,7 @@ Prevent `IndexDirectory` from indexing files the project's `.gitignore` says sho
 - NOT in scope: `.git/info/exclude`, global gitignore (`~/.config/git/ignore`)
 - No new external dependencies — pure Go stdlib implementation
 - No public API changes to `IndexDirectory`, `IndexDirOption`, or any exported types
+- Prospective filtering only: future `IndexDirectory` runs stop indexing ignored paths, but this issue does NOT retroactively purge already-indexed sources that have become ignored
 
 ## Architecture
 
@@ -31,13 +32,13 @@ type gitignorePattern struct {
     pattern  string // cleaned pattern (no leading !, no leading /, no trailing /)
     negation bool   // starts with ! -> un-ignores a previously ignored path
     dirOnly  bool   // ends with / -> only matches directories
-    anchored bool   // contains / (other than trailing) -> match against full path
+    anchored bool   // leading / or internal / -> match against scoped path from baseDir root
 }
 
 // matchRule pairs a pattern with the directory scope of its .gitignore file.
 type matchRule struct {
     pattern gitignorePattern
-    baseDir string // directory containing the .gitignore (for scoping)
+    baseDir string // slash-normalized repo-relative directory containing the .gitignore
 }
 
 // gitignoreMatcher holds a stack of rules from multiple .gitignore files.
@@ -53,8 +54,8 @@ type gitignoreMatcher struct {
 func newGitignoreMatcher() *gitignoreMatcher
 
 // addFromFile parses a .gitignore file and appends its rules scoped to baseDir.
-// Returns silently if the file doesn't exist or can't be read.
-func (m *gitignoreMatcher) addFromFile(path string, baseDir string)
+// Returns nil if the file doesn't exist. Read errors are returned to the caller.
+func (m *gitignoreMatcher) addFromFile(path string, baseDir string) error
 
 // isIgnored checks if a relative path should be ignored.
 // isDir indicates whether the path is a directory (for directory-only patterns).
@@ -80,11 +81,12 @@ The walk phase gains gitignore awareness:
 1. Create `gitignoreMatcher` at start
 2. Load root `.gitignore` immediately
 3. During `filepath.Walk`:
-   - For each directory: (a) check `WithExclude` first, (b) check gitignore → SkipDir if ignored, (c) if NOT skipped, look for `.gitignore` inside and append scoped rules
+   - For each path, compute the repo-relative path with `filepath.Rel`, then normalize it with `filepath.ToSlash` before matching
+   - For each directory: (a) check `WithExclude` first, (b) check gitignore final verdict for that directory and `SkipDir` only if still ignored after all currently loaded rules, (c) if NOT skipped, look for `.gitignore` inside and append scoped rules
    - For each file: check if ignored by gitignore, then check extension filter
 4. Gitignore check runs AFTER `WithExclude` (hardcoded excludes) but BEFORE extension filtering
 
-**Note:** When a directory is skipped (via `WithExclude` or gitignore), its entire subtree — including any nested `.gitignore` files — is never visited. This matches git's behavior and is correct: if a directory is ignored, its contents and ignore rules are irrelevant.
+**Note:** When a directory's final verdict is ignored (via `WithExclude` or gitignore), its entire subtree — including any nested `.gitignore` files — is never visited. This matches git's behavior: ancestor rules already loaded from parent `.gitignore` files can still un-ignore the directory itself (for example `!build/`), but a `.gitignore` inside a skipped directory is never consulted.
 
 ## Pattern Parsing Rules
 
@@ -96,12 +98,22 @@ From `man gitignore`:
 4. Leading `!` marks a negation pattern (un-ignores), then stripped
 5. Trailing `/` marks directory-only match, then stripped
 6. Leading `/` anchors the pattern to the `.gitignore` directory scope, then stripped. Example: `/build` matches only `build` at the `.gitignore` root, not `src/build`
-7. Pattern contains `/` (other than leading or trailing) means anchored (match against relative path from `.gitignore` location)
-8. No `/` in pattern means unanchored (match against basename anywhere in the tree)
+7. Leading `/` sets `anchored=true` even after the slash is stripped
+8. Pattern contains `/` (other than leading or trailing) also means anchored (match against relative path from `.gitignore` location)
+9. No `/` in pattern means unanchored (match against basename anywhere in the scoped tree)
+
+## Path Normalization
+
+Gitignore syntax is defined in terms of `/`, regardless of host OS. The matcher therefore works only with slash-normalized repo-relative paths:
+
+- `filepath.Walk`, `filepath.Rel`, and file I/O remain OS-native
+- Before any ignore check, `relPath` and rule `baseDir` are normalized with `filepath.ToSlash`
+- Matching logic uses slash semantics (`/`) consistently on all platforms
+- Helper code should use the `path` package for slash-based basename/dir handling where needed, not `filepath`
 
 ## Glob Matching
 
-Custom `globMatch` function extending `filepath.Match` with `**` support:
+Custom `globMatch` function implementing gitignore-style slash matching with `**` support. For segments without `**`, use `path.Match` semantics against slash-normalized strings:
 
 | Pattern | Meaning | Example |
 |---------|---------|---------|
@@ -147,11 +159,19 @@ Implementation: split pattern on `/**/` segments and match each segment against 
 - A negation pattern like `!vendor/important.go` CANNOT override `WithExclude("vendor")` — this is intentional since these are structural excludes the caller explicitly set
 - Matches current behavior — no breaking change
 
+## Interaction with Existing Indexed Data
+
+This change affects which files are considered for indexing during the current run; it does not scan the vector store for stale sources that have become ignored since a previous run.
+
+- If `foo/generated.go` was already indexed and later becomes ignored, a subsequent `IndexDirectory` run will skip re-indexing it, but will not delete its existing chunks
+- This preserves the current `VectorStore` surface area and keeps the implementation scoped to filesystem-side filtering
+- Callers that need exact store reconciliation after ignore-rule changes should rebuild the index from a clean store for now
+
 ## Error Handling
 
-- Missing `.gitignore` file: silently skip (current behavior)
+- Missing `.gitignore` file (`os.ErrNotExist`): silently skip (current behavior)
+- Permission or other read error opening `.gitignore`: return error from `addFromFile`; walk callback appends it to walk errors and continues indexing
 - Malformed pattern line: skip that line, continue parsing (lenient, matches git behavior)
-- Permission error reading nested `.gitignore`: append to walk errors, continue indexing
 
 ## Testing
 
@@ -174,10 +194,13 @@ Unit tests for the pattern matching engine in isolation:
 - Middle `a/**/b` matches `a/b`, `a/x/b`, `a/x/y/z/b`
 - Standard globs: `*.log`, `?.go`, `[Mm]akefile`
 - Edge cases: literal match (no wildcards), empty path
+- Path normalization: Windows-style relative paths are converted to slash form before matching
 
 **Precedence & negation:**
 - `*.log` then `!important.log` — `important.log` is NOT ignored
 - Later rule overrides earlier rule
+- `build/`, `!build/`, `!build/keep.go` — `build/keep.go` is NOT ignored
+- `build/`, `!build/keep.go` — `build/keep.go` remains ignored because the parent directory was never un-ignored
 
 **Directory-only patterns:**
 - `build/` ignores directory `build` but not file named `build`
@@ -198,10 +221,12 @@ Integration tests with temp directories and nested `.gitignore` files:
 - Negation in subdirectory un-ignores a file
 - Overlapping nested rules: nested `.gitignore` re-ignores something parent negated (last-rule-wins across files)
 - Directory skip (`build/` prevents walking entire subtree)
+- Directory un-ignore (`build/`, `!build/`) re-enables walking the subtree so descendant rules are evaluated normally
 - `WithExclude` takes priority over `.gitignore` negation
 - No `.gitignore` present (same behavior as before)
 - Path-scoped rules (`src/generated/` only ignores that specific path)
 - Nested `.gitignore` scoping does NOT affect sibling directories (e.g., `src/.gitignore` with `*.log` does NOT ignore `lib/debug.log`)
+- Already-indexed files that become ignored are left untouched on later runs (explicitly documenting the current scope)
 
 ### Existing tests
 
