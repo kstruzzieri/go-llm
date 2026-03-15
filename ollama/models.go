@@ -23,6 +23,20 @@ func (c *Client) ListModels(ctx context.Context) ([]ModelInfo, error) {
 	return models, nil
 }
 
+// AvailableModels returns the names of all models available in the Ollama instance.
+// This method satisfies the config.ModelChecker interface.
+func (c *Client) AvailableModels(ctx context.Context) ([]string, error) {
+	models, err := c.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, len(models))
+	for i, m := range models {
+		names[i] = m.Name
+	}
+	return names, nil
+}
+
 // ShowModel returns detailed information about a specific model.
 func (c *Client) ShowModel(ctx context.Context, name string) (*ModelInfo, error) {
 	body := struct {
