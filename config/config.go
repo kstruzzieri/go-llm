@@ -32,6 +32,9 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 	if err != nil {
 		return fmt.Errorf("config: invalid duration %q: %w", s, err)
 	}
+	if parsed < 0 {
+		return fmt.Errorf("config: duration must not be negative: %q", s)
+	}
 	d.Duration = parsed
 	return nil
 }
@@ -79,6 +82,9 @@ var validModelTypes = map[string]bool{
 // Embedding models can only fall back to other embedding models.
 // Dense and MoE models are interchangeable as fallbacks.
 func typeCompatible(fromType, toType string) bool {
+	if !validModelTypes[fromType] || !validModelTypes[toType] {
+		return false
+	}
 	if fromType == "embedding" || toType == "embedding" {
 		return fromType == "embedding" && toType == "embedding"
 	}
@@ -148,8 +154,11 @@ func (c *Config) ProviderFor(role string) *ProviderConfig {
 //
 // Returns a descriptive error if no configuration file is found at any location.
 func Default() (*Config, error) {
-	// 1. $GO_LLM_CONFIG env var.
-	if envPath := os.Getenv("GO_LLM_CONFIG"); envPath != "" {
+	// 1. $GO_LLM_CONFIG env var (if set and non-empty).
+	if envPath, ok := os.LookupEnv("GO_LLM_CONFIG"); ok {
+		if envPath == "" {
+			return nil, fmt.Errorf("config: GO_LLM_CONFIG is set but empty")
+		}
 		return Load(envPath)
 	}
 
@@ -280,6 +289,9 @@ func (cfg *Config) validate() error {
 
 		// Validate fallbacks.
 		for _, fb := range m.Fallbacks {
+			if fb == role {
+				return fmt.Errorf("config: model %q: lists itself as a fallback", role)
+			}
 			fbModel, ok := cfg.Models[fb]
 			if !ok {
 				return fmt.Errorf("config: model %q: fallback %q references unknown role", role, fb)

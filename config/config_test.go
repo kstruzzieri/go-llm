@@ -51,6 +51,11 @@ func TestDuration_UnmarshalJSON(t *testing.T) {
 			input:   `{"d":123}`,
 			wantErr: true,
 		},
+		{
+			name:    "negative",
+			input:   `{"d":"-5m"}`,
+			wantErr: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -261,6 +266,11 @@ func TestLoad_Validation(t *testing.T) {
 			wantErr: `config: model "x": fallback "e" has incompatible type`,
 		},
 		{
+			name:    "self-referencing fallback",
+			json:    `{"providers":{"ollama":{"base_url":"http://localhost:11434"}},"models":{"x":{"name":"m","type":"dense","fallbacks":["x"]}},"defaults":{}}`,
+			wantErr: `config: model "x": lists itself as a fallback`,
+		},
+		{
 			name: "circular fallback",
 			json: `{
 				"providers": {"ollama": {"base_url": "http://localhost:11434"}},
@@ -436,8 +446,8 @@ func TestDefault_WorkingDir(t *testing.T) {
 		t.Fatalf("failed to write models.json: %v", err)
 	}
 
-	// Clear env var so it doesn't take precedence.
-	t.Setenv("GO_LLM_CONFIG", "")
+	// Unset env var so it doesn't take precedence.
+	os.Unsetenv("GO_LLM_CONFIG")
 
 	// Chdir into the temp dir.
 	origDir, err := os.Getwd()
@@ -461,8 +471,8 @@ func TestDefault_WorkingDir(t *testing.T) {
 func TestDefault_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	// Clear env var.
-	t.Setenv("GO_LLM_CONFIG", "")
+	// Unset env var.
+	os.Unsetenv("GO_LLM_CONFIG")
 	// Set HOME to empty temp dir so ~/.config/go-llm/models.json won't be found.
 	t.Setenv("HOME", tmpDir)
 
@@ -482,6 +492,17 @@ func TestDefault_NotFound(t *testing.T) {
 	}
 	if !contains(err.Error(), "config: no configuration file found") {
 		t.Errorf("error = %q, want substring %q", err.Error(), "config: no configuration file found")
+	}
+}
+
+func TestDefault_EmptyEnvVar(t *testing.T) {
+	t.Setenv("GO_LLM_CONFIG", "")
+	_, err := Default()
+	if err == nil {
+		t.Fatal("expected error when GO_LLM_CONFIG is set but empty")
+	}
+	if !contains(err.Error(), "GO_LLM_CONFIG is set but empty") {
+		t.Errorf("error = %q, want substring about empty GO_LLM_CONFIG", err.Error())
 	}
 }
 
