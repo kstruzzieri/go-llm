@@ -101,6 +101,42 @@ func (c *Config) RoleConfig(role string) *ModelConfig {
 	return &m
 }
 
+// ModelFor resolves a use-case to a model name through the defaults chain.
+// It looks up useCase in Defaults to find the role, then looks up that role in Models
+// to return the model Name. Returns "" if the use-case or its target role is not found.
+func (c *Config) ModelFor(useCase string) string {
+	role, ok := c.Defaults[useCase]
+	if !ok {
+		return ""
+	}
+	m, ok := c.Models[role]
+	if !ok {
+		return ""
+	}
+	return m.Name
+}
+
+// MustModelFor is like ModelFor but panics if the use-case cannot be resolved.
+func (c *Config) MustModelFor(useCase string) string {
+	name := c.ModelFor(useCase)
+	if name == "" {
+		panic(fmt.Sprintf("config: no model for use-case %q", useCase))
+	}
+	return name
+}
+
+// ProviderFor returns the provider config for a given role's model.
+// It looks up the role in Models to find the Provider field (defaulted to "ollama"),
+// then returns the corresponding ProviderConfig. Returns nil if the role or its
+// provider is not found.
+func (c *Config) ProviderFor(role string) *ProviderConfig {
+	m, ok := c.Models[role]
+	if !ok {
+		return nil
+	}
+	return c.Provider(m.Provider)
+}
+
 // Load reads a models.json file from path, parses it, applies defaults, and validates.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)

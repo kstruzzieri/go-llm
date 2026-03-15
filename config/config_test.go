@@ -287,3 +287,109 @@ func TestLoad_Validation(t *testing.T) {
 		})
 	}
 }
+
+func TestModelFor(t *testing.T) {
+	cfg, err := Load("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tests := []struct {
+		useCase string
+		want    string
+	}{
+		{"chat", "qwen3.5:27b"},
+		{"completion", "qwen3-coder-next:latest"},
+		{"embedding", "qwen3-embedding:8b"},
+		{"agent", "qwen3.5:35b-a3b"},
+		{"analysis", "qwen3.5:27b"},
+		{"unknown", ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.useCase, func(t *testing.T) {
+			got := cfg.ModelFor(tt.useCase)
+			if got != tt.want {
+				t.Errorf("ModelFor(%q) = %q, want %q", tt.useCase, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMustModelFor_Panics(t *testing.T) {
+	cfg, err := Load("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected MustModelFor(\"unknown\") to panic")
+		}
+	}()
+
+	cfg.MustModelFor("unknown")
+}
+
+func TestRoleConfig(t *testing.T) {
+	cfg, err := Load("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify embedding role returns Dimensions=4096.
+	rc := cfg.RoleConfig("embedding")
+	if rc == nil {
+		t.Fatal("expected RoleConfig(\"embedding\") to be non-nil")
+	}
+	if rc.Dimensions != 4096 {
+		t.Errorf("Dimensions = %d, want 4096", rc.Dimensions)
+	}
+
+	// Nonexistent role returns nil.
+	if cfg.RoleConfig("nonexistent") != nil {
+		t.Error("expected RoleConfig(\"nonexistent\") to be nil")
+	}
+}
+
+func TestProvider(t *testing.T) {
+	cfg, err := Load("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify "ollama" returns correct BaseURL.
+	p := cfg.Provider("ollama")
+	if p == nil {
+		t.Fatal("expected Provider(\"ollama\") to be non-nil")
+	}
+	if p.BaseURL != "http://localhost:11434" {
+		t.Errorf("BaseURL = %q, want %q", p.BaseURL, "http://localhost:11434")
+	}
+
+	// Nonexistent provider returns nil.
+	if cfg.Provider("nonexistent") != nil {
+		t.Error("expected Provider(\"nonexistent\") to be nil")
+	}
+}
+
+func TestProviderFor(t *testing.T) {
+	cfg, err := Load("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify "general" role resolves to the ollama provider.
+	p := cfg.ProviderFor("general")
+	if p == nil {
+		t.Fatal("expected ProviderFor(\"general\") to be non-nil")
+	}
+	if p.BaseURL != "http://localhost:11434" {
+		t.Errorf("BaseURL = %q, want %q", p.BaseURL, "http://localhost:11434")
+	}
+
+	// Nonexistent role returns nil.
+	if cfg.ProviderFor("nonexistent") != nil {
+		t.Error("expected ProviderFor(\"nonexistent\") to be nil")
+	}
+}
