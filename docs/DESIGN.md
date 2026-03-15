@@ -31,6 +31,12 @@ projects/
 │   │   ├── models.go                    # Model listing, info, pull, delete
 │   │   └── models_test.go
 │   │
+│   ├── config/                          # Model configuration loader
+│   │   ├── config.go                    # Types, Load, ModelFor, Provider lookups
+│   │   ├── config_test.go
+│   │   ├── resolve.go                   # ModelChecker interface, Resolve, ResolveAll
+│   │   └── resolve_test.go
+│   │
 │   ├── rag/                             # RAG (Retrieval Augmented Generation)
 │   │   ├── chunker.go                   # Text chunking strategies
 │   │   ├── chunker_test.go

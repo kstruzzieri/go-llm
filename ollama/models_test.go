@@ -105,6 +105,53 @@ func TestPullModel(t *testing.T) {
 	}
 }
 
+func TestAvailableModels(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != http.MethodGet {
+			t.Errorf("expected GET, got %s", r.Method)
+		}
+		resp := listModelsResponse{
+			Models: []listModelEntry{
+				{Name: "qwen3.5:27b", Size: 15000000000},
+				{Name: "qwen3:8b", Size: 5000000000},
+			},
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	names, err := c.AvailableModels(context.Background())
+	if err != nil {
+		t.Fatalf("AvailableModels() error: %v", err)
+	}
+	if len(names) != 2 {
+		t.Fatalf("expected 2 names, got %d", len(names))
+	}
+	if names[0] != "qwen3.5:27b" {
+		t.Errorf("expected name %q, got %q", "qwen3.5:27b", names[0])
+	}
+	if names[1] != "qwen3:8b" {
+		t.Errorf("expected name %q, got %q", "qwen3:8b", names[1])
+	}
+}
+
+func TestAvailableModelsServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	_, err := c.AvailableModels(context.Background())
+	if err == nil {
+		t.Fatal("expected error for 503 response")
+	}
+}
+
 func TestListModelsServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusServiceUnavailable)

@@ -57,11 +57,11 @@ func NewProvider(client *ollama.Client, model string) *Provider {
 
 // Complete generates an inline completion synchronously.
 func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, error) {
+	if p.client == nil {
+		return nil, fmt.Errorf("completion: client is required")
+	}
 	if p.model == "" {
 		return nil, fmt.Errorf("completion: model is required")
-	}
-	if req.Prefix == "" {
-		return nil, fmt.Errorf("completion: prefix is required")
 	}
 
 	genReq := p.buildRequest(req)
@@ -82,11 +82,11 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 // CompleteStream generates a streaming inline completion, calling fn for each token.
 // If fn returns an error, streaming stops and that error is returned.
 func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(token string) error) error {
+	if p.client == nil {
+		return fmt.Errorf("completion: client is required")
+	}
 	if p.model == "" {
 		return fmt.Errorf("completion: model is required")
-	}
-	if req.Prefix == "" {
-		return fmt.Errorf("completion: prefix is required")
 	}
 	if fn == nil {
 		return fmt.Errorf("completion: callback function is required")

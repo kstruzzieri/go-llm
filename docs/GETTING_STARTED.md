@@ -35,16 +35,34 @@ ollama pull qwen3-embedding:8b
 
 ## Model Configuration
 
-The `models.json` file at the project root is a **reference document** listing recommended models and their roles. It is not read by the library at runtime -- model names are passed explicitly when constructing clients, indexers, and retrievers:
+The `models.json` file at the project root configures which models are used for each task. Load it with the `config` package:
 
 ```go
-// Model names are explicit in your code
-client.Chat(ctx, ollama.ChatRequest{Model: "qwen3.5:27b", ...})
-rag.NewIndexer(client, store, rag.WithEmbeddingModel("qwen3-embedding:8b"))
-completion.NewProvider(client, "qwen3-coder-next")
+import "github.com/kstruzzieri/go-llm/config"
+
+cfg := config.MustLoad("models.json")
+
+// Resolve model names by use-case
+chatModel := cfg.MustModelFor("chat")           // "qwen3.5:27b"
+codeModel := cfg.MustModelFor("completion")      // "qwen3-coder-next:latest"
+embedModel := cfg.MustModelFor("embedding")      // "qwen3-embedding:8b"
+
+// Get provider connection info
+providerCfg := cfg.Provider("ollama")
+client := ollama.NewClient(ollama.WithBaseURL(providerCfg.BaseURL))
 ```
 
-Consumer applications (Firn IDE, Flux ML) can load `models.json` to make model selection user-configurable, but go-llm itself treats model names as plain strings.
+Models are organized by **role** (general, coding, embedding, etc.) with a **defaults** map linking use-cases to roles. Each model can specify **fallbacks** — if the preferred model isn't available in Ollama, the config resolver will try alternatives automatically:
+
+```go
+// Check availability and fall back if needed
+resolved, err := cfg.Resolve(ctx, client, "chat")
+if resolved.IsFallback {
+    log.Printf("using fallback model %s instead of primary", resolved.Name)
+}
+```
+
+Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to discover `models.json` automatically.
 
 ### Choosing a Model
 
@@ -58,17 +76,17 @@ Consumer applications (Firn IDE, Flux ML) can load `models.json` to make model s
 
 ### Swapping Models
 
-To use different models (e.g., Llama, Mistral, DeepSeek), change the model name strings in your code:
+To use different models, edit `models.json`:
 
-```go
-// Before
-client.Chat(ctx, ollama.ChatRequest{Model: "qwen3.5:27b", ...})
-
-// After
-client.Chat(ctx, ollama.ChatRequest{Model: "llama3.3:70b", ...})
+```json
+"general": {
+  "name": "llama3.3:70b",
+  "type": "dense",
+  ...
+}
 ```
 
-Just pull the new model (`ollama pull llama3.3:70b`) and update the model name.
+Pull the new model (`ollama pull llama3.3:70b`) and restart your application.
 
 ## Quick Start
 
@@ -190,7 +208,8 @@ go-llm/
 │   └── retriever.go   # Query embedding + context building
 ├── completion/    # IDE inline completions (planned)
 ├── analysis/      # Domain analysis helpers (planned)
-├── models.json    # Model reference (not loaded at runtime)
+├── config/        # Model configuration loader (models.json)
+├── models.json    # Model configuration (loaded by config package)
 └── docs/          # Documentation
 ```
 

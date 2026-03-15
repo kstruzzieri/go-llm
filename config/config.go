@@ -1,0 +1,364 @@
+// Package config loads and validates model configuration from models.json,
+// providing model name resolution, provider lookups, and fallback chain walking.
+package config
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"time"
+)
+
+// Duration wraps time.Duration with JSON marshal/unmarshal support.
+// It expects JSON strings in Go duration format (e.g. "5m", "30s", "1h30m").
+type Duration struct {
+	time.Duration
+}
+
+// UnmarshalJSON parses a quoted string as a Go duration.
+// Returns an error for empty strings, non-string values, or invalid duration formats.
+func (d *Duration) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("config: duration must be a string: %w", err)
+	}
+	if s == "" {
+		return fmt.Errorf("config: duration must not be empty")
+	}
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("config: invalid duration %q: %w", s, err)
+	}
+	if parsed < 0 {
+		return fmt.Errorf("config: duration must not be negative: %q", s)
+	}
+	d.Duration = parsed
+	return nil
+}
+
+// MarshalJSON returns the duration as a quoted string (e.g. "5m0s").
+func (d Duration) MarshalJSON() ([]byte, error) {
+	return json.Marshal(d.Duration.String())
+}
+
+// ProviderConfig holds connection settings for an LLM provider (e.g. Ollama, vLLM).
+type ProviderConfig struct {
+	BaseURL   string   `json:"base_url"`
+	Timeout   Duration `json:"timeout"`
+	APIKey    string   `json:"api_key,omitempty"`
+	APIFormat string   `json:"api_format,omitempty"`
+}
+
+// ModelConfig describes a model's identity, capabilities, and fallback chain.
+type ModelConfig struct {
+	Name          string   `json:"name"`
+	Provider      string   `json:"provider,omitempty"`
+	Description   string   `json:"description,omitempty"`
+	Type          string   `json:"type"`
+	Parameters    string   `json:"parameters,omitempty"`
+	ContextWindow int      `json:"context_window,omitempty"`
+	Dimensions    int      `json:"dimensions,omitempty"`
+	Fallbacks     []string `json:"fallbacks,omitempty"`
+}
+
+// Config is the top-level configuration loaded from models.json.
+type Config struct {
+	Providers map[string]ProviderConfig `json:"providers"`
+	Models    map[string]ModelConfig    `json:"models"`
+	Defaults  map[string]string         `json:"defaults"`
+}
+
+// validModelTypes enumerates the allowed values for ModelConfig.Type.
+var validModelTypes = map[string]bool{
+	"dense":     true,
+	"moe":       true,
+	"embedding": true,
+}
+
+// typeCompatible reports whether a model of fromType can fall back to a model of toType.
+// Embedding models can only fall back to other embedding models.
+// Dense and MoE models are interchangeable as fallbacks.
+func typeCompatible(fromType, toType string) bool {
+	if !validModelTypes[fromType] || !validModelTypes[toType] {
+		return false
+	}
+	if fromType == "embedding" || toType == "embedding" {
+		return fromType == "embedding" && toType == "embedding"
+	}
+	// dense and moe are mutually compatible
+	return true
+}
+
+// Provider returns a pointer to the ProviderConfig for the given key, or nil if not found.
+func (c *Config) Provider(key string) *ProviderConfig {
+	p, ok := c.Providers[key]
+	if !ok {
+		return nil
+	}
+	return &p
+}
+
+// RoleConfig returns a pointer to the ModelConfig for the given role, or nil if not found.
+func (c *Config) RoleConfig(role string) *ModelConfig {
+	m, ok := c.Models[role]
+	if !ok {
+		return nil
+	}
+	return &m
+}
+
+// ModelFor resolves a use-case to a model name through the defaults chain.
+// It looks up useCase in Defaults to find the role, then looks up that role in Models
+// to return the model Name. Returns "" if the use-case or its target role is not found.
+func (c *Config) ModelFor(useCase string) string {
+	role, ok := c.Defaults[useCase]
+	if !ok {
+		return ""
+	}
+	m, ok := c.Models[role]
+	if !ok {
+		return ""
+	}
+	return m.Name
+}
+
+// MustModelFor is like ModelFor but panics if the use-case cannot be resolved.
+func (c *Config) MustModelFor(useCase string) string {
+	name := c.ModelFor(useCase)
+	if name == "" {
+		panic(fmt.Sprintf("config: no model for use-case %q", useCase))
+	}
+	return name
+}
+
+// ProviderFor returns the provider config for a given role's model.
+// It looks up the role in Models to find the Provider field (defaulted to "ollama"),
+// then returns the corresponding ProviderConfig. Returns nil if the role or its
+// provider is not found.
+func (c *Config) ProviderFor(role string) *ProviderConfig {
+	m, ok := c.Models[role]
+	if !ok {
+		return nil
+	}
+	provider := m.Provider
+	if provider == "" {
+		provider = "ollama"
+	}
+	return c.Provider(provider)
+}
+
+// Default discovers and loads the configuration file from standard locations.
+// It searches in order:
+//  1. $GO_LLM_CONFIG environment variable (absolute path)
+//  2. ./models.json (current working directory)
+//  3. ~/.config/go-llm/models.json (user config directory)
+//
+// Returns a descriptive error if no configuration file is found at any location.
+func Default() (*Config, error) {
+	// 1. $GO_LLM_CONFIG env var (if set and non-empty).
+	if envPath, ok := os.LookupEnv("GO_LLM_CONFIG"); ok {
+		if envPath == "" {
+			return nil, fmt.Errorf("config: GO_LLM_CONFIG is set but empty")
+		}
+		return Load(envPath)
+	}
+
+	// 2. ./models.json in current working directory.
+	if _, err := os.Stat("models.json"); err == nil {
+		return Load("models.json")
+	}
+
+	// 3. ~/.config/go-llm/models.json.
+	if home, err := os.UserHomeDir(); err == nil {
+		homePath := filepath.Join(home, ".config", "go-llm", "models.json")
+		if _, err := os.Stat(homePath); err == nil {
+			return Load(homePath)
+		}
+	}
+
+	return nil, fmt.Errorf("config: no configuration file found; set GO_LLM_CONFIG, " +
+		"place models.json in the working directory, or create ~/.config/go-llm/models.json")
+}
+
+// Load reads a models.json file from path, parses it, applies defaults, and validates.
+func Load(path string) (*Config, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("config: read %q: %w", path, err)
+	}
+
+	var cfg Config
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return nil, fmt.Errorf("config: parse %q: %w", path, err)
+	}
+
+	// Validate first (before materializing defaults).
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+
+	// Apply defaults after validation passes.
+	cfg.applyDefaults()
+
+	return &cfg, nil
+}
+
+// MustLoad is like Load but panics on error.
+func MustLoad(path string) *Config {
+	cfg, err := Load(path)
+	if err != nil {
+		panic(err)
+	}
+	return cfg
+}
+
+// applyDefaults materializes implicit provider assignments and timeout defaults.
+func (cfg *Config) applyDefaults() {
+	// Default timeout to 5m for any provider that has a zero timeout.
+	for key, p := range cfg.Providers {
+		if p.Timeout.Duration == 0 {
+			p.Timeout.Duration = 5 * time.Minute
+			cfg.Providers[key] = p
+		}
+	}
+
+	// Materialize implicit provider: models without an explicit provider get "ollama".
+	for role, m := range cfg.Models {
+		if m.Provider == "" {
+			m.Provider = "ollama"
+			cfg.Models[role] = m
+		}
+	}
+}
+
+// validate checks all config invariants and returns the first error found.
+func (cfg *Config) validate() error {
+	// At least one provider is required.
+	if len(cfg.Providers) == 0 {
+		return fmt.Errorf("config: at least one provider is required")
+	}
+
+	// Validate providers (sorted for deterministic errors).
+	providerKeys := make([]string, 0, len(cfg.Providers))
+	for key := range cfg.Providers {
+		providerKeys = append(providerKeys, key)
+	}
+	sort.Strings(providerKeys)
+	for _, key := range providerKeys {
+		p := cfg.Providers[key]
+		if p.BaseURL == "" {
+			return fmt.Errorf("config: provider %q: base_url is required", key)
+		}
+		u, err := url.ParseRequestURI(p.BaseURL)
+		if err != nil {
+			return fmt.Errorf("config: provider %q: invalid base_url: %w", key, err)
+		}
+		if u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("config: provider %q: base_url must include scheme and host", key)
+		}
+	}
+
+	// Validate models (sorted for deterministic errors).
+	modelKeys := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		modelKeys = append(modelKeys, role)
+	}
+	sort.Strings(modelKeys)
+	for _, role := range modelKeys {
+		m := cfg.Models[role]
+		if m.Name == "" {
+			return fmt.Errorf("config: model %q: name is required", role)
+		}
+		if m.Type == "" {
+			return fmt.Errorf("config: model %q: type is required", role)
+		}
+		if !validModelTypes[m.Type] {
+			return fmt.Errorf("config: model %q: invalid type %q", role, m.Type)
+		}
+
+		// Check provider exists. Use local variable to resolve implicit default.
+		provider := m.Provider
+		if provider == "" {
+			provider = "ollama"
+		}
+		if _, ok := cfg.Providers[provider]; !ok {
+			if m.Provider == "" {
+				return fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role)
+			}
+			return fmt.Errorf("config: model %q: provider %q not found", role, provider)
+		}
+
+		// Validate fallbacks.
+		for _, fb := range m.Fallbacks {
+			if fb == role {
+				return fmt.Errorf("config: model %q: lists itself as a fallback", role)
+			}
+			fbModel, ok := cfg.Models[fb]
+			if !ok {
+				return fmt.Errorf("config: model %q: fallback %q references unknown role", role, fb)
+			}
+			if !typeCompatible(m.Type, fbModel.Type) {
+				return fmt.Errorf("config: model %q: fallback %q has incompatible type", role, fb)
+			}
+		}
+	}
+
+	// Validate defaults (sorted for deterministic errors).
+	defaultKeys := make([]string, 0, len(cfg.Defaults))
+	for key := range cfg.Defaults {
+		defaultKeys = append(defaultKeys, key)
+	}
+	sort.Strings(defaultKeys)
+	for _, key := range defaultKeys {
+		role := cfg.Defaults[key]
+		if _, ok := cfg.Models[role]; !ok {
+			return fmt.Errorf("config: default %q references unknown role %q", key, role)
+		}
+	}
+
+	// Detect circular fallback chains.
+	// Sort roles for deterministic error reporting.
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		if err := cfg.detectCycle(role); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// detectCycle checks for circular fallback chains starting from startRole.
+// It uses on-path tracking to avoid false positives on diamond-shaped graphs.
+func (cfg *Config) detectCycle(startRole string) error {
+	onPath := make(map[string]bool)
+
+	var walk func(role string) error
+	walk = func(role string) error {
+		if onPath[role] {
+			return fmt.Errorf("config: model %q: circular fallback chain", startRole)
+		}
+		m, ok := cfg.Models[role]
+		if !ok {
+			return nil
+		}
+		onPath[role] = true
+		defer delete(onPath, role)
+
+		for _, fb := range m.Fallbacks {
+			if err := walk(fb); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	return walk(startRole)
+}
