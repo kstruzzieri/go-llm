@@ -1,3 +1,5 @@
+// Package config loads and validates model configuration from models.json,
+// providing model name resolution, provider lookups, and fallback chain walking.
 package config
 
 import (
@@ -237,8 +239,12 @@ func (cfg *Config) validate() error {
 		if p.BaseURL == "" {
 			return fmt.Errorf("config: provider %q: base_url is required", key)
 		}
-		if _, err := url.ParseRequestURI(p.BaseURL); err != nil {
+		u, err := url.ParseRequestURI(p.BaseURL)
+		if err != nil {
 			return fmt.Errorf("config: provider %q: invalid base_url: %w", key, err)
+		}
+		if u.Scheme == "" || u.Host == "" {
+			return fmt.Errorf("config: provider %q: base_url must include scheme and host", key)
 		}
 	}
 

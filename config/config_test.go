@@ -394,6 +394,15 @@ func TestProviderFor(t *testing.T) {
 	}
 }
 
+func TestMustLoad_Panics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("expected MustLoad to panic on nonexistent file")
+		}
+	}()
+	MustLoad("/nonexistent/models.json")
+}
+
 func TestDefault_EnvVar(t *testing.T) {
 	// Get absolute path to testdata/valid.json.
 	absPath, err := filepath.Abs("testdata/valid.json")
