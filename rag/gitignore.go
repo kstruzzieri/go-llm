@@ -33,6 +33,8 @@ type gitignoreMatcher struct {
 // Returns the pattern and true if the line is a valid pattern,
 // or zero value and false if the line should be skipped.
 func parsePattern(line string) (gitignorePattern, bool) {
+	// Strip CRLF: bufio.Scanner preserves \r from Windows-style line endings.
+	line = strings.TrimRight(line, "\r")
 	original := line
 
 	// Rule 1: blank lines

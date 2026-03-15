@@ -57,6 +57,11 @@ func TestParsePattern(t *testing.T) {
 
 		// Character classes (pass through to globMatch)
 		{name: "char class", line: "[Mm]akefile", wantOK: true, pattern: "[Mm]akefile"},
+
+		// CRLF line endings (Windows .gitignore files)
+		{name: "crlf simple", line: "*.log\r", wantOK: true, pattern: "*.log"},
+		{name: "crlf dir-only", line: "build/\r", wantOK: true, pattern: "build", dirOnly: true},
+		{name: "crlf blank", line: "\r", wantOK: false},
 	}
 
 	for _, tt := range tests {
