@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 )
@@ -20,14 +21,14 @@ type Duration struct {
 func (d *Duration) UnmarshalJSON(data []byte) error {
 	var s string
 	if err := json.Unmarshal(data, &s); err != nil {
-		return fmt.Errorf("duration must be a string: %w", err)
+		return fmt.Errorf("config: duration must be a string: %w", err)
 	}
 	if s == "" {
-		return fmt.Errorf("duration must not be empty")
+		return fmt.Errorf("config: duration must not be empty")
 	}
 	parsed, err := time.ParseDuration(s)
 	if err != nil {
-		return fmt.Errorf("invalid duration %q: %w", s, err)
+		return fmt.Errorf("config: invalid duration %q: %w", s, err)
 	}
 	d.Duration = parsed
 	return nil
@@ -42,8 +43,8 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 type ProviderConfig struct {
 	BaseURL   string   `json:"base_url"`
 	Timeout   Duration `json:"timeout"`
-	APIKey    string   `json:"api_key"`
-	APIFormat string   `json:"api_format"`
+	APIKey    string   `json:"api_key,omitempty"`
+	APIFormat string   `json:"api_format,omitempty"`
 }
 
 // ModelConfig describes a model's identity, capabilities, and fallback chain.
@@ -137,25 +138,55 @@ func (c *Config) ProviderFor(role string) *ProviderConfig {
 	return c.Provider(m.Provider)
 }
 
+// Default discovers and loads the configuration file from standard locations.
+// It searches in order:
+//  1. $GO_LLM_CONFIG environment variable (absolute path)
+//  2. ./models.json (current working directory)
+//  3. ~/.config/go-llm/models.json (user config directory)
+//
+// Returns a descriptive error if no configuration file is found at any location.
+func Default() (*Config, error) {
+	// 1. $GO_LLM_CONFIG env var.
+	if envPath := os.Getenv("GO_LLM_CONFIG"); envPath != "" {
+		return Load(envPath)
+	}
+
+	// 2. ./models.json in current working directory.
+	if _, err := os.Stat("models.json"); err == nil {
+		return Load("models.json")
+	}
+
+	// 3. ~/.config/go-llm/models.json.
+	if home, err := os.UserHomeDir(); err == nil {
+		homePath := filepath.Join(home, ".config", "go-llm", "models.json")
+		if _, err := os.Stat(homePath); err == nil {
+			return Load(homePath)
+		}
+	}
+
+	return nil, fmt.Errorf("config: no configuration file found; set GO_LLM_CONFIG, " +
+		"place models.json in the working directory, or create ~/.config/go-llm/models.json")
+}
+
 // Load reads a models.json file from path, parses it, applies defaults, and validates.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("config: read %s: %w", path, err)
+		return nil, fmt.Errorf("config: read %q: %w", path, err)
 	}
 
 	var cfg Config
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("config: parse %s: %w", path, err)
+		return nil, fmt.Errorf("config: parse %q: %w", path, err)
 	}
 
-	// Apply defaults.
-	cfg.applyDefaults()
-
-	// Validate.
+	// Validate first (before materializing defaults).
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+
+	// Apply defaults after validation passes.
+	cfg.applyDefaults()
 
 	return &cfg, nil
 }
@@ -229,12 +260,16 @@ func (cfg *Config) validate() error {
 			return fmt.Errorf("config: model %q: invalid type %q", role, m.Type)
 		}
 
-		// Check provider exists (provider was already materialized by applyDefaults).
-		if _, ok := cfg.Providers[m.Provider]; !ok {
-			if m.Provider == "ollama" {
-				return fmt.Errorf("config: model %q: implicit provider %q not found", role, m.Provider)
+		// Check provider exists. Use local variable to resolve implicit default.
+		provider := m.Provider
+		if provider == "" {
+			provider = "ollama"
+		}
+		if _, ok := cfg.Providers[provider]; !ok {
+			if m.Provider == "" {
+				return fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role)
 			}
-			return fmt.Errorf("config: model %q: provider %q not found", role, m.Provider)
+			return fmt.Errorf("config: model %q: provider %q not found", role, provider)
 		}
 
 		// Validate fallbacks.
