@@ -96,6 +96,18 @@ func TestResolve_CheckerError(t *testing.T) {
 	}
 }
 
+func TestResolve_NilChecker(t *testing.T) {
+	cfg := loadTestConfig(t)
+	_, err := cfg.Resolve(context.Background(), nil, "chat")
+	if err == nil {
+		t.Fatal("expected error for nil checker")
+	}
+	_, err = cfg.ResolveAll(context.Background(), nil)
+	if err == nil {
+		t.Fatal("expected error for nil checker in ResolveAll")
+	}
+}
+
 func TestResolveAll_AllAvailable(t *testing.T) {
 	cfg := loadTestConfig(t)
 	checker := &mockChecker{models: []string{

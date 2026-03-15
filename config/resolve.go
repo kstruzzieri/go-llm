@@ -23,6 +23,9 @@ type ResolvedModel struct {
 // It calls checker.AvailableModels once, builds a lookup set, then tries the
 // primary model followed by each fallback until one is found in the set.
 func (c *Config) Resolve(ctx context.Context, checker ModelChecker, useCase string) (ResolvedModel, error) {
+	if checker == nil {
+		return ResolvedModel{}, fmt.Errorf("config: model checker is required")
+	}
 	role, ok := c.Defaults[useCase]
 	if !ok {
 		return ResolvedModel{}, fmt.Errorf("config: unknown use-case %q", useCase)
@@ -40,6 +43,9 @@ func (c *Config) Resolve(ctx context.Context, checker ModelChecker, useCase stri
 // ResolveAll resolves every entry in Defaults with a single AvailableModels call.
 // It returns partial results alongside an error if some use-cases could not resolve.
 func (c *Config) ResolveAll(ctx context.Context, checker ModelChecker) (map[string]ResolvedModel, error) {
+	if checker == nil {
+		return nil, fmt.Errorf("config: model checker is required")
+	}
 	models, err := checker.AvailableModels(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("config: checking available models: %w", err)
