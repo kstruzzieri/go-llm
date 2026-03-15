@@ -393,3 +393,85 @@ func TestProviderFor(t *testing.T) {
 		t.Error("expected ProviderFor(\"nonexistent\") to be nil")
 	}
 }
+
+func TestDefault_EnvVar(t *testing.T) {
+	// Get absolute path to testdata/valid.json.
+	absPath, err := filepath.Abs("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("failed to get abs path: %v", err)
+	}
+
+	t.Setenv("GO_LLM_CONFIG", absPath)
+
+	cfg, err := Default()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := len(cfg.Providers); got != 1 {
+		t.Errorf("providers: got %d, want 1", got)
+	}
+	if got := len(cfg.Models); got != 5 {
+		t.Errorf("models: got %d, want 5", got)
+	}
+}
+
+func TestDefault_WorkingDir(t *testing.T) {
+	// Copy valid.json into a temp dir as models.json.
+	src, err := os.ReadFile("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("failed to read valid.json: %v", err)
+	}
+	tmpDir := t.TempDir()
+	dst := filepath.Join(tmpDir, "models.json")
+	if err := os.WriteFile(dst, src, 0644); err != nil {
+		t.Fatalf("failed to write models.json: %v", err)
+	}
+
+	// Clear env var so it doesn't take precedence.
+	t.Setenv("GO_LLM_CONFIG", "")
+
+	// Chdir into the temp dir.
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working dir: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	cfg, err := Default()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := len(cfg.Models); got != 5 {
+		t.Errorf("models: got %d, want 5", got)
+	}
+}
+
+func TestDefault_NotFound(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Clear env var.
+	t.Setenv("GO_LLM_CONFIG", "")
+	// Set HOME to empty temp dir so ~/.config/go-llm/models.json won't be found.
+	t.Setenv("HOME", tmpDir)
+
+	// Chdir into the empty temp dir.
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("failed to get working dir: %v", err)
+	}
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("failed to chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(origDir) })
+
+	_, err = Default()
+	if err == nil {
+		t.Fatal("expected Default() to return error when no config found")
+	}
+	if !contains(err.Error(), "config: no configuration file found") {
+		t.Errorf("error = %q, want substring %q", err.Error(), "config: no configuration file found")
+	}
+}
