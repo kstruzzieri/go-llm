@@ -143,7 +143,11 @@ func (c *Config) ProviderFor(role string) *ProviderConfig {
 	if !ok {
 		return nil
 	}
-	return c.Provider(m.Provider)
+	provider := m.Provider
+	if provider == "" {
+		provider = "ollama"
+	}
+	return c.Provider(provider)
 }
 
 // Default discovers and loads the configuration file from standard locations.

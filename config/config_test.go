@@ -402,6 +402,24 @@ func TestProviderFor(t *testing.T) {
 	if cfg.ProviderFor("nonexistent") != nil {
 		t.Error("expected ProviderFor(\"nonexistent\") to be nil")
 	}
+
+	// ProviderFor defaults to "ollama" for programmatically constructed configs
+	// where the Provider field was never materialized by Load.
+	manualCfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"ollama": {BaseURL: "http://manual:11434"},
+		},
+		Models: map[string]ModelConfig{
+			"test": {Name: "m", Type: "dense"}, // no Provider set
+		},
+	}
+	mp := manualCfg.ProviderFor("test")
+	if mp == nil {
+		t.Fatal("expected ProviderFor to default to ollama for empty Provider field")
+	}
+	if mp.BaseURL != "http://manual:11434" {
+		t.Errorf("BaseURL = %q, want %q", mp.BaseURL, "http://manual:11434")
+	}
 }
 
 func TestMustLoad_Panics(t *testing.T) {

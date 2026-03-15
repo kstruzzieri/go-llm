@@ -141,6 +141,18 @@ func TestCompleteStreamCallbackError(t *testing.T) {
 func TestCompleteValidation(t *testing.T) {
 	client := ollama.NewClient()
 
+	t.Run("nil client", func(t *testing.T) {
+		provider := NewProvider(nil, "test-model")
+		_, err := provider.Complete(context.Background(), FIMRequest{Prefix: "code"})
+		if err == nil {
+			t.Fatal("expected error for nil client")
+		}
+		err = provider.CompleteStream(context.Background(), FIMRequest{Prefix: "code"}, func(string) error { return nil })
+		if err == nil {
+			t.Fatal("expected error for nil client in stream")
+		}
+	})
+
 	t.Run("model required", func(t *testing.T) {
 		provider := NewProvider(client, "")
 		_, err := provider.Complete(context.Background(), FIMRequest{
@@ -151,11 +163,24 @@ func TestCompleteValidation(t *testing.T) {
 		}
 	})
 
-	t.Run("prefix required", func(t *testing.T) {
-		provider := NewProvider(client, "test-model")
-		_, err := provider.Complete(context.Background(), FIMRequest{})
-		if err == nil {
-			t.Fatal("expected error for missing prefix")
+	t.Run("empty prefix is valid for FIM", func(t *testing.T) {
+		// Empty prefix is valid — represents cursor at the start of a file or new buffer.
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			json.NewEncoder(w).Encode(map[string]any{
+				"response":   "generated",
+				"done":       true,
+				"eval_count": 1,
+			})
+		}))
+		defer srv.Close()
+		c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+		provider := NewProvider(c, "test-model")
+		resp, err := provider.Complete(context.Background(), FIMRequest{Suffix: "func main() {}"})
+		if err != nil {
+			t.Fatalf("unexpected error for empty prefix: %v", err)
+		}
+		if resp.Completion != "generated" {
+			t.Errorf("got %q, want %q", resp.Completion, "generated")
 		}
 	})
 
