@@ -475,3 +475,16 @@ func TestDefault_NotFound(t *testing.T) {
 		t.Errorf("error = %q, want substring %q", err.Error(), "config: no configuration file found")
 	}
 }
+
+func TestLoad_RootModelsJSON(t *testing.T) {
+	cfg, err := Load("../models.json")
+	if err != nil {
+		t.Fatalf("Load(root models.json) error: %v", err)
+	}
+	if cfg.ModelFor("chat") == "" {
+		t.Error("expected chat model from root models.json")
+	}
+	if len(cfg.Models) != 5 {
+		t.Errorf("expected 5 models, got %d", len(cfg.Models))
+	}
+}
