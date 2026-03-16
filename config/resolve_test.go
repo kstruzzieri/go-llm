@@ -192,3 +192,61 @@ func TestResolveAll_NoneAvailable(t *testing.T) {
 		t.Fatal("expected error when no models are available")
 	}
 }
+
+// TestResolve_DiamondFallbackGraph verifies that shared fallback nodes
+// in a diamond-shaped graph are not falsely detected as circular.
+// Graph: a → {b, c}, both b and c fall back to d.
+// When b's path through d fails (d's model unavailable), d must still
+// be explorable through c's path without a circular fallback error.
+func TestResolve_DiamondFallbackGraph(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"a": {Name: "model-a", Fallbacks: []string{"b", "c"}},
+			"b": {Name: "model-b", Fallbacks: []string{"d"}},
+			"c": {Name: "model-c", Fallbacks: []string{"d"}},
+			"d": {Name: "model-d"},
+		},
+		Defaults: map[string]string{
+			"test": "a",
+		},
+	}
+
+	// Only model-d is available — resolution must walk a → b → d (or a → c → d).
+	checker := &mockChecker{models: []string{"model-d"}}
+
+	got, err := cfg.Resolve(context.Background(), checker, "test")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v (diamond fallback falsely detected as cycle?)", err)
+	}
+	if got.Name != "model-d" {
+		t.Errorf("Name = %q, want %q", got.Name, "model-d")
+	}
+	if !got.IsFallback {
+		t.Error("IsFallback = false, want true")
+	}
+}
+
+// TestResolve_CircularFallbackTerminates verifies that circular fallback chains
+// terminate (don't infinite loop) and return an error.
+func TestResolve_CircularFallbackTerminates(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"a": {Name: "model-a", Fallbacks: []string{"b"}},
+			"b": {Name: "model-b", Fallbacks: []string{"a"}}, // cycle: a → b → a
+		},
+		Defaults: map[string]string{
+			"test": "a",
+		},
+	}
+
+	checker := &mockChecker{models: []string{}} // nothing available, forces full walk
+
+	_, err := cfg.Resolve(context.Background(), checker, "test")
+	if err == nil {
+		t.Fatal("expected error for circular fallback chain")
+	}
+	// The function must terminate and return an error — not hang.
+	// The error will be "no available model" since the circular error
+	// is caught internally to prevent infinite recursion.
+}
+

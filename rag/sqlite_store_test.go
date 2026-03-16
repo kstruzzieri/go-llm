@@ -216,3 +216,284 @@ func TestSQLiteStoreReplaceSourceRollsBackOnInsertFailure(t *testing.T) {
 		t.Fatalf("expected original chunk to remain after failed replace, got %#v", results)
 	}
 }
+
+// --- ExportChunks tests ---
+
+func seedExportStore(t *testing.T) *SQLiteStore {
+	t.Helper()
+	vs := newTestStore(t)
+	store := vs.(*SQLiteStore)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "func main()", Source: "/src/main.go", StartLine: 1, EndLine: 5, Language: "go", Metadata: map[string]string{}},
+		{ID: "c2", Content: "func helper()", Source: "/src/main.go", StartLine: 6, EndLine: 10, Language: "go", Metadata: map[string]string{}},
+		{ID: "c3", Content: "def train()", Source: "/src/train.py", StartLine: 1, EndLine: 20, Language: "python", Metadata: map[string]string{}},
+		{ID: "c4", Content: "import React", Source: "/src/app.tsx", StartLine: 1, EndLine: 3, Language: "typescript", Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{
+		{1.0, 0.0, 0.0},
+		{0.0, 1.0, 0.0},
+		{0.0, 0.0, 1.0},
+		{1.0, 1.0, 0.0},
+	}
+
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("seed Store() error: %v", err)
+	}
+	return store
+}
+
+func TestExportChunksRoundTrip(t *testing.T) {
+	store := seedExportStore(t)
+	ctx := context.Background()
+
+	seq, err := store.ExportChunks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ExportChunks() error: %v", err)
+	}
+
+	var results []ExportedChunk
+	for ec, iterErr := range seq {
+		if iterErr != nil {
+			t.Fatalf("iteration error: %v", iterErr)
+		}
+		results = append(results, ec)
+	}
+
+	if len(results) != 4 {
+		t.Fatalf("got %d chunks, want 4", len(results))
+	}
+
+	// Verify data integrity for first result.
+	found := false
+	for _, ec := range results {
+		if ec.Chunk.ID == "c1" {
+			found = true
+			if ec.Chunk.Content != "func main()" {
+				t.Errorf("Content = %q, want %q", ec.Chunk.Content, "func main()")
+			}
+			if ec.Chunk.Source != "/src/main.go" {
+				t.Errorf("Source = %q, want %q", ec.Chunk.Source, "/src/main.go")
+			}
+			if ec.Chunk.Language != "go" {
+				t.Errorf("Language = %q, want %q", ec.Chunk.Language, "go")
+			}
+			if len(ec.Embedding) != 3 {
+				t.Errorf("Embedding dim = %d, want 3", len(ec.Embedding))
+			}
+			if ec.Embedding[0] != 1.0 || ec.Embedding[1] != 0.0 || ec.Embedding[2] != 0.0 {
+				t.Errorf("Embedding = %v, want [1 0 0]", ec.Embedding)
+			}
+			// Metadata should be nil (not exported).
+			if ec.Chunk.Metadata != nil {
+				t.Errorf("Metadata should be nil, got %v", ec.Chunk.Metadata)
+			}
+			break
+		}
+	}
+	if !found {
+		t.Error("chunk c1 not found in results")
+	}
+}
+
+func TestExportChunksLanguageFilter(t *testing.T) {
+	store := seedExportStore(t)
+	ctx := context.Background()
+
+	filter := &ExportFilter{Language: "go"}
+	seq, err := store.ExportChunks(ctx, filter)
+	if err != nil {
+		t.Fatalf("ExportChunks() error: %v", err)
+	}
+
+	var results []ExportedChunk
+	for ec, iterErr := range seq {
+		if iterErr != nil {
+			t.Fatalf("iteration error: %v", iterErr)
+		}
+		results = append(results, ec)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("got %d chunks, want 2 (go only)", len(results))
+	}
+	for _, ec := range results {
+		if ec.Chunk.Language != "go" {
+			t.Errorf("got language %q, want %q", ec.Chunk.Language, "go")
+		}
+	}
+}
+
+func TestExportChunksSourceGlob(t *testing.T) {
+	store := seedExportStore(t)
+	ctx := context.Background()
+
+	filter := &ExportFilter{SourcePattern: "*.py"}
+	seq, err := store.ExportChunks(ctx, filter)
+	if err != nil {
+		t.Fatalf("ExportChunks() error: %v", err)
+	}
+
+	var results []ExportedChunk
+	for ec, iterErr := range seq {
+		if iterErr != nil {
+			t.Fatalf("iteration error: %v", iterErr)
+		}
+		results = append(results, ec)
+	}
+
+	if len(results) != 1 {
+		t.Fatalf("got %d chunks, want 1 (python only)", len(results))
+	}
+	if results[0].Chunk.ID != "c3" {
+		t.Errorf("got chunk %q, want c3", results[0].Chunk.ID)
+	}
+}
+
+func TestExportChunksOrdering(t *testing.T) {
+	store := seedExportStore(t)
+	ctx := context.Background()
+
+	seq, err := store.ExportChunks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ExportChunks() error: %v", err)
+	}
+
+	var results []ExportedChunk
+	for ec, iterErr := range seq {
+		if iterErr != nil {
+			t.Fatalf("iteration error: %v", iterErr)
+		}
+		results = append(results, ec)
+	}
+
+	// Should be ordered by source, then start_line.
+	for i := 1; i < len(results); i++ {
+		prev, curr := results[i-1], results[i]
+		if prev.Chunk.Source > curr.Chunk.Source {
+			t.Errorf("out of order: %q > %q", prev.Chunk.Source, curr.Chunk.Source)
+		}
+		if prev.Chunk.Source == curr.Chunk.Source && prev.Chunk.StartLine > curr.Chunk.StartLine {
+			t.Errorf("out of order within source %q: line %d > %d",
+				prev.Chunk.Source, prev.Chunk.StartLine, curr.Chunk.StartLine)
+		}
+	}
+}
+
+func TestExportChunksEmptyStore(t *testing.T) {
+	vs := newTestStore(t)
+	store := vs.(*SQLiteStore)
+	ctx := context.Background()
+
+	seq, err := store.ExportChunks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ExportChunks() error: %v", err)
+	}
+
+	count := 0
+	for _, iterErr := range seq {
+		if iterErr != nil {
+			t.Fatalf("iteration error: %v", iterErr)
+		}
+		count++
+	}
+
+	if count != 0 {
+		t.Errorf("got %d chunks from empty store, want 0", count)
+	}
+}
+
+func TestExportChunksContextCancellation(t *testing.T) {
+	store := seedExportStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	seq, err := store.ExportChunks(ctx, nil)
+	if err != nil {
+		t.Fatalf("ExportChunks() error: %v", err)
+	}
+
+	count := 0
+	for _, iterErr := range seq {
+		if iterErr != nil {
+			// Context cancellation may surface as an error during iteration.
+			break
+		}
+		count++
+		if count == 1 {
+			cancel()
+			// Continue — the iterator should stop on next check or yield an error.
+		}
+	}
+
+	// We cancelled after 1 row. The store has 4 rows total.
+	// With context cancellation, we should get fewer than all 4.
+	// (The iterator may yield 1-2 more rows before checking context.)
+	if count >= 4 {
+		t.Errorf("got all %d chunks despite cancel after 1, cancellation not effective", count)
+	}
+}
+
+func TestSchemaMigrationIndexes(t *testing.T) {
+	vs := newTestStore(t)
+	store := vs.(*SQLiteStore)
+
+	// Verify the new indexes exist.
+	rows, err := store.db.Query(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chunks' ORDER BY name`)
+	if err != nil {
+		t.Fatalf("query indexes: %v", err)
+	}
+	defer rows.Close()
+
+	indexes := make(map[string]bool)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		indexes[name] = true
+	}
+
+	if !indexes["idx_chunks_source_line"] {
+		t.Error("missing idx_chunks_source_line index")
+	}
+	if !indexes["idx_chunks_lang_source_line"] {
+		t.Error("missing idx_chunks_lang_source_line index")
+	}
+	// Old index should be gone.
+	if indexes["idx_chunks_source"] {
+		t.Error("old idx_chunks_source index should have been dropped")
+	}
+}
+
+func TestExportChunksCombinedFilter(t *testing.T) {
+	store := seedExportStore(t)
+	ctx := context.Background()
+
+	filter := &ExportFilter{SourcePattern: "/src/main*", Language: "go"}
+	seq, err := store.ExportChunks(ctx, filter)
+	if err != nil {
+		t.Fatalf("ExportChunks() error: %v", err)
+	}
+
+	var results []ExportedChunk
+	for ec, iterErr := range seq {
+		if iterErr != nil {
+			t.Fatalf("iteration error: %v", iterErr)
+		}
+		results = append(results, ec)
+	}
+
+	if len(results) != 2 {
+		t.Fatalf("got %d chunks, want 2 (go + main.go)", len(results))
+	}
+}
+
+// Verify the new store returns *SQLiteStore that satisfies Exportable.
+func TestSQLiteStoreImplementsExportable(t *testing.T) {
+	vs := newTestStore(t)
+	if _, ok := vs.(Exportable); !ok {
+		t.Error("SQLiteStore (via VectorStore) should implement Exportable")
+	}
+}

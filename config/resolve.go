@@ -80,16 +80,19 @@ func (c *Config) ResolveAll(ctx context.Context, checker ModelChecker) (map[stri
 
 // resolveRole tries the primary model for the given role, then walks its
 // Fallbacks slice, returning the first model found in the available set.
-// The visited set prevents infinite recursion if fallback chains are circular
-// (defensive — Load validates against cycles, but this protects programmatic use).
-func (c *Config) resolveRole(role string, available map[string]bool, visited map[string]bool) (ResolvedModel, error) {
-	if visited == nil {
-		visited = make(map[string]bool)
+// The onStack set tracks the current DFS path to detect circular fallbacks
+// while allowing diamond-shaped shared fallback nodes to be visited from
+// multiple parents (defensive — Load validates against cycles, but this
+// protects programmatic use).
+func (c *Config) resolveRole(role string, available map[string]bool, onStack map[string]bool) (ResolvedModel, error) {
+	if onStack == nil {
+		onStack = make(map[string]bool)
 	}
-	if visited[role] {
+	if onStack[role] {
 		return ResolvedModel{}, fmt.Errorf("config: circular fallback at role %q", role)
 	}
-	visited[role] = true
+	onStack[role] = true
+	defer delete(onStack, role)
 
 	m, ok := c.Models[role]
 	if !ok {
@@ -103,7 +106,7 @@ func (c *Config) resolveRole(role string, available map[string]bool, visited map
 
 	// Walk fallback chain: try each fallback role (and transitively its own fallbacks).
 	for _, fbRole := range m.Fallbacks {
-		resolved, err := c.resolveRole(fbRole, available, visited)
+		resolved, err := c.resolveRole(fbRole, available, onStack)
 		if err == nil {
 			resolved.IsFallback = true
 			return resolved, nil
