@@ -28,6 +28,7 @@ module github.com/kstruzzieri/go-llm
 Keep minimal. Allowed external dependencies:
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
 - `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
+- `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 
 Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc.)
 

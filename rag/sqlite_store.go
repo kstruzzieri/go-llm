@@ -5,10 +5,18 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"math"
 	"sort"
+	"strings"
 
 	_ "modernc.org/sqlite"
+)
+
+// Compile-time interface satisfaction checks.
+var (
+	_ VectorStore = (*SQLiteStore)(nil)
+	_ Exportable  = (*SQLiteStore)(nil)
 )
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
@@ -58,10 +66,16 @@ func initSchema(db *sql.DB) error {
 		metadata TEXT NOT NULL DEFAULT '{}',
 		embedding TEXT NOT NULL
 	);
-	CREATE INDEX IF NOT EXISTS idx_chunks_source ON chunks(source);
+	CREATE INDEX IF NOT EXISTS idx_chunks_source_line ON chunks(source, start_line);
+	CREATE INDEX IF NOT EXISTS idx_chunks_lang_source_line ON chunks(language, source, start_line);
 	`
+	// Migrate: drop old single-column index superseded by idx_chunks_source_line.
+	const dropOldIndex = `DROP INDEX IF EXISTS idx_chunks_source`
 	if _, err := db.Exec(schema); err != nil {
 		return fmt.Errorf("rag: create schema: %w", err)
+	}
+	if _, err := db.Exec(dropOldIndex); err != nil {
+		return fmt.Errorf("rag: drop old index: %w", err)
 	}
 	return nil
 }
@@ -190,7 +204,9 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 		}
 
 		chunk.Metadata = make(map[string]string)
-		json.Unmarshal([]byte(metaJSON), &chunk.Metadata)
+		if err := json.Unmarshal([]byte(metaJSON), &chunk.Metadata); err != nil {
+			return nil, fmt.Errorf("rag: unmarshal metadata for chunk %q: %w", chunk.ID, err)
+		}
 
 		var embedding []float64
 		if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
@@ -287,3 +303,76 @@ func cosineSimilarity(a, b []float64) float64 {
 }
 
 // detectLanguageFromPath is available in chunker_code.go as detectLanguage.
+
+// ExportChunks implements Exportable by streaming all matching chunks from SQLite.
+// The returned iterator yields one ExportedChunk at a time, with cleanup handled
+// automatically when iteration stops.
+func (s *SQLiteStore) ExportChunks(ctx context.Context, filter *ExportFilter) (iter.Seq2[ExportedChunk, error], error) {
+	query, args := buildExportQuery(filter)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("rag: export chunks: %w", err)
+	}
+	return func(yield func(ExportedChunk, error) bool) {
+		defer rows.Close()
+		for rows.Next() {
+			if err := ctx.Err(); err != nil {
+				yield(ExportedChunk{}, err)
+				return
+			}
+			chunk, embedding, err := scanExportRow(rows)
+			if err != nil {
+				yield(ExportedChunk{}, err)
+				return
+			}
+			if !yield(ExportedChunk{Chunk: chunk, Embedding: embedding}, nil) {
+				return
+			}
+		}
+		if err := rows.Err(); err != nil {
+			yield(ExportedChunk{}, fmt.Errorf("rag: iterate export chunks: %w", err))
+		}
+	}, nil
+}
+
+// buildExportQuery constructs the SELECT with optional WHERE clauses for export filtering.
+func buildExportQuery(filter *ExportFilter) (string, []any) {
+	base := `SELECT id, content, source, start_line, end_line, language, embedding FROM chunks`
+	var conditions []string
+	var args []any
+
+	if filter != nil {
+		if filter.SourcePattern != "" {
+			conditions = append(conditions, "source GLOB ?")
+			args = append(args, filter.SourcePattern)
+		}
+		if filter.Language != "" {
+			conditions = append(conditions, "language = ?")
+			args = append(args, filter.Language)
+		}
+	}
+
+	if len(conditions) > 0 {
+		base += " WHERE " + strings.Join(conditions, " AND ")
+	}
+	base += " ORDER BY source, start_line"
+	return base, args
+}
+
+// scanExportRow scans a row from the export query into a Chunk and embedding.
+// Metadata is intentionally not selected — it's excluded from the Parquet schema.
+func scanExportRow(rows *sql.Rows) (Chunk, []float64, error) {
+	var chunk Chunk
+	var embJSON string
+	if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
+		&chunk.StartLine, &chunk.EndLine, &chunk.Language, &embJSON); err != nil {
+		return Chunk{}, nil, fmt.Errorf("rag: scan export row: %w", err)
+	}
+
+	var embedding []float64
+	if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
+		return Chunk{}, nil, fmt.Errorf("rag: unmarshal export embedding: %w", err)
+	}
+
+	return chunk, embedding, nil
+}
