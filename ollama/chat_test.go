@@ -228,6 +228,20 @@ func TestChatStreamWithTools(t *testing.T) {
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if !req.Stream {
+			t.Error("expected stream=true for streaming chat with tools")
+		}
+		if len(req.Tools) != 1 {
+			t.Errorf("expected 1 tool, got %d", len(req.Tools))
+		}
+		if req.Tools[0].Function.Name != "get_weather" {
+			t.Errorf("tool name = %q, want %q", req.Tools[0].Function.Name, "get_weather")
+		}
+
 		for _, chunk := range chunks {
 			data, _ := json.Marshal(chunk)
 			fmt.Fprintf(w, "%s\n", data)

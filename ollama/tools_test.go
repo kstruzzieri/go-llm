@@ -51,7 +51,9 @@ func TestChatRequestNoToolsOmitted(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	var raw map[string]json.RawMessage
-	json.Unmarshal(data, &raw)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
 	if _, ok := raw["tools"]; ok {
 		t.Error("expected tools field to be omitted when empty")
 	}
@@ -220,7 +222,9 @@ func TestParamWithEnum(t *testing.T) {
 	}
 
 	var schema map[string]any
-	json.Unmarshal(data, &schema)
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
 	props := schema["properties"].(map[string]any)
 	unitsProp := props["units"].(map[string]any)
 
@@ -247,7 +251,9 @@ func TestObjectParamsNoRequired(t *testing.T) {
 	}
 
 	var raw map[string]json.RawMessage
-	json.Unmarshal(data, &raw)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal raw: %v", err)
+	}
 	if _, ok := raw["required"]; ok {
 		t.Error("expected required field to be omitted when empty")
 	}
@@ -294,9 +300,14 @@ func TestNewToolRaw(t *testing.T) {
 		t.Errorf("function name = %q, want %q", tool.Function.Name, "compute")
 	}
 
-	data, _ := json.Marshal(tool)
+	data, err := json.Marshal(tool)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 	var decoded Tool
-	json.Unmarshal(data, &decoded)
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 
 	if string(decoded.Function.Parameters) != string(rawSchema) {
 		t.Errorf("schema not preserved:\ngot:  %s\nwant: %s", decoded.Function.Parameters, rawSchema)
@@ -315,14 +326,22 @@ func TestToolResultMessage(t *testing.T) {
 		t.Errorf("tool_name = %q, want %q", msg.ToolName, "get_weather")
 	}
 
-	data, _ := json.Marshal(msg)
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
 	var raw map[string]any
-	json.Unmarshal(data, &raw)
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 	if raw["role"] != "tool" {
 		t.Error("JSON role != tool")
 	}
 	if raw["tool_name"] != "get_weather" {
 		t.Error("JSON tool_name missing or wrong")
+	}
+	if _, ok := raw["tool_calls"]; ok {
+		t.Error("expected tool_calls to be omitted for tool result message")
 	}
 }
 
