@@ -2,6 +2,7 @@ package ollama
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -312,6 +313,20 @@ func TestNewToolRaw(t *testing.T) {
 	if string(decoded.Function.Parameters) != string(rawSchema) {
 		t.Errorf("schema not preserved:\ngot:  %s\nwant: %s", decoded.Function.Parameters, rawSchema)
 	}
+}
+
+func TestNewToolRawInvalidJSON(t *testing.T) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic for invalid JSON schema")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "not valid JSON") {
+			t.Errorf("unexpected panic value: %v", r)
+		}
+	}()
+	NewToolRaw("bad", "desc", json.RawMessage(`{not valid`))
 }
 
 func TestToolResultMessage(t *testing.T) {

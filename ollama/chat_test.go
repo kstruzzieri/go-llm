@@ -34,7 +34,9 @@ func TestChat(t *testing.T) {
 			Message: ChatMessage{Role: "assistant", Content: "Hello!"},
 			Done:    true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -63,13 +65,19 @@ func TestChatStream(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ChatRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
 		if !req.Stream {
 			t.Error("expected stream=true for streaming chat")
 		}
 
 		for _, chunk := range chunks {
-			data, _ := json.Marshal(chunk)
+			data, err := json.Marshal(chunk)
+			if err != nil {
+				t.Errorf("marshal chunk: %v", err)
+				return
+			}
 			fmt.Fprintf(w, "%s\n", data)
 		}
 	}))
@@ -105,7 +113,11 @@ func TestChatStreamCallbackError(t *testing.T) {
 			Message: ChatMessage{Role: "assistant", Content: "test"},
 			Done:    false,
 		}
-		data, _ := json.Marshal(chunk)
+		data, err := json.Marshal(chunk)
+		if err != nil {
+			t.Errorf("marshal chunk: %v", err)
+			return
+		}
 		fmt.Fprintf(w, "%s\n", data)
 	}))
 	defer srv.Close()
