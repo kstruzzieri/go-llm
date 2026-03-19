@@ -2,10 +2,42 @@
 // supporting chat completions, text generation, embeddings, and model management.
 package ollama
 
+import "encoding/json"
+
+// Tool defines a tool the model may call during chat.
+type Tool struct {
+	Type     string       `json:"type"`     // always "function"
+	Function ToolFunction `json:"function"`
+}
+
+// ToolFunction describes a callable function.
+type ToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Parameters  json.RawMessage `json:"parameters"` // JSON Schema
+}
+
+// ToolCall represents a tool invocation returned by the model.
+type ToolCall struct {
+	Type     string           `json:"type"`     // "function"
+	Function ToolCallFunction `json:"function"`
+}
+
+// ToolCallFunction holds the index, name, and parsed arguments of a tool call.
+// Index identifies the call for parallel tool invocations, enabling correlation
+// between tool calls and their results.
+type ToolCallFunction struct {
+	Index     int            `json:"index"`
+	Name      string         `json:"name"`
+	Arguments map[string]any `json:"arguments"`
+}
+
 // ChatMessage represents a single message in a chat conversation.
 type ChatMessage struct {
-	Role    string `json:"role"`    // system, user, assistant
-	Content string `json:"content"`
+	Role      string     `json:"role"`                // system, user, assistant, tool
+	Content   string     `json:"content"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // present when assistant invokes tools
+	ToolName  string     `json:"tool_name,omitempty"`  // set when role="tool" (result)
 }
 
 // ChatRequest is the request body for the /api/chat endpoint.
@@ -14,6 +46,7 @@ type ChatRequest struct {
 	Messages []ChatMessage `json:"messages"`
 	Stream   bool          `json:"stream"`
 	Options  *ModelOptions `json:"options,omitempty"`
+	Tools    []Tool        `json:"tools,omitempty"` // available tools
 }
 
 // ChatResponse is the response from the /api/chat endpoint.
