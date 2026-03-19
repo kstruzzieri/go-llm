@@ -160,3 +160,218 @@ func TestToolCallRoundTrip(t *testing.T) {
 		t.Errorf("round-trip name = %q, want %q", tc.Function.Name, "get_weather")
 	}
 }
+
+func TestObjectParamsSerialization(t *testing.T) {
+	params := ObjectParams(
+		Param("city", ParamTypeString, "The city name"),
+		Param("count", ParamTypeInteger, "Number of results"),
+	).Required("city")
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(data, &schema); err != nil {
+		t.Fatalf("unmarshal schema: %v", err)
+	}
+
+	if schema["type"] != "object" {
+		t.Errorf("schema type = %v, want %q", schema["type"], "object")
+	}
+
+	props, ok := schema["properties"].(map[string]any)
+	if !ok {
+		t.Fatal("properties is not a map")
+	}
+	if len(props) != 2 {
+		t.Errorf("expected 2 properties, got %d", len(props))
+	}
+
+	cityProp, ok := props["city"].(map[string]any)
+	if !ok {
+		t.Fatal("city property missing or not a map")
+	}
+	if cityProp["type"] != "string" {
+		t.Errorf("city type = %v, want %q", cityProp["type"], "string")
+	}
+	if cityProp["description"] != "The city name" {
+		t.Errorf("city description = %v, want %q", cityProp["description"], "The city name")
+	}
+
+	req, ok := schema["required"].([]any)
+	if !ok {
+		t.Fatal("required is not an array")
+	}
+	if len(req) != 1 || req[0] != "city" {
+		t.Errorf("required = %v, want [city]", req)
+	}
+}
+
+func TestParamWithEnum(t *testing.T) {
+	params := ObjectParams(
+		Param("units", ParamTypeString, "Temperature unit").WithEnum("celsius", "fahrenheit"),
+	)
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var schema map[string]any
+	json.Unmarshal(data, &schema)
+	props := schema["properties"].(map[string]any)
+	unitsProp := props["units"].(map[string]any)
+
+	enumVals, ok := unitsProp["enum"].([]any)
+	if !ok {
+		t.Fatal("enum field missing or not an array")
+	}
+	if len(enumVals) != 2 {
+		t.Fatalf("expected 2 enum values, got %d", len(enumVals))
+	}
+	if enumVals[0] != "celsius" || enumVals[1] != "fahrenheit" {
+		t.Errorf("enum = %v, want [celsius fahrenheit]", enumVals)
+	}
+}
+
+func TestObjectParamsNoRequired(t *testing.T) {
+	params := ObjectParams(
+		Param("query", ParamTypeString, "Search query"),
+	)
+
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var raw map[string]json.RawMessage
+	json.Unmarshal(data, &raw)
+	if _, ok := raw["required"]; ok {
+		t.Error("expected required field to be omitted when empty")
+	}
+}
+
+func TestNewTool(t *testing.T) {
+	tool := NewTool("get_weather", "Get weather for a city",
+		ObjectParams(
+			Param("city", ParamTypeString, "The city name"),
+			Param("units", ParamTypeString, "Unit").WithEnum("celsius", "fahrenheit"),
+		).Required("city"),
+	)
+
+	if tool.Type != "function" {
+		t.Errorf("tool type = %q, want %q", tool.Type, "function")
+	}
+	if tool.Function.Name != "get_weather" {
+		t.Errorf("function name = %q, want %q", tool.Function.Name, "get_weather")
+	}
+	if tool.Function.Description != "Get weather for a city" {
+		t.Errorf("description = %q, want %q", tool.Function.Description, "Get weather for a city")
+	}
+	if tool.Function.Parameters == nil {
+		t.Fatal("parameters is nil")
+	}
+
+	var schema map[string]any
+	if err := json.Unmarshal(tool.Function.Parameters, &schema); err != nil {
+		t.Fatalf("parameters is not valid JSON: %v", err)
+	}
+	if schema["type"] != "object" {
+		t.Errorf("schema type = %v, want %q", schema["type"], "object")
+	}
+}
+
+func TestNewToolRaw(t *testing.T) {
+	rawSchema := json.RawMessage(`{"type":"object","properties":{"x":{"type":"number"}},"required":["x"]}`)
+	tool := NewToolRaw("compute", "Run computation", rawSchema)
+
+	if tool.Type != "function" {
+		t.Errorf("tool type = %q, want %q", tool.Type, "function")
+	}
+	if tool.Function.Name != "compute" {
+		t.Errorf("function name = %q, want %q", tool.Function.Name, "compute")
+	}
+
+	data, _ := json.Marshal(tool)
+	var decoded Tool
+	json.Unmarshal(data, &decoded)
+
+	if string(decoded.Function.Parameters) != string(rawSchema) {
+		t.Errorf("schema not preserved:\ngot:  %s\nwant: %s", decoded.Function.Parameters, rawSchema)
+	}
+}
+
+func TestToolResultMessage(t *testing.T) {
+	msg := ToolResultMessage("get_weather", "11 degrees celsius")
+	if msg.Role != "tool" {
+		t.Errorf("role = %q, want %q", msg.Role, "tool")
+	}
+	if msg.Content != "11 degrees celsius" {
+		t.Errorf("content = %q, want %q", msg.Content, "11 degrees celsius")
+	}
+	if msg.ToolName != "get_weather" {
+		t.Errorf("tool_name = %q, want %q", msg.ToolName, "get_weather")
+	}
+
+	data, _ := json.Marshal(msg)
+	var raw map[string]any
+	json.Unmarshal(data, &raw)
+	if raw["role"] != "tool" {
+		t.Error("JSON role != tool")
+	}
+	if raw["tool_name"] != "get_weather" {
+		t.Error("JSON tool_name missing or wrong")
+	}
+}
+
+func TestToolCallArgumentTypes(t *testing.T) {
+	input := `{
+		"role": "assistant",
+		"content": "",
+		"tool_calls": [{
+			"type": "function",
+			"function": {
+				"index": 0,
+				"name": "process",
+				"arguments": {
+					"name": "test",
+					"count": 42,
+					"enabled": true,
+					"ratio": 3.14,
+					"tags": ["a", "b"],
+					"meta": {"key": "val"}
+				}
+			}
+		}]
+	}`
+
+	var msg ChatMessage
+	if err := json.Unmarshal([]byte(input), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	args := msg.ToolCalls[0].Function.Arguments
+
+	if args["name"] != "test" {
+		t.Errorf("name = %v, want %q", args["name"], "test")
+	}
+	if args["count"] != float64(42) {
+		t.Errorf("count = %v (%T), want float64(42)", args["count"], args["count"])
+	}
+	if args["enabled"] != true {
+		t.Errorf("enabled = %v, want true", args["enabled"])
+	}
+	if args["ratio"] != 3.14 {
+		t.Errorf("ratio = %v, want 3.14", args["ratio"])
+	}
+	tags, ok := args["tags"].([]any)
+	if !ok || len(tags) != 2 {
+		t.Errorf("tags = %v, want [a b]", args["tags"])
+	}
+	meta, ok := args["meta"].(map[string]any)
+	if !ok || meta["key"] != "val" {
+		t.Errorf("meta = %v, want {key: val}", args["meta"])
+	}
+}
