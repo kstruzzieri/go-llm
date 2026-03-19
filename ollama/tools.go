@@ -95,7 +95,11 @@ func NewTool(name, description string, params ToolParams) Tool {
 }
 
 // NewToolRaw creates a Tool with a raw JSON Schema — for MCP passthrough.
+// Panics if schema is not valid JSON (programming error).
 func NewToolRaw(name, description string, schema json.RawMessage) Tool {
+	if !json.Valid(schema) {
+		panic(fmt.Sprintf("ollama: NewToolRaw %q: schema is not valid JSON", name))
+	}
 	return Tool{
 		Type: "function",
 		Function: ToolFunction{

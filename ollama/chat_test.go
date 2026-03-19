@@ -172,7 +172,9 @@ func TestChatWithTools(t *testing.T) {
 			},
 			Done: true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -243,7 +245,11 @@ func TestChatStreamWithTools(t *testing.T) {
 		}
 
 		for _, chunk := range chunks {
-			data, _ := json.Marshal(chunk)
+			data, err := json.Marshal(chunk)
+			if err != nil {
+				t.Errorf("marshal chunk: %v", err)
+				return
+			}
 			fmt.Fprintf(w, "%s\n", data)
 		}
 	}))
