@@ -195,7 +195,7 @@ func TestChatWithTools(t *testing.T) {
 		Model:    "test-model",
 		Messages: []ChatMessage{{Role: "user", Content: "Weather in Tokyo?"}},
 		Tools: []Tool{
-			NewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)),
+			MustNewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)),
 		},
 	})
 	if err != nil {
@@ -273,7 +273,7 @@ func TestChatStreamWithTools(t *testing.T) {
 		Model:    "test-model",
 		Messages: []ChatMessage{{Role: "user", Content: "Weather?"}},
 		Tools: []Tool{
-			NewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object"}`)),
+			MustNewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object"}`)),
 		},
 	}, func(resp ChatResponse) error {
 		if len(resp.Message.ToolCalls) > 0 {

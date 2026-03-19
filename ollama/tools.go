@@ -95,10 +95,11 @@ func NewTool(name, description string, params ToolParams) Tool {
 }
 
 // NewToolRaw creates a Tool with a raw JSON Schema — for MCP passthrough.
-// Panics if schema is not valid JSON (programming error).
-func NewToolRaw(name, description string, schema json.RawMessage) Tool {
-	if !json.Valid(schema) {
-		panic(fmt.Sprintf("ollama: NewToolRaw %q: schema is not valid JSON", name))
+// Returns an error if schema is not a valid JSON object.
+func NewToolRaw(name, description string, schema json.RawMessage) (Tool, error) {
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(schema, &obj); err != nil || obj == nil {
+		return Tool{}, fmt.Errorf("ollama: NewToolRaw %q: schema must be a JSON object", name)
 	}
 	return Tool{
 		Type: "function",
@@ -107,7 +108,17 @@ func NewToolRaw(name, description string, schema json.RawMessage) Tool {
 			Description: description,
 			Parameters:  schema,
 		},
+	}, nil
+}
+
+// MustNewToolRaw is like NewToolRaw but panics on error.
+// Use for hardcoded schemas known to be valid at compile time.
+func MustNewToolRaw(name, description string, schema json.RawMessage) Tool {
+	t, err := NewToolRaw(name, description, schema)
+	if err != nil {
+		panic(err)
 	}
+	return t
 }
 
 // ToolResultMessage creates a ChatMessage for feeding a tool's result back to the model.

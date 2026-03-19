@@ -292,7 +292,10 @@ func TestNewTool(t *testing.T) {
 
 func TestNewToolRaw(t *testing.T) {
 	rawSchema := json.RawMessage(`{"type":"object","properties":{"x":{"type":"number"}},"required":["x"]}`)
-	tool := NewToolRaw("compute", "Run computation", rawSchema)
+	tool, err := NewToolRaw("compute", "Run computation", rawSchema)
+	if err != nil {
+		t.Fatalf("NewToolRaw: %v", err)
+	}
 
 	if tool.Type != "function" {
 		t.Errorf("tool type = %q, want %q", tool.Type, "function")
@@ -316,17 +319,43 @@ func TestNewToolRaw(t *testing.T) {
 }
 
 func TestNewToolRawInvalidJSON(t *testing.T) {
+	_, err := NewToolRaw("bad", "desc", json.RawMessage(`{not valid`))
+	if err == nil {
+		t.Fatal("expected error for invalid JSON schema")
+	}
+	if !strings.Contains(err.Error(), "JSON object") {
+		t.Errorf("error should mention JSON object: %v", err)
+	}
+}
+
+func TestNewToolRawNonObject(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+	}{
+		{"null", `null`},
+		{"array", `[1, 2, 3]`},
+		{"string", `"hello"`},
+		{"number", `42`},
+		{"boolean", `true`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := NewToolRaw("test", "desc", json.RawMessage(tc.schema))
+			if err == nil {
+				t.Errorf("expected error for non-object schema %s", tc.schema)
+			}
+		})
+	}
+}
+
+func TestMustNewToolRawPanic(t *testing.T) {
 	defer func() {
-		r := recover()
-		if r == nil {
+		if r := recover(); r == nil {
 			t.Fatal("expected panic for invalid JSON schema")
 		}
-		msg, ok := r.(string)
-		if !ok || !strings.Contains(msg, "not valid JSON") {
-			t.Errorf("unexpected panic value: %v", r)
-		}
 	}()
-	NewToolRaw("bad", "desc", json.RawMessage(`{not valid`))
+	MustNewToolRaw("bad", "desc", json.RawMessage(`{not valid`))
 }
 
 func TestToolResultMessage(t *testing.T) {
