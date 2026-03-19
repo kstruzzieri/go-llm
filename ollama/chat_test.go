@@ -139,3 +139,126 @@ func TestChatServerError(t *testing.T) {
 		t.Fatal("expected error for 500 response")
 	}
 }
+
+func TestChatWithTools(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		if len(req.Tools) != 1 {
+			t.Errorf("expected 1 tool, got %d", len(req.Tools))
+		}
+		if req.Tools[0].Function.Name != "get_weather" {
+			t.Errorf("tool name = %q, want %q", req.Tools[0].Function.Name, "get_weather")
+		}
+
+		resp := ChatResponse{
+			Model: "test-model",
+			Message: ChatMessage{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: []ToolCall{
+					{
+						Type: "function",
+						Function: ToolCallFunction{
+							Index:     0,
+							Name:      "get_weather",
+							Arguments: map[string]any{"city": "Tokyo"},
+						},
+					},
+				},
+			},
+			Done: true,
+		}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	resp, err := c.Chat(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "user", Content: "Weather in Tokyo?"}},
+		Tools: []Tool{
+			NewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if len(resp.Message.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(resp.Message.ToolCalls))
+	}
+	tc := resp.Message.ToolCalls[0]
+	if tc.Function.Name != "get_weather" {
+		t.Errorf("tool call name = %q, want %q", tc.Function.Name, "get_weather")
+	}
+	if tc.Function.Arguments["city"] != "Tokyo" {
+		t.Errorf("arguments[city] = %v, want %q", tc.Function.Arguments["city"], "Tokyo")
+	}
+}
+
+func TestChatStreamWithTools(t *testing.T) {
+	chunks := []ChatResponse{
+		{
+			Model: "test-model",
+			Message: ChatMessage{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: []ToolCall{
+					{
+						Type: "function",
+						Function: ToolCallFunction{
+							Index:     0,
+							Name:      "get_weather",
+							Arguments: map[string]any{"city": "Tokyo"},
+						},
+					},
+				},
+			},
+			Done: false,
+		},
+		{
+			Model:     "test-model",
+			Message:   ChatMessage{Role: "assistant", Content: ""},
+			Done:      true,
+			EvalCount: 5,
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, chunk := range chunks {
+			data, _ := json.Marshal(chunk)
+			fmt.Fprintf(w, "%s\n", data)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	var toolCallChunks []ChatResponse
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "user", Content: "Weather?"}},
+		Tools: []Tool{
+			NewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object"}`)),
+		},
+	}, func(resp ChatResponse) error {
+		if len(resp.Message.ToolCalls) > 0 {
+			toolCallChunks = append(toolCallChunks, resp)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error: %v", err)
+	}
+	if len(toolCallChunks) != 1 {
+		t.Fatalf("expected 1 chunk with tool calls, got %d", len(toolCallChunks))
+	}
+	if toolCallChunks[0].Done {
+		t.Error("tool call chunk should have done=false")
+	}
+	if toolCallChunks[0].Message.ToolCalls[0].Function.Name != "get_weather" {
+		t.Error("tool call name mismatch in stream")
+	}
+}
