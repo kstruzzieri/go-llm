@@ -122,6 +122,15 @@ func MustNewToolRaw(name, description string, schema json.RawMessage) Tool {
 }
 
 // ToolResultMessage creates a ChatMessage for feeding a tool's result back to the model.
+// For parallel tool calls, use ToolResultMessageWithIndex to correlate each result
+// with its originating call.
 func ToolResultMessage(toolName, content string) ChatMessage {
 	return ChatMessage{Role: "tool", Content: content, ToolName: toolName}
+}
+
+// ToolResultMessageWithIndex creates a ChatMessage for a tool result that correlates
+// with a specific parallel tool call via its index. Use this when the model invokes
+// the same tool multiple times in one turn and results must be unambiguous.
+func ToolResultMessageWithIndex(toolName, content string, callIndex int) ChatMessage {
+	return ChatMessage{Role: "tool", Content: content, ToolName: toolName, ToolCallIndex: callIndex}
 }

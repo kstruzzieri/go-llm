@@ -158,12 +158,16 @@ func ExportDataset(
 		return nil, err
 	}
 
-	// Step 10: Atomic rename.
+	// Step 10: Atomic publish. Remove destination first for Windows compatibility
+	// (os.Rename cannot overwrite an existing file on Windows).
 	if err := tmpFile.Close(); err != nil {
 		tmpClosed = true
 		return nil, fmt.Errorf("parquet: close temp file: %w", err)
 	}
 	tmpClosed = true
+	if err := os.Remove(outputPath); err != nil && !os.IsNotExist(err) {
+		return nil, fmt.Errorf("parquet: remove existing output: %w", err)
+	}
 	if err := os.Rename(tmpPath, outputPath); err != nil {
 		return nil, fmt.Errorf("parquet: rename to output: %w", err)
 	}

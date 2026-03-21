@@ -171,16 +171,17 @@ func Default() (*Config, error) {
 		return Load("models.json")
 	}
 
-	// 3. ~/.config/go-llm/models.json.
-	if home, err := os.UserHomeDir(); err == nil {
-		homePath := filepath.Join(home, ".config", "go-llm", "models.json")
-		if _, err := os.Stat(homePath); err == nil {
-			return Load(homePath)
+	// 3. Platform-standard user config directory (e.g., ~/.config on Linux,
+	// ~/Library/Application Support on macOS, %AppData% on Windows).
+	if configDir, err := os.UserConfigDir(); err == nil {
+		configPath := filepath.Join(configDir, "go-llm", "models.json")
+		if _, err := os.Stat(configPath); err == nil {
+			return Load(configPath)
 		}
 	}
 
 	return nil, fmt.Errorf("config: no configuration file found; set GO_LLM_CONFIG, " +
-		"place models.json in the working directory, or create ~/.config/go-llm/models.json")
+		"place models.json in the working directory, or create <user-config-dir>/go-llm/models.json")
 }
 
 // Load reads a models.json file from path, parses it, applies defaults, and validates.
