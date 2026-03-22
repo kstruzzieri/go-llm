@@ -322,3 +322,83 @@ func TestFTS5SyncOnDelete(t *testing.T) {
 		t.Errorf("post-delete: FTS5 MATCH 'charlie' returned %d rows, want 1", count)
 	}
 }
+
+func TestFTS5SyncOnReplaceSource(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Store initial chunks.
+	chunks := []Chunk{
+		{ID: "c1", Content: "alpha bravo", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	if err := store.Store(ctx, chunks, [][]float64{{1.0, 0.0}}); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+
+	// Verify FTS5 has "alpha".
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'alpha'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("pre-replace FTS5 query: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("pre-replace: expected 1 match for 'alpha', got %d", count)
+	}
+
+	// Replace with different content.
+	replacement := []Chunk{
+		{ID: "c2", Content: "charlie delta", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	if err := store.ReplaceSource(ctx, "a.go", replacement, [][]float64{{0.0, 1.0}}); err != nil {
+		t.Fatalf("ReplaceSource() error: %v", err)
+	}
+
+	// FTS5 should no longer match "alpha" (old content removed).
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'alpha'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("post-replace FTS5 query: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("post-replace: FTS5 MATCH 'alpha' returned %d rows, want 0", count)
+	}
+
+	// FTS5 should match "charlie" (new content).
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'charlie'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("post-replace FTS5 query for charlie: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("post-replace: FTS5 MATCH 'charlie' returned %d rows, want 1", count)
+	}
+}
+
+func TestMigrationIdempotency(t *testing.T) {
+	// Create a fresh database and run migrations.
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("first runMigrations() error: %v", err)
+	}
+
+	// Running migrations again should be a no-op.
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("second runMigrations() error: %v", err)
+	}
+
+	// Verify version is still 2 (not duplicated).
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&count); err != nil {
+		t.Fatalf("count versions: %v", err)
+	}
+	if count != 2 {
+		t.Errorf("expected 2 version records (v1, v2), got %d", count)
+	}
+}

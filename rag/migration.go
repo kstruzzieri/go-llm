@@ -150,12 +150,21 @@ func runMigrations(db *sql.DB) error {
 			return fmt.Errorf("rag: migration v%d (%s): %w", m.version, m.description, err)
 		}
 
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("rag: commit migration v%d: %w", m.version, err)
+		// Record version inside the transaction so it commits atomically
+		// with the DDL. Without this, a crash between commit and version
+		// recording would leave an applied-but-unrecorded migration,
+		// and non-idempotent DDL (e.g., ALTER TABLE ADD COLUMN) would
+		// fail on the next startup.
+		if _, err := tx.Exec(
+			`INSERT INTO rag_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
+			m.version, m.description, time.Now().Unix(),
+		); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("rag: record version %d: %w", m.version, err)
 		}
 
-		if err := recordVersion(db, m.version, m.description); err != nil {
-			return err
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("rag: commit migration v%d: %w", m.version, err)
 		}
 	}
 
