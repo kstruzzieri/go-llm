@@ -52,6 +52,7 @@ func (c *Client) ShowModel(ctx context.Context, name string) (*ModelInfo, error)
 		Name:       name,
 		ParamSize:  resp.Details.ParamSize,
 		QuantLevel: resp.Details.QuantLevel,
+		Digest:     resp.Digest,
 	}, nil
 }
 

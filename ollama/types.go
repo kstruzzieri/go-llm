@@ -109,6 +109,7 @@ type ModelInfo struct {
 	Size       int64  `json:"size"`
 	ParamSize  string `json:"parameter_size"`
 	QuantLevel string `json:"quantization_level"`
+	Digest     string `json:"digest"` // model version hash from /api/show
 }
 
 // modelDetails is used when parsing /api/show responses.
@@ -131,6 +132,7 @@ type listModelEntry struct {
 // showModelResponse wraps the /api/show response.
 type showModelResponse struct {
 	Details modelDetails `json:"details"`
+	Digest  string       `json:"digest"`
 }
 
 // pullModelRequest is the request body for /api/pull.

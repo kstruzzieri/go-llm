@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-func newTestStore(t *testing.T) VectorStore {
+func newTestStore(t *testing.T) *SQLiteStore {
 	t.Helper()
 	store, err := NewSQLiteStore(":memory:")
 	if err != nil {
@@ -175,11 +175,7 @@ func TestSQLiteStoreUpsert(t *testing.T) {
 }
 
 func TestSQLiteStoreReplaceSourceRollsBackOnInsertFailure(t *testing.T) {
-	vs := newTestStore(t)
-	store, ok := vs.(*SQLiteStore)
-	if !ok {
-		t.Fatal("expected *SQLiteStore")
-	}
+	store := newTestStore(t)
 	ctx := context.Background()
 
 	// Seed existing data for the source.
@@ -221,8 +217,7 @@ func TestSQLiteStoreReplaceSourceRollsBackOnInsertFailure(t *testing.T) {
 
 func seedExportStore(t *testing.T) *SQLiteStore {
 	t.Helper()
-	vs := newTestStore(t)
-	store := vs.(*SQLiteStore)
+	store := newTestStore(t)
 	ctx := context.Background()
 
 	chunks := []Chunk{
@@ -382,8 +377,7 @@ func TestExportChunksOrdering(t *testing.T) {
 }
 
 func TestExportChunksEmptyStore(t *testing.T) {
-	vs := newTestStore(t)
-	store := vs.(*SQLiteStore)
+	store := newTestStore(t)
 	ctx := context.Background()
 
 	seq, err := store.ExportChunks(ctx, nil)
@@ -436,8 +430,7 @@ func TestExportChunksContextCancellation(t *testing.T) {
 }
 
 func TestSchemaMigrationIndexes(t *testing.T) {
-	vs := newTestStore(t)
-	store := vs.(*SQLiteStore)
+	store := newTestStore(t)
 
 	// Verify the new indexes exist.
 	rows, err := store.db.Query(`SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='chunks' ORDER BY name`)
@@ -492,8 +485,6 @@ func TestExportChunksCombinedFilter(t *testing.T) {
 
 // Verify the new store returns *SQLiteStore that satisfies Exportable.
 func TestSQLiteStoreImplementsExportable(t *testing.T) {
-	vs := newTestStore(t)
-	if _, ok := vs.(Exportable); !ok {
-		t.Error("SQLiteStore (via VectorStore) should implement Exportable")
-	}
+	store := newTestStore(t)
+	var _ Exportable = store // compile-time check
 }
