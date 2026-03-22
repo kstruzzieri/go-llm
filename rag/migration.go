@@ -126,12 +126,27 @@ func runMigrations(db *sql.DB) error {
 	}
 
 	if currentVersion == 0 && tableExists(db, "chunks") {
-		// Database was created before the migration system.
-		// Mark the baseline (v1) as applied since the schema already exists.
-		if err := recordVersion(db, 1, "baseline schema (pre-existing)"); err != nil {
-			return err
+		// Database was created before the migration system. Determine
+		// which version the schema actually represents.
+		if tableExists(db, "chunks_fts") {
+			// Schema has v2 artifacts (FTS5 table, indexed_at column,
+			// triggers) but no version records. This happens if a prior
+			// version committed the v2 migration DDL but crashed before
+			// recording the version. Mark both v1 and v2 as applied.
+			if err := recordVersion(db, 1, "baseline schema (pre-existing)"); err != nil {
+				return err
+			}
+			if err := recordVersion(db, 2, "add indexed_at, FTS5 index, and sync triggers (pre-existing)"); err != nil {
+				return err
+			}
+			currentVersion = 2
+		} else {
+			// True legacy v1 database (chunks table only, no FTS5).
+			if err := recordVersion(db, 1, "baseline schema (pre-existing)"); err != nil {
+				return err
+			}
+			currentVersion = 1
 		}
-		currentVersion = 1
 	}
 
 	// Apply pending migrations in order.

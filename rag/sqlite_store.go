@@ -83,9 +83,25 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 }
 
 func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64) error {
+	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
+	// INSERT OR REPLACE deletes the old row and inserts a new one, but
+	// SQLite does not fire DELETE triggers for rows removed by REPLACE
+	// conflict resolution (unless recursive_triggers is enabled). This
+	// leaves stale entries in the FTS5 index. ON CONFLICT DO UPDATE
+	// modifies the row in place (preserving its rowid) and fires the
+	// AFTER UPDATE trigger, which correctly maintains FTS5.
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+				content = excluded.content,
+				source = excluded.source,
+				start_line = excluded.start_line,
+				end_line = excluded.end_line,
+				language = excluded.language,
+				metadata = excluded.metadata,
+				embedding = excluded.embedding,
+				indexed_at = excluded.indexed_at`)
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}

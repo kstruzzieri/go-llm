@@ -402,3 +402,140 @@ func TestMigrationIdempotency(t *testing.T) {
 		t.Errorf("expected 2 version records (v1, v2), got %d", count)
 	}
 }
+
+func TestFTS5UpsertConsistency(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert a chunk with content "original alpha".
+	chunks := []Chunk{
+		{ID: "c1", Content: "original alpha", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	if err := store.Store(ctx, chunks, [][]float64{{1.0, 0.0}}); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+
+	// Verify FTS5 finds "alpha".
+	var count int
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'alpha'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("pre-upsert FTS5 query: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("pre-upsert: expected 1 match for 'alpha', got %d", count)
+	}
+
+	// Upsert the same chunk ID with different content.
+	updated := []Chunk{
+		{ID: "c1", Content: "updated bravo", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	if err := store.Store(ctx, updated, [][]float64{{0.0, 1.0}}); err != nil {
+		t.Fatalf("Store() upsert error: %v", err)
+	}
+
+	// FTS5 must NOT find "alpha" (old content removed).
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'alpha'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("post-upsert FTS5 query for old term: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("post-upsert: FTS5 MATCH 'alpha' returned %d rows, want 0 (stale terms)", count)
+	}
+
+	// FTS5 must find "bravo" (new content indexed).
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM chunks_fts WHERE chunks_fts MATCH 'bravo'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("post-upsert FTS5 query for new term: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("post-upsert: FTS5 MATCH 'bravo' returned %d rows, want 1", count)
+	}
+
+	// Verify content-sync reads don't fail (no "missing row from content table").
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT rowid, content, source FROM chunks_fts WHERE chunks_fts MATCH 'bravo'`)
+	if err != nil {
+		t.Fatalf("content-sync read: %v", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var rowid int64
+		var content, source string
+		if err := rows.Scan(&rowid, &content, &source); err != nil {
+			t.Fatalf("content-sync scan: %v", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("content-sync iterate: %v", err)
+	}
+}
+
+func TestMigrationHalfAppliedV2(t *testing.T) {
+	// Simulate a database where v2 DDL was applied but version was
+	// not recorded (crash between tx.Commit and recordVersion in the
+	// original non-atomic code path).
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	// Create v2-shaped schema: chunks table with indexed_at + FTS5.
+	v2Schema := `
+	CREATE TABLE chunks (
+		id TEXT PRIMARY KEY,
+		content TEXT NOT NULL,
+		source TEXT NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
+		language TEXT NOT NULL DEFAULT '',
+		metadata TEXT NOT NULL DEFAULT '{}',
+		embedding TEXT NOT NULL,
+		indexed_at INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX idx_chunks_source_line ON chunks(source, start_line);
+	CREATE INDEX idx_chunks_lang_source_line ON chunks(language, source, start_line);
+
+	CREATE VIRTUAL TABLE chunks_fts USING fts5(
+		content, source,
+		content=chunks, content_rowid=rowid
+	);
+	CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+		INSERT INTO chunks_fts(rowid, content, source)
+		VALUES (new.rowid, new.content, new.source);
+	END;
+	CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+		VALUES ('delete', old.rowid, old.content, old.source);
+	END;
+	CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+		VALUES ('delete', old.rowid, old.content, old.source);
+		INSERT INTO chunks_fts(rowid, content, source)
+		VALUES (new.rowid, new.content, new.source);
+	END;
+	`
+	if _, err := db.Exec(v2Schema); err != nil {
+		t.Fatalf("create v2 schema: %v", err)
+	}
+
+	// NO rag_schema_version table — simulates crash window.
+
+	// runMigrations must succeed without "duplicate column name" error.
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() on half-applied v2: %v", err)
+	}
+
+	// Verify version recorded as 2.
+	var maxVersion int
+	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if maxVersion != 2 {
+		t.Errorf("max version = %d, want 2", maxVersion)
+	}
+}
