@@ -655,6 +655,50 @@ func TestAtomicWrite(t *testing.T) {
 	}
 }
 
+func TestOverwriteExistingFile(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "test.parquet")
+
+	mock1 := &mockExportable{
+		chunks: []rag.ExportedChunk{
+			makeChunk("c1", "first", "/a.go", "go", 1, 1, uniformEmb(3, 1.0)),
+		},
+	}
+	// Create initial file.
+	_, err := ExportDataset(context.Background(), mock1, out)
+	if err != nil {
+		t.Fatalf("initial export: %v", err)
+	}
+	origInfo, _ := os.Stat(out)
+
+	// Overwrite with different data.
+	mock2 := &mockExportable{
+		chunks: []rag.ExportedChunk{
+			makeChunk("c2", "second content that is longer", "/b.go", "go", 1, 1, uniformEmb(3, 0.5)),
+			makeChunk("c3", "third", "/c.go", "go", 1, 1, uniformEmb(3, 0.5)),
+		},
+	}
+	info, err := ExportDataset(context.Background(), mock2, out)
+	if err != nil {
+		t.Fatalf("overwrite export: %v", err)
+	}
+	if info.RowCount != 2 {
+		t.Errorf("RowCount = %d, want 2", info.RowCount)
+	}
+
+	// File size should differ (different data).
+	newInfo, _ := os.Stat(out)
+	if newInfo.Size() == origInfo.Size() {
+		t.Error("file size unchanged after overwrite with different data")
+	}
+
+	// No orphaned temp files.
+	temps, _ := filepath.Glob(filepath.Join(dir, ".parquet-export-*.tmp"))
+	if len(temps) != 0 {
+		t.Errorf("orphaned temp files after overwrite: %v", temps)
+	}
+}
+
 func TestDatasetInfoAccuracy(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "test.parquet")

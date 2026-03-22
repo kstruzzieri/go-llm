@@ -389,16 +389,31 @@ func TestToolResultMessage(t *testing.T) {
 	}
 }
 
-func TestToolResultMessageWithIndex(t *testing.T) {
-	msg := ToolResultMessageWithIndex("get_weather", "sunny", 0)
+func TestToolResultMessageFor(t *testing.T) {
+	call := ToolCall{
+		ID:   "call_abc123",
+		Type: "function",
+		Function: ToolCallFunction{
+			Index: 0,
+			Name:  "get_weather",
+			Arguments: map[string]any{
+				"city": "London",
+			},
+		},
+	}
+
+	msg := ToolResultMessageFor(call, "sunny")
 	if msg.Role != "tool" {
 		t.Errorf("role = %q, want %q", msg.Role, "tool")
 	}
-	if msg.ToolCallIndex == nil || *msg.ToolCallIndex != 0 {
-		t.Errorf("tool_call_index = %v, want pointer to 0", msg.ToolCallIndex)
+	if msg.ToolName != "get_weather" {
+		t.Errorf("tool_name = %q, want %q", msg.ToolName, "get_weather")
+	}
+	if msg.ToolCallID != "call_abc123" {
+		t.Errorf("tool_call_id = %q, want %q", msg.ToolCallID, "call_abc123")
 	}
 
-	// Index 0 must serialize (not be omitted by omitempty).
+	// tool_call_id must serialize in JSON.
 	data, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -407,17 +422,22 @@ func TestToolResultMessageWithIndex(t *testing.T) {
 	if err := json.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if _, ok := raw["tool_call_index"]; !ok {
-		t.Error("tool_call_index=0 must be present in JSON, not omitted")
+	if raw["tool_call_id"] != "call_abc123" {
+		t.Errorf("JSON tool_call_id = %v, want %q", raw["tool_call_id"], "call_abc123")
 	}
 
-	// Original ToolResultMessage must NOT include tool_call_index.
+	// Original ToolResultMessage must NOT include tool_call_id.
 	plain := ToolResultMessage("get_weather", "sunny")
-	data2, _ := json.Marshal(plain)
+	data2, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("marshal plain ToolResultMessage: %v", err)
+	}
 	var raw2 map[string]any
-	json.Unmarshal(data2, &raw2)
-	if _, ok := raw2["tool_call_index"]; ok {
-		t.Error("plain ToolResultMessage should not include tool_call_index")
+	if err := json.Unmarshal(data2, &raw2); err != nil {
+		t.Fatalf("unmarshal plain ToolResultMessage: %v", err)
+	}
+	if _, ok := raw2["tool_call_id"]; ok {
+		t.Error("plain ToolResultMessage should not include tool_call_id")
 	}
 }
 
