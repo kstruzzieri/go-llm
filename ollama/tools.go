@@ -132,5 +132,6 @@ func ToolResultMessage(toolName, content string) ChatMessage {
 // with a specific parallel tool call via its index. Use this when the model invokes
 // the same tool multiple times in one turn and results must be unambiguous.
 func ToolResultMessageWithIndex(toolName, content string, callIndex int) ChatMessage {
-	return ChatMessage{Role: "tool", Content: content, ToolName: toolName, ToolCallIndex: callIndex}
+	idx := callIndex
+	return ChatMessage{Role: "tool", Content: content, ToolName: toolName, ToolCallIndex: &idx}
 }

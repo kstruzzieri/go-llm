@@ -389,6 +389,38 @@ func TestToolResultMessage(t *testing.T) {
 	}
 }
 
+func TestToolResultMessageWithIndex(t *testing.T) {
+	msg := ToolResultMessageWithIndex("get_weather", "sunny", 0)
+	if msg.Role != "tool" {
+		t.Errorf("role = %q, want %q", msg.Role, "tool")
+	}
+	if msg.ToolCallIndex == nil || *msg.ToolCallIndex != 0 {
+		t.Errorf("tool_call_index = %v, want pointer to 0", msg.ToolCallIndex)
+	}
+
+	// Index 0 must serialize (not be omitted by omitempty).
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if _, ok := raw["tool_call_index"]; !ok {
+		t.Error("tool_call_index=0 must be present in JSON, not omitted")
+	}
+
+	// Original ToolResultMessage must NOT include tool_call_index.
+	plain := ToolResultMessage("get_weather", "sunny")
+	data2, _ := json.Marshal(plain)
+	var raw2 map[string]any
+	json.Unmarshal(data2, &raw2)
+	if _, ok := raw2["tool_call_index"]; ok {
+		t.Error("plain ToolResultMessage should not include tool_call_index")
+	}
+}
+
 func TestToolCallArgumentTypes(t *testing.T) {
 	input := `{
 		"role": "assistant",

@@ -38,7 +38,7 @@ type ChatMessage struct {
 	Content       string     `json:"content"`
 	ToolCalls     []ToolCall `json:"tool_calls,omitempty"`      // present when assistant invokes tools
 	ToolName      string     `json:"tool_name,omitempty"`       // set when role="tool" (result)
-	ToolCallIndex int        `json:"tool_call_index,omitempty"` // correlates result with parallel call
+	ToolCallIndex *int       `json:"tool_call_index,omitempty"` // correlates result with parallel call
 }
 
 // ChatRequest is the request body for the /api/chat endpoint.

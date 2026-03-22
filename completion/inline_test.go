@@ -354,3 +354,32 @@ func TestCompleteCustomMaxTokens(t *testing.T) {
 		MaxTokens: 256,
 	})
 }
+
+func TestCompleteMaxTokensClamped(t *testing.T) {
+	// MaxTokens exceeding (defaultNumCtx - fimTokenOverhead) must be clamped
+	// so that num_predict never exceeds num_ctx.
+	maxAllowed := defaultNumCtx - fimTokenOverhead // 2045
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.GenerateRequest
+		json.NewDecoder(r.Body).Decode(&req)
+
+		if req.Options.NumPredict != maxAllowed {
+			t.Errorf("NumPredict = %d, want %d (clamped)", req.Options.NumPredict, maxAllowed)
+		}
+		if req.Options.NumPredict > req.Options.NumCtx {
+			t.Errorf("NumPredict (%d) > NumCtx (%d)", req.Options.NumPredict, req.Options.NumCtx)
+		}
+
+		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
+		json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	provider := NewProvider(client, "test-model")
+	provider.Complete(context.Background(), FIMRequest{
+		Prefix:    "code",
+		MaxTokens: 99999, // absurdly large — must be clamped
+	})
+}
