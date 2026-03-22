@@ -181,6 +181,17 @@ func Default() (*Config, error) {
 		}
 	}
 
+	// 4. Legacy fallback: ~/.config/go-llm/models.json. Preserves backward
+	// compatibility for users who created configs at the old hardcoded path
+	// on platforms where os.UserConfigDir() returns a different directory
+	// (e.g., macOS returns ~/Library/Application Support, not ~/.config).
+	if home, err := os.UserHomeDir(); err == nil {
+		legacyPath := filepath.Join(home, ".config", "go-llm", "models.json")
+		if _, err := os.Stat(legacyPath); err == nil {
+			return Load(legacyPath)
+		}
+	}
+
 	// Build an actionable error message with the resolved config path when available.
 	configHint := "<user-config-dir>/go-llm/models.json"
 	if configDirErr == nil {

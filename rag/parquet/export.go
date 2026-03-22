@@ -170,6 +170,11 @@ func ExportDataset(
 	tmpClosed = true
 	if err := os.Rename(tmpPath, outputPath); err != nil {
 		// Rename failed — likely Windows with existing destination.
+		// Guard: refuse to remove directories to prevent accidental data loss
+		// if outputPath is a directory instead of a file.
+		if fi, statErr := os.Stat(outputPath); statErr == nil && fi.IsDir() {
+			return nil, fmt.Errorf("parquet: output path %q is a directory, not a file", outputPath)
+		}
 		// Remove destination and retry; if remove fails, report the
 		// original rename error to avoid masking the root cause.
 		if removeErr := os.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
