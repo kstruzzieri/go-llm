@@ -539,3 +539,75 @@ func TestMigrationHalfAppliedV2(t *testing.T) {
 		t.Errorf("max version = %d, want 2", maxVersion)
 	}
 }
+
+func TestMigrationHalfAppliedV2WithV1Recorded(t *testing.T) {
+	// Simulate the gap identified in review: v2-shaped schema but only
+	// version 1 is recorded (crash between first and second recordVersion
+	// in the previous non-atomic repair code).
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	// Create v2-shaped schema.
+	v2Schema := `
+	CREATE TABLE chunks (
+		id TEXT PRIMARY KEY,
+		content TEXT NOT NULL,
+		source TEXT NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
+		language TEXT NOT NULL DEFAULT '',
+		metadata TEXT NOT NULL DEFAULT '{}',
+		embedding TEXT NOT NULL,
+		indexed_at INTEGER NOT NULL DEFAULT 0
+	);
+	CREATE INDEX idx_chunks_source_line ON chunks(source, start_line);
+	CREATE INDEX idx_chunks_lang_source_line ON chunks(language, source, start_line);
+	CREATE VIRTUAL TABLE chunks_fts USING fts5(
+		content, source,
+		content=chunks, content_rowid=rowid
+	);
+	CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+		INSERT INTO chunks_fts(rowid, content, source)
+		VALUES (new.rowid, new.content, new.source);
+	END;
+	CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+		VALUES ('delete', old.rowid, old.content, old.source);
+	END;
+	CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+		VALUES ('delete', old.rowid, old.content, old.source);
+		INSERT INTO chunks_fts(rowid, content, source)
+		VALUES (new.rowid, new.content, new.source);
+	END;
+
+	-- Version table exists but only v1 is recorded (simulates partial repair crash).
+	CREATE TABLE rag_schema_version (
+		version     INTEGER PRIMARY KEY,
+		description TEXT NOT NULL,
+		applied_at  INTEGER NOT NULL
+	);
+	INSERT INTO rag_schema_version (version, description, applied_at) VALUES (1, 'baseline', 1000);
+	`
+	if _, err := db.Exec(v2Schema); err != nil {
+		t.Fatalf("create v2 schema with v1 recorded: %v", err)
+	}
+
+	// runMigrations must succeed without "duplicate column name" error.
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() on v2 schema with v1 recorded: %v", err)
+	}
+
+	// Verify version is now 2.
+	var maxVersion int
+	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if maxVersion != 2 {
+		t.Errorf("max version = %d, want 2", maxVersion)
+	}
+}

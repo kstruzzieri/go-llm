@@ -127,26 +127,25 @@ func runMigrations(db *sql.DB) error {
 
 	if currentVersion == 0 && tableExists(db, "chunks") {
 		// Database was created before the migration system. Determine
-		// which version the schema actually represents.
+		// which version the schema actually represents and record all
+		// applicable versions atomically so a crash cannot leave a
+		// partial version state.
+		detectedVersion := 1
 		if tableExists(db, "chunks_fts") {
-			// Schema has v2 artifacts (FTS5 table, indexed_at column,
-			// triggers) but no version records. This happens if a prior
-			// version committed the v2 migration DDL but crashed before
-			// recording the version. Mark both v1 and v2 as applied.
-			if err := recordVersion(db, 1, "baseline schema (pre-existing)"); err != nil {
-				return err
-			}
-			if err := recordVersion(db, 2, "add indexed_at, FTS5 index, and sync triggers (pre-existing)"); err != nil {
-				return err
-			}
-			currentVersion = 2
-		} else {
-			// True legacy v1 database (chunks table only, no FTS5).
-			if err := recordVersion(db, 1, "baseline schema (pre-existing)"); err != nil {
-				return err
-			}
-			currentVersion = 1
+			detectedVersion = 2
 		}
+		if err := recordVersionsUpTo(db, detectedVersion); err != nil {
+			return err
+		}
+		currentVersion = detectedVersion
+	} else if currentVersion > 0 && currentVersion < 2 && tableExists(db, "chunks_fts") {
+		// Schema has v2 artifacts but only version 1 is recorded.
+		// This can happen if a prior repair wrote v1 but crashed
+		// before writing v2. Record v2 to prevent re-running it.
+		if err := recordVersionsUpTo(db, 2); err != nil {
+			return err
+		}
+		currentVersion = 2
 	}
 
 	// Apply pending migrations in order.
@@ -213,6 +212,33 @@ func recordVersion(db *sql.DB, version int, description string) error {
 	)
 	if err != nil {
 		return fmt.Errorf("rag: record version %d: %w", version, err)
+	}
+	return nil
+}
+
+// recordVersionsUpTo atomically inserts version records for all migrations
+// up to and including the given version. Used during pre-migration database
+// detection to ensure a crash cannot leave a partial version state.
+func recordVersionsUpTo(db *sql.DB, upTo int) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("rag: begin version recording: %w", err)
+	}
+	now := time.Now().Unix()
+	for _, m := range migrations {
+		if m.version > upTo {
+			break
+		}
+		if _, err := tx.Exec(
+			`INSERT OR IGNORE INTO rag_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
+			m.version, m.description+" (pre-existing)", now,
+		); err != nil {
+			tx.Rollback()
+			return fmt.Errorf("rag: record version %d: %w", m.version, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rag: commit version recording: %w", err)
 	}
 	return nil
 }
