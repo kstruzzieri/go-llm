@@ -1,19 +1,32 @@
 # go-llm
 
-A shared Go module providing Ollama LLM integration and a lightweight RAG (Retrieval Augmented Generation) layer with SQLite-backed vector storage.
+A batteries-included Go module for building local-first AI features on top of [Ollama](https://ollama.com). Provides a complete pipeline from model management and configuration through RAG-powered retrieval to domain-specific analysis — all running locally with no cloud dependencies or API keys.
+
+Designed for embedding into Go applications that need LLM capabilities: chat, tool calling, code completion, retrieval-augmented generation, and more. A standalone MCP server mode is [on the roadmap](#roadmap) for use as a local AI service without embedding. Pure Go with minimal dependencies (no CGo).
+
+### What's included
+
+- **Ollama client** — chat, completions, embeddings, model management, and tool calling with streaming support
+- **RAG pipeline** — code-aware chunking, SQLite vector store, concurrent indexing with `.gitignore` support, and context-building retrieval
+- **FIM completion** — Fill-in-the-Middle for IDE inline suggestions with context window management
+- **Model config** — `models.json`-driven configuration with provider settings, role-based defaults, and fallback chain resolution
+- **Parquet export** — ML pipeline interop with quality metrics and configurable precision
+- **Analysis helpers** — code review, ML training metrics, and trading strategy analysis
 
 ## Packages
 
 | Package | Description |
 |---------|-------------|
-| `ollama/` | HTTP client for the Ollama REST API — chat, text generation, embeddings, model management. Streaming support via callbacks. |
-| `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity search, file/directory indexer, and context-building retriever. |
-| `completion/` | IDE inline completion helpers (Fill-in-the-Middle). *(planned)* |
-| `analysis/` | Domain-specific analysis — code review, ML metrics, trading strategy analysis. *(planned)* |
+| `ollama/` | HTTP client for the Ollama REST API — chat, text generation, embeddings, model management, tool calling. Streaming support via callbacks. |
+| `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity search, concurrent file/directory indexer with `.gitignore` support, and context-building retriever. |
+| `rag/parquet/` | Parquet dataset exporter for ML pipeline interop — exports vector store contents with quality metrics and configurable precision. |
+| `completion/` | IDE inline completion via Fill-in-the-Middle (FIM) with context window management. Sync and streaming APIs. |
+| `analysis/` | Domain-specific analysis helpers — code review (with optional RAG context), ML training metrics, and trading strategy analysis. |
+| `config/` | Model configuration loader (`models.json`) with provider settings, role-based defaults, and fallback chain resolution against available models. |
 
 ## Requirements
 
-- Go 1.23+
+- Go 1.24+
 - [Ollama](https://ollama.com) running locally (default: `http://localhost:11434`)
 
 ## Installation
@@ -61,6 +74,36 @@ err := client.ChatStream(ctx, ollama.ChatRequest{
     fmt.Print(resp.Message.Content)
     return nil
 })
+```
+
+### Tool calling
+
+```go
+// Define a tool with the builder API
+weatherTool := ollama.NewTool(
+    "get_weather",
+    "Get current weather for a location",
+    ollama.ObjectParams(
+        ollama.Param("location", ollama.ParamTypeString, "City name"),
+        ollama.Param("unit", ollama.ParamTypeString, "Temperature unit").
+            WithEnum("celsius", "fahrenheit"),
+    ).Required("location"),
+)
+
+// Send a chat request with tools
+resp, _ := client.Chat(ctx, ollama.ChatRequest{
+    Model:    "qwen2.5:72b",
+    Messages: []ollama.ChatMessage{{Role: "user", Content: "What's the weather in NYC?"}},
+    Tools:    []ollama.Tool{weatherTool},
+})
+
+// The model may respond with tool calls
+if len(resp.Message.ToolCalls) > 0 {
+    call := resp.Message.ToolCalls[0]
+    // Execute the tool, then return the result
+    result := ollama.ToolResultMessageFor(call, `{"temp": 72, "unit": "fahrenheit"}`)
+    // Continue the conversation with the tool result...
+}
 ```
 
 ### Generate embeddings
@@ -130,14 +173,16 @@ store, _ := rag.NewSQLiteStore(":memory:")
 
 ### Indexing
 
-- Atomic re-indexing: existing data is preserved if embedding fails
-- Respects `.gitignore` (root-level, basic patterns)
+- **Concurrent**: configurable worker pool (default: 4 workers) via `golang.org/x/sync/errgroup`
+- **Atomic**: existing data is preserved if embedding fails mid-index
+- **`.gitignore`-aware**: automatically loads root and nested `.gitignore` files (globs, `**` wildcards, directory-only rules). Note: negation patterns (`!`) cannot re-include files inside an ignored directory because the directory tree is skipped eagerly
 - Configurable file extensions and exclusion patterns
 
 ```go
 indexer.IndexDirectory(ctx, dir,
     rag.WithExtensions(".go", ".py", ".ts", ".md"),
     rag.WithExclude("node_modules", ".git", "vendor"),
+    rag.WithConcurrency(8), // default: 4
 )
 ```
 
@@ -162,12 +207,113 @@ client.PullModel(ctx, "nomic-embed-text", func(status string, completed, total i
 })
 ```
 
+## Inline Completion (FIM)
+
+Fill-in-the-Middle completion for IDE integration with automatic context window management.
+
+```go
+import "github.com/kstruzzieri/go-llm/completion"
+
+provider := completion.NewProvider(client, "qwen2.5-coder:7b")
+
+resp, _ := provider.Complete(ctx, completion.FIMRequest{
+    Prefix:    "func fibonacci(n int) int {\n\t",
+    Suffix:    "\n}",
+    FilePath:  "math.go",
+    MaxTokens: 128,
+})
+fmt.Println(resp.Completion)
+
+// Streaming variant
+provider.CompleteStream(ctx, req, func(token string) error {
+    fmt.Print(token)
+    return nil
+})
+```
+
+## Model Configuration
+
+Load model settings from `models.json` with provider configs, role-based defaults, and fallback chains that resolve against available Ollama models.
+
+```go
+import "github.com/kstruzzieri/go-llm/config"
+
+cfg, _ := config.Default() // auto-discovers models.json
+
+// Simple lookup
+model := cfg.ModelFor("chat") // e.g., "qwen2.5:72b"
+
+// Resolve with fallback chain (checks which models are actually available)
+resolved, _ := cfg.Resolve(ctx, client, "chat")
+fmt.Printf("Using %s (fallback: %v)\n", resolved.Name, resolved.IsFallback)
+```
+
+## Parquet Export
+
+Export vector store contents to Parquet format for ML pipeline interop.
+
+```go
+import "github.com/kstruzzieri/go-llm/rag/parquet"
+
+info, _ := parquet.ExportVectorStore(ctx, store, "dataset.parquet",
+    parquet.WithDType(parquet.Float32),
+    parquet.WithSourcePattern("*.go"),
+    parquet.WithModel("nomic-embed-text"),
+)
+fmt.Printf("Exported %d rows (%d clean, %d flagged)\n",
+    info.RowCount, info.Quality.CleanRows, info.Quality.FlaggedRows)
+```
+
+## Analysis
+
+Domain-specific analysis helpers that leverage Ollama models.
+
+```go
+import "github.com/kstruzzieri/go-llm/analysis"
+
+// Code review (optionally backed by RAG context)
+reviewer, _ := analysis.NewCodeReviewer(client, retriever, "qwen2.5:72b")
+review, _ := reviewer.Review(ctx, code, analysis.WithLanguage("go"))
+
+// ML training metrics analysis
+analyzer, _ := analysis.NewMetricsAnalyzer(client, "qwen2.5:72b")
+insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
+    Epoch: 10, Loss: 0.42, LearningRate: 1e-4,
+})
+```
+
+## Roadmap
+
+### Up next
+
+| Feature | Description |
+|---------|-------------|
+| Hybrid retrieval | FTS5 full-text search alongside vector similarity for keyword+semantic search |
+| Conversation store | Persistent conversation history with lossless tool-call round-trips |
+| Candidate resolution | Ordered model fallback chains resolved against what's actually running |
+| Fingerprint profiles | Backend-scoped identity profiles for per-deployment configuration |
+
+### Planned
+
+| Feature | Description |
+|---------|-------------|
+| MCP server | Expose go-llm as a standalone [Model Context Protocol](https://modelcontextprotocol.io) server — use it as a local AI service without embedding |
+| Stable chunk identity | Content-addressed chunk keys for feedback-safe reindexing |
+| Behavioral feedback | Collect and aggregate implicit quality signals to improve retrieval over time |
+| Prefetch engine | Warm-cache retrieval for predictable access patterns |
+| Orchestration pipeline | Multi-model orchestration with enriched model selection |
+| Diff-aware indexing | Incremental reindexing that only re-embeds changed content |
+| Vision support | Image inputs in chat messages |
+| Batch embeddings | True batch embedding via Ollama's array API |
+| ANN search | Approximate nearest neighbor search for large vector stores |
+
 ## Dependencies
 
 Minimal by design:
 
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
-- Everything else is Go stdlib
+- `golang.org/x/sync` — concurrency primitives (bounded worker pools for indexing)
+- `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 
 ## Testing
 
