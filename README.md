@@ -175,7 +175,7 @@ store, _ := rag.NewSQLiteStore(":memory:")
 
 - **Concurrent**: configurable worker pool (default: 4 workers) via `golang.org/x/sync/errgroup`
 - **Atomic**: existing data is preserved if embedding fails mid-index
-- **`.gitignore`-aware**: automatically loads root and nested `.gitignore` files with full pattern support (globs, negation, `**` wildcards, directory-only rules)
+- **`.gitignore`-aware**: automatically loads root and nested `.gitignore` files (globs, `**` wildcards, directory-only rules). Note: negation patterns (`!`) cannot re-include files inside an ignored directory because the directory tree is skipped eagerly
 - Configurable file extensions and exclusion patterns
 
 ```go
