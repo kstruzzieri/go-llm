@@ -171,16 +171,34 @@ func Default() (*Config, error) {
 		return Load("models.json")
 	}
 
-	// 3. ~/.config/go-llm/models.json.
-	if home, err := os.UserHomeDir(); err == nil {
-		homePath := filepath.Join(home, ".config", "go-llm", "models.json")
-		if _, err := os.Stat(homePath); err == nil {
-			return Load(homePath)
+	// 3. Platform-standard user config directory (e.g., ~/.config on Linux,
+	// ~/Library/Application Support on macOS, %AppData% on Windows).
+	configDir, configDirErr := os.UserConfigDir()
+	if configDirErr == nil {
+		configPath := filepath.Join(configDir, "go-llm", "models.json")
+		if _, err := os.Stat(configPath); err == nil {
+			return Load(configPath)
 		}
 	}
 
-	return nil, fmt.Errorf("config: no configuration file found; set GO_LLM_CONFIG, " +
-		"place models.json in the working directory, or create ~/.config/go-llm/models.json")
+	// 4. Legacy fallback: ~/.config/go-llm/models.json. Preserves backward
+	// compatibility for users who created configs at the old hardcoded path
+	// on platforms where os.UserConfigDir() returns a different directory
+	// (e.g., macOS returns ~/Library/Application Support, not ~/.config).
+	if home, err := os.UserHomeDir(); err == nil {
+		legacyPath := filepath.Join(home, ".config", "go-llm", "models.json")
+		if _, err := os.Stat(legacyPath); err == nil {
+			return Load(legacyPath)
+		}
+	}
+
+	// Build an actionable error message with the resolved config path when available.
+	configHint := "<user-config-dir>/go-llm/models.json"
+	if configDirErr == nil {
+		configHint = filepath.Join(configDir, "go-llm", "models.json")
+	}
+	return nil, fmt.Errorf("config: no configuration file found; set GO_LLM_CONFIG, "+
+		"place models.json in the working directory, or create %s", configHint)
 }
 
 // Load reads a models.json file from path, parses it, applies defaults, and validates.

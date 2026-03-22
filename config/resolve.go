@@ -105,14 +105,20 @@ func (c *Config) resolveRole(role string, available map[string]bool, onStack map
 	}
 
 	// Walk fallback chain: try each fallback role (and transitively its own fallbacks).
+	var fallbackErrs []string
 	for _, fbRole := range m.Fallbacks {
 		resolved, err := c.resolveRole(fbRole, available, onStack)
 		if err == nil {
 			resolved.IsFallback = true
 			return resolved, nil
 		}
+		fallbackErrs = append(fallbackErrs, fmt.Sprintf("%s: %v", fbRole, err))
 	}
 
+	if len(fallbackErrs) > 0 {
+		return ResolvedModel{}, fmt.Errorf("config: no available model for role %q (fallback errors: %s)",
+			role, strings.Join(fallbackErrs, "; "))
+	}
 	return ResolvedModel{}, fmt.Errorf("config: no available model for role %q", role)
 }
 

@@ -158,14 +158,31 @@ func ExportDataset(
 		return nil, err
 	}
 
-	// Step 10: Atomic rename.
+	// Step 10: Atomic publish. Try rename first (atomic overwrite on Unix).
+	// If rename fails (e.g., Windows cannot overwrite an existing file),
+	// fall back to remove + rename. This preserves the existing file until
+	// the rename is confirmed to succeed on Unix, and only removes on
+	// platforms where overwrite-rename is not supported.
 	if err := tmpFile.Close(); err != nil {
 		tmpClosed = true
 		return nil, fmt.Errorf("parquet: close temp file: %w", err)
 	}
 	tmpClosed = true
 	if err := os.Rename(tmpPath, outputPath); err != nil {
-		return nil, fmt.Errorf("parquet: rename to output: %w", err)
+		// Rename failed — likely Windows with existing destination.
+		// Guard: refuse to remove directories to prevent accidental data loss
+		// if outputPath is a directory instead of a file.
+		if fi, statErr := os.Stat(outputPath); statErr == nil && fi.IsDir() {
+			return nil, fmt.Errorf("parquet: output path %q is a directory, not a file", outputPath)
+		}
+		// Remove destination and retry; if remove fails, report the
+		// original rename error to avoid masking the root cause.
+		if removeErr := os.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return nil, fmt.Errorf("parquet: rename to output: %w", err)
+		}
+		if err := os.Rename(tmpPath, outputPath); err != nil {
+			return nil, fmt.Errorf("parquet: rename to output: %w", err)
+		}
 	}
 
 	// Step 11: Stat the output file for size.

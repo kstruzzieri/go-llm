@@ -19,7 +19,8 @@ type ToolFunction struct {
 
 // ToolCall represents a tool invocation returned by the model.
 type ToolCall struct {
-	Type     string           `json:"type"`     // "function"
+	ID       string           `json:"id,omitempty"` // unique call ID for result correlation
+	Type     string           `json:"type"`         // "function"
 	Function ToolCallFunction `json:"function"`
 }
 
@@ -34,10 +35,11 @@ type ToolCallFunction struct {
 
 // ChatMessage represents a single message in a chat conversation.
 type ChatMessage struct {
-	Role      string     `json:"role"`                // system, user, assistant, tool
-	Content   string     `json:"content"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"` // present when assistant invokes tools
-	ToolName  string     `json:"tool_name,omitempty"`  // set when role="tool" (result)
+	Role       string     `json:"role"`                    // system, user, assistant, tool
+	Content    string     `json:"content"`
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`    // present when assistant invokes tools
+	ToolName   string     `json:"tool_name,omitempty"`     // set when role="tool" (result)
+	ToolCallID string     `json:"tool_call_id,omitempty"`  // correlates result with originating call
 }
 
 // ChatRequest is the request body for the /api/chat endpoint.

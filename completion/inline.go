@@ -110,6 +110,15 @@ func (p *Provider) buildRequest(req FIMRequest) ollama.GenerateRequest {
 	if maxTokens <= 0 {
 		maxTokens = defaultMaxTokens
 	}
+	// Clamp to prevent num_predict > num_ctx, and reserve at least one token of
+	// prompt budget plus fimTokenOverhead for the FIM special tokens.
+	maxLimit := defaultNumCtx - fimTokenOverhead - 1
+	if maxLimit < 1 {
+		maxLimit = 1
+	}
+	if maxTokens > maxLimit {
+		maxTokens = maxLimit
+	}
 
 	// Budget the context window: total - generation - FIM overhead
 	availableCtx := defaultNumCtx - maxTokens - fimTokenOverhead

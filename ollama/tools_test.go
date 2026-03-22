@@ -389,6 +389,58 @@ func TestToolResultMessage(t *testing.T) {
 	}
 }
 
+func TestToolResultMessageFor(t *testing.T) {
+	call := ToolCall{
+		ID:   "call_abc123",
+		Type: "function",
+		Function: ToolCallFunction{
+			Index: 0,
+			Name:  "get_weather",
+			Arguments: map[string]any{
+				"city": "London",
+			},
+		},
+	}
+
+	msg := ToolResultMessageFor(call, "sunny")
+	if msg.Role != "tool" {
+		t.Errorf("role = %q, want %q", msg.Role, "tool")
+	}
+	if msg.ToolName != "get_weather" {
+		t.Errorf("tool_name = %q, want %q", msg.ToolName, "get_weather")
+	}
+	if msg.ToolCallID != "call_abc123" {
+		t.Errorf("tool_call_id = %q, want %q", msg.ToolCallID, "call_abc123")
+	}
+
+	// tool_call_id must serialize in JSON.
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if raw["tool_call_id"] != "call_abc123" {
+		t.Errorf("JSON tool_call_id = %v, want %q", raw["tool_call_id"], "call_abc123")
+	}
+
+	// Original ToolResultMessage must NOT include tool_call_id.
+	plain := ToolResultMessage("get_weather", "sunny")
+	data2, err := json.Marshal(plain)
+	if err != nil {
+		t.Fatalf("marshal plain ToolResultMessage: %v", err)
+	}
+	var raw2 map[string]any
+	if err := json.Unmarshal(data2, &raw2); err != nil {
+		t.Fatalf("unmarshal plain ToolResultMessage: %v", err)
+	}
+	if _, ok := raw2["tool_call_id"]; ok {
+		t.Error("plain ToolResultMessage should not include tool_call_id")
+	}
+}
+
 func TestToolCallArgumentTypes(t *testing.T) {
 	input := `{
 		"role": "assistant",
