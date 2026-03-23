@@ -53,6 +53,7 @@ func TestShowModel(t *testing.T) {
 				ParamSize:  "72B",
 				QuantLevel: "Q4_K_M",
 			},
+			Digest: "sha256:abc123def456",
 		}
 		json.NewEncoder(w).Encode(resp)
 	}))
@@ -68,6 +69,9 @@ func TestShowModel(t *testing.T) {
 	}
 	if info.QuantLevel != "Q4_K_M" {
 		t.Errorf("expected quant level %q, got %q", "Q4_K_M", info.QuantLevel)
+	}
+	if info.Digest != "sha256:abc123def456" {
+		t.Errorf("expected digest %q, got %q", "sha256:abc123def456", info.Digest)
 	}
 }
 

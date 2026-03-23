@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -26,7 +27,7 @@ type SQLiteStore struct {
 
 // NewSQLiteStore creates a vector store backed by SQLite.
 // Use ":memory:" for dbPath to create an in-memory database (for testing).
-func NewSQLiteStore(dbPath string) (VectorStore, error) {
+func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("rag: open sqlite: %w", err)
@@ -46,7 +47,7 @@ func NewSQLiteStore(dbPath string) (VectorStore, error) {
 		}
 	}
 
-	if err := initSchema(db); err != nil {
+	if err := runMigrations(db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -54,30 +55,11 @@ func NewSQLiteStore(dbPath string) (VectorStore, error) {
 	return &SQLiteStore{db: db}, nil
 }
 
-func initSchema(db *sql.DB) error {
-	schema := `
-	CREATE TABLE IF NOT EXISTS chunks (
-		id TEXT PRIMARY KEY,
-		content TEXT NOT NULL,
-		source TEXT NOT NULL,
-		start_line INTEGER NOT NULL,
-		end_line INTEGER NOT NULL,
-		language TEXT NOT NULL DEFAULT '',
-		metadata TEXT NOT NULL DEFAULT '{}',
-		embedding TEXT NOT NULL
-	);
-	CREATE INDEX IF NOT EXISTS idx_chunks_source_line ON chunks(source, start_line);
-	CREATE INDEX IF NOT EXISTS idx_chunks_lang_source_line ON chunks(language, source, start_line);
-	`
-	// Migrate: drop old single-column index superseded by idx_chunks_source_line.
-	const dropOldIndex = `DROP INDEX IF EXISTS idx_chunks_source`
-	if _, err := db.Exec(schema); err != nil {
-		return fmt.Errorf("rag: create schema: %w", err)
-	}
-	if _, err := db.Exec(dropOldIndex); err != nil {
-		return fmt.Errorf("rag: drop old index: %w", err)
-	}
-	return nil
+// DB returns the underlying *sql.DB for packages that need shared access
+// to the workspace database (e.g., conversation/ and feedback/ creating
+// their own tables).
+func (s *SQLiteStore) DB() *sql.DB {
+	return s.db
 }
 
 func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
@@ -101,14 +83,31 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 }
 
 func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64) error {
+	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
+	// INSERT OR REPLACE deletes the old row and inserts a new one, but
+	// SQLite does not fire DELETE triggers for rows removed by REPLACE
+	// conflict resolution (unless recursive_triggers is enabled). This
+	// leaves stale entries in the FTS5 index. ON CONFLICT DO UPDATE
+	// modifies the row in place (preserving its rowid) and fires the
+	// AFTER UPDATE trigger, which correctly maintains FTS5.
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT OR REPLACE INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(id) DO UPDATE SET
+				content = excluded.content,
+				source = excluded.source,
+				start_line = excluded.start_line,
+				end_line = excluded.end_line,
+				language = excluded.language,
+				metadata = excluded.metadata,
+				embedding = excluded.embedding,
+				indexed_at = excluded.indexed_at`)
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}
 	defer stmt.Close()
 
+	now := time.Now().Unix()
 	for i, chunk := range chunks {
 		metaJSON, err := json.Marshal(chunk.Metadata)
 		if err != nil {
@@ -119,7 +118,7 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 			return fmt.Errorf("rag: marshal embedding: %w", err)
 		}
 		if _, err := stmt.ExecContext(ctx, chunk.ID, chunk.Content, chunk.Source,
-			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON)); err != nil {
+			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now); err != nil {
 			return fmt.Errorf("rag: insert chunk %q: %w", chunk.ID, err)
 		}
 	}
