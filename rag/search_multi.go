@@ -98,7 +98,7 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 			SearchResult: SearchResult{
 				Chunk:    chunk,
 				Score:    finalScore,
-				Distance: 1 - finalScore,
+				Distance: 1 - semanticScores[i], // cosine distance from semantic signal
 			},
 			Signals: map[string]float64{
 				"semantic":   semanticScores[i],
@@ -159,7 +159,7 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 }
 
 // computeRanks returns 1-based ranks for a score slice (highest score = rank 1).
-// Ties receive the same rank.
+// Ties receive the same rank: if two items share the highest score, both get rank 1.
 func computeRanks(scores []float64) []int {
 	type indexed struct {
 		index int
@@ -169,13 +169,18 @@ func computeRanks(scores []float64) []int {
 	for i, s := range scores {
 		sorted[i] = indexed{i, s}
 	}
-	sort.Slice(sorted, func(i, j int) bool {
+	sort.SliceStable(sorted, func(i, j int) bool {
 		return sorted[i].score > sorted[j].score
 	})
 
 	ranks := make([]int, len(scores))
-	for rank, entry := range sorted {
-		ranks[entry.index] = rank + 1 // 1-based
+	for i, entry := range sorted {
+		if i > 0 && entry.score == sorted[i-1].score {
+			// Tie: same rank as the previous entry.
+			ranks[entry.index] = ranks[sorted[i-1].index]
+		} else {
+			ranks[entry.index] = i + 1 // 1-based
+		}
 	}
 	return ranks
 }

@@ -217,7 +217,7 @@ func TestComputeRanks(t *testing.T) {
 		{"ascending", []float64{0.1, 0.5, 0.9}, []int{3, 2, 1}},
 		{"single", []float64{0.5}, []int{1}},
 		{"empty", []float64{}, []int{}},
-		{"equal", []float64{0.5, 0.5, 0.5}, []int{1, 2, 3}}, // stable sort gives sequential ranks
+		{"equal", []float64{0.5, 0.5, 0.5}, []int{1, 1, 1}}, // ties get the same rank
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
