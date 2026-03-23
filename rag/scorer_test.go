@@ -205,11 +205,11 @@ func TestStructuralScorerScoreBatch(t *testing.T) {
 		{
 			name: "mixed proximity levels",
 			chunks: []Chunk{
-				{ID: "c1", Source: "/project/src/main.go"},     // same file
-				{ID: "c2", Source: "/project/src/handler.go"},  // same dir
-				{ID: "c3", Source: "/project/config.go"},       // parent dir
-				{ID: "c4", Source: "/other/lib.go"},            // open file
-				{ID: "c5", Source: "/unrelated/something.go"},  // unrelated
+				{ID: "c1", Source: "/project/src/main.go"},    // same file
+				{ID: "c2", Source: "/project/src/handler.go"}, // same dir
+				{ID: "c3", Source: "/project/config.go"},      // parent dir
+				{ID: "c4", Source: "/other/lib.go"},           // open file
+				{ID: "c5", Source: "/unrelated/something.go"}, // unrelated
 			},
 			qCtx: QueryContext{
 				CurrentFile: "/project/src/main.go",

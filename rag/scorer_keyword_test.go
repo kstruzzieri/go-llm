@@ -2,8 +2,11 @@ package rag
 
 import (
 	"context"
+	"database/sql"
 	"math"
 	"testing"
+
+	_ "modernc.org/sqlite"
 )
 
 // newScorerTestStore creates an in-memory SQLite store with the full schema
@@ -189,7 +192,73 @@ func TestKeywordScorerNormalizedRange(t *testing.T) {
 	}
 }
 
-func TestKeywordScorerMalformedQuery(t *testing.T) {
+func TestKeywordScorerCodeStyleQueries(t *testing.T) {
+	store := newScorerTestStore(t)
+	ctx := context.Background()
+
+	// Index chunks where the code-style tokens primarily live in the source
+	// path so the test validates the indexed source column as well as content.
+	chunks := []Chunk{
+		{ID: "c1", Content: "startup handler", Source: "pkg/main.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c2", Content: "utility processor", Source: "foo-bar.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c3", Content: "model configuration", Source: "qwen2.5:72b.modelfile", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c4", Content: "unrelated content about databases", Source: "db.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{
+		{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}, {0, 0, 0, 1},
+	}
+
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	scorer := NewKeywordScorer(store.DB())
+
+	// These queries previously caused FTS5 MATCH parse errors and
+	// silently returned zero scores. After sanitization they should
+	// produce matches.
+	tests := []struct {
+		query       string
+		wantNonZero int // index of chunk expected to score > 0
+	}{
+		{"pkg/main.go", 0}, // "pkg" "main" "go" matches c1
+		{"foo-bar", 1},     // "foo" "bar" matches c2
+		{"qwen2.5:72b", 2}, // "qwen2" "5" "72b" matches c3
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.query, func(t *testing.T) {
+			scores, err := scorer.ScoreBatch(ctx, chunks, tt.query, nil, QueryContext{})
+			if err != nil {
+				t.Fatalf("ScoreBatch(%q): %v", tt.query, err)
+			}
+			if scores[tt.wantNonZero] == 0 {
+				t.Errorf("scores[%d] = 0 for query %q, want > 0 (keyword match expected)", tt.wantNonZero, tt.query)
+			}
+		})
+	}
+}
+
+func TestKeywordScorerPropagatesDatabaseErrors(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+
+	scorer := NewKeywordScorer(db)
+	chunks := []Chunk{
+		{ID: "c1", Content: "hello world", Source: "a.go", StartLine: 1, EndLine: 1},
+	}
+
+	_, err = scorer.ScoreBatch(context.Background(), chunks, "hello", nil, QueryContext{})
+	if err == nil {
+		t.Fatal("expected database error when FTS5 schema is missing")
+	}
+}
+
+func TestKeywordScorerPunctuationOnlyQuery(t *testing.T) {
 	store := newScorerTestStore(t)
 	ctx := context.Background()
 
@@ -204,30 +273,122 @@ func TestKeywordScorerMalformedQuery(t *testing.T) {
 
 	scorer := NewKeywordScorer(store.DB())
 
-	// FTS5 special syntax characters that may cause MATCH to fail.
-	malformedQueries := []string{
-		`"unclosed quote`,
-		`(unbalanced`,
-		`col:value AND`,
-		`NOT`,
-	}
-
-	for _, q := range malformedQueries {
+	// Queries that contain no alphanumeric tokens should return zero
+	// scores gracefully (not an error).
+	for _, q := range []string{"...", "---", "///", ":::"} {
 		t.Run(q, func(t *testing.T) {
 			scores, err := scorer.ScoreBatch(ctx, chunks, q, nil, QueryContext{})
 			if err != nil {
-				t.Errorf("ScoreBatch(%q) returned error: %v, want graceful zero scores", q, err)
+				t.Errorf("ScoreBatch(%q) returned error: %v, want zero scores", q, err)
+			}
+			if len(scores) != 1 || scores[0] != 0 {
+				t.Errorf("scores = %v for query %q, want [0]", scores, q)
+			}
+		})
+	}
+}
+
+func TestKeywordScorerMalformedQuery(t *testing.T) {
+	store := newScorerTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "hello world value unclosed unbalanced col", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{{1.0}}
+
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	scorer := NewKeywordScorer(store.DB())
+
+	// These queries contain FTS5 syntax characters that would previously
+	// cause MATCH errors. After sanitization, the alphanumeric tokens
+	// are extracted and should match successfully.
+	queries := []string{
+		`"unclosed quote`, // sanitized to: "unclosed" "quote"
+		`(unbalanced`,     // sanitized to: "unbalanced"
+		`col:value AND`,   // sanitized to: "col" "value" "AND"
+		`NOT`,             // sanitized to: "NOT"
+	}
+
+	for _, q := range queries {
+		t.Run(q, func(t *testing.T) {
+			scores, err := scorer.ScoreBatch(ctx, chunks, q, nil, QueryContext{})
+			if err != nil {
+				t.Fatalf("ScoreBatch(%q) returned error: %v", q, err)
 			}
 			if len(scores) != 1 {
 				t.Fatalf("len(scores) = %d, want 1", len(scores))
 			}
-			// Malformed queries should return zero scores (graceful degradation).
-			if scores[0] != 0 {
-				// Note: some "malformed" queries may actually work in FTS5.
-				// We only verify no error is returned.
-				t.Logf("scores[0] = %f for query %q (may be valid FTS5)", scores[0], q)
+			// After sanitization, these all have valid tokens that should
+			// match the chunk content. Verify no error and non-zero score.
+			if scores[0] == 0 {
+				t.Logf("scores[0] = 0 for query %q (tokens may not match chunk content)", q)
 			}
 		})
+	}
+}
+
+func TestSanitizeFTS5Query(t *testing.T) {
+	tests := []struct {
+		input string
+		want  string
+	}{
+		{"hello world", `"hello" "world"`},
+		{"pkg/main.go", `"pkg" "main" "go"`},
+		{"foo-bar", `"foo" "bar"`},
+		{"qwen2.5:72b", `"qwen2" "5" "72b"`},
+		{"simple", `"simple"`},
+		{"...", ""},
+		{"", ""},
+		{"  spaces  ", `"spaces"`},
+		{"a/b/c.d", `"a" "b" "c" "d"`},
+		{"hello_world", `"hello_world"`}, // underscore preserved for phrase semantics
+		{"café", `"café"`},                 // unicode letters preserved
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			got := sanitizeFTS5Query(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeFTS5Query(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestKeywordScorerUnderscorePhraseSemantics(t *testing.T) {
+	store := newScorerTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "the snake_case variable is set", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c2", Content: "snake guide case study notes", Source: "b.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{
+		{1.0, 0.0},
+		{0.0, 1.0},
+	}
+
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	scorer := NewKeywordScorer(store.DB())
+	scores, err := scorer.ScoreBatch(ctx, chunks, "snake_case", nil, QueryContext{})
+	if err != nil {
+		t.Fatalf("ScoreBatch: %v", err)
+	}
+
+	// c1 has "snake_case" (adjacent tokens) — should match the phrase query.
+	if scores[0] == 0 {
+		t.Errorf("scores[0] = 0, want > 0 (snake_case as adjacent tokens)")
+	}
+	// c2 has "snake" and "case" but NOT adjacent — phrase query should not match.
+	if scores[1] != 0 {
+		t.Errorf("scores[1] = %f, want 0 (snake and case are not adjacent)", scores[1])
 	}
 }
 

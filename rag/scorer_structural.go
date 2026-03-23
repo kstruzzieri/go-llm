@@ -39,15 +39,17 @@ func (s *StructuralScorer) ScoreBatch(ctx context.Context, chunks []Chunk, query
 		return scores, nil
 	}
 
-	// Pre-compute current file path components.
-	currentClean := filepath.Clean(qCtx.CurrentFile)
+	// Normalize all paths through WorkspaceRoot so that relative chunk
+	// sources (e.g., "rag/store.go") and absolute editor paths (e.g.,
+	// "/home/user/project/rag/store.go") resolve to the same canonical form.
+	currentClean := normalizePath(qCtx.CurrentFile, qCtx.WorkspaceRoot)
 	currentDir := filepath.Dir(currentClean)
 	parentDir := filepath.Dir(currentDir)
 
 	// Build a set of open files for O(1) lookup.
 	openSet := make(map[string]struct{}, len(qCtx.OpenFiles))
 	for _, f := range qCtx.OpenFiles {
-		openSet[filepath.Clean(f)] = struct{}{}
+		openSet[normalizePath(f, qCtx.WorkspaceRoot)] = struct{}{}
 	}
 
 	for i, chunk := range chunks {
@@ -55,7 +57,7 @@ func (s *StructuralScorer) ScoreBatch(ctx context.Context, chunks []Chunk, query
 			return nil, err
 		}
 
-		chunkClean := filepath.Clean(chunk.Source)
+		chunkClean := normalizePath(chunk.Source, qCtx.WorkspaceRoot)
 		chunkDir := filepath.Dir(chunkClean)
 
 		switch {
@@ -75,4 +77,16 @@ func (s *StructuralScorer) ScoreBatch(ctx context.Context, chunks []Chunk, query
 	}
 
 	return scores, nil
+}
+
+// normalizePath resolves a file path to a canonical absolute form using the
+// workspace root. If the path is relative and a non-empty workspace root is
+// provided, the path is joined with the root. This ensures that relative
+// chunk sources from indexing and absolute editor paths compare correctly.
+func normalizePath(path, workspaceRoot string) string {
+	cleaned := filepath.Clean(path)
+	if workspaceRoot == "" || filepath.IsAbs(cleaned) {
+		return cleaned
+	}
+	return filepath.Clean(filepath.Join(workspaceRoot, cleaned))
 }
