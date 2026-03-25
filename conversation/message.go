@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math"
 	"time"
+	"unicode/utf8"
 )
 
 // ErrNotFound is returned by Load when the conversation ID does not exist.
@@ -23,10 +24,11 @@ type TokenEstimator func(text string) int
 // multilingual/code models.
 func CharRatioEstimator(charsPerToken float64) TokenEstimator {
 	return func(text string) int {
-		if len(text) == 0 {
+		n := utf8.RuneCountInString(text)
+		if n == 0 {
 			return 0
 		}
-		return int(math.Ceil(float64(len(text)) / charsPerToken))
+		return int(math.Ceil(float64(n) / charsPerToken))
 	}
 }
 

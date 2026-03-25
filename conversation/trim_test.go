@@ -3,6 +3,7 @@ package conversation
 import (
 	"encoding/json"
 	"testing"
+	"unicode/utf8"
 )
 
 // lenEstimator counts characters as tokens (1:1) for deterministic tests.
@@ -322,5 +323,90 @@ func TestTrimByExchanges_ZeroExchanges(t *testing.T) {
 	}
 	if result.Messages[0].Role != "system" {
 		t.Error("expected system message only")
+	}
+}
+
+// --- Regression tests for review findings ---
+
+func TestCharRatioEstimator_CountsRunesNotBytes(t *testing.T) {
+	est := CharRatioEstimator(4)
+	// "éééé" is 4 runes but 8 UTF-8 bytes.
+	text := "éééé"
+	if utf8.RuneCountInString(text) != 4 {
+		t.Fatal("test precondition: expected 4 runes")
+	}
+	got := est(text)
+	// 4 runes / 4 chars-per-token = 1 token
+	if got != 1 {
+		t.Errorf("CharRatioEstimator(4)(%q) = %d, want 1 (rune-based)", text, got)
+	}
+}
+
+func TestCharRatioEstimator_EmptyAndASCII(t *testing.T) {
+	est := CharRatioEstimator(4)
+	if got := est(""); got != 0 {
+		t.Errorf("empty string: got %d, want 0", got)
+	}
+	// "hello" = 5 runes, ceil(5/4) = 2
+	if got := est("hello"); got != 2 {
+		t.Errorf("\"hello\": got %d, want 2", got)
+	}
+}
+
+func TestTrimMessages_MidThreadSystemOrderPreserved(t *testing.T) {
+	msgs := []Message{
+		makeMsg("user", "q1"),
+		makeMsg("system", "mid-thread instruction"),
+		makeMsg("assistant", "a1"),
+	}
+	result := TrimMessages(msgs, 1000, lenEstimator)
+
+	// Order must be: user, system, assistant — not system, user, assistant.
+	if len(result.Messages) != 3 {
+		t.Fatalf("Messages len = %d, want 3", len(result.Messages))
+	}
+	expected := []string{"user", "system", "assistant"}
+	for i, want := range expected {
+		if result.Messages[i].Role != want {
+			t.Errorf("Messages[%d].Role = %q, want %q", i, result.Messages[i].Role, want)
+		}
+	}
+}
+
+func TestTrimMessages_FallbackPreservesMidThreadSystemOrder(t *testing.T) {
+	msgs := []Message{
+		makeMsg("user", "q1"),
+		makeMsg("system", "mid-thread instruction"),
+		makeMsg("assistant", "a1"),
+	}
+	result := TrimMessages(msgs, 0, lenEstimator)
+
+	if len(result.Messages) != 2 {
+		t.Fatalf("Messages len = %d, want 2", len(result.Messages))
+	}
+	expected := []string{"user", "system"}
+	for i, want := range expected {
+		if result.Messages[i].Role != want {
+			t.Errorf("Messages[%d].Role = %q, want %q", i, result.Messages[i].Role, want)
+		}
+	}
+}
+
+func TestTrimByExchanges_MidThreadSystemOrderPreserved(t *testing.T) {
+	msgs := []Message{
+		makeMsg("user", "q1"),
+		makeMsg("system", "mid-thread instruction"),
+		makeMsg("assistant", "a1"),
+	}
+	result := TrimByExchanges(msgs, 10)
+
+	if len(result.Messages) != 3 {
+		t.Fatalf("Messages len = %d, want 3", len(result.Messages))
+	}
+	expected := []string{"user", "system", "assistant"}
+	for i, want := range expected {
+		if result.Messages[i].Role != want {
+			t.Errorf("Messages[%d].Role = %q, want %q", i, result.Messages[i].Role, want)
+		}
 	}
 }
