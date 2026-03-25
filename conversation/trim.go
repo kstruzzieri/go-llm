@@ -174,22 +174,15 @@ func TrimMessages(msgs []Message, maxTokens int, estimator TokenEstimator) TrimR
 		}
 	}
 
-	// Build result.
-	var result []Message
-	result = append(result, systemMsgs...)
-	trimmedCount := 0
-	keptCost := systemCost
-	for i, m := range nonSystem {
-		if keep[i] {
-			result = append(result, m)
-			keptCost += messageCost(m, estimator)
-		} else {
-			trimmedCount++
+	// Ensure at least one non-system message if any existed.
+	hasKeptNonSystem := false
+	for _, kept := range keep {
+		if kept {
+			hasKeptNonSystem = true
+			break
 		}
 	}
-
-	// Ensure at least one non-system message if any existed.
-	if len(result) == len(systemMsgs) && len(nonSystem) > 0 {
+	if !hasKeptNonSystem && len(nonSystem) > 0 {
 		fallback := len(nonSystem) - 1
 		for j := len(nonSystem) - 1; j >= 0; j-- {
 			if nonSystem[j].Role == "user" {
@@ -197,9 +190,26 @@ func TrimMessages(msgs []Message, maxTokens int, estimator TokenEstimator) TrimR
 				break
 			}
 		}
-		result = append(result, nonSystem[fallback])
-		keptCost += messageCost(nonSystem[fallback], estimator)
-		trimmedCount--
+		keep[fallback] = true
+	}
+
+	// Build result preserving original message order.
+	var result []Message
+	trimmedCount := 0
+	keptCost := systemCost
+	nsIdx := 0
+	for _, m := range msgs {
+		if m.Role == "system" {
+			result = append(result, m)
+		} else {
+			if keep[nsIdx] {
+				result = append(result, m)
+				keptCost += messageCost(m, estimator)
+			} else {
+				trimmedCount++
+			}
+			nsIdx++
+		}
 	}
 
 	return TrimResult{
@@ -304,14 +314,20 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 		}
 	}
 
+	// Build result preserving original message order.
 	var result []Message
-	result = append(result, systemMsgs...)
 	trimmedCount := 0
-	for i, m := range nonSystem {
-		if keep[i] {
+	nsIdx := 0
+	for _, m := range msgs {
+		if m.Role == "system" {
 			result = append(result, m)
 		} else {
-			trimmedCount++
+			if keep[nsIdx] {
+				result = append(result, m)
+			} else {
+				trimmedCount++
+			}
+			nsIdx++
 		}
 	}
 
