@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -210,5 +212,80 @@ func TestDelete_Idempotent(t *testing.T) {
 	_, err := store.Load(ctx, id)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Load after Delete: error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSave_And_Load_WithToolCalls(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	original := []ollama.ChatMessage{
+		{Role: "user", Content: "Find files"},
+		{
+			Role: "assistant",
+			ToolCalls: []ollama.ToolCall{
+				{
+					ID:   "call_1",
+					Type: "function",
+					Function: ollama.ToolCallFunction{
+						Index: 0,
+						Name:  "find",
+						Arguments: map[string]any{
+							"pattern": "*.go",
+							"depth":   float64(3),
+						},
+					},
+				},
+			},
+		},
+		{
+			Role:       "tool",
+			Content:    `["main.go", "util.go"]`,
+			ToolName:   "find",
+			ToolCallID: "call_1",
+		},
+		{Role: "assistant", Content: "Found 2 Go files."},
+	}
+
+	msgs, err := FromChatMessages(original)
+	if err != nil {
+		t.Fatalf("FromChatMessages() error: %v", err)
+	}
+
+	conv := Conversation{
+		ID:       NewID(),
+		Title:    "tool call test",
+		Messages: msgs,
+	}
+	if err := store.Save(ctx, conv); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	loaded, err := store.Load(ctx, conv.ID)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+
+	restored, err := ToChatMessages(loaded.Messages)
+	if err != nil {
+		t.Fatalf("ToChatMessages() error: %v", err)
+	}
+
+	if len(restored[1].ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(restored[1].ToolCalls))
+	}
+	tc := restored[1].ToolCalls[0]
+	if tc.Function.Name != "find" {
+		t.Errorf("Function.Name = %q, want %q", tc.Function.Name, "find")
+	}
+	args := tc.Function.Arguments
+	if args["pattern"] != "*.go" {
+		t.Errorf("Arguments[pattern] = %v, want %q", args["pattern"], "*.go")
+	}
+	if args["depth"] != float64(3) {
+		t.Errorf("Arguments[depth] = %v, want %v", args["depth"], float64(3))
+	}
+	if restored[2].ToolCallID != "call_1" {
+		t.Errorf("ToolCallID = %q, want %q", restored[2].ToolCallID, "call_1")
 	}
 }
