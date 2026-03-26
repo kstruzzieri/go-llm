@@ -77,9 +77,9 @@ func WithRAGPath(path string) Option {
 }
 
 // WithRAGDisabled disables RAG functionality entirely.
-func WithRAGDisabled(disabled bool) Option {
+func WithRAGDisabled() Option {
 	return func(s *Server) {
-		s.ragDisabled = disabled
+		s.ragDisabled = true
 	}
 }
 
@@ -93,10 +93,11 @@ func WithTLS(cert, key string) Option {
 
 // defaultRAGPath returns the default path for the RAG database.
 // It expands to $HOME/.local/share/go-llm/rag.db.
+// Falls back to "rag.db" in the working directory if $HOME is unavailable.
 func defaultRAGPath() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return ""
+		return "rag.db"
 	}
 	return filepath.Join(home, ".local", "share", "go-llm", "rag.db")
 }
@@ -117,15 +118,15 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Step 1: Create Ollama client.
 	s.client = ollama.NewClient(ollama.WithBaseURL(s.ollamaURL))
 
-	// Step 2: Load configuration (non-fatal if missing).
+	// Step 2: Load configuration.
+	// Explicit config path: hard error if it fails (user asked for this file).
+	// Auto-discovery: non-fatal if missing.
 	if s.configPath != "" {
 		cfg, err := config.Load(s.configPath)
 		if err != nil {
-			// Config load failed — continue without config.
-			_ = err
-		} else {
-			s.cfg = cfg
+			return nil, fmt.Errorf("mcp: load config %q: %w", s.configPath, err)
 		}
+		s.cfg = cfg
 	} else {
 		cfg, err := config.Default()
 		if err != nil {
@@ -177,7 +178,9 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 
 	// Step 8: Register tools, prompts, and resources (stubs for now).
 	s.registerChatTools()
+	s.registerGenerateTools()
 	s.registerCompletionTools()
+	s.registerEmbedTools()
 	s.registerRAGTools()
 	s.registerModelTools()
 	s.registerAnalysisTools()
@@ -230,7 +233,9 @@ func (s *Server) Close() error {
 // Stub registration methods — implementations will be added in later tasks.
 
 func (s *Server) registerChatTools()       {}
+func (s *Server) registerGenerateTools()   {}
 func (s *Server) registerCompletionTools() {}
+func (s *Server) registerEmbedTools()      {}
 func (s *Server) registerRAGTools()        {}
 func (s *Server) registerModelTools()      {}
 func (s *Server) registerAnalysisTools()   {}

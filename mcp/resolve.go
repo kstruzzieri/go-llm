@@ -17,7 +17,7 @@ func (s *Server) resolveModel(explicit, useCase string) (string, error) {
 
 	// No config available — model must be provided explicitly.
 	if s.cfg == nil {
-		return "", fmt.Errorf("mcp: model parameter required (no models.json configured)")
+		return "", fmt.Errorf("mcp: resolve model: model parameter required (no models.json configured)")
 	}
 
 	s.mu.RLock()
@@ -26,15 +26,15 @@ func (s *Server) resolveModel(explicit, useCase string) (string, error) {
 
 	// Config exists but resolved map is empty (Ollama was unavailable).
 	if len(resolved) == 0 {
-		return "", fmt.Errorf("mcp: defaults unavailable; provide model explicitly")
+		return "", fmt.Errorf("mcp: resolve model: defaults unavailable; provide model explicitly")
 	}
 
 	rm, ok := resolved[useCase]
 	if !ok {
-		return "", fmt.Errorf("mcp: no model configured for use-case %q", useCase)
+		return "", fmt.Errorf("mcp: resolve model: no model configured for use-case %q", useCase)
 	}
 	if rm.Name == "" {
-		return "", fmt.Errorf("mcp: default for use-case %q did not resolve", useCase)
+		return "", fmt.Errorf("mcp: resolve model: default for use-case %q did not resolve", useCase)
 	}
 
 	return rm.Name, nil
@@ -44,7 +44,7 @@ func (s *Server) resolveModel(explicit, useCase string) (string, error) {
 // and rebuilds derived clients. Partial results are stored even on error.
 func (s *Server) refreshResolved(ctx context.Context) error {
 	if s.cfg == nil {
-		return fmt.Errorf("mcp: no configuration loaded")
+		return fmt.Errorf("mcp: refresh models: no configuration loaded")
 	}
 
 	resolved, err := s.cfg.ResolveAll(ctx, s.client)
@@ -59,7 +59,7 @@ func (s *Server) refreshResolved(ctx context.Context) error {
 	s.rebuildDerivedClients()
 
 	if err != nil {
-		return fmt.Errorf("mcp: refresh models: %w", err)
+		return fmt.Errorf("mcp: refresh models: resolve: %w", err)
 	}
 	return nil
 }

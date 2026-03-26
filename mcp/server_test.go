@@ -8,7 +8,7 @@ import (
 func TestNewServerDefaults(t *testing.T) {
 	ctx := context.Background()
 	// RAG disabled so we don't need a real SQLite DB.
-	s, err := NewServer(ctx, WithRAGDisabled(true))
+	s, err := NewServer(ctx, WithRAGDisabled())
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
@@ -34,7 +34,7 @@ func TestNewServerWithOptions(t *testing.T) {
 
 	s, err := NewServer(ctx,
 		WithOllamaURL(customURL),
-		WithRAGDisabled(true),
+		WithRAGDisabled(),
 	)
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)

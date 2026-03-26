@@ -27,7 +27,7 @@ func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
 	ctx := context.Background()
 	s, err := NewServer(ctx,
 		WithOllamaURL(mock.URL),
-		WithRAGDisabled(true),
+		WithRAGDisabled(),
 	)
 	if err != nil {
 		mock.Close()
@@ -62,6 +62,7 @@ func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
 		server:  s,
 		session: session,
 		cleanup: func() {
+			session.Close()
 			s.Close()
 			mock.Close()
 		},
