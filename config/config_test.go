@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -510,6 +511,9 @@ func TestDefault_NotFound(t *testing.T) {
 	}
 	if !contains(err.Error(), "config: no configuration file found") {
 		t.Errorf("error = %q, want substring %q", err.Error(), "config: no configuration file found")
+	}
+	if !errors.Is(err, ErrConfigNotFound) {
+		t.Errorf("errors.Is(err, ErrConfigNotFound) = false, want true")
 	}
 }
 

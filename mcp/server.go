@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -27,12 +28,13 @@ const (
 
 // Server wraps go-llm functionality as an MCP server.
 type Server struct {
-	ollamaURL  string
-	configPath string
-	ragPath    string
-	ragDisabled bool
-	tlsCert    string
-	tlsKey     string
+	ollamaURL         string
+	ollamaURLExplicit bool
+	configPath        string
+	ragPath           string
+	ragDisabled       bool
+	tlsCert           string
+	tlsKey            string
 
 	client    *ollama.Client
 	cfg       *config.Config
@@ -57,6 +59,7 @@ type Option func(*Server)
 func WithOllamaURL(url string) Option {
 	return func(s *Server) {
 		s.ollamaURL = url
+		s.ollamaURLExplicit = true
 	}
 }
 
@@ -115,10 +118,7 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		opt(s)
 	}
 
-	// Step 1: Create Ollama client.
-	s.client = ollama.NewClient(ollama.WithBaseURL(s.ollamaURL))
-
-	// Step 2: Load configuration.
+	// Step 1: Load configuration.
 	// Explicit config path: hard error if it fails (user asked for this file).
 	// Auto-discovery: non-fatal if missing.
 	if s.configPath != "" {
@@ -130,14 +130,31 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	} else {
 		cfg, err := config.Default()
 		if err != nil {
-			// No config found — continue without config.
-			_ = err
+			if !errors.Is(err, config.ErrConfigNotFound) {
+				return nil, fmt.Errorf("mcp: auto-discover config: %w", err)
+			}
 		} else {
 			s.cfg = cfg
 		}
 	}
 
-	// Step 3: Check Ollama availability (non-fatal — degraded mode).
+	// Step 2: Build the Ollama client, honoring provider settings from config
+	// unless the caller explicitly overrode the base URL.
+	clientOpts := []ollama.Option{ollama.WithBaseURL(s.ollamaURL)}
+	if s.cfg != nil {
+		if provider := s.cfg.Provider("ollama"); provider != nil {
+			if !s.ollamaURLExplicit && provider.BaseURL != "" {
+				s.ollamaURL = provider.BaseURL
+				clientOpts[0] = ollama.WithBaseURL(s.ollamaURL)
+			}
+			if provider.Timeout.Duration > 0 {
+				clientOpts = append(clientOpts, ollama.WithTimeout(provider.Timeout.Duration))
+			}
+		}
+	}
+	s.client = ollama.NewClient(clientOpts...)
+
+	// Step 3: Check Ollama availability (non-fatal, degraded mode on failure).
 	s.ollamaAvailable = s.client.IsAvailable(ctx)
 
 	// Step 4: Open RAG store if not disabled (before model resolution
@@ -195,24 +212,19 @@ func (s *Server) rebuildDerivedClients() {
 		s.completer = completion.NewProvider(s.client, rm.Name)
 	}
 
-	// Rebuild indexer and retriever from resolved "embedding" model.
+	// Rebuild indexer and retriever only when the embedding default resolved.
+	// If resolution failed or defaults are unavailable, keep RAG clients nil so
+	// callers do not discover the outage only on first use.
 	embeddingModel := ""
 	if rm, ok := resolved["embedding"]; ok && rm.Name != "" {
 		embeddingModel = rm.Name
-	} else if s.cfg != nil {
-		embeddingModel = s.cfg.ModelFor("embedding")
 	}
 
 	s.indexer = nil
 	s.retriever = nil
-	if s.store != nil {
-		if embeddingModel != "" {
-			s.indexer = rag.NewIndexer(s.client, s.store, rag.WithEmbeddingModel(embeddingModel))
-			s.retriever = rag.NewRetriever(s.client, s.store, rag.WithRetrieverModel(embeddingModel))
-		} else {
-			s.indexer = rag.NewIndexer(s.client, s.store)
-			s.retriever = rag.NewRetriever(s.client, s.store)
-		}
+	if s.store != nil && embeddingModel != "" {
+		s.indexer = rag.NewIndexer(s.client, s.store, rag.WithEmbeddingModel(embeddingModel))
+		s.retriever = rag.NewRetriever(s.client, s.store, rag.WithRetrieverModel(embeddingModel))
 	}
 }
 

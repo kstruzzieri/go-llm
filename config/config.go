@@ -4,6 +4,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
@@ -70,6 +71,10 @@ type Config struct {
 	Models    map[string]ModelConfig    `json:"models"`
 	Defaults  map[string]string         `json:"defaults"`
 }
+
+// ErrConfigNotFound indicates that Default could not find a models.json file
+// in any of its discovery locations.
+var ErrConfigNotFound = errors.New("config: no configuration file found")
 
 // validModelTypes enumerates the allowed values for ModelConfig.Type.
 var validModelTypes = map[string]bool{
@@ -197,8 +202,8 @@ func Default() (*Config, error) {
 	if configDirErr == nil {
 		configHint = filepath.Join(configDir, "go-llm", "models.json")
 	}
-	return nil, fmt.Errorf("config: no configuration file found; set GO_LLM_CONFIG, "+
-		"place models.json in the working directory, or create %s", configHint)
+	return nil, fmt.Errorf("%w; set GO_LLM_CONFIG, "+
+		"place models.json in the working directory, or create %s", ErrConfigNotFound, configHint)
 }
 
 // Load reads a models.json file from path, parses it, applies defaults, and validates.
