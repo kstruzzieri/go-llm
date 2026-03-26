@@ -253,14 +253,18 @@ func (s *Server) Retriever() *rag.Retriever {
 }
 
 // Close releases all resources held by the server.
-// Safe to call multiple times.
+// Safe to call multiple times; serialized with handler reads via s.mu.
 func (s *Server) Close() error {
-	if s.store != nil {
-		err := s.store.Close()
-		s.store = nil
-		s.indexer = nil
-		s.retriever = nil
-		return err
+	s.mu.Lock()
+	store := s.store
+	s.store = nil
+	s.indexer = nil
+	s.retriever = nil
+	s.completer = nil
+	s.mu.Unlock()
+
+	if store != nil {
+		return store.Close()
 	}
 	return nil
 }
