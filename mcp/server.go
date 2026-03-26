@@ -140,21 +140,8 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Step 3: Check Ollama availability (non-fatal — degraded mode).
 	s.ollamaAvailable = s.client.IsAvailable(ctx)
 
-	// Step 4: Resolve models if config and Ollama are available (non-fatal).
-	if s.cfg != nil && s.ollamaAvailable {
-		resolved, err := s.cfg.ResolveAll(ctx, s.client)
-		if err != nil {
-			// Partial results may be available even on error.
-			_ = err
-		}
-		if resolved != nil {
-			s.mu.Lock()
-			s.resolved = resolved
-			s.mu.Unlock()
-		}
-	}
-
-	// Step 5: Open RAG store if not disabled.
+	// Step 4: Open RAG store if not disabled (before model resolution
+	// so that rebuildDerivedClients can wire up indexer/retriever).
 	if !s.ragDisabled && s.ragPath != "" {
 		parentDir := filepath.Dir(s.ragPath)
 		if err := os.MkdirAll(parentDir, 0o755); err != nil {
@@ -167,8 +154,14 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		s.store = store
 	}
 
-	// Step 6: Build derived clients (completer, indexer, retriever).
-	s.rebuildDerivedClients()
+	// Step 5: Resolve models and rebuild derived clients (non-fatal).
+	// Uses refreshResolved which stores partial results and calls rebuildDerivedClients.
+	if s.cfg != nil && s.ollamaAvailable {
+		_ = s.refreshResolved(ctx) // non-fatal: partial results are kept
+	} else {
+		// No resolution possible — still build derived clients with defaults.
+		s.rebuildDerivedClients()
+	}
 
 	// Step 7: Create MCP SDK server.
 	s.mcpServer = gomcp.NewServer(&gomcp.Implementation{
@@ -192,12 +185,12 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 
 // rebuildDerivedClients rebuilds the completer, indexer, and retriever
 // from the currently resolved models.
+// Caller must hold s.mu (write lock) OR call this during init (single-goroutine).
 func (s *Server) rebuildDerivedClients() {
-	s.mu.RLock()
 	resolved := s.resolved
-	s.mu.RUnlock()
 
 	// Rebuild completer from resolved "completion" model.
+	s.completer = nil
 	if rm, ok := resolved["completion"]; ok && rm.Name != "" {
 		s.completer = completion.NewProvider(s.client, rm.Name)
 	}
@@ -210,22 +203,52 @@ func (s *Server) rebuildDerivedClients() {
 		embeddingModel = s.cfg.ModelFor("embedding")
 	}
 
+	s.indexer = nil
+	s.retriever = nil
 	if s.store != nil {
 		if embeddingModel != "" {
 			s.indexer = rag.NewIndexer(s.client, s.store, rag.WithEmbeddingModel(embeddingModel))
 			s.retriever = rag.NewRetriever(s.client, s.store, rag.WithRetrieverModel(embeddingModel))
 		} else {
-			// Use package defaults (nomic-embed-text).
 			s.indexer = rag.NewIndexer(s.client, s.store)
 			s.retriever = rag.NewRetriever(s.client, s.store)
 		}
 	}
 }
 
+// Completer returns the current FIM completion provider (may be nil).
+// Safe for concurrent use.
+func (s *Server) Completer() *completion.Provider {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.completer
+}
+
+// Indexer returns the current RAG indexer (nil if RAG disabled).
+// Safe for concurrent use.
+func (s *Server) Indexer() *rag.Indexer {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.indexer
+}
+
+// Retriever returns the current RAG retriever (nil if RAG disabled).
+// Safe for concurrent use.
+func (s *Server) Retriever() *rag.Retriever {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.retriever
+}
+
 // Close releases all resources held by the server.
+// Safe to call multiple times.
 func (s *Server) Close() error {
 	if s.store != nil {
-		return s.store.Close()
+		err := s.store.Close()
+		s.store = nil
+		s.indexer = nil
+		s.retriever = nil
+		return err
 	}
 	return nil
 }

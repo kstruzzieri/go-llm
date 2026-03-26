@@ -38,7 +38,7 @@ func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
 	serverTransport, clientTransport := gomcp.NewInMemoryTransports()
 
 	// Connect the MCP server to its transport.
-	_, sErr := s.mcpServer.Connect(ctx, serverTransport, nil)
+	serverSession, sErr := s.mcpServer.Connect(ctx, serverTransport, nil)
 	if sErr != nil {
 		s.Close()
 		mock.Close()
@@ -63,6 +63,7 @@ func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
 		session: session,
 		cleanup: func() {
 			session.Close()
+			serverSession.Close()
 			s.Close()
 			mock.Close()
 		},

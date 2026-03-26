@@ -8,8 +8,14 @@ import (
 
 // toolError returns a CallToolResult with isError set to true.
 // The message is formatted with category prefix for consistent error reporting.
-func toolError(category, msg string, args ...any) *gomcp.CallToolResult {
-	text := fmt.Sprintf("%s: %s", category, fmt.Sprintf(msg, args...))
+func toolError(category string, msg string, args ...any) *gomcp.CallToolResult {
+	var detail string
+	if len(args) > 0 {
+		detail = fmt.Sprintf(msg, args...)
+	} else {
+		detail = msg
+	}
+	text := category + ": " + detail
 	return &gomcp.CallToolResult{
 		Content: []gomcp.Content{
 			&gomcp.TextContent{Text: text},

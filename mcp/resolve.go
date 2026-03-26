@@ -49,14 +49,14 @@ func (s *Server) refreshResolved(ctx context.Context) error {
 
 	resolved, err := s.cfg.ResolveAll(ctx, s.client)
 
-	// Store partial results even when some use-cases fail to resolve.
+	// Store partial results and rebuild derived clients under the write lock
+	// to prevent tool handlers from seeing a stale completer/indexer/retriever.
+	s.mu.Lock()
 	if resolved != nil {
-		s.mu.Lock()
 		s.resolved = resolved
-		s.mu.Unlock()
 	}
-
 	s.rebuildDerivedClients()
+	s.mu.Unlock()
 
 	if err != nil {
 		return fmt.Errorf("mcp: refresh models: resolve: %w", err)
