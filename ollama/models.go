@@ -39,6 +39,9 @@ func (c *Client) AvailableModels(ctx context.Context) ([]string, error) {
 
 // ShowModel returns detailed information about a specific model.
 func (c *Client) ShowModel(ctx context.Context, name string) (*ModelInfo, error) {
+	if name == "" {
+		return nil, fmt.Errorf("ollama: show model: model name is required")
+	}
 	body := struct {
 		Name string `json:"name"`
 	}{Name: name}
@@ -49,10 +52,13 @@ func (c *Client) ShowModel(ctx context.Context, name string) (*ModelInfo, error)
 	}
 
 	return &ModelInfo{
-		Name:       name,
-		ParamSize:  resp.Details.ParamSize,
-		QuantLevel: resp.Details.QuantLevel,
-		Digest:     resp.Digest,
+		Name:         name,
+		ParamSize:    resp.Details.ParamSize,
+		QuantLevel:   resp.Details.QuantLevel,
+		Digest:       resp.Digest,
+		Family:       resp.Details.Family,
+		Template:     resp.Template,
+		Capabilities: resp.Capabilities,
 	}, nil
 }
 

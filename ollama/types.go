@@ -2,7 +2,10 @@
 // supporting chat completions, text generation, embeddings, and model management.
 package ollama
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"fmt"
+)
 
 // Tool defines a tool the model may call during chat.
 type Tool struct {
@@ -54,12 +57,15 @@ type ChatRequest struct {
 // ChatResponse is the response from the /api/chat endpoint.
 // During streaming, each chunk has Done=false until the final response.
 type ChatResponse struct {
-	Model         string      `json:"model"`
-	Message       ChatMessage `json:"message"`
-	Done          bool        `json:"done"`
-	TotalDuration int64       `json:"total_duration,omitempty"` // nanoseconds
-	EvalCount     int         `json:"eval_count,omitempty"`     // tokens generated
-	EvalDuration  int64       `json:"eval_duration,omitempty"`  // nanoseconds for generation
+	Model              string      `json:"model"`
+	Message            ChatMessage `json:"message"`
+	Done               bool        `json:"done"`
+	TotalDuration      int64       `json:"total_duration,omitempty"`       // nanoseconds
+	EvalCount          int         `json:"eval_count,omitempty"`           // tokens generated
+	EvalDuration       int64       `json:"eval_duration,omitempty"`        // nanoseconds for generation
+	LoadDuration       int64       `json:"load_duration,omitempty"`        // nanoseconds to load model
+	PromptEvalCount    int         `json:"prompt_eval_count,omitempty"`    // tokens in prompt
+	PromptEvalDuration int64       `json:"prompt_eval_duration,omitempty"` // nanoseconds for prompt eval
 }
 
 // ModelOptions controls generation parameters sent to Ollama.
@@ -104,18 +110,23 @@ type GenerateResponse struct {
 }
 
 // ModelInfo holds metadata about an Ollama model.
+// Capabilities may be nil when the model or Ollama version does not report capabilities.
 type ModelInfo struct {
-	Name       string `json:"name"`
-	Size       int64  `json:"size"`
-	ParamSize  string `json:"parameter_size"`
-	QuantLevel string `json:"quantization_level"`
-	Digest     string `json:"digest"` // model version hash from /api/show
+	Name         string   `json:"name"`
+	Size         int64    `json:"size"`
+	ParamSize    string   `json:"parameter_size"`
+	QuantLevel   string   `json:"quantization_level"`
+	Digest       string   `json:"digest"`       // model version hash from /api/show
+	Family       string   `json:"family"`        // model family (e.g. "qwen2", "llama")
+	Template     string   `json:"template"`      // prompt template; non-empty for chat models
+	Capabilities []string `json:"capabilities"`  // e.g. ["completion","tools"]; nil if not reported
 }
 
 // modelDetails is used when parsing /api/show responses.
 type modelDetails struct {
 	ParamSize  string `json:"parameter_size"`
 	QuantLevel string `json:"quantization_level"`
+	Family     string `json:"family"`
 }
 
 // listModelsResponse wraps the /api/tags response.
@@ -131,8 +142,10 @@ type listModelEntry struct {
 
 // showModelResponse wraps the /api/show response.
 type showModelResponse struct {
-	Details modelDetails `json:"details"`
-	Digest  string       `json:"digest"`
+	Details      modelDetails `json:"details"`
+	Digest       string       `json:"digest"`
+	Template     string       `json:"template"`
+	Capabilities []string     `json:"capabilities"`
 }
 
 // pullModelRequest is the request body for /api/pull.
@@ -147,4 +160,18 @@ type pullModelResponse struct {
 	Completed int64  `json:"completed,omitempty"`
 	Total     int64  `json:"total,omitempty"`
 	Done      bool   `json:"-"` // derived from status
+}
+
+// APIError represents a non-2xx response from the Ollama API.
+// Callers can use errors.As to extract status codes for decision logic.
+type APIError struct {
+	// StatusCode is the HTTP status code from the Ollama API response.
+	StatusCode int
+	// Message is the parsed error message from the Ollama JSON response,
+	// or the raw response body if JSON parsing fails.
+	Message string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("ollama: HTTP %d: %s", e.StatusCode, e.Message)
 }
