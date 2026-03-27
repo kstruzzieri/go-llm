@@ -12,13 +12,13 @@ import (
 // --- Mock Store ---
 
 type mockStore struct {
-	mu           sync.Mutex
-	profiles     map[string]*Profile
-	failures     map[string]*FailureInfo
-	needsResult  map[string]bool
-	saveCalled   int
-	saveFailed   int
-	saveErr      error
+	mu          sync.Mutex
+	profiles    map[string]*Profile
+	failures    map[string]*FailureInfo
+	needsResult map[string]bool
+	saveCalled  int
+	saveFailed  int
+	saveErr     error
 }
 
 func newMockStore() *mockStore {
@@ -454,11 +454,11 @@ func TestProfiler_EnsureProfile_IncompleteProfile_ActiveBackoff(t *testing.T) {
 	store := newMockStore()
 	k := store.key(testBackend, "partial-model")
 	store.profiles[k] = &Profile{
-		BackendID:              testBackend,
-		ModelName:              "partial-model",
-		ModelDigest:            testDigest,
-		ModelKind:              ModelKindChat,
-		IncompleteCapabilities: []string{"embedding"},
+		BackendID:                 testBackend,
+		ModelName:                 "partial-model",
+		ModelDigest:               testDigest,
+		ModelKind:                 ModelKindChat,
+		IncompleteCapabilities:    []string{"embedding"},
 		GenerationTokensPerSecond: 20.0,
 	}
 	store.failures[k] = &FailureInfo{
@@ -486,13 +486,13 @@ func TestProfiler_EnsureProfile_IncompleteProfile_RetryAfterBackoff(t *testing.T
 	store := newMockStore()
 	k := store.key(testBackend, "partial-model")
 	store.profiles[k] = &Profile{
-		BackendID:              testBackend,
-		ModelName:              "partial-model",
-		ModelDigest:            testDigest,
-		ModelKind:              ModelKindChat,
-		IncompleteCapabilities: []string{"embedding"},
+		BackendID:                 testBackend,
+		ModelName:                 "partial-model",
+		ModelDigest:               testDigest,
+		ModelKind:                 ModelKindChat,
+		IncompleteCapabilities:    []string{"embedding"},
 		GenerationTokensPerSecond: 20.0,
-		PromptLatency:          200 * time.Millisecond,
+		PromptLatency:             200 * time.Millisecond,
 	}
 	store.failures[k] = &FailureInfo{
 		ModelDigest:  testDigest,

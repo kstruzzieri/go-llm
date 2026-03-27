@@ -225,13 +225,13 @@ func TestProbeChat(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{
 			"model":                "test-model",
-			"message":             map[string]any{"role": "assistant", "content": "Hello!"},
-			"done":                true,
-			"eval_count":          10,
-			"eval_duration":       500_000_000, // 500ms → 20 tok/s
+			"message":              map[string]any{"role": "assistant", "content": "Hello!"},
+			"done":                 true,
+			"eval_count":           10,
+			"eval_duration":        500_000_000, // 500ms → 20 tok/s
 			"prompt_eval_duration": 200_000_000, // 200ms
-			"load_duration":       50_000_000,  // 50ms (warm — below threshold)
-			"total_duration":      800_000_000,
+			"load_duration":        50_000_000,  // 50ms (warm — below threshold)
+			"total_duration":       800_000_000,
 		})
 	}))
 	defer srv.Close()
