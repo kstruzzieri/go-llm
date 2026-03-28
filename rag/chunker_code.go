@@ -46,7 +46,12 @@ func (c *codeChunker) Chunk(source string, content string) ([]Chunk, error) {
 		if err != nil {
 			return nil, fmt.Errorf("rag: create fallback chunker for %q: %w", source, err)
 		}
-		return sw.Chunk(source, content)
+		swChunks, err := sw.Chunk(source, content)
+		if err != nil {
+			return nil, err
+		}
+		populateSlidingWindowMetadata(swChunks)
+		return swChunks, nil
 	}
 
 	chunks := c.splitByBoundaries(source, content, lang)
@@ -56,9 +61,15 @@ func (c *codeChunker) Chunk(source string, content string) ([]Chunk, error) {
 		if err != nil {
 			return nil, fmt.Errorf("rag: create fallback chunker for %q: %w", source, err)
 		}
-		return sw.Chunk(source, content)
+		swChunks, err := sw.Chunk(source, content)
+		if err != nil {
+			return nil, err
+		}
+		populateSlidingWindowMetadata(swChunks)
+		return swChunks, nil
 	}
 
+	populateCodeChunkMetadata(chunks, lang)
 	return chunks, nil
 }
 

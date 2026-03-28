@@ -17,11 +17,12 @@ import (
 // may call IndexFile concurrently provided the injected Chunker and
 // VectorStore implementations are themselves safe for concurrent use.
 type Indexer struct {
-	client  *ollama.Client
-	model   string
-	store   VectorStore
-	chunker Chunker
-	storeMu sync.Mutex
+	client        *ollama.Client
+	model         string
+	store         VectorStore
+	chunker       Chunker
+	storeMu       sync.Mutex
+	workspaceRoot string // canonicalized absolute path; used for StableKey computation
 }
 
 // atomicSourceReplacer is an optional store capability for transactional
@@ -44,6 +45,19 @@ func WithEmbeddingModel(model string) IndexerOption {
 func WithChunker(c Chunker) IndexerOption {
 	return func(idx *Indexer) {
 		idx.chunker = c
+	}
+}
+
+// WithWorkspaceRoot sets the workspace root directory used for StableKey
+// computation. The path is canonicalized with filepath.Abs + filepath.Clean.
+// This is required when using IndexFile directly; IndexDirectory sets it
+// automatically from the directory argument.
+func WithWorkspaceRoot(root string) IndexerOption {
+	return func(idx *Indexer) {
+		abs, err := filepath.Abs(root)
+		if err == nil {
+			idx.workspaceRoot = filepath.Clean(abs)
+		}
 	}
 }
 
@@ -112,6 +126,18 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 			return fmt.Errorf("rag: clear chunks for %q with no chunk output: %w", path, err)
 		}
 		return nil
+	}
+
+	// Step 1.5: Compute stable keys if workspace root is set.
+	if idx.workspaceRoot != "" {
+		for i := range chunks {
+			key, err := ComputeStableKey(chunks[i], idx.workspaceRoot)
+			if err != nil {
+				// Non-fatal: leave StableKey empty rather than failing the entire index.
+				continue
+			}
+			chunks[i].StableKey = key
+		}
 	}
 
 	// Step 2: Generate embeddings (most likely to fail — network/model errors)
@@ -183,7 +209,16 @@ type IndexStatus struct {
 // IndexDirectory indexes all supported files in a directory tree.
 // Files are processed concurrently (default: 4 workers).
 // It respects .gitignore patterns and can be cancelled via context.
+// The cleaned absolute path of dir is used as the workspace root for
+// StableKey computation during this indexing run.
 func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...IndexDirOption) error {
+	// Set workspace root for StableKey computation.
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return fmt.Errorf("rag: resolve directory %q: %w", dir, err)
+	}
+	idx.workspaceRoot = filepath.Clean(absDir)
+
 	cfg := &indexDirConfig{
 		extensions: map[string]bool{
 			".go": true, ".py": true, ".ts": true, ".tsx": true,

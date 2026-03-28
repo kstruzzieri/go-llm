@@ -123,7 +123,7 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 // loadChunksWithEmbeddings loads all chunks and their embeddings from the database.
 func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, [][]float64, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, content, source, start_line, end_line, language, metadata, embedding FROM chunks`)
+		`SELECT id, content, source, start_line, end_line, language, metadata, embedding, stable_key FROM chunks`)
 	if err != nil {
 		return nil, nil, fmt.Errorf("rag: query chunks: %w", err)
 	}
@@ -135,7 +135,7 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 		var chunk Chunk
 		var metaJSON, embJSON string
 		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
-			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &embJSON); err != nil {
+			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &embJSON, &chunk.StableKey); err != nil {
 			return nil, nil, fmt.Errorf("rag: scan chunk: %w", err)
 		}
 

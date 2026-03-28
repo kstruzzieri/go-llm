@@ -8,16 +8,16 @@ import (
 	"strings"
 )
 
-
 // Chunk represents a segment of text suitable for embedding.
 type Chunk struct {
-	ID        string            // deterministic hash of content + source
-	Content   string            // the text
-	Source    string            // file path
-	StartLine int              // line number in source (1-indexed)
+	ID        string // deterministic hash of content + source
+	Content   string // the text
+	Source    string // file path
+	StartLine int    // line number in source (1-indexed)
 	EndLine   int
 	Language  string            // "go", "python", "typescript", etc.
 	Metadata  map[string]string // arbitrary k/v (function name, class, etc.)
+	StableKey string            // logical identity surviving re-indexes (see stable_key.go)
 }
 
 // Chunker splits text into chunks suitable for embedding.
@@ -118,6 +118,7 @@ func (sw *SlidingWindowChunker) Chunk(source string, content string) ([]Chunk, e
 		chunks = append(chunks, makeChunk(source, buf.String(), startLine, len(lines), ""))
 	}
 
+	populateSlidingWindowMetadata(chunks)
 	return chunks, nil
 }
 

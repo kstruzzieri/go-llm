@@ -27,6 +27,11 @@ var migrations = []migration{
 		description: "add indexed_at, FTS5 index, and sync triggers",
 		fn:          migrateV2,
 	},
+	{
+		version:     3,
+		description: "add stable_key column for chunk identity",
+		fn:          migrateV3,
+	},
 }
 
 // migrateV1 creates the baseline chunks table and indexes.
@@ -96,6 +101,21 @@ func migrateV2(tx *sql.Tx) error {
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("rag: migrate v2: %w", err)
+		}
+	}
+	return nil
+}
+
+// migrateV3 adds the stable_key column for logical chunk identity.
+// Existing rows get an empty default that will be populated on re-index.
+func migrateV3(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE chunks ADD COLUMN stable_key TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_stable_key ON chunks(stable_key)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("rag: migrate v3: %w", err)
 		}
 	}
 	return nil
