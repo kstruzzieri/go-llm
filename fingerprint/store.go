@@ -115,6 +115,11 @@ func (s *SQLiteStore) GetFailure(ctx context.Context, backendID, modelName strin
 
 // Save persists a profile using upsert semantics. For complete profiles
 // (empty IncompleteCapabilities), any failure record for the same model is deleted.
+//
+// The upsert only overwrites an existing row when the incoming profile is
+// at least as recent (by tested_at). This prevents a slow-finishing probe
+// for an old digest from overwriting a newer profile during concurrent
+// mixed-digest profiling.
 func (s *SQLiteStore) Save(ctx context.Context, profile Profile) error {
 	capsJSON, err := json.Marshal(profile.Capabilities)
 	if err != nil {
@@ -158,7 +163,8 @@ func (s *SQLiteStore) Save(ctx context.Context, profile Profile) error {
 			embedding_coherence       = excluded.embedding_coherence,
 			embedding_latency_ns      = excluded.embedding_latency_ns,
 			peak_memory_mb            = excluded.peak_memory_mb,
-			gpu_layers_used           = excluded.gpu_layers_used`,
+			gpu_layers_used           = excluded.gpu_layers_used
+		WHERE excluded.tested_at >= fingerprint_profiles.tested_at`,
 		profile.BackendID, profile.ModelName, profile.ModelDigest, string(profile.ModelKind),
 		string(capsJSON), string(incompleteJSON), profile.KindSource,
 		profile.ProfileVersion, profile.TestedAt.UnixMilli(),
@@ -293,6 +299,8 @@ func (s *SQLiteStore) NeedsFingerprint(ctx context.Context, backendID, modelName
 }
 
 // SaveFailure records or increments a fingerprint failure for backoff tracking.
+// When the digest changes, attempt_count resets to 1 so a new model version
+// starts with a fresh backoff window instead of inheriting stale retry history.
 func (s *SQLiteStore) SaveFailure(ctx context.Context, backendID, modelName, modelDigest, errMsg string) error {
 	now := time.Now().UnixMilli()
 	_, err := s.db.ExecContext(ctx,
@@ -302,7 +310,11 @@ func (s *SQLiteStore) SaveFailure(ctx context.Context, backendID, modelName, mod
 			model_digest  = excluded.model_digest,
 			last_error    = excluded.last_error,
 			attempted_at  = excluded.attempted_at,
-			attempt_count = attempt_count + 1`,
+			attempt_count = CASE
+				WHEN fingerprint_failures.model_digest = excluded.model_digest
+				THEN attempt_count + 1
+				ELSE 1
+			END`,
 		backendID, modelName, modelDigest, errMsg, now,
 	)
 	if err != nil {

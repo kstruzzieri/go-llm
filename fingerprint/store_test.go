@@ -527,3 +527,80 @@ func TestStore_BackendScoping(t *testing.T) {
 		t.Errorf("GetFailure p2 error = %v, want ErrNotFound", err)
 	}
 }
+
+func TestStore_SaveFailure_DigestChangeResetsCount(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	backendID := "http://localhost:11434"
+	modelName := "qwen2.5:7b"
+
+	// Build up retry count with old digest.
+	for i := 0; i < 3; i++ {
+		if err := store.SaveFailure(ctx, backendID, modelName, "old-digest", "old error"); err != nil {
+			t.Fatalf("SaveFailure() error: %v", err)
+		}
+	}
+
+	fi, err := store.GetFailure(ctx, backendID, modelName)
+	if err != nil {
+		t.Fatalf("GetFailure() error: %v", err)
+	}
+	if fi.AttemptCount != 3 {
+		t.Fatalf("AttemptCount = %d, want 3 before digest change", fi.AttemptCount)
+	}
+
+	// Save failure with new digest -- count should reset to 1.
+	if err := store.SaveFailure(ctx, backendID, modelName, "new-digest", "new error"); err != nil {
+		t.Fatalf("SaveFailure() error: %v", err)
+	}
+
+	fi, err = store.GetFailure(ctx, backendID, modelName)
+	if err != nil {
+		t.Fatalf("GetFailure() error: %v", err)
+	}
+	if fi.AttemptCount != 1 {
+		t.Errorf("AttemptCount = %d, want 1 (reset on digest change)", fi.AttemptCount)
+	}
+	if fi.ModelDigest != "new-digest" {
+		t.Errorf("ModelDigest = %q, want %q", fi.ModelDigest, "new-digest")
+	}
+	if fi.LastError != "new error" {
+		t.Errorf("LastError = %q, want %q", fi.LastError, "new error")
+	}
+}
+
+func TestStore_Save_StaleWriteGuard(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Save a newer profile first.
+	newer := testProfile()
+	newer.ModelDigest = "digest-v2"
+	newer.TestedAt = time.Now()
+	newer.GenerationTokensPerSecond = 30.0
+	if err := store.Save(ctx, newer); err != nil {
+		t.Fatalf("Save newer error: %v", err)
+	}
+
+	// Try to save an older profile for the same key.
+	older := testProfile()
+	older.ModelDigest = "digest-v1"
+	older.TestedAt = newer.TestedAt.Add(-time.Hour) // 1 hour older
+	older.GenerationTokensPerSecond = 10.0
+	if err := store.Save(ctx, older); err != nil {
+		t.Fatalf("Save older error: %v", err)
+	}
+
+	// The newer profile should still be stored.
+	got, err := store.Get(ctx, newer.BackendID, newer.ModelName)
+	if err != nil {
+		t.Fatalf("Get error: %v", err)
+	}
+	if got.ModelDigest != "digest-v2" {
+		t.Errorf("ModelDigest = %q, want %q (stale write should not overwrite)", got.ModelDigest, "digest-v2")
+	}
+	if got.GenerationTokensPerSecond != 30.0 {
+		t.Errorf("GenerationTokensPerSecond = %f, want 30.0", got.GenerationTokensPerSecond)
+	}
+}
