@@ -101,7 +101,12 @@ func (p *Profiler) ensureProfileInner(ctx context.Context, backendID, modelName,
 			// In backoff but have partial profile — return partial.
 			return existing, nil
 		}
-		base = existing
+		// Only use as a merge base if the profile version is current.
+		// A stale-version partial needs a full re-probe, not a
+		// selective retry that would stamp old metrics as current.
+		if existing.ProfileVersion >= CurrentProfileVersion {
+			base = existing
+		}
 	}
 
 	// Detect model kind.
@@ -205,8 +210,11 @@ func (p *Profiler) ensureProfileInner(ctx context.Context, backendID, modelName,
 // selectProbes determines which probes to run based on detection and any
 // existing base profile.
 func (p *Profiler) selectProbes(det *KindDetection, base *Profile) (chat, embed bool) {
-	if base != nil && len(base.IncompleteCapabilities) > 0 {
-		// Only retry incomplete capabilities.
+	if base != nil && len(base.IncompleteCapabilities) > 0 &&
+		base.ProfileVersion >= CurrentProfileVersion {
+		// Only retry incomplete capabilities when the profile version is
+		// current. If the version is stale, re-run all probes so that the
+		// new version's metrics are collected for every capability.
 		for _, cap := range base.IncompleteCapabilities {
 			switch cap {
 			case "completion":

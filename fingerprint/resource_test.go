@@ -1,6 +1,7 @@
 package fingerprint
 
 import (
+	"runtime"
 	"testing"
 )
 
@@ -67,8 +68,17 @@ func TestDetect_ReturnsNonZeroMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Detect() error: %v", err)
 	}
-	// On any real machine, total memory should be at least 1 GB
-	if rp.TotalMemoryMB < 1024 {
-		t.Errorf("TotalMemoryMB = %d, want >= 1024", rp.TotalMemoryMB)
+	switch runtime.GOOS {
+	case "darwin", "linux":
+		// On supported platforms, total memory should be at least 1 GB.
+		if rp.TotalMemoryMB < 1024 {
+			t.Errorf("TotalMemoryMB = %d, want >= 1024", rp.TotalMemoryMB)
+		}
+	default:
+		// Fallback platform: memory detection is not implemented,
+		// so TotalMemoryMB is expected to be zero.
+		if rp.TotalMemoryMB != 0 {
+			t.Errorf("TotalMemoryMB = %d, want 0 on %s (unsupported platform)", rp.TotalMemoryMB, runtime.GOOS)
+		}
 	}
 }

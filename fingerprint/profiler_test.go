@@ -292,6 +292,55 @@ func TestProfiler_EnsureProfile_VersionUpgrade(t *testing.T) {
 	}
 }
 
+func TestProfiler_EnsureProfile_VersionUpgrade_PartialRerunsAllProbes(t *testing.T) {
+	// Regression test for P2: a stale-version partial profile must re-run
+	// ALL probes, not just incomplete capabilities. Otherwise the merged
+	// result gets stamped as CurrentProfileVersion without collecting the
+	// new version's metrics for the already-complete capability.
+	store := newMockStore()
+	k := store.key(testBackend, "dual-model")
+	store.profiles[k] = &Profile{
+		BackendID:                 testBackend,
+		ModelName:                 "dual-model",
+		ModelDigest:               testDigest,
+		ModelKind:                 ModelKindChat,
+		ProfileVersion:            0, // Old version
+		IncompleteCapabilities:    []string{"embedding"},
+		GenerationTokensPerSecond: 10.0, // Old chat metrics
+	}
+	store.needsResult[k] = true // Version upgrade triggers
+
+	prober := &mockProber{
+		detectKindFn: func(_ context.Context, _ string) (*KindDetection, error) {
+			return &KindDetection{
+				Kind:         ModelKindChat,
+				Source:       "capabilities",
+				Capabilities: []string{"completion", "embedding"},
+			}, nil
+		},
+	}
+	profiler := NewProfiler(store, prober)
+
+	profile, err := profiler.EnsureProfile(context.Background(), testBackend, "dual-model", testDigest)
+	if err != nil {
+		t.Fatalf("EnsureProfile() error: %v", err)
+	}
+	// Both probes must run for version upgrade.
+	if prober.probeChatCalls.Load() != 1 {
+		t.Errorf("ProbeChat called %d times, want 1 (version upgrade re-runs all)", prober.probeChatCalls.Load())
+	}
+	if prober.probeEmbedCalls.Load() != 1 {
+		t.Errorf("ProbeEmbedding called %d times, want 1 (version upgrade re-runs all)", prober.probeEmbedCalls.Load())
+	}
+	// Chat metrics should be fresh (20.0 from mock), not carried forward (10.0).
+	if profile.GenerationTokensPerSecond != 20.0 {
+		t.Errorf("GenerationTokensPerSecond = %f, want 20.0 (fresh probe, not carried forward)", profile.GenerationTokensPerSecond)
+	}
+	if profile.ProfileVersion != CurrentProfileVersion {
+		t.Errorf("ProfileVersion = %d, want %d", profile.ProfileVersion, CurrentProfileVersion)
+	}
+}
+
 func TestProfiler_EnsureProfile_RaceCondition(t *testing.T) {
 	// NeedsFingerprint returns false, Get returns ErrNotFound,
 	// GetFailure returns ErrNotFound → falls through to profiling.
@@ -490,6 +539,7 @@ func TestProfiler_EnsureProfile_IncompleteProfile_RetryAfterBackoff(t *testing.T
 		ModelName:                 "partial-model",
 		ModelDigest:               testDigest,
 		ModelKind:                 ModelKindChat,
+		ProfileVersion:            CurrentProfileVersion, // Current version — only incomplete retried
 		IncompleteCapabilities:    []string{"embedding"},
 		GenerationTokensPerSecond: 20.0,
 		PromptLatency:             200 * time.Millisecond,

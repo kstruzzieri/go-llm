@@ -102,19 +102,30 @@ func (p *OllamaProber) probeKind(ctx context.Context, model string, info *ollama
 	}, nil
 }
 
+// Compile-time interface check.
+var _ ModelProber = (*OllamaProber)(nil)
+
 // ProbeChat sends a minimal chat request and extracts performance metrics
-// from Ollama's timing fields. The options parameter allows callers to
-// control context size and token limits; pass nil for defaults.
-func (p *OllamaProber) ProbeChat(ctx context.Context, model string, opts *ollama.ModelOptions) (*ChatMetrics, error) {
-	if opts == nil {
-		opts = &ollama.ModelOptions{NumPredict: 16}
+// from Ollama's timing fields. The opts parameter accepts *ollama.ModelOptions
+// or nil for defaults.
+func (p *OllamaProber) ProbeChat(ctx context.Context, model string, opts interface{}) (*ChatMetrics, error) {
+	var modelOpts *ollama.ModelOptions
+	if opts != nil {
+		var ok bool
+		modelOpts, ok = opts.(*ollama.ModelOptions)
+		if !ok {
+			return nil, fmt.Errorf("fingerprint: probe chat %q: opts must be *ollama.ModelOptions, got %T", model, opts)
+		}
+	}
+	if modelOpts == nil {
+		modelOpts = &ollama.ModelOptions{NumPredict: 16}
 	}
 
 	start := time.Now()
 	resp, err := p.client.Chat(ctx, ollama.ChatRequest{
 		Model:    model,
 		Messages: []ollama.ChatMessage{{Role: "user", Content: "Say hello."}},
-		Options:  opts,
+		Options:  modelOpts,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: probe chat %q: %w", model, err)
