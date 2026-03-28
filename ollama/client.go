@@ -100,8 +100,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, dst 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ollama: unexpected status %d: %s", resp.StatusCode, string(respBody))
+		return newAPIError(resp.StatusCode, resp.Body)
 	}
 
 	if dst != nil {
@@ -132,8 +131,7 @@ func (c *Client) doStream(ctx context.Context, path string, body any, fn func(js
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("ollama: unexpected status %d: %s", resp.StatusCode, string(respBody))
+		return newAPIError(resp.StatusCode, resp.Body)
 	}
 
 	scanner := bufio.NewScanner(resp.Body)
@@ -154,4 +152,20 @@ func (c *Client) doStream(ctx context.Context, path string, body any, fn func(js
 		return fmt.Errorf("ollama: read stream: %w", err)
 	}
 	return nil
+}
+
+// newAPIError constructs an APIError from a non-2xx response body.
+// It attempts to parse the Ollama JSON error format {"error":"..."} and
+// falls back to the raw body text. Reads at most 4KB to prevent memory
+// exhaustion from misbehaving upstreams.
+func newAPIError(statusCode int, body io.Reader) *APIError {
+	respBody, _ := io.ReadAll(io.LimitReader(body, 4096))
+	msg := string(respBody)
+	var errResp struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != "" {
+		msg = errResp.Error
+	}
+	return &APIError{StatusCode: statusCode, Message: msg}
 }
