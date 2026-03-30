@@ -3,6 +3,7 @@ package feedback
 import (
 	"context"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -330,6 +331,37 @@ func TestMultipleSignalsSameChunk(t *testing.T) {
 	// With decay=0, score = 0.8 + 0.6 + 0.3 = 1.7 exactly.
 	if w < 1.6 || w > 1.8 {
 		t.Errorf("Weights = %f, expected ~1.7", w)
+	}
+}
+
+func TestSweepExpiredTriggersRecompute(t *testing.T) {
+	// Verify that weak-negative signals written by sweepExpired are reflected
+	// in materialized aggregates immediately (not deferred to later Record).
+	store := newTestStore(t)
+	cfg := CollectorConfig{WarmupSignals: 0, MinRetrievals: 1, DecayLambda: 0.0}
+	c := NewCollector(store, cfg)
+	t.Cleanup(func() { c.Close() })
+	ctx := context.Background()
+
+	id, err := c.RegisterRetrieval(ctx, "q", []string{"chunk-1"})
+	if err != nil {
+		t.Fatalf("RegisterRetrieval: %v", err)
+	}
+
+	// Manually expire the window so sweepExpired writes weak negatives.
+	c.mu.Lock()
+	c.windows[id].createdAt = time.Now().Add(-2 * maxWindowAge)
+	c.mu.Unlock()
+
+	c.sweepExpired()
+
+	// The weak-negative should already be materialized in aggregates.
+	agg, err := store.GetAggregate(ctx, "chunk-1")
+	if err != nil {
+		t.Fatalf("GetAggregate: %v", err)
+	}
+	if agg.WeightedScore >= 0 {
+		t.Errorf("weighted_score = %f, expected negative after expiry sweep", agg.WeightedScore)
 	}
 }
 

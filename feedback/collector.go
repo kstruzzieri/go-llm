@@ -229,6 +229,9 @@ func (c *Collector) sweepLoop() {
 }
 
 // sweepExpired checks all open windows and expires those past maxWindowAge.
+// Weak-negative signals are written for non-interacted chunks, the signal
+// counter is bumped, and aggregates are recomputed so the penalties take
+// effect immediately.
 func (c *Collector) sweepExpired() {
 	now := time.Now()
 	c.mu.Lock()
@@ -242,12 +245,19 @@ func (c *Collector) sweepExpired() {
 	c.mu.Unlock()
 
 	ctx := context.Background()
+	var written int
 	for _, w := range expired {
 		for _, key := range w.chunkKeys {
 			if !w.interacted[key] {
 				_ = c.store.InsertSignal(ctx, w.retrievalID, key, "window_expired", weakNegative)
+				written++
 			}
 		}
+	}
+
+	if written > 0 {
+		c.signalCount.Add(int64(written))
+		_ = c.store.RecomputeAggregates(ctx, c.config.DecayLambda)
 	}
 }
 

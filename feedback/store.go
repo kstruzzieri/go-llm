@@ -214,6 +214,16 @@ func (s *SQLiteSignalStore) RecomputeAggregates(ctx context.Context, lambda floa
 		return fmt.Errorf("feedback: recompute begin: %w", err)
 	}
 
+	// Zero out all weighted_scores so that chunks whose signals were fully
+	// pruned don't retain stale non-zero scores.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE feedback_aggregates SET weighted_score = 0, recomputed_at = ?`,
+		nowMs,
+	); err != nil {
+		_ = tx.Rollback()
+		return fmt.Errorf("feedback: recompute zero scores: %w", err)
+	}
+
 	for key, score := range scores {
 		if _, err := tx.ExecContext(ctx,
 			`INSERT INTO feedback_aggregates (chunk_key, weighted_score, recomputed_at)

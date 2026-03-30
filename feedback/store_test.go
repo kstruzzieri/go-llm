@@ -191,6 +191,49 @@ func TestRecomputeAggregatesEmpty(t *testing.T) {
 	}
 }
 
+func TestRecomputeAggregatesZerosStaleScores(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+
+	// Insert a signal and recompute to set a non-zero weighted_score.
+	if err := store.InsertRetrieval(ctx, "r1", "q", []string{"chunk-1"}); err != nil {
+		t.Fatalf("InsertRetrieval: %v", err)
+	}
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+		t.Fatalf("InsertSignal: %v", err)
+	}
+	if err := store.RecomputeAggregates(ctx, 0.0); err != nil {
+		t.Fatalf("RecomputeAggregates: %v", err)
+	}
+
+	agg, err := store.GetAggregate(ctx, "chunk-1")
+	if err != nil {
+		t.Fatalf("GetAggregate before prune: %v", err)
+	}
+	if agg.WeightedScore < 0.7 {
+		t.Fatalf("expected non-zero score before prune, got %f", agg.WeightedScore)
+	}
+
+	// Prune ALL signals for this chunk.
+	cutoff := time.Now().Add(time.Hour)
+	if _, err := store.PruneSignals(ctx, cutoff); err != nil {
+		t.Fatalf("PruneSignals: %v", err)
+	}
+
+	// Recompute -- chunk-1 has no signals left, score should be zeroed.
+	if err := store.RecomputeAggregates(ctx, 0.0); err != nil {
+		t.Fatalf("RecomputeAggregates after prune: %v", err)
+	}
+
+	agg, err = store.GetAggregate(ctx, "chunk-1")
+	if err != nil {
+		t.Fatalf("GetAggregate after prune+recompute: %v", err)
+	}
+	if agg.WeightedScore != 0 {
+		t.Errorf("weighted_score after prune+recompute = %f, want 0", agg.WeightedScore)
+	}
+}
+
 func TestPruneSignals(t *testing.T) {
 	ctx := context.Background()
 	store := newTestStore(t)
