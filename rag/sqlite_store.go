@@ -91,8 +91,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 	// modifies the row in place (preserving its rowid) and fires the
 	// AFTER UPDATE trigger, which correctly maintains FTS5.
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 				content = excluded.content,
 				source = excluded.source,
@@ -101,7 +101,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 				language = excluded.language,
 				metadata = excluded.metadata,
 				embedding = excluded.embedding,
-				indexed_at = excluded.indexed_at`)
+				indexed_at = excluded.indexed_at,
+				stable_key = excluded.stable_key`)
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}
@@ -118,7 +119,7 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 			return fmt.Errorf("rag: marshal embedding: %w", err)
 		}
 		if _, err := stmt.ExecContext(ctx, chunk.ID, chunk.Content, chunk.Source,
-			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now); err != nil {
+			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey); err != nil {
 			return fmt.Errorf("rag: insert chunk %q: %w", chunk.ID, err)
 		}
 	}
@@ -187,7 +188,7 @@ func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks [
 // Search finds the top-k most similar chunks using brute-force cosine similarity.
 func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k int) ([]SearchResult, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, content, source, start_line, end_line, language, metadata, embedding FROM chunks`)
+		`SELECT id, content, source, start_line, end_line, language, metadata, embedding, stable_key FROM chunks`)
 	if err != nil {
 		return nil, fmt.Errorf("rag: query chunks: %w", err)
 	}
@@ -198,7 +199,7 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 		var chunk Chunk
 		var metaJSON, embJSON string
 		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
-			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &embJSON); err != nil {
+			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &embJSON, &chunk.StableKey); err != nil {
 			return nil, fmt.Errorf("rag: scan chunk: %w", err)
 		}
 
@@ -336,7 +337,7 @@ func (s *SQLiteStore) ExportChunks(ctx context.Context, filter *ExportFilter) (i
 
 // buildExportQuery constructs the SELECT with optional WHERE clauses for export filtering.
 func buildExportQuery(filter *ExportFilter) (string, []any) {
-	base := `SELECT id, content, source, start_line, end_line, language, embedding FROM chunks`
+	base := `SELECT id, content, source, start_line, end_line, language, embedding, stable_key FROM chunks`
 	var conditions []string
 	var args []any
 
@@ -364,7 +365,7 @@ func scanExportRow(rows *sql.Rows) (Chunk, []float64, error) {
 	var chunk Chunk
 	var embJSON string
 	if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
-		&chunk.StartLine, &chunk.EndLine, &chunk.Language, &embJSON); err != nil {
+		&chunk.StartLine, &chunk.EndLine, &chunk.Language, &embJSON, &chunk.StableKey); err != nil {
 		return Chunk{}, nil, fmt.Errorf("rag: scan export row: %w", err)
 	}
 
