@@ -223,13 +223,14 @@ func (e *Engine) prefetchForState(parentCtx context.Context, activeFile string, 
 			OpenFiles:   openFiles,
 			Timestamp:   time.Now(),
 		}
-		result, err := e.retriever.Retrieve(ctx, q, 10, qCtx, RetrieveOptions{})
+		const prefetchK = 10
+		result, err := e.retriever.Retrieve(ctx, q, prefetchK, qCtx, RetrieveOptions{})
 		if err != nil {
 			// Prefetch errors are non-fatal; we just skip this query.
 			continue
 		}
 		if e.cache != nil {
-			e.cache.Put(q, result.Chunks)
+			e.cache.Put(buildCacheKey(q, prefetchK, qCtx), result.Chunks)
 		}
 	}
 }
