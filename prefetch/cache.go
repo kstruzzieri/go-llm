@@ -119,10 +119,14 @@ func (c *WarmCache) Put(key string, results []rag.ScoredResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Defensive copy so callers cannot mutate cached state.
+	stored := make([]rag.ScoredResult, len(results))
+	copy(stored, results)
+
 	// Update existing entry in-place.
 	if elem, ok := c.items[key]; ok {
 		entry := elem.Value.(*cacheEntry)
-		entry.results = results
+		entry.results = stored
 		entry.expiresAt = c.now().Add(c.ttl)
 		c.order.MoveToFront(elem)
 		return
@@ -140,7 +144,7 @@ func (c *WarmCache) Put(key string, results []rag.ScoredResult) {
 
 	entry := &cacheEntry{
 		key:       key,
-		results:   results,
+		results:   stored,
 		expiresAt: c.now().Add(c.ttl),
 	}
 	elem := c.order.PushFront(entry)

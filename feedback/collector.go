@@ -148,9 +148,11 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 		}
 	}
 
+	oldCount := c.signalCount.Load()
 	newCount := c.signalCount.Add(int64(len(keys)))
-	if newCount%recomputeInterval == 0 {
-		// Trigger async recomputation (best effort).
+	// Trigger when the counter crosses an interval boundary, not just on
+	// exact multiples. This handles batched signals that skip exact hits.
+	if newCount/recomputeInterval > oldCount/recomputeInterval {
 		go func() {
 			_ = c.store.RecomputeAggregates(context.Background(), c.config.DecayLambda)
 		}()
