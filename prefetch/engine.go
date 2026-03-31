@@ -217,7 +217,6 @@ func (e *Engine) prefetchForState(parentCtx context.Context, activeFile string, 
 		qCtx := rag.QueryContext{
 			CurrentFile: activeFile,
 			OpenFiles:   openFiles,
-			Timestamp:   time.Now(),
 		}
 		const prefetchK = 10
 		result, err := e.retriever.Retrieve(ctx, q, prefetchK, qCtx, RetrieveOptions{})
