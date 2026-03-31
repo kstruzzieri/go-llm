@@ -266,7 +266,10 @@ func TestExtractSymbolName(t *testing.T) {
 		want    string
 	}{
 		{"go func", "func Hello() {}", "go", "Hello"},
-		{"go method", "func (s *Server) Start() error {}", "go", "Start"},
+		{"go method", "func (s *Server) Start() error {}", "go", "Server.Start"},
+		{"go method value receiver", "func (s Server) Stop() error {}", "go", "Server.Stop"},
+		{"go generic receiver", "func (s *Server[T]) Start() error {}", "go", "Server.Start"},
+		{"go generic multi-param", "func (s *Cache[K, V]) Get() {}", "go", "Cache.Get"},
 		{"python def", "def process_data():", "python", "process_data"},
 		{"python class", "class MyModel:", "python", "MyModel"},
 		{"ts function", "export function render() {}", "typescript", "render"},

@@ -2,11 +2,60 @@ package prefetch
 
 import (
 	"container/list"
+	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/rag"
 )
+
+// cacheKey combines query text, result count, and context-sensitive fields
+// so that different (query, k, context) combinations get independent entries.
+type cacheKey struct {
+	query         string
+	k             int
+	currentFile   string
+	workspaceRoot string
+	openFiles     []string
+	timestampUnix int64
+}
+
+func newCacheKey(query string, k int, qCtx rag.QueryContext) cacheKey {
+	openFiles := append([]string(nil), qCtx.OpenFiles...)
+	sort.Strings(openFiles)
+
+	var ts int64
+	if !qCtx.Timestamp.IsZero() {
+		ts = qCtx.Timestamp.Unix()
+	}
+
+	return cacheKey{
+		query:         query,
+		k:             k,
+		currentFile:   qCtx.CurrentFile,
+		workspaceRoot: qCtx.WorkspaceRoot,
+		openFiles:     openFiles,
+		timestampUnix: ts,
+	}
+}
+
+func (ck cacheKey) String() string {
+	var b strings.Builder
+	b.WriteString(ck.query)
+	b.WriteString("\x00")
+	b.WriteString(strconv.Itoa(ck.k))
+	b.WriteString("\x00")
+	b.WriteString(ck.currentFile)
+	b.WriteString("\x00")
+	b.WriteString(ck.workspaceRoot)
+	b.WriteString("\x00")
+	b.WriteString(strings.Join(ck.openFiles, "\x1f"))
+	b.WriteString("\x00")
+	b.WriteString(strconv.FormatInt(ck.timestampUnix, 10))
+	return b.String()
+}
 
 // cacheEntry holds a cached set of scored results with an expiration time.
 type cacheEntry struct {
@@ -58,7 +107,10 @@ func (c *WarmCache) Get(key string) ([]rag.ScoredResult, bool) {
 
 	// Move to front (most recently used).
 	c.order.MoveToFront(elem)
-	return entry.results, true
+	// Return a copy so callers cannot mutate the cached slice.
+	cp := make([]rag.ScoredResult, len(entry.results))
+	copy(cp, entry.results)
+	return cp, true
 }
 
 // Put stores results for the given query key, evicting the least recently
@@ -67,10 +119,14 @@ func (c *WarmCache) Put(key string, results []rag.ScoredResult) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Defensive copy so callers cannot mutate cached state.
+	stored := make([]rag.ScoredResult, len(results))
+	copy(stored, results)
+
 	// Update existing entry in-place.
 	if elem, ok := c.items[key]; ok {
 		entry := elem.Value.(*cacheEntry)
-		entry.results = results
+		entry.results = stored
 		entry.expiresAt = c.now().Add(c.ttl)
 		c.order.MoveToFront(elem)
 		return
@@ -88,7 +144,7 @@ func (c *WarmCache) Put(key string, results []rag.ScoredResult) {
 
 	entry := &cacheEntry{
 		key:       key,
-		results:   results,
+		results:   stored,
 		expiresAt: c.now().Add(c.ttl),
 	}
 	elem := c.order.PushFront(entry)

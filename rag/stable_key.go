@@ -122,7 +122,7 @@ func anchorHash(content string) string {
 // same boundary patterns used in chunker_code.go, extracting the identifier
 // that follows the keyword.
 var symbolExtractors = map[string]*regexp.Regexp{
-	"go":         regexp.MustCompile(`^func\s+(?:\(\s*\w+\s+\*?\w+\)\s+)?(\w+)`),
+	"go":         regexp.MustCompile(`^func\s+(?:\(\s*\w+\s+(\*?\w+(?:\[[\w,\s]+\])?)\)\s+)?(\w+)`),
 	"python":     regexp.MustCompile(`^(?:def|class)\s+(\w+)`),
 	"typescript": regexp.MustCompile(`^(?:export\s+)?(?:function|class|const|interface|type)\s+(\w+)`),
 	"javascript": regexp.MustCompile(`^(?:export\s+)?(?:function|class|const)\s+(\w+)`),
@@ -132,7 +132,10 @@ var symbolExtractors = map[string]*regexp.Regexp{
 }
 
 // extractSymbolName scans the chunk content for the first recognizable symbol
-// declaration and returns its name. Returns "" if no symbol is found.
+// declaration and returns its name. For Go methods, the result includes the
+// receiver type (e.g. "Server.Start") to disambiguate same-named methods on
+// different types. Generic type params are stripped (Server[T] -> Server).
+// Returns "" if no symbol is found.
 func extractSymbolName(content string, lang string) string {
 	pattern, ok := symbolExtractors[lang]
 	if !ok {
@@ -141,6 +144,19 @@ func extractSymbolName(content string, lang string) string {
 	for _, line := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if m := pattern.FindStringSubmatch(trimmed); m != nil {
+			// Go regex has 2 capture groups: receiver type (may be empty) and func name.
+			if lang == "go" && len(m) >= 3 {
+				receiver := m[1]
+				funcName := m[2]
+				if receiver != "" {
+					receiver = strings.TrimPrefix(receiver, "*")
+					if idx := strings.IndexByte(receiver, '['); idx >= 0 {
+						receiver = receiver[:idx]
+					}
+					return receiver + "." + funcName
+				}
+				return funcName
+			}
 			return m[1]
 		}
 	}

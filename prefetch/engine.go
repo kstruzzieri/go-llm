@@ -130,14 +130,10 @@ func (e *Engine) Retrieve(ctx context.Context, query string, k int,
 	// Cancel any in-flight prefetch so the cold retriever is not contended.
 	e.cancelPrefetch()
 
-	cacheKey := buildCacheKey(query, k, qCtx)
+	key := newCacheKey(query, k, qCtx).String()
 
 	if !opts.SkipCache && e.cache != nil {
-		if results, ok := e.cache.Get(cacheKey); ok {
-			// Trim to requested k if cache has more.
-			if k > 0 && len(results) > k {
-				results = results[:k]
-			}
+		if results, ok := e.cache.Get(key); ok {
 			return &RetrieveResult{
 				Chunks:   results,
 				CacheHit: true,
@@ -152,7 +148,7 @@ func (e *Engine) Retrieve(ctx context.Context, query string, k int,
 
 	// Warm the cache with this result for future hits.
 	if e.cache != nil {
-		e.cache.Put(cacheKey, result.Chunks)
+		e.cache.Put(key, result.Chunks)
 	}
 
 	return result, nil
@@ -221,7 +217,6 @@ func (e *Engine) prefetchForState(parentCtx context.Context, activeFile string, 
 		qCtx := rag.QueryContext{
 			CurrentFile: activeFile,
 			OpenFiles:   openFiles,
-			Timestamp:   time.Now(),
 		}
 		const prefetchK = 10
 		result, err := e.retriever.Retrieve(ctx, q, prefetchK, qCtx, RetrieveOptions{})
@@ -230,7 +225,7 @@ func (e *Engine) prefetchForState(parentCtx context.Context, activeFile string, 
 			continue
 		}
 		if e.cache != nil {
-			e.cache.Put(buildCacheKey(q, prefetchK, qCtx), result.Chunks)
+			e.cache.Put(newCacheKey(q, prefetchK, qCtx).String(), result.Chunks)
 		}
 	}
 }
@@ -390,14 +385,9 @@ func commonPathPrefix(path string) string {
 	return parent + "/"
 }
 
-// buildCacheKey constructs a composite cache key that includes the query
-// context dimensions affecting multi-signal scoring, so that different editor
-// contexts do not share cached results.
-func buildCacheKey(query string, k int, qCtx rag.QueryContext) string {
-	return fmt.Sprintf("%s|k=%d|file=%s", query, k, qCtx.CurrentFile)
-}
-
 // stateChanged returns true if the active file or open files set has changed.
+// Open files are compared as sets (order-insensitive) because StateProvider
+// does not guarantee ordering.
 func stateChanged(activeFile string, openFiles []string, lastActive string, lastOpen []string) bool {
 	if activeFile != lastActive {
 		return true
@@ -405,8 +395,12 @@ func stateChanged(activeFile string, openFiles []string, lastActive string, last
 	if len(openFiles) != len(lastOpen) {
 		return true
 	}
-	for i := range openFiles {
-		if openFiles[i] != lastOpen[i] {
+	set := make(map[string]struct{}, len(lastOpen))
+	for _, f := range lastOpen {
+		set[f] = struct{}{}
+	}
+	for _, f := range openFiles {
+		if _, ok := set[f]; !ok {
 			return true
 		}
 	}
