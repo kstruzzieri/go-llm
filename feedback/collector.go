@@ -92,10 +92,14 @@ func (c *Collector) RegisterRetrieval(ctx context.Context, query string, chunkKe
 		return "", err
 	}
 
+	// Defensive copy so callers cannot mutate the window's key set.
+	keysCopy := make([]string, len(chunkKeys))
+	copy(keysCopy, chunkKeys)
+
 	c.mu.Lock()
 	c.windows[id] = &attributionWindow{
 		retrievalID: id,
-		chunkKeys:   chunkKeys,
+		chunkKeys:   keysCopy,
 		interacted:  make(map[string]bool),
 		createdAt:   time.Now(),
 	}
@@ -139,7 +143,7 @@ func (c *Collector) Record(ctx context.Context, signal Signal) error {
 	}
 
 	for _, key := range keys {
-		if err := c.store.InsertSignal(ctx, signal.RetrievalID, key, signal.Kind, strength); err != nil {
+		if err := c.store.InsertSignal(ctx, signal.RetrievalID, key, signal.Kind, strength, signal.Timestamp); err != nil {
 			return err
 		}
 	}
@@ -249,7 +253,7 @@ func (c *Collector) sweepExpired() {
 	for _, w := range expired {
 		for _, key := range w.chunkKeys {
 			if !w.interacted[key] {
-				_ = c.store.InsertSignal(ctx, w.retrievalID, key, "window_expired", weakNegative)
+				_ = c.store.InsertSignal(ctx, w.retrievalID, key, "window_expired", weakNegative, time.Time{})
 				written++
 			}
 		}

@@ -26,7 +26,7 @@ func TestInsertRetrievalAndSignal(t *testing.T) {
 		t.Fatalf("InsertRetrieval: %v", err)
 	}
 
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
 
@@ -69,7 +69,7 @@ func TestGetAggregate(t *testing.T) {
 	if err := store.InsertRetrieval(ctx, "r1", "q", []string{"chunk-1"}); err != nil {
 		t.Fatalf("InsertRetrieval: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
 
@@ -102,10 +102,10 @@ func TestGetAggregatesBatch(t *testing.T) {
 	if err := store.InsertRetrieval(ctx, "r1", "q", []string{"chunk-1", "chunk-2"}); err != nil {
 		t.Fatalf("InsertRetrieval: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCodeKept, 0.6); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCodeKept, 0.6, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-2", SignalCodeUndone, -0.7); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-2", SignalCodeUndone, -0.7, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
 
@@ -159,10 +159,10 @@ func TestRecomputeAggregates(t *testing.T) {
 	if err := store.InsertRetrieval(ctx, "r1", "q", []string{"chunk-1"}); err != nil {
 		t.Fatalf("InsertRetrieval: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCodeKept, 0.6); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCodeKept, 0.6, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal (2nd): %v", err)
 	}
 
@@ -199,7 +199,7 @@ func TestRecomputeAggregatesZerosStaleScores(t *testing.T) {
 	if err := store.InsertRetrieval(ctx, "r1", "q", []string{"chunk-1"}); err != nil {
 		t.Fatalf("InsertRetrieval: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
 	if err := store.RecomputeAggregates(ctx, 0.0); err != nil {
@@ -241,7 +241,7 @@ func TestPruneSignals(t *testing.T) {
 	if err := store.InsertRetrieval(ctx, "r1", "q", []string{"chunk-1"}); err != nil {
 		t.Fatalf("InsertRetrieval: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
 
@@ -271,7 +271,7 @@ func TestPruneSignalsNone(t *testing.T) {
 	if err := store.InsertRetrieval(ctx, "r1", "q", []string{"chunk-1"}); err != nil {
 		t.Fatalf("InsertRetrieval: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
 
@@ -297,7 +297,7 @@ func TestPruneRetrievals(t *testing.T) {
 	if err := store.InsertRetrieval(ctx, "r2", "q2", []string{"chunk-2"}); err != nil {
 		t.Fatalf("InsertRetrieval r2: %v", err)
 	}
-	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8); err != nil {
+	if err := store.InsertSignal(ctx, "r1", "chunk-1", SignalCompletionAccepted, 0.8, time.Time{}); err != nil {
 		t.Fatalf("InsertSignal: %v", err)
 	}
 

@@ -20,8 +20,9 @@ type SignalStore interface {
 	// InsertRetrieval records a retrieval event with its associated chunk keys.
 	InsertRetrieval(ctx context.Context, id, query string, chunkKeys []string) error
 
-	// InsertSignal persists a signal event.
-	InsertSignal(ctx context.Context, retrievalID, chunkKey string, kind SignalKind, strength float64) error
+	// InsertSignal persists a signal event. When createdAt is zero the
+	// current time is used.
+	InsertSignal(ctx context.Context, retrievalID, chunkKey string, kind SignalKind, strength float64, createdAt time.Time) error
 
 	// SignalCount returns the total number of recorded signals.
 	SignalCount(ctx context.Context) (int, error)
@@ -76,9 +77,12 @@ func (s *SQLiteSignalStore) InsertRetrieval(ctx context.Context, id, query strin
 }
 
 // InsertSignal persists a signal event and updates the last_signal_at
-// aggregate timestamp.
-func (s *SQLiteSignalStore) InsertSignal(ctx context.Context, retrievalID, chunkKey string, kind SignalKind, strength float64) error {
-	now := time.Now().UnixMilli()
+// aggregate timestamp. When createdAt is zero the current time is used.
+func (s *SQLiteSignalStore) InsertSignal(ctx context.Context, retrievalID, chunkKey string, kind SignalKind, strength float64, createdAt time.Time) error {
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	now := createdAt.UnixMilli()
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
