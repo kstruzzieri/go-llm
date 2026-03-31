@@ -105,6 +105,13 @@ func NewEngine(retriever Retriever, store rag.VectorStore, state StateProvider, 
 		opt(e)
 	}
 
+	// Auto-detect resources when no override was provided.
+	if e.resources.TotalMemoryMB == 0 && e.resources.CPUCores == 0 {
+		if detected, err := fingerprint.Detect(); err == nil {
+			e.resources = detected
+		}
+	}
+
 	e.config = configForResources(e.resources)
 
 	if e.config.cacheCapacity > 0 {
@@ -123,8 +130,10 @@ func (e *Engine) Retrieve(ctx context.Context, query string, k int,
 	// Cancel any in-flight prefetch so the cold retriever is not contended.
 	e.cancelPrefetch()
 
+	cacheKey := buildCacheKey(query, k, qCtx)
+
 	if !opts.SkipCache && e.cache != nil {
-		if results, ok := e.cache.Get(query); ok {
+		if results, ok := e.cache.Get(cacheKey); ok {
 			// Trim to requested k if cache has more.
 			if k > 0 && len(results) > k {
 				results = results[:k]
@@ -143,7 +152,7 @@ func (e *Engine) Retrieve(ctx context.Context, query string, k int,
 
 	// Warm the cache with this result for future hits.
 	if e.cache != nil {
-		e.cache.Put(query, result.Chunks)
+		e.cache.Put(cacheKey, result.Chunks)
 	}
 
 	return result, nil
@@ -179,7 +188,7 @@ func (e *Engine) Watch(ctx context.Context) error {
 			}
 
 			lastActiveFile = activeFile
-			lastOpenFiles = openFiles
+			lastOpenFiles = append([]string(nil), openFiles...)
 
 			e.prefetchForState(ctx, activeFile, openFiles)
 		}
@@ -378,6 +387,13 @@ func commonPathPrefix(path string) string {
 		return ""
 	}
 	return parent + "/"
+}
+
+// buildCacheKey constructs a composite cache key that includes the query
+// context dimensions affecting multi-signal scoring, so that different editor
+// contexts do not share cached results.
+func buildCacheKey(query string, k int, qCtx rag.QueryContext) string {
+	return fmt.Sprintf("%s|k=%d|file=%s", query, k, qCtx.CurrentFile)
 }
 
 // stateChanged returns true if the active file or open files set has changed.

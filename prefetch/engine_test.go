@@ -388,19 +388,8 @@ func TestEngine_WatchStateChange(t *testing.T) {
 	}
 }
 
-func TestEngine_CacheHitTopKTrimming(t *testing.T) {
-	retriever := &mockRetriever{
-		results: &RetrieveResult{
-			Chunks: []rag.ScoredResult{
-				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "a"}, Score: 0.9}},
-				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "b"}, Score: 0.8}},
-				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "c"}, Score: 0.7}},
-				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "d"}, Score: 0.6}},
-				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "e"}, Score: 0.5}},
-			},
-			CacheHit: false,
-		},
-	}
+func TestEngine_DifferentKSeparateCacheEntries(t *testing.T) {
+	retriever := &mockRetriever{results: defaultTestResults()}
 	store := &mockVectorStore{}
 	state := &mockStateProvider{activeFile: "main.go"}
 
@@ -408,24 +397,64 @@ func TestEngine_CacheHitTopKTrimming(t *testing.T) {
 		WithResources(fingerprint.ResourceProfile{TotalMemoryMB: 65536}),
 	)
 
-	// Warm the cache with k=5.
+	// Warm cache with k=5.
 	_, err := engine.Retrieve(context.Background(), "query", 5,
 		rag.QueryContext{}, RetrieveOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// Request with k=2 should trim cached results.
+	// k=2 is a different cache key -- should miss and call retriever again.
 	result, err := engine.Retrieve(context.Background(), "query", 2,
 		rag.QueryContext{}, RetrieveOptions{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !result.CacheHit {
-		t.Error("expected cache hit")
+	if result.CacheHit {
+		t.Error("expected cache miss for different k")
 	}
-	if len(result.Chunks) != 2 {
-		t.Errorf("expected 2 chunks (trimmed), got %d", len(result.Chunks))
+	if retriever.calls() != 2 {
+		t.Errorf("expected 2 retriever calls, got %d", retriever.calls())
+	}
+}
+
+func TestEngine_DifferentContextSeparateCacheEntries(t *testing.T) {
+	retriever := &mockRetriever{results: defaultTestResults()}
+	store := &mockVectorStore{}
+	state := &mockStateProvider{activeFile: "main.go"}
+
+	engine := NewEngine(retriever, store, state,
+		WithResources(fingerprint.ResourceProfile{TotalMemoryMB: 65536}),
+	)
+
+	// Warm cache from file A context.
+	_, err := engine.Retrieve(context.Background(), "query", 5,
+		rag.QueryContext{CurrentFile: "a.go"}, RetrieveOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Same query from file B context should miss cache.
+	result, err := engine.Retrieve(context.Background(), "query", 5,
+		rag.QueryContext{CurrentFile: "b.go"}, RetrieveOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.CacheHit {
+		t.Error("expected cache miss for different CurrentFile")
+	}
+	if retriever.calls() != 2 {
+		t.Errorf("expected 2 retriever calls, got %d", retriever.calls())
+	}
+
+	// Same query + same context should hit cache.
+	result, err = engine.Retrieve(context.Background(), "query", 5,
+		rag.QueryContext{CurrentFile: "b.go"}, RetrieveOptions{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !result.CacheHit {
+		t.Error("expected cache hit for same context")
 	}
 }
 
