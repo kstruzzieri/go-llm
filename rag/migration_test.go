@@ -12,14 +12,14 @@ import (
 func TestMigrationFreshDB(t *testing.T) {
 	store := newTestStore(t)
 
-	// Verify rag_schema_version exists with version 3.
+	// Verify rag_schema_version exists with version 4.
 	var maxVersion int
 	err := store.db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max schema version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max schema version = %d, want 4", maxVersion)
 	}
 
 	// Verify chunks_fts virtual table exists.
@@ -102,14 +102,14 @@ func TestMigrationExistingDB(t *testing.T) {
 		t.Fatalf("runMigrations() error: %v", err)
 	}
 
-	// Verify version upgraded to 3.
+	// Verify version upgraded to 4.
 	var maxVersion int
 	err = db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max schema version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max schema version = %d, want 4", maxVersion)
 	}
 
 	// Verify indexed_at was backfilled (should be non-zero).
@@ -393,13 +393,13 @@ func TestMigrationIdempotency(t *testing.T) {
 		t.Fatalf("second runMigrations() error: %v", err)
 	}
 
-	// Verify version is still 3 (not duplicated).
+	// Verify version is still 4 (not duplicated).
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&count); err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
-	if count != 3 {
-		t.Errorf("expected 3 version records (v1, v2, v3), got %d", count)
+	if count != 4 {
+		t.Errorf("expected 4 version records (v1, v2, v3, v4), got %d", count)
 	}
 }
 
@@ -530,13 +530,13 @@ func TestMigrationHalfAppliedV2(t *testing.T) {
 		t.Fatalf("runMigrations() on half-applied v2: %v", err)
 	}
 
-	// Verify version recorded as 3 (v2 detected, then v3 applied).
+	// Verify version recorded as 4 (v2 detected, then v3+v4 applied).
 	var maxVersion int
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max version = %d, want 4", maxVersion)
 	}
 }
 
@@ -602,12 +602,12 @@ func TestMigrationHalfAppliedV2WithV1Recorded(t *testing.T) {
 		t.Fatalf("runMigrations() on v2 schema with v1 recorded: %v", err)
 	}
 
-	// Verify version is now 3 (v2 detected, then v3 applied).
+	// Verify version is now 4 (v2 detected, then v3+v4 applied).
 	var maxVersion int
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max version = %d, want 4", maxVersion)
 	}
 }
