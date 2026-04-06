@@ -12,14 +12,14 @@ import (
 func TestMigrationFreshDB(t *testing.T) {
 	store := newTestStore(t)
 
-	// Verify rag_schema_version exists with version 3.
+	// Verify rag_schema_version exists with version 4.
 	var maxVersion int
 	err := store.db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max schema version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max schema version = %d, want 4", maxVersion)
 	}
 
 	// Verify chunks_fts virtual table exists.
@@ -102,14 +102,14 @@ func TestMigrationExistingDB(t *testing.T) {
 		t.Fatalf("runMigrations() error: %v", err)
 	}
 
-	// Verify version upgraded to 3.
+	// Verify version upgraded to 4.
 	var maxVersion int
 	err = db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max schema version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max schema version = %d, want 4", maxVersion)
 	}
 
 	// Verify indexed_at was backfilled (should be non-zero).
@@ -393,13 +393,13 @@ func TestMigrationIdempotency(t *testing.T) {
 		t.Fatalf("second runMigrations() error: %v", err)
 	}
 
-	// Verify version is still 3 (not duplicated).
+	// Verify version is still 4 (not duplicated).
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&count); err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
-	if count != 3 {
-		t.Errorf("expected 3 version records (v1, v2, v3), got %d", count)
+	if count != 4 {
+		t.Errorf("expected 4 version records (v1, v2, v3, v4), got %d", count)
 	}
 }
 
@@ -473,6 +473,132 @@ func TestFTS5UpsertConsistency(t *testing.T) {
 	}
 }
 
+func TestMigrationV4SourceContentHash(t *testing.T) {
+	store := newTestStore(t)
+
+	// Verify max schema version is 4.
+	var maxVersion int
+	err := store.db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
+	if err != nil {
+		t.Fatalf("query rag_schema_version: %v", err)
+	}
+	if maxVersion != 4 {
+		t.Errorf("max schema version = %d, want 4", maxVersion)
+	}
+
+	// Verify source_content_hash column exists by inserting and querying it.
+	_, err = store.db.Exec(
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash)
+		 VALUES ('test-v4', 'content', 'src.go', 1, 1, 'go', '{}', '[]', 12345, 'key1', 'abc123')`,
+	)
+	if err != nil {
+		t.Fatalf("insert with source_content_hash: %v", err)
+	}
+
+	var hash string
+	err = store.db.QueryRow(`SELECT source_content_hash FROM chunks WHERE id = 'test-v4'`).Scan(&hash)
+	if err != nil {
+		t.Fatalf("query source_content_hash: %v", err)
+	}
+	if hash != "abc123" {
+		t.Errorf("source_content_hash = %q, want %q", hash, "abc123")
+	}
+}
+
+func TestMigrationV4ExistingDB(t *testing.T) {
+	// Simulate a V3-shaped database: chunks table with stable_key but NOT source_content_hash.
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer func() { _ = db.Close() }()
+
+	// Create V3-shaped schema with stable_key, indexed_at, FTS5, and triggers.
+	v3Schema := `
+	CREATE TABLE chunks (
+		id TEXT PRIMARY KEY,
+		content TEXT NOT NULL,
+		source TEXT NOT NULL,
+		start_line INTEGER NOT NULL,
+		end_line INTEGER NOT NULL,
+		language TEXT NOT NULL DEFAULT '',
+		metadata TEXT NOT NULL DEFAULT '{}',
+		embedding TEXT NOT NULL,
+		indexed_at INTEGER NOT NULL DEFAULT 0,
+		stable_key TEXT NOT NULL DEFAULT ''
+	);
+	CREATE INDEX idx_chunks_source_line ON chunks(source, start_line);
+	CREATE INDEX idx_chunks_lang_source_line ON chunks(language, source, start_line);
+	CREATE INDEX idx_chunks_stable_key ON chunks(stable_key);
+
+	CREATE VIRTUAL TABLE chunks_fts USING fts5(
+		content, source,
+		content=chunks, content_rowid=rowid
+	);
+	CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+		INSERT INTO chunks_fts(rowid, content, source)
+		VALUES (new.rowid, new.content, new.source);
+	END;
+	CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+		VALUES ('delete', old.rowid, old.content, old.source);
+	END;
+	CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+		INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+		VALUES ('delete', old.rowid, old.content, old.source);
+		INSERT INTO chunks_fts(rowid, content, source)
+		VALUES (new.rowid, new.content, new.source);
+	END;
+
+	CREATE TABLE rag_schema_version (
+		version     INTEGER PRIMARY KEY,
+		description TEXT NOT NULL,
+		applied_at  INTEGER NOT NULL
+	);
+	INSERT INTO rag_schema_version (version, description, applied_at) VALUES (1, 'baseline schema', 1000);
+	INSERT INTO rag_schema_version (version, description, applied_at) VALUES (2, 'add indexed_at, FTS5 index, and sync triggers', 1000);
+	INSERT INTO rag_schema_version (version, description, applied_at) VALUES (3, 'add stable_key column for chunk identity', 1000);
+	`
+	if _, err := db.Exec(v3Schema); err != nil {
+		t.Fatalf("create v3 schema: %v", err)
+	}
+
+	// Insert a row without source_content_hash column.
+	_, err = db.Exec(
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key)
+		 VALUES ('c1', 'hello world', 'main.go', 1, 5, 'go', '{}', '[0.1, 0.2]', 12345, 'key1')`,
+	)
+	if err != nil {
+		t.Fatalf("insert test data: %v", err)
+	}
+
+	// Run migrations on the V3 database.
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
+	}
+
+	// Verify version upgraded to 4.
+	var maxVersion int
+	err = db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
+	if err != nil {
+		t.Fatalf("query schema version: %v", err)
+	}
+	if maxVersion != 4 {
+		t.Errorf("max schema version = %d, want 4", maxVersion)
+	}
+
+	// Verify existing row has empty default hash.
+	var hash string
+	err = db.QueryRow(`SELECT source_content_hash FROM chunks WHERE id = 'c1'`).Scan(&hash)
+	if err != nil {
+		t.Fatalf("query source_content_hash: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("existing row source_content_hash = %q, want empty string", hash)
+	}
+}
+
 func TestMigrationHalfAppliedV2(t *testing.T) {
 	// Simulate a database where v2 DDL was applied but version was
 	// not recorded (crash between tx.Commit and recordVersion in the
@@ -530,13 +656,13 @@ func TestMigrationHalfAppliedV2(t *testing.T) {
 		t.Fatalf("runMigrations() on half-applied v2: %v", err)
 	}
 
-	// Verify version recorded as 3 (v2 detected, then v3 applied).
+	// Verify version recorded as 4 (v2 detected, then v3+v4 applied).
 	var maxVersion int
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max version = %d, want 4", maxVersion)
 	}
 }
 
@@ -602,12 +728,12 @@ func TestMigrationHalfAppliedV2WithV1Recorded(t *testing.T) {
 		t.Fatalf("runMigrations() on v2 schema with v1 recorded: %v", err)
 	}
 
-	// Verify version is now 3 (v2 detected, then v3 applied).
+	// Verify version is now 4 (v2 detected, then v3+v4 applied).
 	var maxVersion int
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 3 {
-		t.Errorf("max version = %d, want 3", maxVersion)
+	if maxVersion != 4 {
+		t.Errorf("max version = %d, want 4", maxVersion)
 	}
 }
