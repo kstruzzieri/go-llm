@@ -60,7 +60,7 @@ func TestMigrationExistingDB(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create the old schema (no rag_schema_version, no indexed_at, no FTS5).
 	oldSchema := `
@@ -117,7 +117,7 @@ func TestMigrationExistingDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query indexed_at: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var id string
 		var indexedAt int64
@@ -162,7 +162,7 @@ func TestIndexedAtWrittenOnStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query indexed_at: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var id string
@@ -382,7 +382,7 @@ func TestMigrationIdempotency(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	if err := runMigrations(db); err != nil {
 		t.Fatalf("first runMigrations() error: %v", err)
@@ -460,7 +460,7 @@ func TestFTS5UpsertConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("content-sync read: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var rowid int64
 		var content, source string
@@ -482,7 +482,7 @@ func TestMigrationHalfAppliedV2(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create v2-shaped schema: chunks table with indexed_at + FTS5.
 	v2Schema := `
@@ -549,7 +549,7 @@ func TestMigrationHalfAppliedV2WithV1Recorded(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	// Create v2-shaped schema.
 	v2Schema := `

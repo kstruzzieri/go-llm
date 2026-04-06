@@ -134,10 +134,10 @@ func ExportDataset(
 	tmpClosed := false
 	cleanup := func() {
 		if !tmpClosed {
-			tmpFile.Close()
+			_ = tmpFile.Close()
 			tmpClosed = true
 		}
-		os.Remove(tmpPath)
+		_ = os.Remove(tmpPath)
 	}
 	success := false
 	defer func() {
@@ -223,7 +223,7 @@ func exportTyped[T any](
 	// closeWriter is a helper for error paths. Writer close errors on error
 	// paths are secondary to the primary error, but we close to release resources.
 	closeWriter := func() {
-		writer.Close()
+		_ = writer.Close()
 	}
 
 	// Step 5: Get iterator from source.

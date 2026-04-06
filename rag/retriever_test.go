@@ -15,13 +15,13 @@ func TestRetrieverRetrieve(t *testing.T) {
 	// Mock embed server returns a fixed vector
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{{1.0, 0.0, 0.0}}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	// Pre-populate store
 	chunks := []Chunk{
@@ -32,7 +32,7 @@ func TestRetrieverRetrieve(t *testing.T) {
 		{0.9, 0.1, 0.0}, // similar to query
 		{0.0, 0.0, 1.0}, // orthogonal to query
 	}
-	store.Store(context.Background(), chunks, embeddings)
+	_ = store.Store(context.Background(), chunks, embeddings)
 
 	retriever := NewRetriever(client, store)
 	results, err := retriever.Retrieve(context.Background(), "test query", 2)
@@ -51,7 +51,7 @@ func TestRetrieverRetrieve(t *testing.T) {
 func TestRetrieverBuildContext(t *testing.T) {
 	client := ollama.NewClient()
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	retriever := NewRetriever(client, store)
 
@@ -87,7 +87,7 @@ func TestRetrieverBuildContext(t *testing.T) {
 func TestRetrieverBuildContextEmpty(t *testing.T) {
 	client := ollama.NewClient()
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	retriever := NewRetriever(client, store)
 	ctx := retriever.BuildContext(nil, 1000)
@@ -99,7 +99,7 @@ func TestRetrieverBuildContextEmpty(t *testing.T) {
 func TestRetrieverBuildContextTruncation(t *testing.T) {
 	client := ollama.NewClient()
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	retriever := NewRetriever(client, store)
 
@@ -124,20 +124,20 @@ func TestRetrieverBuildContextTruncation(t *testing.T) {
 func TestRetrieverWithCustomModel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.EmbedRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.Model != "custom-embed" {
 			t.Errorf("expected model %q, got %q", "custom-embed", req.Model)
 		}
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{{1.0, 0.0}}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
-	store.Store(context.Background(),
+	_ = store.Store(context.Background(),
 		[]Chunk{{ID: "c1", Content: "test", Source: "a.go", Metadata: map[string]string{}}},
 		[][]float64{{1.0, 0.0}},
 	)

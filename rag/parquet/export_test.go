@@ -94,9 +94,9 @@ func TestRoundTripFloat32(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	reader := pq.NewGenericReader[embeddingRowF32](f)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	rows := make([]embeddingRowF32, 1)
 	n, err := reader.Read(rows)
@@ -164,9 +164,9 @@ func TestRoundTripFloat64(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	reader := pq.NewGenericReader[embeddingRowF64](f)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	rows := make([]embeddingRowF64, 1)
 	n, err := reader.Read(rows)
@@ -531,7 +531,7 @@ func TestRowGroupBoundaries(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		t.Fatalf("stat: %v", err)
@@ -948,9 +948,9 @@ func readF32Rows(t *testing.T, path string) []embeddingRowF32 {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	reader := pq.NewGenericReader[embeddingRowF32](f)
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	rows := make([]embeddingRowF32, 100)
 	n, readErr := reader.Read(rows)
@@ -966,7 +966,7 @@ func readFileMetadata(t *testing.T, path string) map[string]string {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	fi, err := f.Stat()
 	if err != nil {
 		t.Fatalf("stat: %v", err)

@@ -343,7 +343,7 @@ func TestEngine_WatchPrefetches(t *testing.T) {
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go engine.Watch(ctx)
+	go func() { _ = engine.Watch(ctx) }()
 
 	// Give Watch time to detect state and prefetch.
 	time.Sleep(100 * time.Millisecond)
@@ -369,7 +369,7 @@ func TestEngine_WatchStateChange(t *testing.T) {
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go engine.Watch(ctx)
+	go func() { _ = engine.Watch(ctx) }()
 
 	// Let initial state be processed.
 	time.Sleep(50 * time.Millisecond)

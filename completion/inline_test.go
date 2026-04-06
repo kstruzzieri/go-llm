@@ -41,7 +41,7 @@ func TestComplete(t *testing.T) {
 			Done:      true,
 			EvalCount: 5,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -76,14 +76,14 @@ func TestCompleteStream(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		if !req.Stream {
 			t.Error("expected stream=true for streaming complete")
 		}
 
 		for _, chunk := range chunks {
 			data, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "%s\n", data)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
 		}
 	}))
 	defer srv.Close()
@@ -119,7 +119,7 @@ func TestCompleteStreamCallbackError(t *testing.T) {
 			Done:     false,
 		}
 		data, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "%s\n", data)
+		_, _ = fmt.Fprintf(w, "%s\n", data)
 	}))
 	defer srv.Close()
 
@@ -166,7 +166,7 @@ func TestCompleteValidation(t *testing.T) {
 	t.Run("empty prefix is valid for FIM", func(t *testing.T) {
 		// Empty prefix is valid — represents cursor at the start of a file or new buffer.
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"response":   "generated",
 				"done":       true,
 				"eval_count": 1,
@@ -200,7 +200,7 @@ func TestCompleteFIMPromptFormat(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		capturedPrompt = req.Prompt
 
 		resp := ollama.GenerateResponse{
@@ -208,14 +208,14 @@ func TestCompleteFIMPromptFormat(t *testing.T) {
 			Response: "result",
 			Done:     true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	provider := NewProvider(client, "test-model")
 
-	provider.Complete(context.Background(), FIMRequest{
+	_, _ = provider.Complete(context.Background(), FIMRequest{
 		Prefix: "BEFORE",
 		Suffix: "AFTER",
 	})
@@ -229,7 +229,7 @@ func TestCompleteFIMPromptFormat(t *testing.T) {
 func TestCompleteModelOptions(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		if req.Options == nil {
 			t.Fatal("expected model options")
@@ -245,13 +245,13 @@ func TestCompleteModelOptions(t *testing.T) {
 		}
 
 		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	provider := NewProvider(client, "test-model")
-	provider.Complete(context.Background(), FIMRequest{Prefix: "code"})
+	_, _ = provider.Complete(context.Background(), FIMRequest{Prefix: "code"})
 }
 
 func TestCompleteContextTruncation(t *testing.T) {
@@ -336,20 +336,20 @@ func TestCompleteContextTruncation(t *testing.T) {
 func TestCompleteCustomMaxTokens(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 
 		if req.Options.NumPredict != 256 {
 			t.Errorf("NumPredict = %d, want 256", req.Options.NumPredict)
 		}
 
 		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	provider := NewProvider(client, "test-model")
-	provider.Complete(context.Background(), FIMRequest{
+	_, _ = provider.Complete(context.Background(), FIMRequest{
 		Prefix:    "code",
 		MaxTokens: 256,
 	})
@@ -374,7 +374,7 @@ func TestCompleteMaxTokensClamped(t *testing.T) {
 		}
 
 		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 

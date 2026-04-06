@@ -127,7 +127,7 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 	if err != nil {
 		return nil, nil, fmt.Errorf("rag: query chunks: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var chunks []Chunk
 	var embeddings [][]float64

@@ -355,7 +355,7 @@ func TestGitignoreMatcherAddFromFile(t *testing.T) {
 	// Write a .gitignore file
 	gitignorePath := tmpDir + "/.gitignore"
 	content := "*.log\n# comment\n!important.log\nbuild/\n"
-	os.WriteFile(gitignorePath, []byte(content), 0644)
+	_ = os.WriteFile(gitignorePath, []byte(content), 0644)
 
 	m := newGitignoreMatcher()
 	err := m.addFromFile(gitignorePath, ".")

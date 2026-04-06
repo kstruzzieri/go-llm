@@ -40,7 +40,7 @@ func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
 	// Connect the MCP server to its transport.
 	serverSession, sErr := s.mcpServer.Connect(ctx, serverTransport, nil)
 	if sErr != nil {
-		s.Close()
+		_ = s.Close()
 		mock.Close()
 		t.Fatalf("newTestEnv: server.Connect() error = %v", sErr)
 	}
@@ -53,7 +53,7 @@ func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
 
 	session, cErr := client.Connect(ctx, clientTransport, nil)
 	if cErr != nil {
-		s.Close()
+		_ = s.Close()
 		mock.Close()
 		t.Fatalf("newTestEnv: client.Connect() error = %v", cErr)
 	}
@@ -62,9 +62,9 @@ func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
 		server:  s,
 		session: session,
 		cleanup: func() {
-			session.Close()
-			serverSession.Close()
-			s.Close()
+			_ = session.Close()
+			_ = serverSession.Close()
+			_ = s.Close()
 			mock.Close()
 		},
 	}

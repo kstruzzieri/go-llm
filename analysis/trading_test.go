@@ -161,7 +161,7 @@ func TestAnalyzeStrategyPromptContent(t *testing.T) {
 			Message: ollama.ChatMessage{Role: "assistant", Content: "analysis"},
 			Done:    true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 

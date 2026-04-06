@@ -42,7 +42,7 @@ func (d *Duration) UnmarshalJSON(data []byte) error {
 
 // MarshalJSON returns the duration as a quoted string (e.g. "5m0s").
 func (d Duration) MarshalJSON() ([]byte, error) {
-	return json.Marshal(d.Duration.String())
+	return json.Marshal(d.String())
 }
 
 // ProviderConfig holds connection settings for an LLM provider (e.g. Ollama, vLLM).

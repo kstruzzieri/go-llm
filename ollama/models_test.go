@@ -24,7 +24,7 @@ func TestListModels(t *testing.T) {
 				{Name: "nomic-embed-text", Size: 300000000},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -56,7 +56,7 @@ func TestShowModel(t *testing.T) {
 			},
 			Digest: "sha256:abc123def456",
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -99,7 +99,7 @@ func TestPullModel(t *testing.T) {
 		}
 		for _, u := range updates {
 			data, _ := json.Marshal(u)
-			fmt.Fprintf(w, "%s\n", data)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
 		}
 	}))
 	defer srv.Close()
@@ -134,7 +134,7 @@ func TestAvailableModels(t *testing.T) {
 				{Name: "qwen3:8b", Size: 5000000000},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -182,7 +182,7 @@ func TestListModelsServerError(t *testing.T) {
 
 func TestShowModel_NewFields(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"details": map[string]any{
 				"parameter_size":     "27B",
 				"quantization_level": "Q4_K_M",
@@ -215,7 +215,7 @@ func TestShowModel_NewFields(t *testing.T) {
 func TestAPIError_ErrorsAs(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"model not found"}`))
+		_, _ = w.Write([]byte(`{"error":"model not found"}`))
 	}))
 	defer srv.Close()
 
@@ -239,7 +239,7 @@ func TestAPIError_ErrorsAs(t *testing.T) {
 func TestChatStream_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"bad request"}`))
+		_, _ = w.Write([]byte(`{"error":"bad request"}`))
 	}))
 	defer srv.Close()
 

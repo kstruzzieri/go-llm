@@ -102,22 +102,22 @@ func (ma *MetricsAnalyzer) ExplainAnomaly(ctx context.Context, anomaly AnomalyIn
 
 func buildTrainingPrompt(m TrainingMetrics) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Analyze the following ML training metrics at epoch %d:\n\n", m.Epoch))
-	b.WriteString(fmt.Sprintf("- Current Loss: %.6f\n", m.Loss))
-	b.WriteString(fmt.Sprintf("- Learning Rate: %g\n", m.LearningRate))
-	b.WriteString(fmt.Sprintf("- KL Divergence: %.6f\n", m.KLDivergence))
-	b.WriteString(fmt.Sprintf("- Mean Reward: %.6f\n", m.RewardMean))
+	fmt.Fprintf(&b, "Analyze the following ML training metrics at epoch %d:\n\n", m.Epoch)
+	fmt.Fprintf(&b, "- Current Loss: %.6f\n", m.Loss)
+	fmt.Fprintf(&b, "- Learning Rate: %g\n", m.LearningRate)
+	fmt.Fprintf(&b, "- KL Divergence: %.6f\n", m.KLDivergence)
+	fmt.Fprintf(&b, "- Mean Reward: %.6f\n", m.RewardMean)
 
 	if len(m.LossHistory) > 0 {
-		b.WriteString(fmt.Sprintf("- Loss History (last %d): %v\n", len(m.LossHistory), m.LossHistory))
+		fmt.Fprintf(&b, "- Loss History (last %d): %v\n", len(m.LossHistory), m.LossHistory)
 	}
 	if len(m.RewardHistory) > 0 {
-		b.WriteString(fmt.Sprintf("- Reward History (last %d): %v\n", len(m.RewardHistory), m.RewardHistory))
+		fmt.Fprintf(&b, "- Reward History (last %d): %v\n", len(m.RewardHistory), m.RewardHistory)
 	}
 	if len(m.CustomMetrics) > 0 {
 		b.WriteString("- Custom Metrics:\n")
 		for k, v := range m.CustomMetrics {
-			b.WriteString(fmt.Sprintf("  - %s: %.6f\n", k, v))
+			fmt.Fprintf(&b, "  - %s: %.6f\n", k, v)
 		}
 	}
 
@@ -127,15 +127,15 @@ func buildTrainingPrompt(m TrainingMetrics) string {
 
 func buildAnomalyPrompt(a AnomalyInfo) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Explain the following training anomaly:\n\n"))
-	b.WriteString(fmt.Sprintf("- Type: %s\n", a.Type))
-	b.WriteString(fmt.Sprintf("- Severity: %s\n", a.Severity))
-	b.WriteString(fmt.Sprintf("- Description: %s\n", a.Description))
+	b.WriteString("Explain the following training anomaly:\n\n")
+	fmt.Fprintf(&b, "- Type: %s\n", a.Type)
+	fmt.Fprintf(&b, "- Severity: %s\n", a.Severity)
+	fmt.Fprintf(&b, "- Description: %s\n", a.Description)
 
 	if len(a.Metrics) > 0 {
 		b.WriteString("- Associated Metrics:\n")
 		for k, v := range a.Metrics {
-			b.WriteString(fmt.Sprintf("  - %s: %.6f\n", k, v))
+			fmt.Fprintf(&b, "  - %s: %.6f\n", k, v)
 		}
 	}
 

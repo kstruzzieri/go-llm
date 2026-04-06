@@ -66,7 +66,7 @@ func runMigrations(db *sql.DB) error {
 		}
 
 		if err := m.fn(tx); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("conversation: migration v%d (%s): %w", m.version, m.description, err)
 		}
 
@@ -74,7 +74,7 @@ func runMigrations(db *sql.DB) error {
 			`INSERT INTO conversation_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
 			m.version, m.description, time.Now().UnixMilli(),
 		); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("conversation: record version %d: %w", m.version, err)
 		}
 

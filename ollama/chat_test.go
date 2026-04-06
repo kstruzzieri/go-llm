@@ -78,7 +78,7 @@ func TestChatStream(t *testing.T) {
 				t.Errorf("marshal chunk: %v", err)
 				return
 			}
-			fmt.Fprintf(w, "%s\n", data)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
 		}
 	}))
 	defer srv.Close()
@@ -118,7 +118,7 @@ func TestChatStreamCallbackError(t *testing.T) {
 			t.Errorf("marshal chunk: %v", err)
 			return
 		}
-		fmt.Fprintf(w, "%s\n", data)
+		_, _ = fmt.Fprintf(w, "%s\n", data)
 	}))
 	defer srv.Close()
 
@@ -138,7 +138,7 @@ func TestChatStreamCallbackError(t *testing.T) {
 func TestChatServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("model not found"))
+		_, _ = w.Write([]byte("model not found"))
 	}))
 	defer srv.Close()
 
@@ -262,7 +262,7 @@ func TestChatStreamWithTools(t *testing.T) {
 				t.Errorf("marshal chunk: %v", err)
 				return
 			}
-			fmt.Fprintf(w, "%s\n", data)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
 		}
 	}))
 	defer srv.Close()

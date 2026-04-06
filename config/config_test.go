@@ -466,7 +466,7 @@ func TestDefault_WorkingDir(t *testing.T) {
 	}
 
 	// Unset env var so it doesn't take precedence.
-	os.Unsetenv("GO_LLM_CONFIG")
+	_ = os.Unsetenv("GO_LLM_CONFIG")
 
 	// Chdir into the temp dir.
 	origDir, err := os.Getwd()
@@ -476,7 +476,7 @@ func TestDefault_WorkingDir(t *testing.T) {
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatalf("failed to chdir: %v", err)
 	}
-	t.Cleanup(func() { os.Chdir(origDir) })
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
 
 	cfg, err := Default()
 	if err != nil {
@@ -491,7 +491,7 @@ func TestDefault_NotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	// Unset env var.
-	os.Unsetenv("GO_LLM_CONFIG")
+	_ = os.Unsetenv("GO_LLM_CONFIG")
 	// Set HOME to empty temp dir so ~/.config/go-llm/models.json won't be found.
 	t.Setenv("HOME", tmpDir)
 
@@ -503,7 +503,7 @@ func TestDefault_NotFound(t *testing.T) {
 	if err := os.Chdir(tmpDir); err != nil {
 		t.Fatalf("failed to chdir: %v", err)
 	}
-	t.Cleanup(func() { os.Chdir(origDir) })
+	t.Cleanup(func() { _ = os.Chdir(origDir) })
 
 	_, err = Default()
 	if err == nil {

@@ -631,7 +631,7 @@ func TestIndexerStableKeyWithWorkspaceRoot(t *testing.T) {
 		emb := make([]float64, 4)
 		emb[0] = 0.5
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{emb}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -640,11 +640,11 @@ func TestIndexerStableKeyWithWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSQLiteStore() error: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "main.go")
-	os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {\n\treturn\n}\n"), 0644)
+	_ = os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {\n\treturn\n}\n"), 0644)
 
 	idx := NewIndexer(client, store,
 		WithEmbeddingModel("test-embed"),
@@ -689,7 +689,7 @@ func TestIndexerStableKeyWithoutWorkspaceRoot(t *testing.T) {
 		emb := make([]float64, 4)
 		emb[0] = 0.5
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{emb}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -698,11 +698,11 @@ func TestIndexerStableKeyWithoutWorkspaceRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSQLiteStore() error: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "main.go")
-	os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {\n\treturn\n}\n"), 0644)
+	_ = os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {\n\treturn\n}\n"), 0644)
 
 	// No WithWorkspaceRoot -- StableKey should be empty.
 	idx := NewIndexer(client, store, WithEmbeddingModel("test-embed"))
@@ -732,7 +732,7 @@ func TestIndexDirectoryStableKeyConsistency(t *testing.T) {
 		emb := make([]float64, 4)
 		emb[0] = 0.5
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{emb}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -741,12 +741,12 @@ func TestIndexDirectoryStableKeyConsistency(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSQLiteStore() error: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	tmpDir := t.TempDir()
 	subDir := filepath.Join(tmpDir, "pkg")
-	os.MkdirAll(subDir, 0755)
-	os.WriteFile(filepath.Join(subDir, "util.go"), []byte("package pkg\n\nfunc Helper() {\n\treturn\n}\n"), 0644)
+	_ = os.MkdirAll(subDir, 0755)
+	_ = os.WriteFile(filepath.Join(subDir, "util.go"), []byte("package pkg\n\nfunc Helper() {\n\treturn\n}\n"), 0644)
 
 	idx := NewIndexer(client, store, WithEmbeddingModel("test-embed"))
 
@@ -784,7 +784,7 @@ func TestIndexFileAndIndexDirectoryProduceSameKey(t *testing.T) {
 		emb := make([]float64, 4)
 		emb[0] = 0.5
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{emb}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -792,14 +792,14 @@ func TestIndexFileAndIndexDirectoryProduceSameKey(t *testing.T) {
 
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "consistent.go")
-	os.WriteFile(goFile, []byte(content), 0644)
+	_ = os.WriteFile(goFile, []byte(content), 0644)
 
 	// Method 1: IndexFile with explicit workspace root.
 	store1, err := NewSQLiteStore(":memory:")
 	if err != nil {
 		t.Fatalf("store1 error: %v", err)
 	}
-	defer store1.Close()
+	defer func() { _ = store1.Close() }()
 
 	idx1 := NewIndexer(client, store1,
 		WithEmbeddingModel("test-embed"),
@@ -814,7 +814,7 @@ func TestIndexFileAndIndexDirectoryProduceSameKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("store2 error: %v", err)
 	}
-	defer store2.Close()
+	defer func() { _ = store2.Close() }()
 
 	idx2 := NewIndexer(client, store2, WithEmbeddingModel("test-embed"))
 	if err := idx2.IndexDirectory(context.Background(), tmpDir); err != nil {

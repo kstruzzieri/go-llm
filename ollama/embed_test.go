@@ -15,7 +15,7 @@ func TestEmbed(t *testing.T) {
 		}
 
 		var req EmbedRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		_ = json.NewDecoder(r.Body).Decode(&req)
 		if req.Model != "nomic-embed-text" {
 			t.Errorf("expected model %q, got %q", "nomic-embed-text", req.Model)
 		}
@@ -23,7 +23,7 @@ func TestEmbed(t *testing.T) {
 		resp := EmbedResponse{
 			Embeddings: [][]float64{{0.1, 0.2, 0.3, 0.4}},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -43,7 +43,7 @@ func TestEmbed(t *testing.T) {
 func TestEmbedEmptyResponse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := EmbedResponse{Embeddings: [][]float64{}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -61,7 +61,7 @@ func TestEmbedBatch(t *testing.T) {
 		resp := EmbedResponse{
 			Embeddings: [][]float64{{float64(callCount), 0.0, 0.0}},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 

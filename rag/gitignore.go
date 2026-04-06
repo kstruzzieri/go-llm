@@ -92,10 +92,7 @@ func parsePattern(line string) (gitignorePattern, bool) {
 		// Check if pattern contains / (other than in leading **/ prefix).
 		// Leading **/ is special syntax meaning "match in all directories"
 		// and its / does NOT trigger anchoring.
-		checkStr := line
-		if strings.HasPrefix(checkStr, "**/") {
-			checkStr = checkStr[3:]
-		}
+		checkStr := strings.TrimPrefix(line, "**/")
 		if strings.Contains(checkStr, "/") {
 			anchored = true
 		}
@@ -211,7 +208,7 @@ func (m *gitignoreMatcher) addFromFile(filePath string, baseDir string) error {
 		}
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {

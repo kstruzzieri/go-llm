@@ -174,7 +174,7 @@ func (s *SQLiteStore) Save(ctx context.Context, profile Profile) error {
 		profile.PeakMemoryMB, profile.GPULayersUsed,
 	)
 	if err != nil {
-		tx.Rollback()
+		_ = tx.Rollback()
 		return fmt.Errorf("fingerprint: save %q/%q: %w", profile.BackendID, profile.ModelName, err)
 	}
 
@@ -184,7 +184,7 @@ func (s *SQLiteStore) Save(ctx context.Context, profile Profile) error {
 			`DELETE FROM fingerprint_failures WHERE backend_id = ? AND model_name = ?`,
 			profile.BackendID, profile.ModelName,
 		); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("fingerprint: save: clear failure %q/%q: %w", profile.BackendID, profile.ModelName, err)
 		}
 	}

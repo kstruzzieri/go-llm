@@ -164,7 +164,7 @@ func (s *SQLiteSignalStore) GetAggregatesBatch(ctx context.Context, chunkKeys []
 	if err != nil {
 		return nil, fmt.Errorf("feedback: get aggregates batch: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	result := make(map[string]Aggregate, len(chunkKeys))
 	for rows.Next() {
@@ -193,7 +193,7 @@ func (s *SQLiteSignalStore) RecomputeAggregates(ctx context.Context, lambda floa
 	if err != nil {
 		return fmt.Errorf("feedback: recompute query signals: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	scores := make(map[string]float64)
 	for rows.Next() {
