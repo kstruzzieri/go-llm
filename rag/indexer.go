@@ -326,7 +326,7 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			return nil
 		})
 	}
-	g.Wait()
+	_ = g.Wait()
 
 	if len(indexErrors) > 0 {
 		return fmt.Errorf("rag: index directory %q completed with %d errors: %s",

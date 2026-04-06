@@ -671,11 +671,11 @@ func TestProfiler_EnsureProfile_Singleflight_DifferentDigest(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		profiler.EnsureProfile(context.Background(), testBackend, testModel, "sha256:digest1")
+		_, _ = profiler.EnsureProfile(context.Background(), testBackend, testModel, "sha256:digest1")
 	}()
 	go func() {
 		defer wg.Done()
-		profiler.EnsureProfile(context.Background(), testBackend, testModel, "sha256:digest2")
+		_, _ = profiler.EnsureProfile(context.Background(), testBackend, testModel, "sha256:digest2")
 	}()
 	wg.Wait()
 

@@ -12,7 +12,7 @@ func newTestStore(t *testing.T) *SQLiteStore {
 	if err != nil {
 		t.Fatalf("NewSQLiteStore() error: %v", err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	return store
 }
 
@@ -61,7 +61,7 @@ func TestSQLiteStoreDeleteBySource(t *testing.T) {
 	}
 	embeddings := [][]float64{{1.0, 0.0}, {0.0, 1.0}}
 
-	store.Store(ctx, chunks, embeddings)
+	_ = store.Store(ctx, chunks, embeddings)
 
 	if err := store.DeleteBySource(ctx, "a.go"); err != nil {
 		t.Fatalf("DeleteBySource() error: %v", err)
@@ -84,7 +84,7 @@ func TestSQLiteStoreStats(t *testing.T) {
 	}
 	embeddings := [][]float64{{1, 0, 0, 0}, {0, 1, 0, 0}, {0, 0, 1, 0}}
 
-	store.Store(ctx, chunks, embeddings)
+	_ = store.Store(ctx, chunks, embeddings)
 
 	stats, err := store.Stats(ctx)
 	if err != nil {
@@ -157,11 +157,11 @@ func TestSQLiteStoreUpsert(t *testing.T) {
 
 	// Insert initial chunk
 	chunks := []Chunk{{ID: "c1", Content: "original", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}
-	store.Store(ctx, chunks, [][]float64{{1.0, 0.0}})
+	_ = store.Store(ctx, chunks, [][]float64{{1.0, 0.0}})
 
 	// Upsert with same ID, different content
 	chunks[0].Content = "updated"
-	store.Store(ctx, chunks, [][]float64{{0.0, 1.0}})
+	_ = store.Store(ctx, chunks, [][]float64{{0.0, 1.0}})
 
 	stats, _ := store.Stats(ctx)
 	if stats.TotalChunks != 1 {
@@ -437,7 +437,7 @@ func TestSchemaMigrationIndexes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query indexes: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	indexes := make(map[string]bool)
 	for rows.Next() {

@@ -245,7 +245,7 @@ func TestKeywordScorerPropagatesDatabaseErrors(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 
 	scorer := NewKeywordScorer(db)
 	chunks := []Chunk{

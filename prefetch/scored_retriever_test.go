@@ -80,7 +80,7 @@ func newMockEmbedServer(embedding []float64) *httptest.Server {
 			Embeddings: [][]float64{embedding},
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 }
 
@@ -190,7 +190,7 @@ func TestScoredRetriever_EmbedError(t *testing.T) {
 	// Server that returns an error.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		json.NewEncoder(w).Encode(map[string]string{"error": "model not found"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "model not found"})
 	}))
 	defer server.Close()
 

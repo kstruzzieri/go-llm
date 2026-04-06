@@ -47,7 +47,7 @@ func (s *TemporalScorer) ScoreBatch(ctx context.Context, chunks []Chunk, query s
 	if err != nil {
 		return nil, fmt.Errorf("rag: query indexed_at: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	timestamps := make(map[string]int64)
 	for rows.Next() {

@@ -70,7 +70,7 @@ func (c *Client) IsAvailable(ctx context.Context) bool {
 	if err != nil {
 		return false
 	}
-	resp.Body.Close()
+	_ = resp.Body.Close()
 	return resp.StatusCode == http.StatusOK
 }
 
@@ -97,7 +97,7 @@ func (c *Client) doJSON(ctx context.Context, method, path string, body any, dst 
 	if err != nil {
 		return fmt.Errorf("ollama: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return newAPIError(resp.StatusCode, resp.Body)
@@ -128,7 +128,7 @@ func (c *Client) doStream(ctx context.Context, path string, body any, fn func(js
 	if err != nil {
 		return fmt.Errorf("ollama: request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return newAPIError(resp.StatusCode, resp.Body)

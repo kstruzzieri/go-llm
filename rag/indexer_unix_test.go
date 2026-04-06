@@ -21,16 +21,16 @@ func TestIndexerConcurrentPartialFailure(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "good.go"), []byte("package good\n\nfunc Good() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "good.go"), []byte("package good\n\nfunc Good() {}\n"), 0644)
 
 	badFile := filepath.Join(tmpDir, "bad.go")
-	os.WriteFile(badFile, []byte("package bad\n"), 0644)
-	os.Chmod(badFile, 0000)
+	_ = os.WriteFile(badFile, []byte("package bad\n"), 0644)
+	_ = os.Chmod(badFile, 0000)
 
 	// Verify the chmod actually prevents reading on this platform.
 	if _, err := os.ReadFile(badFile); err == nil {

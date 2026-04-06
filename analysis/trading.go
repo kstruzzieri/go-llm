@@ -85,10 +85,10 @@ func (sa *StrategyAnalyzer) CompareStrategies(ctx context.Context, strategies ma
 
 func buildStrategyPrompt(name string, metrics map[string]float64) string {
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("Analyze the trading strategy %q with the following performance metrics:\n\n", name))
+	fmt.Fprintf(&b, "Analyze the trading strategy %q with the following performance metrics:\n\n", name)
 
 	for k, v := range metrics {
-		b.WriteString(fmt.Sprintf("- %s: %.6f\n", k, v))
+		fmt.Fprintf(&b, "- %s: %.6f\n", k, v)
 	}
 
 	b.WriteString("\nProvide:\n1. Overall performance assessment\n2. Risk analysis\n3. Strengths and weaknesses\n4. Recommendations for improvement")
@@ -100,9 +100,9 @@ func buildComparisonPrompt(strategies map[string]map[string]float64) string {
 	b.WriteString("Compare the following trading strategies:\n\n")
 
 	for name, metrics := range strategies {
-		b.WriteString(fmt.Sprintf("Strategy: %s\n", name))
+		fmt.Fprintf(&b, "Strategy: %s\n", name)
 		for k, v := range metrics {
-			b.WriteString(fmt.Sprintf("  - %s: %.6f\n", k, v))
+			fmt.Fprintf(&b, "  - %s: %.6f\n", k, v)
 		}
 		b.WriteString("\n")
 	}

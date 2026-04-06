@@ -42,13 +42,13 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		// File-backed databases: enable WAL mode for better concurrent read performance.
 		// WAL is not meaningful for :memory: databases.
 		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
-			db.Close()
+			_ = db.Close()
 			return nil, fmt.Errorf("rag: set WAL mode: %w", err)
 		}
 	}
 
 	if err := runMigrations(db); err != nil {
-		db.Close()
+		_ = db.Close()
 		return nil, err
 	}
 
@@ -106,7 +106,7 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	now := time.Now().Unix()
 	for i, chunk := range chunks {
@@ -139,7 +139,7 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 	if err != nil {
 		return fmt.Errorf("rag: begin transaction: %w", err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if err := s.insertChunksTx(ctx, tx, chunks, embeddings); err != nil {
 		return err
@@ -167,7 +167,7 @@ func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks [
 	if err != nil {
 		return fmt.Errorf("rag: replace source %q: begin transaction: %w", source, err)
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: replace source %q: delete existing chunks: %w", source, err)
@@ -192,7 +192,7 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 	if err != nil {
 		return nil, fmt.Errorf("rag: query chunks: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var results []SearchResult
 	for rows.Next() {
@@ -314,7 +314,7 @@ func (s *SQLiteStore) ExportChunks(ctx context.Context, filter *ExportFilter) (i
 		return nil, fmt.Errorf("rag: export chunks: %w", err)
 	}
 	return func(yield func(ExportedChunk, error) bool) {
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		for rows.Next() {
 			if err := ctx.Err(); err != nil {
 				yield(ExportedChunk{}, err)

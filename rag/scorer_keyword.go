@@ -56,7 +56,7 @@ func (s *KeywordScorer) ScoreBatch(ctx context.Context, chunks []Chunk, query st
 		// than silently returning zero scores.
 		return nil, fmt.Errorf("rag: keyword FTS5 query: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	// Build map of chunk ID -> raw BM25 score.
 	bm25Scores := make(map[string]float64)

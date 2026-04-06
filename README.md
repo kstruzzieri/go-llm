@@ -26,7 +26,7 @@ Designed for embedding into Go applications that need LLM capabilities: chat, to
 
 ## Requirements
 
-- Go 1.24+
+- Go 1.25+
 - [Ollama](https://ollama.com) running locally (default: `http://localhost:11434`)
 
 ## Installation

@@ -20,7 +20,7 @@ func newTestProber(handler http.Handler) (*OllamaProber, *httptest.Server) {
 // TestDetectKind_Capabilities verifies Tier 1: capabilities array.
 func TestDetectKind_Capabilities(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"details":      map[string]any{"family": "qwen2"},
 			"template":     "{{ .System }}\n{{ .Prompt }}",
 			"capabilities": []string{"completion", "tools"},
@@ -46,7 +46,7 @@ func TestDetectKind_Capabilities(t *testing.T) {
 // TestDetectKind_Embedding verifies embedding detection from capabilities.
 func TestDetectKind_Embedding(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"details":      map[string]any{"family": "nomic-bert"},
 			"capabilities": []string{"embedding"},
 		})
@@ -69,7 +69,7 @@ func TestDetectKind_Embedding(t *testing.T) {
 func TestDetectKind_Heuristic(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// No capabilities, but has template (chat model).
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"details":  map[string]any{"family": "llama"},
 			"template": "{{ .System }}\n{{ .Prompt }}",
 		})
@@ -92,7 +92,7 @@ func TestDetectKind_Heuristic(t *testing.T) {
 func TestDetectKind_HeuristicEmbedding(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Known embedding family, no capabilities.
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"details": map[string]any{"family": "bert"},
 		})
 	}))
@@ -116,12 +116,12 @@ func TestDetectKind_Probe(t *testing.T) {
 		switch r.URL.Path {
 		case "/api/show":
 			// No capabilities, no template, unknown family
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"details": map[string]any{"family": "custom"},
 			})
 		case "/api/chat":
 			// Chat succeeds — this model is a chat model
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"model":   "custom-model",
 				"message": map[string]any{"role": "assistant", "content": "hi"},
 				"done":    true,
@@ -149,16 +149,16 @@ func TestDetectKind_ProbeEmbedding(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/show":
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"details": map[string]any{"family": "custom"},
 			})
 		case "/api/chat":
 			// Chat fails
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"not a chat model"}`))
+			_, _ = w.Write([]byte(`{"error":"not a chat model"}`))
 		case "/api/embed":
 			// Embedding succeeds
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"embeddings": [][]float64{{0.1, 0.2, 0.3}},
 			})
 		default:
@@ -184,12 +184,12 @@ func TestDetectKind_ProbeUnknown(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/show":
-			json.NewEncoder(w).Encode(map[string]any{
+			_ = json.NewEncoder(w).Encode(map[string]any{
 				"details": map[string]any{"family": "custom"},
 			})
 		default:
 			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte(`{"error":"not supported"}`))
+			_, _ = w.Write([]byte(`{"error":"not supported"}`))
 		}
 	}))
 	defer srv.Close()
@@ -210,7 +210,7 @@ func TestDetectKind_ProbeUnknown(t *testing.T) {
 func TestDetectKind_ShowError(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		w.Write([]byte(`{"error":"model not found"}`))
+		_, _ = w.Write([]byte(`{"error":"model not found"}`))
 	}))
 	defer srv.Close()
 
@@ -223,7 +223,7 @@ func TestDetectKind_ShowError(t *testing.T) {
 // TestProbeChat verifies chat metric extraction.
 func TestProbeChat(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model":                "test-model",
 			"message":              map[string]any{"role": "assistant", "content": "Hello!"},
 			"done":                 true,
@@ -256,7 +256,7 @@ func TestProbeChat(t *testing.T) {
 // TestProbeChat_ColdStart verifies cold start detection.
 func TestProbeChat_ColdStart(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"model":          "test-model",
 			"message":        map[string]any{"role": "assistant", "content": "Hi"},
 			"done":           true,
@@ -281,7 +281,7 @@ func TestProbeChat_ColdStart(t *testing.T) {
 func TestProbeChat_Error(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"model unavailable"}`))
+		_, _ = w.Write([]byte(`{"error":"model unavailable"}`))
 	}))
 	defer srv.Close()
 
@@ -299,7 +299,7 @@ func TestProbeEmbedding(t *testing.T) {
 	}
 
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"embeddings": [][]float64{vec},
 		})
 	}))
@@ -321,7 +321,7 @@ func TestProbeEmbedding(t *testing.T) {
 func TestProbeEmbedding_Error(t *testing.T) {
 	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(`{"error":"not an embedding model"}`))
+		_, _ = w.Write([]byte(`{"error":"not an embedding model"}`))
 	}))
 	defer srv.Close()
 

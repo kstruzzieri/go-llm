@@ -14,7 +14,7 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatalf("open :memory: db: %v", err)
 	}
 	db.SetMaxOpenConns(1)
-	t.Cleanup(func() { db.Close() })
+	t.Cleanup(func() { _ = db.Close() })
 	return db
 }
 

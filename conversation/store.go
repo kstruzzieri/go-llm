@@ -100,7 +100,7 @@ func (s *SQLiteStore) List(ctx context.Context) ([]Summary, error) {
 	if err != nil {
 		return nil, fmt.Errorf("conversation: list: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var summaries []Summary
 	for rows.Next() {

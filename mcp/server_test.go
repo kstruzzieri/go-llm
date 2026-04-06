@@ -21,7 +21,7 @@ func TestNewServerDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if s.ollamaURL != defaultOllamaURL {
 		t.Errorf("ollamaURL = %q, want %q", s.ollamaURL, defaultOllamaURL)
@@ -48,7 +48,7 @@ func TestNewServerWithOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if s.ollamaURL != customURL {
 		t.Errorf("ollamaURL = %q, want %q", s.ollamaURL, customURL)
@@ -82,7 +82,7 @@ func TestNewServerUsesConfiguredOllamaProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if s.ollamaURL != mock.URL {
 		t.Fatalf("ollamaURL = %q, want %q", s.ollamaURL, mock.URL)
@@ -127,7 +127,7 @@ func TestNewServerWithoutAutoDiscoveredConfigContinues(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServer() error = %v", err)
 	}
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	if s.cfg != nil {
 		t.Fatalf("cfg = %#v, want nil when no config is found", s.cfg)

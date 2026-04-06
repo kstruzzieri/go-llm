@@ -105,10 +105,10 @@ func (cr *CodeReviewer) buildReviewPrompt(ctx context.Context, code string, cfg 
 
 	b.WriteString("Please review the following code")
 	if cfg.language != "" {
-		b.WriteString(fmt.Sprintf(" (language: %s)", cfg.language))
+		fmt.Fprintf(&b, " (language: %s)", cfg.language)
 	}
 	if cfg.focus != "" {
-		b.WriteString(fmt.Sprintf(" with a focus on %s", cfg.focus))
+		fmt.Fprintf(&b, " with a focus on %s", cfg.focus)
 	}
 	b.WriteString(":\n\n```\n")
 	b.WriteString(code)

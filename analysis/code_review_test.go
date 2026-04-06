@@ -28,7 +28,7 @@ func newMockChatServer(t *testing.T, wantContent string) *httptest.Server {
 			Message: ollama.ChatMessage{Role: "assistant", Content: wantContent},
 			Done:    true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 }
 
@@ -127,7 +127,7 @@ func TestReviewWithOptions(t *testing.T) {
 			Message: ollama.ChatMessage{Role: "assistant", Content: "Security review complete."},
 			Done:    true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 
@@ -168,7 +168,7 @@ func TestReviewEmptyCode(t *testing.T) {
 func TestReviewServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("internal error"))
+		_, _ = w.Write([]byte("internal error"))
 	}))
 	defer srv.Close()
 
@@ -194,7 +194,7 @@ func TestReviewContextCanceled(t *testing.T) {
 			Message: ollama.ChatMessage{Role: "assistant", Content: "ok"},
 			Done:    true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 	defer srv.Close()
 

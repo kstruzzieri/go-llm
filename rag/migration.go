@@ -180,7 +180,7 @@ func runMigrations(db *sql.DB) error {
 		}
 
 		if err := m.fn(tx); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("rag: migration v%d (%s): %w", m.version, m.description, err)
 		}
 
@@ -193,7 +193,7 @@ func runMigrations(db *sql.DB) error {
 			`INSERT INTO rag_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
 			m.version, m.description, time.Now().Unix(),
 		); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("rag: record version %d: %w", m.version, err)
 		}
 
@@ -253,7 +253,7 @@ func recordVersionsUpTo(db *sql.DB, upTo int) error {
 			`INSERT OR IGNORE INTO rag_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
 			m.version, m.description+" (pre-existing)", now,
 		); err != nil {
-			tx.Rollback()
+			_ = tx.Rollback()
 			return fmt.Errorf("rag: record version %d: %w", m.version, err)
 		}
 	}

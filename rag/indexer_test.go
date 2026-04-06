@@ -26,7 +26,7 @@ func newMockEmbedServer(dim int) *httptest.Server {
 		emb := make([]float64, dim)
 		emb[0] = 0.5
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{emb}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 }
 
@@ -39,7 +39,7 @@ func TestIndexerIndexFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewSQLiteStore() error: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store, WithEmbeddingModel("test-embed"))
 
@@ -66,16 +66,16 @@ func TestIndexerReindex(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store)
 	testFile := filepath.Join("..", "testdata", "sample.go")
 
 	// Index twice — should not duplicate
-	idx.IndexFile(context.Background(), testFile)
+	_ = idx.IndexFile(context.Background(), testFile)
 	stats1, _ := store.Stats(context.Background())
 
-	idx.IndexFile(context.Background(), testFile)
+	_ = idx.IndexFile(context.Background(), testFile)
 	stats2, _ := store.Stats(context.Background())
 
 	if stats2.TotalChunks != stats1.TotalChunks {
@@ -89,15 +89,15 @@ func TestIndexerIndexDirectory(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store)
 
 	// Create a temp directory with some files
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "util.py"), []byte("def helper():\n    pass\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "data.csv"), []byte("a,b,c\n1,2,3\n"), 0644) // should be skipped
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "util.py"), []byte("def helper():\n    pass\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "data.csv"), []byte("a,b,c\n1,2,3\n"), 0644) // should be skipped
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -120,7 +120,7 @@ func TestIndexerContextCancellation(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store)
 
@@ -128,7 +128,7 @@ func TestIndexerContextCancellation(t *testing.T) {
 	cancel() // cancel immediately
 
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n"), 0644)
 
 	err := idx.IndexDirectory(ctx, tmpDir)
 	if err == nil {
@@ -142,7 +142,7 @@ func TestIndexerPreservesDataOnEmbedFailure(t *testing.T) {
 	defer goodSrv.Close()
 
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	goodClient := ollama.NewClient(ollama.WithBaseURL(goodSrv.URL))
 	idx := NewIndexer(goodClient, store, WithEmbeddingModel("test-embed"))
@@ -160,7 +160,7 @@ func TestIndexerPreservesDataOnEmbedFailure(t *testing.T) {
 	// Now try to re-index with a broken embed server
 	badSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"model not found"}`))
+		_, _ = w.Write([]byte(`{"error":"model not found"}`))
 	}))
 	defer badSrv.Close()
 
@@ -185,7 +185,7 @@ func TestIndexerReindexEmptyFileRemovesChunks(t *testing.T) {
 	defer srv.Close()
 
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	idx := NewIndexer(client, store, WithEmbeddingModel("test-embed"))
@@ -224,7 +224,7 @@ func TestIndexerDuplicateContentDifferentPositions(t *testing.T) {
 	defer srv.Close()
 
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	chunker, _ := NewSlidingWindowChunker(30, 0)
@@ -233,7 +233,7 @@ func TestIndexerDuplicateContentDifferentPositions(t *testing.T) {
 	// Create a file with duplicate lines that will end up in different chunks
 	tmpDir := t.TempDir()
 	content := "return nil\nreturn nil\nreturn nil\nreturn nil\nreturn nil\n"
-	os.WriteFile(filepath.Join(tmpDir, "dup.go"), []byte(content), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "dup.go"), []byte(content), 0644)
 
 	if err := idx.IndexFile(context.Background(), filepath.Join(tmpDir, "dup.go")); err != nil {
 		t.Fatalf("IndexFile() error: %v", err)
@@ -253,7 +253,7 @@ func TestIndexerWithCustomChunker(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	chunker, _ := NewSlidingWindowChunker(50, 10)
 	idx := NewIndexer(client, store, WithChunker(chunker))
@@ -280,7 +280,7 @@ func newCountingEmbedServer(dim int, counter *atomic.Int32) *httptest.Server {
 		emb := make([]float64, dim)
 		emb[0] = 0.5
 		resp := ollama.EmbedResponse{Embeddings: [][]float64{emb}}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 }
 
@@ -291,7 +291,7 @@ func TestIndexerConcurrentIndexDirectory(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store)
 
@@ -300,7 +300,7 @@ func TestIndexerConcurrentIndexDirectory(t *testing.T) {
 	for i := 0; i < numFiles; i++ {
 		name := fmt.Sprintf("file%d.go", i)
 		content := fmt.Sprintf("package main\n\nfunc F%d() {}\n", i)
-		os.WriteFile(filepath.Join(tmpDir, name), []byte(content), 0644)
+		_ = os.WriteFile(filepath.Join(tmpDir, name), []byte(content), 0644)
 	}
 
 	err := idx.IndexDirectory(context.Background(), tmpDir, WithConcurrency(3))
@@ -323,12 +323,12 @@ func TestIndexerConcurrencyValidation(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
 
 	// WithConcurrency(0) should not panic or deadlock — clamped to 1
 	if err := idx.IndexDirectory(context.Background(), tmpDir, WithConcurrency(0)); err != nil {
@@ -345,20 +345,20 @@ func TestIndexerConcurrentErrorAggregation(t *testing.T) {
 	// Server that always fails embedding
 	failSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte(`{"error":"model not found"}`))
+		_, _ = w.Write([]byte(`{"error":"model not found"}`))
 	}))
 	defer failSrv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(failSrv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
-	os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("package b\n\nfunc B() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "c.go"), []byte("package c\n\nfunc C() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "a.go"), []byte("package a\n\nfunc A() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "b.go"), []byte("package b\n\nfunc B() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "c.go"), []byte("package c\n\nfunc C() {}\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir, WithConcurrency(2))
 	if err == nil {
@@ -377,28 +377,28 @@ func TestIndexerGitignoreNestedScoping(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// Root .gitignore ignores *.log
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n"), 0644)
 
 	// src/.gitignore ignores *.tmp
-	os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "src", ".gitignore"), []byte("*.tmp\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", ".gitignore"), []byte("*.tmp\n"), 0644)
 
 	// lib/ has no .gitignore
-	os.MkdirAll(filepath.Join(tmpDir, "lib"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "lib"), 0755)
 
 	// Create test files
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "app.log"), []byte("log data\n"), 0644)          // ignored by root
-	os.WriteFile(filepath.Join(tmpDir, "src", "util.go"), []byte("package src\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "src", "cache.tmp"), []byte("temp\n"), 0644)     // ignored by src
-	os.WriteFile(filepath.Join(tmpDir, "src", "debug.log"), []byte("log\n"), 0644)      // ignored by root
-	os.WriteFile(filepath.Join(tmpDir, "lib", "helper.go"), []byte("package lib\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "app.log"), []byte("log data\n"), 0644)          // ignored by root
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "util.go"), []byte("package src\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "cache.tmp"), []byte("temp\n"), 0644)     // ignored by src
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "debug.log"), []byte("log\n"), 0644)      // ignored by root
+	_ = os.WriteFile(filepath.Join(tmpDir, "lib", "helper.go"), []byte("package lib\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -418,17 +418,17 @@ func TestIndexerGitignoreNegation(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// Root: ignore all .gen.go, but un-ignore important.gen.go
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.gen.go\n!important.gen.go\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.gen.go\n!important.gen.go\n"), 0644)
 
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "schema.gen.go"), []byte("package main\n"), 0644)    // ignored
-	os.WriteFile(filepath.Join(tmpDir, "important.gen.go"), []byte("package main\n"), 0644) // NOT ignored
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "schema.gen.go"), []byte("package main\n"), 0644)    // ignored
+	_ = os.WriteFile(filepath.Join(tmpDir, "important.gen.go"), []byte("package main\n"), 0644) // NOT ignored
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -448,18 +448,18 @@ func TestIndexerGitignoreDirectorySkip(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// Ignore the build/ directory
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n"), 0644)
 
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.MkdirAll(filepath.Join(tmpDir, "build", "deep", "nested"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "build", "output.go"), []byte("package build\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "build", "deep", "nested", "inner.go"), []byte("package nested\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "build", "deep", "nested"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "build", "output.go"), []byte("package build\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "build", "deep", "nested", "inner.go"), []byte("package nested\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -479,17 +479,17 @@ func TestIndexerGitignoreWithExcludePriority(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// .gitignore tries to un-ignore vendor/
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("!vendor/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("!vendor/\n"), 0644)
 
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.MkdirAll(filepath.Join(tmpDir, "vendor"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "vendor", "dep.go"), []byte("package dep\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "vendor"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "vendor", "dep.go"), []byte("package dep\n"), 0644)
 
 	// Default WithExclude includes "vendor"
 	err := idx.IndexDirectory(context.Background(), tmpDir)
@@ -510,21 +510,21 @@ func TestIndexerGitignorePathScoped(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// Path-scoped rule: only ignore generated/ under src/
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("src/generated/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("src/generated/\n"), 0644)
 
-	os.MkdirAll(filepath.Join(tmpDir, "src", "generated"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "lib", "generated"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "src", "generated"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "lib", "generated"), 0755)
 
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "src", "generated", "proto.go"), []byte("package gen\n"), 0644) // ignored
-	os.WriteFile(filepath.Join(tmpDir, "lib", "generated", "types.go"), []byte("package gen\n"), 0644) // NOT ignored
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "generated", "proto.go"), []byte("package gen\n"), 0644) // ignored
+	_ = os.WriteFile(filepath.Join(tmpDir, "lib", "generated", "types.go"), []byte("package gen\n"), 0644) // NOT ignored
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -544,14 +544,14 @@ func TestIndexerNoGitignore(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// No .gitignore file
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "util.py"), []byte("def helper():\n    pass\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "util.py"), []byte("def helper():\n    pass\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -570,21 +570,21 @@ func TestIndexerGitignoreSiblingScoping(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
-	os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
-	os.MkdirAll(filepath.Join(tmpDir, "lib"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "lib"), 0755)
 
 	// src/.gitignore ignores *.gen.go
-	os.WriteFile(filepath.Join(tmpDir, "src", ".gitignore"), []byte("*.gen.go\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", ".gitignore"), []byte("*.gen.go\n"), 0644)
 
-	os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "src", "schema.gen.go"), []byte("package src\n"), 0644) // ignored by src rule
-	os.WriteFile(filepath.Join(tmpDir, "lib", "types.gen.go"), []byte("package lib\n"), 0644)  // NOT ignored
-	os.WriteFile(filepath.Join(tmpDir, "lib", "helper.go"), []byte("package lib\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "schema.gen.go"), []byte("package src\n"), 0644) // ignored by src rule
+	_ = os.WriteFile(filepath.Join(tmpDir, "lib", "types.gen.go"), []byte("package lib\n"), 0644)  // NOT ignored
+	_ = os.WriteFile(filepath.Join(tmpDir, "lib", "helper.go"), []byte("package lib\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -604,17 +604,17 @@ func TestIndexerGitignoreDirectoryUnignore(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// Ignore build/, then un-ignore it — subtree should be walked
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n!build/\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n!build/\n"), 0644)
 
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.MkdirAll(filepath.Join(tmpDir, "build"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "build", "output.go"), []byte("package build\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "build"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "build", "output.go"), []byte("package build\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -634,22 +634,22 @@ func TestIndexerGitignoreOverlappingNestedRules(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// Root: ignore *.log, then un-ignore *.log
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n!*.log\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("*.log\n!*.log\n"), 0644)
 
 	// src/: re-ignore *.log (overrides parent negation)
-	os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "src", ".gitignore"), []byte("*.log\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "src"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", ".gitignore"), []byte("*.log\n"), 0644)
 
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "root.log"), []byte("root log\n"), 0644)        // NOT ignored (root negation)
-	os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "src", "debug.log"), []byte("src log\n"), 0644) // ignored (nested re-ignore)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "root.log"), []byte("root log\n"), 0644)        // NOT ignored (root negation)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "debug.log"), []byte("src log\n"), 0644) // ignored (nested re-ignore)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir,
 		WithExtensions(".go", ".log")) // include .log in extensions
@@ -670,14 +670,14 @@ func TestIndexerGitignoreAlreadyIndexedFileSurvives(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// First run: no .gitignore, index everything
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "util.go"), []byte("package main\n\nfunc util() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "util.go"), []byte("package main\n\nfunc util() {}\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -690,7 +690,7 @@ func TestIndexerGitignoreAlreadyIndexedFileSurvives(t *testing.T) {
 	}
 
 	// Second run: add .gitignore that ignores util.go
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("util.go\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("util.go\n"), 0644)
 
 	err = idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
@@ -710,19 +710,19 @@ func TestIndexerGitignoreNegationInsideIgnoredDir(t *testing.T) {
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	store, _ := NewSQLiteStore(":memory:")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx := NewIndexer(client, store)
 
 	tmpDir := t.TempDir()
 
 	// Ignore build/ directory, then try to un-ignore a file inside it.
 	// The negation cannot work because SkipDir prevents the walk from reaching the file.
-	os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n!build/keep.go\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, ".gitignore"), []byte("build/\n!build/keep.go\n"), 0644)
 
-	os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	os.MkdirAll(filepath.Join(tmpDir, "build"), 0755)
-	os.WriteFile(filepath.Join(tmpDir, "build", "keep.go"), []byte("package build\n"), 0644)
-	os.WriteFile(filepath.Join(tmpDir, "build", "other.go"), []byte("package build\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
+	_ = os.MkdirAll(filepath.Join(tmpDir, "build"), 0755)
+	_ = os.WriteFile(filepath.Join(tmpDir, "build", "keep.go"), []byte("package build\n"), 0644)
+	_ = os.WriteFile(filepath.Join(tmpDir, "build", "other.go"), []byte("package build\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
 	if err != nil {
