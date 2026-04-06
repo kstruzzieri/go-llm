@@ -161,29 +161,31 @@ type ToolCall struct {
 
 // ToolCallFunction holds the name and parsed arguments of a tool call.
 type ToolCallFunction struct {
-	Index     int            `json:"index"`
-	Name      string         `json:"name"`
-	Arguments map[string]any `json:"arguments"`
+	Index     int             `json:"index"`
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 // ChatRequest is the provider-agnostic request for a chat completion.
 type ChatRequest struct {
-	Model     string        `json:"model"`
-	Messages  []ChatMessage `json:"messages"`
-	Options   *ModelOptions `json:"options,omitempty"`
-	Tools     []Tool        `json:"tools,omitempty"`
-	ThinkMode ThinkMode     `json:"think_mode,omitempty"`
+	Model    string        `json:"model"`
+	Messages []ChatMessage `json:"messages"`
+	Options  ModelOptions  `json:"options,omitempty"`
+	Tools    []Tool        `json:"tools,omitempty"`
+	Stream   bool          `json:"stream"`
 }
 
 // ChatResponse is the provider-agnostic response from a chat completion.
 type ChatResponse struct {
-	Content   string       `json:"content"`
-	Thinking  string       `json:"thinking,omitempty"`
-	ToolCalls []ToolCall   `json:"tool_calls,omitempty"`
-	Done      bool         `json:"done"`
-	Partial   bool         `json:"partial,omitempty"` // true for streaming chunks
-	Usage     *Usage       `json:"usage,omitempty"`
-	Latency   *LatencyInfo `json:"latency,omitempty"`
+	Model     string     `json:"model"`
+	Provider  string     `json:"provider"`
+	Content   string     `json:"content"`
+	Thinking  string     `json:"thinking,omitempty"`
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	Done      bool       `json:"done"`
+	Partial   bool       `json:"partial,omitempty"`
+	Usage     Usage      `json:"usage,omitempty"`
+	Latency   LatencyInfo `json:"latency,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -192,20 +194,23 @@ type ChatResponse struct {
 
 // GenerateRequest is the provider-agnostic request for raw text generation.
 type GenerateRequest struct {
-	Model   string        `json:"model"`
-	Prompt  string        `json:"prompt"`
-	System  string        `json:"system,omitempty"`
-	Suffix  string        `json:"suffix,omitempty"` // for Fill-in-the-Middle
-	Options *ModelOptions `json:"options,omitempty"`
+	Model   string       `json:"model"`
+	Prompt  string       `json:"prompt"`
+	System  string       `json:"system,omitempty"`
+	Suffix  string       `json:"suffix,omitempty"` // presence triggers FIM mode
+	Options ModelOptions `json:"options,omitempty"`
+	Stream  bool         `json:"stream"`
 }
 
 // GenerateResponse is the provider-agnostic response from text generation.
 type GenerateResponse struct {
+	Model      string                `json:"model"`
+	Provider   string                `json:"provider"`
 	Response   string                `json:"response"`
 	Done       bool                  `json:"done"`
 	Partial    bool                  `json:"partial,omitempty"`
-	Usage      *Usage                `json:"usage,omitempty"`
-	Latency    *LatencyInfo          `json:"latency,omitempty"`
+	Usage      Usage                 `json:"usage,omitempty"`
+	Latency    LatencyInfo           `json:"latency,omitempty"`
 	Confidence *CompletionConfidence `json:"confidence,omitempty"`
 }
 
@@ -221,7 +226,10 @@ type EmbedRequest struct {
 
 // EmbedResponse is the provider-agnostic response from embedding generation.
 type EmbedResponse struct {
+	Model      string      `json:"model"`
+	Provider   string      `json:"provider"`
 	Embeddings [][]float64 `json:"embeddings"`
+	Usage      Usage       `json:"usage,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
