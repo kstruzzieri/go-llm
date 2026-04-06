@@ -16,8 +16,9 @@ import (
 
 // Compile-time interface satisfaction checks.
 var (
-	_ VectorStore = (*SQLiteStore)(nil)
-	_ Exportable  = (*SQLiteStore)(nil)
+	_ VectorStore      = (*SQLiteStore)(nil)
+	_ Exportable       = (*SQLiteStore)(nil)
+	_ sourceChunkLoader = (*SQLiteStore)(nil)
 )
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
@@ -241,6 +242,51 @@ func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
 		return fmt.Errorf("rag: delete by source %q: %w", source, err)
 	}
 	return nil
+}
+
+// GetBySource returns all chunks for a given source path, ordered by start_line,
+// with their embeddings. This supports incremental indexing by allowing comparison
+// of existing chunks against newly generated ones.
+func (s *SQLiteStore) GetBySource(ctx context.Context, source string) ([]ChunkWithEmbedding, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, source, start_line, end_line, language,
+		        metadata, embedding, stable_key
+		 FROM chunks WHERE source = ?
+		 ORDER BY start_line`, source)
+	if err != nil {
+		return nil, fmt.Errorf("rag: get by source %q: %w", source, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []ChunkWithEmbedding
+	for rows.Next() {
+		var chunk Chunk
+		var metaJSON, embJSON string
+		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
+			&chunk.StartLine, &chunk.EndLine, &chunk.Language,
+			&metaJSON, &embJSON, &chunk.StableKey); err != nil {
+			return nil, fmt.Errorf("rag: scan chunk for source %q: %w", source, err)
+		}
+
+		chunk.Metadata = make(map[string]string)
+		if err := json.Unmarshal([]byte(metaJSON), &chunk.Metadata); err != nil {
+			return nil, fmt.Errorf("rag: unmarshal metadata for chunk %q: %w", chunk.ID, err)
+		}
+
+		var embedding []float64
+		if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
+			return nil, fmt.Errorf("rag: unmarshal embedding for chunk %q: %w", chunk.ID, err)
+		}
+
+		results = append(results, ChunkWithEmbedding{
+			Chunk:     chunk,
+			Embedding: embedding,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rag: iterate chunks for source %q: %w", source, err)
+	}
+	return results, nil
 }
 
 // Stats returns index statistics.
