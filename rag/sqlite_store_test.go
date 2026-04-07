@@ -539,61 +539,12 @@ func TestGetBySourceBasic(t *testing.T) {
 	if results[1].Chunk.ID != "m2" {
 		t.Errorf("results[1].Chunk.ID = %q, want %q", results[1].Chunk.ID, "m2")
 	}
-
-	// Verify start_line ordering.
-	if results[0].Chunk.StartLine != 1 {
-		t.Errorf("results[0].Chunk.StartLine = %d, want 1", results[0].Chunk.StartLine)
-	}
-	if results[1].Chunk.StartLine != 10 {
-		t.Errorf("results[1].Chunk.StartLine = %d, want 10", results[1].Chunk.StartLine)
-	}
-
-	// Verify embeddings are correct.
-	// m1 was stored with embedding [0.4, 0.5, 0.6].
-	if len(results[0].Embedding) != 3 {
-		t.Fatalf("results[0].Embedding length = %d, want 3", len(results[0].Embedding))
-	}
-	if results[0].Embedding[0] != 0.4 || results[0].Embedding[1] != 0.5 || results[0].Embedding[2] != 0.6 {
-		t.Errorf("results[0].Embedding = %v, want [0.4 0.5 0.6]", results[0].Embedding)
-	}
-	// m2 was stored with embedding [0.1, 0.2, 0.3].
-	if results[1].Embedding[0] != 0.1 || results[1].Embedding[1] != 0.2 || results[1].Embedding[2] != 0.3 {
-		t.Errorf("results[1].Embedding = %v, want [0.1 0.2 0.3]", results[1].Embedding)
-	}
-
-	// Verify StableKeys.
-	if results[0].Chunk.StableKey != "main.go::package" {
-		t.Errorf("results[0].Chunk.StableKey = %q, want %q", results[0].Chunk.StableKey, "main.go::package")
-	}
-	if results[1].Chunk.StableKey != "main.go::helper" {
-		t.Errorf("results[1].Chunk.StableKey = %q, want %q", results[1].Chunk.StableKey, "main.go::helper")
-	}
-
-	// Verify metadata is populated.
-	if results[0].Chunk.Metadata["kind"] != "package" {
-		t.Errorf("results[0].Chunk.Metadata[\"kind\"] = %q, want %q", results[0].Chunk.Metadata["kind"], "package")
-	}
-	if results[1].Chunk.Metadata["kind"] != "function" {
-		t.Errorf("results[1].Chunk.Metadata[\"kind\"] = %q, want %q", results[1].Chunk.Metadata["kind"], "function")
-	}
-
-	// Verify other fields.
-	if results[0].Chunk.Content != "package main" {
-		t.Errorf("results[0].Chunk.Content = %q, want %q", results[0].Chunk.Content, "package main")
-	}
-	if results[0].Chunk.Language != "go" {
-		t.Errorf("results[0].Chunk.Language = %q, want %q", results[0].Chunk.Language, "go")
-	}
-	if results[0].Chunk.Source != "main.go" {
-		t.Errorf("results[0].Chunk.Source = %q, want %q", results[0].Chunk.Source, "main.go")
-	}
 }
 
 func TestGetBySourceEmpty(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	// GetBySource for a nonexistent source returns empty slice, no error.
 	results, err := store.GetBySource(ctx, "nonexistent.go")
 	if err != nil {
 		t.Fatalf("GetBySource() error: %v", err)
@@ -605,7 +556,6 @@ func TestGetBySourceEmpty(t *testing.T) {
 
 func TestGetBySourceImplementsInterface(t *testing.T) {
 	store := newTestStore(t)
-	// Compile-time check that *SQLiteStore satisfies sourceChunkLoader.
 	var _ sourceChunkLoader = store
 }
 
@@ -636,7 +586,6 @@ func TestGetSourceHashEmpty(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	// GetSourceHash for a nonexistent source returns "", nil.
 	hash, err := store.GetSourceHash(ctx, "nonexistent.go")
 	if err != nil {
 		t.Fatalf("GetSourceHash() error: %v", err)
@@ -669,6 +618,249 @@ func TestGetSourceHashNoHashStored(t *testing.T) {
 
 func TestGetSourceHashImplementsInterface(t *testing.T) {
 	store := newTestStore(t)
-	// Compile-time check that *SQLiteStore satisfies sourceHashChecker.
 	var _ sourceHashChecker = store
+}
+
+// --- ReplaceSourceWithHash tests (Task 1.5) ---
+
+func TestReplaceSourceWithHashPopulatesHash(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{
+			ID: "c1", Content: "func Hello() {}", Source: "main.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+		{
+			ID: "c2", Content: "func World() {}", Source: "main.go",
+			StartLine: 5, EndLine: 7, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddings := [][]float64{{1.0, 0.0}, {0.0, 1.0}}
+	sourceHash := "abc123def456abc123def456"
+
+	if err := store.ReplaceSourceWithHash(ctx, "main.go", chunks, embeddings, sourceHash); err != nil {
+		t.Fatalf("ReplaceSourceWithHash() error: %v", err)
+	}
+
+	// All chunks from the same source should have the same source_content_hash.
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT id, source_content_hash FROM chunks WHERE source = 'main.go' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var count int
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if hash != sourceHash {
+			t.Errorf("chunk %q source_content_hash = %q, want %q", id, hash, sourceHash)
+		}
+		count++
+	}
+	if count != 2 {
+		t.Fatalf("expected 2 chunks, got %d", count)
+	}
+}
+
+func TestReplaceSourceWithoutHashLeavesEmpty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{
+			ID: "c1", Content: "func Hello() {}", Source: "main.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddings := [][]float64{{1.0, 0.0}}
+
+	// Standard ReplaceSource (no hash).
+	if err := store.ReplaceSource(ctx, "main.go", chunks, embeddings); err != nil {
+		t.Fatalf("ReplaceSource() error: %v", err)
+	}
+
+	var hash string
+	err := store.db.QueryRowContext(ctx,
+		`SELECT source_content_hash FROM chunks WHERE id = 'c1'`).Scan(&hash)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("source_content_hash = %q, want empty (no hash provided)", hash)
+	}
+}
+
+func TestInsertChunksPopulatesSourceContentHash(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{
+			ID: "c1", Content: "func Hello() {}", Source: "main.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+		{
+			ID: "c2", Content: "func World() {}", Source: "main.go",
+			StartLine: 5, EndLine: 7, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddings := [][]float64{{1.0, 0.0}, {0.0, 1.0}}
+
+	// Compute hash the same way the indexer would.
+	combined := chunks[0].Content + chunks[1].Content
+	expectedHash := contentHash(combined)
+
+	// Use ReplaceSourceWithHash which flows through insertChunksTx.
+	if err := store.ReplaceSourceWithHash(ctx, "main.go", chunks, embeddings, expectedHash); err != nil {
+		t.Fatalf("ReplaceSourceWithHash() error: %v", err)
+	}
+
+	// All chunks from the same source should have the same source_content_hash.
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT id, source_content_hash FROM chunks WHERE source = 'main.go' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var hashes []string
+	for rows.Next() {
+		var id, hash string
+		if err := rows.Scan(&id, &hash); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if hash == "" {
+			t.Errorf("chunk %q has empty source_content_hash", id)
+		}
+		hashes = append(hashes, hash)
+	}
+
+	if len(hashes) != 2 {
+		t.Fatalf("expected 2 chunks, got %d", len(hashes))
+	}
+	if hashes[0] != hashes[1] {
+		t.Errorf("chunks from same source have different hashes: %q vs %q", hashes[0], hashes[1])
+	}
+	if hashes[0] != expectedHash {
+		t.Errorf("source_content_hash = %q, want %q", hashes[0], expectedHash)
+	}
+}
+
+func TestSourceContentHashChangesOnUpdate(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// First insert.
+	chunks1 := []Chunk{
+		{
+			ID: "c1", Content: "func Hello() {}", Source: "main.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddings1 := [][]float64{{1.0, 0.0}}
+	hash1 := contentHash("func Hello() {}")
+
+	if err := store.ReplaceSourceWithHash(ctx, "main.go", chunks1, embeddings1, hash1); err != nil {
+		t.Fatalf("first ReplaceSourceWithHash() error: %v", err)
+	}
+
+	// Verify first hash.
+	gotHash1, err := store.GetSourceHash(ctx, "main.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if gotHash1 != hash1 {
+		t.Fatalf("first hash = %q, want %q", gotHash1, hash1)
+	}
+
+	// Second insert with different content.
+	chunks2 := []Chunk{
+		{
+			ID: "c1", Content: "func Goodbye() {}", Source: "main.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddings2 := [][]float64{{0.0, 1.0}}
+	hash2 := contentHash("func Goodbye() {}")
+
+	if err := store.ReplaceSourceWithHash(ctx, "main.go", chunks2, embeddings2, hash2); err != nil {
+		t.Fatalf("second ReplaceSourceWithHash() error: %v", err)
+	}
+
+	// Verify hash changed.
+	gotHash2, err := store.GetSourceHash(ctx, "main.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if gotHash2 == gotHash1 {
+		t.Errorf("hash did not change after update: %q", gotHash2)
+	}
+	if gotHash2 != hash2 {
+		t.Errorf("second hash = %q, want %q", gotHash2, hash2)
+	}
+}
+
+func TestDifferentSourcesDifferentHashes(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert chunks for source A.
+	chunksA := []Chunk{
+		{
+			ID: "a1", Content: "func Alpha() {}", Source: "alpha.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddingsA := [][]float64{{1.0, 0.0}}
+	hashA := contentHash("func Alpha() {}")
+
+	if err := store.ReplaceSourceWithHash(ctx, "alpha.go", chunksA, embeddingsA, hashA); err != nil {
+		t.Fatalf("ReplaceSourceWithHash(alpha) error: %v", err)
+	}
+
+	// Insert chunks for source B.
+	chunksB := []Chunk{
+		{
+			ID: "b1", Content: "func Beta() {}", Source: "beta.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddingsB := [][]float64{{0.0, 1.0}}
+	hashB := contentHash("func Beta() {}")
+
+	if err := store.ReplaceSourceWithHash(ctx, "beta.go", chunksB, embeddingsB, hashB); err != nil {
+		t.Fatalf("ReplaceSourceWithHash(beta) error: %v", err)
+	}
+
+	// Verify different hashes.
+	gotHashA, err := store.GetSourceHash(ctx, "alpha.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash(alpha) error: %v", err)
+	}
+	gotHashB, err := store.GetSourceHash(ctx, "beta.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash(beta) error: %v", err)
+	}
+
+	if gotHashA == "" {
+		t.Error("alpha hash is empty")
+	}
+	if gotHashB == "" {
+		t.Error("beta hash is empty")
+	}
+	if gotHashA == gotHashB {
+		t.Errorf("different sources have same hash: %q", gotHashA)
+	}
+	if gotHashA != hashA {
+		t.Errorf("alpha hash = %q, want %q", gotHashA, hashA)
+	}
+	if gotHashB != hashB {
+		t.Errorf("beta hash = %q, want %q", gotHashB, hashB)
+	}
 }

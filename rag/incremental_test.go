@@ -93,10 +93,8 @@ func TestChunkWithEmbedding(t *testing.T) {
 func TestSourceChunkLoaderInterface(t *testing.T) {
 	var store VectorStore = newTestStore(t)
 
-	// sourceChunkLoader is optional — SQLiteStore does not implement it yet.
-	// This test verifies the interface is well-formed by attempting a type assertion.
 	if _, ok := store.(sourceChunkLoader); ok {
-		t.Log("SQLiteStore implements sourceChunkLoader (will be added in a later task)")
+		t.Log("SQLiteStore implements sourceChunkLoader")
 	}
 }
 
@@ -105,10 +103,8 @@ func TestSourceChunkLoaderInterface(t *testing.T) {
 func TestSourceHashCheckerInterface(t *testing.T) {
 	var store VectorStore = newTestStore(t)
 
-	// sourceHashChecker is optional — SQLiteStore does not implement it yet.
-	// This test verifies the interface is well-formed by attempting a type assertion.
 	if _, ok := store.(sourceHashChecker); ok {
-		t.Log("SQLiteStore implements sourceHashChecker (will be added in a later task)")
+		t.Log("SQLiteStore implements sourceHashChecker")
 	}
 }
 

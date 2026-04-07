@@ -84,7 +84,7 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 	return nil
 }
 
-func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64) error {
+func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash string) error {
 	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
 	// INSERT OR REPLACE deletes the old row and inserts a new one, but
 	// SQLite does not fire DELETE triggers for rows removed by REPLACE
@@ -93,8 +93,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 	// modifies the row in place (preserving its rowid) and fires the
 	// AFTER UPDATE trigger, which correctly maintains FTS5.
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 				content = excluded.content,
 				source = excluded.source,
@@ -104,7 +104,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 				metadata = excluded.metadata,
 				embedding = excluded.embedding,
 				indexed_at = excluded.indexed_at,
-				stable_key = excluded.stable_key`)
+				stable_key = excluded.stable_key,
+				source_content_hash = excluded.source_content_hash`)
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}
@@ -121,7 +122,7 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 			return fmt.Errorf("rag: marshal embedding: %w", err)
 		}
 		if _, err := stmt.ExecContext(ctx, chunk.ID, chunk.Content, chunk.Source,
-			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey); err != nil {
+			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey, sourceContentHash); err != nil {
 			return fmt.Errorf("rag: insert chunk %q: %w", chunk.ID, err)
 		}
 	}
@@ -143,7 +144,7 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := s.insertChunksTx(ctx, tx, chunks, embeddings); err != nil {
+	if err := s.insertChunksTx(ctx, tx, chunks, embeddings, ""); err != nil {
 		return err
 	}
 
@@ -156,6 +157,13 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 // ReplaceSource atomically replaces all chunks for a source path.
 // If insertion fails, the delete is rolled back and existing data is preserved.
 func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64) error {
+	return s.ReplaceSourceWithHash(ctx, source, chunks, embeddings, "")
+}
+
+// ReplaceSourceWithHash atomically replaces all chunks for a source path
+// and stores the given source content hash on each chunk for fast
+// file-level change detection during subsequent incremental indexes.
+func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash string) error {
 	if err := validateStoreInputs(chunks, embeddings); err != nil {
 		return fmt.Errorf("rag: replace source %q: %w", source, err)
 	}
@@ -176,7 +184,7 @@ func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks [
 	}
 
 	if len(chunks) > 0 {
-		if err := s.insertChunksTx(ctx, tx, chunks, embeddings); err != nil {
+		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, sourceHash); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
 	}
