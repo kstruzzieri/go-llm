@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -708,5 +710,531 @@ func TestToOllamaToolCalls_RoundTrip(t *testing.T) {
 	}
 	if back[0].Function.Name != "search" {
 		t.Errorf("round-trip: Name = %q, want %q", back[0].Function.Name, "search")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Generate (non-streaming)
+// ---------------------------------------------------------------------------
+
+func TestOllamaProvider_Generate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		var req ollama.GenerateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Stream {
+			t.Error("expected stream=false for non-streaming generate")
+		}
+		if req.Model != "qwen3:8b" {
+			t.Errorf("model = %q, want %q", req.Model, "qwen3:8b")
+		}
+		if req.Prompt != "Complete this:" {
+			t.Errorf("prompt = %q, want %q", req.Prompt, "Complete this:")
+		}
+
+		resp := ollama.GenerateResponse{
+			Model:         "qwen3:8b",
+			Response:      "Generated text here.",
+			Done:          true,
+			EvalCount:     10,
+			EvalDuration:  5000000,
+			TotalDuration: 6000000,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	resp, err := p.Generate(context.Background(), GenerateRequest{
+		Model:  "qwen3:8b",
+		Prompt: "Complete this:",
+	})
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if resp.Response != "Generated text here." {
+		t.Errorf("Response = %q, want %q", resp.Response, "Generated text here.")
+	}
+	if resp.Provider != "ollama" {
+		t.Errorf("Provider = %q, want %q", resp.Provider, "ollama")
+	}
+	if resp.Model != "qwen3:8b" {
+		t.Errorf("Model = %q, want %q", resp.Model, "qwen3:8b")
+	}
+	if !resp.Done {
+		t.Error("expected Done=true")
+	}
+	if resp.Usage.CompletionTokens != 10 {
+		t.Errorf("Usage.CompletionTokens = %d, want 10", resp.Usage.CompletionTokens)
+	}
+	if resp.Latency.GenerationDuration != time.Duration(5000000) {
+		t.Errorf("Latency.GenerationDuration = %v, want 5ms", resp.Latency.GenerationDuration)
+	}
+}
+
+func TestOllamaProvider_Generate_WithOptions(t *testing.T) {
+	var receivedOpts ollama.ModelOptions
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.GenerateRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Options != nil {
+			receivedOpts = *req.Options
+		}
+		if req.System != "You are a code assistant." {
+			t.Errorf("System = %q, want %q", req.System, "You are a code assistant.")
+		}
+		if req.Suffix != "// end" {
+			t.Errorf("Suffix = %q, want %q", req.Suffix, "// end")
+		}
+		resp := ollama.GenerateResponse{
+			Model:    "qwen3:8b",
+			Response: "ok",
+			Done:     true,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	_, err := p.Generate(context.Background(), GenerateRequest{
+		Model:  "qwen3:8b",
+		Prompt: "function add(",
+		System: "You are a code assistant.",
+		Suffix: "// end",
+		Options: ModelOptions{
+			Temperature: Ptr(0.3),
+			NumPredict:  50,
+		},
+	})
+	if err != nil {
+		t.Fatalf("Generate() error: %v", err)
+	}
+	if receivedOpts.Temperature != 0.3 {
+		t.Errorf("Temperature = %f, want 0.3", receivedOpts.Temperature)
+	}
+	if receivedOpts.NumPredict != 50 {
+		t.Errorf("NumPredict = %d, want 50", receivedOpts.NumPredict)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// GenerateStream
+// ---------------------------------------------------------------------------
+
+func TestOllamaProvider_GenerateStream(t *testing.T) {
+	chunks := []ollama.GenerateResponse{
+		{Model: "qwen3:8b", Response: "Hello ", Done: false},
+		{Model: "qwen3:8b", Response: "world!", Done: false},
+		{Model: "qwen3:8b", Response: "", Done: true, EvalCount: 4, EvalDuration: 2000000},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for _, chunk := range chunks {
+			data, _ := json.Marshal(chunk)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
+		}
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	var received []GenerateResponse
+	err := p.GenerateStream(context.Background(), GenerateRequest{
+		Model:  "qwen3:8b",
+		Prompt: "Complete:",
+	}, func(resp GenerateResponse) error {
+		received = append(received, resp)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("GenerateStream() error: %v", err)
+	}
+	if len(received) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(received))
+	}
+	if received[0].Response != "Hello " {
+		t.Errorf("chunk[0].Response = %q, want %q", received[0].Response, "Hello ")
+	}
+	if received[0].Provider != "ollama" {
+		t.Errorf("chunk[0].Provider = %q, want %q", received[0].Provider, "ollama")
+	}
+	if received[1].Response != "world!" {
+		t.Errorf("chunk[1].Response = %q, want %q", received[1].Response, "world!")
+	}
+	if !received[2].Done {
+		t.Error("last chunk should have Done=true")
+	}
+	if received[2].Usage.CompletionTokens != 4 {
+		t.Errorf("last chunk Usage.CompletionTokens = %d, want 4", received[2].Usage.CompletionTokens)
+	}
+}
+
+func TestOllamaProvider_GenerateStream_GracefulCancellation(t *testing.T) {
+	ready := make(chan struct{})
+	serverDone := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chunk := ollama.GenerateResponse{
+			Model:    "qwen3:8b",
+			Response: "partial output",
+			Done:     false,
+		}
+		data, _ := json.Marshal(chunk)
+		_, _ = fmt.Fprintf(w, "%s\n", data)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		close(ready)
+		<-serverDone
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	var received []GenerateResponse
+	done := make(chan error, 1)
+	go func() {
+		done <- p.GenerateStream(ctx, GenerateRequest{
+			Model:  "qwen3:8b",
+			Prompt: "Generate something long",
+		}, func(resp GenerateResponse) error {
+			received = append(received, resp)
+			return nil
+		})
+	}()
+
+	<-ready
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	err := <-done
+	close(serverDone)
+
+	if err == nil {
+		t.Fatal("expected error after cancellation")
+	}
+	if !strings.Contains(err.Error(), "provider: ollama:") {
+		t.Errorf("error should contain 'provider: ollama:' prefix, got: %v", err)
+	}
+
+	gotPartial := false
+	for _, r := range received {
+		if r.Partial && r.Done {
+			gotPartial = true
+			if r.Response != "partial output" {
+				t.Errorf("partial Response = %q, want %q", r.Response, "partial output")
+			}
+		}
+	}
+	if !gotPartial {
+		t.Error("expected a partial result chunk after cancellation")
+	}
+}
+
+func TestOllamaProvider_GenerateStream_NilCallback(t *testing.T) {
+	c := ollama.NewClient()
+	p := NewOllamaProvider(c)
+
+	err := p.GenerateStream(context.Background(), GenerateRequest{
+		Model:  "qwen3:8b",
+		Prompt: "Hi",
+	}, nil)
+	if err == nil {
+		t.Fatal("expected error for nil callback")
+	}
+	if !strings.Contains(err.Error(), "callback function is required") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestOllamaProvider_GenerateStream_CallbackError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		chunk := ollama.GenerateResponse{
+			Model:    "qwen3:8b",
+			Response: "hello",
+			Done:     false,
+		}
+		data, _ := json.Marshal(chunk)
+		_, _ = fmt.Fprintf(w, "%s\n", data)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	callbackErr := fmt.Errorf("consumer stopped")
+	err := p.GenerateStream(context.Background(), GenerateRequest{
+		Model:  "qwen3:8b",
+		Prompt: "Hi",
+	}, func(_ GenerateResponse) error {
+		return callbackErr
+	})
+	if err == nil {
+		t.Fatal("expected error from callback")
+	}
+	if !strings.Contains(err.Error(), "consumer stopped") {
+		t.Errorf("expected callback error in chain, got: %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Embed
+// ---------------------------------------------------------------------------
+
+func TestOllamaProvider_Embed(t *testing.T) {
+	var callCount int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&callCount, 1)
+		resp := ollama.EmbedResponse{
+			Embeddings: [][]float64{{0.1, 0.2, 0.3}},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	resp, err := p.Embed(context.Background(), EmbedRequest{
+		Model: "nomic-embed-text",
+		Input: []string{"hello world", "goodbye world"},
+	})
+	if err != nil {
+		t.Fatalf("Embed() error: %v", err)
+	}
+	if len(resp.Embeddings) != 2 {
+		t.Fatalf("expected 2 embeddings, got %d", len(resp.Embeddings))
+	}
+	if resp.Provider != "ollama" {
+		t.Errorf("Provider = %q, want %q", resp.Provider, "ollama")
+	}
+	if resp.Model != "nomic-embed-text" {
+		t.Errorf("Model = %q, want %q", resp.Model, "nomic-embed-text")
+	}
+	if resp.Usage.PromptTokens != 2 {
+		t.Errorf("Usage.PromptTokens = %d, want 2", resp.Usage.PromptTokens)
+	}
+	if got := atomic.LoadInt32(&callCount); got != 2 {
+		t.Errorf("expected 2 API calls (one per input), got %d", got)
+	}
+	// Verify embedding values.
+	for i, emb := range resp.Embeddings {
+		if len(emb) != 3 {
+			t.Errorf("embedding[%d] length = %d, want 3", i, len(emb))
+		}
+	}
+}
+
+func TestOllamaProvider_Embed_Validation(t *testing.T) {
+	c := ollama.NewClient()
+	p := NewOllamaProvider(c)
+
+	tests := []struct {
+		name    string
+		req     EmbedRequest
+		wantErr string
+	}{
+		{
+			name:    "empty model",
+			req:     EmbedRequest{Input: []string{"hello"}},
+			wantErr: "model name is required",
+		},
+		{
+			name:    "empty input",
+			req:     EmbedRequest{Model: "nomic-embed-text"},
+			wantErr: "at least one input text is required",
+		},
+		{
+			name:    "nil input",
+			req:     EmbedRequest{Model: "nomic-embed-text", Input: nil},
+			wantErr: "at least one input text is required",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := p.Embed(context.Background(), tt.req)
+			if err == nil {
+				t.Fatal("expected error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Errorf("error = %q, want to contain %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestOllamaProvider_Embed_Singleflight(t *testing.T) {
+	// Track how many times the server is actually called. We use an atomic
+	// counter because concurrent goroutines will hit the handler in parallel.
+	var serverCalls int32
+
+	// Add a small delay in the handler so concurrent requests overlap.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&serverCalls, 1)
+		time.Sleep(50 * time.Millisecond)
+		resp := ollama.EmbedResponse{
+			Embeddings: [][]float64{{0.1, 0.2, 0.3}},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	req := EmbedRequest{
+		Model: "nomic-embed-text",
+		Input: []string{"identical text"},
+	}
+
+	const concurrency = 5
+	var wg sync.WaitGroup
+	errs := make([]error, concurrency)
+	results := make([]*EmbedResponse, concurrency)
+
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			resp, err := p.Embed(context.Background(), req)
+			errs[idx] = err
+			results[idx] = resp
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Errorf("goroutine %d: Embed() error: %v", i, err)
+		}
+	}
+
+	// With singleflight, only 1 request's worth of embed calls should hit
+	// the server (1 input text = 1 server call), not 5.
+	got := atomic.LoadInt32(&serverCalls)
+	if got != 1 {
+		t.Errorf("expected 1 server call (singleflight dedup), got %d", got)
+	}
+
+	// All results should be valid and identical (shared via singleflight).
+	for i, resp := range results {
+		if resp == nil {
+			t.Errorf("goroutine %d: nil response", i)
+			continue
+		}
+		if len(resp.Embeddings) != 1 {
+			t.Errorf("goroutine %d: expected 1 embedding, got %d", i, len(resp.Embeddings))
+		}
+		if resp.Provider != "ollama" {
+			t.Errorf("goroutine %d: Provider = %q, want %q", i, resp.Provider, "ollama")
+		}
+	}
+}
+
+func TestOllamaProvider_Embed_DifferentRequestsNotDeduplicated(t *testing.T) {
+	var serverCalls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&serverCalls, 1)
+		resp := ollama.EmbedResponse{
+			Embeddings: [][]float64{{0.1, 0.2, 0.3}},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	// Two sequential requests with different inputs should both hit the server.
+	_, err := p.Embed(context.Background(), EmbedRequest{
+		Model: "nomic-embed-text",
+		Input: []string{"first text"},
+	})
+	if err != nil {
+		t.Fatalf("first Embed() error: %v", err)
+	}
+
+	_, err = p.Embed(context.Background(), EmbedRequest{
+		Model: "nomic-embed-text",
+		Input: []string{"second text"},
+	})
+	if err != nil {
+		t.Fatalf("second Embed() error: %v", err)
+	}
+
+	got := atomic.LoadInt32(&serverCalls)
+	if got != 2 {
+		t.Errorf("expected 2 server calls for different inputs, got %d", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// toOllamaGenerateRequest helper
+// ---------------------------------------------------------------------------
+
+func TestToOllamaGenerateRequest(t *testing.T) {
+	req := GenerateRequest{
+		Model:  "qwen3:8b",
+		Prompt: "Complete this code:",
+		System: "You are a code assistant.",
+		Suffix: "// end of function",
+		Options: ModelOptions{
+			Temperature: Ptr(0.3),
+			NumPredict:  200,
+			NumCtx:      4096,
+		},
+	}
+
+	oReq := toOllamaGenerateRequest(req)
+
+	if oReq.Model != "qwen3:8b" {
+		t.Errorf("Model = %q, want %q", oReq.Model, "qwen3:8b")
+	}
+	if oReq.Prompt != "Complete this code:" {
+		t.Errorf("Prompt = %q, want %q", oReq.Prompt, "Complete this code:")
+	}
+	if oReq.System != "You are a code assistant." {
+		t.Errorf("System = %q, want %q", oReq.System, "You are a code assistant.")
+	}
+	if oReq.Suffix != "// end of function" {
+		t.Errorf("Suffix = %q, want %q", oReq.Suffix, "// end of function")
+	}
+	if oReq.Options == nil {
+		t.Fatal("Options should not be nil")
+	}
+	if oReq.Options.Temperature != 0.3 {
+		t.Errorf("Options.Temperature = %f, want 0.3", oReq.Options.Temperature)
+	}
+	if oReq.Options.NumPredict != 200 {
+		t.Errorf("Options.NumPredict = %d, want 200", oReq.Options.NumPredict)
+	}
+	if oReq.Options.NumCtx != 4096 {
+		t.Errorf("Options.NumCtx = %d, want 4096", oReq.Options.NumCtx)
+	}
+}
+
+func TestToOllamaGenerateRequest_NoOptions(t *testing.T) {
+	req := GenerateRequest{
+		Model:  "qwen3:8b",
+		Prompt: "Hello",
+	}
+
+	oReq := toOllamaGenerateRequest(req)
+
+	if oReq.Options != nil {
+		t.Errorf("expected nil Options for zero-value ModelOptions, got %+v", oReq.Options)
 	}
 }

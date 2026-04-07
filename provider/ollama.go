@@ -4,12 +4,15 @@ package provider
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"golang.org/x/sync/singleflight"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,6 +56,7 @@ type OllamaProvider struct {
 	thinkMode   ThinkMode
 	thinkTags   ThinkTags
 	thinkBudget *ThinkBudget
+	embedGroup  singleflight.Group
 }
 
 // NewOllamaProvider creates a Provider backed by the given ollama.Client.
@@ -310,26 +314,166 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 }
 
 // ---------------------------------------------------------------------------
-// Generate (stub — Task 2)
+// Generate (non-streaming)
 // ---------------------------------------------------------------------------
 
-// Generate sends a non-streaming text generation request.
-func (p *OllamaProvider) Generate(_ context.Context, _ GenerateRequest) (*GenerateResponse, error) {
-	return nil, fmt.Errorf("provider: ollama: Generate not yet implemented")
+// Generate sends a non-streaming text generation request, translating between
+// provider and ollama types.
+func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
+	oReq := toOllamaGenerateRequest(req)
+	oReq.Stream = false
+
+	oResp, err := p.client.Generate(ctx, oReq)
+	if err != nil {
+		return nil, fmt.Errorf("provider: ollama: generate: %w", err)
+	}
+
+	return &GenerateResponse{
+		Model:    oResp.Model,
+		Provider: "ollama",
+		Response: oResp.Response,
+		Done:     true,
+		Usage: Usage{
+			CompletionTokens: oResp.EvalCount,
+		},
+		Latency: LatencyInfo{
+			GenerationDuration: time.Duration(oResp.EvalDuration),
+		},
+	}, nil
 }
 
-// GenerateStream sends a streaming text generation request.
-func (p *OllamaProvider) GenerateStream(_ context.Context, _ GenerateRequest, _ func(GenerateResponse) error) error {
-	return fmt.Errorf("provider: ollama: GenerateStream not yet implemented")
+// ---------------------------------------------------------------------------
+// GenerateStream (streaming with graceful cancellation)
+// ---------------------------------------------------------------------------
+
+// GenerateStream sends a streaming text generation request. Each chunk is
+// forwarded to fn with the provider-level GenerateResponse type.
+//
+// If the context is cancelled after at least one chunk has been received, a
+// final synthetic chunk with Partial=true and Done=true is emitted containing
+// the accumulated response so far, then the context error is returned.
+func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest, fn func(GenerateResponse) error) error {
+	if fn == nil {
+		return fmt.Errorf("provider: ollama: generate stream: callback function is required")
+	}
+
+	oReq := toOllamaGenerateRequest(req)
+	oReq.Stream = true
+
+	var accumulated strings.Builder
+	var lastUsage Usage
+	var lastLatency LatencyInfo
+	chunksReceived := 0
+	lastDone := false
+	var callbackErr error
+
+	streamErr := p.client.GenerateStream(ctx, oReq, func(oResp ollama.GenerateResponse) error {
+		chunksReceived++
+		accumulated.WriteString(oResp.Response)
+
+		if oResp.Done {
+			lastDone = true
+			lastUsage = Usage{
+				CompletionTokens: oResp.EvalCount,
+			}
+			lastLatency = LatencyInfo{
+				GenerationDuration: time.Duration(oResp.EvalDuration),
+			}
+		}
+
+		resp := GenerateResponse{
+			Model:    oResp.Model,
+			Provider: "ollama",
+			Response: oResp.Response,
+			Done:     oResp.Done,
+			Usage:    lastUsage,
+			Latency:  lastLatency,
+		}
+		if err := fn(resp); err != nil {
+			callbackErr = err
+			return err
+		}
+		return nil
+	})
+
+	// Graceful cancellation: if context was cancelled after receiving chunks,
+	// emit a partial result so consumers can use what was generated.
+	if streamErr != nil && ctx.Err() != nil && chunksReceived > 0 && !lastDone {
+		partial := GenerateResponse{
+			Model:    req.Model,
+			Provider: "ollama",
+			Response: accumulated.String(),
+			Done:     true,
+			Partial:  true,
+			Usage:    lastUsage,
+			Latency:  lastLatency,
+		}
+		// Best-effort delivery of partial result; ignore callback error.
+		_ = fn(partial)
+		return fmt.Errorf("provider: ollama: generate stream: %w", ctx.Err())
+	}
+
+	if streamErr != nil {
+		if callbackErr != nil {
+			return fmt.Errorf("provider: ollama: generate stream: %w", streamErr)
+		}
+		return fmt.Errorf("provider: ollama: generate stream: %w", streamErr)
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------------
-// Embed (stub — Task 2)
+// Embed (with singleflight deduplication)
 // ---------------------------------------------------------------------------
 
-// Embed generates vector embeddings for the given input texts.
-func (p *OllamaProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedResponse, error) {
-	return nil, fmt.Errorf("provider: ollama: Embed not yet implemented")
+// Embed generates vector embeddings for the given input texts. Concurrent
+// identical requests (same model and inputs) are deduplicated via singleflight
+// to avoid redundant computation during batch RAG indexing.
+func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error) {
+	if req.Model == "" {
+		return nil, fmt.Errorf("provider: ollama: embed: model name is required")
+	}
+	if len(req.Input) == 0 {
+		return nil, fmt.Errorf("provider: ollama: embed: at least one input text is required")
+	}
+
+	// Build singleflight key from model + hash of all inputs.
+	key := embedKey(req.Model, req.Input)
+
+	result, err, _ := p.embedGroup.Do(key, func() (any, error) {
+		embeddings := make([][]float64, len(req.Input))
+		for i, text := range req.Input {
+			if ctx.Err() != nil {
+				return nil, fmt.Errorf("provider: ollama: embed: %w", ctx.Err())
+			}
+			emb, embedErr := p.client.Embed(ctx, req.Model, text)
+			if embedErr != nil {
+				return nil, fmt.Errorf("provider: ollama: embed: %w", embedErr)
+			}
+			embeddings[i] = emb
+		}
+		return &EmbedResponse{
+			Model:      req.Model,
+			Provider:   "ollama",
+			Embeddings: embeddings,
+			Usage: Usage{
+				PromptTokens: len(req.Input),
+			},
+		}, nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return result.(*EmbedResponse), nil
+}
+
+// embedKey builds a singleflight dedup key from the model name and input texts.
+// Inputs are joined with a null byte separator to avoid collisions, then hashed
+// with SHA-256 for a fixed-size key component.
+func embedKey(model string, inputs []string) string {
+	h := sha256.Sum256([]byte(strings.Join(inputs, "\x00")))
+	return model + ":" + hex.EncodeToString(h[:])
 }
 
 // ---------------------------------------------------------------------------
@@ -354,6 +498,21 @@ func toOllamaChatRequest(req ChatRequest) ollama.ChatRequest {
 		Messages: msgs,
 		Stream:   req.Stream,
 		Tools:    toOllamaTools(req.Tools),
+	}
+	if opts := toOllamaOptions(req.Options); opts != nil {
+		oReq.Options = opts
+	}
+	return oReq
+}
+
+// toOllamaGenerateRequest converts a provider GenerateRequest to an ollama GenerateRequest.
+func toOllamaGenerateRequest(req GenerateRequest) ollama.GenerateRequest {
+	oReq := ollama.GenerateRequest{
+		Model:  req.Model,
+		Prompt: req.Prompt,
+		System: req.System,
+		Suffix: req.Suffix,
+		Stream: req.Stream,
 	}
 	if opts := toOllamaOptions(req.Options); opts != nil {
 		oReq.Options = opts
