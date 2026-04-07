@@ -16,9 +16,10 @@ import (
 
 // Compile-time interface satisfaction checks.
 var (
-	_ VectorStore      = (*SQLiteStore)(nil)
-	_ Exportable       = (*SQLiteStore)(nil)
+	_ VectorStore       = (*SQLiteStore)(nil)
+	_ Exportable        = (*SQLiteStore)(nil)
 	_ sourceChunkLoader = (*SQLiteStore)(nil)
+	_ sourceHashChecker = (*SQLiteStore)(nil)
 )
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
@@ -287,6 +288,23 @@ func (s *SQLiteStore) GetBySource(ctx context.Context, source string) ([]ChunkWi
 		return nil, fmt.Errorf("rag: iterate chunks for source %q: %w", source, err)
 	}
 	return results, nil
+}
+
+// GetSourceHash returns the stored content hash for a source path, or empty
+// string if the source has no chunks or no hash is stored. This enables fast
+// file-level change detection during incremental indexing.
+func (s *SQLiteStore) GetSourceHash(ctx context.Context, source string) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT source_content_hash FROM chunks WHERE source = ? LIMIT 1`,
+		source).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("rag: get source hash for %q: %w", source, err)
+	}
+	return hash, nil
 }
 
 // Stats returns index statistics.

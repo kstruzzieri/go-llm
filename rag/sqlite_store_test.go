@@ -608,3 +608,67 @@ func TestGetBySourceImplementsInterface(t *testing.T) {
 	// Compile-time check that *SQLiteStore satisfies sourceChunkLoader.
 	var _ sourceChunkLoader = store
 }
+
+// --- GetSourceHash tests ---
+
+func TestGetSourceHashBasic(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Manually insert a chunk with source_content_hash set.
+	_, err := store.db.ExecContext(ctx,
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash)
+		 VALUES ('h1', 'func main()', 'main.go', 1, 5, 'go', '{}', '[0.1,0.2]', 12345, 'main.go::main', 'deadbeef1234')`)
+	if err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	hash, err := store.GetSourceHash(ctx, "main.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash != "deadbeef1234" {
+		t.Errorf("GetSourceHash() = %q, want %q", hash, "deadbeef1234")
+	}
+}
+
+func TestGetSourceHashEmpty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// GetSourceHash for a nonexistent source returns "", nil.
+	hash, err := store.GetSourceHash(ctx, "nonexistent.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("GetSourceHash() = %q, want empty string", hash)
+	}
+}
+
+func TestGetSourceHashNoHashStored(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert a chunk with default empty source_content_hash (simulating pre-V4 data).
+	_, err := store.db.ExecContext(ctx,
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key)
+		 VALUES ('h2', 'package foo', 'foo.go', 1, 1, 'go', '{}', '[0.5]', 12345, 'foo.go::package')`)
+	if err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	hash, err := store.GetSourceHash(ctx, "foo.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("GetSourceHash() = %q, want empty string for default", hash)
+	}
+}
+
+func TestGetSourceHashImplementsInterface(t *testing.T) {
+	store := newTestStore(t)
+	// Compile-time check that *SQLiteStore satisfies sourceHashChecker.
+	var _ sourceHashChecker = store
+}
