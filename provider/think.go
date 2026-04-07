@@ -423,6 +423,26 @@ func (p *ThinkParser) Reset() {
 	p.budgetExceeded = false
 }
 
+// SetActive controls whether a ThinkToggle parser actively parses think tags.
+// When active is true, the parser behaves like ThinkAlways (parses tags).
+// When active is false, the parser behaves like ThinkNone (passthrough).
+//
+// This method is only meaningful when the parser's mode is ThinkToggle.
+// For other modes it is a no-op. The Provider calls SetActive based on
+// whether it injected /think or /no_think into the prompt for this request.
+//
+// Must be called before Process, typically after Reset for a new request.
+func (p *ThinkParser) SetActive(active bool) {
+	if p.origMode != ThinkToggle {
+		return
+	}
+	if active {
+		p.mode = ThinkAlways
+	} else {
+		p.mode = ThinkNone
+	}
+}
+
 // Metrics returns the accumulated thinking and content metrics for the current
 // (or most recent) response. Call after Flush for complete results.
 func (p *ThinkParser) Metrics() ThinkMetrics {

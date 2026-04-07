@@ -940,3 +940,134 @@ func TestThinkParser_AngleBracketInsideContent(t *testing.T) {
 		t.Errorf("content = %q, want %q", got, "<div>not a think tag</div>")
 	}
 }
+
+func TestThinkParser_ThinkToggle_SetActiveTrue(t *testing.T) {
+	onTh, onCt, thinking, content := collect()
+	p := NewThinkParser(ThinkParserConfig{
+		Mode:       ThinkToggle,
+		Tags:       DefaultThinkTags(),
+		OnThinking: onTh,
+		OnContent:  onCt,
+	})
+
+	// Activate reasoning for this request.
+	p.SetActive(true)
+
+	for _, chunk := range []string{"<think>reasoning</think>", "answer"} {
+		if err := p.Process(chunk); err != nil {
+			t.Fatalf("Process(%q) error: %v", chunk, err)
+		}
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush() error: %v", err)
+	}
+
+	if got := joined(thinking); got != "reasoning" {
+		t.Errorf("thinking = %q, want %q", got, "reasoning")
+	}
+	if got := joined(content); got != "answer" {
+		t.Errorf("content = %q, want %q", got, "answer")
+	}
+}
+
+func TestThinkParser_ThinkToggle_SetActiveFalse(t *testing.T) {
+	onTh, onCt, thinking, content := collect()
+	p := NewThinkParser(ThinkParserConfig{
+		Mode:       ThinkToggle,
+		Tags:       DefaultThinkTags(),
+		OnThinking: onTh,
+		OnContent:  onCt,
+	})
+
+	// Deactivate reasoning — passthrough mode.
+	p.SetActive(false)
+
+	input := "<think>this should pass through</think>as content"
+	if err := p.Process(input); err != nil {
+		t.Fatalf("Process() error: %v", err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush() error: %v", err)
+	}
+
+	// Everything should be content, including the tags.
+	if got := joined(thinking); got != "" {
+		t.Errorf("thinking = %q, want empty", got)
+	}
+	if got := joined(content); got != input {
+		t.Errorf("content = %q, want %q", got, input)
+	}
+}
+
+func TestThinkParser_ThinkToggle_ResetAndToggle(t *testing.T) {
+	onTh, onCt, thinking, content := collect()
+	p := NewThinkParser(ThinkParserConfig{
+		Mode:       ThinkToggle,
+		Tags:       DefaultThinkTags(),
+		OnThinking: onTh,
+		OnContent:  onCt,
+	})
+
+	// Request 1: reasoning active.
+	p.SetActive(true)
+	if err := p.Process("<think>thought1</think>answer1"); err != nil {
+		t.Fatalf("Process() error: %v", err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush() error: %v", err)
+	}
+	if got := joined(thinking); got != "thought1" {
+		t.Errorf("req1 thinking = %q, want %q", got, "thought1")
+	}
+	if got := joined(content); got != "answer1" {
+		t.Errorf("req1 content = %q, want %q", got, "answer1")
+	}
+
+	// Reset for request 2.
+	p.Reset()
+	*thinking = nil
+	*content = nil
+
+	// Request 2: reasoning disabled.
+	p.SetActive(false)
+	input := "no reasoning here"
+	if err := p.Process(input); err != nil {
+		t.Fatalf("Process() error: %v", err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush() error: %v", err)
+	}
+	if got := joined(thinking); got != "" {
+		t.Errorf("req2 thinking = %q, want empty", got)
+	}
+	if got := joined(content); got != input {
+		t.Errorf("req2 content = %q, want %q", got, input)
+	}
+}
+
+func TestThinkParser_SetActive_NoopForNonToggle(t *testing.T) {
+	onTh, onCt, thinking, content := collect()
+	p := NewThinkParser(ThinkParserConfig{
+		Mode:       ThinkAlways,
+		Tags:       DefaultThinkTags(),
+		OnThinking: onTh,
+		OnContent:  onCt,
+	})
+
+	// SetActive should be a no-op for ThinkAlways.
+	p.SetActive(false)
+
+	// Should still parse tags (not passthrough).
+	if err := p.Process("<think>thought</think>answer"); err != nil {
+		t.Fatalf("Process() error: %v", err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush() error: %v", err)
+	}
+	if got := joined(thinking); got != "thought" {
+		t.Errorf("thinking = %q, want %q", got, "thought")
+	}
+	if got := joined(content); got != "answer" {
+		t.Errorf("content = %q, want %q", got, "answer")
+	}
+}
