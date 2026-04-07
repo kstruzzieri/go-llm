@@ -488,3 +488,187 @@ func TestSQLiteStoreImplementsExportable(t *testing.T) {
 	store := newTestStore(t)
 	var _ Exportable = store // compile-time check
 }
+
+// --- GetBySource tests ---
+
+func TestGetBySourceBasic(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Store 3 chunks: 2 for "main.go" (out of order by start_line), 1 for "other.go".
+	chunks := []Chunk{
+		{
+			ID: "m2", Content: "func helper() {}", Source: "main.go",
+			StartLine: 10, EndLine: 15, Language: "go",
+			Metadata: map[string]string{"kind": "function"}, StableKey: "main.go::helper",
+		},
+		{
+			ID: "m1", Content: "package main", Source: "main.go",
+			StartLine: 1, EndLine: 3, Language: "go",
+			Metadata: map[string]string{"kind": "package"}, StableKey: "main.go::package",
+		},
+		{
+			ID: "o1", Content: "package other", Source: "other.go",
+			StartLine: 1, EndLine: 1, Language: "go",
+			Metadata: map[string]string{}, StableKey: "other.go::package",
+		},
+	}
+	embeddings := [][]float64{
+		{0.1, 0.2, 0.3},
+		{0.4, 0.5, 0.6},
+		{0.7, 0.8, 0.9},
+	}
+
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+
+	// GetBySource for "main.go" should return 2 results ordered by start_line.
+	results, err := store.GetBySource(ctx, "main.go")
+	if err != nil {
+		t.Fatalf("GetBySource() error: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+
+	// First result should be m1 (start_line=1), second m2 (start_line=10).
+	if results[0].Chunk.ID != "m1" {
+		t.Errorf("results[0].Chunk.ID = %q, want %q", results[0].Chunk.ID, "m1")
+	}
+	if results[1].Chunk.ID != "m2" {
+		t.Errorf("results[1].Chunk.ID = %q, want %q", results[1].Chunk.ID, "m2")
+	}
+
+	// Verify start_line ordering.
+	if results[0].Chunk.StartLine != 1 {
+		t.Errorf("results[0].Chunk.StartLine = %d, want 1", results[0].Chunk.StartLine)
+	}
+	if results[1].Chunk.StartLine != 10 {
+		t.Errorf("results[1].Chunk.StartLine = %d, want 10", results[1].Chunk.StartLine)
+	}
+
+	// Verify embeddings are correct.
+	// m1 was stored with embedding [0.4, 0.5, 0.6].
+	if len(results[0].Embedding) != 3 {
+		t.Fatalf("results[0].Embedding length = %d, want 3", len(results[0].Embedding))
+	}
+	if results[0].Embedding[0] != 0.4 || results[0].Embedding[1] != 0.5 || results[0].Embedding[2] != 0.6 {
+		t.Errorf("results[0].Embedding = %v, want [0.4 0.5 0.6]", results[0].Embedding)
+	}
+	// m2 was stored with embedding [0.1, 0.2, 0.3].
+	if results[1].Embedding[0] != 0.1 || results[1].Embedding[1] != 0.2 || results[1].Embedding[2] != 0.3 {
+		t.Errorf("results[1].Embedding = %v, want [0.1 0.2 0.3]", results[1].Embedding)
+	}
+
+	// Verify StableKeys.
+	if results[0].Chunk.StableKey != "main.go::package" {
+		t.Errorf("results[0].Chunk.StableKey = %q, want %q", results[0].Chunk.StableKey, "main.go::package")
+	}
+	if results[1].Chunk.StableKey != "main.go::helper" {
+		t.Errorf("results[1].Chunk.StableKey = %q, want %q", results[1].Chunk.StableKey, "main.go::helper")
+	}
+
+	// Verify metadata is populated.
+	if results[0].Chunk.Metadata["kind"] != "package" {
+		t.Errorf("results[0].Chunk.Metadata[\"kind\"] = %q, want %q", results[0].Chunk.Metadata["kind"], "package")
+	}
+	if results[1].Chunk.Metadata["kind"] != "function" {
+		t.Errorf("results[1].Chunk.Metadata[\"kind\"] = %q, want %q", results[1].Chunk.Metadata["kind"], "function")
+	}
+
+	// Verify other fields.
+	if results[0].Chunk.Content != "package main" {
+		t.Errorf("results[0].Chunk.Content = %q, want %q", results[0].Chunk.Content, "package main")
+	}
+	if results[0].Chunk.Language != "go" {
+		t.Errorf("results[0].Chunk.Language = %q, want %q", results[0].Chunk.Language, "go")
+	}
+	if results[0].Chunk.Source != "main.go" {
+		t.Errorf("results[0].Chunk.Source = %q, want %q", results[0].Chunk.Source, "main.go")
+	}
+}
+
+func TestGetBySourceEmpty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// GetBySource for a nonexistent source returns empty slice, no error.
+	results, err := store.GetBySource(ctx, "nonexistent.go")
+	if err != nil {
+		t.Fatalf("GetBySource() error: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("got %d results for nonexistent source, want 0", len(results))
+	}
+}
+
+func TestGetBySourceImplementsInterface(t *testing.T) {
+	store := newTestStore(t)
+	// Compile-time check that *SQLiteStore satisfies sourceChunkLoader.
+	var _ sourceChunkLoader = store
+}
+
+// --- GetSourceHash tests ---
+
+func TestGetSourceHashBasic(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Manually insert a chunk with source_content_hash set.
+	_, err := store.db.ExecContext(ctx,
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash)
+		 VALUES ('h1', 'func main()', 'main.go', 1, 5, 'go', '{}', '[0.1,0.2]', 12345, 'main.go::main', 'deadbeef1234')`)
+	if err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	hash, err := store.GetSourceHash(ctx, "main.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash != "deadbeef1234" {
+		t.Errorf("GetSourceHash() = %q, want %q", hash, "deadbeef1234")
+	}
+}
+
+func TestGetSourceHashEmpty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// GetSourceHash for a nonexistent source returns "", nil.
+	hash, err := store.GetSourceHash(ctx, "nonexistent.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("GetSourceHash() = %q, want empty string", hash)
+	}
+}
+
+func TestGetSourceHashNoHashStored(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert a chunk with default empty source_content_hash (simulating pre-V4 data).
+	_, err := store.db.ExecContext(ctx,
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key)
+		 VALUES ('h2', 'package foo', 'foo.go', 1, 1, 'go', '{}', '[0.5]', 12345, 'foo.go::package')`)
+	if err != nil {
+		t.Fatalf("insert chunk: %v", err)
+	}
+
+	hash, err := store.GetSourceHash(ctx, "foo.go")
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash != "" {
+		t.Errorf("GetSourceHash() = %q, want empty string for default", hash)
+	}
+}
+
+func TestGetSourceHashImplementsInterface(t *testing.T) {
+	store := newTestStore(t)
+	// Compile-time check that *SQLiteStore satisfies sourceHashChecker.
+	var _ sourceHashChecker = store
+}
