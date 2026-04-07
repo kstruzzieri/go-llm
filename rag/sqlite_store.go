@@ -16,8 +16,10 @@ import (
 
 // Compile-time interface satisfaction checks.
 var (
-	_ VectorStore = (*SQLiteStore)(nil)
-	_ Exportable  = (*SQLiteStore)(nil)
+	_ VectorStore       = (*SQLiteStore)(nil)
+	_ Exportable        = (*SQLiteStore)(nil)
+	_ sourceChunkLoader = (*SQLiteStore)(nil)
+	_ sourceHashChecker = (*SQLiteStore)(nil)
 )
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
@@ -82,7 +84,7 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 	return nil
 }
 
-func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64) error {
+func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash string) error {
 	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
 	// INSERT OR REPLACE deletes the old row and inserts a new one, but
 	// SQLite does not fire DELETE triggers for rows removed by REPLACE
@@ -91,8 +93,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 	// modifies the row in place (preserving its rowid) and fires the
 	// AFTER UPDATE trigger, which correctly maintains FTS5.
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 				content = excluded.content,
 				source = excluded.source,
@@ -102,7 +104,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 				metadata = excluded.metadata,
 				embedding = excluded.embedding,
 				indexed_at = excluded.indexed_at,
-				stable_key = excluded.stable_key`)
+				stable_key = excluded.stable_key,
+				source_content_hash = excluded.source_content_hash`)
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}
@@ -119,7 +122,7 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 			return fmt.Errorf("rag: marshal embedding: %w", err)
 		}
 		if _, err := stmt.ExecContext(ctx, chunk.ID, chunk.Content, chunk.Source,
-			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey); err != nil {
+			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey, sourceContentHash); err != nil {
 			return fmt.Errorf("rag: insert chunk %q: %w", chunk.ID, err)
 		}
 	}
@@ -141,7 +144,7 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := s.insertChunksTx(ctx, tx, chunks, embeddings); err != nil {
+	if err := s.insertChunksTx(ctx, tx, chunks, embeddings, ""); err != nil {
 		return err
 	}
 
@@ -154,6 +157,13 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 // ReplaceSource atomically replaces all chunks for a source path.
 // If insertion fails, the delete is rolled back and existing data is preserved.
 func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64) error {
+	return s.ReplaceSourceWithHash(ctx, source, chunks, embeddings, "")
+}
+
+// ReplaceSourceWithHash atomically replaces all chunks for a source path
+// and stores the given source content hash on each chunk for fast
+// file-level change detection during subsequent incremental indexes.
+func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash string) error {
 	if err := validateStoreInputs(chunks, embeddings); err != nil {
 		return fmt.Errorf("rag: replace source %q: %w", source, err)
 	}
@@ -174,7 +184,7 @@ func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks [
 	}
 
 	if len(chunks) > 0 {
-		if err := s.insertChunksTx(ctx, tx, chunks, embeddings); err != nil {
+		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, sourceHash); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
 	}
@@ -241,6 +251,68 @@ func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
 		return fmt.Errorf("rag: delete by source %q: %w", source, err)
 	}
 	return nil
+}
+
+// GetBySource returns all chunks for a given source path, ordered by start_line,
+// with their embeddings. This supports incremental indexing by allowing comparison
+// of existing chunks against newly generated ones.
+func (s *SQLiteStore) GetBySource(ctx context.Context, source string) ([]ChunkWithEmbedding, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, content, source, start_line, end_line, language,
+		        metadata, embedding, stable_key
+		 FROM chunks WHERE source = ?
+		 ORDER BY start_line`, source)
+	if err != nil {
+		return nil, fmt.Errorf("rag: get by source %q: %w", source, err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var results []ChunkWithEmbedding
+	for rows.Next() {
+		var chunk Chunk
+		var metaJSON, embJSON string
+		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
+			&chunk.StartLine, &chunk.EndLine, &chunk.Language,
+			&metaJSON, &embJSON, &chunk.StableKey); err != nil {
+			return nil, fmt.Errorf("rag: scan chunk for source %q: %w", source, err)
+		}
+
+		chunk.Metadata = make(map[string]string)
+		if err := json.Unmarshal([]byte(metaJSON), &chunk.Metadata); err != nil {
+			return nil, fmt.Errorf("rag: unmarshal metadata for chunk %q: %w", chunk.ID, err)
+		}
+
+		var embedding []float64
+		if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
+			return nil, fmt.Errorf("rag: unmarshal embedding for chunk %q: %w", chunk.ID, err)
+		}
+
+		results = append(results, ChunkWithEmbedding{
+			Chunk:     chunk,
+			Embedding: embedding,
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rag: iterate chunks for source %q: %w", source, err)
+	}
+	return results, nil
+}
+
+// GetSourceHash returns the stored content hash for a source path, or empty
+// string if the source has no chunks or no hash is stored. This enables fast
+// file-level change detection during incremental indexing.
+func (s *SQLiteStore) GetSourceHash(ctx context.Context, source string) (string, error) {
+	var hash string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT source_content_hash FROM chunks WHERE source = ? LIMIT 1`,
+		source).Scan(&hash)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", fmt.Errorf("rag: get source hash for %q: %w", source, err)
+	}
+	return hash, nil
 }
 
 // Stats returns index statistics.
