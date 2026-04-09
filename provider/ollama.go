@@ -471,7 +471,16 @@ func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedRes
 		if res.Err != nil {
 			return nil, res.Err
 		}
-		return res.Val.(*EmbedResponse), nil
+		// Defensive copy: singleflight shares the result pointer among all
+		// callers. Copy the response so consumers cannot corrupt shared state.
+		shared := res.Val.(*EmbedResponse)
+		copied := *shared
+		copied.Embeddings = make([][]float64, len(shared.Embeddings))
+		for i, emb := range shared.Embeddings {
+			copied.Embeddings[i] = make([]float64, len(emb))
+			copy(copied.Embeddings[i], emb)
+		}
+		return &copied, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("provider: ollama: embed: %w", ctx.Err())
 	}
@@ -547,9 +556,10 @@ func toOllamaOptions(opts ModelOptions) *ollama.ModelOptions {
 		o.RepeatPenalty = *opts.RepeatPenalty
 	}
 
-	// Return nil if everything is zero to match omitempty.
-	if o.Temperature == 0 && o.TopP == 0 && o.NumPredict == 0 &&
-		o.NumCtx == 0 && len(o.Stop) == 0 && o.RepeatPenalty == 0 {
+	// Return nil only if no options were explicitly set.
+	// Check the source pointer fields to distinguish "not set" from "set to zero".
+	if opts.Temperature == nil && opts.TopP == nil && opts.RepeatPenalty == nil &&
+		opts.NumPredict == 0 && opts.NumCtx == 0 && len(opts.Stop) == 0 {
 		return nil
 	}
 	return o

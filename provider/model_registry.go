@@ -118,15 +118,21 @@ func (r *ModelRegistry) LookupAny(ctx context.Context, model string) ([]*ModelPr
 }
 
 // All returns merged profiles for every model across every registered
-// provider. Errors for individual models are skipped silently to provide
-// best-effort results even when some providers are unhealthy.
+// provider. Individual lookup errors are skipped to provide best-effort
+// results, but if ALL providers fail, an error is returned.
 func (r *ModelRegistry) All(ctx context.Context) ([]*ModelProfile, error) {
 	allProviders := r.providers.All()
+	if len(allProviders) == 0 {
+		return nil, nil
+	}
+
 	var profiles []*ModelProfile
+	var providerErrors int
 
 	for _, p := range allProviders {
 		models, err := p.Models(ctx)
 		if err != nil {
+			providerErrors++
 			continue
 		}
 		for _, mi := range models {
@@ -137,6 +143,10 @@ func (r *ModelRegistry) All(ctx context.Context) ([]*ModelProfile, error) {
 			}
 			profiles = append(profiles, profile)
 		}
+	}
+
+	if len(profiles) == 0 && providerErrors == len(allProviders) {
+		return nil, fmt.Errorf("provider: model registry: all %d providers failed", providerErrors)
 	}
 
 	return profiles, nil
