@@ -486,16 +486,24 @@ func TestOllamaProvider_ChatStream_GracefulCancellation(t *testing.T) {
 
 	// Should have at least the content chunk and the partial result.
 	gotPartial := false
+	contentDeltas := ""
 	for _, r := range received {
+		contentDeltas += r.Content
 		if r.Partial && r.Done {
 			gotPartial = true
-			if r.Content != "partial content" {
-				t.Errorf("partial Content = %q, want %q", r.Content, "partial content")
+			if r.Content != "" {
+				t.Errorf("partial Content = %q, want empty delta-preserving partial chunk", r.Content)
+			}
+			if r.Thinking != "" {
+				t.Errorf("partial Thinking = %q, want empty delta-preserving partial chunk", r.Thinking)
 			}
 		}
 	}
 	if !gotPartial {
 		t.Error("expected a partial result chunk after cancellation")
+	}
+	if contentDeltas != "partial content" {
+		t.Errorf("combined content deltas = %q, want %q", contentDeltas, "partial content")
 	}
 }
 
@@ -931,16 +939,21 @@ func TestOllamaProvider_GenerateStream_GracefulCancellation(t *testing.T) {
 	}
 
 	gotPartial := false
+	responseDeltas := ""
 	for _, r := range received {
+		responseDeltas += r.Response
 		if r.Partial && r.Done {
 			gotPartial = true
-			if r.Response != "partial output" {
-				t.Errorf("partial Response = %q, want %q", r.Response, "partial output")
+			if r.Response != "" {
+				t.Errorf("partial Response = %q, want empty delta-preserving partial chunk", r.Response)
 			}
 		}
 	}
 	if !gotPartial {
 		t.Error("expected a partial result chunk after cancellation")
+	}
+	if responseDeltas != "partial output" {
+		t.Errorf("combined response deltas = %q, want %q", responseDeltas, "partial output")
 	}
 }
 

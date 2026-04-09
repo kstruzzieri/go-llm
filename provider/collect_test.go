@@ -88,6 +88,30 @@ func TestCollect_Partial(t *testing.T) {
 	}
 }
 
+func TestCollect_PartialMetadataOnly(t *testing.T) {
+	inner := func(resp ChatResponse) error { return nil }
+	wrapped, getFinal := Collect(inner)
+
+	responses := []ChatResponse{
+		{Content: "Hello ", Done: false},
+		{Content: "world", Done: false},
+		{Done: true, Partial: true},
+	}
+	for _, resp := range responses {
+		if err := wrapped(resp); err != nil {
+			t.Fatalf("wrapped() error: %v", err)
+		}
+	}
+
+	final := getFinal()
+	if final.Content != "Hello world" {
+		t.Errorf("final.Content = %q, want %q", final.Content, "Hello world")
+	}
+	if !final.Partial {
+		t.Error("final.Partial should be true")
+	}
+}
+
 func TestCollect_NilInner(t *testing.T) {
 	wrapped, getFinal := Collect(nil)
 

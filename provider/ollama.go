@@ -169,9 +169,10 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 // ChatStream sends a streaming chat request. Each chunk is processed through
 // a per-request ThinkParser to separate reasoning from content in real time.
 //
-// If the context is cancelled after at least one chunk has been received, a
-// final synthetic chunk with Partial=true and Done=true is emitted containing
-// accumulated content so far, then the context error is returned.
+// If the context is cancelled after at least one chunk has been received, the
+// parser is flushed and a final synthetic chunk with Partial=true and Done=true
+// is emitted without replaying prior content deltas, then the context error is
+// returned.
 func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn func(ChatResponse) error) error {
 	if fn == nil {
 		return fmt.Errorf("provider: ollama: chat stream: callback function is required")
@@ -185,8 +186,6 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 	var lastToolCalls []ToolCall
 	var lastUsage Usage
 	var lastLatency LatencyInfo
-	var thinkingBuf strings.Builder
-	var contentBuf strings.Builder
 	chunksReceived := 0
 	var callbackErr error
 	lastDone := false
@@ -195,7 +194,6 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 		Mode: p.thinkMode,
 		Tags: p.thinkTags,
 		OnThinking: func(s string) error {
-			thinkingBuf.WriteString(s)
 			resp := ChatResponse{
 				Model:    lastModel,
 				Provider: "ollama",
@@ -208,7 +206,6 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 			return nil
 		},
 		OnContent: func(s string) error {
-			contentBuf.WriteString(s)
 			resp := ChatResponse{
 				Model:    lastModel,
 				Provider: "ollama",
@@ -286,11 +283,14 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 		// Flush any remaining parser state.
 		_ = parser.Flush()
 
+		model := lastModel
+		if model == "" {
+			model = req.Model
+		}
+
 		partial := ChatResponse{
-			Model:     req.Model,
+			Model:     model,
 			Provider:  "ollama",
-			Content:   contentBuf.String(),
-			Thinking:  thinkingBuf.String(),
 			ToolCalls: lastToolCalls,
 			Done:      true,
 			Partial:   true,
@@ -350,8 +350,8 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (*Ge
 // forwarded to fn with the provider-level GenerateResponse type.
 //
 // If the context is cancelled after at least one chunk has been received, a
-// final synthetic chunk with Partial=true and Done=true is emitted containing
-// the accumulated response so far, then the context error is returned.
+// final synthetic chunk with Partial=true and Done=true is emitted without
+// replaying prior response deltas, then the context error is returned.
 func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest, fn func(GenerateResponse) error) error {
 	if fn == nil {
 		return fmt.Errorf("provider: ollama: generate stream: callback function is required")
@@ -360,7 +360,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest
 	oReq := toOllamaGenerateRequest(req)
 	oReq.Stream = true
 
-	var accumulated strings.Builder
+	var lastModel string
 	var lastUsage Usage
 	var lastLatency LatencyInfo
 	chunksReceived := 0
@@ -369,7 +369,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest
 
 	streamErr := p.client.GenerateStream(ctx, oReq, func(oResp ollama.GenerateResponse) error {
 		chunksReceived++
-		accumulated.WriteString(oResp.Response)
+		lastModel = oResp.Model
 
 		if oResp.Done {
 			lastDone = true
@@ -399,10 +399,13 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest
 	// Graceful cancellation: if context was cancelled after receiving chunks,
 	// emit a partial result so consumers can use what was generated.
 	if streamErr != nil && ctx.Err() != nil && chunksReceived > 0 && !lastDone {
+		model := lastModel
+		if model == "" {
+			model = req.Model
+		}
 		partial := GenerateResponse{
-			Model:    req.Model,
+			Model:    model,
 			Provider: "ollama",
-			Response: accumulated.String(),
 			Done:     true,
 			Partial:  true,
 			Usage:    lastUsage,
