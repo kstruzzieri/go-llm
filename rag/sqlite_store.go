@@ -315,6 +315,18 @@ func (s *SQLiteStore) GetSourceHash(ctx context.Context, source string) (string,
 	return hash, nil
 }
 
+// UpdateSourceHash updates the source_content_hash for all chunks belonging
+// to the given source. Used to backfill the hash on databases migrated from
+// V3 where chunks exist but the hash column is empty.
+func (s *SQLiteStore) UpdateSourceHash(ctx context.Context, source, hash string) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE chunks SET source_content_hash = ? WHERE source = ?`, hash, source)
+	if err != nil {
+		return fmt.Errorf("rag: update source hash for %q: %w", source, err)
+	}
+	return nil
+}
+
 // Stats returns index statistics.
 func (s *SQLiteStore) Stats(ctx context.Context) (StoreStats, error) {
 	var stats StoreStats

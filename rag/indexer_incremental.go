@@ -151,6 +151,13 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 
 	// Short circuit: nothing changed.
 	if len(diff.modified) == 0 && len(diff.added) == 0 && len(diff.deletedIDs) == 0 {
+		// Persist the source hash if it wasn't stored yet (e.g. migrated V3 database).
+		// Without this, the file-level fast path never activates for pre-existing data.
+		if checker, ok := idx.store.(sourceHashChecker); ok {
+			if stored, _ := checker.GetSourceHash(ctx, path); stored != sourceHash {
+				idx.updateSourceHash(ctx, path, sourceHash)
+			}
+		}
 		return nil
 	}
 
@@ -195,4 +202,16 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 	return nil
+}
+
+// updateSourceHash updates the source_content_hash for all chunks of a source
+// without re-inserting them. Used when chunks are unchanged but the hash was
+// not previously stored (e.g. databases migrated from V3).
+func (idx *Indexer) updateSourceHash(ctx context.Context, source, hash string) {
+	type hashUpdater interface {
+		UpdateSourceHash(ctx context.Context, source, hash string) error
+	}
+	if u, ok := idx.store.(hashUpdater); ok {
+		_ = u.UpdateSourceHash(ctx, source, hash)
+	}
 }
