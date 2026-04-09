@@ -653,3 +653,265 @@ func TestIndexFileIncremental_EmptyFile(t *testing.T) {
 		t.Errorf("expected 0 chunks after indexing empty file, got %d", statsAfter.TotalChunks)
 	}
 }
+
+// --- Source hash fast path tests ---
+
+// countingChunker wraps a Chunker and counts how many times Chunk is called.
+type countingChunker struct {
+	inner   Chunker
+	counter *atomic.Int32
+}
+
+func (c *countingChunker) Chunk(source string, content string) ([]Chunk, error) {
+	c.counter.Add(1)
+	return c.inner.Chunk(source, content)
+}
+
+// countingGetBySourceStore wraps a *SQLiteStore and counts GetBySource calls.
+type countingGetBySourceStore struct {
+	*SQLiteStore
+	getBySourceCount *atomic.Int32
+}
+
+func (s *countingGetBySourceStore) GetBySource(ctx context.Context, source string) ([]ChunkWithEmbedding, error) {
+	s.getBySourceCount.Add(1)
+	return s.SQLiteStore.GetBySource(ctx, source)
+}
+
+func TestIndexFileIncremental_HashSkip(t *testing.T) {
+	// This test proves the source-hash fast path exists and works.
+	// On the second call with unchanged content:
+	//   - 0 embed calls (no embedding work)
+	//   - 0 Chunk() calls (no chunking work)
+	//   - 0 GetBySource calls (no store lookup for old chunks)
+	// This distinguishes the fast path from the incremental "all chunks unchanged"
+	// path, which would still chunk and call GetBySource.
+
+	var embedCount atomic.Int32
+	srv := newBatchCountingEmbedServer(4, &embedCount)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+
+	innerStore, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = innerStore.Close() }()
+
+	var getBySourceCount atomic.Int32
+	store := &countingGetBySourceStore{
+		SQLiteStore:      innerStore,
+		getBySourceCount: &getBySourceCount,
+	}
+
+	var chunkCount atomic.Int32
+	chunker := &countingChunker{
+		inner:   NewCodeChunker(),
+		counter: &chunkCount,
+	}
+
+	tmpDir := t.TempDir()
+	goFile := filepath.Join(tmpDir, "main.go")
+	content := "package main\n\nfunc Hello() {\n\treturn 1\n}\n"
+	if err := os.WriteFile(goFile, []byte(content), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	idx := NewIndexer(client, store,
+		WithEmbeddingModel("test-embed"),
+		WithWorkspaceRoot(tmpDir),
+		WithChunker(chunker),
+	)
+
+	// First call: full index (stores source_content_hash).
+	if err := idx.IndexFileIncremental(context.Background(), goFile); err != nil {
+		t.Fatalf("initial IndexFileIncremental() error: %v", err)
+	}
+
+	// Verify hash was stored.
+	hash, err := innerStore.GetSourceHash(context.Background(), goFile)
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("expected non-empty source_content_hash after indexing")
+	}
+
+	// Reset all counters.
+	embedCount.Store(0)
+	chunkCount.Store(0)
+	getBySourceCount.Store(0)
+
+	// Second call: same content -- should hit hash fast path.
+	if err := idx.IndexFileIncremental(context.Background(), goFile); err != nil {
+		t.Fatalf("second IndexFileIncremental() error: %v", err)
+	}
+
+	// Verify the fast path: no embedding, no chunking, no GetBySource.
+	if got := embedCount.Load(); got != 0 {
+		t.Errorf("expected 0 embed calls for hash-matched file, got %d", got)
+	}
+	if got := chunkCount.Load(); got != 0 {
+		t.Errorf("expected 0 Chunk() calls for hash-matched file, got %d", got)
+	}
+	if got := getBySourceCount.Load(); got != 0 {
+		t.Errorf("expected 0 GetBySource calls for hash-matched file, got %d", got)
+	}
+}
+
+func TestIndexFileIncremental_HashMismatch(t *testing.T) {
+	// After editing a file, the source hash should differ and the incremental
+	// path should run (chunking + selective embedding).
+
+	var embedCount atomic.Int32
+	srv := newBatchCountingEmbedServer(4, &embedCount)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	var chunkCount atomic.Int32
+	chunker := &countingChunker{
+		inner:   NewCodeChunker(),
+		counter: &chunkCount,
+	}
+
+	tmpDir := t.TempDir()
+	goFile := filepath.Join(tmpDir, "main.go")
+
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {\n\treturn 1\n}\n"), 0644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	idx := NewIndexer(client, store,
+		WithEmbeddingModel("test-embed"),
+		WithWorkspaceRoot(tmpDir),
+		WithChunker(chunker),
+	)
+
+	// Full index.
+	if err := idx.IndexFileIncremental(context.Background(), goFile); err != nil {
+		t.Fatalf("initial IndexFileIncremental() error: %v", err)
+	}
+
+	// Verify the stored hash matches initial content.
+	hashBefore, err := store.GetSourceHash(context.Background(), goFile)
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hashBefore == "" {
+		t.Fatal("expected non-empty hash after initial index")
+	}
+
+	// Reset counters.
+	embedCount.Store(0)
+	chunkCount.Store(0)
+
+	// Edit the file.
+	if err := os.WriteFile(goFile, []byte("package main\n\nfunc Hello() {\n\treturn 42\n}\n"), 0644); err != nil {
+		t.Fatalf("write edited file: %v", err)
+	}
+
+	// Incremental index with changed content.
+	if err := idx.IndexFileIncremental(context.Background(), goFile); err != nil {
+		t.Fatalf("IndexFileIncremental() after edit error: %v", err)
+	}
+
+	// The hash should have changed.
+	hashAfter, err := store.GetSourceHash(context.Background(), goFile)
+	if err != nil {
+		t.Fatalf("GetSourceHash() after edit error: %v", err)
+	}
+	if hashAfter == hashBefore {
+		t.Error("expected source hash to change after file edit")
+	}
+	if hashAfter == "" {
+		t.Error("expected non-empty source hash after re-index")
+	}
+
+	// Should have chunked (hash mismatch means no fast path).
+	if got := chunkCount.Load(); got == 0 {
+		t.Error("expected at least 1 Chunk() call for changed file")
+	}
+
+	// Should have embedded changed chunk(s).
+	if got := embedCount.Load(); got == 0 {
+		t.Error("expected embed calls for changed file")
+	}
+}
+
+func TestIndexFile_StoresHash(t *testing.T) {
+	// Verify that a full IndexFile (not incremental) stores the content hash
+	// so that subsequent IndexFileIncremental calls can use the fast path.
+
+	var embedCount atomic.Int32
+	srv := newBatchCountingEmbedServer(4, &embedCount)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	var chunkCount atomic.Int32
+	chunker := &countingChunker{
+		inner:   NewCodeChunker(),
+		counter: &chunkCount,
+	}
+
+	tmpDir := t.TempDir()
+	goFile := filepath.Join(tmpDir, "main.go")
+	content := "package main\n\nfunc Hello() {\n\treturn 1\n}\n"
+	if err := os.WriteFile(goFile, []byte(content), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	idx := NewIndexer(client, store,
+		WithEmbeddingModel("test-embed"),
+		WithWorkspaceRoot(tmpDir),
+		WithChunker(chunker),
+	)
+
+	// Full IndexFile (not incremental).
+	if err := idx.IndexFile(context.Background(), goFile); err != nil {
+		t.Fatalf("IndexFile() error: %v", err)
+	}
+
+	// Verify hash was stored.
+	hash, err := store.GetSourceHash(context.Background(), goFile)
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hash == "" {
+		t.Fatal("expected non-empty source_content_hash after IndexFile")
+	}
+
+	// Verify the hash matches the expected value.
+	expectedHash := contentHash(content)
+	if hash != expectedHash {
+		t.Errorf("stored hash = %q, want %q", hash, expectedHash)
+	}
+
+	// Reset counters.
+	embedCount.Store(0)
+	chunkCount.Store(0)
+
+	// Now IndexFileIncremental should skip via hash fast path.
+	if err := idx.IndexFileIncremental(context.Background(), goFile); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	if got := embedCount.Load(); got != 0 {
+		t.Errorf("expected 0 embed calls after hash match, got %d", got)
+	}
+	if got := chunkCount.Load(); got != 0 {
+		t.Errorf("expected 0 Chunk() calls after hash match, got %d", got)
+	}
+}

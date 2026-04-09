@@ -59,6 +59,16 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 		return nil
 	}
 
+	// Fast path: if the file content hash matches the stored hash, skip entirely.
+	// This avoids chunking, GetBySource, and all comparison work.
+	fileHash := contentHash(content)
+	if checker, ok := idx.store.(sourceHashChecker); ok {
+		storedHash, hashErr := checker.GetSourceHash(ctx, path)
+		if hashErr == nil && storedHash != "" && storedHash == fileHash {
+			return nil
+		}
+	}
+
 	// Step 1: Chunk the file (always needed -- chunking is cheap).
 	chunks, err := idx.chunker.Chunk(path, content)
 	if err != nil {
@@ -85,7 +95,7 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 
 	// Try incremental path.
 	if idx.canDoIncremental(chunks) {
-		err := idx.indexIncremental(ctx, path, content, chunks)
+		err := idx.indexIncremental(ctx, path, chunks, fileHash)
 		if err == nil {
 			return nil
 		}
@@ -108,8 +118,7 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
 	}
 
-	sourceHash := contentHash(content)
-	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
+	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, fileHash); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 	return nil
@@ -117,11 +126,12 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 
 // indexIncremental is the internal incremental indexing path.
 // It assumes preconditions have been checked (store supports GetBySource,
-// workspace root is set, StableKeys are computed).
+// workspace root is set, StableKeys are computed). The sourceHash is the
+// pre-computed content hash that will be stored alongside the new chunks.
 //
 // Returns a non-nil error on any failure. The caller falls back to full
 // re-indexing when this returns an error.
-func (idx *Indexer) indexIncremental(ctx context.Context, path string, content string, newChunks []Chunk) error {
+func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks []Chunk, sourceHash string) error {
 	loader, ok := idx.store.(sourceChunkLoader)
 	if !ok {
 		return fmt.Errorf("rag: store does not support GetBySource")
@@ -181,7 +191,6 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, content s
 	}
 
 	// Atomically replace source with the full new chunk set.
-	sourceHash := contentHash(content)
 	if err := idx.replaceSourceWithHash(ctx, path, newChunks, finalEmbeddings, sourceHash); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
