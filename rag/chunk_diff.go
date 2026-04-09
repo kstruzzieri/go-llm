@@ -60,14 +60,12 @@ func diffChunks(oldChunks []ChunkWithEmbedding, newChunks []Chunk) chunkDiff {
 	// Also track which old chunk IDs made it into the map so we can
 	// correctly identify duplicates as deleted.
 	oldByKey := make(map[string]ChunkWithEmbedding, len(oldChunks))
-	oldIDInMap := make(map[string]bool, len(oldChunks))
 	for _, old := range oldChunks {
 		if old.Chunk.StableKey == "" {
 			continue
 		}
 		if _, exists := oldByKey[old.Chunk.StableKey]; !exists {
 			oldByKey[old.Chunk.StableKey] = old
-			oldIDInMap[old.Chunk.ID] = true
 		}
 	}
 

@@ -149,16 +149,22 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 	// Diff old vs. new.
 	diff := diffChunks(oldChunks, newChunks)
 
-	// Short circuit: nothing changed.
+	// Short circuit: nothing changed content-wise.
+	// Even though chunk content is unchanged, metadata (StartLine/EndLine) may
+	// have shifted if lines were added/removed between functions. We still need
+	// to write the updated chunks to keep line references accurate.
 	if len(diff.modified) == 0 && len(diff.added) == 0 && len(diff.deletedIDs) == 0 {
-		// Persist the source hash if it wasn't stored yet (e.g. migrated V3 database).
-		// Without this, the file-level fast path never activates for pre-existing data.
-		if checker, ok := idx.store.(sourceHashChecker); ok {
-			if stored, _ := checker.GetSourceHash(ctx, path); stored != sourceHash {
-				idx.updateSourceHash(ctx, path, sourceHash)
+		// Reuse all existing embeddings — no embed calls needed.
+		finalEmbeddings := make([][]float64, len(newChunks))
+		for i, nc := range newChunks {
+			for _, uc := range diff.unchanged {
+				if uc.chunk.StableKey == nc.StableKey {
+					finalEmbeddings[i] = uc.embedding
+					break
+				}
 			}
 		}
-		return nil
+		return idx.replaceSourceWithHash(ctx, path, newChunks, finalEmbeddings, sourceHash)
 	}
 
 	// Build a map from StableKey -> cached embedding for unchanged chunks.
@@ -192,6 +198,9 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 		if emb, cached := cachedEmbeddings[nc.StableKey]; cached {
 			finalEmbeddings[i] = emb
 		} else {
+			if freshIdx >= len(freshEmbeddings) {
+				return fmt.Errorf("rag: incremental index %q: embedding count mismatch (expected %d, got %d)", path, len(textsToEmbed), len(freshEmbeddings))
+			}
 			finalEmbeddings[i] = freshEmbeddings[freshIdx]
 			freshIdx++
 		}
