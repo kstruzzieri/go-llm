@@ -149,10 +149,6 @@ func (p *ThinkParser) processAutoSniff(chunk string) error {
 	if p.hasPartialTagPrefix(p.sniffBuf, p.tags.Open) {
 		return nil
 	}
-	// If we've accumulated enough with no tag and no partial match, resolve.
-	if len(p.sniffBuf) >= sniffLimit {
-		return p.resolveAuto()
-	}
 	return nil
 }
 

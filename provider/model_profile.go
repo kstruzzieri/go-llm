@@ -140,11 +140,11 @@ type ModelProfile struct {
 // request a ranked list of provider-qualified candidates.
 type RecommendOpts struct {
 	// RequestedModel is an optional canonical selector or unqualified model name.
-	// When set, Recommend narrows its search to models matching this name.
+	// Reserved for Phase 2 (Router) — not yet used by Recommend.
 	RequestedModel string
 
 	// UseCase describes the intended use: "chat", "fim", "embedding",
-	// "reasoning", "code-review". Used for capability inference and ranking.
+	// "reasoning", "code-review". Reserved for Phase 2 — not yet used by Recommend.
 	UseCase string
 
 	// AvailableRAM is the amount of RAM (in GB) the caller can allocate.
@@ -156,11 +156,11 @@ type RecommendOpts struct {
 	ContextSize int
 
 	// PreferWarm, when true, biases ranking toward models that are already
-	// loaded in the provider's memory.
+	// loaded in the provider's memory. Reserved for Phase 2 (WarmthTracker).
 	PreferWarm bool
 
 	// PreferredProviders is a soft preference for specific backends.
-	// Models from these providers are ranked higher, all else being equal.
+	// Reserved for Phase 2 — not yet used by Recommend.
 	PreferredProviders []string
 
 	// RequiredCaps is a bitmask of capabilities the model must support.

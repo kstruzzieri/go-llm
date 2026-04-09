@@ -81,7 +81,7 @@ func (p *OllamaProvider) Name() string {
 
 // Capabilities returns the bitmask of features the Ollama backend supports.
 func (p *OllamaProvider) Capabilities() Capability {
-	return CapChat | CapGenerate | CapEmbed | CapStream | CapToolCall
+	return CapChat | CapGenerate | CapEmbed | CapStream | CapToolCall | CapThinking
 }
 
 // Health checks whether the Ollama server is reachable and responsive.
@@ -303,10 +303,8 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 	}
 
 	if streamErr != nil {
-		// If the error originated from the user callback, return it directly
-		// to avoid double-wrapping.
 		if callbackErr != nil {
-			return fmt.Errorf("provider: ollama: chat stream: %w", streamErr)
+			return callbackErr // already has caller context; don't re-wrap
 		}
 		return fmt.Errorf("provider: ollama: chat stream: %w", streamErr)
 	}
@@ -418,7 +416,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest
 
 	if streamErr != nil {
 		if callbackErr != nil {
-			return fmt.Errorf("provider: ollama: generate stream: %w", streamErr)
+			return callbackErr // already has caller context; don't re-wrap
 		}
 		return fmt.Errorf("provider: ollama: generate stream: %w", streamErr)
 	}
@@ -443,7 +441,10 @@ func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedRes
 	// Build singleflight key from model + hash of all inputs.
 	key := embedKey(req.Model, req.Input)
 
-	result, err, _ := p.embedGroup.Do(key, func() (any, error) {
+	// Use DoChan so each caller respects its own context deadline.
+	// singleflight.Do would block until the winner's request completes,
+	// ignoring other callers' cancelled contexts.
+	ch := p.embedGroup.DoChan(key, func() (any, error) {
 		embeddings := make([][]float64, len(req.Input))
 		for i, text := range req.Input {
 			if ctx.Err() != nil {
@@ -465,10 +466,15 @@ func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedRes
 		}, nil
 	})
 
-	if err != nil {
-		return nil, err
+	select {
+	case res := <-ch:
+		if res.Err != nil {
+			return nil, res.Err
+		}
+		return res.Val.(*EmbedResponse), nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("provider: ollama: embed: %w", ctx.Err())
 	}
-	return result.(*EmbedResponse), nil
 }
 
 // embedKey builds a singleflight dedup key from the model name and input texts.
