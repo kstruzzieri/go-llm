@@ -15,6 +15,10 @@ type codeChunker struct {
 	language string
 }
 
+func (c *codeChunker) sourceSignature() string {
+	return fmt.Sprintf("%T:max=%d:overlap=%d:language=%s", c, c.maxSize, c.overlap, c.language)
+}
+
 // NewCodeChunker returns a chunker that respects code boundaries.
 // It splits on function/method/class boundaries rather than arbitrary line counts.
 // Falls back to sliding window for non-code files.

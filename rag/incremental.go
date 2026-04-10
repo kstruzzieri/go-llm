@@ -28,6 +28,13 @@ type sourceHashChecker interface {
 	GetSourceHash(ctx context.Context, source string) (string, error)
 }
 
+// chunkerSignatureProvider lets built-in chunkers describe the configuration
+// that affects chunk boundaries. Configuration changes must invalidate the
+// source signature even when the concrete chunker type stays the same.
+type chunkerSignatureProvider interface {
+	sourceSignature() string
+}
+
 // sourceSignatureVersion identifies the persisted source signature format.
 // Bump this when the index inputs change in a way that requires full re-embed.
 const sourceSignatureVersion = 1
@@ -68,12 +75,19 @@ func parseSourceSignature(raw string) (sourceSignature, bool) {
 	return sig, true
 }
 
+func chunkerSignature(chunker Chunker) string {
+	if sig, ok := chunker.(chunkerSignatureProvider); ok {
+		return sig.sourceSignature()
+	}
+	return fmt.Sprintf("%T", chunker)
+}
+
 func (idx *Indexer) currentSourceSignature(content string) sourceSignature {
 	return sourceSignature{
 		Version:          sourceSignatureVersion,
 		ContentHash:      contentHash(content),
 		EmbeddingModel:   idx.model,
-		Chunker:          fmt.Sprintf("%T", idx.chunker),
+		Chunker:          chunkerSignature(idx.chunker),
 		StableKeyVersion: stableKeyVersion,
 	}
 }

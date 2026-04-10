@@ -31,6 +31,10 @@ type SlidingWindowChunker struct {
 	overlap int
 }
 
+func (sw *SlidingWindowChunker) sourceSignature() string {
+	return fmt.Sprintf("%T:max=%d:overlap=%d", sw, sw.maxSize, sw.overlap)
+}
+
 // ChunkerOption configures a chunker.
 type ChunkerOption func(*codeChunker)
 

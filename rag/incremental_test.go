@@ -193,3 +193,23 @@ func TestMockSourceHashChecker(t *testing.T) {
 		t.Errorf("hash = %q, want empty string", hash)
 	}
 }
+
+func TestChunkerSignatureIncludesConfig(t *testing.T) {
+	swA, err := NewSlidingWindowChunker(64, 8)
+	if err != nil {
+		t.Fatalf("NewSlidingWindowChunker() error: %v", err)
+	}
+	swB, err := NewSlidingWindowChunker(96, 8)
+	if err != nil {
+		t.Fatalf("NewSlidingWindowChunker() error: %v", err)
+	}
+	if gotA, gotB := chunkerSignature(swA), chunkerSignature(swB); gotA == gotB {
+		t.Errorf("sliding window chunker signatures should differ when config changes: %q == %q", gotA, gotB)
+	}
+
+	codeA := NewCodeChunker(WithMaxChunkSize(128), WithOverlap(16), WithLanguage("go"))
+	codeB := NewCodeChunker(WithMaxChunkSize(256), WithOverlap(16), WithLanguage("go"))
+	if gotA, gotB := chunkerSignature(codeA), chunkerSignature(codeB); gotA == gotB {
+		t.Errorf("code chunker signatures should differ when config changes: %q == %q", gotA, gotB)
+	}
+}

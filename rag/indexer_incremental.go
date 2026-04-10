@@ -66,11 +66,17 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 	forceFullReembed := false
 	if checker, ok := idx.store.(sourceHashChecker); ok {
 		storedHash, hashErr := checker.GetSourceHash(ctx, path)
-		if hashErr == nil && storedHash != "" {
-			if storedHash == sourceHash {
-				return nil
+		if hashErr == nil {
+			if storedHash == "" {
+				// Rows migrated from earlier schema versions have no persisted
+				// provenance, so unchanged chunks cannot be safely reused.
+				forceFullReembed = true
+			} else {
+				if storedHash == sourceHash {
+					return nil
+				}
+				forceFullReembed = idx.requiresFullReembed(storedHash, currentSig)
 			}
-			forceFullReembed = idx.requiresFullReembed(storedHash, currentSig)
 		}
 	}
 
