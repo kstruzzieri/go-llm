@@ -915,3 +915,41 @@ func TestIndexFile_StoresHash(t *testing.T) {
 		t.Errorf("expected 0 Chunk() calls after hash match, got %d", got)
 	}
 }
+
+func TestIndexDirectory_WithIncremental(t *testing.T) {
+	var embedCount atomic.Int32
+	srv := newBatchCountingEmbedServer(4, &embedCount)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	idx := NewIndexer(client, store, WithEmbeddingModel("test-embed"))
+
+	tmpDir := t.TempDir()
+	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc Hello() {\n\treturn\n}\n"), 0644)
+
+	// First index: full.
+	if err := idx.IndexDirectory(context.Background(), tmpDir); err != nil {
+		t.Fatalf("first IndexDirectory() error: %v", err)
+	}
+	firstEmbedCount := embedCount.Load()
+	if firstEmbedCount == 0 {
+		t.Fatal("expected embed calls on first index")
+	}
+
+	// Reset counter.
+	embedCount.Store(0)
+
+	// Second index with WithIncremental: same content → no embeds.
+	if err := idx.IndexDirectory(context.Background(), tmpDir, WithIncremental()); err != nil {
+		t.Fatalf("incremental IndexDirectory() error: %v", err)
+	}
+	if got := embedCount.Load(); got != 0 {
+		t.Errorf("expected 0 embed calls with WithIncremental on unchanged files, got %d", got)
+	}
+}

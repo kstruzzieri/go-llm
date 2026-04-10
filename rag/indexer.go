@@ -183,6 +183,7 @@ type indexDirConfig struct {
 	extensions  map[string]bool
 	exclude     []string
 	concurrency int
+	incremental bool
 }
 
 // WithExtensions sets which file extensions to index (default: .go, .py, .ts, .tsx, .js, .md).
@@ -210,6 +211,17 @@ func WithExclude(patterns ...string) IndexDirOption {
 func WithConcurrency(n int) IndexDirOption {
 	return func(cfg *indexDirConfig) {
 		cfg.concurrency = n
+	}
+}
+
+// WithIncremental enables incremental indexing for IndexDirectory.
+// When enabled, each file uses IndexFileIncremental which diffs against
+// stored chunks and only embeds changed content. Files indexed for the
+// first time or whose store lacks incremental support transparently
+// fall back to full indexing.
+func WithIncremental() IndexDirOption {
+	return func(cfg *indexDirConfig) {
+		cfg.incremental = true
 	}
 }
 
@@ -334,9 +346,15 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			break
 		}
 		g.Go(func() error {
-			if err := idx.IndexFile(ctx, path); err != nil {
+			var indexErr error
+			if cfg.incremental {
+				indexErr = idx.IndexFileIncremental(ctx, path)
+			} else {
+				indexErr = idx.IndexFile(ctx, path)
+			}
+			if indexErr != nil {
 				mu.Lock()
-				indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, err))
+				indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, indexErr))
 				mu.Unlock()
 			}
 			return nil
