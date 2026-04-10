@@ -8,6 +8,11 @@ import (
 	"strings"
 )
 
+// stableKeyVersion identifies the current stable-key derivation scheme.
+// Bump this when ComputeStableKey semantics change so persisted source
+// signatures force a full re-index instead of reusing stale embeddings.
+const stableKeyVersion = "v1"
+
 // ComputeStableKey derives a logical identity key for a chunk that survives
 // re-indexes and benign line shifts. The key format depends on the metadata
 // available on the chunk:

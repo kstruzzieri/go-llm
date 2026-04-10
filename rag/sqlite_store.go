@@ -161,8 +161,8 @@ func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks [
 }
 
 // ReplaceSourceWithHash atomically replaces all chunks for a source path
-// and stores the given source content hash on each chunk for fast
-// file-level change detection during subsequent incremental indexes.
+// and stores the given source signature on each chunk for fast file-level
+// invalidation during subsequent incremental indexes.
 func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash string) error {
 	if err := validateStoreInputs(chunks, embeddings); err != nil {
 		return fmt.Errorf("rag: replace source %q: %w", source, err)
@@ -298,9 +298,9 @@ func (s *SQLiteStore) GetBySource(ctx context.Context, source string) ([]ChunkWi
 	return results, nil
 }
 
-// GetSourceHash returns the stored content hash for a source path, or empty
-// string if the source has no chunks or no hash is stored. This enables fast
-// file-level change detection during incremental indexing.
+// GetSourceHash returns the stored source signature for a source path, or
+// empty string if the source has no chunks or no signature is stored. This
+// enables fast file-level invalidation during incremental indexing.
 func (s *SQLiteStore) GetSourceHash(ctx context.Context, source string) (string, error) {
 	var hash string
 	err := s.db.QueryRowContext(ctx,

@@ -760,6 +760,86 @@ func TestIndexFileIncremental_HashSkip(t *testing.T) {
 	}
 }
 
+func TestIndexFileIncremental_HashInvalidatedByEmbeddingModel(t *testing.T) {
+	var embedCount atomic.Int32
+	srv := newBatchCountingEmbedServer(4, &embedCount)
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+
+	innerStore, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = innerStore.Close() }()
+
+	var getBySourceCount atomic.Int32
+	store := &countingGetBySourceStore{
+		SQLiteStore:      innerStore,
+		getBySourceCount: &getBySourceCount,
+	}
+
+	var chunkCount atomic.Int32
+	chunker := &countingChunker{
+		inner:   NewCodeChunker(),
+		counter: &chunkCount,
+	}
+
+	tmpDir := t.TempDir()
+	goFile := filepath.Join(tmpDir, "main.go")
+	content := "package main\n\nfunc Hello() {\n\treturn 1\n}\n"
+	if err := os.WriteFile(goFile, []byte(content), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	idx1 := NewIndexer(client, store,
+		WithEmbeddingModel("test-embed-a"),
+		WithWorkspaceRoot(tmpDir),
+		WithChunker(chunker),
+	)
+	if err := idx1.IndexFile(context.Background(), goFile); err != nil {
+		t.Fatalf("initial IndexFile() error: %v", err)
+	}
+
+	hashBefore, err := innerStore.GetSourceHash(context.Background(), goFile)
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hashBefore == "" {
+		t.Fatal("expected non-empty source hash after initial index")
+	}
+
+	embedCount.Store(0)
+	chunkCount.Store(0)
+	getBySourceCount.Store(0)
+
+	idx2 := NewIndexer(client, store,
+		WithEmbeddingModel("test-embed-b"),
+		WithWorkspaceRoot(tmpDir),
+		WithChunker(chunker),
+	)
+	if err := idx2.IndexFileIncremental(context.Background(), goFile); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	hashAfter, err := innerStore.GetSourceHash(context.Background(), goFile)
+	if err != nil {
+		t.Fatalf("GetSourceHash() after model change error: %v", err)
+	}
+	if hashAfter == hashBefore {
+		t.Error("expected source hash to change after embedding model change")
+	}
+	if got := embedCount.Load(); got == 0 {
+		t.Error("expected embed calls after embedding model change")
+	}
+	if got := chunkCount.Load(); got == 0 {
+		t.Error("expected chunking after embedding model change")
+	}
+	if got := getBySourceCount.Load(); got != 0 {
+		t.Errorf("expected 0 GetBySource calls on forced full re-embed, got %d", got)
+	}
+}
+
 func TestIndexFileIncremental_HashMismatch(t *testing.T) {
 	// After editing a file, the source hash should differ and the incremental
 	// path should run (chunking + selective embedding).
@@ -846,8 +926,9 @@ func TestIndexFileIncremental_HashMismatch(t *testing.T) {
 }
 
 func TestIndexFile_StoresHash(t *testing.T) {
-	// Verify that a full IndexFile (not incremental) stores the content hash
-	// so that subsequent IndexFileIncremental calls can use the fast path.
+	// Verify that a full IndexFile (not incremental) stores the source
+	// signature so that subsequent IndexFileIncremental calls can use the
+	// fast path only when the indexing inputs still match.
 
 	var embedCount atomic.Int32
 	srv := newBatchCountingEmbedServer(4, &embedCount)
@@ -893,8 +974,8 @@ func TestIndexFile_StoresHash(t *testing.T) {
 		t.Fatal("expected non-empty source_content_hash after IndexFile")
 	}
 
-	// Verify the hash matches the expected value.
-	expectedHash := contentHash(content)
+	// Verify the stored signature matches the expected value.
+	expectedHash := idx.currentSourceSignature(content).String()
 	if hash != expectedHash {
 		t.Errorf("stored hash = %q, want %q", hash, expectedHash)
 	}

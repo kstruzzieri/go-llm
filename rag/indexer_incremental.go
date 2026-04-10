@@ -59,13 +59,18 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 		return nil
 	}
 
-	// Fast path: if the file content hash matches the stored hash, skip entirely.
-	// This avoids chunking, GetBySource, and all comparison work.
-	fileHash := contentHash(content)
+	// Fast path: if the full source signature matches the stored signature, skip
+	// entirely. This avoids chunking, GetBySource, and all comparison work.
+	currentSig := idx.currentSourceSignature(content)
+	sourceHash := currentSig.String()
+	forceFullReembed := false
 	if checker, ok := idx.store.(sourceHashChecker); ok {
 		storedHash, hashErr := checker.GetSourceHash(ctx, path)
-		if hashErr == nil && storedHash != "" && storedHash == fileHash {
-			return nil
+		if hashErr == nil && storedHash != "" {
+			if storedHash == sourceHash {
+				return nil
+			}
+			forceFullReembed = idx.requiresFullReembed(storedHash, currentSig)
 		}
 	}
 
@@ -94,8 +99,8 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 	}
 
 	// Try incremental path.
-	if idx.canDoIncremental(chunks) {
-		err := idx.indexIncremental(ctx, path, chunks, fileHash)
+	if !forceFullReembed && idx.canDoIncremental(chunks) {
+		err := idx.indexIncremental(ctx, path, chunks, sourceHash)
 		if err == nil {
 			return nil
 		}
@@ -118,7 +123,7 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
 	}
 
-	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, fileHash); err != nil {
+	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 	return nil
@@ -127,7 +132,7 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 // indexIncremental is the internal incremental indexing path.
 // It assumes preconditions have been checked (store supports GetBySource,
 // workspace root is set, StableKeys are computed). The sourceHash is the
-// pre-computed content hash that will be stored alongside the new chunks.
+// pre-computed source signature that will be stored alongside the new chunks.
 //
 // Returns a non-nil error on any failure. The caller falls back to full
 // re-indexing when this returns an error.
@@ -214,8 +219,8 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 }
 
 // updateSourceHash updates the source_content_hash for all chunks of a source
-// without re-inserting them. Used when chunks are unchanged but the hash was
-// not previously stored (e.g. databases migrated from V3).
+// without re-inserting them. Used when chunks are unchanged but the signature
+// was not previously stored (e.g. databases migrated from V3).
 func (idx *Indexer) updateSourceHash(ctx context.Context, source, hash string) {
 	type hashUpdater interface {
 		UpdateSourceHash(ctx context.Context, source, hash string) error

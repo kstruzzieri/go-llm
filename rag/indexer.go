@@ -166,9 +166,9 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
 	}
 
-	// Step 3: Replace old chunks with new ones. Store the content hash so
-	// subsequent IndexFileIncremental calls can use the fast path.
-	sourceHash := contentHash(content)
+	// Step 3: Replace old chunks with new ones. Store the source signature so
+	// subsequent IndexFileIncremental calls can safely use the fast path.
+	sourceHash := idx.currentSourceSignature(content).String()
 	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
