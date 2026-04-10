@@ -234,17 +234,18 @@ func (p *ThinkParser) processChunk(chunk string) error {
 			} else if len(tag) <= len(p.tags.Open) && p.tags.Open[:len(tag)] == tag {
 				// Still a valid prefix of the open tag: keep accumulating.
 			} else {
-				// Mismatch: emit accumulated tagBuf as content.
-				buf := tag
+				// Mismatch: if the current byte is '<', let it restart tag
+				// detection instead of emitting it twice.
+				buf, restart := splitRestartTag(tag, ch)
 				p.tagBuf.Reset()
 				p.state = stateContent
-				p.contentTokens += estimateTokens(buf)
-				if err := p.OnContent(buf); err != nil {
-					return err
+				if buf != "" {
+					p.contentTokens += estimateTokens(buf)
+					if err := p.OnContent(buf); err != nil {
+						return err
+					}
 				}
-				// Re-process current character in stateContent.
-				// The character might be '<' starting a new potential tag.
-				if ch == '<' {
+				if restart {
 					p.state = stateTagOpen
 					p.tagBuf.WriteByte(ch)
 				}
@@ -286,15 +287,17 @@ func (p *ThinkParser) processChunk(chunk string) error {
 			} else if len(tag) <= len(p.tags.Close) && p.tags.Close[:len(tag)] == tag {
 				// Still a valid prefix of the close tag: keep accumulating.
 			} else {
-				// Mismatch: emit accumulated tagBuf as thinking.
-				buf := tag
+				// Mismatch: if the current byte is '<', let it restart close-tag
+				// detection instead of emitting it twice.
+				buf, restart := splitRestartTag(tag, ch)
 				p.tagBuf.Reset()
 				p.state = stateThinking
-				if err := p.emitThinking(buf); err != nil {
-					return err
+				if buf != "" {
+					if err := p.emitThinking(buf); err != nil {
+						return err
+					}
 				}
-				// Re-process current character in stateThinking.
-				if ch == '<' {
+				if restart {
 					p.state = stateTagClose
 					p.tagBuf.WriteByte(ch)
 				}
@@ -302,6 +305,13 @@ func (p *ThinkParser) processChunk(chunk string) error {
 		}
 	}
 	return nil
+}
+
+func splitRestartTag(tag string, ch byte) (emit string, restart bool) {
+	if ch == '<' && len(tag) > 0 {
+		return tag[:len(tag)-1], true
+	}
+	return tag, false
 }
 
 // emitThinking sends thinking content via the callback, applying budget constraints.

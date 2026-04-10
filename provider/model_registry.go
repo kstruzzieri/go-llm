@@ -221,6 +221,11 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	// Layer 2: Static catalog match.
 	parsed := ParseModelName(key.Model)
 	staticProfile := r.catalog.lookup(parsed.NormalizedFamily(), parsed.ParamSize)
+	if staticProfile == nil && parsed.ParamSize == "" && parsed.Tag != "" {
+		// Some catalog-only variants are keyed by tag (for example ":latest")
+		// rather than by parsed parameter size.
+		staticProfile = r.catalog.lookup(parsed.NormalizedFamily(), parsed.Tag)
+	}
 	if staticProfile == nil {
 		// Try family-only lookup for family-level metadata (FIM, think mode).
 		staticProfile = r.catalog.lookupFamily(parsed.NormalizedFamily())

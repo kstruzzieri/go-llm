@@ -59,7 +59,7 @@ type mrMockProvider struct {
 	caps   Capability
 }
 
-func (m *mrMockProvider) Name() string            { return m.name }
+func (m *mrMockProvider) Name() string             { return m.name }
 func (m *mrMockProvider) Capabilities() Capability { return m.caps }
 
 func (m *mrMockProvider) Health(_ context.Context) error { return nil }
@@ -216,6 +216,52 @@ func TestModelRegistry_Lookup_CatalogMatch(t *testing.T) {
 	// Verify catalog-provided resource data was populated.
 	if profile.Resources.RAMRequired == 0 {
 		t.Error("expected RAMRequired > 0 from catalog")
+	}
+}
+
+func TestModelRegistry_Lookup_LatestVariantCatalogMatch(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapEmbed,
+		models: []ModelInfo{
+			{
+				Name:          "nomic-embed-text:latest",
+				Family:        "nomic-embed-text",
+				ParameterSize: "137M",
+				ContextWindow: 8192,
+				Digest:        "embed123",
+				Capabilities:  []string{"embedding"},
+			},
+		},
+	}
+
+	reg := &mrMockProviderRegistry{
+		providers: map[string]Provider{"ollama": prov},
+	}
+
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+
+	profile, err := mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "nomic-embed-text:latest"})
+	if err != nil {
+		t.Fatalf("Lookup() error: %v", err)
+	}
+
+	if profile.Resources.RAMRequired != 0.5 {
+		t.Errorf("RAMRequired = %f, want 0.5", profile.Resources.RAMRequired)
+	}
+	if profile.Resources.RAMRecommended != 1.0 {
+		t.Errorf("RAMRecommended = %f, want 1.0", profile.Resources.RAMRecommended)
+	}
+	if profile.Quality != TierGood {
+		t.Errorf("Quality = %v, want %v", profile.Quality, TierGood)
+	}
+	if profile.Speed != TierGreat {
+		t.Errorf("Speed = %v, want %v", profile.Speed, TierGreat)
 	}
 }
 
@@ -584,6 +630,19 @@ func TestModelRegistry_Recommend(t *testing.T) {
 			if p.Caps&CapEmbed == 0 {
 				t.Errorf("recommended model %q lacks CapEmbed", p.Name)
 			}
+		}
+	})
+
+	t.Run("filter latest-only variant by RAM", func(t *testing.T) {
+		profiles, err := mr.Recommend(ctx, RecommendOpts{
+			RequiredCaps: CapEmbed,
+			AvailableRAM: 0.4,
+		})
+		if err != nil {
+			t.Fatalf("Recommend(embedding, RAM) error: %v", err)
+		}
+		if len(profiles) != 0 {
+			t.Fatalf("expected no recommendations under 0.4 GB RAM, got %d", len(profiles))
 		}
 	})
 
@@ -1028,7 +1087,7 @@ func TestQuantBytesPerParam(t *testing.T) {
 		{"f16", 2.0},
 		{"fp32", 4.0},
 		{"f32", 4.0},
-		{"", 0.55},     // default
+		{"", 0.55},        // default
 		{"unknown", 0.55}, // default
 	}
 

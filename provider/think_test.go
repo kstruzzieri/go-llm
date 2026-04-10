@@ -52,10 +52,10 @@ func TestThinkParser_BasicThinking(t *testing.T) {
 
 func TestThinkParser_FragmentedOpenTag(t *testing.T) {
 	tests := []struct {
-		name    string
-		chunks  []string
-		wantTh  string
-		wantCt  string
+		name   string
+		chunks []string
+		wantTh string
+		wantCt string
 	}{
 		{
 			name:   "split after <",
@@ -118,10 +118,10 @@ func TestThinkParser_FragmentedOpenTag(t *testing.T) {
 
 func TestThinkParser_FragmentedCloseTag(t *testing.T) {
 	tests := []struct {
-		name    string
-		chunks  []string
-		wantTh  string
-		wantCt  string
+		name   string
+		chunks []string
+		wantTh string
+		wantCt string
 	}{
 		{
 			name:   "split after </",
@@ -938,6 +938,54 @@ func TestThinkParser_AngleBracketInsideContent(t *testing.T) {
 	}
 	if got := joined(content); got != "<div>not a think tag</div>" {
 		t.Errorf("content = %q, want %q", got, "<div>not a think tag</div>")
+	}
+}
+
+func TestThinkParser_OpenTagMismatchRestartDoesNotDuplicateAngleBracket(t *testing.T) {
+	onTh, onCt, thinking, content := collect()
+	p := NewThinkParser(ThinkParserConfig{
+		Mode:       ThinkAlways,
+		Tags:       DefaultThinkTags(),
+		OnThinking: onTh,
+		OnContent:  onCt,
+	})
+
+	if err := p.Process("<<think>reasoning</think>done"); err != nil {
+		t.Fatalf("Process error: %v", err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush error: %v", err)
+	}
+
+	if got := joined(thinking); got != "reasoning" {
+		t.Errorf("thinking = %q, want %q", got, "reasoning")
+	}
+	if got := joined(content); got != "<done" {
+		t.Errorf("content = %q, want %q", got, "<done")
+	}
+}
+
+func TestThinkParser_CloseTagMismatchRestartDoesNotDuplicateAngleBracket(t *testing.T) {
+	onTh, onCt, thinking, content := collect()
+	p := NewThinkParser(ThinkParserConfig{
+		Mode:       ThinkAlways,
+		Tags:       DefaultThinkTags(),
+		OnThinking: onTh,
+		OnContent:  onCt,
+	})
+
+	if err := p.Process("<think>reason<</think>done"); err != nil {
+		t.Fatalf("Process error: %v", err)
+	}
+	if err := p.Flush(); err != nil {
+		t.Fatalf("Flush error: %v", err)
+	}
+
+	if got := joined(thinking); got != "reason<" {
+		t.Errorf("thinking = %q, want %q", got, "reason<")
+	}
+	if got := joined(content); got != "done" {
+		t.Errorf("content = %q, want %q", got, "done")
 	}
 }
 
