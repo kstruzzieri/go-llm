@@ -215,6 +215,39 @@ func TestOllamaProvider_Chat_NoThinkTags(t *testing.T) {
 	}
 }
 
+func TestOllamaProvider_Chat_ThinkToggleDisabled(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ollama.ChatResponse{
+			Model:   "qwen3:8b",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "<think>Let me reason about this.</think>The answer is 42."},
+			Done:    true,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c, WithThinkMode(ThinkToggle))
+
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Messages: []ChatMessage{{Role: "user", Content: "What is the meaning of life?"}},
+		Options: ModelOptions{
+			Think: Ptr(false),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Thinking != "" {
+		t.Errorf("Thinking = %q, want empty", resp.Thinking)
+	}
+	want := "<think>Let me reason about this.</think>The answer is 42."
+	if resp.Content != want {
+		t.Errorf("Content = %q, want %q", resp.Content, want)
+	}
+}
+
 func TestOllamaProvider_Chat_WithOptions(t *testing.T) {
 	var receivedOpts ollama.ModelOptions
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -423,6 +456,76 @@ func TestOllamaProvider_ChatStream_FragmentedTags(t *testing.T) {
 	}
 	if content != "content" {
 		t.Errorf("content = %q, want %q", content, "content")
+	}
+}
+
+func TestOllamaProvider_ChatStream_ThinkToggle(t *testing.T) {
+	chunks := []ollama.ChatResponse{
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Content: "<think>Let me"}, Done: false},
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Content: " think.</think>The answer"}, Done: false},
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Content: " is 42."}, Done: false},
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Content: ""}, Done: true},
+	}
+
+	for _, tt := range []struct {
+		name         string
+		think        bool
+		wantThinking string
+		wantContent  string
+	}{
+		{
+			name:         "enabled",
+			think:        true,
+			wantThinking: "Let me think.",
+			wantContent:  "The answer is 42.",
+		},
+		{
+			name:         "disabled",
+			think:        false,
+			wantThinking: "",
+			wantContent:  "<think>Let me think.</think>The answer is 42.",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				for _, chunk := range chunks {
+					data, _ := json.Marshal(chunk)
+					_, _ = fmt.Fprintf(w, "%s\n", data)
+				}
+			}))
+			defer srv.Close()
+
+			c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+			p := NewOllamaProvider(c, WithThinkMode(ThinkToggle))
+
+			var thinkingChunks []string
+			var contentChunks []string
+			err := p.ChatStream(context.Background(), ChatRequest{
+				Model:    "qwen3:8b",
+				Messages: []ChatMessage{{Role: "user", Content: "What is the meaning of life?"}},
+				Options: ModelOptions{
+					Think: Ptr(tt.think),
+				},
+			}, func(resp ChatResponse) error {
+				if resp.Thinking != "" {
+					thinkingChunks = append(thinkingChunks, resp.Thinking)
+				}
+				if resp.Content != "" {
+					contentChunks = append(contentChunks, resp.Content)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("ChatStream() error: %v", err)
+			}
+
+			if got := strings.Join(thinkingChunks, ""); got != tt.wantThinking {
+				t.Errorf("thinking = %q, want %q", got, tt.wantThinking)
+			}
+			if got := strings.Join(contentChunks, ""); got != tt.wantContent {
+				t.Errorf("content = %q, want %q", got, tt.wantContent)
+			}
+		})
 	}
 }
 
@@ -1154,6 +1257,70 @@ func TestOllamaProvider_Embed_Singleflight(t *testing.T) {
 		if resp.Provider != "ollama" {
 			t.Errorf("goroutine %d: Provider = %q, want %q", i, resp.Provider, "ollama")
 		}
+	}
+}
+
+func TestOllamaProvider_Embed_SingleflightLeaderCancellationDoesNotCancelFollowers(t *testing.T) {
+	var serverCalls int32
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&serverCalls, 1)
+		select {
+		case <-started:
+		default:
+			close(started)
+		}
+		time.Sleep(100 * time.Millisecond)
+		resp := ollama.EmbedResponse{
+			Embeddings: [][]float64{{0.1, 0.2, 0.3}},
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+	req := EmbedRequest{
+		Model: "nomic-embed-text",
+		Input: []string{"identical text"},
+	}
+
+	leaderCtx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	leaderDone := make(chan error, 1)
+	go func() {
+		_, err := p.Embed(leaderCtx, req)
+		leaderDone <- err
+	}()
+
+	<-started
+
+	followerDone := make(chan struct {
+		resp *EmbedResponse
+		err  error
+	}, 1)
+	go func() {
+		resp, err := p.Embed(context.Background(), req)
+		followerDone <- struct {
+			resp *EmbedResponse
+			err  error
+		}{resp: resp, err: err}
+	}()
+
+	if err := <-leaderDone; err == nil {
+		t.Fatal("expected leader request to be canceled")
+	}
+
+	follower := <-followerDone
+	if follower.err != nil {
+		t.Fatalf("follower Embed() error: %v", follower.err)
+	}
+	if follower.resp == nil || len(follower.resp.Embeddings) != 1 {
+		t.Fatalf("follower response = %#v, want one embedding", follower.resp)
+	}
+	if got := atomic.LoadInt32(&serverCalls); got != 1 {
+		t.Errorf("expected 1 server call, got %d", got)
 	}
 }
 

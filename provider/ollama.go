@@ -74,6 +74,21 @@ func NewOllamaProvider(client *ollama.Client, opts ...OllamaOption) *OllamaProvi
 	return p
 }
 
+func (p *OllamaProvider) thinkToggleActive(opts ModelOptions) bool {
+	return opts.Think != nil && *opts.Think
+}
+
+func (p *OllamaProvider) shouldExtractThinking(opts ModelOptions) bool {
+	switch p.thinkMode {
+	case ThinkNone:
+		return false
+	case ThinkToggle:
+		return p.thinkToggleActive(opts)
+	default:
+		return true
+	}
+}
+
 // Name returns the canonical provider identifier "ollama".
 func (p *OllamaProvider) Name() string {
 	return "ollama"
@@ -139,8 +154,11 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 		return nil, fmt.Errorf("provider: ollama: chat: %w", err)
 	}
 
-	// Extract thinking from the complete response using regex.
-	content, thinking := ExtractThinking(oResp.Message.Content, p.thinkTags)
+	content := oResp.Message.Content
+	thinking := ""
+	if p.shouldExtractThinking(req.Options) {
+		content, thinking = ExtractThinking(oResp.Message.Content, p.thinkTags)
+	}
 
 	return &ChatResponse{
 		Model:     oResp.Model,
@@ -219,6 +237,9 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 		},
 		Budget: p.thinkBudget,
 	})
+	if p.thinkMode == ThinkToggle {
+		parser.SetActive(p.thinkToggleActive(req.Options))
+	}
 
 	streamErr := p.client.ChatStream(ctx, oReq, func(oResp ollama.ChatResponse) error {
 		chunksReceived++
@@ -444,13 +465,11 @@ func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedRes
 	// Use DoChan so each caller respects its own context deadline.
 	// singleflight.Do would block until the winner's request completes,
 	// ignoring other callers' cancelled contexts.
+	sharedCtx := context.WithoutCancel(ctx)
 	ch := p.embedGroup.DoChan(key, func() (any, error) {
 		embeddings := make([][]float64, len(req.Input))
 		for i, text := range req.Input {
-			if ctx.Err() != nil {
-				return nil, fmt.Errorf("provider: ollama: embed: %w", ctx.Err())
-			}
-			emb, embedErr := p.client.Embed(ctx, req.Model, text)
+			emb, embedErr := p.client.Embed(sharedCtx, req.Model, text)
 			if embedErr != nil {
 				return nil, fmt.Errorf("provider: ollama: embed: %w", embedErr)
 			}

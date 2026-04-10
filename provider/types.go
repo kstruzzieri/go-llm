@@ -132,7 +132,7 @@ type Provider interface {
 
 // ChatMessage represents a single message in a multi-turn conversation.
 type ChatMessage struct {
-	Role       string     `json:"role"`                   // system, user, assistant, tool
+	Role       string     `json:"role"` // system, user, assistant, tool
 	Content    string     `json:"content"`
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // present when assistant invokes tools
 	ToolName   string     `json:"tool_name,omitempty"`    // set when role="tool"
@@ -141,7 +141,7 @@ type ChatMessage struct {
 
 // Tool defines a tool the model may invoke during chat.
 type Tool struct {
-	Type     string       `json:"type"`     // always "function"
+	Type     string       `json:"type"` // always "function"
 	Function ToolFunction `json:"function"`
 }
 
@@ -177,14 +177,14 @@ type ChatRequest struct {
 
 // ChatResponse is the provider-agnostic response from a chat completion.
 type ChatResponse struct {
-	Model     string     `json:"model"`
-	Provider  string     `json:"provider"`
-	Content   string     `json:"content"`
-	Thinking  string     `json:"thinking,omitempty"`
-	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-	Done      bool       `json:"done"`
-	Partial   bool       `json:"partial,omitempty"`
-	Usage     Usage      `json:"usage,omitempty"`
+	Model     string      `json:"model"`
+	Provider  string      `json:"provider"`
+	Content   string      `json:"content"`
+	Thinking  string      `json:"thinking,omitempty"`
+	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
+	Done      bool        `json:"done"`
+	Partial   bool        `json:"partial,omitempty"`
+	Usage     Usage       `json:"usage,omitempty"`
 	Latency   LatencyInfo `json:"latency,omitempty"`
 }
 
@@ -245,6 +245,7 @@ type ModelOptions struct {
 	NumCtx        int      `json:"num_ctx,omitempty"`
 	Stop          []string `json:"stop,omitempty"`
 	RepeatPenalty *float64 `json:"repeat_penalty,omitempty"`
+	Think         *bool    `json:"think,omitempty"` // only used when ThinkMode is ThinkToggle
 }
 
 // ModelInfo holds metadata about a model available from a provider.
