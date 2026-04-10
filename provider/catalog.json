@@ -1,0 +1,269 @@
+{
+  "families": {
+    "qwen2.5": {
+      "fim": {
+        "prefix": "<|fim_prefix|>",
+        "suffix": "<|fim_suffix|>",
+        "middle": "<|fim_middle|>",
+        "prefix_budget_pct": 75
+      },
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 32768,
+      "variants": {
+        "0.5b": { "ram_required": 1.0, "ram_recommended": 1.5, "vram_recommended": 1.0, "quality": "basic", "speed": "fast" },
+        "1.5b": { "ram_required": 1.5, "ram_recommended": 2.5, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
+        "3b":   { "ram_required": 2.5, "ram_recommended": 4.0, "vram_recommended": 2.5, "quality": "basic", "speed": "fast" },
+        "7b":   { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "14b":  { "ram_required": 9.0, "ram_recommended": 12.0, "vram_recommended": 9.0, "quality": "good", "speed": "medium" },
+        "32b":  { "ram_required": 20.0, "ram_recommended": 24.0, "vram_recommended": 20.0, "quality": "great", "speed": "medium" },
+        "72b":  { "ram_required": 44.0, "ram_recommended": 52.0, "vram_recommended": 44.0, "quality": "best", "speed": "slow" }
+      }
+    },
+    "qwen3": {
+      "fim": {
+        "prefix": "<|fim_prefix|>",
+        "suffix": "<|fim_suffix|>",
+        "middle": "<|fim_middle|>",
+        "prefix_budget_pct": 75
+      },
+      "think_mode": "toggle",
+      "think_tags": { "open": "<think>", "close": "</think>" },
+      "caps": ["completion", "tools"],
+      "context_window": 40960,
+      "variants": {
+        "0.6b": { "ram_required": 1.5, "ram_recommended": 2.0, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
+        "1.7b": { "ram_required": 2.0, "ram_recommended": 3.0, "vram_recommended": 2.0, "quality": "basic", "speed": "fast" },
+        "4b":   { "ram_required": 3.5, "ram_recommended": 5.0, "vram_recommended": 3.5, "quality": "good", "speed": "fast" },
+        "8b":   { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "14b":  { "ram_required": 9.0, "ram_recommended": 12.0, "vram_recommended": 9.0, "quality": "great", "speed": "medium" },
+        "30b":  { "ram_required": 19.0, "ram_recommended": 24.0, "vram_recommended": 19.0, "quality": "great", "speed": "medium" },
+        "32b":  { "ram_required": 20.0, "ram_recommended": 24.0, "vram_recommended": 20.0, "quality": "great", "speed": "medium" },
+        "235b": { "ram_required": 140.0, "ram_recommended": 160.0, "vram_recommended": 140.0, "quality": "best", "speed": "slow" }
+      }
+    },
+    "qwen3.5": {
+      "fim": {
+        "prefix": "<|fim_prefix|>",
+        "suffix": "<|fim_suffix|>",
+        "middle": "<|fim_middle|>",
+        "prefix_budget_pct": 75
+      },
+      "think_mode": "toggle",
+      "think_tags": { "open": "<think>", "close": "</think>" },
+      "caps": ["completion", "tools"],
+      "context_window": 131072,
+      "variants": {
+        "7b":  { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "14b": { "ram_required": 9.0, "ram_recommended": 12.0, "vram_recommended": 9.0, "quality": "great", "speed": "medium" },
+        "27b": { "ram_required": 17.0, "ram_recommended": 22.0, "vram_recommended": 17.0, "quality": "great", "speed": "medium" },
+        "35b": { "ram_required": 22.0, "ram_recommended": 28.0, "vram_recommended": 22.0, "quality": "great", "speed": "medium" }
+      }
+    },
+    "deepseek-r1": {
+      "fim": null,
+      "think_mode": "always",
+      "think_tags": { "open": "<think>", "close": "</think>" },
+      "caps": ["completion"],
+      "context_window": 65536,
+      "variants": {
+        "1.5b": { "ram_required": 1.5, "ram_recommended": 2.5, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
+        "7b":   { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "8b":   { "ram_required": 5.5, "ram_recommended": 8.0, "vram_recommended": 5.5, "quality": "good", "speed": "fast" },
+        "14b":  { "ram_required": 9.0, "ram_recommended": 12.0, "vram_recommended": 9.0, "quality": "great", "speed": "medium" },
+        "32b":  { "ram_required": 20.0, "ram_recommended": 24.0, "vram_recommended": 20.0, "quality": "great", "speed": "medium" },
+        "70b":  { "ram_required": 44.0, "ram_recommended": 52.0, "vram_recommended": 44.0, "quality": "best", "speed": "slow" }
+      }
+    },
+    "deepseek-coder-v2": {
+      "fim": {
+        "prefix": "<|fim_prefix|>",
+        "suffix": "<|fim_suffix|>",
+        "middle": "<|fim_middle|>",
+        "prefix_budget_pct": 70
+      },
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 65536,
+      "variants": {
+        "16b": { "ram_required": 10.0, "ram_recommended": 14.0, "vram_recommended": 10.0, "quality": "great", "speed": "medium" }
+      }
+    },
+    "codellama": {
+      "fim": {
+        "prefix": "<PRE>",
+        "suffix": " <SUF>",
+        "middle": " <MID>",
+        "prefix_budget_pct": 65
+      },
+      "think_mode": "none",
+      "caps": ["completion"],
+      "context_window": 16384,
+      "variants": {
+        "7b":  { "ram_required": 5.0, "ram_recommended": 7.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "13b": { "ram_required": 8.5, "ram_recommended": 12.0, "vram_recommended": 8.5, "quality": "good", "speed": "medium" },
+        "34b": { "ram_required": 21.0, "ram_recommended": 26.0, "vram_recommended": 21.0, "quality": "great", "speed": "medium" },
+        "70b": { "ram_required": 44.0, "ram_recommended": 52.0, "vram_recommended": 44.0, "quality": "great", "speed": "slow" }
+      }
+    },
+    "starcoder": {
+      "fim": {
+        "prefix": "<fim_prefix>",
+        "suffix": "<fim_suffix>",
+        "middle": "<fim_middle>",
+        "prefix_budget_pct": 70
+      },
+      "think_mode": "none",
+      "caps": ["completion"],
+      "context_window": 8192,
+      "variants": {
+        "1b":  { "ram_required": 1.5, "ram_recommended": 2.5, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
+        "3b":  { "ram_required": 2.5, "ram_recommended": 4.0, "vram_recommended": 2.5, "quality": "basic", "speed": "fast" },
+        "7b":  { "ram_required": 5.0, "ram_recommended": 7.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "15b": { "ram_required": 10.0, "ram_recommended": 14.0, "vram_recommended": 10.0, "quality": "good", "speed": "medium" }
+      }
+    },
+    "starcoder2": {
+      "fim": {
+        "prefix": "<fim_prefix>",
+        "suffix": "<fim_suffix>",
+        "middle": "<fim_middle>",
+        "prefix_budget_pct": 70
+      },
+      "think_mode": "none",
+      "caps": ["completion"],
+      "context_window": 16384,
+      "variants": {
+        "3b":  { "ram_required": 2.5, "ram_recommended": 4.0, "vram_recommended": 2.5, "quality": "good", "speed": "fast" },
+        "7b":  { "ram_required": 5.0, "ram_recommended": 7.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "15b": { "ram_required": 10.0, "ram_recommended": 14.0, "vram_recommended": 10.0, "quality": "great", "speed": "medium" }
+      }
+    },
+    "llama3": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 8192,
+      "variants": {
+        "8b":  { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "70b": { "ram_required": 44.0, "ram_recommended": 52.0, "vram_recommended": 44.0, "quality": "great", "speed": "slow" }
+      }
+    },
+    "llama3.1": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 131072,
+      "variants": {
+        "8b":  { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "70b": { "ram_required": 44.0, "ram_recommended": 52.0, "vram_recommended": 44.0, "quality": "best", "speed": "slow" }
+      }
+    },
+    "llama3.2": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 131072,
+      "variants": {
+        "1b": { "ram_required": 1.5, "ram_recommended": 2.5, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
+        "3b": { "ram_required": 2.5, "ram_recommended": 4.0, "vram_recommended": 2.5, "quality": "basic", "speed": "fast" }
+      }
+    },
+    "llama3.3": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 131072,
+      "variants": {
+        "70b": { "ram_required": 44.0, "ram_recommended": 52.0, "vram_recommended": 44.0, "quality": "best", "speed": "slow" }
+      }
+    },
+    "gemma2": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion"],
+      "context_window": 8192,
+      "variants": {
+        "2b":  { "ram_required": 2.0, "ram_recommended": 3.0, "vram_recommended": 2.0, "quality": "basic", "speed": "fast" },
+        "9b":  { "ram_required": 6.0, "ram_recommended": 9.0, "vram_recommended": 6.0, "quality": "good", "speed": "fast" },
+        "27b": { "ram_required": 17.0, "ram_recommended": 22.0, "vram_recommended": 17.0, "quality": "great", "speed": "medium" }
+      }
+    },
+    "gemma3": {
+      "fim": null,
+      "think_mode": "toggle",
+      "think_tags": { "open": "<think>", "close": "</think>" },
+      "caps": ["completion", "tools"],
+      "context_window": 131072,
+      "variants": {
+        "1b":  { "ram_required": 1.5, "ram_recommended": 2.5, "vram_recommended": 1.5, "quality": "basic", "speed": "fast" },
+        "4b":  { "ram_required": 3.5, "ram_recommended": 5.0, "vram_recommended": 3.5, "quality": "good", "speed": "fast" },
+        "12b": { "ram_required": 8.0, "ram_recommended": 11.0, "vram_recommended": 8.0, "quality": "good", "speed": "medium" },
+        "27b": { "ram_required": 17.0, "ram_recommended": 22.0, "vram_recommended": 17.0, "quality": "great", "speed": "medium" }
+      }
+    },
+    "phi3": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 4096,
+      "variants": {
+        "3.8b": { "ram_required": 3.0, "ram_recommended": 4.5, "vram_recommended": 3.0, "quality": "good", "speed": "fast" },
+        "14b":  { "ram_required": 9.0, "ram_recommended": 12.0, "vram_recommended": 9.0, "quality": "good", "speed": "medium" }
+      }
+    },
+    "phi4": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 16384,
+      "variants": {
+        "14b": { "ram_required": 9.0, "ram_recommended": 12.0, "vram_recommended": 9.0, "quality": "great", "speed": "medium" }
+      }
+    },
+    "mistral": {
+      "fim": {
+        "prefix": "[PREFIX]",
+        "suffix": "[SUFFIX]",
+        "middle": "[MIDDLE]",
+        "prefix_budget_pct": 70
+      },
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 32768,
+      "variants": {
+        "7b": { "ram_required": 5.0, "ram_recommended": 7.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" }
+      }
+    },
+    "mixtral": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["completion", "tools"],
+      "context_window": 32768,
+      "variants": {
+        "8x7b":  { "ram_required": 28.0, "ram_recommended": 36.0, "vram_recommended": 28.0, "quality": "great", "speed": "medium" },
+        "8x22b": { "ram_required": 84.0, "ram_recommended": 96.0, "vram_recommended": 84.0, "quality": "best", "speed": "slow" }
+      }
+    },
+    "nomic-embed-text": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["embedding"],
+      "context_window": 8192,
+      "dimensions": 768,
+      "variants": {
+        "latest": { "ram_required": 0.5, "ram_recommended": 1.0, "vram_recommended": 0.5, "quality": "good", "speed": "fast" }
+      }
+    },
+    "mxbai-embed-large": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["embedding"],
+      "context_window": 512,
+      "dimensions": 1024,
+      "variants": {
+        "latest": { "ram_required": 0.7, "ram_recommended": 1.2, "vram_recommended": 0.7, "quality": "great", "speed": "fast" }
+      }
+    }
+  }
+}
