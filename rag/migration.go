@@ -32,6 +32,11 @@ var migrations = []migration{
 		description: "add stable_key column for chunk identity",
 		fn:          migrateV3,
 	},
+	{
+		version:     4,
+		description: "add source_content_hash for incremental indexing",
+		fn:          migrateV4,
+	},
 }
 
 // migrateV1 creates the baseline chunks table and indexes.
@@ -117,6 +122,17 @@ func migrateV3(tx *sql.Tx) error {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("rag: migrate v3: %w", err)
 		}
+	}
+	return nil
+}
+
+// migrateV4 adds the source_content_hash column for persisted source
+// signatures used by fast invalidation during incremental indexing.
+// Existing rows default to empty, triggering a full check on next re-index.
+func migrateV4(tx *sql.Tx) error {
+	_, err := tx.Exec(`ALTER TABLE chunks ADD COLUMN source_content_hash TEXT NOT NULL DEFAULT ''`)
+	if err != nil {
+		return fmt.Errorf("rag: migrate v4: %w", err)
 	}
 	return nil
 }

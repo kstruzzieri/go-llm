@@ -31,6 +31,12 @@ type atomicSourceReplacer interface {
 	ReplaceSource(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64) error
 }
 
+// atomicSourceReplacerWithHash extends atomicSourceReplacer to include
+// the source content hash for incremental indexing change detection.
+type atomicSourceReplacerWithHash interface {
+	ReplaceSourceWithHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash string) error
+}
+
 // IndexerOption configures an Indexer.
 type IndexerOption func(*Indexer)
 
@@ -76,8 +82,16 @@ func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption)
 }
 
 func (idx *Indexer) replaceSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64) error {
+	return idx.replaceSourceWithHash(ctx, path, chunks, embeddings, "")
+}
+
+func (idx *Indexer) replaceSourceWithHash(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash string) error {
 	idx.storeMu.Lock()
 	defer idx.storeMu.Unlock()
+
+	if replacer, ok := idx.store.(atomicSourceReplacerWithHash); ok {
+		return replacer.ReplaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash)
+	}
 
 	if replacer, ok := idx.store.(atomicSourceReplacer); ok {
 		return replacer.ReplaceSource(ctx, path, chunks, embeddings)
@@ -152,8 +166,10 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
 	}
 
-	// Step 3: Replace old chunks with new ones.
-	if err := idx.replaceSource(ctx, path, chunks, embeddings); err != nil {
+	// Step 3: Replace old chunks with new ones. Store the source signature so
+	// subsequent IndexFileIncremental calls can safely use the fast path.
+	sourceHash := idx.currentSourceSignature(content).String()
+	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 
@@ -167,6 +183,7 @@ type indexDirConfig struct {
 	extensions  map[string]bool
 	exclude     []string
 	concurrency int
+	incremental bool
 }
 
 // WithExtensions sets which file extensions to index (default: .go, .py, .ts, .tsx, .js, .md).
@@ -194,6 +211,17 @@ func WithExclude(patterns ...string) IndexDirOption {
 func WithConcurrency(n int) IndexDirOption {
 	return func(cfg *indexDirConfig) {
 		cfg.concurrency = n
+	}
+}
+
+// WithIncremental enables incremental indexing for IndexDirectory.
+// When enabled, each file uses IndexFileIncremental which diffs against
+// stored chunks and only embeds changed content. Files indexed for the
+// first time or whose store lacks incremental support transparently
+// fall back to full indexing.
+func WithIncremental() IndexDirOption {
+	return func(cfg *indexDirConfig) {
+		cfg.incremental = true
 	}
 }
 
@@ -318,9 +346,15 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			break
 		}
 		g.Go(func() error {
-			if err := idx.IndexFile(ctx, path); err != nil {
+			var indexErr error
+			if cfg.incremental {
+				indexErr = idx.IndexFileIncremental(ctx, path)
+			} else {
+				indexErr = idx.IndexFile(ctx, path)
+			}
+			if indexErr != nil {
 				mu.Lock()
-				indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, err))
+				indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, indexErr))
 				mu.Unlock()
 			}
 			return nil
