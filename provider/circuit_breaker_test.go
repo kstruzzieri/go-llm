@@ -2,6 +2,7 @@ package provider
 
 import (
 	"errors"
+	"sync"
 	"testing"
 	"time"
 )
@@ -222,4 +223,19 @@ func TestCircuitBreakerInfo(t *testing.T) {
 	if info.RecoverAt.Before(info.LastFailure) {
 		t.Fatal("expected RecoverAt to be after LastFailure")
 	}
+}
+
+func TestCircuitBreakerConcurrentAccess(t *testing.T) {
+	cb := NewCircuitBreaker(WithFailureThreshold(5), WithCooldown(10*time.Millisecond))
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(3)
+		go func() { defer wg.Done(); cb.Allow() }()
+		go func() { defer wg.Done(); cb.RecordFailure(errors.New("fail")) }()
+		go func() { defer wg.Done(); cb.RecordSuccess() }()
+	}
+	wg.Wait()
+	// No race detected and no panic = pass.
+	_ = cb.State()
+	_ = cb.Info()
 }

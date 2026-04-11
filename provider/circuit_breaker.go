@@ -23,7 +23,6 @@ type CircuitBreaker struct {
 	state            BreakerState
 	failures         int
 	lastFailure      time.Time
-	lastSuccess      time.Time
 	lastError        error
 	failureThreshold int
 	cooldown         time.Duration
@@ -104,7 +103,6 @@ func (cb *CircuitBreaker) RecordSuccess() {
 
 	cb.failures = 0
 	cb.lastError = nil
-	cb.lastSuccess = time.Now()
 
 	if cb.state == BreakerHalfOpen {
 		cb.state = BreakerClosed
