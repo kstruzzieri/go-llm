@@ -359,9 +359,9 @@ func (rp *RoutePlan) handleResult(err error, fallbacksUsed int) *RouteOutcome {
 		return nil
 	}
 
-	if IsInfrastructureError(err) {
-		rp.recordFailure(actualKey, err)
-	}
+	// Infrastructure failures are recorded inline by the Execute methods
+	// (once per provider attempt) rather than here, to avoid double-counting
+	// the last-tried provider in the fallback chain.
 
 	return nil
 }
