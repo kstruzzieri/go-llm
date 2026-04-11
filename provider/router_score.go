@@ -151,8 +151,10 @@ func scoreCandidate(
 	bd.capabilityGate = true
 
 	// 5. Circuit breaker gate: if the breaker is open, the candidate is
-	//    penalized with -Inf so it sorts to the bottom.
-	if breaker != nil && !breaker.Allow() {
+	//    penalized with -Inf so it sorts to the bottom. Uses State() instead
+	//    of Allow() to avoid the Open→HalfOpen side effect — scoring must be
+	//    read-only. The Allow() call belongs in RoutePlan.Execute*.
+	if breaker != nil && breaker.State() == BreakerOpen {
 		bd.breakerPenalty = math.Inf(-1)
 		return bd
 	}
