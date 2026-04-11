@@ -90,13 +90,14 @@ func (m *mockWarmthSource) RecordUse(key ModelKey) {
 	}
 }
 
-// Snapshot returns all currently loaded models.
+// Snapshot returns all currently warm (loaded and not expired) models.
 func (m *mockWarmthSource) Snapshot() []WarmModel {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	now := time.Now()
 	var out []WarmModel
 	for k, info := range m.models {
-		if info.Loaded {
+		if info.Loaded && now.Before(info.ExpiresAt) {
 			out = append(out, WarmModel{Key: k, Info: *info})
 		}
 	}
