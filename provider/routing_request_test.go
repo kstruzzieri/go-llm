@@ -87,8 +87,8 @@ func TestStickyKeyDeterminism(t *testing.T) {
 		ExpectedOutput: 2048,
 	}
 
-	key1 := req.StickyKey()
-	key2 := req.StickyKey()
+	key1 := StickyKey(req)
+	key2 := StickyKey(req)
 
 	if key1 == "" {
 		t.Fatal("StickyKey() returned empty string")
@@ -111,26 +111,26 @@ func TestStickyKeyDiffers(t *testing.T) {
 		ExpectedOutput: 2048,
 	}
 
-	baseKey := base.StickyKey()
+	baseKey := StickyKey(base)
 
 	// Different AffinityKey
 	diffAffinity := base
 	diffAffinity.AffinityKey = "session-456"
-	if diffAffinity.StickyKey() == baseKey {
+	if StickyKey(diffAffinity) == baseKey {
 		t.Error("different AffinityKey should produce different StickyKey")
 	}
 
 	// Different Priority
 	diffPriority := base
 	diffPriority.Priority = PriorityCritical
-	if diffPriority.StickyKey() == baseKey {
+	if StickyKey(diffPriority) == baseKey {
 		t.Error("different Priority should produce different StickyKey")
 	}
 
 	// Different UseCase
 	diffUseCase := base
 	diffUseCase.UseCase = "fim"
-	if diffUseCase.StickyKey() == baseKey {
+	if StickyKey(diffUseCase) == baseKey {
 		t.Error("different UseCase should produce different StickyKey")
 	}
 }
@@ -194,7 +194,7 @@ func TestEstimateRoutingInputTokens(t *testing.T) {
 				{Role: "user", Content: "hello world test message here"},
 			},
 		}
-		tokens := req.estimateRoutingInputTokens()
+		tokens := estimateRoutingInputTokens(req)
 		if tokens <= 0 {
 			t.Errorf("expected positive token count, got %d", tokens)
 		}
@@ -204,7 +204,7 @@ func TestEstimateRoutingInputTokens(t *testing.T) {
 		req := RoutingRequest{
 			Prompt: "generate some code for me please",
 		}
-		tokens := req.estimateRoutingInputTokens()
+		tokens := estimateRoutingInputTokens(req)
 		if tokens <= 0 {
 			t.Errorf("expected positive token count, got %d", tokens)
 		}
@@ -214,7 +214,7 @@ func TestEstimateRoutingInputTokens(t *testing.T) {
 		req := RoutingRequest{
 			System: "you are a helpful assistant",
 		}
-		tokens := req.estimateRoutingInputTokens()
+		tokens := estimateRoutingInputTokens(req)
 		if tokens <= 0 {
 			t.Errorf("expected positive token count, got %d", tokens)
 		}
@@ -224,7 +224,7 @@ func TestEstimateRoutingInputTokens(t *testing.T) {
 		req := RoutingRequest{
 			Suffix: "some suffix content here for FIM",
 		}
-		tokens := req.estimateRoutingInputTokens()
+		tokens := estimateRoutingInputTokens(req)
 		if tokens <= 0 {
 			t.Errorf("expected positive token count, got %d", tokens)
 		}
@@ -234,7 +234,7 @@ func TestEstimateRoutingInputTokens(t *testing.T) {
 		req := RoutingRequest{
 			Input: []string{"text to embed number one", "text to embed number two"},
 		}
-		tokens := req.estimateRoutingInputTokens()
+		tokens := estimateRoutingInputTokens(req)
 		if tokens <= 0 {
 			t.Errorf("expected positive token count, got %d", tokens)
 		}
@@ -242,7 +242,7 @@ func TestEstimateRoutingInputTokens(t *testing.T) {
 
 	t.Run("empty request returns zero", func(t *testing.T) {
 		req := RoutingRequest{}
-		tokens := req.estimateRoutingInputTokens()
+		tokens := estimateRoutingInputTokens(req)
 		if tokens != 0 {
 			t.Errorf("expected 0 tokens for empty request, got %d", tokens)
 		}
@@ -259,16 +259,16 @@ func TestEstimateRoutingInputTokens(t *testing.T) {
 			Suffix: "suffix text",
 			Input:  []string{"embed this"},
 		}
-		tokens := req.estimateRoutingInputTokens()
+		tokens := estimateRoutingInputTokens(req)
 
 		// Each field alone should contribute less than all combined.
 		msgOnly := RoutingRequest{Messages: req.Messages}
 		promptOnly := RoutingRequest{Prompt: req.Prompt}
 
-		if tokens <= msgOnly.estimateRoutingInputTokens() {
+		if tokens <= estimateRoutingInputTokens(msgOnly) {
 			t.Error("combined should be greater than messages alone")
 		}
-		if tokens <= promptOnly.estimateRoutingInputTokens() {
+		if tokens <= estimateRoutingInputTokens(promptOnly) {
 			t.Error("combined should be greater than prompt alone")
 		}
 	})

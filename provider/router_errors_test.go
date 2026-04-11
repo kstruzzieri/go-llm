@@ -178,10 +178,19 @@ func TestBreakerStateString(t *testing.T) {
 }
 
 func TestHTTPStatusError_Error(t *testing.T) {
-	err := &HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable"}
-	got := err.Error()
-	want := "HTTP 503: 503 Service Unavailable"
-	if got != want {
-		t.Errorf("HTTPStatusError.Error() = %q, want %q", got, want)
+	tests := []struct {
+		name string
+		err  *HTTPStatusError
+		want string
+	}{
+		{"with status text", &HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable"}, "503 Service Unavailable"},
+		{"empty status text", &HTTPStatusError{StatusCode: 500}, "HTTP 500"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.err.Error(); got != tt.want {
+				t.Errorf("HTTPStatusError.Error() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }

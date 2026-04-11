@@ -100,7 +100,10 @@ type HTTPStatusError struct {
 
 // Error implements the error interface.
 func (e *HTTPStatusError) Error() string {
-	return fmt.Sprintf("HTTP %d: %s", e.StatusCode, e.Status)
+	if e.Status != "" {
+		return e.Status
+	}
+	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
 // ---------------------------------------------------------------------------

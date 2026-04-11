@@ -182,17 +182,22 @@ func outputBudgetClass(tokens int) string {
 //
 // The key is derived from: affinity_key, model, use_case, required_caps,
 // priority, input budget class, and output budget class.
-func (r *RoutingRequest) StickyKey() string {
-	inputTokens := r.estimateRoutingInputTokens()
+func StickyKey(req RoutingRequest) string {
+	expectedOut := req.ExpectedOutput
+	if expectedOut == 0 {
+		expectedOut = DefaultExpectedOutput(req.UseCase)
+	}
+
+	inputTokens := estimateRoutingInputTokens(req)
 	inClass := inputBudgetClass(inputTokens)
-	outClass := outputBudgetClass(r.ExpectedOutput)
+	outClass := outputBudgetClass(expectedOut)
 
 	data := fmt.Sprintf("%s|%s|%s|%d|%d|%s|%s",
-		r.AffinityKey,
-		r.Model,
-		r.UseCase,
-		r.RequiredCaps,
-		r.Priority,
+		req.AffinityKey,
+		req.Model,
+		req.UseCase,
+		req.RequiredCaps,
+		req.Priority,
 		inClass,
 		outClass,
 	)
@@ -209,15 +214,15 @@ func (r *RoutingRequest) StickyKey() string {
 // estimateRoutingInputTokens provides a rough estimate of the total input
 // tokens across all text-bearing fields of the routing request. It uses the
 // package-level estimateTokens heuristic (len/4).
-func (r *RoutingRequest) estimateRoutingInputTokens() int {
+func estimateRoutingInputTokens(req RoutingRequest) int {
 	total := 0
-	for _, m := range r.Messages {
+	for _, m := range req.Messages {
 		total += estimateTokens(m.Content)
 	}
-	total += estimateTokens(r.Prompt)
-	total += estimateTokens(r.System)
-	total += estimateTokens(r.Suffix)
-	for _, s := range r.Input {
+	total += estimateTokens(req.Prompt)
+	total += estimateTokens(req.System)
+	total += estimateTokens(req.Suffix)
+	for _, s := range req.Input {
 		total += estimateTokens(s)
 	}
 	return total
