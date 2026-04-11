@@ -263,3 +263,17 @@ func TestTokenBudgetWithOutputDefault(t *testing.T) {
 		t.Errorf("expected BudgetTokens = %d, got %d", expectedBudget, result.BudgetTokens)
 	}
 }
+
+func TestTokenBudgetZeroContextWindow(t *testing.T) {
+	v := NewTokenBudgetValidator()
+	profile := &ModelProfile{ContextWindow: 0}
+	req := RoutingRequest{UseCase: "chat", Prompt: "hello"}
+
+	result := v.Validate(req, profile)
+	if result.Decision != BudgetReject {
+		t.Errorf("Decision = %v, want BudgetReject for zero context window", result.Decision)
+	}
+	if result.Reason != "model has no context window configured" {
+		t.Errorf("Reason = %q, want 'model has no context window configured'", result.Reason)
+	}
+}

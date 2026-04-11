@@ -118,6 +118,17 @@ func (v *TokenBudgetValidator) Validate(req RoutingRequest, profile *ModelProfil
 	expectedOut := v.expectedOutput(req)
 	effectiveCtx := profile.EffectiveContextWindow(req.UseCase)
 
+	// Guard: a zero or negative effective context means the profile is
+	// misconfigured or uninitialized. Reject with a clear reason.
+	if effectiveCtx <= 0 {
+		return BudgetResult{
+			Decision:      BudgetReject,
+			RequestTokens: inputTokens,
+			BudgetTokens:  0,
+			Reason:        "model has no context window configured",
+		}
+	}
+
 	// Budget is the context window minus the reserved output tokens, clamped to 0.
 	budget := effectiveCtx - expectedOut
 	if budget < 0 {
@@ -130,8 +141,6 @@ func (v *TokenBudgetValidator) Validate(req RoutingRequest, profile *ModelProfil
 			Decision:      BudgetReject,
 			RequestTokens: inputTokens,
 			BudgetTokens:  0,
-			HeadroomPct:   0,
-			HeadroomScore: 0,
 			Reason:        "output budget exceeds context window",
 		}
 	}
