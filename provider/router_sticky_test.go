@@ -12,8 +12,8 @@ func TestStickyCacheGetMiss(t *testing.T) {
 	if ok {
 		t.Fatal("expected miss on empty cache, got hit")
 	}
-	if got != nil {
-		t.Fatalf("expected nil entry on miss, got %+v", got)
+	if got.key != "" {
+		t.Fatalf("expected zero entry on miss, got %+v", got)
 	}
 }
 
@@ -69,8 +69,8 @@ func TestStickyCacheExpiry(t *testing.T) {
 	if ok {
 		t.Fatal("expected miss after TTL expiry, got hit")
 	}
-	if got != nil {
-		t.Fatal("expected nil entry after expiry")
+	if got.key != "" {
+		t.Fatal("expected zero entry after expiry")
 	}
 }
 

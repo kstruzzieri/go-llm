@@ -52,24 +52,25 @@ func newStickyCache(ttl time.Duration, maxEntries int) *stickyCache {
 	}
 }
 
-// get retrieves an entry by key. Returns nil, false if not found or expired.
-// Expired entries are lazily evicted on lookup.
-func (sc *stickyCache) get(key string) (*routeSticky, bool) {
+// get retrieves an entry by key. Returns the zero value and false if not found
+// or expired. The returned struct is a copy — safe to read without holding the
+// lock. Expired entries are lazily evicted on lookup.
+func (sc *stickyCache) get(key string) (routeSticky, bool) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
 
 	entry, ok := sc.entries[key]
 	if !ok {
-		return nil, false
+		return routeSticky{}, false
 	}
 
 	// Lazy expiry: if the entry has expired, delete it and report a miss.
 	if time.Now().After(entry.expiresAt) {
 		delete(sc.entries, key)
-		return nil, false
+		return routeSticky{}, false
 	}
 
-	return entry, true
+	return *entry, true
 }
 
 // put inserts or replaces an entry. If at capacity, expired entries are
