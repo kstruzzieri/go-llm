@@ -191,13 +191,18 @@ func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOptio
 // Close shuts down the router. Subsequent calls to Route and convenience
 // methods return ErrRouterClosed. Close is idempotent.
 func (r *Router) Close() error {
+	var err error
 	r.closeOnce.Do(func() {
 		r.mu.Lock()
 		r.closed = true
 		r.mu.Unlock()
 		close(r.done)
+
+		if r.warmth != nil {
+			err = r.warmth.Close()
+		}
 	})
-	return nil
+	return err
 }
 
 // ---------------------------------------------------------------------------
@@ -265,7 +270,10 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 			// Return best truncatable with adaptation error.
 			sortScoredCandidates(truncatable, r.warmth)
 			winner := truncatable[0]
-			plan := r.buildPlan(winner, nil, req, false)
+			plan, buildErr := r.buildPlan(winner, nil, req, false)
+			if buildErr != nil {
+				return nil, ErrNoViableCandidate
+			}
 			plan.Degraded = true
 			return plan, ErrBudgetAdaptationRequired
 		}
@@ -321,7 +329,10 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 		fallbacks = executable[1 : 1+maxFb]
 	}
 
-	plan := r.buildPlan(executable[0], fallbacks, req, wasSticky)
+	plan, buildErr := r.buildPlan(executable[0], fallbacks, req, wasSticky)
+	if buildErr != nil {
+		return nil, fmt.Errorf("router: %w", buildErr)
+	}
 
 	// 8. Update sticky cache (skip if DryRun).
 	if req.AffinityKey != "" && !req.DryRun && stickyKey != "" {
@@ -641,20 +652,10 @@ func (r *Router) findIncumbentScore(key ModelKey, scored []scoredCandidate) int 
 
 // buildPlan constructs a RoutePlan from the winning candidate, fallback
 // candidates, the original request, and the sticky state.
-func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, req RoutingRequest, wasSticky bool) *RoutePlan {
+func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, req RoutingRequest, wasSticky bool) (*RoutePlan, error) {
 	prov, err := r.providers.Resolve(winner.profile.Key)
 	if err != nil {
-		// This should not happen since the candidate was resolved from the
-		// registry, but handle gracefully.
-		return &RoutePlan{
-			Kind:    inferRouteKind(req),
-			Model:   winner.profile.Key.Model,
-			Profile: winner.profile,
-			Request: req,
-			Score:   winner.score,
-			Budget:  winner.budget,
-			Reason:  fmt.Sprintf("provider resolution failed: %v", err),
-		}
+		return nil, fmt.Errorf("router: provider resolution failed for %s: %w", winner.profile.Key, err)
 	}
 
 	plan := &RoutePlan{
@@ -689,7 +690,7 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 		plan.Fallbacks = append(plan.Fallbacks, fbPlan)
 	}
 
-	return plan
+	return plan, nil
 }
 
 // buildReason creates a human-readable reason string from a scored candidate.
