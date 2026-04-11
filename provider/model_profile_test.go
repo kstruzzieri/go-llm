@@ -225,6 +225,67 @@ func TestModelProfileNilThinkTags(t *testing.T) {
 	}
 }
 
+func TestModelProfileQualityCtxCeiling(t *testing.T) {
+	t.Run("stored correctly", func(t *testing.T) {
+		p := ModelProfile{
+			Key:               ModelKey{Provider: "ollama", Model: "qwen3:32b"},
+			ContextWindow:     131072,
+			QualityCtxCeiling: 32768,
+		}
+		if p.QualityCtxCeiling != 32768 {
+			t.Errorf("QualityCtxCeiling = %d, want 32768", p.QualityCtxCeiling)
+		}
+	})
+
+	t.Run("zero means use ContextWindow", func(t *testing.T) {
+		p := ModelProfile{
+			Key:               ModelKey{Provider: "ollama", Model: "deepseek-r1:8b"},
+			ContextWindow:     65536,
+			QualityCtxCeiling: 0,
+		}
+		// When QualityCtxCeiling is 0, EffectiveContextWindow should return ContextWindow
+		// for any use case.
+		if got := p.EffectiveContextWindow("chat"); got != 65536 {
+			t.Errorf("EffectiveContextWindow(\"chat\") with zero ceiling = %d, want 65536", got)
+		}
+		if got := p.EffectiveContextWindow("fim"); got != 65536 {
+			t.Errorf("EffectiveContextWindow(\"fim\") with zero ceiling = %d, want 65536", got)
+		}
+	})
+}
+
+func TestEffectiveContextWindow(t *testing.T) {
+	p := ModelProfile{
+		Key:               ModelKey{Provider: "ollama", Model: "qwen3:32b"},
+		ContextWindow:     131072,
+		QualityCtxCeiling: 32768,
+	}
+
+	tests := []struct {
+		useCase string
+		want    int
+	}{
+		// Quality-sensitive use cases should respect the ceiling.
+		{"chat", 32768},
+		{"reasoning", 32768},
+		{"code-review", 32768},
+		// Quantity-sensitive use cases should use the full context window.
+		{"fim", 131072},
+		{"embedding", 131072},
+		// Unknown use case should use the full context window.
+		{"unknown", 131072},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.useCase, func(t *testing.T) {
+			got := p.EffectiveContextWindow(tt.useCase)
+			if got != tt.want {
+				t.Errorf("EffectiveContextWindow(%q) = %d, want %d", tt.useCase, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRecommendOptsConstruction(t *testing.T) {
 	opts := RecommendOpts{
 		RequestedModel:     "qwen3:8b",
