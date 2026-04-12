@@ -177,15 +177,16 @@ type ChatRequest struct {
 
 // ChatResponse is the provider-agnostic response from a chat completion.
 type ChatResponse struct {
-	Model     string      `json:"model"`
-	Provider  string      `json:"provider"`
-	Content   string      `json:"content"`
-	Thinking  string      `json:"thinking,omitempty"`
-	ToolCalls []ToolCall  `json:"tool_calls,omitempty"`
-	Done      bool        `json:"done"`
-	Partial   bool        `json:"partial,omitempty"`
-	Usage     Usage       `json:"usage,omitempty"`
-	Latency   LatencyInfo `json:"latency,omitempty"`
+	Model        string        `json:"model"`
+	Provider     string        `json:"provider"`
+	Content      string        `json:"content"`
+	Thinking     string        `json:"thinking,omitempty"`
+	ToolCalls    []ToolCall    `json:"tool_calls,omitempty"`
+	Done         bool          `json:"done"`
+	Partial      bool          `json:"partial,omitempty"`
+	Usage        Usage         `json:"usage,omitempty"`
+	Latency      LatencyInfo   `json:"latency,omitempty"`
+	RouteOutcome *RouteOutcome `json:"route_outcome,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -204,14 +205,15 @@ type GenerateRequest struct {
 
 // GenerateResponse is the provider-agnostic response from text generation.
 type GenerateResponse struct {
-	Model      string                `json:"model"`
-	Provider   string                `json:"provider"`
-	Response   string                `json:"response"`
-	Done       bool                  `json:"done"`
-	Partial    bool                  `json:"partial,omitempty"`
-	Usage      Usage                 `json:"usage,omitempty"`
-	Latency    LatencyInfo           `json:"latency,omitempty"`
-	Confidence *CompletionConfidence `json:"confidence,omitempty"`
+	Model        string                `json:"model"`
+	Provider     string                `json:"provider"`
+	Response     string                `json:"response"`
+	Done         bool                  `json:"done"`
+	Partial      bool                  `json:"partial,omitempty"`
+	Usage        Usage                 `json:"usage,omitempty"`
+	Latency      LatencyInfo           `json:"latency,omitempty"`
+	Confidence   *CompletionConfidence `json:"confidence,omitempty"`
+	RouteOutcome *RouteOutcome         `json:"route_outcome,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -226,10 +228,11 @@ type EmbedRequest struct {
 
 // EmbedResponse is the provider-agnostic response from embedding generation.
 type EmbedResponse struct {
-	Model      string      `json:"model"`
-	Provider   string      `json:"provider"`
-	Embeddings [][]float64 `json:"embeddings"`
-	Usage      Usage       `json:"usage,omitempty"`
+	Model        string        `json:"model"`
+	Provider     string        `json:"provider"`
+	Embeddings   [][]float64   `json:"embeddings"`
+	Usage        Usage         `json:"usage,omitempty"`
+	RouteOutcome *RouteOutcome `json:"route_outcome,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +372,23 @@ type CompletionConfidence struct {
 	AvgLogProb float64 `json:"avg_log_prob"`
 	MinLogProb float64 `json:"min_log_prob"`
 	DropOffIdx int     `json:"drop_off_idx"`
+}
+
+// ---------------------------------------------------------------------------
+// Route outcome
+// ---------------------------------------------------------------------------
+
+// RouteOutcome captures the Router's decision metadata for a request.
+// It records which model was originally planned, which model actually served
+// the request (after any fallbacks), and scoring information. This is attached
+// to response types so callers can observe routing decisions.
+type RouteOutcome struct {
+	PlannedModel  ModelKey `json:"planned_model"`
+	ActualModel   ModelKey `json:"actual_model"`
+	FallbacksUsed int      `json:"fallbacks_used"`
+	WasSticky     bool     `json:"was_sticky"`
+	Score         float64  `json:"score"`
+	Reason        string   `json:"reason"`
 }
 
 // ---------------------------------------------------------------------------

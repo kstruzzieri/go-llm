@@ -113,22 +113,44 @@ func (rp ResourceProfile) RAMAtContext(ctxSize int) float64 {
 // overridden by live runtime data from the provider. The Source field
 // records which layers contributed to this profile.
 type ModelProfile struct {
-	Key           ModelKey        // canonical provider-qualified identity
-	Name          string          // display name
-	Family        string          // normalized: "qwen3", "deepseek-r1", "codellama"
-	Provider      string          // provider name
-	Resources     ResourceProfile // resource requirements
-	Caps          Capability      // authoritative per-model capabilities after merge
-	FIM           *FIMConfig      // nil if model doesn't support FIM
-	ThinkMode     ThinkMode       // reasoning behavior
-	ThinkTags     *ThinkTags      // nil uses default <think></think>
-	Quality       Tier            // basic, good, great, best
-	Speed         Tier            // basic=slow, good=medium, great=fast, best=fastest
-	ContextWindow int             // max context tokens
-	Dimensions    int             // embedding dimensions, 0 if not embedding model
-	Source        ProfileSource   // static, fingerprint, runtime, merged
-	Digest        string          // model digest for staleness detection
-	UpdatedAt     time.Time       // when this profile was last computed
+	Key               ModelKey        // canonical provider-qualified identity
+	Name              string          // display name
+	Family            string          // normalized: "qwen3", "deepseek-r1", "codellama"
+	Provider          string          // provider name
+	Resources         ResourceProfile // resource requirements
+	Caps              Capability      // authoritative per-model capabilities after merge
+	FIM               *FIMConfig      // nil if model doesn't support FIM
+	ThinkMode         ThinkMode       // reasoning behavior
+	ThinkTags         *ThinkTags      // nil uses default <think></think>
+	Quality           Tier            // basic, good, great, best
+	Speed             Tier            // basic=slow, good=medium, great=fast, best=fastest
+	ContextWindow     int             // max context tokens
+	QualityCtxCeiling int             // 0 = same as ContextWindow; quality degrades above this
+	Dimensions        int             // embedding dimensions, 0 if not embedding model
+	Source            ProfileSource   // static, fingerprint, runtime, merged
+	Digest            string          // model digest for staleness detection
+	UpdatedAt         time.Time       // when this profile was last computed
+}
+
+// qualitySensitiveUseCases identifies use cases where output quality degrades
+// when the context window exceeds the model's training context. Models like
+// Qwen3 are trained on 32K but advertise 128K via YaRN — quality is lower
+// above the training context for tasks that require high fidelity.
+var qualitySensitiveUseCases = map[string]bool{
+	"chat":        true,
+	"reasoning":   true,
+	"code-review": true,
+}
+
+// EffectiveContextWindow returns the usable context window for a given use case.
+// For quality-sensitive use cases (chat, reasoning, code-review), it returns
+// QualityCtxCeiling when set. For quantity-sensitive use cases (fim, embedding)
+// or when QualityCtxCeiling is 0, it returns the full ContextWindow.
+func (p *ModelProfile) EffectiveContextWindow(useCase string) int {
+	if p.QualityCtxCeiling > 0 && qualitySensitiveUseCases[useCase] {
+		return p.QualityCtxCeiling
+	}
+	return p.ContextWindow
 }
 
 // ---------------------------------------------------------------------------
