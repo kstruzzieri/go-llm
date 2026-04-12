@@ -150,11 +150,14 @@ func scoreCandidate(
 	}
 	bd.capabilityGate = true
 
-	// 5. Circuit breaker gate: if the breaker is open, the candidate is
-	//    penalized with -Inf so it sorts to the bottom. Uses State() instead
-	//    of Allow() to avoid the Open→HalfOpen side effect — scoring must be
-	//    read-only. The Allow() call belongs in RoutePlan.Execute*.
-	if breaker != nil && breaker.State() == BreakerOpen {
+	// 5. Circuit breaker gate: if the breaker blocks the request, the
+	//    candidate is penalized with -Inf so it sorts to the bottom.
+	//    Allow() is used intentionally — it transitions Open→HalfOpen after
+	//    cooldown, enabling one probe request. Without this, a tripped
+	//    breaker could never recover. The Router calls scoreCandidate once
+	//    per candidate per Route(), so at most one probe is granted per
+	//    provider per routing pass.
+	if breaker != nil && !breaker.Allow() {
 		bd.breakerPenalty = math.Inf(-1)
 		return bd
 	}

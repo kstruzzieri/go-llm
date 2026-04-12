@@ -140,42 +140,49 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 
 	err := rp.Provider.ChatStream(ctx, req, wrappedFn)
 
-	if err != nil && !delivered && IsInfrastructureError(err) {
+	if err != nil && IsInfrastructureError(err) {
 		rp.recordFailure(rp.Profile.Key, err)
 
-		for i, fb := range rp.Fallbacks {
-			fbReq := fb.buildChatRequest(true)
-			delivered = false
-			fallbacksUsed = i + 1
+		// Only attempt fallback if no user-visible content was delivered.
+		if !delivered {
+			for i, fb := range rp.Fallbacks {
+				fbReq := fb.buildChatRequest(true)
+				delivered = false
+				fallbacksUsed = i + 1
 
-			wrappedFbFn := func(chunk ChatResponse) error {
-				if !delivered && hasVisibleContent(chunk.Content, chunk.Thinking, chunk.ToolCalls) {
-					delivered = true
-				}
-				if chunk.Done {
-					outcome = rp.handleResult(nil, fallbacksUsed)
-					if outcome != nil {
-						chunk.RouteOutcome = outcome
+				wrappedFbFn := func(chunk ChatResponse) error {
+					if !delivered && hasVisibleContent(chunk.Content, chunk.Thinking, chunk.ToolCalls) {
+						delivered = true
 					}
+					if chunk.Done {
+						outcome = rp.handleResult(nil, fallbacksUsed)
+						if outcome != nil {
+							chunk.RouteOutcome = outcome
+						}
+					}
+					return fn(chunk)
 				}
-				return fn(chunk)
-			}
 
-			err = fb.Provider.ChatStream(ctx, fbReq, wrappedFbFn)
-			if err == nil {
-				return nil
+				err = fb.Provider.ChatStream(ctx, fbReq, wrappedFbFn)
+				if err == nil {
+					return nil
+				}
+				if IsInfrastructureError(err) {
+					rp.recordFailure(fb.Profile.Key, err)
+					// Only continue to next fallback if this one did not deliver content.
+					if delivered {
+						break
+					}
+					continue
+				}
+				break
 			}
-			if IsInfrastructureError(err) {
-				rp.recordFailure(fb.Profile.Key, err)
-				continue
-			}
-			break
 		}
 	}
 
-	// If the stream succeeded (err == nil) but outcome was not yet built
-	// (e.g., provider never sent a Done chunk), still record.
-	if err != nil && outcome == nil {
+	// Record signals for streams that completed without a Done chunk, or
+	// that ended in a non-infrastructure error / cancellation.
+	if outcome == nil {
 		rp.handleResult(err, fallbacksUsed)
 	}
 
@@ -255,40 +262,48 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 
 	err := rp.Provider.GenerateStream(ctx, req, wrappedFn)
 
-	if err != nil && !delivered && IsInfrastructureError(err) {
+	if err != nil && IsInfrastructureError(err) {
 		rp.recordFailure(rp.Profile.Key, err)
 
-		for i, fb := range rp.Fallbacks {
-			fbReq := fb.buildGenerateRequest(true)
-			delivered = false
-			fallbacksUsed = i + 1
+		// Only attempt fallback if no user-visible content was delivered.
+		if !delivered {
+			for i, fb := range rp.Fallbacks {
+				fbReq := fb.buildGenerateRequest(true)
+				delivered = false
+				fallbacksUsed = i + 1
 
-			wrappedFbFn := func(chunk GenerateResponse) error {
-				if !delivered && chunk.Response != "" {
-					delivered = true
-				}
-				if chunk.Done {
-					outcome = rp.handleResult(nil, fallbacksUsed)
-					if outcome != nil {
-						chunk.RouteOutcome = outcome
+				wrappedFbFn := func(chunk GenerateResponse) error {
+					if !delivered && chunk.Response != "" {
+						delivered = true
 					}
+					if chunk.Done {
+						outcome = rp.handleResult(nil, fallbacksUsed)
+						if outcome != nil {
+							chunk.RouteOutcome = outcome
+						}
+					}
+					return fn(chunk)
 				}
-				return fn(chunk)
-			}
 
-			err = fb.Provider.GenerateStream(ctx, fbReq, wrappedFbFn)
-			if err == nil {
-				return nil
+				err = fb.Provider.GenerateStream(ctx, fbReq, wrappedFbFn)
+				if err == nil {
+					return nil
+				}
+				if IsInfrastructureError(err) {
+					rp.recordFailure(fb.Profile.Key, err)
+					if delivered {
+						break
+					}
+					continue
+				}
+				break
 			}
-			if IsInfrastructureError(err) {
-				rp.recordFailure(fb.Profile.Key, err)
-				continue
-			}
-			break
 		}
 	}
 
-	if err != nil && outcome == nil {
+	// Record signals for streams that completed without a Done chunk, or
+	// that ended in a non-infrastructure error / cancellation.
+	if outcome == nil {
 		rp.handleResult(err, fallbacksUsed)
 	}
 

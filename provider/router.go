@@ -221,10 +221,9 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	}
 	r.mu.RUnlock()
 
-	// Apply default priority if not set.
-	if req.Priority == 0 && r.defaultOpts.defaultPriority != PriorityBackground {
-		req.Priority = r.defaultOpts.defaultPriority
-	}
+	// Priority is used as-is from the request. PriorityBackground (zero value)
+	// is a valid explicit choice, so we do not override it with a default.
+	// Convenience methods set appropriate priorities (e.g., FIM -> PriorityHigh).
 
 	// 2. Resolve candidates.
 	candidates, err := r.resolveCandidates(ctx, req)
