@@ -180,13 +180,13 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		s.rebuildDerivedClients()
 	}
 
-	// Step 7: Create MCP SDK server.
+	// Step 6: Create MCP SDK server.
 	s.mcpServer = gomcp.NewServer(&gomcp.Implementation{
 		Name:    serverName,
 		Version: serverVersion,
 	}, nil)
 
-	// Step 8: Register tools, prompts, and resources (stubs for now).
+	// Step 7: Register tools, prompts, and resources.
 	s.registerChatTools()
 	s.registerGenerateTools()
 	s.registerCompletionTools()
@@ -252,6 +252,29 @@ func (s *Server) Retriever() *rag.Retriever {
 	return s.retriever
 }
 
+// Shutdown gracefully stops the server: shuts down the HTTP server (if running),
+// then releases all resources (RAG store, derived clients).
+// The ctx deadline bounds how long the HTTP server waits for in-flight requests.
+func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.RLock()
+	hs := s.httpServer
+	s.mu.RUnlock()
+
+	var httpErr error
+	if hs != nil {
+		httpErr = hs.Shutdown(ctx)
+		if errors.Is(httpErr, http.ErrServerClosed) {
+			httpErr = nil
+		}
+	}
+
+	closeErr := s.Close()
+	if httpErr != nil {
+		return httpErr
+	}
+	return closeErr
+}
+
 // Close releases all resources held by the server.
 // Safe to call multiple times; serialized with handler reads via s.mu.
 func (s *Server) Close() error {
@@ -269,14 +292,3 @@ func (s *Server) Close() error {
 	return nil
 }
 
-// Stub registration methods — implementations will be added in later tasks.
-
-func (s *Server) registerChatTools()       {}
-func (s *Server) registerGenerateTools()   {}
-func (s *Server) registerCompletionTools() {}
-func (s *Server) registerEmbedTools()      {}
-func (s *Server) registerRAGTools()        {}
-func (s *Server) registerModelTools()      {}
-func (s *Server) registerAnalysisTools()   {}
-func (s *Server) registerPrompts()         {}
-func (s *Server) registerResources()       {}

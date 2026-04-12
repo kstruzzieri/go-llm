@@ -14,6 +14,8 @@ go-llm/
 ├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers
+├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2
+├── cmd/go-llm-mcp/  # Standalone MCP server binary
 └── testdata/        # Test fixtures
 ```
 
@@ -28,6 +30,8 @@ module github.com/kstruzzieri/go-llm
 Keep minimal. Allowed external dependencies:
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
 - `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
+- `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
+- `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (only imported by `mcp/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 
 Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc.)
