@@ -134,7 +134,7 @@ func (s *Server) handleRAGQueryPrompt(ctx context.Context, req *gomcp.GetPromptR
 
 	contextText := "No relevant context found in the codebase."
 	if len(results) > 0 {
-		contextText = retriever.BuildContext(results, 4096)
+		contextText = retriever.BuildContext(results, ragContextMaxTokens)
 	}
 
 	return &gomcp.GetPromptResult{

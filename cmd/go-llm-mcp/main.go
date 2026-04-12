@@ -39,7 +39,13 @@ func main() {
 	if *noRAG {
 		opts = append(opts, mcp.WithRAGDisabled())
 	}
-	if *tlsCert != "" && *tlsKey != "" {
+	if *tlsCert != "" || *tlsKey != "" {
+		if *tlsCert == "" {
+			log.Fatal("--tls-cert is required when --tls-key is provided")
+		}
+		if *tlsKey == "" {
+			log.Fatal("--tls-key is required when --tls-cert is provided")
+		}
 		opts = append(opts, mcp.WithTLS(*tlsCert, *tlsKey))
 	}
 

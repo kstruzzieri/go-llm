@@ -21,9 +21,10 @@ import (
 )
 
 const (
-	defaultOllamaURL = "http://localhost:11434"
-	serverName       = "go-llm"
-	serverVersion    = "0.1.0"
+	defaultOllamaURL    = "http://localhost:11434"
+	serverName          = "go-llm"
+	serverVersion       = "0.1.0"
+	ragContextMaxTokens = 4096
 )
 
 // Server wraps go-llm functionality as an MCP server.
@@ -269,10 +270,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	}
 
 	closeErr := s.Close()
-	if httpErr != nil {
-		return httpErr
-	}
-	return closeErr
+	return errors.Join(httpErr, closeErr)
 }
 
 // Close releases all resources held by the server.

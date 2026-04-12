@@ -98,7 +98,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 			return toolError("rag", "RAG index is empty; run rag_index_file or rag_index_directory first"), nil
 		}
 
-		ragContext := retriever.BuildContext(results, 4096)
+		ragContext := retriever.BuildContext(results, ragContextMaxTokens)
 		systemMsg := ollama.ChatMessage{
 			Role:    "system",
 			Content: fmt.Sprintf("Relevant context from the codebase:\n\n%s", ragContext),
