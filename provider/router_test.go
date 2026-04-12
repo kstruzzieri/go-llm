@@ -223,7 +223,7 @@ func setupTestRouter(t *testing.T, opts ...RouterOption) (*Router, *rtMockProvid
 	}
 
 	router := NewRouter(modelReg, provReg, opts...)
-	t.Cleanup(func() { router.Close() })
+	t.Cleanup(func() { _ = router.Close() })
 
 	return router, prov
 }
@@ -596,7 +596,7 @@ func TestRouterWithAvailableRAM(t *testing.T) {
 
 	// Create router with only 8 GB available RAM.
 	router := NewRouter(modelReg, provReg, WithAvailableRAM(8.0))
-	t.Cleanup(func() { router.Close() })
+	t.Cleanup(func() { _ = router.Close() })
 
 	// Route without specifying a model — the large model should be filtered.
 	plan, err := router.Route(context.Background(), RoutingRequest{

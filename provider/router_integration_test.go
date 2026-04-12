@@ -42,7 +42,7 @@ func setupIntegrationRouter(
 	}
 
 	router := NewRouter(modelReg, provReg, opts...)
-	t.Cleanup(func() { router.Close() })
+	t.Cleanup(func() { _ = router.Close() })
 	return router
 }
 

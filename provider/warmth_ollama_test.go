@@ -68,7 +68,7 @@ func TestOllamaWarmthSourcePoll(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(50*time.Millisecond),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// Wait for at least one poll cycle to complete.
 	time.Sleep(100 * time.Millisecond)
@@ -115,7 +115,7 @@ func TestOllamaWarmthSourceCold(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(50*time.Millisecond),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// Wait for initial poll.
 	time.Sleep(100 * time.Millisecond)
@@ -145,7 +145,7 @@ func TestOllamaWarmthSourceRecordUse(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(1*time.Hour),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
 
@@ -229,7 +229,7 @@ func TestOllamaWarmthSourceProviderFilter(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(50*time.Millisecond),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// Wait for poll.
 	time.Sleep(100 * time.Millisecond)
@@ -260,7 +260,7 @@ func TestOllamaWarmthSourceModelUnloaded(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(50*time.Millisecond),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
 
@@ -299,7 +299,7 @@ func TestOllamaWarmthSourceHTTPError(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(50*time.Millisecond),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// Wait for poll attempt — should not crash.
 	time.Sleep(100 * time.Millisecond)
@@ -321,7 +321,7 @@ func TestOllamaWarmthSourceInvalidJSON(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(50*time.Millisecond),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	// Wait for poll attempt — should not crash.
 	time.Sleep(100 * time.Millisecond)
@@ -341,7 +341,7 @@ func TestOllamaWarmthSourceOptions(t *testing.T) {
 		ws := NewOllamaWarmthSource(srv.URL, "ollama",
 			WithPollInterval(0),
 		)
-		defer ws.Close()
+		defer func() { _ = ws.Close() }()
 
 		if ws.pollInterval != defaultPollInterval {
 			t.Errorf("pollInterval = %v, want %v", ws.pollInterval, defaultPollInterval)
@@ -356,7 +356,7 @@ func TestOllamaWarmthSourceOptions(t *testing.T) {
 		ws := NewOllamaWarmthSource(srv.URL, "ollama",
 			WithPollInterval(-1*time.Second),
 		)
-		defer ws.Close()
+		defer func() { _ = ws.Close() }()
 
 		if ws.pollInterval != defaultPollInterval {
 			t.Errorf("pollInterval = %v, want %v", ws.pollInterval, defaultPollInterval)
@@ -371,7 +371,7 @@ func TestOllamaWarmthSourceOptions(t *testing.T) {
 		ws := NewOllamaWarmthSource(srv.URL, "ollama",
 			WithKeepAlive(0),
 		)
-		defer ws.Close()
+		defer func() { _ = ws.Close() }()
 
 		if ws.keepAlive != defaultKeepAlive {
 			t.Errorf("keepAlive = %v, want %v", ws.keepAlive, defaultKeepAlive)
@@ -386,7 +386,7 @@ func TestOllamaWarmthSourceOptions(t *testing.T) {
 		ws := NewOllamaWarmthSource(srv.URL, "ollama",
 			WithKeepAlive(10*time.Minute),
 		)
-		defer ws.Close()
+		defer func() { _ = ws.Close() }()
 
 		if ws.keepAlive != 10*time.Minute {
 			t.Errorf("keepAlive = %v, want %v", ws.keepAlive, 10*time.Minute)
@@ -402,7 +402,7 @@ func TestOllamaWarmthSourceString(t *testing.T) {
 	ws := NewOllamaWarmthSource(srv.URL, "ollama",
 		WithPollInterval(1*time.Hour),
 	)
-	defer ws.Close()
+	defer func() { _ = ws.Close() }()
 
 	s := ws.String()
 	if s == "" {
