@@ -2,7 +2,7 @@
 
 A batteries-included Go module for building local-first AI features on top of [Ollama](https://ollama.com). Provides a complete pipeline from model management and configuration through RAG-powered retrieval to domain-specific analysis — all running locally with no cloud dependencies or API keys.
 
-Designed for embedding into Go applications that need LLM capabilities: chat, tool calling, code completion, retrieval-augmented generation, and more. A standalone MCP server mode is [on the roadmap](#roadmap) for use as a local AI service without embedding. Pure Go with minimal dependencies (no CGo).
+Designed for embedding into Go applications that need LLM capabilities: chat, tool calling, code completion, retrieval-augmented generation, and more. Also runs as a standalone [MCP server](#mcp-server) for use as a local AI service without embedding. Pure Go with minimal dependencies (no CGo).
 
 ### What's included
 
@@ -18,11 +18,18 @@ Designed for embedding into Go applications that need LLM capabilities: chat, to
 | Package | Description |
 |---------|-------------|
 | `ollama/` | HTTP client for the Ollama REST API — chat, text generation, embeddings, model management, tool calling. Streaming support via callbacks. |
-| `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity search, concurrent file/directory indexer with `.gitignore` support, and context-building retriever. |
+| `config/` | Model configuration loader (`models.json`) with provider settings, role-based defaults, and fallback chain resolution against available models. |
+| `provider/` | Intelligent model routing — Router with circuit breakers, warmth tracking, token budget, sticky routing, and multi-model scoring. |
+| `rag/` | Code-aware text chunking, SQLite vector store with cosine similarity and FTS5 hybrid search, concurrent file/directory indexer with `.gitignore` support, diff-aware incremental reindexing, and context-building retriever. |
 | `rag/parquet/` | Parquet dataset exporter for ML pipeline interop — exports vector store contents with quality metrics and configurable precision. |
 | `completion/` | IDE inline completion via Fill-in-the-Middle (FIM) with context window management. Sync and streaming APIs. |
 | `analysis/` | Domain-specific analysis helpers — code review (with optional RAG context), ML training metrics, and trading strategy analysis. |
-| `config/` | Model configuration loader (`models.json`) with provider settings, role-based defaults, and fallback chain resolution against available models. |
+| `mcp/` | MCP server exposing go-llm as tools, prompts, and resources over stdio and HTTP/2 transports. |
+| `conversation/` | Persistent conversation storage with SQLite. |
+| `feedback/` | Implicit user behavioral signal collection for retrieval quality improvement. |
+| `fingerprint/` | Model profiling — latency benchmarks and capability detection. |
+| `prefetch/` | Predictive cache-warming engine for RAG retrieval. |
+| `cmd/go-llm-mcp/` | Standalone MCP server binary with stdio and HTTP/2 support. |
 
 ## Requirements
 
@@ -52,7 +59,7 @@ func main() {
     client := ollama.NewClient()
 
     resp, err := client.Chat(context.Background(), ollama.ChatRequest{
-        Model: "qwen2.5:72b",
+        Model: "qwen3.5:27b",
         Messages: []ollama.ChatMessage{
             {Role: "user", Content: "Explain walk-forward validation for trading strategies"},
         },
@@ -68,7 +75,7 @@ func main() {
 
 ```go
 err := client.ChatStream(ctx, ollama.ChatRequest{
-    Model:    "qwen2.5:72b",
+    Model:    "qwen3.5:27b",
     Messages: []ollama.ChatMessage{{Role: "user", Content: "Hello"}},
 }, func(resp ollama.ChatResponse) error {
     fmt.Print(resp.Message.Content)
@@ -92,7 +99,7 @@ weatherTool := ollama.NewTool(
 
 // Send a chat request with tools
 resp, _ := client.Chat(ctx, ollama.ChatRequest{
-    Model:    "qwen2.5:72b",
+    Model:    "qwen3.5:27b",
     Messages: []ollama.ChatMessage{{Role: "user", Content: "What's the weather in NYC?"}},
     Tools:    []ollama.Tool{weatherTool},
 })
@@ -109,8 +116,8 @@ if len(resp.Message.ToolCalls) > 0 {
 ### Generate embeddings
 
 ```go
-embedding, err := client.Embed(ctx, "nomic-embed-text", "mean reversion strategy")
-// embedding is []float64 with 768 dimensions
+embedding, err := client.Embed(ctx, "qwen3-embedding:8b", "mean reversion strategy")
+// embedding is []float64 with 4096 dimensions
 ```
 
 ### Index a codebase for RAG
@@ -125,20 +132,24 @@ client := ollama.NewClient()
 store, _ := rag.NewSQLiteStore("vectors.db")
 defer store.Close()
 
-indexer := rag.NewIndexer(client, store)
+indexer := rag.NewIndexer(client, store,
+    rag.WithEmbeddingModel("qwen3-embedding:8b"),
+)
 indexer.IndexDirectory(ctx, "/path/to/project")
 ```
 
 ### Query with RAG context
 
 ```go
-retriever := rag.NewRetriever(client, store)
+retriever := rag.NewRetriever(client, store,
+    rag.WithRetrieverModel("qwen3-embedding:8b"),
+)
 results, _ := retriever.Retrieve(ctx, "how does the pairs trading strategy work?", 5)
 context := retriever.BuildContext(results, 4096)
 
 // Feed context into a chat completion
 resp, _ := client.Chat(ctx, ollama.ChatRequest{
-    Model: "qwen2.5:72b",
+    Model: "qwen3.5:27b",
     Messages: []ollama.ChatMessage{
         {Role: "system", Content: "Answer using the following code context:\n\n" + context},
         {Role: "user", Content: "How does the pairs trading strategy calculate hedge ratios?"},
@@ -201,8 +212,8 @@ client := ollama.NewClient(
 
 ```go
 models, _ := client.ListModels(ctx)
-info, _ := client.ShowModel(ctx, "qwen2.5:72b")
-client.PullModel(ctx, "nomic-embed-text", func(status string, completed, total int64) {
+info, _ := client.ShowModel(ctx, "qwen3.5:27b")
+client.PullModel(ctx, "qwen3:8b", func(status string, completed, total int64) {
     fmt.Printf("%s: %d/%d\n", status, completed, total)
 })
 ```
@@ -214,7 +225,7 @@ Fill-in-the-Middle completion for IDE integration with automatic context window 
 ```go
 import "github.com/kstruzzieri/go-llm/completion"
 
-provider := completion.NewProvider(client, "qwen2.5-coder:7b")
+provider := completion.NewProvider(client, "qwen3-coder-next")
 
 resp, _ := provider.Complete(ctx, completion.FIMRequest{
     Prefix:    "func fibonacci(n int) int {\n\t",
@@ -241,12 +252,45 @@ import "github.com/kstruzzieri/go-llm/config"
 cfg, _ := config.Default() // auto-discovers models.json
 
 // Simple lookup
-model := cfg.ModelFor("chat") // e.g., "qwen2.5:72b"
+model := cfg.ModelFor("chat") // e.g., "qwen3.5:27b"
 
 // Resolve with fallback chain (checks which models are actually available)
 resolved, _ := cfg.Resolve(ctx, client, "chat")
 fmt.Printf("Using %s (fallback: %v)\n", resolved.Name, resolved.IsFallback)
 ```
+
+## MCP Server
+
+Expose all go-llm capabilities over the [Model Context Protocol](https://modelcontextprotocol.io/) for use with Claude Desktop, IDE extensions, or any MCP client.
+
+```bash
+# Build
+go build -o go-llm-mcp ./cmd/go-llm-mcp/
+
+# Stdio (Claude Desktop, IDE integration)
+./go-llm-mcp --transport stdio
+
+# HTTP/2 (local development)
+./go-llm-mcp --transport http --addr 127.0.0.1:8080
+
+# Custom Ollama URL
+./go-llm-mcp --ollama-url http://gpu-server:11434
+```
+
+Claude Desktop configuration (`claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "go-llm": {
+      "command": "/path/to/go-llm-mcp",
+      "args": ["--transport", "stdio"]
+    }
+  }
+}
+```
+
+The server exposes 19 tools (chat, generate, code completion, embeddings, RAG, model management, analysis), 4 prompt templates, and 5 resources. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the configured default for that use-case is used.
 
 ## Parquet Export
 
@@ -258,7 +302,7 @@ import "github.com/kstruzzieri/go-llm/rag/parquet"
 info, _ := parquet.ExportVectorStore(ctx, store, "dataset.parquet",
     parquet.WithDType(parquet.Float32),
     parquet.WithSourcePattern("*.go"),
-    parquet.WithModel("nomic-embed-text"),
+    parquet.WithModel("qwen3-embedding:8b"),
 )
 fmt.Printf("Exported %d rows (%d clean, %d flagged)\n",
     info.RowCount, info.Quality.CleanRows, info.Quality.FlaggedRows)
@@ -272,11 +316,11 @@ Domain-specific analysis helpers that leverage Ollama models.
 import "github.com/kstruzzieri/go-llm/analysis"
 
 // Code review (optionally backed by RAG context)
-reviewer, _ := analysis.NewCodeReviewer(client, retriever, "qwen2.5:72b")
+reviewer, _ := analysis.NewCodeReviewer(client, retriever, "qwen3.5:27b")
 review, _ := reviewer.Review(ctx, code, analysis.WithLanguage("go"))
 
 // ML training metrics analysis
-analyzer, _ := analysis.NewMetricsAnalyzer(client, "qwen2.5:72b")
+analyzer, _ := analysis.NewMetricsAnalyzer(client, "qwen3.5:27b")
 insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
     Epoch: 10, Loss: 0.42, LearningRate: 1e-4,
 })
@@ -284,27 +328,12 @@ insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
 
 ## Roadmap
 
-### Up next
-
 | Feature | Description |
 |---------|-------------|
-| Hybrid retrieval | FTS5 full-text search alongside vector similarity for keyword+semantic search |
-| Conversation store | Persistent conversation history with lossless tool-call round-trips |
-| Candidate resolution | Ordered model fallback chains resolved against what's actually running |
-| Fingerprint profiles | Backend-scoped identity profiles for per-deployment configuration |
-
-### Planned
-
-| Feature | Description |
-|---------|-------------|
-| MCP server | Expose go-llm as a standalone [Model Context Protocol](https://modelcontextprotocol.io) server — use it as a local AI service without embedding |
-| Stable chunk identity | Content-addressed chunk keys for feedback-safe reindexing |
-| Behavioral feedback | Collect and aggregate implicit quality signals to improve retrieval over time |
-| Prefetch engine | Warm-cache retrieval for predictable access patterns |
-| Orchestration pipeline | Multi-model orchestration with enriched model selection |
-| Diff-aware indexing | Incremental reindexing that only re-embeds changed content |
+| Router-MCP integration | Wire provider.Router into MCP server for intelligent model selection with circuit breakers and fallback chains |
+| FIM intelligence | Adaptive token budgets and multi-family stop tokens for completion |
+| OpenAI-compatible endpoint | `compat/` package exposing an OpenAI-compatible API over local Ollama models |
 | Vision support | Image inputs in chat messages |
-| Batch embeddings | True batch embedding via Ollama's array API |
 | ANN search | Approximate nearest neighbor search for large vector stores |
 
 ## Dependencies
@@ -313,6 +342,8 @@ Minimal by design:
 
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
 - `golang.org/x/sync` — concurrency primitives (bounded worker pools for indexing)
+- `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
+- `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (only imported by `mcp/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 
 ## Testing

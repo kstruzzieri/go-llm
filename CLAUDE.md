@@ -11,10 +11,16 @@
 ```
 go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
+├── config/          # Model configuration loader (models.json, resolve, fallback)
+├── provider/        # Intelligent model routing (Router, circuit breakers, warmth, scoring)
 ├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
-├── analysis/        # Domain-specific analysis helpers
+├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2
+├── conversation/    # Persistent conversation storage with SQLite
+├── feedback/        # Implicit user behavioral signal collection
+├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
+├── prefetch/        # Predictive cache-warming engine for RAG retrieval
 ├── cmd/go-llm-mcp/  # Standalone MCP server binary
 └── testdata/        # Test fixtures
 ```
@@ -61,7 +67,7 @@ Base URL: `http://localhost:11434`
 ### Chat Request
 ```json
 {
-  "model": "qwen2.5:72b",
+  "model": "qwen3.5:27b",
   "messages": [{"role": "user", "content": "hello"}],
   "stream": true,
   "options": {
@@ -75,7 +81,7 @@ Base URL: `http://localhost:11434`
 ### Embed Request
 ```json
 {
-  "model": "nomic-embed-text",
+  "model": "qwen3-embedding:8b",
   "input": "text to embed"
 }
 ```

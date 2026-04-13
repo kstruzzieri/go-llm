@@ -4,7 +4,7 @@ A guide to setting up and using go-llm with your local Ollama models.
 
 ## Prerequisites
 
-1. **Go 1.24+** installed
+1. **Go 1.25+** installed
 2. **Ollama** running locally — [install](https://ollama.com/download)
 3. Required models pulled (see [Model Configuration](#model-configuration))
 
@@ -188,29 +188,89 @@ resp, _ := client.Chat(ctx, ollama.ChatRequest{
 })
 ```
 
+### MCP Server
+
+The MCP server exposes all go-llm capabilities over the [Model Context Protocol](https://modelcontextprotocol.io/) for use with Claude Desktop, IDE extensions, or any MCP client.
+
+#### Standalone Binary
+
+```bash
+# Build
+go build -o go-llm-mcp ./cmd/go-llm-mcp/
+
+# Stdio transport (for Claude Desktop / IDE integration)
+./go-llm-mcp --transport stdio
+
+# HTTP/2 transport (local development)
+./go-llm-mcp --transport http --addr 127.0.0.1:8080
+
+# With custom Ollama URL and config
+./go-llm-mcp --ollama-url http://gpu-server:11434 --config /path/to/models.json
+
+# Disable RAG tools
+./go-llm-mcp --no-rag
+
+# HTTP/2 with TLS (remote deployment)
+./go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+```
+
+#### Claude Desktop Configuration
+
+Add to `claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "go-llm": {
+      "command": "/path/to/go-llm-mcp",
+      "args": ["--transport", "stdio"]
+    }
+  }
+}
+```
+
+#### Embedded in a Go Application
+
+```go
+import "github.com/kstruzzieri/go-llm/mcp"
+
+srv, err := mcp.NewServer(ctx,
+    mcp.WithOllamaURL("http://localhost:11434"),
+    mcp.WithConfig("models.json"),
+    mcp.WithRAGPath("./vectors.db"),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer srv.Shutdown(ctx)
+
+// Stdio (connects to parent process)
+srv.ListenStdio(ctx)
+
+// Or HTTP/2 (network)
+srv.ListenHTTP(ctx, "127.0.0.1:8080")
+```
+
+The server provides 19 tools (chat, generate, code completion, embeddings, RAG, model management, analysis), 4 prompt templates, and 5 resources. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the configured default for that use-case is used.
+
 ## Architecture
 
 ```
 go-llm/
-├── ollama/        # Ollama REST API client
-│   ├── client.go  # HTTP client with functional options
-│   ├── chat.go    # Chat completions (streaming + sync)
-│   ├── generate.go# Text generation (streaming + sync)
-│   ├── embed.go   # Embedding generation (single + batch)
-│   ├── models.go  # Model management (list, show, pull)
-│   └── types.go   # Request/response types
-├── rag/           # Retrieval Augmented Generation
-│   ├── store.go       # VectorStore interface
-│   ├── sqlite_store.go# SQLite implementation (cosine similarity)
-│   ├── chunker.go     # Text chunking interface + sliding window
-│   ├── chunker_code.go# Code-aware chunking (Go, Python, TS, etc.)
-│   ├── indexer.go     # File/directory indexing coordinator
-│   └── retriever.go   # Query embedding + context building
-├── completion/    # IDE inline completions (planned)
-├── analysis/      # Domain analysis helpers (planned)
-├── config/        # Model configuration loader (models.json)
-├── models.json    # Model configuration (loaded by config package)
-└── docs/          # Documentation
+├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
+├── config/          # Model configuration loader (models.json, resolve, fallback)
+├── provider/        # Intelligent model routing (Router, circuit breakers, warmth, scoring)
+├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
+├── completion/      # IDE inline completion (Fill-in-the-Middle)
+├── analysis/        # Domain-specific analysis (code review, ML metrics, trading)
+├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2
+├── conversation/    # Persistent conversation storage with SQLite
+├── feedback/        # Implicit user behavioral signal collection
+├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
+├── prefetch/        # Predictive cache-warming engine for RAG retrieval
+├── cmd/go-llm-mcp/  # Standalone MCP server binary
+├── models.json      # Model configuration (loaded by config package)
+└── testdata/        # Test fixtures
 ```
 
 ## Hardware Requirements
