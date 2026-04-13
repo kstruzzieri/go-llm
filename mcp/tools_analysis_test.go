@@ -95,6 +95,30 @@ func TestAnalyzeTrainingToolBasic(t *testing.T) {
 		Arguments: map[string]any{
 			"model": "m",
 			"metrics": map[string]any{
+				"epoch":         5,
+				"loss":          0.42,
+				"loss_history":  []float64{1.0, 0.8, 0.6, 0.5, 0.42},
+				"learning_rate": 0.001,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool() isError = true, content = %v", extractText(result))
+	}
+}
+
+func TestAnalyzeTrainingToolLegacyFieldNames(t *testing.T) {
+	env := newTestEnv(t, analysisOllamaMock())
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "analyze_training",
+		Arguments: map[string]any{
+			"model": "m",
+			"metrics": map[string]any{
 				"Epoch":        5,
 				"Loss":         0.42,
 				"LossHistory":  []float64{1.0, 0.8, 0.6, 0.5, 0.42},
@@ -107,6 +131,49 @@ func TestAnalyzeTrainingToolBasic(t *testing.T) {
 	}
 	if result.IsError {
 		t.Fatalf("CallTool() isError = true, content = %v", extractText(result))
+	}
+}
+
+func TestAnalyzeTrainingToolMissingMetrics(t *testing.T) {
+	env := newTestEnv(t, analysisOllamaMock())
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "analyze_training",
+		Arguments: map[string]any{
+			"model": "m",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected isError = true for missing metrics")
+	}
+	if text := extractText(result); !strings.Contains(text, "metrics are required") {
+		t.Errorf("error = %q, want to contain %q", text, "metrics are required")
+	}
+}
+
+func TestAnalyzeTrainingToolEmptyMetrics(t *testing.T) {
+	env := newTestEnv(t, analysisOllamaMock())
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "analyze_training",
+		Arguments: map[string]any{
+			"model":   "m",
+			"metrics": map[string]any{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected isError = true for empty metrics")
+	}
+	if text := extractText(result); !strings.Contains(text, "metrics must not be empty") {
+		t.Errorf("error = %q, want to contain %q", text, "metrics must not be empty")
 	}
 }
 
@@ -208,6 +275,7 @@ func TestCompareStrategiesToolMissingModel(t *testing.T) {
 		Arguments: map[string]any{
 			"strategies": map[string]any{
 				"a": map[string]float64{"x": 1.0},
+				"b": map[string]float64{"x": 2.0},
 			},
 		},
 	})
@@ -219,5 +287,29 @@ func TestCompareStrategiesToolMissingModel(t *testing.T) {
 	}
 	if text := extractText(result); !strings.Contains(text, "model parameter required") {
 		t.Errorf("error = %q, want to contain %q", text, "model parameter required")
+	}
+}
+
+func TestCompareStrategiesToolSingleStrategy(t *testing.T) {
+	env := newTestEnv(t, analysisOllamaMock())
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "compare_strategies",
+		Arguments: map[string]any{
+			"model": "m",
+			"strategies": map[string]any{
+				"a": map[string]float64{"x": 1.0},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected isError = true for single strategy")
+	}
+	if text := extractText(result); !strings.Contains(text, "at least 2 strategies are required") {
+		t.Errorf("error = %q, want to contain %q", text, "at least 2 strategies are required")
 	}
 }

@@ -1,8 +1,10 @@
 package mcp
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -164,11 +166,16 @@ func (s *Server) handleExplainCode(ctx context.Context, req *gomcp.CallToolReque
 
 func (s *Server) handleAnalyzeTraining(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	var args struct {
-		Metrics analysis.TrainingMetrics `json:"metrics"`
-		Model   string                   `json:"model,omitempty"`
+		Metrics json.RawMessage `json:"metrics"`
+		Model   string          `json:"model,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+
+	metrics, err := decodeTrainingMetrics(args.Metrics)
+	if err != nil {
+		return toolError("validation", "%v", err), nil
 	}
 
 	model, err := s.resolveModel(args.Model, "analysis")
@@ -181,7 +188,7 @@ func (s *Server) handleAnalyzeTraining(ctx context.Context, req *gomcp.CallToolR
 		return toolError("ollama", "%v", err), nil
 	}
 
-	result, err := analyzer.AnalyzeTraining(ctx, args.Metrics)
+	result, err := analyzer.AnalyzeTraining(ctx, metrics)
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
@@ -261,6 +268,9 @@ func (s *Server) handleCompareStrategies(ctx context.Context, req *gomcp.CallToo
 	if len(args.Strategies) == 0 {
 		return toolError("validation", "strategies must not be empty"), nil
 	}
+	if len(args.Strategies) < 2 {
+		return toolError("validation", "at least 2 strategies are required"), nil
+	}
 
 	model, err := s.resolveModel(args.Model, "analysis")
 	if err != nil {
@@ -278,4 +288,67 @@ func (s *Server) handleCompareStrategies(ctx context.Context, req *gomcp.CallToo
 	}
 
 	return toolResult(result), nil
+}
+
+func decodeTrainingMetrics(raw json.RawMessage) (analysis.TrainingMetrics, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return analysis.TrainingMetrics{}, errMetricsRequired
+	}
+
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return analysis.TrainingMetrics{}, err
+	}
+	if len(fields) == 0 {
+		return analysis.TrainingMetrics{}, errEmptyMetrics
+	}
+
+	var metrics analysis.TrainingMetrics
+	recognized := false
+
+	for _, field := range []struct {
+		aliases []string
+		dest    any
+	}{
+		{aliases: []string{"epoch", "Epoch"}, dest: &metrics.Epoch},
+		{aliases: []string{"loss", "Loss"}, dest: &metrics.Loss},
+		{aliases: []string{"loss_history", "LossHistory"}, dest: &metrics.LossHistory},
+		{aliases: []string{"reward_mean", "RewardMean"}, dest: &metrics.RewardMean},
+		{aliases: []string{"reward_history", "RewardHistory"}, dest: &metrics.RewardHistory},
+		{aliases: []string{"kl_divergence", "KLDivergence"}, dest: &metrics.KLDivergence},
+		{aliases: []string{"learning_rate", "LearningRate"}, dest: &metrics.LearningRate},
+		{aliases: []string{"custom_metrics", "CustomMetrics"}, dest: &metrics.CustomMetrics},
+	} {
+		matched, err := unmarshalAliasedJSONField(fields, field.aliases, field.dest)
+		if err != nil {
+			return analysis.TrainingMetrics{}, err
+		}
+		recognized = recognized || matched
+	}
+
+	if !recognized {
+		return analysis.TrainingMetrics{}, errEmptyMetrics
+	}
+
+	return metrics, nil
+}
+
+var (
+	errMetricsRequired = errors.New("metrics are required")
+	errEmptyMetrics    = errors.New("metrics must not be empty")
+)
+
+func unmarshalAliasedJSONField(fields map[string]json.RawMessage, aliases []string, dest any) (bool, error) {
+	for _, alias := range aliases {
+		raw, ok := fields[alias]
+		if !ok {
+			continue
+		}
+		if err := json.Unmarshal(raw, dest); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+	return false, nil
 }
