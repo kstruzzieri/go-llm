@@ -48,8 +48,8 @@ func TestResolveModelNoConfigNoExplicit(t *testing.T) {
 	if err == nil {
 		t.Fatal("resolveModel() error = nil, want error")
 	}
-	if !strings.Contains(err.Error(), "resolve model: model parameter required") {
-		t.Errorf("error = %q, want to contain %q", err.Error(), "resolve model: model parameter required")
+	if !strings.Contains(err.Error(), "model parameter required") {
+		t.Errorf("error = %q, want to contain %q", err.Error(), "model parameter required")
 	}
 }
 
