@@ -199,19 +199,19 @@ The MCP server exposes all go-llm capabilities over the [Model Context Protocol]
 go build -o go-llm-mcp ./cmd/go-llm-mcp/
 
 # Stdio transport (for Claude Desktop / IDE integration)
-go-llm-mcp --transport stdio
+./go-llm-mcp --transport stdio
 
 # HTTP/2 transport (local development)
-go-llm-mcp --transport http --addr 127.0.0.1:8080
+./go-llm-mcp --transport http --addr 127.0.0.1:8080
 
 # With custom Ollama URL and config
-go-llm-mcp --ollama-url http://gpu-server:11434 --config /path/to/models.json
+./go-llm-mcp --ollama-url http://gpu-server:11434 --config /path/to/models.json
 
 # Disable RAG tools
-go-llm-mcp --no-rag
+./go-llm-mcp --no-rag
 
 # HTTP/2 with TLS (remote deployment)
-go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+./go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
 ```
 
 #### Claude Desktop Configuration

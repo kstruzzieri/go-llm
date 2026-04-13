@@ -268,13 +268,13 @@ Expose all go-llm capabilities over the [Model Context Protocol](https://modelco
 go build -o go-llm-mcp ./cmd/go-llm-mcp/
 
 # Stdio (Claude Desktop, IDE integration)
-go-llm-mcp --transport stdio
+./go-llm-mcp --transport stdio
 
 # HTTP/2 (local development)
-go-llm-mcp --transport http --addr 127.0.0.1:8080
+./go-llm-mcp --transport http --addr 127.0.0.1:8080
 
 # Custom Ollama URL
-go-llm-mcp --ollama-url http://gpu-server:11434
+./go-llm-mcp --ollama-url http://gpu-server:11434
 ```
 
 Claude Desktop configuration (`claude_desktop_config.json`):
