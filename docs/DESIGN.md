@@ -12,55 +12,20 @@ A shared Go module providing Ollama integration (chat, completions, embeddings) 
 ## Repository Structure
 
 ```
-projects/
-├── go-llm/                              # NEW: shared module
-│   ├── go.mod                           # module github.com/kstruzzieri/go-llm
-│   ├── go.sum
-│   ├── README.md
-│   │
-│   ├── ollama/                          # Ollama API client
-│   │   ├── client.go                    # HTTP client, connection management
-│   │   ├── client_test.go
-│   │   ├── types.go                     # Request/response types
-│   │   ├── chat.go                      # Chat completions (streaming + non-streaming)
-│   │   ├── chat_test.go
-│   │   ├── generate.go                  # Raw text generation
-│   │   ├── generate_test.go
-│   │   ├── embed.go                     # Embedding generation
-│   │   ├── embed_test.go
-│   │   ├── models.go                    # Model listing, info, pull, delete
-│   │   └── models_test.go
-│   │
-│   ├── config/                          # Model configuration loader
-│   │   ├── config.go                    # Types, Load, ModelFor, Provider lookups
-│   │   ├── config_test.go
-│   │   ├── resolve.go                   # ModelChecker interface, Resolve, ResolveAll
-│   │   └── resolve_test.go
-│   │
-│   ├── rag/                             # RAG (Retrieval Augmented Generation)
-│   │   ├── chunker.go                   # Text chunking strategies
-│   │   ├── chunker_test.go
-│   │   ├── chunker_code.go             # Code-aware chunking (by function/class)
-│   │   ├── store.go                     # VectorStore interface
-│   │   ├── store_test.go
-│   │   ├── sqlite_store.go             # SQLite + brute-force cosine similarity
-│   │   ├── sqlite_store_test.go
-│   │   ├── indexer.go                   # Index files → chunks → embeddings → store
-│   │   ├── indexer_test.go
-│   │   ├── retriever.go                # Query → embed → search → rank → return
-│   │   └── retriever_test.go
-│   │
-│   ├── completion/                      # IDE completion helpers
-│   │   ├── inline.go                    # FIM (Fill-in-the-Middle) completion
-│   │   ├── inline_test.go
-│   │   ├── context.go                   # Context window management
-│   │   └── context_test.go
-│   │
-│   └── analysis/                        # Higher-level analysis helpers
-│       ├── code_review.go               # Code review prompt construction
-│       ├── explain.go                   # Code explanation
-│       ├── metrics.go                   # ML metrics analysis (for Flux)
-│       └── trading.go                   # Trading strategy analysis (for QT)
+go-llm/
+├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
+├── config/          # Model configuration loader (models.json, resolve, fallback)
+├── provider/        # Intelligent model routing (Router, circuit breakers, warmth, scoring)
+├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
+├── completion/      # IDE inline completion (Fill-in-the-Middle)
+├── analysis/        # Domain-specific analysis (code review, ML metrics, trading)
+├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2
+├── conversation/    # Persistent conversation storage with SQLite
+├── feedback/        # Implicit user behavioral signal collection
+├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
+├── prefetch/        # Predictive cache-warming engine for RAG retrieval
+├── cmd/go-llm-mcp/  # Standalone MCP server binary
+└── testdata/        # Test fixtures
 ```
 
 ## Module Path
@@ -271,7 +236,7 @@ type Indexer struct {
 func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption) *Indexer
 
 type IndexerOption func(*Indexer)
-func WithEmbeddingModel(model string) IndexerOption  // default: "nomic-embed-text"
+func WithEmbeddingModel(model string) IndexerOption  // default: from config or "qwen3-embedding:8b"
 func WithChunker(c Chunker) IndexerOption
 
 // IndexFile indexes a single file.
@@ -402,6 +367,74 @@ type AnomalyInfo struct {
 }
 ```
 
+### `mcp/` — MCP Server
+
+Exposes all go-llm capabilities over the [Model Context Protocol](https://modelcontextprotocol.io/), allowing any MCP-compatible client (Claude Desktop, IDE extensions, custom tools) to use them without writing Go.
+
+```go
+package mcp
+
+// Server wraps go-llm functionality as an MCP server.
+// Initializes in degraded mode when Ollama is unavailable.
+type Server struct { /* ... */ }
+
+func NewServer(ctx context.Context, opts ...Option) (*Server, error)
+
+// Options
+func WithOllamaURL(url string) Option
+func WithConfig(path string) Option    // models.json path
+func WithRAGPath(path string) Option   // SQLite vector store
+func WithRAGDisabled() Option
+func WithTLS(cert, key string) Option
+
+// Transports
+func (s *Server) ListenStdio(ctx context.Context) error
+func (s *Server) ListenHTTP(ctx context.Context, addr string) error
+
+// Lifecycle
+func (s *Server) Shutdown(ctx context.Context) error
+func (s *Server) Close() error
+```
+
+**19 tools** organized by domain:
+
+| Domain | Tools |
+|--------|-------|
+| Chat | `chat` (with optional RAG context) |
+| Generate | `generate` (raw text) |
+| Completion | `complete_code` (FIM) |
+| Embeddings | `embed`, `embed_batch` |
+| Models | `list_models`, `show_model`, `pull_model` |
+| RAG | `rag_index_file`, `rag_index_directory`, `rag_search`, `rag_stats`, `rag_delete` |
+| Analysis | `code_review`, `explain_code`, `analyze_training`, `explain_anomaly`, `analyze_strategy`, `compare_strategies` |
+
+**4 prompt templates:** `code-review`, `explain`, `rag-query`, `refactor`
+
+**5 resources:** `go-llm://health`, `go-llm://models`, `go-llm://models/{name}`, `go-llm://rag/stats`, `go-llm://config`
+
+**Key design decisions:**
+- Stateful `Server` struct wraps `ollama.Client` + optional `rag.VectorStore`/`rag.Indexer`/`rag.Retriever`
+- Model resolution: explicit model param > config defaults > error. Uses `config.ResolveAll` with cached results, refreshed on `list_models` / `pull_model`
+- Transport: stdio for client integration, HTTP/2 for network. h2c (cleartext HTTP/2) for local, TLS for remote — `isLoopback()` prevents accidental plaintext exposure on non-loopback addresses
+- Graceful shutdown: `Shutdown` stops HTTP listener, waits for in-flight requests, then closes RAG store and derived clients
+- RAG tools trust caller-provided paths (matches MCP trust model: server trusts its client)
+
+### `cmd/go-llm-mcp/` — Standalone Binary
+
+```bash
+# Stdio (for Claude Desktop, IDE integration)
+go-llm-mcp --transport stdio
+
+# HTTP/2 (local development)
+go-llm-mcp --transport http --addr 127.0.0.1:8080
+
+# HTTP/2 with TLS (remote deployment)
+go-llm-mcp --transport http --addr 0.0.0.0:443 --tls-cert cert.pem --tls-key key.pem
+
+# Custom config
+go-llm-mcp --ollama-url http://gpu-server:11434 --config /etc/go-llm/models.json
+```
+
 ---
 
 ## Integration Points
@@ -432,7 +465,7 @@ func NewService(dbPath string) (*Service, error) {
     store, _ := rag.NewSQLiteStore(dbPath)
     indexer := rag.NewIndexer(client, store)
     retriever := rag.NewRetriever(client, store)
-    completer := completion.NewProvider(client, "qwen2.5-coder:32b")
+    completer := completion.NewProvider(client, "qwen3-coder-next")
 
     return &Service{
         client:    client,
@@ -505,7 +538,7 @@ func NewService() *Service {
     client := ollama.NewClient()
     return &Service{
         client:   client,
-        analyzer: analysis.NewMetricsAnalyzer(client, "qwen2.5:72b"),
+        analyzer: analysis.NewMetricsAnalyzer(client, "qwen3.5:27b"),
     }
 }
 
@@ -534,14 +567,18 @@ Minimal external dependencies:
 // go.mod
 module github.com/kstruzzieri/go-llm
 
-go 1.23
+go 1.25
 
 require (
-    modernc.org/sqlite v1.44.3   // SQLite for vector store (pure Go, no CGo)
+    modernc.org/sqlite                      // SQLite for vector store (pure Go, no CGo)
+    golang.org/x/sync                       // errgroup for bounded worker pools
+    golang.org/x/net                        // h2c HTTP/2 cleartext (mcp/ only)
+    github.com/modelcontextprotocol/go-sdk  // Official MCP Go SDK (mcp/ only)
+    github.com/parquet-go/parquet-go         // Parquet file writer (rag/parquet/ only)
 )
 ```
 
-That's it. The Ollama client is pure `net/http`. Embeddings math is `math` stdlib. SQLite is already used by Flux ML (same driver: `modernc.org/sqlite`).
+The Ollama client is pure `net/http`. Embeddings math is `math` stdlib. SQLite is already used by Flux ML (same driver: `modernc.org/sqlite`).
 
 ---
 
@@ -582,7 +619,7 @@ That's it. The Ollama client is pure `net/http`. Embeddings math is `math` stdli
 
 ## Performance Considerations
 
-- **Embedding batch size:** nomic-embed-text handles ~32 texts per batch efficiently. The indexer should batch.
+- **Embedding batch size:** Embedding models handle ~32 texts per batch efficiently. The indexer should batch.
 - **Vector search:** For < 50k chunks (typical codebase), brute-force cosine similarity in SQLite is < 50ms. No ANN index needed yet.
 - **Completion latency:** FIM completion should target < 500ms for inline suggestions. Use small context windows (2048 tokens) and `num_predict: 128`.
 - **Memory:** The go-llm module itself uses negligible memory. Ollama manages model memory independently.
