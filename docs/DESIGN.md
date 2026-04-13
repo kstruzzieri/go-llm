@@ -236,7 +236,7 @@ type Indexer struct {
 func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption) *Indexer
 
 type IndexerOption func(*Indexer)
-func WithEmbeddingModel(model string) IndexerOption  // default: from config or "qwen3-embedding:8b"
+func WithEmbeddingModel(model string) IndexerOption  // default: "nomic-embed-text"
 func WithChunker(c Chunker) IndexerOption
 
 // IndexFile indexes a single file.
@@ -534,12 +534,16 @@ type Service struct {
     analyzer *analysis.MetricsAnalyzer
 }
 
-func NewService() *Service {
+func NewService() (*Service, error) {
     client := ollama.NewClient()
+    analyzer, err := analysis.NewMetricsAnalyzer(client, "qwen3.5:27b")
+    if err != nil {
+        return nil, err
+    }
     return &Service{
         client:   client,
-        analyzer: analysis.NewMetricsAnalyzer(client, "qwen3.5:27b"),
-    }
+        analyzer: analyzer,
+    }, nil
 }
 
 // --- Wails-exposed methods ---

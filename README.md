@@ -132,14 +132,18 @@ client := ollama.NewClient()
 store, _ := rag.NewSQLiteStore("vectors.db")
 defer store.Close()
 
-indexer := rag.NewIndexer(client, store)
+indexer := rag.NewIndexer(client, store,
+    rag.WithEmbeddingModel("qwen3-embedding:8b"),
+)
 indexer.IndexDirectory(ctx, "/path/to/project")
 ```
 
 ### Query with RAG context
 
 ```go
-retriever := rag.NewRetriever(client, store)
+retriever := rag.NewRetriever(client, store,
+    rag.WithRetrieverModel("qwen3-embedding:8b"),
+)
 results, _ := retriever.Retrieve(ctx, "how does the pairs trading strategy work?", 5)
 context := retriever.BuildContext(results, 4096)
 
