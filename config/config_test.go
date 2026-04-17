@@ -536,7 +536,7 @@ func TestLoad_RootModelsJSON(t *testing.T) {
 	if cfg.ModelFor("chat") == "" {
 		t.Error("expected chat model from root models.json")
 	}
-	if len(cfg.Models) != 5 {
-		t.Errorf("expected 5 models, got %d", len(cfg.Models))
+	if len(cfg.Models) != 6 {
+		t.Errorf("expected 6 models, got %d", len(cfg.Models))
 	}
 }

@@ -7,18 +7,27 @@
   },
   "models": {
     "general": {
-      "name": "qwen3.5:27b",
+      "name": "gemma4:31b",
       "provider": "ollama",
-      "description": "General purpose — reasoning, conversation, multimodal (vision)",
+      "description": "Gemma 4 31B dense — reasoning, analysis, multimodal; configurable thinking mode",
       "type": "dense",
-      "parameters": "27B",
+      "parameters": "31B",
       "context_window": 256000,
-      "fallbacks": ["lightweight"]
+      "fallbacks": ["fast", "lightweight"]
+    },
+    "agent": {
+      "name": "gemma4:31b",
+      "provider": "ollama",
+      "description": "Agent / tool-use — 86.4% τ2-bench, native function calling, 80.0% LiveCodeBench",
+      "type": "dense",
+      "parameters": "31B",
+      "context_window": 256000,
+      "fallbacks": ["fast", "lightweight"]
     },
     "fast": {
-      "name": "qwen3.5:35b-a3b",
+      "name": "qwen3.6:35b-a3b",
       "provider": "ollama",
-      "description": "MoE model — fast inference, agent/tool use, multimodal",
+      "description": "Qwen 3.6 MoE — 73.4% SWE-bench, 3B active for fast inference, tool use",
       "type": "moe",
       "parameters": "35B total / 3B active",
       "context_window": 256000,
@@ -27,24 +36,24 @@
     "coding": {
       "name": "qwen3-coder-next:latest",
       "provider": "ollama",
-      "description": "Dedicated coding model — code generation, review, completion",
-      "type": "dense",
-      "parameters": "~32B",
-      "context_window": 131072,
-      "fallbacks": ["general", "lightweight"]
+      "description": "Qwen3-Coder-Next MoE — 70.6% SWE-bench, dedicated agentic coding",
+      "type": "moe",
+      "parameters": "80B total / 3.9B active",
+      "context_window": 262144,
+      "fallbacks": ["fast", "lightweight"]
     },
     "lightweight": {
       "name": "qwen3:8b",
       "provider": "ollama",
-      "description": "Small and fast — simple tasks, low resource usage",
+      "description": "Small and fast — FIM / inline completion, simple tasks",
       "type": "dense",
       "parameters": "8B",
-      "context_window": 32768
+      "context_window": 40960
     },
     "embedding": {
       "name": "qwen3-embedding:8b",
       "provider": "ollama",
-      "description": "Embedding model for RAG vector search",
+      "description": "Qwen3 embedding — #1 MTEB multilingual, strong code retrieval",
       "type": "embedding",
       "parameters": "8B",
       "dimensions": 4096
@@ -54,7 +63,7 @@
     "chat": "general",
     "completion": "coding",
     "embedding": "embedding",
-    "agent": "fast",
+    "agent": "agent",
     "analysis": "general"
   }
 }
