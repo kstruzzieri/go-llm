@@ -1,0 +1,8 @@
+{
+  "context": "between_declarations",
+  "shape": ["declaration", "block"],
+  "min_prefix_pct": 60,
+  "max_prefix_pct": 95,
+  "min_tokens": 1,
+  "no_stop_leak": true
+}

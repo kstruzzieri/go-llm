@@ -1,0 +1,11 @@
+package main
+
+func compute(x int) int {
+	result := x * 2
+	<CURSOR>
+	return result
+}
+
+func main() {
+	_ = compute(21)
+}
