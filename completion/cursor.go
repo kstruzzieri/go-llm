@@ -203,3 +203,155 @@ func languageHintsFor(lang string) LanguageHints {
 	}
 	return genericHints
 }
+
+// AnalyzeCursor examines the last ~200 chars of prefix and first ~200 chars
+// of suffix to classify cursor position and intended completion shape.
+// Detection uses string scanning only — no regex, no AST.
+func AnalyzeCursor(prefix, suffix, language string) CursorAnalysis {
+	hints := languageHintsFor(language)
+
+	prefixWindow := prefix
+	if len(prefixWindow) > 200 {
+		prefixWindow = prefixWindow[len(prefixWindow)-200:]
+	}
+	suffixWindow := suffix
+	if len(suffixWindow) > 200 {
+		suffixWindow = suffixWindow[:200]
+	}
+
+	ctx, ctxConf, ctxReason := detectContext(prefixWindow, suffixWindow, hints)
+	shape, shapeConf, shapeReason := detectShape(prefixWindow, suffixWindow, ctx, hints)
+
+	// Overall confidence takes the stronger of the two signals: a strong
+	// lexical shape match (e.g., "return ", "= ") corroborates the context,
+	// so a weak context reading should not cap a strong shape signal.
+	confidence := ctxConf
+	if shapeConf > confidence {
+		confidence = shapeConf
+	}
+
+	return CursorAnalysis{
+		Context:    ctx,
+		Shape:      shape,
+		Confidence: confidence,
+		Reason:     ctxReason + "; " + shapeReason,
+	}
+}
+
+func detectContext(prefix, suffix string, hints LanguageHints) (CursorContext, float64, string) {
+	if isInImportBlock(prefix, hints) {
+		return ContextImportBlock, 0.75, "import keyword in prefix"
+	}
+	if isBetweenDeclarations(prefix, suffix, hints) {
+		return ContextBetweenDeclarations, 0.75, "between top-level declarations"
+	}
+	if endsWithOpenBrace(prefix) {
+		return ContextAfterOpenBrace, 1.0, "prefix ends with open brace"
+	}
+	if isInComment(prefix, hints) {
+		return ContextCommentBlock, 0.75, "comment prefix detected"
+	}
+	if prefix == "" && suffix == "" {
+		return ContextBetweenDeclarations, 0.25, "empty file"
+	}
+	if prefix == "" {
+		return ContextBetweenDeclarations, 0.25, "cursor at file start"
+	}
+	if suffix == "" {
+		return ContextBetweenDeclarations, 0.5, "cursor at file end"
+	}
+	return ContextFunctionBody, 0.5, "inside code block"
+}
+
+func detectShape(prefix, suffix string, ctx CursorContext, hints LanguageHints) (CompletionShape, float64, string) {
+	switch ctx {
+	case ContextImportBlock:
+		return ShapeToken, 0.75, "import completion"
+	case ContextBetweenDeclarations:
+		return ShapeDeclaration, 0.75, "declaration boundary"
+	case ContextCommentBlock:
+		return ShapeLine, 0.75, "comment continuation"
+	case ContextAfterOpenBrace:
+		return ShapeBlock, 1.0, "block after open brace"
+	}
+
+	trimmed := strings.TrimRight(prefix, " \t")
+
+	if strings.HasSuffix(trimmed, ",") || strings.HasSuffix(trimmed, ".") {
+		return ShapeToken, 0.5, "after comma/dot"
+	}
+	if strings.HasSuffix(trimmed, "= ") || strings.HasSuffix(prefix, "= ") {
+		return ShapeExpression, 0.5, "after assignment"
+	}
+	if strings.HasSuffix(trimmed, "return ") || strings.HasSuffix(prefix, "return ") {
+		return ShapeExpression, 0.75, "after return"
+	}
+	if strings.HasSuffix(trimmed, "(") || strings.HasSuffix(trimmed, "[") {
+		return ShapeExpression, 0.5, "after open paren/bracket"
+	}
+	if strings.HasSuffix(trimmed, ": ") || strings.HasSuffix(prefix, ": ") {
+		return ShapeExpression, 0.5, "after colon"
+	}
+
+	return ShapeBlock, 0.25, "default shape"
+}
+
+func isInImportBlock(prefix string, hints LanguageHints) bool {
+	if len(hints.ImportKeywords) == 0 {
+		return false
+	}
+	for _, kw := range hints.ImportKeywords {
+		if strings.Contains(prefix, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+func isBetweenDeclarations(prefix, suffix string, hints LanguageHints) bool {
+	if len(hints.DeclarationKeywords) == 0 {
+		return false
+	}
+	trimmedPrefix := strings.TrimRight(prefix, " \t\n")
+
+	prefixEndsDecl := strings.HasSuffix(trimmedPrefix, "}") ||
+		strings.HasSuffix(trimmedPrefix, ")")
+
+	if !prefixEndsDecl && trimmedPrefix != "" {
+		return false
+	}
+
+	trimmedSuffix := strings.TrimLeft(suffix, " \t\n")
+	for _, kw := range hints.DeclarationKeywords {
+		if strings.HasPrefix(trimmedSuffix, kw) {
+			return true
+		}
+	}
+
+	return trimmedSuffix == "" && prefixEndsDecl
+}
+
+func endsWithOpenBrace(prefix string) bool {
+	trimmed := strings.TrimRight(prefix, " \t")
+	return strings.HasSuffix(trimmed, "{\n") ||
+		strings.HasSuffix(trimmed, "{\n\t") ||
+		strings.HasSuffix(trimmed, "{\n    ") ||
+		strings.HasSuffix(trimmed, "{")
+}
+
+func isInComment(prefix string, hints LanguageHints) bool {
+	if len(hints.CommentPrefixes) == 0 {
+		return false
+	}
+	lines := strings.Split(prefix, "\n")
+	if len(lines) == 0 {
+		return false
+	}
+	lastLine := strings.TrimLeft(lines[len(lines)-1], " \t")
+	for _, cp := range hints.CommentPrefixes {
+		if strings.HasPrefix(lastLine, cp) {
+			return true
+		}
+	}
+	return false
+}

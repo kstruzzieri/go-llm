@@ -78,3 +78,151 @@ func TestLanguageHints(t *testing.T) {
 		}
 	})
 }
+
+func TestAnalyzeCursor(t *testing.T) {
+	tests := []struct {
+		name       string
+		prefix     string
+		suffix     string
+		language   string
+		wantCtx    CursorContext
+		wantShape  CompletionShape
+		wantConfGe float64
+	}{
+		{
+			name:       "import block — Go",
+			prefix:     "package main\n\nimport (\n\t\"fmt\"\n\t",
+			suffix:     "\n)\n\nfunc main() {}",
+			language:   "go",
+			wantCtx:    ContextImportBlock,
+			wantShape:  ShapeToken,
+			wantConfGe: 0.75,
+		},
+		{
+			name:       "import block — Python",
+			prefix:     "import os\nimport ",
+			suffix:     "\n\ndef main():\n    pass",
+			language:   "python",
+			wantCtx:    ContextImportBlock,
+			wantShape:  ShapeToken,
+			wantConfGe: 0.75,
+		},
+		{
+			name:       "after open brace",
+			prefix:     "func main() {\n\t",
+			suffix:     "\n}",
+			language:   "go",
+			wantCtx:    ContextAfterOpenBrace,
+			wantShape:  ShapeBlock,
+			wantConfGe: 0.75,
+		},
+		{
+			name:       "between declarations",
+			prefix:     "func foo() {\n\treturn 1\n}\n\n",
+			suffix:     "\nfunc bar() {\n\treturn 2\n}",
+			language:   "go",
+			wantCtx:    ContextBetweenDeclarations,
+			wantShape:  ShapeDeclaration,
+			wantConfGe: 0.75,
+		},
+		{
+			name:       "comment block",
+			prefix:     "func main() {\n\t// ",
+			suffix:     "\n\tfmt.Println(\"hi\")\n}",
+			language:   "go",
+			wantCtx:    ContextCommentBlock,
+			wantShape:  ShapeLine,
+			wantConfGe: 0.75,
+		},
+		{
+			name:       "expression after equals",
+			prefix:     "func main() {\n\tx = ",
+			suffix:     "\n}",
+			language:   "go",
+			wantCtx:    ContextFunctionBody,
+			wantShape:  ShapeExpression,
+			wantConfGe: 0.5,
+		},
+		{
+			name:       "expression after return",
+			prefix:     "func foo() int {\n\treturn ",
+			suffix:     "\n}",
+			language:   "go",
+			wantCtx:    ContextFunctionBody,
+			wantShape:  ShapeExpression,
+			wantConfGe: 0.75,
+		},
+		{
+			name:       "token after comma",
+			prefix:     "func foo(a int, ",
+			suffix:     ") {}",
+			language:   "go",
+			wantCtx:    ContextFunctionBody,
+			wantShape:  ShapeToken,
+			wantConfGe: 0.5,
+		},
+		{
+			name:       "token after dot",
+			prefix:     "func main() {\n\tfmt.",
+			suffix:     "\n}",
+			language:   "go",
+			wantCtx:    ContextFunctionBody,
+			wantShape:  ShapeToken,
+			wantConfGe: 0.5,
+		},
+		{
+			name:       "empty prefix — start of file",
+			prefix:     "",
+			suffix:     "func main() {\n}",
+			language:   "go",
+			wantCtx:    ContextBetweenDeclarations,
+			wantShape:  ShapeDeclaration,
+			wantConfGe: 0.25,
+		},
+		{
+			name:       "empty suffix — end of file",
+			prefix:     "func main() {\n\treturn\n}\n",
+			suffix:     "",
+			language:   "go",
+			wantCtx:    ContextBetweenDeclarations,
+			wantShape:  ShapeDeclaration,
+			wantConfGe: 0.5,
+		},
+		{
+			name:       "both empty — new file",
+			prefix:     "",
+			suffix:     "",
+			language:   "go",
+			wantCtx:    ContextBetweenDeclarations,
+			wantShape:  ShapeDeclaration,
+			wantConfGe: 0.25,
+		},
+		{
+			name:       "unknown language fallback",
+			prefix:     "foo bar baz\n",
+			suffix:     "\nqux",
+			language:   "",
+			wantCtx:    ContextFunctionBody,
+			wantShape:  ShapeBlock,
+			wantConfGe: 0.25,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := AnalyzeCursor(tt.prefix, tt.suffix, tt.language)
+			if result.Context != tt.wantCtx {
+				t.Errorf("Context = %v, want %v (reason: %s)", result.Context, tt.wantCtx, result.Reason)
+			}
+			if result.Shape != tt.wantShape {
+				t.Errorf("Shape = %v, want %v (reason: %s)", result.Shape, tt.wantShape, result.Reason)
+			}
+			if result.Confidence < tt.wantConfGe {
+				t.Errorf("Confidence = %v, want >= %v", result.Confidence, tt.wantConfGe)
+			}
+			if result.Reason == "" {
+				t.Error("Reason should not be empty")
+			}
+		})
+	}
+}
