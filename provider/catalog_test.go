@@ -1,6 +1,33 @@
 package provider
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+// TestQwen3CoderNextVariantsInSync guards against drift between the
+// "latest" alias and the canonical "80b" variant. If 80b's profile is
+// retuned, latest must track — or this test must be updated deliberately.
+func TestQwen3CoderNextVariantsInSync(t *testing.T) {
+	cat, err := loadCatalog()
+	if err != nil {
+		t.Fatalf("loadCatalog() error: %v", err)
+	}
+
+	fam, ok := cat.Families["qwen3-coder-next"]
+	if !ok {
+		t.Fatal("catalog missing qwen3-coder-next family")
+	}
+
+	latest, hasLatest := fam.Variants["latest"]
+	canonical, hasCanonical := fam.Variants["80b"]
+	if !hasLatest || !hasCanonical {
+		t.Fatalf("qwen3-coder-next variants: latest=%v 80b=%v", hasLatest, hasCanonical)
+	}
+	if !reflect.DeepEqual(latest, canonical) {
+		t.Errorf("qwen3-coder-next latest != 80b — variants drifted\nlatest: %+v\n80b:    %+v", latest, canonical)
+	}
+}
 
 func TestCatalogLoad(t *testing.T) {
 	cat, err := loadCatalog()
@@ -13,11 +40,11 @@ func TestCatalogLoad(t *testing.T) {
 
 	// Spot-check that all required families are present.
 	families := []string{
-		"qwen2.5", "qwen3", "qwen3.5",
+		"qwen2.5", "qwen3", "qwen3.5", "qwen3.6", "qwen3-coder-next",
 		"deepseek-r1", "deepseek-coder-v2",
 		"codellama", "starcoder", "starcoder2",
 		"llama3", "llama3.1", "llama3.2", "llama3.3",
-		"gemma2", "gemma3",
+		"gemma2", "gemma3", "gemma4",
 		"phi3", "phi4",
 		"mistral", "mixtral",
 		"nomic-embed-text", "mxbai-embed-large",
@@ -124,6 +151,14 @@ func TestCatalogLookupExact(t *testing.T) {
 			wantFIM:    true,
 			wantThink:  ThinkNone,
 			wantRAMMin: 10.0,
+		},
+		{
+			name:       "qwen3-coder-next latest retains scoring data",
+			family:     "qwen3-coder-next",
+			paramSize:  "latest",
+			wantFIM:    true,
+			wantThink:  ThinkToggle,
+			wantRAMMin: 46.0,
 		},
 	}
 	for _, tt := range tests {

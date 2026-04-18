@@ -60,6 +60,50 @@
         "35b": { "ram_required": 22.0, "ram_recommended": 28.0, "vram_recommended": 22.0, "quality": "great", "speed": "medium" }
       }
     },
+    "qwen3.6": {
+      "fim": {
+        "prefix": "<|fim_prefix|>",
+        "suffix": "<|fim_suffix|>",
+        "middle": "<|fim_middle|>",
+        "prefix_budget_pct": 75
+      },
+      "think_mode": "toggle",
+      "think_tags": { "open": "<think>", "close": "</think>" },
+      "caps": ["completion", "tools"],
+      "context_window": 256000,
+      "variants": {
+        "35b": { "ram_required": 20.0, "ram_recommended": 28.0, "vram_recommended": 20.0, "quality": "best", "speed": "fast" }
+      }
+    },
+    "qwen3-coder-next": {
+      "fim": {
+        "prefix": "<|fim_prefix|>",
+        "suffix": "<|fim_suffix|>",
+        "middle": "<|fim_middle|>",
+        "prefix_budget_pct": 75
+      },
+      "think_mode": "toggle",
+      "think_tags": { "open": "<think>", "close": "</think>" },
+      "caps": ["completion", "tools"],
+      "context_window": 262144,
+      "variants": {
+        "latest": { "ram_required": 46.0, "ram_recommended": 56.0, "vram_recommended": 46.0, "quality": "best", "speed": "fast" },
+        "80b": { "ram_required": 46.0, "ram_recommended": 56.0, "vram_recommended": 46.0, "quality": "best", "speed": "fast" }
+      }
+    },
+    "gemma4": {
+      "fim": null,
+      "think_mode": "toggle",
+      "think_tags": { "open": "<think>", "close": "</think>" },
+      "caps": ["completion", "tools"],
+      "context_window": 256000,
+      "variants": {
+        "e2b": { "ram_required": 2.5, "ram_recommended": 4.0, "vram_recommended": 2.5, "quality": "basic", "speed": "fast" },
+        "e4b": { "ram_required": 4.5, "ram_recommended": 6.5, "vram_recommended": 4.5, "quality": "good", "speed": "fast" },
+        "26b": { "ram_required": 16.0, "ram_recommended": 20.0, "vram_recommended": 16.0, "quality": "great", "speed": "fast" },
+        "31b": { "ram_required": 19.0, "ram_recommended": 24.0, "vram_recommended": 19.0, "quality": "best", "speed": "medium" }
+      }
+    },
     "deepseek-r1": {
       "fim": null,
       "think_mode": "always",
