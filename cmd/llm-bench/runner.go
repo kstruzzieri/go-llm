@@ -18,13 +18,14 @@ const benchKeepAlive = "30m"
 
 // Sentinel errors so tests assert on identity rather than message text.
 var (
-	errNoUserTurn      = errors.New("trace has no user turn")
-	errMultiUserTurn   = errors.New("multi-turn replay not yet supported")
-	errEmptyBaseURL    = errors.New("empty ollama base URL")
-	errMissingGolden   = errors.New("scorer requires golden.final_answer_substring")
-	errEmptySystem     = errors.New("trace has empty system prompt")
-	errNoTurns         = errors.New("trace has no turns")
-	errUnsupportedProv = errors.New("unsupported provider")
+	errNoUserTurn       = errors.New("trace has no user turn")
+	errMultiUserTurn    = errors.New("multi-turn replay not yet supported")
+	errEmptyBaseURL     = errors.New("empty ollama base URL")
+	errMissingGolden    = errors.New("scorer requires golden.final_answer_substring")
+	errEmptySystem      = errors.New("trace has empty system prompt")
+	errNoTurns          = errors.New("trace has no turns")
+	errInvalidTraceTool = errors.New("trace has invalid tool definition")
+	errUnsupportedProv  = errors.New("unsupported provider")
 )
 
 // Runner executes traces against a list of candidate models and collects
@@ -139,10 +140,15 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 		{Role: "system", Content: trace.System},
 		{Role: "user", Content: firstUser.Content},
 	}
+	tools, err := decodeTraceTools(trace.Tools)
+	if err != nil {
+		return nil, fmt.Errorf("trace %q: %w", trace.ID, err)
+	}
 
 	resp, err := client.Chat(ctx, ollama.ChatRequest{
 		Model:     model,
 		Messages:  messages,
+		Tools:     tools,
 		KeepAlive: benchKeepAlive,
 	})
 	if err != nil {
@@ -155,6 +161,74 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 	}
 
 	return []Turn{turn}, nil
+}
+
+func decodeTraceTools(rawTools []json.RawMessage) ([]ollama.Tool, error) {
+	if len(rawTools) == 0 {
+		return nil, nil
+	}
+
+	tools := make([]ollama.Tool, 0, len(rawTools))
+	for i, raw := range rawTools {
+		tool, err := decodeTraceTool(raw)
+		if err != nil {
+			return nil, fmt.Errorf("tool[%d]: %w", i, err)
+		}
+		tools = append(tools, tool)
+	}
+	return tools, nil
+}
+
+func decodeTraceTool(raw json.RawMessage) (ollama.Tool, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil || fields == nil {
+		if err != nil {
+			return ollama.Tool{}, fmt.Errorf("%w: invalid JSON object: %v", errInvalidTraceTool, err)
+		}
+		return ollama.Tool{}, fmt.Errorf("%w: invalid JSON object", errInvalidTraceTool)
+	}
+
+	if _, ok := fields["function"]; ok {
+		var tool ollama.Tool
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			return ollama.Tool{}, fmt.Errorf("%w: decode provider tool: %v", errInvalidTraceTool, err)
+		}
+		if tool.Type != "" && tool.Type != "function" {
+			return ollama.Tool{}, fmt.Errorf("%w: unsupported type %q", errInvalidTraceTool, tool.Type)
+		}
+		if strings.TrimSpace(tool.Function.Name) == "" {
+			return ollama.Tool{}, fmt.Errorf("%w: missing function.name", errInvalidTraceTool)
+		}
+		normalized, err := ollama.NewToolRaw(tool.Function.Name, tool.Function.Description, tool.Function.Parameters)
+		if err != nil {
+			return ollama.Tool{}, fmt.Errorf("%w: %v", errInvalidTraceTool, err)
+		}
+		return normalized, nil
+	}
+
+	if _, ok := fields["name"]; ok {
+		var tool struct {
+			Name        string          `json:"name"`
+			Description string          `json:"description"`
+			InputSchema json.RawMessage `json:"inputSchema"`
+		}
+		if err := json.Unmarshal(raw, &tool); err != nil {
+			return ollama.Tool{}, fmt.Errorf("%w: decode MCP tool: %v", errInvalidTraceTool, err)
+		}
+		if len(tool.InputSchema) == 0 {
+			tool.InputSchema = fields["input_schema"]
+		}
+		if strings.TrimSpace(tool.Name) == "" {
+			return ollama.Tool{}, fmt.Errorf("%w: missing name", errInvalidTraceTool)
+		}
+		normalized, err := ollama.NewToolRaw(tool.Name, tool.Description, tool.InputSchema)
+		if err != nil {
+			return ollama.Tool{}, fmt.Errorf("%w: %v", errInvalidTraceTool, err)
+		}
+		return normalized, nil
+	}
+
+	return ollama.Tool{}, fmt.Errorf("%w: expected provider tool or MCP tool shape", errInvalidTraceTool)
 }
 
 func assistantTurnFromMessage(msg ollama.ChatMessage) (Turn, error) {

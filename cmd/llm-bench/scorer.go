@@ -88,12 +88,16 @@ func toolSequenceScore(expected, actual []string) float64 {
 	for _, e := range expected {
 		expSet[e] = struct{}{}
 	}
+	actSet := make(map[string]struct{}, len(actual))
+	for _, a := range actual {
+		actSet[a] = struct{}{}
+	}
 	union := make(map[string]struct{}, len(expected)+len(actual))
 	for k := range expSet {
 		union[k] = struct{}{}
 	}
 	intersect := 0
-	for _, a := range actual {
+	for a := range actSet {
 		union[a] = struct{}{}
 		if _, ok := expSet[a]; ok {
 			intersect++

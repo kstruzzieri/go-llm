@@ -59,3 +59,10 @@ func TestExactMatchScorerSubstringMiss(t *testing.T) {
 		t.Errorf("AnswerQuality = %f, want 0.0", score.AnswerQuality)
 	}
 }
+
+func TestToolSequenceScoreDeduplicatesActualToolNames(t *testing.T) {
+	score := toolSequenceScore([]string{"read_file"}, []string{"read_file", "read_file"})
+	if score != 1.0 {
+		t.Fatalf("toolSequenceScore() = %f, want 1.0", score)
+	}
+}
