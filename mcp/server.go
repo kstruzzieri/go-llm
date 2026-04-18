@@ -17,6 +17,7 @@ import (
 	"github.com/kstruzzieri/go-llm/completion"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -37,12 +38,14 @@ type Server struct {
 	tlsCert           string
 	tlsKey            string
 
-	client    *ollama.Client
-	cfg       *config.Config
-	store     rag.VectorStore
-	indexer   *rag.Indexer
-	retriever *rag.Retriever
-	completer *completion.Provider
+	client        *ollama.Client
+	cfg           *config.Config
+	store         rag.VectorStore
+	indexer       *rag.Indexer
+	retriever     *rag.Retriever
+	completer     *completion.Provider
+	modelRegistry *provider.ModelRegistry
+	ollamaProv    provider.Provider
 
 	ollamaAvailable bool
 
@@ -158,6 +161,21 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Step 3: Check Ollama availability (non-fatal, degraded mode on failure).
 	s.ollamaAvailable = s.client.IsAvailable(ctx)
 
+	// Step 3b: Build a provider-level model registry so the completer can
+	// source FIMConfig, context window, and tier from merged ModelProfiles.
+	// Degraded mode: any failure here just leaves the registry nil, and the
+	// completer will not be constructed (handled in rebuildDerivedClients).
+	if s.ollamaAvailable {
+		pReg := provider.NewRegistry()
+		s.ollamaProv = provider.NewOllamaProvider(s.client)
+		if err := pReg.Register(s.ollamaProv); err == nil {
+			_ = pReg.RefreshModels(ctx, s.ollamaProv.Name())
+			if mr, err := provider.NewModelRegistry(pReg, nil); err == nil {
+				s.modelRegistry = mr
+			}
+		}
+	}
+
 	// Step 4: Open RAG store if not disabled (before model resolution
 	// so that rebuildDerivedClients can wire up indexer/retriever).
 	if !s.ragDisabled && s.ragPath != "" {
@@ -210,7 +228,9 @@ func (s *Server) rebuildDerivedClients() {
 	// Rebuild completer from resolved "completion" model.
 	s.completer = nil
 	if rm, ok := resolved["completion"]; ok && rm.Name != "" {
-		s.completer = completion.NewProvider(s.client, rm.Name)
+		if c, err := s.newCompletionProvider(context.Background(), rm.Name); err == nil {
+			s.completer = c
+		}
 	}
 
 	// Rebuild indexer and retriever only when the embedding default resolved.
@@ -235,6 +255,26 @@ func (s *Server) Completer() *completion.Provider {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.completer
+}
+
+// newCompletionProvider builds a completion.Provider for the given model by
+// looking up its merged ModelProfile via the model registry and deriving a
+// ProviderConfig. Returns an error when the registry is unavailable, the
+// lookup fails, or the model does not advertise FIM support.
+func (s *Server) newCompletionProvider(ctx context.Context, model string) (*completion.Provider, error) {
+	if s.modelRegistry == nil || s.ollamaProv == nil {
+		return nil, fmt.Errorf("mcp: model registry unavailable")
+	}
+	key := provider.ModelKey{Provider: s.ollamaProv.Name(), Model: model}
+	profile, err := s.modelRegistry.Lookup(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: lookup profile %q: %w", model, err)
+	}
+	cfg, err := completion.ProviderConfigFromProfile(profile)
+	if err != nil {
+		return nil, err
+	}
+	return completion.NewProvider(s.client, model, cfg)
 }
 
 // Indexer returns the current RAG indexer (nil if RAG disabled).

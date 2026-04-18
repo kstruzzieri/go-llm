@@ -318,14 +318,21 @@ func TestCompleteModelOptions(t *testing.T) {
 		if req.Options == nil {
 			t.Fatal("expected model options")
 		}
-		if req.Options.NumPredict != 128 {
-			t.Errorf("NumPredict = %d, want 128", req.Options.NumPredict)
-		}
+		// Values are now adaptive: NumCtx is pinned by ContextWindow=2048
+		// in testProviderConfig, but NumPredict and Temperature come from
+		// ComputeBudget and depend on the detected cursor context/shape.
 		if req.Options.NumCtx != 2048 {
-			t.Errorf("NumCtx = %d, want 2048", req.Options.NumCtx)
+			t.Errorf("NumCtx = %d, want 2048 (bounded by ContextWindow)", req.Options.NumCtx)
 		}
-		if req.Options.Temperature != 0.2 {
-			t.Errorf("Temperature = %f, want 0.2", req.Options.Temperature)
+		if req.Options.NumPredict < 16 || req.Options.NumPredict > 512 {
+			t.Errorf("NumPredict = %d, want within adaptive range [16, 512]", req.Options.NumPredict)
+		}
+		if req.Options.Temperature < 0.0 || req.Options.Temperature > 0.5 {
+			t.Errorf("Temperature = %f, want within adaptive range [0.0, 0.5]", req.Options.Temperature)
+		}
+		if req.Options.NumPredict > req.Options.NumCtx {
+			t.Errorf("NumPredict (%d) must not exceed NumCtx (%d)",
+				req.Options.NumPredict, req.Options.NumCtx)
 		}
 
 		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
@@ -468,5 +475,147 @@ func TestCompleteMaxTokensClamped(t *testing.T) {
 	}
 	if resp == nil {
 		t.Fatal("expected non-nil response")
+	}
+}
+
+func TestCompleteAdaptive(t *testing.T) {
+	var capturedPrompt string
+	var capturedOpts *ollama.ModelOptions
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.GenerateRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		capturedPrompt = req.Prompt
+		capturedOpts = req.Options
+
+		resp := ollama.GenerateResponse{
+			Model:     "test-model",
+			Response:  "fmt.Println(\"hello\")",
+			Done:      true,
+			EvalCount: 5,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	cfg := ProviderConfig{
+		FIM: &provider.FIMConfig{
+			Prefix:          "<|fim_prefix|>",
+			Suffix:          "<|fim_suffix|>",
+			Middle:          "<|fim_middle|>",
+			StopTokens:      []string{"<|endoftext|>"},
+			PrefixBudgetPct: 75,
+		},
+		ContextWindow: 32768,
+		QualityTier:   provider.TierGood,
+	}
+	p, err := NewProvider(client, "test-model", cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	resp, err := p.Complete(context.Background(), FIMRequest{
+		Prefix:   "func main() {\n\t",
+		Suffix:   "\n}",
+		FilePath: "main.go",
+		Trace:    true,
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+
+	if !strings.Contains(capturedPrompt, "<|fim_prefix|>") {
+		t.Error("prompt missing FIM prefix token")
+	}
+	if !strings.Contains(capturedPrompt, "<|fim_suffix|>") {
+		t.Error("prompt missing FIM suffix token")
+	}
+
+	if resp.CursorContext == ContextUnknown && resp.CompletionShape == ShapeUnknown {
+		t.Error("expected cursor analysis to populate context and shape")
+	}
+
+	if resp.BudgetTrace == nil {
+		t.Fatal("expected BudgetTrace when Trace=true")
+	}
+	if resp.BudgetTrace.Language != "go" {
+		t.Errorf("BudgetTrace.Language = %q, want %q", resp.BudgetTrace.Language, "go")
+	}
+
+	if capturedOpts == nil {
+		t.Fatal("expected model options")
+	}
+	if len(capturedOpts.Stop) == 0 {
+		t.Error("expected stop tokens in model options")
+	}
+
+	if resp.Completion != "fmt.Println(\"hello\")" {
+		t.Errorf("Completion = %q", resp.Completion)
+	}
+}
+
+func TestCompleteStopTokenStripping(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollama.GenerateResponse{
+			Model:     "test-model",
+			Response:  "result<|endoftext|>",
+			Done:      true,
+			EvalCount: 2,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	cfg := ProviderConfig{
+		FIM: &provider.FIMConfig{
+			Prefix:     "<|fim_prefix|>",
+			Suffix:     "<|fim_suffix|>",
+			Middle:     "<|fim_middle|>",
+			StopTokens: []string{"<|endoftext|>"},
+		},
+		ContextWindow: 8192,
+		QualityTier:   provider.TierGood,
+	}
+	p, err := NewProvider(client, "test-model", cfg)
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+
+	resp, err := p.Complete(context.Background(), FIMRequest{
+		Prefix: "x = ", Suffix: "\n", FilePath: "main.go",
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if resp.Completion != "result" {
+		t.Errorf("expected stop token stripped, got %q", resp.Completion)
+	}
+}
+
+func TestCompleteMaxTokensOverride(t *testing.T) {
+	var capturedOpts *ollama.ModelOptions
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.GenerateRequest
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		capturedOpts = req.Options
+		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := mustNewProvider(t, client, "test-model")
+
+	_, _ = p.Complete(context.Background(), FIMRequest{
+		Prefix:    "code",
+		MaxTokens: 256,
+		FilePath:  "main.go",
+	})
+
+	if capturedOpts.NumPredict != 256 {
+		t.Errorf("NumPredict = %d, want 256 (manual override)", capturedOpts.NumPredict)
 	}
 }

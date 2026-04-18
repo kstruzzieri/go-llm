@@ -15,14 +15,6 @@ const (
 	// fimCtxCeilingLarge is used when input tokens already exceed fimCtxCeiling,
 	// so the request can fit but remains capped to avoid blowing out memory.
 	fimCtxCeilingLarge = 16384
-
-	defaultMaxTokens   = 128
-	defaultTemperature = 0.2
-
-	// prefixBudgetPercent is the fraction of available context allocated to
-	// prefix when cfg.FIM.PrefixBudgetPct is not set. Task 9 replaces this
-	// with a per-family value from ComputeBudget.
-	prefixBudgetPercent = 75
 )
 
 // FIMRequest represents a Fill-in-the-Middle completion request.
@@ -30,7 +22,7 @@ type FIMRequest struct {
 	Prefix    string // code before cursor
 	Suffix    string // code after cursor
 	FilePath  string // for language detection
-	MaxTokens int    // max tokens to generate (default: adaptive)
+	MaxTokens int    // max tokens to generate (0 means adaptive)
 	Language  string // auto-detect from FilePath if empty
 	Trace     bool   // when true, FIMResponse.BudgetTrace is populated
 }
@@ -86,6 +78,100 @@ func (p *Provider) effectiveNumCtx(inputTokens int) int {
 	return ceiling
 }
 
+// plannedRequest carries the fully-resolved plan for a single FIM round-trip.
+type plannedRequest struct {
+	genReq   ollama.GenerateRequest
+	analysis CursorAnalysis
+	budget   ComputedBudget
+	language string
+	numCtx   int
+	maxTok   int
+}
+
+// planRequest runs cursor analysis, computes the adaptive budget, truncates
+// prefix/suffix, assembles the FIM prompt, and returns everything needed to
+// call Ollama and construct the response.
+func (p *Provider) planRequest(req FIMRequest) plannedRequest {
+	lang := resolveLanguage(req.Language, req.FilePath)
+	analysis := AnalyzeCursor(req.Prefix, req.Suffix, lang)
+	budget := ComputeBudget(analysis, lang, p.cfg.QualityTier, p.cfg.FIM,
+		p.cfg.ContextWindow, req.Prefix, req.Suffix)
+
+	maxTokens := budget.MaxTokens
+	if req.MaxTokens > 0 {
+		maxTokens = req.MaxTokens
+	}
+
+	numCtx := p.effectiveNumCtx(EstimateTokens(req.Prefix) + EstimateTokens(req.Suffix))
+
+	overhead := p.cfg.FIM.TokenOverhead()
+	maxLimit := numCtx - overhead - 1
+	if maxLimit < 1 {
+		maxLimit = 1
+	}
+	if maxTokens > maxLimit {
+		maxTokens = maxLimit
+	}
+
+	availableCtx := numCtx - maxTokens - overhead
+	if availableCtx < 0 {
+		availableCtx = 0
+	}
+	prefixBudget := availableCtx * budget.PrefixBudgetPct / 100
+	suffixBudget := availableCtx - prefixBudget
+
+	prefixTokens := EstimateTokens(req.Prefix)
+	suffixTokens := EstimateTokens(req.Suffix)
+	if prefixTokens < prefixBudget {
+		suffixBudget += prefixBudget - prefixTokens
+		prefixBudget = prefixTokens
+	} else if suffixTokens < suffixBudget {
+		prefixBudget += suffixBudget - suffixTokens
+		suffixBudget = suffixTokens
+	}
+
+	prefix := TruncateToTokens(req.Prefix, prefixBudget)
+	suffix := TruncateSuffixToTokens(req.Suffix, suffixBudget)
+	prompt := assembleFIMPrompt(p.cfg.FIM, prefix, suffix)
+
+	genReq := ollama.GenerateRequest{
+		Model:  p.model,
+		Prompt: prompt,
+		Options: &ollama.ModelOptions{
+			NumPredict:  maxTokens,
+			NumCtx:      numCtx,
+			Temperature: budget.Temperature,
+			Stop:        budget.StopTokens,
+		},
+	}
+
+	return plannedRequest{
+		genReq:   genReq,
+		analysis: analysis,
+		budget:   budget,
+		language: lang,
+		numCtx:   numCtx,
+		maxTok:   maxTokens,
+	}
+}
+
+// buildTrace constructs a BudgetTrace from a planned request.
+func buildTrace(pr plannedRequest) *BudgetTrace {
+	return &BudgetTrace{
+		DetectedContext:    pr.analysis.Context,
+		CompletionShape:    pr.analysis.Shape,
+		DetectorConfidence: pr.analysis.Confidence,
+		DecisionReason:     pr.analysis.Reason,
+		Language:           pr.language,
+		MaxTokens:          pr.maxTok,
+		NumCtx:             pr.numCtx,
+		PrefixBudgetPct:    pr.budget.PrefixBudgetPct,
+		Temperature:        pr.budget.Temperature,
+		ShapeMult:          shapeMultiplier[pr.analysis.Shape],
+		StopTokenCount:     len(pr.budget.StopTokens),
+	}
+}
+
 // Complete generates an inline completion synchronously.
 func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, error) {
 	if p.client == nil {
@@ -95,19 +181,27 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 		return nil, fmt.Errorf("completion: model is required")
 	}
 
-	genReq := p.buildRequest(req)
+	pr := p.planRequest(req)
 	start := time.Now()
 
-	resp, err := p.client.Generate(ctx, genReq)
+	resp, err := p.client.Generate(ctx, pr.genReq)
 	if err != nil {
 		return nil, fmt.Errorf("completion: %w", err)
 	}
 
-	return &FIMResponse{
-		Completion: resp.Response,
-		Tokens:     resp.EvalCount,
-		LatencyMs:  time.Since(start).Milliseconds(),
-	}, nil
+	completion := stripStopTokens(resp.Response, pr.budget.StopTokens)
+
+	result := &FIMResponse{
+		Completion:      completion,
+		Tokens:          resp.EvalCount,
+		LatencyMs:       time.Since(start).Milliseconds(),
+		CursorContext:   pr.analysis.Context,
+		CompletionShape: pr.analysis.Shape,
+	}
+	if req.Trace {
+		result.BudgetTrace = buildTrace(pr)
+	}
+	return result, nil
 }
 
 // CompleteStream generates a streaming inline completion, calling fn for each token.
@@ -123,72 +217,12 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 		return fmt.Errorf("completion: callback function is required")
 	}
 
-	genReq := p.buildRequest(req)
+	pr := p.planRequest(req)
 
-	return p.client.GenerateStream(ctx, genReq, func(resp ollama.GenerateResponse) error {
+	return p.client.GenerateStream(ctx, pr.genReq, func(resp ollama.GenerateResponse) error {
 		if resp.Response != "" {
 			return fn(resp.Response)
 		}
 		return nil
 	})
-}
-
-// buildRequest constructs an Ollama GenerateRequest with FIM prompt format.
-// Uses the model's FIM tokens from cfg. Task 9 will replace this with full
-// ComputeBudget integration; for now it preserves the existing non-adaptive
-// budget behavior while switching to catalog-driven FIM tokens.
-func (p *Provider) buildRequest(req FIMRequest) ollama.GenerateRequest {
-	overhead := p.cfg.FIM.TokenOverhead()
-
-	maxTokens := req.MaxTokens
-	if maxTokens <= 0 {
-		maxTokens = defaultMaxTokens
-	}
-
-	numCtx := p.effectiveNumCtx(EstimateTokens(req.Prefix) + EstimateTokens(req.Suffix))
-
-	maxLimit := numCtx - overhead - 1
-	if maxLimit < 1 {
-		maxLimit = 1
-	}
-	if maxTokens > maxLimit {
-		maxTokens = maxLimit
-	}
-
-	availableCtx := numCtx - maxTokens - overhead
-	if availableCtx < 0 {
-		availableCtx = 0
-	}
-
-	familyPct := p.cfg.FIM.PrefixBudgetPct
-	if familyPct == 0 {
-		familyPct = prefixBudgetPercent
-	}
-	prefixBudget := availableCtx * familyPct / 100
-	suffixBudget := availableCtx - prefixBudget
-
-	prefixTokens := EstimateTokens(req.Prefix)
-	suffixTokens := EstimateTokens(req.Suffix)
-	if prefixTokens < prefixBudget {
-		suffixBudget += prefixBudget - prefixTokens
-		prefixBudget = prefixTokens
-	} else if suffixTokens < suffixBudget {
-		prefixBudget += suffixBudget - suffixTokens
-		suffixBudget = suffixTokens
-	}
-
-	prefix := TruncateToTokens(req.Prefix, prefixBudget)
-	suffix := TruncateSuffixToTokens(req.Suffix, suffixBudget)
-
-	prompt := assembleFIMPrompt(p.cfg.FIM, prefix, suffix)
-
-	return ollama.GenerateRequest{
-		Model:  p.model,
-		Prompt: prompt,
-		Options: &ollama.ModelOptions{
-			NumPredict:  maxTokens,
-			NumCtx:      numCtx,
-			Temperature: defaultTemperature,
-		},
-	}
 }
