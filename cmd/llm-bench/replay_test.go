@@ -48,6 +48,30 @@ func TestReplayRefusesMultipleUserTurns(t *testing.T) {
 	}
 }
 
+func TestReplayRefusesTraceWithUnsupportedExtraTurns(t *testing.T) {
+	srv, called := newBlockedServer(t)
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+
+	trace := Trace{
+		ID:     "tool-loop-trace",
+		System: "sys",
+		Turns: []Turn{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file"}}},
+			{Role: "tool", Name: "read_file", Content: "contents"},
+			{Role: "assistant", Content: "final"},
+		},
+	}
+
+	_, err := replay(context.Background(), client, "some-model", trace)
+	if !errors.Is(err, errUnsupportedTurns) {
+		t.Fatalf("err = %v, want errUnsupportedTurns", err)
+	}
+	if *called {
+		t.Error("replay reached Ollama despite refusing the trace")
+	}
+}
+
 func TestReplayRefusesTraceWithoutUserTurn(t *testing.T) {
 	srv, called := newBlockedServer(t)
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))

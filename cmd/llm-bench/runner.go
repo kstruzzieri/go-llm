@@ -25,6 +25,7 @@ var (
 	errEmptySystem      = errors.New("trace has empty system prompt")
 	errNoTurns          = errors.New("trace has no turns")
 	errInvalidTraceTool = errors.New("trace has invalid tool definition")
+	errUnsupportedTurns = errors.New("trace has unsupported extra turns")
 	errUnsupportedProv  = errors.New("unsupported provider")
 )
 
@@ -115,9 +116,10 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 // Feeding tool results back to the model and extracting real ToolCalls
 // from the Ollama response requires more plumbing than this scaffold.
 //
-// Until the tool loop lands, replay refuses multi-user-turn traces rather
-// than silently scoring only the first turn, which would produce
-// misleading aggregates.
+// Until the tool loop lands, replay only supports the minimal trace shape:
+// a single user turn plus the top-level system prompt. Any additional
+// assistant/tool turns would be silently truncated by this scaffold, so
+// replay refuses them rather than producing misleading aggregates.
 func replay(ctx context.Context, client *ollama.Client, model string, trace Trace) ([]Turn, error) {
 	var firstUser *Turn
 	userTurns := 0
@@ -134,6 +136,9 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 	}
 	if userTurns > 1 {
 		return nil, fmt.Errorf("trace %q has %d user turns: %w", trace.ID, userTurns, errMultiUserTurn)
+	}
+	if len(trace.Turns) != 1 {
+		return nil, fmt.Errorf("trace %q has %d turns: %w", trace.ID, len(trace.Turns), errUnsupportedTurns)
 	}
 
 	messages := []ollama.ChatMessage{
