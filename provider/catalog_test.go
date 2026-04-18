@@ -247,14 +247,25 @@ func TestCatalogFIMTokens(t *testing.T) {
 		wantPrefix string
 		wantSuffix string
 		wantMiddle string
+		wantStops  []string
+		wantBudget int
 	}{
-		{"qwen3", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"},
-		{"qwen2.5", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"},
-		{"codellama", "<PRE>", " <SUF>", " <MID>"},
-		{"starcoder2", "<fim_prefix>", "<fim_suffix>", "<fim_middle>"},
-		{"starcoder", "<fim_prefix>", "<fim_suffix>", "<fim_middle>"},
-		{"mistral", "[PREFIX]", "[SUFFIX]", "[MIDDLE]"},
-		{"deepseek-coder-v2", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"},
+		{"qwen3", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+			[]string{"<|endoftext|>", "<|fim_pad|>"}, 75},
+		{"qwen2.5", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+			[]string{"<|endoftext|>", "<|fim_pad|>"}, 75},
+		{"qwen3.5", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+			[]string{"<|endoftext|>", "<|fim_pad|>"}, 75},
+		{"deepseek-coder-v2", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>",
+			[]string{"<|EOT|>", "<|end_of_sentence|>"}, 70},
+		{"codellama", "<PRE>", " <SUF>", " <MID>",
+			[]string{"<EOT>", "</s>"}, 65},
+		{"starcoder", "<fim_prefix>", "<fim_suffix>", "<fim_middle>",
+			[]string{"<|endoftext|>"}, 70},
+		{"starcoder2", "<fim_prefix>", "<fim_suffix>", "<fim_middle>",
+			[]string{"<|endoftext|>"}, 70},
+		{"mistral", "[PREFIX]", "[SUFFIX]", "[MIDDLE]",
+			[]string{"[/MIDDLE]", "</s>"}, 70},
 	}
 	for _, tt := range tests {
 		t.Run(tt.family, func(t *testing.T) {
@@ -273,6 +284,17 @@ func TestCatalogFIMTokens(t *testing.T) {
 			}
 			if profile.FIM.Middle != tt.wantMiddle {
 				t.Errorf("FIM.Middle = %q, want %q", profile.FIM.Middle, tt.wantMiddle)
+			}
+			if len(profile.FIM.StopTokens) != len(tt.wantStops) {
+				t.Fatalf("StopTokens len = %d, want %d", len(profile.FIM.StopTokens), len(tt.wantStops))
+			}
+			for i, want := range tt.wantStops {
+				if profile.FIM.StopTokens[i] != want {
+					t.Errorf("StopTokens[%d] = %q, want %q", i, profile.FIM.StopTokens[i], want)
+				}
+			}
+			if profile.FIM.PrefixBudgetPct != tt.wantBudget {
+				t.Errorf("PrefixBudgetPct = %d, want %d", profile.FIM.PrefixBudgetPct, tt.wantBudget)
 			}
 		})
 	}

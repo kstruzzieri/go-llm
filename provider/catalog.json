@@ -5,6 +5,7 @@
         "prefix": "<|fim_prefix|>",
         "suffix": "<|fim_suffix|>",
         "middle": "<|fim_middle|>",
+        "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
       "think_mode": "none",
@@ -25,6 +26,7 @@
         "prefix": "<|fim_prefix|>",
         "suffix": "<|fim_suffix|>",
         "middle": "<|fim_middle|>",
+        "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
       "think_mode": "toggle",
@@ -47,6 +49,7 @@
         "prefix": "<|fim_prefix|>",
         "suffix": "<|fim_suffix|>",
         "middle": "<|fim_middle|>",
+        "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
       "think_mode": "toggle",
@@ -65,6 +68,7 @@
         "prefix": "<|fim_prefix|>",
         "suffix": "<|fim_suffix|>",
         "middle": "<|fim_middle|>",
+        "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
       "think_mode": "toggle",
@@ -80,6 +84,7 @@
         "prefix": "<|fim_prefix|>",
         "suffix": "<|fim_suffix|>",
         "middle": "<|fim_middle|>",
+        "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
       "think_mode": "toggle",
@@ -124,6 +129,7 @@
         "prefix": "<|fim_prefix|>",
         "suffix": "<|fim_suffix|>",
         "middle": "<|fim_middle|>",
+        "stop_tokens": ["<|EOT|>", "<|end_of_sentence|>"],
         "prefix_budget_pct": 70
       },
       "think_mode": "none",
@@ -138,6 +144,7 @@
         "prefix": "<PRE>",
         "suffix": " <SUF>",
         "middle": " <MID>",
+        "stop_tokens": ["<EOT>", "</s>"],
         "prefix_budget_pct": 65
       },
       "think_mode": "none",
@@ -155,6 +162,7 @@
         "prefix": "<fim_prefix>",
         "suffix": "<fim_suffix>",
         "middle": "<fim_middle>",
+        "stop_tokens": ["<|endoftext|>"],
         "prefix_budget_pct": 70
       },
       "think_mode": "none",
@@ -172,6 +180,7 @@
         "prefix": "<fim_prefix>",
         "suffix": "<fim_suffix>",
         "middle": "<fim_middle>",
+        "stop_tokens": ["<|endoftext|>"],
         "prefix_budget_pct": 70
       },
       "think_mode": "none",
@@ -270,6 +279,7 @@
         "prefix": "[PREFIX]",
         "suffix": "[SUFFIX]",
         "middle": "[MIDDLE]",
+        "stop_tokens": ["[/MIDDLE]", "</s>"],
         "prefix_budget_pct": 70
       },
       "think_mode": "none",

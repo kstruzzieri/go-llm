@@ -20,21 +20,13 @@ type catalogData struct {
 // Each family defines shared properties (FIM tokens, think mode, context window)
 // and a map of size-keyed variants with resource requirements.
 type catalogFamily struct {
-	FIM           *catalogFIM               `json:"fim"`
+	FIM           *FIMConfig                `json:"fim"`
 	ThinkMode     string                    `json:"think_mode"`
 	ThinkTags     *catalogThinkTags         `json:"think_tags"`
 	Caps          []string                  `json:"caps"`
 	ContextWindow int                       `json:"context_window"`
 	Dimensions    int                       `json:"dimensions"`
 	Variants      map[string]catalogVariant `json:"variants"`
-}
-
-// catalogFIM is the JSON representation of FIM (Fill-in-the-Middle) configuration.
-type catalogFIM struct {
-	Prefix          string `json:"prefix"`
-	Suffix          string `json:"suffix"`
-	Middle          string `json:"middle"`
-	PrefixBudgetPct int    `json:"prefix_budget_pct"`
 }
 
 // catalogThinkTags is the JSON representation of thinking delimiters.
@@ -128,12 +120,7 @@ func (sc *staticCatalog) buildProfile(family string, fam *catalogFamily, variant
 	}
 
 	if fam.FIM != nil {
-		p.FIM = &FIMConfig{
-			Prefix:          fam.FIM.Prefix,
-			Suffix:          fam.FIM.Suffix,
-			Middle:          fam.FIM.Middle,
-			PrefixBudgetPct: fam.FIM.PrefixBudgetPct,
-		}
+		p.FIM = fam.FIM
 	}
 
 	if fam.ThinkTags != nil {
