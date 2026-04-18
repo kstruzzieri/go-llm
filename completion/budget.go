@@ -68,9 +68,10 @@ func mergeStopTokens(modelStops, langStops []string) []string {
 }
 
 // ComputedBudget holds all adaptive values for a single FIM request.
+// NumCtx is not part of this struct because it is derived from the request
+// input size in Provider.effectiveNumCtx, not from cursor analysis.
 type ComputedBudget struct {
 	MaxTokens       int
-	NumCtx          int
 	PrefixBudgetPct int
 	Temperature     float64
 	StopTokens      []string
@@ -207,7 +208,6 @@ func ComputeBudget(analysis CursorAnalysis, lang string, tier provider.Tier,
 
 	return ComputedBudget{
 		MaxTokens:       maxTokens,
-		NumCtx:          ctxWindow,
 		PrefixBudgetPct: budgetPct,
 		Temperature:     temp,
 		StopTokens:      stops,
