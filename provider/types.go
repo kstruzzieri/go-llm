@@ -7,6 +7,7 @@ package provider
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -354,12 +355,42 @@ type ThinkMetrics struct {
 // FIM (Fill-in-the-Middle)
 // ---------------------------------------------------------------------------
 
-// FIMConfig holds the token markers and budget for Fill-in-the-Middle completion.
+// FIMConfig holds the token markers, stop tokens, and budget for Fill-in-the-Middle completion.
 type FIMConfig struct {
-	Prefix          string `json:"prefix"`
-	Suffix          string `json:"suffix"`
-	Middle          string `json:"middle"`
-	PrefixBudgetPct int    `json:"prefix_budget_pct,omitempty"`
+	Prefix          string   `json:"prefix"`
+	Suffix          string   `json:"suffix"`
+	Middle          string   `json:"middle"`
+	StopTokens      []string `json:"stop_tokens,omitempty"`
+	PrefixBudgetPct int      `json:"prefix_budget_pct,omitempty"`
+}
+
+// Validate checks that all required FIM token markers are present and
+// that PrefixBudgetPct is within a valid range when set.
+func (c *FIMConfig) Validate() error {
+	if c.Prefix == "" {
+		return fmt.Errorf("fim: prefix token is required")
+	}
+	if c.Suffix == "" {
+		return fmt.Errorf("fim: suffix token is required")
+	}
+	if c.Middle == "" {
+		return fmt.Errorf("fim: middle token is required")
+	}
+	for i, tok := range c.StopTokens {
+		if tok == "" {
+			return fmt.Errorf("fim: stop_tokens[%d] is empty", i)
+		}
+	}
+	if c.PrefixBudgetPct != 0 && (c.PrefixBudgetPct < 1 || c.PrefixBudgetPct > 99) {
+		return fmt.Errorf("fim: prefix_budget_pct must be 1-99, got %d", c.PrefixBudgetPct)
+	}
+	return nil
+}
+
+// TokenOverhead returns the number of control marker tokens inserted by FIM
+// prompt assembly. Currently always 3 (prefix, suffix, middle).
+func (c *FIMConfig) TokenOverhead() int {
+	return 3
 }
 
 // ---------------------------------------------------------------------------

@@ -273,6 +273,120 @@ func TestFIMConfig(t *testing.T) {
 	}
 }
 
+func TestFIMConfigValidate(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     FIMConfig
+		wantErr bool
+	}{
+		{
+			name: "valid config",
+			cfg: FIMConfig{
+				Prefix:          "<|fim_prefix|>",
+				Suffix:          "<|fim_suffix|>",
+				Middle:          "<|fim_middle|>",
+				StopTokens:      []string{"<|endoftext|>"},
+				PrefixBudgetPct: 75,
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid without stop tokens",
+			cfg: FIMConfig{
+				Prefix: "<|fim_prefix|>",
+				Suffix: "<|fim_suffix|>",
+				Middle: "<|fim_middle|>",
+			},
+			wantErr: false,
+		},
+		{
+			name: "valid with zero budget uses default",
+			cfg: FIMConfig{
+				Prefix:          "<|fim_prefix|>",
+				Suffix:          "<|fim_suffix|>",
+				Middle:          "<|fim_middle|>",
+				PrefixBudgetPct: 0,
+			},
+			wantErr: false,
+		},
+		{
+			name:    "empty prefix",
+			cfg:     FIMConfig{Prefix: "", Suffix: "<|fim_suffix|>", Middle: "<|fim_middle|>"},
+			wantErr: true,
+		},
+		{
+			name:    "empty suffix",
+			cfg:     FIMConfig{Prefix: "<|fim_prefix|>", Suffix: "", Middle: "<|fim_middle|>"},
+			wantErr: true,
+		},
+		{
+			name:    "empty middle",
+			cfg:     FIMConfig{Prefix: "<|fim_prefix|>", Suffix: "<|fim_suffix|>", Middle: ""},
+			wantErr: true,
+		},
+		{
+			name: "empty stop token entry",
+			cfg: FIMConfig{
+				Prefix:     "<|fim_prefix|>",
+				Suffix:     "<|fim_suffix|>",
+				Middle:     "<|fim_middle|>",
+				StopTokens: []string{"<|endoftext|>", ""},
+			},
+			wantErr: true,
+		},
+		{
+			name: "budget pct too low",
+			cfg: FIMConfig{
+				Prefix:          "<|fim_prefix|>",
+				Suffix:          "<|fim_suffix|>",
+				Middle:          "<|fim_middle|>",
+				PrefixBudgetPct: -1,
+			},
+			wantErr: true,
+		},
+		{
+			name: "budget pct too high",
+			cfg: FIMConfig{
+				Prefix:          "<|fim_prefix|>",
+				Suffix:          "<|fim_suffix|>",
+				Middle:          "<|fim_middle|>",
+				PrefixBudgetPct: 100,
+			},
+			wantErr: true,
+		},
+		{
+			name: "stop tokens preserve whitespace",
+			cfg: FIMConfig{
+				Prefix:     "<PRE>",
+				Suffix:     " <SUF>",
+				Middle:     " <MID>",
+				StopTokens: []string{" <EOT>"},
+			},
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.cfg.Validate()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestFIMConfigTokenOverhead(t *testing.T) {
+	cfg := FIMConfig{
+		Prefix: "<|fim_prefix|>",
+		Suffix: "<|fim_suffix|>",
+		Middle: "<|fim_middle|>",
+	}
+	if got := cfg.TokenOverhead(); got != 3 {
+		t.Errorf("TokenOverhead() = %d, want 3", got)
+	}
+}
+
 func TestCompletionConfidence(t *testing.T) {
 	cc := CompletionConfidence{
 		Score:      0.95,
