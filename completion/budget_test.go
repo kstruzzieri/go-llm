@@ -1,6 +1,7 @@
 package completion
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -214,5 +215,220 @@ func TestMergeStopTokens(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestComputeBudgetMaxTokens(t *testing.T) {
+	fim := &provider.FIMConfig{
+		Prefix:          "<|fim_prefix|>",
+		Suffix:          "<|fim_suffix|>",
+		Middle:          "<|fim_middle|>",
+		StopTokens:      []string{"<|endoftext|>"},
+		PrefixBudgetPct: 75,
+	}
+
+	tests := []struct {
+		name    string
+		ctx     CursorContext
+		shape   CompletionShape
+		conf    float64
+		lang    string
+		tier    provider.Tier
+		wantMin int
+		wantMax int
+	}{
+		{
+			name:    "import block + token shape = small budget",
+			ctx:     ContextImportBlock,
+			shape:   ShapeToken,
+			conf:    0.75,
+			lang:    "go",
+			tier:    provider.TierGood,
+			wantMin: 16,
+			wantMax: 32,
+		},
+		{
+			name:    "between declarations + declaration shape + Java + best tier",
+			ctx:     ContextBetweenDeclarations,
+			shape:   ShapeDeclaration,
+			conf:    0.75,
+			lang:    "java",
+			tier:    provider.TierBest,
+			wantMin: 384,
+			wantMax: 512,
+		},
+		{
+			name:    "function body + block shape + Go + good tier",
+			ctx:     ContextFunctionBody,
+			shape:   ShapeBlock,
+			conf:    0.5,
+			lang:    "go",
+			tier:    provider.TierGood,
+			wantMin: 100,
+			wantMax: 200,
+		},
+		{
+			name:    "YAML gets halved",
+			ctx:     ContextFunctionBody,
+			shape:   ShapeBlock,
+			conf:    0.5,
+			lang:    "yaml",
+			tier:    provider.TierGood,
+			wantMin: 50,
+			wantMax: 80,
+		},
+		{
+			name:    "basic tier halves output",
+			ctx:     ContextFunctionBody,
+			shape:   ShapeBlock,
+			conf:    0.5,
+			lang:    "go",
+			tier:    provider.TierBasic,
+			wantMin: 50,
+			wantMax: 80,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			analysis := CursorAnalysis{
+				Context:    tt.ctx,
+				Shape:      tt.shape,
+				Confidence: tt.conf,
+				Reason:     "test",
+			}
+			budget := ComputeBudget(analysis, tt.lang, tt.tier, fim, 32768, "prefix", "suffix")
+			if budget.MaxTokens < tt.wantMin || budget.MaxTokens > tt.wantMax {
+				t.Errorf("MaxTokens = %d, want [%d, %d]", budget.MaxTokens, tt.wantMin, tt.wantMax)
+			}
+		})
+	}
+}
+
+func TestComputeBudgetTemperature(t *testing.T) {
+	fim := &provider.FIMConfig{
+		Prefix: "<|fim_prefix|>", Suffix: "<|fim_suffix|>", Middle: "<|fim_middle|>",
+	}
+
+	tests := []struct {
+		name     string
+		ctx      CursorContext
+		conf     float64
+		wantTemp float64
+	}{
+		{"import block", ContextImportBlock, 0.75, 0.0},
+		{"comment block", ContextCommentBlock, 0.75, 0.15},
+		{"function body", ContextFunctionBody, 0.75, 0.2},
+		{"after open brace", ContextAfterOpenBrace, 0.75, 0.2},
+		{"between declarations", ContextBetweenDeclarations, 0.75, 0.3},
+		{"unknown", ContextUnknown, 0.75, 0.2},
+		{"low confidence clamps to 0.2", ContextBetweenDeclarations, 0.5, 0.2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			analysis := CursorAnalysis{
+				Context: tt.ctx, Shape: ShapeBlock, Confidence: tt.conf, Reason: "test",
+			}
+			budget := ComputeBudget(analysis, "go", provider.TierGood, fim, 32768, "prefix", "suffix")
+			if budget.Temperature != tt.wantTemp {
+				t.Errorf("Temperature = %v, want %v", budget.Temperature, tt.wantTemp)
+			}
+		})
+	}
+}
+
+func TestComputeBudgetPrefixRatio(t *testing.T) {
+	fim := &provider.FIMConfig{
+		Prefix: "<|fim_prefix|>", Suffix: "<|fim_suffix|>", Middle: "<|fim_middle|>",
+		PrefixBudgetPct: 75,
+	}
+
+	tests := []struct {
+		name       string
+		prefix     string
+		suffix     string
+		conf       float64
+		wantMinPct int
+		wantMaxPct int
+	}{
+		{
+			name:       "default ratio with mid-file cursor",
+			prefix:     strings.Repeat("x", 500),
+			suffix:     strings.Repeat("y", 500),
+			conf:       0.75,
+			wantMinPct: 70,
+			wantMaxPct: 80,
+		},
+		{
+			name:       "near file top — shift toward suffix",
+			prefix:     strings.Repeat("x", 50),
+			suffix:     strings.Repeat("y", 950),
+			conf:       0.75,
+			wantMinPct: 20,
+			wantMaxPct: 30,
+		},
+		{
+			name:       "near file end — almost all prefix",
+			prefix:     strings.Repeat("x", 950),
+			suffix:     strings.Repeat("y", 50),
+			conf:       0.75,
+			wantMinPct: 85,
+			wantMaxPct: 95,
+		},
+		{
+			name:       "low confidence — no override",
+			prefix:     strings.Repeat("x", 50),
+			suffix:     strings.Repeat("y", 950),
+			conf:       0.5,
+			wantMinPct: 70,
+			wantMaxPct: 80,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			analysis := CursorAnalysis{
+				Context: ContextFunctionBody, Shape: ShapeBlock,
+				Confidence: tt.conf, Reason: "test",
+			}
+			budget := ComputeBudget(analysis, "go", provider.TierGood, fim, 32768, tt.prefix, tt.suffix)
+			if budget.PrefixBudgetPct < tt.wantMinPct || budget.PrefixBudgetPct > tt.wantMaxPct {
+				t.Errorf("PrefixBudgetPct = %d, want [%d, %d]", budget.PrefixBudgetPct, tt.wantMinPct, tt.wantMaxPct)
+			}
+		})
+	}
+}
+
+func TestComputeBudgetStopTokenMerge(t *testing.T) {
+	fim := &provider.FIMConfig{
+		Prefix: "<|fim_prefix|>", Suffix: "<|fim_suffix|>", Middle: "<|fim_middle|>",
+		StopTokens: []string{"<|endoftext|>", "<|fim_pad|>"},
+	}
+	analysis := CursorAnalysis{
+		Context: ContextFunctionBody, Shape: ShapeBlock,
+		Confidence: 0.75, Reason: "test",
+	}
+
+	budget := ComputeBudget(analysis, "go", provider.TierGood, fim, 32768, "prefix", "suffix")
+
+	if len(budget.StopTokens) < 2 {
+		t.Fatalf("expected at least 2 stop tokens (model), got %d", len(budget.StopTokens))
+	}
+	if budget.StopTokens[0] != "<|endoftext|>" {
+		t.Errorf("first stop = %q, want <|endoftext|>", budget.StopTokens[0])
+	}
+	if budget.StopTokens[1] != "<|fim_pad|>" {
+		t.Errorf("second stop = %q, want <|fim_pad|>", budget.StopTokens[1])
+	}
+	hasLangStop := false
+	for _, s := range budget.StopTokens {
+		if s == "\nfunc " {
+			hasLangStop = true
+			break
+		}
+	}
+	if !hasLangStop {
+		t.Error("expected Go language stop pattern \\nfunc in merged stops")
 	}
 }
