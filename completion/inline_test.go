@@ -10,7 +10,89 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
+
+// testFIM returns a valid FIMConfig for tests using Qwen-style tokens.
+func testFIM() *provider.FIMConfig {
+	return &provider.FIMConfig{
+		Prefix:          "<|fim_prefix|>",
+		Suffix:          "<|fim_suffix|>",
+		Middle:          "<|fim_middle|>",
+		StopTokens:      []string{"<|endoftext|>"},
+		PrefixBudgetPct: 75,
+	}
+}
+
+// testProviderConfig returns a standard test ProviderConfig.
+func testProviderConfig() ProviderConfig {
+	return ProviderConfig{
+		FIM:           testFIM(),
+		ContextWindow: 2048,
+		QualityTier:   provider.TierGood,
+	}
+}
+
+// mustNewProvider creates a Provider for testing, failing on error.
+func mustNewProvider(t *testing.T, client *ollama.Client, model string) *Provider {
+	t.Helper()
+	p, err := NewProvider(client, model, testProviderConfig())
+	if err != nil {
+		t.Fatalf("NewProvider: %v", err)
+	}
+	return p
+}
+
+func TestNewProviderValidation(t *testing.T) {
+	client := ollama.NewClient()
+
+	t.Run("nil FIM config rejected", func(t *testing.T) {
+		_, err := NewProvider(client, "test", ProviderConfig{
+			ContextWindow: 8192,
+			QualityTier:   provider.TierGood,
+		})
+		if err == nil {
+			t.Fatal("expected error for nil FIM config")
+		}
+	})
+
+	t.Run("invalid FIM config rejected", func(t *testing.T) {
+		_, err := NewProvider(client, "test", ProviderConfig{
+			FIM:           &provider.FIMConfig{Prefix: "", Suffix: "s", Middle: "m"},
+			ContextWindow: 8192,
+		})
+		if err == nil {
+			t.Fatal("expected error for invalid FIM config")
+		}
+	})
+
+	t.Run("zero context window rejected", func(t *testing.T) {
+		_, err := NewProvider(client, "test", ProviderConfig{
+			FIM:           &provider.FIMConfig{Prefix: "p", Suffix: "s", Middle: "m"},
+			ContextWindow: 0,
+		})
+		if err == nil {
+			t.Fatal("expected error for zero context window")
+		}
+	})
+
+	t.Run("valid config accepted", func(t *testing.T) {
+		p, err := NewProvider(client, "test", ProviderConfig{
+			FIM: &provider.FIMConfig{
+				Prefix: "<|fim_prefix|>", Suffix: "<|fim_suffix|>", Middle: "<|fim_middle|>",
+				StopTokens: []string{"<|endoftext|>"},
+			},
+			ContextWindow: 32768,
+			QualityTier:   provider.TierGood,
+		})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if p == nil {
+			t.Fatal("expected non-nil provider")
+		}
+	})
+}
 
 func TestComplete(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -46,9 +128,9 @@ func TestComplete(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
+	p := mustNewProvider(t, client, "test-model")
 
-	resp, err := provider.Complete(context.Background(), FIMRequest{
+	resp, err := p.Complete(context.Background(), FIMRequest{
 		Prefix: "func main() {\n\t",
 		Suffix: "\n}",
 	})
@@ -89,10 +171,10 @@ func TestCompleteStream(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
+	p := mustNewProvider(t, client, "test-model")
 
 	var tokens []string
-	err := provider.CompleteStream(context.Background(), FIMRequest{
+	err := p.CompleteStream(context.Background(), FIMRequest{
 		Prefix: "func main() {\n\t",
 		Suffix: "\n}",
 	}, func(token string) error {
@@ -124,10 +206,10 @@ func TestCompleteStreamCallbackError(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
+	p := mustNewProvider(t, client, "test-model")
 
 	callbackErr := fmt.Errorf("stop streaming")
-	err := provider.CompleteStream(context.Background(), FIMRequest{
+	err := p.CompleteStream(context.Background(), FIMRequest{
 		Prefix: "func main() {",
 		Suffix: "}",
 	}, func(token string) error {
@@ -139,32 +221,33 @@ func TestCompleteStreamCallbackError(t *testing.T) {
 }
 
 func TestCompleteValidation(t *testing.T) {
-	client := ollama.NewClient()
-
-	t.Run("nil client", func(t *testing.T) {
-		provider := NewProvider(nil, "test-model")
-		_, err := provider.Complete(context.Background(), FIMRequest{Prefix: "code"})
+	t.Run("nil client caught at complete time", func(t *testing.T) {
+		p, err := NewProvider(nil, "test-model", testProviderConfig())
+		if err != nil {
+			t.Fatalf("unexpected construction error: %v", err)
+		}
+		_, err = p.Complete(context.Background(), FIMRequest{Prefix: "code"})
 		if err == nil {
 			t.Fatal("expected error for nil client")
 		}
-		err = provider.CompleteStream(context.Background(), FIMRequest{Prefix: "code"}, func(string) error { return nil })
+		err = p.CompleteStream(context.Background(), FIMRequest{Prefix: "code"}, func(string) error { return nil })
 		if err == nil {
 			t.Fatal("expected error for nil client in stream")
 		}
 	})
 
 	t.Run("model required", func(t *testing.T) {
-		provider := NewProvider(client, "")
-		_, err := provider.Complete(context.Background(), FIMRequest{
-			Prefix: "code",
-		})
+		p, err := NewProvider(ollama.NewClient(), "", testProviderConfig())
+		if err != nil {
+			t.Fatalf("unexpected construction error: %v", err)
+		}
+		_, err = p.Complete(context.Background(), FIMRequest{Prefix: "code"})
 		if err == nil {
 			t.Fatal("expected error for missing model")
 		}
 	})
 
 	t.Run("empty prefix is valid for FIM", func(t *testing.T) {
-		// Empty prefix is valid — represents cursor at the start of a file or new buffer.
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"response":   "generated",
@@ -174,8 +257,8 @@ func TestCompleteValidation(t *testing.T) {
 		}))
 		defer srv.Close()
 		c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-		provider := NewProvider(c, "test-model")
-		resp, err := provider.Complete(context.Background(), FIMRequest{Suffix: "func main() {}"})
+		p := mustNewProvider(t, c, "test-model")
+		resp, err := p.Complete(context.Background(), FIMRequest{Suffix: "func main() {}"})
 		if err != nil {
 			t.Fatalf("unexpected error for empty prefix: %v", err)
 		}
@@ -185,10 +268,11 @@ func TestCompleteValidation(t *testing.T) {
 	})
 
 	t.Run("stream fn required", func(t *testing.T) {
-		provider := NewProvider(client, "test-model")
-		err := provider.CompleteStream(context.Background(), FIMRequest{
-			Prefix: "code",
-		}, nil)
+		p, err := NewProvider(ollama.NewClient(), "test-model", testProviderConfig())
+		if err != nil {
+			t.Fatalf("unexpected construction error: %v", err)
+		}
+		err = p.CompleteStream(context.Background(), FIMRequest{Prefix: "code"}, nil)
 		if err == nil {
 			t.Fatal("expected error for nil callback")
 		}
@@ -213,9 +297,9 @@ func TestCompleteFIMPromptFormat(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
+	p := mustNewProvider(t, client, "test-model")
 
-	_, _ = provider.Complete(context.Background(), FIMRequest{
+	_, _ = p.Complete(context.Background(), FIMRequest{
 		Prefix: "BEFORE",
 		Suffix: "AFTER",
 	})
@@ -250,21 +334,18 @@ func TestCompleteModelOptions(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
-	_, _ = provider.Complete(context.Background(), FIMRequest{Prefix: "code"})
+	p := mustNewProvider(t, client, "test-model")
+	_, _ = p.Complete(context.Background(), FIMRequest{Prefix: "code"})
 }
 
 func TestCompleteContextTruncation(t *testing.T) {
 	// Build distinguishable prefix and suffix that far exceed the context budget.
-	// Prefix: "P00000...P29999" — each segment is 6 chars, so we can verify
-	// that truncation keeps the END of the prefix (high-numbered segments).
-	// Suffix: "S00000...S09999" — verify truncation keeps the BEGINNING (low-numbered).
 	var prefixBuilder, suffixBuilder strings.Builder
 	for i := 0; i < 5000; i++ {
-		fmt.Fprintf(&prefixBuilder, "P%05d", i) // 6 chars each = 30000 total
+		fmt.Fprintf(&prefixBuilder, "P%05d", i)
 	}
 	for i := 0; i < 1667; i++ {
-		fmt.Fprintf(&suffixBuilder, "S%05d", i) // 6 chars each = 10002 total
+		fmt.Fprintf(&suffixBuilder, "S%05d", i)
 	}
 	longPrefix := prefixBuilder.String()
 	longSuffix := suffixBuilder.String()
@@ -285,8 +366,8 @@ func TestCompleteContextTruncation(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
-	_, err := provider.Complete(context.Background(), FIMRequest{
+	p := mustNewProvider(t, client, "test-model")
+	_, err := p.Complete(context.Background(), FIMRequest{
 		Prefix: longPrefix,
 		Suffix: longSuffix,
 	})
@@ -294,15 +375,13 @@ func TestCompleteContextTruncation(t *testing.T) {
 		t.Fatalf("Complete() error: %v", err)
 	}
 
-	// The prompt should be much shorter than the raw inputs.
-	// Available = 2048 - 128 - 3 = 1917 tokens * 4 chars = 7668 chars max for prefix+suffix.
-	// Plus FIM tokens themselves (~42 chars for the 3 token strings).
+	// Input exceeds fimCtxCeiling, so effectiveNumCtx returns min(16384, 2048) = 2048.
+	// Available = 2048 - 128 - 3 = 1917 tokens * 4 chars = 7668 chars.
 	maxExpectedLen := 7668 + len("<|fim_prefix|>") + len("<|fim_suffix|>") + len("<|fim_middle|>")
 	if len(capturedPrompt) > maxExpectedLen {
 		t.Errorf("prompt length %d exceeds budget %d", len(capturedPrompt), maxExpectedLen)
 	}
 
-	// Extract prefix and suffix portions from the prompt
 	suffixTokenIdx := strings.Index(capturedPrompt, "<|fim_suffix|>")
 	middleTokenIdx := strings.Index(capturedPrompt, "<|fim_middle|>")
 	if suffixTokenIdx == -1 || middleTokenIdx == -1 {
@@ -311,7 +390,6 @@ func TestCompleteContextTruncation(t *testing.T) {
 	truncatedPrefix := capturedPrompt[len("<|fim_prefix|>"):suffixTokenIdx]
 	truncatedSuffix := capturedPrompt[suffixTokenIdx+len("<|fim_suffix|>") : middleTokenIdx]
 
-	// Verify prefix was truncated and keeps the END (high-numbered segments)
 	if len(truncatedPrefix) >= len(longPrefix) {
 		t.Error("prefix should have been truncated")
 	}
@@ -323,7 +401,6 @@ func TestCompleteContextTruncation(t *testing.T) {
 		t.Error("prefix should NOT start with P00000 (beginning should be trimmed)")
 	}
 
-	// Verify suffix was truncated and keeps the BEGINNING (low-numbered segments)
 	if len(truncatedSuffix) >= len(longSuffix) {
 		t.Error("suffix should have been truncated")
 	}
@@ -348,17 +425,19 @@ func TestCompleteCustomMaxTokens(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
-	_, _ = provider.Complete(context.Background(), FIMRequest{
+	p := mustNewProvider(t, client, "test-model")
+	_, _ = p.Complete(context.Background(), FIMRequest{
 		Prefix:    "code",
 		MaxTokens: 256,
 	})
 }
 
 func TestCompleteMaxTokensClamped(t *testing.T) {
-	// MaxTokens exceeding (defaultNumCtx - fimTokenOverhead - 1) must be clamped
-	// so that num_predict never exceeds num_ctx and at least 1 token of prompt budget remains.
-	maxAllowed := defaultNumCtx - fimTokenOverhead - 1 // 2044
+	// MaxTokens exceeding (effectiveNumCtx - overhead - 1) must be clamped
+	// so that num_predict never exceeds num_ctx. testProviderConfig uses
+	// ContextWindow=2048, so effectiveNumCtx=2048 and maxAllowed=2044.
+	overhead := testFIM().TokenOverhead()
+	maxAllowed := 2048 - overhead - 1 // 2044
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
@@ -379,10 +458,10 @@ func TestCompleteMaxTokensClamped(t *testing.T) {
 	defer srv.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
-	provider := NewProvider(client, "test-model")
-	resp, err := provider.Complete(context.Background(), FIMRequest{
+	p := mustNewProvider(t, client, "test-model")
+	resp, err := p.Complete(context.Background(), FIMRequest{
 		Prefix:    "code",
-		MaxTokens: 99999, // absurdly large -- must be clamped
+		MaxTokens: 99999,
 	})
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
