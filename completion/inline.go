@@ -204,7 +204,11 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 	return result, nil
 }
 
-// CompleteStream generates a streaming inline completion, calling fn for each token.
+// CompleteStream generates a streaming inline completion, calling fn for each
+// token. The callback never receives a literal stop token, even when the
+// upstream stream splits one across multiple chunks: a trailing buffer sized
+// to the longest effective stop token is held back on every write and only
+// flushed (with any tail stop token stripped) on the final chunk.
 // If fn returns an error, streaming stops and that error is returned.
 func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(token string) error) error {
 	if p.client == nil {
@@ -219,10 +223,42 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 
 	pr := p.planRequest(req)
 
+	maxStopLen := 0
+	for _, tok := range pr.budget.StopTokens {
+		if len(tok) > maxStopLen {
+			maxStopLen = len(tok)
+		}
+	}
+
+	var buffer string
+
 	return p.client.GenerateStream(ctx, pr.genReq, func(resp ollama.GenerateResponse) error {
-		if resp.Response != "" {
+		if maxStopLen == 0 {
+			if resp.Response == "" {
+				return nil
+			}
 			return fn(resp.Response)
 		}
-		return nil
+
+		buffer += resp.Response
+
+		if resp.Done {
+			if buffer == "" {
+				return nil
+			}
+			cleaned := stripStopTokens(buffer, pr.budget.StopTokens)
+			buffer = ""
+			if cleaned == "" {
+				return nil
+			}
+			return fn(cleaned)
+		}
+
+		if len(buffer) <= maxStopLen {
+			return nil
+		}
+		safe := buffer[:len(buffer)-maxStopLen]
+		buffer = buffer[len(buffer)-maxStopLen:]
+		return fn(safe)
 	})
 }

@@ -184,8 +184,8 @@ func TestCompleteStream(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CompleteStream() error: %v", err)
 	}
-	if len(tokens) != 3 {
-		t.Fatalf("expected 3 tokens, got %d", len(tokens))
+	if len(tokens) == 0 {
+		t.Fatal("expected at least one token callback")
 	}
 	joined := strings.Join(tokens, "")
 	if joined != "fmt.Println()" {
@@ -194,10 +194,13 @@ func TestCompleteStream(t *testing.T) {
 }
 
 func TestCompleteStreamCallbackError(t *testing.T) {
+	// Send a chunk larger than the longest stop token so that the buffered
+	// CompleteStream flushes at least once; otherwise the trailing buffer
+	// would swallow the whole chunk until the done marker.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		chunk := ollama.GenerateResponse{
 			Model:    "test-model",
-			Response: "token",
+			Response: strings.Repeat("token", 10),
 			Done:     false,
 		}
 		data, _ := json.Marshal(chunk)
@@ -617,5 +620,84 @@ func TestCompleteMaxTokensOverride(t *testing.T) {
 
 	if capturedOpts.NumPredict != 256 {
 		t.Errorf("NumPredict = %d, want 256 (manual override)", capturedOpts.NumPredict)
+	}
+}
+
+func TestCompleteStreamStopSuppression(t *testing.T) {
+	chunks := []ollama.GenerateResponse{
+		{Model: "test-model", Response: "fmt.", Done: false},
+		{Model: "test-model", Response: "Println()", Done: false},
+		{Model: "test-model", Response: "<|endo", Done: false},
+		{Model: "test-model", Response: "ftext|>", Done: false},
+		{Model: "test-model", Response: "", Done: true, EvalCount: 4},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, chunk := range chunks {
+			data, _ := json.Marshal(chunk)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
+		}
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := mustNewProvider(t, client, "test-model")
+
+	var tokens []string
+	err := p.CompleteStream(context.Background(), FIMRequest{
+		Prefix:   "func main() {\n\t",
+		Suffix:   "\n}",
+		FilePath: "main.go",
+	}, func(token string) error {
+		tokens = append(tokens, token)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+
+	joined := strings.Join(tokens, "")
+	if strings.Contains(joined, "<|endoftext|>") {
+		t.Errorf("stop token leaked to callback: %q", joined)
+	}
+	if !strings.Contains(joined, "fmt.Println()") {
+		t.Errorf("expected code content, got %q", joined)
+	}
+}
+
+func TestCompleteStreamNoStopToken(t *testing.T) {
+	chunks := []ollama.GenerateResponse{
+		{Model: "test-model", Response: "hello", Done: false},
+		{Model: "test-model", Response: " world", Done: false},
+		{Model: "test-model", Response: "", Done: true, EvalCount: 2},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, chunk := range chunks {
+			data, _ := json.Marshal(chunk)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
+		}
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := mustNewProvider(t, client, "test-model")
+
+	var tokens []string
+	err := p.CompleteStream(context.Background(), FIMRequest{
+		Prefix:   "x = ",
+		Suffix:   "\n",
+		FilePath: "main.go",
+	}, func(token string) error {
+		tokens = append(tokens, token)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("CompleteStream: %v", err)
+	}
+
+	joined := strings.Join(tokens, "")
+	if joined != "hello world" {
+		t.Errorf("unexpected output: %q", joined)
 	}
 }
