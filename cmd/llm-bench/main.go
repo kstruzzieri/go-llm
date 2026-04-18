@@ -87,7 +87,7 @@ func main() {
 		return
 	}
 
-	if err := os.WriteFile(*reportPath, []byte(report), 0o644); err != nil {
+	if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
 		log.Fatalf("llm-bench: write report: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "llm-bench: report written to %s\n", *reportPath)

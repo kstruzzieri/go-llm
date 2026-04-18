@@ -47,19 +47,24 @@ func newScorer(name string) (Scorer, error) {
 // before drawing conclusions.
 type ExactMatchScorer struct{}
 
-// Score implements Scorer.
+// Score implements Scorer. ToolArgsValid is left unset (zero) because the
+// tool loop has not yet been wired in Phase 1, so per-call argument
+// validation against trace.Tools schemas is not computable. The Notes
+// field records this so aggregate consumers can distinguish "not scored"
+// from "scored zero".
 func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
+	needle := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
+	if needle == "" {
+		return Score{}, fmt.Errorf("exact-match scorer requires golden.final_answer_substring for trace %q", trace.ID)
+	}
+
 	score := Score{
 		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		ToolArgsValid:     1.0, // TODO: validate against trace.Tools JSON schemas once the tool loop is wired
+		Notes:             "ToolArgsValid not computed (tool loop pending; see benchmark-plan.md Phase 2)",
 	}
 
 	finalText := lastAssistantContent(actual.Transcript)
-	needle := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
-	if needle == "" {
-		score.AnswerQuality = 0.5
-		score.Notes = "no FinalAnswerSubstring in golden; defaulting AnswerQuality=0.5"
-	} else if strings.Contains(finalText, needle) {
+	if strings.Contains(finalText, needle) {
 		score.AnswerQuality = 1.0
 	} else {
 		score.AnswerQuality = 0.0

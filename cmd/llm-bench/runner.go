@@ -32,7 +32,7 @@ type Result struct {
 func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
 	results := make([]Result, 0, len(targets)*len(traces))
 	for _, target := range targets {
-		client, err := newOllamaClient(target.Model, r.OllamaURL)
+		client, err := newOllamaClient(r.OllamaURL)
 		if err != nil {
 			return nil, fmt.Errorf("client for %q: %w", target.Display, err)
 		}
@@ -76,13 +76,31 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 // responses. This is a SKELETON — the tool-call loop is not yet wired up.
 // Feeding tool results back to the model and extracting real ToolCalls
 // from the Ollama response requires more plumbing than this scaffold.
+//
+// Until the tool loop lands, replay refuses multi-user-turn traces rather
+// than silently scoring only the first turn, which would produce
+// misleading aggregates.
 func replay(ctx context.Context, client *ollama.Client, model string, trace Trace) ([]Turn, error) {
-	messages := []ollama.ChatMessage{{Role: "system", Content: trace.System}}
-	for _, t := range trace.Turns {
-		if t.Role == "user" {
-			messages = append(messages, ollama.ChatMessage{Role: "user", Content: t.Content})
-			break // replay only first user turn for now; tool loop is TODO
+	var firstUser *Turn
+	userTurns := 0
+	for i := range trace.Turns {
+		if trace.Turns[i].Role == "user" {
+			userTurns++
+			if firstUser == nil {
+				firstUser = &trace.Turns[i]
+			}
 		}
+	}
+	if firstUser == nil {
+		return nil, fmt.Errorf("trace %q has no user turn", trace.ID)
+	}
+	if userTurns > 1 {
+		return nil, fmt.Errorf("trace %q has %d user turns; multi-turn replay not yet supported", trace.ID, userTurns)
+	}
+
+	messages := []ollama.ChatMessage{
+		{Role: "system", Content: trace.System},
+		{Role: "user", Content: firstUser.Content},
 	}
 
 	resp, err := client.Chat(ctx, ollama.ChatRequest{
@@ -127,11 +145,11 @@ func assistantTurnFromMessage(msg ollama.ChatMessage) (Turn, error) {
 }
 
 // newOllamaClient constructs an ollama.Client targeting the configured URL.
-// The model argument is unused today but will matter when we route to
-// different endpoints per provider (e.g. LM Studio at a different port).
-func newOllamaClient(model, baseURL string) (*ollama.Client, error) {
-	if strings.TrimSpace(model) == "" {
-		return nil, fmt.Errorf("empty model")
+// Multi-provider routing (e.g. LM Studio at a different port) is a
+// follow-up that will introduce a client factory keyed by target.Provider.
+func newOllamaClient(baseURL string) (*ollama.Client, error) {
+	if strings.TrimSpace(baseURL) == "" {
+		return nil, fmt.Errorf("empty ollama base URL")
 	}
 	return ollama.NewClient(ollama.WithBaseURL(baseURL)), nil
 }
