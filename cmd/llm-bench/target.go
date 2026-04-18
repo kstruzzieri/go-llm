@@ -50,7 +50,7 @@ func parseModelTarget(raw string) (ModelTarget, error) {
 	}
 
 	if target.Provider != defaultBenchProvider {
-		return ModelTarget{}, fmt.Errorf("unsupported provider %q", target.Provider)
+		return ModelTarget{}, fmt.Errorf("%w: %q", errUnsupportedProv, target.Provider)
 	}
 
 	return target, nil

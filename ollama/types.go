@@ -47,11 +47,12 @@ type ChatMessage struct {
 
 // ChatRequest is the request body for the /api/chat endpoint.
 type ChatRequest struct {
-	Model    string        `json:"model"`
-	Messages []ChatMessage `json:"messages"`
-	Stream   bool          `json:"stream"`
-	Options  *ModelOptions `json:"options,omitempty"`
-	Tools    []Tool        `json:"tools,omitempty"` // available tools
+	Model     string        `json:"model"`
+	Messages  []ChatMessage `json:"messages"`
+	Stream    bool          `json:"stream"`
+	Options   *ModelOptions `json:"options,omitempty"`
+	Tools     []Tool        `json:"tools,omitempty"`      // available tools
+	KeepAlive string        `json:"keep_alive,omitempty"` // e.g. "5m", "30m", "-1" (keep forever); empty = Ollama default
 }
 
 // ChatResponse is the response from the /api/chat endpoint.

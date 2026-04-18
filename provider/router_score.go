@@ -36,13 +36,18 @@ type WeightProfile struct {
 // FIM heavily favors KV cache (prefix reuse) and speed. Chat favors quality
 // and feedback. Embedding cares about quality and speed, not warmth/headroom.
 // Reasoning maximizes quality with headroom for long outputs. Code-review
-// balances quality and feedback.
+// balances quality and feedback. Agent (tool-calling) loops need speed per
+// call (many small calls), headroom (accumulating tool trace), and feedback
+// (tool-call accuracy is directly observable). "tool-use" is an alias for
+// "agent" kept so callers can pick whichever name reads better locally.
 var defaultWeightProfiles = map[string]*WeightProfile{
 	"fim":         {Warmth: 2, Headroom: 1, Feedback: 1, Quality: 1, Speed: 2, KVCache: 3, Cost: 1},
 	"chat":        {Warmth: 1, Headroom: 2, Feedback: 3, Quality: 4, Speed: 1, KVCache: 0, Cost: 1},
 	"embedding":   {Warmth: 0, Headroom: 0, Feedback: 1, Quality: 3, Speed: 2, KVCache: 0, Cost: 2},
 	"reasoning":   {Warmth: 1, Headroom: 3, Feedback: 3, Quality: 5, Speed: 0, KVCache: 0, Cost: 1},
 	"code-review": {Warmth: 1, Headroom: 3, Feedback: 4, Quality: 3, Speed: 1, KVCache: 0, Cost: 1},
+	"agent":       {Warmth: 2, Headroom: 2, Feedback: 4, Quality: 4, Speed: 3, KVCache: 1, Cost: 1},
+	"tool-use":    {Warmth: 2, Headroom: 2, Feedback: 4, Quality: 4, Speed: 3, KVCache: 1, Cost: 1},
 }
 
 // defaultWeightProfile returns the weight profile for the given use case.

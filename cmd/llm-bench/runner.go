@@ -3,11 +3,28 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+)
+
+// benchKeepAlive is the Ollama keep_alive directive used for benchmark runs.
+// Explicitly overrides Ollama's 5-minute default so the outer-loop ordering
+// in RunAll actually keeps the model warm across all of a target's traces.
+const benchKeepAlive = "30m"
+
+// Sentinel errors so tests assert on identity rather than message text.
+var (
+	errNoUserTurn      = errors.New("trace has no user turn")
+	errMultiUserTurn   = errors.New("multi-turn replay not yet supported")
+	errEmptyBaseURL    = errors.New("empty ollama base URL")
+	errMissingGolden   = errors.New("scorer requires golden.final_answer_substring")
+	errEmptySystem     = errors.New("trace has empty system prompt")
+	errNoTurns         = errors.New("trace has no turns")
+	errUnsupportedProv = errors.New("unsupported provider")
 )
 
 // Runner executes traces against a list of candidate models and collects
@@ -28,17 +45,34 @@ type Result struct {
 }
 
 // RunAll replays every trace against every model. Iterates models in the
-// outer loop so a warm model stays warm across its traces.
+// outer loop plus an explicit keep_alive directive so the model stays
+// warm across all of its traces. Per-target client-construction failures
+// and per-trace errors are recorded as Result rows rather than aborting
+// the whole run, so partial progress is never discarded.
 func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
 	results := make([]Result, 0, len(targets)*len(traces))
 	for _, target := range targets {
+		if err := ctx.Err(); err != nil {
+			return results, err
+		}
+
 		client, err := newOllamaClient(r.OllamaURL)
 		if err != nil {
-			return nil, fmt.Errorf("client for %q: %w", target.Display, err)
+			for _, trace := range traces {
+				results = append(results, Result{
+					Model:   target.Display,
+					TraceID: trace.ID,
+					Err:     fmt.Errorf("client for %q: %w", target.Display, err),
+				})
+			}
+			continue
 		}
+
 		for _, trace := range traces {
-			res := r.runOne(ctx, client, target, trace)
-			results = append(results, res)
+			if err := ctx.Err(); err != nil {
+				return results, err
+			}
+			results = append(results, r.runOne(ctx, client, target, trace))
 		}
 	}
 	return results, nil
@@ -48,8 +82,9 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	runCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 
-	start := time.Now()
+	replayStart := time.Now()
 	transcript, err := replay(runCtx, client, target.Model, trace)
+	replayMs := time.Since(replayStart).Milliseconds()
 	if err != nil {
 		return Result{Model: target.Display, TraceID: trace.ID, Err: err}
 	}
@@ -62,7 +97,9 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	if err != nil {
 		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: transcript}
 	}
-	score.LatencyMs = time.Since(start).Milliseconds()
+	// Latency reflects replay only, not scorer work. When llm-judge lands,
+	// the judge round-trip must not pollute the model-latency metric.
+	score.LatencyMs = replayMs
 
 	return Result{
 		Model:      target.Display,
@@ -92,10 +129,10 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 		}
 	}
 	if firstUser == nil {
-		return nil, fmt.Errorf("trace %q has no user turn", trace.ID)
+		return nil, fmt.Errorf("trace %q: %w", trace.ID, errNoUserTurn)
 	}
 	if userTurns > 1 {
-		return nil, fmt.Errorf("trace %q has %d user turns; multi-turn replay not yet supported", trace.ID, userTurns)
+		return nil, fmt.Errorf("trace %q has %d user turns: %w", trace.ID, userTurns, errMultiUserTurn)
 	}
 
 	messages := []ollama.ChatMessage{
@@ -104,8 +141,9 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 	}
 
 	resp, err := client.Chat(ctx, ollama.ChatRequest{
-		Model:    model,
-		Messages: messages,
+		Model:     model,
+		Messages:  messages,
+		KeepAlive: benchKeepAlive,
 	})
 	if err != nil {
 		return nil, err
@@ -149,7 +187,7 @@ func assistantTurnFromMessage(msg ollama.ChatMessage) (Turn, error) {
 // follow-up that will introduce a client factory keyed by target.Provider.
 func newOllamaClient(baseURL string) (*ollama.Client, error) {
 	if strings.TrimSpace(baseURL) == "" {
-		return nil, fmt.Errorf("empty ollama base URL")
+		return nil, errEmptyBaseURL
 	}
 	return ollama.NewClient(ollama.WithBaseURL(baseURL)), nil
 }

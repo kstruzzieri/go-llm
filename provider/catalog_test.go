@@ -1,6 +1,33 @@
 package provider
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
+
+// TestQwen3CoderNextVariantsInSync guards against drift between the
+// "latest" alias and the canonical "80b" variant. If 80b's profile is
+// retuned, latest must track — or this test must be updated deliberately.
+func TestQwen3CoderNextVariantsInSync(t *testing.T) {
+	cat, err := loadCatalog()
+	if err != nil {
+		t.Fatalf("loadCatalog() error: %v", err)
+	}
+
+	fam, ok := cat.Families["qwen3-coder-next"]
+	if !ok {
+		t.Fatal("catalog missing qwen3-coder-next family")
+	}
+
+	latest, hasLatest := fam.Variants["latest"]
+	canonical, hasCanonical := fam.Variants["80b"]
+	if !hasLatest || !hasCanonical {
+		t.Fatalf("qwen3-coder-next variants: latest=%v 80b=%v", hasLatest, hasCanonical)
+	}
+	if !reflect.DeepEqual(latest, canonical) {
+		t.Errorf("qwen3-coder-next latest != 80b — variants drifted\nlatest: %+v\n80b:    %+v", latest, canonical)
+	}
+}
 
 func TestCatalogLoad(t *testing.T) {
 	cat, err := loadCatalog()

@@ -74,8 +74,10 @@ the existing `feedback/` and `conversation/` SQLite stores.
 
 ### Per-trace
 
-1. **Tool call sequence match** — Levenshtein distance between actual and
-   golden tool-call sequence, normalized to [0,1].
+1. **Tool call sequence match** — Jaccard set overlap between actual and
+   golden tool-call names, normalized to [0,1]. Order-agnostic in Phase 1
+   (`toolSequenceScore` in `scorer.go`); ordered Levenshtein comparison is
+   a Phase 2 follow-up once the tool loop records real per-turn calls.
 2. **Tool argument validity** — JSON schema validation against the
    declared tool schemas. Binary pass/fail per call, averaged.
 3. **Final answer quality** — *User-selected scoring strategy*:

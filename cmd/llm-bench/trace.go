@@ -44,6 +44,8 @@ type Golden struct {
 }
 
 // loadTraces reads each path as a JSON Trace and returns the full set.
+// Validates structural minimums up front so malformed traces surface at
+// load time, not deep in the replay loop.
 func loadTraces(paths []string) ([]Trace, error) {
 	traces := make([]Trace, 0, len(paths))
 	for _, path := range paths {
@@ -55,10 +57,23 @@ func loadTraces(paths []string) ([]Trace, error) {
 		if err := json.Unmarshal(data, &t); err != nil {
 			return nil, fmt.Errorf("parse %q: %w", path, err)
 		}
-		if t.ID == "" {
-			return nil, fmt.Errorf("trace %q: missing id", path)
+		if err := validateTrace(t); err != nil {
+			return nil, fmt.Errorf("trace %q (%s): %w", path, t.ID, err)
 		}
 		traces = append(traces, t)
 	}
 	return traces, nil
+}
+
+func validateTrace(t Trace) error {
+	if t.ID == "" {
+		return fmt.Errorf("missing id")
+	}
+	if t.System == "" {
+		return errEmptySystem
+	}
+	if len(t.Turns) == 0 {
+		return errNoTurns
+	}
+	return nil
 }

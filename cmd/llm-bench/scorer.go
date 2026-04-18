@@ -55,7 +55,7 @@ type ExactMatchScorer struct{}
 func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
 	needle := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
 	if needle == "" {
-		return Score{}, fmt.Errorf("exact-match scorer requires golden.final_answer_substring for trace %q", trace.ID)
+		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingGolden)
 	}
 
 	score := Score{
@@ -115,9 +115,15 @@ func extractToolNames(turns []Turn) []string {
 	return names
 }
 
+// lastAssistantContent returns the content of the final assistant turn, or
+// "" if there is no assistant turn. It does NOT walk backward past an
+// empty-content assistant turn to find a prior non-empty one — doing so
+// would return stale content if the last action was a tool call with no
+// final answer. Callers can distinguish "no final answer" from "answer
+// didn't match" via an empty return.
 func lastAssistantContent(turns []Turn) string {
 	for i := len(turns) - 1; i >= 0; i-- {
-		if turns[i].Role == "assistant" && turns[i].Content != "" {
+		if turns[i].Role == "assistant" {
 			return turns[i].Content
 		}
 	}

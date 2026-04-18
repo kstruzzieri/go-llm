@@ -36,12 +36,14 @@ func formatReport(models []string, results []Result) string {
 		rs := byModel[m]
 		sort.Slice(rs, func(i, j int) bool { return rs[i].TraceID < rs[j].TraceID })
 		for _, r := range rs {
-			errCell := ""
 			if r.Err != nil {
-				errCell = r.Err.Error()
+				// Errored runs: render em-dash in metric cells so a reader
+				// never confuses an error with a genuine zero score.
+				fmt.Fprintf(&b, "| %s | — | — | — | %s |\n", r.TraceID, r.Err.Error())
+				continue
 			}
-			fmt.Fprintf(&b, "| %s | %.2f | %.2f | %d | %s |\n",
-				r.TraceID, r.Score.AnswerQuality, r.Score.ToolSequenceMatch, r.Score.LatencyMs, errCell)
+			fmt.Fprintf(&b, "| %s | %.2f | %.2f | %d | |\n",
+				r.TraceID, r.Score.AnswerQuality, r.Score.ToolSequenceMatch, r.Score.LatencyMs)
 		}
 		fmt.Fprintln(&b)
 	}

@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"strings"
+	"errors"
 	"testing"
 )
 
@@ -12,11 +12,8 @@ func TestExactMatchScorerRequiresGoldenSubstring(t *testing.T) {
 	actual := Result{Transcript: []Turn{{Role: "assistant", Content: "some answer"}}}
 
 	_, err := s.Score(context.Background(), trace, actual)
-	if err == nil {
-		t.Fatal("expected error when golden.final_answer_substring is missing, got nil")
-	}
-	if !strings.Contains(err.Error(), "final_answer_substring") {
-		t.Errorf("error = %v, want mention of final_answer_substring", err)
+	if !errors.Is(err, errMissingGolden) {
+		t.Fatalf("err = %v, want errMissingGolden", err)
 	}
 }
 

@@ -66,6 +66,26 @@ integration cost. The experiment's real value is *evidence* that
 defending Setup 1 against speculative criticism ("but GLM-5.1 is better
 on SWE-bench!") is correct for this workload.
 
+## Unvalidated claims to verify on deploy
+
+The `context_window` values in `models.json` (256000 for `gemma4:31b` /
+`qwen3.6:35b-a3b`, 262144 for `qwen3-coder-next:latest`) are the
+published model maxima and have **not** been validated at build time —
+the library does not boot Ollama in unit tests. First use on a given
+machine, the `fingerprint/` package will observe the real context
+window Ollama reports and cache it. If a published figure is wrong,
+prompt-overflow bugs will surface at runtime, not at install.
+
+Mitigation: after pulling, run `ollama show <model>` once and compare
+the `num_ctx` figure with `models.json`. If they disagree, update
+`models.json` rather than trusting the source.
+
+The catalog keeps both `qwen3-coder-next:latest` and `qwen3-coder-next:80b`
+variants with identical specs. `latest` tracks Ollama's floating tag and
+is what `models.json` references; `80b` is retained so a consumer that
+pins explicitly still gets curated scoring data. `TestQwen3CoderNextVariantsInSync`
+enforces they stay identical.
+
 ## Files touched in this migration
 
 - `models.json` — role assignments
@@ -81,30 +101,17 @@ No code changes required to `config/`, `provider/`, `ollama/`, `rag/`,
 signature is stable; new models get picked up automatically via
 `config.Load` and the catalog.
 
-## User decision required
+## Router weight profiles
 
-The router has default weight profiles (`provider/router_score.go`) for
-`fim`, `chat`, `embedding`, `reasoning`, and `code-review`. It does
-**not** have a profile for `agent` or `tool-use`. Adding Gemma 4 as the
-`agent` role surfaces this gap.
+`provider/router_score.go` ships default profiles for `fim`, `chat`,
+`embedding`, `reasoning`, `code-review`, `agent`, and `tool-use`
+(`agent` and `tool-use` are aliased to the same values). The agent
+profile prioritizes Speed and Feedback more heavily than chat, on the
+reasoning that tool-calling loops make many small calls and tool-call
+accuracy is directly observable as success/failure. If real traces
+suggest these weights are wrong, retune them — they are opinions, not
+benchmarked values, and the benchmark harness (`cmd/llm-bench`) is the
+right tool to validate them.
 
-**TODO (requires Keith's input):** Define a `tool-use` weight profile.
-Candidate starting values:
-
-```go
-"tool-use": {Warmth: 2, Headroom: 2, Feedback: 4, Quality: 4, Speed: 3, KVCache: 1, Cost: 1},
-```
-
-vs. reasoning (`{Warmth: 1, Headroom: 3, Feedback: 3, Quality: 5, Speed: 0, KVCache: 0, Cost: 1}`).
-
-The meaningful tradeoffs:
-- `Speed` — agents make many small calls; speed per call matters more
-  than it does for reasoning (which is latency-tolerant)
-- `Feedback` — tool-call accuracy is directly observable; heavier
-  weighting on historical success is appropriate
-- `Headroom` — tool traces accumulate (system prompt + tool schemas + N
-  turns); but each individual call is small
-
-Whether this belongs as a new profile or as a parameterization of
-existing profiles is a design call that depends on how often agent
-loops blend with chat/reasoning in practice.
+Consumers can override any profile at construction via
+`provider.WithWeightOverrides(map[string]*WeightProfile{...})`.

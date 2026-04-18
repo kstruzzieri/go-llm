@@ -37,7 +37,7 @@ func TestTierToFloat(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestDefaultWeightProfile(t *testing.T) {
-	useCases := []string{"fim", "chat", "embedding", "reasoning", "code-review"}
+	useCases := []string{"fim", "chat", "embedding", "reasoning", "code-review", "agent", "tool-use"}
 
 	for _, uc := range useCases {
 		t.Run(uc, func(t *testing.T) {
@@ -74,6 +74,22 @@ func TestDefaultWeightProfile(t *testing.T) {
 		}
 		if *unknown != *chat {
 			t.Errorf("unknown profile = %+v, want chat profile %+v", unknown, chat)
+		}
+	})
+
+	t.Run("agent and tool-use are aliased", func(t *testing.T) {
+		agent := defaultWeightProfile("agent")
+		toolUse := defaultWeightProfile("tool-use")
+		if *agent != *toolUse {
+			t.Errorf("agent (%+v) and tool-use (%+v) should share a profile", agent, toolUse)
+		}
+		// Agent workloads must weight Speed and Feedback higher than chat.
+		chat := defaultWeightProfile("chat")
+		if agent.Speed <= chat.Speed {
+			t.Errorf("agent Speed (%d) should exceed chat Speed (%d)", agent.Speed, chat.Speed)
+		}
+		if agent.Feedback <= chat.Feedback {
+			t.Errorf("agent Feedback (%d) should exceed chat Feedback (%d)", agent.Feedback, chat.Feedback)
 		}
 	})
 }
