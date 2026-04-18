@@ -32,6 +32,24 @@ after OS overhead).
   (GLM-5.1, MiniMax M2.7) produces a measurable quality delta on real
   workloads.
 
+## Manual Smoke Test
+
+To smoke-test `cmd/llm-bench` without waiting for real captured traces,
+use the checked-in synthetic trace:
+
+```bash
+go run ./cmd/llm-bench \
+  -traces 'cmd/llm-bench/testdata/smoke/*.json' \
+  -models 'ollama/gemma4:31b,ollama/qwen3.6:35b-a3b' \
+  -scorer exact-match \
+  -report /tmp/llm-bench-smoke.md
+```
+
+Success criteria: the command exits `0`, writes `/tmp/llm-bench-smoke.md`,
+and the report shows `Errors = 0` with `Mean Quality = 1.00` for each
+model on the `smoke-minimal-001` trace. This only verifies harness
+plumbing and basic model reachability, not real MCP-agent quality.
+
 ## Date stamp
 
 All research was conducted April 16, 2026. Benchmark numbers and release

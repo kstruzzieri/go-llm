@@ -1,0 +1,18 @@
+{
+  "id": "smoke-minimal-001",
+  "source": "repo-smoke-test",
+  "captured_at": "2026-04-18T00:00:00Z",
+  "system": "You are a precise test assistant. Follow the user's output instructions exactly.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Reply with exactly: smoke-ok"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "Assistant returns the literal token smoke-ok.",
+    "final_answer_substring": "smoke-ok"
+  }
+}
