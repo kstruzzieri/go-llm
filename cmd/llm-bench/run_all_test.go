@@ -19,7 +19,9 @@ func newFakeChatServer(t *testing.T, reply string) *httptest.Server {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"model":"m","done":true,"message":{"role":"assistant","content":"` + reply + `"}}`))
+		if _, err := w.Write([]byte(`{"model":"m","done":true,"message":{"role":"assistant","content":"` + reply + `"}}`)); err != nil {
+			t.Errorf("fake server write: %v", err)
+		}
 	}))
 	t.Cleanup(srv.Close)
 	return srv
