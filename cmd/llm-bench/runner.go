@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -19,52 +20,52 @@ type Runner struct {
 
 // Result is a single (model, trace) evaluation.
 type Result struct {
-	Model     string
-	TraceID   string
-	Score     Score
-	Err       error
+	Model      string
+	TraceID    string
+	Score      Score
+	Err        error
 	Transcript []Turn
 }
 
 // RunAll replays every trace against every model. Iterates models in the
 // outer loop so a warm model stays warm across its traces.
-func (r *Runner) RunAll(ctx context.Context, models []string, traces []Trace) ([]Result, error) {
-	results := make([]Result, 0, len(models)*len(traces))
-	for _, model := range models {
-		client, err := newOllamaClient(model, r.OllamaURL)
+func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
+	results := make([]Result, 0, len(targets)*len(traces))
+	for _, target := range targets {
+		client, err := newOllamaClient(target.Model, r.OllamaURL)
 		if err != nil {
-			return nil, fmt.Errorf("client for %q: %w", model, err)
+			return nil, fmt.Errorf("client for %q: %w", target.Display, err)
 		}
 		for _, trace := range traces {
-			res := r.runOne(ctx, client, model, trace)
+			res := r.runOne(ctx, client, target, trace)
 			results = append(results, res)
 		}
 	}
 	return results, nil
 }
 
-func (r *Runner) runOne(ctx context.Context, client *ollama.Client, model string, trace Trace) Result {
+func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target ModelTarget, trace Trace) Result {
 	runCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 
 	start := time.Now()
-	transcript, err := replay(runCtx, client, model, trace)
+	transcript, err := replay(runCtx, client, target.Model, trace)
 	if err != nil {
-		return Result{Model: model, TraceID: trace.ID, Err: err}
+		return Result{Model: target.Display, TraceID: trace.ID, Err: err}
 	}
 
 	score, err := r.Scorer.Score(runCtx, trace, Result{
-		Model:      model,
+		Model:      target.Display,
 		TraceID:    trace.ID,
 		Transcript: transcript,
 	})
 	if err != nil {
-		return Result{Model: model, TraceID: trace.ID, Err: err, Transcript: transcript}
+		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: transcript}
 	}
 	score.LatencyMs = time.Since(start).Milliseconds()
 
 	return Result{
-		Model:      model,
+		Model:      target.Display,
 		TraceID:    trace.ID,
 		Score:      score,
 		Transcript: transcript,
@@ -92,7 +93,37 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 		return nil, err
 	}
 
-	return []Turn{{Role: "assistant", Content: resp.Message.Content}}, nil
+	turn, err := assistantTurnFromMessage(resp.Message)
+	if err != nil {
+		return nil, err
+	}
+
+	return []Turn{turn}, nil
+}
+
+func assistantTurnFromMessage(msg ollama.ChatMessage) (Turn, error) {
+	role := msg.Role
+	if role == "" {
+		role = "assistant"
+	}
+
+	toolCalls := make([]ToolCall, 0, len(msg.ToolCalls))
+	for _, tc := range msg.ToolCalls {
+		args, err := json.Marshal(tc.Function.Arguments)
+		if err != nil {
+			return Turn{}, fmt.Errorf("marshal tool call arguments for %q: %w", tc.Function.Name, err)
+		}
+		toolCalls = append(toolCalls, ToolCall{
+			Name:      tc.Function.Name,
+			Arguments: json.RawMessage(args),
+		})
+	}
+
+	return Turn{
+		Role:      role,
+		Content:   msg.Content,
+		ToolCalls: toolCalls,
+	}, nil
 }
 
 // newOllamaClient constructs an ollama.Client targeting the configured URL.

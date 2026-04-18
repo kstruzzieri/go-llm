@@ -87,6 +87,7 @@
       "caps": ["completion", "tools"],
       "context_window": 262144,
       "variants": {
+        "latest": { "ram_required": 46.0, "ram_recommended": 56.0, "vram_recommended": 46.0, "quality": "best", "speed": "fast" },
         "80b": { "ram_required": 46.0, "ram_recommended": 56.0, "vram_recommended": 46.0, "quality": "best", "speed": "fast" }
       }
     },

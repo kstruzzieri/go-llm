@@ -265,6 +265,55 @@ func TestModelRegistry_Lookup_LatestVariantCatalogMatch(t *testing.T) {
 	}
 }
 
+func TestModelRegistry_Lookup_Qwen3CoderNextLatestCatalogMatch(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream,
+		models: []ModelInfo{
+			{
+				Name:          "qwen3-coder-next:latest",
+				Family:        "qwen3-coder-next",
+				ParameterSize: "80B",
+				ContextWindow: 262144,
+				Digest:        "coder123",
+				Capabilities:  []string{"completion", "tools"},
+			},
+		},
+	}
+
+	reg := &mrMockProviderRegistry{
+		providers: map[string]Provider{"ollama": prov},
+	}
+
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+
+	profile, err := mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "qwen3-coder-next:latest"})
+	if err != nil {
+		t.Fatalf("Lookup() error: %v", err)
+	}
+
+	if profile.Resources.RAMRequired != 46.0 {
+		t.Errorf("RAMRequired = %f, want 46.0", profile.Resources.RAMRequired)
+	}
+	if profile.Resources.RAMRecommended != 56.0 {
+		t.Errorf("RAMRecommended = %f, want 56.0", profile.Resources.RAMRecommended)
+	}
+	if profile.Quality != TierBest {
+		t.Errorf("Quality = %v, want %v", profile.Quality, TierBest)
+	}
+	if profile.Speed != TierGreat {
+		t.Errorf("Speed = %v, want %v", profile.Speed, TierGreat)
+	}
+	if profile.FIM == nil {
+		t.Fatal("expected FIM config from catalog, got nil")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestModelRegistry_Lookup_UnknownModel
 // ---------------------------------------------------------------------------

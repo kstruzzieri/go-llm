@@ -20,14 +20,13 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 )
 
 func main() {
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required)")
-	modelsArg := flag.String("models", "", "Comma-separated provider/model identifiers (required)")
+	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
@@ -47,9 +46,9 @@ func main() {
 		log.Fatalf("llm-bench: no traces matched %q", *tracesGlob)
 	}
 
-	models := strings.Split(*modelsArg, ",")
-	for i, m := range models {
-		models[i] = strings.TrimSpace(m)
+	targets, err := parseModelTargets(*modelsArg)
+	if err != nil {
+		log.Fatalf("llm-bench: parse models: %v", err)
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -71,12 +70,17 @@ func main() {
 		Scorer:    scorer,
 	}
 
-	results, err := runner.RunAll(ctx, models, traces)
+	results, err := runner.RunAll(ctx, targets, traces)
 	if err != nil {
 		log.Fatalf("llm-bench: run: %v", err)
 	}
 
-	report := formatReport(models, results)
+	modelNames := make([]string, 0, len(targets))
+	for _, target := range targets {
+		modelNames = append(modelNames, target.Display)
+	}
+
+	report := formatReport(modelNames, results)
 
 	if *reportPath == "" {
 		fmt.Print(report)
