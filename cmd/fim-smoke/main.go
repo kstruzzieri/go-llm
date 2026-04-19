@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/completion"
@@ -107,6 +108,9 @@ func buildProvider(ctx context.Context, url, model string) (*completion.Provider
 	if err != nil {
 		return nil, nil, fmt.Errorf("lookup %q: %w", model, err)
 	}
+	if !profile.SupportsFIM() {
+		return nil, nil, unsupportedFIMError(url, model, profile)
+	}
 	cfg, err := completion.ProviderConfigFromProfile(profile)
 	if err != nil {
 		return nil, nil, fmt.Errorf("config from profile: %w", err)
@@ -116,6 +120,60 @@ func buildProvider(ctx context.Context, url, model string) (*completion.Provider
 		return nil, nil, fmt.Errorf("new provider: %w", err)
 	}
 	return prov, cfg.FIM.StopTokens, nil
+}
+
+func unsupportedFIMError(url, model string, profile *provider.ModelProfile) error {
+	reason := "unknown reason"
+	templatePreview := "<empty>"
+	caps := "<none reported>"
+
+	if profile != nil {
+		if got := profile.FIMUnsupportedReason(); got != "" {
+			reason = got
+		}
+		templatePreview = summarizeTemplate(profile.Template)
+		if got := profileCapabilities(profile); len(got) > 0 {
+			caps = strings.Join(got, ",")
+		}
+	}
+
+	return fmt.Errorf(
+		"model %q does not support native FIM (%s)\n"+
+			"  detected template: %s\n"+
+			"  detected capabilities: %s\n"+
+			"  preflight commands:\n"+
+			"    ollama show %s --modelfile\n"+
+			"    curl -s %s/api/show -d '{\"model\":\"%s\"}'",
+		model,
+		reason,
+		templatePreview,
+		caps,
+		model,
+		strings.TrimRight(url, "/"),
+		model,
+	)
+}
+
+func summarizeTemplate(tmpl string) string {
+	tmpl = strings.TrimSpace(tmpl)
+	if tmpl == "" {
+		return "<empty>"
+	}
+	parts := strings.Fields(tmpl)
+	flat := strings.Join(parts, " ")
+	const maxLen = 80
+	if len(flat) <= maxLen {
+		return flat
+	}
+	return flat[:maxLen-3] + "..."
+}
+
+func profileCapabilities(p *provider.ModelProfile) []string {
+	if p == nil || p.Caps == 0 {
+		return nil
+	}
+	parts := strings.Split(p.Caps.String(), "|")
+	return parts
 }
 
 // runFixture runs a single fixture through the provider. When stream is
