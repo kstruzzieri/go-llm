@@ -234,7 +234,7 @@ func TestCatalogLookupMiss(t *testing.T) {
 	}
 }
 
-func TestCatalogFIMTokens(t *testing.T) {
+func TestCatalogFIMPolicy(t *testing.T) {
 	cat, err := loadCatalog()
 	if err != nil {
 		t.Fatalf("loadCatalog() error: %v", err)
@@ -244,17 +244,17 @@ func TestCatalogFIMTokens(t *testing.T) {
 
 	tests := []struct {
 		family     string
-		wantPrefix string
-		wantSuffix string
-		wantMiddle string
+		wantStops  []string
+		wantBudget int
 	}{
-		{"qwen3", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"},
-		{"qwen2.5", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"},
-		{"codellama", "<PRE>", " <SUF>", " <MID>"},
-		{"starcoder2", "<fim_prefix>", "<fim_suffix>", "<fim_middle>"},
-		{"starcoder", "<fim_prefix>", "<fim_suffix>", "<fim_middle>"},
-		{"mistral", "[PREFIX]", "[SUFFIX]", "[MIDDLE]"},
-		{"deepseek-coder-v2", "<|fim_prefix|>", "<|fim_suffix|>", "<|fim_middle|>"},
+		{"qwen3", []string{"<|endoftext|>", "<|fim_pad|>"}, 75},
+		{"qwen2.5", []string{"<|endoftext|>", "<|fim_pad|>"}, 75},
+		{"qwen3.5", []string{"<|endoftext|>", "<|fim_pad|>"}, 75},
+		{"deepseek-coder-v2", []string{"<|EOT|>", "<|end_of_sentence|>"}, 70},
+		{"codellama", []string{"<EOT>", "</s>"}, 65},
+		{"starcoder", []string{"<|endoftext|>"}, 70},
+		{"starcoder2", []string{"<|endoftext|>"}, 70},
+		{"mistral", []string{"[/MIDDLE]", "</s>"}, 70},
 	}
 	for _, tt := range tests {
 		t.Run(tt.family, func(t *testing.T) {
@@ -265,14 +265,16 @@ func TestCatalogFIMTokens(t *testing.T) {
 			if profile.FIM == nil {
 				t.Fatalf("FIM config is nil for %q", tt.family)
 			}
-			if profile.FIM.Prefix != tt.wantPrefix {
-				t.Errorf("FIM.Prefix = %q, want %q", profile.FIM.Prefix, tt.wantPrefix)
+			if len(profile.FIM.StopTokens) != len(tt.wantStops) {
+				t.Fatalf("StopTokens len = %d, want %d", len(profile.FIM.StopTokens), len(tt.wantStops))
 			}
-			if profile.FIM.Suffix != tt.wantSuffix {
-				t.Errorf("FIM.Suffix = %q, want %q", profile.FIM.Suffix, tt.wantSuffix)
+			for i, want := range tt.wantStops {
+				if profile.FIM.StopTokens[i] != want {
+					t.Errorf("StopTokens[%d] = %q, want %q", i, profile.FIM.StopTokens[i], want)
+				}
 			}
-			if profile.FIM.Middle != tt.wantMiddle {
-				t.Errorf("FIM.Middle = %q, want %q", profile.FIM.Middle, tt.wantMiddle)
+			if profile.FIM.PrefixBudgetPct != tt.wantBudget {
+				t.Errorf("PrefixBudgetPct = %d, want %d", profile.FIM.PrefixBudgetPct, tt.wantBudget)
 			}
 		})
 	}
@@ -339,8 +341,8 @@ func TestCatalogToModelProfile(t *testing.T) {
 		if p.FIM == nil {
 			t.Fatal("FIM is nil")
 		}
-		if p.FIM.Prefix != "<|fim_prefix|>" {
-			t.Errorf("FIM.Prefix = %q, want %q", p.FIM.Prefix, "<|fim_prefix|>")
+		if len(p.FIM.StopTokens) != 2 {
+			t.Errorf("StopTokens len = %d, want 2", len(p.FIM.StopTokens))
 		}
 		if p.Resources.RAMRequired != 5.0 {
 			t.Errorf("RAMRequired = %f, want 5.0", p.Resources.RAMRequired)
@@ -534,6 +536,11 @@ func TestParseCaps(t *testing.T) {
 			name:  "embedding gives embed",
 			input: []string{"embedding"},
 			want:  CapEmbed,
+		},
+		{
+			name:  "insert gives generate+stream+insert",
+			input: []string{"insert"},
+			want:  CapGenerate | CapInsert | CapStream,
 		},
 		{
 			name:  "completion+tools combined",

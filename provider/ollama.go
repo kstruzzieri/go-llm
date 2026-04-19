@@ -96,7 +96,7 @@ func (p *OllamaProvider) Name() string {
 
 // Capabilities returns the bitmask of features the Ollama backend supports.
 func (p *OllamaProvider) Capabilities() Capability {
-	return CapChat | CapGenerate | CapEmbed | CapStream | CapToolCall | CapThinking
+	return CapChat | CapGenerate | CapInsert | CapEmbed | CapStream | CapToolCall | CapThinking
 }
 
 // Health checks whether the Ollama server is reachable and responsive.
@@ -126,16 +126,34 @@ func (p *OllamaProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 			}
 			continue
 		}
-		models[i] = ModelInfo{
-			Name:          detail.Name,
-			Family:        detail.Family,
-			ParameterSize: detail.ParamSize,
-			QuantLevel:    detail.QuantLevel,
-			Capabilities:  detail.Capabilities,
-			Digest:        detail.Digest,
-		}
+		models[i] = ollamaModelInfo(detail)
 	}
 	return models, nil
+}
+
+// ModelInfo returns metadata for a single named model using /api/show.
+func (p *OllamaProvider) ModelInfo(ctx context.Context, name string) (*ModelInfo, error) {
+	detail, err := p.client.ShowModel(ctx, name)
+	if err != nil {
+		return nil, fmt.Errorf("provider: ollama: show model %q: %w", name, err)
+	}
+	info := ollamaModelInfo(detail)
+	return &info, nil
+}
+
+func ollamaModelInfo(detail *ollama.ModelInfo) ModelInfo {
+	if detail == nil {
+		return ModelInfo{}
+	}
+	return ModelInfo{
+		Name:          detail.Name,
+		Family:        detail.Family,
+		ParameterSize: detail.ParamSize,
+		QuantLevel:    detail.QuantLevel,
+		Template:      detail.Template,
+		Capabilities:  detail.Capabilities,
+		Digest:        detail.Digest,
+	}
 }
 
 // ---------------------------------------------------------------------------

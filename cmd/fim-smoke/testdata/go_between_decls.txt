@@ -1,0 +1,16 @@
+package main
+
+func first() int {
+	return 1
+}
+
+<CURSOR>
+
+func last() int {
+	return 3
+}
+
+func main() {
+	_ = first()
+	_ = last()
+}

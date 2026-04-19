@@ -1,10 +1,14 @@
 package mcp
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 func TestResolveModelExplicit(t *testing.T) {
@@ -12,7 +16,7 @@ func TestResolveModelExplicit(t *testing.T) {
 		resolved: make(map[string]config.ResolvedModel),
 	}
 
-	got, err := s.resolveModel("explicit-model", "chat")
+	got, err := s.resolveModel(context.Background(), "explicit-model", "chat")
 	if err != nil {
 		t.Fatalf("resolveModel() error = %v", err)
 	}
@@ -29,7 +33,7 @@ func TestResolveModelFromCache(t *testing.T) {
 		},
 	}
 
-	got, err := s.resolveModel("", "chat")
+	got, err := s.resolveModel(context.Background(), "", "chat")
 	if err != nil {
 		t.Fatalf("resolveModel() error = %v", err)
 	}
@@ -44,7 +48,7 @@ func TestResolveModelNoConfigNoExplicit(t *testing.T) {
 		resolved: make(map[string]config.ResolvedModel),
 	}
 
-	_, err := s.resolveModel("", "chat")
+	_, err := s.resolveModel(context.Background(), "", "chat")
 	if err == nil {
 		t.Fatal("resolveModel() error = nil, want error")
 	}
@@ -59,7 +63,7 @@ func TestResolveModelDefaultsUnavailable(t *testing.T) {
 		resolved: make(map[string]config.ResolvedModel),
 	}
 
-	_, err := s.resolveModel("", "chat")
+	_, err := s.resolveModel(context.Background(), "", "chat")
 	if err == nil {
 		t.Fatal("resolveModel() error = nil, want error")
 	}
@@ -76,7 +80,7 @@ func TestResolveModelUseCaseNotConfigured(t *testing.T) {
 		},
 	}
 
-	_, err := s.resolveModel("", "embedding")
+	_, err := s.resolveModel(context.Background(), "", "embedding")
 	if err == nil {
 		t.Fatal("resolveModel() error = nil, want error")
 	}
@@ -93,11 +97,45 @@ func TestResolveModelDidNotResolve(t *testing.T) {
 		},
 	}
 
-	_, err := s.resolveModel("", "chat")
+	_, err := s.resolveModel(context.Background(), "", "chat")
 	if err == nil {
 		t.Fatal("resolveModel() error = nil, want error")
 	}
 	if !strings.Contains(err.Error(), "did not resolve") {
 		t.Errorf("error = %q, want to contain %q", err.Error(), "did not resolve")
+	}
+}
+
+func TestResolveModelRefreshesDefaultsAfterOutage(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3-coder-next:latest"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	s := &Server{
+		client: ollama.NewClient(ollama.WithBaseURL(srv.URL)),
+		cfg: &config.Config{
+			Defaults: map[string]string{"completion": "coding"},
+			Models: map[string]config.ModelConfig{
+				"coding": {Name: "qwen3-coder-next:latest", Provider: "ollama"},
+			},
+		},
+		resolved: make(map[string]config.ResolvedModel),
+	}
+
+	got, err := s.resolveModel(context.Background(), "", "completion")
+	if err != nil {
+		t.Fatalf("resolveModel() error = %v", err)
+	}
+	if got != "qwen3-coder-next:latest" {
+		t.Fatalf("resolveModel() = %q, want %q", got, "qwen3-coder-next:latest")
+	}
+	if len(s.resolved) == 0 {
+		t.Fatal("resolved cache was not refreshed")
 	}
 }

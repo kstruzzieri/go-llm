@@ -44,14 +44,18 @@ func (s *Server) handleCompletion(ctx context.Context, req *gomcp.CallToolReques
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "completion")
+	model, err := s.resolveModel(ctx, args.Model, "completion")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
 
-	// Provider creation is cheap (struct with client ref + model name).
-	// Always create per-request to match the resolved/explicit model.
-	provider := completion.NewProvider(s.client, model)
+	// Build a provider for this specific model via the MCP server's registry
+	// so ProviderConfig (FIM tokens, context window, quality tier) reflects
+	// the resolved ModelProfile rather than hardcoded defaults.
+	provider, err := s.newCompletionProvider(ctx, model)
+	if err != nil {
+		return toolError("config", "%v", err), nil
+	}
 
 	resp, err := provider.Complete(ctx, completion.FIMRequest{
 		Prefix:    args.Prefix,

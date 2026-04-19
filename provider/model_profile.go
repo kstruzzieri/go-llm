@@ -1,6 +1,9 @@
 package provider
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // ---------------------------------------------------------------------------
 // Tier
@@ -119,7 +122,7 @@ type ModelProfile struct {
 	Provider          string          // provider name
 	Resources         ResourceProfile // resource requirements
 	Caps              Capability      // authoritative per-model capabilities after merge
-	FIM               *FIMConfig      // nil if model doesn't support FIM
+	FIM               *FIMConfig      // optional local FIM policy (stops/budget), not capability truth
 	ThinkMode         ThinkMode       // reasoning behavior
 	ThinkTags         *ThinkTags      // nil uses default <think></think>
 	Quality           Tier            // basic, good, great, best
@@ -127,6 +130,7 @@ type ModelProfile struct {
 	ContextWindow     int             // max context tokens
 	QualityCtxCeiling int             // 0 = same as ContextWindow; quality degrades above this
 	Dimensions        int             // embedding dimensions, 0 if not embedding model
+	Template          string          // live provider template when available
 	Source            ProfileSource   // static, fingerprint, runtime, merged
 	Digest            string          // model digest for staleness detection
 	UpdatedAt         time.Time       // when this profile was last computed
@@ -151,6 +155,41 @@ func (p *ModelProfile) EffectiveContextWindow(useCase string) int {
 		return p.QualityCtxCeiling
 	}
 	return p.ContextWindow
+}
+
+// SupportsFIM reports whether the model supports native prompt+suffix insert.
+// When a live template is available, it is authoritative; older runtimes may
+// omit the template, in which case the insert capability bit is used.
+func (p *ModelProfile) SupportsFIM() bool {
+	if p == nil {
+		return false
+	}
+	if p.Template != "" {
+		return templateUsesSuffix(p.Template)
+	}
+	return p.Caps.Has(CapInsert)
+}
+
+// FIMUnsupportedReason returns a human-readable explanation when SupportsFIM
+// is false. An empty string means the profile appears FIM-ready.
+func (p *ModelProfile) FIMUnsupportedReason() string {
+	if p == nil {
+		return "missing model profile"
+	}
+	if p.Template != "" {
+		if !templateUsesSuffix(p.Template) {
+			return "template does not reference .Suffix"
+		}
+		return ""
+	}
+	if !p.Caps.Has(CapInsert) {
+		return "model does not advertise insert capability"
+	}
+	return ""
+}
+
+func templateUsesSuffix(tmpl string) bool {
+	return strings.Contains(tmpl, ".Suffix")
 }
 
 // ---------------------------------------------------------------------------

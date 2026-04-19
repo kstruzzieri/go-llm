@@ -17,6 +17,7 @@ import (
 	"github.com/kstruzzieri/go-llm/completion"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -37,14 +38,18 @@ type Server struct {
 	tlsCert           string
 	tlsKey            string
 
-	client    *ollama.Client
-	cfg       *config.Config
-	store     rag.VectorStore
-	indexer   *rag.Indexer
-	retriever *rag.Retriever
-	completer *completion.Provider
+	client        *ollama.Client
+	cfg           *config.Config
+	store         rag.VectorStore
+	indexer       *rag.Indexer
+	retriever     *rag.Retriever
+	completer     *completion.Provider
+	modelRegistry *provider.ModelRegistry
+	ollamaProv    provider.Provider
 
 	ollamaAvailable bool
+	closed          bool
+	stateVersion    uint64
 
 	mu       sync.RWMutex
 	resolved map[string]config.ResolvedModel
@@ -158,6 +163,10 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Step 3: Check Ollama availability (non-fatal, degraded mode on failure).
 	s.ollamaAvailable = s.client.IsAvailable(ctx)
 
+	// Step 3b: Build the provider-level model registry even in degraded mode
+	// so explicit completion requests can recover once Ollama comes back.
+	_ = s.ensureModelRegistry()
+
 	// Step 4: Open RAG store if not disabled (before model resolution
 	// so that rebuildDerivedClients can wire up indexer/retriever).
 	if !s.ragDisabled && s.ragPath != "" {
@@ -178,7 +187,7 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		_ = s.refreshResolved(ctx) // non-fatal: partial results are kept
 	} else {
 		// No resolution possible — still build derived clients with defaults.
-		s.rebuildDerivedClients()
+		s.rebuildDerivedClients(ctx)
 	}
 
 	// Step 6: Create MCP SDK server.
@@ -201,16 +210,29 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	return s, nil
 }
 
-// rebuildDerivedClients rebuilds the completer, indexer, and retriever
-// from the currently resolved models.
-// Caller must hold s.mu (write lock) OR call this during init (single-goroutine).
-func (s *Server) rebuildDerivedClients() {
-	resolved := s.resolved
+// rebuildDerivedClients rebuilds the completer, indexer, and retriever from
+// the currently resolved models. Network-backed completion construction runs
+// outside the server lock so canceled callers do not block other handlers.
+func (s *Server) rebuildDerivedClients(ctx context.Context) {
+	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return
+	}
+	resolved := make(map[string]config.ResolvedModel, len(s.resolved))
+	for k, v := range s.resolved {
+		resolved[k] = v
+	}
+	store := s.store
+	stateVersion := s.stateVersion
+	s.mu.RUnlock()
 
 	// Rebuild completer from resolved "completion" model.
-	s.completer = nil
+	var completer *completion.Provider
 	if rm, ok := resolved["completion"]; ok && rm.Name != "" {
-		s.completer = completion.NewProvider(s.client, rm.Name)
+		if c, err := s.newCompletionProvider(ctx, rm.Name); err == nil {
+			completer = c
+		}
 	}
 
 	// Rebuild indexer and retriever only when the embedding default resolved.
@@ -221,12 +243,56 @@ func (s *Server) rebuildDerivedClients() {
 		embeddingModel = rm.Name
 	}
 
-	s.indexer = nil
-	s.retriever = nil
-	if s.store != nil && embeddingModel != "" {
-		s.indexer = rag.NewIndexer(s.client, s.store, rag.WithEmbeddingModel(embeddingModel))
-		s.retriever = rag.NewRetriever(s.client, s.store, rag.WithRetrieverModel(embeddingModel))
+	var indexer *rag.Indexer
+	var retriever *rag.Retriever
+	if store != nil && embeddingModel != "" {
+		indexer = rag.NewIndexer(s.client, store, rag.WithEmbeddingModel(embeddingModel))
+		retriever = rag.NewRetriever(s.client, store, rag.WithRetrieverModel(embeddingModel))
 	}
+
+	s.mu.Lock()
+	if s.closed || s.stateVersion != stateVersion {
+		s.mu.Unlock()
+		return
+	}
+	s.completer = completer
+	s.indexer = indexer
+	s.retriever = retriever
+	s.mu.Unlock()
+}
+
+func (s *Server) ensureModelRegistry() error {
+	s.mu.RLock()
+	if s.modelRegistry != nil && s.ollamaProv != nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	client := s.client
+	s.mu.RUnlock()
+
+	if client == nil {
+		return fmt.Errorf("mcp: model registry unavailable")
+	}
+
+	ollamaProv := provider.NewOllamaProvider(client)
+	pReg := provider.NewRegistry()
+	if err := pReg.Register(ollamaProv); err != nil {
+		return fmt.Errorf("mcp: model registry unavailable: %w", err)
+	}
+	mr, err := provider.NewModelRegistry(pReg, nil)
+	if err != nil {
+		return fmt.Errorf("mcp: model registry unavailable: %w", err)
+	}
+
+	s.mu.Lock()
+	if s.ollamaProv == nil {
+		s.ollamaProv = ollamaProv
+	}
+	if s.modelRegistry == nil {
+		s.modelRegistry = mr
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 // Completer returns the current FIM completion provider (may be nil).
@@ -235,6 +301,35 @@ func (s *Server) Completer() *completion.Provider {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.completer
+}
+
+// newCompletionProvider builds a completion.Provider for the given model by
+// looking up its merged ModelProfile via the model registry and deriving a
+// ProviderConfig. Returns an error when the registry is unavailable, the
+// lookup fails, or the model does not support native FIM at runtime.
+func (s *Server) newCompletionProvider(ctx context.Context, model string) (*completion.Provider, error) {
+	if err := s.ensureModelRegistry(); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	modelRegistry := s.modelRegistry
+	ollamaProv := s.ollamaProv
+	s.mu.RUnlock()
+	if modelRegistry == nil || ollamaProv == nil {
+		return nil, fmt.Errorf("mcp: model registry unavailable")
+	}
+
+	key := provider.ModelKey{Provider: ollamaProv.Name(), Model: model}
+	profile, err := modelRegistry.Lookup(ctx, key)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: lookup profile %q: %w", model, err)
+	}
+	cfg, err := completion.ProviderConfigFromProfile(profile)
+	if err != nil {
+		return nil, err
+	}
+	return completion.NewProvider(s.client, model, cfg)
 }
 
 // Indexer returns the current RAG indexer (nil if RAG disabled).
@@ -277,6 +372,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Safe to call multiple times; serialized with handler reads via s.mu.
 func (s *Server) Close() error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.stateVersion++
 	store := s.store
 	s.store = nil
 	s.indexer = nil
@@ -289,4 +390,3 @@ func (s *Server) Close() error {
 	}
 	return nil
 }
-

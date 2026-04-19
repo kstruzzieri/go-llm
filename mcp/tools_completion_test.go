@@ -15,9 +15,15 @@ func TestCompletionToolBasic(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		case "/api/generate":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"model":"m","response":"fmt.Println(x)","done":true}`))
+			_, _ = w.Write([]byte(`{"model":"qwen3:8b","response":"fmt.Println(x)","done":true}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -29,7 +35,7 @@ func TestCompletionToolBasic(t *testing.T) {
 	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "complete_code",
 		Arguments: map[string]any{
-			"model":  "m",
+			"model":  "qwen3:8b",
 			"prefix": "func main() {\n\tx := 42\n\t",
 			"suffix": "\n}",
 		},
@@ -52,6 +58,12 @@ func TestCompletionToolWithOptions(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		case "/api/generate":
 			var body struct {
 				Options struct {
@@ -62,7 +74,7 @@ func TestCompletionToolWithOptions(t *testing.T) {
 				receivedMaxTokens = body.Options.NumPredict
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"model":"m","response":"code","done":true}`))
+			_, _ = w.Write([]byte(`{"model":"qwen3:8b","response":"code","done":true}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -74,7 +86,7 @@ func TestCompletionToolWithOptions(t *testing.T) {
 	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
 		Name: "complete_code",
 		Arguments: map[string]any{
-			"model":      "m",
+			"model":      "qwen3:8b",
 			"prefix":     "func ",
 			"suffix":     "() {}",
 			"max_tokens": 64,
@@ -125,6 +137,12 @@ func TestCompletionToolOllamaError(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"nonexistent"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		case "/api/generate":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"model not found"}`))
@@ -152,5 +170,46 @@ func TestCompletionToolOllamaError(t *testing.T) {
 	}
 	if text := extractText(result); !strings.Contains(text, "ollama:") {
 		t.Errorf("error = %q, want to contain %q", text, "ollama:")
+	}
+}
+
+func TestCompletionToolExplicitModelSurvivesTagListFailure(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"error":"tags unavailable"}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
+		case "/api/generate":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"model":"qwen3:8b","response":"fmt.Println(x)","done":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+
+	env := newTestEnv(t, mock)
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "complete_code",
+		Arguments: map[string]any{
+			"model":  "qwen3:8b",
+			"prefix": "func main() {\n\tx := 42\n\t",
+			"suffix": "\n}",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool() isError = true, content = %v", extractText(result))
+	}
+	if got := extractText(result); got != "fmt.Println(x)" {
+		t.Errorf("got %q, want %q", got, "fmt.Println(x)")
 	}
 }

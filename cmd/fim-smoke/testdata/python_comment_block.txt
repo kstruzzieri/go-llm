@@ -1,0 +1,9 @@
+def compute(x):
+    """Compute something non-trivial."""
+    # This helper doubles the input and then
+    # <CURSOR>
+    return x * 2
+
+
+def main():
+    print(compute(21))

@@ -443,6 +443,7 @@ func (r *Router) Generate(ctx context.Context, req GenerateRequest) (*GenerateRe
 	}
 	if req.Suffix != "" {
 		rr.UseCase = "fim"
+		rr.RequiredCaps = CapGenerate | CapInsert
 		rr.Priority = PriorityHigh
 	}
 
@@ -467,6 +468,7 @@ func (r *Router) GenerateStream(ctx context.Context, req GenerateRequest, fn fun
 	}
 	if req.Suffix != "" {
 		rr.UseCase = "fim"
+		rr.RequiredCaps = CapGenerate | CapInsert | CapStream
 		rr.Priority = PriorityHigh
 	}
 

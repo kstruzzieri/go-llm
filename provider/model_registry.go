@@ -43,6 +43,14 @@ type ModelRegistry struct {
 	providers ProviderResolver
 }
 
+// directModelInfoProvider is an optional provider capability that returns
+// metadata for a specific model without relying on a full model-list scan.
+// It is used as a resilience fallback when list queries fail or when the
+// requested model name does not appear verbatim in the provider's tags list.
+type directModelInfoProvider interface {
+	ModelInfo(ctx context.Context, name string) (*ModelInfo, error)
+}
+
 // NewModelRegistry creates a ModelRegistry backed by the given provider
 // resolver and fingerprint store. The static catalog is loaded from the
 // embedded catalog.json at construction time. The fingerprint store may
@@ -195,9 +203,9 @@ func (r *ModelRegistry) Recommend(ctx context.Context, opts RecommendOpts) ([]*M
 	return candidates, nil
 }
 
-// FIMConfigFor returns the FIM configuration for a given model, or nil
-// if the model does not support Fill-in-the-Middle. This is a convenience
-// wrapper around Lookup.
+// FIMConfigFor returns the local FIM policy for a given model, or nil if no
+// stop-token or budget overrides are known. Capability detection is resolved
+// separately from runtime model metadata.
 func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMConfig, error) {
 	profile, err := r.Lookup(ctx, key)
 	if err != nil {
@@ -208,7 +216,7 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 
 // buildProfile performs the three-layer merge for a model key and caches
 // the result. The merge layers in order of ascending precedence are:
-//  1. Static catalog: FIM tokens, think_mode, quality/speed tiers, RAM estimates
+//  1. Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
 //  2. Fingerprint: capability probing data, benchmarked resource observations
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
@@ -260,9 +268,15 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 	if err != nil {
 		return nil, err
 	}
+	direct, _ := p.(directModelInfoProvider)
 
 	models, err := p.Models(ctx)
 	if err != nil {
+		if direct != nil {
+			if detail, detailErr := direct.ModelInfo(ctx, key.Model); detailErr == nil {
+				return detail, nil
+			}
+		}
 		return nil, fmt.Errorf("query models from %q: %w", key.Provider, err)
 	}
 
@@ -271,13 +285,18 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 			return &models[i], nil
 		}
 	}
+	if direct != nil {
+		if detail, err := direct.ModelInfo(ctx, key.Model); err == nil {
+			return detail, nil
+		}
+	}
 
 	return nil, fmt.Errorf("model %q not found on %q", key.Model, key.Provider)
 }
 
 // merge combines runtime, static, and fingerprint data into a single
 // ModelProfile. Precedence (lowest to highest):
-//   - Static catalog: FIM tokens, think_mode, quality/speed tiers, RAM estimates
+//   - Static catalog: FIM policy, think_mode, quality/speed tiers, RAM estimates
 //   - Fingerprint: capability probing data, benchmarked resource observations
 //   - Runtime: context_window, dimensions, parameter_size, quant_level (freshest)
 func (r *ModelRegistry) merge(
@@ -344,11 +363,21 @@ func (r *ModelRegistry) merge(
 		if runtime.Digest != "" {
 			profile.Digest = runtime.Digest
 		}
+		if runtime.Template != "" {
+			profile.Template = runtime.Template
+		}
 
 		// Merge runtime capabilities.
 		rtCaps := parseCaps(runtime.Capabilities)
 		if rtCaps != 0 {
 			profile.Caps |= rtCaps
+		}
+		if runtime.Template != "" {
+			if templateUsesSuffix(runtime.Template) {
+				profile.Caps |= CapInsert
+			} else {
+				profile.Caps &^= CapInsert
+			}
 		}
 	}
 

@@ -70,6 +70,9 @@ func TestNewServerUsesConfiguredOllamaProvider(t *testing.T) {
 		case "/api/tags":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3.5:27b"},{"name":"qwen3.5:35b-a3b"},{"name":"qwen3-coder-next:latest"},{"name":"qwen3-embedding:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -132,6 +135,12 @@ func TestNewServerWithoutAutoDiscoveredConfigContinues(t *testing.T) {
 	if s.cfg != nil {
 		t.Fatalf("cfg = %#v, want nil when no config is found", s.cfg)
 	}
+	if s.modelRegistry == nil {
+		t.Fatal("modelRegistry = nil, want degraded-mode registry for later recovery")
+	}
+	if s.ollamaProv == nil {
+		t.Fatal("ollamaProv = nil, want provider initialized in degraded mode")
+	}
 }
 
 func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
@@ -152,7 +161,7 @@ func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
 		resolved: make(map[string]config.ResolvedModel),
 	}
 
-	s.rebuildDerivedClients()
+	s.rebuildDerivedClients(context.Background())
 	if s.Indexer() != nil {
 		t.Fatal("Indexer() != nil without a resolved embedding model")
 	}
@@ -161,12 +170,78 @@ func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
 	}
 
 	s.resolved["embedding"] = config.ResolvedModel{Name: "qwen3-embedding:8b", Role: "embedding"}
-	s.rebuildDerivedClients()
+	s.rebuildDerivedClients(context.Background())
 	if s.Indexer() == nil {
 		t.Fatal("Indexer() = nil, want non-nil after embedding resolution")
 	}
 	if s.Retriever() == nil {
 		t.Fatal("Retriever() = nil, want non-nil after embedding resolution")
+	}
+}
+
+func TestRebuildDerivedClientsDoesNotRepublishAfterClose(t *testing.T) {
+	tagsStarted := make(chan struct{}, 1)
+	releaseTags := make(chan struct{})
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			tagsStarted <- struct{}{}
+			<-releaseTags
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mock.Close()
+
+	s := &Server{
+		client: ollama.NewClient(ollama.WithBaseURL(mock.URL)),
+		cfg: &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"ollama": {BaseURL: mock.URL},
+			},
+			Models: map[string]config.ModelConfig{
+				"completion": {Name: "qwen3:8b", Provider: "ollama", Type: "dense"},
+				"embedding":  {Name: "qwen3-embedding:8b", Provider: "ollama", Type: "embedding"},
+			},
+			Defaults: map[string]string{
+				"completion": "completion",
+				"embedding":  "embedding",
+			},
+		},
+		store: stubVectorStore{},
+		resolved: map[string]config.ResolvedModel{
+			"completion": {Name: "qwen3:8b", Role: "completion"},
+			"embedding":  {Name: "qwen3-embedding:8b", Role: "embedding"},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.rebuildDerivedClients(context.Background())
+		close(done)
+	}()
+
+	<-tagsStarted
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	close(releaseTags)
+	<-done
+
+	if s.Completer() != nil {
+		t.Fatal("Completer() != nil after Close won the race")
+	}
+	if s.Indexer() != nil {
+		t.Fatal("Indexer() != nil after Close won the race")
+	}
+	if s.Retriever() != nil {
+		t.Fatal("Retriever() != nil after Close won the race")
 	}
 }
 

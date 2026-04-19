@@ -57,7 +57,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		return toolError("validation", "messages must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "chat")
+	model, err := s.resolveModel(ctx, args.Model, "chat")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
