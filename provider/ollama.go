@@ -96,7 +96,7 @@ func (p *OllamaProvider) Name() string {
 
 // Capabilities returns the bitmask of features the Ollama backend supports.
 func (p *OllamaProvider) Capabilities() Capability {
-	return CapChat | CapGenerate | CapEmbed | CapStream | CapToolCall | CapThinking
+	return CapChat | CapGenerate | CapInsert | CapEmbed | CapStream | CapToolCall | CapThinking
 }
 
 // Health checks whether the Ollama server is reachable and responsive.
@@ -131,6 +131,7 @@ func (p *OllamaProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 			Family:        detail.Family,
 			ParameterSize: detail.ParamSize,
 			QuantLevel:    detail.QuantLevel,
+			Template:      detail.Template,
 			Capabilities:  detail.Capabilities,
 			Digest:        detail.Digest,
 		}

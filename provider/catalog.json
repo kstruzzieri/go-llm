@@ -2,9 +2,6 @@
   "families": {
     "qwen2.5": {
       "fim": {
-        "prefix": "<|fim_prefix|>",
-        "suffix": "<|fim_suffix|>",
-        "middle": "<|fim_middle|>",
         "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
@@ -23,9 +20,6 @@
     },
     "qwen3": {
       "fim": {
-        "prefix": "<|fim_prefix|>",
-        "suffix": "<|fim_suffix|>",
-        "middle": "<|fim_middle|>",
         "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
@@ -46,9 +40,6 @@
     },
     "qwen3.5": {
       "fim": {
-        "prefix": "<|fim_prefix|>",
-        "suffix": "<|fim_suffix|>",
-        "middle": "<|fim_middle|>",
         "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
@@ -65,9 +56,6 @@
     },
     "qwen3.6": {
       "fim": {
-        "prefix": "<|fim_prefix|>",
-        "suffix": "<|fim_suffix|>",
-        "middle": "<|fim_middle|>",
         "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
@@ -81,9 +69,6 @@
     },
     "qwen3-coder-next": {
       "fim": {
-        "prefix": "<|fim_prefix|>",
-        "suffix": "<|fim_suffix|>",
-        "middle": "<|fim_middle|>",
         "stop_tokens": ["<|endoftext|>", "<|fim_pad|>"],
         "prefix_budget_pct": 75
       },
@@ -126,9 +111,6 @@
     },
     "deepseek-coder-v2": {
       "fim": {
-        "prefix": "<|fim_prefix|>",
-        "suffix": "<|fim_suffix|>",
-        "middle": "<|fim_middle|>",
         "stop_tokens": ["<|EOT|>", "<|end_of_sentence|>"],
         "prefix_budget_pct": 70
       },
@@ -141,9 +123,6 @@
     },
     "codellama": {
       "fim": {
-        "prefix": "<PRE>",
-        "suffix": " <SUF>",
-        "middle": " <MID>",
         "stop_tokens": ["<EOT>", "</s>"],
         "prefix_budget_pct": 65
       },
@@ -159,9 +138,6 @@
     },
     "starcoder": {
       "fim": {
-        "prefix": "<fim_prefix>",
-        "suffix": "<fim_suffix>",
-        "middle": "<fim_middle>",
         "stop_tokens": ["<|endoftext|>"],
         "prefix_budget_pct": 70
       },
@@ -177,9 +153,6 @@
     },
     "starcoder2": {
       "fim": {
-        "prefix": "<fim_prefix>",
-        "suffix": "<fim_suffix>",
-        "middle": "<fim_middle>",
         "stop_tokens": ["<|endoftext|>"],
         "prefix_budget_pct": 70
       },
@@ -276,9 +249,6 @@
     },
     "mistral": {
       "fim": {
-        "prefix": "[PREFIX]",
-        "suffix": "[SUFFIX]",
-        "middle": "[MIDDLE]",
         "stop_tokens": ["[/MIDDLE]", "</s>"],
         "prefix_budget_pct": 70
       },

@@ -38,6 +38,7 @@ func TestOllamaProvider_Capabilities(t *testing.T) {
 	}{
 		{"CapChat", CapChat},
 		{"CapGenerate", CapGenerate},
+		{"CapInsert", CapInsert},
 		{"CapEmbed", CapEmbed},
 		{"CapStream", CapStream},
 		{"CapToolCall", CapToolCall},

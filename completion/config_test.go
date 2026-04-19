@@ -16,17 +16,20 @@ func TestProviderConfigFromProfile(t *testing.T) {
 		wantStops int
 	}{
 		{
+			name:    "nil profile rejected",
+			profile: nil,
+			wantErr: true,
+		},
+		{
 			name: "FIM-enabled model",
 			profile: &provider.ModelProfile{
 				FIM: &provider.FIMConfig{
-					Prefix:          "<|fim_prefix|>",
-					Suffix:          "<|fim_suffix|>",
-					Middle:          "<|fim_middle|>",
 					StopTokens:      []string{"<|endoftext|>", "<|fim_pad|>"},
 					PrefixBudgetPct: 75,
 				},
 				ContextWindow: 32768,
 				Quality:       provider.TierGreat,
+				Template:      "{{ .Prompt }}{{ .Suffix }}",
 			},
 			wantErr:   false,
 			wantCtx:   32768,
@@ -46,12 +49,11 @@ func TestProviderConfigFromProfile(t *testing.T) {
 			name: "FIM with invalid config rejected",
 			profile: &provider.ModelProfile{
 				FIM: &provider.FIMConfig{
-					Prefix: "",
-					Suffix: "<|fim_suffix|>",
-					Middle: "<|fim_middle|>",
+					StopTokens: []string{""},
 				},
 				ContextWindow: 8192,
 				Quality:       provider.TierGood,
+				Template:      "{{ .Prompt }}{{ .Suffix }}",
 			},
 			wantErr: true,
 		},
@@ -59,13 +61,12 @@ func TestProviderConfigFromProfile(t *testing.T) {
 			name: "uses EffectiveContextWindow for fim",
 			profile: &provider.ModelProfile{
 				FIM: &provider.FIMConfig{
-					Prefix: "<|fim_prefix|>",
-					Suffix: "<|fim_suffix|>",
-					Middle: "<|fim_middle|>",
+					PrefixBudgetPct: 75,
 				},
 				ContextWindow:     131072,
 				QualityCtxCeiling: 32768,
 				Quality:           provider.TierBest,
+				Template:          "{{ .Prompt }}{{ .Suffix }}",
 			},
 			wantErr:  false,
 			wantCtx:  131072, // "fim" is NOT quality-sensitive, returns full ContextWindow
@@ -80,6 +81,9 @@ func TestProviderConfigFromProfile(t *testing.T) {
 				t.Fatalf("ProviderConfigFromProfile() error = %v, wantErr %v", err, tt.wantErr)
 			}
 			if tt.wantErr {
+				if tt.profile == nil && err.Error() != "completion: missing model profile" {
+					t.Fatalf("ProviderConfigFromProfile() error = %q, want missing model profile", err)
+				}
 				return
 			}
 			if cfg.ContextWindow != tt.wantCtx {

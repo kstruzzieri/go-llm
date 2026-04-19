@@ -58,7 +58,7 @@ func TestNewProviderValidation(t *testing.T) {
 
 	t.Run("invalid FIM config rejected", func(t *testing.T) {
 		_, err := NewProvider(client, "test", ProviderConfig{
-			FIM:           &provider.FIMConfig{Prefix: "", Suffix: "s", Middle: "m"},
+			FIM:           &provider.FIMConfig{StopTokens: []string{""}},
 			ContextWindow: 8192,
 		})
 		if err == nil {
@@ -68,7 +68,7 @@ func TestNewProviderValidation(t *testing.T) {
 
 	t.Run("zero context window rejected", func(t *testing.T) {
 		_, err := NewProvider(client, "test", ProviderConfig{
-			FIM:           &provider.FIMConfig{Prefix: "p", Suffix: "s", Middle: "m"},
+			FIM:           &provider.FIMConfig{},
 			ContextWindow: 0,
 		})
 		if err == nil {
@@ -79,7 +79,6 @@ func TestNewProviderValidation(t *testing.T) {
 	t.Run("valid config accepted", func(t *testing.T) {
 		p, err := NewProvider(client, "test", ProviderConfig{
 			FIM: &provider.FIMConfig{
-				Prefix: "<|fim_prefix|>", Suffix: "<|fim_suffix|>", Middle: "<|fim_middle|>",
 				StopTokens: []string{"<|endoftext|>"},
 			},
 			ContextWindow: 32768,
@@ -107,14 +106,11 @@ func TestComplete(t *testing.T) {
 		if req.Stream {
 			t.Error("expected stream=false for non-streaming complete")
 		}
-		if !strings.Contains(req.Prompt, "<|fim_prefix|>") {
-			t.Error("prompt should contain FIM prefix token")
+		if req.Prompt != "func main() {\n\t" {
+			t.Errorf("Prompt = %q, want prefix payload", req.Prompt)
 		}
-		if !strings.Contains(req.Prompt, "<|fim_suffix|>") {
-			t.Error("prompt should contain FIM suffix token")
-		}
-		if !strings.Contains(req.Prompt, "<|fim_middle|>") {
-			t.Error("prompt should contain FIM middle token")
+		if req.Suffix != "\n}" {
+			t.Errorf("Suffix = %q, want suffix payload", req.Suffix)
 		}
 
 		resp := ollama.GenerateResponse{
@@ -284,11 +280,13 @@ func TestCompleteValidation(t *testing.T) {
 
 func TestCompleteFIMPromptFormat(t *testing.T) {
 	var capturedPrompt string
+	var capturedSuffix string
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		capturedPrompt = req.Prompt
+		capturedSuffix = req.Suffix
 
 		resp := ollama.GenerateResponse{
 			Model:    "test-model",
@@ -307,9 +305,11 @@ func TestCompleteFIMPromptFormat(t *testing.T) {
 		Suffix: "AFTER",
 	})
 
-	expected := "<|fim_prefix|>BEFORE<|fim_suffix|>AFTER<|fim_middle|>"
-	if capturedPrompt != expected {
-		t.Errorf("FIM prompt = %q, want %q", capturedPrompt, expected)
+	if capturedPrompt != "BEFORE" {
+		t.Errorf("Prompt = %q, want %q", capturedPrompt, "BEFORE")
+	}
+	if capturedSuffix != "AFTER" {
+		t.Errorf("Suffix = %q, want %q", capturedSuffix, "AFTER")
 	}
 }
 
@@ -361,12 +361,14 @@ func TestCompleteContextTruncation(t *testing.T) {
 	longSuffix := suffixBuilder.String()
 
 	var capturedPrompt string
+	var capturedSuffix string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("failed to decode generate request: %v", err)
 		}
 		capturedPrompt = req.Prompt
+		capturedSuffix = req.Suffix
 
 		resp := ollama.GenerateResponse{Model: "test-model", Response: "x", Done: true}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -386,19 +388,16 @@ func TestCompleteContextTruncation(t *testing.T) {
 	}
 
 	// Input exceeds fimCtxCeiling, so effectiveNumCtx returns min(16384, 2048) = 2048.
-	// Available = 2048 - 128 - 3 = 1917 tokens * 4 chars = 7668 chars.
-	maxExpectedLen := 7668 + len("<|fim_prefix|>") + len("<|fim_suffix|>") + len("<|fim_middle|>")
-	if len(capturedPrompt) > maxExpectedLen {
-		t.Errorf("prompt length %d exceeds budget %d", len(capturedPrompt), maxExpectedLen)
+	// Available = 2048 - 128 - 0 = 1920 tokens, split 75/25 into prefix/suffix.
+	if len(capturedPrompt) > 5760 {
+		t.Errorf("prompt length %d exceeds prefix budget %d", len(capturedPrompt), 5760)
+	}
+	if len(capturedSuffix) > 1920 {
+		t.Errorf("suffix length %d exceeds suffix budget %d", len(capturedSuffix), 1920)
 	}
 
-	suffixTokenIdx := strings.Index(capturedPrompt, "<|fim_suffix|>")
-	middleTokenIdx := strings.Index(capturedPrompt, "<|fim_middle|>")
-	if suffixTokenIdx == -1 || middleTokenIdx == -1 {
-		t.Fatal("prompt missing FIM tokens")
-	}
-	truncatedPrefix := capturedPrompt[len("<|fim_prefix|>"):suffixTokenIdx]
-	truncatedSuffix := capturedPrompt[suffixTokenIdx+len("<|fim_suffix|>") : middleTokenIdx]
+	truncatedPrefix := capturedPrompt
+	truncatedSuffix := capturedSuffix
 
 	if len(truncatedPrefix) >= len(longPrefix) {
 		t.Error("prefix should have been truncated")
@@ -443,11 +442,10 @@ func TestCompleteCustomMaxTokens(t *testing.T) {
 }
 
 func TestCompleteMaxTokensClamped(t *testing.T) {
-	// MaxTokens exceeding (effectiveNumCtx - overhead - 1) must be clamped
-	// so that num_predict never exceeds num_ctx. testProviderConfig uses
-	// ContextWindow=2048, so effectiveNumCtx=2048 and maxAllowed=2044.
-	overhead := testFIM().TokenOverhead()
-	maxAllowed := 2048 - overhead - 1 // 2044
+	// MaxTokens exceeding (effectiveNumCtx - 1) must be clamped so that
+	// num_predict never exceeds num_ctx. testProviderConfig uses
+	// ContextWindow=2048, so effectiveNumCtx=2048 and maxAllowed=2047.
+	maxAllowed := 2048 - 1
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
@@ -483,12 +481,14 @@ func TestCompleteMaxTokensClamped(t *testing.T) {
 
 func TestCompleteAdaptive(t *testing.T) {
 	var capturedPrompt string
+	var capturedSuffix string
 	var capturedOpts *ollama.ModelOptions
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.GenerateRequest
 		_ = json.NewDecoder(r.Body).Decode(&req)
 		capturedPrompt = req.Prompt
+		capturedSuffix = req.Suffix
 		capturedOpts = req.Options
 
 		resp := ollama.GenerateResponse{
@@ -504,9 +504,6 @@ func TestCompleteAdaptive(t *testing.T) {
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	cfg := ProviderConfig{
 		FIM: &provider.FIMConfig{
-			Prefix:          "<|fim_prefix|>",
-			Suffix:          "<|fim_suffix|>",
-			Middle:          "<|fim_middle|>",
 			StopTokens:      []string{"<|endoftext|>"},
 			PrefixBudgetPct: 75,
 		},
@@ -528,11 +525,11 @@ func TestCompleteAdaptive(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 
-	if !strings.Contains(capturedPrompt, "<|fim_prefix|>") {
-		t.Error("prompt missing FIM prefix token")
+	if capturedPrompt != "func main() {\n\t" {
+		t.Errorf("Prompt = %q, want prefix payload", capturedPrompt)
 	}
-	if !strings.Contains(capturedPrompt, "<|fim_suffix|>") {
-		t.Error("prompt missing FIM suffix token")
+	if capturedSuffix != "\n}" {
+		t.Errorf("Suffix = %q, want suffix payload", capturedSuffix)
 	}
 
 	if resp.CursorContext == ContextUnknown && resp.CompletionShape == ShapeUnknown {
@@ -573,9 +570,6 @@ func TestCompleteStopTokenStripping(t *testing.T) {
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
 	cfg := ProviderConfig{
 		FIM: &provider.FIMConfig{
-			Prefix:     "<|fim_prefix|>",
-			Suffix:     "<|fim_suffix|>",
-			Middle:     "<|fim_middle|>",
 			StopTokens: []string{"<|endoftext|>"},
 		},
 		ContextWindow: 8192,

@@ -20,7 +20,7 @@ func TestCompletionToolBasic(t *testing.T) {
 			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
 		case "/api/show":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"}}`))
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		case "/api/generate":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"model":"qwen3:8b","response":"fmt.Println(x)","done":true}`))
@@ -63,7 +63,7 @@ func TestCompletionToolWithOptions(t *testing.T) {
 			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
 		case "/api/show":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"}}`))
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		case "/api/generate":
 			var body struct {
 				Options struct {
@@ -137,6 +137,12 @@ func TestCompletionToolOllamaError(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"nonexistent"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		case "/api/generate":
 			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = w.Write([]byte(`{"error":"model not found"}`))

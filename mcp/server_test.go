@@ -70,6 +70,9 @@ func TestNewServerUsesConfiguredOllamaProvider(t *testing.T) {
 		case "/api/tags":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3.5:27b"},{"name":"qwen3.5:35b-a3b"},{"name":"qwen3-coder-next:latest"},{"name":"qwen3-embedding:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
 		default:
 			http.NotFound(w, r)
 		}

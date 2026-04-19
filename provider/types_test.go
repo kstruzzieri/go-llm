@@ -21,7 +21,7 @@ func TestCapability_Has(t *testing.T) {
 		{name: "zero has zero", cap: 0, flag: 0, want: true},
 		{name: "nonzero has zero", cap: CapChat, flag: 0, want: true},
 		{name: "zero lacks any bit", cap: 0, flag: CapChat, want: false},
-		{name: "all caps has thinking", cap: CapChat | CapGenerate | CapEmbed | CapStream | CapToolCall | CapThinking, flag: CapThinking, want: true},
+		{name: "all caps has thinking", cap: CapChat | CapGenerate | CapInsert | CapEmbed | CapStream | CapToolCall | CapThinking, flag: CapThinking, want: true},
 	}
 
 	for _, tt := range tests {
@@ -45,7 +45,8 @@ func TestCapability_String(t *testing.T) {
 		{name: "single embed", cap: CapEmbed, want: "embed"},
 		{name: "chat and stream", cap: CapChat | CapStream, want: "chat|stream"},
 		{name: "generate and embed", cap: CapGenerate | CapEmbed, want: "generate|embed"},
-		{name: "all capabilities", cap: CapChat | CapGenerate | CapEmbed | CapStream | CapToolCall | CapThinking, want: "chat|generate|embed|stream|tool_call|thinking"},
+		{name: "all capabilities", cap: CapChat | CapGenerate | CapInsert | CapEmbed | CapStream | CapToolCall | CapThinking, want: "chat|generate|insert|embed|stream|tool_call|thinking"},
+		{name: "insert only", cap: CapInsert, want: "insert"},
 		{name: "thinking only", cap: CapThinking, want: "thinking"},
 		{name: "tool_call and thinking", cap: CapToolCall | CapThinking, want: "tool_call|thinking"},
 	}
@@ -250,6 +251,9 @@ func TestCapability_BitwiseOps(t *testing.T) {
 	if combined&CapToolCall == 0 {
 		t.Error("combined should include CapToolCall")
 	}
+	if combined&CapInsert != 0 {
+		t.Error("combined should not include CapInsert")
+	}
 	if combined&CapEmbed != 0 {
 		t.Error("combined should not include CapEmbed")
 	}
@@ -268,8 +272,8 @@ func TestFIMConfig(t *testing.T) {
 	if cfg.PrefixBudgetPct != 75 {
 		t.Errorf("PrefixBudgetPct = %d, want 75", cfg.PrefixBudgetPct)
 	}
-	if cfg.Prefix != "<|fim_prefix|>" {
-		t.Errorf("Prefix = %q, want %q", cfg.Prefix, "<|fim_prefix|>")
+	if cfg.StopTokens != nil {
+		t.Errorf("StopTokens = %v, want nil", cfg.StopTokens)
 	}
 }
 
@@ -310,19 +314,9 @@ func TestFIMConfigValidate(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name:    "empty prefix",
-			cfg:     FIMConfig{Prefix: "", Suffix: "<|fim_suffix|>", Middle: "<|fim_middle|>"},
-			wantErr: true,
-		},
-		{
-			name:    "empty suffix",
-			cfg:     FIMConfig{Prefix: "<|fim_prefix|>", Suffix: "", Middle: "<|fim_middle|>"},
-			wantErr: true,
-		},
-		{
-			name:    "empty middle",
-			cfg:     FIMConfig{Prefix: "<|fim_prefix|>", Suffix: "<|fim_suffix|>", Middle: ""},
-			wantErr: true,
+			name:    "legacy token fields ignored",
+			cfg:     FIMConfig{Prefix: "", Suffix: "", Middle: ""},
+			wantErr: false,
 		},
 		{
 			name: "empty stop token entry",
@@ -373,17 +367,6 @@ func TestFIMConfigValidate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestFIMConfigTokenOverhead(t *testing.T) {
-	cfg := FIMConfig{
-		Prefix: "<|fim_prefix|>",
-		Suffix: "<|fim_suffix|>",
-		Middle: "<|fim_middle|>",
-	}
-	if got := cfg.TokenOverhead(); got != 3 {
-		t.Errorf("TokenOverhead() = %d, want 3", got)
 	}
 }
 

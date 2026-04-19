@@ -14,16 +14,28 @@ type ProviderConfig struct {
 }
 
 // ProviderConfigFromProfile converts a resolved model profile into a validated
-// completion.ProviderConfig. Returns an error when the model does not support FIM.
+// completion.ProviderConfig. Returns an error when the model does not support
+// native prompt+suffix FIM.
 func ProviderConfigFromProfile(profile *provider.ModelProfile) (ProviderConfig, error) {
-	if profile.FIM == nil {
-		return ProviderConfig{}, fmt.Errorf("completion: model %q does not support FIM", profile.Name)
+	if profile == nil {
+		return ProviderConfig{}, fmt.Errorf("completion: missing model profile")
 	}
-	if err := profile.FIM.Validate(); err != nil {
+	if !profile.SupportsFIM() {
+		reason := profile.FIMUnsupportedReason()
+		if reason == "" {
+			return ProviderConfig{}, fmt.Errorf("completion: model %q does not support native FIM", profile.Name)
+		}
+		return ProviderConfig{}, fmt.Errorf("completion: model %q does not support native FIM: %s", profile.Name, reason)
+	}
+	fim := profile.FIM
+	if fim == nil {
+		fim = &provider.FIMConfig{}
+	}
+	if err := fim.Validate(); err != nil {
 		return ProviderConfig{}, fmt.Errorf("completion: invalid FIM config: %w", err)
 	}
 	return ProviderConfig{
-		FIM:           profile.FIM,
+		FIM:           fim,
 		ContextWindow: profile.EffectiveContextWindow("fim"),
 		QualityTier:   profile.Quality,
 	}, nil

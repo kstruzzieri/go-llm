@@ -147,8 +147,8 @@ func TestModelProfileConstruction(t *testing.T) {
 	if profile.FIM == nil {
 		t.Fatal("FIM should not be nil")
 	}
-	if profile.FIM.Prefix != "<|fim_prefix|>" {
-		t.Errorf("FIM.Prefix = %q, want %q", profile.FIM.Prefix, "<|fim_prefix|>")
+	if profile.FIM.PrefixBudgetPct != 75 {
+		t.Errorf("FIM.PrefixBudgetPct = %d, want %d", profile.FIM.PrefixBudgetPct, 75)
 	}
 	if profile.ThinkMode != ThinkToggle {
 		t.Errorf("ThinkMode = %v, want ThinkToggle", profile.ThinkMode)
@@ -281,6 +281,66 @@ func TestEffectiveContextWindow(t *testing.T) {
 			got := p.EffectiveContextWindow(tt.useCase)
 			if got != tt.want {
 				t.Errorf("EffectiveContextWindow(%q) = %d, want %d", tt.useCase, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestModelProfileSupportsFIM(t *testing.T) {
+	tests := []struct {
+		name       string
+		profile    *ModelProfile
+		want       bool
+		wantReason string
+	}{
+		{
+			name:       "nil profile",
+			profile:    nil,
+			want:       false,
+			wantReason: "missing model profile",
+		},
+		{
+			name: "template with suffix is authoritative",
+			profile: &ModelProfile{
+				Template: "{{ .Prompt }}{{ .Suffix }}",
+			},
+			want:       true,
+			wantReason: "",
+		},
+		{
+			name: "template without suffix overrides insert capability",
+			profile: &ModelProfile{
+				Template: "{{ .Prompt }}",
+				Caps:     CapGenerate | CapInsert,
+			},
+			want:       false,
+			wantReason: "template does not reference .Suffix",
+		},
+		{
+			name: "capability fallback when template absent",
+			profile: &ModelProfile{
+				Caps: CapGenerate | CapInsert,
+			},
+			want:       true,
+			wantReason: "",
+		},
+		{
+			name: "capability fallback rejects when insert absent",
+			profile: &ModelProfile{
+				Caps: CapGenerate,
+			},
+			want:       false,
+			wantReason: "model does not advertise insert capability",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.profile.SupportsFIM(); got != tt.want {
+				t.Fatalf("SupportsFIM() = %v, want %v", got, tt.want)
+			}
+			if got := tt.profile.FIMUnsupportedReason(); got != tt.wantReason {
+				t.Fatalf("FIMUnsupportedReason() = %q, want %q", got, tt.wantReason)
 			}
 		})
 	}

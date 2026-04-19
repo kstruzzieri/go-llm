@@ -8,19 +8,6 @@ import (
 
 const maxStopTokens = 10
 
-// assembleFIMPrompt constructs the FIM prompt from control tokens and source text.
-func assembleFIMPrompt(fim *provider.FIMConfig, prefix, suffix string) string {
-	totalLen := len(fim.Prefix) + len(prefix) + len(fim.Suffix) + len(suffix) + len(fim.Middle)
-	var b strings.Builder
-	b.Grow(totalLen)
-	b.WriteString(fim.Prefix)
-	b.WriteString(prefix)
-	b.WriteString(fim.Suffix)
-	b.WriteString(suffix)
-	b.WriteString(fim.Middle)
-	return b.String()
-}
-
 // stripStopTokens removes any effective stop token that appears at the tail
 // of the completion text. Only the tail is checked — interior matches are
 // left alone so that the model may legitimately emit these bytes.

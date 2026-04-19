@@ -17,8 +17,8 @@ type catalogData struct {
 }
 
 // catalogFamily is the JSON representation of a model family entry.
-// Each family defines shared properties (FIM tokens, think mode, context window)
-// and a map of size-keyed variants with resource requirements.
+// Each family defines shared policy defaults (FIM stops/budget, think mode,
+// context window) and a map of size-keyed variants with resource requirements.
 type catalogFamily struct {
 	FIM           *FIMConfig                `json:"fim"`
 	ThinkMode     string                    `json:"think_mode"`
@@ -84,7 +84,7 @@ func (sc *staticCatalog) lookup(family, paramSize string) *ModelProfile {
 	return sc.buildProfile(family, &fam, &variant)
 }
 
-// lookupFamily returns a ModelProfile with family-level metadata (FIM tokens,
+// lookupFamily returns a ModelProfile with family-level metadata (FIM policy,
 // think mode, context window) but without variant-specific resource data.
 // Returns nil if the family is not found in the catalog.
 func (sc *staticCatalog) lookupFamily(family string) *ModelProfile {
@@ -187,6 +187,7 @@ func parseTier(s string) Tier {
 // parseCaps converts a string slice of capability names from catalog JSON
 // to a Capability bitmask. The catalog uses higher-level labels:
 //   - "completion" implies CapChat | CapGenerate | CapStream
+//   - "insert" implies CapGenerate | CapStream | CapInsert
 //   - "tools" implies CapToolCall
 //   - "embedding" implies CapEmbed
 //   - "thinking" implies CapThinking
@@ -196,6 +197,8 @@ func parseCaps(caps []string) Capability {
 		switch strings.ToLower(s) {
 		case "completion":
 			c |= CapChat | CapGenerate | CapStream
+		case "insert":
+			c |= CapGenerate | CapStream | CapInsert
 		case "tools":
 			c |= CapToolCall
 		case "embedding":

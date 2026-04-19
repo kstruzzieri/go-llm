@@ -196,8 +196,8 @@ func TestModelRegistry_Lookup_CatalogMatch(t *testing.T) {
 	if profile.FIM == nil {
 		t.Fatal("expected FIM config from catalog, got nil")
 	}
-	if profile.FIM.Prefix != "<|fim_prefix|>" {
-		t.Errorf("FIM.Prefix = %q, want %q", profile.FIM.Prefix, "<|fim_prefix|>")
+	if len(profile.FIM.StopTokens) != 2 {
+		t.Errorf("StopTokens len = %d, want 2", len(profile.FIM.StopTokens))
 	}
 	if profile.ThinkMode != ThinkToggle {
 		t.Errorf("ThinkMode = %v, want ThinkToggle", profile.ThinkMode)
@@ -587,8 +587,8 @@ func TestModelRegistry_FIMConfigFor(t *testing.T) {
 	if fimCfg == nil {
 		t.Fatal("expected FIMConfig for qwen3, got nil")
 	}
-	if fimCfg.Prefix != "<|fim_prefix|>" {
-		t.Errorf("FIM.Prefix = %q, want %q", fimCfg.Prefix, "<|fim_prefix|>")
+	if fimCfg.PrefixBudgetPct != 75 {
+		t.Errorf("PrefixBudgetPct = %d, want 75", fimCfg.PrefixBudgetPct)
 	}
 
 	// llama3.1 has no FIM in the catalog.

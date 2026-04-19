@@ -89,8 +89,9 @@ type plannedRequest struct {
 }
 
 // planRequest runs cursor analysis, computes the adaptive budget, truncates
-// prefix/suffix, assembles the FIM prompt, and returns everything needed to
-// call Ollama and construct the response.
+// prefix/suffix, and returns everything needed to call Ollama and construct
+// the response. When suffix is present, Ollama's live model template owns the
+// final prompt assembly.
 func (p *Provider) planRequest(req FIMRequest) plannedRequest {
 	lang := resolveLanguage(req.Language, req.FilePath)
 	analysis := AnalyzeCursor(req.Prefix, req.Suffix, lang)
@@ -104,7 +105,7 @@ func (p *Provider) planRequest(req FIMRequest) plannedRequest {
 
 	numCtx := p.effectiveNumCtx(EstimateTokens(req.Prefix) + EstimateTokens(req.Suffix))
 
-	overhead := p.cfg.FIM.TokenOverhead()
+	overhead := 0
 	maxLimit := numCtx - overhead - 1
 	if maxLimit < 1 {
 		maxLimit = 1
@@ -132,11 +133,11 @@ func (p *Provider) planRequest(req FIMRequest) plannedRequest {
 
 	prefix := TruncateToTokens(req.Prefix, prefixBudget)
 	suffix := TruncateSuffixToTokens(req.Suffix, suffixBudget)
-	prompt := assembleFIMPrompt(p.cfg.FIM, prefix, suffix)
 
 	genReq := ollama.GenerateRequest{
 		Model:  p.model,
-		Prompt: prompt,
+		Prompt: prefix,
+		Suffix: suffix,
 		Options: &ollama.ModelOptions{
 			NumPredict:  maxTokens,
 			NumCtx:      numCtx,

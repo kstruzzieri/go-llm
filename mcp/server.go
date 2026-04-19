@@ -260,7 +260,7 @@ func (s *Server) Completer() *completion.Provider {
 // newCompletionProvider builds a completion.Provider for the given model by
 // looking up its merged ModelProfile via the model registry and deriving a
 // ProviderConfig. Returns an error when the registry is unavailable, the
-// lookup fails, or the model does not advertise FIM support.
+// lookup fails, or the model does not support native FIM at runtime.
 func (s *Server) newCompletionProvider(ctx context.Context, model string) (*completion.Provider, error) {
 	if s.modelRegistry == nil || s.ollamaProv == nil {
 		return nil, fmt.Errorf("mcp: model registry unavailable")
@@ -329,4 +329,3 @@ func (s *Server) Close() error {
 	}
 	return nil
 }
-
