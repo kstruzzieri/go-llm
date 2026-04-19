@@ -108,7 +108,7 @@ func (s *Server) handleCodeReview(ctx context.Context, req *gomcp.CallToolReques
 		return toolError("validation", "code must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "analysis")
+	model, err := s.resolveModel(ctx, args.Model, "analysis")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
@@ -151,7 +151,7 @@ func (s *Server) handleExplainCode(ctx context.Context, req *gomcp.CallToolReque
 		return toolError("validation", "code must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "analysis")
+	model, err := s.resolveModel(ctx, args.Model, "analysis")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
@@ -178,7 +178,7 @@ func (s *Server) handleAnalyzeTraining(ctx context.Context, req *gomcp.CallToolR
 		return toolError("validation", "%v", err), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "analysis")
+	model, err := s.resolveModel(ctx, args.Model, "analysis")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
@@ -205,7 +205,7 @@ func (s *Server) handleExplainAnomaly(ctx context.Context, req *gomcp.CallToolRe
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "analysis")
+	model, err := s.resolveModel(ctx, args.Model, "analysis")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
@@ -239,7 +239,7 @@ func (s *Server) handleAnalyzeStrategy(ctx context.Context, req *gomcp.CallToolR
 		return toolError("validation", "metrics must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "analysis")
+	model, err := s.resolveModel(ctx, args.Model, "analysis")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
@@ -272,7 +272,7 @@ func (s *Server) handleCompareStrategies(ctx context.Context, req *gomcp.CallToo
 		return toolError("validation", "at least 2 strategies are required"), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "analysis")
+	model, err := s.resolveModel(ctx, args.Model, "analysis")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}

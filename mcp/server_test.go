@@ -135,6 +135,12 @@ func TestNewServerWithoutAutoDiscoveredConfigContinues(t *testing.T) {
 	if s.cfg != nil {
 		t.Fatalf("cfg = %#v, want nil when no config is found", s.cfg)
 	}
+	if s.modelRegistry == nil {
+		t.Fatal("modelRegistry = nil, want degraded-mode registry for later recovery")
+	}
+	if s.ollamaProv == nil {
+		t.Fatal("ollamaProv = nil, want provider initialized in degraded mode")
+	}
 }
 
 func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
@@ -155,7 +161,7 @@ func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
 		resolved: make(map[string]config.ResolvedModel),
 	}
 
-	s.rebuildDerivedClients()
+	s.rebuildDerivedClients(context.Background())
 	if s.Indexer() != nil {
 		t.Fatal("Indexer() != nil without a resolved embedding model")
 	}
@@ -164,7 +170,7 @@ func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
 	}
 
 	s.resolved["embedding"] = config.ResolvedModel{Name: "qwen3-embedding:8b", Role: "embedding"}
-	s.rebuildDerivedClients()
+	s.rebuildDerivedClients(context.Background())
 	if s.Indexer() == nil {
 		t.Fatal("Indexer() = nil, want non-nil after embedding resolution")
 	}

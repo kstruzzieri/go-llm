@@ -219,6 +219,42 @@ func TestCompleteStreamCallbackError(t *testing.T) {
 	}
 }
 
+func TestCompleteStreamFlushesTailOnStreamError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprintln(w, `{"model":"test-model","response":"hello","done":false}`)
+		_, _ = fmt.Fprintln(w, `{"broken":`)
+	}))
+	defer srv.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p, err := NewProvider(client, "test-model", ProviderConfig{
+		FIM: &provider.FIMConfig{
+			StopTokens: []string{"XYZ"},
+		},
+		ContextWindow: 2048,
+		QualityTier:   provider.TierGood,
+	})
+	if err != nil {
+		t.Fatalf("NewProvider() error: %v", err)
+	}
+
+	var tokens []string
+	err = p.CompleteStream(context.Background(), FIMRequest{
+		Prefix: "func main() {",
+		Suffix: "}",
+	}, func(token string) error {
+		tokens = append(tokens, token)
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected stream error")
+	}
+
+	if got := strings.Join(tokens, ""); got != "hello" {
+		t.Fatalf("stream tail lost on error: got %q, want %q", got, "hello")
+	}
+}
+
 func TestCompleteValidation(t *testing.T) {
 	t.Run("nil client caught at complete time", func(t *testing.T) {
 		p, err := NewProvider(nil, "test-model", testProviderConfig())

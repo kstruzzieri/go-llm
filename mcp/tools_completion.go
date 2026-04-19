@@ -44,7 +44,7 @@ func (s *Server) handleCompletion(ctx context.Context, req *gomcp.CallToolReques
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "completion")
+	model, err := s.resolveModel(ctx, args.Model, "completion")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}

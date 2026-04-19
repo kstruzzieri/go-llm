@@ -15,15 +15,22 @@ func stripStopTokens(completion string, stopTokens []string) string {
 	if completion == "" || len(stopTokens) == 0 {
 		return completion
 	}
-	for _, tok := range stopTokens {
-		if tok == "" {
-			continue
+
+	for {
+		longest := ""
+		for _, tok := range stopTokens {
+			if tok == "" {
+				continue
+			}
+			if strings.HasSuffix(completion, tok) && len(tok) > len(longest) {
+				longest = tok
+			}
 		}
-		if strings.HasSuffix(completion, tok) {
-			return completion[:len(completion)-len(tok)]
+		if longest == "" {
+			return completion
 		}
+		completion = completion[:len(completion)-len(longest)]
 	}
-	return completion
 }
 
 // mergeStopTokens combines model-native and language-specific stop tokens

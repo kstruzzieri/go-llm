@@ -161,20 +161,9 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Step 3: Check Ollama availability (non-fatal, degraded mode on failure).
 	s.ollamaAvailable = s.client.IsAvailable(ctx)
 
-	// Step 3b: Build a provider-level model registry so the completer can
-	// source FIMConfig, context window, and tier from merged ModelProfiles.
-	// Degraded mode: any failure here just leaves the registry nil, and the
-	// completer will not be constructed (handled in rebuildDerivedClients).
-	if s.ollamaAvailable {
-		pReg := provider.NewRegistry()
-		s.ollamaProv = provider.NewOllamaProvider(s.client)
-		if err := pReg.Register(s.ollamaProv); err == nil {
-			_ = pReg.RefreshModels(ctx, s.ollamaProv.Name())
-			if mr, err := provider.NewModelRegistry(pReg, nil); err == nil {
-				s.modelRegistry = mr
-			}
-		}
-	}
+	// Step 3b: Build the provider-level model registry even in degraded mode
+	// so explicit completion requests can recover once Ollama comes back.
+	_ = s.ensureModelRegistry()
 
 	// Step 4: Open RAG store if not disabled (before model resolution
 	// so that rebuildDerivedClients can wire up indexer/retriever).
@@ -196,7 +185,7 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		_ = s.refreshResolved(ctx) // non-fatal: partial results are kept
 	} else {
 		// No resolution possible — still build derived clients with defaults.
-		s.rebuildDerivedClients()
+		s.rebuildDerivedClients(ctx)
 	}
 
 	// Step 6: Create MCP SDK server.
@@ -219,17 +208,23 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	return s, nil
 }
 
-// rebuildDerivedClients rebuilds the completer, indexer, and retriever
-// from the currently resolved models.
-// Caller must hold s.mu (write lock) OR call this during init (single-goroutine).
-func (s *Server) rebuildDerivedClients() {
-	resolved := s.resolved
+// rebuildDerivedClients rebuilds the completer, indexer, and retriever from
+// the currently resolved models. Network-backed completion construction runs
+// outside the server lock so canceled callers do not block other handlers.
+func (s *Server) rebuildDerivedClients(ctx context.Context) {
+	s.mu.RLock()
+	resolved := make(map[string]config.ResolvedModel, len(s.resolved))
+	for k, v := range s.resolved {
+		resolved[k] = v
+	}
+	store := s.store
+	s.mu.RUnlock()
 
 	// Rebuild completer from resolved "completion" model.
-	s.completer = nil
+	var completer *completion.Provider
 	if rm, ok := resolved["completion"]; ok && rm.Name != "" {
-		if c, err := s.newCompletionProvider(context.Background(), rm.Name); err == nil {
-			s.completer = c
+		if c, err := s.newCompletionProvider(ctx, rm.Name); err == nil {
+			completer = c
 		}
 	}
 
@@ -241,12 +236,52 @@ func (s *Server) rebuildDerivedClients() {
 		embeddingModel = rm.Name
 	}
 
-	s.indexer = nil
-	s.retriever = nil
-	if s.store != nil && embeddingModel != "" {
-		s.indexer = rag.NewIndexer(s.client, s.store, rag.WithEmbeddingModel(embeddingModel))
-		s.retriever = rag.NewRetriever(s.client, s.store, rag.WithRetrieverModel(embeddingModel))
+	var indexer *rag.Indexer
+	var retriever *rag.Retriever
+	if store != nil && embeddingModel != "" {
+		indexer = rag.NewIndexer(s.client, store, rag.WithEmbeddingModel(embeddingModel))
+		retriever = rag.NewRetriever(s.client, store, rag.WithRetrieverModel(embeddingModel))
 	}
+
+	s.mu.Lock()
+	s.completer = completer
+	s.indexer = indexer
+	s.retriever = retriever
+	s.mu.Unlock()
+}
+
+func (s *Server) ensureModelRegistry() error {
+	s.mu.RLock()
+	if s.modelRegistry != nil && s.ollamaProv != nil {
+		s.mu.RUnlock()
+		return nil
+	}
+	client := s.client
+	s.mu.RUnlock()
+
+	if client == nil {
+		return fmt.Errorf("mcp: model registry unavailable")
+	}
+
+	ollamaProv := provider.NewOllamaProvider(client)
+	pReg := provider.NewRegistry()
+	if err := pReg.Register(ollamaProv); err != nil {
+		return fmt.Errorf("mcp: model registry unavailable: %w", err)
+	}
+	mr, err := provider.NewModelRegistry(pReg, nil)
+	if err != nil {
+		return fmt.Errorf("mcp: model registry unavailable: %w", err)
+	}
+
+	s.mu.Lock()
+	if s.ollamaProv == nil {
+		s.ollamaProv = ollamaProv
+	}
+	if s.modelRegistry == nil {
+		s.modelRegistry = mr
+	}
+	s.mu.Unlock()
+	return nil
 }
 
 // Completer returns the current FIM completion provider (may be nil).
@@ -262,11 +297,20 @@ func (s *Server) Completer() *completion.Provider {
 // ProviderConfig. Returns an error when the registry is unavailable, the
 // lookup fails, or the model does not support native FIM at runtime.
 func (s *Server) newCompletionProvider(ctx context.Context, model string) (*completion.Provider, error) {
-	if s.modelRegistry == nil || s.ollamaProv == nil {
+	if err := s.ensureModelRegistry(); err != nil {
+		return nil, err
+	}
+
+	s.mu.RLock()
+	modelRegistry := s.modelRegistry
+	ollamaProv := s.ollamaProv
+	s.mu.RUnlock()
+	if modelRegistry == nil || ollamaProv == nil {
 		return nil, fmt.Errorf("mcp: model registry unavailable")
 	}
-	key := provider.ModelKey{Provider: s.ollamaProv.Name(), Model: model}
-	profile, err := s.modelRegistry.Lookup(ctx, key)
+
+	key := provider.ModelKey{Provider: ollamaProv.Name(), Model: model}
+	profile, err := modelRegistry.Lookup(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: lookup profile %q: %w", model, err)
 	}

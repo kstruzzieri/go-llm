@@ -63,7 +63,7 @@ func (s *Server) handleEmbed(ctx context.Context, req *gomcp.CallToolRequest) (*
 		return toolError("validation", "text must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "embedding")
+	model, err := s.resolveModel(ctx, args.Model, "embedding")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}
@@ -92,7 +92,7 @@ func (s *Server) handleEmbedBatch(ctx context.Context, req *gomcp.CallToolReques
 		return toolError("validation", "texts exceeds maximum batch size of %d (got %d)", maxBatchSize, len(args.Texts)), nil
 	}
 
-	model, err := s.resolveModel(args.Model, "embedding")
+	model, err := s.resolveModel(ctx, args.Model, "embedding")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}

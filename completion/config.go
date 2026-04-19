@@ -6,6 +6,8 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+const defaultFIMContextWindow = 8192
+
 // ProviderConfig supplies model-specific parameters for FIM completion.
 type ProviderConfig struct {
 	FIM           *provider.FIMConfig
@@ -34,9 +36,13 @@ func ProviderConfigFromProfile(profile *provider.ModelProfile) (ProviderConfig, 
 	if err := fim.Validate(); err != nil {
 		return ProviderConfig{}, fmt.Errorf("completion: invalid FIM config: %w", err)
 	}
+	ctxWindow := profile.EffectiveContextWindow("fim")
+	if ctxWindow <= 0 {
+		ctxWindow = defaultFIMContextWindow
+	}
 	return ProviderConfig{
 		FIM:           fim,
-		ContextWindow: profile.EffectiveContextWindow("fim"),
+		ContextWindow: ctxWindow,
 		QualityTier:   profile.Quality,
 	}, nil
 }

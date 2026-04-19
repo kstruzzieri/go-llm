@@ -171,6 +171,15 @@ func TestAnalyzeCursor(t *testing.T) {
 			wantConfGe: 0.5,
 		},
 		{
+			name:       "import keywords earlier in file do not force import context",
+			prefix:     "package main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"hi\")\n\treturn ",
+			suffix:     "\n}",
+			language:   "go",
+			wantCtx:    ContextFunctionBody,
+			wantShape:  ShapeExpression,
+			wantConfGe: 0.75,
+		},
+		{
 			name:       "empty prefix — start of file",
 			prefix:     "",
 			suffix:     "func main() {\n}",

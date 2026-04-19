@@ -3,6 +3,8 @@ package mcp
 import (
 	"context"
 	"fmt"
+
+	"github.com/kstruzzieri/go-llm/config"
 )
 
 // resolveModel resolves a model name for a given use-case.
@@ -10,7 +12,7 @@ import (
 // Otherwise, the resolved map is consulted for the use-case key.
 // Use-case keys match config.Defaults (e.g., "chat", "completion",
 // "embedding", "analysis"), not role names.
-func (s *Server) resolveModel(explicit, useCase string) (string, error) {
+func (s *Server) resolveModel(ctx context.Context, explicit, useCase string) (string, error) {
 	if explicit != "" {
 		return explicit, nil
 	}
@@ -20,9 +22,16 @@ func (s *Server) resolveModel(explicit, useCase string) (string, error) {
 		return "", fmt.Errorf("model parameter required (no models.json configured)")
 	}
 
-	s.mu.RLock()
-	resolved := s.resolved
-	s.mu.RUnlock()
+	resolved := s.snapshotResolved()
+	needsRefresh := len(resolved) == 0
+	if !needsRefresh {
+		rm, ok := resolved[useCase]
+		needsRefresh = !ok || rm.Name == ""
+	}
+	if needsRefresh {
+		s.maybeRefreshResolved(ctx)
+		resolved = s.snapshotResolved()
+	}
 
 	// Config exists but resolved map is empty (Ollama was unavailable).
 	if len(resolved) == 0 {
@@ -46,20 +55,43 @@ func (s *Server) refreshResolved(ctx context.Context) error {
 	if s.cfg == nil {
 		return fmt.Errorf("mcp: refresh models: no configuration loaded")
 	}
+	if s.client == nil {
+		return fmt.Errorf("mcp: refresh models: client unavailable")
+	}
 
 	resolved, err := s.cfg.ResolveAll(ctx, s.client)
 
 	// Store partial results and rebuild derived clients under the write lock
-	// to prevent tool handlers from seeing a stale completer/indexer/retriever.
+	// so future requests see the freshest resolved defaults. Derived clients
+	// are rebuilt outside the lock because completion-provider construction may
+	// perform cancelable network I/O.
 	s.mu.Lock()
 	if resolved != nil {
 		s.resolved = resolved
 	}
-	s.rebuildDerivedClients()
 	s.mu.Unlock()
+	s.rebuildDerivedClients(ctx)
 
 	if err != nil {
 		return fmt.Errorf("mcp: refresh models: resolve: %w", err)
 	}
 	return nil
+}
+
+func (s *Server) maybeRefreshResolved(ctx context.Context) {
+	if s.client == nil {
+		return
+	}
+	_ = s.refreshResolved(ctx)
+}
+
+func (s *Server) snapshotResolved() map[string]config.ResolvedModel {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	resolved := make(map[string]config.ResolvedModel, len(s.resolved))
+	for k, v := range s.resolved {
+		resolved[k] = v
+	}
+	return resolved
 }

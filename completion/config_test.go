@@ -72,6 +72,19 @@ func TestProviderConfigFromProfile(t *testing.T) {
 			wantCtx:  131072, // "fim" is NOT quality-sensitive, returns full ContextWindow
 			wantTier: provider.TierBest,
 		},
+		{
+			name: "falls back to default context window when runtime context missing",
+			profile: &provider.ModelProfile{
+				FIM: &provider.FIMConfig{
+					PrefixBudgetPct: 75,
+				},
+				Quality:  provider.TierGood,
+				Template: "{{ .Prompt }}{{ .Suffix }}",
+			},
+			wantErr:  false,
+			wantCtx:  defaultFIMContextWindow,
+			wantTier: provider.TierGood,
+		},
 	}
 
 	for _, tt := range tests {

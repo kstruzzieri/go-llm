@@ -2,6 +2,7 @@ package completion
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -232,13 +233,21 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 	}
 
 	var buffer string
+	var callbackErr error
+	emit := func(token string) error {
+		if token == "" {
+			return nil
+		}
+		if err := fn(token); err != nil {
+			callbackErr = err
+			return err
+		}
+		return nil
+	}
 
-	return p.client.GenerateStream(ctx, pr.genReq, func(resp ollama.GenerateResponse) error {
+	streamErr := p.client.GenerateStream(ctx, pr.genReq, func(resp ollama.GenerateResponse) error {
 		if maxStopLen == 0 {
-			if resp.Response == "" {
-				return nil
-			}
-			return fn(resp.Response)
+			return emit(resp.Response)
 		}
 
 		buffer += resp.Response
@@ -249,10 +258,7 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 			}
 			cleaned := stripStopTokens(buffer, pr.budget.StopTokens)
 			buffer = ""
-			if cleaned == "" {
-				return nil
-			}
-			return fn(cleaned)
+			return emit(cleaned)
 		}
 
 		if len(buffer) <= maxStopLen {
@@ -260,6 +266,14 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 		}
 		safe := buffer[:len(buffer)-maxStopLen]
 		buffer = buffer[len(buffer)-maxStopLen:]
-		return fn(safe)
+		return emit(safe)
 	})
+	if streamErr != nil && callbackErr == nil && buffer != "" {
+		cleaned := stripStopTokens(buffer, pr.budget.StopTokens)
+		buffer = ""
+		if err := emit(cleaned); err != nil {
+			return errors.Join(streamErr, err)
+		}
+	}
+	return streamErr
 }

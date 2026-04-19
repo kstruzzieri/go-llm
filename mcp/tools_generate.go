@@ -46,7 +46,7 @@ func (s *Server) handleGenerate(ctx context.Context, req *gomcp.CallToolRequest)
 	}
 
 	// Generate resolves to the "chat" use-case (no dedicated "generation" default).
-	model, err := s.resolveModel(args.Model, "chat")
+	model, err := s.resolveModel(ctx, args.Model, "chat")
 	if err != nil {
 		return toolError("config", "%v", err), nil
 	}

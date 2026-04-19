@@ -297,15 +297,29 @@ func detectShape(prefix, suffix string, ctx CursorContext, hints LanguageHints) 
 }
 
 func isInImportBlock(prefix string, hints LanguageHints) bool {
-	if len(hints.ImportKeywords) == 0 {
+	if len(hints.ImportKeywords) == 0 || prefix == "" {
 		return false
 	}
+
+	lastLine := prefix
+	if idx := strings.LastIndex(lastLine, "\n"); idx >= 0 {
+		lastLine = lastLine[idx+1:]
+	}
+	trimmedLine := strings.TrimLeft(lastLine, " \t")
+
 	for _, kw := range hints.ImportKeywords {
-		if strings.Contains(prefix, kw) {
+		if strings.HasPrefix(trimmedLine, kw) {
 			return true
 		}
 	}
-	return false
+
+	groupStart := strings.LastIndex(prefix, "import (")
+	if groupStart == -1 {
+		return false
+	}
+
+	groupBody := prefix[groupStart+len("import ("):]
+	return !strings.Contains(groupBody, ")")
 }
 
 func isBetweenDeclarations(prefix, suffix string, hints LanguageHints) bool {

@@ -68,6 +68,12 @@ func TestStripStopTokens(t *testing.T) {
 			stops:      []string{"<|endoftext|>"},
 			want:       "",
 		},
+		{
+			name:       "strip chained trailing stop tokens",
+			completion: "return 42<|fim_pad|><|endoftext|>",
+			stops:      []string{"<|endoftext|>", "<|fim_pad|>"},
+			want:       "return 42",
+		},
 	}
 
 	for _, tt := range tests {
