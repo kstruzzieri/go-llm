@@ -48,6 +48,8 @@ type Server struct {
 	ollamaProv    provider.Provider
 
 	ollamaAvailable bool
+	closed          bool
+	stateVersion    uint64
 
 	mu       sync.RWMutex
 	resolved map[string]config.ResolvedModel
@@ -213,11 +215,16 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 // outside the server lock so canceled callers do not block other handlers.
 func (s *Server) rebuildDerivedClients(ctx context.Context) {
 	s.mu.RLock()
+	if s.closed {
+		s.mu.RUnlock()
+		return
+	}
 	resolved := make(map[string]config.ResolvedModel, len(s.resolved))
 	for k, v := range s.resolved {
 		resolved[k] = v
 	}
 	store := s.store
+	stateVersion := s.stateVersion
 	s.mu.RUnlock()
 
 	// Rebuild completer from resolved "completion" model.
@@ -244,6 +251,10 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 	}
 
 	s.mu.Lock()
+	if s.closed || s.stateVersion != stateVersion {
+		s.mu.Unlock()
+		return
+	}
 	s.completer = completer
 	s.indexer = indexer
 	s.retriever = retriever
@@ -361,6 +372,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Safe to call multiple times; serialized with handler reads via s.mu.
 func (s *Server) Close() error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil
+	}
+	s.closed = true
+	s.stateVersion++
 	store := s.store
 	s.store = nil
 	s.indexer = nil

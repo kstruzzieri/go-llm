@@ -43,6 +43,14 @@ type ModelRegistry struct {
 	providers ProviderResolver
 }
 
+// directModelInfoProvider is an optional provider capability that returns
+// metadata for a specific model without relying on a full model-list scan.
+// It is used as a resilience fallback when list queries fail or when the
+// requested model name does not appear verbatim in the provider's tags list.
+type directModelInfoProvider interface {
+	ModelInfo(ctx context.Context, name string) (*ModelInfo, error)
+}
+
 // NewModelRegistry creates a ModelRegistry backed by the given provider
 // resolver and fingerprint store. The static catalog is loaded from the
 // embedded catalog.json at construction time. The fingerprint store may
@@ -260,15 +268,26 @@ func (r *ModelRegistry) queryRuntime(ctx context.Context, key ModelKey) (*ModelI
 	if err != nil {
 		return nil, err
 	}
+	direct, _ := p.(directModelInfoProvider)
 
 	models, err := p.Models(ctx)
 	if err != nil {
+		if direct != nil {
+			if detail, detailErr := direct.ModelInfo(ctx, key.Model); detailErr == nil {
+				return detail, nil
+			}
+		}
 		return nil, fmt.Errorf("query models from %q: %w", key.Provider, err)
 	}
 
 	for i := range models {
 		if models[i].Name == key.Model {
 			return &models[i], nil
+		}
+	}
+	if direct != nil {
+		if detail, err := direct.ModelInfo(ctx, key.Model); err == nil {
+			return detail, nil
 		}
 	}
 

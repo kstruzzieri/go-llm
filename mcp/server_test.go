@@ -179,6 +179,72 @@ func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
 	}
 }
 
+func TestRebuildDerivedClientsDoesNotRepublishAfterClose(t *testing.T) {
+	tagsStarted := make(chan struct{}, 1)
+	releaseTags := make(chan struct{})
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			tagsStarted <- struct{}{}
+			<-releaseTags
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mock.Close()
+
+	s := &Server{
+		client: ollama.NewClient(ollama.WithBaseURL(mock.URL)),
+		cfg: &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"ollama": {BaseURL: mock.URL},
+			},
+			Models: map[string]config.ModelConfig{
+				"completion": {Name: "qwen3:8b", Provider: "ollama", Type: "dense"},
+				"embedding":  {Name: "qwen3-embedding:8b", Provider: "ollama", Type: "embedding"},
+			},
+			Defaults: map[string]string{
+				"completion": "completion",
+				"embedding":  "embedding",
+			},
+		},
+		store: stubVectorStore{},
+		resolved: map[string]config.ResolvedModel{
+			"completion": {Name: "qwen3:8b", Role: "completion"},
+			"embedding":  {Name: "qwen3-embedding:8b", Role: "embedding"},
+		},
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.rebuildDerivedClients(context.Background())
+		close(done)
+	}()
+
+	<-tagsStarted
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+	close(releaseTags)
+	<-done
+
+	if s.Completer() != nil {
+		t.Fatal("Completer() != nil after Close won the race")
+	}
+	if s.Indexer() != nil {
+		t.Fatal("Indexer() != nil after Close won the race")
+	}
+	if s.Retriever() != nil {
+		t.Fatal("Retriever() != nil after Close won the race")
+	}
+}
+
 type stubVectorStore struct{}
 
 func (stubVectorStore) Store(context.Context, []rag.Chunk, [][]float64) error { return nil }

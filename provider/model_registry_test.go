@@ -54,9 +54,12 @@ func (m *mrMockProviderRegistry) All() []Provider {
 
 // mrMockProvider implements a minimal Provider for ModelRegistry tests.
 type mrMockProvider struct {
-	name   string
-	models []ModelInfo
-	caps   Capability
+	name       string
+	models     []ModelInfo
+	modelsErr  error
+	details    map[string]ModelInfo
+	detailsErr error
+	caps       Capability
 }
 
 func (m *mrMockProvider) Name() string             { return m.name }
@@ -65,7 +68,21 @@ func (m *mrMockProvider) Capabilities() Capability { return m.caps }
 func (m *mrMockProvider) Health(_ context.Context) error { return nil }
 
 func (m *mrMockProvider) Models(_ context.Context) ([]ModelInfo, error) {
+	if m.modelsErr != nil {
+		return nil, m.modelsErr
+	}
 	return m.models, nil
+}
+
+func (m *mrMockProvider) ModelInfo(_ context.Context, name string) (*ModelInfo, error) {
+	if m.detailsErr != nil {
+		return nil, m.detailsErr
+	}
+	if detail, ok := m.details[name]; ok {
+		copy := detail
+		return &copy, nil
+	}
+	return nil, fmt.Errorf("provider: model %q not found", name)
 }
 
 func (m *mrMockProvider) Chat(_ context.Context, _ ChatRequest) (*ChatResponse, error) {
@@ -867,6 +884,86 @@ func TestModelRegistry_Lookup_ModelNotFound(t *testing.T) {
 	_, err = mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "nonexistent:7b"})
 	if err == nil {
 		t.Fatal("expected error for model not found on provider")
+	}
+}
+
+func TestModelRegistry_Lookup_FallsBackToDirectModelInfoOnListError(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name:      "ollama",
+		caps:      CapChat,
+		modelsErr: errors.New("tags unavailable"),
+		details: map[string]ModelInfo{
+			"qwen3:8b": {
+				Name:          "qwen3:8b",
+				Family:        "qwen3",
+				ParameterSize: "8B",
+				Template:      "{{ .Prompt }}{{ .Suffix }}",
+				Capabilities:  []string{"completion", "insert"},
+			},
+		},
+	}
+
+	reg := &mrMockProviderRegistry{
+		providers: map[string]Provider{"ollama": prov},
+	}
+
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+
+	profile, err := mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "qwen3:8b"})
+	if err != nil {
+		t.Fatalf("Lookup() error: %v", err)
+	}
+	if profile.Name != "qwen3:8b" {
+		t.Fatalf("profile.Name = %q, want %q", profile.Name, "qwen3:8b")
+	}
+	if !profile.SupportsFIM() {
+		t.Fatal("expected fallback direct model info to preserve FIM support")
+	}
+}
+
+func TestModelRegistry_Lookup_FallsBackToDirectModelInfoOnNameMismatch(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat,
+		models: []ModelInfo{
+			{Name: "qwen3:8b:listed"},
+		},
+		details: map[string]ModelInfo{
+			"qwen3:8b": {
+				Name:          "qwen3:8b",
+				Family:        "qwen3",
+				ParameterSize: "8B",
+				Template:      "{{ .Prompt }}{{ .Suffix }}",
+				Capabilities:  []string{"completion", "insert"},
+			},
+		},
+	}
+
+	reg := &mrMockProviderRegistry{
+		providers: map[string]Provider{"ollama": prov},
+	}
+
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+
+	profile, err := mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "qwen3:8b"})
+	if err != nil {
+		t.Fatalf("Lookup() error: %v", err)
+	}
+	if profile.Name != "qwen3:8b" {
+		t.Fatalf("profile.Name = %q, want %q", profile.Name, "qwen3:8b")
+	}
+	if profile.Family != "qwen3" {
+		t.Fatalf("profile.Family = %q, want %q", profile.Family, "qwen3")
 	}
 }
 
