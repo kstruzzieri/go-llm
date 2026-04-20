@@ -161,6 +161,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET "+s.basePath+"/status", s.handleStatus)
 	mux.HandleFunc("GET "+s.basePath+"/models", s.handleModels)
 	mux.HandleFunc("POST "+s.basePath+"/chat/completions", s.handleChatCompletions)
+	mux.HandleFunc("POST "+s.basePath+"/completions", s.handleCompletions)
 
 	var handler http.Handler = mux
 	handler = recoveryMiddleware(handler)
