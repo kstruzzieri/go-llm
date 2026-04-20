@@ -1,6 +1,10 @@
 package compat
 
 import (
+	"bytes"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -34,13 +38,47 @@ type ChatCompletionRequest struct {
 	DryRun      bool   `json:"x_dry_run,omitempty"`
 }
 
-// ChatMessageParam is a single message in an OpenAI chat request.
-// Role and Content are always populated; Name is optional and currently
-// dropped during conversion because provider.ChatMessage has no Name field.
+// ChatMessageParam is a single message in an OpenAI chat request or response.
+//
+// Fields:
+//   - Role / Content: always populated on the wire.
+//   - Name: honored only when Role=="tool" (it names the tool whose result
+//     this message carries). On any other role, Name is silently dropped
+//     during conversion because provider.ChatMessage has no general-purpose
+//     Name field. This is intentional — OpenAI's Name on non-tool roles is
+//     informational and has no provider-side effect today.
+//   - ToolCallID: correlates a role=="tool" result with the prior assistant
+//     tool_call that produced it. Required by the model to match the result
+//     to the invocation.
+//   - ToolCalls: populated on assistant turns (inbound when replaying a
+//     tool-calling history, outbound when the model emits a new invocation).
 type ChatMessageParam struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
-	Name    string `json:"name,omitempty"`
+	Role       string             `json:"role"`
+	Content    string             `json:"content"`
+	Name       string             `json:"name,omitempty"`
+	ToolCallID string             `json:"tool_call_id,omitempty"`
+	ToolCalls  []ChatToolCallWire `json:"tool_calls,omitempty"`
+}
+
+// ChatToolCallWire mirrors OpenAI's tool_calls[] entry on assistant messages.
+// It carries the call ID, the fixed "function" type, and the nested function
+// descriptor.
+type ChatToolCallWire struct {
+	ID       string                   `json:"id,omitempty"`
+	Type     string                   `json:"type"` // "function"
+	Function ChatToolCallFunctionWire `json:"function"`
+}
+
+// ChatToolCallFunctionWire is the function descriptor inside a tool_calls entry.
+// Arguments is forwarded from the provider verbatim as raw JSON. Note that
+// OpenAI's canonical API returns Arguments as a JSON-encoded string (a string
+// literal whose value is a serialized JSON object). go-llm preserves the
+// provider's own encoding instead of re-stringifying it; clients that compare
+// bytes strictly may notice the difference. This is an intentional transparency
+// tradeoff, not a lossy conversion — the semantic payload round-trips.
+type ChatToolCallFunctionWire struct {
+	Name      string          `json:"name"`
+	Arguments json.RawMessage `json:"arguments"`
 }
 
 // ChatCompletionResponse is the OpenAI-shape response body. The x_ fields
@@ -104,13 +142,25 @@ type OpenAIToolFnParam struct {
 type StopSequences []string
 
 // UnmarshalJSON decodes either a JSON string or array of strings into s.
-// An empty string unmarshals to nil so downstream code sees no stop
-// sequences rather than a single empty sentinel.
+// Empty strings are filtered out in both shapes so downstream code sees a
+// clean list: [""] / "" become nil, ["", "b", ""] becomes []string{"b"}.
+// Providers treat an empty stop sequence as a no-op at best and an always-fire
+// sentinel at worst, so normalizing at the edge is strictly safer.
 func (s *StopSequences) UnmarshalJSON(data []byte) error {
 	// Try array first — this is the OpenAI canonical shape.
 	var arr []string
 	if err := json.Unmarshal(data, &arr); err == nil {
-		*s = arr
+		filtered := arr[:0]
+		for _, v := range arr {
+			if v != "" {
+				filtered = append(filtered, v)
+			}
+		}
+		if len(filtered) == 0 {
+			*s = nil
+		} else {
+			*s = filtered
+		}
 		return nil
 	}
 	// Fall back to single string.
@@ -176,8 +226,13 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		DryRun:       req.DryRun,
 	}
 	if len(req.Tools) > 0 {
+		tools, err := toProviderTools(req.Tools)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_tool_parameters", err.Error())
+			return
+		}
 		rr.RequiredCaps |= provider.CapToolCall
-		rr.Tools = toProviderTools(req.Tools)
+		rr.Tools = tools
 	}
 	if req.Stream {
 		s.serveChatStream(w, r, rr)
@@ -209,18 +264,33 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Derive finish_reason from response state. OpenAI's ordering is:
+	// "tool_calls" when the model emitted any function invocations; else
+	// "length" when MaxTokens was set and the response exhausted the budget;
+	// else "stop".
+	finish := "stop"
+	if len(resp.ToolCalls) > 0 {
+		finish = "tool_calls"
+	} else if req.MaxTokens != nil && *req.MaxTokens > 0 && resp.Usage.CompletionTokens >= *req.MaxTokens {
+		finish = "length"
+	}
+
 	out := ChatCompletionResponse{
-		ID:      "chatcmpl_" + requestIDFrom(r.Context()),
+		ID:      chatResponseID(r.Context()),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
-		Model:   resp.Model,
+		// Model is the qualified "provider/model" form taken from the plan
+		// so success and dry-run responses have identical shape even when
+		// resp.Model (provider-reported) omits the provider prefix.
+		Model: plan.Profile.Key.String(),
 		Choices: []ChatChoice{{
 			Index: 0,
 			Message: ChatMessageParam{
-				Role:    "assistant",
-				Content: resp.Content,
+				Role:      "assistant",
+				Content:   resp.Content,
+				ToolCalls: toolCallsToWire(resp.ToolCalls),
 			},
-			FinishReason: "stop",
+			FinishReason: finish,
 		}},
 		Usage: UsageWire{
 			PromptTokens:     resp.Usage.PromptTokens,
@@ -250,7 +320,7 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr prov
 // planned and the actual model — we do not walk the fallback chain.
 func writeChatDryRun(w http.ResponseWriter, r *http.Request, plan *provider.RoutePlan) {
 	out := ChatCompletionResponse{
-		ID:      "chatcmpl_" + requestIDFrom(r.Context()),
+		ID:      chatResponseID(r.Context()),
 		Object:  "chat.completion",
 		Created: time.Now().Unix(),
 		Model:   plan.Profile.Key.String(),
@@ -310,25 +380,52 @@ func resolvePriority(explicit *int, def provider.Priority) provider.Priority {
 }
 
 // toProviderMessages converts OpenAI chat messages to provider.ChatMessage.
-// Role/Content only — the Name field on ChatMessageParam is silently dropped
-// because provider.ChatMessage has no corresponding field today.
+//
+// Field handling:
+//   - Role=="tool": Name populates provider.ChatMessage.ToolName and
+//     ToolCallID populates provider.ChatMessage.ToolCallID. Both are
+//     required for the model to correlate a tool result with the assistant
+//     invocation that produced it; dropping them would break multi-turn
+//     tool use.
+//   - Role=="assistant" with inbound ToolCalls: converted to
+//     provider.ToolCall entries on the provider message so history replay
+//     carries the original invocations.
+//   - Other roles: Name is intentionally dropped. OpenAI allows Name on
+//     user/system messages for "human name" tagging, but provider.ChatMessage
+//     has no general-purpose Name field today and adding one would require
+//     provider-side changes outside the scope of the compat façade.
 func toProviderMessages(in []ChatMessageParam) []provider.ChatMessage {
 	out := make([]provider.ChatMessage, 0, len(in))
 	for _, m := range in {
-		out = append(out, provider.ChatMessage{
+		msg := provider.ChatMessage{
 			Role:    m.Role,
 			Content: m.Content,
-		})
+		}
+		if m.Role == "tool" {
+			msg.ToolName = m.Name
+			msg.ToolCallID = m.ToolCallID
+		}
+		if len(m.ToolCalls) > 0 {
+			msg.ToolCalls = toolCallsFromWire(m.ToolCalls)
+		}
+		out = append(out, msg)
 	}
 	return out
 }
 
 // toProviderTools converts OpenAI tool descriptors to provider.Tool entries.
 // Parameters is passed through as raw JSON so we do not canonicalize or
-// re-encode the schema.
-func toProviderTools(in []OpenAIToolParam) []provider.Tool {
+// re-encode the schema, but we reject payloads that are clearly not a JSON
+// object. Forwarding, e.g., a JSON string or array to the provider would
+// cause the upstream to return an opaque 400 that surfaces here as a 502.
+// Catching the mismatch at the edge gives the client a precise
+// invalid_tool_parameters signal instead.
+func toProviderTools(in []OpenAIToolParam) ([]provider.Tool, error) {
 	out := make([]provider.Tool, 0, len(in))
-	for _, t := range in {
+	for i, t := range in {
+		if err := validateToolParameters(t.Function.Parameters); err != nil {
+			return nil, fmt.Errorf("tools[%d].function.parameters: %w", i, err)
+		}
 		out = append(out, provider.Tool{
 			Type: firstNonEmpty(t.Type, "function"),
 			Function: provider.ToolFunction{
@@ -338,7 +435,93 @@ func toProviderTools(in []OpenAIToolParam) []provider.Tool {
 			},
 		})
 	}
+	return out, nil
+}
+
+// validateToolParameters checks that a tool-function parameters payload is
+// either empty (omitted) or a JSON object. We inspect the first
+// non-whitespace byte rather than fully unmarshaling — JSON Schema documents
+// can be arbitrarily nested and we do not want to pay the allocation cost on
+// every request. Rejecting obvious mismatches (strings, numbers, arrays) is
+// enough; malformed JSON inside a valid-looking object will still be caught
+// by the provider.
+func validateToolParameters(raw json.RawMessage) error {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 {
+		return nil
+	}
+	if trimmed[0] != '{' {
+		return fmt.Errorf("must be a JSON object")
+	}
+	return nil
+}
+
+// toolCallsFromWire converts inbound ChatToolCallWire entries (replayed on
+// assistant messages) to provider.ToolCall. Arguments is forwarded as raw
+// JSON; provider.ToolCallFunction.Index defaults to zero which matches
+// OpenAI's behavior on non-streaming calls.
+func toolCallsFromWire(in []ChatToolCallWire) []provider.ToolCall {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]provider.ToolCall, 0, len(in))
+	for _, c := range in {
+		out = append(out, provider.ToolCall{
+			ID:   c.ID,
+			Type: firstNonEmpty(c.Type, "function"),
+			Function: provider.ToolCallFunction{
+				Name:      c.Function.Name,
+				Arguments: c.Function.Arguments,
+			},
+		})
+	}
 	return out
+}
+
+// toolCallsToWire converts outbound provider.ToolCall entries to
+// ChatToolCallWire for the response payload. Arguments is forwarded
+// verbatim — see the ChatToolCallFunctionWire godoc for the
+// OpenAI-canonical-string caveat.
+func toolCallsToWire(in []provider.ToolCall) []ChatToolCallWire {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ChatToolCallWire, 0, len(in))
+	for _, c := range in {
+		out = append(out, ChatToolCallWire{
+			ID:   c.ID,
+			Type: firstNonEmpty(c.Type, "function"),
+			Function: ChatToolCallFunctionWire{
+				Name:      c.Function.Name,
+				Arguments: c.Function.Arguments,
+			},
+		})
+	}
+	return out
+}
+
+// chatResponseID builds the "chatcmpl_" response ID. It prefers the request
+// ID attached by requestIDMiddleware (so HTTP access logs and response
+// bodies correlate), but falls back to a freshly generated random suffix
+// when the context carries none — e.g. when handlers are invoked directly
+// via the mux for tests or embedded callers. Without the fallback, bypass
+// paths would return "chatcmpl_" verbatim, which is indistinguishable from
+// a bug.
+func chatResponseID(ctx context.Context) string {
+	rid := requestIDFrom(ctx)
+	if rid == "" {
+		rid = fallbackRequestID()
+	}
+	return "chatcmpl_" + rid
+}
+
+// fallbackRequestID generates a short, random hex suffix for use when no
+// request-ID middleware has run. 8 random bytes (16 hex chars) is well
+// beyond collision-hazard for response-body correlation.
+func fallbackRequestID() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return "cmpl_" + hex.EncodeToString(b[:])
 }
 
 // toModelOptions maps the OpenAI sampling fields onto provider.ModelOptions.

@@ -118,6 +118,13 @@ func TestChatCompletions_NonStreaming_Success(t *testing.T) {
 	if out.Usage.TotalTokens != 8 {
 		t.Errorf("usage.total_tokens = %d, want 8", out.Usage.TotalTokens)
 	}
+	// Top-level "model" must be qualified (provider/model) to match the
+	// dry-run branch; see chat.go — we take it from plan.Profile.Key.String()
+	// rather than resp.Model so the wire is consistent even when the
+	// provider reports a bare model name.
+	if out.Model != "ollama/qwen3:8b" {
+		t.Errorf("response.model = %q, want ollama/qwen3:8b", out.Model)
+	}
 	if out.RouteInfo == nil {
 		t.Fatal("x_route_info missing; router should populate it")
 	}
@@ -289,6 +296,299 @@ func TestChatCompletions_DryRun(t *testing.T) {
 	}
 }
 
+// newChatFixtureWithResponse is like newChatFixture but lets the caller shape
+// the response returned by the mock provider. The builder receives the request
+// the provider observed and returns the desired ChatResponse — this is how
+// tests for finish_reason, tool_calls forwarding, etc. scriptedly inject
+// response state the mock would not otherwise produce.
+func newChatFixtureWithResponse(
+	t *testing.T,
+	build func(provider.ChatRequest) *provider.ChatResponse,
+	opts ...Option,
+) (*Server, *provider.ChatRequest, func()) {
+	t.Helper()
+	var last provider.ChatRequest
+	mp := &mockProvider{
+		name: "ollama",
+		caps: provider.CapChat | provider.CapGenerate | provider.CapStream | provider.CapToolCall,
+		models: []provider.ModelInfo{
+			{Name: "qwen3:8b", ContextWindow: 32768},
+		},
+		chatFn: func(_ context.Context, req provider.ChatRequest) (*provider.ChatResponse, error) {
+			last = req
+			return build(req), nil
+		},
+	}
+	srv, teardown := newTestServer(t, mp, opts...)
+	return srv, &last, teardown
+}
+
+// TestChatCompletions_ToolCallsPreserved verifies that a tool_calls response
+// from the provider surfaces in the response body's message.tool_calls array
+// AND drives finish_reason="tool_calls" — before this fix, tool_calls were
+// silently dropped and finish_reason was hard-coded to "stop".
+func TestChatCompletions_ToolCallsPreserved(t *testing.T) {
+	args := json.RawMessage(`{"city":"Paris"}`)
+	srv, _, teardown := newChatFixtureWithResponse(t, func(req provider.ChatRequest) *provider.ChatResponse {
+		return &provider.ChatResponse{
+			Model:    req.Model,
+			Provider: "ollama",
+			// Content may be empty when the model emits only tool calls;
+			// OpenAI SDK clients tolerate that.
+			Content: "",
+			Done:    true,
+			ToolCalls: []provider.ToolCall{{
+				ID:   "call_abc",
+				Type: "function",
+				Function: provider.ToolCallFunction{
+					Name:      "get_weather",
+					Arguments: args,
+				},
+			}},
+			Usage: provider.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8},
+		}
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model": "ollama/qwen3:8b",
+		"messages": []map[string]string{
+			{"role": "user", "content": "weather in Paris?"},
+		},
+	}
+	rec := doChat(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var out ChatCompletionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Choices) != 1 {
+		t.Fatalf("choices = %d, want 1", len(out.Choices))
+	}
+	if out.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %q, want tool_calls", out.Choices[0].FinishReason)
+	}
+	calls := out.Choices[0].Message.ToolCalls
+	if len(calls) != 1 {
+		t.Fatalf("message.tool_calls = %d, want 1", len(calls))
+	}
+	if calls[0].ID != "call_abc" {
+		t.Errorf("tool_call.id = %q, want call_abc", calls[0].ID)
+	}
+	if calls[0].Type != "function" {
+		t.Errorf("tool_call.type = %q, want function", calls[0].Type)
+	}
+	if calls[0].Function.Name != "get_weather" {
+		t.Errorf("tool_call.function.name = %q, want get_weather", calls[0].Function.Name)
+	}
+	if !bytes.Equal(calls[0].Function.Arguments, args) {
+		t.Errorf("tool_call.function.arguments = %s, want %s", calls[0].Function.Arguments, args)
+	}
+}
+
+// TestChatCompletions_FinishReasonLength exercises the length-cap branch of
+// finish_reason derivation — when MaxTokens is set and the response hit the
+// cap, we return "length" instead of "stop".
+func TestChatCompletions_FinishReasonLength(t *testing.T) {
+	srv, _, teardown := newChatFixtureWithResponse(t, func(req provider.ChatRequest) *provider.ChatResponse {
+		return &provider.ChatResponse{
+			Model:    req.Model,
+			Provider: "ollama",
+			Content:  "truncated",
+			Done:     true,
+			Usage:    provider.Usage{PromptTokens: 3, CompletionTokens: 5, TotalTokens: 8},
+		}
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model": "ollama/qwen3:8b",
+		"messages": []map[string]string{
+			{"role": "user", "content": "write a long essay"},
+		},
+		"max_tokens": 5,
+	}
+	rec := doChat(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var out ChatCompletionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Choices[0].FinishReason != "length" {
+		t.Errorf("finish_reason = %q, want length", out.Choices[0].FinishReason)
+	}
+}
+
+// TestChatCompletions_ToolRoleMessageRoundTrip verifies that a tool-role
+// message's Name and ToolCallID flow through to the provider — they name the
+// tool whose result this message carries and correlate with the assistant's
+// prior invocation, so dropping them breaks multi-turn tool use.
+func TestChatCompletions_ToolRoleMessageRoundTrip(t *testing.T) {
+	srv, last, _, teardown := newChatFixture(t, "thanks")
+	defer teardown()
+
+	body := map[string]any{
+		"model": "ollama/qwen3:8b",
+		"messages": []map[string]any{
+			{"role": "user", "content": "weather?"},
+			{
+				"role":         "tool",
+				"name":         "search",
+				"tool_call_id": "call_1",
+				"content":      `{"results":[]}`,
+			},
+		},
+	}
+	rec := doChat(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if len(last.Messages) != 2 {
+		t.Fatalf("provider saw %d messages, want 2", len(last.Messages))
+	}
+	m := last.Messages[1]
+	if m.Role != "tool" {
+		t.Errorf("message[1].role = %q, want tool", m.Role)
+	}
+	if m.ToolName != "search" {
+		t.Errorf("message[1].ToolName = %q, want search", m.ToolName)
+	}
+	if m.ToolCallID != "call_1" {
+		t.Errorf("message[1].ToolCallID = %q, want call_1", m.ToolCallID)
+	}
+	if m.Content != `{"results":[]}` {
+		t.Errorf("message[1].Content = %q", m.Content)
+	}
+}
+
+// TestChatCompletions_InvalidToolParameters rejects non-object parameter
+// payloads at the edge rather than forwarding garbage to the provider.
+func TestChatCompletions_InvalidToolParameters(t *testing.T) {
+	srv, _, _, teardown := newChatFixture(t, "n/a")
+	defer teardown()
+
+	body := map[string]any{
+		"model": "ollama/qwen3:8b",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+		"tools": []map[string]any{
+			{
+				"type": "function",
+				"function": map[string]any{
+					"name":       "broken",
+					"parameters": "not an object",
+				},
+			},
+		},
+	}
+	rec := doChat(t, srv, body)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400, body=%s", rec.Code, rec.Body.String())
+	}
+	var env errorEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error.Code != "invalid_tool_parameters" {
+		t.Errorf("code = %q, want invalid_tool_parameters", env.Error.Code)
+	}
+}
+
+// TestChatCompletions_429WhenAtCapacity exercises the admission-control
+// boundary: once the semaphore is full, new requests receive 429 with
+// Retry-After: 1 and error code "capacity". Releasing the slot lets the
+// next request succeed.
+func TestChatCompletions_429WhenAtCapacity(t *testing.T) {
+	srv, _, _, teardown := newChatFixture(t, "ok", WithMaxConcurrency(1))
+	defer teardown()
+
+	// Manually fill the single slot so the handler's acquire() returns
+	// false. This mirrors what a real in-flight request would hold.
+	release, ok := srv.semaphore.acquire(provider.PriorityNormal)
+	if !ok {
+		t.Fatal("could not acquire semaphore slot for test setup")
+	}
+
+	body := map[string]any{
+		"model": "ollama/qwen3:8b",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	}
+	rec := doChat(t, srv, body)
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Retry-After"); got != "1" {
+		t.Errorf("Retry-After = %q, want 1", got)
+	}
+	var env errorEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode 429 body: %v", err)
+	}
+	if env.Error.Code != "capacity" {
+		t.Errorf("error.code = %q, want capacity", env.Error.Code)
+	}
+
+	// Release and retry — the next request should succeed.
+	release()
+	rec2 := doChat(t, srv, body)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("after release: status = %d, body=%s", rec2.Code, rec2.Body.String())
+	}
+}
+
+// TestChatCompletions_RequestIDFallback verifies that when the handler is
+// invoked through a path that bypasses requestIDMiddleware, the response ID
+// still gets a non-empty suffix. This guards against a bug where bypass
+// paths would emit "chatcmpl_" verbatim.
+func TestChatCompletions_RequestIDFallback(t *testing.T) {
+	srv, _, _, teardown := newChatFixture(t, "ok")
+	defer teardown()
+
+	// Build a mux directly (no middleware chain) so requestIDMiddleware
+	// never runs. This is the bypass path the fallback protects.
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST "+srv.basePath+"/chat/completions", srv.handleChatCompletions)
+
+	body := map[string]any{
+		"model": "ollama/qwen3:8b",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	var out ChatCompletionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.ID == "chatcmpl_" {
+		t.Errorf("id = %q, want non-empty suffix via fallback", out.ID)
+	}
+	if !strings.HasPrefix(out.ID, "chatcmpl_") {
+		t.Errorf("id = %q, want chatcmpl_ prefix", out.ID)
+	}
+	if len(out.ID) <= len("chatcmpl_") {
+		t.Errorf("id = %q, want suffix longer than empty", out.ID)
+	}
+}
+
 // TestChatCompletions_AffinityKeyForwarded verifies that a request with
 // x_affinity_key set completes successfully. The provider.ChatRequest that
 // the mock receives does not carry AffinityKey (plumbing stays at the
@@ -330,6 +630,11 @@ func TestStopSequences_UnmarshalJSON(t *testing.T) {
 		{"single", `"END"`, []string{"END"}},
 		{"empty-string", `""`, nil},
 		{"null", `null`, nil},
+		// Array branch: empty strings are filtered out so providers never
+		// see a nil-like sentinel that would match at every token.
+		{"array-with-empties", `["", "b", ""]`, []string{"b"}},
+		{"array-all-empty", `[""]`, nil},
+		{"array-empty", `[]`, nil},
 	}
 	for _, tc := range cases {
 		tc := tc
