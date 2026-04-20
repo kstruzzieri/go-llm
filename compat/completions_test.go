@@ -567,6 +567,163 @@ func TestPromptUnion_UnmarshalJSON_Invalid(t *testing.T) {
 	}
 }
 
+// TestCompletions_FIMBudgetZeroPrefixPreservesOriginal guards against a
+// regression where applyFIMBudget silently emptied the FIM prefix when
+// budgetForProfile returned a zero prefix budget (e.g. max_tokens=1): the old
+// code computed keepChars=0 and sliced prompt[len(prompt)-0:] -> "". The fix
+// preserves the original prefix and logs a breadcrumb.
+func TestCompletions_FIMBudgetZeroPrefixPreservesOriginal(t *testing.T) {
+	var seenPrompt, seenSuffix string
+	mp := &mockProvider{
+		name: "ollama",
+		caps: provider.CapGenerate | provider.CapInsert | provider.CapStream,
+		models: []provider.ModelInfo{
+			{Name: "qwen3:8b", ContextWindow: 32768, Capabilities: []string{"insert"}},
+		},
+		genFn: func(_ context.Context, req provider.GenerateRequest) (*provider.GenerateResponse, error) {
+			seenPrompt = req.Prompt
+			seenSuffix = req.Suffix
+			return &provider.GenerateResponse{Model: req.Model, Provider: "ollama", Response: "ok", Done: true}, nil
+		},
+	}
+	srv, teardown := newTestServer(t, mp)
+	defer teardown()
+
+	longPrefix := strings.Repeat("A", 400)
+	body := `{"model":"ollama/qwen3:8b","prompt":"` + longPrefix + `","suffix":"B","max_tokens":1,"x_language":"python"}`
+	rec := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if seenPrompt == "" {
+		t.Fatal("provider received empty prompt — budget truncated to zero silently")
+	}
+	if seenSuffix == "" {
+		t.Fatal("provider received empty suffix")
+	}
+}
+
+// TestCompletions_StopFiltersEmptyStrings covers the toModelOptions fix:
+// {"stop": ""} and {"stop": ["",""]} must not forward "" to the provider,
+// which Ollama interprets as "stop immediately" and silently truncates
+// generation.
+func TestCompletions_StopFiltersEmptyStrings(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"stop_as_empty_string", `{"model":"ollama/qwen3:8b","prompt":"p","stop":""}`},
+		{"stop_as_array_of_empty", `{"model":"ollama/qwen3:8b","prompt":"p","stop":["",""]}`},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var seenStop []string
+			mp := &mockProvider{
+				name: "ollama",
+				caps: provider.CapGenerate | provider.CapStream,
+				models: []provider.ModelInfo{
+					{Name: "qwen3:8b", ContextWindow: 32768},
+				},
+				genFn: func(_ context.Context, req provider.GenerateRequest) (*provider.GenerateResponse, error) {
+					seenStop = req.Options.Stop
+					return &provider.GenerateResponse{Model: req.Model, Provider: "ollama", Response: "x", Done: true}, nil
+				},
+			}
+			srv, teardown := newTestServer(t, mp)
+			defer teardown()
+			rec := httptest.NewRecorder()
+			srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(tc.body)))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			if len(seenStop) != 0 {
+				t.Errorf("provider received non-empty Stop after empty-only filter: %+v", seenStop)
+			}
+		})
+	}
+}
+
+// TestCompletions_FIMDryRunDoesNotTruncate verifies that applyFIMBudget runs
+// AFTER the dry-run short-circuit: on a dry-run, the mutation is skipped
+// entirely (the provider never executes) and the metadata-only response
+// carries an empty choice.
+func TestCompletions_FIMDryRunDoesNotTruncate(t *testing.T) {
+	var called int32
+	mp := &mockProvider{
+		name: "ollama",
+		caps: provider.CapGenerate | provider.CapInsert | provider.CapStream,
+		models: []provider.ModelInfo{
+			{Name: "qwen3:8b", ContextWindow: 32768, Capabilities: []string{"insert"}},
+		},
+		genFn: func(context.Context, provider.GenerateRequest) (*provider.GenerateResponse, error) {
+			atomic.AddInt32(&called, 1)
+			return nil, nil
+		},
+	}
+	srv, teardown := newTestServer(t, mp)
+	defer teardown()
+	long := strings.Repeat("A", 2000)
+	body := `{"model":"ollama/qwen3:8b","prompt":"` + long + `","suffix":"x","max_tokens":4,"x_dry_run":true}`
+	rec := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/completions", strings.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(&called); got != 0 {
+		t.Fatalf("provider invoked on dry-run (calls=%d)", got)
+	}
+	var resp CompletionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.RouteInfo == nil {
+		t.Fatal("dry-run missing route info")
+	}
+	// Sanity: dry-run should not itself write generated text.
+	if len(resp.Choices) != 1 || resp.Choices[0].Text != "" {
+		t.Errorf("dry-run emitted non-empty text: %+v", resp.Choices)
+	}
+}
+
+// TestCompletions_DryRunReportsWasSticky verifies that writeCompletionDryRun
+// surfaces RoutePlan.WasSticky() on the wire. The handler-level integration
+// path (Router.Route with req.DryRun=true) deliberately bypasses the sticky
+// cache in the Router (see router.go step 6: `req.AffinityKey != "" && !req.DryRun`),
+// so integration testing is not possible today. We test the wire-shape
+// responsibility of the compat layer directly: given a plan whose
+// SetWasSticky(true) was called, writeCompletionDryRun must populate
+// RouteInfo.WasSticky. Without the accessor+field wiring this fix added,
+// RouteInfo.WasSticky would always be false regardless of plan state.
+func TestCompletions_DryRunReportsWasSticky(t *testing.T) {
+	key := provider.ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+	plan := &provider.RoutePlan{
+		Profile: &provider.ModelProfile{Key: key, Family: "qwen3"},
+		Score:   0.75,
+		Reason:  "test",
+	}
+	plan.SetWasSticky(true)
+
+	rec := httptest.NewRecorder()
+	r := httptest.NewRequest(http.MethodPost, "/v1/completions", nil)
+	writeCompletionDryRun(rec, r, plan)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp CompletionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.RouteInfo == nil {
+		t.Fatal("dry-run missing route info")
+	}
+	if !resp.RouteInfo.WasSticky {
+		t.Errorf("expected WasSticky=true, got RouteInfo=%+v", resp.RouteInfo)
+	}
+}
+
 func TestPromptUnion_String(t *testing.T) {
 	cases := []struct {
 		name string

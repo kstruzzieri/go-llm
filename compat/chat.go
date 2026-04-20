@@ -668,7 +668,10 @@ func fallbackRequestID() string {
 // toModelOptions maps the OpenAI sampling fields onto provider.ModelOptions.
 // Pointer inputs pass through unchanged. maxTokens is stored as NumPredict
 // (Ollama's convention); nil leaves NumPredict at zero so the provider picks
-// a default. Empty stop slices are normalized to nil.
+// a default. Empty stop slices are normalized to nil. Empty-string stop
+// entries are filtered out: Ollama treats "" as "stop immediately" which
+// would truncate generation to zero/one token with finish_reason="stop",
+// silently masking a caller mistake ({"stop": ""} or {"stop": [""]}).
 func toModelOptions(temperature, topP *float64, maxTokens *int, stop []string) provider.ModelOptions {
 	opts := provider.ModelOptions{
 		Temperature: temperature,
@@ -678,7 +681,15 @@ func toModelOptions(temperature, topP *float64, maxTokens *int, stop []string) p
 		opts.NumPredict = *maxTokens
 	}
 	if len(stop) > 0 {
-		opts.Stop = stop
+		filtered := make([]string, 0, len(stop))
+		for _, s := range stop {
+			if s != "" {
+				filtered = append(filtered, s)
+			}
+		}
+		if len(filtered) > 0 {
+			opts.Stop = filtered
+		}
 	}
 	return opts
 }

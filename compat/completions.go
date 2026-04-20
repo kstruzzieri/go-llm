@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -149,9 +150,12 @@ func (p PromptUnion) String() string {
 //  5. Acquire a concurrency slot using the resolved priority — AFTER the
 //     FIM/generate branch sets rr.Priority so FIM gets its elevated slot.
 //  6. Route via Router.Route. On error, map via writeCompatError.
-//  7. FIM branch: apply the adaptive FIM budget to the routing request IN
+//  7. If DryRun, render route metadata with empty choice text and return.
+//     This runs BEFORE applyFIMBudget so the metadata describes the plan
+//     as it would actually be routed, not a budget-mutated copy that never
+//     executes.
+//  8. FIM branch: apply the adaptive FIM budget to the routing request IN
 //     PLACE before execution so the provider receives trimmed prefix/suffix.
-//  8. If DryRun, render route metadata with empty choice text and return.
 //  9. Execute via RoutePlan.ExecuteGenerate and render the OpenAI response.
 func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	if s.router == nil {
@@ -220,6 +224,15 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Dry-run short-circuits BEFORE applyFIMBudget so the returned route
+	// metadata reflects the plan that would actually be routed (unmutated
+	// prefix/suffix). Reporting a budget-mutated plan that never executes
+	// would be phantom state.
+	if req.DryRun {
+		writeCompletionDryRun(w, r, plan)
+		return
+	}
+
 	// Apply the adaptive FIM budget in place on the plan's request snapshot so
 	// buildGenerateRequest picks up the trimmed prefix/suffix. No-op for the
 	// generate branch (suffix is empty).
@@ -227,10 +240,6 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		applyFIMBudget(plan, req.Language, prompt, req.Suffix, req.MaxTokens)
 	}
 
-	if req.DryRun {
-		writeCompletionDryRun(w, r, plan)
-		return
-	}
 	resp, err := plan.ExecuteGenerate(r.Context())
 	if err != nil {
 		writeCompatError(w, err)
@@ -240,6 +249,8 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	// Derive finish_reason from usage: "length" when MaxTokens was set and the
 	// response exhausted the budget, else "stop". We do not emit "tool_calls"
 	// here — the completions endpoint is not tool-aware.
+	// TODO(#48): Ollama's done_reason isn't surfaced by provider — finish_reason
+	// may misreport "stop" when the upstream actually hit num_predict.
 	finish := "stop"
 	if req.MaxTokens != nil && *req.MaxTokens > 0 && resp.Usage.CompletionTokens >= *req.MaxTokens {
 		finish = "length"
@@ -307,6 +318,7 @@ func writeCompletionDryRun(w http.ResponseWriter, r *http.Request, plan *provide
 		RouteInfo: &RouteInfoExt{
 			ActualModel:  plan.Profile.Key.String(),
 			PlannedModel: plan.Profile.Key.String(),
+			WasSticky:    plan.WasSticky(),
 			Score:        plan.Score,
 			Reason:       plan.Reason,
 		},
@@ -340,15 +352,26 @@ func applyFIMBudget(plan *provider.RoutePlan, language, prompt, suffix string, m
 	prefixTok := (len(prompt) / 4) + 1
 	suffixTok := (len(suffix) / 4) + 1
 	b := budgetForProfile(plan.Profile.Family, language, overridePct, prefixTok, suffixTok, *maxTokens)
-	if b.Prefix < prefixTok {
+	// Guard against zero/negative budgets (e.g. max_tokens=1): without this,
+	// keepChars=0 would silently set Prompt/Suffix to "" and the provider
+	// would see an empty FIM request. Preserve the original content instead
+	// and log one breadcrumb per occurrence so the misconfiguration is
+	// observable.
+	if b.Prefix <= 0 {
+		log.Printf("compat: applyFIMBudget: zero prefix budget (max_tokens=%d, family=%s, lang=%s); preserving original prefix",
+			*maxTokens, plan.Profile.Family, language)
+	} else if b.Prefix < prefixTok {
 		keepChars := b.Prefix * 4
-		if keepChars < len(prompt) {
+		if keepChars > 0 && keepChars < len(prompt) {
 			plan.Request.Prompt = prompt[len(prompt)-keepChars:]
 		}
 	}
-	if b.Suffix < suffixTok {
+	if b.Suffix <= 0 {
+		log.Printf("compat: applyFIMBudget: zero suffix budget (max_tokens=%d, family=%s, lang=%s); preserving original suffix",
+			*maxTokens, plan.Profile.Family, language)
+	} else if b.Suffix < suffixTok {
 		keepChars := b.Suffix * 4
-		if keepChars < len(suffix) {
+		if keepChars > 0 && keepChars < len(suffix) {
 			plan.Request.Suffix = suffix[:keepChars]
 		}
 	}
