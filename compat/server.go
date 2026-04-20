@@ -44,8 +44,9 @@ type Server struct {
 	// arrives after shutdown begins. closeOnce is a separate primitive that
 	// makes the Close body itself idempotent; it cannot replace closed because
 	// handlers need a cheap readable flag, not a run-once action. startedAt is
-	// written once at server start and is read-only thereafter, so it does not
-	// require mu.
+	// written once in New so handlers invoked via buildHandler (tests,
+	// embedded callers) see a meaningful uptime even when ListenAndServe has
+	// not run; it is read-only thereafter and does not require mu.
 	mu        sync.Mutex
 	closed    bool
 	closeOnce sync.Once
@@ -66,6 +67,7 @@ func New(router *provider.Router, registry *provider.ModelRegistry, providers *p
 		maxConcurrency:    4,
 		embeddingsEnabled: false,
 		shutdownTimeout:   30 * time.Second,
+		startedAt:         time.Now(),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -88,7 +90,6 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return http.ErrServerClosed
 	}
 	s.httpServer = httpServer
-	s.startedAt = time.Now()
 	s.mu.Unlock()
 
 	// The shutdown goroutine must exit when EITHER ctx is canceled OR the
@@ -150,6 +151,7 @@ func (s *Server) Close() error {
 //     mid-stream panics) sees the same *statusRecorder that logging installed.
 func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET "+s.basePath+"/status", s.handleStatus)
 
 	var handler http.Handler = mux
 	handler = recoveryMiddleware(handler)
