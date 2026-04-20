@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -349,9 +350,12 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 //  5. For each chunk, emit a ChatCompletionChunk with the qualified model
 //     ID and, on the Done chunk, a derived finish_reason matching the
 //     non-streaming branch's logic (tool_calls > length > stop).
-//  6. After ExecuteChatStream returns, emit "data: [DONE]" if the stream
-//     has been committed. If the failure happened before the first chunk,
-//     surface a JSON error instead.
+//  6. After ExecuteChatStream returns, emit "data: [DONE]" only on clean
+//     completion. If the failure happened before the first chunk, surface
+//     a JSON error envelope. If the failure happened mid-stream, skip the
+//     [DONE] sentinel so clients can detect premature EOS via its absence;
+//     context.Canceled (client disconnect) is treated as normal and its
+//     log is suppressed to prevent spam.
 func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr provider.RoutingRequest) {
 	rr.RequiredCaps |= provider.CapStream
 
@@ -412,13 +416,20 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr prov
 		// If the failure happened BEFORE any chunk was delivered, the SSE
 		// writer never committed the 200 status — so we can still surface a
 		// JSON error envelope. Otherwise the stream is already live on the
-		// wire and the only correct action is to log and terminate with
-		// [DONE]. OpenAI SDKs tolerate a missing final event.
+		// wire and we must NOT emit "data: [DONE]" — that is OpenAI's
+		// success sentinel, and emitting it under error conditions silently
+		// signals success. Skipping it lets SDKs detect premature EOS via
+		// the missing terminator.
 		if !sw.started {
 			writeCompatError(w, streamErr)
 			return
 		}
-		log.Printf("compat: chat stream error rid=%s: %v", requestIDFrom(r.Context()), streamErr)
+		// Client disconnect is normal (e.g., IDE cancels completion on every
+		// keystroke) — suppress the log to prevent spam.
+		if !errors.Is(streamErr, context.Canceled) {
+			log.Printf("compat: chat stream error rid=%s: %v", requestIDFrom(r.Context()), streamErr)
+		}
+		return
 	}
 
 	_ = sw.writeDone()

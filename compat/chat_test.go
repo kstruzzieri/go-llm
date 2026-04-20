@@ -442,6 +442,170 @@ func TestChatCompletions_Streaming_ErrorBeforeFirstChunk(t *testing.T) {
 	}
 }
 
+// TestChatCompletions_Streaming_ErrorAfterFirstChunk guards the HIGH-severity
+// silent-truncation fix: when the provider emits one chunk successfully then
+// fails mid-stream (non-cancellation error), the handler MUST NOT emit
+// "data: [DONE]". The [DONE] sentinel is OpenAI's success signal — emitting
+// it under error conditions silently masks the truncation. Its absence lets
+// OpenAI SDKs detect premature EOS.
+func TestChatCompletions_Streaming_ErrorAfterFirstChunk(t *testing.T) {
+	srv, teardown := newStreamingServer(t, func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		if err := fn(provider.ChatResponse{Model: req.Model, Content: "partial"}); err != nil {
+			return err
+		}
+		return errors.New("upstream collapsed")
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	}
+	rec := doChatRequest(t, srv, body)
+
+	// Status 200 + event-stream headers are committed because the first chunk
+	// was written successfully. The error occurs after commit.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (headers committed on first chunk), body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("content-type = %q, want text/event-stream", ct)
+	}
+
+	text := rec.Body.String()
+	// First chunk was delivered before the failure.
+	if !strings.Contains(text, `"content":"partial"`) {
+		t.Errorf("body missing first chunk payload %q: %q", `"content":"partial"`, text)
+	}
+	// Critical assertion: no [DONE] sentinel. Its absence is the wire-level
+	// signal of premature EOS that clients rely on.
+	if strings.Contains(text, "data: [DONE]") {
+		t.Errorf("body unexpectedly contains data: [DONE] after mid-stream error: %q", text)
+	}
+}
+
+// TestChatCompletions_Streaming_ClientDisconnect verifies the handler returns
+// cleanly when the caller's context is canceled mid-stream (IDE closing the
+// completion, e.g., on the next keystroke). The semaphore slot must be
+// released so subsequent requests are not blocked — we probe this by
+// acquiring all slots after the handler returns.
+func TestChatCompletions_Streaming_ClientDisconnect(t *testing.T) {
+	// Use a single-slot semaphore so we can prove the slot was released by
+	// re-acquiring it after the handler returns.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, teardown := newStreamingServer(t, func(streamCtx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		// Emit one chunk, then cancel the request context and return the
+		// cancellation error — simulating a client disconnect detected by the
+		// provider after it had already pushed a chunk.
+		if err := fn(provider.ChatResponse{Model: req.Model, Content: "tick"}); err != nil {
+			return err
+		}
+		cancel()
+		return context.Canceled
+	}, WithMaxConcurrency(1))
+	defer teardown()
+
+	buf, err := json.Marshal(map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(buf)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Should not panic and should return (not hang).
+	srv.buildHandler().ServeHTTP(rec, req)
+
+	// The first chunk made it onto the wire; no [DONE] should follow because
+	// the stream was aborted.
+	text := rec.Body.String()
+	if !strings.Contains(text, `"content":"tick"`) {
+		t.Errorf("body missing first chunk: %q", text)
+	}
+	if strings.Contains(text, "data: [DONE]") {
+		t.Errorf("body contains data: [DONE] after cancellation: %q", text)
+	}
+
+	// Probe semaphore release: with max concurrency 1, we must be able to
+	// acquire a fresh slot now that the handler has returned.
+	release, ok := srv.semaphore.acquire(provider.PriorityNormal)
+	if !ok {
+		t.Fatal("semaphore slot not released after client-disconnect — handler leaked a slot")
+	}
+	release()
+}
+
+// TestChatCompletions_Streaming_ProviderWithoutCapStream verifies that a
+// streaming request routed through a model that lacks CapStream is rejected
+// cleanly — the router's capability gate eliminates the candidate BEFORE
+// newSSEWriter is called, so the client sees a JSON error envelope (not a
+// partial SSE stream). This proves the capability gate closes before any SSE
+// bytes are committed.
+//
+// The model profile's Caps come from the static catalog or runtime
+// ModelInfo.Capabilities (merged in model_registry.go). Using a model that is
+// NOT in the catalog and providing no runtime Capabilities yields profile.Caps
+// == 0, which fails the gate when RequiredCaps includes CapChat | CapStream.
+func TestChatCompletions_Streaming_ProviderWithoutCapStream(t *testing.T) {
+	mp := &mockProvider{
+		name: "ollama",
+		caps: provider.CapChat,
+		models: []provider.ModelInfo{
+			// No Capabilities set, no catalog match for this family — so
+			// profile.Caps stays 0 and the capability gate rejects when the
+			// router requires CapStream.
+			{Name: "unlisted-model:1b", ContextWindow: 32768},
+		},
+	}
+	srv, teardown := newTestServer(t, mp)
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/unlisted-model:1b",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	}
+	rec := doChatRequest(t, srv, body)
+
+	if rec.Code == http.StatusOK {
+		t.Fatalf("status = 200, want non-200 (router should reject before SSE headers): body=%s", rec.Body.String())
+	}
+	// JSON envelope, not text/event-stream — the lazy-start SSE writer was
+	// never constructed because Route returned an error first.
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q, want application/json (JSON error envelope, not partial SSE)", ct)
+	}
+	var env errorEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if env.Error.Code == "" {
+		t.Errorf("error.code is empty, want non-empty")
+	}
+	// Pin the specific code: the router returns ErrNoViableCandidate for
+	// capability-gated rejections, which statusForCompatError maps to
+	// "no_viable_candidate" with status 400.
+	if env.Error.Code != "no_viable_candidate" {
+		t.Errorf("error.code = %q, want no_viable_candidate", env.Error.Code)
+	}
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (ErrNoViableCandidate)", rec.Code)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Compatibility tests
 // ---------------------------------------------------------------------------
