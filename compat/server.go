@@ -137,9 +137,24 @@ func (s *Server) Close() error {
 	return err
 }
 
-// buildHandler constructs the HTTP handler. Task 2 mounts a 404-only mux so
-// the lifecycle tests pass; later tasks replace this with real routes.
+// buildHandler constructs the HTTP handler. Routes are registered on the mux
+// in later tasks; the returned handler wraps the mux in (outermost first)
+// CORS → request-ID → logging → recovery → mux. Empty corsOrigin disables CORS.
+//
+// Order matters:
+//   - request-ID is outside CORS-preflight short-circuit so OPTIONS responses
+//     still carry X-Request-Id for correlation.
+//   - logging wraps recovery so panics (converted to 500s by recovery) are
+//     still recorded in the access log with the correct status.
+//   - recovery is innermost so its statusRecorder-aware writer check (for
+//     mid-stream panics) sees the same *statusRecorder that logging installed.
 func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
-	return mux
+
+	var handler http.Handler = mux
+	handler = recoveryMiddleware(handler)
+	handler = loggingMiddleware(handler)
+	handler = requestIDMiddleware(handler)
+	handler = corsMiddleware(handler, s.corsOrigin)
+	return handler
 }
