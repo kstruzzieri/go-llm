@@ -1,6 +1,9 @@
 package compat
 
-import "time"
+import (
+	"path"
+	"time"
+)
 
 // Option configures a Server at construction time.
 type Option func(*Server)
@@ -72,9 +75,8 @@ func WithEmbeddings(enabled bool) Option {
 }
 
 // WithShutdownTimeout sets how long Close waits for in-flight requests.
-// Default 30 seconds. Values <= 0 are ignored (the default is preserved);
-// this matches the zero-value semantics of time.Duration so callers can pass
-// a configured duration without a conditional wrap.
+// Default 30 seconds. Values <= 0 are treated as no-op so the default set by
+// New survives (callers can wire up optional configuration without a branch).
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(s *Server) {
 		if d > 0 {
@@ -83,14 +85,22 @@ func WithShutdownTimeout(d time.Duration) Option {
 	}
 }
 
-// normalizeBase trims trailing slashes, forces a leading slash when non-empty,
-// and maps empty or "/" to "".
+// normalizeBase canonicalizes an HTTP base path prefix:
+//   - empty input returns ""
+//   - a leading slash is added when missing
+//   - consecutive slashes anywhere in the path are collapsed (path.Clean)
+//   - a trailing slash (and "/" or "//..." that collapses to "/") is mapped to ""
+//     so callers can join "basePath + /route" unambiguously
 func normalizeBase(prefix string) string {
-	if prefix != "" && prefix[0] != '/' {
+	if prefix == "" {
+		return ""
+	}
+	if prefix[0] != '/' {
 		prefix = "/" + prefix
 	}
-	for len(prefix) > 0 && prefix[len(prefix)-1] == '/' {
-		prefix = prefix[:len(prefix)-1]
+	prefix = path.Clean(prefix)
+	if prefix == "/" {
+		return ""
 	}
 	return prefix
 }

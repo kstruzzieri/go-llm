@@ -17,6 +17,12 @@ func TestNormalizeBase(t *testing.T) {
 		"///":      "",
 		"/v1//":    "/v1",
 		"api/v1":   "/api/v1",
+		// Regression guard: consecutive slashes anywhere must be collapsed,
+		// not just trailing. Previous hand-rolled trim left these uncleaned.
+		"//foo":       "/foo",
+		"///api":      "/api",
+		"/a//b":       "/a/b",
+		"//foo/bar//": "/foo/bar",
 	}
 	for in, want := range cases {
 		if got := normalizeBase(in); got != want {
@@ -34,10 +40,24 @@ func TestWithAddr(t *testing.T) {
 }
 
 func TestWithBasePath_Normalizes(t *testing.T) {
-	s := &Server{}
-	WithBasePath("/openai/v1/")(s)
-	if s.basePath != "/openai/v1" {
-		t.Fatalf("basePath = %q, want %q", s.basePath, "/openai/v1")
+	cases := []struct {
+		in, want string
+	}{
+		{"/openai/v1/", "/openai/v1"},
+		{"openai/v1", "/openai/v1"},
+		{"//foo", "/foo"},
+		{"/a//b", "/a/b"},
+		{"", ""},
+		{"/", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.in, func(t *testing.T) {
+			s := &Server{}
+			WithBasePath(tc.in)(s)
+			if s.basePath != tc.want {
+				t.Fatalf("basePath = %q, want %q", s.basePath, tc.want)
+			}
+		})
 	}
 }
 
@@ -129,11 +149,13 @@ func TestWithShutdownTimeout_ZeroOrNegativeIgnored(t *testing.T) {
 	// accidentally zero the field.
 	baseline := 30 * time.Second
 	for _, bad := range []time.Duration{0, -1, -500 * time.Millisecond} {
-		s := &Server{shutdownTimeout: baseline}
-		WithShutdownTimeout(bad)(s)
-		if s.shutdownTimeout != baseline {
-			t.Fatalf("WithShutdownTimeout(%s) mutated field to %s, want %s",
-				bad, s.shutdownTimeout, baseline)
-		}
+		t.Run(bad.String(), func(t *testing.T) {
+			s := &Server{shutdownTimeout: baseline}
+			WithShutdownTimeout(bad)(s)
+			if s.shutdownTimeout != baseline {
+				t.Fatalf("WithShutdownTimeout(%s) mutated field to %s, want %s",
+					bad, s.shutdownTimeout, baseline)
+			}
+		})
 	}
 }
