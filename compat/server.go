@@ -37,6 +37,11 @@ type Server struct {
 	embeddingsEnabled bool
 	shutdownTimeout   time.Duration
 
+	// semaphore bounds concurrent in-flight requests and reserves a lane for
+	// PriorityHigh+ traffic. Initialized in New after options apply so that
+	// WithMaxConcurrency has already been observed.
+	semaphore *semaphore
+
 	httpServer *http.Server
 	startedAt  time.Time
 
@@ -72,6 +77,8 @@ func New(router *provider.Router, registry *provider.ModelRegistry, providers *p
 	for _, opt := range opts {
 		opt(s)
 	}
+	// newSemaphore normalizes max < 1 to 1 so we do not need a guard here.
+	s.semaphore = newSemaphore(s.maxConcurrency)
 	return s
 }
 
@@ -153,6 +160,7 @@ func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+s.basePath+"/status", s.handleStatus)
 	mux.HandleFunc("GET "+s.basePath+"/models", s.handleModels)
+	mux.HandleFunc("POST "+s.basePath+"/chat/completions", s.handleChatCompletions)
 
 	var handler http.Handler = mux
 	handler = recoveryMiddleware(handler)
