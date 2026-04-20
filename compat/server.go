@@ -1,12 +1,19 @@
 package compat
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+// ErrNonLoopbackRequiresTLS is returned from ListenAndServe when the bind
+// address is not a loopback and WithTLS was not configured.
+var ErrNonLoopbackRequiresTLS = errors.New("compat: non-loopback address requires TLS (use WithTLS)")
 
 // Server is the OpenAI-compatible HTTP façade over a provider.Router.
 //
@@ -42,4 +49,97 @@ type Server struct {
 	mu        sync.Mutex
 	closed    bool
 	closeOnce sync.Once
+}
+
+// New constructs a Server with the given router, model registry, and provider
+// registry. These may be nil in tests that exercise only the bare HTTP
+// lifecycle; real callers must supply all three. Options override defaults.
+func New(router *provider.Router, registry *provider.ModelRegistry, providers *provider.Registry, opts ...Option) *Server {
+	s := &Server{
+		router:            router,
+		registry:          registry,
+		providers:         providers,
+		addr:              "127.0.0.1:18741",
+		basePath:          "/v1",
+		corsOrigin:        "*",
+		aliases:           map[string]string{},
+		maxConcurrency:    4,
+		embeddingsEnabled: false,
+		shutdownTimeout:   30 * time.Second,
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// ListenAndServe starts the HTTP server and blocks until ctx is cancelled or
+// an unrecoverable error occurs. Non-loopback bind requires TLS.
+func (s *Server) ListenAndServe(ctx context.Context) error {
+	if s.tlsCert == "" && !isLoopback(s.addr) {
+		return fmt.Errorf("%w: addr=%q", ErrNonLoopbackRequiresTLS, s.addr)
+	}
+
+	httpServer := &http.Server{Addr: s.addr, Handler: s.buildHandler()}
+
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return http.ErrServerClosed
+	}
+	s.httpServer = httpServer
+	s.startedAt = time.Now()
+	s.mu.Unlock()
+
+	// The shutdown goroutine must exit when EITHER ctx is canceled OR the
+	// serve call returns early (e.g. port already in use). Without the served
+	// channel, an early error leaks the goroutine for the lifetime of ctx.
+	served := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.Done():
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
+			defer cancel()
+			_ = httpServer.Shutdown(shutdownCtx)
+		case <-served:
+		}
+	}()
+
+	var err error
+	if s.tlsCert != "" {
+		err = httpServer.ListenAndServeTLS(s.tlsCert, s.tlsKey)
+	} else {
+		err = httpServer.ListenAndServe()
+	}
+	close(served)
+	if errors.Is(err, http.ErrServerClosed) {
+		return nil
+	}
+	return err
+}
+
+// Close shuts down the server. Idempotent. Subsequent ListenAndServe calls
+// after Close return http.ErrServerClosed.
+func (s *Server) Close() error {
+	var err error
+	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		srv := s.httpServer
+		s.mu.Unlock()
+		if srv == nil {
+			return
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), s.shutdownTimeout)
+		defer cancel()
+		err = srv.Shutdown(shutdownCtx)
+	})
+	return err
+}
+
+// buildHandler constructs the HTTP handler. Task 2 mounts a 404-only mux so
+// the lifecycle tests pass; later tasks replace this with real routes.
+func (s *Server) buildHandler() http.Handler {
+	mux := http.NewServeMux()
+	return mux
 }
