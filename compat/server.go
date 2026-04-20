@@ -152,6 +152,7 @@ func (s *Server) Close() error {
 func (s *Server) buildHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET "+s.basePath+"/status", s.handleStatus)
+	mux.HandleFunc("GET "+s.basePath+"/models", s.handleModels)
 
 	var handler http.Handler = mux
 	handler = recoveryMiddleware(handler)
