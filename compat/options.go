@@ -72,7 +72,9 @@ func WithEmbeddings(enabled bool) Option {
 }
 
 // WithShutdownTimeout sets how long Close waits for in-flight requests.
-// Default 30 seconds.
+// Default 30 seconds. Values <= 0 are ignored (the default is preserved);
+// this matches the zero-value semantics of time.Duration so callers can pass
+// a configured duration without a conditional wrap.
 func WithShutdownTimeout(d time.Duration) Option {
 	return func(s *Server) {
 		if d > 0 {

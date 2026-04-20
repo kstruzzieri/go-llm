@@ -26,7 +26,11 @@ type Server struct {
 
 	httpServer *http.Server
 	startedAt  time.Time
-	mu         sync.Mutex
-	closed     bool
-	closeOnce  sync.Once
+
+	// mu guards closed. closeOnce enforces single-shot Close semantics;
+	// startedAt is written once at server start and is read-only thereafter,
+	// so it does not require mu.
+	mu        sync.Mutex
+	closed    bool
+	closeOnce sync.Once
 }
