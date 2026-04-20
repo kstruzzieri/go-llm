@@ -2,6 +2,7 @@ package compat
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"sort"
 	"time"
@@ -60,6 +61,19 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 
 	profiles, err := s.registry.All(r.Context())
 	if err != nil {
+		// ModelRegistry.All does not wrap the underlying cancellation with %w
+		// when every provider fails, so errors.Is(err, context.Canceled) on
+		// the aggregate "all N providers failed" string returns false. Detect
+		// cancellation directly via the request context and route through
+		// writeCompatError so it maps to 499 (client closed) or 504 (deadline)
+		// instead of a misleading 502. For genuine registry failures, keep the
+		// specific registry_error code and log the cause so operators can see
+		// why the list endpoint is flapping.
+		if ctxErr := r.Context().Err(); ctxErr != nil {
+			writeCompatError(w, ctxErr)
+			return
+		}
+		log.Printf("compat: /v1/models registry error: %v", err)
 		writeError(w, http.StatusBadGateway, "registry_error", err.Error())
 		return
 	}
@@ -80,12 +94,21 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Track canonical IDs and UpdatedAt so alias entries can reuse the
-	// target's UpdatedAt instead of falling back to zero.
+	// target's UpdatedAt instead of falling back to zero. We also keep a
+	// secondary index keyed by bare model name so unqualified alias targets
+	// (e.g. "gpt-3.5-turbo" -> "qwen3:8b") can still find a canonical
+	// timestamp. Ambiguous bare names — the same model served by more than one
+	// provider — are dropped below so we do not arbitrarily pick one
+	// provider's UpdatedAt.
 	canonicalUpdatedAt := make(map[string]time.Time, len(profiles))
+	bareCount := make(map[string]int, len(profiles))
+	bareUpdatedAt := make(map[string]time.Time, len(profiles))
 
 	for _, p := range profiles {
 		id := p.Key.String()
 		canonicalUpdatedAt[id] = p.UpdatedAt
+		bareCount[p.Key.Model]++
+		bareUpdatedAt[p.Key.Model] = p.UpdatedAt
 
 		obj := ModelObject{
 			ID:            id,
@@ -105,6 +128,17 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out = append(out, obj)
+	}
+
+	// Drop ambiguous bare-name entries: when a bare model name is advertised
+	// by more than one provider, we cannot pick a single canonical UpdatedAt
+	// without silently privileging one provider over another. Deleting the
+	// key here makes unqualified alias Created fall back to 0, which is more
+	// honest than an arbitrary choice.
+	for model, n := range bareCount {
+		if n > 1 {
+			delete(bareUpdatedAt, model)
+		}
 	}
 
 	// Deterministic alias ordering: Go map iteration is randomized, so sort
@@ -130,13 +164,23 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Use the canonical target's UpdatedAt when we can resolve it; fall
-		// back to 0 otherwise. The plan does not require a specific semantic
-		// for alias Created, so linking the alias's timestamp to the profile
-		// it points at keeps clients' staleness checks coherent when they
-		// follow x_alias_for.
+		// back to 0 otherwise. Disambiguation rules:
+		//   1. Qualified target (provider/model): look up the canonical entry
+		//      directly and use its UpdatedAt.
+		//   2. Unqualified target (bare model) with exactly one canonical
+		//      provider advertising that model: use that canonical's
+		//      UpdatedAt.
+		//   3. Unqualified target whose bare name is advertised by multiple
+		//      providers: Created stays 0. Picking one provider's timestamp
+		//      arbitrarily would mislead clients that follow x_alias_for to a
+		//      different provider's canonical entry.
 		var created int64
 		if ts, ok := canonicalUpdatedAt[aliasFor]; ok {
 			created = ts.Unix()
+		} else if tk.Provider == "" {
+			if ts, ok := bareUpdatedAt[tk.Model]; ok {
+				created = ts.Unix()
+			}
 		}
 
 		out = append(out, ModelObject{
@@ -155,11 +199,13 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 }
 
 // sortModelsWarmFirst orders entries so warm models come before cold ones and
-// IDs ascend within each group. The sort is stable-by-construction because
-// the keying function is total. Extracted as a named helper so the ordering
-// policy can be unit-tested without threading warmth through the router.
+// IDs ascend within each group. Uses a stable sort so any future refactor that
+// introduces tied keys (e.g. multiple alias entries sharing an ID shape)
+// preserves input order rather than flipping entries between calls. Extracted
+// as a named helper so the ordering policy can be unit-tested without threading
+// warmth through the router.
 func sortModelsWarmFirst(models []ModelObject) {
-	sort.Slice(models, func(i, j int) bool {
+	sort.SliceStable(models, func(i, j int) bool {
 		if models[i].Warm != models[j].Warm {
 			return models[i].Warm
 		}

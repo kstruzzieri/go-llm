@@ -1,10 +1,13 @@
 package compat
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -182,7 +185,7 @@ func TestModelsHandler_EmptyRegistryReturnsEmptyList(t *testing.T) {
 	}
 	// The raw body must contain "data":[] not "data":null.
 	body := rec.Body.String()
-	if !contains(body, `"data":[]`) {
+	if !strings.Contains(body, `"data":[]`) {
 		t.Errorf("body = %q, want Data to serialize as []", body)
 	}
 }
@@ -214,19 +217,124 @@ func TestSortModelsWarmFirst_WarmBeforeCold(t *testing.T) {
 	}
 }
 
-// contains is a tiny helper so the test file does not pull in strings just for
-// one substring check.
-func contains(haystack, needle string) bool {
-	return len(haystack) >= len(needle) && indexOf(haystack, needle) >= 0
+// fakeWarmthSource is a minimal WarmthSource that always reports the same
+// snapshot. It is used to drive x_warm through a real Router for
+// TestModelsHandler_WarmModelsGetXWarmTrue. Only Snapshot/Close are exercised
+// by the models handler; the other interface methods are stubbed to satisfy
+// the compile-time assertion.
+type fakeWarmthSource struct {
+	models []provider.WarmModel
 }
 
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
+func (f *fakeWarmthSource) IsWarm(key provider.ModelKey) bool {
+	for _, wm := range f.models {
+		if wm.Key == key && wm.Info.Loaded {
+			return true
 		}
 	}
-	return -1
+	return false
+}
+
+func (f *fakeWarmthSource) WarmthState(key provider.ModelKey) *provider.WarmthInfo {
+	for _, wm := range f.models {
+		if wm.Key == key {
+			info := wm.Info
+			return &info
+		}
+	}
+	return nil
+}
+
+func (f *fakeWarmthSource) RecordUse(provider.ModelKey)    {}
+func (f *fakeWarmthSource) Snapshot() []provider.WarmModel { return f.models }
+func (f *fakeWarmthSource) Close() error                   { return nil }
+
+// TestModelsHandler_WarmModelsGetXWarmTrue plugs a fake WarmthSource into a
+// real Router and verifies x_warm propagates end-to-end through the handler.
+// This guards against a future refactor where ModelKey formatting drift (e.g.
+// provider-name capitalization) could silently mark every canonical entry cold
+// with no HTTP-level test to catch it. TestSortModelsWarmFirst_WarmBeforeCold
+// only exercises the sort helper in isolation, so the warm map lookup would be
+// untested otherwise.
+func TestModelsHandler_WarmModelsGetXWarmTrue(t *testing.T) {
+	warmModel := &mockProvider{
+		name: "ollama",
+		caps: provider.CapChat | provider.CapGenerate,
+		models: []provider.ModelInfo{
+			{Name: "qwen3:8b", ContextWindow: 32768},
+			{Name: "qwen3-embedding:8b", ContextWindow: 8192},
+		},
+	}
+
+	provReg := provider.NewRegistry()
+	if err := provReg.Register(warmModel); err != nil {
+		t.Fatalf("provider registry register: %v", err)
+	}
+	if err := provReg.RefreshModels(context.Background(), warmModel.Name()); err != nil {
+		t.Fatalf("provider registry refresh models: %v", err)
+	}
+	modelReg, err := provider.NewModelRegistry(provReg, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+
+	// Mark qwen3:8b warm, leave qwen3-embedding:8b cold. The handler's warmth
+	// lookup keys on provider.ModelKey, so the fake's entry must match the
+	// canonical key exactly.
+	warmKey := provider.ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+	ws := &fakeWarmthSource{
+		models: []provider.WarmModel{
+			{
+				Key: warmKey,
+				Info: provider.WarmthInfo{
+					Loaded:    true,
+					Since:     time.Now().Add(-1 * time.Minute),
+					ExpiresAt: time.Now().Add(5 * time.Minute),
+					VRAM:      6.0,
+				},
+			},
+		},
+	}
+	router := provider.NewRouter(modelReg, provReg,
+		provider.WithStickyTTL(time.Second),
+		provider.WithAvailableRAM(256),
+		provider.WithWarmthSource(ws),
+	)
+	defer func() { _ = router.Close() }()
+	srv := New(router, modelReg, provReg)
+
+	rec := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/models", nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+
+	var resp ModelsListResponse
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	byID := make(map[string]ModelObject, len(resp.Data))
+	for _, m := range resp.Data {
+		byID[m.ID] = m
+	}
+
+	hot, ok := byID["ollama/qwen3:8b"]
+	if !ok {
+		t.Fatalf("missing canonical entry ollama/qwen3:8b; got IDs=%v", idsOf(resp.Data))
+	}
+	if !hot.Warm {
+		t.Errorf("ollama/qwen3:8b x_warm = false, want true (warmth snapshot did not propagate)")
+	}
+
+	cold, ok := byID["ollama/qwen3-embedding:8b"]
+	if !ok {
+		t.Fatalf("missing canonical entry ollama/qwen3-embedding:8b; got IDs=%v", idsOf(resp.Data))
+	}
+	if cold.Warm {
+		t.Errorf("ollama/qwen3-embedding:8b x_warm = true, want false (cold model reported warm)")
+	}
 }
 
 func idsOf(models []ModelObject) []string {
