@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -154,23 +155,290 @@ func TestChatCompletions_MissingMessages_400(t *testing.T) {
 	}
 }
 
-func TestChatCompletions_StreamReturns501(t *testing.T) {
-	srv, _, calls, teardown := newChatFixture(t, "n/a")
+// ---------------------------------------------------------------------------
+// Streaming path
+// ---------------------------------------------------------------------------
+
+// doChatRequest is doChat's streaming cousin — it keeps the raw recorder so
+// callers can inspect the SSE body for framing as well as individual chunks.
+func doChatRequest(t *testing.T, srv *Server, body any) *httptest.ResponseRecorder {
+	t.Helper()
+	buf, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal body: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(buf))
+	req.Header.Set("Content-Type", "application/json")
+	srv.buildHandler().ServeHTTP(rec, req)
+	return rec
+}
+
+// decodeSSEChunks parses an SSE body into individual ChatCompletionChunk
+// payloads. It skips the [DONE] sentinel and any non-"data:" lines.
+func decodeSSEChunks(t *testing.T, body string) []ChatCompletionChunk {
+	t.Helper()
+	var chunks []ChatCompletionChunk
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			continue
+		}
+		var c ChatCompletionChunk
+		if err := json.Unmarshal([]byte(payload), &c); err != nil {
+			t.Fatalf("decode chunk %q: %v", payload, err)
+		}
+		chunks = append(chunks, c)
+	}
+	return chunks
+}
+
+// newStreamingServer wires a server whose provider scripts ChatStream directly
+// — distinct from newChatFixture which scripts the non-streaming path. The
+// `build` callback lets each test drive its own chunk sequence.
+func newStreamingServer(
+	t *testing.T,
+	build func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error,
+	opts ...Option,
+) (*Server, func()) {
+	t.Helper()
+	mp := &mockProvider{
+		name: "ollama",
+		caps: provider.CapChat | provider.CapStream | provider.CapToolCall,
+		models: []provider.ModelInfo{
+			{Name: "qwen3:8b", ContextWindow: 32768},
+		},
+		chatStreamFn: build,
+	}
+	return newTestServer(t, mp, opts...)
+}
+
+// TestChatCompletions_Streaming exercises the happy path: two chunks from the
+// provider, the final one with Done=true, produce two SSE events followed by
+// "data: [DONE]". The first chunk must carry role=assistant and content="hi ",
+// the second must carry finish_reason="stop".
+func TestChatCompletions_Streaming(t *testing.T) {
+	srv, teardown := newStreamingServer(t, func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		if err := fn(provider.ChatResponse{Model: req.Model, Content: "hi "}); err != nil {
+			return err
+		}
+		return fn(provider.ChatResponse{Model: req.Model, Content: "there", Done: true})
+	})
 	defer teardown()
 
 	body := map[string]any{
-		"model": "ollama/qwen3:8b",
+		"model":  "ollama/qwen3:8b",
+		"stream": true,
 		"messages": []map[string]string{
 			{"role": "user", "content": "hi"},
 		},
+	}
+	rec := doChatRequest(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("content-type = %q, want text/event-stream", ct)
+	}
+	text := rec.Body.String()
+	if !strings.HasSuffix(text, "data: [DONE]\n\n") {
+		t.Errorf("missing DONE sentinel: %q", text)
+	}
+	chunks := decodeSSEChunks(t, text)
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2: %q", len(chunks), text)
+	}
+	// First chunk: content delta, no finish_reason.
+	c0 := chunks[0]
+	if c0.Object != "chat.completion.chunk" {
+		t.Errorf("chunk[0].object = %q", c0.Object)
+	}
+	if !strings.HasPrefix(c0.ID, "chatcmpl_") {
+		t.Errorf("chunk[0].id = %q, want chatcmpl_ prefix", c0.ID)
+	}
+	if len(c0.Choices) != 1 {
+		t.Fatalf("chunk[0].choices = %d", len(c0.Choices))
+	}
+	if c0.Choices[0].Delta.Role != "assistant" {
+		t.Errorf("chunk[0].delta.role = %q", c0.Choices[0].Delta.Role)
+	}
+	if c0.Choices[0].Delta.Content != "hi " {
+		t.Errorf("chunk[0].delta.content = %q", c0.Choices[0].Delta.Content)
+	}
+	if c0.Choices[0].FinishReason != nil {
+		t.Errorf("chunk[0].finish_reason = %v, want nil", *c0.Choices[0].FinishReason)
+	}
+	// Second chunk: content delta, finish_reason=stop.
+	c1 := chunks[1]
+	if c1.Choices[0].Delta.Content != "there" {
+		t.Errorf("chunk[1].delta.content = %q", c1.Choices[0].Delta.Content)
+	}
+	if c1.Choices[0].FinishReason == nil || *c1.Choices[0].FinishReason != "stop" {
+		t.Errorf("chunk[1].finish_reason = %v, want stop", c1.Choices[0].FinishReason)
+	}
+}
+
+// TestChatCompletions_Streaming_ModelQualified verifies that every streaming
+// chunk carries the qualified "provider/model" form in the Model field,
+// matching the non-streaming branch's plan.Profile.Key.String() convention.
+func TestChatCompletions_Streaming_ModelQualified(t *testing.T) {
+	srv, teardown := newStreamingServer(t, func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		// Provider returns bare model name (this is the realistic Ollama shape).
+		return fn(provider.ChatResponse{Model: req.Model, Content: "ok", Done: true})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
 		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
 	}
-	rec := doChat(t, srv, body)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501, body=%s", rec.Code, rec.Body.String())
+	rec := doChatRequest(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
 	}
-	if got := atomic.LoadInt32(calls); got != 0 {
-		t.Errorf("provider Chat called %d times, want 0", got)
+	chunks := decodeSSEChunks(t, rec.Body.String())
+	if len(chunks) == 0 {
+		t.Fatalf("no chunks: %q", rec.Body.String())
+	}
+	for i, c := range chunks {
+		if c.Model != "ollama/qwen3:8b" {
+			t.Errorf("chunk[%d].model = %q, want ollama/qwen3:8b (qualified)", i, c.Model)
+		}
+	}
+}
+
+// TestChatCompletions_Streaming_FinishReasonFromToolCalls asserts that when
+// the provider emits tool_calls on the final chunk, the wire delta carries
+// them AND finish_reason is "tool_calls" — matching the non-streaming Task 9
+// fix's derivation rules.
+func TestChatCompletions_Streaming_FinishReasonFromToolCalls(t *testing.T) {
+	args := json.RawMessage(`{"city":"Paris"}`)
+	srv, teardown := newStreamingServer(t, func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		return fn(provider.ChatResponse{
+			Model: req.Model,
+			Done:  true,
+			ToolCalls: []provider.ToolCall{{
+				ID:   "call_abc",
+				Type: "function",
+				Function: provider.ToolCallFunction{
+					Name:      "get_weather",
+					Arguments: args,
+				},
+			}},
+		})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "weather in Paris?"},
+		},
+	}
+	rec := doChatRequest(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeSSEChunks(t, rec.Body.String())
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want 1", len(chunks))
+	}
+	final := chunks[0]
+	if final.Choices[0].FinishReason == nil || *final.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("finish_reason = %v, want tool_calls", final.Choices[0].FinishReason)
+	}
+	calls := final.Choices[0].Delta.ToolCalls
+	if len(calls) != 1 {
+		t.Fatalf("delta.tool_calls = %d, want 1", len(calls))
+	}
+	if calls[0].ID != "call_abc" {
+		t.Errorf("tool_call.id = %q, want call_abc", calls[0].ID)
+	}
+	if calls[0].Function.Name != "get_weather" {
+		t.Errorf("tool_call.function.name = %q, want get_weather", calls[0].Function.Name)
+	}
+	if !bytes.Equal(calls[0].Function.Arguments, args) {
+		t.Errorf("tool_call.function.arguments = %s, want %s", calls[0].Function.Arguments, args)
+	}
+}
+
+// TestChatCompletions_Streaming_FinishReasonLength covers the length-cap
+// branch of streaming finish_reason derivation: MaxTokens=5 and usage
+// reporting CompletionTokens=5 on the Done chunk must yield "length".
+func TestChatCompletions_Streaming_FinishReasonLength(t *testing.T) {
+	srv, teardown := newStreamingServer(t, func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		return fn(provider.ChatResponse{
+			Model:   req.Model,
+			Content: "truncated",
+			Done:    true,
+			Usage:   provider.Usage{CompletionTokens: 5, TotalTokens: 8, PromptTokens: 3},
+		})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":      "ollama/qwen3:8b",
+		"stream":     true,
+		"max_tokens": 5,
+		"messages": []map[string]string{
+			{"role": "user", "content": "write a long essay"},
+		},
+	}
+	rec := doChatRequest(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeSSEChunks(t, rec.Body.String())
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want 1", len(chunks))
+	}
+	final := chunks[0]
+	if final.Choices[0].FinishReason == nil || *final.Choices[0].FinishReason != "length" {
+		t.Errorf("finish_reason = %v, want length", final.Choices[0].FinishReason)
+	}
+}
+
+// TestChatCompletions_Streaming_ErrorBeforeFirstChunk verifies the lazy-start
+// guarantee: when the provider's ChatStream fails before invoking fn even
+// once, the client sees a normal JSON error envelope (not a partial SSE
+// stream). The status is 502 because an unclassified provider error maps
+// through statusForCompatError to upstream_error.
+func TestChatCompletions_Streaming_ErrorBeforeFirstChunk(t *testing.T) {
+	wantErr := errors.New("synthetic upstream failure")
+	srv, teardown := newStreamingServer(t, func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		// Never invoke fn — fail immediately. The SSE writer's lazy-start
+		// means no "data: ..." bytes have been committed yet.
+		return wantErr
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"stream": true,
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	}
+	rec := doChatRequest(t, srv, body)
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q, want application/json (JSON error envelope)", ct)
+	}
+	var env errorEnvelope
+	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
+		t.Fatalf("decode error envelope: %v", err)
+	}
+	if env.Error.Code != "upstream_error" {
+		t.Errorf("error.code = %q, want upstream_error", env.Error.Code)
 	}
 }
 

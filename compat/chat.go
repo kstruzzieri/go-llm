@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"time"
 
@@ -109,6 +110,30 @@ type UsageWire struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+}
+
+// ChatCompletionChunk is one frame of an OpenAI-shape streaming response.
+// Each chunk carries exactly one ChatChunkChoice today. Usage is not included
+// on per-chunk frames — OpenAI emits usage only on the final frame when
+// stream_options.include_usage is set, which we don't yet expose.
+type ChatCompletionChunk struct {
+	ID      string            `json:"id"`
+	Object  string            `json:"object"` // "chat.completion.chunk"
+	Created int64             `json:"created"`
+	Model   string            `json:"model"`
+	Choices []ChatChunkChoice `json:"choices"`
+
+	// Extensions.
+	Thinking string `json:"x_thinking,omitempty"`
+}
+
+// ChatChunkChoice is one choice inside a streaming chunk. FinishReason is a
+// pointer so interim chunks serialize as "finish_reason":null and only the
+// final chunk carries a non-null reason, matching OpenAI's wire format.
+type ChatChunkChoice struct {
+	Index        int              `json:"index"`
+	Delta        ChatMessageParam `json:"delta"`
+	FinishReason *string          `json:"finish_reason"`
 }
 
 // RouteInfoExt surfaces the Router's decision metadata for a request. It is
@@ -304,12 +329,117 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// serveChatStream handles the streaming branch. Task 10 replaces this stub
-// with a lazy-start SSE writer so pre-first-chunk failures still return a
-// JSON error envelope.
+// serveChatStream handles the streaming branch of POST /v1/chat/completions.
+// It emits an SSE (text/event-stream) body whose events each carry a JSON
+// ChatCompletionChunk, terminated by a "data: [DONE]" sentinel.
+//
+// Order of operations:
+//  1. Broaden rr.RequiredCaps with CapStream so the router rejects any
+//     provider that cannot stream before any bytes are written.
+//  2. Acquire the HTTP concurrency slot using the resolved priority — the
+//     slot is released when the stream completes. Placement AFTER route
+//     parsing (already done by the caller) means x_priority influences
+//     admission control on streaming requests too.
+//  3. Route via Router.Route. On error, writeCompatError still works
+//     because no bytes have been written yet.
+//  4. Construct a lazy-start sseWriter — it does NOT commit the 200 status
+//     until the first chunk is written, so a pre-first-chunk
+//     ExecuteChatStream failure (e.g. provider returns 5xx before any chunk)
+//     can still be surfaced as a regular JSON error envelope.
+//  5. For each chunk, emit a ChatCompletionChunk with the qualified model
+//     ID and, on the Done chunk, a derived finish_reason matching the
+//     non-streaming branch's logic (tool_calls > length > stop).
+//  6. After ExecuteChatStream returns, emit "data: [DONE]" if the stream
+//     has been committed. If the failure happened before the first chunk,
+//     surface a JSON error instead.
 func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr provider.RoutingRequest) {
-	_ = rr // consumed by the SSE implementation in a follow-up task.
-	writeError(w, http.StatusNotImplemented, "not_implemented", "streaming arrives in a follow-up commit")
+	rr.RequiredCaps |= provider.CapStream
+
+	release, ok := s.semaphore.acquire(rr.Priority)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "capacity", "server is at capacity")
+		return
+	}
+	defer release()
+
+	plan, err := s.router.Route(r.Context(), rr)
+	if err != nil {
+		writeCompatError(w, err)
+		return
+	}
+
+	sw, err := newSSEWriter(w)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "no_flusher", err.Error())
+		return
+	}
+
+	// Capture the response ID and qualified model ID BEFORE invoking the
+	// provider so every chunk carries stable identifiers. chatResponseID
+	// falls back to a random suffix when no request-id middleware has run —
+	// this matches the non-streaming branch's fix (commit 9f04342).
+	id := chatResponseID(r.Context())
+	created := time.Now().Unix()
+	modelID := plan.Profile.Key.String()
+
+	streamErr := plan.ExecuteChatStream(r.Context(), func(chunk provider.ChatResponse) error {
+		delta := ChatMessageParam{
+			Role:      "assistant",
+			Content:   chunk.Content,
+			ToolCalls: toolCallsToWire(chunk.ToolCalls),
+		}
+		var finish *string
+		if chunk.Done {
+			reason := deriveStreamFinishReason(chunk, rr.Options.NumPredict)
+			finish = &reason
+		}
+		return sw.writeEvent(ChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   modelID,
+			Choices: []ChatChunkChoice{{
+				Index:        0,
+				Delta:        delta,
+				FinishReason: finish,
+			}},
+			Thinking: chunk.Thinking,
+		})
+	})
+
+	if streamErr != nil {
+		// If the failure happened BEFORE any chunk was delivered, the SSE
+		// writer never committed the 200 status — so we can still surface a
+		// JSON error envelope. Otherwise the stream is already live on the
+		// wire and the only correct action is to log and terminate with
+		// [DONE]. OpenAI SDKs tolerate a missing final event.
+		if !sw.started {
+			writeCompatError(w, streamErr)
+			return
+		}
+		log.Printf("compat: chat stream error rid=%s: %v", requestIDFrom(r.Context()), streamErr)
+	}
+
+	_ = sw.writeDone()
+}
+
+// deriveStreamFinishReason mirrors the non-streaming branch's finish_reason
+// logic for the Done chunk of a stream. Priority:
+//   - "tool_calls" when the final chunk carried any tool invocations.
+//   - "length" when MaxTokens was set and usage reached the cap.
+//   - "stop" otherwise.
+//
+// numPredict is 0 when MaxTokens was unset, in which case we cannot infer a
+// length stop and default to "stop".
+func deriveStreamFinishReason(chunk provider.ChatResponse, numPredict int) string {
+	if len(chunk.ToolCalls) > 0 {
+		return "tool_calls"
+	}
+	if numPredict > 0 && chunk.Usage.CompletionTokens >= numPredict {
+		return "length"
+	}
+	return "stop"
 }
 
 // writeChatDryRun renders the route decision without executing the request.
