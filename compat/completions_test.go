@@ -812,6 +812,92 @@ func TestCompletions_Streaming_ModelQualified(t *testing.T) {
 	}
 }
 
+// TestCompletions_Streaming_NoDoneChunkSkipsDONE guards Fix 1 for the Task 13
+// skeptic findings: when ExecuteGenerateStream returns nil (no error) but the
+// provider never sent a chunk with Done=true, the handler must NOT emit
+// "data: [DONE]". The sentinel is OpenAI's success signal — emitting it when
+// the stream was never cleanly terminated makes SDKs silently report success
+// on a truncated response. Withholding the sentinel preserves the wire-level
+// premature-EOS signal clients depend on.
+func TestCompletions_Streaming_NoDoneChunkSkipsDONE(t *testing.T) {
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		// Clean return but the provider never set Done=true.
+		_ = fn(provider.GenerateResponse{Model: req.Model, Response: "partial"})
+		return nil
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "p",
+		"stream": true,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	text := rec.Body.String()
+	if !strings.Contains(text, `"text":"partial"`) {
+		t.Errorf("body missing first chunk payload: %q", text)
+	}
+	if strings.Contains(text, "data: [DONE]") {
+		t.Errorf("emitted [DONE] despite provider never sending Done chunk:\n%s", text)
+	}
+}
+
+// TestCompletions_Streaming_ConfidenceOnDoneChunk guards Fix 2 for the Task 13
+// skeptic findings: the streaming CompletionChunk must surface
+// x_completion_id and x_confidence on the final (Done) frame, matching the
+// non-streaming CompletionResponse. Interim frames must not carry either
+// (omitempty + nil pointer).
+func TestCompletions_Streaming_ConfidenceOnDoneChunk(t *testing.T) {
+	score := 0.87
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		if err := fn(provider.GenerateResponse{Model: req.Model, Response: "a"}); err != nil {
+			return err
+		}
+		return fn(provider.GenerateResponse{
+			Model:      req.Model,
+			Response:   "b",
+			Done:       true,
+			Confidence: &provider.CompletionConfidence{Score: score},
+		})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "p",
+		"stream": true,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeCompletionSSEChunks(t, rec.Body.String())
+	if len(chunks) < 2 {
+		t.Fatalf("want >=2 chunks, got %d: %q", len(chunks), rec.Body.String())
+	}
+	// Interim chunk must NOT carry extensions — omitempty + nil pointer keeps
+	// the wire frame minimal.
+	if chunks[0].Confidence != nil {
+		t.Errorf("interim chunk carried confidence: %v", *chunks[0].Confidence)
+	}
+	if chunks[0].CompletionID != "" {
+		t.Errorf("interim chunk carried x_completion_id: %q", chunks[0].CompletionID)
+	}
+	last := chunks[len(chunks)-1]
+	if last.Confidence == nil {
+		t.Fatalf("done chunk missing x_confidence:\n%s", rec.Body.String())
+	}
+	if *last.Confidence != score {
+		t.Errorf("confidence = %v, want %v", *last.Confidence, score)
+	}
+	if last.CompletionID == "" {
+		t.Error("done chunk missing x_completion_id")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests for helpers
 // ---------------------------------------------------------------------------

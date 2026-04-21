@@ -78,6 +78,13 @@ type CompletionChunk struct {
 	Created int64                   `json:"created"`
 	Model   string                  `json:"model"`
 	Choices []CompletionChunkChoice `json:"choices"`
+
+	// Extensions. Populated only on the final (Done) chunk so interim frames
+	// stay minimal; omitempty + nil pointer keep the wire unchanged for
+	// non-final chunks. Mirrors CompletionResponse.CompletionID / Confidence
+	// so clients that toggle stream:true see the same extension fields.
+	CompletionID string   `json:"x_completion_id,omitempty"`
+	Confidence   *float64 `json:"x_confidence,omitempty"`
 }
 
 // CompletionChunkChoice is one choice inside a streaming completion chunk.
@@ -378,7 +385,7 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 	modelID := plan.Profile.Key.String()
 
 	var lastConfidence *float64
-	_ = lastConfidence // reserved hook point for Task 14's completion store
+	var sawDone bool
 
 	streamErr := plan.ExecuteGenerateStream(r.Context(), func(chunk provider.GenerateResponse) error {
 		// Derive finish_reason on the Done chunk. Completions are not
@@ -390,6 +397,7 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 		// both sites.
 		var finish *string
 		if chunk.Done {
+			sawDone = true
 			reason := "stop"
 			if rr.Options.NumPredict > 0 && chunk.Usage.CompletionTokens >= rr.Options.NumPredict {
 				reason = "length"
@@ -404,7 +412,7 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 			// point (local identifiers populated above) so Task 14 is a
 			// pure additive diff.
 		}
-		return sw.writeEvent(CompletionChunk{
+		out := CompletionChunk{
 			ID:      id,
 			Object:  "text_completion",
 			Created: created,
@@ -414,7 +422,16 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 				Text:         chunk.Response,
 				FinishReason: finish,
 			}},
-		})
+		}
+		// Surface x_completion_id / x_confidence only on the final frame so
+		// interim chunks stay minimal (omitempty + nil pointer). This mirrors
+		// the non-streaming CompletionResponse shape — toggling stream:true
+		// must not silently drop those extensions.
+		if chunk.Done {
+			out.CompletionID = id
+			out.Confidence = lastConfidence
+		}
+		return sw.writeEvent(out)
 	})
 
 	if streamErr != nil {
@@ -434,6 +451,17 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 		if !errors.Is(streamErr, context.Canceled) {
 			log.Printf("compat: generate stream error rid=%s: %v", requestIDFrom(r.Context()), streamErr)
 		}
+		return
+	}
+
+	// A nil streamErr with no terminal Done chunk is a misbehaving provider
+	// (or upstream wrapper that swallowed the terminator). Emitting [DONE]
+	// here would tell the SDK the stream completed successfully even though
+	// we never saw a Done frame. Skip the sentinel so clients detect the
+	// premature EOS, and log one breadcrumb with the request ID so the
+	// misbehavior is observable in logs.
+	if !sawDone {
+		log.Printf("compat: generate stream ended without Done chunk rid=%s", requestIDFrom(r.Context()))
 		return
 	}
 
