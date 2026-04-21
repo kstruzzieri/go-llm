@@ -173,6 +173,9 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("POST "+s.basePath+"/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST "+s.basePath+"/completions", s.handleCompletions)
 	mux.HandleFunc("POST "+s.basePath+"/completions/feedback", s.handleFeedback)
+	if s.embeddingsEnabled {
+		mux.HandleFunc("POST "+s.basePath+"/embeddings", s.handleEmbeddings)
+	}
 
 	var handler http.Handler = mux
 	handler = recoveryMiddleware(handler)
