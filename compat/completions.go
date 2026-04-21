@@ -288,6 +288,18 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := completionResponseID(r.Context())
+	routeReason := ""
+	if resp.RouteOutcome != nil {
+		routeReason = resp.RouteOutcome.Reason
+	}
+	s.completionStore.put(CompletionRecord{
+		ID:        id,
+		Provider:  resp.Provider,
+		Model:     plan.Profile.Key.String(),
+		UseCase:   rr.UseCase,
+		FilePath:  req.FilePath,
+		RouteInfo: routeReason,
+	})
 	out := CompletionResponse{
 		ID:      id,
 		Object:  "text_completion",
@@ -352,8 +364,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 // If maintainers later want streaming-FIM budgeting, they can wire
 // req.MaxTokens through rr.Options.NumPredict.
 func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, rr provider.RoutingRequest, filePath string, fim bool) {
-	_ = filePath // reserved for Task 14's completion store; currently unused
-	_ = fim      // reserved for Task 14's completion store; currently unused
+	_ = fim // reserved for Task 14's completion store; currently unused
 
 	rr.RequiredCaps |= provider.CapStream
 
@@ -407,10 +418,18 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 				v := chunk.Confidence.Score
 				lastConfidence = &v
 			}
-			// Task 14 wires s.completionStore.put here once the
-			// CompletionRecord type and LRU store land. Leaving a hook
-			// point (local identifiers populated above) so Task 14 is a
-			// pure additive diff.
+			routeReason := ""
+			if chunk.RouteOutcome != nil {
+				routeReason = chunk.RouteOutcome.Reason
+			}
+			s.completionStore.put(CompletionRecord{
+				ID:        id,
+				Provider:  chunk.Provider,
+				Model:     modelID,
+				UseCase:   rr.UseCase,
+				FilePath:  filePath,
+				RouteInfo: routeReason,
+			})
 		}
 		out := CompletionChunk{
 			ID:      id,

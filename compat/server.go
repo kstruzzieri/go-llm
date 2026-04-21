@@ -42,6 +42,11 @@ type Server struct {
 	// WithMaxConcurrency has already been observed.
 	semaphore *semaphore
 
+	// completionStore attributes x_completion_id back to the provider/model
+	// that served the original completion, so the feedback endpoint can route
+	// signals to the canonical entry. Initialized in New.
+	completionStore *completionRecordStore
+
 	httpServer *http.Server
 	startedAt  time.Time
 
@@ -79,6 +84,11 @@ func New(router *provider.Router, registry *provider.ModelRegistry, providers *p
 	}
 	// newSemaphore normalizes max < 1 to 1 so we do not need a guard here.
 	s.semaphore = newSemaphore(s.maxConcurrency)
+	// completionStore attributes x_completion_id → (provider, model) so
+	// feedback requests can be routed back to the canonical entry that
+	// served the original completion. 15-minute TTL matches Phase 4's
+	// feedback SLA; 4096 entries bound memory (~1MB worst case).
+	s.completionStore = newCompletionRecordStore(15*time.Minute, 4096)
 	return s
 }
 
