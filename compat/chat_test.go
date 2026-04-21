@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1010,14 +1011,12 @@ func TestChatCompletions_RequestIDFallback(t *testing.T) {
 	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out.ID == "chatcmpl_" {
-		t.Errorf("id = %q, want non-empty suffix via fallback", out.ID)
-	}
-	if !strings.HasPrefix(out.ID, "chatcmpl_") {
-		t.Errorf("id = %q, want chatcmpl_ prefix", out.ID)
-	}
-	if len(out.ID) <= len("chatcmpl_") {
-		t.Errorf("id = %q, want suffix longer than empty", out.ID)
+	// Exact shape: "chatcmpl_" + 16 hex chars (8 random bytes). The regex
+	// rejects the historical "chatcmpl_cmpl_<hex>" double-prefix bug that
+	// arose when fallbackRequestID returned its own "cmpl_" prefix.
+	idRE := regexp.MustCompile(`^chatcmpl_[0-9a-f]{16}$`)
+	if !idRE.MatchString(out.ID) {
+		t.Errorf("id = %q, want match %s", out.ID, idRE)
 	}
 }
 

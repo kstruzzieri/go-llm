@@ -99,7 +99,17 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return fmt.Errorf("%w: addr=%q", ErrNonLoopbackRequiresTLS, s.addr)
 	}
 
-	httpServer := &http.Server{Addr: s.addr, Handler: s.buildHandler()}
+	// ReadHeaderTimeout bounds the header-read phase so a slow-header attack
+	// (Slowloris) cannot pin a handler slot — and burn a semaphore lane —
+	// indefinitely when the server is exposed beyond loopback via WithTLS.
+	// Body reads are bounded per-endpoint by json.Decode against a MaxBytes
+	// reader. WriteTimeout is deliberately unset because SSE streams run
+	// open-ended.
+	httpServer := &http.Server{
+		Addr:              s.addr,
+		Handler:           s.buildHandler(),
+		ReadHeaderTimeout: 10 * time.Second,
+	}
 
 	s.mu.Lock()
 	if s.closed {

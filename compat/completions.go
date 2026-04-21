@@ -2,8 +2,6 @@ package compat
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -600,16 +598,10 @@ func applyFIMBudget(plan *provider.RoutePlan, language, prompt, suffix string, m
 // the context carries none — e.g. when handlers are invoked directly via the
 // mux for tests or embedded callers. Without the fallback, bypass paths would
 // return "cmpl_" verbatim, which is indistinguishable from a bug.
-//
-// NOTE: we deliberately do NOT reuse fallbackRequestID() from chat.go — that
-// helper prepends its own "cmpl_" prefix, which would yield "cmpl_cmpl_<hex>"
-// when composed here.
 func completionResponseID(ctx context.Context) string {
 	rid := requestIDFrom(ctx)
 	if rid == "" {
-		var b [8]byte
-		_, _ = rand.Read(b[:])
-		rid = hex.EncodeToString(b[:])
+		rid = fallbackRequestID()
 	}
 	return "cmpl_" + rid
 }

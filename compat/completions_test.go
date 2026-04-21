@@ -456,10 +456,9 @@ func TestCompletions_FinishReasonStop(t *testing.T) {
 
 // TestCompletions_RequestIDFallback verifies that when the handler is invoked
 // through a path that bypasses requestIDMiddleware, the response ID gets a
-// generated random-hex suffix rather than the bare "cmpl_" string. This also
-// guards against the accidental "cmpl_cmpl_<hex>" double-prefix regression
-// that would arise from reusing fallbackRequestID() (which has its own cmpl_
-// prefix).
+// generated random-hex suffix rather than the bare "cmpl_" string. The regex
+// also pins the exact "cmpl_<16 hex>" shape so a future change to
+// fallbackRequestID that reintroduces a prefix would break the assertion.
 func TestCompletions_RequestIDFallback(t *testing.T) {
 	srv, _, _, teardown := newCompletionFixture(t, "ok")
 	defer teardown()

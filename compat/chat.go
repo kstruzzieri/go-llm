@@ -658,11 +658,13 @@ func chatResponseID(ctx context.Context) string {
 
 // fallbackRequestID generates a short, random hex suffix for use when no
 // request-ID middleware has run. 8 random bytes (16 hex chars) is well
-// beyond collision-hazard for response-body correlation.
+// beyond collision-hazard for response-body correlation. Returns bare hex so
+// callers can compose their own family-specific prefix (e.g. "chatcmpl_" or
+// "cmpl_") without risking a double-prefix like "chatcmpl_cmpl_<hex>".
 func fallbackRequestID() string {
 	var b [8]byte
 	_, _ = rand.Read(b[:])
-	return "cmpl_" + hex.EncodeToString(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 // toModelOptions maps the OpenAI sampling fields onto provider.ModelOptions.
