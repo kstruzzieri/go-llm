@@ -2,6 +2,8 @@ package compat
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"log"
 	"net/http"
 )
@@ -24,9 +26,20 @@ var validFeedbackActions = map[string]bool{
 	"edited":   true,
 }
 
+// handleFeedback records an IDE-side acceptance/rejection/edit signal for a
+// previously issued completion. The contract is single-shot: the completion
+// record is consumed on first successful call, so any subsequent POST with the
+// same completion_id returns 404.
+//
+// Admission control is applied by Task 17 at handler registration time if
+// needed; feedback is cheap enough that exemption may be appropriate.
 func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	var req FeedbackRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if errors.Is(err, io.EOF) {
+			writeError(w, http.StatusBadRequest, "empty_body", "request body is required")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "decode_error", err.Error())
 		return
 	}
@@ -39,13 +52,19 @@ func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 			"action must be one of: accepted, rejected, edited")
 		return
 	}
-	rec, ok := s.completionStore.get(req.CompletionID)
+	rec, ok := s.completionStore.consume(req.CompletionID)
 	if !ok {
-		writeError(w, http.StatusNotFound, "unknown_completion", "completion_id not found or expired")
+		writeError(w, http.StatusNotFound, "unknown_completion",
+			"completion_id not found, expired, or already consumed")
 		return
 	}
-	log.Printf("compat: feedback rid=%s id=%s provider=%s model=%s action=%s",
-		requestIDFrom(r.Context()), rec.ID, rec.Provider, rec.Model, req.Action)
+	if req.EditDistance != nil {
+		log.Printf("compat: feedback rid=%s id=%s provider=%s model=%s action=%s edit_distance=%d",
+			requestIDFrom(r.Context()), rec.ID, rec.Provider, rec.Model, req.Action, *req.EditDistance)
+	} else {
+		log.Printf("compat: feedback rid=%s id=%s provider=%s model=%s action=%s",
+			requestIDFrom(r.Context()), rec.ID, rec.Provider, rec.Model, req.Action)
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(FeedbackResponse{Recorded: true})

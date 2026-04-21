@@ -90,3 +90,27 @@ func (s *completionRecordStore) get(id string) (CompletionRecord, bool) {
 	s.list.MoveToFront(elem)
 	return rec, true
 }
+
+// consume returns the record and deletes it atomically so subsequent calls
+// miss. Used by the feedback endpoint to enforce a single-shot contract:
+// the first POST for a given completion_id records it; subsequent POSTs
+// return 404 (unknown_completion). Expired entries are also removed and
+// reported as a miss.
+func (s *completionRecordStore) consume(id string) (CompletionRecord, bool) {
+	if id == "" {
+		return CompletionRecord{}, false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	elem, ok := s.index[id]
+	if !ok {
+		return CompletionRecord{}, false
+	}
+	rec := elem.Value.(CompletionRecord)
+	s.list.Remove(elem)
+	delete(s.index, id)
+	if time.Since(rec.CreatedAt) > s.ttl {
+		return CompletionRecord{}, false
+	}
+	return rec, true
+}

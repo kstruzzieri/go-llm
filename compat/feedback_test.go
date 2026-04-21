@@ -53,3 +53,40 @@ func TestFeedback_InvalidAction(t *testing.T) {
 		t.Fatalf("status=%d want 400", rec.Code)
 	}
 }
+
+func TestFeedback_SecondCallReturns404(t *testing.T) {
+	srv, teardown := newTestServer(t, &mockProvider{name: "ollama", caps: provider.CapGenerate})
+	defer teardown()
+	srv.completionStore.put(CompletionRecord{ID: "cmpl_once", Provider: "ollama", Model: "qwen3:8b"})
+
+	body := FeedbackRequest{CompletionID: "cmpl_once", Action: "accepted"}
+	raw, _ := json.Marshal(body)
+
+	rec1 := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec1, httptest.NewRequest(http.MethodPost, "/v1/completions/feedback", bytes.NewReader(raw)))
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first call: status=%d want 200 body=%s", rec1.Code, rec1.Body.String())
+	}
+
+	rec2 := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec2, httptest.NewRequest(http.MethodPost, "/v1/completions/feedback", bytes.NewReader(raw)))
+	if rec2.Code != http.StatusNotFound {
+		t.Fatalf("second call: status=%d want 404 body=%s", rec2.Code, rec2.Body.String())
+	}
+	if !bytes.Contains(rec2.Body.Bytes(), []byte("already consumed")) {
+		t.Errorf("expected 'already consumed' in error message, got %s", rec2.Body.String())
+	}
+}
+
+func TestFeedback_EmptyBodyReturns400(t *testing.T) {
+	srv, teardown := newTestServer(t, &mockProvider{name: "ollama", caps: provider.CapGenerate})
+	defer teardown()
+	rec := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/completions/feedback", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400", rec.Code)
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("empty_body")) {
+		t.Errorf("expected empty_body error code, got %s", rec.Body.String())
+	}
+}
