@@ -172,7 +172,12 @@ func (s *Server) buildHandler() http.Handler {
 	mux.HandleFunc("GET "+s.basePath+"/models", s.handleModels)
 	mux.HandleFunc("POST "+s.basePath+"/chat/completions", s.handleChatCompletions)
 	mux.HandleFunc("POST "+s.basePath+"/completions", s.handleCompletions)
-	mux.HandleFunc("POST "+s.basePath+"/completions/feedback", s.handleFeedback)
+	// Feedback is cheap but unauthenticated; gate at background priority so
+	// it never crowds out user-facing work when the server is saturated.
+	mux.Handle(
+		"POST "+s.basePath+"/completions/feedback",
+		withSemaphore(s.semaphore, provider.PriorityBackground, http.HandlerFunc(s.handleFeedback)),
+	)
 	if s.embeddingsEnabled {
 		mux.HandleFunc("POST "+s.basePath+"/embeddings", s.handleEmbeddings)
 	}

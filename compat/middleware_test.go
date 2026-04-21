@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -229,6 +230,35 @@ func TestStatusForCompatError_WrappedErrorsStillClassified(t *testing.T) {
 	if status != 429 || code != "rate_limited" {
 		t.Errorf("wrapped HTTP 429 = (%d, %q), want (429, rate_limited)", status, code)
 	}
+}
+
+func TestConcurrencyMiddleware_429WhenFull(t *testing.T) {
+	sem := newSemaphore(1)
+	blocker := make(chan struct{})
+	h := withSemaphore(sem, provider.PriorityNormal, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blocker
+	}))
+
+	// First request takes the only slot.
+	done := make(chan struct{})
+	go func() {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+		close(done)
+	}()
+	time.Sleep(10 * time.Millisecond)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusTooManyRequests {
+		t.Errorf("status=%d want 429", rec.Code)
+	}
+	if rec.Header().Get("Retry-After") == "" {
+		t.Error("missing Retry-After header")
+	}
+
+	close(blocker)
+	<-done
 }
 
 func TestWriteCompatError_EndToEnd(t *testing.T) {

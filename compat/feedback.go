@@ -31,8 +31,9 @@ var validFeedbackActions = map[string]bool{
 // record is consumed on first successful call, so any subsequent POST with the
 // same completion_id returns 404.
 //
-// Admission control is applied by Task 17 at handler registration time if
-// needed; feedback is cheap enough that exemption may be appropriate.
+// Admission control is applied at route registration (see buildHandler in
+// server.go) using PriorityBackground so feedback never crowds out
+// user-facing work.
 func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	var req FeedbackRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

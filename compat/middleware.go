@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 type ctxKey int
@@ -126,5 +128,24 @@ func loggingMiddleware(next http.Handler) http.Handler {
 			r.Method, r.URL.Path, rec.status,
 			time.Since(start).Round(time.Millisecond),
 			requestIDFrom(r.Context()))
+	})
+}
+
+// withSemaphore wraps next with admission control at the handler boundary.
+// This helper is for routes that do NOT need body-parse-before-acquire
+// (e.g. GET endpoints, or fixed-priority POSTs like /feedback). Body-bearing
+// endpoints that resolve priority from `x_priority` MUST acquire the
+// semaphore inline AFTER parsing so the resolved priority is honored —
+// wrapping them here would acquire before the priority is known.
+func withSemaphore(sem *semaphore, p provider.Priority, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		release, ok := sem.acquire(p)
+		if !ok {
+			w.Header().Set("Retry-After", "1")
+			writeError(w, http.StatusTooManyRequests, "capacity", "server is at capacity")
+			return
+		}
+		defer release()
+		next.ServeHTTP(w, r)
 	})
 }
