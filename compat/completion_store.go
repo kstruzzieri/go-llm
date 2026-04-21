@@ -19,6 +19,12 @@ type CompletionRecord struct {
 }
 
 // completionRecordStore is an in-memory, bounded, TTL-expiring LRU.
+//
+// ID must be non-empty; empty IDs are silently ignored (both on put and get)
+// as defense-in-depth against caller bugs. Callers never construct empty IDs
+// in practice (completionResponseID always returns "cmpl_"+suffix), so the
+// short-circuit is purely to prevent a single "" key from overwriting itself
+// and colliding across unrelated requests.
 type completionRecordStore struct {
 	mu    sync.Mutex
 	ttl   time.Duration
@@ -36,7 +42,15 @@ func newCompletionRecordStore(ttl time.Duration, max int) *completionRecordStore
 	}
 }
 
+// put stores rec under rec.ID. An empty rec.ID is silently ignored — see the
+// type-level doc for rationale. Re-put of an existing ID refreshes CreatedAt
+// when the caller's CreatedAt is zero, otherwise preserves the caller-provided
+// CreatedAt. Callers should generally not re-put — completion IDs are unique
+// per request.
 func (s *completionRecordStore) put(rec CompletionRecord) {
+	if rec.ID == "" {
+		return
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if rec.CreatedAt.IsZero() {
@@ -58,6 +72,9 @@ func (s *completionRecordStore) put(rec CompletionRecord) {
 }
 
 func (s *completionRecordStore) get(id string) (CompletionRecord, bool) {
+	if id == "" {
+		return CompletionRecord{}, false
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	elem, ok := s.index[id]

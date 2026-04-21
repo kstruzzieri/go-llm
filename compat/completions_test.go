@@ -845,6 +845,73 @@ func TestCompletions_Streaming_NoDoneChunkSkipsDONE(t *testing.T) {
 	}
 }
 
+// TestCompletions_Streaming_StoreRecordOnCleanDone verifies that after a clean
+// streaming completion (interim chunk + terminal Done chunk) the completion
+// record store has a hit for the response's x_completion_id. This is the
+// orphan-avoidance positive test.
+func TestCompletions_Streaming_StoreRecordOnCleanDone(t *testing.T) {
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		if err := fn(provider.GenerateResponse{Model: req.Model, Response: "a"}); err != nil {
+			return err
+		}
+		return fn(provider.GenerateResponse{Model: req.Model, Response: "b", Done: true})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "p",
+		"stream": true,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeCompletionSSEChunks(t, rec.Body.String())
+	if len(chunks) == 0 {
+		t.Fatalf("no chunks: %q", rec.Body.String())
+	}
+	last := chunks[len(chunks)-1]
+	if last.CompletionID == "" {
+		t.Fatalf("final chunk missing x_completion_id:\n%s", rec.Body.String())
+	}
+	rec2, ok := srv.completionStore.get(last.CompletionID)
+	if !ok {
+		t.Fatalf("completionStore.get(%q) miss; want hit after clean Done", last.CompletionID)
+	}
+	if rec2.Model != "ollama/qwen3:8b" {
+		t.Errorf("record.Model = %q, want ollama/qwen3:8b", rec2.Model)
+	}
+}
+
+// TestCompletions_Streaming_NoStoreRecordWithoutDone verifies that when the
+// provider returns nil without ever sending a Done chunk, no completion
+// record is written. The Task 15 feedback flow depends on a miss in this
+// case (the stream was incomplete — feedback on a lost completion should
+// not find an attribution record).
+func TestCompletions_Streaming_NoStoreRecordWithoutDone(t *testing.T) {
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		_ = fn(provider.GenerateResponse{Model: req.Model, Response: "partial"})
+		return nil
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "p",
+		"stream": true,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	// The handler doesn't expose the generated id on this path, so we assert
+	// the store remained empty — equivalent and stricter.
+	if got := srv.completionStore.list.Len(); got != 0 {
+		t.Errorf("completionStore.list.Len() = %d; want 0 (no Done chunk = no record)", got)
+	}
+}
+
 // TestCompletions_Streaming_ConfidenceOnDoneChunk guards Fix 2 for the Task 13
 // skeptic findings: the streaming CompletionChunk must surface
 // x_completion_id and x_confidence on the final (Done) frame, matching the

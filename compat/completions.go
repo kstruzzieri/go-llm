@@ -292,6 +292,11 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	if resp.RouteOutcome != nil {
 		routeReason = resp.RouteOutcome.Reason
 	}
+	// Non-streaming: the put happens before the JSON encode. If the encoder
+	// fails mid-write the record is technically orphan, but the response body
+	// is a single JSON object (not a multi-frame stream) and encode failures
+	// here are vanishingly rare — the streaming orphan case is the one that
+	// actually warrants deferred persistence.
 	s.completionStore.put(CompletionRecord{
 		ID:        id,
 		Provider:  resp.Provider,
@@ -397,6 +402,13 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 
 	var lastConfidence *float64
 	var sawDone bool
+	// Captured on the Done chunk and used AFTER the stream loop returns
+	// cleanly, so we only persist attribution for completions the client
+	// actually received. Writing the record inside the callback (before the
+	// Done frame is flushed) risks storing a record for a completion the
+	// client never saw if writeEvent fails on the final frame.
+	var lastProvider string
+	var lastRouteReason string
 
 	streamErr := plan.ExecuteGenerateStream(r.Context(), func(chunk provider.GenerateResponse) error {
 		// Derive finish_reason on the Done chunk. Completions are not
@@ -418,18 +430,13 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 				v := chunk.Confidence.Score
 				lastConfidence = &v
 			}
-			routeReason := ""
+			// Capture attribution for the post-stream put. See the
+			// success-path put below for why we defer until after the
+			// Done frame has been flushed successfully.
+			lastProvider = chunk.Provider
 			if chunk.RouteOutcome != nil {
-				routeReason = chunk.RouteOutcome.Reason
+				lastRouteReason = chunk.RouteOutcome.Reason
 			}
-			s.completionStore.put(CompletionRecord{
-				ID:        id,
-				Provider:  chunk.Provider,
-				Model:     modelID,
-				UseCase:   rr.UseCase,
-				FilePath:  filePath,
-				RouteInfo: routeReason,
-			})
 		}
 		out := CompletionChunk{
 			ID:      id,
@@ -482,6 +489,23 @@ func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, 
 	if !sawDone {
 		log.Printf("compat: generate stream ended without Done chunk rid=%s", requestIDFrom(r.Context()))
 		return
+	}
+
+	// Persist attribution only after the stream completed cleanly AND the
+	// provider sent a terminal Done chunk. This avoids orphan records for
+	// streams that errored mid-flight or silently ended without [DONE]: Task
+	// 15 feedback keyed on a lost completion should miss, not hit. At this
+	// point streamErr is nil and sawDone is true (both guarded above), so
+	// the put is unconditional — the explicit if is kept for readability.
+	if sawDone {
+		s.completionStore.put(CompletionRecord{
+			ID:        id,
+			Provider:  lastProvider,
+			Model:     modelID,
+			UseCase:   rr.UseCase,
+			FilePath:  filePath,
+			RouteInfo: lastRouteReason,
+		})
 	}
 
 	_ = sw.writeDone()
