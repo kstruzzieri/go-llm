@@ -4,13 +4,27 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+// maxEmbeddingInputs caps the number of per-request inputs we accept. The
+// router's token-budget path fans out across every element, so an unbounded
+// array lets a single caller monopolize provider capacity. 2048 matches the
+// OpenAI embeddings batch limit and is well below any reasonable memory
+// threshold for the collected vector slice.
+const maxEmbeddingInputs = 2048
+
 // EmbeddingRequest is the OpenAI-shape embedding request. Input accepts either
 // a single string or a string array.
+//
+// The target embedding model MUST be registered with a non-zero ContextWindow;
+// otherwise the router's token-budget check rejects every request with
+// "budget_exceeded". This is a Phase-3 router artifact — embeddings are per-
+// input and don't conceptually need a window, but the budget path is shared.
 type EmbeddingRequest struct {
 	Model string         `json:"model"`
 	Input EmbeddingInput `json:"input"`
@@ -58,12 +72,24 @@ func (e *EmbeddingInput) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("embedding input must be string or string array")
 }
 
+// embeddingUsageWire mirrors OpenAI's embedding usage shape, which omits
+// completion_tokens entirely (embeddings produce no completion). Reusing the
+// shared UsageWire would surface "completion_tokens":0 on every response and
+// diverge from the reference wire.
+type embeddingUsageWire struct {
+	PromptTokens int `json:"prompt_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}
+
 // EmbeddingResponse is the OpenAI-shape response.
 type EmbeddingResponse struct {
-	Object string          `json:"object"` // "list"
-	Data   []EmbeddingData `json:"data"`
-	Model  string          `json:"model"`
-	Usage  UsageWire       `json:"usage"`
+	Object string             `json:"object"` // "list"
+	Data   []EmbeddingData    `json:"data"`
+	Model  string             `json:"model"`
+	Usage  embeddingUsageWire `json:"usage"`
+
+	// Extensions.
+	RouteInfo *RouteInfoExt `json:"x_route_info,omitempty"`
 }
 
 // EmbeddingData is one vector with its source index.
@@ -74,6 +100,11 @@ type EmbeddingData struct {
 }
 
 func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
+	if s.router == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_router", "server has no router")
+		return
+	}
+
 	var req EmbeddingRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "decode_error", err.Error())
@@ -86,6 +117,18 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Input.Values) == 0 {
 		writeError(w, http.StatusBadRequest, "missing_input", "input is required")
+		return
+	}
+	for i, v := range req.Input.Values {
+		if strings.TrimSpace(v) == "" {
+			writeError(w, http.StatusBadRequest, "invalid_input",
+				fmt.Sprintf("input[%d] is empty or whitespace-only", i))
+			return
+		}
+	}
+	if len(req.Input.Values) > maxEmbeddingInputs {
+		writeError(w, http.StatusBadRequest, "input_too_large",
+			fmt.Sprintf("input array length %d exceeds maximum %d", len(req.Input.Values), maxEmbeddingInputs))
 		return
 	}
 
@@ -114,6 +157,12 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		writeCompatError(w, err)
 		return
 	}
+	log.Printf("compat: embed rid=%s model=%s inputs=%d prompt_tokens=%d",
+		requestIDFrom(r.Context()),
+		plan.Profile.Key.String(),
+		len(req.Input.Values),
+		resp.Usage.PromptTokens,
+	)
 
 	// Use the qualified "provider/model" form for wire consistency with
 	// /v1/completions and /v1/chat/completions, which also report
@@ -122,15 +171,15 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 		Object: "list",
 		Model:  plan.Profile.Key.String(),
 		Data:   make([]EmbeddingData, 0, len(resp.Embeddings)),
-		Usage: UsageWire{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
+		Usage: embeddingUsageWire{
+			PromptTokens: resp.Usage.PromptTokens,
+			TotalTokens:  resp.Usage.TotalTokens,
 		},
 	}
 	for i, vec := range resp.Embeddings {
 		out.Data = append(out.Data, EmbeddingData{Object: "embedding", Embedding: vec, Index: i})
 	}
+	out.RouteInfo = routeInfoFrom(resp.RouteOutcome)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(out)
 }

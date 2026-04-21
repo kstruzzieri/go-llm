@@ -81,3 +81,30 @@ func TestEmbeddings_EnabledAcceptsSingleStringInput(t *testing.T) {
 		t.Errorf("bad data: %+v", resp.Data)
 	}
 }
+
+func TestEmbeddings_ResponseOmitsCompletionTokens(t *testing.T) {
+	mp := &mockProvider{
+		name: "ollama", caps: provider.CapEmbed,
+		models: []provider.ModelInfo{{Name: "qwen3-embedding:8b", ContextWindow: 32768, Capabilities: []string{"embedding"}}},
+		embedFn: func(ctx context.Context, req provider.EmbedRequest) (*provider.EmbedResponse, error) {
+			return &provider.EmbedResponse{
+				Model:      req.Model,
+				Embeddings: [][]float64{{0.1}},
+				Usage:      provider.Usage{PromptTokens: 1, TotalTokens: 1},
+			}, nil
+		},
+	}
+	srv, teardown := newTestServer(t, mp, WithEmbeddings(true))
+	defer teardown()
+
+	raw, _ := json.Marshal(EmbeddingRequest{Model: "qwen3-embedding:8b", Input: EmbeddingInput{Values: []string{"hi"}}})
+	rec := httptest.NewRecorder()
+	srv.buildHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/embeddings", bytes.NewReader(raw)))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if bytes.Contains(rec.Body.Bytes(), []byte("completion_tokens")) {
+		t.Errorf("response should omit completion_tokens, got: %s", rec.Body.String())
+	}
+}
