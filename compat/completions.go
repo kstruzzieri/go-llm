@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -65,6 +66,28 @@ type CompletionChoice struct {
 	Index        int    `json:"index"`
 	Text         string `json:"text"`
 	FinishReason string `json:"finish_reason"`
+}
+
+// CompletionChunk is one frame of an OpenAI-shape streaming /v1/completions
+// response. Each chunk carries exactly one CompletionChunkChoice today. Usage
+// is not included on per-chunk frames — OpenAI emits usage only on the final
+// frame when stream_options.include_usage is set, which we don't yet expose.
+type CompletionChunk struct {
+	ID      string                  `json:"id"`
+	Object  string                  `json:"object"` // "text_completion"
+	Created int64                   `json:"created"`
+	Model   string                  `json:"model"`
+	Choices []CompletionChunkChoice `json:"choices"`
+}
+
+// CompletionChunkChoice is one choice inside a streaming completion chunk.
+// FinishReason is a pointer so interim chunks serialize as
+// "finish_reason":null and only the final chunk carries a non-null reason,
+// matching OpenAI's wire format.
+type CompletionChunkChoice struct {
+	Index        int     `json:"index"`
+	Text         string  `json:"text"`
+	FinishReason *string `json:"finish_reason"`
 }
 
 // PromptUnion decodes OpenAI's "prompt" field which may be either a single
@@ -190,7 +213,8 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		AffinityKey: req.AffinityKey,
 		DryRun:      req.DryRun,
 	}
-	if req.Suffix != "" {
+	fim := req.Suffix != ""
+	if fim {
 		// FIM branch: Router.Generate mirrors these fields when Suffix is
 		// non-empty, so we match them exactly for consistency.
 		rr.UseCase = "fim"
@@ -203,7 +227,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.Stream {
-		s.serveCompletionsStream(w, r, rr)
+		s.serveCompletionsStream(w, r, rr, req.FilePath, fim)
 		return
 	}
 
@@ -286,12 +310,134 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(out)
 }
 
-// serveCompletionsStream is the streaming branch stub. Task 13 replaces it
-// with the real SSE writer; today it returns 501 so clients get a clear
-// signal rather than a silent fallthrough. The non-streaming handler still
-// honors every other feature (FIM budget, dry-run, route metadata).
-func (s *Server) serveCompletionsStream(w http.ResponseWriter, _ *http.Request, _ provider.RoutingRequest) {
-	writeError(w, http.StatusNotImplemented, "not_implemented", "streaming completions not yet implemented")
+// serveCompletionsStream handles the streaming branch of POST /v1/completions.
+// It emits an SSE (text/event-stream) body whose events each carry a JSON
+// CompletionChunk, terminated by a "data: [DONE]" sentinel.
+//
+// Order of operations:
+//  1. Broaden rr.RequiredCaps with CapStream so the router rejects any
+//     provider that cannot stream before any bytes are written.
+//  2. Acquire the HTTP concurrency slot using the resolved priority — the
+//     slot is released when the stream completes.
+//  3. Route via Router.Route. On error, writeCompatError still works
+//     because no bytes have been written yet.
+//  4. Construct a lazy-start sseWriter — it does NOT commit the 200 status
+//     until the first chunk is written, so a pre-first-chunk
+//     ExecuteGenerateStream failure can still be surfaced as a regular JSON
+//     error envelope. Without this guard a failure that happens before the
+//     first chunk is written as an empty 200 response, which is
+//     indistinguishable from a successful zero-token stream.
+//  5. For each chunk, emit a CompletionChunk with the qualified model ID and,
+//     on the Done chunk, a derived finish_reason matching the non-streaming
+//     branch's logic ("length" when NumPredict was set and usage reached the
+//     cap, "stop" otherwise — completions don't emit tool_calls).
+//  6. After ExecuteGenerateStream returns, emit "data: [DONE]" only on clean
+//     completion. If the failure happened before the first chunk, surface a
+//     JSON error envelope. If the failure happened mid-stream, skip the
+//     [DONE] sentinel so clients can detect premature EOS via its absence;
+//     context.Canceled (client disconnect — e.g. IDE cancels completion on
+//     every keystroke) is treated as normal and its log is suppressed to
+//     prevent spam.
+//
+// FIM budget is not applied on the streaming path — a streaming client
+// selects num_predict via the provider's live back-pressure rather than a
+// pre-truncation budget. Non-streaming callers still get applyFIMBudget.
+// If maintainers later want streaming-FIM budgeting, they can wire
+// req.MaxTokens through rr.Options.NumPredict.
+func (s *Server) serveCompletionsStream(w http.ResponseWriter, r *http.Request, rr provider.RoutingRequest, filePath string, fim bool) {
+	_ = filePath // reserved for Task 14's completion store; currently unused
+	_ = fim      // reserved for Task 14's completion store; currently unused
+
+	rr.RequiredCaps |= provider.CapStream
+
+	release, ok := s.semaphore.acquire(rr.Priority)
+	if !ok {
+		w.Header().Set("Retry-After", "1")
+		writeError(w, http.StatusTooManyRequests, "capacity", "server is at capacity")
+		return
+	}
+	defer release()
+
+	plan, err := s.router.Route(r.Context(), rr)
+	if err != nil {
+		writeCompatError(w, err)
+		return
+	}
+
+	sw, err := newSSEWriter(w)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "no_flusher", err.Error())
+		return
+	}
+
+	// Capture the response ID and qualified model ID BEFORE invoking the
+	// provider so every chunk carries stable identifiers. completionResponseID
+	// falls back to a random suffix when no request-id middleware has run.
+	id := completionResponseID(r.Context())
+	created := time.Now().Unix()
+	modelID := plan.Profile.Key.String()
+
+	var lastConfidence *float64
+	_ = lastConfidence // reserved hook point for Task 14's completion store
+
+	streamErr := plan.ExecuteGenerateStream(r.Context(), func(chunk provider.GenerateResponse) error {
+		// Derive finish_reason on the Done chunk. Completions are not
+		// tool-aware, so the rule collapses to "length" vs "stop".
+		// TODO(#48): Ollama's done_reason isn't surfaced by provider —
+		// finish_reason may misreport "stop" when the upstream actually hit
+		// num_predict but arrived with CompletionTokens==0. Same caveat as
+		// the non-streaming branch; a future DoneReason plumbing will fix
+		// both sites.
+		var finish *string
+		if chunk.Done {
+			reason := "stop"
+			if rr.Options.NumPredict > 0 && chunk.Usage.CompletionTokens >= rr.Options.NumPredict {
+				reason = "length"
+			}
+			finish = &reason
+			if chunk.Confidence != nil {
+				v := chunk.Confidence.Score
+				lastConfidence = &v
+			}
+			// Task 14 wires s.completionStore.put here once the
+			// CompletionRecord type and LRU store land. Leaving a hook
+			// point (local identifiers populated above) so Task 14 is a
+			// pure additive diff.
+		}
+		return sw.writeEvent(CompletionChunk{
+			ID:      id,
+			Object:  "text_completion",
+			Created: created,
+			Model:   modelID,
+			Choices: []CompletionChunkChoice{{
+				Index:        0,
+				Text:         chunk.Response,
+				FinishReason: finish,
+			}},
+		})
+	})
+
+	if streamErr != nil {
+		// If the failure happened BEFORE any chunk was delivered, the SSE
+		// writer never committed the 200 status — so we can still surface a
+		// JSON error envelope. Otherwise the stream is already live on the
+		// wire and we must NOT emit "data: [DONE]" — that is OpenAI's
+		// success sentinel, and emitting it under error conditions silently
+		// signals success. Skipping it lets SDKs detect premature EOS via
+		// the missing terminator.
+		if !sw.started {
+			writeCompatError(w, streamErr)
+			return
+		}
+		// Client disconnect is normal (e.g., IDE cancels completion on every
+		// keystroke) — suppress the log to prevent spam.
+		if !errors.Is(streamErr, context.Canceled) {
+			log.Printf("compat: generate stream error rid=%s: %v", requestIDFrom(r.Context()), streamErr)
+		}
+		return
+	}
+
+	_ = sw.writeDone()
 }
 
 // writeCompletionDryRun renders the route decision without executing the

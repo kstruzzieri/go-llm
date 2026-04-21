@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -495,12 +496,170 @@ func TestCompletions_RequestIDFallback(t *testing.T) {
 	}
 }
 
-// TestCompletions_StreamStubReturns501 pins the current streaming behavior:
-// stream=true yields 501 not_implemented until Task 13 replaces the stub with
-// the real SSE writer. Task 13 will delete this test as it wires in the real
-// streaming path.
-func TestCompletions_StreamStubReturns501(t *testing.T) {
-	srv, _, calls, teardown := newCompletionFixture(t, "ok")
+// ---------------------------------------------------------------------------
+// Streaming path
+// ---------------------------------------------------------------------------
+
+// newStreamingCompletionServer wires a server whose provider scripts
+// GenerateStream directly. The `build` callback lets each test drive its own
+// chunk sequence. The registered model grants CapGenerate|CapInsert|CapStream
+// so both generate and FIM streaming routes resolve.
+func newStreamingCompletionServer(
+	t *testing.T,
+	build func(ctx context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error,
+	opts ...Option,
+) (*Server, func()) {
+	t.Helper()
+	mp := &mockProvider{
+		name: "ollama",
+		caps: provider.CapGenerate | provider.CapInsert | provider.CapStream,
+		models: []provider.ModelInfo{
+			{Name: "qwen3:8b", ContextWindow: 32768, Capabilities: []string{"insert"}},
+		},
+		genStreamFn: build,
+	}
+	return newTestServer(t, mp, opts...)
+}
+
+// decodeCompletionSSEChunks parses an SSE body into individual CompletionChunk
+// payloads. It skips the [DONE] sentinel and any non-"data:" lines.
+func decodeCompletionSSEChunks(t *testing.T, body string) []CompletionChunk {
+	t.Helper()
+	var chunks []CompletionChunk
+	for _, line := range strings.Split(body, "\n") {
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			continue
+		}
+		var c CompletionChunk
+		if err := json.Unmarshal([]byte(payload), &c); err != nil {
+			t.Fatalf("decode chunk %q: %v", payload, err)
+		}
+		chunks = append(chunks, c)
+	}
+	return chunks
+}
+
+// TestCompletions_Streaming exercises the happy path: two chunks "4" then "2"
+// from the provider (the second with Done=true) produce two SSE events
+// followed by "data: [DONE]". The first chunk must carry text="4" with no
+// finish_reason, the second must carry text="2" and finish_reason="stop".
+func TestCompletions_Streaming(t *testing.T) {
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		if err := fn(provider.GenerateResponse{Model: req.Model, Response: "4"}); err != nil {
+			return err
+		}
+		return fn(provider.GenerateResponse{Model: req.Model, Response: "2", Done: true})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "what is 4+38?",
+		"stream": true,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("content-type = %q, want text/event-stream", ct)
+	}
+	text := rec.Body.String()
+	if !strings.HasSuffix(text, "data: [DONE]\n\n") {
+		t.Errorf("missing DONE sentinel: %q", text)
+	}
+	if !strings.Contains(text, `"text":"4"`) {
+		t.Errorf("first chunk text %q not found in body: %q", "4", text)
+	}
+	if !strings.Contains(text, `"text":"2"`) {
+		t.Errorf("second chunk text %q not found in body: %q", "2", text)
+	}
+
+	chunks := decodeCompletionSSEChunks(t, text)
+	if len(chunks) != 2 {
+		t.Fatalf("got %d chunks, want 2: %q", len(chunks), text)
+	}
+	c0 := chunks[0]
+	if c0.Object != "text_completion" {
+		t.Errorf("chunk[0].object = %q, want text_completion", c0.Object)
+	}
+	if !strings.HasPrefix(c0.ID, "cmpl_") {
+		t.Errorf("chunk[0].id = %q, want cmpl_ prefix", c0.ID)
+	}
+	if c0.Model != "ollama/qwen3:8b" {
+		t.Errorf("chunk[0].model = %q, want ollama/qwen3:8b (qualified)", c0.Model)
+	}
+	if len(c0.Choices) != 1 {
+		t.Fatalf("chunk[0].choices = %d", len(c0.Choices))
+	}
+	if c0.Choices[0].Text != "4" {
+		t.Errorf("chunk[0].text = %q, want 4", c0.Choices[0].Text)
+	}
+	if c0.Choices[0].FinishReason != nil {
+		t.Errorf("chunk[0].finish_reason = %v, want nil", *c0.Choices[0].FinishReason)
+	}
+	c1 := chunks[1]
+	if c1.Choices[0].Text != "2" {
+		t.Errorf("chunk[1].text = %q, want 2", c1.Choices[0].Text)
+	}
+	if c1.Choices[0].FinishReason == nil || *c1.Choices[0].FinishReason != "stop" {
+		t.Errorf("chunk[1].finish_reason = %v, want stop", c1.Choices[0].FinishReason)
+	}
+	if c1.Model != "ollama/qwen3:8b" {
+		t.Errorf("chunk[1].model = %q, want ollama/qwen3:8b (qualified)", c1.Model)
+	}
+}
+
+// TestCompletions_Streaming_FinishReasonLength covers the length-cap branch of
+// streaming finish_reason derivation: max_tokens=8 and usage reporting
+// CompletionTokens=8 on the Done chunk must yield "length".
+func TestCompletions_Streaming_FinishReasonLength(t *testing.T) {
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		return fn(provider.GenerateResponse{
+			Model:    req.Model,
+			Response: "truncated",
+			Done:     true,
+			Usage:    provider.Usage{PromptTokens: 3, CompletionTokens: 8, TotalTokens: 11},
+		})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":      "ollama/qwen3:8b",
+		"prompt":     "write a long essay",
+		"stream":     true,
+		"max_tokens": 8,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeCompletionSSEChunks(t, rec.Body.String())
+	if len(chunks) != 1 {
+		t.Fatalf("got %d chunks, want 1", len(chunks))
+	}
+	final := chunks[0]
+	if final.Choices[0].FinishReason == nil || *final.Choices[0].FinishReason != "length" {
+		t.Errorf("finish_reason = %v, want length", final.Choices[0].FinishReason)
+	}
+}
+
+// TestCompletions_Streaming_ErrorBeforeFirstChunk verifies the lazy-start
+// guarantee: when the provider's GenerateStream fails before invoking fn even
+// once, the client sees a normal JSON error envelope (not a partial SSE
+// stream). The status is 502 because an unclassified provider error maps
+// through statusForCompatError to upstream_error.
+func TestCompletions_Streaming_ErrorBeforeFirstChunk(t *testing.T) {
+	wantErr := errors.New("synthetic upstream failure")
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, _ provider.GenerateRequest, _ func(provider.GenerateResponse) error) error {
+		// Never invoke fn — fail immediately. The SSE writer's lazy-start
+		// means no "data: ..." bytes have been committed yet.
+		return wantErr
+	})
 	defer teardown()
 
 	body := map[string]any{
@@ -509,18 +668,147 @@ func TestCompletions_StreamStubReturns501(t *testing.T) {
 		"stream": true,
 	}
 	rec := doCompletion(t, srv, body)
-	if rec.Code != http.StatusNotImplemented {
-		t.Fatalf("status = %d, want 501, body=%s", rec.Code, rec.Body.String())
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502, body=%s", rec.Code, rec.Body.String())
 	}
-	if got := atomic.LoadInt32(calls); got != 0 {
-		t.Errorf("provider Generate called %d times for stream stub, want 0", got)
+	if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("content-type = %q, want application/json (JSON error envelope)", ct)
+	}
+	if strings.Contains(rec.Body.String(), "data:") {
+		t.Errorf("body unexpectedly contains SSE data line: %q", rec.Body.String())
 	}
 	var env errorEnvelope
 	if err := json.NewDecoder(rec.Body).Decode(&env); err != nil {
-		t.Fatalf("decode 501 body: %v", err)
+		t.Fatalf("decode error envelope: %v", err)
 	}
-	if env.Error.Code != "not_implemented" {
-		t.Errorf("error.code = %q, want not_implemented", env.Error.Code)
+	if env.Error.Code != "upstream_error" {
+		t.Errorf("error.code = %q, want upstream_error", env.Error.Code)
+	}
+}
+
+// TestCompletions_Streaming_ErrorAfterFirstChunk guards the HIGH-severity
+// silent-truncation fix: when the provider emits one chunk successfully then
+// fails mid-stream (non-cancellation error), the handler MUST NOT emit
+// "data: [DONE]". The [DONE] sentinel is OpenAI's success signal — emitting
+// it under error conditions silently masks the truncation. Its absence lets
+// OpenAI SDKs detect premature EOS.
+func TestCompletions_Streaming_ErrorAfterFirstChunk(t *testing.T) {
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		if err := fn(provider.GenerateResponse{Model: req.Model, Response: "partial"}); err != nil {
+			return err
+		}
+		return errors.New("upstream collapsed")
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "hi",
+		"stream": true,
+	}
+	rec := doCompletion(t, srv, body)
+
+	// Status 200 + event-stream headers are committed because the first chunk
+	// was written successfully. The error occurs after commit.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (headers committed on first chunk), body=%s", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "text/event-stream" {
+		t.Errorf("content-type = %q, want text/event-stream", ct)
+	}
+
+	text := rec.Body.String()
+	if !strings.Contains(text, `"text":"partial"`) {
+		t.Errorf("body missing first chunk payload: %q", text)
+	}
+	// Critical assertion: no [DONE] sentinel. Its absence is the wire-level
+	// signal of premature EOS that clients rely on.
+	if strings.Contains(text, "data: [DONE]") {
+		t.Errorf("body unexpectedly contains data: [DONE] after mid-stream error: %q", text)
+	}
+}
+
+// TestCompletions_Streaming_ClientDisconnect verifies the handler returns
+// cleanly when the caller's context is canceled mid-stream (IDE closing the
+// completion, e.g., on the next keystroke). The semaphore slot must be
+// released so subsequent requests are not blocked — we probe this by
+// acquiring a fresh slot after the handler returns with MaxConcurrency=1.
+func TestCompletions_Streaming_ClientDisconnect(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		// Emit one chunk, then cancel the request context and return the
+		// cancellation error — simulating a client disconnect detected by the
+		// provider after it had already pushed a chunk.
+		if err := fn(provider.GenerateResponse{Model: req.Model, Response: "tick"}); err != nil {
+			return err
+		}
+		cancel()
+		return context.Canceled
+	}, WithMaxConcurrency(1))
+	defer teardown()
+
+	buf, err := json.Marshal(map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "hi",
+		"stream": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions", bytes.NewReader(buf)).WithContext(ctx)
+	req.Header.Set("Content-Type", "application/json")
+
+	// Should not panic and should return (not hang).
+	srv.buildHandler().ServeHTTP(rec, req)
+
+	text := rec.Body.String()
+	if !strings.Contains(text, `"text":"tick"`) {
+		t.Errorf("body missing first chunk: %q", text)
+	}
+	if strings.Contains(text, "data: [DONE]") {
+		t.Errorf("body contains data: [DONE] after cancellation: %q", text)
+	}
+
+	// Probe semaphore release: with max concurrency 1, we must be able to
+	// acquire a fresh slot now that the handler has returned.
+	release, ok := srv.semaphore.acquire(provider.PriorityNormal)
+	if !ok {
+		t.Fatal("semaphore slot not released after client-disconnect — handler leaked a slot")
+	}
+	release()
+}
+
+// TestCompletions_Streaming_ModelQualified verifies that every streaming
+// chunk carries the qualified "provider/model" form in the Model field,
+// matching the non-streaming branch's plan.Profile.Key.String() convention.
+// The provider returns a bare model name (the realistic Ollama shape); the
+// compat layer must upgrade it to the qualified form.
+func TestCompletions_Streaming_ModelQualified(t *testing.T) {
+	srv, teardown := newStreamingCompletionServer(t, func(_ context.Context, req provider.GenerateRequest, fn func(provider.GenerateResponse) error) error {
+		return fn(provider.GenerateResponse{Model: req.Model, Response: "ok", Done: true})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "hi",
+		"stream": true,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeCompletionSSEChunks(t, rec.Body.String())
+	if len(chunks) == 0 {
+		t.Fatalf("no chunks: %q", rec.Body.String())
+	}
+	for i, c := range chunks {
+		if c.Model != "ollama/qwen3:8b" {
+			t.Errorf("chunk[%d].model = %q, want ollama/qwen3:8b (qualified)", i, c.Model)
+		}
 	}
 }
 
