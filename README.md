@@ -59,7 +59,7 @@ func main() {
     client := ollama.NewClient()
 
     resp, err := client.Chat(context.Background(), ollama.ChatRequest{
-        Model: "qwen3.5:27b",
+        Model: "gemma4:31b",
         Messages: []ollama.ChatMessage{
             {Role: "user", Content: "Explain walk-forward validation for trading strategies"},
         },
@@ -75,7 +75,7 @@ func main() {
 
 ```go
 err := client.ChatStream(ctx, ollama.ChatRequest{
-    Model:    "qwen3.5:27b",
+    Model:    "gemma4:31b",
     Messages: []ollama.ChatMessage{{Role: "user", Content: "Hello"}},
 }, func(resp ollama.ChatResponse) error {
     fmt.Print(resp.Message.Content)
@@ -99,7 +99,7 @@ weatherTool := ollama.NewTool(
 
 // Send a chat request with tools
 resp, _ := client.Chat(ctx, ollama.ChatRequest{
-    Model:    "qwen3.5:27b",
+    Model:    "gemma4:31b",
     Messages: []ollama.ChatMessage{{Role: "user", Content: "What's the weather in NYC?"}},
     Tools:    []ollama.Tool{weatherTool},
 })
@@ -149,7 +149,7 @@ context := retriever.BuildContext(results, 4096)
 
 // Feed context into a chat completion
 resp, _ := client.Chat(ctx, ollama.ChatRequest{
-    Model: "qwen3.5:27b",
+    Model: "gemma4:31b",
     Messages: []ollama.ChatMessage{
         {Role: "system", Content: "Answer using the following code context:\n\n" + context},
         {Role: "user", Content: "How does the pairs trading strategy calculate hedge ratios?"},
@@ -212,7 +212,7 @@ client := ollama.NewClient(
 
 ```go
 models, _ := client.ListModels(ctx)
-info, _ := client.ShowModel(ctx, "qwen3.5:27b")
+info, _ := client.ShowModel(ctx, "gemma4:31b")
 client.PullModel(ctx, "qwen3:8b", func(status string, completed, total int64) {
     fmt.Printf("%s: %d/%d\n", status, completed, total)
 })
@@ -246,13 +246,15 @@ provider.CompleteStream(ctx, req, func(token string) error {
 
 Load model settings from `models.json` with provider configs, role-based defaults, and fallback chains that resolve against available Ollama models.
 
+`go-llm` does not hard-code a model roster — `models.json` is the sole source of truth. Substitute any model your configured provider can load by editing `models.json`; capabilities (chat / embedding / tool-call) are detected at runtime by `fingerprint/`. See [`docs/llm/`](docs/llm/) for the reference lineup shipped by default and the full BYO guide.
+
 ```go
 import "github.com/kstruzzieri/go-llm/config"
 
 cfg, _ := config.Default() // auto-discovers models.json
 
 // Simple lookup
-model := cfg.ModelFor("chat") // e.g., "qwen3.5:27b"
+model := cfg.ModelFor("chat") // e.g., "gemma4:31b"
 
 // Resolve with fallback chain (checks which models are actually available)
 resolved, _ := cfg.Resolve(ctx, client, "chat")
@@ -316,11 +318,11 @@ Domain-specific analysis helpers that leverage Ollama models.
 import "github.com/kstruzzieri/go-llm/analysis"
 
 // Code review (optionally backed by RAG context)
-reviewer, _ := analysis.NewCodeReviewer(client, retriever, "qwen3.5:27b")
+reviewer, _ := analysis.NewCodeReviewer(client, retriever, "gemma4:31b")
 review, _ := reviewer.Review(ctx, code, analysis.WithLanguage("go"))
 
 // ML training metrics analysis
-analyzer, _ := analysis.NewMetricsAnalyzer(client, "qwen3.5:27b")
+analyzer, _ := analysis.NewMetricsAnalyzer(client, "gemma4:31b")
 insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
     Epoch: 10, Loss: 0.42, LearningRate: 1e-4,
 })
