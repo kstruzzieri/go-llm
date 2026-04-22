@@ -1,8 +1,8 @@
-# go-llm: Local Model Strategy (April 2026)
+# go-llm: Local Model Strategy
 
-This directory documents the analysis and decisions behind the model lineup
-powering `go-llm` and its consumers (Firn IDE, Flux ML, Quantum Trader) on
-Apple Silicon workstations.
+This directory documents the analysis and decisions behind the reference
+model lineup shipped with `go-llm` and its consumers (Firn IDE, Flux ML,
+Quantum Trader) on Apple Silicon workstations.
 
 **Target hardware:** MacBook Pro M3 Max, 128GB unified memory (~97GB usable
 after OS overhead).
@@ -13,26 +13,46 @@ after OS overhead).
 |---|---|
 | [analysis.md](analysis.md) | 2026 open-weight landscape, benchmark summary, sources |
 | [setups.md](setups.md) | Three candidate setup combinations with tradeoffs |
-| [recommendation.md](recommendation.md) | Chosen lineup + migration steps |
+| [recommendation.md](recommendation.md) | Current reference lineup + how to customize |
 | [benchmark-plan.md](benchmark-plan.md) | Harness design for A/B'ing models on real traces |
 
-## TL;DR
+## Bring-your-own model
 
-- **Keep** `qwen3-coder-next` (primary code generation) and
-  `qwen3-embedding:8b` (embeddings).
-- **Add** `gemma4:31b` (dense) — agent / tool-use / reasoning specialist.
-  Fills the tool-calling gap; 86.4% τ2-bench, 80.0% LiveCodeBench.
-- **Add** `qwen3.6:35b-a3b` — MoE upgrade over `qwen3.5:35b-a3b` (73.4%
-  SWE-bench Verified with 3B active).
-- **Retire** `qwen3.5:27b` and `qwen3.5:35b-a3b` after validation.
-- **Stay on Ollama** — as of 0.19, it is backed by MLX on Apple Silicon,
-  so the historical MLX-vs-Ollama speed gap is closed.
-- **Defer** a llama.cpp / LM Studio backend abstraction until the
-  benchmark harness shows Gemma 4 or a frontier non-Ollama model
-  (GLM-5.1, MiniMax M2.7) produces a measurable quality delta on real
-  workloads.
+`go-llm` does **not** hard-code a model roster. `models.json` is the only
+source of truth for which models exist, what role each plays, and which
+provider serves them. You can substitute any model the provider can load:
+edit `models.json`, restart, and the router picks it up. See
+[recommendation.md#customizing-the-lineup](recommendation.md#customizing-the-lineup)
+for the full story.
 
-## Manual Smoke Test
+On first use, the `fingerprint/` package probes the model via the
+provider's `/api/show` (or equivalent) endpoint, captures capabilities
+(chat / embedding / tool-call) plus latency and throughput, and persists
+the profile to SQLite. No code changes are required to add a model — only
+config.
+
+The specific model IDs in this documentation describe the reference
+lineup checked into `models.json`. Treat them as "what ships by default",
+not "what `go-llm` requires."
+
+## TL;DR — Reference lineup (April 2026)
+
+- **`qwen3-coder-next`** — primary code generation (80B / 3.9B active MoE)
+- **`qwen3-embedding:8b`** — embeddings (#1 MTEB multilingual)
+- **`gemma4:31b`** (dense) — agent / tool-use / reasoning (86.4% τ2-bench,
+  80.0% LiveCodeBench, native function calling)
+- **`qwen3.6:35b-a3b`** — fast MoE (73.4% SWE-bench, 3B active)
+- **`qwen3:8b`** — lightweight / FIM
+
+The fleet co-resides in ~77GB with comfortable headroom. The architecture
+stays on Ollama (as of 0.19, Ollama is backed by MLX on Apple Silicon, so
+the historical MLX-vs-Ollama speed gap is closed). A second backend
+(llama.cpp, LM Studio, mlx-lm) is deferred until the benchmark harness
+shows a measurable quality delta on real workloads — see
+[setups.md](setups.md) for Setup 2/3 (GLM-5.1, MiniMax M2.7) as
+alternative paths.
+
+## Manual smoke test
 
 To smoke-test `cmd/llm-bench` without waiting for real captured traces,
 use the checked-in synthetic trace:
@@ -45,12 +65,14 @@ go run ./cmd/llm-bench \
   -report /tmp/llm-bench-smoke.md
 ```
 
-Success criteria: the command exits `0`, writes `/tmp/llm-bench-smoke.md`,
-and the report shows `Errors = 0` with `Mean Quality = 1.00` for each
-model on the `smoke-minimal-001` trace. This only verifies harness
-plumbing and basic model reachability, not real MCP-agent quality.
+Substitute whichever models are pulled on your machine. Success criteria:
+the command exits `0`, writes `/tmp/llm-bench-smoke.md`, and the report
+shows `Errors = 0` with `Mean Quality = 1.00` for each model on the
+`smoke-minimal-001` trace. This only verifies harness plumbing and basic
+model reachability, not real MCP-agent quality.
 
 ## Date stamp
 
-All research was conducted April 16, 2026. Benchmark numbers and release
-dates reflect that snapshot.
+Research was conducted April 16, 2026 and refreshed against the live
+`models.json` as of that date. Benchmark numbers and release dates
+reflect that snapshot.

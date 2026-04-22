@@ -140,8 +140,15 @@ manual review because the "right answer" is domain-specific.
 
 ### Phase 4 — Live comparison runs
 
-- Qwen3-Coder-Next vs Gemma 4 31B on `agent` role traces
-- Qwen3-Coder-Next vs GLM-5.1 (Setup 2 experiment) on code-gen traces
+- **Currently-configured model vs candidate** on each role's captured
+  traces. The harness takes `-models <provider>/<name>,...` so any model
+  reachable through an existing `provider.Provider` can participate —
+  swap candidates without editing Go code.
+- Initial target comparisons against the reference lineup in `models.json`:
+  - `coding` — Qwen3-Coder-Next vs GLM-5.1 on code-gen traces (Setup 2
+    experiment; see [setups.md](setups.md))
+  - `agent` — Gemma 4 31B vs MiniMax M2.7 on MCP tool-use traces
+    (Setup 3 experiment)
 - Report in `docs/llm/benchmarks/YYYY-MM-DD-<name>.md`
 
 ## User decision required

@@ -1,70 +1,132 @@
-# Recommended Lineup + Migration Plan
+# Current Lineup + Customization
 
-## Decision
+## Reference lineup (shipped in `models.json`)
 
-Adopt **Setup 1 — Balanced Daily Driver** as the production `go-llm`
-lineup. Run **Setup 2 (GLM-5.1 in LM Studio)** as a parallel off-Ollama
-experiment to gather evidence for whether second-backend work is
-justified.
+Adopted from the April 2026 analysis (see [analysis.md](analysis.md)).
+This is **Setup 1 — Balanced Daily Driver** from [setups.md](setups.md):
+drop-in upgrades, all-Ollama, full co-residency, zero architectural
+change to `go-llm`.
 
-## Target lineup
+| Role | Model | Source |
+|---|---|---|
+| `coding` | `qwen3-coder-next:latest` | Ollama |
+| `agent` | `gemma4:31b` | Ollama |
+| `general` | `gemma4:31b` | Ollama |
+| `analysis` | `gemma4:31b` | Ollama |
+| `fast` | `qwen3.6:35b-a3b` | Ollama |
+| `lightweight` | `qwen3:8b` | Ollama |
+| `embedding` | `qwen3-embedding:8b` | Ollama |
 
-| Role | Model | Source | Status |
-|---|---|---|---|
-| `coding` | `qwen3-coder-next:latest` | Ollama | **keep** |
-| `agent` | `gemma4:31b` | Ollama | **add** |
-| `general` | `gemma4:31b` | Ollama | **retarget** (was `qwen3.5:27b`) |
-| `analysis` | `gemma4:31b` | Ollama | **retarget** (was `qwen3.5:27b`) |
-| `fast` | `qwen3.6:35b-a3b` | Ollama | **add** (replaces `qwen3.5:35b-a3b`) |
-| `lightweight` | `qwen3:8b` | Ollama | **keep** |
-| `embedding` | `qwen3-embedding:8b` | Ollama | **keep** |
+These specific IDs are **the reference lineup**, not a contract. `go-llm`
+has no hard-coded model list: the router, registry, and every consumer
+read from `models.json`.
 
-## Migration steps
+## Customizing the lineup
 
-### Phase 1 — Pull new models (10 min)
+### The short story
 
-```bash
-ollama pull gemma4:31b          # ~20GB dense
-ollama pull gemma4:26b          # ~18GB MoE (optional, latency alternative)
-ollama pull qwen3.6:35b-a3b     # ~28GB MoE
+Edit `models.json`. Restart. Done.
+
+`go-llm` loads models at boot from a single config file and profiles each
+one on first use. There is no roster file to edit in Go, no build-time
+list to regenerate, and no capability list to keep in sync by hand —
+capabilities are discovered at runtime via the provider's model-info
+endpoint and cached in the fingerprint store (SQLite).
+
+### What a model entry looks like
+
+```json
+{
+  "models": {
+    "coding": {
+      "name": "llama-4-scout:q5_k_m",
+      "provider": "ollama",
+      "type": "dense",
+      "context_window": 131072,
+      "fallbacks": ["fast", "lightweight"]
+    }
+  }
+}
 ```
 
-### Phase 2 — Validate (1–2 days of normal use)
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | Whatever the provider uses to load the model |
+| `provider` | no | Defaults to `"ollama"`; any key from the `providers` map |
+| `type` | yes | `"dense"`, `"moe"`, or `"embedding"` (validates fallback compatibility) |
+| `context_window` | no | Observed/overridden at runtime by fingerprint if wrong |
+| `dimensions` | no | For embedding models |
+| `fallbacks` | no | Role names to degrade to when the primary is unavailable |
+| `description`, `parameters` | no | Human-readable only |
 
-Run with both new and old models pulled. `models.json` updated to point
-to new models, but old models still available. Monitor:
+### Adding a new provider
 
-- `gemma4:31b` on agent workloads (Quantum Trader MCP loops, Firn code
-  actions)
-- `qwen3.6:35b-a3b` on general chat / analysis
-- Existing `qwen3-coder-next` workflows for regression (they should be
-  unchanged)
+`providers` is also config-driven:
 
-### Phase 3 — Retire legacy (5 min)
-
-Once Phase 2 passes:
-
-```bash
-ollama rm qwen3.5:27b
-ollama rm qwen3.5:35b-a3b
+```json
+{
+  "providers": {
+    "ollama": { "base_url": "http://localhost:11434", "timeout": "5m" },
+    "lm-studio": {
+      "base_url": "http://localhost:1234/v1",
+      "api_format": "openai",
+      "timeout": "5m"
+    }
+  }
+}
 ```
 
-### Phase 4 — Parallel GLM-5.1 experiment
+Then any model's `provider` field can reference the new key. This is how
+Setup 2 / Setup 3 from [setups.md](setups.md) land once they're
+justified — the abstraction seam already exists; the implementation (a
+second `provider.Provider`) is the only remaining work.
 
-Independent of the main migration:
+### Capability detection
 
-1. Install LM Studio (or `llama.cpp` server).
-2. Pull `glm-5.1-UD-Q2_K_XL` (via Unsloth).
-3. Run the benchmark harness (see [benchmark-plan.md](benchmark-plan.md))
-   comparing Qwen3-Coder-Next and GLM-5.1 on real captured traces.
-4. **Decision gate**: if GLM-5.1 shows ≥5% quality improvement on real
-   workloads (not synthetic benchmarks), invest in the second-backend
-   abstraction (Setup 2).
+The first time a model is used, `fingerprint/` queries the provider for
+model metadata and records:
 
-Expected outcome: in most cases the quality gain will not justify the
-integration cost. The experiment's real value is *evidence* that
-defending Setup 1 against speculative criticism ("but GLM-5.1 is better
-on SWE-bench!") is correct for this workload.
+- **Kind** — completion, embedding, tool-call, thinking-mode support
+- **Latency** — first-token and inter-token latency
+- **Throughput** — tokens per second under load
+- **Resources** — peak memory, cold-start time
+
+The catalog (`provider/catalog.json`) matches model **families** (e.g.
+`qwen3`, `gemma4`, `codellama`, `deepseek`) by name prefix and supplies
+FIM-policy and thinking-mode defaults. If a model's family isn't in the
+catalog, the system falls back to runtime-detected capabilities and a
+neutral default policy — it still works; it just won't get family-specific
+tuning until you add a catalog entry.
+
+### Router weight profiles
+
+`provider/router_score.go` ships default profiles for `fim`, `chat`,
+`embedding`, `reasoning`, `code-review`, `agent`, and `tool-use`
+(`agent` and `tool-use` are aliased to the same values). The profiles
+weigh generic traits — speed, quality, feedback — not specific models,
+so they apply unchanged to any lineup. If your own models have unusual
+speed/quality tradeoffs (e.g., a reasoner that's slow but very high
+quality), retune by constructing the router with
+`provider.WithWeightOverrides(map[string]*WeightProfile{...})`.
+
+### OpenAI-compat aliases
+
+The compat layer ships a `RecommendedAliases()` preset
+(`compat/aliases.go`) that maps OpenAI model names (`gpt-4`, `gpt-4o`,
+`text-embedding-3-large`, etc.) to the reference lineup for easy
+drop-in with Cursor / Continue / raw `openai` SDKs. **These aliases
+reference specific go-llm model IDs and will move as the reference
+lineup evolves.** For a custom lineup, pass your own map to
+`compat.WithAliases()`:
+
+```go
+srv := compat.New(router, registry, providers,
+    compat.WithAliases(map[string]string{
+        "gpt-4":                  "ollama/llama-4-scout:q5_k_m",
+        "text-embedding-3-large": "ollama/nomic-embed-code",
+    }),
+)
+```
 
 ## Unvalidated claims to verify on deploy
 
@@ -73,12 +135,13 @@ The `context_window` values in `models.json` (256000 for `gemma4:31b` /
 published model maxima and have **not** been validated at build time —
 the library does not boot Ollama in unit tests. First use on a given
 machine, the `fingerprint/` package will observe the real context
-window Ollama reports and cache it. If a published figure is wrong,
+window the provider reports and cache it. If a published figure is wrong,
 prompt-overflow bugs will surface at runtime, not at install.
 
-Mitigation: after pulling, run `ollama show <model>` once and compare
-the `num_ctx` figure with `models.json`. If they disagree, update
-`models.json` rather than trusting the source.
+Mitigation: after pulling, run `ollama show <model>` (or the equivalent
+for your provider) once and compare the `num_ctx` figure with
+`models.json`. If they disagree, update `models.json` rather than
+trusting the source.
 
 The catalog keeps both `qwen3-coder-next:latest` and `qwen3-coder-next:80b`
 variants with identical specs. `latest` tracks Ollama's floating tag and
@@ -86,32 +149,30 @@ is what `models.json` references; `80b` is retained so a consumer that
 pins explicitly still gets curated scoring data. `TestQwen3CoderNextVariantsInSync`
 enforces they stay identical.
 
-## Files touched in this migration
+## Alternate paths — GLM-5.1 and MiniMax experiments
 
-- `models.json` — role assignments
-- `provider/catalog.json` — add `qwen3.6`, `qwen3-coder-next`, `gemma4`
-  families
-- `docs/GETTING_STARTED.md` — update "Pull Required Models" section
-  *(follow-up PR, not blocking)*
-- `docs/llm/` — this directory
+Setup 2 (GLM-5.1 in LM Studio) and Setup 3 (MiniMax M2.7) from
+[setups.md](setups.md) remain candidate upgrades. They're deferred,
+not rejected. The benchmark harness
+([benchmark-plan.md](benchmark-plan.md)) is the decision gate: if a
+frontier non-Ollama model shows ≥5% quality improvement on real captured
+traces (not synthetic benchmarks), that's the evidence to invest in the
+second-backend abstraction. Until that evidence exists, Setup 1 wins on
+integration cost.
 
-No code changes required to `config/`, `provider/`, `ollama/`, `rag/`,
-`completion/`, `analysis/`, `mcp/`, `conversation/`, `feedback/`,
-`fingerprint/`, or `prefetch/` for Phase 1–3. The `provider.Router`
-signature is stable; new models get picked up automatically via
-`config.Load` and the catalog.
+## Files consulted when changing the lineup
 
-## Router weight profiles
+- `models.json` — role assignments (the only required edit for most
+  changes)
+- `provider/catalog.json` — family metadata (add a family entry if your
+  model belongs to a new family not already listed)
+- `docs/GETTING_STARTED.md` — "Pull Required Models" section, if you
+  ship a consumer-facing install guide
+- `docs/llm/` — this directory, if the change is significant enough to
+  warrant narrative updates
 
-`provider/router_score.go` ships default profiles for `fim`, `chat`,
-`embedding`, `reasoning`, `code-review`, `agent`, and `tool-use`
-(`agent` and `tool-use` are aliased to the same values). The agent
-profile prioritizes Speed and Feedback more heavily than chat, on the
-reasoning that tool-calling loops make many small calls and tool-call
-accuracy is directly observable as success/failure. If real traces
-suggest these weights are wrong, retune them — they are opinions, not
-benchmarked values, and the benchmark harness (`cmd/llm-bench`) is the
-right tool to validate them.
-
-Consumers can override any profile at construction via
-`provider.WithWeightOverrides(map[string]*WeightProfile{...})`.
+No code changes are required in `config/`, `provider/`, `ollama/`,
+`rag/`, `completion/`, `analysis/`, `mcp/`, `conversation/`,
+`feedback/`, `fingerprint/`, `prefetch/`, or `compat/` to add or swap
+models. The `provider.Router` signature is stable; new models get picked
+up automatically via `config.Load` and the catalog.
