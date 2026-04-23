@@ -16,15 +16,17 @@ go get github.com/kstruzzieri/go-llm
 
 ## Pull Required Models
 
-```bash
-# General purpose (reasoning, vision, conversation)
-ollama pull qwen3.5:27b
+These pulls match the current reference lineup checked into `models.json`:
 
-# Fast MoE model (agents, tool use, high throughput)
-ollama pull qwen3.5:35b-a3b
+```bash
+# General / agent / analysis (reasoning, multimodal chat, tool use)
+ollama pull gemma4:31b
+
+# Fast fallback / lower-latency chat
+ollama pull qwen3.6:35b-a3b
 
 # Coding (code generation, review, FIM completion)
-ollama pull qwen3-coder-next
+ollama pull qwen3-coder-next:latest
 
 # Lightweight (simple/fast tasks)
 ollama pull qwen3:8b
@@ -32,6 +34,10 @@ ollama pull qwen3:8b
 # Embeddings (RAG vector search)
 ollama pull qwen3-embedding:8b
 ```
+
+If you customize `models.json`, pull the models you configured instead.
+See [llm/recommendation.md](llm/recommendation.md) for the current
+reference lineup and BYO-model guidance.
 
 ## Model Configuration
 
@@ -43,7 +49,7 @@ import "github.com/kstruzzieri/go-llm/config"
 cfg := config.MustLoad("models.json")
 
 // Resolve model names by use-case
-chatModel := cfg.MustModelFor("chat")           // "qwen3.5:27b"
+chatModel := cfg.MustModelFor("chat")            // "gemma4:31b"
 codeModel := cfg.MustModelFor("completion")      // "qwen3-coder-next:latest"
 embedModel := cfg.MustModelFor("embedding")      // "qwen3-embedding:8b"
 
@@ -68,11 +74,16 @@ Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to dis
 
 | Role | Model | When to Use |
 |------|-------|-------------|
-| `general` | qwen3.5:27b (17GB) | Complex reasoning, image analysis, long conversations |
-| `fast` | qwen3.5:35b-a3b (23GB) | Agent loops, tool calling, rapid iteration. MoE = only 3B params active per token |
-| `coding` | qwen3-coder-next (51GB) | Code generation, review, FIM completions |
-| `lightweight` | qwen3:8b (5GB) | Quick answers, classification, low-stakes tasks |
-| `embedding` | qwen3-embedding:8b (5GB) | Vector embeddings for RAG search |
+| `general` | `gemma4:31b` (~20GB) | Complex reasoning, multimodal chat, long conversations |
+| `agent` | `gemma4:31b` (~20GB) | Tool use, agent loops, function calling |
+| `fast` | `qwen3.6:35b-a3b` (~28GB) | Lower-latency chat and strong fallback path |
+| `coding` | `qwen3-coder-next:latest` (~46GB) | Code generation, review, FIM completions |
+| `lightweight` | `qwen3:8b` (~6GB) | Quick answers, classification, low-stakes tasks |
+| `embedding` | `qwen3-embedding:8b` (~5GB) | Vector embeddings for RAG search |
+
+The `analysis` use-case currently maps to the `general` role in
+`models.json`, so it also resolves to `gemma4:31b` unless you customize
+the defaults.
 
 ### Swapping Models
 
@@ -105,9 +116,9 @@ func main() {
     client := ollama.NewClient()
 
     resp, err := client.Chat(context.Background(), ollama.ChatRequest{
-        Model: "qwen3.5:27b",
+        Model: "gemma4:31b",
         Messages: []ollama.ChatMessage{
-            {Role: "user", Content: "Explain MoE architectures in neural networks"},
+            {Role: "user", Content: "Explain walk-forward validation for trading strategies"},
         },
     })
     if err != nil {
@@ -121,7 +132,7 @@ func main() {
 
 ```go
 err := client.ChatStream(ctx, ollama.ChatRequest{
-    Model:    "qwen3.5:35b-a3b",  // fast model for interactive use
+    Model:    "qwen3.6:35b-a3b",  // fast model for interactive use
     Messages: []ollama.ChatMessage{{Role: "user", Content: "Hello"}},
 }, func(resp ollama.ChatResponse) error {
     fmt.Print(resp.Message.Content)
@@ -133,7 +144,7 @@ err := client.ChatStream(ctx, ollama.ChatRequest{
 
 ```go
 resp, err := client.Generate(ctx, ollama.GenerateRequest{
-    Model:  "qwen3-coder-next",
+    Model:  "qwen3-coder-next:latest",
     Prompt: "Write a Go function that implements binary search on a sorted slice",
     Options: &ollama.ModelOptions{
         Temperature: 0.2,  // low temp for precise code
@@ -180,7 +191,7 @@ context := retriever.BuildContext(results, 4096)
 
 // Ask the LLM with retrieved context
 resp, _ := client.Chat(ctx, ollama.ChatRequest{
-    Model: "qwen3.5:27b",
+    Model: "gemma4:31b",
     Messages: []ollama.ChatMessage{
         {Role: "system", Content: "Answer using the provided code context.\n\n" + context},
         {Role: "user", Content: "How does authentication work in this project?"},
@@ -277,10 +288,10 @@ go-llm/
 
 | Setup | RAM | Recommended Models |
 |-------|-----|-------------------|
-| Minimal (8GB) | 8GB | qwen3:8b only |
-| Standard (16-32GB) | 16-32GB | qwen3.5:27b + qwen3:8b + embedding |
-| Full (64GB+) | 64GB+ | All models |
-| Power (128GB+) | 128GB+ | All models, can run 2+ simultaneously |
+| Minimal (8GB) | 8GB | `qwen3:8b` only |
+| Standard (16-32GB) | 16-32GB | `qwen3:8b` + `qwen3-embedding:8b` |
+| Large (32-64GB) | 32-64GB | One primary model at a time (`gemma4:31b` or `qwen3.6:35b-a3b`), adding smaller models only if memory allows |
+| Power (128GB+) | 128GB+ | Full reference lineup from `models.json` |
 
 ## Consumers
 
