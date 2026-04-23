@@ -111,22 +111,28 @@ quality), retune by constructing the router with
 
 ### OpenAI-compat aliases
 
-The compat layer ships a `RecommendedAliases()` preset
-(`compat/aliases.go`) that maps OpenAI model names (`gpt-4`, `gpt-4o`,
-`text-embedding-3-large`, etc.) to the reference lineup for easy
-drop-in with Cursor / Continue / raw `openai` SDKs. **These aliases
-reference specific go-llm model IDs and will move as the reference
-lineup evolves.** For a custom lineup, pass your own map to
-`compat.WithAliases()`:
+If you expose the optional `compat/` package's OpenAI-compatible HTTP
+façade, `compat.RecommendedAliases()` provides a conservative preset for
+tools that hardcode OpenAI model names (`gpt-4`, `gpt-4o`,
+`text-embedding-3-large`, etc.). The server default is an empty alias
+map; install aliases explicitly with `compat.WithAliases()`.
+
+For a custom lineup, start from the recommended preset and override the
+entries that should point somewhere else:
 
 ```go
+aliases := compat.RecommendedAliases()
+aliases["gpt-4"] = "ollama/llama-4-scout:q5_k_m"
+aliases["text-embedding-3-large"] = "ollama/nomic-embed-code"
+
 srv := compat.New(router, registry, providers,
-    compat.WithAliases(map[string]string{
-        "gpt-4":                  "ollama/llama-4-scout:q5_k_m",
-        "text-embedding-3-large": "ollama/nomic-embed-code",
-    }),
+    compat.WithAliases(aliases),
 )
 ```
+
+**These aliases reference specific go-llm model IDs and will move as the
+reference lineup evolves.** Treat the alias map as a view over
+`models.json`, not as a second source of truth.
 
 ## Unvalidated claims to verify on deploy
 
