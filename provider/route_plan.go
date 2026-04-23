@@ -65,6 +65,13 @@ func (rp *RoutePlan) SetWasSticky(v bool) {
 	rp.wasSticky = v
 }
 
+// WasSticky reports whether the plan was selected via sticky routing. This
+// mirrors the RouteOutcome field of the same name but is available before
+// execution, which is what dry-run callers want.
+func (rp *RoutePlan) WasSticky() bool {
+	return rp.wasSticky
+}
+
 // ---------------------------------------------------------------------------
 // Execute — Chat (non-streaming)
 // ---------------------------------------------------------------------------
