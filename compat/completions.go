@@ -230,7 +230,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		rr.Priority = resolvePriority(req.Priority, provider.PriorityNormal)
 	}
 
-	if req.Stream {
+	if req.Stream && !req.DryRun {
 		s.serveCompletionsStream(w, r, rr, req.FilePath, fim)
 		return
 	}

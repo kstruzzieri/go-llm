@@ -259,7 +259,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		rr.RequiredCaps |= provider.CapToolCall
 		rr.Tools = tools
 	}
-	if req.Stream {
+	if req.Stream && !req.DryRun {
 		s.serveChatStream(w, r, rr)
 		return
 	}

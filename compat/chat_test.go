@@ -755,6 +755,37 @@ func TestChatCompletions_DryRun(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_DryRunWinsOverStream(t *testing.T) {
+	srv, _, calls, teardown := newChatFixture(t, "should-not-be-generated")
+	defer teardown()
+
+	body := map[string]any{
+		"model": "ollama/qwen3:8b",
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+		"stream":    true,
+		"x_dry_run": true,
+	}
+	rec := doChat(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Errorf("provider Chat called %d times on stream dry-run, want 0", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("content-type = %q, want application/json", got)
+	}
+	var out ChatCompletionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.RouteInfo == nil {
+		t.Fatal("x_route_info missing on stream dry-run")
+	}
+}
+
 // newChatFixtureWithResponse is like newChatFixture but lets the caller shape
 // the response returned by the mock provider. The builder receives the request
 // the provider observed and returns the desired ChatResponse — this is how

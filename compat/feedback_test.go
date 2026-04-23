@@ -90,3 +90,25 @@ func TestFeedback_EmptyBodyReturns400(t *testing.T) {
 		t.Errorf("expected empty_body error code, got %s", rec.Body.String())
 	}
 }
+
+func TestFeedback_BodyTooLargeReturns413(t *testing.T) {
+	srv, teardown := newTestServer(t, &mockProvider{name: "ollama", caps: provider.CapGenerate})
+	defer teardown()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions/feedback",
+		oversizedJSONStringReader(
+			`{"completion_id":"`,
+			maxFeedbackRequestBodyBytes+1,
+			`","action":"accepted"}`,
+		))
+	req.Header.Set("Content-Type", "application/json")
+	srv.buildHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !bytes.Contains(rec.Body.Bytes(), []byte("body_too_large")) {
+		t.Errorf("expected body_too_large error code, got %s", rec.Body.String())
+	}
+}

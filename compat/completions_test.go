@@ -337,6 +337,47 @@ func TestCompletions_DryRunReturnsRouteMetadata(t *testing.T) {
 	}
 }
 
+func TestCompletions_DryRunWinsOverStream(t *testing.T) {
+	var calls int32
+	mp := &mockProvider{
+		name: "ollama",
+		caps: provider.CapGenerate | provider.CapInsert | provider.CapStream,
+		models: []provider.ModelInfo{
+			{Name: "qwen3:8b", ContextWindow: 32768, Capabilities: []string{"insert"}},
+		},
+		genFn: func(_ context.Context, _ provider.GenerateRequest) (*provider.GenerateResponse, error) {
+			atomic.AddInt32(&calls, 1)
+			panic("provider.Generate called on stream dry-run path")
+		},
+	}
+	srv, teardown := newTestServer(t, mp)
+	defer teardown()
+
+	body := map[string]any{
+		"model":     "ollama/qwen3:8b",
+		"prompt":    "should not execute",
+		"stream":    true,
+		"x_dry_run": true,
+	}
+	rec := doCompletion(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Errorf("provider Generate called %d times on stream dry-run, want 0", got)
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Errorf("content-type = %q, want application/json", got)
+	}
+	var out CompletionResponse
+	if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.RouteInfo == nil {
+		t.Fatal("x_route_info missing on stream dry-run")
+	}
+}
+
 // TestCompletions_AffinityKeyForwarded verifies that a request carrying
 // x_affinity_key executes successfully and produces a populated x_route_info
 // block — proving the field was accepted by the handler and the request

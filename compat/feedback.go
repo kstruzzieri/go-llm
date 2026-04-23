@@ -36,7 +36,13 @@ var validFeedbackActions = map[string]bool{
 // user-facing work.
 func (s *Server) handleFeedback(w http.ResponseWriter, r *http.Request) {
 	var req FeedbackRequest
+	r.Body = http.MaxBytesReader(w, r.Body, maxFeedbackRequestBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			writeBodyTooLarge(w, maxErr.Limit)
+			return
+		}
 		if errors.Is(err, io.EOF) {
 			writeError(w, http.StatusBadRequest, "empty_body", "request body is required")
 			return
