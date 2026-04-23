@@ -192,8 +192,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req CompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "decode_error", err.Error())
+	if !decodeJSONBody(w, r, maxCompletionRequestBodyBytes, &req) {
 		return
 	}
 	key, err := resolveModel(req.Model, s.aliases)
@@ -592,16 +591,15 @@ func applyFIMBudget(plan *provider.RoutePlan, language, prompt, suffix string, m
 	}
 }
 
-// completionResponseID builds the "cmpl_<suffix>" response ID. It prefers the
-// request ID attached by requestIDMiddleware (so HTTP access logs and response
-// bodies correlate), but falls back to a freshly generated random suffix when
-// the context carries none — e.g. when handlers are invoked directly via the
-// mux for tests or embedded callers. Without the fallback, bypass paths would
-// return "cmpl_" verbatim, which is indistinguishable from a bug.
+// completionResponseID builds the "cmpl_<suffix>" response ID. When an inbound
+// request ID exists, we keep it as a correlation prefix but always append a
+// server-generated random suffix so callers cannot force duplicate completion
+// IDs by reusing X-Request-Id across requests. Without the fallback, bypass
+// paths would return "cmpl_" verbatim, which is indistinguishable from a bug.
 func completionResponseID(ctx context.Context) string {
 	rid := requestIDFrom(ctx)
 	if rid == "" {
-		rid = fallbackRequestID()
+		return "cmpl_" + fallbackRequestID()
 	}
-	return "cmpl_" + rid
+	return "cmpl_" + rid + "_" + fallbackRequestID()
 }

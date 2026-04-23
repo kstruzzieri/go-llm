@@ -135,6 +135,32 @@ func TestChatCompletions_NonStreaming_Success(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_BodyTooLarge(t *testing.T) {
+	srv, _, calls, teardown := newChatFixture(t, "unused")
+	defer teardown()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		oversizedJSONStringReader(
+			`{"model":"ollama/qwen3:8b","messages":[{"role":"user","content":"`,
+			maxChatRequestBodyBytes+1,
+			`"}]}`,
+		))
+	req.Header.Set("Content-Type", "application/json")
+	srv.buildHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("provider Chat called %d times, want 0", got)
+	}
+	env := decodeErrorEnvelope(t, rec)
+	if env.Error.Code != "body_too_large" {
+		t.Errorf("error.code = %q, want body_too_large", env.Error.Code)
+	}
+}
+
 func TestChatCompletions_MissingMessages_400(t *testing.T) {
 	srv, _, _, teardown := newChatFixture(t, "n/a")
 	defer teardown()

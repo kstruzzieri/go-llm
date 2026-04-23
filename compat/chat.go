@@ -227,8 +227,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req ChatCompletionRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "decode_error", err.Error())
+	if !decodeJSONBody(w, r, maxChatRequestBodyBytes, &req) {
 		return
 	}
 	key, err := resolveModel(req.Model, s.aliases)

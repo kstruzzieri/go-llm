@@ -82,6 +82,37 @@ func TestEmbeddings_EnabledAcceptsSingleStringInput(t *testing.T) {
 	}
 }
 
+func TestEmbeddings_BodyTooLarge(t *testing.T) {
+	mp := &mockProvider{
+		name: "ollama", caps: provider.CapEmbed,
+		models: []provider.ModelInfo{{Name: "qwen3-embedding:8b", ContextWindow: 32768, Capabilities: []string{"embedding"}}},
+		embedFn: func(context.Context, provider.EmbedRequest) (*provider.EmbedResponse, error) {
+			t.Fatal("provider should not be called for oversized body")
+			return nil, nil
+		},
+	}
+	srv, teardown := newTestServer(t, mp, WithEmbeddings(true))
+	defer teardown()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/embeddings",
+		oversizedJSONStringReader(
+			`{"model":"qwen3-embedding:8b","input":"`,
+			maxEmbeddingRequestBodyBytes+1,
+			`"}`,
+		))
+	req.Header.Set("Content-Type", "application/json")
+	srv.buildHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	env := decodeErrorEnvelope(t, rec)
+	if env.Error.Code != "body_too_large" {
+		t.Errorf("error.code = %q, want body_too_large", env.Error.Code)
+	}
+}
+
 func TestEmbeddings_ResponseOmitsCompletionTokens(t *testing.T) {
 	mp := &mockProvider{
 		name: "ollama", caps: provider.CapEmbed,

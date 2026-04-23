@@ -129,6 +129,32 @@ func TestCompletions_GenerateMode(t *testing.T) {
 	}
 }
 
+func TestCompletions_BodyTooLarge(t *testing.T) {
+	srv, _, calls, teardown := newCompletionFixture(t, "unused")
+	defer teardown()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/completions",
+		oversizedJSONStringReader(
+			`{"model":"ollama/qwen3:8b","prompt":"`,
+			maxCompletionRequestBodyBytes+1,
+			`"}`,
+		))
+	req.Header.Set("Content-Type", "application/json")
+	srv.buildHandler().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if got := atomic.LoadInt32(calls); got != 0 {
+		t.Fatalf("provider Generate called %d times, want 0", got)
+	}
+	env := decodeErrorEnvelope(t, rec)
+	if env.Error.Code != "body_too_large" {
+		t.Errorf("error.code = %q, want body_too_large", env.Error.Code)
+	}
+}
+
 // TestCompletions_FIMMode verifies that a non-empty Suffix triggers the FIM
 // branch: UseCase="fim" and CapGenerate|CapInsert required (we prove the
 // latter indirectly by successful routing to a model that only satisfies
@@ -492,6 +518,55 @@ func TestCompletions_RequestIDFallback(t *testing.T) {
 	idRE := regexp.MustCompile(`^cmpl_[0-9a-f]{16}$`)
 	if !idRE.MatchString(out.ID) {
 		t.Errorf("id = %q, want match %s", out.ID, idRE)
+	}
+}
+
+func TestCompletions_RequestIDDoesNotForceDuplicateCompletionIDs(t *testing.T) {
+	srv, _, _, teardown := newCompletionFixture(t, "ok")
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"prompt": "hi",
+	}
+	buf, err := json.Marshal(body)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	doReq := func() CompletionResponse {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/v1/completions", bytes.NewReader(buf))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Request-Id", "caller-id")
+		srv.buildHandler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		var out CompletionResponse
+		if err := json.NewDecoder(rec.Body).Decode(&out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		return out
+	}
+
+	first := doReq()
+	second := doReq()
+
+	if first.ID != first.CompletionID {
+		t.Fatalf("id = %q, x_completion_id = %q; want identical IDs", first.ID, first.CompletionID)
+	}
+	if second.ID != second.CompletionID {
+		t.Fatalf("id = %q, x_completion_id = %q; want identical IDs", second.ID, second.CompletionID)
+	}
+	if first.CompletionID == second.CompletionID {
+		t.Fatalf("duplicate completion IDs for reused X-Request-Id: %q", first.CompletionID)
+	}
+	if !strings.HasPrefix(first.CompletionID, "cmpl_caller-id_") {
+		t.Errorf("first completion id = %q, want caller-id correlation prefix", first.CompletionID)
+	}
+	if !strings.HasPrefix(second.CompletionID, "cmpl_caller-id_") {
+		t.Errorf("second completion id = %q, want caller-id correlation prefix", second.CompletionID)
 	}
 }
 

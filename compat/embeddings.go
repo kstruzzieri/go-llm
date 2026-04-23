@@ -106,8 +106,7 @@ func (s *Server) handleEmbeddings(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req EmbeddingRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "decode_error", err.Error())
+	if !decodeJSONBody(w, r, maxEmbeddingRequestBodyBytes, &req) {
 		return
 	}
 	key, err := resolveModel(req.Model, s.aliases)

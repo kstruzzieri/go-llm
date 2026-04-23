@@ -42,7 +42,7 @@ func TestIntegration_ChatRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
@@ -93,7 +93,7 @@ func TestIntegration_FeedbackRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer cResp.Body.Close()
+	defer closeBody(t, cResp.Body)
 	var cOut CompletionResponse
 	if err := json.NewDecoder(cResp.Body).Decode(&cOut); err != nil {
 		t.Fatalf("decode response: %v", err)
@@ -107,7 +107,7 @@ func TestIntegration_FeedbackRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer fResp.Body.Close()
+	defer closeBody(t, fResp.Body)
 	if fResp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(fResp.Body)
 		t.Fatalf("feedback status=%d body=%s", fResp.StatusCode, raw)
@@ -127,7 +127,7 @@ func TestIntegration_FeedbackRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer dupResp.Body.Close()
+	defer closeBody(t, dupResp.Body)
 	if dupResp.StatusCode != http.StatusNotFound {
 		raw, _ := io.ReadAll(dupResp.Body)
 		t.Fatalf("duplicate feedback status=%d, want 404; body=%s", dupResp.StatusCode, raw)
@@ -156,7 +156,7 @@ func TestIntegration_StatusReportsLiveUptime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status=%d", resp.StatusCode)
 	}
@@ -242,7 +242,7 @@ func TestIntegration_ModelsAliasAndWarmOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
@@ -318,7 +318,7 @@ func TestIntegration_EmbeddingsScalarInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
@@ -340,7 +340,7 @@ func TestIntegration_EmbeddingsScalarInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer emptyResp.Body.Close()
+	defer closeBody(t, emptyResp.Body)
 	if emptyResp.StatusCode != http.StatusBadRequest {
 		raw, _ := io.ReadAll(emptyResp.Body)
 		t.Fatalf("empty-array status=%d, want 400; body=%s", emptyResp.StatusCode, raw)
@@ -378,7 +378,7 @@ func TestIntegration_ChatDryRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
@@ -430,7 +430,7 @@ func TestIntegration_StreamPreFirstChunkError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode < 400 {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("expected error status, got %d body=%s", resp.StatusCode, raw)
@@ -478,7 +478,7 @@ func TestIntegration_SSEFraming(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer closeBody(t, resp.Body)
 	if resp.StatusCode != http.StatusOK {
 		raw, _ := io.ReadAll(resp.Body)
 		t.Fatalf("status=%d body=%s", resp.StatusCode, raw)
