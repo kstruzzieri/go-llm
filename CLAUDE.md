@@ -67,7 +67,7 @@ Base URL: `http://localhost:11434`
 ### Chat Request
 ```json
 {
-  "model": "qwen3.5:27b",
+  "model": "gemma4:31b",
   "messages": [{"role": "user", "content": "hello"}],
   "stream": true,
   "options": {
@@ -77,6 +77,10 @@ Base URL: `http://localhost:11434`
   }
 }
 ```
+
+Model names in examples reflect the current `models.json` defaults but are
+not required by `go-llm` — any model the configured provider can load
+works. See `docs/llm/` for the reference lineup and BYO guidance.
 
 ### Embed Request
 ```json

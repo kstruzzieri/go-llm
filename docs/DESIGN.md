@@ -536,7 +536,7 @@ type Service struct {
 
 func NewService() (*Service, error) {
     client := ollama.NewClient()
-    analyzer, err := analysis.NewMetricsAnalyzer(client, "qwen3.5:27b")
+    analyzer, err := analysis.NewMetricsAnalyzer(client, "gemma4:31b")
     if err != nil {
         return nil, err
     }

@@ -9,9 +9,18 @@ Keith runs an M3 Max, 128GB RAM, developing three apps that depend on
 - **Flux ML** — Wails ML dev environment, needs chat + analysis
 - **Quantum Trader** — Go+Python trading platform, needs agent loops + tool use
 
-The existing model lineup (`qwen3-coder-next`, `qwen3.5:35b-a3b`,
-`qwen3.5:27b`, `qwen3:8b`, `qwen3-embedding:8b`) was selected in late 2025.
-Several frontier open-weight releases in Q1 2026 warrant a re-evaluation.
+The late-2025 lineup was built around the Qwen 3.5 family. Frontier
+open-weight releases in Q1 2026 (Qwen 3.6, Gemma 4, GLM-5.1, MiniMax M2.7)
+triggered the re-evaluation captured in this document. The resulting
+reference lineup — shipped in `models.json` — supersedes Qwen 3.5 with
+Gemma 4 31B (agent/general/analysis), Qwen 3.6 35B-A3B (fast), and
+retains Qwen3-Coder-Next + Qwen3-Embedding. See
+[recommendation.md](recommendation.md) for role assignments.
+
+This analysis is **descriptive, not prescriptive**. `go-llm` does not
+hard-code any model. The IDs below are the reference lineup checked into
+`models.json`; edit that file to substitute your own. See
+[recommendation.md#customizing-the-lineup](recommendation.md#customizing-the-lineup).
 
 ## Hardware budget
 
@@ -29,8 +38,8 @@ dramatically faster than a dense 14B.
 
 | Model | Total / Active | SWE-bench Verified | Memory @ Q4 | Notes |
 |---|---|---|---|---|
-| **Qwen3-Coder-Next** | 80B / 3.9B | 70.6% | ~46GB | Already in use. Still top-tier agentic coding workhorse. |
-| **Qwen3.6-35B-A3B** | 35B / 3B | 73.4% | ~20GB | Direct drop-in for qwen3.5:35b-a3b. 86.0% GPQA, 92.7% AIME 2026. |
+| **Qwen3-Coder-Next** | 80B / 3.9B | 70.6% | ~46GB | `coding` role in the reference lineup. Top-tier agentic coding workhorse. |
+| **Qwen3.6-35B-A3B** | 35B / 3B | 73.4% | ~20GB | `fast` role in the reference lineup — superseded the legacy qwen3.5:35b-a3b. 86.0% GPQA, 92.7% AIME 2026. |
 | **Qwen3.6 Plus** | closed/cloud | 78.8% | — | Cloud-only, 1M context. Not applicable for local. |
 | **GLM-5.1** | 754B / 40B | 77.8% | ~95–110GB UD-Q2_K_XL | Tight fit, displaces everything else. |
 | **MiniMax M2.7** | 229B / 10B | ~80% | ~115GB Q4 | Best tool-calling (76.8% BFCL). Very tight. |
@@ -49,7 +58,7 @@ dramatically faster than a dense 14B.
 
 | Model | Params | MTEB | Strengths | Notes |
 |---|---|---|---|---|
-| **Qwen3-Embedding-8B** | 8B | 70.58 (multilingual #1 as of June 2025) | Multilingual + code | Already in use. Keep. |
+| **Qwen3-Embedding-8B** | 8B | 70.58 (multilingual #1 as of June 2025) | Multilingual + code | `embedding` role in the reference lineup. |
 | Nomic-Embed-Code | 7B | code-specialized | Beats Voyage Code 3, OpenAI Embed 3 Large on CodeSearchNet | Strong alternative if code retrieval becomes the bottleneck. |
 | Gemini Embedding 2 | API | 84.0 (MTEB Code) | Best code retrieval | Not local. |
 | Voyage code-3 | API | — | Strong for code/technical | Not local. |
