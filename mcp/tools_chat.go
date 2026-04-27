@@ -8,6 +8,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // chatArgs are the parameters for the chat tool.
@@ -57,9 +58,8 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		return toolError("validation", "messages must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "chat")
-	if err != nil {
-		return toolError("config", "%v", err), nil
+	if s.router == nil {
+		return toolError("config", "router unavailable"), nil
 	}
 
 	messages := args.Messages
@@ -90,9 +90,9 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 			return toolError("validation", "use_rag requires at least one user message"), nil
 		}
 
-		results, err := retriever.Retrieve(ctx, query, topK)
-		if err != nil {
-			return toolError("rag", "retrieve: %v", err), nil
+		results, rerr := retriever.Retrieve(ctx, query, topK)
+		if rerr != nil {
+			return toolError("rag", "retrieve: %v", rerr), nil
 		}
 		if len(results) == 0 {
 			return toolError("rag", "RAG index is empty; run rag_index_file or rag_index_directory first"), nil
@@ -106,21 +106,43 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		messages = append([]ollama.ChatMessage{systemMsg}, messages...)
 	}
 
-	var opts *ollama.ModelOptions
-	if args.Temperature != nil {
-		opts = &ollama.ModelOptions{Temperature: *args.Temperature}
+	// Translate ollama.ChatMessage → provider.ChatMessage for routing.
+	pmsgs := make([]provider.ChatMessage, len(messages))
+	for i, m := range messages {
+		pmsgs[i] = provider.ChatMessage{Role: m.Role, Content: m.Content}
 	}
 
-	resp, err := s.client.Chat(ctx, ollama.ChatRequest{
-		Model:    model,
-		Messages: messages,
-		Options:  opts,
-	})
+	opts := provider.ModelOptions{}
+	if args.Temperature != nil {
+		opts.Temperature = args.Temperature
+	}
+
+	rr := provider.RoutingRequest{
+		Model:          args.Model,
+		UseCase:        "chat",
+		RequiredCaps:   provider.CapChat,
+		Messages:       pmsgs,
+		Options:        opts,
+		ExpectedOutput: provider.DefaultExpectedOutput("chat"),
+		Priority:       provider.PriorityNormal,
+	}
+	if rr.Model == "" {
+		chain, err := s.chainFor("chat")
+		if err != nil {
+			return toolError("config", "%v", err), nil
+		}
+		rr.PreferredChain = chain
+	}
+
+	plan, err := s.router.Route(ctx, rr)
+	if err != nil {
+		return toolError("router", "%v", err), nil
+	}
+	resp, err := plan.ExecuteChat(ctx)
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
-
-	return toolResult(resp.Message.Content), nil
+	return toolResult(resp.Content), nil
 }
 
 // lastUserMessage returns the content of the last message with role "user".
