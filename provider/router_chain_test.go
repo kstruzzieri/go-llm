@@ -108,3 +108,41 @@ func TestRouter_routeChain_SingleStepHappyPath(t *testing.T) {
 		t.Errorf("Fallbacks length = %d, want 0", got)
 	}
 }
+
+func TestRouter_routeChain_MultiStepOrdering(t *testing.T) {
+	mr, pr := newChainTestRegistry(t,
+		ModelKey{Provider: "ollama", Model: "primary:8b"},
+		ModelKey{Provider: "ollama", Model: "fallback1:8b"},
+		ModelKey{Provider: "ollama", Model: "fallback2:8b"},
+	)
+	r := NewRouter(mr, pr)
+	defer r.Close()
+
+	req := RoutingRequest{
+		UseCase:      "chat",
+		RequiredCaps: CapChat,
+		PreferredChain: []string{
+			"ollama/primary:8b",
+			"ollama/fallback1:8b",
+			"ollama/fallback2:8b",
+		},
+		StrictChain: true, // skip Recommend tail for clarity
+		Messages:    []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	plan, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Model != "primary:8b" {
+		t.Errorf("primary = %q, want primary:8b", plan.Profile.Key.Model)
+	}
+	if len(plan.Fallbacks) != 2 {
+		t.Fatalf("fallback count = %d, want 2", len(plan.Fallbacks))
+	}
+	if plan.Fallbacks[0].Profile.Key.Model != "fallback1:8b" {
+		t.Errorf("fallbacks[0] = %q, want fallback1:8b", plan.Fallbacks[0].Profile.Key.Model)
+	}
+	if plan.Fallbacks[1].Profile.Key.Model != "fallback2:8b" {
+		t.Errorf("fallbacks[1] = %q, want fallback2:8b", plan.Fallbacks[1].Profile.Key.Model)
+	}
+}
