@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -183,5 +184,74 @@ func TestRouter_routeChain_WithinStepScoring(t *testing.T) {
 	}
 	if len(plan.Fallbacks) != 1 || plan.Fallbacks[0].Profile.Key.Provider != "slow" {
 		t.Errorf("fallback should be slow/shared:8b, got %v", plan.Fallbacks)
+	}
+}
+
+func TestRouter_routeChain_RecommendTailFires(t *testing.T) {
+	// Chain entry is budget-rejected (ContextWindow: 1); tail should pick the
+	// only viable other model. Do not open the provider breaker, since that
+	// would also gate the tail candidate.
+	mr, pr := newChainTestRegistry(t,
+		ModelKey{Provider: "ollama", Model: "broken:8b"},
+		ModelKey{Provider: "ollama", Model: "alternate:8b"},
+	)
+
+	r := NewRouter(mr, pr)
+	defer r.Close()
+
+	// Re-seed the chain entry with ContextWindow: 1 to force budget rejection.
+	seedChainProfile(t, mr, &ModelProfile{
+		Key:           ModelKey{Provider: "ollama", Model: "broken:8b"},
+		Caps:          CapChat,
+		Quality:       TierGood,
+		Speed:         TierGood,
+		ContextWindow: 1,
+	})
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"ollama/broken:8b"},
+		StrictChain:    false, // allow tail
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	plan, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Model != "alternate:8b" {
+		t.Errorf("primary = %q, want alternate:8b (Recommend tail)", plan.Profile.Key.Model)
+	}
+}
+
+func TestRouter_routeChain_StrictChainSuppressesTail(t *testing.T) {
+	mr, pr := newChainTestRegistry(t,
+		ModelKey{Provider: "ollama", Model: "broken:8b"},
+		ModelKey{Provider: "ollama", Model: "alternate:8b"},
+	)
+	r := NewRouter(mr, pr)
+	defer r.Close()
+
+	seedChainProfile(t, mr, &ModelProfile{
+		Key:           ModelKey{Provider: "ollama", Model: "broken:8b"},
+		Caps:          CapChat,
+		Quality:       TierGood,
+		Speed:         TierGood,
+		ContextWindow: 1,
+	})
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"ollama/broken:8b"},
+		StrictChain:    true,
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	_, err := r.Route(context.Background(), req)
+	if err == nil {
+		t.Fatal("expected error when StrictChain=true and chain exhausted")
+	}
+	if !errors.Is(err, ErrBudgetExceeded) && !errors.Is(err, ErrNoViableCandidate) && !errors.Is(err, ErrBudgetAdaptationRequired) {
+		t.Errorf("err = %v, want ErrBudgetExceeded, ErrBudgetAdaptationRequired, or ErrNoViableCandidate", err)
 	}
 }
