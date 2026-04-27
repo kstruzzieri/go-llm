@@ -95,3 +95,20 @@ func (s *Server) snapshotResolved() map[string]config.ResolvedModel {
 	}
 	return resolved
 }
+
+// chainFor returns the ordered config-derived selector chain for a use-case,
+// suitable for RoutingRequest.PreferredChain. It returns config errors before
+// handlers call Router.Route so empty chains cannot fall into global Recommend.
+func (s *Server) chainFor(useCase string) ([]string, error) {
+	if s.cfg == nil {
+		return nil, fmt.Errorf("model parameter required (no models.json configured)")
+	}
+	chain, err := s.cfg.RoleFallbackChain(useCase)
+	if err != nil {
+		return nil, err
+	}
+	if len(chain) == 0 {
+		return nil, fmt.Errorf("no model configured for use-case %q", useCase)
+	}
+	return chain, nil
+}
