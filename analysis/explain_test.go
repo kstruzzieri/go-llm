@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestExplain(t *testing.T) {
@@ -127,5 +128,28 @@ func TestExplainServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "analysis: explain:") {
 		t.Errorf("error %q should have analysis: explain: prefix", err.Error())
+	}
+}
+
+func TestExplainWithChat_AcceptsEmptyModel(t *testing.T) {
+	chat := func(ctx context.Context, useCase string, req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if useCase != "analysis" {
+			t.Errorf("useCase = %q, want \"analysis\"", useCase)
+		}
+		return &provider.ChatResponse{Content: "this is a hello world program", Done: true}, nil
+	}
+	got, err := ExplainWithChat(context.Background(), chat, "", "package main")
+	if err != nil {
+		t.Fatalf("ExplainWithChat: %v", err)
+	}
+	if got == "" {
+		t.Error("expected non-empty explanation")
+	}
+}
+
+func TestExplain_StillRequiresModel(t *testing.T) {
+	_, err := Explain(context.Background(), &ollama.Client{}, "", "package main")
+	if err == nil {
+		t.Fatal("expected error for empty model")
 	}
 }
