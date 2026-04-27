@@ -379,6 +379,34 @@ func (s *Server) Retriever() *rag.Retriever {
 	return s.retriever
 }
 
+// BreakerInfo returns the circuit breaker state for the named provider.
+// Returns false if no breaker exists yet or the router is unavailable.
+func (s *Server) BreakerInfo(name string) (provider.BreakerInfo, bool) {
+	if s.router == nil {
+		return provider.BreakerInfo{}, false
+	}
+	return s.router.BreakerInfo(name)
+}
+
+// WarmthSnapshot returns all currently warm models, or nil if no warmth
+// source is configured.
+func (s *Server) WarmthSnapshot() []provider.WarmModel {
+	if s.router == nil {
+		return nil
+	}
+	return s.router.WarmthSnapshot()
+}
+
+// StickyRoutes returns a snapshot of all active sticky routing entries.
+// Will be empty in steady state for chain-routed requests (sticky is
+// suppressed at the Router boundary when PreferredChain is set).
+func (s *Server) StickyRoutes() map[string]provider.StickyRouteInfo {
+	if s.router == nil {
+		return nil
+	}
+	return s.router.StickyRoutes()
+}
+
 // Shutdown gracefully stops the server: shuts down the HTTP server (if running),
 // then releases all resources (RAG store, derived clients).
 // The ctx deadline bounds how long the HTTP server waits for in-flight requests.

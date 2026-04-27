@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func (s *Server) registerResources() {
@@ -44,6 +46,27 @@ func (s *Server) registerResources() {
 		Description: "Details for a specific Ollama model",
 		MIMEType:    "application/json",
 	}, s.handleModelDetailResource)
+
+	s.mcpServer.AddResource(&gomcp.Resource{
+		URI:         "route://breakers",
+		Name:        "Provider circuit breakers",
+		Description: "Live circuit breaker state for every provider with a breaker.",
+		MIMEType:    "application/json",
+	}, s.handleRouteBreakersResource)
+
+	s.mcpServer.AddResource(&gomcp.Resource{
+		URI:         "route://warmth",
+		Name:        "Warm models",
+		Description: "Models currently loaded in provider memory (warmth snapshot).",
+		MIMEType:    "application/json",
+	}, s.handleRouteWarmthResource)
+
+	s.mcpServer.AddResource(&gomcp.Resource{
+		URI:         "route://sticky",
+		Name:        "Sticky routes",
+		Description: "Active sticky routing entries (empty for chain-routed requests).",
+		MIMEType:    "application/json",
+	}, s.handleRouteStickyResource)
 }
 
 func resourceResult(uri, mimeType, text string) *gomcp.ReadResourceResult {
@@ -144,4 +167,38 @@ func (s *Server) handleModelDetailResource(ctx context.Context, req *gomcp.ReadR
 		return nil, err
 	}
 	return marshalResource(req.Params.URI, info)
+}
+
+// breakerEntry pairs a provider name with its breaker state for JSON output.
+type breakerEntry struct {
+	Provider string               `json:"provider"`
+	Info     provider.BreakerInfo `json:"info"`
+}
+
+func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
+	entries := []breakerEntry{}
+	if s.router != nil && s.providerRegistry != nil {
+		for _, name := range s.providerRegistry.Names() {
+			if info, ok := s.router.BreakerInfo(name); ok {
+				entries = append(entries, breakerEntry{Provider: name, Info: info})
+			}
+		}
+	}
+	return marshalResource("route://breakers", entries)
+}
+
+func (s *Server) handleRouteWarmthResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
+	snap := s.WarmthSnapshot()
+	if snap == nil {
+		snap = []provider.WarmModel{}
+	}
+	return marshalResource("route://warmth", snap)
+}
+
+func (s *Server) handleRouteStickyResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
+	snap := s.StickyRoutes()
+	if snap == nil {
+		snap = map[string]provider.StickyRouteInfo{}
+	}
+	return marshalResource("route://sticky", snap)
 }

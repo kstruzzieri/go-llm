@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -93,6 +94,18 @@ func (r *Registry) All() []Provider {
 		result = append(result, p)
 	}
 	return result
+}
+
+// Names returns the registered provider names in deterministic (sorted) order.
+func (r *Registry) Names() []string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	names := make([]string, 0, len(r.providers))
+	for n := range r.providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Resolve finds a provider by the ModelKey's Provider field. Returns an error
