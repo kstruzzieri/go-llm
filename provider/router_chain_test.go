@@ -300,3 +300,60 @@ func TestRouter_routeChain_SuppressesStickyEvenWithAffinityKey(t *testing.T) {
 		t.Error("plan.WasSticky() = true, want false for chain routes")
 	}
 }
+
+// flakyProvider returns 5xx HTTPStatusError for any Models() call,
+// which propagates through Lookup as IsInfrastructureError == true.
+type flakyProvider struct {
+	fakeChainProvider
+}
+
+func (f *flakyProvider) Models(ctx context.Context) ([]ModelInfo, error) {
+	return nil, &HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable"}
+}
+
+func TestRouter_routeChain_LookupFailureRecordsBreaker(t *testing.T) {
+	provReg := NewRegistry()
+	if err := provReg.Register(&flakyProvider{fakeChainProvider: fakeChainProvider{name: "flaky"}}); err != nil {
+		t.Fatalf("register flaky: %v", err)
+	}
+	if err := provReg.Register(&fakeChainProvider{name: "stable"}); err != nil {
+		t.Fatalf("register stable: %v", err)
+	}
+	mr, err := NewModelRegistry(provReg, nil)
+	if err != nil {
+		t.Fatalf("model registry: %v", err)
+	}
+	// Pre-seed only the stable profile so flaky's Lookup is forced to fall
+	// through to the runtime query (which 503s).
+	seedChainProfile(t, mr, &ModelProfile{
+		Key: ModelKey{Provider: "stable", Model: "m:8b"}, Caps: CapChat,
+		Quality: TierGood, Speed: TierGood, ContextWindow: 8192,
+	})
+
+	r := NewRouter(mr, provReg)
+	defer r.Close()
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"flaky/missing:8b", "stable/m:8b"},
+		StrictChain:    true,
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	plan, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v (chain should fall through to stable)", err)
+	}
+	if plan.Profile.Key.Provider != "stable" {
+		t.Errorf("primary provider = %q, want stable", plan.Profile.Key.Provider)
+	}
+
+	// Breaker for "flaky" should have recorded the lookup failure.
+	info, ok := r.BreakerInfo("flaky")
+	if !ok {
+		t.Fatal("expected breaker for \"flaky\" to exist after lookup failure")
+	}
+	if info.Failures == 0 {
+		t.Errorf("flaky breaker failures = %d, want >= 1", info.Failures)
+	}
+}
