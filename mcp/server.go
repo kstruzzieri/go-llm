@@ -181,6 +181,20 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// so explicit completion requests can recover once Ollama comes back.
 	_ = s.ensureModelRegistry()
 
+	// Step 3c: build warmth source and Router. NewRouter does not perform
+	// network I/O, so this is safe even when Ollama is unreachable. The
+	// warmth source's polling goroutine starts immediately and is fail-open.
+	if s.modelRegistry != nil && s.providerRegistry != nil {
+		s.warmthSource = provider.NewOllamaWarmthSource(s.ollamaURL, "ollama")
+		s.router = provider.NewRouter(s.modelRegistry, s.providerRegistry,
+			provider.WithWarmthSource(s.warmthSource),
+		)
+		// Best-effort: populate the providerRegistry's model index so the
+		// Recommend safety-net tail can produce candidates. Failures are
+		// tolerated; handleListModels self-heals on the next call.
+		_ = s.providerRegistry.RefreshModels(ctx, "ollama")
+	}
+
 	// Step 4: Open RAG store if not disabled (before model resolution
 	// so that rebuildDerivedClients can wire up indexer/retriever).
 	if !s.ragDisabled && s.ragPath != "" {
