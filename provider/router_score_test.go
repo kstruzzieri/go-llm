@@ -448,3 +448,20 @@ func TestTiebreakPreferWarm(t *testing.T) {
 			candidates[1].profile.Key.Model)
 	}
 }
+
+func TestDefaultWeightProfile_Analysis(t *testing.T) {
+	wp := defaultWeightProfile("analysis")
+	if wp == nil {
+		t.Fatal("defaultWeightProfile(\"analysis\") returned nil")
+	}
+	// "analysis" must be a distinct profile, not silently aliased to "chat".
+	chatWp := defaultWeightProfile("chat")
+	if wp == chatWp {
+		t.Fatal("\"analysis\" profile must not alias \"chat\" — distinct entry required")
+	}
+	// Spot-check the agreed weights from the design.
+	if wp.Quality != 5 || wp.Speed != 1 || wp.Headroom != 3 {
+		t.Errorf("analysis weights: got Quality=%d Speed=%d Headroom=%d, want 5/1/3",
+			wp.Quality, wp.Speed, wp.Headroom)
+	}
+}
