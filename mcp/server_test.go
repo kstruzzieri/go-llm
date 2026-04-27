@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -309,4 +311,29 @@ func unsetEnv(t *testing.T, key string) {
 			panic(err)
 		}
 	})
+}
+
+func TestServer_Close_ClosesRouter(t *testing.T) {
+	s, err := NewServer(context.Background(), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer: %v", err)
+	}
+	if s.router == nil {
+		// In environments where ensureModelRegistry can't run (no Ollama
+		// client), the Router may be nil — skip rather than fail.
+		t.Skip("router not constructed; skip")
+	}
+	router := s.router
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Calling a Router method after Close must return ErrRouterClosed.
+	_, err = router.Route(context.Background(), provider.RoutingRequest{
+		UseCase:      "chat",
+		RequiredCaps: provider.CapChat,
+		Model:        "ollama/qwen3:8b",
+	})
+	if !errors.Is(err, provider.ErrRouterClosed) {
+		t.Errorf("post-Close Route err = %v, want ErrRouterClosed", err)
+	}
 }

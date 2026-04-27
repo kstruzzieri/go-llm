@@ -410,14 +410,21 @@ func (s *Server) Close() error {
 	s.closed = true
 	s.stateVersion++
 	store := s.store
+	router := s.router
 	s.store = nil
 	s.indexer = nil
 	s.retriever = nil
 	s.completer = nil
+	s.router = nil
+	s.warmthSource = nil
 	s.mu.Unlock()
 
-	if store != nil {
-		return store.Close()
+	var routerErr, storeErr error
+	if router != nil {
+		routerErr = router.Close()
 	}
-	return nil
+	if store != nil {
+		storeErr = store.Close()
+	}
+	return errors.Join(routerErr, storeErr)
 }
