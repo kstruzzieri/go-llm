@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -355,5 +356,64 @@ func TestRouter_routeChain_LookupFailureRecordsBreaker(t *testing.T) {
 	}
 	if info.Failures == 0 {
 		t.Errorf("flaky breaker failures = %d, want >= 1", info.Failures)
+	}
+}
+
+func TestRouter_routeChain_AllBudgetRejected(t *testing.T) {
+	mr, pr := newChainTestRegistry(t,
+		ModelKey{Provider: "ollama", Model: "small:8b"},
+	)
+	r := NewRouter(mr, pr)
+	defer r.Close()
+	seedChainProfile(t, mr, &ModelProfile{
+		Key:           ModelKey{Provider: "ollama", Model: "small:8b"},
+		Caps:          CapChat,
+		Quality:       TierGood,
+		Speed:         TierGood,
+		ContextWindow: 1,
+	})
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"ollama/small:8b"},
+		StrictChain:    true,
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	_, err := r.Route(context.Background(), req)
+	// Sole truncatable candidate becomes degraded; otherwise classified
+	// as ErrBudgetExceeded. Both are acceptable per the design.
+	if !errors.Is(err, ErrBudgetExceeded) && !errors.Is(err, ErrBudgetAdaptationRequired) {
+		t.Errorf("err = %v, want ErrBudgetExceeded or ErrBudgetAdaptationRequired", err)
+	}
+}
+
+func TestRouter_routeChain_AllLookupsFailedWrapsErrors(t *testing.T) {
+	provReg := NewRegistry()
+	if err := provReg.Register(&flakyProvider{fakeChainProvider: fakeChainProvider{name: "flaky"}}); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	mr, err := NewModelRegistry(provReg, nil)
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	r := NewRouter(mr, provReg)
+	defer r.Close()
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"flaky/a:8b", "flaky/b:8b"},
+		StrictChain:    true,
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	_, err = r.Route(context.Background(), req)
+	if !errors.Is(err, ErrNoViableCandidate) {
+		t.Errorf("err = %v, want wrapped ErrNoViableCandidate", err)
+	}
+	// Diagnostics should mention both selectors.
+	msg := err.Error()
+	if !strings.Contains(msg, "flaky/a:8b") || !strings.Contains(msg, "flaky/b:8b") {
+		t.Errorf("error message %q should reference both failed selectors", msg)
 	}
 }
