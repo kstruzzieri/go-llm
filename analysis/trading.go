@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // StrategyReport holds the results of a trading strategy analysis.
@@ -16,11 +17,13 @@ type StrategyReport struct {
 
 // StrategyAnalyzer generates natural-language analysis of trading strategies.
 type StrategyAnalyzer struct {
-	client *ollama.Client
-	model  string
+	chat  ChatFunc
+	model string
 }
 
-// NewStrategyAnalyzer creates a StrategyAnalyzer with the given client and model.
+// NewStrategyAnalyzer is the *ollama.Client-backed compat shim. Existing
+// callers continue to use this constructor with no behavior change. New code
+// should prefer NewStrategyAnalyzerWithChat.
 func NewStrategyAnalyzer(client *ollama.Client, model string) (*StrategyAnalyzer, error) {
 	if client == nil {
 		return nil, fmt.Errorf("analysis: new strategy analyzer: client is required")
@@ -28,10 +31,16 @@ func NewStrategyAnalyzer(client *ollama.Client, model string) (*StrategyAnalyzer
 	if model == "" {
 		return nil, fmt.Errorf("analysis: new strategy analyzer: model is required")
 	}
-	return &StrategyAnalyzer{
-		client: client,
-		model:  model,
-	}, nil
+	return NewStrategyAnalyzerWithChat(chatFuncFromOllamaClient(client), model)
+}
+
+// NewStrategyAnalyzerWithChat builds a StrategyAnalyzer that routes through
+// chat. Empty model defers selection to the chat implementation.
+func NewStrategyAnalyzerWithChat(chat ChatFunc, model string) (*StrategyAnalyzer, error) {
+	if chat == nil {
+		return nil, fmt.Errorf("analysis: new strategy analyzer: chat is required")
+	}
+	return &StrategyAnalyzer{chat: chat, model: model}, nil
 }
 
 // AnalyzeStrategy generates a natural-language analysis of a trading strategy
@@ -46,9 +55,9 @@ func (sa *StrategyAnalyzer) AnalyzeStrategy(ctx context.Context, name string, me
 
 	prompt := buildStrategyPrompt(name, metrics)
 
-	resp, err := sa.client.Chat(ctx, ollama.ChatRequest{
+	resp, err := sa.chat(ctx, "analysis", provider.ChatRequest{
 		Model: sa.model,
-		Messages: []ollama.ChatMessage{
+		Messages: []provider.ChatMessage{
 			{Role: "system", Content: "You are a quantitative finance expert. Analyze trading strategy performance and provide actionable insights about risk, returns, and potential improvements."},
 			{Role: "user", Content: prompt},
 		},
@@ -57,7 +66,7 @@ func (sa *StrategyAnalyzer) AnalyzeStrategy(ctx context.Context, name string, me
 		return "", fmt.Errorf("analysis: analyze strategy: %w", err)
 	}
 
-	return resp.Message.Content, nil
+	return resp.Content, nil
 }
 
 // CompareStrategies generates a comparative analysis of multiple trading strategies.
@@ -69,9 +78,9 @@ func (sa *StrategyAnalyzer) CompareStrategies(ctx context.Context, strategies ma
 
 	prompt := buildComparisonPrompt(strategies)
 
-	resp, err := sa.client.Chat(ctx, ollama.ChatRequest{
+	resp, err := sa.chat(ctx, "analysis", provider.ChatRequest{
 		Model: sa.model,
-		Messages: []ollama.ChatMessage{
+		Messages: []provider.ChatMessage{
 			{Role: "system", Content: "You are a quantitative finance expert. Compare trading strategies objectively, highlighting relative strengths, weaknesses, and risk-adjusted performance."},
 			{Role: "user", Content: prompt},
 		},
@@ -80,7 +89,7 @@ func (sa *StrategyAnalyzer) CompareStrategies(ctx context.Context, strategies ma
 		return "", fmt.Errorf("analysis: compare strategies: %w", err)
 	}
 
-	return resp.Message.Content, nil
+	return resp.Content, nil
 }
 
 func buildStrategyPrompt(name string, metrics map[string]float64) string {
