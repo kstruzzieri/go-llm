@@ -29,6 +29,17 @@ const (
 )
 
 // Server wraps go-llm functionality as an MCP server.
+// routeEngine is the MCP-local interface to provider.Router. Defining it here
+// (rather than depending on the concrete *provider.Router) lets handler tests
+// inject a fake without constructing a full provider/registry stack.
+type routeEngine interface {
+	Route(context.Context, provider.RoutingRequest) (*provider.RoutePlan, error)
+	Close() error
+	BreakerInfo(string) (provider.BreakerInfo, bool)
+	WarmthSnapshot() []provider.WarmModel
+	StickyRoutes() map[string]provider.StickyRouteInfo
+}
+
 type Server struct {
 	ollamaURL         string
 	ollamaURLExplicit bool
@@ -38,14 +49,17 @@ type Server struct {
 	tlsCert           string
 	tlsKey            string
 
-	client        *ollama.Client
-	cfg           *config.Config
-	store         rag.VectorStore
-	indexer       *rag.Indexer
-	retriever     *rag.Retriever
-	completer     *completion.Provider
-	modelRegistry *provider.ModelRegistry
-	ollamaProv    provider.Provider
+	client           *ollama.Client
+	cfg              *config.Config
+	store            rag.VectorStore
+	indexer          *rag.Indexer
+	retriever        *rag.Retriever
+	completer        *completion.Provider
+	modelRegistry    *provider.ModelRegistry
+	providerRegistry *provider.Registry
+	ollamaProv       provider.Provider
+	router           routeEngine
+	warmthSource     provider.WarmthSource
 
 	ollamaAvailable bool
 	closed          bool
@@ -263,7 +277,7 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 
 func (s *Server) ensureModelRegistry() error {
 	s.mu.RLock()
-	if s.modelRegistry != nil && s.ollamaProv != nil {
+	if s.modelRegistry != nil && s.ollamaProv != nil && s.providerRegistry != nil {
 		s.mu.RUnlock()
 		return nil
 	}
@@ -287,6 +301,9 @@ func (s *Server) ensureModelRegistry() error {
 	s.mu.Lock()
 	if s.ollamaProv == nil {
 		s.ollamaProv = ollamaProv
+	}
+	if s.providerRegistry == nil {
+		s.providerRegistry = pReg
 	}
 	if s.modelRegistry == nil {
 		s.modelRegistry = mr
