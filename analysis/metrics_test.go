@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestNewMetricsAnalyzer(t *testing.T) {
@@ -264,5 +265,32 @@ func TestAnalyzeTrainingServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "analysis: analyze training:") {
 		t.Errorf("error %q should have analysis: prefix", err.Error())
+	}
+}
+
+func TestNewMetricsAnalyzerWithChat_AcceptsEmptyModel(t *testing.T) {
+	chat := func(ctx context.Context, useCase string, req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if useCase != "analysis" {
+			t.Errorf("useCase = %q, want \"analysis\"", useCase)
+		}
+		return &provider.ChatResponse{Content: "stable training", Done: true}, nil
+	}
+	a, err := NewMetricsAnalyzerWithChat(chat, "")
+	if err != nil {
+		t.Fatalf("NewMetricsAnalyzerWithChat: %v", err)
+	}
+	got, err := a.AnalyzeTraining(context.Background(), TrainingMetrics{Loss: 0.1})
+	if err != nil {
+		t.Fatalf("AnalyzeTraining: %v", err)
+	}
+	if got != "stable training" {
+		t.Errorf("AnalyzeTraining content = %q, want \"stable training\"", got)
+	}
+}
+
+func TestNewMetricsAnalyzer_StillRequiresModel(t *testing.T) {
+	_, err := NewMetricsAnalyzer(&ollama.Client{}, "")
+	if err == nil {
+		t.Fatal("expected error for empty model")
 	}
 }

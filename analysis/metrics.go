@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // TrainingMetrics holds ML training metrics for a single epoch or checkpoint.
@@ -30,11 +31,12 @@ type AnomalyInfo struct {
 
 // MetricsAnalyzer generates natural-language analysis of ML training metrics.
 type MetricsAnalyzer struct {
-	client *ollama.Client
-	model  string
+	chat  ChatFunc
+	model string
 }
 
-// NewMetricsAnalyzer creates a MetricsAnalyzer with the given client and model.
+// NewMetricsAnalyzer is the *ollama.Client-backed compat shim.
+// New code should prefer NewMetricsAnalyzerWithChat.
 func NewMetricsAnalyzer(client *ollama.Client, model string) (*MetricsAnalyzer, error) {
 	if client == nil {
 		return nil, fmt.Errorf("analysis: new metrics analyzer: client is required")
@@ -42,10 +44,16 @@ func NewMetricsAnalyzer(client *ollama.Client, model string) (*MetricsAnalyzer, 
 	if model == "" {
 		return nil, fmt.Errorf("analysis: new metrics analyzer: model is required")
 	}
-	return &MetricsAnalyzer{
-		client: client,
-		model:  model,
-	}, nil
+	return NewMetricsAnalyzerWithChat(chatFuncFromOllamaClient(client), model)
+}
+
+// NewMetricsAnalyzerWithChat builds a MetricsAnalyzer that routes through chat.
+// Empty model defers selection to the chat implementation.
+func NewMetricsAnalyzerWithChat(chat ChatFunc, model string) (*MetricsAnalyzer, error) {
+	if chat == nil {
+		return nil, fmt.Errorf("analysis: new metrics analyzer: chat is required")
+	}
+	return &MetricsAnalyzer{chat: chat, model: model}, nil
 }
 
 // AnalyzeTraining generates a natural-language analysis of training metrics,
@@ -60,9 +68,9 @@ func (ma *MetricsAnalyzer) AnalyzeTraining(ctx context.Context, metrics Training
 
 	prompt := buildTrainingPrompt(metrics)
 
-	resp, err := ma.client.Chat(ctx, ollama.ChatRequest{
+	resp, err := ma.chat(ctx, "analysis", provider.ChatRequest{
 		Model: ma.model,
-		Messages: []ollama.ChatMessage{
+		Messages: []provider.ChatMessage{
 			{Role: "system", Content: "You are an ML training expert. Analyze training metrics and provide actionable insights about convergence, stability, and potential issues."},
 			{Role: "user", Content: prompt},
 		},
@@ -71,7 +79,7 @@ func (ma *MetricsAnalyzer) AnalyzeTraining(ctx context.Context, metrics Training
 		return "", fmt.Errorf("analysis: analyze training: %w", err)
 	}
 
-	return resp.Message.Content, nil
+	return resp.Content, nil
 }
 
 // ExplainAnomaly generates a natural-language explanation and remediation advice
@@ -86,9 +94,9 @@ func (ma *MetricsAnalyzer) ExplainAnomaly(ctx context.Context, anomaly AnomalyIn
 
 	prompt := buildAnomalyPrompt(anomaly)
 
-	resp, err := ma.client.Chat(ctx, ollama.ChatRequest{
+	resp, err := ma.chat(ctx, "analysis", provider.ChatRequest{
 		Model: ma.model,
-		Messages: []ollama.ChatMessage{
+		Messages: []provider.ChatMessage{
 			{Role: "system", Content: "You are an ML training expert. Explain training anomalies clearly and suggest concrete remediation steps."},
 			{Role: "user", Content: prompt},
 		},
@@ -97,7 +105,7 @@ func (ma *MetricsAnalyzer) ExplainAnomaly(ctx context.Context, anomaly AnomalyIn
 		return "", fmt.Errorf("analysis: explain anomaly: %w", err)
 	}
 
-	return resp.Message.Content, nil
+	return resp.Content, nil
 }
 
 func buildTrainingPrompt(m TrainingMetrics) string {
