@@ -146,3 +146,42 @@ func TestRouter_routeChain_MultiStepOrdering(t *testing.T) {
 		t.Errorf("fallbacks[1] = %q, want fallback2:8b", plan.Fallbacks[1].Profile.Key.Model)
 	}
 }
+
+func TestRouter_routeChain_WithinStepScoring(t *testing.T) {
+	// Two providers, both serving the same unqualified model name.
+	// Provider "fast" has Speed=TierBest; provider "slow" has Speed=TierBasic.
+	// Expectation: "fast" wins the within-step ordering.
+	mr, provReg := newChainTestRegistry(t,
+		ModelKey{Provider: "fast", Model: "shared:8b"},
+		ModelKey{Provider: "slow", Model: "shared:8b"},
+	)
+	seedChainProfile(t, mr, &ModelProfile{
+		Key: ModelKey{Provider: "fast", Model: "shared:8b"}, Caps: CapChat,
+		Quality: TierGood, Speed: TierBest, ContextWindow: 8192,
+	})
+	seedChainProfile(t, mr, &ModelProfile{
+		Key: ModelKey{Provider: "slow", Model: "shared:8b"}, Caps: CapChat,
+		Quality: TierGood, Speed: TierBasic, ContextWindow: 8192,
+	})
+
+	r := NewRouter(mr, provReg)
+	defer r.Close()
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"shared:8b"}, // unqualified — resolves to both
+		StrictChain:    true,
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	plan, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Provider != "fast" {
+		t.Errorf("primary provider = %q, want fast", plan.Profile.Key.Provider)
+	}
+	if len(plan.Fallbacks) != 1 || plan.Fallbacks[0].Profile.Key.Provider != "slow" {
+		t.Errorf("fallback should be slow/shared:8b, got %v", plan.Fallbacks)
+	}
+}
