@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 )
 
 // fakeChainProvider implements Provider just enough to exercise routeChain.
@@ -253,5 +254,49 @@ func TestRouter_routeChain_StrictChainSuppressesTail(t *testing.T) {
 	}
 	if !errors.Is(err, ErrBudgetExceeded) && !errors.Is(err, ErrNoViableCandidate) && !errors.Is(err, ErrBudgetAdaptationRequired) {
 		t.Errorf("err = %v, want ErrBudgetExceeded, ErrBudgetAdaptationRequired, or ErrNoViableCandidate", err)
+	}
+}
+
+func TestRouter_routeChain_SuppressesStickyEvenWithAffinityKey(t *testing.T) {
+	mr, pr := newChainTestRegistry(t,
+		ModelKey{Provider: "ollama", Model: "primary:8b"},
+		ModelKey{Provider: "ollama", Model: "fallback:8b"},
+	)
+	r := NewRouter(mr, pr)
+	defer r.Close()
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"ollama/primary:8b", "ollama/fallback:8b"},
+		StrictChain:    true,
+		AffinityKey:    "anything-non-empty",
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+
+	// Pre-seed sticky cache with fallback as the incumbent for the actual
+	// key the request would compute. If routeChain ever consulted sticky,
+	// it would reorder to put fallback first; we assert it does not.
+	now := time.Now()
+	r.sticky.put(&routeSticky{
+		key:         StickyKey(req),
+		providerKey: ModelKey{Provider: "ollama", Model: "fallback:8b"},
+		score:       100,
+		reason:      "test",
+		createdAt:   now,
+		lastUsedAt:  now,
+		expiresAt:   now.Add(time.Hour),
+	})
+
+	plan, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Model != "primary:8b" {
+		t.Fatalf("primary = %q, want primary:8b — sticky must not reorder chain",
+			plan.Profile.Key.Model)
+	}
+	if plan.WasSticky() {
+		t.Error("plan.WasSticky() = true, want false for chain routes")
 	}
 }
