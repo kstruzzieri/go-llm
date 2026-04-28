@@ -58,7 +58,8 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		return toolError("validation", "messages must not be empty"), nil
 	}
 
-	if s.router == nil {
+	router := s.routerSnapshot()
+	if router == nil {
 		return toolError("config", "router unavailable"), nil
 	}
 
@@ -134,7 +135,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		rr.PreferredChain = chain
 	}
 
-	plan, err := s.router.Route(ctx, rr)
+	plan, err := router.Route(ctx, rr)
 	if err != nil {
 		return toolError("router", "%v", err), nil
 	}

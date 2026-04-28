@@ -64,7 +64,8 @@ func (s *Server) handleEmbed(ctx context.Context, req *gomcp.CallToolRequest) (*
 	if args.Text == "" {
 		return toolError("validation", "text must not be empty"), nil
 	}
-	if s.router == nil {
+	router := s.routerSnapshot()
+	if router == nil {
 		return toolError("config", "router unavailable"), nil
 	}
 
@@ -84,7 +85,7 @@ func (s *Server) handleEmbed(ctx context.Context, req *gomcp.CallToolRequest) (*
 		rr.PreferredChain = chain
 	}
 
-	plan, err := s.router.Route(ctx, rr)
+	plan, err := router.Route(ctx, rr)
 	if err != nil {
 		return toolError("router", "%v", err), nil
 	}
@@ -113,7 +114,8 @@ func (s *Server) handleEmbedBatch(ctx context.Context, req *gomcp.CallToolReques
 	if len(args.Texts) > maxBatchSize {
 		return toolError("validation", "texts exceeds maximum batch size of %d (got %d)", maxBatchSize, len(args.Texts)), nil
 	}
-	if s.router == nil {
+	router := s.routerSnapshot()
+	if router == nil {
 		return toolError("config", "router unavailable"), nil
 	}
 
@@ -133,7 +135,7 @@ func (s *Server) handleEmbedBatch(ctx context.Context, req *gomcp.CallToolReques
 		rr.PreferredChain = chain
 	}
 
-	plan, err := s.router.Route(ctx, rr)
+	plan, err := router.Route(ctx, rr)
 	if err != nil {
 		return toolError("router", "%v", err), nil
 	}

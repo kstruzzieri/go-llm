@@ -177,9 +177,11 @@ type breakerEntry struct {
 
 func (s *Server) handleRouteBreakersResource(_ context.Context, _ *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
 	entries := []breakerEntry{}
-	if s.router != nil && s.providerRegistry != nil {
-		for _, name := range s.providerRegistry.Names() {
-			if info, ok := s.router.BreakerInfo(name); ok {
+	router := s.routerSnapshot()
+	providerRegistry := s.providerRegistrySnapshot()
+	if router != nil && providerRegistry != nil {
+		for _, name := range providerRegistry.Names() {
+			if info, ok := router.BreakerInfo(name); ok {
 				entries = append(entries, breakerEntry{Provider: name, Info: info})
 			}
 		}

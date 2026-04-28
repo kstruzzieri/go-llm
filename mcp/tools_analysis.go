@@ -31,7 +31,8 @@ func useCaseToConfigRole(useCase string) string {
 // via req.Model; chain selection from config happens here.
 func (s *Server) analysisChatFunc() analysis.ChatFunc {
 	return func(ctx context.Context, useCase string, req provider.ChatRequest) (*provider.ChatResponse, error) {
-		if s.router == nil {
+		router := s.routerSnapshot()
+		if router == nil {
 			return nil, fmt.Errorf("mcp: router unavailable")
 		}
 		caps := provider.CapChat
@@ -55,7 +56,7 @@ func (s *Server) analysisChatFunc() analysis.ChatFunc {
 			}
 			rr.PreferredChain = chain
 		}
-		plan, err := s.router.Route(ctx, rr)
+		plan, err := router.Route(ctx, rr)
 		if err != nil {
 			return nil, err
 		}
