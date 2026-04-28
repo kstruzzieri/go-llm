@@ -172,7 +172,7 @@ func (s *Server) handleCodeReview(ctx context.Context, req *gomcp.CallToolReques
 
 	reviewer, err := analysis.NewCodeReviewerWithChat(s.analysisChatFunc(), ctxRetriever, args.Model)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError("config", "%v", err), nil
 	}
 
 	var opts []analysis.ReviewOption
@@ -227,7 +227,7 @@ func (s *Server) handleAnalyzeTraining(ctx context.Context, req *gomcp.CallToolR
 
 	analyzer, err := analysis.NewMetricsAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError("config", "%v", err), nil
 	}
 
 	result, err := analyzer.AnalyzeTraining(ctx, metrics)
@@ -249,7 +249,7 @@ func (s *Server) handleExplainAnomaly(ctx context.Context, req *gomcp.CallToolRe
 
 	analyzer, err := analysis.NewMetricsAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError("config", "%v", err), nil
 	}
 
 	result, err := analyzer.ExplainAnomaly(ctx, args.Anomaly)
@@ -278,7 +278,7 @@ func (s *Server) handleAnalyzeStrategy(ctx context.Context, req *gomcp.CallToolR
 
 	analyzer, err := analysis.NewStrategyAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError("config", "%v", err), nil
 	}
 
 	result, err := analyzer.AnalyzeStrategy(ctx, args.Name, args.Metrics)
@@ -306,7 +306,7 @@ func (s *Server) handleCompareStrategies(ctx context.Context, req *gomcp.CallToo
 
 	analyzer, err := analysis.NewStrategyAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError("config", "%v", err), nil
 	}
 
 	result, err := analyzer.CompareStrategies(ctx, args.Strategies)
