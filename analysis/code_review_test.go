@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func newMockChatServer(t *testing.T, wantContent string) *httptest.Server {
@@ -210,5 +211,47 @@ func TestReviewContextCanceled(t *testing.T) {
 	_, err = cr.Review(ctx, "some code")
 	if err == nil {
 		t.Fatal("expected error for canceled context")
+	}
+}
+
+func TestNewCodeReviewerWithChat_AcceptsEmptyModel(t *testing.T) {
+	called := false
+	chat := func(ctx context.Context, useCase string, req provider.ChatRequest) (*provider.ChatResponse, error) {
+		called = true
+		if useCase != "code-review" {
+			t.Errorf("useCase = %q, want \"code-review\"", useCase)
+		}
+		if req.Model != "" {
+			t.Errorf("Model = %q, want empty (deferred to chat impl)", req.Model)
+		}
+		return &provider.ChatResponse{Content: "looks good", Done: true}, nil
+	}
+	cr, err := NewCodeReviewerWithChat(chat, nil, "") // empty model OK
+	if err != nil {
+		t.Fatalf("NewCodeReviewerWithChat: %v", err)
+	}
+	got, err := cr.Review(context.Background(), "package main")
+	if err != nil {
+		t.Fatalf("Review: %v", err)
+	}
+	if got != "looks good" {
+		t.Errorf("Review content = %q, want \"looks good\"", got)
+	}
+	if !called {
+		t.Error("ChatFunc was not invoked")
+	}
+}
+
+func TestNewCodeReviewer_StillRequiresModel(t *testing.T) {
+	_, err := NewCodeReviewer(&ollama.Client{}, nil, "")
+	if err == nil {
+		t.Fatal("expected error for empty model in compat shim")
+	}
+}
+
+func TestNewCodeReviewerWithChat_RequiresChat(t *testing.T) {
+	_, err := NewCodeReviewerWithChat(nil, nil, "some-model")
+	if err == nil {
+		t.Fatal("expected error for nil chat func")
 	}
 }

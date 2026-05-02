@@ -130,3 +130,57 @@ func toSet(items []string) map[string]bool {
 	}
 	return s
 }
+
+// RoleFallbackChain returns the ordered chain of model selectors for a use-case
+// role: the primary model first, then each fallback in declared order, then
+// transitively each fallback's fallbacks. Selectors are always provider-
+// qualified ("provider/model") because Load defaults Model.Provider to
+// "ollama" when unset.
+//
+// The chain is first-seen unique: a model encountered via multiple paths in a
+// diamond fallback graph appears only once. Cycles in the fallback graph
+// surface as an error. Availability is NOT filtered — that is the Router's
+// job via breakers, warmth, and gates.
+func (c *Config) RoleFallbackChain(useCase string) ([]string, error) {
+	role, ok := c.Defaults[useCase]
+	if !ok {
+		return nil, fmt.Errorf("config: unknown use-case %q", useCase)
+	}
+	var chain []string
+	seen := make(map[string]bool)    // dedupe on selector string
+	onStack := make(map[string]bool) // cycle detection on role
+	if err := c.walkRole(role, &chain, seen, onStack); err != nil {
+		return nil, err
+	}
+	return chain, nil
+}
+
+func (c *Config) walkRole(role string, chain *[]string, seen, onStack map[string]bool) error {
+	if onStack[role] {
+		return fmt.Errorf("config: circular fallback at role %q", role)
+	}
+	onStack[role] = true
+	defer delete(onStack, role)
+
+	m, ok := c.Models[role]
+	if !ok {
+		return fmt.Errorf("config: unknown role %q", role)
+	}
+	// Provider is guaranteed non-empty by Load (defaults to "ollama" when
+	// unset). Always emit the qualified form.
+	provider := m.Provider
+	if provider == "" {
+		provider = "ollama"
+	}
+	selector := provider + "/" + m.Name
+	if !seen[selector] {
+		seen[selector] = true
+		*chain = append(*chain, selector)
+	}
+	for _, fb := range m.Fallbacks {
+		if err := c.walkRole(fb, chain, seen, onStack); err != nil {
+			return err
+		}
+	}
+	return nil
+}

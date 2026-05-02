@@ -8,6 +8,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // chatArgs are the parameters for the chat tool.
@@ -32,8 +33,11 @@ func (s *Server) registerChatTools() {
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"role":    map[string]any{"type": "string", "enum": []string{"system", "user", "assistant"}},
-							"content": map[string]any{"type": "string"},
+							"role":         map[string]any{"type": "string", "enum": []string{"system", "user", "assistant", "tool"}},
+							"content":      map[string]any{"type": "string"},
+							"tool_calls":   map[string]any{"type": "array"},
+							"tool_name":    map[string]any{"type": "string"},
+							"tool_call_id": map[string]any{"type": "string"},
 						},
 						"required": []string{"role", "content"},
 					},
@@ -57,9 +61,9 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		return toolError("validation", "messages must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "chat")
-	if err != nil {
-		return toolError("config", "%v", err), nil
+	router := s.routerSnapshot()
+	if router == nil {
+		return toolError("config", "router unavailable"), nil
 	}
 
 	messages := args.Messages
@@ -90,9 +94,9 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 			return toolError("validation", "use_rag requires at least one user message"), nil
 		}
 
-		results, err := retriever.Retrieve(ctx, query, topK)
-		if err != nil {
-			return toolError("rag", "retrieve: %v", err), nil
+		results, rerr := retriever.Retrieve(ctx, query, topK)
+		if rerr != nil {
+			return toolError("rag", "retrieve: %v", rerr), nil
 		}
 		if len(results) == 0 {
 			return toolError("rag", "RAG index is empty; run rag_index_file or rag_index_directory first"), nil
@@ -106,21 +110,39 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		messages = append([]ollama.ChatMessage{systemMsg}, messages...)
 	}
 
-	var opts *ollama.ModelOptions
+	pmsgs := toProviderChatMessages(messages)
+
+	opts := provider.ModelOptions{}
 	if args.Temperature != nil {
-		opts = &ollama.ModelOptions{Temperature: *args.Temperature}
+		opts.Temperature = args.Temperature
 	}
 
-	resp, err := s.client.Chat(ctx, ollama.ChatRequest{
-		Model:    model,
-		Messages: messages,
-		Options:  opts,
-	})
+	rr := provider.RoutingRequest{
+		Model:          args.Model,
+		UseCase:        "chat",
+		RequiredCaps:   provider.CapChat,
+		Messages:       pmsgs,
+		Options:        opts,
+		ExpectedOutput: provider.DefaultExpectedOutput("chat"),
+		Priority:       provider.PriorityNormal,
+	}
+	if rr.Model == "" {
+		chain, err := s.chainFor("chat")
+		if err != nil {
+			return toolError("config", "%v", err), nil
+		}
+		rr.PreferredChain = chain
+	}
+
+	plan, err := router.Route(ctx, rr)
+	if err != nil {
+		return toolError("router", "%v", err), nil
+	}
+	resp, err := plan.ExecuteChat(ctx)
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
-
-	return toolResult(resp.Message.Content), nil
+	return toolResult(resp.Content), nil
 }
 
 // lastUserMessage returns the content of the last message with role "user".
@@ -131,4 +153,42 @@ func lastUserMessage(msgs []ollama.ChatMessage) string {
 		}
 	}
 	return ""
+}
+
+func toProviderChatMessages(in []ollama.ChatMessage) []provider.ChatMessage {
+	out := make([]provider.ChatMessage, len(in))
+	for i, m := range in {
+		out[i] = provider.ChatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  toProviderToolCalls(m.ToolCalls),
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	return out
+}
+
+func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]provider.ToolCall, len(in))
+	for i, c := range in {
+		var args json.RawMessage
+		if c.Function.Arguments != nil {
+			args, _ = json.Marshal(c.Function.Arguments)
+		}
+		out[i] = provider.ToolCall{
+			ID:   c.ID,
+			Type: c.Type,
+			Function: provider.ToolCallFunction{
+				Index:     c.Function.Index,
+				Name:      c.Function.Name,
+				Arguments: args,
+			},
+		}
+	}
+	return out
 }

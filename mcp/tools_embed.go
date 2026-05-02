@@ -6,6 +6,8 @@ import (
 	"fmt"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 const maxBatchSize = 100
@@ -62,20 +64,41 @@ func (s *Server) handleEmbed(ctx context.Context, req *gomcp.CallToolRequest) (*
 	if args.Text == "" {
 		return toolError("validation", "text must not be empty"), nil
 	}
-
-	model, err := s.resolveModel(ctx, args.Model, "embedding")
-	if err != nil {
-		return toolError("config", "%v", err), nil
+	router := s.routerSnapshot()
+	if router == nil {
+		return toolError("config", "router unavailable"), nil
 	}
 
-	embedding, err := s.client.Embed(ctx, model, args.Text)
+	rr := provider.RoutingRequest{
+		Model:          args.Model,
+		UseCase:        "embedding",
+		RequiredCaps:   provider.CapEmbed,
+		Input:          []string{args.Text},
+		ExpectedOutput: provider.DefaultExpectedOutput("embedding"),
+		Priority:       provider.PriorityNormal,
+	}
+	if rr.Model == "" {
+		chain, err := s.chainFor("embedding")
+		if err != nil {
+			return toolError("config", "%v", err), nil
+		}
+		rr.PreferredChain = chain
+	}
+
+	plan, err := router.Route(ctx, rr)
+	if err != nil {
+		return toolError("router", "%v", err), nil
+	}
+	resp, err := plan.ExecuteEmbed(ctx)
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
-
-	data, err := json.Marshal(embedding)
-	if err != nil {
-		return toolError("ollama", "marshal embedding: %v", err), nil
+	if len(resp.Embeddings) == 0 {
+		return toolError("ollama", "no embedding returned"), nil
+	}
+	data, mErr := json.Marshal(resp.Embeddings[0])
+	if mErr != nil {
+		return toolError("ollama", "marshal embedding: %v", mErr), nil
 	}
 	return toolResult(string(data)), nil
 }
@@ -91,20 +114,38 @@ func (s *Server) handleEmbedBatch(ctx context.Context, req *gomcp.CallToolReques
 	if len(args.Texts) > maxBatchSize {
 		return toolError("validation", "texts exceeds maximum batch size of %d (got %d)", maxBatchSize, len(args.Texts)), nil
 	}
-
-	model, err := s.resolveModel(ctx, args.Model, "embedding")
-	if err != nil {
-		return toolError("config", "%v", err), nil
+	router := s.routerSnapshot()
+	if router == nil {
+		return toolError("config", "router unavailable"), nil
 	}
 
-	embeddings, err := s.client.EmbedBatch(ctx, model, args.Texts)
+	rr := provider.RoutingRequest{
+		Model:          args.Model,
+		UseCase:        "embedding",
+		RequiredCaps:   provider.CapEmbed,
+		Input:          args.Texts,
+		ExpectedOutput: provider.DefaultExpectedOutput("embedding"),
+		Priority:       provider.PriorityNormal,
+	}
+	if rr.Model == "" {
+		chain, err := s.chainFor("embedding")
+		if err != nil {
+			return toolError("config", "%v", err), nil
+		}
+		rr.PreferredChain = chain
+	}
+
+	plan, err := router.Route(ctx, rr)
+	if err != nil {
+		return toolError("router", "%v", err), nil
+	}
+	resp, err := plan.ExecuteEmbed(ctx)
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
-
-	data, err := json.Marshal(embeddings)
-	if err != nil {
-		return toolError("ollama", "marshal embeddings: %v", err), nil
+	data, mErr := json.Marshal(resp.Embeddings)
+	if mErr != nil {
+		return toolError("ollama", "marshal embeddings: %v", mErr), nil
 	}
 	return toolResult(string(data)), nil
 }

@@ -221,6 +221,10 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	}
 	r.mu.RUnlock()
 
+	if len(req.PreferredChain) > 0 {
+		return r.routeChain(ctx, req)
+	}
+
 	// Priority is used as-is from the request. PriorityBackground (zero value)
 	// is a valid explicit choice, so we do not override it with a default.
 	// Convenience methods set appropriate priorities (e.g., FIM -> PriorityHigh).

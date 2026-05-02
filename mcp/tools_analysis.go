@@ -5,11 +5,64 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/analysis"
+	"github.com/kstruzzieri/go-llm/provider"
 )
+
+// useCaseToConfigRole maps router use-case names back to config Defaults keys.
+// "code-review" and "analysis" both consult the "analysis" config role.
+func useCaseToConfigRole(useCase string) string {
+	switch useCase {
+	case "code-review", "analysis":
+		return "analysis"
+	case "embedding":
+		return "embedding"
+	default:
+		return "chat"
+	}
+}
+
+// analysisChatFunc builds the analysis.ChatFunc closure that routes analysis
+// tool requests through the Router. Caller supplies the explicit pin (or "")
+// via req.Model; chain selection from config happens here.
+func (s *Server) analysisChatFunc() analysis.ChatFunc {
+	return func(ctx context.Context, useCase string, req provider.ChatRequest) (*provider.ChatResponse, error) {
+		router := s.routerSnapshot()
+		if router == nil {
+			return nil, fmt.Errorf("mcp: router unavailable")
+		}
+		caps := provider.CapChat
+		if len(req.Tools) > 0 {
+			caps |= provider.CapToolCall
+		}
+		rr := provider.RoutingRequest{
+			Model:          req.Model,
+			UseCase:        useCase,
+			RequiredCaps:   caps,
+			Messages:       req.Messages,
+			Options:        req.Options,
+			Tools:          req.Tools,
+			ExpectedOutput: provider.DefaultExpectedOutput(useCase),
+			Priority:       provider.PriorityNormal,
+		}
+		if rr.Model == "" {
+			chain, err := s.chainFor(useCaseToConfigRole(useCase))
+			if err != nil {
+				return nil, err
+			}
+			rr.PreferredChain = chain
+		}
+		plan, err := router.Route(ctx, rr)
+		if err != nil {
+			return nil, err
+		}
+		return plan.ExecuteChat(ctx)
+	}
+}
 
 func (s *Server) registerAnalysisTools() {
 	s.mcpServer.AddTool(&gomcp.Tool{
@@ -108,19 +161,18 @@ func (s *Server) handleCodeReview(ctx context.Context, req *gomcp.CallToolReques
 		return toolError("validation", "code must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "analysis")
-	if err != nil {
-		return toolError("config", "%v", err), nil
-	}
-
-	// CodeReviewer accepts a nil retriever (no RAG context).
 	s.mu.RLock()
 	retriever := s.retriever
 	s.mu.RUnlock()
 
-	reviewer, err := analysis.NewCodeReviewer(s.client, retriever, model)
+	var ctxRetriever analysis.ContextRetriever
+	if retriever != nil {
+		ctxRetriever = retriever
+	}
+
+	reviewer, err := analysis.NewCodeReviewerWithChat(s.analysisChatFunc(), ctxRetriever, args.Model)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError("config", "%v", err), nil
 	}
 
 	var opts []analysis.ReviewOption
@@ -151,12 +203,7 @@ func (s *Server) handleExplainCode(ctx context.Context, req *gomcp.CallToolReque
 		return toolError("validation", "code must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "analysis")
-	if err != nil {
-		return toolError("config", "%v", err), nil
-	}
-
-	result, err := analysis.Explain(ctx, s.client, model, args.Code)
+	result, err := analysis.ExplainWithChat(ctx, s.analysisChatFunc(), args.Model, args.Code)
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
@@ -178,14 +225,9 @@ func (s *Server) handleAnalyzeTraining(ctx context.Context, req *gomcp.CallToolR
 		return toolError("validation", "%v", err), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "analysis")
+	analyzer, err := analysis.NewMetricsAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
 		return toolError("config", "%v", err), nil
-	}
-
-	analyzer, err := analysis.NewMetricsAnalyzer(s.client, model)
-	if err != nil {
-		return toolError("ollama", "%v", err), nil
 	}
 
 	result, err := analyzer.AnalyzeTraining(ctx, metrics)
@@ -205,14 +247,9 @@ func (s *Server) handleExplainAnomaly(ctx context.Context, req *gomcp.CallToolRe
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "analysis")
+	analyzer, err := analysis.NewMetricsAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
 		return toolError("config", "%v", err), nil
-	}
-
-	analyzer, err := analysis.NewMetricsAnalyzer(s.client, model)
-	if err != nil {
-		return toolError("ollama", "%v", err), nil
 	}
 
 	result, err := analyzer.ExplainAnomaly(ctx, args.Anomaly)
@@ -239,14 +276,9 @@ func (s *Server) handleAnalyzeStrategy(ctx context.Context, req *gomcp.CallToolR
 		return toolError("validation", "metrics must not be empty"), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "analysis")
+	analyzer, err := analysis.NewStrategyAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
 		return toolError("config", "%v", err), nil
-	}
-
-	analyzer, err := analysis.NewStrategyAnalyzer(s.client, model)
-	if err != nil {
-		return toolError("ollama", "%v", err), nil
 	}
 
 	result, err := analyzer.AnalyzeStrategy(ctx, args.Name, args.Metrics)
@@ -272,14 +304,9 @@ func (s *Server) handleCompareStrategies(ctx context.Context, req *gomcp.CallToo
 		return toolError("validation", "at least 2 strategies are required"), nil
 	}
 
-	model, err := s.resolveModel(ctx, args.Model, "analysis")
+	analyzer, err := analysis.NewStrategyAnalyzerWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
 		return toolError("config", "%v", err), nil
-	}
-
-	analyzer, err := analysis.NewStrategyAnalyzer(s.client, model)
-	if err != nil {
-		return toolError("ollama", "%v", err), nil
 	}
 
 	result, err := analyzer.CompareStrategies(ctx, args.Strategies)

@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -248,5 +249,102 @@ func TestResolve_CircularFallbackTerminates(t *testing.T) {
 	// The function must terminate and return an error — not hang.
 	// The error will be "no available model" since the circular error
 	// is caught internally to prevent infinite recursion.
+}
+
+func TestConfig_RoleFallbackChain_LinearChain(t *testing.T) {
+	cfg := &Config{
+		Defaults: map[string]string{"chat": "primary"},
+		Models: map[string]ModelConfig{
+			"primary":  {Name: "p:8b", Provider: "ollama", Fallbacks: []string{"middle"}},
+			"middle":   {Name: "m:8b", Provider: "ollama", Fallbacks: []string{"backstop"}},
+			"backstop": {Name: "b:8b", Provider: "ollama"},
+		},
+	}
+	chain, err := cfg.RoleFallbackChain("chat")
+	if err != nil {
+		t.Fatalf("RoleFallbackChain: %v", err)
+	}
+	want := []string{"ollama/p:8b", "ollama/m:8b", "ollama/b:8b"}
+	if len(chain) != len(want) {
+		t.Fatalf("chain length = %d, want %d (got %v)", len(chain), len(want), chain)
+	}
+	for i, s := range want {
+		if chain[i] != s {
+			t.Errorf("chain[%d] = %q, want %q", i, chain[i], s)
+		}
+	}
+}
+
+func TestConfig_RoleFallbackChain_DiamondDedupes(t *testing.T) {
+	// Diamond: chat → [A, B], A → [shared], B → [shared].
+	// Expected chain: chat, A, shared, B (shared appears once on first sight).
+	cfg := &Config{
+		Defaults: map[string]string{"chat": "root"},
+		Models: map[string]ModelConfig{
+			"root":   {Name: "r:8b", Provider: "ollama", Fallbacks: []string{"a", "b"}},
+			"a":      {Name: "a:8b", Provider: "ollama", Fallbacks: []string{"shared"}},
+			"b":      {Name: "b:8b", Provider: "ollama", Fallbacks: []string{"shared"}},
+			"shared": {Name: "s:8b", Provider: "ollama"},
+		},
+	}
+	chain, err := cfg.RoleFallbackChain("chat")
+	if err != nil {
+		t.Fatalf("RoleFallbackChain: %v", err)
+	}
+	want := []string{"ollama/r:8b", "ollama/a:8b", "ollama/s:8b", "ollama/b:8b"}
+	if len(chain) != len(want) {
+		t.Fatalf("chain = %v, want %v", chain, want)
+	}
+	for i, s := range want {
+		if chain[i] != s {
+			t.Errorf("chain[%d] = %q, want %q", i, chain[i], s)
+		}
+	}
+	// Assert that "ollama/s:8b" appears exactly once.
+	count := 0
+	for _, s := range chain {
+		if s == "ollama/s:8b" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Errorf("ollama/s:8b appeared %d times, want 1", count)
+	}
+}
+
+func TestConfig_RoleFallbackChain_CycleErrors(t *testing.T) {
+	cfg := &Config{
+		Defaults: map[string]string{"chat": "a"},
+		Models: map[string]ModelConfig{
+			"a": {Name: "a:8b", Provider: "ollama", Fallbacks: []string{"b"}},
+			"b": {Name: "b:8b", Provider: "ollama", Fallbacks: []string{"a"}},
+		},
+	}
+	_, err := cfg.RoleFallbackChain("chat")
+	if err == nil {
+		t.Fatal("expected cycle error, got nil")
+	}
+	if !strings.Contains(err.Error(), "circular fallback") {
+		t.Errorf("err = %v, want \"circular fallback\" in message", err)
+	}
+}
+
+func TestConfig_RoleFallbackChain_UnknownUseCase(t *testing.T) {
+	cfg := &Config{Defaults: map[string]string{}, Models: map[string]ModelConfig{}}
+	_, err := cfg.RoleFallbackChain("unknown")
+	if err == nil {
+		t.Fatal("expected unknown-use-case error, got nil")
+	}
+}
+
+func TestConfig_RoleFallbackChain_UnknownRole(t *testing.T) {
+	cfg := &Config{
+		Defaults: map[string]string{"chat": "missing"},
+		Models:   map[string]ModelConfig{},
+	}
+	_, err := cfg.RoleFallbackChain("chat")
+	if err == nil {
+		t.Fatal("expected unknown-role error, got nil")
+	}
 }
 

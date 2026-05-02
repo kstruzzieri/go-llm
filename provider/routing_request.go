@@ -114,6 +114,17 @@ type RoutingRequest struct {
 	Priority Priority
 	// AffinityKey is a caller-supplied key for sticky routing (e.g. session ID).
 	AffinityKey string
+	// PreferredChain is an ordered list of model selectors (same syntax as
+	// Model: "provider/model" qualified, "model" unqualified) derived from a
+	// higher layer such as config.Config.RoleFallbackChain. When non-empty,
+	// the Router walks chain entries in order (chain-first routing) and
+	// suppresses sticky routing for this request. Empty preserves the
+	// existing global-scoring path.
+	PreferredChain []string
+	// StrictChain, when true, suppresses the Recommend safety-net tail that
+	// the chain-first router otherwise appends when every chain entry is
+	// gated out. Has no effect when PreferredChain is empty.
+	StrictChain bool
 	// DryRun, when true, returns the routing decision without executing the request.
 	DryRun bool
 }

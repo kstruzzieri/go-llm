@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestNewStrategyAnalyzer(t *testing.T) {
@@ -269,5 +270,28 @@ func TestCompareStrategiesServerError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "analysis: compare strategies:") {
 		t.Errorf("error %q should have analysis: prefix", err.Error())
+	}
+}
+
+func TestNewStrategyAnalyzerWithChat_AcceptsEmptyModel(t *testing.T) {
+	chat := func(ctx context.Context, useCase string, req provider.ChatRequest) (*provider.ChatResponse, error) {
+		if useCase != "analysis" {
+			t.Errorf("useCase = %q, want \"analysis\"", useCase)
+		}
+		return &provider.ChatResponse{Content: "ok", Done: true}, nil
+	}
+	a, err := NewStrategyAnalyzerWithChat(chat, "")
+	if err != nil {
+		t.Fatalf("NewStrategyAnalyzerWithChat: %v", err)
+	}
+	if _, err := a.AnalyzeStrategy(context.Background(), "alpha", map[string]float64{"sharpe": 2.0}); err != nil {
+		t.Fatalf("AnalyzeStrategy: %v", err)
+	}
+}
+
+func TestNewStrategyAnalyzer_StillRequiresModel(t *testing.T) {
+	_, err := NewStrategyAnalyzer(&ollama.Client{}, "")
+	if err == nil {
+		t.Fatal("expected error for empty model")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -37,13 +38,14 @@ func WithFocus(focus string) ReviewOption {
 
 // CodeReviewer generates code reviews using an LLM with optional RAG context.
 type CodeReviewer struct {
-	client    *ollama.Client
-	retriever *rag.Retriever
+	chat      ChatFunc
+	retriever ContextRetriever
 	model     string
 }
 
-// NewCodeReviewer creates a CodeReviewer. The retriever may be nil if RAG context
-// is not needed. The client and model are required.
+// NewCodeReviewer is the *ollama.Client-backed compat shim. Existing callers
+// (Firn IDE, Flux ML, Quantum Trader) continue to use this constructor with
+// no behavior change. New code should prefer NewCodeReviewerWithChat.
 func NewCodeReviewer(client *ollama.Client, retriever *rag.Retriever, model string) (*CodeReviewer, error) {
 	if client == nil {
 		return nil, fmt.Errorf("analysis: new code reviewer: client is required")
@@ -51,11 +53,23 @@ func NewCodeReviewer(client *ollama.Client, retriever *rag.Retriever, model stri
 	if model == "" {
 		return nil, fmt.Errorf("analysis: new code reviewer: model is required")
 	}
-	return &CodeReviewer{
-		client:    client,
-		retriever: retriever,
-		model:     model,
-	}, nil
+	// Pass retriever as ContextRetriever; *rag.Retriever satisfies it
+	// structurally. nil *rag.Retriever stays nil through the conversion.
+	var r ContextRetriever
+	if retriever != nil {
+		r = retriever
+	}
+	return NewCodeReviewerWithChat(chatFuncFromOllamaClient(client), r, model)
+}
+
+// NewCodeReviewerWithChat builds a CodeReviewer that routes through chat.
+// The model parameter may be empty; an empty model defers selection to the
+// chat implementation (typically PreferredChain + Recommend in the Router).
+func NewCodeReviewerWithChat(chat ChatFunc, retriever ContextRetriever, model string) (*CodeReviewer, error) {
+	if chat == nil {
+		return nil, fmt.Errorf("analysis: new code reviewer: chat is required")
+	}
+	return &CodeReviewer{chat: chat, retriever: retriever, model: model}, nil
 }
 
 // Review performs a code review on the provided code and returns the review as text.
@@ -73,9 +87,9 @@ func (cr *CodeReviewer) Review(ctx context.Context, code string, opts ...ReviewO
 
 	prompt := cr.buildReviewPrompt(ctx, code, cfg)
 
-	resp, err := cr.client.Chat(ctx, ollama.ChatRequest{
+	resp, err := cr.chat(ctx, "code-review", provider.ChatRequest{
 		Model: cr.model,
-		Messages: []ollama.ChatMessage{
+		Messages: []provider.ChatMessage{
 			{Role: "system", Content: "You are an expert code reviewer. Provide clear, actionable feedback."},
 			{Role: "user", Content: prompt},
 		},
@@ -84,7 +98,7 @@ func (cr *CodeReviewer) Review(ctx context.Context, code string, opts ...ReviewO
 		return "", fmt.Errorf("analysis: review code: %w", err)
 	}
 
-	return resp.Message.Content, nil
+	return resp.Content, nil
 }
 
 // buildReviewPrompt constructs the review prompt with optional language, focus, and RAG context.

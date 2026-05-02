@@ -6,7 +6,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // generateArgs are the parameters for the generate tool.
@@ -44,33 +44,48 @@ func (s *Server) handleGenerate(ctx context.Context, req *gomcp.CallToolRequest)
 	if args.Prompt == "" {
 		return toolError("validation", "prompt must not be empty"), nil
 	}
+	router := s.routerSnapshot()
+	if router == nil {
+		return toolError("config", "router unavailable"), nil
+	}
 
-	// Generate resolves to the "chat" use-case (no dedicated "generation" default).
-	model, err := s.resolveModel(ctx, args.Model, "chat")
+	opts := provider.ModelOptions{}
+	if args.Temperature != nil {
+		opts.Temperature = args.Temperature
+	}
+	if args.MaxTokens > 0 {
+		opts.NumPredict = args.MaxTokens
+	}
+	expectedOutput := provider.DefaultExpectedOutput("chat")
+	if args.MaxTokens > 0 {
+		expectedOutput = args.MaxTokens
+	}
+
+	rr := provider.RoutingRequest{
+		Model:          args.Model,
+		UseCase:        "chat", // generate routes via the chat use-case
+		RequiredCaps:   provider.CapGenerate,
+		Prompt:         args.Prompt,
+		System:         args.System,
+		Options:        opts,
+		ExpectedOutput: expectedOutput,
+		Priority:       provider.PriorityNormal,
+	}
+	if rr.Model == "" {
+		chain, err := s.chainFor("chat")
+		if err != nil {
+			return toolError("config", "%v", err), nil
+		}
+		rr.PreferredChain = chain
+	}
+
+	plan, err := router.Route(ctx, rr)
 	if err != nil {
-		return toolError("config", "%v", err), nil
+		return toolError("router", "%v", err), nil
 	}
-
-	var opts *ollama.ModelOptions
-	if args.Temperature != nil || args.MaxTokens > 0 {
-		opts = &ollama.ModelOptions{}
-		if args.Temperature != nil {
-			opts.Temperature = *args.Temperature
-		}
-		if args.MaxTokens > 0 {
-			opts.NumPredict = args.MaxTokens
-		}
-	}
-
-	resp, err := s.client.Generate(ctx, ollama.GenerateRequest{
-		Model:   model,
-		Prompt:  args.Prompt,
-		System:  args.System,
-		Options: opts,
-	})
+	resp, err := plan.ExecuteGenerate(ctx)
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
-
 	return toolResult(resp.Response), nil
 }

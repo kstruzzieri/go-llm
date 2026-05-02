@@ -4,13 +4,19 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestEmbedToolBasic(t *testing.T) {
+	t.Skip("end-to-end Ollama-traffic test; request-shape coverage now lives " +
+		"in TestHandleEmbed_UsesRouter via the routeEngine seam.")
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
@@ -77,6 +83,8 @@ func TestEmbedToolEmptyText(t *testing.T) {
 }
 
 func TestEmbedBatchToolBasic(t *testing.T) {
+	t.Skip("end-to-end Ollama-traffic test; request-shape coverage now lives " +
+		"in TestHandleEmbedBatch_UsesRouter via the routeEngine seam.")
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
@@ -172,5 +180,93 @@ func TestEmbedBatchToolEmptyTexts(t *testing.T) {
 	}
 	if text := extractText(result); !strings.Contains(text, "texts must not be empty") {
 		t.Errorf("error = %q, want to contain %q", text, "texts must not be empty")
+	}
+}
+
+func TestHandleEmbed_UsesRouter(t *testing.T) {
+	router := newRecordingRouteEngine("")
+	router.embedVectors = [][]float64{{0.1, 0.2, 0.3}}
+	s := &Server{
+		cfg: &config.Config{
+			Defaults: map[string]string{"embedding": "embedder"},
+			Models: map[string]config.ModelConfig{
+				"embedder": {Name: "qwen3-embedding:8b", Provider: "ollama"},
+			},
+		},
+		router: router,
+	}
+
+	args, _ := json.Marshal(embedArgs{Text: "hello world"})
+	res, err := s.handleEmbed(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{Arguments: args},
+	})
+	if err != nil {
+		t.Fatalf("handleEmbed: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleEmbed returned error: %s", extractText(res))
+	}
+	if !router.called {
+		t.Fatal("router was not called")
+	}
+	if want := []string{"hello world"}; !reflect.DeepEqual(router.last.Input, want) {
+		t.Errorf("Input = %v, want %v", router.last.Input, want)
+	}
+	if router.last.RequiredCaps != provider.CapEmbed {
+		t.Errorf("RequiredCaps = %v, want CapEmbed", router.last.RequiredCaps)
+	}
+	if want := []string{"ollama/qwen3-embedding:8b"}; !reflect.DeepEqual(router.last.PreferredChain, want) {
+		t.Errorf("PreferredChain = %v, want %v", router.last.PreferredChain, want)
+	}
+}
+
+func TestHandleEmbedBatch_UsesRouter(t *testing.T) {
+	router := newRecordingRouteEngine("")
+	router.embedVectors = [][]float64{{0.1}, {0.2}, {0.3}}
+	s := &Server{
+		cfg: &config.Config{
+			Defaults: map[string]string{"embedding": "embedder"},
+			Models: map[string]config.ModelConfig{
+				"embedder": {Name: "qwen3-embedding:8b", Provider: "ollama"},
+			},
+		},
+		router: router,
+	}
+
+	args, _ := json.Marshal(embedBatchArgs{Texts: []string{"a", "b", "c"}})
+	_, err := s.handleEmbedBatch(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{Arguments: args},
+	})
+	if err != nil {
+		t.Fatalf("handleEmbedBatch: %v", err)
+	}
+	if want := []string{"a", "b", "c"}; !reflect.DeepEqual(router.last.Input, want) {
+		t.Errorf("Input = %v, want %v", router.last.Input, want)
+	}
+	if router.last.UseCase != "embedding" {
+		t.Errorf("UseCase = %q, want embedding", router.last.UseCase)
+	}
+}
+
+func TestHandleEmbedBatch_BatchSizeValidatedBeforeRouting(t *testing.T) {
+	router := newRecordingRouteEngine("")
+	s := &Server{router: router}
+
+	texts := make([]string, maxBatchSize+1)
+	for i := range texts {
+		texts[i] = "x"
+	}
+	args, _ := json.Marshal(embedBatchArgs{Texts: texts, Model: "ollama/m:8b"})
+	res, err := s.handleEmbedBatch(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{Arguments: args},
+	})
+	if err != nil {
+		t.Fatalf("handleEmbedBatch: %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("expected validation error for batch over limit")
+	}
+	if router.called {
+		t.Error("router was called despite batch-size validation failure")
 	}
 }

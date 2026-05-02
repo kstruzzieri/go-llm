@@ -29,6 +29,17 @@ const (
 )
 
 // Server wraps go-llm functionality as an MCP server.
+// routeEngine is the MCP-local interface to provider.Router. Defining it here
+// (rather than depending on the concrete *provider.Router) lets handler tests
+// inject a fake without constructing a full provider/registry stack.
+type routeEngine interface {
+	Route(context.Context, provider.RoutingRequest) (*provider.RoutePlan, error)
+	Close() error
+	BreakerInfo(string) (provider.BreakerInfo, bool)
+	WarmthSnapshot() []provider.WarmModel
+	StickyRoutes() map[string]provider.StickyRouteInfo
+}
+
 type Server struct {
 	ollamaURL         string
 	ollamaURLExplicit bool
@@ -38,14 +49,17 @@ type Server struct {
 	tlsCert           string
 	tlsKey            string
 
-	client        *ollama.Client
-	cfg           *config.Config
-	store         rag.VectorStore
-	indexer       *rag.Indexer
-	retriever     *rag.Retriever
-	completer     *completion.Provider
-	modelRegistry *provider.ModelRegistry
-	ollamaProv    provider.Provider
+	client           *ollama.Client
+	cfg              *config.Config
+	store            rag.VectorStore
+	indexer          *rag.Indexer
+	retriever        *rag.Retriever
+	completer        *completion.Provider
+	modelRegistry    *provider.ModelRegistry
+	providerRegistry *provider.Registry
+	ollamaProv       provider.Provider
+	router           routeEngine
+	warmthSource     provider.WarmthSource
 
 	ollamaAvailable bool
 	closed          bool
@@ -181,6 +195,21 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		s.store = store
 	}
 
+	// Step 4b: build warmth source and Router after fallible store setup.
+	// NewRouter does not perform network I/O, so this is safe even when
+	// Ollama is unreachable. The warmth source's polling goroutine starts
+	// immediately and is fail-open.
+	if s.modelRegistry != nil && s.providerRegistry != nil {
+		s.warmthSource = provider.NewOllamaWarmthSource(s.ollamaURL, "ollama")
+		s.router = provider.NewRouter(s.modelRegistry, s.providerRegistry,
+			provider.WithWarmthSource(s.warmthSource),
+		)
+		// Best-effort: populate the providerRegistry's model index so the
+		// Recommend safety-net tail can produce candidates. Failures are
+		// tolerated; handleListModels self-heals on the next call.
+		_ = s.providerRegistry.RefreshModels(ctx, "ollama")
+	}
+
 	// Step 5: Resolve models and rebuild derived clients (non-fatal).
 	// Uses refreshResolved which stores partial results and calls rebuildDerivedClients.
 	if s.cfg != nil && s.ollamaAvailable {
@@ -263,7 +292,7 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 
 func (s *Server) ensureModelRegistry() error {
 	s.mu.RLock()
-	if s.modelRegistry != nil && s.ollamaProv != nil {
+	if s.modelRegistry != nil && s.ollamaProv != nil && s.providerRegistry != nil {
 		s.mu.RUnlock()
 		return nil
 	}
@@ -287,6 +316,9 @@ func (s *Server) ensureModelRegistry() error {
 	s.mu.Lock()
 	if s.ollamaProv == nil {
 		s.ollamaProv = ollamaProv
+	}
+	if s.providerRegistry == nil {
+		s.providerRegistry = pReg
 	}
 	if s.modelRegistry == nil {
 		s.modelRegistry = mr
@@ -348,6 +380,49 @@ func (s *Server) Retriever() *rag.Retriever {
 	return s.retriever
 }
 
+func (s *Server) routerSnapshot() routeEngine {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.router
+}
+
+func (s *Server) providerRegistrySnapshot() *provider.Registry {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.providerRegistry
+}
+
+// BreakerInfo returns the circuit breaker state for the named provider.
+// Returns false if no breaker exists yet or the router is unavailable.
+func (s *Server) BreakerInfo(name string) (provider.BreakerInfo, bool) {
+	router := s.routerSnapshot()
+	if router == nil {
+		return provider.BreakerInfo{}, false
+	}
+	return router.BreakerInfo(name)
+}
+
+// WarmthSnapshot returns all currently warm models, or nil if no warmth
+// source is configured.
+func (s *Server) WarmthSnapshot() []provider.WarmModel {
+	router := s.routerSnapshot()
+	if router == nil {
+		return nil
+	}
+	return router.WarmthSnapshot()
+}
+
+// StickyRoutes returns a snapshot of all active sticky routing entries.
+// Will be empty in steady state for chain-routed requests (sticky is
+// suppressed at the Router boundary when PreferredChain is set).
+func (s *Server) StickyRoutes() map[string]provider.StickyRouteInfo {
+	router := s.routerSnapshot()
+	if router == nil {
+		return nil
+	}
+	return router.StickyRoutes()
+}
+
 // Shutdown gracefully stops the server: shuts down the HTTP server (if running),
 // then releases all resources (RAG store, derived clients).
 // The ctx deadline bounds how long the HTTP server waits for in-flight requests.
@@ -379,14 +454,21 @@ func (s *Server) Close() error {
 	s.closed = true
 	s.stateVersion++
 	store := s.store
+	router := s.router
 	s.store = nil
 	s.indexer = nil
 	s.retriever = nil
 	s.completer = nil
+	s.router = nil
+	s.warmthSource = nil
 	s.mu.Unlock()
 
-	if store != nil {
-		return store.Close()
+	var routerErr, storeErr error
+	if router != nil {
+		routerErr = router.Close()
 	}
-	return nil
+	if store != nil {
+		storeErr = store.Close()
+	}
+	return errors.Join(routerErr, storeErr)
 }
