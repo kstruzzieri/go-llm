@@ -334,6 +334,73 @@ func TestHandleChat_UsesRouter(t *testing.T) {
 	}
 }
 
+func TestHandleChat_PreservesToolMetadata(t *testing.T) {
+	router := newRecordingRouteEngine("routed-chat")
+	s := &Server{router: router}
+
+	args, err := json.Marshal(chatArgs{
+		Model: "ollama/qwen3:8b",
+		Messages: []ollama.ChatMessage{
+			{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID:   "call_1",
+						Type: "function",
+						Function: ollama.ToolCallFunction{
+							Index:     0,
+							Name:      "lookup",
+							Arguments: map[string]any{"query": "weather"},
+						},
+					},
+				},
+			},
+			{
+				Role:       "tool",
+				Content:    "sunny",
+				ToolName:   "lookup",
+				ToolCallID: "call_1",
+			},
+			{Role: "user", Content: "continue"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal args: %v", err)
+	}
+
+	_, err = s.handleChat(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{Arguments: args},
+	})
+	if err != nil {
+		t.Fatalf("handleChat: %v", err)
+	}
+
+	if len(router.last.Messages) != 3 {
+		t.Fatalf("router messages = %d, want 3", len(router.last.Messages))
+	}
+
+	assistant := router.last.Messages[0]
+	if len(assistant.ToolCalls) != 1 {
+		t.Fatalf("assistant tool calls = %d, want 1", len(assistant.ToolCalls))
+	}
+	call := assistant.ToolCalls[0]
+	if call.ID != "call_1" || call.Type != "function" || call.Function.Name != "lookup" {
+		t.Fatalf("tool call = %+v, want call_1/function/lookup", call)
+	}
+	var callArgs map[string]string
+	if err := json.Unmarshal(call.Function.Arguments, &callArgs); err != nil {
+		t.Fatalf("unmarshal provider tool args: %v", err)
+	}
+	if callArgs["query"] != "weather" {
+		t.Errorf("tool call query = %q, want weather", callArgs["query"])
+	}
+
+	tool := router.last.Messages[1]
+	if tool.Role != "tool" || tool.ToolName != "lookup" || tool.ToolCallID != "call_1" {
+		t.Errorf("tool message = %+v, want role/tool_name/tool_call_id preserved", tool)
+	}
+}
+
 func TestHandleChat_ExplicitModelSkipsChain(t *testing.T) {
 	router := newRecordingRouteEngine("routed-chat")
 	s := &Server{router: router} // no cfg — explicit model only path

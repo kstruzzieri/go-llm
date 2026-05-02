@@ -15,9 +15,11 @@ type fakeChainProvider struct {
 	models []string
 }
 
-func (f *fakeChainProvider) Name() string                                     { return f.name }
-func (f *fakeChainProvider) Capabilities() Capability                         { return CapChat | CapGenerate | CapEmbed | CapStream }
-func (f *fakeChainProvider) Health(ctx context.Context) error                 { return nil }
+func (f *fakeChainProvider) Name() string { return f.name }
+func (f *fakeChainProvider) Capabilities() Capability {
+	return CapChat | CapGenerate | CapEmbed | CapStream
+}
+func (f *fakeChainProvider) Health(ctx context.Context) error { return nil }
 func (f *fakeChainProvider) Models(ctx context.Context) ([]ModelInfo, error) {
 	models := make([]ModelInfo, 0, len(f.models))
 	for _, name := range f.models {
@@ -89,10 +91,19 @@ func seedChainProfile(t *testing.T, mr *ModelRegistry, profile *ModelProfile) {
 	mr.profiles[profile.Key] = profile
 }
 
+func cleanupRouter(t *testing.T, r *Router) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := r.Close(); err != nil {
+			t.Errorf("close router: %v", err)
+		}
+	})
+}
+
 func TestRouter_routeChain_SingleStepHappyPath(t *testing.T) {
 	mr, pr := newChainTestRegistry(t, ModelKey{Provider: "ollama", Model: "qwen3:8b"})
 	r := NewRouter(mr, pr)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	req := RoutingRequest{
 		UseCase:        "chat",
@@ -119,7 +130,7 @@ func TestRouter_routeChain_MultiStepOrdering(t *testing.T) {
 		ModelKey{Provider: "ollama", Model: "fallback2:8b"},
 	)
 	r := NewRouter(mr, pr)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	req := RoutingRequest{
 		UseCase:      "chat",
@@ -168,7 +179,7 @@ func TestRouter_routeChain_WithinStepScoring(t *testing.T) {
 	})
 
 	r := NewRouter(mr, provReg)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	req := RoutingRequest{
 		UseCase:        "chat",
@@ -199,7 +210,7 @@ func TestRouter_routeChain_RecommendTailFires(t *testing.T) {
 	)
 
 	r := NewRouter(mr, pr)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	// Re-seed the chain entry with ContextWindow: 1 to force budget rejection.
 	seedChainProfile(t, mr, &ModelProfile{
@@ -232,7 +243,7 @@ func TestRouter_routeChain_StrictChainSuppressesTail(t *testing.T) {
 		ModelKey{Provider: "ollama", Model: "alternate:8b"},
 	)
 	r := NewRouter(mr, pr)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	seedChainProfile(t, mr, &ModelProfile{
 		Key:           ModelKey{Provider: "ollama", Model: "broken:8b"},
@@ -264,7 +275,7 @@ func TestRouter_routeChain_SuppressesStickyEvenWithAffinityKey(t *testing.T) {
 		ModelKey{Provider: "ollama", Model: "fallback:8b"},
 	)
 	r := NewRouter(mr, pr)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	req := RoutingRequest{
 		UseCase:        "chat",
@@ -332,7 +343,7 @@ func TestRouter_routeChain_LookupFailureRecordsBreaker(t *testing.T) {
 	})
 
 	r := NewRouter(mr, provReg)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	req := RoutingRequest{
 		UseCase:        "chat",
@@ -364,7 +375,7 @@ func TestRouter_routeChain_AllBudgetRejected(t *testing.T) {
 		ModelKey{Provider: "ollama", Model: "small:8b"},
 	)
 	r := NewRouter(mr, pr)
-	defer r.Close()
+	cleanupRouter(t, r)
 	seedChainProfile(t, mr, &ModelProfile{
 		Key:           ModelKey{Provider: "ollama", Model: "small:8b"},
 		Caps:          CapChat,
@@ -398,7 +409,7 @@ func TestRouter_routeChain_AllLookupsFailedWrapsErrors(t *testing.T) {
 		t.Fatalf("registry: %v", err)
 	}
 	r := NewRouter(mr, provReg)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	req := RoutingRequest{
 		UseCase:        "chat",

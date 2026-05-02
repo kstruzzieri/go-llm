@@ -51,7 +51,7 @@ func TestRouter_routeChain_Integration_BreakerOpensOnFailure(t *testing.T) {
 	}
 
 	r := NewRouter(mr, provReg)
-	defer r.Close()
+	cleanupRouter(t, r)
 
 	// First entry will fail (Lookup of a non-existent model returns an error
 	// from the Ollama provider); second entry should be a model the running

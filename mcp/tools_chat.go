@@ -33,8 +33,11 @@ func (s *Server) registerChatTools() {
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
-							"role":    map[string]any{"type": "string", "enum": []string{"system", "user", "assistant"}},
-							"content": map[string]any{"type": "string"},
+							"role":         map[string]any{"type": "string", "enum": []string{"system", "user", "assistant", "tool"}},
+							"content":      map[string]any{"type": "string"},
+							"tool_calls":   map[string]any{"type": "array"},
+							"tool_name":    map[string]any{"type": "string"},
+							"tool_call_id": map[string]any{"type": "string"},
 						},
 						"required": []string{"role", "content"},
 					},
@@ -107,11 +110,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 		messages = append([]ollama.ChatMessage{systemMsg}, messages...)
 	}
 
-	// Translate ollama.ChatMessage → provider.ChatMessage for routing.
-	pmsgs := make([]provider.ChatMessage, len(messages))
-	for i, m := range messages {
-		pmsgs[i] = provider.ChatMessage{Role: m.Role, Content: m.Content}
-	}
+	pmsgs := toProviderChatMessages(messages)
 
 	opts := provider.ModelOptions{}
 	if args.Temperature != nil {
@@ -154,4 +153,42 @@ func lastUserMessage(msgs []ollama.ChatMessage) string {
 		}
 	}
 	return ""
+}
+
+func toProviderChatMessages(in []ollama.ChatMessage) []provider.ChatMessage {
+	out := make([]provider.ChatMessage, len(in))
+	for i, m := range in {
+		out[i] = provider.ChatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  toProviderToolCalls(m.ToolCalls),
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	return out
+}
+
+func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]provider.ToolCall, len(in))
+	for i, c := range in {
+		var args json.RawMessage
+		if c.Function.Arguments != nil {
+			args, _ = json.Marshal(c.Function.Arguments)
+		}
+		out[i] = provider.ToolCall{
+			ID:   c.ID,
+			Type: c.Type,
+			Function: provider.ToolCallFunction{
+				Index:     c.Function.Index,
+				Name:      c.Function.Name,
+				Arguments: args,
+			},
+		}
+	}
+	return out
 }
