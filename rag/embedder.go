@@ -1,15 +1,7 @@
-// Embedder seam for rag.
-//
-// The Embedder interface is rag's narrow embedding dependency: batch-shaped,
-// returning generic provenance instead of importing provider response types
-// into rag. Router-backed implementations are supplied by callers (see
-// mcp.Server.ragEmbedder); the legacy *ollama.Client path is preserved via
-// the private embedderFromOllamaClient adapter used by NewIndexer / NewRetriever.
 package rag
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/kstruzzieri/go-llm/ollama"
 )
@@ -71,7 +63,7 @@ func embedderFromOllamaClient(c *ollama.Client) Embedder {
 		}
 		embeddings, err := c.EmbedBatch(ctx, model, inputs)
 		if err != nil {
-			return EmbedResult{}, fmt.Errorf("rag: ollama embedder: %w", err)
+			return EmbedResult{}, err
 		}
 		return EmbedResult{
 			Embeddings:    embeddings,

@@ -42,12 +42,11 @@ type IndexerOption func(*Indexer)
 
 // WithEmbeddingModel sets the embedding model name (default: "nomic-embed-text").
 //
-// An empty model defers selection to the Embedder. For Router-backed
-// embedders this can enable chain fallback, which can substitute embedding
-// models and corrupt the SQLite vector store by mixing incompatible vector
-// spaces. Only pass an empty string when the Embedder is known not to fall
-// back across embedding-model boundaries — the MCP server's ragEmbedder
-// rejects empty-model RAG calls precisely to prevent this drift.
+// An empty model defers selection to the Embedder. Router-backed embedders
+// that allow chain fallback (the MCP server's ragEmbedder does not) can
+// substitute embedding models, corrupting the SQLite vector store by mixing
+// incompatible vector spaces. Only pass an empty string when the Embedder
+// is known not to fall back across embedding-model boundaries.
 func WithEmbeddingModel(model string) IndexerOption {
 	return func(idx *Indexer) {
 		idx.model = model
@@ -111,7 +110,7 @@ func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption)
 // expected to supply a real Embedder.
 func NewIndexerWithEmbedder(embedder Embedder, store VectorStore, opts ...IndexerOption) (*Indexer, error) {
 	if embedder == nil {
-		return nil, fmt.Errorf("rag: embedder is required")
+		return nil, fmt.Errorf("rag: NewIndexerWithEmbedder: embedder is required")
 	}
 	return buildIndexer(embedder, store, opts...), nil
 }

@@ -18,7 +18,10 @@ type Retriever struct {
 // RetrieverOption configures a Retriever.
 type RetrieverOption func(*Retriever)
 
-// WithRetrieverModel sets the embedding model for query embedding (default: "nomic-embed-text").
+// WithRetrieverModel sets the embedding model for query embedding (default:
+// "nomic-embed-text"). The retriever model must match the model used when
+// the corpus was indexed; mismatches surface as SQLiteStore.Search dimension
+// errors at query time rather than silent zero-score results.
 func WithRetrieverModel(model string) RetrieverOption {
 	return func(r *Retriever) {
 		r.model = model
@@ -57,7 +60,7 @@ func NewRetriever(client *ollama.Client, store VectorStore, opts ...RetrieverOpt
 // Returns an error if embedder is nil.
 func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...RetrieverOption) (*Retriever, error) {
 	if embedder == nil {
-		return nil, fmt.Errorf("rag: embedder is required")
+		return nil, fmt.Errorf("rag: NewRetrieverWithEmbedder: embedder is required")
 	}
 	return buildRetriever(embedder, store, opts...), nil
 }
