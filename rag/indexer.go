@@ -94,6 +94,21 @@ func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption)
 	return buildIndexer(embedderFromOllamaClient(client), store, opts...)
 }
 
+// NewIndexerWithEmbedder is the router-aware constructor. The supplied
+// Embedder mediates all embedding calls, so callers can route through
+// provider.Router (circuit breakers, warmth, token-budget validation) by
+// supplying a Router-backed Embedder.
+//
+// Returns an error if embedder is nil — distinct from NewIndexer's
+// no-validation contract, since callers picking the new shape are
+// expected to supply a real Embedder.
+func NewIndexerWithEmbedder(embedder Embedder, store VectorStore, opts ...IndexerOption) (*Indexer, error) {
+	if embedder == nil {
+		return nil, fmt.Errorf("rag: embedder is required")
+	}
+	return buildIndexer(embedder, store, opts...), nil
+}
+
 func (idx *Indexer) replaceSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64) error {
 	return idx.replaceSourceWithHash(ctx, path, chunks, embeddings, "")
 }
