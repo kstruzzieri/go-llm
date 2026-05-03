@@ -41,6 +41,13 @@ type atomicSourceReplacerWithHash interface {
 type IndexerOption func(*Indexer)
 
 // WithEmbeddingModel sets the embedding model name (default: "nomic-embed-text").
+//
+// An empty model defers selection to the Embedder. For Router-backed
+// embedders this can enable chain fallback, which can substitute embedding
+// models and corrupt the SQLite vector store by mixing incompatible vector
+// spaces. Only pass an empty string when the Embedder is known not to fall
+// back across embedding-model boundaries — the MCP server's ragEmbedder
+// rejects empty-model RAG calls precisely to prevent this drift.
 func WithEmbeddingModel(model string) IndexerOption {
 	return func(idx *Indexer) {
 		idx.model = model
