@@ -17,7 +17,7 @@ import (
 // may call IndexFile concurrently provided the injected Chunker and
 // VectorStore implementations are themselves safe for concurrent use.
 type Indexer struct {
-	client        *ollama.Client
+	embedder      Embedder
 	model         string
 	store         VectorStore
 	chunker       Chunker
@@ -67,18 +67,31 @@ func WithWorkspaceRoot(root string) IndexerOption {
 	}
 }
 
-// NewIndexer creates an indexer that coordinates chunking, embedding, and storing.
-func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption) *Indexer {
+// buildIndexer is the single private path constructing an Indexer; both the
+// legacy ollama-backed shim NewIndexer and the new NewIndexerWithEmbedder
+// route through it so option-application order and defaults match exactly.
+func buildIndexer(emb Embedder, store VectorStore, opts ...IndexerOption) *Indexer {
 	idx := &Indexer{
-		client:  client,
-		model:   "nomic-embed-text",
-		store:   store,
-		chunker: NewCodeChunker(),
+		embedder: emb,
+		model:    "nomic-embed-text",
+		store:    store,
+		chunker:  NewCodeChunker(),
 	}
 	for _, opt := range opts {
 		opt(idx)
 	}
 	return idx
+}
+
+// NewIndexer is the *ollama.Client-backed compat shim. Existing consumers
+// (Firn IDE, Flux ML, Quantum Trader) continue to use this constructor
+// unchanged; new code should prefer NewIndexerWithEmbedder.
+//
+// Nil-passthrough is preserved: passing a nil client yields an Indexer
+// whose embedder is nil and which will nil-deref on first embed call,
+// matching the pre-Embedder behaviour.
+func NewIndexer(client *ollama.Client, store VectorStore, opts ...IndexerOption) *Indexer {
+	return buildIndexer(embedderFromOllamaClient(client), store, opts...)
 }
 
 func (idx *Indexer) replaceSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64) error {
@@ -160,11 +173,15 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 		texts[i] = c.Content
 	}
 
-	embeddings, err := idx.client.EmbedBatch(ctx, idx.model, texts)
+	res, err := idx.embedder.Embed(ctx, idx.model, texts)
 	if err != nil {
 		// Embedding failed — preserve existing indexed data for this file
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
 	}
+	if len(res.Embeddings) != len(texts) {
+		return fmt.Errorf("rag: embed chunks for %q: count mismatch (got %d for %d chunks)", path, len(res.Embeddings), len(texts))
+	}
+	embeddings := res.Embeddings
 
 	// Step 3: Replace old chunks with new ones. Store the source signature so
 	// subsequent IndexFileIncremental calls can safely use the fast path.
