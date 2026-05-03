@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,6 +78,26 @@ func TestSearchMultiEmptyStore(t *testing.T) {
 	}
 	if len(results) != 0 {
 		t.Errorf("expected 0 results from empty store, got %d", len(results))
+	}
+}
+
+func TestSearchMultiRejectsDimensionMismatch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "test content", Source: "test.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	if err := store.Store(ctx, chunks, [][]float64{{0.1, 0.2, 0.3, 0.4}}); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+
+	_, err := store.SearchMulti(ctx, []float64{0.1, 0.2, 0.3}, "test", 5, QueryContext{})
+	if err == nil {
+		t.Fatal("expected dimension-mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "dimension mismatch") {
+		t.Errorf("error = %q, want it to mention %q", err.Error(), "dimension mismatch")
 	}
 }
 

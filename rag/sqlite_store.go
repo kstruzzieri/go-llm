@@ -222,8 +222,8 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 		if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
 			return nil, fmt.Errorf("rag: unmarshal embedding: %w", err)
 		}
-		if len(embedding) != len(queryEmbedding) {
-			return nil, fmt.Errorf("rag: search: embedding dimension mismatch for chunk %q (query=%d stored=%d)", chunk.ID, len(queryEmbedding), len(embedding))
+		if err := validateSearchEmbeddingDimension(chunk.ID, queryEmbedding, embedding); err != nil {
+			return nil, err
 		}
 
 		score := cosineSimilarity(queryEmbedding, embedding)
