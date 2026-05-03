@@ -73,13 +73,13 @@ func (s *Server) routedEmbed(ctx context.Context, model string, inputs []string,
 	if rr.Model == "" {
 		chain, err := s.chainFor("embedding")
 		if err != nil {
-			return nil, routedEmbedError{category: embedToolConfig, err: fmt.Errorf("chain: %w", err)}
+			return nil, routedEmbedError{category: embedToolConfig, err: err}
 		}
 		rr.PreferredChain = chain
 	}
 	plan, err := router.Route(ctx, rr)
 	if err != nil {
-		return nil, routedEmbedError{category: embedToolRouter, err: fmt.Errorf("route: %w", err)}
+		return nil, routedEmbedError{category: embedToolRouter, err: err}
 	}
 	resp, err := plan.ExecuteEmbed(ctx)
 	if err != nil {
@@ -110,6 +110,12 @@ func (s *Server) ragEmbedder(priority provider.Priority) rag.Embedder {
 		if model == "" {
 			return rag.EmbedResult{}, fmt.Errorf("rag: embedder requires explicit model to prevent vector-space drift across embedding-model boundaries")
 		}
+		if len(inputs) == 0 {
+			// Short-circuit before routing. Provider/VectorSpaceID are
+			// undetermined without a routing decision; preserve the requested
+			// model so callers see the model they asked for.
+			return rag.EmbedResult{Model: model}, nil
+		}
 		resp, err := s.routedEmbed(ctx, model, inputs, priority)
 		if err != nil {
 			return rag.EmbedResult{}, err
@@ -120,7 +126,10 @@ func (s *Server) ragEmbedder(priority provider.Priority) rag.Embedder {
 			Provider:   resp.Provider,
 		}
 		if resp.RouteOutcome != nil {
-			result.VectorSpaceID = resp.RouteOutcome.ActualModel.String()
+			am := resp.RouteOutcome.ActualModel
+			if am.Provider != "" && am.Model != "" {
+				result.VectorSpaceID = am.String()
+			}
 		}
 		if result.VectorSpaceID == "" && result.Provider != "" && result.Model != "" {
 			result.VectorSpaceID = result.Provider + "/" + result.Model
