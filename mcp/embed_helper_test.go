@@ -125,6 +125,23 @@ func TestRoutedEmbed_NilRouterIsCategorisedConfig(t *testing.T) {
 	if got := routedEmbedCategory(err); got != embedToolConfig {
 		t.Errorf("category = %q, want %q", got, embedToolConfig)
 	}
+	if !strings.Contains(err.Error(), "router unavailable") {
+		t.Errorf("error = %q, want it to mention %q", err.Error(), "router unavailable")
+	}
+}
+
+// TestRoutedEmbedCategory_UnwrappedErrorDefaultsToOllama documents the
+// conservative default for errors that are not routedEmbedError-wrapped:
+// they categorise as "ollama" (assume backend execution failed). This
+// guards the fallback at routedEmbedCategory against silent recategorisation
+// if a future refactor leaks an unwrapped error from routedEmbed.
+func TestRoutedEmbedCategory_UnwrappedErrorDefaultsToOllama(t *testing.T) {
+	if got := routedEmbedCategory(errors.New("plain error")); got != embedToolOllama {
+		t.Errorf("category = %q, want %q", got, embedToolOllama)
+	}
+	if got := routedEmbedCategory(nil); got != embedToolOllama {
+		t.Errorf("category for nil = %q, want %q", got, embedToolOllama)
+	}
 }
 
 func TestRagEmbedder_EmptyModelRejected(t *testing.T) {
@@ -182,10 +199,37 @@ func TestRagEmbedder_ExtractsProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("err = %v", err)
 	}
-	if res.Provider == "" || res.Model == "" {
-		t.Errorf("expected populated Provider/Model in EmbedResult, got %+v", res)
+	if res.Provider != "fake" {
+		t.Errorf("Provider = %q, want %q", res.Provider, "fake")
 	}
-	if res.VectorSpaceID == "" {
-		t.Errorf("expected populated VectorSpaceID in EmbedResult, got %+v", res)
+	if res.Model != "m" {
+		t.Errorf("Model = %q, want %q", res.Model, "m")
+	}
+	if res.VectorSpaceID != "fake/m" {
+		t.Errorf("VectorSpaceID = %q, want %q", res.VectorSpaceID, "fake/m")
+	}
+}
+
+// TestRagEmbedder_EmptyInputsPropagatesModel verifies that empty-input RAG
+// calls short-circuit before routing AND preserve the requested model in the
+// result, so callers see the model they asked for even when no embeddings
+// were produced.
+func TestRagEmbedder_EmptyInputsPropagatesModel(t *testing.T) {
+	eng := newRecordingRouteEngine("")
+	s := newEmbedHelperServer(t, eng)
+
+	emb := s.ragEmbedder(provider.PriorityNormal)
+	res, err := emb.Embed(context.Background(), "embed-model", nil)
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if eng.called {
+		t.Error("router was contacted for empty inputs; want short-circuit before routing")
+	}
+	if res.Model != "embed-model" {
+		t.Errorf("Model = %q, want %q (caller-supplied model must surface even on empty-input short-circuit)", res.Model, "embed-model")
+	}
+	if len(res.Embeddings) != 0 {
+		t.Errorf("Embeddings = %v, want empty", res.Embeddings)
 	}
 }
