@@ -112,6 +112,9 @@ func NewIndexerWithEmbedder(embedder Embedder, store VectorStore, opts ...Indexe
 	if embedder == nil {
 		return nil, fmt.Errorf("rag: NewIndexerWithEmbedder: embedder is required")
 	}
+	if isNilVectorStore(store) {
+		return nil, fmt.Errorf("rag: NewIndexerWithEmbedder: store is required")
+	}
 	return buildIndexer(embedder, store, opts...), nil
 }
 

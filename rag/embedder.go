@@ -29,8 +29,10 @@ type EmbedResult struct {
 // Implementations must be safe for concurrent use; Indexer.IndexDirectory
 // runs files in parallel and may issue Embed calls from multiple goroutines.
 //
-// Empty inputs (nil or zero-length slice) MUST short-circuit and return
-// (EmbedResult{}, nil) without invoking the backend.
+// Empty inputs (nil or zero-length slice) MUST short-circuit without invoking
+// the backend and return nil error with zero embeddings. Implementations MAY
+// populate provenance fields such as Model when they can do so without routing
+// or execution.
 type Embedder interface {
 	Embed(ctx context.Context, model string, inputs []string) (EmbedResult, error)
 }

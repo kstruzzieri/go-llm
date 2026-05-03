@@ -25,6 +25,32 @@ func TestNewRetrieverWithEmbedder_NilEmbedderRejected(t *testing.T) {
 	}
 }
 
+func TestNewRetrieverWithEmbedder_NilStoreRejected(t *testing.T) {
+	emb := &recordingEmbedder{}
+
+	tests := []struct {
+		name  string
+		store VectorStore
+	}{
+		{name: "nil interface", store: nil},
+		{name: "typed nil", store: (*SQLiteStore)(nil)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r, err := NewRetrieverWithEmbedder(emb, tt.store)
+			if err == nil {
+				t.Fatal("expected error for nil store, got nil")
+			}
+			if r != nil {
+				t.Errorf("expected nil retriever on error, got %v", r)
+			}
+			if !strings.Contains(err.Error(), "store") {
+				t.Errorf("error = %q, want it to mention store", err.Error())
+			}
+		})
+	}
+}
+
 // TestNewRetrieverWithEmbedder_AppliesRetrieverModel verifies WithRetrieverModel
 // surfaces the configured model in the embedder call (observable via
 // recordingEmbedder), rather than asserting on private struct fields.

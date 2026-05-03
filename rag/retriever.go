@@ -62,6 +62,9 @@ func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...Retr
 	if embedder == nil {
 		return nil, fmt.Errorf("rag: NewRetrieverWithEmbedder: embedder is required")
 	}
+	if isNilVectorStore(store) {
+		return nil, fmt.Errorf("rag: NewRetrieverWithEmbedder: store is required")
+	}
 	return buildRetriever(embedder, store, opts...), nil
 }
 
