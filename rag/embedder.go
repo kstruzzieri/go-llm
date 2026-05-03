@@ -1,4 +1,4 @@
-// Package rag — Embedder seam.
+// Embedder seam for rag.
 //
 // The Embedder interface is rag's narrow embedding dependency: batch-shaped,
 // returning generic provenance instead of importing provider response types
