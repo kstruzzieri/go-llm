@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 // embedToolCategory enumerates the error-category strings used by the embed
@@ -91,4 +92,39 @@ func (s *Server) routedEmbed(ctx context.Context, model string, inputs []string,
 		}
 	}
 	return resp, nil
+}
+
+// ragEmbedder returns a rag.Embedder that routes through provider.Router via
+// s.routedEmbed at the supplied priority. Indexing should pass
+// provider.PriorityBackground; query retrieval should pass
+// provider.PriorityNormal so latency-sensitive user-facing paths take
+// precedence under contention.
+//
+// The closure refuses empty model strings to prevent vector-space drift:
+// RAG indexing and query embedding must always use the configured embedding
+// model, not chain fallback. If a real use case for empty-model + RAG
+// emerges, replace the inline error with a typed sentinel so callers can
+// errors.Is and consciously override.
+func (s *Server) ragEmbedder(priority provider.Priority) rag.Embedder {
+	return rag.EmbedderFunc(func(ctx context.Context, model string, inputs []string) (rag.EmbedResult, error) {
+		if model == "" {
+			return rag.EmbedResult{}, fmt.Errorf("rag: embedder requires explicit model to prevent vector-space drift across embedding-model boundaries")
+		}
+		resp, err := s.routedEmbed(ctx, model, inputs, priority)
+		if err != nil {
+			return rag.EmbedResult{}, err
+		}
+		result := rag.EmbedResult{
+			Embeddings: resp.Embeddings,
+			Model:      resp.Model,
+			Provider:   resp.Provider,
+		}
+		if resp.RouteOutcome != nil {
+			result.VectorSpaceID = resp.RouteOutcome.ActualModel.String()
+		}
+		if result.VectorSpaceID == "" && result.Provider != "" && result.Model != "" {
+			result.VectorSpaceID = result.Provider + "/" + result.Model
+		}
+		return result, nil
+	})
 }
