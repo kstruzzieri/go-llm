@@ -275,8 +275,22 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 	var indexer *rag.Indexer
 	var retriever *rag.Retriever
 	if store != nil && embeddingModel != "" {
-		indexer = rag.NewIndexer(s.client, store, rag.WithEmbeddingModel(embeddingModel))
-		retriever = rag.NewRetriever(s.client, store, rag.WithRetrieverModel(embeddingModel))
+		// Indexing is best-effort batch traffic — yield to user-facing routes.
+		if idx, err := rag.NewIndexerWithEmbedder(
+			s.ragEmbedder(provider.PriorityBackground),
+			store,
+			rag.WithEmbeddingModel(embeddingModel),
+		); err == nil {
+			indexer = idx
+		}
+		// Retrieval is in the user-facing latency path.
+		if ret, err := rag.NewRetrieverWithEmbedder(
+			s.ragEmbedder(provider.PriorityNormal),
+			store,
+			rag.WithRetrieverModel(embeddingModel),
+		); err == nil {
+			retriever = ret
+		}
 	}
 
 	s.mu.Lock()
