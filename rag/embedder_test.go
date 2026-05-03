@@ -173,6 +173,87 @@ func TestIndexer_LengthMismatchSurfacesError(t *testing.T) {
 	}
 }
 
+// TestIndexer_CountMismatchPreservesExistingData guards Indexer.IndexFile's
+// "existing data is preserved on embedding failure" doc invariant for the
+// count-mismatch failure path specifically. If a future refactor moves the
+// length check below replaceSourceWithHash, prior chunks would be wiped
+// silently; this test catches that regression.
+func TestIndexer_CountMismatchPreservesExistingData(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	twoChunks := chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{
+			{ID: "a", Content: content, Source: path, StartLine: 1, EndLine: 1},
+			{ID: "b", Content: content, Source: path, StartLine: 2, EndLine: 2},
+		}, nil
+	})
+
+	goodEmb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		out := make([][]float64, len(inputs))
+		for i := range out {
+			out[i] = []float64{1, 2, 3}
+		}
+		return EmbedResult{Embeddings: out, Model: "m", Provider: "fake"}, nil
+	})
+	idx, err := NewIndexerWithEmbedder(goodEmb, store)
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	idx.chunker = twoChunks
+
+	tmp := t.TempDir()
+	path := tmp + "/f.go"
+	if err := writeFileImpl(path, "v1"); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("first IndexFile: %v", err)
+	}
+
+	pre, err := store.Search(context.Background(), []float64{1, 2, 3}, 5)
+	if err != nil {
+		t.Fatalf("pre-Search: %v", err)
+	}
+	if len(pre) != 2 {
+		t.Fatalf("pre-Search: got %d results, want 2 (seed phase failed)", len(pre))
+	}
+
+	// Second pass: rewrite content, return one fewer embedding than chunks.
+	if err := writeFileImpl(path, "v2"); err != nil {
+		t.Fatalf("rewrite: %v", err)
+	}
+	badEmb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		out := make([][]float64, len(inputs)-1)
+		for i := range out {
+			out[i] = []float64{4, 5, 6}
+		}
+		return EmbedResult{Embeddings: out, Model: "m", Provider: "fake"}, nil
+	})
+	idxBad, err := NewIndexerWithEmbedder(badEmb, store)
+	if err != nil {
+		t.Fatalf("ctor: %v", err)
+	}
+	idxBad.chunker = twoChunks
+
+	if err := idxBad.IndexFile(context.Background(), path); err == nil {
+		t.Fatal("expected count-mismatch error, got nil")
+	} else if !strings.Contains(err.Error(), "count mismatch") {
+		t.Errorf("error = %q, want it to mention %q", err.Error(), "count mismatch")
+	}
+
+	post, err := store.Search(context.Background(), []float64{1, 2, 3}, 5)
+	if err != nil {
+		t.Fatalf("post-Search: %v", err)
+	}
+	if len(post) != 2 {
+		t.Errorf("post-Search: got %d results, want 2 — count-mismatch path wiped or partially overwrote prior data", len(post))
+	}
+}
+
 func TestRetriever_LengthMismatchSurfacesError(t *testing.T) {
 	store, err := NewSQLiteStore(":memory:")
 	if err != nil {
