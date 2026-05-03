@@ -64,34 +64,10 @@ func (s *Server) handleEmbed(ctx context.Context, req *gomcp.CallToolRequest) (*
 	if args.Text == "" {
 		return toolError("validation", "text must not be empty"), nil
 	}
-	router := s.routerSnapshot()
-	if router == nil {
-		return toolError("config", "router unavailable"), nil
-	}
 
-	rr := provider.RoutingRequest{
-		Model:          args.Model,
-		UseCase:        "embedding",
-		RequiredCaps:   provider.CapEmbed,
-		Input:          []string{args.Text},
-		ExpectedOutput: provider.DefaultExpectedOutput("embedding"),
-		Priority:       provider.PriorityNormal,
-	}
-	if rr.Model == "" {
-		chain, err := s.chainFor("embedding")
-		if err != nil {
-			return toolError("config", "%v", err), nil
-		}
-		rr.PreferredChain = chain
-	}
-
-	plan, err := router.Route(ctx, rr)
+	resp, err := s.routedEmbed(ctx, args.Model, []string{args.Text}, provider.PriorityNormal)
 	if err != nil {
-		return toolError("router", "%v", err), nil
-	}
-	resp, err := plan.ExecuteEmbed(ctx)
-	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError(string(routedEmbedCategory(err)), "%v", err), nil
 	}
 	if len(resp.Embeddings) == 0 {
 		return toolError("ollama", "no embedding returned"), nil
@@ -114,34 +90,10 @@ func (s *Server) handleEmbedBatch(ctx context.Context, req *gomcp.CallToolReques
 	if len(args.Texts) > maxBatchSize {
 		return toolError("validation", "texts exceeds maximum batch size of %d (got %d)", maxBatchSize, len(args.Texts)), nil
 	}
-	router := s.routerSnapshot()
-	if router == nil {
-		return toolError("config", "router unavailable"), nil
-	}
 
-	rr := provider.RoutingRequest{
-		Model:          args.Model,
-		UseCase:        "embedding",
-		RequiredCaps:   provider.CapEmbed,
-		Input:          args.Texts,
-		ExpectedOutput: provider.DefaultExpectedOutput("embedding"),
-		Priority:       provider.PriorityNormal,
-	}
-	if rr.Model == "" {
-		chain, err := s.chainFor("embedding")
-		if err != nil {
-			return toolError("config", "%v", err), nil
-		}
-		rr.PreferredChain = chain
-	}
-
-	plan, err := router.Route(ctx, rr)
+	resp, err := s.routedEmbed(ctx, args.Model, args.Texts, provider.PriorityNormal)
 	if err != nil {
-		return toolError("router", "%v", err), nil
-	}
-	resp, err := plan.ExecuteEmbed(ctx)
-	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError(string(routedEmbedCategory(err)), "%v", err), nil
 	}
 	data, mErr := json.Marshal(resp.Embeddings)
 	if mErr != nil {
