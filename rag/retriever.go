@@ -10,27 +10,32 @@ import (
 
 // Retriever queries the vector store and builds augmented prompts.
 type Retriever struct {
-	client *ollama.Client
-	model  string
-	store  VectorStore
+	embedder Embedder
+	model    string
+	store    VectorStore
 }
 
 // RetrieverOption configures a Retriever.
 type RetrieverOption func(*Retriever)
 
-// WithRetrieverModel sets the embedding model for query embedding (default: "nomic-embed-text").
+// WithRetrieverModel sets the embedding model for query embedding (default:
+// "nomic-embed-text"). The retriever model must match the model used when
+// the corpus was indexed; mismatches surface as SQLiteStore.Search dimension
+// errors at query time rather than silent zero-score results.
 func WithRetrieverModel(model string) RetrieverOption {
 	return func(r *Retriever) {
 		r.model = model
 	}
 }
 
-// NewRetriever creates a retriever that queries the vector store.
-func NewRetriever(client *ollama.Client, store VectorStore, opts ...RetrieverOption) *Retriever {
+// buildRetriever is the single private path constructing a Retriever; both
+// the legacy ollama-backed shim NewRetriever and the new
+// NewRetrieverWithEmbedder route through it.
+func buildRetriever(emb Embedder, store VectorStore, opts ...RetrieverOption) *Retriever {
 	r := &Retriever{
-		client: client,
-		model:  "nomic-embed-text",
-		store:  store,
+		embedder: emb,
+		model:    "nomic-embed-text",
+		store:    store,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -38,12 +43,41 @@ func NewRetriever(client *ollama.Client, store VectorStore, opts ...RetrieverOpt
 	return r
 }
 
+// NewRetriever is the *ollama.Client-backed compat shim. Existing consumers
+// continue to use this constructor unchanged; new code should prefer
+// NewRetrieverWithEmbedder.
+//
+// Nil-passthrough is preserved: passing a nil client yields a Retriever
+// whose embedder is nil and which will nil-deref on first Retrieve call,
+// matching the pre-Embedder behaviour.
+func NewRetriever(client *ollama.Client, store VectorStore, opts ...RetrieverOption) *Retriever {
+	return buildRetriever(embedderFromOllamaClient(client), store, opts...)
+}
+
+// NewRetrieverWithEmbedder is the router-aware constructor. See
+// NewIndexerWithEmbedder for the design rationale.
+//
+// Returns an error if embedder is nil.
+func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...RetrieverOption) (*Retriever, error) {
+	if embedder == nil {
+		return nil, fmt.Errorf("rag: NewRetrieverWithEmbedder: embedder is required")
+	}
+	if isNilVectorStore(store) {
+		return nil, fmt.Errorf("rag: NewRetrieverWithEmbedder: store is required")
+	}
+	return buildRetriever(embedder, store, opts...), nil
+}
+
 // Retrieve finds the top-k most relevant chunks for a query.
 func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
-	embedding, err := r.client.Embed(ctx, r.model, query)
+	res, err := r.embedder.Embed(ctx, r.model, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("rag: embed query: %w", err)
 	}
+	if len(res.Embeddings) != 1 {
+		return nil, fmt.Errorf("rag: embed query: expected 1 embedding, got %d", len(res.Embeddings))
+	}
+	embedding := res.Embeddings[0]
 
 	results, err := r.store.Search(ctx, embedding, k)
 	if err != nil {

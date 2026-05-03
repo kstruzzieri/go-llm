@@ -123,11 +123,15 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 		texts[i] = c.Content
 	}
 
-	embeddings, err := idx.client.EmbedBatch(ctx, idx.model, texts)
+	res, err := idx.embedder.Embed(ctx, idx.model, texts)
 	if err != nil {
 		// Embedding failed -- preserve existing indexed data for this file.
 		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
 	}
+	if len(res.Embeddings) != len(texts) {
+		return fmt.Errorf("rag: embed chunks for %q: count mismatch (got %d for %d chunks)", path, len(res.Embeddings), len(texts))
+	}
+	embeddings := res.Embeddings
 
 	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
@@ -196,10 +200,14 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 	// Embed only changed chunks.
 	var freshEmbeddings [][]float64
 	if len(textsToEmbed) > 0 {
-		freshEmbeddings, err = idx.client.EmbedBatch(ctx, idx.model, textsToEmbed)
-		if err != nil {
-			return fmt.Errorf("rag: embed changed chunks for %q: %w", path, err)
+		res, embedErr := idx.embedder.Embed(ctx, idx.model, textsToEmbed)
+		if embedErr != nil {
+			return fmt.Errorf("rag: embed changed chunks for %q: %w", path, embedErr)
 		}
+		if len(res.Embeddings) != len(textsToEmbed) {
+			return fmt.Errorf("rag: embed changed chunks for %q: count mismatch (got %d for %d chunks)", path, len(res.Embeddings), len(textsToEmbed))
+		}
+		freshEmbeddings = res.Embeddings
 	}
 
 	// Assemble final embeddings aligned 1:1 with newChunks.

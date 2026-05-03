@@ -43,6 +43,9 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	// Build embedding map for the semantic scorer.
 	embMap := make(map[string][]float64, len(chunks))
 	for i, chunk := range chunks {
+		if err := validateSearchEmbeddingDimension(chunk.ID, queryEmbedding, embeddings[i]); err != nil {
+			return nil, err
+		}
 		embMap[chunk.ID] = embeddings[i]
 	}
 
@@ -156,6 +159,14 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 		return nil, nil, fmt.Errorf("rag: iterate chunks: %w", err)
 	}
 	return chunks, embeddings, nil
+}
+
+func validateSearchEmbeddingDimension(chunkID string, queryEmbedding, storedEmbedding []float64) error {
+	if len(storedEmbedding) != len(queryEmbedding) {
+		return fmt.Errorf("rag: search: embedding dimension mismatch for chunk %q (query=%d stored=%d)",
+			chunkID, len(queryEmbedding), len(storedEmbedding))
+	}
+	return nil
 }
 
 // computeRanks returns 1-based ranks for a score slice (highest score = rank 1).
