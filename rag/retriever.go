@@ -51,6 +51,17 @@ func NewRetriever(client *ollama.Client, store VectorStore, opts ...RetrieverOpt
 	return buildRetriever(embedderFromOllamaClient(client), store, opts...)
 }
 
+// NewRetrieverWithEmbedder is the router-aware constructor. See
+// NewIndexerWithEmbedder for the design rationale.
+//
+// Returns an error if embedder is nil.
+func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...RetrieverOption) (*Retriever, error) {
+	if embedder == nil {
+		return nil, fmt.Errorf("rag: embedder is required")
+	}
+	return buildRetriever(embedder, store, opts...), nil
+}
+
 // Retrieve finds the top-k most relevant chunks for a query.
 func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
 	res, err := r.embedder.Embed(ctx, r.model, []string{query})
