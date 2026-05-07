@@ -64,6 +64,13 @@ func NewProvider(client *ollama.Client, model string, cfg ProviderConfig) (*Prov
 //
 // Unlike NewProvider's legacy nil-client compatibility path, a nil generator
 // is rejected at construction time.
+//
+// FIM request shaping remains caller-resolved: cfg.FIM is read from the
+// resolved ModelProfile by the caller (typically via
+// ProviderConfigFromProfile), and the chosen Generator must not substitute
+// across FIM-family boundaries within a single call. The MCP server's
+// s.fimGenerator pins the resolved model in the routing request to enforce
+// this; other Generator implementations should follow the same policy.
 func NewProviderWithGenerator(generator Generator, model string, cfg ProviderConfig) (*Provider, error) {
 	if generator == nil {
 		return nil, fmt.Errorf("completion: NewProviderWithGenerator: generator is required")

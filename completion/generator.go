@@ -108,13 +108,24 @@ type GenerateChunk struct {
 // stop-token suppression buffer without external synchronization; a
 // Generator that fans chunks out across goroutines would break it.
 //
-// Implementations MUST reject requests where Prompt AND Suffix are both
-// empty, matching ollama.Client.Generate's contract. The Generator
-// interface itself does not enforce this: the completion package's
-// Provider.planRequest can produce trivially-empty prompts on edge cases
-// (cursor at file start with empty suffix), and a defensive
-// implementation may catch them before issuing a backend call. Callers
-// should treat such requests as invalid.
+// Empty-Prompt-AND-empty-Suffix requests are not rejected by the
+// interface itself: ollama.Client.Generate already rejects such requests
+// at the backend layer (the bundled ollamaGenerator surfaces the same
+// rejection at the seam), and Provider.planRequest does not produce them
+// for current FIM call sites. Implementations MAY add their own
+// defensive validation; callers should treat such requests as invalid
+// regardless.
+//
+// Suffix being non-empty implies FIM mode and requires the backing
+// implementation to honour CapInsert at the provider level. The
+// implementation MUST NOT substitute across FIM-family template
+// compatibility boundaries within a single call: families differ in
+// their native prompt+suffix marker tokens (qwen3-coder, codellama,
+// codestral, etc. each use distinct templates), so cross-family
+// fallback can produce malformed prompts and incorrect completions.
+// The MCP server's s.fimGenerator pins the resolved model end-to-end
+// to enforce this; other Generator implementations should follow the
+// same policy or document the deviation.
 //
 // On success, GenerateResult.Response is the complete, non-stop-stripped
 // backend payload; Provider.Complete owns stop-token stripping.
