@@ -221,6 +221,15 @@ func (g *mcpFIMGenerator) Generate(ctx context.Context, req completion.GenerateR
 	if err != nil {
 		return completion.GenerateResult{}, routedGenerateError{category: generateToolOllama, err: err}
 	}
+	// Defensive nil-check: provider contract requires non-nil resp on nil err,
+	// but a buggy provider implementation could violate it; surface a clear
+	// error rather than letting resultFromGenerateResponse nil-deref.
+	if resp == nil {
+		return completion.GenerateResult{}, routedGenerateError{
+			category: generateToolOllama,
+			err:      fmt.Errorf("fim: provider returned nil response with no error"),
+		}
+	}
 	return resultFromGenerateResponse(resp, req), nil
 }
 
