@@ -234,15 +234,50 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 // to the longest effective stop token is held back on every write and only
 // flushed (with any tail stop token stripped) on the final chunk.
 // If fn returns an error, streaming stops and that error is returned.
+//
+// Code that needs the aggregated GenerateResult (route metadata, final
+// model/provider, token count) should prefer CompleteStreamWithResult.
+// The two methods produce byte-identical chunk sequences to fn; they
+// differ only in what is returned after the stream terminates.
 func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(token string) error) error {
+	_, err := p.completeStream(ctx, req, fn)
+	return err
+}
+
+// CompleteStreamWithResult is the router-aware streaming entry point. It
+// behaves identically to CompleteStream except it returns the aggregated
+// GenerateResult (final Response, Tokens, Model, Provider, and Outcome
+// route metadata) on success.
+//
+// CompleteStream(...) error remains unchanged for backwards compatibility
+// with Firn IDE / Flux ML / Quantum Trader; new code that needs route
+// provenance (e.g. for #82 drift telemetry or FIM acceptance/cancel
+// feedback) should prefer CompleteStreamWithResult.
+//
+// When the underlying Generator is the Router-backed mcpFIMGenerator, the
+// returned GenerateResult.Outcome is populated by translateRouteOutcome.
+// When the Generator is the legacy ollama adapter, Outcome is nil but
+// Model and Provider are still populated from the request and adapter
+// respectively.
+func (p *Provider) CompleteStreamWithResult(ctx context.Context, req FIMRequest, fn func(token string) error) (GenerateResult, error) {
+	return p.completeStream(ctx, req, fn)
+}
+
+// completeStream is the shared implementation for CompleteStream and
+// CompleteStreamWithResult. It performs the full streaming flow with
+// stop-token suppression and returns the aggregated GenerateResult
+// (final Response, Tokens, Model, Provider, Outcome) along with any
+// error. Both public methods delegate here so the streaming-buffer and
+// stop-suppression logic exists in exactly one place.
+func (p *Provider) completeStream(ctx context.Context, req FIMRequest, fn func(token string) error) (GenerateResult, error) {
 	if p.generator == nil {
-		return fmt.Errorf("completion: generator is required")
+		return GenerateResult{}, fmt.Errorf("completion: generator is required")
 	}
 	if p.model == "" {
-		return fmt.Errorf("completion: model is required")
+		return GenerateResult{}, fmt.Errorf("completion: model is required")
 	}
 	if fn == nil {
-		return fmt.Errorf("completion: callback function is required")
+		return GenerateResult{}, fmt.Errorf("completion: callback function is required")
 	}
 
 	pr := p.planRequest(req)
@@ -267,7 +302,7 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 		return nil
 	}
 
-	_, streamErr := p.generator.GenerateStream(ctx, pr.genReq, func(resp GenerateChunk) error {
+	result, streamErr := p.generator.GenerateStream(ctx, pr.genReq, func(resp GenerateChunk) error {
 		if maxStopLen == 0 {
 			return emit(resp.Response)
 		}
@@ -294,8 +329,8 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 		cleaned := stripStopTokens(buffer, pr.budget.StopTokens)
 		buffer = ""
 		if err := emit(cleaned); err != nil {
-			return errors.Join(streamErr, err)
+			return result, errors.Join(streamErr, err)
 		}
 	}
-	return streamErr
+	return result, streamErr
 }
