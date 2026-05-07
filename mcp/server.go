@@ -394,7 +394,18 @@ func (s *Server) newCompletionProvider(ctx context.Context, model string) (*comp
 	if err != nil {
 		return nil, err
 	}
-	return completion.NewProvider(s.client, model, cfg)
+
+	// modelRegistry.Lookup proved this model exists for ollamaProv via
+	// /api/show. Seed the providerRegistry's routing index so Router can
+	// dispatch to it even when the bulk /api/tags-based RefreshModels at
+	// startup failed (partial Ollama outage). Idempotent; failure here is
+	// non-fatal — Router's own ProvidersForModel error will surface
+	// naturally if the seed didn't take.
+	if pReg := s.providerRegistrySnapshot(); pReg != nil {
+		_ = pReg.AddModelToIndex(model, ollamaProv.Name())
+	}
+
+	return completion.NewProviderWithGenerator(s.fimGenerator(s.fimPriority()), model, cfg)
 }
 
 // Indexer returns the current RAG indexer (nil if RAG disabled).
