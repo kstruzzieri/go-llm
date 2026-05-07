@@ -183,15 +183,15 @@ func TestNewProviderNilClientCompatibility(t *testing.T) {
 	if err == nil {
 		t.Fatal("Complete with nil client must error")
 	}
-	if !strings.Contains(err.Error(), "client is required") {
-		t.Fatalf("Complete error = %v, want substring %q", err, "client is required")
+	if !strings.Contains(err.Error(), "generator is required") {
+		t.Fatalf("Complete error = %v, want substring %q", err, "generator is required")
 	}
 	err = p.CompleteStream(context.Background(), FIMRequest{Prefix: "x", Suffix: "y"}, func(string) error { return nil })
 	if err == nil {
 		t.Fatal("CompleteStream with nil client must error")
 	}
-	if !strings.Contains(err.Error(), "client is required") {
-		t.Fatalf("CompleteStream error = %v, want substring %q", err, "client is required")
+	if !strings.Contains(err.Error(), "generator is required") {
+		t.Fatalf("CompleteStream error = %v, want substring %q", err, "generator is required")
 	}
 }
 

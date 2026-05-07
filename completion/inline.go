@@ -48,9 +48,10 @@ type Provider struct {
 // NewProvider creates a completion Provider for the given model using an
 // Ollama client-backed compatibility shim.
 //
-// A nil client is accepted for backwards compatibility with the legacy
-// constructor contract, but Complete and CompleteStream will reject it at call
-// time with "completion: client is required".
+// A nil client is accepted only for backwards compatibility with the legacy
+// constructor contract; new code should always pass a real *ollama.Client or
+// migrate to NewProviderWithGenerator. When client is nil, Complete and
+// CompleteStream reject the call with "completion: generator is required".
 // Returns an error if cfg is invalid or cfg.FIM is nil.
 func NewProvider(client *ollama.Client, model string, cfg ProviderConfig) (*Provider, error) {
 	return buildProvider(generatorFromOllamaClient(client), model, cfg)
@@ -198,7 +199,7 @@ func buildTrace(pr plannedRequest) *BudgetTrace {
 // Complete generates an inline completion synchronously.
 func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, error) {
 	if p.generator == nil {
-		return nil, fmt.Errorf("completion: client is required")
+		return nil, fmt.Errorf("completion: generator is required")
 	}
 	if p.model == "" {
 		return nil, fmt.Errorf("completion: model is required")
@@ -235,7 +236,7 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 // If fn returns an error, streaming stops and that error is returned.
 func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(token string) error) error {
 	if p.generator == nil {
-		return fmt.Errorf("completion: client is required")
+		return fmt.Errorf("completion: generator is required")
 	}
 	if p.model == "" {
 		return fmt.Errorf("completion: model is required")

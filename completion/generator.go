@@ -99,8 +99,14 @@ type GenerateChunk struct {
 // silently degrading to Generate (callers may interpret a one-chunk
 // stream as the final answer).
 //
-// Implementations MUST be safe for concurrent use. The IDE invokes FIM
-// completions on every keystroke and may have multiple in flight.
+// Implementations MUST be safe for concurrent use across separate
+// Generate / GenerateStream calls — the IDE invokes FIM completions on
+// every keystroke and may have multiple in flight. Within a single
+// GenerateStream call, however, fn MUST be invoked serially from a
+// single goroutine and MUST NOT be called concurrently. Provider.
+// CompleteStream relies on this serial-fn contract to maintain its
+// stop-token suppression buffer without external synchronization; a
+// Generator that fans chunks out across goroutines would break it.
 //
 // Implementations MUST reject requests where Prompt AND Suffix are both
 // empty, matching ollama.Client.Generate's contract. The Generator
