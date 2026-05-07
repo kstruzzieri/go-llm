@@ -3,7 +3,6 @@ package completion
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -12,23 +11,84 @@ import (
 	"github.com/kstruzzieri/go-llm/ollama"
 )
 
+// fakeGenerator is the canonical test fake for the Generator seam. It
+// supports two usage styles, in priority order:
+//
+//  1. Function override via generate / stream — preferred for tests that
+//     need to capture/inspect the request arg or drive custom chunk
+//     sequences.
+//  2. Struct-field recording via result / chunks / genErr / streamErr —
+//     preferred for happy-path tests where the test only cares about the
+//     return value and the request/called-flag fields are inspected after.
+//
+// Both Generate and GenerateStream record called/streamCalled and lastReq
+// regardless of which path runs, so tests can assert "the seam was
+// invoked" without driving the function path.
+//
+// Concurrency: fakeGenerator is intended for SERIAL test invocation. The
+// recording fields (called, streamCalled, lastReq) are written without a
+// mutex; concurrent calls would race. This matches the typical Generator
+// caller pattern (Provider.Complete / completeStream invoke the seam
+// from a single goroutine), but tests that exercise concurrent use must
+// add their own synchronization or use a different fake.
+//
+// Default behaviour: when no function override AND no struct-field path
+// is configured, Generate / GenerateStream return (GenerateResult{}, nil)
+// — a SILENT success. Tests that must catch unexpected invocations
+// should assert !gen.called / !gen.streamCalled explicitly. This
+// trade-off was made deliberately so the struct-field happy-path tests
+// don't have to set up an unused function override; the cost is the
+// loss of the prior "unexpected Generate call" loud-failure default.
 type fakeGenerator struct {
+	// Function overrides — when non-nil, take precedence over the
+	// struct-field path.
 	generate func(context.Context, GenerateRequest) (GenerateResult, error)
 	stream   func(context.Context, GenerateRequest, func(GenerateChunk) error) (GenerateResult, error)
+
+	// Struct-field path — used when the corresponding function override
+	// is nil. result is returned from both Generate and GenerateStream;
+	// chunks is fed to fn (in order) by GenerateStream before returning
+	// result; genErr / streamErr force the corresponding error path.
+	result    GenerateResult
+	chunks    []GenerateChunk
+	genErr    error
+	streamErr error
+
+	// Recording — populated on every invocation regardless of path.
+	called       bool
+	streamCalled bool
+	lastReq      GenerateRequest
 }
 
 func (g *fakeGenerator) Generate(ctx context.Context, req GenerateRequest) (GenerateResult, error) {
-	if g.generate == nil {
-		return GenerateResult{}, errors.New("unexpected Generate call")
+	g.called = true
+	g.lastReq = req
+	if g.generate != nil {
+		return g.generate(ctx, req)
 	}
-	return g.generate(ctx, req)
+	if g.genErr != nil {
+		return GenerateResult{}, g.genErr
+	}
+	return g.result, nil
 }
 
 func (g *fakeGenerator) GenerateStream(ctx context.Context, req GenerateRequest, fn func(GenerateChunk) error) (GenerateResult, error) {
-	if g.stream == nil {
-		return GenerateResult{}, errors.New("unexpected GenerateStream call")
+	g.streamCalled = true
+	g.lastReq = req
+	if g.stream != nil {
+		return g.stream(ctx, req, fn)
 	}
-	return g.stream(ctx, req, fn)
+	if g.streamErr != nil {
+		return GenerateResult{}, g.streamErr
+	}
+	if fn != nil {
+		for _, ch := range g.chunks {
+			if err := fn(ch); err != nil {
+				return GenerateResult{}, err
+			}
+		}
+	}
+	return g.result, nil
 }
 
 func TestNewProviderWithGeneratorValidation(t *testing.T) {
