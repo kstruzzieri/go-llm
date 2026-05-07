@@ -38,16 +38,39 @@ type FIMResponse struct {
 	BudgetTrace     *BudgetTrace    // populated when FIMRequest.Trace is true
 }
 
-// Provider performs FIM (Fill-in-the-Middle) completions against an Ollama backend.
+// Provider performs FIM (Fill-in-the-Middle) completions against a generation backend.
 type Provider struct {
-	client *ollama.Client
-	model  string
-	cfg    ProviderConfig
+	generator Generator
+	model     string
+	cfg       ProviderConfig
 }
 
-// NewProvider creates a completion Provider for the given model.
+// NewProvider creates a completion Provider for the given model using an
+// Ollama client-backed compatibility shim.
+//
+// A nil client is accepted for backwards compatibility with the legacy
+// constructor contract, but Complete and CompleteStream will reject it at call
+// time with "completion: client is required".
 // Returns an error if cfg is invalid or cfg.FIM is nil.
 func NewProvider(client *ollama.Client, model string, cfg ProviderConfig) (*Provider, error) {
+	return buildProvider(generatorFromOllamaClient(client), model, cfg)
+}
+
+// NewProviderWithGenerator creates a completion Provider backed by the given
+// Generator. It is additive to NewProvider so existing callers can keep the
+// Ollama client-shaped constructor while router-aware callers supply their own
+// generation implementation.
+//
+// Unlike NewProvider's legacy nil-client compatibility path, a nil generator
+// is rejected at construction time.
+func NewProviderWithGenerator(generator Generator, model string, cfg ProviderConfig) (*Provider, error) {
+	if generator == nil {
+		return nil, fmt.Errorf("completion: NewProviderWithGenerator: generator is required")
+	}
+	return buildProvider(generator, model, cfg)
+}
+
+func buildProvider(generator Generator, model string, cfg ProviderConfig) (*Provider, error) {
 	if cfg.FIM == nil {
 		return nil, fmt.Errorf("completion: FIM config is required")
 	}
@@ -58,9 +81,9 @@ func NewProvider(client *ollama.Client, model string, cfg ProviderConfig) (*Prov
 		return nil, fmt.Errorf("completion: context window must be positive, got %d", cfg.ContextWindow)
 	}
 	return &Provider{
-		client: client,
-		model:  model,
-		cfg:    cfg,
+		generator: generator,
+		model:     model,
+		cfg:       cfg,
 	}, nil
 }
 
@@ -81,7 +104,7 @@ func (p *Provider) effectiveNumCtx(inputTokens int) int {
 
 // plannedRequest carries the fully-resolved plan for a single FIM round-trip.
 type plannedRequest struct {
-	genReq   ollama.GenerateRequest
+	genReq   GenerateRequest
 	analysis CursorAnalysis
 	budget   ComputedBudget
 	language string
@@ -135,16 +158,14 @@ func (p *Provider) planRequest(req FIMRequest) plannedRequest {
 	prefix := TruncateToTokens(req.Prefix, prefixBudget)
 	suffix := TruncateSuffixToTokens(req.Suffix, suffixBudget)
 
-	genReq := ollama.GenerateRequest{
-		Model:  p.model,
-		Prompt: prefix,
-		Suffix: suffix,
-		Options: &ollama.ModelOptions{
-			NumPredict:  maxTokens,
-			NumCtx:      numCtx,
-			Temperature: budget.Temperature,
-			Stop:        budget.StopTokens,
-		},
+	genReq := GenerateRequest{
+		Model:       p.model,
+		Prompt:      prefix,
+		Suffix:      suffix,
+		NumPredict:  maxTokens,
+		NumCtx:      numCtx,
+		Temperature: budget.Temperature,
+		Stop:        budget.StopTokens,
 	}
 
 	return plannedRequest{
@@ -176,7 +197,7 @@ func buildTrace(pr plannedRequest) *BudgetTrace {
 
 // Complete generates an inline completion synchronously.
 func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, error) {
-	if p.client == nil {
+	if p.generator == nil {
 		return nil, fmt.Errorf("completion: client is required")
 	}
 	if p.model == "" {
@@ -186,7 +207,7 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 	pr := p.planRequest(req)
 	start := time.Now()
 
-	resp, err := p.client.Generate(ctx, pr.genReq)
+	resp, err := p.generator.Generate(ctx, pr.genReq)
 	if err != nil {
 		return nil, fmt.Errorf("completion: %w", err)
 	}
@@ -195,7 +216,7 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 
 	result := &FIMResponse{
 		Completion:      completion,
-		Tokens:          resp.EvalCount,
+		Tokens:          resp.Tokens,
 		LatencyMs:       time.Since(start).Milliseconds(),
 		CursorContext:   pr.analysis.Context,
 		CompletionShape: pr.analysis.Shape,
@@ -213,7 +234,7 @@ func (p *Provider) Complete(ctx context.Context, req FIMRequest) (*FIMResponse, 
 // flushed (with any tail stop token stripped) on the final chunk.
 // If fn returns an error, streaming stops and that error is returned.
 func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(token string) error) error {
-	if p.client == nil {
+	if p.generator == nil {
 		return fmt.Errorf("completion: client is required")
 	}
 	if p.model == "" {
@@ -245,7 +266,7 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 		return nil
 	}
 
-	streamErr := p.client.GenerateStream(ctx, pr.genReq, func(resp ollama.GenerateResponse) error {
+	_, streamErr := p.generator.GenerateStream(ctx, pr.genReq, func(resp GenerateChunk) error {
 		if maxStopLen == 0 {
 			return emit(resp.Response)
 		}
