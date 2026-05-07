@@ -65,6 +65,9 @@ type Server struct {
 	closed          bool
 	stateVersion    uint64
 
+	fimPriorityCfg      provider.Priority
+	fimPriorityExplicit bool
+
 	mu       sync.RWMutex
 	resolved map[string]config.ResolvedModel
 
@@ -111,6 +114,22 @@ func WithTLS(cert, key string) Option {
 	return func(s *Server) {
 		s.tlsCert = cert
 		s.tlsKey = key
+	}
+}
+
+// WithFIMPriority sets the routing priority used when MCP FIM completions
+// are dispatched through provider.Router. When this option is not invoked,
+// s.fimPriority() returns provider.PriorityHigh.
+//
+// Per-consumer guidance: IDE consumers (Firn IDE) treating keystroke latency
+// as non-droppable may pass provider.PriorityCritical. Non-IDE MCP consumers
+// can leave the default, drop to provider.PriorityNormal, or set
+// provider.PriorityBackground for batch/background completion. Hard-coding
+// either default would bake one product's policy into the seam.
+func WithFIMPriority(p provider.Priority) Option {
+	return func(s *Server) {
+		s.fimPriorityCfg = p
+		s.fimPriorityExplicit = true
 	}
 }
 
@@ -398,6 +417,23 @@ func (s *Server) routerSnapshot() routeEngine {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.router
+}
+
+// fimPriority returns the configured FIM routing priority, defaulting to
+// provider.PriorityHigh when WithFIMPriority was not invoked.
+//
+// The fimPriorityExplicit boolean is required because
+// provider.PriorityBackground is the zero value of provider.Priority and is
+// itself a valid configured value; "did the caller invoke WithFIMPriority?"
+// cannot be answered by checking fimPriorityCfg == 0 alone.
+//
+// Called by newCompletionProvider when wiring completion construction
+// through s.fimGenerator.
+func (s *Server) fimPriority() provider.Priority {
+	if !s.fimPriorityExplicit {
+		return provider.PriorityHigh
+	}
+	return s.fimPriorityCfg
 }
 
 func (s *Server) providerRegistrySnapshot() *provider.Registry {
