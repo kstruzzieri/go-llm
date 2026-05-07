@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/completion"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -180,4 +181,80 @@ func translateRouteOutcome(o *provider.RouteOutcome) *completion.RouteOutcome {
 		FallbacksUsed: o.FallbacksUsed,
 		WasSticky:     o.WasSticky,
 	}
+}
+
+// fimGenerator returns a completion.Generator that routes FIM completions
+// through provider.Router via s.routedGenerate at the supplied priority. FIM
+// completions are user-facing keystroke-driven traffic; production wiring
+// (newCompletionProvider in mcp/server.go) supplies s.fimPriority() which
+// defaults to provider.PriorityHigh.
+//
+// Both Generator methods pin the resolved model end-to-end (no
+// PreferredChain), so Router cannot substitute across FIM-family boundaries.
+// Cross-family fallback is deferred to a future ticket.
+func (s *Server) fimGenerator(priority provider.Priority) completion.Generator {
+	return &mcpFIMGenerator{server: s, priority: priority}
+}
+
+// mcpFIMGenerator is the concrete completion.Generator wired into the MCP
+// server. Unexported because external consumers wanting a router-aware
+// generator should construct their own implementation against the
+// completion.Generator interface; this type is an MCP wiring detail.
+//
+// Safe for concurrent use: routedGenerate snapshots the router under a read
+// lock per call, RoutePlan execution is itself concurrent-safe, and the
+// closure holds no mutable per-instance state beyond the immutable Server
+// pointer and priority. Within a single GenerateStream call, fn is invoked
+// serially from a single goroutine — Provider.completeStream's stop-token
+// suppression buffer relies on this contract (see Generator interface).
+type mcpFIMGenerator struct {
+	server   *Server
+	priority provider.Priority
+}
+
+func (g *mcpFIMGenerator) Generate(ctx context.Context, req completion.GenerateRequest) (completion.GenerateResult, error) {
+	plan, err := g.server.routedGenerate(ctx, req, g.priority, 0)
+	if err != nil {
+		return completion.GenerateResult{}, err
+	}
+	resp, err := plan.ExecuteGenerate(ctx)
+	if err != nil {
+		return completion.GenerateResult{}, routedGenerateError{category: generateToolOllama, err: err}
+	}
+	return resultFromGenerateResponse(resp, req), nil
+}
+
+func (g *mcpFIMGenerator) GenerateStream(ctx context.Context, req completion.GenerateRequest, fn func(completion.GenerateChunk) error) (completion.GenerateResult, error) {
+	if fn == nil {
+		return completion.GenerateResult{}, routedGenerateError{
+			category: generateToolConfig,
+			err:      fmt.Errorf("fim: GenerateStream callback is required"),
+		}
+	}
+	plan, err := g.server.routedGenerate(ctx, req, g.priority, provider.CapStream)
+	if err != nil {
+		return completion.GenerateResult{}, err
+	}
+	var (
+		full    strings.Builder
+		tokens  int
+		outcome *provider.RouteOutcome
+	)
+	streamErr := plan.ExecuteGenerateStream(ctx, func(chunk provider.GenerateResponse) error {
+		full.WriteString(chunk.Response)
+		// Cumulative max: providers (notably Ollama) only stamp Usage on the
+		// terminal chunk, but a future provider could stream incremental
+		// Usage updates — taking the max preserves correctness either way.
+		if chunk.Usage.CompletionTokens > tokens {
+			tokens = chunk.Usage.CompletionTokens
+		}
+		if chunk.RouteOutcome != nil {
+			outcome = chunk.RouteOutcome
+		}
+		return fn(completion.GenerateChunk{Response: chunk.Response, Done: chunk.Done})
+	})
+	if streamErr != nil {
+		return completion.GenerateResult{}, routedGenerateError{category: generateToolOllama, err: streamErr}
+	}
+	return resultFromAggregatedStream(full.String(), tokens, outcome, req), nil
 }
