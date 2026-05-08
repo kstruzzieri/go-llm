@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -266,6 +267,15 @@ func (p *Provider) CompleteStream(ctx context.Context, req FIMRequest, fn func(t
 // When the Generator is the legacy ollama adapter, Outcome is nil but
 // Model and Provider are still populated from the request and adapter
 // respectively.
+//
+// On success, GenerateResult.Response is the stop-token-stripped completion
+// text — the byte concatenation of tokens fn observed, matching the
+// semantics of FIMResponse.Completion from Provider.Complete. The raw
+// non-stop-stripped backend payload returned by the underlying Generator's
+// GenerateStream is replaced with this cleaned aggregate so the two views
+// (chunks-via-fn and Response-via-return) cannot diverge. On error, the
+// Response field carries whatever the underlying Generator returned (the
+// bundled implementations return GenerateResult{} on error).
 func (p *Provider) CompleteStreamWithResult(ctx context.Context, req FIMRequest, fn func(token string) error) (GenerateResult, error) {
 	return p.completeStream(ctx, req, fn)
 }
@@ -298,6 +308,13 @@ func (p *Provider) completeStream(ctx context.Context, req FIMRequest, fn func(t
 
 	var buffer string
 	var callbackErr error
+	// cleanedStream accumulates the stop-stripped tokens fn actually saw,
+	// so the returned GenerateResult.Response can be overwritten with the
+	// cleaned aggregate. Without this, CompleteStreamWithResult callers
+	// would see the underlying Generator's raw (non-stop-stripped) payload
+	// in Response while their fn callback received clean tokens — two
+	// inconsistent views of the same stream.
+	var cleanedStream strings.Builder
 	emit := func(token string) error {
 		if token == "" {
 			return nil
@@ -306,6 +323,7 @@ func (p *Provider) completeStream(ctx context.Context, req FIMRequest, fn func(t
 			callbackErr = err
 			return err
 		}
+		cleanedStream.WriteString(token)
 		return nil
 	}
 
@@ -338,6 +356,14 @@ func (p *Provider) completeStream(ctx context.Context, req FIMRequest, fn func(t
 		if err := emit(cleaned); err != nil {
 			return result, errors.Join(streamErr, err)
 		}
+	}
+	if streamErr == nil {
+		// Overwrite Response with the cleaned aggregate so
+		// CompleteStreamWithResult callers see semantically the same text
+		// as fn observed. On error we leave whatever the Generator
+		// returned (typically GenerateResult{} for the bundled
+		// implementations) so error-path provenance is unchanged.
+		result.Response = cleanedStream.String()
 	}
 	return result, streamErr
 }

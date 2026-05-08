@@ -245,6 +245,61 @@ func TestProvider_CompleteStreamWithResult_NilOutcomeWhenGeneratorOmitsIt(t *tes
 	}
 }
 
+// TestProvider_CompleteStreamWithResult_ResponseStopsStripped proves that
+// CompleteStreamWithResult.Response is the byte concatenation of the
+// stop-stripped tokens fn observed, NOT the raw backend payload the
+// underlying Generator returned. Without this guarantee, callers would
+// see a Response containing literal stop tokens (e.g. "<|endoftext|>")
+// even though fn was correctly stripped — two inconsistent views of the
+// same stream. This is the post-fix invariant for the P2 review finding
+// on inline.go's completeStream.
+func TestProvider_CompleteStreamWithResult_ResponseStopsStripped(t *testing.T) {
+	cfg := testProviderConfig()
+	// Sanity: the fixture must declare a stop token, otherwise the
+	// stripping path is never exercised and this test would tautologically
+	// pass.
+	if len(cfg.FIM.StopTokens) == 0 {
+		t.Fatal("testProviderConfig().FIM.StopTokens must be non-empty for this test to be meaningful")
+	}
+	stop := cfg.FIM.StopTokens[0]
+
+	gen := &fakeGenerator{
+		// Chunks split the stop token across boundaries to also exercise
+		// the trailing-buffer logic.
+		chunks: []GenerateChunk{
+			{Response: "fmt.", Done: false},
+			{Response: "Println()" + stop[:2], Done: false},
+			{Response: stop[2:], Done: true},
+		},
+		// The fake's raw result.Response carries the stop token exactly
+		// like Ollama would; if completeStream returned this verbatim,
+		// callers would observe a leak.
+		result: GenerateResult{
+			Response: "fmt.Println()" + stop,
+			Tokens:   3,
+			Model:    "qwen3:8b",
+			Provider: "ollama",
+		},
+	}
+	p, err := NewProviderWithGenerator(gen, "qwen3:8b", cfg)
+	if err != nil {
+		t.Fatalf("NewProviderWithGenerator: %v", err)
+	}
+	got, err := p.CompleteStreamWithResult(context.Background(), FIMRequest{
+		Prefix: "func main() {\n\t",
+		Suffix: "\n}",
+	}, func(string) error { return nil })
+	if err != nil {
+		t.Fatalf("CompleteStreamWithResult: %v", err)
+	}
+	if strings.Contains(got.Response, stop) {
+		t.Errorf("Response = %q contains literal stop token %q; CompleteStreamWithResult must return the stop-stripped aggregate", got.Response, stop)
+	}
+	if want := "fmt.Println()"; got.Response != want {
+		t.Errorf("Response = %q, want %q (cleaned aggregate matching fn-observed bytes)", got.Response, want)
+	}
+}
+
 // TestProvider_CompleteStream_ChunkParityWithCompleteStreamWithResult
 // proves the two streaming entry points produce byte-identical fn-observed
 // chunk sequences for the same fake-Generator input. This is the

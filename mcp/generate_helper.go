@@ -74,6 +74,18 @@ func (s *Server) routedGenerate(ctx context.Context, req completion.GenerateRequ
 		return nil, routedGenerateError{category: generateToolConfig, err: fmt.Errorf("router unavailable")}
 	}
 	requiredCaps := provider.CapGenerate | provider.CapInsert | extraCaps
+	// ExpectedOutput tracks the actual planned NumPredict so Router scoring
+	// and budget gating reflect this request's real output budget, not the
+	// generic 200-token "fim" default. Provider.planRequest already trims
+	// NumPredict for tight contexts; passing the static default would
+	// cause Router to over-reserve and either mis-score or reject requests
+	// that would otherwise fit. Falls back to the use-case default only
+	// when NumPredict is unset (zero) — primarily a defensive case since
+	// the empty-model rejection above already covers most malformed input.
+	expectedOutput := req.NumPredict
+	if expectedOutput <= 0 {
+		expectedOutput = provider.DefaultExpectedOutput("fim")
+	}
 	rr := provider.RoutingRequest{
 		Model:        req.Model,
 		UseCase:      "fim",
@@ -90,7 +102,7 @@ func (s *Server) routedGenerate(ctx context.Context, req completion.GenerateRequ
 			NumCtx:      req.NumCtx,
 			Stop:        req.Stop,
 		},
-		ExpectedOutput: provider.DefaultExpectedOutput("fim"),
+		ExpectedOutput: expectedOutput,
 		Priority:       priority,
 		// PreferredChain intentionally left empty — see FIM pinning policy.
 	}

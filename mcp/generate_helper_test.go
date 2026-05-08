@@ -100,8 +100,12 @@ func TestRoutedGenerate_RoutingRequestShape(t *testing.T) {
 	if len(rr.PreferredChain) != 0 {
 		t.Errorf("PreferredChain = %v, want empty (FIM pin policy)", rr.PreferredChain)
 	}
-	if rr.ExpectedOutput != provider.DefaultExpectedOutput("fim") {
-		t.Errorf("ExpectedOutput = %d, want %d", rr.ExpectedOutput, provider.DefaultExpectedOutput("fim"))
+	// ExpectedOutput tracks req.NumPredict (the actual planned budget),
+	// not the generic 200-token "fim" default — Router scoring + budget
+	// gating must see the real output budget so tight-context requests
+	// don't get over-reserved or rejected.
+	if rr.ExpectedOutput != req.NumPredict {
+		t.Errorf("ExpectedOutput = %d, want %d (req.NumPredict)", rr.ExpectedOutput, req.NumPredict)
 	}
 	if rr.Options.Temperature == nil {
 		t.Fatal("Options.Temperature is nil, want non-nil pointer (FIM uses literal-zero temperature)")
@@ -115,6 +119,37 @@ func TestRoutedGenerate_RoutingRequestShape(t *testing.T) {
 	if rr.Options.NumCtx != req.NumCtx {
 		t.Errorf("Options.NumCtx = %d, want %d", rr.Options.NumCtx, req.NumCtx)
 	}
+}
+
+// TestRoutedGenerate_ExpectedOutputTracksNumPredict exercises both branches
+// of the expectedOutput selection in routedGenerate: when req.NumPredict is
+// set, it propagates verbatim; when unset (zero), the use-case default
+// (DefaultExpectedOutput("fim") = 200) is the safety fallback.
+func TestRoutedGenerate_ExpectedOutputTracksNumPredict(t *testing.T) {
+	t.Run("explicit NumPredict propagates", func(t *testing.T) {
+		eng := newRecordingRouteEngine("done")
+		s := newServerWithRouter(eng)
+		req := fimReqFor("qwen3:8b")
+		req.NumPredict = 8 // tight-context smoke-test budget
+		if _, err := s.routedGenerate(context.Background(), req, provider.PriorityHigh, 0); err != nil {
+			t.Fatalf("routedGenerate error: %v", err)
+		}
+		if eng.last.ExpectedOutput != 8 {
+			t.Errorf("ExpectedOutput = %d, want 8 (req.NumPredict)", eng.last.ExpectedOutput)
+		}
+	})
+	t.Run("zero NumPredict falls back to use-case default", func(t *testing.T) {
+		eng := newRecordingRouteEngine("done")
+		s := newServerWithRouter(eng)
+		req := fimReqFor("qwen3:8b")
+		req.NumPredict = 0
+		if _, err := s.routedGenerate(context.Background(), req, provider.PriorityHigh, 0); err != nil {
+			t.Fatalf("routedGenerate error: %v", err)
+		}
+		if want := provider.DefaultExpectedOutput("fim"); eng.last.ExpectedOutput != want {
+			t.Errorf("ExpectedOutput = %d, want %d (DefaultExpectedOutput(fim) fallback)", eng.last.ExpectedOutput, want)
+		}
+	})
 }
 
 func TestRoutedGenerate_StreamingAddsCapStream(t *testing.T) {
@@ -196,6 +231,15 @@ func TestFIMGenerator_GenerateOmitsCapStream(t *testing.T) {
 	if want := "fake/qwen3:8b"; res.Outcome.PlannedModel != want {
 		t.Errorf("Outcome.PlannedModel = %q, want %q", res.Outcome.PlannedModel, want)
 	}
+	// Drift-detector contract (per completion.RouteOutcome doc): on a
+	// successful no-fallback route, the qualified PlannedModel string
+	// must equal Provider+"/"+Model. If this fails, either the format
+	// invariants are wrong (PlannedModel unqualified, or Provider/Model
+	// qualified) or RouteOutcome translation dropped the provider
+	// component.
+	if drift := res.Outcome.PlannedModel != res.Provider+"/"+res.Model; drift {
+		t.Errorf("drift detector reported drift on a no-fallback success: PlannedModel=%q vs %q+\"/\"+%q", res.Outcome.PlannedModel, res.Provider, res.Model)
+	}
 }
 
 // TestFIMGenerator_GenerateStreamRequiresCapStream asserts the streaming
@@ -257,6 +301,14 @@ func TestFIMGenerator_GenerateStreamRequiresCapStream(t *testing.T) {
 	}
 	if want := "fake/qwen3:8b"; res.Outcome.PlannedModel != want {
 		t.Errorf("Outcome.PlannedModel = %q, want %q", res.Outcome.PlannedModel, want)
+	}
+	// Drift-detector contract on the streaming path: the qualified
+	// PlannedModel string must equal Provider+"/"+Model on a no-fallback
+	// success. Catches regressions in resultFromAggregatedStream's
+	// Provider population (the streaming sibling of the same assertion in
+	// TestFIMGenerator_GenerateOmitsCapStream).
+	if drift := res.Outcome.PlannedModel != res.Provider+"/"+res.Model; drift {
+		t.Errorf("drift detector reported drift on a no-fallback streaming success: PlannedModel=%q vs %q+\"/\"+%q", res.Outcome.PlannedModel, res.Provider, res.Model)
 	}
 }
 

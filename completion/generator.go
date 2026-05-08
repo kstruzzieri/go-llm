@@ -62,14 +62,23 @@ type GenerateResult struct {
 // RouteHint is human-readable provenance suitable for logs and telemetry
 // (typically the underlying provider.RouteOutcome.Reason; falls back to
 // ActualModel.String() if Reason is empty). PlannedModel records the
-// router's first-choice candidate; differs from the top-level
-// GenerateResult.Model when chain fallback occurred. The expression
-// `result.Outcome != nil && result.Outcome.PlannedModel != result.Model`
-// is the canonical drift detector for #82. Score is the composite ranking
-// score the resolved candidate received. FallbacksUsed is the number of
-// chain fallbacks consumed before success (0 = first candidate answered).
-// WasSticky is true if the resolved model came from the sticky-cache
-// rather than fresh scoring.
+// router's first-choice candidate as a provider-qualified identity in
+// "provider/model" form (e.g. "ollama/qwen3:8b"); it preserves the
+// provider component so provider-level fallback is observable even when
+// the model name happens to coincide across providers.
+//
+// The canonical drift detector for #82 is therefore the qualified
+// comparison:
+//
+//	result.Outcome != nil && result.Outcome.PlannedModel != result.Provider+"/"+result.Model
+//
+// Comparing PlannedModel against the unqualified GenerateResult.Model
+// alone would report false drift on every routed success because the
+// formats differ. Score is the composite ranking score the resolved
+// candidate received. FallbacksUsed is the number of chain fallbacks
+// consumed before success (0 = first candidate answered). WasSticky is
+// true if the resolved model came from the sticky-cache rather than
+// fresh scoring.
 type RouteOutcome struct {
 	RouteHint     string
 	PlannedModel  string
