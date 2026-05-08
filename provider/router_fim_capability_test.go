@@ -8,8 +8,9 @@ import (
 
 // fimCapProvider is a minimal Provider that advertises a fixed capability
 // set at the provider level. Per-profile gating in scoreCandidate filters on
-// ModelProfile.Caps, so each test seeds profiles with different cap masks
-// even though the underlying provider always reports the full superset.
+// ModelProfile metadata, so each test seeds profiles with different cap masks
+// and templates even though the underlying provider always reports the full
+// superset.
 type fimCapProvider struct {
 	name   string
 	models []ModelInfo
@@ -132,6 +133,38 @@ func TestRouter_FIMRejectsAllNonInsertCandidates(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNoViableCandidate) {
 		t.Errorf("Route err = %v, want errors.Is(_, ErrNoViableCandidate) — capability gate must hard-filter, not soft-prefer", err)
+	}
+}
+
+func TestRouter_FIMTemplateSuffixSatisfiesCapInsertGate(t *testing.T) {
+	model := "template-fim"
+	r := routerWithFIMProfiles(t,
+		&ModelProfile{
+			Key:           ModelKey{Provider: "plain", Model: model},
+			Caps:          CapGenerate,
+			Template:      "{{ .Prompt }}",
+			ContextWindow: 8192,
+		},
+		&ModelProfile{
+			Key:           ModelKey{Provider: "template", Model: model},
+			Caps:          CapGenerate,
+			Template:      "{{ .Prompt }}{{ .Suffix }}",
+			ContextWindow: 8192,
+		},
+	)
+	plan, err := r.Route(context.Background(), RoutingRequest{
+		Model:          model,
+		UseCase:        "fim",
+		RequiredCaps:   CapGenerate | CapInsert,
+		Prompt:         "prefix",
+		Suffix:         "suffix",
+		ExpectedOutput: DefaultExpectedOutput("fim"),
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if got := plan.Profile.Key.Provider; got != "template" {
+		t.Fatalf("Provider = %q, want %q (template .Suffix must satisfy CapInsert gate)", got, "template")
 	}
 }
 
