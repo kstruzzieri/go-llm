@@ -65,6 +65,9 @@ type Server struct {
 	closed          bool
 	stateVersion    uint64
 
+	fimPriorityCfg      provider.Priority
+	fimPriorityExplicit bool
+
 	mu       sync.RWMutex
 	resolved map[string]config.ResolvedModel
 
@@ -111,6 +114,22 @@ func WithTLS(cert, key string) Option {
 	return func(s *Server) {
 		s.tlsCert = cert
 		s.tlsKey = key
+	}
+}
+
+// WithFIMPriority sets the routing priority used when MCP FIM completions
+// are dispatched through provider.Router. When this option is not invoked,
+// s.fimPriority() returns provider.PriorityHigh.
+//
+// Per-consumer guidance: IDE consumers (Firn IDE) treating keystroke latency
+// as non-droppable may pass provider.PriorityCritical. Non-IDE MCP consumers
+// can leave the default, drop to provider.PriorityNormal, or set
+// provider.PriorityBackground for batch/background completion. Hard-coding
+// either default would bake one product's policy into the seam.
+func WithFIMPriority(p provider.Priority) Option {
+	return func(s *Server) {
+		s.fimPriorityCfg = p
+		s.fimPriorityExplicit = true
 	}
 }
 
@@ -375,7 +394,18 @@ func (s *Server) newCompletionProvider(ctx context.Context, model string) (*comp
 	if err != nil {
 		return nil, err
 	}
-	return completion.NewProvider(s.client, model, cfg)
+
+	// modelRegistry.Lookup proved this model exists for ollamaProv via
+	// /api/show. Seed the providerRegistry's routing index so Router can
+	// dispatch to it even when the bulk /api/tags-based RefreshModels at
+	// startup failed (partial Ollama outage). Idempotent; failure here is
+	// non-fatal — Router's own ProvidersForModel error will surface
+	// naturally if the seed didn't take.
+	if pReg := s.providerRegistrySnapshot(); pReg != nil {
+		_ = pReg.AddModelToIndex(model, ollamaProv.Name())
+	}
+
+	return completion.NewProviderWithGenerator(s.fimGenerator(s.fimPriority()), model, cfg)
 }
 
 // Indexer returns the current RAG indexer (nil if RAG disabled).
@@ -398,6 +428,23 @@ func (s *Server) routerSnapshot() routeEngine {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.router
+}
+
+// fimPriority returns the configured FIM routing priority, defaulting to
+// provider.PriorityHigh when WithFIMPriority was not invoked.
+//
+// The fimPriorityExplicit boolean is required because
+// provider.PriorityBackground is the zero value of provider.Priority and is
+// itself a valid configured value; "did the caller invoke WithFIMPriority?"
+// cannot be answered by checking fimPriorityCfg == 0 alone.
+//
+// Called by newCompletionProvider when wiring completion construction
+// through s.fimGenerator.
+func (s *Server) fimPriority() provider.Priority {
+	if !s.fimPriorityExplicit {
+		return provider.PriorityHigh
+	}
+	return s.fimPriorityCfg
 }
 
 func (s *Server) providerRegistrySnapshot() *provider.Registry {

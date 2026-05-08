@@ -241,6 +241,98 @@ func TestRegistry_RefreshModels_NotFound(t *testing.T) {
 	}
 }
 
+func TestRegistry_AddModelToIndex(t *testing.T) {
+	r := NewRegistry()
+	p := &mockProvider{name: "ollama"}
+	if err := r.Register(p); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	if err := r.AddModelToIndex("qwen3:8b", "ollama"); err != nil {
+		t.Fatalf("AddModelToIndex: %v", err)
+	}
+
+	providers, err := r.ProvidersForModel("qwen3:8b")
+	if err != nil {
+		t.Fatalf("ProvidersForModel: %v", err)
+	}
+	if len(providers) != 1 || providers[0].Name() != "ollama" {
+		t.Fatalf("providers = %v, want [ollama]", providers)
+	}
+}
+
+func TestRegistry_AddModelToIndex_Idempotent(t *testing.T) {
+	r := NewRegistry()
+	p := &mockProvider{name: "ollama"}
+	_ = r.Register(p)
+
+	for i := 0; i < 3; i++ {
+		if err := r.AddModelToIndex("qwen3:8b", "ollama"); err != nil {
+			t.Fatalf("AddModelToIndex iteration %d: %v", i, err)
+		}
+	}
+
+	providers, err := r.ProvidersForModel("qwen3:8b")
+	if err != nil {
+		t.Fatalf("ProvidersForModel: %v", err)
+	}
+	if len(providers) != 1 {
+		t.Errorf("providers count = %d, want 1 (idempotency violated; duplicate entries materialised)", len(providers))
+	}
+}
+
+func TestRegistry_AddModelToIndex_UnknownProvider(t *testing.T) {
+	r := NewRegistry()
+	if err := r.AddModelToIndex("qwen3:8b", "unregistered"); err == nil {
+		t.Fatal("expected error for unregistered provider")
+	}
+	if _, err := r.ProvidersForModel("qwen3:8b"); err == nil {
+		t.Fatal("ProvidersForModel must still report no providers after rejected AddModelToIndex")
+	}
+}
+
+func TestRegistry_AddModelToIndex_EmptyArguments(t *testing.T) {
+	r := NewRegistry()
+	p := &mockProvider{name: "ollama"}
+	_ = r.Register(p)
+
+	if err := r.AddModelToIndex("", "ollama"); err == nil {
+		t.Error("empty model must be rejected")
+	}
+	if err := r.AddModelToIndex("qwen3:8b", ""); err == nil {
+		t.Error("empty provider name must be rejected")
+	}
+}
+
+func TestRegistry_AddModelToIndex_CoexistsWithRefreshModels(t *testing.T) {
+	// Seed via AddModelToIndex first, then RefreshModels: the bulk path must
+	// not duplicate or lose the explicitly-seeded entry.
+	r := NewRegistry()
+	p := &mockProvider{
+		name: "ollama",
+		models: []ModelInfo{
+			{Name: "qwen3:8b"},
+			{Name: "nomic-embed-text"},
+		},
+	}
+	_ = r.Register(p)
+
+	if err := r.AddModelToIndex("qwen3:8b", "ollama"); err != nil {
+		t.Fatalf("AddModelToIndex: %v", err)
+	}
+	if err := r.RefreshModels(context.Background(), "ollama"); err != nil {
+		t.Fatalf("RefreshModels: %v", err)
+	}
+
+	providers, err := r.ProvidersForModel("qwen3:8b")
+	if err != nil {
+		t.Fatalf("ProvidersForModel: %v", err)
+	}
+	if len(providers) != 1 {
+		t.Errorf("providers = %d, want 1 (RefreshModels must not duplicate the seeded entry)", len(providers))
+	}
+}
+
 func TestRegistry_RefreshModels_ProviderError(t *testing.T) {
 	r := NewRegistry()
 	p := &mockProvider{

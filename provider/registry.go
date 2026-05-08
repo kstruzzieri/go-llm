@@ -145,6 +145,41 @@ func (r *Registry) ProvidersForModel(model string) ([]Provider, error) {
 	return result, nil
 }
 
+// AddModelToIndex registers that providerName advertises model in the routing
+// index used by ProvidersForModel. Idempotent: re-adding an existing
+// (model, providerName) pair is a no-op rather than producing duplicate
+// entries. Returns an error if either argument is empty or providerName is
+// not a registered provider.
+//
+// Intended for callers that have proof-of-existence for a single model from
+// a side channel (e.g. an /api/show response that succeeded while
+// /api/tags-based RefreshModels failed) and need to seed the routing index
+// without bulk discovery. The bulk path is RefreshModels; this is the
+// single-model fallback for partial-outage scenarios.
+func (r *Registry) AddModelToIndex(model, providerName string) error {
+	if model == "" {
+		return fmt.Errorf("provider: add model to index: model name must not be empty")
+	}
+	if providerName == "" {
+		return fmt.Errorf("provider: add model to index: provider name must not be empty")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if _, exists := r.providers[providerName]; !exists {
+		return fmt.Errorf("provider: add model to index: provider %q not found", providerName)
+	}
+
+	for _, existing := range r.modelIndex[model] {
+		if existing == providerName {
+			return nil
+		}
+	}
+	r.modelIndex[model] = append(r.modelIndex[model], providerName)
+	return nil
+}
+
 // RefreshModels queries the named provider for its available models and updates
 // the registry's model index. This must be called after registration to populate
 // the model index for ProvidersForModel lookups.

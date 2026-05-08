@@ -149,8 +149,11 @@ func scoreCandidate(
 	bd.feedbackScore = 0.5
 
 	// 4. Capability gate: if the request requires capabilities the model
-	//    doesn't have, eliminate the candidate immediately.
-	if req.RequiredCaps != 0 && !profile.Caps.Has(req.RequiredCaps) {
+	//    doesn't have, eliminate the candidate immediately. CapInsert is
+	//    satisfied by either the explicit capability bit or a live template that
+	//    proves native suffix insertion support; this keeps Router admission in
+	//    sync with ModelProfile.SupportsFIM.
+	if !profileSatisfiesRequiredCaps(profile, req.RequiredCaps) {
 		bd.capabilityGate = false
 		return bd
 	}
@@ -174,6 +177,17 @@ func scoreCandidate(
 	}
 
 	return bd
+}
+
+func profileSatisfiesRequiredCaps(profile *ModelProfile, required Capability) bool {
+	if required == 0 {
+		return true
+	}
+	caps := profile.Caps
+	if required.Has(CapInsert) && profile.SupportsFIM() {
+		caps |= CapInsert
+	}
+	return caps.Has(required)
 }
 
 // ---------------------------------------------------------------------------

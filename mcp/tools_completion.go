@@ -65,7 +65,12 @@ func (s *Server) handleCompletion(ctx context.Context, req *gomcp.CallToolReques
 		Language:  args.Language,
 	})
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		// Map through routedGenerateCategory so config/router/ollama
+		// failures surface with the right MCP tool error category instead
+		// of being flattened into "ollama". Non-routed errors (e.g. the
+		// completion provider's own nil-guard) keep the conservative
+		// "ollama" default — see routedGenerateCategory's doc.
+		return toolError(string(routedGenerateCategory(err)), "%v", err), nil
 	}
 
 	return toolResult(resp.Completion), nil
