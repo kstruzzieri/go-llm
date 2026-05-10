@@ -15,6 +15,23 @@ type Retriever struct {
 	store    VectorStore
 }
 
+// vectorSpaceProbe summarizes the vector-space-id distribution across a
+// corpus. KnownIDs is a deduped sample (capped at 2) of distinct non-empty
+// vsids; HasUnknown reports whether any chunks still carry the empty-string
+// legacy vsid. The two fields are orthogonal — both can be true for a
+// partially migrated corpus.
+type vectorSpaceProbe struct {
+	KnownIDs   []string
+	HasUnknown bool
+}
+
+// vectorSpaceProber is the optional capability a VectorStore can implement
+// to expose its vsid distribution. Stores that don't implement it skip the
+// drift check.
+type vectorSpaceProber interface {
+	ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, error)
+}
+
 // RetrieverOption configures a Retriever.
 type RetrieverOption func(*Retriever)
 

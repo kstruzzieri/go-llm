@@ -64,6 +64,64 @@ func (s *SQLiteStore) DB() *sql.DB {
 	return s.db
 }
 
+// ProbeVectorSpaces summarizes the vector_space_id distribution across the
+// chunks table. It returns the lex min and max non-empty vsid (deduped to
+// at most two entries) plus a flag indicating any legacy empty-vsid rows.
+//
+// The bookend (ASC LIMIT 1 / DESC LIMIT 1) form is preferred over
+// DISTINCT...LIMIT 2 because the partial index idx_chunks_vector_space_id_nonempty
+// is ordered by vsid, so each bookend serves from a single index entry. A
+// DISTINCT scan would generally walk the index to prove no second distinct
+// value exists. Returned IDs are also deterministic across SQLite versions,
+// which matters for tests that assert returned IDs.
+func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, error) {
+	var minID string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT vector_space_id
+		  FROM chunks
+		 WHERE vector_space_id <> ''
+		 ORDER BY vector_space_id ASC
+		 LIMIT 1`).Scan(&minID)
+	if err != nil && err != sql.ErrNoRows {
+		return vectorSpaceProbe{}, fmt.Errorf("rag: probe min vector space: %w", err)
+	}
+	hasKnown := err != sql.ErrNoRows
+
+	var maxID string
+	if hasKnown {
+		if err := s.db.QueryRowContext(ctx, `
+			SELECT vector_space_id
+			  FROM chunks
+			 WHERE vector_space_id <> ''
+			 ORDER BY vector_space_id DESC
+			 LIMIT 1`).Scan(&maxID); err != nil {
+			return vectorSpaceProbe{}, fmt.Errorf("rag: probe max vector space: %w", err)
+		}
+	}
+
+	// EXISTS short-circuits on first match. Worst case is a fully-migrated
+	// corpus (no empties) which scans the table; SQLite's sequential scan
+	// is acceptable, and the alternative — an index over the empty
+	// predicate — would defeat the partial-index design.
+	var hasUnknown bool
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT EXISTS(SELECT 1 FROM chunks WHERE vector_space_id = '')
+		`).Scan(&hasUnknown); err != nil {
+		return vectorSpaceProbe{}, fmt.Errorf("rag: probe unknown vector spaces: %w", err)
+	}
+
+	probe := vectorSpaceProbe{HasUnknown: hasUnknown}
+	if hasKnown {
+		if minID == maxID {
+			probe.KnownIDs = []string{minID}
+		} else {
+			// Min/max bookends are sufficient evidence of ≥2 distinct values.
+			probe.KnownIDs = []string{minID, maxID}
+		}
+	}
+	return probe, nil
+}
+
 func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 	if len(chunks) != len(embeddings) {
 		return fmt.Errorf("rag: store: chunks/embeddings length mismatch (%d vs %d)", len(chunks), len(embeddings))

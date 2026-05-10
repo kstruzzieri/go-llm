@@ -37,6 +37,21 @@ type atomicSourceReplacerWithHash interface {
 	ReplaceSourceWithHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash string) error
 }
 
+// atomicSourceReplacerWithVectorSpaceID extends atomicSourceReplacerWithHash
+// with vector-space identifier persistence. Stores that implement the
+// capability support drift detection at retrieval time; stores that only
+// implement atomicSourceReplacerWithHash silently drop the vsid.
+type atomicSourceReplacerWithVectorSpaceID interface {
+	ReplaceSourceWithHashAndVectorSpaceID(
+		ctx context.Context,
+		source string,
+		chunks []Chunk,
+		embeddings [][]float64,
+		sourceHash string,
+		vectorSpaceID string,
+	) error
+}
+
 // IndexerOption configures an Indexer.
 type IndexerOption func(*Indexer)
 

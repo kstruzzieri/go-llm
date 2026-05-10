@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"math"
+	"reflect"
 	"testing"
 )
 
@@ -862,5 +863,145 @@ func TestDifferentSourcesDifferentHashes(t *testing.T) {
 	}
 	if gotHashB != hashB {
 		t.Errorf("beta hash = %q, want %q", gotHashB, hashB)
+	}
+}
+
+// insertVSIDRow writes a chunk row with the given vector_space_id directly,
+// bypassing the public Store API which does not yet accept vsid.
+func insertVSIDRow(t *testing.T, store *SQLiteStore, id, vsid string) {
+	t.Helper()
+	if _, err := store.db.Exec(
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+		 VALUES (?, 'x', 's.go', 1, 1, 'go', '{}', '[0.1]', 1, '', '', ?)`,
+		id, vsid,
+	); err != nil {
+		t.Fatalf("insert vsid row %q/%q: %v", id, vsid, err)
+	}
+}
+
+func TestProbeVectorSpaces_empty(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatalf("ProbeVectorSpaces: %v", err)
+	}
+	want := vectorSpaceProbe{KnownIDs: nil, HasUnknown: false}
+	if !reflect.DeepEqual(probe, want) {
+		t.Errorf("probe = %+v, want %+v", probe, want)
+	}
+}
+
+func TestProbeVectorSpaces_singleKnown(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"a", "b", "c"} {
+		insertVSIDRow(t, store, id, "X")
+	}
+
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatalf("ProbeVectorSpaces: %v", err)
+	}
+	want := vectorSpaceProbe{KnownIDs: []string{"X"}, HasUnknown: false}
+	if !reflect.DeepEqual(probe, want) {
+		t.Errorf("probe = %+v, want %+v", probe, want)
+	}
+}
+
+func TestProbeVectorSpaces_singleKnown_plusUnknown(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	insertVSIDRow(t, store, "a", "X")
+	insertVSIDRow(t, store, "b", "X")
+	insertVSIDRow(t, store, "c", "")
+	insertVSIDRow(t, store, "d", "")
+
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatalf("ProbeVectorSpaces: %v", err)
+	}
+	want := vectorSpaceProbe{KnownIDs: []string{"X"}, HasUnknown: true}
+	if !reflect.DeepEqual(probe, want) {
+		t.Errorf("probe = %+v, want %+v", probe, want)
+	}
+}
+
+func TestProbeVectorSpaces_twoKnown(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	// Insert in non-alphabetical order to verify bookend probe sorts.
+	insertVSIDRow(t, store, "a", "Y")
+	insertVSIDRow(t, store, "b", "A")
+
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatalf("ProbeVectorSpaces: %v", err)
+	}
+	want := vectorSpaceProbe{KnownIDs: []string{"A", "Y"}, HasUnknown: false}
+	if !reflect.DeepEqual(probe, want) {
+		t.Errorf("probe = %+v, want %+v", probe, want)
+	}
+}
+
+func TestProbeVectorSpaces_twoKnown_plusUnknown(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	insertVSIDRow(t, store, "a", "Y")
+	insertVSIDRow(t, store, "b", "A")
+	insertVSIDRow(t, store, "c", "")
+
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatalf("ProbeVectorSpaces: %v", err)
+	}
+	want := vectorSpaceProbe{KnownIDs: []string{"A", "Y"}, HasUnknown: true}
+	if !reflect.DeepEqual(probe, want) {
+		t.Errorf("probe = %+v, want %+v", probe, want)
+	}
+}
+
+func TestProbeVectorSpaces_fullyLegacy(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, id := range []string{"a", "b", "c"} {
+		insertVSIDRow(t, store, id, "")
+	}
+
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatalf("ProbeVectorSpaces: %v", err)
+	}
+	want := vectorSpaceProbe{KnownIDs: nil, HasUnknown: true}
+	if !reflect.DeepEqual(probe, want) {
+		t.Errorf("probe = %+v, want %+v", probe, want)
+	}
+}
+
+// TestProbeVectorSpaces_threeKnown_returnsBookends documents that the bookend
+// strategy returns only the lex min/max even if a middle vsid exists. This
+// is intentional — Retriever's decision matrix only cares whether ≥2 distinct
+// values exist; deeper enumeration would not change the outcome.
+func TestProbeVectorSpaces_threeKnown_returnsBookends(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	insertVSIDRow(t, store, "a", "A")
+	insertVSIDRow(t, store, "b", "M")
+	insertVSIDRow(t, store, "c", "Z")
+
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatalf("ProbeVectorSpaces: %v", err)
+	}
+	want := vectorSpaceProbe{KnownIDs: []string{"A", "Z"}, HasUnknown: false}
+	if !reflect.DeepEqual(probe, want) {
+		t.Errorf("probe = %+v, want %+v", probe, want)
 	}
 }
