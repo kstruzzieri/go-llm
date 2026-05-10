@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"reflect"
 	"testing"
@@ -620,6 +621,73 @@ func TestGetSourceHashNoHashStored(t *testing.T) {
 func TestGetSourceHashImplementsInterface(t *testing.T) {
 	store := newTestStore(t)
 	var _ sourceHashChecker = store
+}
+
+// --- ReplaceSourceWithHashAndVectorSpaceID tests (#82 Phase 2) ---
+
+// TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_writesColumnAndMetadata
+// is the foundational store-layer test for #82 Phase 2 (spec §10.2, TDD test 1).
+//
+// Asserts the store owns the metadata-mirror invariant: when given a non-empty
+// vsid, it writes the value to both the chunks.vector_space_id column (primary)
+// AND injects "vector_space_id": "X" into each chunk's metadata JSON (mirror).
+// Both assertions go through direct SQL — the verification gate's integration
+// test reads vector_space_id via SELECT, so the unit test mirrors that observable.
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_writesColumnAndMetadata(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{
+			ID: "c1", Content: "func Hello() {}", Source: "main.go",
+			StartLine: 1, EndLine: 3, Language: "go", Metadata: map[string]string{},
+		},
+		{
+			ID: "c2", Content: "func World() {}", Source: "main.go",
+			StartLine: 5, EndLine: 7, Language: "go", Metadata: map[string]string{},
+		},
+	}
+	embeddings := [][]float64{{1.0, 0.0}, {0.0, 1.0}}
+	const (
+		sourceHash    = "abc123def456abc123def456"
+		vectorSpaceID = "ollama/qwen3-embedding:8b"
+	)
+
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", chunks, embeddings, sourceHash, vectorSpaceID); err != nil {
+		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID() error: %v", err)
+	}
+
+	rows, err := store.db.QueryContext(ctx,
+		`SELECT id, vector_space_id, metadata FROM chunks WHERE source = 'main.go' ORDER BY id`)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var seen int
+	for rows.Next() {
+		var id, vsidCol, metaJSON string
+		if err := rows.Scan(&id, &vsidCol, &metaJSON); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if vsidCol != vectorSpaceID {
+			t.Errorf("chunk %q vector_space_id column = %q, want %q", id, vsidCol, vectorSpaceID)
+		}
+		var meta map[string]string
+		if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+			t.Fatalf("chunk %q metadata unmarshal: %v (raw=%q)", id, err, metaJSON)
+		}
+		if got := meta["vector_space_id"]; got != vectorSpaceID {
+			t.Errorf("chunk %q metadata[\"vector_space_id\"] = %q, want %q", id, got, vectorSpaceID)
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+	if seen != 2 {
+		t.Fatalf("expected 2 chunks, got %d", seen)
+	}
 }
 
 // --- ReplaceSourceWithHash tests (Task 1.5) ---
