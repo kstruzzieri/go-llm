@@ -24,12 +24,15 @@ Designed for embedding into Go applications that need LLM capabilities: chat, to
 | `rag/parquet/` | Parquet dataset exporter for ML pipeline interop — exports vector store contents with quality metrics and configurable precision. |
 | `completion/` | IDE inline completion via Fill-in-the-Middle (FIM) with context window management. Sync and streaming APIs. |
 | `analysis/` | Domain-specific analysis helpers — code review (with optional RAG context), ML training metrics, and trading strategy analysis. |
-| `mcp/` | MCP server exposing go-llm as tools, prompts, and resources over stdio and HTTP/2 transports. |
+| `mcp/` | MCP server exposing go-llm as tools, prompts, and resources over stdio and HTTP/2 transports. Tool calls flow through `provider.Router`. |
 | `conversation/` | Persistent conversation storage with SQLite. |
 | `feedback/` | Implicit user behavioral signal collection for retrieval quality improvement. |
 | `fingerprint/` | Model profiling — latency benchmarks and capability detection. |
 | `prefetch/` | Predictive cache-warming engine for RAG retrieval. |
+| `compat/` | OpenAI-compatible endpoint shim — chat, completions, model aliases, and a concurrency limiter for clients that speak OpenAI's API but want to target local Ollama models. |
 | `cmd/go-llm-mcp/` | Standalone MCP server binary with stdio and HTTP/2 support. |
+| `cmd/fim-smoke/` | Smoke-test harness for Fill-in-the-Middle completion against a running Ollama. |
+| `cmd/llm-bench/` | Latency benchmark for the configured model lineup. |
 
 ## Requirements
 
@@ -292,7 +295,7 @@ Claude Desktop configuration (`claude_desktop_config.json`):
 }
 ```
 
-The server exposes 19 tools (chat, generate, code completion, embeddings, RAG, model management, analysis), 4 prompt templates, and 5 resources. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the configured default for that use-case is used.
+The server exposes 19 tools (chat, generate, code completion, embeddings, RAG, model management, analysis), 4 prompt templates, 7 concrete resources, and 1 resource template. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see Roadmap.)
 
 ## Parquet Export
 
@@ -330,11 +333,25 @@ insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
 
 ## Roadmap
 
+### Recently shipped
+
 | Feature | Description |
 |---------|-------------|
-| Router-MCP integration | Wire provider.Router into MCP server for intelligent model selection with circuit breakers and fallback chains |
-| FIM intelligence | Adaptive token budgets and multi-family stop tokens for completion |
-| OpenAI-compatible endpoint | `compat/` package exposing an OpenAI-compatible API over local Ollama models |
+| Provider Router → MCP | `mcp/` chat/generate/embed/completion tools and analysis handlers route through `provider.Router` with use-case-aware weight profiles, circuit breakers, warmth scoring, and sticky preference. Routing state surfaced via `route://breakers`, `route://warmth`, `route://sticky` resources. |
+| FIM via Router | Completion routing with FIM-family pinning, template prompt support, and empty-suffix semantics — `provider.Router` chooses the actual completion model under the hood. |
+
+### In progress
+
+| Feature | Description |
+|---------|-------------|
+| OpenAI-compatible endpoint | `compat/` package exposes local Ollama models via an OpenAI-compatible chat/completions API for clients that speak OpenAI's API but want a local backend. Concurrency limiter and model-alias resolution are in place; further hardening ongoing. |
+| Persistent drift signature | Per-chunk vector-space identity in the RAG SQLite store so cross-run drift across embedding-model boundaries is detected at query time. Closes the chain-fallback channel that the in-memory drift guard left open. |
+
+### Future
+
+| Feature | Description |
+|---------|-------------|
+| In-band routing transparency | Surface `RouteOutcome` (actual model, fallbacks used, sticky decision) in MCP tool responses so callers see which model served a request rather than only the planned default. Out-of-band today via `route://*` resources. |
 | Vision support | Image inputs in chat messages |
 | ANN search | Approximate nearest neighbor search for large vector stores |
 

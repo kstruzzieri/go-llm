@@ -12,16 +12,21 @@
 go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
 ├── config/          # Model configuration loader (models.json, resolve, fallback)
-├── provider/        # Intelligent model routing (Router, circuit breakers, warmth, scoring)
+├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, sticky routing, scoring, fallback chains
 ├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
-├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2
+├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
 ├── conversation/    # Persistent conversation storage with SQLite
 ├── feedback/        # Implicit user behavioral signal collection
 ├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
 ├── prefetch/        # Predictive cache-warming engine for RAG retrieval
-├── cmd/go-llm-mcp/  # Standalone MCP server binary
+├── compat/          # OpenAI-compatible endpoint shim (chat, completions, model aliases, concurrency limiter)
+├── cmd/
+│   ├── go-llm-mcp/  # Standalone MCP server binary (stdio + HTTP/2)
+│   ├── fim-smoke/   # FIM smoke-test harness
+│   └── llm-bench/   # Model latency benchmark
+├── docs/            # Reference documentation (BYO models, design notes)
 └── testdata/        # Test fixtures
 ```
 
