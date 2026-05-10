@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"database/sql"
+	"strings"
 	"testing"
 	"time"
 
@@ -12,14 +13,14 @@ import (
 func TestMigrationFreshDB(t *testing.T) {
 	store := newTestStore(t)
 
-	// Verify rag_schema_version exists with version 4.
+	// Verify rag_schema_version exists with the latest applied version.
 	var maxVersion int
 	err := store.db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 4 {
-		t.Errorf("max schema version = %d, want 4", maxVersion)
+	if maxVersion != 5 {
+		t.Errorf("max schema version = %d, want 5", maxVersion)
 	}
 
 	// Verify chunks_fts virtual table exists.
@@ -102,14 +103,14 @@ func TestMigrationExistingDB(t *testing.T) {
 		t.Fatalf("runMigrations() error: %v", err)
 	}
 
-	// Verify version upgraded to 4.
+	// Verify version upgraded to the latest applied version.
 	var maxVersion int
 	err = db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 4 {
-		t.Errorf("max schema version = %d, want 4", maxVersion)
+	if maxVersion != 5 {
+		t.Errorf("max schema version = %d, want 5", maxVersion)
 	}
 
 	// Verify indexed_at was backfilled (should be non-zero).
@@ -393,13 +394,13 @@ func TestMigrationIdempotency(t *testing.T) {
 		t.Fatalf("second runMigrations() error: %v", err)
 	}
 
-	// Verify version is still 4 (not duplicated).
+	// Verify version count is unchanged after re-run (no duplicates).
 	var count int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&count); err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
-	if count != 4 {
-		t.Errorf("expected 4 version records (v1, v2, v3, v4), got %d", count)
+	if count != 5 {
+		t.Errorf("expected 5 version records (v1..v5), got %d", count)
 	}
 }
 
@@ -476,14 +477,14 @@ func TestFTS5UpsertConsistency(t *testing.T) {
 func TestMigrationV4SourceContentHash(t *testing.T) {
 	store := newTestStore(t)
 
-	// Verify max schema version is 4.
+	// Verify max schema version is the latest applied version.
 	var maxVersion int
 	err := store.db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 4 {
-		t.Errorf("max schema version = %d, want 4", maxVersion)
+	if maxVersion != 5 {
+		t.Errorf("max schema version = %d, want 5", maxVersion)
 	}
 
 	// Verify source_content_hash column exists by inserting and querying it.
@@ -578,14 +579,14 @@ func TestMigrationV4ExistingDB(t *testing.T) {
 		t.Fatalf("runMigrations() error: %v", err)
 	}
 
-	// Verify version upgraded to 4.
+	// Verify version upgraded to the latest applied version.
 	var maxVersion int
 	err = db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion)
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 4 {
-		t.Errorf("max schema version = %d, want 4", maxVersion)
+	if maxVersion != 5 {
+		t.Errorf("max schema version = %d, want 5", maxVersion)
 	}
 
 	// Verify existing row has empty default hash.
@@ -656,13 +657,13 @@ func TestMigrationHalfAppliedV2(t *testing.T) {
 		t.Fatalf("runMigrations() on half-applied v2: %v", err)
 	}
 
-	// Verify version recorded as 4 (v2 detected, then v3+v4 applied).
+	// Verify version recorded at latest (v2 detected, then v3+v4+v5 applied).
 	var maxVersion int
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 4 {
-		t.Errorf("max version = %d, want 4", maxVersion)
+	if maxVersion != 5 {
+		t.Errorf("max version = %d, want 5", maxVersion)
 	}
 }
 
@@ -728,12 +729,310 @@ func TestMigrationHalfAppliedV2WithV1Recorded(t *testing.T) {
 		t.Fatalf("runMigrations() on v2 schema with v1 recorded: %v", err)
 	}
 
-	// Verify version is now 4 (v2 detected, then v3+v4 applied).
+	// Verify version is now at latest (v2 detected, then v3+v4+v5 applied).
 	var maxVersion int
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 4 {
-		t.Errorf("max version = %d, want 4", maxVersion)
+	if maxVersion != 5 {
+		t.Errorf("max version = %d, want 5", maxVersion)
+	}
+}
+
+// v4Schema is the chunks-table shape after migrations 1-4. Used by the v5
+// migration tests to set up a pre-v5 fixture.
+const v4Schema = `
+CREATE TABLE chunks (
+	id TEXT PRIMARY KEY,
+	content TEXT NOT NULL,
+	source TEXT NOT NULL,
+	start_line INTEGER NOT NULL,
+	end_line INTEGER NOT NULL,
+	language TEXT NOT NULL DEFAULT '',
+	metadata TEXT NOT NULL DEFAULT '{}',
+	embedding TEXT NOT NULL,
+	indexed_at INTEGER NOT NULL DEFAULT 0,
+	stable_key TEXT NOT NULL DEFAULT '',
+	source_content_hash TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX idx_chunks_source_line ON chunks(source, start_line);
+CREATE INDEX idx_chunks_lang_source_line ON chunks(language, source, start_line);
+CREATE INDEX idx_chunks_stable_key ON chunks(stable_key);
+CREATE VIRTUAL TABLE chunks_fts USING fts5(
+	content, source,
+	content=chunks, content_rowid=rowid
+);
+CREATE TRIGGER chunks_ai AFTER INSERT ON chunks BEGIN
+	INSERT INTO chunks_fts(rowid, content, source)
+	VALUES (new.rowid, new.content, new.source);
+END;
+CREATE TRIGGER chunks_ad AFTER DELETE ON chunks BEGIN
+	INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+	VALUES ('delete', old.rowid, old.content, old.source);
+END;
+CREATE TRIGGER chunks_au AFTER UPDATE ON chunks BEGIN
+	INSERT INTO chunks_fts(chunks_fts, rowid, content, source)
+	VALUES ('delete', old.rowid, old.content, old.source);
+	INSERT INTO chunks_fts(rowid, content, source)
+	VALUES (new.rowid, new.content, new.source);
+END;
+CREATE TABLE rag_schema_version (
+	version     INTEGER PRIMARY KEY,
+	description TEXT NOT NULL,
+	applied_at  INTEGER NOT NULL
+);
+INSERT INTO rag_schema_version (version, description, applied_at) VALUES (1, 'baseline schema', 1000);
+INSERT INTO rag_schema_version (version, description, applied_at) VALUES (2, 'add indexed_at, FTS5 index, and sync triggers', 1000);
+INSERT INTO rag_schema_version (version, description, applied_at) VALUES (3, 'add stable_key column for chunk identity', 1000);
+INSERT INTO rag_schema_version (version, description, applied_at) VALUES (4, 'add source_content_hash for incremental indexing', 1000);
+`
+
+// openV4DB returns an in-memory SQLite handle pre-loaded with the v4 schema
+// fixture. Single MaxOpenConns keeps schema state on one connection.
+func openV4DB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(v4Schema); err != nil {
+		t.Fatalf("create v4 schema: %v", err)
+	}
+	return db
+}
+
+func TestMigration_v4_to_v5_addsColumn(t *testing.T) {
+	db := openV4DB(t)
+
+	// Pre-existing v4 row, written without knowledge of vector_space_id.
+	if _, err := db.Exec(
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash)
+		 VALUES ('legacy-1', 'hello', 'main.go', 1, 5, 'go', '{}', '[0.1]', 12345, 'sk1', 'h1')`,
+	); err != nil {
+		t.Fatalf("seed v4 row: %v", err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
+	}
+
+	var maxVersion int
+	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
+		t.Fatalf("query version: %v", err)
+	}
+	if maxVersion != 5 {
+		t.Errorf("max schema version = %d, want 5", maxVersion)
+	}
+
+	rows, err := db.Query(`PRAGMA table_info(chunks)`)
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var (
+		found   bool
+		colType string
+		notNull int
+		dfltVal sql.NullString
+	)
+	for rows.Next() {
+		var (
+			cid   int
+			name  string
+			ctype string
+			nn    int
+			dflt  sql.NullString
+			pk    int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &nn, &dflt, &pk); err != nil {
+			t.Fatalf("scan pragma row: %v", err)
+		}
+		if name == "vector_space_id" {
+			found = true
+			colType = ctype
+			notNull = nn
+			dfltVal = dflt
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("pragma rows.Err: %v", err)
+	}
+	if !found {
+		t.Fatal("vector_space_id column missing after v5 migration")
+	}
+	if colType != "TEXT" {
+		t.Errorf("vector_space_id type = %q, want TEXT", colType)
+	}
+	if notNull != 1 {
+		t.Errorf("vector_space_id NOT NULL = %d, want 1", notNull)
+	}
+	// SQLite stores the default literal verbatim, including quotes.
+	if !dfltVal.Valid || dfltVal.String != "''" {
+		t.Errorf("vector_space_id default = %v, want ''", dfltVal)
+	}
+
+	var vsid string
+	if err := db.QueryRow(
+		`SELECT vector_space_id FROM chunks WHERE id = 'legacy-1'`,
+	).Scan(&vsid); err != nil {
+		t.Fatalf("scan vector_space_id: %v", err)
+	}
+	if vsid != "" {
+		t.Errorf("legacy row vector_space_id = %q, want \"\"", vsid)
+	}
+}
+
+func TestMigration_v4_to_v5_partialIndex(t *testing.T) {
+	db := openV4DB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
+	}
+
+	rowsToInsert := []struct {
+		id, vsid string
+	}{
+		{"a", ""},
+		{"b", "ollama/qwen3-embedding:8b"},
+		{"c", "ollama/nomic-embed-text"},
+		{"d", ""},
+	}
+	for _, r := range rowsToInsert {
+		if _, err := db.Exec(
+			`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+			 VALUES (?, 'x', 's.go', 1, 1, 'go', '{}', '[0.1]', 1, '', '', ?)`,
+			r.id, r.vsid,
+		); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+	}
+
+	planRows, err := db.Query(`EXPLAIN QUERY PLAN
+		SELECT vector_space_id FROM chunks
+		 WHERE vector_space_id <> ''
+		 ORDER BY vector_space_id ASC
+		 LIMIT 1`)
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer func() { _ = planRows.Close() }()
+
+	var planText string
+	for planRows.Next() {
+		var (
+			id     int
+			parent int
+			notUsd int
+			detail string
+		)
+		if err := planRows.Scan(&id, &parent, &notUsd, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		planText += detail + "\n"
+	}
+	if err := planRows.Err(); err != nil {
+		t.Fatalf("plan rows.Err: %v", err)
+	}
+	if !strings.Contains(planText, "idx_chunks_vector_space_id_nonempty") {
+		t.Errorf("query plan does not reference idx_chunks_vector_space_id_nonempty:\n%s", planText)
+	}
+
+	var nonEmptyCount int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM chunks WHERE vector_space_id <> ''`,
+	).Scan(&nonEmptyCount); err != nil {
+		t.Fatalf("count non-empty: %v", err)
+	}
+	if nonEmptyCount != 2 {
+		t.Errorf("non-empty count = %d, want 2", nonEmptyCount)
+	}
+}
+
+// TestMigration_v5_partialIndex_descBookend pairs with TestMigration_v4_to_v5_partialIndex
+// to verify both ASC and DESC bookend probes serve from the partial index.
+// ProbeVectorSpaces relies on this for its lex-min/lex-max single-index-entry
+// reads; without coverage of the DESC plan, a planner regression could
+// silently turn the max-bookend into a full index scan.
+func TestMigration_v5_partialIndex_descBookend(t *testing.T) {
+	db := openV4DB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
+	}
+
+	// Insert in non-alphabetical order so DESC plan is meaningful.
+	for _, r := range []struct{ id, vsid string }{
+		{"a", "B"},
+		{"b", "A"},
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+			 VALUES (?, 'x', 's.go', 1, 1, 'go', '{}', '[0.1]', 1, '', '', ?)`,
+			r.id, r.vsid,
+		); err != nil {
+			t.Fatalf("insert %s: %v", r.id, err)
+		}
+	}
+
+	planRows, err := db.Query(`EXPLAIN QUERY PLAN
+		SELECT vector_space_id FROM chunks
+		 WHERE vector_space_id <> ''
+		 ORDER BY vector_space_id DESC
+		 LIMIT 1`)
+	if err != nil {
+		t.Fatalf("explain query plan: %v", err)
+	}
+	defer func() { _ = planRows.Close() }()
+
+	var planText string
+	for planRows.Next() {
+		var (
+			id     int
+			parent int
+			notUsd int
+			detail string
+		)
+		if err := planRows.Scan(&id, &parent, &notUsd, &detail); err != nil {
+			t.Fatalf("scan plan: %v", err)
+		}
+		planText += detail + "\n"
+	}
+	if err := planRows.Err(); err != nil {
+		t.Fatalf("plan rows.Err: %v", err)
+	}
+	if !strings.Contains(planText, "idx_chunks_vector_space_id_nonempty") {
+		t.Errorf("DESC bookend plan does not reference idx_chunks_vector_space_id_nonempty:\n%s", planText)
+	}
+}
+
+func TestMigration_v5_open_idempotent(t *testing.T) {
+	db := openV4DB(t)
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("first runMigrations() error: %v", err)
+	}
+	var firstVersion int
+	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&firstVersion); err != nil {
+		t.Fatalf("query first version: %v", err)
+	}
+	if firstVersion != 5 {
+		t.Fatalf("first run max version = %d, want 5", firstVersion)
+	}
+
+	var firstRowCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&firstRowCount); err != nil {
+		t.Fatalf("count version rows: %v", err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("second runMigrations() error: %v", err)
+	}
+	var secondRowCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&secondRowCount); err != nil {
+		t.Fatalf("count version rows after re-run: %v", err)
+	}
+	if secondRowCount != firstRowCount {
+		t.Errorf("schema_version rows after re-open = %d, want %d (no duplicate inserts)", secondRowCount, firstRowCount)
 	}
 }

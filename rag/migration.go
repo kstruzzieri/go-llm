@@ -37,6 +37,11 @@ var migrations = []migration{
 		description: "add source_content_hash for incremental indexing",
 		fn:          migrateV4,
 	},
+	{
+		version:     5,
+		description: "add vector_space_id column with non-empty partial index",
+		fn:          migrateV5,
+	},
 }
 
 // migrateV1 creates the baseline chunks table and indexes.
@@ -133,6 +138,25 @@ func migrateV4(tx *sql.Tx) error {
 	_, err := tx.Exec(`ALTER TABLE chunks ADD COLUMN source_content_hash TEXT NOT NULL DEFAULT ''`)
 	if err != nil {
 		return fmt.Errorf("rag: migrate v4: %w", err)
+	}
+	return nil
+}
+
+// migrateV5 adds the vector_space_id column and a partial index over
+// non-empty values. Legacy rows keep the empty default; the partial-index
+// predicate keeps them out of the index, so probe queries that filter on
+// vector_space_id <> '' stay cheap regardless of corpus size.
+func migrateV5(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE chunks ADD COLUMN vector_space_id TEXT NOT NULL DEFAULT ''`,
+		`CREATE INDEX IF NOT EXISTS idx_chunks_vector_space_id_nonempty
+			ON chunks(vector_space_id)
+			WHERE vector_space_id <> ''`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("rag: migrate v5: %w", err)
+		}
 	}
 	return nil
 }
