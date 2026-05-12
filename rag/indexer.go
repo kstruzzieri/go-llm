@@ -242,8 +242,14 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	// subsequent IndexFileIncremental calls can safely use the fast path.
 	// Persist the resolved vector-space identity so retrieval-time drift
 	// detection can fail closed across cross-run embedding-model changes.
+	vsid := resolveVectorSpaceID(res)
+	if vsid == "" {
+		if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable {
+			return fmt.Errorf("rag: refuse to index %q: embedder returned no VectorSpaceID/Provider/Model and store is vsid-capable", path)
+		}
+	}
 	sourceHash := idx.currentSourceSignature(content).String()
-	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, resolveVectorSpaceID(res)); err != nil {
+	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vsid); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 

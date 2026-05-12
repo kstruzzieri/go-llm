@@ -871,3 +871,109 @@ func TestIndexer_vsidFallbackProviderModel(t *testing.T) {
 		t.Errorf("vector_space_id = %q, want %q (derived from Provider/Model fallback)", vsidCol, wantVSID)
 	}
 }
+
+// TestIndexer_vsidCapableStore_emptyVSID_fails covers spec §5.6 fail-closed
+// behavior. When the underlying store is vsid-capable and the embedder
+// returns embeddings without any way to derive a vsid (empty
+// VectorSpaceID/Provider/Model), IndexFile MUST refuse the write before any
+// rows land. This prevents fresh vector_space_id = '' rows from being
+// silently mixed into a corpus that drift detection cannot recover from.
+//
+// Red until IndexFile gains a pre-dispatch fail-closed check for vsid-capable
+// stores receiving an empty resolved vsid on a non-empty chunk batch.
+func TestIndexer_vsidCapableStore_emptyVSID_fails(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings: [][]float64{{1, 0, 0, 0}},
+		// VectorSpaceID, Provider, Model all empty — resolveVectorSpaceID returns ""
+	}}
+
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{{ID: "c1", Content: content, Source: path, StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	if err := os.WriteFile(path, []byte("package x"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	err = idx.IndexFile(context.Background(), path)
+	if err == nil {
+		t.Fatal("IndexFile() with empty vsid against capable store: expected error, got nil")
+	}
+
+	// No fresh empty-vsid rows must have been written.
+	var count int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM chunks WHERE source = ?`, path).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("chunks rows after failed IndexFile = %d, want 0 (must not write empty-vsid rows)", count)
+	}
+}
+
+// TestIndexer_vsidCapableStore_emptyContent_clearsCleanly is the §10.2
+// refinement sibling of the empty-vsid fail-closed test. The fail-closed
+// check must NOT fire on legitimate empty-content / no-chunks paths, which
+// all four call sites (rag/indexer.go and rag/indexer_incremental.go) drive
+// through idx.replaceSource(ctx, path, nil, nil). Those paths intentionally
+// pass empty vsid with empty chunks, and must continue to work.
+func TestIndexer_vsidCapableStore_emptyContent_clearsCleanly(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	// Seed a pre-existing row to confirm empty-content clears it.
+	seedEmb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0, 0, 0}},
+		VectorSpaceID: "ollama/seed",
+	}}
+	idx, err := NewIndexerWithEmbedder(seedEmb, store, WithEmbeddingModel("seed"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{{ID: "c1", Content: content, Source: path, StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	if err := os.WriteFile(path, []byte("package x"), 0644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("seed IndexFile: %v", err)
+	}
+
+	// Now truncate the file and re-index. This drives the empty-content path
+	// at indexer.go's `if content == ""` branch, which calls
+	// idx.replaceSource(ctx, path, nil, nil) — empty vsid, no chunks.
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatalf("truncate: %v", err)
+	}
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("IndexFile on empty content: expected clean clear, got error: %v", err)
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM chunks WHERE source = ?`, path).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("chunks rows after empty-content re-index = %d, want 0 (seeded row should be cleared)", count)
+	}
+}
