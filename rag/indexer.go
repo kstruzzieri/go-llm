@@ -243,11 +243,27 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	// Persist the resolved vector-space identity so retrieval-time drift
 	// detection can fail closed across cross-run embedding-model changes.
 	sourceHash := idx.currentSourceSignature(content).String()
-	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, res.VectorSpaceID); err != nil {
+	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, resolveVectorSpaceID(res)); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 
 	return nil
+}
+
+// resolveVectorSpaceID picks the vsid the indexer will persist for a batch.
+// It prefers the embedder's explicit VectorSpaceID, falls back to
+// Provider/Model synthesis when only those two are populated, and returns
+// empty when neither path yields a value. Capability-aware dispatch in
+// replaceSourceWithProvenance is responsible for failing closed on empty
+// vsid against a vsid-capable store (see spec §5.6 / Test 4a).
+func resolveVectorSpaceID(res EmbedResult) string {
+	if res.VectorSpaceID != "" {
+		return res.VectorSpaceID
+	}
+	if res.Provider != "" && res.Model != "" {
+		return res.Provider + "/" + res.Model
+	}
+	return ""
 }
 
 // IndexDirOption configures IndexDirectory behavior.

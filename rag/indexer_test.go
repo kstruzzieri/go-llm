@@ -820,3 +820,54 @@ func TestIndexer_writesMetadataMirror(t *testing.T) {
 		t.Fatalf("expected 1 chunk, got %d", seen)
 	}
 }
+
+// TestIndexer_vsidFallbackProviderModel covers spec §5.6 fallback derivation:
+// when the embedder returns an empty VectorSpaceID but populates Provider and
+// Model, the indexer MUST synthesize the vsid as "Provider/Model" rather than
+// persisting an empty column. This preserves vsid drift detection for older
+// Embedder implementations that did not adopt the explicit VectorSpaceID field.
+//
+// Red until IndexFile computes the fallback before calling
+// replaceSourceWithProvenance.
+func TestIndexer_vsidFallbackProviderModel(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0, 0, 0}},
+		Provider:      "fake",
+		Model:         "m",
+		VectorSpaceID: "", // empty — indexer must fall back to Provider/Model
+	}}
+
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{{ID: "c1", Content: content, Source: path, StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	if err := os.WriteFile(path, []byte("package x"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("IndexFile() error: %v", err)
+	}
+
+	const wantVSID = "fake/m"
+	var vsidCol string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT vector_space_id FROM chunks WHERE source = ? LIMIT 1`, path).Scan(&vsidCol); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if vsidCol != wantVSID {
+		t.Errorf("vector_space_id = %q, want %q (derived from Provider/Model fallback)", vsidCol, wantVSID)
+	}
+}
