@@ -133,7 +133,15 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 	}
 	embeddings := res.Embeddings
 
-	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
+	// Mirror IndexFile's vsid resolution + fail-closed check so this
+	// fallback path can't silently drop vsid into a vsid-capable store.
+	vsid := resolveVectorSpaceID(res)
+	if vsid == "" {
+		if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable {
+			return fmt.Errorf("rag: refuse to index %q: embedder returned no VectorSpaceID/Provider/Model and store is vsid-capable", path)
+		}
+	}
+	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vsid); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 	return nil

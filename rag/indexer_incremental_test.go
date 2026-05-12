@@ -1191,3 +1191,59 @@ func TestIndexDirectory_WithIncremental(t *testing.T) {
 		t.Errorf("expected 0 embed calls with WithIncremental on unchanged files, got %d", got)
 	}
 }
+
+// TestIndexerIncremental_fullReplacement_writesVSID is the §10.2 refinement
+// guard for the second indexer write path: IndexFileIncremental's
+// full-replacement fall-back. The incremental indexer falls back to full
+// re-embed under several conditions (no workspace root, no pre-existing
+// chunks, version bump, incremental path error), and that fall-back must
+// route through the same vsid-aware funnel as IndexFile. Without the guard,
+// vsid silently drops through this path and corrupts the corpus.
+//
+// Red until indexer_incremental.go's full re-index call site is migrated
+// from replaceSourceWithHash to replaceSourceWithProvenance with vsid
+// resolution.
+func TestIndexerIncremental_fullReplacement_writesVSID(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "ollama/qwen3-embedding:8b"
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0, 0, 0}},
+		Model:         "qwen3-embedding:8b",
+		Provider:      "ollama",
+		VectorSpaceID: wantVSID,
+	}}
+
+	// No WithWorkspaceRoot → canDoIncremental returns false → straight to
+	// the full re-index path inside IndexFileIncremental.
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("qwen3-embedding:8b"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{{ID: "c1", Content: content, Source: path, StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	if err := os.WriteFile(path, []byte("package x"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	var vsidCol string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT vector_space_id FROM chunks WHERE source = ? LIMIT 1`, path).Scan(&vsidCol); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if vsidCol != wantVSID {
+		t.Errorf("vector_space_id after IndexFileIncremental fallback = %q, want %q (full re-index path must route vsid)", vsidCol, wantVSID)
+	}
+}
