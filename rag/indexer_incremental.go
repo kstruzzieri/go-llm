@@ -98,6 +98,11 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 		}
 		return nil
 	}
+	if hasExpectedSourceHash {
+		if _, ok := idx.store.(atomicSourceReplacerWithExpectedHashAndVectorSpaceID); !ok {
+			forceFullReembed = true
+		}
+	}
 
 	// Step 1.5: Compute stable keys if workspace root is set.
 	if idx.workspaceRoot != "" {
@@ -226,12 +231,7 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 	reusedStatus := cachedVSIDNone
 	if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable && len(diff.unchanged) > 0 {
 		reusedVSID, reusedStatus = reusedCachedVSID(diff.unchanged)
-		switch reusedStatus {
-		case cachedVSIDUniform:
-			// Reusable cached embeddings all belong to the same known vector space.
-		case cachedVSIDLegacyUnknown:
-			return reusedCachedVSIDError(path, reusedStatus)
-		default:
+		if reusedStatus != cachedVSIDUniform {
 			return reusedCachedVSIDError(path, reusedStatus)
 		}
 	}
@@ -285,7 +285,7 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 
 	// Atomically replace source with the full new chunk set.
 	if err := idx.replaceIncrementalSource(ctx, path, newChunks, finalEmbeddings, sourceHash, finalVSID, expectedSourceHash, hasExpectedSourceHash); err != nil {
-		return fmt.Errorf("%w: replace chunks for %q: %w", ErrStoreOperation, path, err)
+		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 	return nil
 }
@@ -324,8 +324,12 @@ func reusedCachedVSID(unchanged []unchangedChunk) (id string, status cachedVSIDS
 func reusedCachedVSIDError(path string, status cachedVSIDStatus) error {
 	switch status {
 	case cachedVSIDLegacyUnknown:
+		// Legacy unknown rows are repairable by a full re-embed, so expose both
+		// the fallback sentinel and the missing-vsid domain reason.
 		return fmt.Errorf("%w: %w: incremental index %q: reused cached embeddings have legacy empty VectorSpaceID", ErrIncrementalRebuildRequired, ErrMissingVectorSpaceID, path)
 	case cachedVSIDMixed:
+		// Mixed known vector spaces are not repairable by silent fallback; they
+		// must fail closed so operators can choose an explicit rebuild.
 		return fmt.Errorf("%w: incremental index %q: reused cached embeddings have mixed VectorSpaceID values", ErrCorpusMixedVectorSpaces, path)
 	default:
 		return fmt.Errorf("%w: incremental index %q: no cached VectorSpaceID available", ErrIncrementalRebuildRequired, path)

@@ -53,9 +53,23 @@ type atomicSourceReplacerWithVectorSpaceID interface {
 	) error
 }
 
-// atomicSourceReplacerWithExpectedHashAndVectorSpaceID extends the vsid-aware
-// replacement capability with a transactional source-hash compare-and-swap for
-// incremental indexing.
+// atomicSourceForceReplacerWithVectorSpaceID is the explicit full-reindex
+// capability. It may replace an existing source even when the stored vector
+// space differs from the incoming vectorSpaceID.
+type atomicSourceForceReplacerWithVectorSpaceID interface {
+	ForceReplaceSourceWithHashAndVectorSpaceID(
+		ctx context.Context,
+		source string,
+		chunks []Chunk,
+		embeddings [][]float64,
+		sourceHash string,
+		vectorSpaceID string,
+	) error
+}
+
+// atomicSourceReplacerWithExpectedHashAndVectorSpaceID is an internal-only
+// SQLite-backed capability that extends the vsid-aware replacement path with a
+// transactional source-hash compare-and-swap for incremental indexing.
 type atomicSourceReplacerWithExpectedHashAndVectorSpaceID interface {
 	ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(
 		ctx context.Context,
@@ -179,10 +193,14 @@ func (idx *Indexer) replaceSourceWithProvenanceIfSourceHash(ctx context.Context,
 		return replacer.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID, expectedSourceHash)
 	}
 
-	return idx.replaceSourceWithProvenanceLocked(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
+	return fmt.Errorf("%w: source-hash CAS unsupported by %T", ErrIncrementalRebuildRequired, idx.store)
 }
 
 func (idx *Indexer) replaceSourceWithProvenanceLocked(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
+	if replacer, ok := idx.store.(atomicSourceForceReplacerWithVectorSpaceID); ok {
+		return replacer.ForceReplaceSourceWithHashAndVectorSpaceID(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
+	}
+
 	if replacer, ok := idx.store.(atomicSourceReplacerWithVectorSpaceID); ok {
 		return replacer.ReplaceSourceWithHashAndVectorSpaceID(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
 	}

@@ -34,6 +34,8 @@ type replaceSourceOptions struct {
 	expectedSourceHash       string
 	checkExpectedSourceHash  bool
 	checkExistingVectorSpace bool
+	allowMissingExisting     bool
+	allowLegacyUnknown       bool
 }
 
 // NewSQLiteStore creates a vector store backed by SQLite.
@@ -200,7 +202,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 // marshalChunkMetadata returns the JSON-encoded chunk metadata. The
 // chunks.vector_space_id column is authoritative; when vectorSpaceID is
 // non-empty, the value is also mirrored into metadata for external SQL/debug
-// consumers without mutating the caller's map.
+// consumers without mutating the caller's map. The store-owned value wins over
+// any caller-supplied "vector_space_id" metadata entry.
 func marshalChunkMetadata(meta map[string]string, vectorSpaceID string) ([]byte, error) {
 	if vectorSpaceID == "" {
 		return json.Marshal(meta)
@@ -222,7 +225,7 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 		return nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return fmt.Errorf("rag: begin transaction: %w", err)
 	}
@@ -259,8 +262,24 @@ func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, 
 // to the chunks.vector_space_id column AND mirrored into the per-chunk
 // metadata JSON under the "vector_space_id" key. Non-empty chunk batches
 // require a non-empty vectorSpaceID; use ReplaceSourceWithHash for legacy
-// replacement that intentionally leaves vector_space_id empty.
+// replacement that intentionally leaves vector_space_id empty. If this source
+// already has known vector-space rows, their id must match vectorSpaceID.
 func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
+	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
+		sourceHash:               sourceHash,
+		vectorSpaceID:            vectorSpaceID,
+		requireVectorSpaceID:     true,
+		checkExistingVectorSpace: true,
+		allowMissingExisting:     true,
+		allowLegacyUnknown:       true,
+	})
+}
+
+// ForceReplaceSourceWithHashAndVectorSpaceID is the explicit full-reindex path:
+// it preserves the atomic replace and non-empty-vsid requirements, but it does
+// not reject an existing source whose stored vector space differs from the
+// incoming vectorSpaceID. Use this for deliberate full-corpus migrations.
+func (s *SQLiteStore) ForceReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
 		sourceHash:           sourceHash,
 		vectorSpaceID:        vectorSpaceID,
@@ -293,16 +312,16 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 			return fmt.Errorf("rag: replace source %q: chunk %d has source %q", source, i, chunk.Source)
 		}
 	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("rag: replace source %q: begin transaction: %w", source, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
 	if opts.requireVectorSpaceID && len(chunks) > 0 && opts.vectorSpaceID == "" {
 		return fmt.Errorf("%w: replace source %q with non-empty chunks", ErrMissingVectorSpaceID, source)
 	}
+
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: replace source %q: begin transaction: %w", ErrStoreOperation, source, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	if opts.checkExpectedSourceHash {
 		matches, err := sourceHashMatchesTx(ctx, tx, source, opts.expectedSourceHash)
 		if err != nil {
@@ -313,7 +332,7 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 		}
 	}
 	if opts.checkExistingVectorSpace && len(chunks) > 0 {
-		if err := validateExistingSourceVectorSpaceTx(ctx, tx, source, opts.vectorSpaceID); err != nil {
+		if err := validateExistingSourceVectorSpaceTx(ctx, tx, source, opts.vectorSpaceID, opts.allowMissingExisting, opts.allowLegacyUnknown); err != nil {
 			return err
 		}
 	}
@@ -334,6 +353,13 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 	return nil
 }
 
+func (s *SQLiteStore) beginWriteTx(ctx context.Context) (*sql.Tx, error) {
+	// Passing explicit non-read-only options asks modernc.org/sqlite to acquire
+	// the write lock at BEGIN time, which keeps CAS reads and writes in one
+	// write transaction instead of upgrading after the validation SELECT.
+	return s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
+}
+
 func sourceHashMatchesTx(ctx context.Context, tx *sql.Tx, source, expected string) (bool, error) {
 	var count int
 	var minHash, maxHash string
@@ -346,7 +372,7 @@ func sourceHashMatchesTx(ctx context.Context, tx *sql.Tx, source, expected strin
 	return count > 0 && minHash == expected && maxHash == expected, nil
 }
 
-func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source, vectorSpaceID string) error {
+func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source, vectorSpaceID string, allowMissing, allowLegacyUnknown bool) error {
 	var count int
 	var minID, maxID string
 	var hasUnknown bool
@@ -360,6 +386,9 @@ func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source
 		return fmt.Errorf("%w: replace source %q: check vector space: %w", ErrStoreOperation, source, err)
 	}
 	if count == 0 {
+		if allowMissing {
+			return nil
+		}
 		return fmt.Errorf("%w: replace source %q has no existing chunks", ErrIncrementalStaleSource, source)
 	}
 	hasKnown := minID != ""
@@ -367,6 +396,9 @@ func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source
 		return fmt.Errorf("%w: replace source %q has known vector space %q plus legacy unknown rows", ErrCorpusMixedVectorSpaces, source, minID)
 	}
 	if hasUnknown {
+		if allowLegacyUnknown {
+			return nil
+		}
 		return fmt.Errorf("%w: %w: replace source %q has only legacy unknown vector-space rows", ErrIncrementalRebuildRequired, ErrMissingVectorSpaceID, source)
 	}
 	if minID != maxID {

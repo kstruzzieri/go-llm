@@ -722,6 +722,58 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_requiresVSIDBeforeDel
 	}
 }
 
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_rejectsExistingVectorSpaceDrift(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	initial := []Chunk{{
+		ID: "old", Content: "original", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", initial, [][]float64{{1}}, "h1", "X"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	replacement := []Chunk{{
+		ID: "new", Content: "replacement", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "Y")
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID error = %v, want ErrVectorSpaceDrift", err)
+	}
+}
+
+func TestSQLiteStore_ForceReplaceSourceWithHashAndVectorSpaceID_allowsExistingVectorSpaceDrift(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	initial := []Chunk{{
+		ID: "old", Content: "original", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", initial, [][]float64{{1}}, "h1", "X"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	replacement := []Chunk{{
+		ID: "new", Content: "replacement", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	if err := store.ForceReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "Y"); err != nil {
+		t.Fatalf("ForceReplaceSourceWithHashAndVectorSpaceID error: %v", err)
+	}
+
+	var id, vsid string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT id, vector_space_id FROM chunks WHERE source = 'main.go'`).Scan(&id, &vsid); err != nil {
+		t.Fatalf("query replacement row: %v", err)
+	}
+	if id != "new" || vsid != "Y" {
+		t.Fatalf("forced replacement = id %q vsid %q, want new/Y", id, vsid)
+	}
+}
+
 func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsStaleSource(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
@@ -779,6 +831,8 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsMi
 	store := newTestStore(t)
 	ctx := context.Background()
 
+	// Intentional schema-coupled seed: public replace APIs enforce one VSID per
+	// source, so this test owns the raw INSERT needed to simulate corruption.
 	for _, row := range []struct {
 		id   string
 		vsid string
@@ -801,6 +855,36 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsMi
 	err := store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "X", "h1")
 	if !errors.Is(err, ErrCorpusMixedVectorSpaces) {
 		t.Fatalf("CAS replace error = %v, want ErrCorpusMixedVectorSpaces", err)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_metadataMirrorStoreValueWinsConflict(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{{
+		ID: "c1", Content: "content", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go",
+		Metadata: map[string]string{"vector_space_id": "caller-value", "kind": "test"},
+	}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", chunks, [][]float64{{1}}, "h1", "store-value"); err != nil {
+		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID error: %v", err)
+	}
+
+	var metaJSON string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT metadata FROM chunks WHERE id = 'c1'`).Scan(&metaJSON); err != nil {
+		t.Fatalf("query metadata: %v", err)
+	}
+	var meta map[string]string
+	if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+		t.Fatalf("unmarshal metadata: %v", err)
+	}
+	if got := meta["vector_space_id"]; got != "store-value" {
+		t.Fatalf("metadata vector_space_id = %q, want store-value", got)
+	}
+	if got := meta["kind"]; got != "test" {
+		t.Fatalf("metadata kind = %q, want test", got)
 	}
 }
 

@@ -23,9 +23,11 @@ type chunkDiff struct {
 // chunk's metadata (StartLine, EndLine may have shifted) while embedding
 // is carried over from the old stored chunk.
 type unchangedChunk struct {
-	chunk         Chunk     // new chunk (may have different StartLine/EndLine)
-	embedding     []float64 // embedding from store (content unchanged)
-	vectorSpaceID string    // vector-space id from the reused stored embedding
+	chunk     Chunk     // new chunk (may have different StartLine/EndLine)
+	embedding []float64 // embedding from store (content unchanged)
+	// vectorSpaceID is copied from ChunkWithEmbedding. Empty means either a
+	// legacy row or a row written before the writer identified its vector space.
+	vectorSpaceID string
 }
 
 // modifiedChunk pairs a new chunk with the old chunk ID it replaces.

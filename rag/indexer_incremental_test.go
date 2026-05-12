@@ -1622,6 +1622,56 @@ func TestIndexerIncremental_emptyChunkOutputClearsWithoutVSID(t *testing.T) {
 	}
 }
 
+func TestIndexerIncremental_vsidStoreWithoutCASFallsBackToFullReembed(t *testing.T) {
+	inner, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = inner.Close() }()
+	store := &vsidNoCASStore{inner: inner}
+
+	const wantVSID = "fake/m"
+	var embedInputs [][]string
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		embedInputs = append(embedInputs, append([]string(nil), inputs...))
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0}
+		}
+		return EmbedResult{Embeddings: embeddings, Provider: "fake", Model: "m", VectorSpaceID: wantVSID}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmp))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = incrementalVSIDFixtureChunker("func A() { return 1 }", "func A() { return 42 }")
+
+	oldChunks, err := idx.chunker.Chunk(path, "initial")
+	if err != nil {
+		t.Fatalf("chunk seed: %v", err)
+	}
+	populateFixtureStableKeys(t, oldChunks, tmp)
+	if err := inner.ReplaceSourceWithHashAndVectorSpaceID(context.Background(), path, oldChunks, [][]float64{{1, 0}, {0, 1}}, idx.currentSourceSignature("initial").String(), wantVSID); err != nil {
+		t.Fatalf("seed rows: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("changed"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+	if store.getBySourceCalls != 0 {
+		t.Fatalf("GetBySource calls = %d, want 0 when CAS capability is missing", store.getBySourceCalls)
+	}
+	if len(embedInputs) != 1 || len(embedInputs[0]) != 2 {
+		t.Fatalf("embed calls = %#v, want one full re-embed of 2 chunks", embedInputs)
+	}
+}
+
 func incrementalVSIDFixtureChunker(initialA, changedA string) chunkerFunc {
 	return chunkerFunc(func(path string, content string) ([]Chunk, error) {
 		aContent := initialA
@@ -1643,6 +1693,44 @@ func incrementalVSIDFixtureChunker(initialA, changedA string) chunkerFunc {
 	})
 }
 
+type vsidNoCASStore struct {
+	inner            *SQLiteStore
+	getBySourceCalls int
+}
+
+func (s *vsidNoCASStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]float64) error {
+	return s.inner.Store(ctx, chunks, embeddings)
+}
+
+func (s *vsidNoCASStore) Search(ctx context.Context, queryEmbedding []float64, k int) ([]SearchResult, error) {
+	return s.inner.Search(ctx, queryEmbedding, k)
+}
+
+func (s *vsidNoCASStore) DeleteBySource(ctx context.Context, source string) error {
+	return s.inner.DeleteBySource(ctx, source)
+}
+
+func (s *vsidNoCASStore) Stats(ctx context.Context) (StoreStats, error) {
+	return s.inner.Stats(ctx)
+}
+
+func (s *vsidNoCASStore) Close() error {
+	return s.inner.Close()
+}
+
+func (s *vsidNoCASStore) GetSourceHash(ctx context.Context, source string) (string, error) {
+	return s.inner.GetSourceHash(ctx, source)
+}
+
+func (s *vsidNoCASStore) GetBySource(ctx context.Context, source string) ([]ChunkWithEmbedding, error) {
+	s.getBySourceCalls++
+	return s.inner.GetBySource(ctx, source)
+}
+
+func (s *vsidNoCASStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
+	return s.inner.ForceReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, sourceHash, vectorSpaceID)
+}
+
 func populateFixtureStableKeys(t *testing.T, chunks []Chunk, workspaceRoot string) {
 	t.Helper()
 	for i := range chunks {
@@ -1656,6 +1744,9 @@ func populateFixtureStableKeys(t *testing.T, chunks []Chunk, workspaceRoot strin
 
 func seedIncrementalFixtureRows(t *testing.T, store *SQLiteStore, source string, chunks []Chunk, embeddings [][]float64, sourceHash string, vectorSpaceIDs []string) {
 	t.Helper()
+	// Intentional schema-coupled seed helper: public replace APIs enforce a
+	// uniform VSID, while these tests need legacy and mixed rows. Keep raw
+	// INSERTs centralized here so future migrations update one fixture path.
 	if len(chunks) != len(embeddings) || len(chunks) != len(vectorSpaceIDs) {
 		t.Fatalf("bad seed lengths: chunks=%d embeddings=%d vsids=%d", len(chunks), len(embeddings), len(vectorSpaceIDs))
 	}
