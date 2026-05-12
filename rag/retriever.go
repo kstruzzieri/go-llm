@@ -89,19 +89,58 @@ func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...Retr
 func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
 	res, err := r.embedder.Embed(ctx, r.model, []string{query})
 	if err != nil {
-		return nil, fmt.Errorf("rag: embed query: %w", err)
+		return nil, fmt.Errorf("%w: embed query: %w", ErrEmbedderFailed, err)
 	}
 	if len(res.Embeddings) != 1 {
-		return nil, fmt.Errorf("rag: embed query: expected 1 embedding, got %d", len(res.Embeddings))
+		return nil, fmt.Errorf("%w: embed query: expected 1 embedding, got %d", ErrEmbeddingCountMismatch, len(res.Embeddings))
 	}
 	embedding := res.Embeddings[0]
 
+	if err := r.validateVectorSpace(ctx, res); err != nil {
+		return nil, err
+	}
+
 	results, err := r.store.Search(ctx, embedding, k)
 	if err != nil {
-		return nil, fmt.Errorf("rag: search: %w", err)
+		return nil, fmt.Errorf("%w: search: %w", ErrStoreOperation, err)
 	}
 
 	return results, nil
+}
+
+func (r *Retriever) validateVectorSpace(ctx context.Context, res EmbedResult) error {
+	prober, ok := r.store.(vectorSpaceProber)
+	if !ok {
+		return nil
+	}
+	probe, err := prober.ProbeVectorSpaces(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: probe vector spaces: %w", ErrStoreOperation, err)
+	}
+	return validateQueryVectorSpace(resolveVectorSpaceID(res), probe)
+}
+
+func validateQueryVectorSpace(queryVectorSpaceID string, probe vectorSpaceProbe) error {
+	if len(probe.KnownIDs) > 1 {
+		return fmt.Errorf("%w: corpus has multiple known vector spaces %v", ErrCorpusMixedVectorSpaces, probe.KnownIDs)
+	}
+	if len(probe.KnownIDs) == 1 && probe.HasUnknown {
+		return fmt.Errorf("%w: corpus has known vector space %q plus legacy unknown rows", ErrCorpusMixedVectorSpaces, probe.KnownIDs[0])
+	}
+	if len(probe.KnownIDs) == 0 {
+		// Empty and fully-legacy corpora cannot be validated by vsid. Preserve
+		// pre-v5 behaviour until rows are re-indexed with a known vector space.
+		return nil
+	}
+
+	corpusVectorSpaceID := probe.KnownIDs[0]
+	if queryVectorSpaceID == "" {
+		return fmt.Errorf("%w: query embedder produced no VectorSpaceID for corpus vector space %q", ErrVectorSpaceMismatch, corpusVectorSpaceID)
+	}
+	if queryVectorSpaceID != corpusVectorSpaceID {
+		return fmt.Errorf("%w: query vector space %q differs from corpus vector space %q", ErrVectorSpaceMismatch, queryVectorSpaceID, corpusVectorSpaceID)
+	}
+	return nil
 }
 
 // BuildContext constructs a context string from retrieved chunks,

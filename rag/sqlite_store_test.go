@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"reflect"
 	"testing"
@@ -687,6 +688,119 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_writesColumnAndMetada
 	}
 	if seen != 2 {
 		t.Fatalf("expected 2 chunks, got %d", seen)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_requiresVSIDBeforeDelete(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	initial := []Chunk{{
+		ID: "old", Content: "original", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", initial, [][]float64{{1}}, "h1", "X"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	replacement := []Chunk{{
+		ID: "new", Content: "replacement", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "")
+	if !errors.Is(err, ErrMissingVectorSpaceID) {
+		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID error = %v, want ErrMissingVectorSpaceID", err)
+	}
+
+	var id, content string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT id, content FROM chunks WHERE source = 'main.go'`).Scan(&id, &content); err != nil {
+		t.Fatalf("query original row: %v", err)
+	}
+	if id != "old" || content != "original" {
+		t.Fatalf("row after rejected replace = %q/%q, want old/original", id, content)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsStaleSource(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	initial := []Chunk{{
+		ID: "old", Content: "original", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", initial, [][]float64{{1}}, "h1", "X"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	replacement := []Chunk{{
+		ID: "new", Content: "replacement", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	err := store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "X", "stale")
+	if !errors.Is(err, ErrIncrementalStaleSource) {
+		t.Fatalf("CAS replace error = %v, want ErrIncrementalStaleSource", err)
+	}
+
+	var id string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT id FROM chunks WHERE source = 'main.go'`).Scan(&id); err != nil {
+		t.Fatalf("query original row: %v", err)
+	}
+	if id != "old" {
+		t.Fatalf("row after stale CAS = %q, want old", id)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsVectorSpaceDrift(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	initial := []Chunk{{
+		ID: "old", Content: "original", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "main.go", initial, [][]float64{{1}}, "h1", "X"); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	replacement := []Chunk{{
+		ID: "new", Content: "replacement", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	err := store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "Y", "h1")
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("CAS replace error = %v, want ErrVectorSpaceDrift", err)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsMixedExistingVSID(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, row := range []struct {
+		id   string
+		vsid string
+	}{
+		{id: "a", vsid: "X"},
+		{id: "b", vsid: "Y"},
+	} {
+		if _, err := store.db.ExecContext(ctx,
+			`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+			 VALUES (?, 'x', 'main.go', 1, 1, 'go', '{}', '[1]', 1, ?, 'h1', ?)`,
+			row.id, row.id, row.vsid); err != nil {
+			t.Fatalf("insert mixed row %q: %v", row.id, err)
+		}
+	}
+
+	replacement := []Chunk{{
+		ID: "new", Content: "replacement", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+	err := store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "X", "h1")
+	if !errors.Is(err, ErrCorpusMixedVectorSpaces) {
+		t.Fatalf("CAS replace error = %v, want ErrCorpusMixedVectorSpaces", err)
 	}
 }
 

@@ -23,8 +23,9 @@ type chunkDiff struct {
 // chunk's metadata (StartLine, EndLine may have shifted) while embedding
 // is carried over from the old stored chunk.
 type unchangedChunk struct {
-	chunk     Chunk     // new chunk (may have different StartLine/EndLine)
-	embedding []float64 // embedding from store (content unchanged)
+	chunk         Chunk     // new chunk (may have different StartLine/EndLine)
+	embedding     []float64 // embedding from store (content unchanged)
+	vectorSpaceID string    // vector-space id from the reused stored embedding
 }
 
 // modifiedChunk pairs a new chunk with the old chunk ID it replaces.
@@ -88,8 +89,9 @@ func diffChunks(oldChunks []ChunkWithEmbedding, newChunks []Chunk) chunkDiff {
 
 		if contentHash(old.Chunk.Content) == contentHash(nc.Content) {
 			result.unchanged = append(result.unchanged, unchangedChunk{
-				chunk:     nc,
-				embedding: old.Embedding,
+				chunk:         nc,
+				embedding:     old.Embedding,
+				vectorSpaceID: old.VectorSpaceID,
 			})
 		} else {
 			result.modified = append(result.modified, modifiedChunk{

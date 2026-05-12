@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -77,5 +78,86 @@ func TestNewRetrieverWithEmbedder_AppliesRetrieverModel(t *testing.T) {
 	}
 	if emb.model != "test-model" {
 		t.Errorf("embedder saw model = %q, want %q", emb.model, "test-model")
+	}
+}
+
+func TestRetriever_VectorSpaceMismatchFailsClosed(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{{ID: "c1", Content: "stored", Source: "s.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "s.go", chunks, [][]float64{{1, 0}}, "hash", "ollama/indexed"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0}},
+		Provider:      "ollama",
+		Model:         "query",
+		VectorSpaceID: "ollama/query",
+	}}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	_, err = r.Retrieve(ctx, "question", 1)
+	if !errors.Is(err, ErrVectorSpaceMismatch) {
+		t.Fatalf("Retrieve error = %v, want ErrVectorSpaceMismatch", err)
+	}
+}
+
+func TestRetriever_MissingQueryVectorSpaceFailsClosed(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{{ID: "c1", Content: "stored", Source: "s.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "s.go", chunks, [][]float64{{1, 0}}, "hash", "ollama/indexed"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	emb := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	_, err = r.Retrieve(ctx, "question", 1)
+	if !errors.Is(err, ErrVectorSpaceMismatch) {
+		t.Fatalf("Retrieve error = %v, want ErrVectorSpaceMismatch", err)
+	}
+}
+
+func TestRetriever_MixedCorpusVectorSpacesFailClosed(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		ids  []string
+	}{
+		{name: "two known", ids: []string{"A", "B"}},
+		{name: "known plus legacy", ids: []string{"A", ""}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newTestStore(t)
+			ctx := context.Background()
+			for i, id := range tt.ids {
+				insertVSIDRow(t, store, string(rune('a'+i)), id)
+			}
+
+			emb := &recordingEmbedder{result: EmbedResult{
+				Embeddings:    [][]float64{{1}},
+				Provider:      "fake",
+				Model:         "A",
+				VectorSpaceID: "A",
+			}}
+			r, err := NewRetrieverWithEmbedder(emb, store)
+			if err != nil {
+				t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+			}
+
+			_, err = r.Retrieve(ctx, "question", 1)
+			if !errors.Is(err, ErrCorpusMixedVectorSpaces) {
+				t.Fatalf("Retrieve error = %v, want ErrCorpusMixedVectorSpaces", err)
+			}
+		})
 	}
 }

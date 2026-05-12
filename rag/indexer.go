@@ -40,7 +40,8 @@ type atomicSourceReplacerWithHash interface {
 // atomicSourceReplacerWithVectorSpaceID extends atomicSourceReplacerWithHash
 // with vector-space identifier persistence. Stores that implement the
 // capability support drift detection at retrieval time; stores that only
-// implement atomicSourceReplacerWithHash silently drop the vsid.
+// implement atomicSourceReplacerWithHash silently drop the vsid. Implementors
+// must reject non-empty chunk batches with an empty vectorSpaceID.
 type atomicSourceReplacerWithVectorSpaceID interface {
 	ReplaceSourceWithHashAndVectorSpaceID(
 		ctx context.Context,
@@ -49,6 +50,21 @@ type atomicSourceReplacerWithVectorSpaceID interface {
 		embeddings [][]float64,
 		sourceHash string,
 		vectorSpaceID string,
+	) error
+}
+
+// atomicSourceReplacerWithExpectedHashAndVectorSpaceID extends the vsid-aware
+// replacement capability with a transactional source-hash compare-and-swap for
+// incremental indexing.
+type atomicSourceReplacerWithExpectedHashAndVectorSpaceID interface {
+	ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(
+		ctx context.Context,
+		source string,
+		chunks []Chunk,
+		embeddings [][]float64,
+		sourceHash string,
+		vectorSpaceID string,
+		expectedSourceHash string,
 	) error
 }
 
@@ -141,18 +157,32 @@ func (idx *Indexer) replaceSourceWithHash(ctx context.Context, path string, chun
 	return idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, "")
 }
 
-// replaceSourceWithProvenance is the single write chokepoint. All four
-// indexer write paths (empty file, no-chunks output, full IndexFile, and the
-// incremental full-replacement fallback) funnel through this method. It
+// replaceSourceWithProvenance serializes source replacement writes and
 // dispatches capability-descending: a store that supports vector-space-id
 // persistence gets the vsid; a store that only supports the source hash gets
 // the hash with vsid silently dropped; a store that only supports atomic
 // replacement gets neither; legacy stores fall through to the non-atomic
-// delete+store fallback.
+// delete+store fallback. VSID write invariants are enforced by the
+// vsid-capable store implementation, not by this dispatcher.
 func (idx *Indexer) replaceSourceWithProvenance(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	idx.storeMu.Lock()
 	defer idx.storeMu.Unlock()
 
+	return idx.replaceSourceWithProvenanceLocked(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
+}
+
+func (idx *Indexer) replaceSourceWithProvenanceIfSourceHash(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID, expectedSourceHash string) error {
+	idx.storeMu.Lock()
+	defer idx.storeMu.Unlock()
+
+	if replacer, ok := idx.store.(atomicSourceReplacerWithExpectedHashAndVectorSpaceID); ok {
+		return replacer.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID, expectedSourceHash)
+	}
+
+	return idx.replaceSourceWithProvenanceLocked(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
+}
+
+func (idx *Indexer) replaceSourceWithProvenanceLocked(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	if replacer, ok := idx.store.(atomicSourceReplacerWithVectorSpaceID); ok {
 		return replacer.ReplaceSourceWithHashAndVectorSpaceID(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
 	}
@@ -231,10 +261,10 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	res, err := idx.embedder.Embed(ctx, idx.model, texts)
 	if err != nil {
 		// Embedding failed — preserve existing indexed data for this file
-		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
+		return fmt.Errorf("%w: embed chunks for %q: %w", ErrEmbedderFailed, path, err)
 	}
 	if len(res.Embeddings) != len(texts) {
-		return fmt.Errorf("rag: embed chunks for %q: count mismatch (got %d for %d chunks)", path, len(res.Embeddings), len(texts))
+		return fmt.Errorf("%w: embed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, path, len(res.Embeddings), len(texts))
 	}
 	embeddings := res.Embeddings
 
@@ -243,11 +273,6 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	// Persist the resolved vector-space identity so retrieval-time drift
 	// detection can fail closed across cross-run embedding-model changes.
 	vsid := resolveVectorSpaceID(res)
-	if vsid == "" {
-		if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable {
-			return fmt.Errorf("rag: refuse to index %q: embedder returned no VectorSpaceID/Provider/Model and store is vsid-capable", path)
-		}
-	}
 	sourceHash := idx.currentSourceSignature(content).String()
 	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vsid); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)

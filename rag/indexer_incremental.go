@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 )
@@ -64,6 +65,8 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 	currentSig := idx.currentSourceSignature(content)
 	sourceHash := currentSig.String()
 	forceFullReembed := false
+	var expectedSourceHash string
+	hasExpectedSourceHash := false
 	if checker, ok := idx.store.(sourceHashChecker); ok {
 		storedHash, hashErr := checker.GetSourceHash(ctx, path)
 		if hashErr == nil {
@@ -76,6 +79,10 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 					return nil
 				}
 				forceFullReembed = idx.requiresFullReembed(storedHash, currentSig)
+				if !forceFullReembed {
+					expectedSourceHash = storedHash
+					hasExpectedSourceHash = true
+				}
 			}
 		}
 	}
@@ -106,13 +113,15 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 
 	// Try incremental path.
 	if !forceFullReembed && idx.canDoIncremental(chunks) {
-		err := idx.indexIncremental(ctx, path, chunks, sourceHash)
+		err := idx.indexIncremental(ctx, path, chunks, sourceHash, expectedSourceHash, hasExpectedSourceHash)
 		if err == nil {
 			return nil
 		}
-		// Incremental failed -- fall through to full path.
 		// Context cancellation should be propagated immediately.
 		if ctx.Err() != nil {
+			return fmt.Errorf("rag: incremental index %q: %w", path, err)
+		}
+		if !incrementalShouldFallback(err) {
 			return fmt.Errorf("rag: incremental index %q: %w", path, err)
 		}
 	}
@@ -126,25 +135,25 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 	res, err := idx.embedder.Embed(ctx, idx.model, texts)
 	if err != nil {
 		// Embedding failed -- preserve existing indexed data for this file.
-		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
+		return fmt.Errorf("%w: embed chunks for %q: %w", ErrEmbedderFailed, path, err)
 	}
 	if len(res.Embeddings) != len(texts) {
-		return fmt.Errorf("rag: embed chunks for %q: count mismatch (got %d for %d chunks)", path, len(res.Embeddings), len(texts))
+		return fmt.Errorf("%w: embed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, path, len(res.Embeddings), len(texts))
 	}
 	embeddings := res.Embeddings
 
-	// Mirror IndexFile's vsid resolution + fail-closed check so this
-	// fallback path can't silently drop vsid into a vsid-capable store.
+	// Mirror IndexFile's vsid resolution so the store can enforce the
+	// vsid-aware write contract.
 	vsid := resolveVectorSpaceID(res)
-	if vsid == "" {
-		if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable {
-			return fmt.Errorf("rag: refuse to index %q: embedder returned no VectorSpaceID/Provider/Model and store is vsid-capable", path)
-		}
-	}
 	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vsid); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 	return nil
+}
+
+func incrementalShouldFallback(err error) bool {
+	return errors.Is(err, ErrIncrementalRebuildRequired) ||
+		errors.Is(err, ErrIncrementalStaleSource)
 }
 
 // indexIncremental is the internal incremental indexing path.
@@ -152,21 +161,21 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 // workspace root is set, StableKeys are computed). The sourceHash is the
 // pre-computed source signature that will be stored alongside the new chunks.
 //
-// Returns a non-nil error on any failure. The caller falls back to full
-// re-indexing when this returns an error.
-func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks []Chunk, sourceHash string) error {
+// Returns a non-nil error on any failure. The caller only falls back to full
+// re-indexing for typed repairable errors.
+func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks []Chunk, sourceHash, expectedSourceHash string, hasExpectedSourceHash bool) error {
 	loader, ok := idx.store.(sourceChunkLoader)
 	if !ok {
-		return fmt.Errorf("rag: store does not support GetBySource")
+		return fmt.Errorf("%w: store does not support GetBySource", ErrIncrementalRebuildRequired)
 	}
 
 	oldChunks, err := loader.GetBySource(ctx, path)
 	if err != nil {
-		return fmt.Errorf("rag: load existing chunks for %q: %w", path, err)
+		return fmt.Errorf("%w: load existing chunks for %q: %w", ErrStoreOperation, path, err)
 	}
 	if len(oldChunks) == 0 {
 		// First time indexing this file -- fall back to full.
-		return fmt.Errorf("rag: no existing chunks for %q", path)
+		return fmt.Errorf("%w: no existing chunks for %q", ErrIncrementalRebuildRequired, path)
 	}
 
 	// Diff old vs. new.
@@ -187,7 +196,15 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 				}
 			}
 		}
-		return idx.replaceSourceWithHash(ctx, path, newChunks, finalEmbeddings, sourceHash)
+		finalVSID := ""
+		if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable {
+			reusedVSID, status := reusedCachedVSID(diff.unchanged)
+			if status != cachedVSIDUniform {
+				return reusedCachedVSIDError(path, status)
+			}
+			finalVSID = reusedVSID
+		}
+		return idx.replaceIncrementalSource(ctx, path, newChunks, finalEmbeddings, sourceHash, finalVSID, expectedSourceHash, hasExpectedSourceHash)
 	}
 
 	// Build a map from StableKey -> cached embedding for unchanged chunks.
@@ -205,17 +222,50 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 		textsToEmbed = append(textsToEmbed, nc.Content)
 	}
 
+	reusedVSID := ""
+	reusedStatus := cachedVSIDNone
+	if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable && len(diff.unchanged) > 0 {
+		reusedVSID, reusedStatus = reusedCachedVSID(diff.unchanged)
+		switch reusedStatus {
+		case cachedVSIDUniform:
+			// Reusable cached embeddings all belong to the same known vector space.
+		case cachedVSIDLegacyUnknown:
+			return reusedCachedVSIDError(path, reusedStatus)
+		default:
+			return reusedCachedVSIDError(path, reusedStatus)
+		}
+	}
+
 	// Embed only changed chunks.
 	var freshEmbeddings [][]float64
+	freshVSID := ""
 	if len(textsToEmbed) > 0 {
 		res, embedErr := idx.embedder.Embed(ctx, idx.model, textsToEmbed)
 		if embedErr != nil {
-			return fmt.Errorf("rag: embed changed chunks for %q: %w", path, embedErr)
+			return fmt.Errorf("%w: embed changed chunks for %q: %w", ErrEmbedderFailed, path, embedErr)
 		}
 		if len(res.Embeddings) != len(textsToEmbed) {
-			return fmt.Errorf("rag: embed changed chunks for %q: count mismatch (got %d for %d chunks)", path, len(res.Embeddings), len(textsToEmbed))
+			return fmt.Errorf("%w: embed changed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, path, len(res.Embeddings), len(textsToEmbed))
 		}
 		freshEmbeddings = res.Embeddings
+		freshVSID = resolveVectorSpaceID(res)
+	}
+
+	finalVSID := freshVSID
+	if _, capable := idx.store.(atomicSourceReplacerWithVectorSpaceID); capable {
+		if len(textsToEmbed) > 0 {
+			if len(diff.unchanged) > 0 {
+				if freshVSID != "" && reusedVSID != freshVSID {
+					return fmt.Errorf("%w: incremental index %q: reused cached VectorSpaceID %q differs from fresh VectorSpaceID %q", ErrVectorSpaceDrift, path, reusedVSID, freshVSID)
+				}
+			}
+			finalVSID = freshVSID
+		} else {
+			if reusedStatus != cachedVSIDUniform {
+				return reusedCachedVSIDError(path, reusedStatus)
+			}
+			finalVSID = reusedVSID
+		}
 	}
 
 	// Assemble final embeddings aligned 1:1 with newChunks.
@@ -226,7 +276,7 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 			finalEmbeddings[i] = emb
 		} else {
 			if freshIdx >= len(freshEmbeddings) {
-				return fmt.Errorf("rag: incremental index %q: embedding count mismatch (expected %d, got %d)", path, len(textsToEmbed), len(freshEmbeddings))
+				return fmt.Errorf("%w: incremental index %q: expected %d fresh embeddings, got %d", ErrEmbeddingCountMismatch, path, len(textsToEmbed), len(freshEmbeddings))
 			}
 			finalEmbeddings[i] = freshEmbeddings[freshIdx]
 			freshIdx++
@@ -234,10 +284,59 @@ func (idx *Indexer) indexIncremental(ctx context.Context, path string, newChunks
 	}
 
 	// Atomically replace source with the full new chunk set.
-	if err := idx.replaceSourceWithHash(ctx, path, newChunks, finalEmbeddings, sourceHash); err != nil {
-		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
+	if err := idx.replaceIncrementalSource(ctx, path, newChunks, finalEmbeddings, sourceHash, finalVSID, expectedSourceHash, hasExpectedSourceHash); err != nil {
+		return fmt.Errorf("%w: replace chunks for %q: %w", ErrStoreOperation, path, err)
 	}
 	return nil
+}
+
+type cachedVSIDStatus int
+
+const (
+	cachedVSIDNone cachedVSIDStatus = iota
+	cachedVSIDUniform
+	cachedVSIDLegacyUnknown
+	cachedVSIDMixed
+)
+
+// reusedCachedVSID returns the unique non-empty VectorSpaceID for reused
+// cached embeddings plus a status that distinguishes legacy empty-vsid rows
+// from genuinely mixed vector spaces.
+func reusedCachedVSID(unchanged []unchangedChunk) (id string, status cachedVSIDStatus) {
+	if len(unchanged) == 0 {
+		return "", cachedVSIDNone
+	}
+	for _, uc := range unchanged {
+		if uc.vectorSpaceID == "" {
+			return "", cachedVSIDLegacyUnknown
+		}
+		if id == "" {
+			id = uc.vectorSpaceID
+			continue
+		}
+		if id != uc.vectorSpaceID {
+			return "", cachedVSIDMixed
+		}
+	}
+	return id, cachedVSIDUniform
+}
+
+func reusedCachedVSIDError(path string, status cachedVSIDStatus) error {
+	switch status {
+	case cachedVSIDLegacyUnknown:
+		return fmt.Errorf("%w: %w: incremental index %q: reused cached embeddings have legacy empty VectorSpaceID", ErrIncrementalRebuildRequired, ErrMissingVectorSpaceID, path)
+	case cachedVSIDMixed:
+		return fmt.Errorf("%w: incremental index %q: reused cached embeddings have mixed VectorSpaceID values", ErrCorpusMixedVectorSpaces, path)
+	default:
+		return fmt.Errorf("%w: incremental index %q: no cached VectorSpaceID available", ErrIncrementalRebuildRequired, path)
+	}
+}
+
+func (idx *Indexer) replaceIncrementalSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID, expectedSourceHash string, hasExpectedSourceHash bool) error {
+	if hasExpectedSourceHash {
+		return idx.replaceSourceWithProvenanceIfSourceHash(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID, expectedSourceHash)
+	}
+	return idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
 }
 
 // updateSourceHash updates the source_content_hash for all chunks of a source

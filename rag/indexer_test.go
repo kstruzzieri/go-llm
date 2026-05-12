@@ -923,6 +923,39 @@ func TestIndexer_vsidCapableStore_emptyVSID_fails(t *testing.T) {
 	}
 }
 
+func TestIndexer_replaceSourceWithProvenance_emptyVSIDRejectsCapableStore(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	idx, err := NewIndexerWithEmbedder(EmbedderFunc(func(context.Context, string, []string) (EmbedResult, error) {
+		return EmbedResult{}, nil
+	}), store)
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	chunks := []Chunk{{
+		ID: "c1", Content: "package x", Source: "main.go",
+		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
+	}}
+
+	err = idx.replaceSourceWithProvenance(context.Background(), "main.go", chunks, [][]float64{{1, 0, 0, 0}}, "hash", "")
+	if err == nil {
+		t.Fatal("replaceSourceWithProvenance() with empty vsid against capable store: expected error, got nil")
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM chunks WHERE source = 'main.go'`).Scan(&count); err != nil {
+		t.Fatalf("count query: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("chunks rows after rejected replace = %d, want 0", count)
+	}
+}
+
 // TestIndexer_vsidCapableStore_emptyContent_clearsCleanly is the §10.2
 // refinement sibling of the empty-vsid fail-closed test. The fail-closed
 // check must NOT fire on legitimate empty-content / no-chunks paths, which

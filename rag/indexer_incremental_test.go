@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -1245,5 +1246,430 @@ func TestIndexerIncremental_fullReplacement_writesVSID(t *testing.T) {
 	}
 	if vsidCol != wantVSID {
 		t.Errorf("vector_space_id after IndexFileIncremental fallback = %q, want %q (full re-index path must route vsid)", vsidCol, wantVSID)
+	}
+}
+
+func TestIndexerIncremental_successfulReusePathPreservesVSID(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "ollama/qwen3-embedding:8b"
+	var embedInputs [][]string
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		copied := append([]string(nil), inputs...)
+		embedInputs = append(embedInputs, copied)
+
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0, 0, 0}
+		}
+		return EmbedResult{
+			Embeddings:    embeddings,
+			Model:         "qwen3-embedding:8b",
+			Provider:      "ollama",
+			VectorSpaceID: wantVSID,
+		}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	idx, err := NewIndexerWithEmbedder(
+		emb,
+		store,
+		WithEmbeddingModel("qwen3-embedding:8b"),
+		WithWorkspaceRoot(tmp),
+	)
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		aContent := "func A() { return 1 }"
+		if content == "changed" {
+			aContent = "func A() { return 42 }"
+		}
+		return []Chunk{
+			{
+				ID: "a-" + contentHash(aContent), Content: aContent, Source: path,
+				StartLine: 1, EndLine: 1, Language: "go",
+				Metadata: map[string]string{"symbol_path": "A", "chunk_ordinal": "0"},
+			},
+			{
+				ID: "b", Content: "func B() { return 2 }", Source: path,
+				StartLine: 3, EndLine: 3, Language: "go",
+				Metadata: map[string]string{"symbol_path": "B", "chunk_ordinal": "0"},
+			},
+		}, nil
+	})
+
+	if err := os.WriteFile(path, []byte("initial"), 0644); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("initial IndexFile() error: %v", err)
+	}
+
+	embedInputs = nil
+	if err := os.WriteFile(path, []byte("changed"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	if len(embedInputs) != 1 {
+		t.Fatalf("embed calls during incremental update = %d, want 1", len(embedInputs))
+	}
+	if got := len(embedInputs[0]); got != 1 {
+		t.Fatalf("embedded chunks during incremental update = %d, want 1 (successful reuse path, not full fallback)", got)
+	}
+
+	var count int
+	var minVSID, maxVSID string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*), MIN(vector_space_id), MAX(vector_space_id) FROM chunks WHERE source = ?`, path).
+		Scan(&count, &minVSID, &maxVSID); err != nil {
+		t.Fatalf("query vector_space_id summary: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("chunk rows after incremental update = %d, want 2", count)
+	}
+	if minVSID != wantVSID || maxVSID != wantVSID {
+		t.Errorf("vector_space_id after successful incremental path = min %q max %q, want both %q", minVSID, maxVSID, wantVSID)
+	}
+}
+
+func TestIndexerIncremental_noDiffRewritePreservesVSID(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "ollama/qwen3-embedding:8b"
+	var embedCalls int
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		embedCalls++
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0, 0, 0}
+		}
+		return EmbedResult{
+			Embeddings:    embeddings,
+			Model:         "qwen3-embedding:8b",
+			Provider:      "ollama",
+			VectorSpaceID: wantVSID,
+		}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	idx, err := NewIndexerWithEmbedder(
+		emb,
+		store,
+		WithEmbeddingModel("qwen3-embedding:8b"),
+		WithWorkspaceRoot(tmp),
+	)
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, _ string) ([]Chunk, error) {
+		return []Chunk{
+			{
+				ID: "a", Content: "func A() { return 1 }", Source: path,
+				StartLine: 1, EndLine: 1, Language: "go",
+				Metadata: map[string]string{"symbol_path": "A", "chunk_ordinal": "0"},
+			},
+			{
+				ID: "b", Content: "func B() { return 2 }", Source: path,
+				StartLine: 3, EndLine: 3, Language: "go",
+				Metadata: map[string]string{"symbol_path": "B", "chunk_ordinal": "0"},
+			},
+		}, nil
+	})
+
+	if err := os.WriteFile(path, []byte("initial file bytes"), 0644); err != nil {
+		t.Fatalf("write initial: %v", err)
+	}
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("initial IndexFile() error: %v", err)
+	}
+
+	embedCalls = 0
+	if err := os.WriteFile(path, []byte("changed file bytes"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+	if embedCalls != 0 {
+		t.Fatalf("embed calls during no-diff incremental rewrite = %d, want 0", embedCalls)
+	}
+
+	var count int
+	var minVSID, maxVSID string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*), MIN(vector_space_id), MAX(vector_space_id) FROM chunks WHERE source = ?`, path).
+		Scan(&count, &minVSID, &maxVSID); err != nil {
+		t.Fatalf("query vector_space_id summary: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("chunk rows after no-diff incremental rewrite = %d, want 2", count)
+	}
+	if minVSID != wantVSID || maxVSID != wantVSID {
+		t.Errorf("vector_space_id after no-diff incremental rewrite = min %q max %q, want both %q", minVSID, maxVSID, wantVSID)
+	}
+}
+
+func TestIndexerIncremental_legacyEmptyVSIDFallsBackAndRepairs(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "fake/m"
+	var embedInputs [][]string
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		embedInputs = append(embedInputs, append([]string(nil), inputs...))
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0}
+		}
+		return EmbedResult{Embeddings: embeddings, Provider: "fake", Model: "m", VectorSpaceID: wantVSID}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmp))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = incrementalVSIDFixtureChunker("func A() { return 1 }", "func A() { return 42 }")
+
+	oldChunks, err := idx.chunker.Chunk(path, "initial")
+	if err != nil {
+		t.Fatalf("chunk seed: %v", err)
+	}
+	populateFixtureStableKeys(t, oldChunks, tmp)
+	if err := store.ReplaceSourceWithHash(context.Background(), path, oldChunks, [][]float64{{1, 0}, {0, 1}}, idx.currentSourceSignature("initial").String()); err != nil {
+		t.Fatalf("seed legacy rows: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("changed"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	if len(embedInputs) != 1 || len(embedInputs[0]) != 2 {
+		t.Fatalf("embed calls = %#v, want one full re-embed of 2 chunks", embedInputs)
+	}
+
+	var count int
+	var minVSID, maxVSID string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*), MIN(vector_space_id), MAX(vector_space_id) FROM chunks WHERE source = ?`, path).
+		Scan(&count, &minVSID, &maxVSID); err != nil {
+		t.Fatalf("query vector_space_id summary: %v", err)
+	}
+	if count != 2 || minVSID != wantVSID || maxVSID != wantVSID {
+		t.Fatalf("vector_space_id summary = count %d min %q max %q, want 2/%q/%q", count, minVSID, maxVSID, wantVSID, wantVSID)
+	}
+}
+
+func TestIndexerIncremental_vectorSpaceDriftDoesNotFallback(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	var embedInputs [][]string
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		embedInputs = append(embedInputs, append([]string(nil), inputs...))
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0}
+		}
+		return EmbedResult{Embeddings: embeddings, Provider: "fake", Model: "new", VectorSpaceID: "fake/new"}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmp))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = incrementalVSIDFixtureChunker("func A() { return 1 }", "func A() { return 42 }")
+
+	oldChunks, err := idx.chunker.Chunk(path, "initial")
+	if err != nil {
+		t.Fatalf("chunk seed: %v", err)
+	}
+	populateFixtureStableKeys(t, oldChunks, tmp)
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(context.Background(), path, oldChunks, [][]float64{{1, 0}, {0, 1}}, idx.currentSourceSignature("initial").String(), "fake/old"); err != nil {
+		t.Fatalf("seed rows: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("changed"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	err = idx.IndexFileIncremental(context.Background(), path)
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("IndexFileIncremental() error = %v, want ErrVectorSpaceDrift", err)
+	}
+	if len(embedInputs) != 1 || len(embedInputs[0]) != 1 {
+		t.Fatalf("embed calls = %#v, want one incremental embed of 1 chunk and no full fallback", embedInputs)
+	}
+
+	var minVSID, maxVSID string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT MIN(vector_space_id), MAX(vector_space_id) FROM chunks WHERE source = ?`, path).
+		Scan(&minVSID, &maxVSID); err != nil {
+		t.Fatalf("query vector_space_id summary: %v", err)
+	}
+	if minVSID != "fake/old" || maxVSID != "fake/old" {
+		t.Fatalf("stored vector_space_id = min %q max %q, want fake/old unchanged", minVSID, maxVSID)
+	}
+}
+
+func TestIndexerIncremental_mixedCachedVSIDDoesNotFallback(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		t.Fatalf("embedder should not be called for mixed cached VSID; inputs=%v", inputs)
+		return EmbedResult{}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmp))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = incrementalVSIDFixtureChunker("func A() { return 1 }", "func A() { return 1 }")
+
+	oldChunks, err := idx.chunker.Chunk(path, "initial")
+	if err != nil {
+		t.Fatalf("chunk seed: %v", err)
+	}
+	populateFixtureStableKeys(t, oldChunks, tmp)
+	seedIncrementalFixtureRows(t, store, path, oldChunks, [][]float64{{1, 0}, {0, 1}}, idx.currentSourceSignature("initial").String(), []string{"fake/a", "fake/b"})
+
+	if err := os.WriteFile(path, []byte("changed"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	err = idx.IndexFileIncremental(context.Background(), path)
+	if !errors.Is(err, ErrCorpusMixedVectorSpaces) {
+		t.Fatalf("IndexFileIncremental() error = %v, want ErrCorpusMixedVectorSpaces", err)
+	}
+}
+
+func TestIndexerIncremental_emptyChunkOutputClearsWithoutVSID(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1}},
+		Provider:      "fake",
+		Model:         "m",
+		VectorSpaceID: "fake/m",
+	}}
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmp))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		if content == "empty-by-chunker" {
+			return nil, nil
+		}
+		return []Chunk{{ID: "c", Content: content, Source: path, StartLine: 1, EndLine: 1, Metadata: map[string]string{"anchor_hash": "seed"}}}, nil
+	})
+
+	if err := os.WriteFile(path, []byte("seed"), 0644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("seed IndexFile() error: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("empty-by-chunker"), 0644); err != nil {
+		t.Fatalf("write empty-by-chunker: %v", err)
+	}
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	var count int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM chunks WHERE source = ?`, path).Scan(&count); err != nil {
+		t.Fatalf("count chunks: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("chunk rows after empty chunk output = %d, want 0", count)
+	}
+}
+
+func incrementalVSIDFixtureChunker(initialA, changedA string) chunkerFunc {
+	return chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		aContent := initialA
+		if content == "changed" {
+			aContent = changedA
+		}
+		return []Chunk{
+			{
+				ID: "a-" + contentHash(aContent), Content: aContent, Source: path,
+				StartLine: 1, EndLine: 1, Language: "go",
+				Metadata: map[string]string{"symbol_path": "A", "chunk_ordinal": "0"},
+			},
+			{
+				ID: "b", Content: "func B() { return 2 }", Source: path,
+				StartLine: 3, EndLine: 3, Language: "go",
+				Metadata: map[string]string{"symbol_path": "B", "chunk_ordinal": "0"},
+			},
+		}, nil
+	})
+}
+
+func populateFixtureStableKeys(t *testing.T, chunks []Chunk, workspaceRoot string) {
+	t.Helper()
+	for i := range chunks {
+		key, err := ComputeStableKey(chunks[i], workspaceRoot)
+		if err != nil {
+			t.Fatalf("ComputeStableKey(%q): %v", chunks[i].ID, err)
+		}
+		chunks[i].StableKey = key
+	}
+}
+
+func seedIncrementalFixtureRows(t *testing.T, store *SQLiteStore, source string, chunks []Chunk, embeddings [][]float64, sourceHash string, vectorSpaceIDs []string) {
+	t.Helper()
+	if len(chunks) != len(embeddings) || len(chunks) != len(vectorSpaceIDs) {
+		t.Fatalf("bad seed lengths: chunks=%d embeddings=%d vsids=%d", len(chunks), len(embeddings), len(vectorSpaceIDs))
+	}
+	ctx := context.Background()
+	for i, chunk := range chunks {
+		embJSON, err := json.Marshal(embeddings[i])
+		if err != nil {
+			t.Fatalf("marshal seed embedding: %v", err)
+		}
+		if _, err := store.db.ExecContext(ctx,
+			`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+			 VALUES (?, ?, ?, ?, ?, ?, '{}', ?, 1, ?, ?, ?)`,
+			chunk.ID, chunk.Content, source, chunk.StartLine, chunk.EndLine, chunk.Language, string(embJSON), chunk.StableKey, sourceHash, vectorSpaceIDs[i]); err != nil {
+			t.Fatalf("seed row %q: %v", chunk.ID, err)
+		}
 	}
 }
