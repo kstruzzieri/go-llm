@@ -735,3 +735,88 @@ func TestIndexerGitignoreNegationInsideIgnoredDir(t *testing.T) {
 		t.Errorf("expected 1 source (cannot un-ignore file inside ignored dir), got %d", stats.TotalSources)
 	}
 }
+
+// --- Persistent drift signature tests (#82 Phase 2, spec §5.6 / §5.7) ---
+
+// TestIndexer_writesMetadataMirror is the indexer-level end-to-end for the
+// store-layer mirror written by Test 1: when IndexFile runs with an embedder
+// that resolves a non-empty VectorSpaceID, the indexer MUST route that vsid
+// into the vsid-aware store method so each persisted chunk ends up with the
+// value on both the chunks.vector_space_id column AND in the per-chunk
+// metadata JSON.
+//
+// Red until replaceSourceWithHash grows a vsid-aware dispatch arm that
+// invokes atomicSourceReplacerWithVectorSpaceID.
+func TestIndexer_writesMetadataMirror(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "ollama/qwen3-embedding:8b"
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0, 0, 0}},
+		Model:         "qwen3-embedding:8b",
+		Provider:      "ollama",
+		VectorSpaceID: wantVSID,
+	}}
+
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("qwen3-embedding:8b"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{{
+			ID: "c1", Content: content, Source: path,
+			StartLine: 1, EndLine: 1, Language: "go",
+			Metadata: map[string]string{"kind": "fn"},
+		}}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	if err := os.WriteFile(path, []byte("package x"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("IndexFile() error: %v", err)
+	}
+
+	rows, err := store.db.QueryContext(context.Background(),
+		`SELECT id, vector_space_id, metadata FROM chunks WHERE source = ? ORDER BY id`, path)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var seen int
+	for rows.Next() {
+		var id, vsidCol, metaJSON string
+		if err := rows.Scan(&id, &vsidCol, &metaJSON); err != nil {
+			t.Fatalf("scan: %v", err)
+		}
+		if vsidCol != wantVSID {
+			t.Errorf("chunk %q vector_space_id column = %q, want %q", id, vsidCol, wantVSID)
+		}
+		var meta map[string]string
+		if err := json.Unmarshal([]byte(metaJSON), &meta); err != nil {
+			t.Fatalf("chunk %q metadata unmarshal: %v (raw=%q)", id, err, metaJSON)
+		}
+		if got := meta["vector_space_id"]; got != wantVSID {
+			t.Errorf("chunk %q metadata[\"vector_space_id\"] = %q, want %q", id, got, wantVSID)
+		}
+		// Pre-existing metadata keys must survive the mirror.
+		if got := meta["kind"]; got != "fn" {
+			t.Errorf("chunk %q metadata[\"kind\"] = %q, want %q (mirror must not clobber caller metadata)", id, got, "fn")
+		}
+		seen++
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("rows.Err: %v", err)
+	}
+	if seen != 1 {
+		t.Fatalf("expected 1 chunk, got %d", seen)
+	}
+}

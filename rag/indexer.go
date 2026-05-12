@@ -134,12 +134,28 @@ func NewIndexerWithEmbedder(embedder Embedder, store VectorStore, opts ...Indexe
 }
 
 func (idx *Indexer) replaceSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64) error {
-	return idx.replaceSourceWithHash(ctx, path, chunks, embeddings, "")
+	return idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, "", "")
 }
 
 func (idx *Indexer) replaceSourceWithHash(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash string) error {
+	return idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, "")
+}
+
+// replaceSourceWithProvenance is the single write chokepoint. All four
+// indexer write paths (empty file, no-chunks output, full IndexFile, and the
+// incremental full-replacement fallback) funnel through this method. It
+// dispatches capability-descending: a store that supports vector-space-id
+// persistence gets the vsid; a store that only supports the source hash gets
+// the hash with vsid silently dropped; a store that only supports atomic
+// replacement gets neither; legacy stores fall through to the non-atomic
+// delete+store fallback.
+func (idx *Indexer) replaceSourceWithProvenance(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	idx.storeMu.Lock()
 	defer idx.storeMu.Unlock()
+
+	if replacer, ok := idx.store.(atomicSourceReplacerWithVectorSpaceID); ok {
+		return replacer.ReplaceSourceWithHashAndVectorSpaceID(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
+	}
 
 	if replacer, ok := idx.store.(atomicSourceReplacerWithHash); ok {
 		return replacer.ReplaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash)
@@ -224,8 +240,10 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 
 	// Step 3: Replace old chunks with new ones. Store the source signature so
 	// subsequent IndexFileIncremental calls can safely use the fast path.
+	// Persist the resolved vector-space identity so retrieval-time drift
+	// detection can fail closed across cross-run embedding-model changes.
 	sourceHash := idx.currentSourceSignature(content).String()
-	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
+	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, res.VectorSpaceID); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 
