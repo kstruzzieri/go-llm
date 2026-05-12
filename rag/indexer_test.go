@@ -977,3 +977,81 @@ func TestIndexer_vsidCapableStore_emptyContent_clearsCleanly(t *testing.T) {
 		t.Errorf("chunks rows after empty-content re-index = %d, want 0 (seeded row should be cleared)", count)
 	}
 }
+
+// hashOnlyStore is a test double satisfying VectorStore and
+// atomicSourceReplacerWithHash but NOT atomicSourceReplacerWithVectorSpaceID.
+// It records which write path was invoked so Test 5 can assert the indexer
+// falls through to the hash-only arm and silently drops vsid.
+type hashOnlyStore struct {
+	withVSIDCalls int
+	withHashCalls int
+	bareCalls     int
+	lastHash      string
+	lastChunks    []Chunk
+}
+
+func (h *hashOnlyStore) Store(_ context.Context, _ []Chunk, _ [][]float64) error {
+	return nil
+}
+func (h *hashOnlyStore) Search(_ context.Context, _ []float64, _ int) ([]SearchResult, error) {
+	return nil, nil
+}
+func (h *hashOnlyStore) DeleteBySource(_ context.Context, _ string) error { return nil }
+func (h *hashOnlyStore) Stats(_ context.Context) (StoreStats, error)      { return StoreStats{}, nil }
+func (h *hashOnlyStore) Close() error                                     { return nil }
+
+func (h *hashOnlyStore) ReplaceSourceWithHash(_ context.Context, _ string, chunks []Chunk, _ [][]float64, hash string) error {
+	h.withHashCalls++
+	h.lastHash = hash
+	h.lastChunks = chunks
+	return nil
+}
+
+// TestIndexer_externalHashOnlyStore_dropsVSID covers spec §5.6 silent-drop
+// dispatch: an external VectorStore that opts into the hash-tier interface
+// but NOT the vsid-tier interface must still accept IndexFile writes; the
+// indexer dispatches to the hash arm and the resolved vsid is silently
+// dropped. This preserves the additive capability tier contract — external
+// consumers (Firn IDE, Flux ML, Quantum Trader) that implement only the
+// pre-#82 interfaces keep working without code changes.
+func TestIndexer_externalHashOnlyStore_dropsVSID(t *testing.T) {
+	store := &hashOnlyStore{}
+
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0, 0, 0}},
+		Provider:      "ollama",
+		Model:         "m",
+		VectorSpaceID: "ollama/m",
+	}}
+
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{{ID: "c1", Content: content, Source: path, StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}, nil
+	})
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	if err := os.WriteFile(path, []byte("package x"), 0644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("IndexFile against hash-only store: expected success, got %v", err)
+	}
+
+	if store.withHashCalls != 1 {
+		t.Errorf("ReplaceSourceWithHash calls = %d, want 1 (hash arm should have been chosen)", store.withHashCalls)
+	}
+	if store.withVSIDCalls != 0 {
+		t.Errorf("vsid-aware calls = %d, want 0 (store does not implement that arm)", store.withVSIDCalls)
+	}
+	if store.bareCalls != 0 {
+		t.Errorf("bare ReplaceSource calls = %d, want 0 (hash arm should win over bare)", store.bareCalls)
+	}
+	if store.lastHash == "" {
+		t.Errorf("ReplaceSourceWithHash received empty hash; expected non-empty source signature")
+	}
+}
