@@ -142,7 +142,7 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 	return nil
 }
 
-func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash string) error {
+func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
 	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
 	// INSERT OR REPLACE deletes the old row and inserts a new one, but
 	// SQLite does not fire DELETE triggers for rows removed by REPLACE
@@ -151,8 +151,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 	// modifies the row in place (preserving its rowid) and fires the
 	// AFTER UPDATE trigger, which correctly maintains FTS5.
 	stmt, err := tx.PrepareContext(ctx,
-		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(id) DO UPDATE SET
 				content = excluded.content,
 				source = excluded.source,
@@ -163,7 +163,8 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 				embedding = excluded.embedding,
 				indexed_at = excluded.indexed_at,
 				stable_key = excluded.stable_key,
-				source_content_hash = excluded.source_content_hash`)
+				source_content_hash = excluded.source_content_hash,
+				vector_space_id = excluded.vector_space_id`)
 	if err != nil {
 		return fmt.Errorf("rag: prepare insert: %w", err)
 	}
@@ -171,7 +172,7 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 
 	now := time.Now().Unix()
 	for i, chunk := range chunks {
-		metaJSON, err := json.Marshal(chunk.Metadata)
+		metaJSON, err := marshalChunkMetadata(chunk.Metadata, vectorSpaceID)
 		if err != nil {
 			return fmt.Errorf("rag: marshal metadata: %w", err)
 		}
@@ -180,11 +181,26 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 			return fmt.Errorf("rag: marshal embedding: %w", err)
 		}
 		if _, err := stmt.ExecContext(ctx, chunk.ID, chunk.Content, chunk.Source,
-			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey, sourceContentHash); err != nil {
+			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey, sourceContentHash, vectorSpaceID); err != nil {
 			return fmt.Errorf("rag: insert chunk %q: %w", chunk.ID, err)
 		}
 	}
 	return nil
+}
+
+// marshalChunkMetadata returns the JSON-encoded chunk metadata. When
+// vectorSpaceID is non-empty, the value is mirrored into the metadata map
+// under "vector_space_id" without mutating the caller's map.
+func marshalChunkMetadata(meta map[string]string, vectorSpaceID string) ([]byte, error) {
+	if vectorSpaceID == "" {
+		return json.Marshal(meta)
+	}
+	merged := make(map[string]string, len(meta)+1)
+	for k, v := range meta {
+		merged[k] = v
+	}
+	merged["vector_space_id"] = vectorSpaceID
+	return json.Marshal(merged)
 }
 
 // Store saves chunks with their embeddings to SQLite.
@@ -202,7 +218,7 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	if err := s.insertChunksTx(ctx, tx, chunks, embeddings, ""); err != nil {
+	if err := s.insertChunksTx(ctx, tx, chunks, embeddings, "", ""); err != nil {
 		return err
 	}
 
@@ -222,6 +238,16 @@ func (s *SQLiteStore) ReplaceSource(ctx context.Context, source string, chunks [
 // and stores the given source signature on each chunk for fast file-level
 // invalidation during subsequent incremental indexes.
 func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash string) error {
+	return s.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, sourceHash, "")
+}
+
+// ReplaceSourceWithHashAndVectorSpaceID atomically replaces all chunks for a
+// source path, stores the source signature, and persists the resolved vector
+// space identity on each chunk. When vectorSpaceID is non-empty it is written
+// to the chunks.vector_space_id column AND mirrored into the per-chunk
+// metadata JSON under the "vector_space_id" key. Pass an empty vectorSpaceID
+// to preserve pre-#82 behavior (column stays empty, metadata unchanged).
+func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	if err := validateStoreInputs(chunks, embeddings); err != nil {
 		return fmt.Errorf("rag: replace source %q: %w", source, err)
 	}
@@ -242,7 +268,7 @@ func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, 
 	}
 
 	if len(chunks) > 0 {
-		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, sourceHash); err != nil {
+		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, sourceHash, vectorSpaceID); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
 	}
