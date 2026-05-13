@@ -37,12 +37,10 @@ func (idx *Indexer) canDoIncremental(chunks []Chunk) bool {
 // It re-chunks the entire file, compares against stored chunks via StableKey,
 // and only embeds chunks whose content actually changed.
 //
-// Falls back to full IndexFile behavior when:
-//   - The store does not implement sourceChunkLoader
-//   - No existing chunks are stored for this source
-//   - The workspace root is not set (StableKey computation impossible)
-//   - More than 50% of new chunks have empty StableKeys
-//   - Any error occurs during the incremental path
+// Falls back to full IndexFile behavior when the incremental preconditions are
+// missing or the incremental path returns ErrIncrementalRebuildRequired. Stale
+// CAS failures and vector-space/corpus drift errors fail closed instead of
+// retrying against an already-read snapshot.
 //
 // On success, the store contains exactly the same chunks that a full
 // IndexFile would produce. The only difference is fewer embedding API calls.
@@ -157,8 +155,7 @@ func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error
 }
 
 func incrementalShouldFallback(err error) bool {
-	return errors.Is(err, ErrIncrementalRebuildRequired) ||
-		errors.Is(err, ErrIncrementalStaleSource)
+	return errors.Is(err, ErrIncrementalRebuildRequired)
 }
 
 // indexIncremental is the internal incremental indexing path.

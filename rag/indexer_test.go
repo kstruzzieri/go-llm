@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -394,10 +395,10 @@ func TestIndexerGitignoreNestedScoping(t *testing.T) {
 
 	// Create test files
 	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "app.log"), []byte("log data\n"), 0644)          // ignored by root
+	_ = os.WriteFile(filepath.Join(tmpDir, "app.log"), []byte("log data\n"), 0644) // ignored by root
 	_ = os.WriteFile(filepath.Join(tmpDir, "src", "util.go"), []byte("package src\n"), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "src", "cache.tmp"), []byte("temp\n"), 0644)     // ignored by src
-	_ = os.WriteFile(filepath.Join(tmpDir, "src", "debug.log"), []byte("log\n"), 0644)      // ignored by root
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "cache.tmp"), []byte("temp\n"), 0644) // ignored by src
+	_ = os.WriteFile(filepath.Join(tmpDir, "src", "debug.log"), []byte("log\n"), 0644)  // ignored by root
 	_ = os.WriteFile(filepath.Join(tmpDir, "lib", "helper.go"), []byte("package lib\n"), 0644)
 
 	err := idx.IndexDirectory(context.Background(), tmpDir)
@@ -647,7 +648,7 @@ func TestIndexerGitignoreOverlappingNestedRules(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(tmpDir, "src", ".gitignore"), []byte("*.log\n"), 0644)
 
 	_ = os.WriteFile(filepath.Join(tmpDir, "main.go"), []byte("package main\n\nfunc main() {}\n"), 0644)
-	_ = os.WriteFile(filepath.Join(tmpDir, "root.log"), []byte("root log\n"), 0644)        // NOT ignored (root negation)
+	_ = os.WriteFile(filepath.Join(tmpDir, "root.log"), []byte("root log\n"), 0644) // NOT ignored (root negation)
 	_ = os.WriteFile(filepath.Join(tmpDir, "src", "app.go"), []byte("package src\n"), 0644)
 	_ = os.WriteFile(filepath.Join(tmpDir, "src", "debug.log"), []byte("src log\n"), 0644) // ignored (nested re-ignore)
 
@@ -876,7 +877,7 @@ func TestIndexer_vsidFallbackProviderModel(t *testing.T) {
 // behavior. When the underlying store is vsid-capable and the embedder
 // returns embeddings without any way to derive a vsid (empty
 // VectorSpaceID/Provider/Model), IndexFile MUST refuse the write before any
-// rows land. This prevents fresh vector_space_id = '' rows from being
+// rows land. This prevents fresh vector_space_id = "" rows from being
 // silently mixed into a corpus that drift detection cannot recover from.
 //
 // Red until IndexFile gains a pre-dispatch fail-closed check for vsid-capable
@@ -953,6 +954,69 @@ func TestIndexer_replaceSourceWithProvenance_emptyVSIDRejectsCapableStore(t *tes
 	}
 	if count != 0 {
 		t.Errorf("chunks rows after rejected replace = %d, want 0", count)
+	}
+}
+
+func TestIndexer_IndexFileExistingVectorSpaceDriftFailsClosed(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	if err := os.WriteFile(path, []byte("package old"), 0644); err != nil {
+		t.Fatalf("write seed: %v", err)
+	}
+
+	chunker := chunkerFunc(func(path string, content string) ([]Chunk, error) {
+		return []Chunk{{
+			ID: "c1", Content: content, Source: path,
+			StartLine: 1, EndLine: 1, Language: "go",
+			Metadata: map[string]string{},
+		}}, nil
+	})
+	seedEmb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0}},
+		Provider:      "fake",
+		Model:         "old",
+		VectorSpaceID: "fake/old",
+	}}
+	idx, err := NewIndexerWithEmbedder(seedEmb, store, WithEmbeddingModel("old"), WithChunker(chunker))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() seed error: %v", err)
+	}
+	if err := idx.IndexFile(context.Background(), path); err != nil {
+		t.Fatalf("seed IndexFile() error: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("package new"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	driftEmb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{0, 1}},
+		Provider:      "fake",
+		Model:         "new",
+		VectorSpaceID: "fake/new",
+	}}
+	idx, err = NewIndexerWithEmbedder(driftEmb, store, WithEmbeddingModel("new"), WithChunker(chunker))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() drift error: %v", err)
+	}
+	err = idx.IndexFile(context.Background(), path)
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("IndexFile() error = %v, want ErrVectorSpaceDrift", err)
+	}
+
+	var content, vectorSpaceID string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT content, vector_space_id FROM chunks WHERE source = ?`, path).
+		Scan(&content, &vectorSpaceID); err != nil {
+		t.Fatalf("query stored row: %v", err)
+	}
+	if content != "package old" || vectorSpaceID != "fake/old" {
+		t.Fatalf("stored row = content %q vsid %q, want unchanged old row/fake/old", content, vectorSpaceID)
 	}
 }
 

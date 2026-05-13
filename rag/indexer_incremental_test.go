@@ -761,7 +761,7 @@ func TestIndexFileIncremental_HashSkip(t *testing.T) {
 	}
 }
 
-func TestIndexFileIncremental_HashInvalidatedByEmbeddingModel(t *testing.T) {
+func TestIndexFileIncremental_EmbeddingModelDriftFailsClosed(t *testing.T) {
 	var embedCount atomic.Int32
 	srv := newBatchCountingEmbedServer(4, &embedCount)
 	defer srv.Close()
@@ -819,16 +819,17 @@ func TestIndexFileIncremental_HashInvalidatedByEmbeddingModel(t *testing.T) {
 		WithWorkspaceRoot(tmpDir),
 		WithChunker(chunker),
 	)
-	if err := idx2.IndexFileIncremental(context.Background(), goFile); err != nil {
-		t.Fatalf("IndexFileIncremental() error: %v", err)
+	err = idx2.IndexFileIncremental(context.Background(), goFile)
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("IndexFileIncremental() error = %v, want ErrVectorSpaceDrift", err)
 	}
 
 	hashAfter, err := innerStore.GetSourceHash(context.Background(), goFile)
 	if err != nil {
 		t.Fatalf("GetSourceHash() after model change error: %v", err)
 	}
-	if hashAfter == hashBefore {
-		t.Error("expected source hash to change after embedding model change")
+	if hashAfter != hashBefore {
+		t.Error("expected source hash to remain unchanged after rejected embedding-model drift")
 	}
 	if got := embedCount.Load(); got == 0 {
 		t.Error("expected embed calls after embedding model change")
@@ -898,7 +899,7 @@ func TestIndexFileIncremental_EmptyStoredHashForcesFullReembed(t *testing.T) {
 	getBySourceCount.Store(0)
 
 	idx2 := NewIndexer(client, store,
-		WithEmbeddingModel("test-embed-b"),
+		WithEmbeddingModel("test-embed-a"),
 		WithWorkspaceRoot(tmpDir),
 		WithChunker(chunker),
 	)
@@ -1481,6 +1482,76 @@ func TestIndexerIncremental_legacyEmptyVSIDFallsBackAndRepairs(t *testing.T) {
 	}
 }
 
+func TestIndexerIncremental_staleSourceDoesNotFallback(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "fake/m"
+	var embedInputs [][]string
+
+	tmp := t.TempDir()
+	path := filepath.Join(tmp, "f.go")
+	emb := EmbedderFunc(func(ctx context.Context, _ string, inputs []string) (EmbedResult, error) {
+		embedInputs = append(embedInputs, append([]string(nil), inputs...))
+		if len(embedInputs) == 1 {
+			if err := store.UpdateSourceHash(ctx, path, "raced"); err != nil {
+				t.Fatalf("UpdateSourceHash() during embed: %v", err)
+			}
+		}
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0}
+		}
+		return EmbedResult{Embeddings: embeddings, Provider: "fake", Model: "m", VectorSpaceID: wantVSID}, nil
+	})
+
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmp))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = incrementalVSIDFixtureChunker("func A() { return 1 }", "func A() { return 42 }")
+
+	oldChunks, err := idx.chunker.Chunk(path, "initial")
+	if err != nil {
+		t.Fatalf("chunk seed: %v", err)
+	}
+	populateFixtureStableKeys(t, oldChunks, tmp)
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(context.Background(), path, oldChunks, [][]float64{{1, 0}, {0, 1}}, idx.currentSourceSignature("initial").String(), wantVSID); err != nil {
+		t.Fatalf("seed rows: %v", err)
+	}
+
+	if err := os.WriteFile(path, []byte("changed"), 0644); err != nil {
+		t.Fatalf("write changed: %v", err)
+	}
+	err = idx.IndexFileIncremental(context.Background(), path)
+	if !errors.Is(err, ErrIncrementalStaleSource) {
+		t.Fatalf("IndexFileIncremental() error = %v, want ErrIncrementalStaleSource", err)
+	}
+	if len(embedInputs) != 1 || len(embedInputs[0]) != 1 {
+		t.Fatalf("embed calls = %#v, want one incremental embed of 1 chunk and no full fallback", embedInputs)
+	}
+
+	hashAfter, err := store.GetSourceHash(context.Background(), path)
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	if hashAfter != "raced" {
+		t.Fatalf("source hash after stale CAS = %q, want raced", hashAfter)
+	}
+	var changedRows int
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*) FROM chunks WHERE source = ? AND content = ?`, path, "func A() { return 42 }").
+		Scan(&changedRows); err != nil {
+		t.Fatalf("query changed rows: %v", err)
+	}
+	if changedRows != 0 {
+		t.Fatalf("changed chunk rows after stale CAS = %d, want 0", changedRows)
+	}
+}
+
 func TestIndexerIncremental_vectorSpaceDriftDoesNotFallback(t *testing.T) {
 	store, err := NewSQLiteStore(":memory:")
 	if err != nil {
@@ -1728,7 +1799,7 @@ func (s *vsidNoCASStore) GetBySource(ctx context.Context, source string) ([]Chun
 }
 
 func (s *vsidNoCASStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
-	return s.inner.ForceReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, sourceHash, vectorSpaceID)
+	return s.inner.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, sourceHash, vectorSpaceID)
 }
 
 func populateFixtureStableKeys(t *testing.T, chunks []Chunk, workspaceRoot string) {
