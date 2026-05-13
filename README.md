@@ -351,6 +351,7 @@ insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
 
 | Feature | Description |
 |---------|-------------|
+| Agentic RAG | Opt-in agentic retrieval layer planned on top of static RAG. Static RAG remains the default. Phase 0 gates are active. |
 | In-band routing transparency | Surface `RouteOutcome` (actual model, fallbacks used, sticky decision) in MCP tool responses so callers see which model served a request rather than only the planned default. Out-of-band today via `route://*` resources. |
 | Vision support | Image inputs in chat messages |
 | ANN search | Approximate nearest neighbor search for large vector stores |
