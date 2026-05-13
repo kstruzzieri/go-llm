@@ -1,0 +1,21 @@
+name: macOS Compile Smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  darwin-smoke:
+    name: macOS Compile Smoke
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Compile smoke
+        run: go test -run '^$' ./...

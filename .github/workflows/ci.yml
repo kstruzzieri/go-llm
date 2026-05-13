@@ -32,16 +32,3 @@ jobs:
 
       - name: Test
         run: go test -race ./...
-
-  darwin-smoke:
-    name: macOS Compile Smoke
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-
-      - name: Compile smoke
-        run: go test -run '^$' ./...

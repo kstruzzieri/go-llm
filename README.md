@@ -376,6 +376,8 @@ go test ./...
 go test ./... -v
 ```
 
+For the pre-push and full local CI suites, see [`docs/local-ci.md`](docs/local-ci.md). The Docker-backed pre-push hook runs lint plus race tests before pushes.
+
 ## License
 
 MIT
