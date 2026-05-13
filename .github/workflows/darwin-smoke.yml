@@ -1,23 +1,24 @@
-name: CI
+name: macOS Compile Smoke
 
 on:
   pull_request:
     branches: [develop, main]
   push:
     branches: [develop, main]
+  workflow_dispatch:
 
 # Cancel stale PR runs on new pushes; let push builds on develop/main complete
 concurrency:
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: darwin-smoke-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
 
 jobs:
-  ci:
-    name: Lint & Test
-    runs-on: ubuntu-latest
+  darwin-smoke:
+    name: macOS Compile Smoke
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
 
@@ -25,10 +26,5 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Lint
-        uses: golangci/golangci-lint-action@v9
-        with:
-          version: v2.11.4
-
-      - name: Test
-        run: go test -race ./...
+      - name: Compile smoke
+        run: go test -run '^$' ./...
