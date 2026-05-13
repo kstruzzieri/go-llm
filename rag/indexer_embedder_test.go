@@ -62,7 +62,10 @@ func TestNewIndexerWithEmbedder_AppliesEmbeddingModel(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	emb := &recordingEmbedder{result: EmbedResult{
-		Embeddings: [][]float64{{1, 2, 3}},
+		Embeddings:    [][]float64{{1, 2, 3}},
+		Provider:      "test",
+		Model:         "test-model",
+		VectorSpaceID: "test/test-model",
 	}}
 	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("test-model"))
 	if err != nil {
