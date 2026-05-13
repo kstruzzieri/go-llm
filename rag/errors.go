@@ -23,4 +23,31 @@ var (
 	// more than one vector space, or a partially-migrated corpus where
 	// known-vsid rows coexist with legacy unknown-vsid rows.
 	ErrCorpusMixedVectorSpaces = errors.New("rag: corpus contains mixed vector spaces")
+
+	// ErrVectorSpaceDrift indicates an incremental index attempted to mix
+	// freshly embedded chunks with cached chunks from a different vector space.
+	ErrVectorSpaceDrift = errors.New("rag: vector-space drift")
+
+	// ErrMissingVectorSpaceID indicates an embedder or write path produced a
+	// non-empty batch without a VectorSpaceID/Provider/Model identity.
+	ErrMissingVectorSpaceID = errors.New("rag: missing vector-space id")
+
+	// ErrIncrementalRebuildRequired indicates the incremental path cannot
+	// safely reuse cached embeddings and the caller should do a full re-embed.
+	ErrIncrementalRebuildRequired = errors.New("rag: incremental index requires full re-embed")
+
+	// ErrIncrementalStaleSource indicates the source changed in the store
+	// between the incremental read/diff and the transactional replace.
+	ErrIncrementalStaleSource = errors.New("rag: incremental source changed during indexing")
+
+	// ErrEmbedderFailed indicates an embedding call failed during indexing.
+	ErrEmbedderFailed = errors.New("rag: embedder failed")
+
+	// ErrEmbeddingCountMismatch indicates an embedder returned the wrong number
+	// of vectors for the requested input batch.
+	ErrEmbeddingCountMismatch = errors.New("rag: embedding count mismatch")
+
+	// ErrStoreOperation indicates the vector store failed an operation needed
+	// by indexing or retrieval.
+	ErrStoreOperation = errors.New("rag: vector store operation failed")
 )

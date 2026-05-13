@@ -40,7 +40,8 @@ type atomicSourceReplacerWithHash interface {
 // atomicSourceReplacerWithVectorSpaceID extends atomicSourceReplacerWithHash
 // with vector-space identifier persistence. Stores that implement the
 // capability support drift detection at retrieval time; stores that only
-// implement atomicSourceReplacerWithHash silently drop the vsid.
+// implement atomicSourceReplacerWithHash silently drop the vsid. Implementors
+// must reject non-empty chunk batches with an empty vectorSpaceID.
 type atomicSourceReplacerWithVectorSpaceID interface {
 	ReplaceSourceWithHashAndVectorSpaceID(
 		ctx context.Context,
@@ -49,6 +50,21 @@ type atomicSourceReplacerWithVectorSpaceID interface {
 		embeddings [][]float64,
 		sourceHash string,
 		vectorSpaceID string,
+	) error
+}
+
+// atomicSourceReplacerWithExpectedHashAndVectorSpaceID is an internal-only
+// SQLite-backed capability that extends the vsid-aware replacement path with a
+// transactional source-hash compare-and-swap for incremental indexing.
+type atomicSourceReplacerWithExpectedHashAndVectorSpaceID interface {
+	ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(
+		ctx context.Context,
+		source string,
+		chunks []Chunk,
+		embeddings [][]float64,
+		sourceHash string,
+		vectorSpaceID string,
+		expectedSourceHash string,
 	) error
 }
 
@@ -134,12 +150,42 @@ func NewIndexerWithEmbedder(embedder Embedder, store VectorStore, opts ...Indexe
 }
 
 func (idx *Indexer) replaceSource(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64) error {
-	return idx.replaceSourceWithHash(ctx, path, chunks, embeddings, "")
+	return idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, "", "")
 }
 
 func (idx *Indexer) replaceSourceWithHash(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash string) error {
+	return idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, "")
+}
+
+// replaceSourceWithProvenance serializes source replacement writes and
+// dispatches capability-descending: a store that supports vector-space-id
+// persistence gets the vsid; a store that only supports the source hash gets
+// the hash with vsid silently dropped; a store that only supports atomic
+// replacement gets neither; legacy stores fall through to the non-atomic
+// delete+store fallback. VSID write invariants are enforced by the
+// vsid-capable store implementation, not by this dispatcher.
+func (idx *Indexer) replaceSourceWithProvenance(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	idx.storeMu.Lock()
 	defer idx.storeMu.Unlock()
+
+	return idx.replaceSourceWithProvenanceLocked(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
+}
+
+func (idx *Indexer) replaceSourceWithProvenanceIfSourceHash(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID, expectedSourceHash string) error {
+	idx.storeMu.Lock()
+	defer idx.storeMu.Unlock()
+
+	if replacer, ok := idx.store.(atomicSourceReplacerWithExpectedHashAndVectorSpaceID); ok {
+		return replacer.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID, expectedSourceHash)
+	}
+
+	return fmt.Errorf("%w: source-hash CAS unsupported by %T", ErrIncrementalRebuildRequired, idx.store)
+}
+
+func (idx *Indexer) replaceSourceWithProvenanceLocked(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
+	if replacer, ok := idx.store.(atomicSourceReplacerWithVectorSpaceID); ok {
+		return replacer.ReplaceSourceWithHashAndVectorSpaceID(ctx, path, chunks, embeddings, sourceHash, vectorSpaceID)
+	}
 
 	if replacer, ok := idx.store.(atomicSourceReplacerWithHash); ok {
 		return replacer.ReplaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash)
@@ -215,21 +261,40 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	res, err := idx.embedder.Embed(ctx, idx.model, texts)
 	if err != nil {
 		// Embedding failed — preserve existing indexed data for this file
-		return fmt.Errorf("rag: embed chunks for %q: %w", path, err)
+		return fmt.Errorf("%w: embed chunks for %q: %w", ErrEmbedderFailed, path, err)
 	}
 	if len(res.Embeddings) != len(texts) {
-		return fmt.Errorf("rag: embed chunks for %q: count mismatch (got %d for %d chunks)", path, len(res.Embeddings), len(texts))
+		return fmt.Errorf("%w: embed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, path, len(res.Embeddings), len(texts))
 	}
 	embeddings := res.Embeddings
 
 	// Step 3: Replace old chunks with new ones. Store the source signature so
 	// subsequent IndexFileIncremental calls can safely use the fast path.
+	// Persist the resolved vector-space identity so retrieval-time drift
+	// detection can fail closed across cross-run embedding-model changes.
+	vsid := resolveVectorSpaceID(res)
 	sourceHash := idx.currentSourceSignature(content).String()
-	if err := idx.replaceSourceWithHash(ctx, path, chunks, embeddings, sourceHash); err != nil {
+	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vsid); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
 	}
 
 	return nil
+}
+
+// resolveVectorSpaceID picks the vsid the indexer will persist for a batch.
+// It prefers the embedder's explicit VectorSpaceID, falls back to
+// Provider/Model synthesis when only those two are populated, and returns
+// empty when neither path yields a value. Capability-aware dispatch in
+// replaceSourceWithProvenance is responsible for failing closed on empty
+// vsid against a vsid-capable store (see spec §5.6 / Test 4a).
+func resolveVectorSpaceID(res EmbedResult) string {
+	if res.VectorSpaceID != "" {
+		return res.VectorSpaceID
+	}
+	if res.Provider != "" && res.Model != "" {
+		return res.Provider + "/" + res.Model
+	}
+	return ""
 }
 
 // IndexDirOption configures IndexDirectory behavior.

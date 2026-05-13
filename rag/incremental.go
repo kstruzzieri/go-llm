@@ -12,6 +12,10 @@ import (
 type ChunkWithEmbedding struct {
 	Chunk     Chunk
 	Embedding []float64
+	// VectorSpaceID is empty for legacy rows and for embeddings written before
+	// the writer could identify the vector space; those cases are intentionally
+	// indistinguishable after reading from SQLite's DEFAULT '' column.
+	VectorSpaceID string
 }
 
 // sourceChunkLoader is an optional store capability for loading existing
