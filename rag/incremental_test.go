@@ -194,6 +194,29 @@ func TestMockSourceHashChecker(t *testing.T) {
 	}
 }
 
+func TestSourceSignatureV1V2Incompatible(t *testing.T) {
+	if sourceSignatureVersion != 2 {
+		t.Fatalf("sourceSignatureVersion = %d, want 2", sourceSignatureVersion)
+	}
+
+	v2 := sourceSignature{
+		Version:          sourceSignatureVersion,
+		ContentHash:      contentHash("package main"),
+		EmbeddingModel:   "qwen3-embedding:8b",
+		Chunker:          "test-chunker",
+		StableKeyVersion: stableKeyVersion,
+	}
+	v1 := v2
+	v1.Version = 1
+
+	if v1.compatibleWith(v2) {
+		t.Fatal("v1 source signature should be incompatible with v2")
+	}
+	if v1.String() == v2.String() {
+		t.Fatal("v1 and v2 source signatures should serialize differently")
+	}
+}
+
 func TestChunkerSignatureIncludesConfig(t *testing.T) {
 	swA, err := NewSlidingWindowChunker(64, 8)
 	if err != nil {

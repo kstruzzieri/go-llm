@@ -925,6 +925,153 @@ func TestIndexFileIncremental_EmptyStoredHashForcesFullReembed(t *testing.T) {
 	}
 }
 
+func TestIndexerV2ForcesReembedOnV1SourceSignature(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "fake/m"
+	var embedInputs [][]string
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		embedInputs = append(embedInputs, append([]string(nil), inputs...))
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0}
+		}
+		return EmbedResult{
+			Embeddings:    embeddings,
+			Provider:      "fake",
+			Model:         "m",
+			VectorSpaceID: wantVSID,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "f.go")
+	if err := os.WriteFile(path, []byte("same content"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmpDir))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = incrementalVSIDFixtureChunker("func A() { return 1 }", "func A() { return 42 }")
+
+	oldChunks, err := idx.chunker.Chunk(path, "same content")
+	if err != nil {
+		t.Fatalf("chunk seed: %v", err)
+	}
+	populateFixtureStableKeys(t, oldChunks, tmpDir)
+
+	legacySig := idx.currentSourceSignature("same content")
+	legacySig.Version = 1
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(
+		context.Background(),
+		path,
+		oldChunks,
+		[][]float64{{1, 0}, {0, 1}},
+		legacySig.String(),
+		wantVSID,
+	); err != nil {
+		t.Fatalf("seed v1 rows: %v", err)
+	}
+
+	embedInputs = nil
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	if len(embedInputs) != 1 || len(embedInputs[0]) != len(oldChunks) {
+		t.Fatalf("embed calls = %#v, want one full re-embed of %d chunks", embedInputs, len(oldChunks))
+	}
+
+	hashAfter, err := store.GetSourceHash(context.Background(), path)
+	if err != nil {
+		t.Fatalf("GetSourceHash() error: %v", err)
+	}
+	afterSig, ok := parseSourceSignature(hashAfter)
+	if !ok {
+		t.Fatalf("parse source signature after reindex failed for %q", hashAfter)
+	}
+	if afterSig.Version != sourceSignatureVersion {
+		t.Fatalf("source signature version after reindex = %d, want %d", afterSig.Version, sourceSignatureVersion)
+	}
+	if hashAfter == legacySig.String() {
+		t.Fatal("source hash still has v1 signature after forced re-embed")
+	}
+}
+
+func TestIndexerV2RepairsV1LegacyUnknownVSID(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	const wantVSID = "fake/m"
+	var embedInputs [][]string
+	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		embedInputs = append(embedInputs, append([]string(nil), inputs...))
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{float64(i + 1), 0}
+		}
+		return EmbedResult{
+			Embeddings:    embeddings,
+			Provider:      "fake",
+			Model:         "m",
+			VectorSpaceID: wantVSID,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "f.go")
+	if err := os.WriteFile(path, []byte("same content"), 0644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+
+	idx, err := NewIndexerWithEmbedder(emb, store, WithEmbeddingModel("m"), WithWorkspaceRoot(tmpDir))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = incrementalVSIDFixtureChunker("func A() { return 1 }", "func A() { return 42 }")
+
+	oldChunks, err := idx.chunker.Chunk(path, "same content")
+	if err != nil {
+		t.Fatalf("chunk seed: %v", err)
+	}
+	populateFixtureStableKeys(t, oldChunks, tmpDir)
+
+	legacySig := idx.currentSourceSignature("same content")
+	legacySig.Version = 1
+	if err := store.ReplaceSourceWithHash(context.Background(), path, oldChunks, [][]float64{{1, 0}, {0, 1}}, legacySig.String()); err != nil {
+		t.Fatalf("seed v1 legacy rows: %v", err)
+	}
+
+	embedInputs = nil
+	if err := idx.IndexFileIncremental(context.Background(), path); err != nil {
+		t.Fatalf("IndexFileIncremental() error: %v", err)
+	}
+
+	if len(embedInputs) != 1 || len(embedInputs[0]) != len(oldChunks) {
+		t.Fatalf("embed calls = %#v, want one full re-embed of %d chunks", embedInputs, len(oldChunks))
+	}
+
+	var count int
+	var minVSID, maxVSID string
+	if err := store.db.QueryRowContext(context.Background(),
+		`SELECT COUNT(*), MIN(vector_space_id), MAX(vector_space_id) FROM chunks WHERE source = ?`, path).
+		Scan(&count, &minVSID, &maxVSID); err != nil {
+		t.Fatalf("query vector_space_id summary: %v", err)
+	}
+	if count != len(oldChunks) || minVSID != wantVSID || maxVSID != wantVSID {
+		t.Fatalf("vector_space_id summary = count %d min %q max %q, want %d/%q/%q", count, minVSID, maxVSID, len(oldChunks), wantVSID, wantVSID)
+	}
+}
+
 func TestIndexFileIncremental_HashInvalidatedByChunkerConfig(t *testing.T) {
 	var embedCount atomic.Int32
 	srv := newBatchCountingEmbedServer(4, &embedCount)
