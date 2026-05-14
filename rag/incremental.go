@@ -41,7 +41,7 @@ type chunkerSignatureProvider interface {
 
 // sourceSignatureVersion identifies the persisted source signature format.
 // Bump this when the index inputs change in a way that requires full re-embed.
-const sourceSignatureVersion = 1
+const sourceSignatureVersion = 2
 
 // sourceSignature captures the inputs that determine whether persisted
 // embeddings can be safely reused for a source file.
