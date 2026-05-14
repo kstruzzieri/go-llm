@@ -1,4 +1,4 @@
 #!/usr/bin/env sh
 set -eu
 
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
+docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full

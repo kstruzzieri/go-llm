@@ -1,6 +1,6 @@
 # Local CI
 
-This repository uses a Docker-backed local CI runner so lint and race tests run before pushes without relying on GitHub Actions minutes.
+This repository uses a Docker-backed local CI runner so lint, race tests, and compile-smoke checks run before pushes without relying on GitHub Actions minutes.
 
 ## Quickstart
 
@@ -13,13 +13,13 @@ git config core.hooksPath .githooks
 Run the same suite the hook runs:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
+docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
 ```
 
-Run the full local suite before opening or updating a PR:
+Run the faster pre-push subset manually when you do not need the compile-smoke pass:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
 ```
 
 The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data.
@@ -27,31 +27,31 @@ The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/worksp
 ## Typical Workflow
 
 1. Make code changes normally.
-2. Run `scripts/ci-local --mode pre-push` for a host-side check, or use the Docker command above when you want the pinned CI toolchain.
-3. Push the branch. The `.githooks/pre-push` hook automatically runs the Docker-backed `pre-push` suite and blocks the push on failure.
-4. Run `scripts/ci-local --mode full` or its Docker equivalent before PR handoff when broad compile behavior may have changed.
+2. Run `scripts/ci-local --mode pre-push` for a faster host-side check while iterating, or use the Docker command above when you want the pinned CI toolchain.
+3. Push the branch. The `.githooks/pre-push` hook automatically runs the Docker-backed `full` suite and blocks the push on failure.
+4. GitHub runs the required `Lint & Test` workflow on PRs to satisfy branch protection. Push-triggered Actions and macOS smoke are disabled unless manually dispatched.
 
 ## Command Contract
 
-Run the pre-push suite directly on the host:
+Run the faster pre-push subset directly on the host:
 
 ```bash
 scripts/ci-local --mode pre-push
 ```
 
-Run the full suite directly on the host:
+Run the full suite directly on the host. This includes all `pre-push` checks plus compile smoke:
 
 ```bash
 scripts/ci-local --mode full
 ```
 
-Run the pre-push suite inside Docker:
+Run the faster pre-push subset inside Docker:
 
 ```bash
 docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
 ```
 
-Run the full suite inside Docker:
+Run the full suite inside Docker. This is what the pre-push hook runs automatically:
 
 ```bash
 docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
@@ -70,13 +70,19 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode fu
 
 ## Git Hook
 
-The pre-push hook lives at `.githooks/pre-push` and runs:
+The pre-push hook lives at `.githooks/pre-push` and runs the full Docker-backed suite:
 
 ```bash
-docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
+docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
 ```
 
-That means pushes fail fast if lint or race tests fail locally.
+That means pushes fail locally if lint, race tests, or compile-smoke checks fail.
+
+## GitHub Actions
+
+The `CI` workflow still runs on `pull_request` so the protected `develop` branch receives the required `Lint & Test` status. It does not run on ordinary pushes.
+
+The macOS compile-smoke workflow is kept as a manual fallback check through `workflow_dispatch`. Local Docker CI is the blocking path before pushes during normal development.
 
 ## Notes
 

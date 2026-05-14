@@ -376,7 +376,21 @@ go test ./...
 go test ./... -v
 ```
 
-For the pre-push and full local CI suites, see [`docs/local-ci.md`](docs/local-ci.md). The Docker-backed pre-push hook runs lint plus race tests before pushes.
+### Local CI
+
+Enable the Docker-backed pre-push hook once per clone:
+
+```bash
+git config core.hooksPath .githooks
+```
+
+Run the same full suite manually:
+
+```bash
+docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode full
+```
+
+`full` includes `golangci-lint run`, `go test -race ./...`, and `go test -run '^$' ./...`. The pre-push hook runs that full suite automatically before pushes. GitHub still runs the required `Lint & Test` workflow on PRs to satisfy branch protection; push-triggered Actions and macOS smoke remain disabled unless manually dispatched. See [`docs/local-ci.md`](docs/local-ci.md) for the full local CI workflow.
 
 ## License
 
