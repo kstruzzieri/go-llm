@@ -1,10 +1,7 @@
 name: CI
 
 on:
-  pull_request:
-    branches: [develop, main]
-  push:
-    branches: [develop, main]
+  workflow_dispatch:
 
 # Cancel stale PR runs on new pushes; let push builds on develop/main complete
 concurrency:
