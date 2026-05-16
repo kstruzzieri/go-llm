@@ -120,9 +120,6 @@ func defaultRunOptions(opts RunOptions) RunOptions {
 	if opts.WarmRuns < 0 {
 		opts.WarmRuns = 0
 	}
-	if opts.WarmRuns == 0 {
-		opts.WarmRuns = 3
-	}
 	return opts
 }
 

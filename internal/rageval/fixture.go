@@ -59,6 +59,7 @@ func (f *Fixture) Validate() error {
 	}
 
 	queries := make(map[string]struct{}, len(f.Queries))
+	queryTexts := make(map[string]string, len(f.Queries))
 	for i, query := range f.Queries {
 		if query.ID == "" {
 			return fmt.Errorf("rag eval: query %d missing id", i)
@@ -72,6 +73,9 @@ func (f *Fixture) Validate() error {
 		if query.Query == "" {
 			return fmt.Errorf("rag eval: query %q missing query text", query.ID)
 		}
+		if previousID, exists := queryTexts[query.Query]; exists {
+			return fmt.Errorf("rag eval: duplicate query text %q used by queries %q and %q", query.Query, previousID, query.ID)
+		}
 		if len(query.Embedding) != dim {
 			return fmt.Errorf("rag eval: query %q embedding dim=%d, want %d", query.ID, len(query.Embedding), dim)
 		}
@@ -84,6 +88,7 @@ func (f *Fixture) Validate() error {
 			}
 		}
 		queries[query.ID] = struct{}{}
+		queryTexts[query.Query] = query.ID
 	}
 	return nil
 }

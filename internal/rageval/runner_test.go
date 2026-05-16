@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 const fixturePath = "testdata/fixtures.json"
@@ -30,6 +33,21 @@ func TestFixtureValidate(t *testing.T) {
 	}
 }
 
+func TestFixtureValidateRejectsDuplicateQueryText(t *testing.T) {
+	fixture, err := LoadFixture(fixturePath)
+	if err != nil {
+		t.Fatalf("LoadFixture: %v", err)
+	}
+	fixture.Queries[1].Query = fixture.Queries[0].Query
+	err = fixture.Validate()
+	if err == nil {
+		t.Fatal("expected error for duplicate query text, got nil")
+	}
+	if !strings.Contains(err.Error(), "duplicate query text") {
+		t.Fatalf("expected error to mention duplicate query text, got: %v", err)
+	}
+}
+
 func TestRunFixtureWithoutLiveModel(t *testing.T) {
 	fixture, err := LoadFixture(fixturePath)
 	if err != nil {
@@ -51,6 +69,37 @@ func TestRunFixtureWithoutLiveModel(t *testing.T) {
 		}
 		if mode.Summary.RecallAt5 <= 0 {
 			t.Fatalf("mode %q recall@5 = %f, want > 0", mode.Name, mode.Summary.RecallAt5)
+		}
+	}
+}
+
+func TestRunModeHonorsZeroWarmRuns(t *testing.T) {
+	fixture, err := LoadFixture(fixturePath)
+	if err != nil {
+		t.Fatalf("LoadFixture: %v", err)
+	}
+
+	calls := 0
+	report, err := runMode(context.Background(), "test", fixture, RunOptions{WarmRuns: 0, MeasureLatency: false}, func(_ context.Context, query QueryFixture, _ int) ([]rag.SearchResult, error) {
+		calls++
+		return []rag.SearchResult{
+			{
+				Chunk: rag.Chunk{
+					ID:      query.ExpectedIDs[0],
+					Content: "fixture result",
+				},
+			},
+		}, nil
+	})
+	if err != nil {
+		t.Fatalf("runMode: %v", err)
+	}
+	if calls != len(fixture.Queries) {
+		t.Fatalf("retrieve calls = %d, want %d cold calls only", calls, len(fixture.Queries))
+	}
+	for _, query := range report.Queries {
+		if query.WarmLatencyMS.Count != 0 {
+			t.Fatalf("query %q warm latency count = %d, want 0", query.ID, query.WarmLatencyMS.Count)
 		}
 	}
 }
