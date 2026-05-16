@@ -132,3 +132,10 @@ Notable invariants:
   runs (no implicit default).
 - `TestBaselineReportShape` — committed baseline parses cleanly into
   `Report`, has the ratified threshold posture, has both modes present.
+- `TestBaselineReproducible` — re-runs `Run` and asserts all deterministic
+  summary fields match the committed `baseline.json` within 1e-9 tolerance.
+  Catches code-vs-baseline drift (someone changed a scorer without
+  regenerating) AND baseline-vs-code drift (someone edited the JSON by
+  hand). Latency fields are deliberately excluded — they vary run-to-run.
+  On a drift failure, run `go generate ./internal/rageval` if the change
+  was intentional.
