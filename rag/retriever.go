@@ -37,8 +37,10 @@ type RetrieverOption func(*Retriever)
 
 // WithRetrieverModel sets the embedding model for query embedding (default:
 // "nomic-embed-text"). The retriever model must match the model used when
-// the corpus was indexed; mismatches surface as SQLiteStore.Search dimension
-// errors at query time rather than silent zero-score results.
+// the corpus was indexed. Stores that expose vector-space provenance reject
+// mismatches before search. Legacy/non-prober stores only retain Search's
+// dimension guard, so same-dimension vector-space drift remains undetectable
+// there until the store opts into vector-space probing.
 func WithRetrieverModel(model string) RetrieverOption {
 	return func(r *Retriever) {
 		r.model = model
@@ -102,7 +104,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 
 	results, err := r.store.Search(ctx, embedding, k)
 	if err != nil {
-		return nil, fmt.Errorf("%w: search: %w", ErrStoreOperation, err)
+		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
 	}
 
 	return results, nil
@@ -125,7 +127,7 @@ func validateQueryVectorSpace(queryVectorSpaceID string, probe vectorSpaceProbe)
 		return fmt.Errorf("%w: corpus has multiple known vector spaces %v", ErrCorpusMixedVectorSpaces, probe.KnownIDs)
 	}
 	if len(probe.KnownIDs) == 1 && probe.HasUnknown {
-		return fmt.Errorf("%w: corpus has known vector space %q plus legacy unknown rows", ErrCorpusMixedVectorSpaces, probe.KnownIDs[0])
+		return fmt.Errorf("%w: corpus has known vector space %q plus chunks with unknown legacy vector space", ErrCorpusMixedVectorSpaces, probe.KnownIDs[0])
 	}
 	if len(probe.KnownIDs) == 0 {
 		// Empty and fully-legacy corpora cannot be validated by vsid. Preserve
