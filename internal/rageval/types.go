@@ -3,9 +3,41 @@ package rageval
 import "time"
 
 const (
+	// SchemaVersion identifies the JSON shape of Report. Bump on incompatible
+	// changes so future readers can detect drift between code and committed
+	// baseline.json. v1 → v2 migration is unspecified until #95 ratifies the
+	// agentic RAG public package surface.
 	SchemaVersion = "rag-eval-baseline/v1"
+
+	// vectorSpaceID isolates the eval fixture from any real corpus a developer
+	// may have indexed locally.
 	vectorSpaceID = "fixture/rag-eval-v1"
+
+	// OwnerKeith identifies the human accountable for threshold values.
+	OwnerKeith = "Keith"
+
+	// StatusPendingOwnerBefore95 marks reports generated before owner ratification.
+	StatusPendingOwnerBefore95 = "pending_owner_values_before_95"
+
+	// StatusThresholdsRatified marks reports whose non-null thresholds are
+	// owner-approved regression floors (not aspirational targets).
+	StatusThresholdsRatified = "thresholds_ratified"
+
+	// charsPerTokenEstimate is the heuristic rag.Retriever.BuildContext uses
+	// to convert a maxTokens budget to a character budget. Mirror it here so
+	// contextTokens() produces a comparable estimate.
+	charsPerTokenEstimate = 4
 )
+
+// replayTimestamp freezes QueryContext.Timestamp passed into hybrid retrieval
+// so the temporal scorer produces deterministic output across runs. The chosen
+// value (2023-11-14 22:13:20 UTC) is arbitrary but must never change — updating
+// it would invalidate every committed baseline's hybrid numbers.
+var replayTimestamp = time.Unix(1_700_000_000, 0)
+
+// floatPtr returns a pointer to v. Used to populate nullable ThresholdSummary
+// fields without per-call temporary variables.
+func floatPtr(v float64) *float64 { return &v }
 
 // Fixture is the committed golden retrieval corpus and query set.
 type Fixture struct {

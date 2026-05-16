@@ -1,3 +1,5 @@
+//go:generate go run ../../cmd/rag-eval -fixtures testdata/fixtures.json -out testdata/baseline.json
+
 package rageval
 
 import (
@@ -10,6 +12,14 @@ import (
 
 	"github.com/kstruzzieri/go-llm/rag"
 )
+
+// contextFormatter mirrors rag.Retriever.BuildContext for token estimation.
+//
+// IMPORTANT CONTRACT: BuildContext is currently a pure formatter (no receiver
+// state). We rely on that to call it via a zero-value Retriever singleton. If
+// BuildContext ever reads receiver fields, contextTokens silently produces
+// wrong numbers. Grep for callers of BuildContext before changing it.
+var contextFormatter rag.Retriever
 
 // Run executes static and hybrid retrieval against the fixture.
 func Run(ctx context.Context, fixture *Fixture, opts RunOptions) (*Report, error) {
@@ -40,7 +50,7 @@ func Run(ctx context.Context, fixture *Fixture, opts RunOptions) (*Report, error
 	hybrid, err := runMode(ctx, "hybrid_search_multi", fixture, opts, func(ctx context.Context, q QueryFixture, k int) ([]rag.SearchResult, error) {
 		results, err := store.SearchMulti(ctx, q.Embedding, q.Query, k, rag.QueryContext{
 			CurrentFile: q.CurrentFile,
-			Timestamp:   time.Unix(1_700_000_000, 0),
+			Timestamp:   replayTimestamp,
 		})
 		if err != nil {
 			return nil, err
@@ -58,12 +68,36 @@ func Run(ctx context.Context, fixture *Fixture, opts RunOptions) (*Report, error
 	return &Report{
 		SchemaVersion: SchemaVersion,
 		Corpus:        summarizeFixture(fixture),
-		Thresholds: ThresholdSummary{
-			Owner:  "Keith",
-			Status: "pending_owner_values_before_95",
-		},
-		Modes: []ModeReport{*static, *hybrid},
+		Thresholds:    buildThresholds(),
+		Modes:         []ModeReport{*static, *hybrid},
 	}, nil
+}
+
+// buildThresholds returns the v1 regression floors ratified by the owner.
+//
+// Posture: each non-null floor is set at "best known minus a small buffer" so
+// real regressions trip CI without flapping on natural metric noise. Numbers
+// are not aspirational — they catch drops, they do not chase improvements.
+// Tightening floors after sustained improvement is a #95-and-later activity.
+//
+// Latency thresholds are intentionally null. The current baseline runs on a
+// 12-chunk in-memory SQLite corpus with N=20 cold samples per mode; P95
+// derived from that is statistically unstable and bears no relation to
+// production workload. Setting a number here would either flap on noise or
+// be ignored when #95 raises it against a realistic corpus — either way it
+// teaches the team to distrust threshold breaches. Better null than theater.
+func buildThresholds() ThresholdSummary {
+	return ThresholdSummary{
+		Owner:                             OwnerKeith,
+		Status:                            StatusThresholdsRatified,
+		MinimumStaticRecallAt5:            floatPtr(0.95), // current 0.9583; 1pp floor catches real regressions without flapping.
+		MinimumHybridRecallAt5Improvement: floatPtr(0.0),  // hybrid currently matches static; "must not regress" until corpus discriminates.
+		MaximumDuplicateRate:              floatPtr(0.05), // current 0; 5% tolerance for SearchMulti's diversification.
+		MinimumContextPrecisionProxy:      floatPtr(0.50), // current 0.51 @K=5; below 0.50 means majority of returned chunks are irrelevant.
+		MaximumAverageContextTokenGrowth:  floatPtr(0.10), // current both modes match; 10% growth flags context-bloat regression.
+		MaximumOptInHybridP95LatencyMS:    nil,            // deferred to #95: synthetic corpus latency is noise.
+		MaximumFutureDefaultP95LatencyMS:  nil,            // deferred to #95: synthetic corpus latency is noise.
+	}
 }
 
 // WriteReport writes a stable, pretty JSON report.
@@ -87,6 +121,9 @@ func runMode(ctx context.Context, mode string, fixture *Fixture, opts RunOptions
 	var warmLatencies []float64
 
 	for _, query := range fixture.Queries {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("rag eval: %s cancelled before %q: %w", mode, query.ID, err)
+		}
 		var results []rag.SearchResult
 		coldMS, err := measure(opts.MeasureLatency, func() error {
 			var retrieveErr error
@@ -100,6 +137,9 @@ func runMode(ctx context.Context, mode string, fixture *Fixture, opts RunOptions
 
 		queryWarm := make([]float64, 0, opts.WarmRuns)
 		for i := 0; i < opts.WarmRuns; i++ {
+			if err := ctx.Err(); err != nil {
+				return nil, fmt.Errorf("rag eval: %s cancelled during warm runs of %q: %w", mode, query.ID, err)
+			}
 			warmMS, err := measure(opts.MeasureLatency, func() error {
 				_, retrieveErr := retrieve(ctx, query, 10)
 				return retrieveErr
@@ -191,7 +231,9 @@ func summarizeFixture(fixture *Fixture) CorpusSummary {
 		VectorID:   vectorSpaceID,
 		Notes: []string{
 			"fixtures use deterministic synthetic embeddings; no live Ollama dependency",
-			"threshold values are owner-gated before #95",
+			"thresholds ratified for v1 regression detection; see runner.buildThresholds for posture rationale",
+			"hybrid_search_multi regresses MRR@5 vs static (~0.825 vs 1.0) on this synthetic corpus — captured for #94 scorer-weight discussion, not flagged as a blocker",
+			"latency thresholds intentionally null: N=20 cold samples on a 12-chunk in-memory SQLite corpus is statistically unstable; defer to #95 against realistic workload",
 		},
 	}
 }
@@ -228,6 +270,10 @@ func averageMetric(queries []QueryReport, k int, pick func(KMetrics) float64) fl
 	return total / float64(len(queries))
 }
 
+// computeKMetrics computes per-K metrics over the result set. If the retriever
+// returns fewer than k items, the metrics reflect the available results — i.e.
+// recall@k's denominator is len(expectedIDs), not k, so a "recall@5" against a
+// retriever that only returned 3 results is computed over those 3.
 func computeKMetrics(results []rag.SearchResult, expectedIDs []string, k int) KMetrics {
 	limited := limitResults(results, k)
 	return KMetrics{
@@ -305,9 +351,8 @@ func contextPrecision(results []rag.SearchResult, expectedIDs []string) float64 
 }
 
 func contextTokens(results []rag.SearchResult) int {
-	var retriever rag.Retriever
-	contextText := retriever.BuildContext(results, 0)
-	return (len(contextText) + 3) / 4
+	contextText := contextFormatter.BuildContext(results, 0)
+	return (len(contextText) + charsPerTokenEstimate - 1) / charsPerTokenEstimate
 }
 
 func set(ids []string) map[string]bool {
@@ -359,6 +404,15 @@ func newFixtureEmbedder(fixture *Fixture) *fixtureEmbedder {
 	return &fixtureEmbedder{byQuery: byQuery}
 }
 
+// Embed looks up a precomputed embedding by exact query-text match.
+//
+// CONTRACT: requires inputs[0] to equal a QueryFixture.Query string exactly as
+// it appears in fixtures.json. This works because rag.Retriever.Retrieve passes
+// the query through to the embedder unchanged. If Retrieve ever normalizes
+// (trim, lowercase, etc.) the query, lookup will fail with the "no fixture
+// embedding" error below — diagnose by checking what Retrieve sent vs. what the
+// fixture contains. See TestFixtureEmbedderRejectsUnknownQuery for the error
+// shape this contract produces on miss.
 func (e *fixtureEmbedder) Embed(_ context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
 	if len(inputs) != 1 {
 		return rag.EmbedResult{}, fmt.Errorf("rag eval: fixture embedder expects 1 input, got %d", len(inputs))
