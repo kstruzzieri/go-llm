@@ -1,0 +1,322 @@
+{
+  "corpus": [
+    {
+      "id": "auth_handler_login",
+      "source": "synthetic/auth/handler.go",
+      "start_line": 10,
+      "end_line": 44,
+      "language": "go",
+      "stable_key": "synthetic/auth/handler.go::LoginHandler#0",
+      "content": "func LoginHandler(service *AuthService) http.HandlerFunc {\n    return func(w http.ResponseWriter, r *http.Request) {\n        var req LoginRequest\n        if err := decodeJSON(r.Body, &req); err != nil {\n            writeError(w, NewBadRequest(\"invalid login body\"))\n            return\n        }\n        session, err := service.Login(r.Context(), req.Email, req.Password)\n        if err != nil {\n            writeError(w, err)\n            return\n        }\n        writeJSON(w, http.StatusOK, session)\n    }\n}",
+      "metadata": {
+        "symbol": "LoginHandler"
+      },
+      "embedding": [0.96, 0.02, 0.18, 0.0, 0.12, 0.18]
+    },
+    {
+      "id": "auth_service_login",
+      "source": "synthetic/auth/service.go",
+      "start_line": 18,
+      "end_line": 78,
+      "language": "go",
+      "stable_key": "synthetic/auth/service.go::AuthService.Login#0",
+      "content": "type AuthService struct {\n    users    *UserRepository\n    sessions *SessionSigner\n}\n\nfunc (s *AuthService) Login(ctx context.Context, email, password string) (*Session, error) {\n    user, err := s.users.FindByEmail(ctx, email)\n    if err != nil {\n        return nil, NewUnauthorized(\"invalid credentials\")\n    }\n    if !ValidatePassword(password, user.PasswordHash) {\n        return nil, NewUnauthorized(\"invalid credentials\")\n    }\n    return s.sessions.IssueSession(user.ID)\n}\n\nfunc ValidatePassword(password, storedHash string) bool {\n    return subtle.ConstantTimeCompare(hash(password), []byte(storedHash)) == 1\n}",
+      "metadata": {
+        "symbol": "AuthService.Login"
+      },
+      "embedding": [0.9, 0.06, 0.05, 0.0, 0.26, 0.32]
+    },
+    {
+      "id": "users_repository_find",
+      "source": "synthetic/users/repository.go",
+      "start_line": 7,
+      "end_line": 40,
+      "language": "go",
+      "stable_key": "synthetic/users/repository.go::UserRepository.FindByEmail#0",
+      "content": "type UserRepository struct {\n    db *sql.DB\n}\n\nfunc (r *UserRepository) FindByEmail(ctx context.Context, email string) (*User, error) {\n    row := r.db.QueryRowContext(ctx, `SELECT id, email, password_hash FROM users WHERE email = ?`, email)\n    var user User\n    if err := row.Scan(&user.ID, &user.Email, &user.PasswordHash); err != nil {\n        return nil, err\n    }\n    return &user, nil\n}",
+      "metadata": {
+        "symbol": "UserRepository.FindByEmail"
+      },
+      "embedding": [0.72, 0.05, 0.0, 0.05, 0.08, 0.8]
+    },
+    {
+      "id": "middleware_require_auth",
+      "source": "synthetic/middleware/auth.go",
+      "start_line": 12,
+      "end_line": 54,
+      "language": "go",
+      "stable_key": "synthetic/middleware/auth.go::RequireAuth#0",
+      "content": "func RequireAuth(verifier *SessionVerifier, next http.Handler) http.Handler {\n    return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n        token := bearerToken(r.Header.Get(\"Authorization\"))\n        claims, err := verifier.Verify(token)\n        if err != nil {\n            writeError(w, NewUnauthorized(\"missing or invalid session\"))\n            return\n        }\n        ctx := context.WithValue(r.Context(), userIDKey{}, claims.UserID)\n        next.ServeHTTP(w, r.WithContext(ctx))\n    })\n}",
+      "metadata": {
+        "symbol": "RequireAuth"
+      },
+      "embedding": [0.82, 0.0, 0.38, 0.0, 0.15, 0.05]
+    },
+    {
+      "id": "api_router_new",
+      "source": "synthetic/api/router.go",
+      "start_line": 9,
+      "end_line": 50,
+      "language": "go",
+      "stable_key": "synthetic/api/router.go::NewRouter#0",
+      "content": "func NewRouter(auth *AuthService, orders *OrderService, verifier *SessionVerifier) http.Handler {\n    mux := http.NewServeMux()\n    mux.Handle(\"POST /login\", LoginHandler(auth))\n    mux.Handle(\"POST /orders\", RequireAuth(verifier, OrderHandler(orders)))\n    mux.Handle(\"GET /orders/{id}\", RequireAuth(verifier, OrderStatusHandler(orders)))\n    return requestLogger(recoverPanics(mux))\n}",
+      "metadata": {
+        "symbol": "NewRouter"
+      },
+      "embedding": [0.42, 0.32, 0.92, 0.08, 0.05, 0.06]
+    },
+    {
+      "id": "orders_service_place",
+      "source": "synthetic/orders/service.go",
+      "start_line": 20,
+      "end_line": 92,
+      "language": "go",
+      "stable_key": "synthetic/orders/service.go::OrderService.PlaceOrder#0",
+      "content": "type OrderService struct {\n    inventory *InventoryService\n    payments  *PaymentClient\n    shipping  *ShippingService\n    orders    *OrderRepository\n}\n\nfunc (s *OrderService) PlaceOrder(ctx context.Context, req OrderRequest) (*Order, error) {\n    reservation, err := s.inventory.Reserve(ctx, req.Items)\n    if err != nil {\n        return nil, err\n    }\n    charge, err := s.payments.Charge(ctx, req.PaymentToken, reservation.Total)\n    if err != nil {\n        s.inventory.Release(ctx, reservation.ID)\n        return nil, err\n    }\n    order := NewOrder(req.CustomerID, reservation, charge)\n    if err := s.orders.Save(ctx, order); err != nil {\n        return nil, err\n    }\n    return order, s.shipping.CreateShipment(ctx, order)\n}",
+      "metadata": {
+        "symbol": "OrderService.PlaceOrder"
+      },
+      "embedding": [0.04, 0.98, 0.08, 0.2, 0.34, 0.35]
+    },
+    {
+      "id": "orders_repository_save",
+      "source": "synthetic/orders/repository.go",
+      "start_line": 8,
+      "end_line": 46,
+      "language": "go",
+      "stable_key": "synthetic/orders/repository.go::OrderRepository.Save#0",
+      "content": "type OrderRepository struct {\n    db *sql.DB\n}\n\nfunc (r *OrderRepository) Save(ctx context.Context, order *Order) error {\n    _, err := r.db.ExecContext(ctx, `INSERT INTO orders (id, customer_id, total, status) VALUES (?, ?, ?, ?)`, order.ID, order.CustomerID, order.Total, order.Status)\n    return err\n}",
+      "metadata": {
+        "symbol": "OrderRepository.Save"
+      },
+      "embedding": [0.02, 0.76, 0.0, 0.12, 0.05, 0.83]
+    },
+    {
+      "id": "inventory_service_reserve",
+      "source": "synthetic/inventory/service.go",
+      "start_line": 14,
+      "end_line": 60,
+      "language": "go",
+      "stable_key": "synthetic/inventory/service.go::InventoryService.Reserve#0",
+      "content": "func (s *InventoryService) Reserve(ctx context.Context, items []LineItem) (*Reservation, error) {\n    for _, item := range items {\n        if item.Quantity <= 0 {\n            return nil, NewBadRequest(\"quantity must be positive\")\n        }\n        if !s.stock.HasAvailable(ctx, item.SKU, item.Quantity) {\n            return nil, NewConflict(\"insufficient inventory\")\n        }\n    }\n    return s.stock.CreateReservation(ctx, items)\n}",
+      "metadata": {
+        "symbol": "InventoryService.Reserve"
+      },
+      "embedding": [0.0, 0.82, 0.08, 0.14, 0.42, 0.24]
+    },
+    {
+      "id": "payments_client_charge",
+      "source": "synthetic/payments/client.go",
+      "start_line": 10,
+      "end_line": 70,
+      "language": "go",
+      "stable_key": "synthetic/payments/client.go::PaymentClient.Charge#0",
+      "content": "type PaymentClient struct {\n    endpoint string\n    http     *http.Client\n}\n\nfunc (c *PaymentClient) Charge(ctx context.Context, token string, amount Money) (*Charge, error) {\n    if token == \"\" {\n        return nil, NewBadRequest(\"payment token is required\")\n    }\n    req := newChargeRequest(token, amount)\n    resp, err := c.http.Do(req.WithContext(ctx))\n    if err != nil {\n        return nil, err\n    }\n    return decodeCharge(resp)\n}",
+      "metadata": {
+        "symbol": "PaymentClient.Charge"
+      },
+      "embedding": [0.0, 0.72, 0.02, 0.72, 0.38, 0.12]
+    },
+    {
+      "id": "shipping_service_create",
+      "source": "synthetic/shipping/service.go",
+      "start_line": 11,
+      "end_line": 48,
+      "language": "go",
+      "stable_key": "synthetic/shipping/service.go::ShippingService.CreateShipment#0",
+      "content": "func (s *ShippingService) CreateShipment(ctx context.Context, order *Order) error {\n    label, err := s.carrier.BuyLabel(ctx, order.ShippingAddress, order.Items)\n    if err != nil {\n        return err\n    }\n    order.Status = StatusReadyToShip\n    order.ShipmentID = label.ID\n    return nil\n}",
+      "metadata": {
+        "symbol": "ShippingService.CreateShipment"
+      },
+      "embedding": [0.0, 0.66, 0.24, 0.42, 0.18, 0.08]
+    },
+    {
+      "id": "config_loader_load",
+      "source": "synthetic/config/config.go",
+      "start_line": 5,
+      "end_line": 56,
+      "language": "go",
+      "stable_key": "synthetic/config/config.go::LoadConfig#0",
+      "content": "func LoadConfig(path string) (*Config, error) {\n    data, err := os.ReadFile(path)\n    if err != nil {\n        return nil, err\n    }\n    var cfg Config\n    if err := json.Unmarshal(data, &cfg); err != nil {\n        return nil, err\n    }\n    if cfg.DatabaseURL == \"\" || cfg.PaymentEndpoint == \"\" {\n        return nil, NewBadRequest(\"missing required configuration\")\n    }\n    return &cfg, nil\n}",
+      "metadata": {
+        "symbol": "LoadConfig"
+      },
+      "embedding": [0.05, 0.08, 0.32, 0.92, 0.32, 0.05]
+    },
+    {
+      "id": "errors_app_error",
+      "source": "synthetic/errors/errors.go",
+      "start_line": 3,
+      "end_line": 52,
+      "language": "go",
+      "stable_key": "synthetic/errors/errors.go::AppError#0",
+      "content": "type AppError struct {\n    Code    string\n    Message string\n    Status  int\n}\n\nfunc NewBadRequest(message string) *AppError {\n    return &AppError{Code: \"bad_request\", Message: message, Status: http.StatusBadRequest}\n}\n\nfunc NewUnauthorized(message string) *AppError {\n    return &AppError{Code: \"unauthorized\", Message: message, Status: http.StatusUnauthorized}\n}\n\nfunc NewConflict(message string) *AppError {\n    return &AppError{Code: \"conflict\", Message: message, Status: http.StatusConflict}\n}",
+      "metadata": {
+        "symbol": "AppError"
+      },
+      "embedding": [0.2, 0.18, 0.06, 0.24, 0.96, 0.05]
+    }
+  ],
+  "queries": [
+    {
+      "id": "single_login_handler",
+      "category": "single_hop",
+      "query": "Where is LoginHandler defined?",
+      "expected_ids": ["auth_handler_login"],
+      "current_file": "synthetic/api/router.go",
+      "embedding": [1.0, 0.0, 0.16, 0.0, 0.08, 0.12]
+    },
+    {
+      "id": "single_find_by_email",
+      "category": "single_hop",
+      "query": "Where is FindByEmail implemented?",
+      "expected_ids": ["users_repository_find"],
+      "current_file": "synthetic/auth/service.go",
+      "embedding": [0.7, 0.04, 0.0, 0.02, 0.04, 0.92]
+    },
+    {
+      "id": "single_require_auth",
+      "category": "single_hop",
+      "query": "Where is RequireAuth defined?",
+      "expected_ids": ["middleware_require_auth"],
+      "current_file": "synthetic/api/router.go",
+      "embedding": [0.86, 0.0, 0.44, 0.0, 0.1, 0.02]
+    },
+    {
+      "id": "single_payment_charge",
+      "category": "single_hop",
+      "query": "Where is PaymentClient.Charge implemented?",
+      "expected_ids": ["payments_client_charge"],
+      "current_file": "synthetic/orders/service.go",
+      "embedding": [0.0, 0.7, 0.02, 0.82, 0.34, 0.08]
+    },
+    {
+      "id": "trace_login_flow",
+      "category": "cross_file_trace",
+      "query": "How does a login request flow from HTTP handler to service to user lookup?",
+      "expected_ids": ["auth_handler_login", "auth_service_login", "users_repository_find"],
+      "current_file": "synthetic/auth/handler.go",
+      "embedding": [0.94, 0.04, 0.1, 0.02, 0.16, 0.42]
+    },
+    {
+      "id": "trace_order_checkout_flow",
+      "category": "cross_file_trace",
+      "query": "How does PlaceOrder coordinate inventory reservation, payment charge, order save, and shipment creation?",
+      "expected_ids": ["orders_service_place", "inventory_service_reserve", "payments_client_charge", "orders_repository_save", "shipping_service_create"],
+      "current_file": "synthetic/orders/service.go",
+      "embedding": [0.0, 0.96, 0.14, 0.48, 0.25, 0.36]
+    },
+    {
+      "id": "trace_protected_route",
+      "category": "cross_file_trace",
+      "query": "How does a protected order route attach session claims before calling the handler?",
+      "expected_ids": ["api_router_new", "middleware_require_auth", "orders_service_place"],
+      "current_file": "synthetic/api/router.go",
+      "embedding": [0.58, 0.46, 0.86, 0.04, 0.08, 0.04]
+    },
+    {
+      "id": "trace_config_to_runtime",
+      "category": "cross_file_trace",
+      "query": "How is configuration loaded before wiring runtime dependencies such as payment endpoints and routes?",
+      "expected_ids": ["config_loader_load", "api_router_new", "payments_client_charge"],
+      "current_file": "synthetic/config/config.go",
+      "embedding": [0.1, 0.22, 0.46, 0.94, 0.2, 0.04]
+    },
+    {
+      "id": "compare_auth_service_repository",
+      "category": "compare",
+      "query": "What is the difference between AuthService.Login and UserRepository.FindByEmail?",
+      "expected_ids": ["auth_service_login", "users_repository_find"],
+      "current_file": "synthetic/auth/service.go",
+      "embedding": [0.86, 0.05, 0.02, 0.03, 0.14, 0.62]
+    },
+    {
+      "id": "compare_payment_inventory",
+      "category": "compare",
+      "query": "Compare PaymentClient.Charge and InventoryService.Reserve responsibilities.",
+      "expected_ids": ["payments_client_charge", "inventory_service_reserve"],
+      "current_file": "synthetic/orders/service.go",
+      "embedding": [0.0, 0.8, 0.06, 0.58, 0.44, 0.18]
+    },
+    {
+      "id": "compare_handler_middleware",
+      "category": "compare",
+      "query": "How does LoginHandler differ from RequireAuth middleware?",
+      "expected_ids": ["auth_handler_login", "middleware_require_auth"],
+      "current_file": "synthetic/api/router.go",
+      "embedding": [0.94, 0.0, 0.36, 0.0, 0.12, 0.08]
+    },
+    {
+      "id": "compare_order_service_repository",
+      "category": "compare",
+      "query": "What is the difference between OrderService.PlaceOrder and OrderRepository.Save?",
+      "expected_ids": ["orders_service_place", "orders_repository_save"],
+      "current_file": "synthetic/orders/service.go",
+      "embedding": [0.0, 0.94, 0.04, 0.16, 0.18, 0.72]
+    },
+    {
+      "id": "architecture_routes",
+      "category": "architecture",
+      "query": "How does the routing layer map HTTP paths to auth and order handlers?",
+      "expected_ids": ["api_router_new", "auth_handler_login", "middleware_require_auth", "orders_service_place"],
+      "current_file": "synthetic/api/router.go",
+      "embedding": [0.52, 0.36, 0.98, 0.06, 0.05, 0.06]
+    },
+    {
+      "id": "architecture_order_coordination",
+      "category": "architecture",
+      "query": "How is order placement architected across inventory, payments, persistence, and shipping?",
+      "expected_ids": ["orders_service_place", "inventory_service_reserve", "payments_client_charge", "orders_repository_save", "shipping_service_create"],
+      "current_file": "synthetic/orders/service.go",
+      "embedding": [0.0, 0.98, 0.18, 0.46, 0.22, 0.42]
+    },
+    {
+      "id": "architecture_auth_sessions",
+      "category": "architecture",
+      "query": "How are authentication sessions issued and later verified?",
+      "expected_ids": ["auth_service_login", "middleware_require_auth", "auth_handler_login"],
+      "current_file": "synthetic/middleware/auth.go",
+      "embedding": [0.94, 0.02, 0.32, 0.0, 0.16, 0.16]
+    },
+    {
+      "id": "architecture_error_model",
+      "category": "architecture",
+      "query": "How does the application model bad request, unauthorized, and conflict errors?",
+      "expected_ids": ["errors_app_error", "auth_handler_login", "inventory_service_reserve", "config_loader_load"],
+      "current_file": "synthetic/errors/errors.go",
+      "embedding": [0.28, 0.24, 0.08, 0.28, 0.98, 0.04]
+    },
+    {
+      "id": "review_validate_password",
+      "category": "code_review",
+      "query": "What edge cases should be reviewed in ValidatePassword and login credential handling?",
+      "expected_ids": ["auth_service_login", "auth_handler_login", "errors_app_error"],
+      "current_file": "synthetic/auth/service.go",
+      "embedding": [0.88, 0.02, 0.04, 0.02, 0.52, 0.2]
+    },
+    {
+      "id": "review_place_order",
+      "category": "code_review",
+      "query": "What edge cases should be reviewed in PlaceOrder around payment failure, inventory release, persistence, and shipment?",
+      "expected_ids": ["orders_service_place", "inventory_service_reserve", "payments_client_charge", "orders_repository_save", "shipping_service_create"],
+      "current_file": "synthetic/orders/service.go",
+      "embedding": [0.0, 0.94, 0.08, 0.36, 0.62, 0.36]
+    },
+    {
+      "id": "review_load_config",
+      "category": "code_review",
+      "query": "What edge cases should be reviewed in LoadConfig for missing files, JSON parse errors, and required fields?",
+      "expected_ids": ["config_loader_load", "errors_app_error"],
+      "current_file": "synthetic/config/config.go",
+      "embedding": [0.08, 0.1, 0.24, 0.96, 0.62, 0.04]
+    },
+    {
+      "id": "review_payment_charge",
+      "category": "code_review",
+      "query": "What edge cases should be reviewed in PaymentClient.Charge around empty tokens, HTTP failures, and response decoding?",
+      "expected_ids": ["payments_client_charge", "errors_app_error"],
+      "current_file": "synthetic/payments/client.go",
+      "embedding": [0.0, 0.62, 0.02, 0.84, 0.72, 0.06]
+    }
+  ]
+}
