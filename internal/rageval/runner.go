@@ -1,4 +1,4 @@
-//go:generate go run ../../cmd/rag-eval -fixtures testdata/fixtures.json -out testdata/baseline.json
+//go:generate go run ../../cmd/rag-eval -fixtures testdata/fixtures.json -out testdata/baseline.json -no-latency
 
 package rageval
 

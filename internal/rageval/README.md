@@ -31,7 +31,8 @@ Regenerate the committed report with:
 ```sh
 go run ./cmd/rag-eval \
   -fixtures internal/rageval/testdata/fixtures.json \
-  -out internal/rageval/testdata/baseline.json
+  -out internal/rageval/testdata/baseline.json \
+  -no-latency
 ```
 
 Or from the package directory:
@@ -39,6 +40,10 @@ Or from the package directory:
 ```sh
 go generate ./internal/rageval
 ```
+
+The committed baseline is generated with `-no-latency` so routine regeneration
+is stable across machines. Omit `-no-latency` only for ad hoc local timing
+experiments; do not commit those volatile latency samples.
 
 The report compares:
 
@@ -93,8 +98,10 @@ uses the same 4-chars-per-token heuristic that `rag.Retriever.BuildContext`
 uses, applied to the same formatted output.
 
 Cold latency is one measurement per query. Warm latency aggregates
-`WarmRuns` repeats. Both report P50 and P95 in milliseconds. **Treat
-sub-millisecond P95 numbers on this corpus as noise**, not signal.
+`WarmRuns` repeats. Both report P50 and P95 in milliseconds when latency
+measurement is enabled. The committed baseline disables latency measurement,
+so these fields are stable zeros. **Treat sub-millisecond P95 numbers on this
+corpus as noise**, not signal.
 
 ## When to regenerate
 
@@ -106,10 +113,10 @@ Regenerate the baseline after **any** change to:
 - `rag.QueryContext` shape or temporal-scorer defaults
 - The fixtures themselves (chunks, queries, embeddings, categories)
 
-`TestBaselineReportShape` asserts the committed file is well-formed. If you
-change retriever behavior without regenerating, that test still passes but
-the committed numbers no longer reflect what the code produces. Don't skip
-the regeneration step.
+`TestBaselineReproducible` asserts the committed deterministic metrics match
+the code. `TestBaselineReportShape` asserts the committed file is well-formed,
+uses the exact ratified threshold values, and still satisfies those threshold
+floors. Don't skip the regeneration step after intentional metric changes.
 
 ## Tests
 
@@ -131,7 +138,8 @@ Notable invariants:
 - `TestRunModeHonorsZeroWarmRuns` — confirms `WarmRuns: 0` means zero warm
   runs (no implicit default).
 - `TestBaselineReportShape` — committed baseline parses cleanly into
-  `Report`, has the ratified threshold posture, has both modes present.
+  `Report`, has the exact ratified threshold values, has both modes present,
+  and satisfies the threshold floors.
 - `TestBaselineReproducible` — re-runs `Run` and asserts all deterministic
   summary fields match the committed `baseline.json` within 1e-9 tolerance.
   Catches code-vs-baseline drift (someone changed a scorer without

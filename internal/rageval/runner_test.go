@@ -132,6 +132,8 @@ func TestRunFixtureWithoutLiveModel(t *testing.T) {
 			t.Fatalf("mode %q duplicate_rate@10 = %f, want 0 (no dedup regressions)", mode.Name, mode.Summary.DuplicateRateAt10)
 		}
 	}
+	assertRatifiedThresholdSummary(t, report.Thresholds)
+	assertReportMeetsRatifiedThresholds(t, report)
 }
 
 // TestBaselineReproducible re-runs Run against the fixture and asserts the
@@ -248,19 +250,108 @@ func TestBaselineReportShape(t *testing.T) {
 	if report.Corpus.Queries != 20 {
 		t.Fatalf("baseline queries = %d, want 20", report.Corpus.Queries)
 	}
-	if report.Thresholds.Status != StatusThresholdsRatified {
-		t.Fatalf("threshold status = %q, want %q", report.Thresholds.Status, StatusThresholdsRatified)
-	}
-	if report.Thresholds.Owner != OwnerKeith {
-		t.Fatalf("threshold owner = %q, want %q", report.Thresholds.Owner, OwnerKeith)
-	}
-	if report.Thresholds.MinimumStaticRecallAt5 == nil {
-		t.Fatal("MinimumStaticRecallAt5 must be set (non-null) per ratified posture")
-	}
-	if report.Thresholds.MaximumOptInHybridP95LatencyMS != nil {
-		t.Fatal("MaximumOptInHybridP95LatencyMS must be null until #95 sets it against a realistic corpus")
-	}
+	assertRatifiedThresholdSummary(t, report.Thresholds)
 	if len(report.Modes) != 2 {
 		t.Fatalf("baseline modes = %d, want 2", len(report.Modes))
+	}
+	assertReportMeetsRatifiedThresholds(t, &report)
+}
+
+func assertRatifiedThresholdSummary(t *testing.T, got ThresholdSummary) {
+	t.Helper()
+
+	if got.Owner != OwnerKeith {
+		t.Fatalf("threshold owner = %q, want %q", got.Owner, OwnerKeith)
+	}
+	if got.Status != StatusThresholdsRatified {
+		t.Fatalf("threshold status = %q, want %q", got.Status, StatusThresholdsRatified)
+	}
+	assertFloatPtrValue(t, "minimum_static_recall_at_5", got.MinimumStaticRecallAt5, 0.95)
+	assertFloatPtrValue(t, "minimum_hybrid_recall_at_5_improvement", got.MinimumHybridRecallAt5Improvement, 0.0)
+	assertFloatPtrValue(t, "maximum_duplicate_rate", got.MaximumDuplicateRate, 0.05)
+	assertFloatPtrValue(t, "minimum_context_precision_proxy", got.MinimumContextPrecisionProxy, 0.50)
+	assertFloatPtrValue(t, "maximum_average_context_token_growth", got.MaximumAverageContextTokenGrowth, 0.10)
+	assertNilFloatPtr(t, "maximum_opt_in_hybrid_p95_latency_ms", got.MaximumOptInHybridP95LatencyMS)
+	assertNilFloatPtr(t, "maximum_future_default_p95_latency_ms", got.MaximumFutureDefaultP95LatencyMS)
+}
+
+func assertReportMeetsRatifiedThresholds(t *testing.T, report *Report) {
+	t.Helper()
+
+	thresholds := report.Thresholds
+	assertRatifiedThresholdSummary(t, thresholds)
+
+	static := modeSummary(t, report, "static")
+	hybrid := modeSummary(t, report, "hybrid_search_multi")
+
+	if threshold := thresholds.MinimumStaticRecallAt5; threshold != nil && static.RecallAt5 < *threshold {
+		t.Fatalf("static recall_at_5 = %.4f, want >= %.4f", static.RecallAt5, *threshold)
+	}
+	if threshold := thresholds.MinimumHybridRecallAt5Improvement; threshold != nil {
+		improvement := hybrid.RecallAt5 - static.RecallAt5
+		if improvement < *threshold {
+			t.Fatalf("hybrid recall_at_5 improvement = %.4f, want >= %.4f (hybrid=%.4f static=%.4f)", improvement, *threshold, hybrid.RecallAt5, static.RecallAt5)
+		}
+	}
+	if threshold := thresholds.MaximumDuplicateRate; threshold != nil {
+		for _, mode := range report.Modes {
+			if mode.Summary.DuplicateRateAt10 > *threshold {
+				t.Fatalf("mode %q duplicate_rate_at_10 = %.4f, want <= %.4f", mode.Name, mode.Summary.DuplicateRateAt10, *threshold)
+			}
+		}
+	}
+	if threshold := thresholds.MinimumContextPrecisionProxy; threshold != nil {
+		for _, mode := range report.Modes {
+			if mode.Summary.ContextPrecisionAt5 < *threshold {
+				t.Fatalf("mode %q context_precision_at_5 = %.4f, want >= %.4f", mode.Name, mode.Summary.ContextPrecisionAt5, *threshold)
+			}
+		}
+	}
+	if threshold := thresholds.MaximumAverageContextTokenGrowth; threshold != nil {
+		assertTokenGrowthWithin(t, "average_context_tokens_at_5", hybrid.AverageContextTokensAt5, static.AverageContextTokensAt5, *threshold)
+		assertTokenGrowthWithin(t, "average_context_tokens_at_10", hybrid.AverageContextTokensAt10, static.AverageContextTokensAt10, *threshold)
+	}
+}
+
+func modeSummary(t *testing.T, report *Report, name string) ModeSummary {
+	t.Helper()
+	for _, mode := range report.Modes {
+		if mode.Name == name {
+			return mode.Summary
+		}
+	}
+	t.Fatalf("mode %q missing from report", name)
+	return ModeSummary{}
+}
+
+func assertFloatPtrValue(t *testing.T, field string, got *float64, want float64) {
+	t.Helper()
+	if got == nil {
+		t.Fatalf("%s = nil, want %.4f", field, want)
+	}
+	diff := *got - want
+	if diff < 0 {
+		diff = -diff
+	}
+	if diff > 1e-12 {
+		t.Fatalf("%s = %.12f, want %.12f", field, *got, want)
+	}
+}
+
+func assertNilFloatPtr(t *testing.T, field string, got *float64) {
+	t.Helper()
+	if got != nil {
+		t.Fatalf("%s = %.4f, want nil", field, *got)
+	}
+}
+
+func assertTokenGrowthWithin(t *testing.T, field string, got, base, maxGrowth float64) {
+	t.Helper()
+	if base <= 0 {
+		t.Fatalf("%s base = %.4f, want > 0", field, base)
+	}
+	growth := (got - base) / base
+	if growth > maxGrowth {
+		t.Fatalf("%s growth = %.4f, want <= %.4f (hybrid=%.2f static=%.2f)", field, growth, maxGrowth, got, base)
 	}
 }
