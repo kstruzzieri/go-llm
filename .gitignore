@@ -1,6 +1,7 @@
 .idea/
 .claude
 docs/plans/
+docs/spikes/
 docs/superpowers/
 docs/llm/traces/
 .DS_Store
