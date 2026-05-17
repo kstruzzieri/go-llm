@@ -412,6 +412,63 @@ func Use() {
 	}
 }
 
+func TestGoExtractorInfersCopiesAssertionsTuplesAndTypeSwitches(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/flow\n\ngo 1.25\n")
+	writeTestFile(t, root, "flow.go", `package flow
+
+type Client struct{}
+
+func (Client) Do() {}
+
+func Pair() (error, Client) {
+	return nil, Client{}
+}
+
+func Use(v any) {
+	a := Client{}
+	b := a
+	b.Do()
+	c := v.(Client)
+	c.Do()
+	_, paired := Pair()
+	paired.Do()
+	switch narrowed := v.(type) {
+	case Client:
+		narrowed.Do()
+	}
+}
+`)
+
+	graph, err := GoExtractor{}.Extract(ctx, "scope-1", root, "vsid-1")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ns := "example.com/flow"
+	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
+	doID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: ns, Receiver: "Client", Name: "Do"})
+	pairID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Pair"})
+
+	wantCalls := []CallEdge{
+		{CallerID: useID, CalleeRaw: "b.Do", Resolution: CallResolutionResolved, CalleeID: doID},
+		{CallerID: useID, CalleeRaw: "c.Do", Resolution: CallResolutionResolved, CalleeID: doID},
+		{CallerID: useID, CalleeRaw: "Pair", Resolution: CallResolutionResolved, CalleeID: pairID},
+		{CallerID: useID, CalleeRaw: "paired.Do", Resolution: CallResolutionResolved, CalleeID: doID},
+		{CallerID: useID, CalleeRaw: "narrowed.Do", Resolution: CallResolutionResolved, CalleeID: doID},
+	}
+	for _, want := range wantCalls {
+		got, ok := findCall(graph.Calls, want.CallerID, want.CalleeRaw)
+		if !ok {
+			t.Fatalf("missing call caller=%q raw=%q; calls=%+v", want.CallerID, want.CalleeRaw, graph.Calls)
+		}
+		if got.Resolution != want.Resolution || got.CalleeID != want.CalleeID {
+			t.Fatalf("call %q resolution/id = %q/%q, want %q/%q",
+				want.CalleeRaw, got.Resolution, got.CalleeID, want.Resolution, want.CalleeID)
+		}
+	}
+}
+
 func TestGoImportedPackageNameUsesPackageClause(t *testing.T) {
 	if got := goImportedPackageName("math/rand/v2"); got != "rand" {
 		t.Fatalf("goImportedPackageName(math/rand/v2) = %q, want rand", got)

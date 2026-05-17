@@ -359,7 +359,7 @@ func extractGoGraph(ctx context.Context, root string, module goModule, sources [
 				case *goast.FuncDecl:
 					node := goFuncNode(fset, pkg, file, decl)
 					nodes = append(nodes, node)
-					index.addNode(node, goFuncReturnType(pkg, file, decl))
+					index.addNode(node, goFuncReturnTypes(pkg, file, decl))
 					funcs = append(funcs, goFuncSymbol{
 						pkg:  pkg,
 						file: file,
@@ -370,7 +370,7 @@ func extractGoGraph(ctx context.Context, root string, module goModule, sources [
 					genNodes, genValues := goGenDeclSymbols(fset, pkg, file, decl)
 					for _, node := range genNodes {
 						nodes = append(nodes, node)
-						index.addNode(node, goTypeRef{})
+						index.addNode(node, nil)
 					}
 					values = append(values, genValues...)
 				}
@@ -729,7 +729,7 @@ type goSymbolIndex struct {
 	functions map[string]map[string]string
 	methods   map[string]map[string]map[string]string
 	types     map[string]map[string]string
-	returns   map[string]goTypeRef
+	returns   map[string][]goTypeRef
 	imported  map[string]map[string]bool
 }
 
@@ -738,12 +738,12 @@ func newGoSymbolIndex() *goSymbolIndex {
 		functions: make(map[string]map[string]string),
 		methods:   make(map[string]map[string]map[string]string),
 		types:     make(map[string]map[string]string),
-		returns:   make(map[string]goTypeRef),
+		returns:   make(map[string][]goTypeRef),
 		imported:  make(map[string]map[string]bool),
 	}
 }
 
-func (idx *goSymbolIndex) addNode(node SymbolNode, returnType goTypeRef) {
+func (idx *goSymbolIndex) addNode(node SymbolNode, returnTypes []goTypeRef) {
 	switch node.Kind {
 	case SymbolKindFunction:
 		if idx.functions[node.Namespace] == nil {
@@ -764,8 +764,8 @@ func (idx *goSymbolIndex) addNode(node SymbolNode, returnType goTypeRef) {
 		}
 		idx.types[node.Namespace][node.Name] = node.ID
 	}
-	if returnType.usable() {
-		idx.returns[node.ID] = returnType
+	if len(returnTypes) > 0 {
+		idx.returns[node.ID] = returnTypes
 	}
 }
 
@@ -984,8 +984,9 @@ func (c *goCallCollector) walkStmt(stmt goast.Stmt) {
 		child := c.withScope(c.scope.clone())
 		child.walkStmt(stmt.Init)
 		child.walkStmt(stmt.Assign)
+		switchName := goTypeSwitchName(stmt.Assign)
 		for _, stmt := range stmt.Body.List {
-			child.walkCaseClause(stmt)
+			child.walkTypeSwitchCaseClause(stmt, switchName)
 		}
 		c.appendFrom(child)
 	case *goast.SelectStmt:
@@ -1013,6 +1014,23 @@ func (c *goCallCollector) walkCaseClause(stmt goast.Stmt) {
 	c.appendFrom(child)
 }
 
+func (c *goCallCollector) walkTypeSwitchCaseClause(stmt goast.Stmt, switchName string) {
+	clause, ok := stmt.(*goast.CaseClause)
+	if !ok {
+		c.walkStmt(stmt)
+		return
+	}
+	child := c.withScope(c.scope.clone())
+	for _, expr := range clause.List {
+		child.walkExpr(expr)
+	}
+	if switchName != "" && len(clause.List) == 1 {
+		child.scope.declare(switchName, goTypeRefFromExpr(child.pkg, child.file, clause.List[0]))
+	}
+	child.walkStmtList(clause.Body)
+	c.appendFrom(child)
+}
+
 func (c *goCallCollector) walkCommClause(stmt goast.Stmt) {
 	clause, ok := stmt.(*goast.CommClause)
 	if !ok {
@@ -1023,6 +1041,25 @@ func (c *goCallCollector) walkCommClause(stmt goast.Stmt) {
 	child.walkStmt(clause.Comm)
 	child.walkStmtList(clause.Body)
 	c.appendFrom(child)
+}
+
+func goTypeSwitchName(stmt goast.Stmt) string {
+	assign, ok := stmt.(*goast.AssignStmt)
+	if !ok || len(assign.Lhs) != 1 || len(assign.Rhs) != 1 {
+		return ""
+	}
+	if assign.Tok != token.DEFINE && assign.Tok != token.ASSIGN {
+		return ""
+	}
+	name, ok := assign.Lhs[0].(*goast.Ident)
+	if !ok || name.Name == "_" {
+		return ""
+	}
+	assertion, ok := assign.Rhs[0].(*goast.TypeAssertExpr)
+	if !ok || assertion.Type != nil {
+		return ""
+	}
+	return name.Name
 }
 
 func (c *goCallCollector) walkDecl(decl goast.Decl) {
@@ -1085,15 +1122,24 @@ func (c *goCallCollector) updateScopeFromAssign(stmt *goast.AssignStmt) {
 	if stmt.Tok != token.DEFINE {
 		return
 	}
+	var tupleRefs []goTypeRef
+	if len(stmt.Rhs) == 1 {
+		tupleRefs = goTypeRefsFromValue(c.index, c.pkg, c.file, c.scope, stmt.Rhs[0])
+	}
 	for i, lhs := range stmt.Lhs {
 		name, ok := lhs.(*goast.Ident)
-		if !ok || name.Name == "_" || i >= len(stmt.Rhs) {
+		if !ok || name.Name == "_" {
 			continue
 		}
 		if c.scope.local[name.Name] {
 			continue
 		}
-		ref := goTypeRefFromValue(c.index, c.pkg, c.file, c.scope, stmt.Rhs[i])
+		ref := goTypeRef{}
+		if i < len(tupleRefs) {
+			ref = tupleRefs[i]
+		} else if i < len(stmt.Rhs) {
+			ref = goTypeRefFromValue(c.index, c.pkg, c.file, c.scope, stmt.Rhs[i])
+		}
 		c.scope.declare(name.Name, ref)
 	}
 }
@@ -1176,34 +1222,58 @@ func (idx *goSymbolIndex) resolveCall(pkg *goPackage, file *goParsedFile, scope 
 	}
 }
 
-func goFuncReturnType(pkg *goPackage, file *goParsedFile, decl *goast.FuncDecl) goTypeRef {
+func goFuncReturnTypes(pkg *goPackage, file *goParsedFile, decl *goast.FuncDecl) []goTypeRef {
 	if decl.Type.Results == nil {
-		return goTypeRef{}
+		return nil
 	}
+	var refs []goTypeRef
 	for _, field := range decl.Type.Results.List {
-		return goTypeRefFromExpr(pkg, file, field.Type)
+		count := len(field.Names)
+		if count == 0 {
+			count = 1
+		}
+		ref := goTypeRefFromExpr(pkg, file, field.Type)
+		for i := 0; i < count; i++ {
+			refs = append(refs, ref)
+		}
 	}
-	return goTypeRef{}
+	return refs
 }
 
 func goTypeRefFromValue(index *goSymbolIndex, pkg *goPackage, file *goParsedFile, scope goCallScope, expr goast.Expr) goTypeRef {
+	refs := goTypeRefsFromValue(index, pkg, file, scope, expr)
+	if len(refs) == 0 {
+		return goTypeRef{}
+	}
+	return refs[0]
+}
+
+func goTypeRefsFromValue(index *goSymbolIndex, pkg *goPackage, file *goParsedFile, scope goCallScope, expr goast.Expr) []goTypeRef {
 	switch expr := expr.(type) {
+	case *goast.Ident:
+		if ref := scope.vars[expr.Name]; ref.usable() {
+			return []goTypeRef{ref}
+		}
 	case *goast.CompositeLit:
-		return goTypeRefFromExpr(pkg, file, expr.Type)
+		return []goTypeRef{goTypeRefFromExpr(pkg, file, expr.Type)}
 	case *goast.UnaryExpr:
 		if expr.Op == token.AND {
-			return goTypeRefFromValue(index, pkg, file, scope, expr.X)
+			return goTypeRefsFromValue(index, pkg, file, scope, expr.X)
+		}
+	case *goast.TypeAssertExpr:
+		if expr.Type != nil {
+			return []goTypeRef{goTypeRefFromExpr(pkg, file, expr.Type)}
 		}
 	case *goast.CallExpr:
 		if ref := goTypeRefFromExpr(pkg, file, unwrapGoInstantiation(expr.Fun)); index.hasType(ref) {
-			return ref
+			return []goTypeRef{ref}
 		}
 		calleeID, resolution, record := index.resolveCall(pkg, file, scope, expr.Fun)
 		if record && resolution == CallResolutionResolved {
 			return index.returns[calleeID]
 		}
 	}
-	return goTypeRef{}
+	return nil
 }
 
 func goTypeRefFromExpr(pkg *goPackage, file *goParsedFile, expr goast.Expr) goTypeRef {
