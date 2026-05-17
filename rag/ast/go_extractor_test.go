@@ -75,6 +75,7 @@ func (c Client) Do() {}
 
 import (
 	"fmt"
+	"time"
 
 	"example.com/demo/internal/util"
 )
@@ -110,6 +111,7 @@ func Top() {
 	fmt.Println(Answer)
 	_ = int(Answer)
 	_ = string([]byte{'x'})
+	_ = time.Duration(Answer)
 	_ = len([]int{1})
 }
 
@@ -249,6 +251,10 @@ func Use(w Worker) {
 	w.Work()
 	fresh := Impl{}
 	fresh.Work()
+	if true {
+		w := Impl{}
+		w.Work()
+	}
 }
 `)
 
@@ -260,6 +266,7 @@ func Use(w Worker) {
 	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
 	workID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: ns, Receiver: "Impl", Name: "Work"})
 
+	var resolvedShadowCalls int
 	var unresolvedWorkerCalls int
 	for _, call := range graph.Calls {
 		if call.CallerID != useID {
@@ -267,10 +274,20 @@ func Use(w Worker) {
 		}
 		switch call.CalleeRaw {
 		case "w.Work":
-			if call.Resolution != CallResolutionUnresolved || call.CalleeID != "" {
-				t.Fatalf("w.Work call = %+v, want unresolved with no callee ID", call)
+			switch call.Resolution {
+			case CallResolutionUnresolved:
+				if call.CalleeID != "" {
+					t.Fatalf("unresolved w.Work call carried callee ID: %+v", call)
+				}
+				unresolvedWorkerCalls++
+			case CallResolutionResolved:
+				if call.CalleeID != workID {
+					t.Fatalf("resolved w.Work call = %+v, want Impl.Work", call)
+				}
+				resolvedShadowCalls++
+			default:
+				t.Fatalf("w.Work call = %+v, want resolved or unresolved", call)
 			}
-			unresolvedWorkerCalls++
 		case "fresh.Work":
 			if call.Resolution != CallResolutionResolved || call.CalleeID != workID {
 				t.Fatalf("fresh.Work call = %+v, want resolved Impl.Work", call)
@@ -279,6 +296,9 @@ func Use(w Worker) {
 	}
 	if unresolvedWorkerCalls != 2 {
 		t.Fatalf("unresolved w.Work calls = %d, want 2; calls=%+v", unresolvedWorkerCalls, graph.Calls)
+	}
+	if resolvedShadowCalls != 1 {
+		t.Fatalf("resolved shadowed w.Work calls = %d, want 1; calls=%+v", resolvedShadowCalls, graph.Calls)
 	}
 }
 

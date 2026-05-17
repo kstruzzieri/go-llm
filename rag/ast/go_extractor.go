@@ -9,8 +9,10 @@ import (
 	"fmt"
 	goast "go/ast"
 	"go/format"
+	"go/importer"
 	"go/parser"
 	"go/token"
+	"go/types"
 	"io/fs"
 	"os"
 	"path"
@@ -686,6 +688,7 @@ type goSymbolIndex struct {
 	methods   map[string]map[string]map[string]string
 	types     map[string]map[string]string
 	returns   map[string]goTypeRef
+	imported  map[string]map[string]bool
 }
 
 func newGoSymbolIndex() *goSymbolIndex {
@@ -694,6 +697,7 @@ func newGoSymbolIndex() *goSymbolIndex {
 		methods:   make(map[string]map[string]map[string]string),
 		types:     make(map[string]map[string]string),
 		returns:   make(map[string]goTypeRef),
+		imported:  make(map[string]map[string]bool),
 	}
 }
 
@@ -749,6 +753,23 @@ func (idx *goSymbolIndex) hasType(ref goTypeRef) bool {
 	return false
 }
 
+func (idx *goSymbolIndex) importedType(importPath string, name string) bool {
+	byName, ok := idx.imported[importPath]
+	if !ok {
+		byName = make(map[string]bool)
+		pkg, err := importer.Default().Import(importPath)
+		if err == nil {
+			for _, exported := range pkg.Scope().Names() {
+				if _, ok := pkg.Scope().Lookup(exported).(*types.TypeName); ok {
+					byName[exported] = true
+				}
+			}
+		}
+		idx.imported[importPath] = byName
+	}
+	return byName[name]
+}
+
 func extractGoCalls(fset *token.FileSet, index *goSymbolIndex, funcs []goFuncSymbol, values []goValueSymbol) []CallEdge {
 	var calls []CallEdge
 	for _, value := range values {
@@ -782,11 +803,15 @@ func extractGoCalls(fset *token.FileSet, index *goSymbolIndex, funcs []goFuncSym
 }
 
 type goCallScope struct {
-	vars map[string]goTypeRef
+	vars  map[string]goTypeRef
+	local map[string]bool
 }
 
 func newGoCallScope() goCallScope {
-	return goCallScope{vars: make(map[string]goTypeRef)}
+	return goCallScope{
+		vars:  make(map[string]goTypeRef),
+		local: make(map[string]bool),
+	}
 }
 
 func (s goCallScope) clone() goCallScope {
@@ -797,9 +822,10 @@ func (s goCallScope) clone() goCallScope {
 	return clone
 }
 
-func (s goCallScope) set(name string, ref goTypeRef) {
+func (s goCallScope) declare(name string, ref goTypeRef) {
 	if name != "_" && ref.valid() {
 		s.vars[name] = ref
+		s.local[name] = true
 	}
 }
 
@@ -1010,7 +1036,7 @@ func (c *goCallCollector) updateScopeFromValueSpec(spec *goast.ValueSpec) {
 		} else if initializer := goInitializerForName(spec, i); initializer != nil {
 			ref = goTypeRefFromValue(c.index, c.pkg, c.file, c.scope, initializer)
 		}
-		c.scope.set(name.Name, ref)
+		c.scope.declare(name.Name, ref)
 	}
 }
 
@@ -1023,11 +1049,11 @@ func (c *goCallCollector) updateScopeFromAssign(stmt *goast.AssignStmt) {
 		if !ok || name.Name == "_" || i >= len(stmt.Rhs) {
 			continue
 		}
-		if _, exists := c.scope.vars[name.Name]; exists {
+		if c.scope.local[name.Name] {
 			continue
 		}
 		ref := goTypeRefFromValue(c.index, c.pkg, c.file, c.scope, stmt.Rhs[i])
-		c.scope.set(name.Name, ref)
+		c.scope.declare(name.Name, ref)
 	}
 }
 
@@ -1041,9 +1067,7 @@ func addGoFieldList(scope goCallScope, pkg *goPackage, file *goParsedFile, field
 			continue
 		}
 		for _, name := range field.Names {
-			if name.Name != "_" {
-				scope.vars[name.Name] = ref
-			}
+			scope.declare(name.Name, ref)
 		}
 	}
 }
@@ -1074,6 +1098,9 @@ func (idx *goSymbolIndex) resolveCall(pkg *goPackage, file *goParsedFile, scope 
 			}
 			if namespace, ok := file.imports[ident.Name]; ok {
 				if idx.hasType(goTypeRef{namespace: namespace, name: expr.Sel.Name}) {
+					return "", "", false
+				}
+				if idx.importedType(namespace, expr.Sel.Name) {
 					return "", "", false
 				}
 				if calleeID := idx.function(namespace, expr.Sel.Name); calleeID != "" {
