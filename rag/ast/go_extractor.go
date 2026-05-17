@@ -1139,10 +1139,16 @@ func (c *goCallCollector) recordCall(call *goast.CallExpr) {
 }
 
 func (c *goCallCollector) updateScopeFromValueSpec(spec *goast.ValueSpec) {
+	var tupleRefs []goTypeRef
+	if spec.Type == nil && len(spec.Values) == 1 {
+		tupleRefs = goTypeRefsFromValue(c.index, c.pkg, c.file, c.scope, spec.Values[0])
+	}
 	for i, name := range spec.Names {
 		ref := goTypeRef{}
 		if spec.Type != nil {
 			ref = goTypeRefFromExpr(c.pkg, c.file, spec.Type)
+		} else if i < len(tupleRefs) {
+			ref = tupleRefs[i]
 		} else if initializer := goInitializerForName(spec, i); initializer != nil {
 			ref = goTypeRefFromValue(c.index, c.pkg, c.file, c.scope, initializer)
 		}
@@ -1253,7 +1259,7 @@ func (idx *goSymbolIndex) resolveCall(pkg *goPackage, file *goParsedFile, scope 
 	base := unwrapGoInstantiation(fun)
 	switch expr := base.(type) {
 	case *goast.Ident:
-		if goBuiltinCall(expr.Name) || goPredeclaredType(expr.Name) || scope.hasTypeParam(expr.Name) || idx.hasType(goTypeRef{namespace: pkg.namespace, name: expr.Name}) {
+		if scope.hasTypeParam(expr.Name) {
 			return "", "", false
 		}
 		if calleeID := idx.function(pkg.namespace, expr.Name); calleeID != "" {
@@ -1263,6 +1269,9 @@ func (idx *goSymbolIndex) resolveCall(pkg *goPackage, file *goParsedFile, scope 
 			if calleeID := idx.function(namespace, expr.Name); calleeID != "" {
 				return calleeID, CallResolutionResolved, true
 			}
+		}
+		if goBuiltinCall(expr.Name) || goPredeclaredType(expr.Name) || idx.hasType(goTypeRef{namespace: pkg.namespace, name: expr.Name}) {
+			return "", "", false
 		}
 		return "", CallResolutionUnresolved, true
 	case *goast.SelectorExpr:

@@ -450,6 +450,8 @@ func Use(v any) {
 	b.Do()
 	c := v.(Client)
 	c.Do()
+	var _, declared = Pair()
+	declared.Do()
 	_, paired := Pair()
 	paired.Do()
 	switch narrowed := v.(type) {
@@ -472,6 +474,7 @@ func Use(v any) {
 		{CallerID: useID, CalleeRaw: "b.Do", Resolution: CallResolutionResolved, CalleeID: doID},
 		{CallerID: useID, CalleeRaw: "c.Do", Resolution: CallResolutionResolved, CalleeID: doID},
 		{CallerID: useID, CalleeRaw: "Pair", Resolution: CallResolutionResolved, CalleeID: pairID},
+		{CallerID: useID, CalleeRaw: "declared.Do", Resolution: CallResolutionResolved, CalleeID: doID},
 		{CallerID: useID, CalleeRaw: "paired.Do", Resolution: CallResolutionResolved, CalleeID: doID},
 		{CallerID: useID, CalleeRaw: "narrowed.Do", Resolution: CallResolutionResolved, CalleeID: doID},
 	}
@@ -484,6 +487,51 @@ func Use(v any) {
 			t.Fatalf("call %q resolution/id = %q/%q, want %q/%q",
 				want.CalleeRaw, got.Resolution, got.CalleeID, want.Resolution, want.CalleeID)
 		}
+	}
+}
+
+func TestGoExtractorResolvesShadowedPredeclaredFunctions(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/predeclared\n\ngo 1.25\n")
+	writeTestFile(t, root, "predeclared.go", `package predeclared
+
+func len() {}
+
+func string() {}
+
+func Use() {
+	len()
+	string()
+	cap([]int{})
+}
+`)
+
+	graph, err := GoExtractor{}.Extract(ctx, "scope-1", root, "vsid-1")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ns := "example.com/predeclared"
+	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
+	lenID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "len"})
+	stringID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "string"})
+
+	wantCalls := []CallEdge{
+		{CallerID: useID, CalleeRaw: "len", Resolution: CallResolutionResolved, CalleeID: lenID},
+		{CallerID: useID, CalleeRaw: "string", Resolution: CallResolutionResolved, CalleeID: stringID},
+	}
+	for _, want := range wantCalls {
+		got, ok := findCall(graph.Calls, want.CallerID, want.CalleeRaw)
+		if !ok {
+			t.Fatalf("missing call caller=%q raw=%q; calls=%+v", want.CallerID, want.CalleeRaw, graph.Calls)
+		}
+		if got.Resolution != want.Resolution || got.CalleeID != want.CalleeID {
+			t.Fatalf("call %q resolution/id = %q/%q, want %q/%q",
+				want.CalleeRaw, got.Resolution, got.CalleeID, want.Resolution, want.CalleeID)
+		}
+	}
+	if _, ok := findCall(graph.Calls, useID, "cap"); ok {
+		t.Fatalf("builtin cap recorded as call; calls=%+v", graph.Calls)
 	}
 }
 
