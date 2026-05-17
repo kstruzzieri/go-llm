@@ -1,126 +1,149 @@
 package ast
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
 
 func TestSymbolID(t *testing.T) {
 	tests := []struct {
-		name     string
-		pkgPath  string
-		receiver string
-		symbol   string
-		want     string
+		name string
+		key  SymbolKey
 	}{
 		{
-			name:    "free function",
-			pkgPath: "github.com/kstruzzieri/go-llm/rag",
-			symbol:  "NewIndexer",
-			want:    "github.com/kstruzzieri/go-llm/rag##NewIndexer",
+			name: "go free function",
+			key: SymbolKey{
+				Language:  "go",
+				Kind:      SymbolKindFunction,
+				Namespace: "github.com/kstruzzieri/go-llm/rag",
+				Name:      "NewIndexer",
+			},
 		},
 		{
-			name:     "method",
-			pkgPath:  "github.com/kstruzzieri/go-llm/rag",
-			receiver: "Indexer",
-			symbol:   "IndexFile",
-			want:     "github.com/kstruzzieri/go-llm/rag#Indexer#IndexFile",
+			name: "go method",
+			key: SymbolKey{
+				Language:  "go",
+				Kind:      SymbolKindMethod,
+				Namespace: "github.com/kstruzzieri/go-llm/rag",
+				Receiver:  "Indexer",
+				Name:      "IndexFile",
+			},
 		},
 		{
-			name:    "main package free function",
-			pkgPath: "main",
-			symbol:  "main",
-			want:    "main##main",
+			name: "overloaded method",
+			key: SymbolKey{
+				Language:      "java",
+				Kind:          SymbolKindMethod,
+				Namespace:     "com.example.Service",
+				Receiver:      "Service",
+				Name:          "Handle",
+				Disambiguator: "(Request)Response",
+			},
 		},
 		{
-			// Pathological input from the criticize-review collision
-			// argument: pkgPath has a dot, receiver and name look like
-			// a method on a dotted-receiver type. The '#' boundaries
-			// keep this distinct from any free-function form with the
-			// same characters.
-			name:     "dotted pkgPath method",
-			pkgPath:  "github.com/foo.bar/baz",
-			receiver: "Type",
-			symbol:   "Method",
-			want:     "github.com/foo.bar/baz#Type#Method",
-		},
-		{
-			name:   "empty pkgPath",
-			symbol: "Foo",
-			want:   "##Foo",
-		},
-		{
-			name:    "empty name",
-			pkgPath: "pkg",
-			want:    "pkg##",
+			name: "punctuation from non-go syntax",
+			key: SymbolKey{
+				Language:      "typescript",
+				Kind:          SymbolKindFunction,
+				Namespace:     "src/routes/admin#users.ts",
+				Name:          "GET /admin/:id",
+				Disambiguator: "export const GET = async (...)",
+			},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := SymbolID(tt.pkgPath, tt.receiver, tt.symbol)
-			if got != tt.want {
-				t.Errorf("SymbolID(%q, %q, %q) = %q, want %q", tt.pkgPath, tt.receiver, tt.symbol, got, tt.want)
+			id := SymbolID(tt.key)
+			got, ok := decodeSymbolID(id)
+			if !ok {
+				t.Fatalf("decodeSymbolID(%q) failed", id)
+			}
+			if got != tt.key {
+				t.Errorf("SymbolID round-trip = %+v, want %+v", got, tt.key)
 			}
 		})
 	}
 }
 
-// TestSymbolIDNoCollisionAcrossDottedPkgPaths pins the collision-resistance
-// property that motivated the '#' separator choice. Includes the exact
-// cases the criticize-review identified as collision risks under the old
-// dot-separator encoding.
-func TestSymbolIDNoCollisionAcrossDottedPkgPaths(t *testing.T) {
-	cases := [][3]string{
-		{"foo.bar", "", "baz"},
-		{"foo", "bar", "baz"},
-		{"foo", "", "bar.baz"},
-		{"foo.bar.baz", "", "x"},
-		{"foo.bar", "baz", "qux"},
-		{"foo", "bar.baz", "qux"}, // even pathological dots-in-receiver are safe
+func TestSymbolIDWireFormat(t *testing.T) {
+	key := SymbolKey{
+		Language:  "go",
+		Kind:      SymbolKindFunction,
+		Namespace: "pkg",
+		Name:      "Foo",
 	}
-	seen := make(map[string][3]string, len(cases))
-	for _, c := range cases {
-		id := SymbolID(c[0], c[1], c[2])
-		if prev, ok := seen[id]; ok {
-			t.Errorf("SymbolID collision: %v and %v both produced %q", prev, c, id)
-		}
-		seen[id] = c
+	const want = "symbol-v1#Z28#ZnVuY3Rpb24#cGtn##Rm9v#"
+	if got := SymbolID(key); got != want {
+		t.Errorf("SymbolID wire format = %q, want %q", got, want)
 	}
 }
 
-// FuzzSymbolID asserts the bijection property: for any (pkg, recv, name)
-// where no component contains '#', the resulting ID splits back into the
-// original three components on '#'.
+func TestSymbolIDNoCollisionAcrossAmbiguousInputs(t *testing.T) {
+	cases := []SymbolKey{
+		{Language: "go", Kind: SymbolKindFunction, Namespace: "foo#bar", Name: "baz"},
+		{Language: "go", Kind: SymbolKindFunction, Namespace: "foo", Receiver: "bar", Name: "baz"},
+		{Language: "go", Kind: SymbolKindMethod, Namespace: "foo", Receiver: "bar", Name: "baz"},
+		{Language: "java", Kind: SymbolKindMethod, Namespace: "foo", Receiver: "bar", Name: "baz"},
+		{Language: "java", Kind: SymbolKindMethod, Namespace: "foo", Receiver: "bar", Name: "baz", Disambiguator: "(int)"},
+		{Language: "java", Kind: SymbolKindMethod, Namespace: "foo", Receiver: "bar", Name: "baz", Disambiguator: "(string)"},
+	}
+	seen := make(map[string]SymbolKey, len(cases))
+	for _, key := range cases {
+		id := SymbolID(key)
+		if prev, ok := seen[id]; ok {
+			t.Errorf("SymbolID collision: %+v and %+v both produced %q", prev, key, id)
+		}
+		seen[id] = key
+	}
+}
+
+// FuzzSymbolID asserts the bijection property for arbitrary component text,
+// including characters that would be separators in simpler encodings.
 func FuzzSymbolID(f *testing.F) {
-	f.Add("pkg", "", "Name")
-	f.Add("github.com/x/y", "Recv", "Method")
-	f.Add("pkg.with.dots", "", "Name")
-	f.Add("", "", "")
-	f.Add("foo.bar", "Type", "Method")
-	f.Fuzz(func(t *testing.T, pkg, recv, name string) {
-		// Contract: components MUST NOT contain '#' (the separator).
-		// '#' is illegal in Go module paths and Go identifiers, so
-		// well-formed extractor output always satisfies this.
-		if strings.ContainsRune(pkg, '#') ||
-			strings.ContainsRune(recv, '#') ||
-			strings.ContainsRune(name, '#') {
-			t.Skip()
+	f.Add("go", "function", "pkg", "", "Name", "")
+	f.Add("go", "method", "github.com/x/y", "Recv", "Method", "")
+	f.Add("typescript", "function", "src/a#b.ts", "", "GET /:id", "export const GET")
+	f.Add("", "", "", "", "", "")
+	f.Fuzz(func(t *testing.T, lang, kind, namespace, recv, name, disambiguator string) {
+		key := SymbolKey{
+			Language:      lang,
+			Kind:          SymbolKind(kind),
+			Namespace:     namespace,
+			Receiver:      recv,
+			Name:          name,
+			Disambiguator: disambiguator,
 		}
-		id := SymbolID(pkg, recv, name)
+		id := SymbolID(key)
 		parts := strings.Split(id, "#")
-		if len(parts) != 3 {
-			t.Errorf("SymbolID(%q, %q, %q) = %q split to %d parts, want 3", pkg, recv, name, id, len(parts))
-			return
+		if len(parts) != 7 {
+			t.Fatalf("SymbolID(%+v) = %q split to %d parts, want 7", key, id, len(parts))
 		}
-		if parts[0] != pkg || parts[1] != recv || parts[2] != name {
-			t.Errorf("SymbolID(%q, %q, %q) = %q failed round-trip: parts=%v", pkg, recv, name, id, parts)
+		for _, part := range parts[1:] {
+			if strings.Contains(part, "#") {
+				t.Fatalf("encoded SymbolID part %q contains separator", part)
+			}
+		}
+		got, ok := decodeSymbolID(id)
+		if !ok {
+			t.Fatalf("decodeSymbolID(%q) failed", id)
+		}
+		if got != key {
+			t.Errorf("SymbolID(%+v) = %q failed round-trip: %+v", key, id, got)
 		}
 	})
 }
 
 func BenchmarkSymbolID(b *testing.B) {
+	key := SymbolKey{
+		Language:  "go",
+		Kind:      SymbolKindMethod,
+		Namespace: "github.com/kstruzzieri/go-llm/rag",
+		Receiver:  "Indexer",
+		Name:      "IndexFile",
+	}
 	for i := 0; i < b.N; i++ {
-		_ = SymbolID("github.com/kstruzzieri/go-llm/rag", "Indexer", "IndexFile")
+		_ = SymbolID(key)
 	}
 }
 
@@ -132,6 +155,9 @@ func TestSymbolNodeZeroValue(t *testing.T) {
 	if n.Kind == SymbolKindUnknown {
 		t.Errorf("zero SymbolNode.Kind should NOT equal SymbolKindUnknown (%q); unknown is an explicit value, not the default", SymbolKindUnknown)
 	}
+	if n.Declaration != "" {
+		t.Errorf("zero SymbolNode.Declaration = %q, want empty", n.Declaration)
+	}
 }
 
 func TestSymbolGraphZeroValue(t *testing.T) {
@@ -139,8 +165,9 @@ func TestSymbolGraphZeroValue(t *testing.T) {
 	if len(g.Nodes) != 0 || len(g.Calls) != 0 {
 		t.Errorf("zero SymbolGraph should have empty slices, got nodes=%d calls=%d", len(g.Nodes), len(g.Calls))
 	}
-	if g.VectorSpaceID != "" || g.Root != "" {
-		t.Errorf("zero SymbolGraph should have empty vsid+root, got vsid=%q root=%q", g.VectorSpaceID, g.Root)
+	if g.Scope != "" || g.VectorSpaceID != "" || g.ExtractionSignature != "" || g.Root != "" {
+		t.Errorf("zero SymbolGraph should have empty scope+vsid+signature+root, got scope=%q vsid=%q signature=%q root=%q",
+			g.Scope, g.VectorSpaceID, g.ExtractionSignature, g.Root)
 	}
 }
 
@@ -162,5 +189,77 @@ func TestSymbolKindConstants(t *testing.T) {
 		if got := string(k); got != want {
 			t.Errorf("SymbolKind wire format drift: got %q, want %q", got, want)
 		}
+	}
+}
+
+func TestCallResolutionConstants(t *testing.T) {
+	wireFormat := map[CallResolution]string{
+		CallResolutionResolved:     "resolved",
+		CallResolutionUnresolved:   "unresolved",
+		CallResolutionNotAttempted: "not_attempted",
+	}
+	for k, want := range wireFormat {
+		if got := string(k); got != want {
+			t.Errorf("CallResolution wire format drift: got %q, want %q", got, want)
+		}
+	}
+}
+
+func TestCallEdgeValidate(t *testing.T) {
+	validResolved := CallEdge{
+		CallerID:   "caller",
+		CalleeID:   "callee",
+		CalleeRaw:  "Do",
+		Resolution: CallResolutionResolved,
+		File:       "x.go",
+		Line:       10,
+	}
+	if err := validResolved.Validate(); err != nil {
+		t.Fatalf("valid resolved edge failed validation: %v", err)
+	}
+
+	validUnresolved := CallEdge{
+		CallerID:   "caller",
+		CalleeRaw:  "unknown.Do",
+		Resolution: CallResolutionUnresolved,
+		File:       "x.go",
+		Line:       11,
+	}
+	if err := validUnresolved.Validate(); err != nil {
+		t.Fatalf("valid unresolved edge failed validation: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		edge CallEdge
+	}{
+		{
+			name: "missing caller",
+			edge: CallEdge{CalleeID: "callee", Resolution: CallResolutionResolved, Line: 1},
+		},
+		{
+			name: "invalid line",
+			edge: CallEdge{CallerID: "caller", CalleeID: "callee", Resolution: CallResolutionResolved},
+		},
+		{
+			name: "resolved without callee id",
+			edge: CallEdge{CallerID: "caller", Resolution: CallResolutionResolved, Line: 1},
+		},
+		{
+			name: "unresolved with callee id",
+			edge: CallEdge{CallerID: "caller", CalleeID: "callee", Resolution: CallResolutionUnresolved, Line: 1},
+		},
+		{
+			name: "unknown resolution",
+			edge: CallEdge{CallerID: "caller", Resolution: CallResolution("maybe"), Line: 1},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.edge.Validate()
+			if !errors.Is(err, ErrInvalidGraph) {
+				t.Fatalf("Validate error = %v, want ErrInvalidGraph", err)
+			}
+		})
 	}
 }

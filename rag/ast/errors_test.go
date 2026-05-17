@@ -14,6 +14,8 @@ func TestSentinelsWrapTransparently(t *testing.T) {
 	cases := []error{
 		ErrSymbolNotFound,
 		ErrVectorSpaceMismatch,
+		ErrInvalidGraph,
+		ErrInvalidArgument,
 	}
 	for _, sentinel := range cases {
 		t.Run(sentinel.Error(), func(t *testing.T) {
@@ -33,7 +35,7 @@ func TestSentinelsWrapTransparently(t *testing.T) {
 func TestSentinelNamespace(t *testing.T) {
 	// All sentinel messages must start with "rag/ast: " so log aggregators
 	// can disambiguate from go/ast and the rag package's own sentinels.
-	for _, err := range []error{ErrSymbolNotFound, ErrVectorSpaceMismatch} {
+	for _, err := range []error{ErrSymbolNotFound, ErrVectorSpaceMismatch, ErrInvalidGraph, ErrInvalidArgument} {
 		if !strings.HasPrefix(err.Error(), "rag/ast: ") {
 			t.Errorf("sentinel %q lacks 'rag/ast: ' namespace prefix", err.Error())
 		}

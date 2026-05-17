@@ -19,4 +19,12 @@ var (
 	// because the symbol graph may drift independently of the chunk store
 	// during partial migrations.
 	ErrVectorSpaceMismatch = errors.New("rag/ast: vector-space mismatch")
+
+	// ErrInvalidGraph indicates a graph or edge violates the SymbolStore
+	// persistence contract.
+	ErrInvalidGraph = errors.New("rag/ast: invalid graph")
+
+	// ErrInvalidArgument indicates a caller supplied an invalid read argument
+	// such as a negative limit.
+	ErrInvalidArgument = errors.New("rag/ast: invalid argument")
 )

@@ -16,7 +16,9 @@ type Extractor interface {
 	// to read concurrently with future Extract calls.
 	Languages() []string
 
-	// Extract walks root and produces a graph stamped with vectorSpaceID.
+	// Extract walks root and produces a graph stamped with scope and
+	// vectorSpaceID. Scope is the caller-defined corpus/root/index namespace
+	// used by SymbolStore to isolate graphs that share the same vector space.
 	// An empty graph with nil error is the correct response for a tree
 	// containing no sources in any of this extractor's languages — that
 	// case is success, not failure. Errors are reserved for IO / parse
@@ -25,11 +27,13 @@ type Extractor interface {
 	// The returned [SymbolGraph.Root] MUST equal root after the same
 	// canonicalization Extract applies to node files (filepath.Clean +
 	// forward slashes), so paths join cleanly.
-	Extract(ctx context.Context, root string, vectorSpaceID string) (SymbolGraph, error)
+	// The returned [SymbolGraph.ExtractionSignature] is the opaque token
+	// callers persist and later pass to Stale.
+	Extract(ctx context.Context, scope string, root string, vectorSpaceID string) (SymbolGraph, error)
 
 	// Stale reports whether a graph previously extracted from root and
-	// stamped with prevSignature can still be reused, or whether the
-	// caller must re-extract. The signature is an opaque token defined
+	// scope, then stamped with prevSignature, can still be reused, or whether
+	// the caller must re-extract. The signature is an opaque token defined
 	// by the extractor itself — it MAY encode the vector-space identity,
 	// source-file fingerprints, the extractor's own version, the toolchain
 	// version, or any combination. Callers treat it as a string and pass
@@ -37,5 +41,5 @@ type Extractor interface {
 	//
 	// Returning (true, nil) forces re-extraction. Returning (false, nil)
 	// authorizes reuse of the previously persisted graph.
-	Stale(ctx context.Context, root string, prevSignature string) (bool, error)
+	Stale(ctx context.Context, scope string, root string, prevSignature string) (bool, error)
 }

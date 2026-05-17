@@ -21,20 +21,26 @@ func TestNoOpExtractor(t *testing.T) {
 	if got := e.Languages(); got != nil {
 		t.Errorf("NoOpExtractor.Languages = %v, want nil", got)
 	}
-	g, err := e.Extract(ctx, "/tmp/example", "vsid-1")
+	g, err := e.Extract(ctx, "scope-1", "/tmp/example/../example", "vsid-1")
 	if err != nil {
 		t.Fatalf("NoOpExtractor.Extract: %v", err)
+	}
+	if g.Scope != "scope-1" {
+		t.Errorf("NoOpExtractor.Extract did not stamp scope: got %q", g.Scope)
 	}
 	if g.VectorSpaceID != "vsid-1" {
 		t.Errorf("NoOpExtractor.Extract did not stamp vsid: got %q", g.VectorSpaceID)
 	}
 	if g.Root != "/tmp/example" {
-		t.Errorf("NoOpExtractor.Extract did not stamp root: got %q", g.Root)
+		t.Errorf("NoOpExtractor.Extract did not canonicalize root: got %q", g.Root)
+	}
+	if g.ExtractionSignature != "" {
+		t.Errorf("NoOpExtractor.Extract signature = %q, want empty", g.ExtractionSignature)
 	}
 	if len(g.Nodes)+len(g.Calls) != 0 {
 		t.Errorf("NoOpExtractor.Extract produced non-empty graph: %+v", g)
 	}
-	stale, err := e.Stale(ctx, "/tmp/example", "any-signature")
+	stale, err := e.Stale(ctx, "scope-1", "/tmp/example", "any-signature")
 	if err != nil {
 		t.Fatalf("NoOpExtractor.Stale: %v", err)
 	}
@@ -46,44 +52,71 @@ func TestNoOpExtractor(t *testing.T) {
 func TestNoOpStoreWrites(t *testing.T) {
 	var s NoOpStore
 	ctx := context.Background()
-	if err := s.UpsertGraph(ctx, SymbolGraph{VectorSpaceID: "vsid-1"}); err != nil {
+	if err := s.UpsertGraph(ctx, SymbolGraph{Scope: "scope-1", VectorSpaceID: "vsid-1"}); err != nil {
 		t.Errorf("UpsertGraph: %v", err)
 	}
-	if err := s.DeleteByVectorSpace(ctx, "vsid-1"); err != nil {
-		t.Errorf("DeleteByVectorSpace: %v", err)
+	if err := s.DeleteGraph(ctx, "scope-1", "vsid-1"); err != nil {
+		t.Errorf("DeleteGraph: %v", err)
+	}
+}
+
+func TestNoOpStoreRejectsInvalidCallEdge(t *testing.T) {
+	var s NoOpStore
+	err := s.UpsertGraph(context.Background(), SymbolGraph{
+		Scope:         "scope-1",
+		VectorSpaceID: "vsid-1",
+		Calls: []CallEdge{
+			{CallerID: "caller", Resolution: CallResolutionResolved, Line: 1},
+		},
+	})
+	if !errors.Is(err, ErrInvalidGraph) {
+		t.Fatalf("UpsertGraph error = %v, want ErrInvalidGraph", err)
 	}
 }
 
 func TestNoOpStoreReadsAreNotFound(t *testing.T) {
 	var s NoOpStore
 	ctx := context.Background()
-	if _, err := s.GetSymbol(ctx, "vsid-1", "pkg#Symbol"); !errors.Is(err, ErrSymbolNotFound) {
+	if _, err := s.ExtractionSignature(ctx, "scope-1", "vsid-1"); !errors.Is(err, ErrSymbolNotFound) {
+		t.Errorf("ExtractionSignature error: got %v, want %v", err, ErrSymbolNotFound)
+	}
+	if _, err := s.GetSymbol(ctx, "scope-1", "vsid-1", "symbol"); !errors.Is(err, ErrSymbolNotFound) {
 		t.Errorf("GetSymbol error: got %v, want %v", err, ErrSymbolNotFound)
 	}
-	if _, err := s.SymbolEnclosing(ctx, "vsid-1", "x.go", 10); !errors.Is(err, ErrSymbolNotFound) {
+	if _, err := s.SymbolEnclosing(ctx, "scope-1", "vsid-1", "x.go", 10); !errors.Is(err, ErrSymbolNotFound) {
 		t.Errorf("SymbolEnclosing error: got %v, want %v", err, ErrSymbolNotFound)
 	}
-	callers, err := s.Callers(ctx, "vsid-1", "pkg#Symbol", 0)
-	if err != nil || callers != nil {
-		t.Errorf("Callers: got (%v, %v), want (nil, nil)", callers, err)
+	callers, err := s.Callers(ctx, "scope-1", "vsid-1", "symbol", 0)
+	if err != nil || len(callers.Sites) != 0 || callers.Truncated {
+		t.Errorf("Callers: got (%+v, %v), want empty non-truncated result", callers, err)
 	}
-	callees, err := s.Callees(ctx, "vsid-1", "pkg#Symbol", 0)
-	if err != nil || callees != nil {
-		t.Errorf("Callees: got (%v, %v), want (nil, nil)", callees, err)
+	callees, err := s.Callees(ctx, "scope-1", "vsid-1", "symbol", 0)
+	if err != nil || len(callees.Sites) != 0 || callees.Truncated {
+		t.Errorf("Callees: got (%+v, %v), want empty non-truncated result", callees, err)
 	}
 }
 
-// TestNoOpStoreCallersLimit exercises the limit parameter contract — the
-// no-op store has no entries so any limit returns nil, but verifying the
-// signature here ensures the parameter is plumbed.
-func TestNoOpStoreCallersLimit(t *testing.T) {
+// TestNoOpStoreCallLimits exercises the limit parameter contract. The no-op
+// store has no entries, so non-negative limits return an empty result; negative
+// limits are rejected like real stores should reject them.
+func TestNoOpStoreCallLimits(t *testing.T) {
 	var s NoOpStore
 	ctx := context.Background()
-	for _, lim := range []int{0, 1, 100, -1} {
-		callers, err := s.Callers(ctx, "vsid-1", "pkg#Symbol", lim)
-		if err != nil || callers != nil {
-			t.Errorf("limit=%d: got (%v, %v), want (nil, nil)", lim, callers, err)
+	for _, lim := range []int{0, 1, 100} {
+		callers, err := s.Callers(ctx, "scope-1", "vsid-1", "symbol", lim)
+		if err != nil || len(callers.Sites) != 0 || callers.Truncated {
+			t.Errorf("callers limit=%d: got (%+v, %v), want empty non-truncated result", lim, callers, err)
 		}
+		callees, err := s.Callees(ctx, "scope-1", "vsid-1", "symbol", lim)
+		if err != nil || len(callees.Sites) != 0 || callees.Truncated {
+			t.Errorf("callees limit=%d: got (%+v, %v), want empty non-truncated result", lim, callees, err)
+		}
+	}
+	if _, err := s.Callers(ctx, "scope-1", "vsid-1", "symbol", -1); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("negative Callers limit error = %v, want ErrInvalidArgument", err)
+	}
+	if _, err := s.Callees(ctx, "scope-1", "vsid-1", "symbol", -1); !errors.Is(err, ErrInvalidArgument) {
+		t.Errorf("negative Callees limit error = %v, want ErrInvalidArgument", err)
 	}
 }
 
@@ -102,16 +135,16 @@ func TestNoOpsConcurrent(t *testing.T) {
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
-			if _, err := extractor.Extract(ctx, "/tmp", "vsid-1"); err != nil {
+			if _, err := extractor.Extract(ctx, "scope-1", "/tmp", "vsid-1"); err != nil {
 				t.Errorf("Extract: %v", err)
 			}
-			if _, err := extractor.Stale(ctx, "/tmp", "sig"); err != nil {
+			if _, err := extractor.Stale(ctx, "scope-1", "/tmp", "sig"); err != nil {
 				t.Errorf("Stale: %v", err)
 			}
-			if err := store.UpsertGraph(ctx, SymbolGraph{VectorSpaceID: "vsid-1"}); err != nil {
+			if err := store.UpsertGraph(ctx, SymbolGraph{Scope: "scope-1", VectorSpaceID: "vsid-1"}); err != nil {
 				t.Errorf("UpsertGraph: %v", err)
 			}
-			if _, err := store.GetSymbol(ctx, "vsid-1", "x"); !errors.Is(err, ErrSymbolNotFound) {
+			if _, err := store.GetSymbol(ctx, "scope-1", "vsid-1", "x"); !errors.Is(err, ErrSymbolNotFound) {
 				t.Errorf("GetSymbol: %v", err)
 			}
 		}()
