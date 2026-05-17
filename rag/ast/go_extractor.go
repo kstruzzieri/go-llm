@@ -346,8 +346,9 @@ func extractGoGraph(ctx context.Context, root string, module goModule, sources [
 
 	index := newGoSymbolIndex()
 	var (
-		nodes []SymbolNode
-		funcs []goFuncSymbol
+		nodes  []SymbolNode
+		funcs  []goFuncSymbol
+		values []goValueSymbol
 	)
 	for _, pkg := range pkgs {
 		for _, file := range pkg.files {
@@ -364,16 +365,18 @@ func extractGoGraph(ctx context.Context, root string, module goModule, sources [
 						id:   node.ID,
 					})
 				case *goast.GenDecl:
-					for _, node := range goGenDeclNodes(fset, pkg, file, decl) {
+					genNodes, genValues := goGenDeclSymbols(fset, pkg, file, decl)
+					for _, node := range genNodes {
 						nodes = append(nodes, node)
 						index.addNode(node, goTypeRef{})
 					}
+					values = append(values, genValues...)
 				}
 			}
 		}
 	}
 
-	calls := extractGoCalls(fset, index, funcs)
+	calls := extractGoCalls(fset, index, funcs, values)
 	sortGoNodes(nodes)
 	sortGoCalls(calls)
 	return nodes, calls, nil
@@ -495,7 +498,7 @@ func goFuncNode(fset *token.FileSet, pkg *goPackage, file *goParsedFile, decl *g
 	}
 }
 
-func goGenDeclNodes(fset *token.FileSet, pkg *goPackage, file *goParsedFile, decl *goast.GenDecl) []SymbolNode {
+func goGenDeclSymbols(fset *token.FileSet, pkg *goPackage, file *goParsedFile, decl *goast.GenDecl) ([]SymbolNode, []goValueSymbol) {
 	switch decl.Tok {
 	case token.TYPE:
 		nodes := make([]SymbolNode, 0, len(decl.Specs))
@@ -528,9 +531,10 @@ func goGenDeclNodes(fset *token.FileSet, pkg *goPackage, file *goParsedFile, dec
 				Doc:         rawGoComment(fset, file.data, doc),
 			})
 		}
-		return nodes
+		return nodes, nil
 	case token.VAR, token.CONST:
 		var nodes []SymbolNode
+		var values []goValueSymbol
 		kind := SymbolKindVar
 		if decl.Tok == token.CONST {
 			kind = SymbolKindConst
@@ -544,7 +548,7 @@ func goGenDeclNodes(fset *token.FileSet, pkg *goPackage, file *goParsedFile, dec
 			if doc == nil {
 				doc = decl.Doc
 			}
-			for _, name := range valueSpec.Names {
+			for i, name := range valueSpec.Names {
 				id := SymbolID(SymbolKey{
 					Language:  goLanguage,
 					Kind:      kind,
@@ -563,12 +567,33 @@ func goGenDeclNodes(fset *token.FileSet, pkg *goPackage, file *goParsedFile, dec
 					Declaration: goSpecDeclaration(fset, decl.Tok, valueSpec),
 					Doc:         rawGoComment(fset, file.data, doc),
 				})
+				if initializer := goInitializerForName(valueSpec, i); initializer != nil {
+					values = append(values, goValueSymbol{
+						pkg:  pkg,
+						file: file,
+						id:   id,
+						expr: initializer,
+					})
+				}
 			}
 		}
-		return nodes
+		return nodes, values
 	default:
+		return nil, nil
+	}
+}
+
+func goInitializerForName(spec *goast.ValueSpec, nameIndex int) goast.Expr {
+	if len(spec.Values) == 0 {
 		return nil
 	}
+	if len(spec.Values) == 1 {
+		return spec.Values[0]
+	}
+	if nameIndex < len(spec.Values) {
+		return spec.Values[nameIndex]
+	}
+	return nil
 }
 
 func goTypeSymbolKind(spec *goast.TypeSpec) SymbolKind {
@@ -638,6 +663,13 @@ type goFuncSymbol struct {
 	file *goParsedFile
 	decl *goast.FuncDecl
 	id   string
+}
+
+type goValueSymbol struct {
+	pkg  *goPackage
+	file *goParsedFile
+	id   string
+	expr goast.Expr
 }
 
 type goTypeRef struct {
@@ -717,33 +749,34 @@ func (idx *goSymbolIndex) hasType(ref goTypeRef) bool {
 	return false
 }
 
-func extractGoCalls(fset *token.FileSet, index *goSymbolIndex, funcs []goFuncSymbol) []CallEdge {
+func extractGoCalls(fset *token.FileSet, index *goSymbolIndex, funcs []goFuncSymbol, values []goValueSymbol) []CallEdge {
 	var calls []CallEdge
+	for _, value := range values {
+		collector := goCallCollector{
+			fset:     fset,
+			index:    index,
+			pkg:      value.pkg,
+			file:     value.file,
+			callerID: value.id,
+			scope:    newGoCallScope(),
+		}
+		collector.walkExpr(value.expr)
+		calls = append(calls, collector.calls...)
+	}
 	for _, fn := range funcs {
 		if fn.decl.Body == nil {
 			continue
 		}
-		scope := collectGoCallScope(index, fn.pkg, fn.file, fn.decl)
-		goast.Inspect(fn.decl.Body, func(node goast.Node) bool {
-			switch node := node.(type) {
-			case *goast.FuncLit:
-				return false
-			case *goast.CallExpr:
-				calleeID, resolution, record := index.resolveCall(fn.pkg, fn.file, scope, node.Fun)
-				if !record {
-					return true
-				}
-				calls = append(calls, CallEdge{
-					CallerID:   fn.id,
-					CalleeID:   calleeID,
-					CalleeRaw:  goFormatNode(fset, node.Fun),
-					Resolution: resolution,
-					File:       fn.file.rel,
-					Line:       goLine(fset, node.Fun.Pos()),
-				})
-			}
-			return true
-		})
+		collector := goCallCollector{
+			fset:     fset,
+			index:    index,
+			pkg:      fn.pkg,
+			file:     fn.file,
+			callerID: fn.id,
+			scope:    initialGoCallScope(fn.pkg, fn.file, fn.decl),
+		}
+		collector.walkStmtList(fn.decl.Body.List)
+		calls = append(calls, collector.calls...)
 	}
 	return calls
 }
@@ -752,60 +785,250 @@ type goCallScope struct {
 	vars map[string]goTypeRef
 }
 
-func collectGoCallScope(index *goSymbolIndex, pkg *goPackage, file *goParsedFile, decl *goast.FuncDecl) goCallScope {
-	scope := goCallScope{vars: make(map[string]goTypeRef)}
+func newGoCallScope() goCallScope {
+	return goCallScope{vars: make(map[string]goTypeRef)}
+}
+
+func (s goCallScope) clone() goCallScope {
+	clone := newGoCallScope()
+	for name, ref := range s.vars {
+		clone.vars[name] = ref
+	}
+	return clone
+}
+
+func (s goCallScope) set(name string, ref goTypeRef) {
+	if name != "_" && ref.valid() {
+		s.vars[name] = ref
+	}
+}
+
+func initialGoCallScope(pkg *goPackage, file *goParsedFile, decl *goast.FuncDecl) goCallScope {
+	scope := newGoCallScope()
 	if decl.Recv != nil {
 		addGoFieldList(scope, pkg, file, decl.Recv)
 	}
 	addGoFieldList(scope, pkg, file, decl.Type.Params)
 	addGoFieldList(scope, pkg, file, decl.Type.Results)
+	return scope
+}
 
-	goast.Inspect(decl.Body, func(node goast.Node) bool {
+type goCallCollector struct {
+	fset     *token.FileSet
+	index    *goSymbolIndex
+	pkg      *goPackage
+	file     *goParsedFile
+	callerID string
+	scope    goCallScope
+	calls    []CallEdge
+}
+
+func (c *goCallCollector) withScope(scope goCallScope) goCallCollector {
+	child := *c
+	child.scope = scope
+	child.calls = nil
+	return child
+}
+
+func (c *goCallCollector) appendFrom(child goCallCollector) {
+	c.calls = append(c.calls, child.calls...)
+}
+
+func (c *goCallCollector) walkStmtList(stmts []goast.Stmt) {
+	for _, stmt := range stmts {
+		c.walkStmt(stmt)
+	}
+}
+
+func (c *goCallCollector) walkStmt(stmt goast.Stmt) {
+	switch stmt := stmt.(type) {
+	case nil:
+		return
+	case *goast.DeclStmt:
+		c.walkDecl(stmt.Decl)
+	case *goast.AssignStmt:
+		for _, expr := range stmt.Lhs {
+			c.walkExpr(expr)
+		}
+		for _, expr := range stmt.Rhs {
+			c.walkExpr(expr)
+		}
+		c.updateScopeFromAssign(stmt)
+	case *goast.ExprStmt:
+		c.walkExpr(stmt.X)
+	case *goast.ReturnStmt:
+		for _, expr := range stmt.Results {
+			c.walkExpr(expr)
+		}
+	case *goast.GoStmt:
+		c.walkExpr(stmt.Call)
+	case *goast.DeferStmt:
+		c.walkExpr(stmt.Call)
+	case *goast.SendStmt:
+		c.walkExpr(stmt.Chan)
+		c.walkExpr(stmt.Value)
+	case *goast.IncDecStmt:
+		c.walkExpr(stmt.X)
+	case *goast.BlockStmt:
+		child := c.withScope(c.scope.clone())
+		child.walkStmtList(stmt.List)
+		c.appendFrom(child)
+	case *goast.IfStmt:
+		ifScope := c.scope.clone()
+		child := c.withScope(ifScope)
+		child.walkStmt(stmt.Init)
+		child.walkExpr(stmt.Cond)
+		body := child.withScope(child.scope.clone())
+		body.walkStmtList(stmt.Body.List)
+		child.appendFrom(body)
+		if stmt.Else != nil {
+			elseBranch := child.withScope(child.scope.clone())
+			elseBranch.walkStmt(stmt.Else)
+			child.appendFrom(elseBranch)
+		}
+		c.appendFrom(child)
+	case *goast.ForStmt:
+		child := c.withScope(c.scope.clone())
+		child.walkStmt(stmt.Init)
+		child.walkExpr(stmt.Cond)
+		body := child.withScope(child.scope.clone())
+		body.walkStmtList(stmt.Body.List)
+		child.appendFrom(body)
+		child.walkStmt(stmt.Post)
+		c.appendFrom(child)
+	case *goast.RangeStmt:
+		child := c.withScope(c.scope.clone())
+		child.walkExpr(stmt.X)
+		body := child.withScope(child.scope.clone())
+		body.walkStmtList(stmt.Body.List)
+		child.appendFrom(body)
+		c.appendFrom(child)
+	case *goast.SwitchStmt:
+		child := c.withScope(c.scope.clone())
+		child.walkStmt(stmt.Init)
+		child.walkExpr(stmt.Tag)
+		for _, stmt := range stmt.Body.List {
+			child.walkCaseClause(stmt)
+		}
+		c.appendFrom(child)
+	case *goast.TypeSwitchStmt:
+		child := c.withScope(c.scope.clone())
+		child.walkStmt(stmt.Init)
+		child.walkStmt(stmt.Assign)
+		for _, stmt := range stmt.Body.List {
+			child.walkCaseClause(stmt)
+		}
+		c.appendFrom(child)
+	case *goast.SelectStmt:
+		child := c.withScope(c.scope.clone())
+		for _, stmt := range stmt.Body.List {
+			child.walkCommClause(stmt)
+		}
+		c.appendFrom(child)
+	case *goast.LabeledStmt:
+		c.walkStmt(stmt.Stmt)
+	}
+}
+
+func (c *goCallCollector) walkCaseClause(stmt goast.Stmt) {
+	clause, ok := stmt.(*goast.CaseClause)
+	if !ok {
+		c.walkStmt(stmt)
+		return
+	}
+	child := c.withScope(c.scope.clone())
+	for _, expr := range clause.List {
+		child.walkExpr(expr)
+	}
+	child.walkStmtList(clause.Body)
+	c.appendFrom(child)
+}
+
+func (c *goCallCollector) walkCommClause(stmt goast.Stmt) {
+	clause, ok := stmt.(*goast.CommClause)
+	if !ok {
+		c.walkStmt(stmt)
+		return
+	}
+	child := c.withScope(c.scope.clone())
+	child.walkStmt(clause.Comm)
+	child.walkStmtList(clause.Body)
+	c.appendFrom(child)
+}
+
+func (c *goCallCollector) walkDecl(decl goast.Decl) {
+	gen, ok := decl.(*goast.GenDecl)
+	if !ok {
+		return
+	}
+	for _, spec := range gen.Specs {
+		valueSpec, ok := spec.(*goast.ValueSpec)
+		if !ok {
+			continue
+		}
+		for _, expr := range valueSpec.Values {
+			c.walkExpr(expr)
+		}
+		c.updateScopeFromValueSpec(valueSpec)
+	}
+}
+
+func (c *goCallCollector) walkExpr(expr goast.Expr) {
+	goast.Inspect(expr, func(node goast.Node) bool {
 		switch node := node.(type) {
+		case nil:
+			return true
 		case *goast.FuncLit:
 			return false
-		case *goast.DeclStmt:
-			gen, ok := node.Decl.(*goast.GenDecl)
-			if !ok || gen.Tok != token.VAR {
-				return true
-			}
-			for _, spec := range gen.Specs {
-				valueSpec, ok := spec.(*goast.ValueSpec)
-				if !ok {
-					continue
-				}
-				for i, name := range valueSpec.Names {
-					if name.Name == "_" {
-						continue
-					}
-					ref := goTypeRef{}
-					if valueSpec.Type != nil {
-						ref = goTypeRefFromExpr(pkg, file, valueSpec.Type)
-					} else if i < len(valueSpec.Values) {
-						ref = goTypeRefFromValue(index, pkg, file, scope, valueSpec.Values[i])
-					}
-					if ref.valid() {
-						scope.vars[name.Name] = ref
-					}
-				}
-			}
-		case *goast.AssignStmt:
-			if node.Tok != token.DEFINE && node.Tok != token.ASSIGN {
-				return true
-			}
-			for i, lhs := range node.Lhs {
-				name, ok := lhs.(*goast.Ident)
-				if !ok || name.Name == "_" || i >= len(node.Rhs) {
-					continue
-				}
-				if ref := goTypeRefFromValue(index, pkg, file, scope, node.Rhs[i]); ref.valid() {
-					scope.vars[name.Name] = ref
-				}
-			}
+		case *goast.CallExpr:
+			c.recordCall(node)
 		}
 		return true
 	})
-	return scope
+}
+
+func (c *goCallCollector) recordCall(call *goast.CallExpr) {
+	calleeID, resolution, record := c.index.resolveCall(c.pkg, c.file, c.scope, call.Fun)
+	if !record {
+		return
+	}
+	c.calls = append(c.calls, CallEdge{
+		CallerID:   c.callerID,
+		CalleeID:   calleeID,
+		CalleeRaw:  goFormatNode(c.fset, call.Fun),
+		Resolution: resolution,
+		File:       c.file.rel,
+		Line:       goLine(c.fset, call.Fun.Pos()),
+	})
+}
+
+func (c *goCallCollector) updateScopeFromValueSpec(spec *goast.ValueSpec) {
+	for i, name := range spec.Names {
+		ref := goTypeRef{}
+		if spec.Type != nil {
+			ref = goTypeRefFromExpr(c.pkg, c.file, spec.Type)
+		} else if initializer := goInitializerForName(spec, i); initializer != nil {
+			ref = goTypeRefFromValue(c.index, c.pkg, c.file, c.scope, initializer)
+		}
+		c.scope.set(name.Name, ref)
+	}
+}
+
+func (c *goCallCollector) updateScopeFromAssign(stmt *goast.AssignStmt) {
+	if stmt.Tok != token.DEFINE {
+		return
+	}
+	for i, lhs := range stmt.Lhs {
+		name, ok := lhs.(*goast.Ident)
+		if !ok || name.Name == "_" || i >= len(stmt.Rhs) {
+			continue
+		}
+		if _, exists := c.scope.vars[name.Name]; exists {
+			continue
+		}
+		ref := goTypeRefFromValue(c.index, c.pkg, c.file, c.scope, stmt.Rhs[i])
+		c.scope.set(name.Name, ref)
+	}
 }
 
 func addGoFieldList(scope goCallScope, pkg *goPackage, file *goParsedFile, fields *goast.FieldList) {

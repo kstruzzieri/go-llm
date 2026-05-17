@@ -81,7 +81,7 @@ import (
 
 const Answer = 42
 
-var Default = Service{}
+var Default = NewService()
 
 // Service handles work.
 type Service struct{}
@@ -185,6 +185,7 @@ func (s *Service) Handle() {
 	}
 
 	topID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: appNS, Name: "Top"})
+	defaultID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindVar, Namespace: appNS, Name: "Default"})
 	handleID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: appNS, Receiver: "Service", Name: "Handle"})
 	localID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: appNS, Name: "Local"})
 	helperID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: utilNS, Name: "Helper"})
@@ -192,6 +193,7 @@ func (s *Service) Handle() {
 	newServiceID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: appNS, Name: "NewService"})
 
 	wantCalls := []CallEdge{
+		{CallerID: defaultID, CalleeRaw: "NewService", Resolution: CallResolutionResolved, CalleeID: newServiceID},
 		{CallerID: topID, CalleeRaw: "Local", Resolution: CallResolutionResolved, CalleeID: localID},
 		{CallerID: topID, CalleeRaw: "s.Handle", Resolution: CallResolutionResolved, CalleeID: handleID},
 		{CallerID: topID, CalleeRaw: "util.Helper", Resolution: CallResolutionResolved, CalleeID: helperID},
@@ -222,6 +224,59 @@ func (s *Service) Handle() {
 			t.Fatalf("call %q resolution/id = %q/%q, want %q/%q",
 				want.CalleeRaw, got.Resolution, got.CalleeID, want.Resolution, want.CalleeID)
 		}
+	}
+}
+
+func TestGoExtractorUsesStatementOrderedScope(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/order\n\ngo 1.25\n")
+	writeTestFile(t, root, "order.go", `package order
+
+type Worker interface {
+	Work()
+}
+
+type Impl struct{}
+
+func (Impl) Work() {}
+
+func Use(w Worker) {
+	w.Work()
+	w = Impl{}
+	w.Work()
+	fresh := Impl{}
+	fresh.Work()
+}
+`)
+
+	graph, err := GoExtractor{}.Extract(ctx, "scope-1", root, "vsid-1")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ns := "example.com/order"
+	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
+	workID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: ns, Receiver: "Impl", Name: "Work"})
+
+	var unresolvedWorkerCalls int
+	for _, call := range graph.Calls {
+		if call.CallerID != useID {
+			continue
+		}
+		switch call.CalleeRaw {
+		case "w.Work":
+			if call.Resolution != CallResolutionUnresolved || call.CalleeID != "" {
+				t.Fatalf("w.Work call = %+v, want unresolved with no callee ID", call)
+			}
+			unresolvedWorkerCalls++
+		case "fresh.Work":
+			if call.Resolution != CallResolutionResolved || call.CalleeID != workID {
+				t.Fatalf("fresh.Work call = %+v, want resolved Impl.Work", call)
+			}
+		}
+	}
+	if unresolvedWorkerCalls != 2 {
+		t.Fatalf("unresolved w.Work calls = %d, want 2; calls=%+v", unresolvedWorkerCalls, graph.Calls)
 	}
 }
 
