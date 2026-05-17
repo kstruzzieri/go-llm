@@ -108,6 +108,8 @@ func Top() {
 	made := NewService()
 	made.Handle()
 	fmt.Println(Answer)
+	_ = int(Answer)
+	_ = string([]byte{'x'})
 	_ = len([]int{1})
 }
 

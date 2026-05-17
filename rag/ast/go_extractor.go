@@ -1052,7 +1052,7 @@ func (idx *goSymbolIndex) resolveCall(pkg *goPackage, file *goParsedFile, scope 
 	base := unwrapGoInstantiation(fun)
 	switch expr := base.(type) {
 	case *goast.Ident:
-		if goBuiltinCall(expr.Name) || idx.hasType(goTypeRef{namespace: pkg.namespace, name: expr.Name}) {
+		if goBuiltinCall(expr.Name) || goPredeclaredType(expr.Name) || idx.hasType(goTypeRef{namespace: pkg.namespace, name: expr.Name}) {
 			return "", "", false
 		}
 		if calleeID := idx.function(pkg.namespace, expr.Name); calleeID != "" {
@@ -1205,6 +1205,18 @@ func goBuiltinCall(name string) bool {
 	case "append", "cap", "clear", "close", "complex", "copy", "delete",
 		"imag", "len", "make", "max", "min", "new", "panic", "print",
 		"println", "real", "recover":
+		return true
+	default:
+		return false
+	}
+}
+
+func goPredeclaredType(name string) bool {
+	switch name {
+	case "any", "bool", "byte", "comparable", "complex64", "complex128",
+		"error", "float32", "float64", "int", "int8", "int16", "int32",
+		"int64", "rune", "string", "uint", "uint8", "uint16", "uint32",
+		"uint64", "uintptr":
 		return true
 	default:
 		return false
