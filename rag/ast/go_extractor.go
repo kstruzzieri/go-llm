@@ -845,14 +845,16 @@ func extractGoCalls(fset *token.FileSet, index *goSymbolIndex, funcs []goFuncSym
 }
 
 type goCallScope struct {
-	vars  map[string]goTypeRef
-	local map[string]bool
+	vars       map[string]goTypeRef
+	typeParams map[string]bool
+	local      map[string]bool
 }
 
 func newGoCallScope() goCallScope {
 	return goCallScope{
-		vars:  make(map[string]goTypeRef),
-		local: make(map[string]bool),
+		vars:       make(map[string]goTypeRef),
+		typeParams: make(map[string]bool),
+		local:      make(map[string]bool),
 	}
 }
 
@@ -860,6 +862,9 @@ func (s goCallScope) clone() goCallScope {
 	clone := newGoCallScope()
 	for name, ref := range s.vars {
 		clone.vars[name] = ref
+	}
+	for name := range s.typeParams {
+		clone.typeParams[name] = true
 	}
 	return clone
 }
@@ -871,8 +876,19 @@ func (s goCallScope) declare(name string, ref goTypeRef) {
 	}
 }
 
+func (s goCallScope) declareTypeParam(name string) {
+	if name != "" && name != "_" {
+		s.typeParams[name] = true
+	}
+}
+
+func (s goCallScope) hasTypeParam(name string) bool {
+	return s.typeParams[name]
+}
+
 func initialGoCallScope(pkg *goPackage, file *goParsedFile, decl *goast.FuncDecl) goCallScope {
 	scope := newGoCallScope()
+	addGoFuncTypeParams(scope, decl)
 	if decl.Recv != nil {
 		addGoFieldList(scope, pkg, file, decl.Recv)
 	}
@@ -1084,11 +1100,27 @@ func (c *goCallCollector) walkExpr(expr goast.Expr) {
 		switch node := node.(type) {
 		case nil:
 			return true
+		case *goast.FuncLit:
+			c.walkFuncLit(node)
+			return false
 		case *goast.CallExpr:
 			c.recordCall(node)
 		}
 		return true
 	})
+}
+
+func (c *goCallCollector) walkFuncLit(lit *goast.FuncLit) {
+	if lit == nil || lit.Body == nil {
+		return
+	}
+	child := c.withScope(c.scope.clone())
+	if lit.Type != nil {
+		addGoFieldList(child.scope, c.pkg, c.file, lit.Type.Params)
+		addGoFieldList(child.scope, c.pkg, c.file, lit.Type.Results)
+	}
+	child.walkStmtList(lit.Body.List)
+	c.appendFrom(child)
 }
 
 func (c *goCallCollector) recordCall(call *goast.CallExpr) {
@@ -1172,11 +1204,56 @@ func addGoFieldList(scope goCallScope, pkg *goPackage, file *goParsedFile, field
 	}
 }
 
+func addGoFuncTypeParams(scope goCallScope, decl *goast.FuncDecl) {
+	if decl == nil || decl.Type == nil {
+		return
+	}
+	addGoTypeParamFieldList(scope, decl.Type.TypeParams)
+	if decl.Recv == nil {
+		return
+	}
+	for _, field := range decl.Recv.List {
+		addGoReceiverTypeParams(scope, field.Type)
+	}
+}
+
+func addGoTypeParamFieldList(scope goCallScope, fields *goast.FieldList) {
+	if fields == nil {
+		return
+	}
+	for _, field := range fields.List {
+		for _, name := range field.Names {
+			scope.declareTypeParam(name.Name)
+		}
+	}
+}
+
+func addGoReceiverTypeParams(scope goCallScope, expr goast.Expr) {
+	switch expr := expr.(type) {
+	case *goast.IndexExpr:
+		addGoReceiverTypeParam(scope, expr.Index)
+	case *goast.IndexListExpr:
+		for _, index := range expr.Indices {
+			addGoReceiverTypeParam(scope, index)
+		}
+	case *goast.ParenExpr:
+		addGoReceiverTypeParams(scope, expr.X)
+	case *goast.StarExpr:
+		addGoReceiverTypeParams(scope, expr.X)
+	}
+}
+
+func addGoReceiverTypeParam(scope goCallScope, expr goast.Expr) {
+	if ident, ok := expr.(*goast.Ident); ok {
+		scope.declareTypeParam(ident.Name)
+	}
+}
+
 func (idx *goSymbolIndex) resolveCall(pkg *goPackage, file *goParsedFile, scope goCallScope, fun goast.Expr) (string, CallResolution, bool) {
 	base := unwrapGoInstantiation(fun)
 	switch expr := base.(type) {
 	case *goast.Ident:
-		if goBuiltinCall(expr.Name) || goPredeclaredType(expr.Name) || idx.hasType(goTypeRef{namespace: pkg.namespace, name: expr.Name}) {
+		if goBuiltinCall(expr.Name) || goPredeclaredType(expr.Name) || scope.hasTypeParam(expr.Name) || idx.hasType(goTypeRef{namespace: pkg.namespace, name: expr.Name}) {
 			return "", "", false
 		}
 		if calleeID := idx.function(pkg.namespace, expr.Name); calleeID != "" {

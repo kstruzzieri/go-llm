@@ -378,15 +378,22 @@ func TestGoExtractorTraversesFunctionLiterals(t *testing.T) {
 	writeTestFile(t, root, "go.mod", "module example.com/closures\n\ngo 1.25\n")
 	writeTestFile(t, root, "closures.go", `package closures
 
+type Client struct{}
+
+func (Client) Do() {}
+
 func Local() {}
 
 func Use() {
 	go func() {
 		Local()
+		c := Client{}
+		c.Do()
 	}()
-	defer func() {
+	defer func(c Client) {
 		Local()
-	}()
+		c.Do()
+	}(Client{})
 }
 `)
 
@@ -397,8 +404,10 @@ func Use() {
 	ns := "example.com/closures"
 	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
 	localID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Local"})
+	doID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: ns, Receiver: "Client", Name: "Do"})
 
 	var localCalls int
+	var doCalls int
 	for _, call := range graph.Calls {
 		if call.CallerID == useID && call.CalleeRaw == "Local" {
 			if call.Resolution != CallResolutionResolved || call.CalleeID != localID {
@@ -406,9 +415,18 @@ func Use() {
 			}
 			localCalls++
 		}
+		if call.CallerID == useID && call.CalleeRaw == "c.Do" {
+			if call.Resolution != CallResolutionResolved || call.CalleeID != doID {
+				t.Fatalf("c.Do call = %+v, want resolved Client.Do", call)
+			}
+			doCalls++
+		}
 	}
 	if localCalls != 2 {
 		t.Fatalf("Local calls from closures = %d, want 2; calls=%+v", localCalls, graph.Calls)
+	}
+	if doCalls != 2 {
+		t.Fatalf("resolved c.Do calls from closures = %d, want 2; calls=%+v", doCalls, graph.Calls)
 	}
 }
 
@@ -465,6 +483,49 @@ func Use(v any) {
 		if got.Resolution != want.Resolution || got.CalleeID != want.CalleeID {
 			t.Fatalf("call %q resolution/id = %q/%q, want %q/%q",
 				want.CalleeRaw, got.Resolution, got.CalleeID, want.Resolution, want.CalleeID)
+		}
+	}
+}
+
+func TestGoExtractorSkipsTypeParameterConversions(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/generic\n\ngo 1.25\n")
+	writeTestFile(t, root, "generic.go", `package generic
+
+type Box[T any] struct{}
+
+func Real() {}
+
+func Convert[T ~int](x int) T {
+	Real()
+	return T(x)
+}
+
+func (b Box[T]) Use(x int) T {
+	return T(x)
+}
+`)
+
+	graph, err := GoExtractor{}.Extract(ctx, "scope-1", root, "vsid-1")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ns := "example.com/generic"
+	convertID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Convert"})
+	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: ns, Receiver: "Box", Name: "Use"})
+	realID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Real"})
+
+	got, ok := findCall(graph.Calls, convertID, "Real")
+	if !ok {
+		t.Fatalf("missing Real call; calls=%+v", graph.Calls)
+	}
+	if got.Resolution != CallResolutionResolved || got.CalleeID != realID {
+		t.Fatalf("Real call = %+v, want resolved Real", got)
+	}
+	for _, call := range graph.Calls {
+		if (call.CallerID == convertID || call.CallerID == useID) && call.CalleeRaw == "T" {
+			t.Fatalf("type parameter conversion recorded as call: %+v; calls=%+v", call, graph.Calls)
 		}
 	}
 }
