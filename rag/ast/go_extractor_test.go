@@ -316,8 +316,15 @@ func NewClient() (Client, error) {
 	return Client{}, nil
 }
 
+func NewClients() []Client {
+	return nil
+}
+
 func Use(clients []Client) {
 	for _, c := range clients {
+		c.Do()
+	}
+	for _, c := range NewClients() {
 		c.Do()
 	}
 	made, err := NewClient()
@@ -334,9 +341,10 @@ func Use(clients []Client) {
 	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
 	doID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: ns, Receiver: "Client", Name: "Do"})
 	newClientID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "NewClient"})
+	newClientsID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "NewClients"})
 
 	wantCalls := []CallEdge{
-		{CallerID: useID, CalleeRaw: "c.Do", Resolution: CallResolutionResolved, CalleeID: doID},
+		{CallerID: useID, CalleeRaw: "NewClients", Resolution: CallResolutionResolved, CalleeID: newClientsID},
 		{CallerID: useID, CalleeRaw: "NewClient", Resolution: CallResolutionResolved, CalleeID: newClientID},
 		{CallerID: useID, CalleeRaw: "made.Do", Resolution: CallResolutionResolved, CalleeID: doID},
 	}
@@ -349,6 +357,64 @@ func Use(clients []Client) {
 			t.Fatalf("call %q resolution/id = %q/%q, want %q/%q",
 				want.CalleeRaw, got.Resolution, got.CalleeID, want.Resolution, want.CalleeID)
 		}
+	}
+	var rangeCalls int
+	for _, call := range graph.Calls {
+		if call.CallerID == useID && call.CalleeRaw == "c.Do" {
+			if call.Resolution != CallResolutionResolved || call.CalleeID != doID {
+				t.Fatalf("c.Do call = %+v, want resolved Client.Do", call)
+			}
+			rangeCalls++
+		}
+	}
+	if rangeCalls != 2 {
+		t.Fatalf("resolved c.Do range calls = %d, want 2; calls=%+v", rangeCalls, graph.Calls)
+	}
+}
+
+func TestGoExtractorTraversesFunctionLiterals(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/closures\n\ngo 1.25\n")
+	writeTestFile(t, root, "closures.go", `package closures
+
+func Local() {}
+
+func Use() {
+	go func() {
+		Local()
+	}()
+	defer func() {
+		Local()
+	}()
+}
+`)
+
+	graph, err := GoExtractor{}.Extract(ctx, "scope-1", root, "vsid-1")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ns := "example.com/closures"
+	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
+	localID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Local"})
+
+	var localCalls int
+	for _, call := range graph.Calls {
+		if call.CallerID == useID && call.CalleeRaw == "Local" {
+			if call.Resolution != CallResolutionResolved || call.CalleeID != localID {
+				t.Fatalf("Local call = %+v, want resolved Local", call)
+			}
+			localCalls++
+		}
+	}
+	if localCalls != 2 {
+		t.Fatalf("Local calls from closures = %d, want 2; calls=%+v", localCalls, graph.Calls)
+	}
+}
+
+func TestGoImportedPackageNameUsesPackageClause(t *testing.T) {
+	if got := goImportedPackageName("math/rand/v2"); got != "rand" {
+		t.Fatalf("goImportedPackageName(math/rand/v2) = %q, want rand", got)
 	}
 }
 

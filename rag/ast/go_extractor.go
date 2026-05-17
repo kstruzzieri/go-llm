@@ -461,7 +461,7 @@ func goFileImports(file *goast.File, packageNames map[string]string) (map[string
 		}
 		alias := packageNames[importPath]
 		if alias == "" {
-			alias = path.Base(importPath)
+			alias = goImportedPackageName(importPath)
 		}
 		if alias != "." && alias != "" {
 			imports[alias] = importPath
@@ -469,6 +469,13 @@ func goFileImports(file *goast.File, packageNames map[string]string) (map[string
 	}
 	sort.Strings(dotImports)
 	return imports, dotImports
+}
+
+func goImportedPackageName(importPath string) string {
+	if pkg, err := importer.Default().Import(importPath); err == nil && pkg.Name() != "" {
+		return pkg.Name()
+	}
+	return path.Base(importPath)
 }
 
 func goFuncNode(fset *token.FileSet, pkg *goPackage, file *goParsedFile, decl *goast.FuncDecl) SymbolNode {
@@ -757,7 +764,7 @@ func (idx *goSymbolIndex) addNode(node SymbolNode, returnType goTypeRef) {
 		}
 		idx.types[node.Namespace][node.Name] = node.ID
 	}
-	if returnType.valid() {
+	if returnType.usable() {
 		idx.returns[node.ID] = returnType
 	}
 }
@@ -1040,8 +1047,6 @@ func (c *goCallCollector) walkExpr(expr goast.Expr) {
 		switch node := node.(type) {
 		case nil:
 			return true
-		case *goast.FuncLit:
-			return false
 		case *goast.CallExpr:
 			c.recordCall(node)
 		}
@@ -1097,7 +1102,7 @@ func (c *goCallCollector) bindRangeVars(stmt *goast.RangeStmt) {
 	if stmt.Tok != token.DEFINE {
 		return
 	}
-	key, elem := goRangeTypes(c.pkg, c.file, c.scope, stmt.X)
+	key, elem := goRangeTypes(c.index, c.pkg, c.file, c.scope, stmt.X)
 	if name, ok := stmt.Key.(*goast.Ident); ok {
 		c.scope.declare(name.Name, key)
 	}
@@ -1237,13 +1242,16 @@ func goTypeRefFromExpr(pkg *goPackage, file *goParsedFile, expr goast.Expr) goTy
 	}
 }
 
-func goRangeTypes(pkg *goPackage, file *goParsedFile, scope goCallScope, expr goast.Expr) (goTypeRef, goTypeRef) {
+func goRangeTypes(index *goSymbolIndex, pkg *goPackage, file *goParsedFile, scope goCallScope, expr goast.Expr) (goTypeRef, goTypeRef) {
 	expr = unwrapGoInstantiation(expr)
 	if ident, ok := expr.(*goast.Ident); ok {
 		ref := scope.vars[ident.Name]
 		return ref.keyRef(), ref.elemRef()
 	}
-	ref := goTypeRefFromExpr(pkg, file, expr)
+	ref := goTypeRefFromValue(index, pkg, file, scope, expr)
+	if !ref.usable() {
+		ref = goTypeRefFromExpr(pkg, file, expr)
+	}
 	return ref.keyRef(), ref.elemRef()
 }
 
