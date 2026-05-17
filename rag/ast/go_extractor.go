@@ -675,12 +675,47 @@ type goValueSymbol struct {
 }
 
 type goTypeRef struct {
-	namespace string
-	name      string
+	namespace     string
+	name          string
+	keyNamespace  string
+	keyName       string
+	elemNamespace string
+	elemName      string
 }
 
 func (r goTypeRef) valid() bool {
 	return r.namespace != "" && r.name != ""
+}
+
+func (r goTypeRef) usable() bool {
+	return r.valid() || r.keyName != "" || r.elemName != ""
+}
+
+func (r goTypeRef) keyRef() goTypeRef {
+	if r.keyName == "" {
+		return goTypeRef{}
+	}
+	return goTypeRef{namespace: r.keyNamespace, name: r.keyName}
+}
+
+func (r goTypeRef) elemRef() goTypeRef {
+	if r.elemName == "" {
+		return goTypeRef{}
+	}
+	return goTypeRef{namespace: r.elemNamespace, name: r.elemName}
+}
+
+func collectionGoTypeRef(key goTypeRef, elem goTypeRef) goTypeRef {
+	ref := goTypeRef{}
+	if key.valid() {
+		ref.keyNamespace = key.namespace
+		ref.keyName = key.name
+	}
+	if elem.valid() {
+		ref.elemNamespace = elem.namespace
+		ref.elemName = elem.name
+	}
+	return ref
 }
 
 type goSymbolIndex struct {
@@ -823,7 +858,7 @@ func (s goCallScope) clone() goCallScope {
 }
 
 func (s goCallScope) declare(name string, ref goTypeRef) {
-	if name != "_" && ref.valid() {
+	if name != "_" && ref.usable() {
 		s.vars[name] = ref
 		s.local[name] = true
 	}
@@ -926,6 +961,7 @@ func (c *goCallCollector) walkStmt(stmt goast.Stmt) {
 		child := c.withScope(c.scope.clone())
 		child.walkExpr(stmt.X)
 		body := child.withScope(child.scope.clone())
+		body.bindRangeVars(stmt)
 		body.walkStmtList(stmt.Body.List)
 		child.appendFrom(body)
 		c.appendFrom(child)
@@ -1057,13 +1093,26 @@ func (c *goCallCollector) updateScopeFromAssign(stmt *goast.AssignStmt) {
 	}
 }
 
+func (c *goCallCollector) bindRangeVars(stmt *goast.RangeStmt) {
+	if stmt.Tok != token.DEFINE {
+		return
+	}
+	key, elem := goRangeTypes(c.pkg, c.file, c.scope, stmt.X)
+	if name, ok := stmt.Key.(*goast.Ident); ok {
+		c.scope.declare(name.Name, key)
+	}
+	if name, ok := stmt.Value.(*goast.Ident); ok {
+		c.scope.declare(name.Name, elem)
+	}
+}
+
 func addGoFieldList(scope goCallScope, pkg *goPackage, file *goParsedFile, fields *goast.FieldList) {
 	if fields == nil {
 		return
 	}
 	for _, field := range fields.List {
 		ref := goTypeRefFromExpr(pkg, file, field.Type)
-		if !ref.valid() {
+		if !ref.usable() {
 			continue
 		}
 		for _, name := range field.Names {
@@ -1126,22 +1175,10 @@ func goFuncReturnType(pkg *goPackage, file *goParsedFile, decl *goast.FuncDecl) 
 	if decl.Type.Results == nil {
 		return goTypeRef{}
 	}
-	total := 0
-	var result goast.Expr
 	for _, field := range decl.Type.Results.List {
-		names := len(field.Names)
-		if names == 0 {
-			names = 1
-		}
-		total += names
-		if total == 1 {
-			result = field.Type
-		}
+		return goTypeRefFromExpr(pkg, file, field.Type)
 	}
-	if total != 1 {
-		return goTypeRef{}
-	}
-	return goTypeRefFromExpr(pkg, file, result)
+	return goTypeRef{}
 }
 
 func goTypeRefFromValue(index *goSymbolIndex, pkg *goPackage, file *goParsedFile, scope goCallScope, expr goast.Expr) goTypeRef {
@@ -1186,9 +1223,28 @@ func goTypeRefFromExpr(pkg *goPackage, file *goParsedFile, expr goast.Expr) goTy
 			return goTypeRef{}
 		}
 		return goTypeRef{namespace: namespace, name: expr.Sel.Name}
+	case *goast.ArrayType:
+		return collectionGoTypeRef(goTypeRef{}, goTypeRefFromExpr(pkg, file, expr.Elt))
+	case *goast.MapType:
+		return collectionGoTypeRef(
+			goTypeRefFromExpr(pkg, file, expr.Key),
+			goTypeRefFromExpr(pkg, file, expr.Value),
+		)
+	case *goast.ChanType:
+		return collectionGoTypeRef(goTypeRef{}, goTypeRefFromExpr(pkg, file, expr.Value))
 	default:
 		return goTypeRef{}
 	}
+}
+
+func goRangeTypes(pkg *goPackage, file *goParsedFile, scope goCallScope, expr goast.Expr) (goTypeRef, goTypeRef) {
+	expr = unwrapGoInstantiation(expr)
+	if ident, ok := expr.(*goast.Ident); ok {
+		ref := scope.vars[ident.Name]
+		return ref.keyRef(), ref.elemRef()
+	}
+	ref := goTypeRefFromExpr(pkg, file, expr)
+	return ref.keyRef(), ref.elemRef()
 }
 
 func unwrapGoInstantiation(expr goast.Expr) goast.Expr {

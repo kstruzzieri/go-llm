@@ -302,6 +302,56 @@ func Use(w Worker) {
 	}
 }
 
+func TestGoExtractorInfersRangeVarsAndFirstReturnType(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	writeTestFile(t, root, "go.mod", "module example.com/range\n\ngo 1.25\n")
+	writeTestFile(t, root, "range.go", `package rangevars
+
+type Client struct{}
+
+func (Client) Do() {}
+
+func NewClient() (Client, error) {
+	return Client{}, nil
+}
+
+func Use(clients []Client) {
+	for _, c := range clients {
+		c.Do()
+	}
+	made, err := NewClient()
+	_ = err
+	made.Do()
+}
+`)
+
+	graph, err := GoExtractor{}.Extract(ctx, "scope-1", root, "vsid-1")
+	if err != nil {
+		t.Fatalf("Extract: %v", err)
+	}
+	ns := "example.com/range"
+	useID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "Use"})
+	doID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindMethod, Namespace: ns, Receiver: "Client", Name: "Do"})
+	newClientID := SymbolID(SymbolKey{Language: "go", Kind: SymbolKindFunction, Namespace: ns, Name: "NewClient"})
+
+	wantCalls := []CallEdge{
+		{CallerID: useID, CalleeRaw: "c.Do", Resolution: CallResolutionResolved, CalleeID: doID},
+		{CallerID: useID, CalleeRaw: "NewClient", Resolution: CallResolutionResolved, CalleeID: newClientID},
+		{CallerID: useID, CalleeRaw: "made.Do", Resolution: CallResolutionResolved, CalleeID: doID},
+	}
+	for _, want := range wantCalls {
+		got, ok := findCall(graph.Calls, want.CallerID, want.CalleeRaw)
+		if !ok {
+			t.Fatalf("missing call caller=%q raw=%q; calls=%+v", want.CallerID, want.CalleeRaw, graph.Calls)
+		}
+		if got.Resolution != want.Resolution || got.CalleeID != want.CalleeID {
+			t.Fatalf("call %q resolution/id = %q/%q, want %q/%q",
+				want.CalleeRaw, got.Resolution, got.CalleeID, want.Resolution, want.CalleeID)
+		}
+	}
+}
+
 func TestGoExtractorStaleTracksSourceAndVectorSpace(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
