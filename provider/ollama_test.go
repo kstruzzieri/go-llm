@@ -28,23 +28,41 @@ func TestOllamaProvider_Name(t *testing.T) {
 }
 
 func TestOllamaProvider_WithProviderName(t *testing.T) {
-	tests := []struct {
-		name     string
-		override string
-		want     string
-	}{
-		{"override applied", "shared-ollama-vm", "shared-ollama-vm"},
-		{"empty override ignored", "", "ollama"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := ollama.NewClient()
-			p := NewOllamaProvider(c, WithProviderName(tt.override))
-			if got := p.Name(); got != tt.want {
-				t.Errorf("Name() = %q, want %q", got, tt.want)
+	t.Run("override applied", func(t *testing.T) {
+		c := ollama.NewClient()
+		p := NewOllamaProvider(c, WithProviderName("shared-ollama-vm"))
+		if got := p.Name(); got != "shared-ollama-vm" {
+			t.Errorf("Name() = %q, want %q", got, "shared-ollama-vm")
+		}
+	})
+
+	t.Run("default preserved when option omitted", func(t *testing.T) {
+		c := ollama.NewClient()
+		p := NewOllamaProvider(c)
+		if got := p.Name(); got != "ollama" {
+			t.Errorf("Name() = %q, want %q", got, "ollama")
+		}
+	})
+
+	// Fail-fast on empty: silent ignore would let a misconfigured factory
+	// produce a provider whose Registry.Register later fails with a less
+	// actionable error.
+	t.Run("empty name panics", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic on empty name, got nil")
 			}
-		})
-	}
+			msg, ok := r.(string)
+			if !ok {
+				t.Fatalf("expected string panic value, got %T: %v", r, r)
+			}
+			if !strings.Contains(msg, "WithProviderName") || !strings.Contains(msg, "empty") {
+				t.Errorf("panic message should explain the misuse, got: %q", msg)
+			}
+		}()
+		_ = WithProviderName("")
+	})
 }
 
 // TestOllamaProvider_ResponseProviderField verifies the configured instance

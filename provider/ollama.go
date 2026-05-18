@@ -45,14 +45,21 @@ func WithThinkBudget(budget *ThinkBudget) OllamaOption {
 
 // WithProviderName overrides the registry identity returned by Name() and
 // stamped on every response's Provider field. The default name is "ollama";
-// supply a config-key instance name (e.g. "shared-ollama-vm") when registering
-// multiple instances of the same backend kind. Empty values are ignored so the
-// default remains in force.
+// supply a config-key instance name (e.g. "shared-ollama-vm") when
+// registering multiple instances of the same backend kind.
+//
+// Panics if name is empty: an empty registry identity is a configuration
+// bug that would otherwise produce a provider whose Registry.Register
+// fails later with a less-actionable error. Fail fast at construction
+// instead of silently keeping the default — caller has obviously passed
+// a misconfigured value rather than meaning "use default" (in which case
+// they would simply omit the option).
 func WithProviderName(name string) OllamaOption {
+	if name == "" {
+		panic("provider: WithProviderName called with empty name; omit the option to use the default \"ollama\"")
+	}
 	return func(p *OllamaProvider) {
-		if name != "" {
-			p.name = name
-		}
+		p.name = name
 	}
 }
 
