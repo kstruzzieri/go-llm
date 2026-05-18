@@ -212,6 +212,29 @@ func TestLoad_APIFormatDefaulting(t *testing.T) {
 	if p2.APIFormat != "openai-compat" {
 		t.Errorf("explicit api_format: got %q, want %q", p2.APIFormat, "openai-compat")
 	}
+
+	// Explicit api_format on a provider with non-zero timeout must survive
+	// applyDefaults — guards against the regression where the write-back
+	// only fired inside the timeout-default branch.
+	explicitBoth := writeTempJSON(t, `{
+		"providers": {"local": {"base_url": "http://localhost:8080", "api_format": "openai-compat", "timeout": "10s"}},
+		"models": {"m": {"name": "x", "type": "dense", "provider": "local"}},
+		"defaults": {}
+	}`)
+	cfg3, err := Load(explicitBoth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p3 := cfg3.Provider("local")
+	if p3 == nil {
+		t.Fatal("expected provider 'local' to exist")
+	}
+	if p3.APIFormat != "openai-compat" {
+		t.Errorf("api_format with explicit timeout: got %q, want %q (applyDefaults regression)", p3.APIFormat, "openai-compat")
+	}
+	if p3.Timeout.Duration != 10*time.Second {
+		t.Errorf("explicit timeout: got %v, want 10s", p3.Timeout.Duration)
+	}
 }
 
 func TestModelConfig_ResolvedCapabilities(t *testing.T) {

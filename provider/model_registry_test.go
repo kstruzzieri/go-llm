@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -1488,6 +1489,61 @@ func TestModelRegistry_CapabilityOverride_FlushesCacheOnInstall(t *testing.T) {
 	if !reverted.Caps.Has(CapGenerate) {
 		t.Errorf("Caps after clearing override missing CapGenerate; clearing must also flush cache, got %v", reverted.Caps)
 	}
+}
+
+// TestModelRegistry_CapabilityOverride_ConcurrentSwap exercises hot-swapping
+// the override concurrently with Lookup calls. Designed to run under `go test
+// -race` to surface unprotected access to capOverride or profiles.
+func TestModelRegistry_CapabilityOverride_ConcurrentSwap(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream,
+		models: []ModelInfo{
+			{Name: "qwen3:8b", Family: "qwen3", Capabilities: []string{"completion"}},
+		},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+
+	const writers = 4
+	const readers = 8
+	const iters = 50
+
+	overrides := []CapabilityOverride{
+		nil,
+		func(_ ModelKey) []string { return []string{"chat", "stream"} },
+		func(_ ModelKey) []string { return []string{"chat"} },
+		func(_ ModelKey) []string { return nil },
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(writers + readers)
+	for w := 0; w < writers; w++ {
+		go func(seed int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				mr.SetCapabilityOverride(overrides[(i+seed)%len(overrides)])
+			}
+		}(w)
+	}
+	for r := 0; r < readers; r++ {
+		go func() {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				if _, err := mr.Lookup(ctx, key); err != nil {
+					t.Errorf("Lookup: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // TestModelRegistry_CapabilityOverride_NilSkipped verifies that the override
