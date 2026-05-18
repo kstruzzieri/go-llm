@@ -600,14 +600,37 @@ func TestParseCaps(t *testing.T) {
 }
 
 func TestParseCapsStrict(t *testing.T) {
-	t.Run("known tokens succeed", func(t *testing.T) {
-		got, err := ParseCapsStrict([]string{"chat", "stream", "embed"})
+	t.Run("canonical tokens succeed (each maps to single bit)", func(t *testing.T) {
+		got, err := ParseCapsStrict([]string{"chat", "stream", "embed", "insert"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
-		want := CapChat | CapStream | CapEmbed
+		want := CapChat | CapStream | CapEmbed | CapInsert
 		if got != want {
 			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("insert is single-bit only (no generate+stream expansion)", func(t *testing.T) {
+		// Critical: aliasedCapability expands "insert" to generate+stream+insert,
+		// but ParseCapsStrict must NOT — otherwise user config ["chat","insert"]
+		// silently adds generate+stream, violating the REPLACES contract.
+		got, err := ParseCapsStrict([]string{"insert"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != CapInsert {
+			t.Errorf("got %v, want %v (insert must NOT expand under strict parser)", got, CapInsert)
+		}
+	})
+	t.Run("multi-bit aliases rejected", func(t *testing.T) {
+		// "completion", "tools", "embedding" are catalog shorthand that
+		// expand multiple bits. They MUST NOT be accepted by the user-config
+		// path — otherwise the REPLACES contract leaks expanded bits.
+		for _, alias := range []string{"completion", "tools", "embedding"} {
+			_, err := ParseCapsStrict([]string{alias})
+			if err == nil {
+				t.Errorf("expected error for alias %q, got nil", alias)
+			}
 		}
 	})
 	t.Run("unknown token rejected", func(t *testing.T) {
@@ -628,4 +651,33 @@ func TestParseCapsStrict(t *testing.T) {
 			t.Errorf("got %v, want 0", got)
 		}
 	})
+	t.Run("case-insensitive (mixed case accepted)", func(t *testing.T) {
+		got, err := ParseCapsStrict([]string{"Chat", "STREAM"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := CapChat | CapStream
+		if got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+}
+
+func TestCanonicalCapabilityNames_Stable(t *testing.T) {
+	// Guard against accidental drift: the public list is consumed by adjacent
+	// packages as the single source of truth for user-config vocabulary. If
+	// names are added/removed, downstream config validation must update too.
+	want := map[string]bool{
+		"chat": true, "generate": true, "stream": true, "embed": true,
+		"tool_call": true, "thinking": true, "insert": true,
+	}
+	if len(CanonicalCapabilityNames) != len(want) {
+		t.Fatalf("CanonicalCapabilityNames length = %d, want %d (%v vs %v)",
+			len(CanonicalCapabilityNames), len(want), CanonicalCapabilityNames, want)
+	}
+	for _, name := range CanonicalCapabilityNames {
+		if !want[name] {
+			t.Errorf("unexpected canonical name %q", name)
+		}
+	}
 }

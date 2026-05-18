@@ -328,6 +328,37 @@ func TestLoad_CapabilityValidation(t *testing.T) {
 			t.Fatalf("unexpected error: %v", err)
 		}
 	})
+
+	// User config rejects multi-bit aliases: the REPLACES contract on
+	// override would otherwise leak expanded bits the user excluded.
+	// Catalog/runtime metadata sources may still use them; user config
+	// must declare canonical single-bit names only.
+	t.Run("multi-bit aliases rejected in user config", func(t *testing.T) {
+		for _, alias := range []string{"completion", "tools", "embedding"} {
+			bad := writeTempJSON(t, `{
+				"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+				"models": {"m": {"name": "x", "type": "dense", "capabilities": ["`+alias+`"]}},
+				"defaults": {}
+			}`)
+			_, err := Load(bad)
+			if err == nil {
+				t.Errorf("expected error for alias %q in user config, got nil", alias)
+			}
+		}
+	})
+
+	// JSON-source casing must not produce silent disagreement between
+	// config validation and provider parsing. Both lowercase before lookup.
+	t.Run("mixed-case capability tokens accepted", func(t *testing.T) {
+		good := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "dense", "capabilities": ["Chat", "STREAM"]}},
+			"defaults": {}
+		}`)
+		if _, err := Load(good); err != nil {
+			t.Fatalf("unexpected error for mixed-case tokens: %v", err)
+		}
+	})
 }
 
 func TestLoad_APIFormatValidation(t *testing.T) {

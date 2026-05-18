@@ -10,7 +10,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // Duration wraps time.Duration with JSON marshal/unmarshal support.
@@ -99,33 +102,26 @@ var validAPIFormats = map[string]bool{
 	"openai-compat": true,
 }
 
-// validCapabilityNames is the schema vocabulary for ModelConfig.Capabilities.
-// Canonical single-bit names match provider.Capability.String() output; the
-// catalog aliases are also accepted so users can mirror values they see in
-// catalog.json or /api/show capability arrays. The provider package owns
-// the bitmask conversion (see provider.ParseCapsStrict).
-var validCapabilityNames = map[string]bool{
-	// Canonical single-bit names.
-	"chat":      true,
-	"generate":  true,
-	"stream":    true,
-	"embed":     true,
-	"tool_call": true,
-	"thinking":  true,
-	"insert":    true,
-	// Catalog aliases retained for compatibility.
-	"completion": true,
-	"tools":      true,
-	"embedding":  true,
-}
+// validCapabilityNames is the schema vocabulary for ModelConfig.Capabilities,
+// derived from provider.CanonicalCapabilityNames so the two never drift.
+// User config accepts ONLY canonical single-bit names; catalog aliases like
+// "completion" or "tools" that expand multiple bits are intentionally
+// forbidden here so the "explicit Capabilities REPLACE derived" contract
+// holds without surprise expansion at the override merge.
+var validCapabilityNames = func() map[string]bool {
+	m := make(map[string]bool, len(provider.CanonicalCapabilityNames))
+	for _, name := range provider.CanonicalCapabilityNames {
+		m[name] = true
+	}
+	return m
+}()
 
 // embeddingOnlyCapabilities are the capability tokens permitted on a model
 // with Type=="embedding". Hybrid models that need additional capabilities
 // must be configured as "dense" or "moe" with explicit capabilities; see
 // the ModelConfig doc.
 var embeddingOnlyCapabilities = map[string]bool{
-	"embed":     true,
-	"embedding": true,
+	"embed": true,
 }
 
 // derivedCapabilitiesByType is the default capability vocabulary applied
@@ -388,16 +384,29 @@ func (cfg *Config) validate() error {
 
 		// Validate explicit capabilities (only when provided; empty defers to
 		// type-driven derivation). Strict-reject unknowns so typos surface at
-		// load time, then enforce the embedding-type-must-only-embed invariant
-		// per the design contract.
+		// load time, and reject multi-bit aliases like "completion" so the
+		// "explicit Capabilities REPLACE derived" contract holds without
+		// surprise expansion at the override merge. Then enforce the
+		// embedding-type-must-only-embed invariant per the design contract.
+		// Tokens are lowercased to match provider.ParseCapsStrict's behavior;
+		// JSON case ("Chat" vs "chat") must not cause silent disagreement.
 		if len(m.Capabilities) > 0 {
 			for _, cap := range m.Capabilities {
-				if !validCapabilityNames[cap] {
-					return fmt.Errorf("config: model %q: unknown capability %q", role, cap)
+				lower := strings.ToLower(cap)
+				if !validCapabilityNames[lower] {
+					return fmt.Errorf("config: model %q: unknown or non-canonical capability %q (canonical names: %v)", role, cap, provider.CanonicalCapabilityNames)
 				}
-				if m.Type == "embedding" && !embeddingOnlyCapabilities[cap] {
+				if m.Type == "embedding" && !embeddingOnlyCapabilities[lower] {
 					return fmt.Errorf("config: model %q: type %q must declare only embedding capabilities, got %q", role, m.Type, cap)
 				}
+			}
+			// Final round-trip check: provider must accept the same tokens.
+			// This catches drift if CanonicalCapabilityNames and the parser
+			// ever diverge — a class of bug the consume-shared-list pattern
+			// is designed to make impossible, but worth asserting in case
+			// someone bypasses the list.
+			if _, err := provider.ParseCapsStrict(m.Capabilities); err != nil {
+				return fmt.Errorf("config: model %q: %w", role, err)
 			}
 		}
 
