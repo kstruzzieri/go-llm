@@ -46,13 +46,28 @@ type ModelRegistry struct {
 
 // CapabilityOverride returns the user-declared canonical capability tokens
 // for a model key, or nil when no override is configured for the key. When
-// non-nil, the returned slice REPLACES the merge-derived Caps on the resulting
-// ModelProfile so users can carve down capabilities below what the static
-// catalog or runtime probe claims — e.g. removing "generate" for an
-// OpenAI-compatible server that lacks /v1/completions.
+// non-nil, the returned slice REPLACES the merge-derived Caps on the
+// resulting ModelProfile so users can carve down capabilities below what
+// the static catalog or runtime probe claims — e.g. removing "generate"
+// for an OpenAI-compatible server that lacks /v1/completions.
 //
-// Returning a non-nil empty slice yields a profile with zero capabilities;
-// callers that want "no override applied" must return nil.
+// Tokens MUST be canonical single-bit names (see CanonicalCapabilityNames /
+// ParseCapsStrict). Multi-bit aliases like "completion" or "insert" expand
+// silently under the lenient parseCaps used here, which would defeat the
+// REPLACES contract; validators (e.g. config.validate) must reject aliases
+// before they reach this seam.
+//
+// Replacement is wholesale and applies AFTER every other merge layer,
+// including the runtime-template-driven CapInsert toggle in merge(). An
+// override that omits "insert" silently drops CapInsert even if the
+// model's template indicates FIM support — this is by design (the user's
+// declaration wins) but is a sharp interaction worth knowing.
+//
+// Returning a nil slice means "no override applied for this key" — the
+// merge-derived caps are used unchanged. Returning a non-nil but empty
+// or all-unknown slice would yield zero capabilities, which is treated
+// as an anomaly and ignored by merge(); see the override application
+// site for details.
 type CapabilityOverride func(key ModelKey) []string
 
 // SetCapabilityOverride installs (or clears) the capability override hook.
@@ -445,17 +460,32 @@ func (r *ModelRegistry) merge(
 		profile.Family = parsed.NormalizedFamily()
 	}
 
-	// Config capability override (final precedence). A non-nil result REPLACES
-	// the merged Caps wholesale — this is the escape hatch the design contract
-	// guarantees, e.g. ["chat", "stream"] genuinely removes CapGenerate even
-	// if the static catalog claims it. Lenient parseCaps matches the other
-	// merge sources; config validation already rejected unknown tokens.
+	// Config capability override (final precedence). A non-nil, non-empty
+	// result that parses to a non-zero bitmask REPLACES the merged Caps
+	// wholesale — this is the escape hatch the design contract guarantees,
+	// e.g. ["chat", "stream"] genuinely removes CapGenerate even if the
+	// static catalog or runtime template detection claims it.
+	//
+	// Two corner cases are deliberately ignored rather than applied:
+	//   1. Non-nil but empty slice — would silently zero out the profile.
+	//      Treated as anomaly; keep merged caps and skip the replace.
+	//   2. Non-empty slice that parses to zero (all unknown tokens) — same
+	//      hazard. Validators upstream MUST reject unknowns; reaching this
+	//      branch with zero parsed caps means a programmatic caller
+	//      bypassed validation. Refuse the replacement rather than
+	//      cripple the profile.
+	//
+	// Lenient parseCaps matches the other merge sources; config validation
+	// already rejected unknown tokens and multi-bit aliases for any
+	// override sourced from models.json.
 	r.mu.RLock()
 	override := r.capOverride
 	r.mu.RUnlock()
 	if override != nil {
-		if cfgCaps := override(key); cfgCaps != nil {
-			profile.Caps = parseCaps(cfgCaps)
+		if cfgCaps := override(key); len(cfgCaps) > 0 {
+			if parsed := parseCaps(cfgCaps); parsed != 0 {
+				profile.Caps = parsed
+			}
 		}
 	}
 
