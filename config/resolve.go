@@ -107,12 +107,12 @@ func (c *Config) resolveRole(role string, available map[string]bool, onStack map
 
 	// Load+applyDefaults guarantees a non-empty Provider for every model.
 	// Reaching this with an empty Provider means the caller constructed
-	// Config programmatically and skipped applyDefaults — silently
-	// inserting "ollama" here would lie to downstream consumers about
-	// which provider instance owns the model. Surface it as a real
-	// configuration error instead.
+	// Config programmatically and skipped Load — silently inserting
+	// "ollama" here would lie to downstream consumers about which provider
+	// instance owns the model. Surface it as a real configuration error
+	// pointing the caller at the exported APIs they should use instead.
 	if m.Provider == "" {
-		return ResolvedModel{}, fmt.Errorf("config: role %q has empty provider; programmatic Configs must call applyDefaults or set Provider explicitly", role)
+		return ResolvedModel{}, fmt.Errorf("config: role %q has empty provider; use config.Load to materialize defaults or set ModelConfig.Provider explicitly", role)
 	}
 
 	// Try primary model.

@@ -293,10 +293,14 @@ func parseCaps(caps []string) Capability {
 }
 
 // ParseCapsStrict converts a slice of canonical-only capability tokens to
-// a bitmask. Each token must map to exactly one Capability bit; unknown
-// tokens AND multi-bit aliases (e.g. "completion", "tools") are rejected.
-// Intended for validating user-authored capability lists in models.json
-// where alias expansion would silently re-add bits the user excluded.
+// a bitmask. Each token must be a name from CanonicalCapabilityNames; any
+// non-canonical token is rejected — including aliases that would expand
+// to multiple bits ("completion" -> chat+generate+stream, the catalog
+// shorthand "insert" -> generate+stream+insert) AND single-bit aliases
+// that merely shadow a canonical name ("tools" is rejected because the
+// canonical spelling is "tool_call"). Intended for validating
+// user-authored capability lists in models.json where any non-canonical
+// token would risk silent bit-set divergence from what the user wrote.
 func ParseCapsStrict(caps []string) (Capability, error) {
 	var c Capability
 	for _, s := range caps {
