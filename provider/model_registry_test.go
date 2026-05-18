@@ -1323,6 +1323,71 @@ func TestModelRegistry_CapabilityOverride_Replaces(t *testing.T) {
 	}
 }
 
+// TestModelRegistry_CapabilityOverride_FlushesCacheOnInstall verifies that
+// SetCapabilityOverride invalidates already-cached profiles so a consumer
+// that installs the override AFTER warming the cache (the natural wiring
+// sequence: build registry -> RefreshModels -> install override) still
+// sees the new policy on the very next Lookup. Without the flush, cached
+// profiles would silently shadow the override.
+func TestModelRegistry_CapabilityOverride_FlushesCacheOnInstall(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream | CapToolCall,
+		models: []ModelInfo{
+			{Name: "qwen3:8b", Family: "qwen3", Capabilities: []string{"completion", "tools"}},
+		},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+
+	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+
+	// Warm the cache without an override installed — simulates the natural
+	// startup sequence where Refresh populates the cache before config-driven
+	// overrides are wired.
+	warmed, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("warm Lookup: %v", err)
+	}
+	if !warmed.Caps.Has(CapGenerate) {
+		t.Fatal("preconditions: expected CapGenerate before override")
+	}
+
+	// Now install the override — must invalidate the cached profile so the
+	// next Lookup re-merges with the override applied.
+	mr.SetCapabilityOverride(func(k ModelKey) []string {
+		if k.Model == "qwen3:8b" {
+			return []string{"chat", "stream"}
+		}
+		return nil
+	})
+
+	postOverride, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("post-override Lookup: %v", err)
+	}
+	want := CapChat | CapStream
+	if postOverride.Caps != want {
+		t.Errorf("Caps = %v, want %v (override installed AFTER warm cache must take effect on next Lookup)", postOverride.Caps, want)
+	}
+
+	// Clearing the override must also flush so the cached overridden profile
+	// is not silently served after revert.
+	mr.SetCapabilityOverride(nil)
+	reverted, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("post-clear Lookup: %v", err)
+	}
+	if !reverted.Caps.Has(CapGenerate) {
+		t.Errorf("Caps after clearing override missing CapGenerate; clearing must also flush cache, got %v", reverted.Caps)
+	}
+}
+
 // TestModelRegistry_CapabilityOverride_NilSkipped verifies that the override
 // hook can return nil for a key to defer to merge-derived caps. Necessary so
 // users can declare capabilities for some models and let others auto-derive.

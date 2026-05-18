@@ -56,12 +56,24 @@ type ModelRegistry struct {
 type CapabilityOverride func(key ModelKey) []string
 
 // SetCapabilityOverride installs (or clears) the capability override hook.
-// Pass nil to disable overrides. Safe for concurrent use; the new function
-// takes effect on subsequent Refresh or Lookup calls that miss the cache.
+// Pass nil to disable overrides. Safe for concurrent use.
+//
+// Installing or clearing an override invalidates the entire profile cache
+// so the new policy applies to every subsequent Lookup, not just to
+// previously-uncached keys. This matches the "Rebuild downstream objects
+// when cache refreshes" principle that keeps the wiring sequence
+// (build registry -> RefreshModels -> install override) correct regardless
+// of which step warmed which entries.
 func (r *ModelRegistry) SetCapabilityOverride(fn CapabilityOverride) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.capOverride = fn
+	// Cached profiles were merged under the previous override (possibly
+	// nil); flush them so the next Lookup re-runs merge with the new
+	// override in effect. Skipping this flush is the bug class where a
+	// warm cache silently shadows config changes — see feedback memory
+	// on rebuilding downstream state when a cache source changes.
+	clear(r.profiles)
 }
 
 // directModelInfoProvider is an optional provider capability that returns
