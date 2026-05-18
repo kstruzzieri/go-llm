@@ -2,6 +2,7 @@ package provider
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -557,6 +558,36 @@ func TestParseCaps(t *testing.T) {
 			input: []string{"completion", "nonexistent"},
 			want:  CapChat | CapGenerate | CapStream,
 		},
+		{
+			name:  "canonical chat token",
+			input: []string{"chat"},
+			want:  CapChat,
+		},
+		{
+			name:  "canonical generate token",
+			input: []string{"generate"},
+			want:  CapGenerate,
+		},
+		{
+			name:  "canonical stream token",
+			input: []string{"stream"},
+			want:  CapStream,
+		},
+		{
+			name:  "canonical embed token",
+			input: []string{"embed"},
+			want:  CapEmbed,
+		},
+		{
+			name:  "canonical tool_call token",
+			input: []string{"tool_call"},
+			want:  CapToolCall,
+		},
+		{
+			name:  "mixed canonical and aliases",
+			input: []string{"chat", "stream", "tools"},
+			want:  CapChat | CapStream | CapToolCall,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -566,4 +597,35 @@ func TestParseCaps(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseCapsStrict(t *testing.T) {
+	t.Run("known tokens succeed", func(t *testing.T) {
+		got, err := ParseCapsStrict([]string{"chat", "stream", "embed"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		want := CapChat | CapStream | CapEmbed
+		if got != want {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+	t.Run("unknown token rejected", func(t *testing.T) {
+		_, err := ParseCapsStrict([]string{"chat", "nonexistent"})
+		if err == nil {
+			t.Fatal("expected error for unknown token, got nil")
+		}
+		if !strings.Contains(err.Error(), "nonexistent") {
+			t.Errorf("error should mention the bad token, got: %v", err)
+		}
+	})
+	t.Run("empty input is no error", func(t *testing.T) {
+		got, err := ParseCapsStrict(nil)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got != 0 {
+			t.Errorf("got %v, want 0", got)
+		}
+	})
 }

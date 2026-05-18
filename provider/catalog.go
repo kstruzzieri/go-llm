@@ -184,28 +184,78 @@ func parseTier(s string) Tier {
 	}
 }
 
-// parseCaps converts a string slice of capability names from catalog JSON
-// to a Capability bitmask. The catalog uses higher-level labels:
-//   - "completion" implies CapChat | CapGenerate | CapStream
-//   - "insert" implies CapGenerate | CapStream | CapInsert
-//   - "tools" implies CapToolCall
-//   - "embedding" implies CapEmbed
-//   - "thinking" implies CapThinking
+// capabilityFor maps a single capability token to its bitmask contribution.
+// It accepts both the canonical lowercase names matching Capability.String()
+// output ("chat", "generate", "stream", "embed", "tool_call", "thinking",
+// "insert") and the higher-level catalog aliases used by catalog.json:
+//
+//	"completion" -> CapChat | CapGenerate | CapStream
+//	"insert"     -> CapGenerate | CapStream | CapInsert
+//	"tools"      -> CapToolCall
+//	"embedding"  -> CapEmbed
+//	"thinking"   -> CapThinking
+//
+// Tokens are lowercased before matching. The boolean return reports whether
+// the token was recognized; callers decide whether unknowns are an error
+// (user config) or a silent skip (upstream metadata sources).
+func capabilityFor(token string) (Capability, bool) {
+	switch strings.ToLower(token) {
+	// Canonical single-bit names.
+	case "chat":
+		return CapChat, true
+	case "generate":
+		return CapGenerate, true
+	case "stream":
+		return CapStream, true
+	case "embed":
+		return CapEmbed, true
+	case "tool_call":
+		return CapToolCall, true
+	case "thinking":
+		return CapThinking, true
+	case "insert":
+		// "insert" intentionally implies generate+stream+insert because
+		// FIM consumers expect the full path; standalone CapInsert without
+		// generate/stream is not a useful state in this codebase.
+		return CapGenerate | CapStream | CapInsert, true
+	// Catalog aliases retained for compatibility with catalog.json and
+	// upstream caps strings emitted by fingerprint / Ollama /api/show.
+	case "completion":
+		return CapChat | CapGenerate | CapStream, true
+	case "tools":
+		return CapToolCall, true
+	case "embedding":
+		return CapEmbed, true
+	}
+	return 0, false
+}
+
+// parseCaps converts a string slice of capability names to a bitmask,
+// silently skipping unknown tokens. Suitable for upstream metadata sources
+// (catalog.json, fingerprint cache, provider /api/show) where graceful
+// degradation across schema versions is the right behavior. User config
+// should use ParseCapsStrict instead so typos surface at load time.
 func parseCaps(caps []string) Capability {
 	var c Capability
 	for _, s := range caps {
-		switch strings.ToLower(s) {
-		case "completion":
-			c |= CapChat | CapGenerate | CapStream
-		case "insert":
-			c |= CapGenerate | CapStream | CapInsert
-		case "tools":
-			c |= CapToolCall
-		case "embedding":
-			c |= CapEmbed
-		case "thinking":
-			c |= CapThinking
+		if bit, ok := capabilityFor(s); ok {
+			c |= bit
 		}
 	}
 	return c
+}
+
+// ParseCapsStrict is the strict variant of parseCaps: it returns an error on
+// the first unknown token. Intended for validating user-authored capability
+// lists in models.json where a silent skip would hide configuration mistakes.
+func ParseCapsStrict(caps []string) (Capability, error) {
+	var c Capability
+	for _, s := range caps {
+		bit, ok := capabilityFor(s)
+		if !ok {
+			return 0, fmt.Errorf("provider: unknown capability %q", s)
+		}
+		c |= bit
+	}
+	return c, nil
 }
