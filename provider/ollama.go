@@ -43,6 +43,19 @@ func WithThinkBudget(budget *ThinkBudget) OllamaOption {
 	}
 }
 
+// WithProviderName overrides the registry identity returned by Name() and
+// stamped on every response's Provider field. The default name is "ollama";
+// supply a config-key instance name (e.g. "shared-ollama-vm") when registering
+// multiple instances of the same backend kind. Empty values are ignored so the
+// default remains in force.
+func WithProviderName(name string) OllamaOption {
+	return func(p *OllamaProvider) {
+		if name != "" {
+			p.name = name
+		}
+	}
+}
+
 // ---------------------------------------------------------------------------
 // OllamaProvider
 // ---------------------------------------------------------------------------
@@ -52,6 +65,7 @@ func WithThinkBudget(budget *ThinkBudget) OllamaOption {
 // and non-streaming) and graceful cancellation with partial results on all
 // streaming methods.
 type OllamaProvider struct {
+	name        string
 	client      *ollama.Client
 	thinkMode   ThinkMode
 	thinkTags   ThinkTags
@@ -60,10 +74,12 @@ type OllamaProvider struct {
 }
 
 // NewOllamaProvider creates a Provider backed by the given ollama.Client.
-// Options configure think-tag parsing behavior. By default, ThinkAuto mode
-// with standard <think></think> tags is used.
+// Options configure think-tag parsing and the registry identity. By default,
+// ThinkAuto mode with standard <think></think> tags is used and Name() returns
+// "ollama"; use WithProviderName to register additional instances.
 func NewOllamaProvider(client *ollama.Client, opts ...OllamaOption) *OllamaProvider {
 	p := &OllamaProvider{
+		name:      "ollama",
 		client:    client,
 		thinkMode: ThinkAuto,
 		thinkTags: DefaultThinkTags(),
@@ -89,9 +105,12 @@ func (p *OllamaProvider) shouldExtractThinking(opts ModelOptions) bool {
 	}
 }
 
-// Name returns the canonical provider identifier "ollama".
+// Name returns the registry identity for this provider instance. Defaults to
+// "ollama" unless WithProviderName overrode it; the value is also stamped on
+// every response's Provider field so RouteOutcome attribution stays accurate
+// when multiple instances of the same backend kind coexist.
 func (p *OllamaProvider) Name() string {
-	return "ollama"
+	return p.name
 }
 
 // Capabilities returns the bitmask of features the Ollama backend supports.
@@ -180,7 +199,7 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 
 	return &ChatResponse{
 		Model:     oResp.Model,
-		Provider:  "ollama",
+		Provider:  p.name,
 		Content:   content,
 		Thinking:  thinking,
 		ToolCalls: toProviderToolCalls(oResp.Message.ToolCalls),
@@ -232,7 +251,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 		OnThinking: func(s string) error {
 			resp := ChatResponse{
 				Model:    lastModel,
-				Provider: "ollama",
+				Provider: p.name,
 				Thinking: s,
 			}
 			if err := fn(resp); err != nil {
@@ -244,7 +263,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 		OnContent: func(s string) error {
 			resp := ChatResponse{
 				Model:    lastModel,
-				Provider: "ollama",
+				Provider: p.name,
 				Content:  s,
 			}
 			if err := fn(resp); err != nil {
@@ -294,7 +313,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 
 			doneResp := ChatResponse{
 				Model:     oResp.Model,
-				Provider:  "ollama",
+				Provider:  p.name,
 				ToolCalls: lastToolCalls,
 				Done:      true,
 				Usage:     lastUsage,
@@ -307,7 +326,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 		if len(oResp.Message.ToolCalls) > 0 {
 			tcResp := ChatResponse{
 				Model:     oResp.Model,
-				Provider:  "ollama",
+				Provider:  p.name,
 				ToolCalls: toProviderToolCalls(oResp.Message.ToolCalls),
 			}
 			return fn(tcResp)
@@ -329,7 +348,7 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 
 		partial := ChatResponse{
 			Model:     model,
-			Provider:  "ollama",
+			Provider:  p.name,
 			ToolCalls: lastToolCalls,
 			Done:      true,
 			Partial:   true,
@@ -367,7 +386,7 @@ func (p *OllamaProvider) Generate(ctx context.Context, req GenerateRequest) (*Ge
 
 	return &GenerateResponse{
 		Model:    oResp.Model,
-		Provider: "ollama",
+		Provider: p.name,
 		Response: oResp.Response,
 		Done:     true,
 		Usage: Usage{
@@ -420,7 +439,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest
 
 		resp := GenerateResponse{
 			Model:    oResp.Model,
-			Provider: "ollama",
+			Provider: p.name,
 			Response: oResp.Response,
 			Done:     oResp.Done,
 			Usage:    lastUsage,
@@ -442,7 +461,7 @@ func (p *OllamaProvider) GenerateStream(ctx context.Context, req GenerateRequest
 		}
 		partial := GenerateResponse{
 			Model:    model,
-			Provider: "ollama",
+			Provider: p.name,
 			Done:     true,
 			Partial:  true,
 			Usage:    lastUsage,
@@ -495,7 +514,7 @@ func (p *OllamaProvider) Embed(ctx context.Context, req EmbedRequest) (*EmbedRes
 		}
 		return &EmbedResponse{
 			Model:      req.Model,
-			Provider:   "ollama",
+			Provider:   p.name,
 			Embeddings: embeddings,
 			Usage: Usage{
 				PromptTokens: len(req.Input),

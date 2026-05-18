@@ -27,6 +27,79 @@ func TestOllamaProvider_Name(t *testing.T) {
 	}
 }
 
+func TestOllamaProvider_WithProviderName(t *testing.T) {
+	tests := []struct {
+		name     string
+		override string
+		want     string
+	}{
+		{"override applied", "shared-ollama-vm", "shared-ollama-vm"},
+		{"empty override ignored", "", "ollama"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := ollama.NewClient()
+			p := NewOllamaProvider(c, WithProviderName(tt.override))
+			if got := p.Name(); got != tt.want {
+				t.Errorf("Name() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestOllamaProvider_ResponseProviderField verifies the configured instance
+// name is stamped on every response variant, not just Name(). This matters
+// because RouteOutcome attribution and downstream RAG vsid synthesis read
+// the response's Provider field, not a separate registry lookup.
+func TestOllamaProvider_ResponseProviderField(t *testing.T) {
+	const instance = "my-llama-instance"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model":   "qwen3:8b",
+				"message": map[string]string{"role": "assistant", "content": "hi"},
+				"done":    true,
+			})
+		case "/api/embed":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"embeddings": [][]float64{{0.1, 0.2}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c, WithProviderName(instance))
+
+	chatResp, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if chatResp.Provider != instance {
+		t.Errorf("Chat response Provider = %q, want %q", chatResp.Provider, instance)
+	}
+
+	embResp, err := p.Embed(context.Background(), EmbedRequest{
+		Model: "qwen3-embedding:8b",
+		Input: []string{"text"},
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if embResp.Provider != instance {
+		t.Errorf("Embed response Provider = %q, want %q", embResp.Provider, instance)
+	}
+}
+
 func TestOllamaProvider_Capabilities(t *testing.T) {
 	c := ollama.NewClient()
 	p := NewOllamaProvider(c)
