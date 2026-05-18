@@ -39,6 +39,9 @@ func TestResolve_PrimaryAvailable(t *testing.T) {
 	if got.Role != "general" {
 		t.Errorf("Role = %q, want %q", got.Role, "general")
 	}
+	if got.Provider != "ollama" {
+		t.Errorf("Provider = %q, want %q", got.Provider, "ollama")
+	}
 	if got.IsFallback {
 		t.Error("IsFallback = true, want false")
 	}
@@ -58,6 +61,50 @@ func TestResolve_FallbackUsed(t *testing.T) {
 	}
 	if got.Role != "lightweight" {
 		t.Errorf("Role = %q, want %q", got.Role, "lightweight")
+	}
+	if got.Provider != "ollama" {
+		t.Errorf("Provider = %q, want %q", got.Provider, "ollama")
+	}
+	if !got.IsFallback {
+		t.Error("IsFallback = false, want true")
+	}
+}
+
+// TestResolve_FallbackCrossProvider verifies the resolved Provider tracks
+// the fallback's owner, not the originally-requested one. Per design:
+// requested role "coding"/provider "local-a" falling back to role "fast"/
+// provider "local-b" must yield Provider="local-b".
+func TestResolve_FallbackCrossProvider(t *testing.T) {
+	crossProvider := writeTempJSON(t, `{
+		"providers": {
+			"local-a": {"base_url": "http://localhost:11434"},
+			"local-b": {"base_url": "http://localhost:8080", "api_format": "openai-compat"}
+		},
+		"models": {
+			"primary":  {"name": "model-a", "provider": "local-a", "type": "dense", "fallbacks": ["backup"]},
+			"backup":   {"name": "model-b", "provider": "local-b", "type": "dense"}
+		},
+		"defaults": {"chat": "primary"}
+	}`)
+	cfg, err := Load(crossProvider)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	// Only the backup model is available, forcing fallback.
+	checker := &mockChecker{models: []string{"model-b"}}
+
+	got, err := cfg.Resolve(context.Background(), checker, "chat")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if got.Name != "model-b" {
+		t.Errorf("Name = %q, want %q", got.Name, "model-b")
+	}
+	if got.Role != "backup" {
+		t.Errorf("Role = %q, want %q", got.Role, "backup")
+	}
+	if got.Provider != "local-b" {
+		t.Errorf("Provider = %q, want %q (must track resolved owner, not requested)", got.Provider, "local-b")
 	}
 	if !got.IsFallback {
 		t.Error("IsFallback = false, want true")
