@@ -105,18 +105,19 @@ func (c *Config) resolveRole(role string, available map[string]bool, onStack map
 		return ResolvedModel{}, fmt.Errorf("config: unknown role %q", role)
 	}
 
-	// applyDefaults guarantees a non-empty Provider, but resolveRole can be
-	// reached on a Config that was constructed programmatically without going
-	// through Load — fall back to "ollama" for that path so downstream callers
-	// always see a populated Provider.
-	provider := m.Provider
-	if provider == "" {
-		provider = "ollama"
+	// Load+applyDefaults guarantees a non-empty Provider for every model.
+	// Reaching this with an empty Provider means the caller constructed
+	// Config programmatically and skipped applyDefaults — silently
+	// inserting "ollama" here would lie to downstream consumers about
+	// which provider instance owns the model. Surface it as a real
+	// configuration error instead.
+	if m.Provider == "" {
+		return ResolvedModel{}, fmt.Errorf("config: role %q has empty provider; programmatic Configs must call applyDefaults or set Provider explicitly", role)
 	}
 
 	// Try primary model.
 	if available[m.Name] {
-		return ResolvedModel{Name: m.Name, Role: role, Provider: provider, IsFallback: false}, nil
+		return ResolvedModel{Name: m.Name, Role: role, Provider: m.Provider, IsFallback: false}, nil
 	}
 
 	// Walk fallback chain: try each fallback role (and transitively its own fallbacks).

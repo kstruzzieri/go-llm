@@ -70,6 +70,32 @@ func TestResolve_FallbackUsed(t *testing.T) {
 	}
 }
 
+// TestResolve_EmptyProviderErrors verifies the resolver surfaces an empty
+// Provider as a real config error rather than silently inserting "ollama".
+// Empty Provider is only reachable on Configs constructed programmatically
+// without going through Load+applyDefaults; lying about the owner would
+// route downstream calls to a provider the caller never declared.
+func TestResolve_EmptyProviderErrors(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"ollama": {BaseURL: "http://localhost:11434"},
+		},
+		Models: map[string]ModelConfig{
+			"chat-role": {Name: "some-model", Type: "dense"}, // Provider intentionally empty
+		},
+		Defaults: map[string]string{"chat": "chat-role"},
+	}
+	checker := &mockChecker{models: []string{"some-model"}}
+
+	_, err := cfg.Resolve(context.Background(), checker, "chat")
+	if err == nil {
+		t.Fatal("expected error for empty Provider, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty provider") {
+		t.Errorf("error should mention empty provider, got: %v", err)
+	}
+}
+
 // TestResolve_FallbackCrossProvider verifies the resolved Provider tracks
 // the fallback's owner, not the originally-requested one. Per design:
 // requested role "coding"/provider "local-a" falling back to role "fast"/
@@ -249,10 +275,10 @@ func TestResolveAll_NoneAvailable(t *testing.T) {
 func TestResolve_DiamondFallbackGraph(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a", Fallbacks: []string{"b", "c"}},
-			"b": {Name: "model-b", Fallbacks: []string{"d"}},
-			"c": {Name: "model-c", Fallbacks: []string{"d"}},
-			"d": {Name: "model-d"},
+			"a": {Name: "model-a", Provider: "ollama", Fallbacks: []string{"b", "c"}},
+			"b": {Name: "model-b", Provider: "ollama", Fallbacks: []string{"d"}},
+			"c": {Name: "model-c", Provider: "ollama", Fallbacks: []string{"d"}},
+			"d": {Name: "model-d", Provider: "ollama"},
 		},
 		Defaults: map[string]string{
 			"test": "a",
@@ -279,8 +305,8 @@ func TestResolve_DiamondFallbackGraph(t *testing.T) {
 func TestResolve_CircularFallbackTerminates(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a", Fallbacks: []string{"b"}},
-			"b": {Name: "model-b", Fallbacks: []string{"a"}}, // cycle: a → b → a
+			"a": {Name: "model-a", Provider: "ollama", Fallbacks: []string{"b"}},
+			"b": {Name: "model-b", Provider: "ollama", Fallbacks: []string{"a"}}, // cycle: a → b → a
 		},
 		Defaults: map[string]string{
 			"test": "a",
