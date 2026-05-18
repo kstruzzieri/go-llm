@@ -237,6 +237,79 @@ func TestLoad_APIFormatDefaulting(t *testing.T) {
 	}
 }
 
+// TestLoad_ProductionModelsJSON_NoBehaviorChange pins the claim from the
+// PR description: existing single-Ollama deployments see no behavior change
+// from the new Capabilities field. The repo's actual models.json has no
+// capabilities populated on any model; every ResolvedCapabilities() result
+// must match the derive-from-type defaults so routing decisions made on
+// top of those caps remain identical to develop's behavior.
+func TestLoad_ProductionModelsJSON_NoBehaviorChange(t *testing.T) {
+	cfg, err := Load("../models.json")
+	if err != nil {
+		t.Fatalf("repo models.json fails to load after PR1 changes: %v", err)
+	}
+
+	for role, m := range cfg.Models {
+		t.Run(role, func(t *testing.T) {
+			if len(m.Capabilities) != 0 {
+				t.Skipf("model %q now has explicit capabilities; remove this skip when production config opts in", role)
+			}
+			got := m.ResolvedCapabilities()
+			var want []string
+			switch m.Type {
+			case "dense", "moe":
+				want = []string{"chat", "generate", "stream"}
+			case "embedding":
+				want = []string{"embed"}
+			default:
+				t.Fatalf("model %q has unexpected type %q", role, m.Type)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("ResolvedCapabilities = %v, want %v (production model %q derive-from-type)", got, want, role)
+			}
+		})
+	}
+}
+
+// TestLoad_CapabilitiesExample exercises the testdata/capabilities.json
+// fixture so the documented usage stays valid and a regression in the
+// schema vocabulary cannot quietly desync from the example.
+func TestLoad_CapabilitiesExample(t *testing.T) {
+	cfg, err := Load("testdata/capabilities.json")
+	if err != nil {
+		t.Fatalf("capabilities.json fixture fails to load: %v", err)
+	}
+
+	carved := cfg.Models["carved-down"]
+	if got := carved.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"chat", "stream"}) {
+		t.Errorf("carved-down capabilities = %v, want [chat stream] (explicit replaces derived)", got)
+	}
+
+	withTools := cfg.Models["with-tools"]
+	if got := withTools.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"chat", "generate", "stream", "tool_call"}) {
+		t.Errorf("with-tools capabilities = %v, want [chat generate stream tool_call]", got)
+	}
+
+	general := cfg.Models["general"]
+	if got := general.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"chat", "generate", "stream"}) {
+		t.Errorf("general (derive-from-type) = %v, want [chat generate stream]", got)
+	}
+
+	emb := cfg.Models["embedding"]
+	if got := emb.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"embed"}) {
+		t.Errorf("embedding (derive-from-type) = %v, want [embed]", got)
+	}
+
+	// The remote-llamacpp provider should carry api_format through Load.
+	remote := cfg.Provider("remote-llamacpp")
+	if remote == nil {
+		t.Fatal("remote-llamacpp provider missing")
+	}
+	if remote.APIFormat != "openai-compat" {
+		t.Errorf("remote-llamacpp api_format = %q, want openai-compat", remote.APIFormat)
+	}
+}
+
 func TestModelConfig_ResolvedCapabilities(t *testing.T) {
 	tests := []struct {
 		name string
