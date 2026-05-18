@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -211,6 +212,122 @@ func TestLoad_APIFormatDefaulting(t *testing.T) {
 	if p2.APIFormat != "openai-compat" {
 		t.Errorf("explicit api_format: got %q, want %q", p2.APIFormat, "openai-compat")
 	}
+}
+
+func TestModelConfig_ResolvedCapabilities(t *testing.T) {
+	tests := []struct {
+		name string
+		m    ModelConfig
+		want []string
+	}{
+		{
+			name: "dense default",
+			m:    ModelConfig{Type: "dense"},
+			want: []string{"chat", "generate", "stream"},
+		},
+		{
+			name: "moe default",
+			m:    ModelConfig{Type: "moe"},
+			want: []string{"chat", "generate", "stream"},
+		},
+		{
+			name: "embedding default",
+			m:    ModelConfig{Type: "embedding"},
+			want: []string{"embed"},
+		},
+		{
+			name: "explicit replaces derived (carve-down for missing /v1/completions)",
+			m:    ModelConfig{Type: "dense", Capabilities: []string{"chat", "stream"}},
+			want: []string{"chat", "stream"},
+		},
+		{
+			name: "explicit replaces derived (no merge with chat/generate/stream)",
+			m:    ModelConfig{Type: "dense", Capabilities: []string{"chat"}},
+			want: []string{"chat"},
+		},
+		{
+			name: "explicit on embedding",
+			m:    ModelConfig{Type: "embedding", Capabilities: []string{"embed"}},
+			want: []string{"embed"},
+		},
+		{
+			name: "unknown type yields nil",
+			m:    ModelConfig{Type: "bogus"},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.m.ResolvedCapabilities()
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("returned slice is independent copy", func(t *testing.T) {
+		m := ModelConfig{Type: "dense"}
+		first := m.ResolvedCapabilities()
+		first[0] = "mutated"
+		second := m.ResolvedCapabilities()
+		if second[0] == "mutated" {
+			t.Error("ResolvedCapabilities returned aliased slice; mutation leaked across calls")
+		}
+	})
+}
+
+func TestLoad_CapabilityValidation(t *testing.T) {
+	t.Run("unknown capability rejected", func(t *testing.T) {
+		bad := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "dense", "capabilities": ["chat", "nonexistent"]}},
+			"defaults": {}
+		}`)
+		_, err := Load(bad)
+		if err == nil {
+			t.Fatal("expected error for unknown capability, got nil")
+		}
+		if !strings.Contains(err.Error(), "nonexistent") {
+			t.Errorf("error should mention bad capability, got: %v", err)
+		}
+	})
+
+	t.Run("embedding type with non-embedding capability rejected", func(t *testing.T) {
+		bad := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "embedding", "capabilities": ["chat"]}},
+			"defaults": {}
+		}`)
+		_, err := Load(bad)
+		if err == nil {
+			t.Fatal("expected error for embedding type with chat capability, got nil")
+		}
+		if !strings.Contains(err.Error(), "embedding") || !strings.Contains(err.Error(), "chat") {
+			t.Errorf("error should mention type and bad capability, got: %v", err)
+		}
+	})
+
+	t.Run("embedding type with explicit embed capability accepted", func(t *testing.T) {
+		good := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "embedding", "capabilities": ["embed"]}},
+			"defaults": {}
+		}`)
+		if _, err := Load(good); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("dense type with carved-down capabilities accepted", func(t *testing.T) {
+		good := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "dense", "capabilities": ["chat", "stream"]}},
+			"defaults": {}
+		}`)
+		if _, err := Load(good); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
 }
 
 func TestLoad_APIFormatValidation(t *testing.T) {

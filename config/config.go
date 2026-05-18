@@ -54,6 +54,13 @@ type ProviderConfig struct {
 }
 
 // ModelConfig describes a model's identity, capabilities, and fallback chain.
+//
+// Capabilities is an optional explicit override of the type-derived default
+// capability set. When non-empty it REPLACES the derived set (not merges)
+// so users can carve down capabilities for backends that don't expose every
+// endpoint — e.g. ["chat", "stream"] for an OpenAI-compat server lacking
+// /v1/completions. When empty, capabilities derive from Type per
+// ResolvedCapabilities. See validCapabilityNames for the accepted vocabulary.
 type ModelConfig struct {
 	Name          string   `json:"name"`
 	Provider      string   `json:"provider,omitempty"`
@@ -62,6 +69,7 @@ type ModelConfig struct {
 	Parameters    string   `json:"parameters,omitempty"`
 	ContextWindow int      `json:"context_window,omitempty"`
 	Dimensions    int      `json:"dimensions,omitempty"`
+	Capabilities  []string `json:"capabilities,omitempty"`
 	Fallbacks     []string `json:"fallbacks,omitempty"`
 }
 
@@ -89,6 +97,64 @@ var validModelTypes = map[string]bool{
 var validAPIFormats = map[string]bool{
 	"ollama":        true,
 	"openai-compat": true,
+}
+
+// validCapabilityNames is the schema vocabulary for ModelConfig.Capabilities.
+// Canonical single-bit names match provider.Capability.String() output; the
+// catalog aliases are also accepted so users can mirror values they see in
+// catalog.json or /api/show capability arrays. The provider package owns
+// the bitmask conversion (see provider.ParseCapsStrict).
+var validCapabilityNames = map[string]bool{
+	// Canonical single-bit names.
+	"chat":      true,
+	"generate":  true,
+	"stream":    true,
+	"embed":     true,
+	"tool_call": true,
+	"thinking":  true,
+	"insert":    true,
+	// Catalog aliases retained for compatibility.
+	"completion": true,
+	"tools":      true,
+	"embedding":  true,
+}
+
+// embeddingOnlyCapabilities are the capability tokens permitted on a model
+// with Type=="embedding". Hybrid models that need additional capabilities
+// must be configured as "dense" or "moe" with explicit capabilities; see
+// the ModelConfig doc.
+var embeddingOnlyCapabilities = map[string]bool{
+	"embed":     true,
+	"embedding": true,
+}
+
+// derivedCapabilitiesByType is the default capability vocabulary applied
+// when ModelConfig.Capabilities is empty. Insert, tool_call, and thinking
+// are never derived — they require explicit declaration or later runtime
+// proof from the provider.
+var derivedCapabilitiesByType = map[string][]string{
+	"dense":     {"chat", "generate", "stream"},
+	"moe":       {"chat", "generate", "stream"},
+	"embedding": {"embed"},
+}
+
+// ResolvedCapabilities returns the effective capability tokens for this
+// model. Explicit Capabilities entries REPLACE the type-derived default set
+// (not merge); an empty list yields the derive-from-type defaults. The
+// returned slice is a fresh copy callers may freely mutate.
+func (m ModelConfig) ResolvedCapabilities() []string {
+	if len(m.Capabilities) > 0 {
+		out := make([]string, len(m.Capabilities))
+		copy(out, m.Capabilities)
+		return out
+	}
+	derived := derivedCapabilitiesByType[m.Type]
+	if len(derived) == 0 {
+		return nil
+	}
+	out := make([]string, len(derived))
+	copy(out, derived)
+	return out
 }
 
 // typeCompatible reports whether a model of fromType can fall back to a model of toType.
@@ -318,6 +384,21 @@ func (cfg *Config) validate() error {
 		}
 		if !validModelTypes[m.Type] {
 			return fmt.Errorf("config: model %q: invalid type %q", role, m.Type)
+		}
+
+		// Validate explicit capabilities (only when provided; empty defers to
+		// type-driven derivation). Strict-reject unknowns so typos surface at
+		// load time, then enforce the embedding-type-must-only-embed invariant
+		// per the design contract.
+		if len(m.Capabilities) > 0 {
+			for _, cap := range m.Capabilities {
+				if !validCapabilityNames[cap] {
+					return fmt.Errorf("config: model %q: unknown capability %q", role, cap)
+				}
+				if m.Type == "embedding" && !embeddingOnlyCapabilities[cap] {
+					return fmt.Errorf("config: model %q: type %q must declare only embedding capabilities, got %q", role, m.Type, cap)
+				}
+			}
 		}
 
 		// Check provider exists. Use local variable to resolve implicit default.
