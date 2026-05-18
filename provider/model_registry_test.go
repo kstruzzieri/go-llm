@@ -1585,6 +1585,109 @@ func TestModelRegistry_CapabilityOverride_FlushesCacheOnInstall(t *testing.T) {
 	}
 }
 
+// gateMockProvider wraps mrMockProvider with a synchronization channel that
+// blocks Models() until released. Used to deterministically interleave
+// buildProfile with a concurrent SetCapabilityOverride for the TOCTOU test.
+type gateMockProvider struct {
+	*mrMockProvider
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *gateMockProvider) Models(ctx context.Context) ([]ModelInfo, error) {
+	select {
+	case g.entered <- struct{}{}:
+	default:
+	}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.mrMockProvider.Models(ctx)
+}
+
+// TestModelRegistry_CapabilityOverride_TOCTOUDoesNotCacheStaleProfile verifies
+// the version-counter guard: an in-flight buildProfile that snapshotted the
+// OLD override must NOT write its result to the cache after SetCapabilityOverride
+// has raced ahead and bumped the version. Without the guard, the stale-policy
+// profile would land in the freshly-cleared map and shadow the swap until
+// the next Refresh — a silent staleness bug the cache-flush alone cannot fix.
+func TestModelRegistry_CapabilityOverride_TOCTOUDoesNotCacheStaleProfile(t *testing.T) {
+	ctx := context.Background()
+
+	base := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream,
+		models: []ModelInfo{
+			{Name: "qwen3:8b", Family: "qwen3", Capabilities: []string{"completion"}},
+		},
+	}
+	gated := &gateMockProvider{
+		mrMockProvider: base,
+		entered:        make(chan struct{}, 1),
+		release:        make(chan struct{}),
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": gated}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+
+	// Install initial override BEFORE the racing Lookup, so the in-flight
+	// buildProfile snapshots a non-nil override that will go stale.
+	oldOverride := func(_ ModelKey) []string { return []string{"chat", "generate"} }
+	mr.SetCapabilityOverride(oldOverride)
+
+	// Goroutine A: Lookup blocks inside Models() until release fires.
+	type result struct {
+		profile *ModelProfile
+		err     error
+	}
+	done := make(chan result, 1)
+	go func() {
+		p, err := mr.Lookup(ctx, key)
+		done <- result{p, err}
+	}()
+
+	// Wait for the racing Lookup to enter Models() — it has now snapshotted
+	// the old override + old version.
+	<-gated.entered
+
+	// Goroutine B: install a different override mid-flight. This bumps the
+	// version counter and clears the (currently empty) cache.
+	newOverride := func(_ ModelKey) []string { return []string{"chat", "stream"} }
+	mr.SetCapabilityOverride(newOverride)
+
+	// Release the gated Models() call so buildProfile completes and reaches
+	// the version-check at cache write time.
+	close(gated.release)
+	res := <-done
+	if res.err != nil {
+		t.Fatalf("Lookup: %v", res.err)
+	}
+
+	// The racing Lookup correctly reflects the override IT observed
+	// (CapChat|CapGenerate) — returning the stale snapshot to that caller
+	// is the right answer.
+	wantStale := CapChat | CapGenerate
+	if res.profile.Caps != wantStale {
+		t.Errorf("racing Lookup result = %v, want %v (old override snapshot must apply to its own return value)", res.profile.Caps, wantStale)
+	}
+
+	// Critical: the stale-policy profile MUST NOT have been cached.
+	// A subsequent Lookup must re-run merge under the NEW override.
+	next, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("post-swap Lookup: %v", err)
+	}
+	wantFresh := CapChat | CapStream
+	if next.Caps != wantFresh {
+		t.Errorf("post-swap Lookup Caps = %v, want %v — stale profile shadowed the override swap (TOCTOU regression)", next.Caps, wantFresh)
+	}
+}
+
 // TestModelRegistry_CapabilityOverride_ConcurrentSwap exercises hot-swapping
 // the override concurrently with Lookup calls. Designed to run under `go test
 // -race` to surface unprotected access to capOverride or profiles.

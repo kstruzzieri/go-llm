@@ -36,12 +36,13 @@ type ProviderResolver interface {
 // implementation returns the cached profile on cache hit without digest
 // revalidation; callers that need freshness guarantees must use Refresh.
 type ModelRegistry struct {
-	mu          sync.RWMutex
-	profiles    map[ModelKey]*ModelProfile
-	catalog     *staticCatalog
-	fpStore     fingerprint.Store
-	providers   ProviderResolver
-	capOverride CapabilityOverride
+	mu              sync.RWMutex
+	profiles        map[ModelKey]*ModelProfile
+	catalog         *staticCatalog
+	fpStore         fingerprint.Store
+	providers       ProviderResolver
+	capOverride     CapabilityOverride
+	overrideVersion uint64
 }
 
 // CapabilityOverride returns the user-declared canonical capability tokens
@@ -80,10 +81,20 @@ type CapabilityOverride func(key ModelKey) []string
 // when cache refreshes" principle that keeps the wiring sequence
 // (build registry -> RefreshModels -> install override) correct regardless
 // of which step warmed which entries.
+//
+// Concurrency model: cache invalidation alone is not enough. An in-flight
+// buildProfile that read the OLD override before this call could otherwise
+// finish, write the stale-policy profile to the freshly-cleared map, and
+// shadow this swap until the next Refresh. To prevent that TOCTOU window
+// the override version is bumped here; buildProfile snapshots the version
+// alongside the override and only writes its result to the cache if the
+// version is still current at write time. Stale results are returned to
+// the caller (correct for that caller's snapshot) but never cached.
 func (r *ModelRegistry) SetCapabilityOverride(fn CapabilityOverride) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.capOverride = fn
+	r.overrideVersion++
 	// Cached profiles were merged under the previous override (possibly
 	// nil); flush them so the next Lookup re-runs merge with the new
 	// override in effect. Skipping this flush is the bug class where a
@@ -269,6 +280,17 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 //  2. Fingerprint: capability probing data, benchmarked resource observations
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
+	// Snapshot (override, version) FIRST so the policy a single buildProfile
+	// applies is fixed at start, and the cache write at the end can detect
+	// any concurrent SetCapabilityOverride. Reading later (after slow IO
+	// like queryRuntime) would shrink the visible TOCTOU window but also
+	// leave the same race against the cache write itself; reading first
+	// keeps the contract simple: one buildProfile -> one policy version.
+	r.mu.RLock()
+	override := r.capOverride
+	overrideVer := r.overrideVersion
+	r.mu.RUnlock()
+
 	// Layer 1: Runtime query.
 	runtimeInfo, err := r.queryRuntime(ctx, key)
 	if err != nil {
@@ -299,12 +321,14 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 		// Ignore errors -- fingerprint is optional enrichment.
 	}
 
-	// Merge layers.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed)
+	// Merge layers using the override snapshot taken at function entry.
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override)
 
-	// Cache the result.
+	// Cache the result iff the override snapshot is still current.
 	r.mu.Lock()
-	r.profiles[key] = profile
+	if r.overrideVersion == overrideVer {
+		r.profiles[key] = profile
+	}
 	r.mu.Unlock()
 
 	return profile, nil
@@ -354,6 +378,7 @@ func (r *ModelRegistry) merge(
 	static *ModelProfile,
 	fp *fingerprint.Profile,
 	parsed ParsedModel,
+	override CapabilityOverride,
 ) *ModelProfile {
 	profile := &ModelProfile{
 		Key:       key,
@@ -484,9 +509,12 @@ func (r *ModelRegistry) merge(
 	// re-introduce alias expansion for tokens like "insert" (single bit
 	// under strict, three bits under lenient), reopening the contract gap
 	// that motivated the canonical-only split in the first place.
-	r.mu.RLock()
-	override := r.capOverride
-	r.mu.RUnlock()
+	//
+	// The override is passed in by buildProfile (not read here from r)
+	// so the merge applies the SAME override the caller version-checks
+	// at cache-write time. Reading r.capOverride here would reintroduce
+	// the TOCTOU window SetCapabilityOverride's version counter exists
+	// to close.
 	if override != nil {
 		if cfgCaps := override(key); len(cfgCaps) > 0 {
 			if parsed, err := ParseCapsStrict(cfgCaps); err == nil && parsed != 0 {
