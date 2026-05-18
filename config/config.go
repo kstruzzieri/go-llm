@@ -210,19 +210,26 @@ func (c *Config) MustModelFor(useCase string) string {
 }
 
 // ProviderFor returns the provider config for a given role's model.
-// It looks up the role in Models to find the Provider field (defaulted to "ollama"),
-// then returns the corresponding ProviderConfig. Returns nil if the role or its
-// provider is not found.
+// It looks up the role in Models to find the Provider field, then returns
+// the corresponding ProviderConfig. Returns nil if the role does not exist,
+// the model has no Provider set (programmatic Config that bypassed
+// applyDefaults), or the named provider is not present in cfg.Providers.
+//
+// This mirrors resolveRole's contract — empty Provider is not silently
+// defaulted to "ollama". Load+applyDefaults guarantees a non-empty Provider
+// for every model loaded from models.json; reaching this method with empty
+// Provider means the caller constructed Config programmatically and
+// skipped applyDefaults, in which case lying about the owner would
+// misdirect downstream callers.
 func (c *Config) ProviderFor(role string) *ProviderConfig {
 	m, ok := c.Models[role]
 	if !ok {
 		return nil
 	}
-	provider := m.Provider
-	if provider == "" {
-		provider = "ollama"
+	if m.Provider == "" {
+		return nil
 	}
-	return c.Provider(provider)
+	return c.Provider(m.Provider)
 }
 
 // Default discovers and loads the configuration file from standard locations.

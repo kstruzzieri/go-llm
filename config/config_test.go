@@ -704,8 +704,10 @@ func TestProviderFor(t *testing.T) {
 		t.Error("expected ProviderFor(\"nonexistent\") to be nil")
 	}
 
-	// ProviderFor defaults to "ollama" for programmatically constructed configs
-	// where the Provider field was never materialized by Load.
+	// Programmatic Config with empty Provider returns nil rather than
+	// silently defaulting to "ollama" — mirrors the resolveRole contract.
+	// applyDefaults (run by Load) materializes the default; callers that
+	// bypass Load must set Provider explicitly.
 	manualCfg := &Config{
 		Providers: map[string]ProviderConfig{
 			"ollama": {BaseURL: "http://manual:11434"},
@@ -714,12 +716,21 @@ func TestProviderFor(t *testing.T) {
 			"test": {Name: "m", Type: "dense"}, // no Provider set
 		},
 	}
-	mp := manualCfg.ProviderFor("test")
-	if mp == nil {
-		t.Fatal("expected ProviderFor to default to ollama for empty Provider field")
+	if mp := manualCfg.ProviderFor("test"); mp != nil {
+		t.Errorf("ProviderFor with empty Provider must return nil, got %+v", mp)
 	}
-	if mp.BaseURL != "http://manual:11434" {
-		t.Errorf("BaseURL = %q, want %q", mp.BaseURL, "http://manual:11434")
+
+	// Programmatic Config with explicit Provider works as expected.
+	explicit := &Config{
+		Providers: map[string]ProviderConfig{
+			"my-instance": {BaseURL: "http://manual:11434"},
+		},
+		Models: map[string]ModelConfig{
+			"test": {Name: "m", Type: "dense", Provider: "my-instance"},
+		},
+	}
+	if ep := explicit.ProviderFor("test"); ep == nil || ep.BaseURL != "http://manual:11434" {
+		t.Errorf("ProviderFor with explicit Provider should return the named instance, got %+v", ep)
 	}
 }
 
