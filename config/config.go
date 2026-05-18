@@ -83,6 +83,14 @@ var validModelTypes = map[string]bool{
 	"embedding": true,
 }
 
+// validAPIFormats enumerates the allowed values for ProviderConfig.APIFormat.
+// Empty is also allowed and is materialized to "ollama" by applyDefaults so
+// existing configs that predate the field continue to load unchanged.
+var validAPIFormats = map[string]bool{
+	"ollama":        true,
+	"openai-compat": true,
+}
+
 // typeCompatible reports whether a model of fromType can fall back to a model of toType.
 // Embedding models can only fall back to other embedding models.
 // Dense and MoE models are interchangeable as fallbacks.
@@ -240,12 +248,16 @@ func MustLoad(path string) *Config {
 
 // applyDefaults materializes implicit provider assignments and timeout defaults.
 func (cfg *Config) applyDefaults() {
-	// Default timeout to 5m for any provider that has a zero timeout.
+	// Default timeout to 5m for any provider that has a zero timeout; default
+	// empty APIFormat to "ollama" so configs predating the field keep working.
 	for key, p := range cfg.Providers {
 		if p.Timeout.Duration == 0 {
 			p.Timeout.Duration = 5 * time.Minute
-			cfg.Providers[key] = p
 		}
+		if p.APIFormat == "" {
+			p.APIFormat = "ollama"
+		}
+		cfg.Providers[key] = p
 	}
 
 	// Materialize implicit provider: models without an explicit provider get "ollama".
@@ -281,6 +293,12 @@ func (cfg *Config) validate() error {
 		}
 		if u.Scheme == "" || u.Host == "" {
 			return fmt.Errorf("config: provider %q: base_url must include scheme and host", key)
+		}
+		// Empty api_format defaults to "ollama" via applyDefaults; only
+		// reject explicit unknown values so a typo like "ollma" surfaces
+		// at load time instead of silently degrading.
+		if p.APIFormat != "" && !validAPIFormats[p.APIFormat] {
+			return fmt.Errorf("config: provider %q: invalid api_format %q", key, p.APIFormat)
 		}
 	}
 

@@ -174,6 +174,62 @@ func TestLoad_TimeoutDefaulting(t *testing.T) {
 	}
 }
 
+func TestLoad_APIFormatDefaulting(t *testing.T) {
+	// Empty api_format must materialize to "ollama" via applyDefaults so
+	// configs that predate the field keep working.
+	noFormat := writeTempJSON(t, `{
+		"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+		"models": {"m": {"name": "x", "type": "dense"}},
+		"defaults": {}
+	}`)
+	cfg, err := Load(noFormat)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p := cfg.Provider("ollama")
+	if p == nil {
+		t.Fatal("expected provider 'ollama' to exist")
+	}
+	if p.APIFormat != "ollama" {
+		t.Errorf("default api_format: got %q, want %q", p.APIFormat, "ollama")
+	}
+
+	// Explicit known values pass through unchanged.
+	explicit := writeTempJSON(t, `{
+		"providers": {"local": {"base_url": "http://localhost:8080", "api_format": "openai-compat"}},
+		"models": {"m": {"name": "x", "type": "dense", "provider": "local"}},
+		"defaults": {}
+	}`)
+	cfg2, err := Load(explicit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p2 := cfg2.Provider("local")
+	if p2 == nil {
+		t.Fatal("expected provider 'local' to exist")
+	}
+	if p2.APIFormat != "openai-compat" {
+		t.Errorf("explicit api_format: got %q, want %q", p2.APIFormat, "openai-compat")
+	}
+}
+
+func TestLoad_APIFormatValidation(t *testing.T) {
+	// Unknown explicit api_format must be rejected at load time so typos
+	// surface immediately instead of silently defaulting.
+	bad := writeTempJSON(t, `{
+		"providers": {"ollama": {"base_url": "http://localhost:11434", "api_format": "ollma"}},
+		"models": {"m": {"name": "x", "type": "dense"}},
+		"defaults": {}
+	}`)
+	_, err := Load(bad)
+	if err == nil {
+		t.Fatal("expected error for unknown api_format, got nil")
+	}
+	if !strings.Contains(err.Error(), "api_format") || !strings.Contains(err.Error(), "ollma") {
+		t.Errorf("error should mention api_format and the bad value, got: %v", err)
+	}
+}
+
 func TestLoad_MoEFallbackCompatibility(t *testing.T) {
 	cfg, err := Load("testdata/valid.json")
 	if err != nil {
