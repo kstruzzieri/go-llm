@@ -1270,3 +1270,102 @@ func TestSortProfiles(t *testing.T) {
 		}
 	}
 }
+
+// TestModelRegistry_CapabilityOverride_Replaces verifies that a configured
+// CapabilityOverride wholesale replaces the merge-derived Caps. This is the
+// design contract that lets users carve down capabilities for backends
+// missing endpoints (e.g. ["chat", "stream"] removes generate even when
+// the runtime probe claimed it).
+func TestModelRegistry_CapabilityOverride_Replaces(t *testing.T) {
+	ctx := context.Background()
+
+	// Runtime claims completion (chat|generate|stream) + tools.
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream | CapToolCall,
+		models: []ModelInfo{
+			{
+				Name:         "qwen3:8b",
+				Family:       "qwen3",
+				Capabilities: []string{"completion", "tools"},
+			},
+		},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+
+	// User carves down to chat+stream only — generate must be removed.
+	mr.SetCapabilityOverride(func(key ModelKey) []string {
+		if key.Model == "qwen3:8b" {
+			return []string{"chat", "stream"}
+		}
+		return nil
+	})
+
+	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	want := CapChat | CapStream
+	if profile.Caps != want {
+		t.Errorf("Caps = %v, want %v (override should wholesale replace, not merge)", profile.Caps, want)
+	}
+	if profile.Caps.Has(CapGenerate) {
+		t.Error("CapGenerate present after override that excluded it; replace semantics violated")
+	}
+	if profile.Caps.Has(CapToolCall) {
+		t.Error("CapToolCall present after override that excluded it; replace semantics violated")
+	}
+}
+
+// TestModelRegistry_CapabilityOverride_NilSkipped verifies that the override
+// hook can return nil for a key to defer to merge-derived caps. Necessary so
+// users can declare capabilities for some models and let others auto-derive.
+// Compares against a baseline registry with no override to avoid hardcoding
+// the static catalog's contribution for the test model.
+func TestModelRegistry_CapabilityOverride_NilSkipped(t *testing.T) {
+	ctx := context.Background()
+
+	newProv := func() *mrMockProvider {
+		return &mrMockProvider{
+			name: "ollama",
+			caps: CapChat | CapGenerate | CapStream,
+			models: []ModelInfo{
+				{Name: "qwen3:8b", Family: "qwen3", Capabilities: []string{"completion"}},
+			},
+		}
+	}
+
+	baselineReg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": newProv()}}
+	baseline, err := NewModelRegistry(baselineReg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("baseline NewModelRegistry: %v", err)
+	}
+	baselineProfile, err := baseline.Lookup(ctx, ModelKey{Provider: "ollama", Model: "qwen3:8b"})
+	if err != nil {
+		t.Fatalf("baseline Lookup: %v", err)
+	}
+
+	overrideReg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": newProv()}}
+	withOverride, err := NewModelRegistry(overrideReg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("override NewModelRegistry: %v", err)
+	}
+	withOverride.SetCapabilityOverride(func(_ ModelKey) []string {
+		return nil // defer to merge for all keys
+	})
+
+	overrideProfile, err := withOverride.Lookup(ctx, ModelKey{Provider: "ollama", Model: "qwen3:8b"})
+	if err != nil {
+		t.Fatalf("override Lookup: %v", err)
+	}
+
+	if overrideProfile.Caps != baselineProfile.Caps {
+		t.Errorf("Caps with nil-returning override = %v, want %v (must match baseline)", overrideProfile.Caps, baselineProfile.Caps)
+	}
+}

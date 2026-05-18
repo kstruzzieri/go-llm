@@ -36,11 +36,32 @@ type ProviderResolver interface {
 // implementation returns the cached profile on cache hit without digest
 // revalidation; callers that need freshness guarantees must use Refresh.
 type ModelRegistry struct {
-	mu        sync.RWMutex
-	profiles  map[ModelKey]*ModelProfile
-	catalog   *staticCatalog
-	fpStore   fingerprint.Store
-	providers ProviderResolver
+	mu          sync.RWMutex
+	profiles    map[ModelKey]*ModelProfile
+	catalog     *staticCatalog
+	fpStore     fingerprint.Store
+	providers   ProviderResolver
+	capOverride CapabilityOverride
+}
+
+// CapabilityOverride returns the user-declared canonical capability tokens
+// for a model key, or nil when no override is configured for the key. When
+// non-nil, the returned slice REPLACES the merge-derived Caps on the resulting
+// ModelProfile so users can carve down capabilities below what the static
+// catalog or runtime probe claims — e.g. removing "generate" for an
+// OpenAI-compatible server that lacks /v1/completions.
+//
+// Returning a non-nil empty slice yields a profile with zero capabilities;
+// callers that want "no override applied" must return nil.
+type CapabilityOverride func(key ModelKey) []string
+
+// SetCapabilityOverride installs (or clears) the capability override hook.
+// Pass nil to disable overrides. Safe for concurrent use; the new function
+// takes effect on subsequent Refresh or Lookup calls that miss the cache.
+func (r *ModelRegistry) SetCapabilityOverride(fn CapabilityOverride) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.capOverride = fn
 }
 
 // directModelInfoProvider is an optional provider capability that returns
@@ -410,6 +431,20 @@ func (r *ModelRegistry) merge(
 	// Set family from parsed name if still empty.
 	if profile.Family == "" {
 		profile.Family = parsed.NormalizedFamily()
+	}
+
+	// Config capability override (final precedence). A non-nil result REPLACES
+	// the merged Caps wholesale — this is the escape hatch the design contract
+	// guarantees, e.g. ["chat", "stream"] genuinely removes CapGenerate even
+	// if the static catalog claims it. Lenient parseCaps matches the other
+	// merge sources; config validation already rejected unknown tokens.
+	r.mu.RLock()
+	override := r.capOverride
+	r.mu.RUnlock()
+	if override != nil {
+		if cfgCaps := override(key); cfgCaps != nil {
+			profile.Caps = parseCaps(cfgCaps)
+		}
 	}
 
 	return profile
