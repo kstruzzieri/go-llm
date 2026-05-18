@@ -46,28 +46,29 @@ type ModelRegistry struct {
 
 // CapabilityOverride returns the user-declared canonical capability tokens
 // for a model key, or nil when no override is configured for the key. When
-// non-nil, the returned slice REPLACES the merge-derived Caps on the
-// resulting ModelProfile so users can carve down capabilities below what
-// the static catalog or runtime probe claims — e.g. removing "generate"
-// for an OpenAI-compatible server that lacks /v1/completions.
+// non-nil and well-formed, the returned slice REPLACES the merge-derived
+// Caps on the resulting ModelProfile so users can carve down capabilities
+// below what the static catalog or runtime probe claims — e.g. removing
+// "generate" for an OpenAI-compatible server that lacks /v1/completions.
 //
 // Tokens MUST be canonical single-bit names (see CanonicalCapabilityNames /
-// ParseCapsStrict). Multi-bit aliases like "completion" or "insert" expand
-// silently under the lenient parseCaps used here, which would defeat the
-// REPLACES contract; validators (e.g. config.validate) must reject aliases
-// before they reach this seam.
+// ParseCapsStrict). Non-canonical tokens — unknowns AND catalog aliases
+// that would expand to multiple bits like "completion" or the catalog
+// shorthand "insert" → generate+stream+insert — are REJECTED at the apply
+// site, not silently expanded. On rejection the merge-derived caps are
+// preserved unchanged so a misconfigured override cannot cripple a model
+// for every router gate downstream.
 //
 // Replacement is wholesale and applies AFTER every other merge layer,
 // including the runtime-template-driven CapInsert toggle in merge(). An
-// override that omits "insert" silently drops CapInsert even if the
-// model's template indicates FIM support — this is by design (the user's
-// declaration wins) but is a sharp interaction worth knowing.
+// override that omits "insert" drops runtime-detected CapInsert by design
+// (the user's declaration wins); this is a sharp interaction worth knowing.
 //
-// Returning a nil slice means "no override applied for this key" — the
-// merge-derived caps are used unchanged. Returning a non-nil but empty
-// or all-unknown slice would yield zero capabilities, which is treated
-// as an anomaly and ignored by merge(); see the override application
-// site for details.
+// Return semantics:
+//   - nil slice: no override applied for this key; merge-derived caps used
+//   - empty []string: ignored (no zero-out)
+//   - any non-canonical token: ignored (no silent expansion)
+//   - parses to zero caps: ignored (same crippling hazard)
 type CapabilityOverride func(key ModelKey) []string
 
 // SetCapabilityOverride installs (or clears) the capability override hook.
@@ -466,24 +467,29 @@ func (r *ModelRegistry) merge(
 	// e.g. ["chat", "stream"] genuinely removes CapGenerate even if the
 	// static catalog or runtime template detection claims it.
 	//
-	// Two corner cases are deliberately ignored rather than applied:
+	// Three corner cases are deliberately ignored rather than applied:
 	//   1. Non-nil but empty slice — would silently zero out the profile.
 	//      Treated as anomaly; keep merged caps and skip the replace.
-	//   2. Non-empty slice that parses to zero (all unknown tokens) — same
-	//      hazard. Validators upstream MUST reject unknowns; reaching this
-	//      branch with zero parsed caps means a programmatic caller
-	//      bypassed validation. Refuse the replacement rather than
-	//      cripple the profile.
+	//   2. Non-canonical tokens (catalog aliases like "completion" or
+	//      "insert"-as-FIM-shorthand) — these would silently expand to
+	//      multiple bits and defeat the REPLACES contract. ParseCapsStrict
+	//      rejects them; on error we keep merged caps and skip the replace.
+	//   3. Non-empty slice that parses to zero (theoretically reachable
+	//      only via a programmatic bypass) — same crippling hazard as
+	//      case 1. Refuse the replacement rather than zero the profile.
 	//
-	// Lenient parseCaps matches the other merge sources; config validation
-	// already rejected unknown tokens and multi-bit aliases for any
-	// override sourced from models.json.
+	// ParseCapsStrict (canonical-only) is used here so the parser at the
+	// apply site matches the parser at the validation site (config.validate
+	// also routes through ParseCapsStrict). Using lenient parseCaps would
+	// re-introduce alias expansion for tokens like "insert" (single bit
+	// under strict, three bits under lenient), reopening the contract gap
+	// that motivated the canonical-only split in the first place.
 	r.mu.RLock()
 	override := r.capOverride
 	r.mu.RUnlock()
 	if override != nil {
 		if cfgCaps := override(key); len(cfgCaps) > 0 {
-			if parsed := parseCaps(cfgCaps); parsed != 0 {
+			if parsed, err := ParseCapsStrict(cfgCaps); err == nil && parsed != 0 {
 				profile.Caps = parsed
 			}
 		}

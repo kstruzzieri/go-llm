@@ -1324,6 +1324,100 @@ func TestModelRegistry_CapabilityOverride_Replaces(t *testing.T) {
 	}
 }
 
+// TestModelRegistry_CapabilityOverride_InsertIsSingleBit pins the most
+// important user-facing contract: ["chat", "insert"] means "exactly chat
+// and insert" — NOT chat+generate+stream+insert via alias expansion.
+//
+// Regression test for the half-fix discovered in the second review cycle:
+// ParseCapsStrict at the validation site enforces single-bit "insert", but
+// the override apply site previously called the lenient parseCaps, which
+// re-expanded "insert" to three bits — silently re-adding the very caps
+// the REPLACES contract was supposed to remove.
+func TestModelRegistry_CapabilityOverride_InsertIsSingleBit(t *testing.T) {
+	ctx := context.Background()
+
+	// Runtime template signals FIM, so all the bits an alias-expansion
+	// would re-add are claimed by lower merge layers; if anything leaks
+	// through into the override result, the test catches it.
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream | CapInsert,
+		models: []ModelInfo{
+			{
+				Name:         "fim-model",
+				Family:       "qwen3-coder",
+				Template:     "{{ .Prompt }}{{ .Suffix }}",
+				Capabilities: []string{"completion", "insert"},
+			},
+		},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+
+	mr.SetCapabilityOverride(func(_ ModelKey) []string {
+		return []string{"chat", "insert"}
+	})
+
+	profile, err := mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "fim-model"})
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	want := CapChat | CapInsert
+	if profile.Caps != want {
+		t.Errorf("Caps = %v, want %v (override [\"chat\", \"insert\"] must NOT alias-expand insert to generate+stream+insert)", profile.Caps, want)
+	}
+	if profile.Caps.Has(CapGenerate) {
+		t.Error("CapGenerate present after override [\"chat\", \"insert\"]; alias expansion at apply site is the bug this test exists to prevent")
+	}
+	if profile.Caps.Has(CapStream) {
+		t.Error("CapStream present after override [\"chat\", \"insert\"]; alias expansion at apply site is the bug this test exists to prevent")
+	}
+}
+
+// TestModelRegistry_CapabilityOverride_NonCanonicalTokensRejected verifies
+// that a programmatic caller passing catalog aliases (rather than canonical
+// single-bit names) sees the override IGNORED rather than silently expanded.
+// Config validation rejects aliases upstream; reaching the apply site with
+// an alias means the validation was bypassed, in which case we must
+// fail safe (keep merged caps) instead of leaking expansion bits.
+func TestModelRegistry_CapabilityOverride_NonCanonicalTokensRejected(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream,
+		models: []ModelInfo{
+			{Name: "qwen3:8b", Family: "qwen3", Capabilities: []string{"completion"}},
+		},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}
+
+	for _, alias := range []string{"completion", "tools", "embedding"} {
+		t.Run(alias, func(t *testing.T) {
+			mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+			if err != nil {
+				t.Fatalf("NewModelRegistry: %v", err)
+			}
+			mr.SetCapabilityOverride(func(_ ModelKey) []string {
+				return []string{alias}
+			})
+			profile, err := mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "qwen3:8b"})
+			if err != nil {
+				t.Fatalf("Lookup: %v", err)
+			}
+			// Override was rejected → merged caps preserved → CapChat present
+			// from the runtime "completion" capability.
+			if !profile.Caps.Has(CapChat) {
+				t.Errorf("merged caps lost after override [%q] was rejected; expected fail-safe to keep them, got %v", alias, profile.Caps)
+			}
+		})
+	}
+}
+
 // TestModelRegistry_CapabilityOverride_ZeroCapsGuard verifies the merge
 // refuses to wholesale-replace with zero caps when the override returns
 // a non-nil but effectively empty result. This protects against
