@@ -721,16 +721,23 @@ func TestProviderFor(t *testing.T) {
 	}
 
 	// Programmatic Config with explicit Provider works as expected.
+	// APIFormat must flow through unchanged so downstream callers that
+	// branch on it (e.g. provider construction picking ollama vs
+	// openai-compat) see the same value the config declared.
 	explicit := &Config{
 		Providers: map[string]ProviderConfig{
-			"my-instance": {BaseURL: "http://manual:11434"},
+			"my-instance": {BaseURL: "http://manual:11434", APIFormat: "openai-compat"},
 		},
 		Models: map[string]ModelConfig{
 			"test": {Name: "m", Type: "dense", Provider: "my-instance"},
 		},
 	}
-	if ep := explicit.ProviderFor("test"); ep == nil || ep.BaseURL != "http://manual:11434" {
+	ep := explicit.ProviderFor("test")
+	if ep == nil || ep.BaseURL != "http://manual:11434" {
 		t.Errorf("ProviderFor with explicit Provider should return the named instance, got %+v", ep)
+	}
+	if ep != nil && ep.APIFormat != "openai-compat" {
+		t.Errorf("ProviderFor APIFormat = %q, want %q (must flow through resolved ProviderConfig)", ep.APIFormat, "openai-compat")
 	}
 }
 
