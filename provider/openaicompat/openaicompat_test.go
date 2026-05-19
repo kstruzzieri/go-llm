@@ -630,6 +630,60 @@ func TestProvider_ChatStream_FragmentedToolCall_AssembledOnDone(t *testing.T) {
 	}
 }
 
+// TestProvider_ChatStream_FragmentedToolCall_LockedEncodingMode verifies
+// that argument-fragment decoding stays in the mode locked by the FIRST
+// non-empty fragment. A server that sent the first fragment as a
+// JSON-string envelope cannot mid-stream switch to raw partial JSON —
+// the accumulator would otherwise produce an unparseable concatenation.
+// Test: server emits encoded first fragment, then a raw-looking second
+// fragment; the accumulator unwraps both consistently and assembles
+// valid final JSON.
+func TestProvider_ChatStream_FragmentedToolCall_LockedEncodingMode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{
+					Index: intPtr(0), ID: "call_1", Type: "function",
+					Function: chatToolCallFunction{Name: "search"},
+				}},
+			}}}},
+			// First non-empty fragment is JSON-string-encoded — locks mode.
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{Index: intPtr(0),
+					Function: chatToolCallFunction{Arguments: rawJSONString(t, `{"q":`)}}},
+			}}}},
+			// Second fragment is also JSON-string-encoded (the locked mode);
+			// decoding under the locked mode yields the inner string.
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{Index: intPtr(0),
+					Function: chatToolCallFunction{Arguments: rawJSONString(t, `"go"}`)}}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	var final provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			final = r
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if len(final.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(final.ToolCalls))
+	}
+	if got := string(final.ToolCalls[0].Function.Arguments); got != `{"q":"go"}` {
+		t.Errorf("locked-mode assembled arguments = %s, want %s", got, `{"q":"go"}`)
+	}
+}
+
 // TestProvider_ChatStream_FragmentedToolCall_NilIndexUsesLastKnown verifies
 // that arg-only deltas with no Index field (a real shape vLLM emits after
 // the opening tool delta) attach to the most-recently-active call rather

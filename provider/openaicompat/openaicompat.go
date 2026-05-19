@@ -750,7 +750,21 @@ type streamToolCall struct {
 	callType  string
 	name      string
 	arguments string
+	argMode   fragmentMode
 }
+
+// fragmentMode locks the argument-fragment encoding for a single tool call
+// after the first non-empty fragment arrives. Once locked, subsequent
+// fragments are decoded with the same mode so a server that switches
+// between JSON-string envelopes and raw partial JSON mid-stream cannot
+// produce an unparseable concatenation.
+type fragmentMode uint8
+
+const (
+	fragModeUnknown fragmentMode = iota
+	fragModeEncoded              // fragment was a JSON-encoded string envelope
+	fragModeRaw                  // fragment was raw partial JSON
+)
 
 // Add merges OpenAI streaming tool-call deltas, whose arguments commonly arrive
 // as fragments keyed by tool_calls[].index.
@@ -791,7 +805,11 @@ func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) []provider.ToolCa
 		if delta.Function.Name != "" {
 			call.name = delta.Function.Name
 		}
-		call.arguments += decodeToolCallArgumentFragment(delta.Function.Arguments)
+		fragment, mode := decodeToolCallArgumentFragment(delta.Function.Arguments, call.argMode)
+		if call.argMode == fragModeUnknown {
+			call.argMode = mode
+		}
+		call.arguments += fragment
 		a.lastIndex = index
 		a.hasLastIndex = true
 	}
@@ -829,16 +847,41 @@ func (a *streamToolCallAccumulator) Snapshot() []provider.ToolCall {
 	return out
 }
 
-func decodeToolCallArgumentFragment(raw json.RawMessage) string {
+// decodeToolCallArgumentFragment extracts the argument-string payload from a
+// single streaming-delta fragment. OpenAI's streaming spec is loose: some
+// servers send each fragment as a JSON-encoded string ("{\"q\""), others
+// send raw partial JSON ({"q") that is only valid once concatenated.
+//
+// The locked argument forces consistent decoding once a call has seen its
+// first non-empty fragment: a server cannot switch from encoded to raw or
+// vice versa mid-stream without producing an unparseable concatenation.
+// Returns the decoded fragment text plus the mode used (which the caller
+// stores on the per-call accumulator state to lock subsequent fragments).
+//
+// fragModeUnknown locked input lets the function probe the first fragment;
+// the locked return is then enforced on subsequent fragments by the caller.
+func decodeToolCallArgumentFragment(raw json.RawMessage, locked fragmentMode) (string, fragmentMode) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
-		return ""
+		return "", locked
 	}
+	switch locked {
+	case fragModeEncoded:
+		var s string
+		if err := json.Unmarshal(trimmed, &s); err == nil {
+			return s, fragModeEncoded
+		}
+		// Server violated its own mode — best-effort fall through as raw.
+		return string(trimmed), fragModeEncoded
+	case fragModeRaw:
+		return string(trimmed), fragModeRaw
+	}
+	// fragModeUnknown — probe the first fragment to lock the mode.
 	var s string
 	if err := json.Unmarshal(trimmed, &s); err == nil {
-		return s
+		return s, fragModeEncoded
 	}
-	return string(trimmed)
+	return string(trimmed), fragModeRaw
 }
 
 // normalizeToolCallArguments unwraps OpenAI's JSON-string envelope around
