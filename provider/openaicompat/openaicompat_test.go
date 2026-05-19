@@ -414,6 +414,45 @@ func TestProvider_Chat_RequestBody_ToolCallArgumentsEncodedAsString(t *testing.T
 	}
 }
 
+// TestNormalizeToolCallArguments_PreservesScalarLiterals locks the rule
+// that scalar JSON literals wrapped in OpenAI's JSON-string envelope are
+// preserved as strings rather than narrowed to bare scalars. Tool
+// implementations declare argument shapes via JSON Schema — a string-typed
+// parameter accidentally arriving as a JSON number would break runtime
+// type checks downstream.
+func TestNormalizeToolCallArguments_PreservesScalarLiterals(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Object / array unwrap to canonical tool-call shape.
+		{"json object string -> raw object", `"{\"q\":\"go\"}"`, `{"q":"go"}`},
+		{"json array string -> raw array", `"[1,2,3]"`, `[1,2,3]`},
+		// Scalar literals stay wrapped — the inner value WAS a string and
+		// downstream consumers must keep it that way.
+		{"numeric literal stays wrapped", `"42"`, `"42"`},
+		{"bool literal stays wrapped", `"true"`, `"true"`},
+		{"null literal stays wrapped", `"null"`, `"null"`},
+		{"non-json string stays wrapped", `"hello"`, `"hello"`},
+		// Empty / nil / null collapse.
+		{"empty input -> nil", ``, ``},
+		{"null literal -> nil", `null`, ``},
+		{"empty string envelope -> nil", `""`, ``},
+		// Raw inputs (no envelope) pass through.
+		{"raw object passes through", `{"q":"go"}`, `{"q":"go"}`},
+		{"raw array passes through", `[1,2]`, `[1,2]`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeToolCallArguments(json.RawMessage(tt.in))
+			if string(got) != tt.want {
+				t.Errorf("normalize(%q) = %q, want %q", tt.in, string(got), tt.want)
+			}
+		})
+	}
+}
+
 func TestProvider_Chat_ToolCallArgumentsStringDecoded(t *testing.T) {
 	srv := newMockServer(t, mockServerOpts{
 		chatResponse: chatResponse{

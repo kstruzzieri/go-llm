@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 	"golang.org/x/sync/singleflight"
@@ -840,6 +841,19 @@ func decodeToolCallArgumentFragment(raw json.RawMessage) string {
 	return string(trimmed)
 }
 
+// normalizeToolCallArguments unwraps OpenAI's JSON-string envelope around
+// tool-call arguments and returns the inner JSON value, OR re-encodes a
+// raw payload as the canonical string envelope when the input is already
+// loose JSON. Empty / "null" inputs collapse to nil so downstream consumers
+// see "no arguments" uniformly.
+//
+// Scalar JSON literals inside the string envelope (e.g. "42", "true",
+// "null") are preserved as JSON-encoded strings rather than unwrapped to
+// bare scalars — the inner string was the original argument value, and
+// type-narrowing to a JSON number/bool would silently change the data
+// shape the tool implementation receives. Object and array literals ARE
+// unwrapped because that is the canonical tool-call shape providers
+// actually consume.
 func normalizeToolCallArguments(raw json.RawMessage) json.RawMessage {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
@@ -850,7 +864,10 @@ func normalizeToolCallArguments(raw json.RawMessage) json.RawMessage {
 		if s == "" {
 			return nil
 		}
-		if json.Valid([]byte(s)) {
+		// Only unwrap when the inner value is a JSON object or array — the
+		// canonical tool-call shape. Bare scalars (numbers, bools, "null")
+		// stay wrapped to preserve the originally-emitted type.
+		if isJSONObjectOrArray(s) {
 			return json.RawMessage(append([]byte(nil), s...))
 		}
 		return mustJSONRawString(s)
@@ -859,6 +876,22 @@ func normalizeToolCallArguments(raw json.RawMessage) json.RawMessage {
 		return json.RawMessage(append([]byte(nil), trimmed...))
 	}
 	return mustJSONRawString(string(trimmed))
+}
+
+// isJSONObjectOrArray reports whether s begins with '{' or '[' after trim
+// AND is well-formed JSON. Used by normalizeToolCallArguments to decide
+// when an inner JSON-string-encoded value is safe to unwrap (object/array)
+// vs must be preserved as a JSON-encoded string (scalar literals).
+func isJSONObjectOrArray(s string) bool {
+	trimmed := strings.TrimLeft(s, " \t\r\n")
+	if trimmed == "" {
+		return false
+	}
+	switch trimmed[0] {
+	case '{', '[':
+		return json.Valid([]byte(s))
+	}
+	return false
 }
 
 func encodeToolCallArguments(raw json.RawMessage) json.RawMessage {
