@@ -1409,8 +1409,20 @@ func TestModelRegistry_CapabilityOverride_NonCanonicalTokensRejected(t *testing.
 			if err != nil {
 				t.Fatalf("Lookup: %v", err)
 			}
-			// Override was rejected → merged caps preserved → CapChat present
-			// from the runtime "completion" capability.
+			// CapChat is the probe because:
+			//   - It is present in the merged caps from the runtime
+			//     "completion" alias (aliasedCapability expands
+			//     "completion" -> CapChat|CapGenerate|CapStream).
+			//   - Under a buggy silent expansion via parseCaps, "tools"
+			//     and "embedding" would REPLACE Caps with bitmasks that
+			//     EXCLUDE CapChat (CapToolCall and CapEmbed respectively),
+			//     so CapChat-absent is the distinguishing canary that the
+			//     override was wrongly applied.
+			//   - The "completion" sub-case is weaker: silent expansion
+			//     would yield CapChat|CapGenerate|CapStream which still
+			//     includes CapChat, so the probe doesn't distinguish for
+			//     that single token. The other two sub-cases share the
+			//     same rejection code path and carry the proof.
 			if !profile.Caps.Has(CapChat) {
 				t.Errorf("merged caps lost after override [%q] was rejected; expected fail-safe to keep them, got %v", alias, profile.Caps)
 			}
