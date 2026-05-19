@@ -431,12 +431,12 @@ func (cfg *Config) validate() error {
 		// Check provider exists. Use a local name distinct from the imported
 		// "provider" package — shadowing would silently break any future
 		// edit that needs to call provider.X inside this loop body.
-		providerKey := m.Provider
+		providerKey, implicit := m.Provider, false
 		if providerKey == "" {
-			providerKey = "ollama"
+			providerKey, implicit = "ollama", true
 		}
 		if _, ok := cfg.Providers[providerKey]; !ok {
-			if m.Provider == "" {
+			if implicit {
 				return fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role)
 			}
 			return fmt.Errorf("config: model %q: provider %q not found", role, providerKey)
