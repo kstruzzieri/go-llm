@@ -633,6 +633,43 @@ func TestParseCapsStrict(t *testing.T) {
 			}
 		}
 	})
+	t.Run("known alias rejection includes did-you-mean hint", func(t *testing.T) {
+		// Known alias -> canonical mappings make the rejection actionable.
+		// Without the hint the user only sees the full vocabulary dump and
+		// has to guess which canonical token they meant.
+		cases := map[string]string{
+			"tools":      "tool_call",
+			"Tools":      "tool_call", // case-insensitive lookup
+			"embedding":  "embed",
+			"completion": "chat",
+		}
+		for alias, wantSubstr := range cases {
+			_, err := ParseCapsStrict([]string{alias})
+			if err == nil {
+				t.Fatalf("expected error for alias %q, got nil", alias)
+			}
+			if !strings.Contains(err.Error(), "did you mean") {
+				t.Errorf("error for %q should include 'did you mean' hint, got: %v", alias, err)
+			}
+			if !strings.Contains(err.Error(), wantSubstr) {
+				t.Errorf("error for %q should suggest %q, got: %v", alias, wantSubstr, err)
+			}
+		}
+	})
+	t.Run("unknown (non-alias) rejection falls back to canonical-names list", func(t *testing.T) {
+		// Tokens not in aliasSuggestions should still get the vocabulary
+		// dump so the user has something to work with.
+		_, err := ParseCapsStrict([]string{"totallyfake"})
+		if err == nil {
+			t.Fatal("expected error, got nil")
+		}
+		if !strings.Contains(err.Error(), "canonical names:") {
+			t.Errorf("unknown token error should list canonical names, got: %v", err)
+		}
+		if strings.Contains(err.Error(), "did you mean") {
+			t.Errorf("unknown (non-alias) token error should NOT include did-you-mean, got: %v", err)
+		}
+	})
 	t.Run("unknown token rejected", func(t *testing.T) {
 		_, err := ParseCapsStrict([]string{"chat", "nonexistent"})
 		if err == nil {

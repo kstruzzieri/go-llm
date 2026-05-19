@@ -292,6 +292,23 @@ func parseCaps(caps []string) Capability {
 	return c
 }
 
+// aliasSuggestions maps known catalog/runtime aliases that ParseCapsStrict
+// rejects to a "did you mean" replacement in canonical user-config form.
+// Used to make the rejection error actionable when the user typed a
+// recognizable shorthand (the most common mistake) rather than dumping
+// the full canonical vocabulary and leaving them to guess.
+//
+// Tokens not in this map fall back to the canonical-names list in the
+// error message. "insert" is NOT here because it is itself canonical —
+// catalog parseCaps expands it to generate+stream+insert, but strict
+// parsing accepts it as the single CapInsert bit, which is the right
+// answer for user config.
+var aliasSuggestions = map[string]string{
+	"tools":      `"tool_call"`,
+	"embedding":  `"embed"`,
+	"completion": `"chat", "generate", and/or "stream" (was a multi-bit alias; pick the bits you actually want)`,
+}
+
 // ParseCapsStrict converts a slice of canonical-only capability tokens to
 // a bitmask. Each token must be a name from CanonicalCapabilityNames; any
 // non-canonical token is rejected — including aliases that would expand
@@ -301,11 +318,18 @@ func parseCaps(caps []string) Capability {
 // canonical spelling is "tool_call"). Intended for validating
 // user-authored capability lists in models.json where any non-canonical
 // token would risk silent bit-set divergence from what the user wrote.
+//
+// Rejection errors include a "did you mean" hint when the rejected token
+// is a known alias (e.g. "tools" -> suggest "tool_call"); otherwise they
+// fall back to listing the canonical vocabulary.
 func ParseCapsStrict(caps []string) (Capability, error) {
 	var c Capability
 	for _, s := range caps {
 		bit, ok := canonicalCapability(s)
 		if !ok {
+			if hint, known := aliasSuggestions[strings.ToLower(s)]; known {
+				return 0, fmt.Errorf("provider: unknown or non-canonical capability %q (did you mean %s?)", s, hint)
+			}
 			return 0, fmt.Errorf("provider: unknown or non-canonical capability %q (canonical names: %v)", s, CanonicalCapabilityNames)
 		}
 		c |= bit
