@@ -167,7 +167,14 @@ func typeCompatible(fromType, toType string) bool {
 	return true
 }
 
-// Provider returns a pointer to the ProviderConfig for the given key, or nil if not found.
+// Provider returns a pointer to the ProviderConfig for the given key, or
+// nil if not found.
+//
+// The returned pointer addresses a COPY of the map value (Go does not allow
+// taking the address of a map entry). Treat the result as read-only — any
+// mutation through this pointer affects only the local copy, never the
+// underlying Config. Callers that need a live, mutable handle should
+// modify c.Providers[key] directly.
 func (c *Config) Provider(key string) *ProviderConfig {
 	p, ok := c.Providers[key]
 	if !ok {
@@ -221,6 +228,10 @@ func (c *Config) MustModelFor(useCase string) string {
 // Provider means the caller constructed Config programmatically and
 // skipped applyDefaults, in which case lying about the owner would
 // misdirect downstream callers.
+//
+// As with Provider(), the returned pointer addresses a COPY of the map
+// value and must be treated as read-only — mutations do not propagate to
+// the underlying Config.
 func (c *Config) ProviderFor(role string) *ProviderConfig {
 	m, ok := c.Models[role]
 	if !ok {
