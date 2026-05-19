@@ -231,7 +231,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 	if err != nil {
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	var (
 		lastModel      string
@@ -414,7 +414,7 @@ func (p *Provider) GenerateStream(ctx context.Context, req provider.GenerateRequ
 	if err != nil {
 		return fmt.Errorf("provider: openaicompat: generate stream: %w", err)
 	}
-	defer reader.Close()
+	defer func() { _ = reader.Close() }()
 
 	var (
 		lastModel      string

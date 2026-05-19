@@ -78,7 +78,7 @@ func (c *Client) postJSON(ctx context.Context, path string, body any, out any) e
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if err := decodeJSONOrError(resp, out); err != nil {
 		return err
@@ -116,7 +116,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out any) error {
 	if err != nil {
 		return fmt.Errorf("openaicompat: %s: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	return decodeJSONOrError(resp, out)
 }
 

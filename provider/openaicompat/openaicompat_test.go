@@ -787,7 +787,7 @@ func TestProvider_Embed_Singleflight_Dedups(t *testing.T) {
 func TestSSEReader_ParsesDataLines(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("data: {\"a\":1}\n\ndata: {\"b\":2}\n\ndata: [DONE]\n\n"))
 	r := newSSEReader(body)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	p1, err := r.Next()
 	if err != nil {
@@ -808,7 +808,7 @@ func TestSSEReader_ParsesDataLines(t *testing.T) {
 func TestSSEReader_SkipsCommentsAndNonDataLines(t *testing.T) {
 	body := io.NopCloser(strings.NewReader(": keepalive\nevent: ping\nid: 1\ndata: {\"x\":1}\n\ndata: [DONE]\n\n"))
 	r := newSSEReader(body)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	p, err := r.Next()
 	if err != nil {
@@ -824,7 +824,7 @@ func TestSSEReader_EOFWithoutDone_IsStreamDone(t *testing.T) {
 	// must treat that as normal termination rather than an error.
 	body := io.NopCloser(strings.NewReader("data: {\"x\":1}\n\n"))
 	r := newSSEReader(body)
-	defer r.Close()
+	defer func() { _ = r.Close() }()
 
 	if _, err := r.Next(); err != nil {
 		t.Fatalf("first Next: %v", err)
