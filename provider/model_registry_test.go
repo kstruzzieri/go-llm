@@ -1418,6 +1418,111 @@ func TestModelRegistry_CapabilityOverride_NonCanonicalTokensRejected(t *testing.
 	}
 }
 
+// TestModelRegistry_OverrideRejectionHook_FiresOnNonCanonicalToken verifies
+// that rejections at the override apply site are observable via the
+// installed hook — the fail-safe (keep merged caps) is preserved, AND the
+// operator gets a signal so the misconfiguration doesn't go silent.
+// Without the hook the only symptom is router decisions that don't match
+// the config the operator wrote, which is exactly the silent-failure
+// class we are surfacing here.
+func TestModelRegistry_OverrideRejectionHook_FiresOnNonCanonicalToken(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream,
+		models: []ModelInfo{
+			{Name: "qwen3:8b", Family: "qwen3", Capabilities: []string{"completion"}},
+		},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+
+	type rejection struct {
+		key    ModelKey
+		tokens []string
+		err    error
+	}
+	var (
+		mu          sync.Mutex
+		rejections  []rejection
+	)
+	mr.SetOverrideRejectionHook(func(k ModelKey, tokens []string, err error) {
+		mu.Lock()
+		defer mu.Unlock()
+		rejections = append(rejections, rejection{k, tokens, err})
+	})
+	mr.SetCapabilityOverride(func(_ ModelKey) []string {
+		return []string{"completion"} // multi-bit alias → rejected
+	})
+
+	key := ModelKey{Provider: "ollama", Model: "qwen3:8b"}
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+
+	// Fail-safe still holds: merged caps preserved.
+	if !profile.Caps.Has(CapChat) {
+		t.Errorf("merged caps lost after rejection; expected fail-safe to keep them, got %v", profile.Caps)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(rejections) != 1 {
+		t.Fatalf("rejection hook fired %d times, want 1", len(rejections))
+	}
+	r := rejections[0]
+	if r.key != key {
+		t.Errorf("rejection key = %v, want %v", r.key, key)
+	}
+	if len(r.tokens) != 1 || r.tokens[0] != "completion" {
+		t.Errorf("rejection tokens = %v, want [completion]", r.tokens)
+	}
+	if r.err == nil {
+		t.Error("rejection err = nil, want non-nil ParseCapsStrict error")
+	}
+}
+
+// TestModelRegistry_OverrideRejectionHook_NotCalledOnAcceptedOverride
+// guards against false-positive observability: when the override parses
+// cleanly the hook MUST NOT fire, otherwise operators see noise on every
+// healthy config and learn to ignore the signal.
+func TestModelRegistry_OverrideRejectionHook_NotCalledOnAcceptedOverride(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "ollama",
+		caps: CapChat | CapGenerate | CapStream,
+		models: []ModelInfo{
+			{Name: "qwen3:8b", Family: "qwen3", Capabilities: []string{"completion"}},
+		},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{"ollama": prov}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+
+	var fired int
+	mr.SetOverrideRejectionHook(func(_ ModelKey, _ []string, _ error) {
+		fired++
+	})
+	mr.SetCapabilityOverride(func(_ ModelKey) []string {
+		return []string{"chat", "stream"} // canonical: accepted
+	})
+
+	if _, err := mr.Lookup(ctx, ModelKey{Provider: "ollama", Model: "qwen3:8b"}); err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if fired != 0 {
+		t.Errorf("rejection hook fired %d times on accepted override, want 0", fired)
+	}
+}
+
 // TestModelRegistry_CapabilityOverride_ZeroCapsGuard verifies the merge
 // refuses to wholesale-replace with zero caps when the override returns
 // a non-nil but effectively empty result. This protects against

@@ -43,6 +43,7 @@ type ModelRegistry struct {
 	providers       ProviderResolver
 	capOverride     CapabilityOverride
 	overrideVersion uint64
+	rejectionHook   OverrideRejectionHook
 }
 
 // CapabilityOverride returns the user-declared canonical capability tokens
@@ -58,7 +59,10 @@ type ModelRegistry struct {
 // shorthand "insert" → generate+stream+insert — are REJECTED at the apply
 // site, not silently expanded. On rejection the merge-derived caps are
 // preserved unchanged so a misconfigured override cannot cripple a model
-// for every router gate downstream.
+// for every router gate downstream. Install an OverrideRejectionHook via
+// SetOverrideRejectionHook to surface rejections; otherwise the drop is
+// silent by design (preserves backward compatibility for callers that
+// only set the override).
 //
 // Replacement is wholesale and applies AFTER every other merge layer,
 // including the runtime-template-driven CapInsert toggle in merge(). An
@@ -71,6 +75,36 @@ type ModelRegistry struct {
 //   - any non-canonical token: ignored (no silent expansion)
 //   - parses to zero caps: ignored (same crippling hazard)
 type CapabilityOverride func(key ModelKey) []string
+
+// OverrideRejectionHook is called when a capability override returned a
+// non-empty token slice that failed strict canonical-only parsing — i.e.
+// the override was applied at the registry but had to be DROPPED because
+// the tokens were unknown or were multi-bit aliases that would silently
+// expand and violate the REPLACES contract.
+//
+// The merged profile preserves its pre-override caps in this case (fail
+// safe), so the hook is the only signal the misconfiguration ever happened.
+// Without it the override is silently swallowed and the operator sees
+// router decisions that don't match the config they wrote.
+//
+// Typical implementations log the rejection or emit a metric. Hooks MUST
+// be cheap and non-blocking — they run inside merge() on every cache miss
+// for the affected key until a Refresh clears the cached pre-override
+// profile, so a slow hook would amplify into a hot-path stall.
+type OverrideRejectionHook func(key ModelKey, tokens []string, err error)
+
+// SetOverrideRejectionHook installs (or clears) the rejection-callback
+// hook. Pass nil to disable. Safe for concurrent use.
+//
+// Unlike SetCapabilityOverride this does NOT invalidate the cache: the
+// hook only fires when an override is rejected at merge time, and changing
+// observability shouldn't churn the cache. Callers that need rejections
+// surfaced for already-merged profiles must call Refresh themselves.
+func (r *ModelRegistry) SetOverrideRejectionHook(fn OverrideRejectionHook) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rejectionHook = fn
+}
 
 // SetCapabilityOverride installs (or clears) the capability override hook.
 // Pass nil to disable overrides. Safe for concurrent use.
@@ -280,15 +314,17 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 //  2. Fingerprint: capability probing data, benchmarked resource observations
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
-	// Snapshot (override, version) FIRST so the policy a single buildProfile
-	// applies is fixed at start, and the cache write at the end can detect
-	// any concurrent SetCapabilityOverride. Reading later (after slow IO
-	// like queryRuntime) would shrink the visible TOCTOU window but also
-	// leave the same race against the cache write itself; reading first
-	// keeps the contract simple: one buildProfile -> one policy version.
+	// Snapshot (override, version, rejectionHook) FIRST so the policy a
+	// single buildProfile applies is fixed at start, and the cache write
+	// at the end can detect any concurrent SetCapabilityOverride. Reading
+	// later (after slow IO like queryRuntime) would shrink the visible
+	// TOCTOU window but also leave the same race against the cache write
+	// itself; reading first keeps the contract simple: one buildProfile ->
+	// one policy version.
 	r.mu.RLock()
 	override := r.capOverride
 	overrideVer := r.overrideVersion
+	rejectionHook := r.rejectionHook
 	r.mu.RUnlock()
 
 	// Layer 1: Runtime query.
@@ -321,8 +357,9 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 		// Ignore errors -- fingerprint is optional enrichment.
 	}
 
-	// Merge layers using the override snapshot taken at function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override)
+	// Merge layers using the (override, rejectionHook) snapshot taken at
+	// function entry.
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, rejectionHook)
 
 	// Cache the result iff the override snapshot is still current.
 	r.mu.Lock()
@@ -379,6 +416,7 @@ func (r *ModelRegistry) merge(
 	fp *fingerprint.Profile,
 	parsed ParsedModel,
 	override CapabilityOverride,
+	rejectionHook OverrideRejectionHook,
 ) *ModelProfile {
 	profile := &ModelProfile{
 		Key:       key,
@@ -517,8 +555,19 @@ func (r *ModelRegistry) merge(
 	// to close.
 	if override != nil {
 		if cfgCaps := override(key); len(cfgCaps) > 0 {
-			if parsed, err := ParseCapsStrict(cfgCaps); err == nil && parsed != 0 {
-				profile.Caps = parsed
+			parsedCaps, err := ParseCapsStrict(cfgCaps)
+			switch {
+			case err != nil:
+				// Non-canonical tokens (e.g. catalog aliases that would
+				// expand to multiple bits) — fire the rejection hook so
+				// the operator can see the misconfiguration. Without this
+				// signal the drop is silent and the only symptom is router
+				// decisions that don't match the config.
+				if rejectionHook != nil {
+					rejectionHook(key, cfgCaps, err)
+				}
+			case parsedCaps != 0:
+				profile.Caps = parsedCaps
 			}
 		}
 	}
