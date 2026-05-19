@@ -8,7 +8,7 @@
       "base_url": "http://localhost:8080",
       "timeout": "30s",
       "api_format": "openai-compat",
-      "api_key": "$LLAMACPP_API_KEY"
+      "api_key": "REPLACE_ME"
     }
   },
   "models": {
