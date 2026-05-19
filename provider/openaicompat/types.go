@@ -43,6 +43,7 @@ type chatFunction struct {
 
 // chatToolCall is one tool-call entry inside an assistant message.
 type chatToolCall struct {
+	Index    *int                 `json:"index,omitempty"` // present on streaming deltas
 	ID       string               `json:"id,omitempty"`
 	Type     string               `json:"type"` // "function"
 	Function chatToolCallFunction `json:"function"`

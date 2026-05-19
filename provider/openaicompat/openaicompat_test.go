@@ -372,6 +372,81 @@ func TestProvider_Chat_RequestBodyShape(t *testing.T) {
 	}
 }
 
+func TestProvider_Chat_RequestBody_ToolCallArgumentsEncodedAsString(t *testing.T) {
+	var captured chatRequest
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(chatResponse{
+			Choices: []chatChoice{{Message: chatMessage{Content: "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	_, err := p.Chat(context.Background(), provider.ChatRequest{
+		Model: "m",
+		Messages: []provider.ChatMessage{{
+			Role: "assistant",
+			ToolCalls: []provider.ToolCall{{
+				ID:   "call_1",
+				Type: "function",
+				Function: provider.ToolCallFunction{
+					Name:      "search",
+					Arguments: json.RawMessage(`{"q":"go"}`),
+				},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(captured.Messages) != 1 || len(captured.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("captured tool calls = %+v", captured.Messages)
+	}
+	var args string
+	if err := json.Unmarshal(captured.Messages[0].ToolCalls[0].Function.Arguments, &args); err != nil {
+		t.Fatalf("arguments should be an OpenAI-style JSON string, got %s: %v", captured.Messages[0].ToolCalls[0].Function.Arguments, err)
+	}
+	if args != `{"q":"go"}` {
+		t.Errorf("arguments string = %q, want raw object JSON", args)
+	}
+}
+
+func TestProvider_Chat_ToolCallArgumentsStringDecoded(t *testing.T) {
+	srv := newMockServer(t, mockServerOpts{
+		chatResponse: chatResponse{
+			Choices: []chatChoice{{Message: chatMessage{
+				ToolCalls: []chatToolCall{{
+					ID:   "call_1",
+					Type: "function",
+					Function: chatToolCallFunction{
+						Name:      "search",
+						Arguments: rawJSONString(t, `{"q":"go"}`),
+					},
+				}},
+			}}},
+		},
+	})
+	defer srv.close()
+
+	p := NewProvider(NewClient(srv.url))
+	resp, err := p.Chat(context.Background(), provider.ChatRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if len(resp.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1", len(resp.ToolCalls))
+	}
+	if got := string(resp.ToolCalls[0].Function.Arguments); got != `{"q":"go"}` {
+		t.Errorf("Arguments = %s, want decoded JSON object", got)
+	}
+	if resp.ToolCalls[0].Function.Index != 0 {
+		t.Errorf("Index = %d, want 0", resp.ToolCalls[0].Function.Index)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // ChatStream
 // ---------------------------------------------------------------------------
@@ -451,6 +526,221 @@ func TestProvider_ChatStream_ToolCallDelta_Emitted(t *testing.T) {
 	}
 	if !sawToolCall {
 		t.Error("tool-call delta was not surfaced as a standalone chunk")
+	}
+}
+
+func TestProvider_ChatStream_FragmentedToolCall_AssembledOnDone(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{
+					Index: intPtr(0),
+					ID:    "call_1",
+					Type:  "function",
+					Function: chatToolCallFunction{
+						Name: "search",
+					},
+				}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{
+					Index: intPtr(0),
+					Function: chatToolCallFunction{
+						Arguments: rawJSONString(t, `{"q"`),
+					},
+				}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{
+					Index: intPtr(0),
+					Function: chatToolCallFunction{
+						Arguments: rawJSONString(t, `:"go"}`),
+					},
+				}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	var final provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			final = r
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if !final.Done {
+		t.Fatal("missing final Done chunk")
+	}
+	if len(final.ToolCalls) != 1 {
+		t.Fatalf("final ToolCalls len = %d, want 1: %+v", len(final.ToolCalls), final.ToolCalls)
+	}
+	call := final.ToolCalls[0]
+	if call.ID != "call_1" || call.Function.Name != "search" || call.Function.Index != 0 {
+		t.Errorf("assembled call metadata = %+v", call)
+	}
+	if got := string(call.Function.Arguments); got != `{"q":"go"}` {
+		t.Errorf("assembled arguments = %s, want decoded JSON object", got)
+	}
+}
+
+// TestProvider_ChatStream_FragmentedToolCall_NilIndexUsesLastKnown verifies
+// that arg-only deltas with no Index field (a real shape vLLM emits after
+// the opening tool delta) attach to the most-recently-active call rather
+// than the per-chunk loop position. Without the lastIndex fallback the
+// fragments would silently land on slot 0 even after the active call moved
+// to slot 1.
+func TestProvider_ChatStream_FragmentedToolCall_NilIndexUsesLastKnown(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			// Opening delta names the call at index 0.
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{
+					Index: intPtr(0), ID: "call_1", Type: "function",
+					Function: chatToolCallFunction{Name: "search"},
+				}},
+			}}}},
+			// Subsequent arg-only deltas omit Index — must still attach to call_1.
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{
+					Function: chatToolCallFunction{Arguments: rawJSONString(t, `{"q"`)},
+				}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{
+					Function: chatToolCallFunction{Arguments: rawJSONString(t, `:"go"}`)},
+				}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	var final provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			final = r
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if len(final.ToolCalls) != 1 {
+		t.Fatalf("ToolCalls len = %d, want 1 (nil-Index fragments must attach to last-known call, not spawn new slots): %+v", len(final.ToolCalls), final.ToolCalls)
+	}
+	if got := string(final.ToolCalls[0].Function.Arguments); got != `{"q":"go"}` {
+		t.Errorf("assembled arguments = %s, want fragments concatenated under last-known index", got)
+	}
+}
+
+// TestProvider_ChatStream_MultiToolFragmented_AssembledIndependently
+// covers two concurrent tool_calls with interleaved arg fragments. The
+// accumulator must keep slot 0 and slot 1 fragments separate even when
+// they arrive in mixed order.
+func TestProvider_ChatStream_MultiToolFragmented_AssembledIndependently(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			// Both tools opened in the same delta.
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{
+					{Index: intPtr(0), ID: "call_a", Type: "function", Function: chatToolCallFunction{Name: "search"}},
+					{Index: intPtr(1), ID: "call_b", Type: "function", Function: chatToolCallFunction{Name: "fetch"}},
+				},
+			}}}},
+			// Interleaved arg fragments.
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{Index: intPtr(1), Function: chatToolCallFunction{Arguments: rawJSONString(t, `{"url":"`)}}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{Index: intPtr(0), Function: chatToolCallFunction{Arguments: rawJSONString(t, `{"q":"go"}`)}}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{Index: intPtr(1), Function: chatToolCallFunction{Arguments: rawJSONString(t, `x.com"}`)}}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	var final provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			final = r
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if len(final.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2: %+v", len(final.ToolCalls), final.ToolCalls)
+	}
+	// Snapshot order follows first-appearance, so call_a (index 0) comes first.
+	if final.ToolCalls[0].ID != "call_a" || final.ToolCalls[1].ID != "call_b" {
+		t.Errorf("ToolCalls order = %q,%q; want call_a,call_b (first-appearance ordering)",
+			final.ToolCalls[0].ID, final.ToolCalls[1].ID)
+	}
+	if got := string(final.ToolCalls[0].Function.Arguments); got != `{"q":"go"}` {
+		t.Errorf("call_a arguments = %s, want isolated to slot 0", got)
+	}
+	if got := string(final.ToolCalls[1].Function.Arguments); got != `{"url":"x.com"}` {
+		t.Errorf("call_b arguments = %s, want fragments correctly concatenated under slot 1", got)
+	}
+}
+
+// TestProvider_ChatStream_FragmentedToolCall_OrderByFirstAppearance
+// confirms snapshot order tracks first-appearance even when indexes arrive
+// out of natural order (e.g. index 1 before index 0). This is the contract
+// downstream consumers depend on for stable iteration.
+func TestProvider_ChatStream_FragmentedToolCall_OrderByFirstAppearance(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{Index: intPtr(1), ID: "second-but-first-seen", Type: "function",
+					Function: chatToolCallFunction{Name: "b", Arguments: rawJSONString(t, `{}`)}}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
+				ToolCalls: []chatToolCall{{Index: intPtr(0), ID: "first-but-second-seen", Type: "function",
+					Function: chatToolCallFunction{Name: "a", Arguments: rawJSONString(t, `{}`)}}},
+			}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	var final provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			final = r
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if len(final.ToolCalls) != 2 {
+		t.Fatalf("ToolCalls len = %d, want 2", len(final.ToolCalls))
+	}
+	if final.ToolCalls[0].ID != "second-but-first-seen" {
+		t.Errorf("first ToolCall.ID = %q, want %q (snapshot order should track first-appearance, not numeric index)",
+			final.ToolCalls[0].ID, "second-but-first-seen")
 	}
 }
 
@@ -548,6 +838,24 @@ func TestProvider_ChatStream_MalformedChunk_Skipped(t *testing.T) {
 	}
 	if saw != "good" {
 		t.Errorf("Content = %q, want %q (malformed chunk should be skipped, good one preserved)", saw, "good")
+	}
+}
+
+func TestProvider_ChatStream_SSEReadError_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", strings.Repeat("x", 1024*1024+1))
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(provider.ChatResponse) error {
+		t.Fatal("callback should not be invoked for an unreadable SSE frame")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "sse read") {
+		t.Fatalf("expected propagated SSE read error, got %v", err)
 	}
 }
 
@@ -651,6 +959,24 @@ func TestProvider_GenerateStream_DeliversChunks(t *testing.T) {
 	}
 	if !lastDone {
 		t.Error("last chunk should be Done")
+	}
+}
+
+func TestProvider_GenerateStream_SSEReadError_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", strings.Repeat("x", 1024*1024+1))
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	err := p.GenerateStream(context.Background(), provider.GenerateRequest{Model: "m", Prompt: "x"}, func(provider.GenerateResponse) error {
+		t.Fatal("callback should not be invoked for an unreadable SSE frame")
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "sse read") {
+		t.Fatalf("expected propagated SSE read error, got %v", err)
 	}
 }
 
@@ -780,6 +1106,64 @@ func TestProvider_Embed_Singleflight_Dedups(t *testing.T) {
 	}
 }
 
+func TestProvider_Embed_SingleflightKey_NULInputsDoNotCollide(t *testing.T) {
+	var calls int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt64(&calls, 1)
+		var req embedRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
+		}
+		time.Sleep(40 * time.Millisecond)
+		data := make([]embeddingDoc, len(req.Input))
+		for i := range req.Input {
+			data[i] = embeddingDoc{Index: i, Embedding: []float64{float64(len(req.Input)), float64(i)}}
+		}
+		_ = json.NewEncoder(w).Encode(embedResponse{Data: data})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	reqs := []provider.EmbedRequest{
+		{Model: "m", Input: []string{"a\x00b"}},
+		{Model: "m", Input: []string{"a", "b"}},
+	}
+	type embedResult struct {
+		count int
+		err   error
+	}
+	results := make([]embedResult, len(reqs))
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(len(reqs))
+	for i := range reqs {
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			resp, err := p.Embed(context.Background(), reqs[i])
+			results[i].err = err
+			if resp != nil {
+				results[i].count = len(resp.Embeddings)
+			}
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, res := range results {
+		if res.err != nil {
+			t.Fatalf("Embed[%d]: %v", i, res.err)
+		}
+		if res.count != len(reqs[i].Input) {
+			t.Fatalf("Embed[%d] returned %d embeddings for %d inputs", i, res.count, len(reqs[i].Input))
+		}
+	}
+	if got := atomic.LoadInt64(&calls); got != 2 {
+		t.Fatalf("upstream calls = %d, want 2 distinct calls for NUL-containing inputs", got)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SSE reader unit tests
 // ---------------------------------------------------------------------------
@@ -901,3 +1285,14 @@ func marshalJSON(t *testing.T, v any) string {
 }
 
 func stringPtr(s string) *string { return &s }
+
+func intPtr(i int) *int { return &i }
+
+func rawJSONString(t *testing.T, s string) json.RawMessage {
+	t.Helper()
+	b, err := json.Marshal(s)
+	if err != nil {
+		t.Fatalf("marshal string: %v", err)
+	}
+	return json.RawMessage(b)
+}

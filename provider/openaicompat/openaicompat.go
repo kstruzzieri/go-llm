@@ -2,12 +2,14 @@
 package openaicompat
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 	"golang.org/x/sync/singleflight"
@@ -239,7 +241,9 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		lastUsage      provider.Usage
 		chunksReceived int
 		callbackErr    error
+		streamErr      error
 		finished       bool
+		toolCalls      streamToolCallAccumulator
 	)
 
 	parser := provider.NewThinkParser(provider.ThinkParserConfig{
@@ -268,6 +272,9 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 	for {
 		payload, readErr := reader.Next()
 		if readErr != nil {
+			if !errors.Is(readErr, errStreamDone) {
+				streamErr = readErr
+			}
 			break
 		}
 
@@ -294,15 +301,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		choice := chunk.Choices[0]
 
 		if len(choice.Delta.ToolCalls) > 0 {
-			lastToolCalls = toProviderToolCalls(choice.Delta.ToolCalls)
-			if err := fn(provider.ChatResponse{
-				Model:     lastModel,
-				Provider:  p.name,
-				ToolCalls: lastToolCalls,
-			}); err != nil {
-				callbackErr = err
-				break
-			}
+			lastToolCalls = toolCalls.Add(choice.Delta.ToolCalls)
 		}
 		if choice.Delta.Content != "" {
 			if err := parser.Process(choice.Delta.Content); err != nil {
@@ -348,6 +347,9 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 			Usage:     lastUsage,
 		})
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", ctx.Err())
+	}
+	if streamErr != nil {
+		return fmt.Errorf("provider: openaicompat: chat stream: %w", streamErr)
 	}
 
 	return nil
@@ -421,12 +423,16 @@ func (p *Provider) GenerateStream(ctx context.Context, req provider.GenerateRequ
 		lastUsage      provider.Usage
 		chunksReceived int
 		callbackErr    error
+		streamErr      error
 		finished       bool
 	)
 
 	for {
 		payload, readErr := reader.Next()
 		if readErr != nil {
+			if !errors.Is(readErr, errStreamDone) {
+				streamErr = readErr
+			}
 			break
 		}
 
@@ -485,6 +491,9 @@ func (p *Provider) GenerateStream(ctx context.Context, req provider.GenerateRequ
 			Usage:    lastUsage,
 		})
 		return fmt.Errorf("provider: openaicompat: generate stream: %w", ctx.Err())
+	}
+	if streamErr != nil {
+		return fmt.Errorf("provider: openaicompat: generate stream: %w", streamErr)
 	}
 
 	return nil
@@ -564,12 +573,17 @@ func (p *Provider) Embed(ctx context.Context, req provider.EmbedRequest) (*provi
 	}
 }
 
-// embedKey builds a singleflight dedup key from model + sha256 of joined
-// inputs. Identical to the OllamaProvider helper; duplicated here so the
-// sub-package has no upward dependency on unexported symbols in provider/.
+// embedKey builds a singleflight dedup key from model + length-prefixed inputs.
+// Length prefixes keep distinct inputs with embedded NUL bytes from colliding.
 func embedKey(model string, inputs []string) string {
-	h := sha256.Sum256([]byte(strings.Join(inputs, "\x00")))
-	return model + ":" + hex.EncodeToString(h[:])
+	h := sha256.New()
+	var lenBuf [8]byte
+	for _, input := range inputs {
+		binary.BigEndian.PutUint64(lenBuf[:], uint64(len(input)))
+		_, _ = h.Write(lenBuf[:])
+		_, _ = h.Write([]byte(input))
+	}
+	return model + ":" + hex.EncodeToString(h.Sum(nil))
 }
 
 // ---------------------------------------------------------------------------
@@ -692,7 +706,7 @@ func toWireToolCalls(calls []provider.ToolCall) []chatToolCall {
 			Type: c.Type,
 			Function: chatToolCallFunction{
 				Name:      c.Function.Name,
-				Arguments: c.Function.Arguments,
+				Arguments: encodeToolCallArguments(c.Function.Arguments),
 			},
 		}
 	}
@@ -706,16 +720,174 @@ func toProviderToolCalls(calls []chatToolCall) []provider.ToolCall {
 	}
 	out := make([]provider.ToolCall, len(calls))
 	for i, c := range calls {
+		index := i
+		if c.Index != nil {
+			index = *c.Index
+		}
 		out[i] = provider.ToolCall{
 			ID:   c.ID,
-			Type: c.Type,
+			Type: firstNonEmpty(c.Type, "function"),
 			Function: provider.ToolCallFunction{
+				Index:     index,
 				Name:      c.Function.Name,
-				Arguments: c.Function.Arguments,
+				Arguments: normalizeToolCallArguments(c.Function.Arguments),
 			},
 		}
 	}
 	return out
+}
+
+type streamToolCallAccumulator struct {
+	order        []int
+	calls        map[int]*streamToolCall
+	lastIndex    int
+	hasLastIndex bool
+}
+
+type streamToolCall struct {
+	id        string
+	callType  string
+	name      string
+	arguments string
+}
+
+// Add merges OpenAI streaming tool-call deltas, whose arguments commonly arrive
+// as fragments keyed by tool_calls[].index.
+//
+// Index resolution precedence per delta:
+//  1. delta.Index when set — the canonical OpenAI signal.
+//  2. The most-recently-used index (lastIndex) when at least one tool call
+//     has already been observed — covers servers that send Index on the
+//     opening delta and omit it on subsequent argument-only fragments
+//     (the common single-tool case).
+//  3. Loop position — bootstrap fallback for the very first delta when no
+//     index has been seen yet.
+//
+// The lastIndex fallback is wrong in the pathological multi-tool case where
+// a server sends Index on the opening deltas but then emits arg-only deltas
+// with neither Index nor a way to disambiguate which call they extend.
+// OpenAI's reference servers do not produce that shape; the consequence of
+// the heuristic in that case is "arguments attach to the most recently
+// active call" — degraded but not silently corrupted across the wrong slot.
+func (a *streamToolCallAccumulator) Add(deltas []chatToolCall) []provider.ToolCall {
+	if a.calls == nil {
+		a.calls = make(map[int]*streamToolCall, len(deltas))
+	}
+	for position, delta := range deltas {
+		index := a.resolveIndex(delta, position)
+		call := a.calls[index]
+		if call == nil {
+			call = &streamToolCall{}
+			a.calls[index] = call
+			a.order = append(a.order, index)
+		}
+		if delta.ID != "" {
+			call.id = delta.ID
+		}
+		if delta.Type != "" {
+			call.callType = delta.Type
+		}
+		if delta.Function.Name != "" {
+			call.name = delta.Function.Name
+		}
+		call.arguments += decodeToolCallArgumentFragment(delta.Function.Arguments)
+		a.lastIndex = index
+		a.hasLastIndex = true
+	}
+	return a.Snapshot()
+}
+
+// resolveIndex implements the index-precedence rules documented on Add.
+func (a *streamToolCallAccumulator) resolveIndex(delta chatToolCall, position int) int {
+	if delta.Index != nil {
+		return *delta.Index
+	}
+	if a.hasLastIndex {
+		return a.lastIndex
+	}
+	return position
+}
+
+func (a *streamToolCallAccumulator) Snapshot() []provider.ToolCall {
+	if len(a.order) == 0 {
+		return nil
+	}
+	out := make([]provider.ToolCall, 0, len(a.order))
+	for _, index := range a.order {
+		call := a.calls[index]
+		out = append(out, provider.ToolCall{
+			ID:   call.id,
+			Type: firstNonEmpty(call.callType, "function"),
+			Function: provider.ToolCallFunction{
+				Index:     index,
+				Name:      call.name,
+				Arguments: normalizeToolCallArguments(json.RawMessage(call.arguments)),
+			},
+		})
+	}
+	return out
+}
+
+func decodeToolCallArgumentFragment(raw json.RawMessage) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err == nil {
+		return s
+	}
+	return string(trimmed)
+}
+
+func normalizeToolCallArguments(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err == nil {
+		if s == "" {
+			return nil
+		}
+		if json.Valid([]byte(s)) {
+			return json.RawMessage(append([]byte(nil), s...))
+		}
+		return mustJSONRawString(s)
+	}
+	if json.Valid(trimmed) {
+		return json.RawMessage(append([]byte(nil), trimmed...))
+	}
+	return mustJSONRawString(string(trimmed))
+}
+
+func encodeToolCallArguments(raw json.RawMessage) json.RawMessage {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(trimmed, &s); err == nil {
+		return json.RawMessage(append([]byte(nil), trimmed...))
+	}
+	return mustJSONRawString(string(trimmed))
+}
+
+func mustJSONRawString(s string) json.RawMessage {
+	b, err := json.Marshal(s)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(b)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // Compile-time assertion that *Provider satisfies provider.Provider.

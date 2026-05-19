@@ -13,10 +13,11 @@
 // from a provider sub-package would invert the layering. Wire shapes are
 // re-declared here with only the fields this client actually consumes.
 //
-// Wiring: config.ProviderConfig.APIFormat == "openai-compat" selects this
-// backend. Pass a per-instance name via WithProviderName when more than one
-// OpenAI-compat server is registered (e.g. "lmstudio-laptop" alongside
-// "vllm-workstation"), matching the OllamaProvider naming convention.
+// Intended wiring: callers that construct providers from config.ProviderConfig
+// should map APIFormat == "openai-compat" to this backend. Pass a per-instance
+// name via WithProviderName when more than one OpenAI-compat server is
+// registered (e.g. "lmstudio-laptop" alongside "vllm-workstation"), matching
+// the OllamaProvider naming convention.
 //
 // Capability semantics: OpenAI-compat servers vary widely in what they
 // actually implement. The constructor advertises a permissive default
