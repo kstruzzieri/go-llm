@@ -42,17 +42,32 @@ type chatFunction struct {
 }
 
 // chatToolCall is one tool-call entry inside an assistant message.
+//
+// Index is a pointer-with-omitempty for two reasons: OpenAI's streaming
+// deltas include it to correlate arg fragments across chunks (the
+// streamToolCallAccumulator depends on this for fragmented assembly),
+// but outbound requests MUST NOT carry it — `index` is a response-only
+// field in OpenAI's spec, and strict server-side schema validators may
+// reject requests that include it. Nil pointer + omitempty produces the
+// correct shape in both directions; toWireToolCalls deliberately never
+// sets Index when converting provider.ToolCall back to the wire form.
 type chatToolCall struct {
-	Index    *int                 `json:"index,omitempty"` // present on streaming deltas
+	Index    *int                 `json:"index,omitempty"` // response-only; see type doc
 	ID       string               `json:"id,omitempty"`
 	Type     string               `json:"type"` // "function"
 	Function chatToolCallFunction `json:"function"`
 }
 
 // chatToolCallFunction is the function descriptor inside a tool_calls entry.
-// Arguments is preserved as raw JSON. OpenAI canonically returns it as a
-// JSON-encoded string; we forward whatever the server returned without
-// re-stringifying (same transparency tradeoff documented in compat/).
+//
+// Arguments is OpenAI's JSON-string envelope around the actual tool-call
+// payload (e.g. the wire carries `"arguments": "{\"q\":\"go\"}"` for a
+// search-style tool). On INBOUND we normalize via
+// normalizeToolCallArguments — object/array literals are unwrapped to the
+// canonical raw-JSON tool-call shape, scalar string literals stay wrapped
+// to preserve type. On OUTBOUND we re-encode via encodeToolCallArguments
+// so the wire shape matches OpenAI's canonical form regardless of which
+// representation a caller passed in.
 type chatToolCallFunction struct {
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`

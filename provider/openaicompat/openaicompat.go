@@ -217,13 +217,19 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 
 // ChatStream sends a streaming /v1/chat/completions request and invokes fn
 // for each chunk. Content is processed through a per-request ThinkParser to
-// separate reasoning from content in real time. Tool-call deltas are
-// emitted as standalone chunks alongside content/thinking.
+// separate reasoning from content in real time.
+//
+// Tool-call emission policy: OpenAI streams tool-call arguments as
+// fragments that are only meaningful once concatenated, so this provider
+// accumulates them silently across deltas and surfaces the assembled
+// ToolCalls slice only on the final Done chunk. Consumers building
+// incremental tool-call UI should treat the Done chunk as the single
+// authoritative source for tool-call payloads on a given stream.
 //
 // Cancellation policy mirrors OllamaProvider: if the context is cancelled
 // after at least one chunk has been received, the parser is flushed and a
-// final synthetic Done+Partial chunk is emitted before the context error
-// is returned.
+// final synthetic Done+Partial chunk is emitted (carrying whatever tool
+// calls had been accumulated so far) before the context error is returned.
 func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
 	if fn == nil {
 		return fmt.Errorf("provider: openaicompat: chat stream: callback function is required")
@@ -574,8 +580,15 @@ func (p *Provider) Embed(ctx context.Context, req provider.EmbedRequest) (*provi
 	}
 }
 
-// embedKey builds a singleflight dedup key from model + length-prefixed inputs.
-// Length prefixes keep distinct inputs with embedded NUL bytes from colliding.
+// embedKey builds a singleflight dedup key from model + length-prefixed
+// inputs. Length prefixes keep distinct inputs with embedded NUL bytes
+// from colliding.
+//
+// The "model:hexhash" layout is collision-free because hex.EncodeToString
+// produces only [0-9a-f] — a model name containing a literal ':' cannot
+// be confused with the separator+hash boundary. If this is ever changed
+// to a non-hex encoding (e.g. base64 with ':' in its alphabet) the
+// separator must be re-chosen.
 func embedKey(model string, inputs []string) string {
 	h := sha256.New()
 	var lenBuf [8]byte
@@ -696,6 +709,16 @@ func toWireTools(tools []provider.Tool) []chatTool {
 }
 
 // toWireToolCalls converts provider tool calls to the OpenAI wire shape.
+//
+// Note: provider.ToolCallFunction.Index is intentionally NOT copied to
+// chatToolCall.Index here. OpenAI's spec treats `index` as a response-only
+// field used to correlate streaming deltas; sending it on an outbound
+// request can be rejected by strict server-side schema validators
+// (notably some self-hosted vLLM and llama.cpp setups). The asymmetry is
+// intentional and parallels what an OpenAI-spec-conformant client must do —
+// it is NOT a missing-feature gap relative to OllamaProvider, which
+// preserves Function.Index outbound because Ollama's wire shape accepts
+// it.
 func toWireToolCalls(calls []provider.ToolCall) []chatToolCall {
 	if len(calls) == 0 {
 		return nil
@@ -937,6 +960,19 @@ func isJSONObjectOrArray(s string) bool {
 	return false
 }
 
+// encodeToolCallArguments produces the canonical OpenAI outbound shape for
+// tool-call arguments: a JSON-encoded string of the inner payload. It
+// accepts EITHER raw JSON (e.g. `{"q":"go"}` from upstream provider-side
+// callers) OR an already-encoded JSON string (when round-tripping
+// previously-received arguments back to the server) and emits the
+// already-encoded form in both cases.
+//
+// Empty input AND the literal "null" both collapse to nil — the outbound
+// wire then omits the arguments field entirely (json.RawMessage(nil) +
+// omitempty). OpenAI does not distinguish "arguments: null" from
+// arguments-omitted at the schema level today, so a caller passing the
+// "null" literal to mean "no arguments" gets the same outbound shape as
+// passing a nil RawMessage.
 func encodeToolCallArguments(raw json.RawMessage) json.RawMessage {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || string(trimmed) == "null" {
@@ -944,11 +980,19 @@ func encodeToolCallArguments(raw json.RawMessage) json.RawMessage {
 	}
 	var s string
 	if err := json.Unmarshal(trimmed, &s); err == nil {
+		// Already JSON-string-encoded — pass through verbatim.
 		return json.RawMessage(append([]byte(nil), trimmed...))
 	}
+	// Raw JSON — wrap as the OpenAI canonical string envelope.
 	return mustJSONRawString(string(trimmed))
 }
 
+// mustJSONRawString JSON-encodes s as a string literal and returns it as
+// a json.RawMessage. json.Marshal of a string is documented as infallible
+// for valid UTF-8; the nil return on error is reachable only for invalid
+// UTF-8 in tool-call arguments, which is already broken at the upstream
+// model and would surface as missing arguments on the outbound wire — the
+// least-bad failure mode.
 func mustJSONRawString(s string) json.RawMessage {
 	b, err := json.Marshal(s)
 	if err != nil {
@@ -957,6 +1001,11 @@ func mustJSONRawString(s string) json.RawMessage {
 	return json.RawMessage(b)
 }
 
+// firstNonEmpty returns the first non-empty string in values, or "" when
+// all values are empty. Used to default tool-call Type to "function" when
+// neither the response nor a delta carries the field — OpenAI's spec
+// only defines "function" today, but storing whatever the server emits
+// keeps the door open to future tool types without round-trip loss.
 func firstNonEmpty(values ...string) string {
 	for _, v := range values {
 		if v != "" {

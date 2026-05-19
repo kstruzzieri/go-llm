@@ -27,4 +27,12 @@
 // /v1/completions). Native FIM detection (CapInsert) is intentionally NOT
 // in the default set because OpenAI-compat servers don't expose template
 // metadata equivalent to Ollama's /api/show — opt in explicitly when known.
+//
+// Streaming tool-call semantics: OpenAI streams tool-call arguments as
+// JSON fragments that are only meaningful once concatenated. ChatStream
+// accumulates fragments silently across deltas and surfaces the assembled
+// ToolCalls slice ONLY on the final Done chunk (or on the synthetic
+// Done+Partial chunk if the context is cancelled mid-stream). Consumers
+// building incremental tool-call UI should treat the Done chunk as the
+// single authoritative source for tool-call payloads.
 package openaicompat
