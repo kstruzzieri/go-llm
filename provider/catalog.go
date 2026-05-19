@@ -184,28 +184,155 @@ func parseTier(s string) Tier {
 	}
 }
 
-// parseCaps converts a string slice of capability names from catalog JSON
-// to a Capability bitmask. The catalog uses higher-level labels:
-//   - "completion" implies CapChat | CapGenerate | CapStream
-//   - "insert" implies CapGenerate | CapStream | CapInsert
-//   - "tools" implies CapToolCall
-//   - "embedding" implies CapEmbed
-//   - "thinking" implies CapThinking
+// CanonicalCapabilityNames is the user-facing capability vocabulary: each
+// token maps to exactly one Capability bit. Aliases like "completion" that
+// expand to multiple bits are NOT in this set — they remain valid only in
+// catalog.json and upstream metadata sources (handled by parseCaps).
+//
+// Exported so config validation in adjacent packages can use this list as
+// the single source of truth for "valid user-config capability tokens"
+// rather than maintaining a parallel set that could drift.
+var CanonicalCapabilityNames = []string{
+	"chat",
+	"generate",
+	"stream",
+	"embed",
+	"tool_call",
+	"thinking",
+	"insert",
+}
+
+// canonicalCapability maps a single canonical token to its single-bit
+// contribution. Used by ParseCapsStrict for user-config validation where
+// each token must mean exactly one bit and aliases are forbidden so the
+// "explicit Capabilities REPLACE derived" contract holds without surprise
+// expansion.
+//
+// Catalog aliases that expand multiple bits (e.g. "insert" -> generate+
+// stream+insert) are handled by aliasedCapability, used only by parseCaps
+// for catalog.json and runtime /api/show output.
+func canonicalCapability(token string) (Capability, bool) {
+	switch strings.ToLower(token) {
+	case "chat":
+		return CapChat, true
+	case "generate":
+		return CapGenerate, true
+	case "stream":
+		return CapStream, true
+	case "embed":
+		return CapEmbed, true
+	case "tool_call":
+		return CapToolCall, true
+	case "thinking":
+		return CapThinking, true
+	case "insert":
+		return CapInsert, true
+	}
+	return 0, false
+}
+
+// aliasedCapability maps catalog/runtime tokens (including aliases that
+// expand multiple bits) to their bitmask contribution. NOT used for
+// user-config — see canonicalCapability and ParseCapsStrict for that path.
+//
+//	"completion" -> CapChat | CapGenerate | CapStream
+//	"insert"     -> CapGenerate | CapStream | CapInsert (full FIM path)
+//	"tools"      -> CapToolCall
+//	"embedding"  -> CapEmbed
+//	"thinking"   -> CapThinking
+//
+// All canonical names are also accepted so catalog.json may use either
+// shorthand or canonical form interchangeably.
+func aliasedCapability(token string) (Capability, bool) {
+	switch strings.ToLower(token) {
+	// Canonical single-bit names (also valid in catalog/runtime input).
+	case "chat":
+		return CapChat, true
+	case "generate":
+		return CapGenerate, true
+	case "stream":
+		return CapStream, true
+	case "embed":
+		return CapEmbed, true
+	case "tool_call":
+		return CapToolCall, true
+	case "thinking":
+		return CapThinking, true
+	// Catalog aliases — multi-bit expansion is intentional here because
+	// these are author-controlled shorthand strings in catalog.json,
+	// fingerprint records, and Ollama /api/show capability arrays.
+	case "insert":
+		return CapGenerate | CapStream | CapInsert, true
+	case "completion":
+		return CapChat | CapGenerate | CapStream, true
+	case "tools":
+		return CapToolCall, true
+	case "embedding":
+		return CapEmbed, true
+	}
+	return 0, false
+}
+
+// parseCaps converts a string slice of capability names to a bitmask,
+// silently skipping unknown tokens. Suitable for upstream metadata sources
+// (catalog.json, fingerprint cache, provider /api/show) where graceful
+// degradation across schema versions is the right behavior. Catalog
+// aliases that expand multiple bits are honored here.
+//
+// User config MUST use ParseCapsStrict instead: aliases are forbidden in
+// user-facing config so the "explicit Capabilities REPLACE derived"
+// contract holds without surprise expansion.
 func parseCaps(caps []string) Capability {
 	var c Capability
 	for _, s := range caps {
-		switch strings.ToLower(s) {
-		case "completion":
-			c |= CapChat | CapGenerate | CapStream
-		case "insert":
-			c |= CapGenerate | CapStream | CapInsert
-		case "tools":
-			c |= CapToolCall
-		case "embedding":
-			c |= CapEmbed
-		case "thinking":
-			c |= CapThinking
+		if bit, ok := aliasedCapability(s); ok {
+			c |= bit
 		}
 	}
 	return c
+}
+
+// aliasSuggestions maps known catalog/runtime aliases that ParseCapsStrict
+// rejects to a "did you mean" replacement in canonical user-config form.
+// Used to make the rejection error actionable when the user typed a
+// recognizable shorthand (the most common mistake) rather than dumping
+// the full canonical vocabulary and leaving them to guess.
+//
+// Tokens not in this map fall back to the canonical-names list in the
+// error message. "insert" is NOT here because it is itself canonical —
+// catalog parseCaps expands it to generate+stream+insert, but strict
+// parsing accepts it as the single CapInsert bit, which is the right
+// answer for user config.
+var aliasSuggestions = map[string]string{
+	"tools":      `"tool_call"`,
+	"embedding":  `"embed"`,
+	"completion": `"chat", "generate", and/or "stream" (was a multi-bit alias; pick the bits you actually want)`,
+}
+
+// ParseCapsStrict converts a slice of canonical-only capability tokens to
+// a bitmask. Each token must be a name from CanonicalCapabilityNames; any
+// non-canonical token is rejected — including aliases that would expand
+// to multiple bits ("completion" -> chat+generate+stream, the catalog
+// shorthand "insert" -> generate+stream+insert) AND single-bit aliases
+// that merely shadow a canonical name ("tools" is rejected because the
+// canonical spelling is "tool_call"). Intended for validating
+// user-authored capability lists in models.json where any non-canonical
+// token would risk silent bit-set divergence from what the user wrote.
+//
+// Rejection errors include a "did you mean" hint when the rejected token
+// is a known alias (e.g. "tools" -> suggest "tool_call"); otherwise they
+// fall back to listing the canonical vocabulary.
+func ParseCapsStrict(caps []string) (Capability, error) {
+	var c Capability
+	for _, s := range caps {
+		bit, ok := canonicalCapability(s)
+		if !ok {
+			if hint, known := aliasSuggestions[strings.ToLower(s)]; known {
+				return 0, fmt.Errorf("provider: unknown or non-canonical capability %q (did you mean %s?)", s, hint)
+			}
+			return 0, fmt.Errorf("provider: unknown or non-canonical capability %q (canonical names: %v)", s, CanonicalCapabilityNames)
+		}
+		c |= bit
+	}
+	return c, nil
 }

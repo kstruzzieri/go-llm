@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -171,6 +172,305 @@ func TestLoad_TimeoutDefaulting(t *testing.T) {
 	}
 	if p2.Timeout.Duration != 5*time.Minute {
 		t.Errorf("default timeout: got %v, want 5m", p2.Timeout.Duration)
+	}
+}
+
+func TestLoad_APIFormatDefaulting(t *testing.T) {
+	// Empty api_format must materialize to "ollama" via applyDefaults so
+	// configs that predate the field keep working.
+	noFormat := writeTempJSON(t, `{
+		"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+		"models": {"m": {"name": "x", "type": "dense"}},
+		"defaults": {}
+	}`)
+	cfg, err := Load(noFormat)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p := cfg.Provider("ollama")
+	if p == nil {
+		t.Fatal("expected provider 'ollama' to exist")
+	}
+	if p.APIFormat != "ollama" {
+		t.Errorf("default api_format: got %q, want %q", p.APIFormat, "ollama")
+	}
+
+	// Explicit known values pass through unchanged.
+	explicit := writeTempJSON(t, `{
+		"providers": {"local": {"base_url": "http://localhost:8080", "api_format": "openai-compat"}},
+		"models": {"m": {"name": "x", "type": "dense", "provider": "local"}},
+		"defaults": {}
+	}`)
+	cfg2, err := Load(explicit)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p2 := cfg2.Provider("local")
+	if p2 == nil {
+		t.Fatal("expected provider 'local' to exist")
+	}
+	if p2.APIFormat != "openai-compat" {
+		t.Errorf("explicit api_format: got %q, want %q", p2.APIFormat, "openai-compat")
+	}
+
+	// Explicit api_format on a provider with non-zero timeout must survive
+	// applyDefaults — guards against the regression where the write-back
+	// only fired inside the timeout-default branch.
+	explicitBoth := writeTempJSON(t, `{
+		"providers": {"local": {"base_url": "http://localhost:8080", "api_format": "openai-compat", "timeout": "10s"}},
+		"models": {"m": {"name": "x", "type": "dense", "provider": "local"}},
+		"defaults": {}
+	}`)
+	cfg3, err := Load(explicitBoth)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	p3 := cfg3.Provider("local")
+	if p3 == nil {
+		t.Fatal("expected provider 'local' to exist")
+	}
+	if p3.APIFormat != "openai-compat" {
+		t.Errorf("api_format with explicit timeout: got %q, want %q (applyDefaults regression)", p3.APIFormat, "openai-compat")
+	}
+	if p3.Timeout.Duration != 10*time.Second {
+		t.Errorf("explicit timeout: got %v, want 10s", p3.Timeout.Duration)
+	}
+}
+
+// TestLoad_ProductionModelsJSON_NoBehaviorChange pins the claim from the
+// PR description: existing single-Ollama deployments see no behavior change
+// from the new Capabilities field. The repo's actual models.json has no
+// capabilities populated on any model; every ResolvedCapabilities() result
+// must match the derive-from-type defaults so routing decisions made on
+// top of those caps remain identical to develop's behavior.
+func TestLoad_ProductionModelsJSON_NoBehaviorChange(t *testing.T) {
+	cfg, err := Load("../models.json")
+	if err != nil {
+		t.Fatalf("repo models.json fails to load after PR1 changes: %v", err)
+	}
+
+	for role, m := range cfg.Models {
+		t.Run(role, func(t *testing.T) {
+			if len(m.Capabilities) != 0 {
+				t.Skipf("model %q now has explicit capabilities; remove this skip when production config opts in", role)
+			}
+			got := m.ResolvedCapabilities()
+			var want []string
+			switch m.Type {
+			case "dense", "moe":
+				want = []string{"chat", "generate", "stream"}
+			case "embedding":
+				want = []string{"embed"}
+			default:
+				t.Fatalf("model %q has unexpected type %q", role, m.Type)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Errorf("ResolvedCapabilities = %v, want %v (production model %q derive-from-type)", got, want, role)
+			}
+		})
+	}
+}
+
+// TestLoad_CapabilitiesExample exercises the testdata/capabilities.json
+// fixture so the documented usage stays valid and a regression in the
+// schema vocabulary cannot quietly desync from the example.
+func TestLoad_CapabilitiesExample(t *testing.T) {
+	cfg, err := Load("testdata/capabilities.json")
+	if err != nil {
+		t.Fatalf("capabilities.json fixture fails to load: %v", err)
+	}
+
+	carved := cfg.Models["carved-down"]
+	if got := carved.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"chat", "stream"}) {
+		t.Errorf("carved-down capabilities = %v, want [chat stream] (explicit replaces derived)", got)
+	}
+
+	withTools := cfg.Models["with-tools"]
+	if got := withTools.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"chat", "generate", "stream", "tool_call"}) {
+		t.Errorf("with-tools capabilities = %v, want [chat generate stream tool_call]", got)
+	}
+
+	general := cfg.Models["general"]
+	if got := general.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"chat", "generate", "stream"}) {
+		t.Errorf("general (derive-from-type) = %v, want [chat generate stream]", got)
+	}
+
+	emb := cfg.Models["embedding"]
+	if got := emb.ResolvedCapabilities(); !reflect.DeepEqual(got, []string{"embed"}) {
+		t.Errorf("embedding (derive-from-type) = %v, want [embed]", got)
+	}
+
+	// The remote-llamacpp provider should carry api_format through Load.
+	remote := cfg.Provider("remote-llamacpp")
+	if remote == nil {
+		t.Fatal("remote-llamacpp provider missing")
+	}
+	if remote.APIFormat != "openai-compat" {
+		t.Errorf("remote-llamacpp api_format = %q, want openai-compat", remote.APIFormat)
+	}
+}
+
+func TestModelConfig_ResolvedCapabilities(t *testing.T) {
+	tests := []struct {
+		name string
+		m    ModelConfig
+		want []string
+	}{
+		{
+			name: "dense default",
+			m:    ModelConfig{Type: "dense"},
+			want: []string{"chat", "generate", "stream"},
+		},
+		{
+			name: "moe default",
+			m:    ModelConfig{Type: "moe"},
+			want: []string{"chat", "generate", "stream"},
+		},
+		{
+			name: "embedding default",
+			m:    ModelConfig{Type: "embedding"},
+			want: []string{"embed"},
+		},
+		{
+			name: "explicit replaces derived (carve-down for missing /v1/completions)",
+			m:    ModelConfig{Type: "dense", Capabilities: []string{"chat", "stream"}},
+			want: []string{"chat", "stream"},
+		},
+		{
+			name: "explicit replaces derived (no merge with chat/generate/stream)",
+			m:    ModelConfig{Type: "dense", Capabilities: []string{"chat"}},
+			want: []string{"chat"},
+		},
+		{
+			name: "explicit on embedding",
+			m:    ModelConfig{Type: "embedding", Capabilities: []string{"embed"}},
+			want: []string{"embed"},
+		},
+		{
+			name: "unknown type yields nil",
+			m:    ModelConfig{Type: "bogus"},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.m.ResolvedCapabilities()
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("returned slice is independent copy", func(t *testing.T) {
+		m := ModelConfig{Type: "dense"}
+		first := m.ResolvedCapabilities()
+		first[0] = "mutated"
+		second := m.ResolvedCapabilities()
+		if second[0] == "mutated" {
+			t.Error("ResolvedCapabilities returned aliased slice; mutation leaked across calls")
+		}
+	})
+}
+
+func TestLoad_CapabilityValidation(t *testing.T) {
+	t.Run("unknown capability rejected", func(t *testing.T) {
+		bad := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "dense", "capabilities": ["chat", "nonexistent"]}},
+			"defaults": {}
+		}`)
+		_, err := Load(bad)
+		if err == nil {
+			t.Fatal("expected error for unknown capability, got nil")
+		}
+		if !strings.Contains(err.Error(), "nonexistent") {
+			t.Errorf("error should mention bad capability, got: %v", err)
+		}
+	})
+
+	t.Run("embedding type with non-embedding capability rejected", func(t *testing.T) {
+		bad := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "embedding", "capabilities": ["chat"]}},
+			"defaults": {}
+		}`)
+		_, err := Load(bad)
+		if err == nil {
+			t.Fatal("expected error for embedding type with chat capability, got nil")
+		}
+		if !strings.Contains(err.Error(), "embedding") || !strings.Contains(err.Error(), "chat") {
+			t.Errorf("error should mention type and bad capability, got: %v", err)
+		}
+	})
+
+	t.Run("embedding type with explicit embed capability accepted", func(t *testing.T) {
+		good := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "embedding", "capabilities": ["embed"]}},
+			"defaults": {}
+		}`)
+		if _, err := Load(good); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("dense type with carved-down capabilities accepted", func(t *testing.T) {
+		good := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "dense", "capabilities": ["chat", "stream"]}},
+			"defaults": {}
+		}`)
+		if _, err := Load(good); err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	// User config rejects multi-bit aliases: the REPLACES contract on
+	// override would otherwise leak expanded bits the user excluded.
+	// Catalog/runtime metadata sources may still use them; user config
+	// must declare canonical single-bit names only.
+	t.Run("multi-bit aliases rejected in user config", func(t *testing.T) {
+		for _, alias := range []string{"completion", "tools", "embedding"} {
+			bad := writeTempJSON(t, `{
+				"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+				"models": {"m": {"name": "x", "type": "dense", "capabilities": ["`+alias+`"]}},
+				"defaults": {}
+			}`)
+			_, err := Load(bad)
+			if err == nil {
+				t.Errorf("expected error for alias %q in user config, got nil", alias)
+			}
+		}
+	})
+
+	// JSON-source casing must not produce silent disagreement between
+	// config validation and provider parsing. Both lowercase before lookup.
+	t.Run("mixed-case capability tokens accepted", func(t *testing.T) {
+		good := writeTempJSON(t, `{
+			"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+			"models": {"m": {"name": "x", "type": "dense", "capabilities": ["Chat", "STREAM"]}},
+			"defaults": {}
+		}`)
+		if _, err := Load(good); err != nil {
+			t.Fatalf("unexpected error for mixed-case tokens: %v", err)
+		}
+	})
+}
+
+func TestLoad_APIFormatValidation(t *testing.T) {
+	// Unknown explicit api_format must be rejected at load time so typos
+	// surface immediately instead of silently defaulting.
+	bad := writeTempJSON(t, `{
+		"providers": {"ollama": {"base_url": "http://localhost:11434", "api_format": "ollma"}},
+		"models": {"m": {"name": "x", "type": "dense"}},
+		"defaults": {}
+	}`)
+	_, err := Load(bad)
+	if err == nil {
+		t.Fatal("expected error for unknown api_format, got nil")
+	}
+	if !strings.Contains(err.Error(), "api_format") || !strings.Contains(err.Error(), "ollma") {
+		t.Errorf("error should mention api_format and the bad value, got: %v", err)
 	}
 }
 
@@ -404,8 +704,10 @@ func TestProviderFor(t *testing.T) {
 		t.Error("expected ProviderFor(\"nonexistent\") to be nil")
 	}
 
-	// ProviderFor defaults to "ollama" for programmatically constructed configs
-	// where the Provider field was never materialized by Load.
+	// Programmatic Config with empty Provider returns nil rather than
+	// silently defaulting to "ollama" — mirrors the resolveRole contract.
+	// applyDefaults (run by Load) materializes the default; callers that
+	// bypass Load must set Provider explicitly.
 	manualCfg := &Config{
 		Providers: map[string]ProviderConfig{
 			"ollama": {BaseURL: "http://manual:11434"},
@@ -414,12 +716,28 @@ func TestProviderFor(t *testing.T) {
 			"test": {Name: "m", Type: "dense"}, // no Provider set
 		},
 	}
-	mp := manualCfg.ProviderFor("test")
-	if mp == nil {
-		t.Fatal("expected ProviderFor to default to ollama for empty Provider field")
+	if mp := manualCfg.ProviderFor("test"); mp != nil {
+		t.Errorf("ProviderFor with empty Provider must return nil, got %+v", mp)
 	}
-	if mp.BaseURL != "http://manual:11434" {
-		t.Errorf("BaseURL = %q, want %q", mp.BaseURL, "http://manual:11434")
+
+	// Programmatic Config with explicit Provider works as expected.
+	// APIFormat must flow through unchanged so downstream callers that
+	// branch on it (e.g. provider construction picking ollama vs
+	// openai-compat) see the same value the config declared.
+	explicit := &Config{
+		Providers: map[string]ProviderConfig{
+			"my-instance": {BaseURL: "http://manual:11434", APIFormat: "openai-compat"},
+		},
+		Models: map[string]ModelConfig{
+			"test": {Name: "m", Type: "dense", Provider: "my-instance"},
+		},
+	}
+	ep := explicit.ProviderFor("test")
+	if ep == nil || ep.BaseURL != "http://manual:11434" {
+		t.Errorf("ProviderFor with explicit Provider should return the named instance, got %+v", ep)
+	}
+	if ep != nil && ep.APIFormat != "openai-compat" {
+		t.Errorf("ProviderFor APIFormat = %q, want %q (must flow through resolved ProviderConfig)", ep.APIFormat, "openai-compat")
 	}
 }
 

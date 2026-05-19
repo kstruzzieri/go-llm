@@ -27,6 +27,201 @@ func TestOllamaProvider_Name(t *testing.T) {
 	}
 }
 
+func TestOllamaProvider_WithProviderName(t *testing.T) {
+	t.Run("override applied", func(t *testing.T) {
+		c := ollama.NewClient()
+		p := NewOllamaProvider(c, WithProviderName("shared-ollama-vm"))
+		if got := p.Name(); got != "shared-ollama-vm" {
+			t.Errorf("Name() = %q, want %q", got, "shared-ollama-vm")
+		}
+	})
+
+	t.Run("default preserved when option omitted", func(t *testing.T) {
+		c := ollama.NewClient()
+		p := NewOllamaProvider(c)
+		if got := p.Name(); got != "ollama" {
+			t.Errorf("Name() = %q, want %q", got, "ollama")
+		}
+	})
+
+	// Fail-fast on empty: silent ignore would let a misconfigured factory
+	// produce a provider whose Registry.Register later fails with a less
+	// actionable error.
+	t.Run("empty name panics", func(t *testing.T) {
+		defer func() {
+			r := recover()
+			if r == nil {
+				t.Fatal("expected panic on empty name, got nil")
+			}
+			msg, ok := r.(string)
+			if !ok {
+				t.Fatalf("expected string panic value, got %T: %v", r, r)
+			}
+			if !strings.Contains(msg, "WithProviderName") || !strings.Contains(msg, "empty") {
+				t.Errorf("panic message should explain the misuse, got: %q", msg)
+			}
+		}()
+		_ = WithProviderName("")
+	})
+}
+
+// TestOllamaProvider_ResponseProviderField verifies the configured instance
+// name is stamped on every response variant, not just Name(). This matters
+// because RouteOutcome attribution and downstream RAG vsid synthesis read
+// the response's Provider field, not a separate registry lookup.
+func TestOllamaProvider_ResponseProviderField(t *testing.T) {
+	const instance = "my-llama-instance"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/chat":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"model":   "qwen3:8b",
+				"message": map[string]string{"role": "assistant", "content": "hi"},
+				"done":    true,
+			})
+		case "/api/embed":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"embeddings": [][]float64{{0.1, 0.2}},
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c, WithProviderName(instance))
+
+	chatResp, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if chatResp.Provider != instance {
+		t.Errorf("Chat response Provider = %q, want %q", chatResp.Provider, instance)
+	}
+
+	embResp, err := p.Embed(context.Background(), EmbedRequest{
+		Model: "qwen3-embedding:8b",
+		Input: []string{"text"},
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if embResp.Provider != instance {
+		t.Errorf("Embed response Provider = %q, want %q", embResp.Provider, instance)
+	}
+}
+
+// TestOllamaProvider_ResponseProviderField_AllPaths covers the response.Provider
+// stamping on the paths the basic ResponseProviderField test misses: Generate
+// (non-streaming), GenerateStream, and ChatStream. All four call sites in
+// ChatStream are exercised by streaming a content chunk followed by a done.
+func TestOllamaProvider_ResponseProviderField_AllPaths(t *testing.T) {
+	const instance = "my-renamed-instance"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/generate":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			// Single non-streaming response if Stream is false; ndjson stream otherwise.
+			// The ollama client distinguishes via the request payload; emit a
+			// streaming sequence either way and let the parser dispatch.
+			enc := json.NewEncoder(w)
+			_ = enc.Encode(map[string]any{"model": "qwen3:8b", "response": "hel", "done": false})
+			_ = enc.Encode(map[string]any{"model": "qwen3:8b", "response": "lo", "done": true, "eval_count": 2})
+		case "/api/chat":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			enc := json.NewEncoder(w)
+			_ = enc.Encode(map[string]any{
+				"model":   "qwen3:8b",
+				"message": map[string]string{"role": "assistant", "content": "hello"},
+				"done":    false,
+			})
+			_ = enc.Encode(map[string]any{
+				"model":   "qwen3:8b",
+				"message": map[string]string{"role": "assistant", "content": ""},
+				"done":    true,
+			})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c, WithProviderName(instance))
+
+	// Generate (non-streaming)
+	t.Run("Generate", func(t *testing.T) {
+		resp, err := p.Generate(context.Background(), GenerateRequest{
+			Model:  "qwen3:8b",
+			Prompt: "say hi",
+		})
+		if err != nil {
+			t.Fatalf("Generate: %v", err)
+		}
+		if resp.Provider != instance {
+			t.Errorf("Provider = %q, want %q", resp.Provider, instance)
+		}
+	})
+
+	// GenerateStream
+	t.Run("GenerateStream", func(t *testing.T) {
+		var providers []string
+		err := p.GenerateStream(context.Background(), GenerateRequest{
+			Model:  "qwen3:8b",
+			Prompt: "say hi",
+			Stream: true,
+		}, func(resp GenerateResponse) error {
+			providers = append(providers, resp.Provider)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("GenerateStream: %v", err)
+		}
+		if len(providers) == 0 {
+			t.Fatal("no chunks received")
+		}
+		for i, got := range providers {
+			if got != instance {
+				t.Errorf("chunk %d Provider = %q, want %q", i, got, instance)
+			}
+		}
+	})
+
+	// ChatStream emits multiple response shapes (thinking, content, done,
+	// tool calls, partial-on-cancel). Provider must be the configured name
+	// for every one of them.
+	t.Run("ChatStream", func(t *testing.T) {
+		var providers []string
+		err := p.ChatStream(context.Background(), ChatRequest{
+			Model:    "qwen3:8b",
+			Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+			Stream:   true,
+		}, func(resp ChatResponse) error {
+			providers = append(providers, resp.Provider)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("ChatStream: %v", err)
+		}
+		if len(providers) == 0 {
+			t.Fatal("no chunks received")
+		}
+		for i, got := range providers {
+			if got != instance {
+				t.Errorf("chunk %d Provider = %q, want %q", i, got, instance)
+			}
+		}
+	})
+}
+
 func TestOllamaProvider_Capabilities(t *testing.T) {
 	c := ollama.NewClient()
 	p := NewOllamaProvider(c)

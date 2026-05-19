@@ -39,6 +39,9 @@ func TestResolve_PrimaryAvailable(t *testing.T) {
 	if got.Role != "general" {
 		t.Errorf("Role = %q, want %q", got.Role, "general")
 	}
+	if got.Provider != "ollama" {
+		t.Errorf("Provider = %q, want %q", got.Provider, "ollama")
+	}
 	if got.IsFallback {
 		t.Error("IsFallback = true, want false")
 	}
@@ -58,6 +61,76 @@ func TestResolve_FallbackUsed(t *testing.T) {
 	}
 	if got.Role != "lightweight" {
 		t.Errorf("Role = %q, want %q", got.Role, "lightweight")
+	}
+	if got.Provider != "ollama" {
+		t.Errorf("Provider = %q, want %q", got.Provider, "ollama")
+	}
+	if !got.IsFallback {
+		t.Error("IsFallback = false, want true")
+	}
+}
+
+// TestResolve_EmptyProviderErrors verifies the resolver surfaces an empty
+// Provider as a real config error rather than silently inserting "ollama".
+// Empty Provider is only reachable on Configs constructed programmatically
+// without going through Load+applyDefaults; lying about the owner would
+// route downstream calls to a provider the caller never declared.
+func TestResolve_EmptyProviderErrors(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"ollama": {BaseURL: "http://localhost:11434"},
+		},
+		Models: map[string]ModelConfig{
+			"chat-role": {Name: "some-model", Type: "dense"}, // Provider intentionally empty
+		},
+		Defaults: map[string]string{"chat": "chat-role"},
+	}
+	checker := &mockChecker{models: []string{"some-model"}}
+
+	_, err := cfg.Resolve(context.Background(), checker, "chat")
+	if err == nil {
+		t.Fatal("expected error for empty Provider, got nil")
+	}
+	if !strings.Contains(err.Error(), "empty provider") {
+		t.Errorf("error should mention empty provider, got: %v", err)
+	}
+}
+
+// TestResolve_FallbackCrossProvider verifies the resolved Provider tracks
+// the fallback's owner, not the originally-requested one. Per design:
+// requested role "coding"/provider "local-a" falling back to role "fast"/
+// provider "local-b" must yield Provider="local-b".
+func TestResolve_FallbackCrossProvider(t *testing.T) {
+	crossProvider := writeTempJSON(t, `{
+		"providers": {
+			"local-a": {"base_url": "http://localhost:11434"},
+			"local-b": {"base_url": "http://localhost:8080", "api_format": "openai-compat"}
+		},
+		"models": {
+			"primary":  {"name": "model-a", "provider": "local-a", "type": "dense", "fallbacks": ["backup"]},
+			"backup":   {"name": "model-b", "provider": "local-b", "type": "dense"}
+		},
+		"defaults": {"chat": "primary"}
+	}`)
+	cfg, err := Load(crossProvider)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	// Only the backup model is available, forcing fallback.
+	checker := &mockChecker{models: []string{"model-b"}}
+
+	got, err := cfg.Resolve(context.Background(), checker, "chat")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if got.Name != "model-b" {
+		t.Errorf("Name = %q, want %q", got.Name, "model-b")
+	}
+	if got.Role != "backup" {
+		t.Errorf("Role = %q, want %q", got.Role, "backup")
+	}
+	if got.Provider != "local-b" {
+		t.Errorf("Provider = %q, want %q (must track resolved owner, not requested)", got.Provider, "local-b")
 	}
 	if !got.IsFallback {
 		t.Error("IsFallback = false, want true")
@@ -202,10 +275,10 @@ func TestResolveAll_NoneAvailable(t *testing.T) {
 func TestResolve_DiamondFallbackGraph(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a", Fallbacks: []string{"b", "c"}},
-			"b": {Name: "model-b", Fallbacks: []string{"d"}},
-			"c": {Name: "model-c", Fallbacks: []string{"d"}},
-			"d": {Name: "model-d"},
+			"a": {Name: "model-a", Provider: "ollama", Fallbacks: []string{"b", "c"}},
+			"b": {Name: "model-b", Provider: "ollama", Fallbacks: []string{"d"}},
+			"c": {Name: "model-c", Provider: "ollama", Fallbacks: []string{"d"}},
+			"d": {Name: "model-d", Provider: "ollama"},
 		},
 		Defaults: map[string]string{
 			"test": "a",
@@ -232,8 +305,8 @@ func TestResolve_DiamondFallbackGraph(t *testing.T) {
 func TestResolve_CircularFallbackTerminates(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a", Fallbacks: []string{"b"}},
-			"b": {Name: "model-b", Fallbacks: []string{"a"}}, // cycle: a → b → a
+			"a": {Name: "model-a", Provider: "ollama", Fallbacks: []string{"b"}},
+			"b": {Name: "model-b", Provider: "ollama", Fallbacks: []string{"a"}}, // cycle: a → b → a
 		},
 		Defaults: map[string]string{
 			"test": "a",

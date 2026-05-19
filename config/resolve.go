@@ -13,9 +13,15 @@ type ModelChecker interface {
 }
 
 // ResolvedModel is the result of resolving a role to an available model.
+// Provider tracks the provider instance that owns the actually-resolved model,
+// including the fallback case — if role "coding" on provider "local-a" falls
+// back to role "fast" on provider "local-b", Provider is "local-b". The
+// originally-requested provider/role belongs in chain metadata or route
+// outcome planning, not here.
 type ResolvedModel struct {
 	Name       string // the model name that was selected
 	Role       string // the role of the resolved model (may differ from requested role if fallback)
+	Provider   string // the provider instance owning the resolved model
 	IsFallback bool   // true if the primary model wasn't available
 }
 
@@ -99,9 +105,19 @@ func (c *Config) resolveRole(role string, available map[string]bool, onStack map
 		return ResolvedModel{}, fmt.Errorf("config: unknown role %q", role)
 	}
 
+	// Load+applyDefaults guarantees a non-empty Provider for every model.
+	// Reaching this with an empty Provider means the caller constructed
+	// Config programmatically and skipped Load — silently inserting
+	// "ollama" here would lie to downstream consumers about which provider
+	// instance owns the model. Surface it as a real configuration error
+	// pointing the caller at the exported APIs they should use instead.
+	if m.Provider == "" {
+		return ResolvedModel{}, fmt.Errorf("config: role %q has empty provider; use config.Load to materialize defaults or set ModelConfig.Provider explicitly", role)
+	}
+
 	// Try primary model.
 	if available[m.Name] {
-		return ResolvedModel{Name: m.Name, Role: role, IsFallback: false}, nil
+		return ResolvedModel{Name: m.Name, Role: role, Provider: m.Provider, IsFallback: false}, nil
 	}
 
 	// Walk fallback chain: try each fallback role (and transitively its own fallbacks).
