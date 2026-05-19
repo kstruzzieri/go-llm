@@ -536,7 +536,13 @@ func TestProvider_ChatStream_DeliversChunksThenDone(t *testing.T) {
 	}
 }
 
-func TestProvider_ChatStream_ToolCallDelta_Emitted(t *testing.T) {
+// TestProvider_ChatStream_SingleToolCall_AssembledOnDone verifies the
+// simplest tool-call streaming shape: one delta carrying a complete call,
+// followed by a finish delta. The call must appear on the Done chunk
+// (not on the opening delta — the accumulator deliberately suppresses
+// per-delta tool-call emission so consumers see one authoritative
+// payload, matching OpenAI streaming semantics).
+func TestProvider_ChatStream_SingleToolCall_AssembledOnDone(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeSSE(t, w, []chatChunk{
 			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{
@@ -553,18 +559,27 @@ func TestProvider_ChatStream_ToolCallDelta_Emitted(t *testing.T) {
 	defer srv.Close()
 
 	p := NewProvider(NewClient(srv.URL))
-	var sawToolCall bool
+	var (
+		preDoneSeenCall bool
+		doneCall        provider.ToolCall
+	)
 	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
-		if len(r.ToolCalls) > 0 && r.ToolCalls[0].Function.Name == "search" {
-			sawToolCall = true
+		if r.Done && len(r.ToolCalls) > 0 {
+			doneCall = r.ToolCalls[0]
+		}
+		if !r.Done && len(r.ToolCalls) > 0 {
+			preDoneSeenCall = true
 		}
 		return nil
 	})
 	if err != nil {
 		t.Fatalf("ChatStream: %v", err)
 	}
-	if !sawToolCall {
-		t.Error("tool-call delta was not surfaced as a standalone chunk")
+	if preDoneSeenCall {
+		t.Error("tool calls were emitted before Done; the contract is assemble-on-Done so consumers see one authoritative payload")
+	}
+	if doneCall.Function.Name != "search" {
+		t.Errorf("Done chunk missing assembled tool call, got %+v", doneCall)
 	}
 }
 
