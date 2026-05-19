@@ -1010,6 +1010,41 @@ func TestProvider_ChatStream_SSEReadError_ReturnsError(t *testing.T) {
 	}
 }
 
+func TestProvider_ChatStream_DoneWithoutFinishReason_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f := w.(http.Flusher)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", marshalJSON(t, chatChunk{
+			Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{Content: "partial"}}},
+		}))
+		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+		f.Flush()
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var sawContent, sawDone bool
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Content == "partial" {
+			sawContent = true
+		}
+		if r.Done {
+			sawDone = true
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ended before final chunk") {
+		t.Fatalf("expected incomplete stream error, got %v", err)
+	}
+	if !sawContent {
+		t.Fatal("expected content chunk before incomplete stream error")
+	}
+	if sawDone {
+		t.Fatal("must not synthesize a successful Done chunk for [DONE] without finish_reason")
+	}
+}
+
 // TestProvider_ChatStream_EOFMidFrame_PropagatesError covers the
 // connection-reset / abrupt-close failure mode: a server begins writing
 // an SSE frame, flushes a partial "data: " prefix without the closing
@@ -1177,6 +1212,41 @@ func TestProvider_GenerateStream_SSEReadError_ReturnsError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "sse read") {
 		t.Fatalf("expected propagated SSE read error, got %v", err)
+	}
+}
+
+func TestProvider_GenerateStream_DoneWithoutFinishReason_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		f := w.(http.Flusher)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", marshalJSON(t, completionChunk{
+			Model: "m", Choices: []completionChunkChoice{{Text: "partial"}},
+		}))
+		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
+		f.Flush()
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	var sawText, sawDone bool
+	err := p.GenerateStream(context.Background(), provider.GenerateRequest{Model: "m", Prompt: "x"}, func(r provider.GenerateResponse) error {
+		if r.Response == "partial" {
+			sawText = true
+		}
+		if r.Done {
+			sawDone = true
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ended before final chunk") {
+		t.Fatalf("expected incomplete stream error, got %v", err)
+	}
+	if !sawText {
+		t.Fatal("expected text chunk before incomplete stream error")
+	}
+	if sawDone {
+		t.Fatal("must not synthesize a successful Done chunk for [DONE] without finish_reason")
 	}
 }
 

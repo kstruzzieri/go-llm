@@ -339,24 +339,29 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		return callbackErr
 	}
 
-	if ctx.Err() != nil && chunksReceived > 0 && !finished {
-		_ = parser.Flush()
-		model := lastModel
-		if model == "" {
-			model = req.Model
+	if ctx.Err() != nil {
+		if chunksReceived > 0 && !finished {
+			_ = parser.Flush()
+			model := lastModel
+			if model == "" {
+				model = req.Model
+			}
+			_ = fn(provider.ChatResponse{
+				Model:     model,
+				Provider:  p.name,
+				ToolCalls: lastToolCalls,
+				Done:      true,
+				Partial:   true,
+				Usage:     lastUsage,
+			})
 		}
-		_ = fn(provider.ChatResponse{
-			Model:     model,
-			Provider:  p.name,
-			ToolCalls: lastToolCalls,
-			Done:      true,
-			Partial:   true,
-			Usage:     lastUsage,
-		})
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", ctx.Err())
 	}
 	if streamErr != nil {
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", streamErr)
+	}
+	if !finished {
+		return fmt.Errorf("provider: openaicompat: chat stream: ended before final chunk")
 	}
 
 	return nil
@@ -485,22 +490,27 @@ func (p *Provider) GenerateStream(ctx context.Context, req provider.GenerateRequ
 		return callbackErr
 	}
 
-	if ctx.Err() != nil && chunksReceived > 0 && !finished {
-		model := lastModel
-		if model == "" {
-			model = req.Model
+	if ctx.Err() != nil {
+		if chunksReceived > 0 && !finished {
+			model := lastModel
+			if model == "" {
+				model = req.Model
+			}
+			_ = fn(provider.GenerateResponse{
+				Model:    model,
+				Provider: p.name,
+				Done:     true,
+				Partial:  true,
+				Usage:    lastUsage,
+			})
 		}
-		_ = fn(provider.GenerateResponse{
-			Model:    model,
-			Provider: p.name,
-			Done:     true,
-			Partial:  true,
-			Usage:    lastUsage,
-		})
 		return fmt.Errorf("provider: openaicompat: generate stream: %w", ctx.Err())
 	}
 	if streamErr != nil {
 		return fmt.Errorf("provider: openaicompat: generate stream: %w", streamErr)
+	}
+	if !finished {
+		return fmt.Errorf("provider: openaicompat: generate stream: ended before final chunk")
 	}
 
 	return nil
