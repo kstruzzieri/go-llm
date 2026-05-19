@@ -372,6 +372,49 @@ func TestProvider_Chat_RequestBodyShape(t *testing.T) {
 	}
 }
 
+// TestProvider_Chat_RequestBody_OmitsToolCallIndex verifies that the
+// outbound wire does NOT carry an `index` field on tool_calls entries.
+// OpenAI treats index as response-only — strict server-side schema
+// validators (some vLLM and llama.cpp builds) reject requests that
+// include it. The omission is enforced by toWireToolCalls deliberately
+// not copying Function.Index and by chatToolCall.Index using
+// `*int` + omitempty. A regression that starts sending `"index":0` on
+// every request would break those servers silently; this test pins
+// the contract.
+func TestProvider_Chat_RequestBody_OmitsToolCallIndex(t *testing.T) {
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rawBody, _ = io.ReadAll(r.Body)
+		_ = json.NewEncoder(w).Encode(chatResponse{
+			Choices: []chatChoice{{Message: chatMessage{Content: "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	_, err := p.Chat(context.Background(), provider.ChatRequest{
+		Model: "m",
+		Messages: []provider.ChatMessage{{
+			Role: "assistant",
+			ToolCalls: []provider.ToolCall{{
+				ID:   "call_1",
+				Type: "function",
+				Function: provider.ToolCallFunction{
+					Index:     3, // non-zero on purpose — caller might have it set
+					Name:      "search",
+					Arguments: json.RawMessage(`{"q":"go"}`),
+				},
+			}},
+		}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if strings.Contains(string(rawBody), `"index"`) {
+		t.Errorf("outbound body must not include tool_call index field, body was: %s", string(rawBody))
+	}
+}
+
 func TestProvider_Chat_RequestBody_ToolCallArgumentsEncodedAsString(t *testing.T) {
 	var captured chatRequest
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -964,6 +1007,55 @@ func TestProvider_ChatStream_SSEReadError_ReturnsError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "sse read") {
 		t.Fatalf("expected propagated SSE read error, got %v", err)
+	}
+}
+
+// TestProvider_ChatStream_EOFMidFrame_PropagatesError covers the
+// connection-reset / abrupt-close failure mode: a server begins writing
+// an SSE frame, flushes a partial "data: " prefix without the closing
+// blank line, then closes the connection. The reader must surface this
+// as a stream error rather than silently terminating via errStreamDone,
+// otherwise consumers would see "success with no Done chunk" and not
+// know to retry. Distinct from cancel-mid-stream (which has its own
+// chunksReceived > 0 + partial-emission path) because here NO complete
+// chunk was ever delivered.
+func TestProvider_ChatStream_EOFMidFrame_PropagatesError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("response writer does not flush")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		// Partial frame: prefix only, no closing blank line, then close.
+		_, _ = fmt.Fprint(w, "data: {\"id\":\"chunk-")
+		flusher.Flush()
+		// Hijack to slam the connection shut so the client sees an
+		// unterminated frame, not a clean [DONE]. httptest's default
+		// behavior on handler return is to close cleanly which surfaces
+		// as scanner.Err == nil. Hijacking guarantees an abrupt close.
+		if hj, hjOK := w.(http.Hijacker); hjOK {
+			conn, _, _ := hj.Hijack()
+			if conn != nil {
+				_ = conn.Close()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(provider.ChatResponse) error {
+		t.Fatal("callback must not fire — no complete chunk was delivered")
+		return nil
+	})
+	if err == nil {
+		t.Fatal("expected error from mid-frame EOF, got nil")
+	}
+	// Either bufio detects the truncation (sse read err) or the http
+	// client surfaces the connection close — both are valid surfacing
+	// paths; the contract is "do not silently succeed".
+	if !strings.Contains(err.Error(), "chat stream") {
+		t.Errorf("error should be wrapped with chat-stream context, got: %v", err)
 	}
 }
 
