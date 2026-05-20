@@ -188,14 +188,19 @@ func TestRecordChainLookupFailure_EmptyProviderSelectorIsNoOp(t *testing.T) {
 }
 
 // TestStickyKey_IncludesProvider verifies that two provider-scoped requests
-// with the same affinity/model/use-case get distinct sticky slots. Candidate
-// filtering prevents wrong routing either way, but without Provider in the
+// with the same affinity/model/use-case get distinct sticky slots, AND that
+// each slot's cached provider matches what the request pinned. Candidate
+// filtering alone prevents wrong routing, but without Provider in the
 // sticky key these requests churn the same sticky cache entry and lose
-// per-provider affinity.
+// per-provider affinity. Asserting both providers appear (not just that
+// the count is 2) catches the case where StickyKey starts separating
+// entries by something OTHER than Provider — a future regression that a
+// count-only check would miss.
 func TestStickyKey_IncludesProvider(t *testing.T) {
 	router, _, _ := setupTwoProviderRouter(t)
 
-	for _, providerName := range []string{"ollama-a", "ollama-b"} {
+	want := []string{"ollama-a", "ollama-b"}
+	for _, providerName := range want {
 		_, err := router.Route(context.Background(), RoutingRequest{
 			Model:        "qwen3:8b",
 			Provider:     providerName,
@@ -208,8 +213,19 @@ func TestStickyKey_IncludesProvider(t *testing.T) {
 		}
 	}
 
-	if got := len(router.StickyRoutes()); got != 2 {
+	routes := router.StickyRoutes()
+	if got := len(routes); got != 2 {
 		t.Fatalf("sticky route count = %d, want 2 provider-scoped entries", got)
+	}
+
+	seen := make(map[string]int, len(want))
+	for _, info := range routes {
+		seen[info.Key.Provider]++
+	}
+	for _, name := range want {
+		if seen[name] != 1 {
+			t.Errorf("sticky entry for provider %q: observed %d, want 1", name, seen[name])
+		}
 	}
 }
 

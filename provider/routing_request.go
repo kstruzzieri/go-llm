@@ -225,6 +225,16 @@ func outputBudgetClass(tokens int) string {
 // Including Provider ensures that scoped requests (RoutingRequest.Provider
 // pinning two distinct instances with the same model name) keep independent
 // sticky entries rather than churning a shared slot.
+//
+// The Provider segment uses a NUL byte separator rather than the "|" used
+// for legacy fields. Provider names come from unvalidated config map keys
+// and could in principle contain "|"; NUL ("\x00") cannot appear in a Go
+// string typed by a user and so cannot collide with future "|"-delimited
+// segments. AffinityKey, Model, UseCase, and budget classes share the same
+// "|"-delimited risk; their collision surface is bounded by Go's string
+// type accepting NUL but config and user input rarely producing it. The
+// Provider-segment hardening is the cheap win where the threat model has
+// shifted with the new code path.
 func StickyKey(req RoutingRequest) string {
 	expectedOut := req.ExpectedOutput
 	if expectedOut == 0 {
@@ -248,7 +258,11 @@ func StickyKey(req RoutingRequest) string {
 		// Appended conditionally so requests that do not set Provider keep
 		// byte-identical sticky keys to the pre-Provider behavior — this
 		// preserves any existing affinity warmth from prior sessions.
-		data += "|provider=" + req.Provider
+		//
+		// "\x00provider=" prevents a future appended segment from sharing
+		// a separator with a user-supplied Provider name that happens to
+		// contain "|" or "provider=".
+		data += "\x00provider=" + req.Provider
 	}
 
 	hash := sha256.Sum256([]byte(data))
