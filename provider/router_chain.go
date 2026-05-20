@@ -172,6 +172,14 @@ func (r *Router) recordChainLookupFailure(selector string, err error) {
 	if !ok {
 		return
 	}
+	// Guard against selectors like "/qwen3:8b" where parseModelSelector
+	// succeeds but the provider half is empty. Without this we would
+	// create and persist a breaker named "" in the breakers map — a
+	// phantom entry that surfaces in observability dumps and that no
+	// legitimate route could ever match.
+	if key.Provider == "" {
+		return
+	}
 	cb := r.getOrCreateBreaker(key.Provider)
 	cb.RecordFailure(err)
 }

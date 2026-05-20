@@ -167,6 +167,26 @@ func TestRoute_QualifiedModel_MatchingProviderAccepted(t *testing.T) {
 	}
 }
 
+// TestRecordChainLookupFailure_EmptyProviderSelectorIsNoOp verifies that a
+// malformed chain selector like "/qwen3:8b" — where parseModelSelector
+// succeeds but the provider half is empty — does NOT create a phantom
+// breaker named "" in the breakers map. The infrastructure-error path
+// that would reach this guard is not currently triggered by chain routing
+// (Registry.Register rejects providers with empty names, so Resolve always
+// returns a non-infrastructure "not found" error for empty Provider), but
+// the guard documents the invariant "no breakers keyed by empty strings"
+// and prevents a regression if the upstream error-classification changes.
+func TestRecordChainLookupFailure_EmptyProviderSelectorIsNoOp(t *testing.T) {
+	router, _, _ := setupTwoProviderRouter(t)
+
+	infra := &HTTPStatusError{StatusCode: 503, Status: "503 Service Unavailable"}
+	router.recordChainLookupFailure("/qwen3:8b", infra)
+
+	if _, ok := router.BreakerInfo(""); ok {
+		t.Errorf("phantom breaker created for empty provider name; want no entry")
+	}
+}
+
 // TestStickyKey_IncludesProvider verifies that two provider-scoped requests
 // with the same affinity/model/use-case get distinct sticky slots. Candidate
 // filtering prevents wrong routing either way, but without Provider in the
