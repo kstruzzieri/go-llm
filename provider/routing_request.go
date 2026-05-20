@@ -218,7 +218,10 @@ func outputBudgetClass(tokens int) string {
 // session affinity and cache reuse.
 //
 // The key is derived from: affinity_key, model, use_case, required_caps,
-// priority, input budget class, and output budget class.
+// priority, input budget class, output budget class, and Provider when set.
+// Including Provider ensures that scoped requests (RoutingRequest.Provider
+// pinning two distinct instances with the same model name) keep independent
+// sticky entries rather than churning a shared slot.
 func StickyKey(req RoutingRequest) string {
 	expectedOut := req.ExpectedOutput
 	if expectedOut == 0 {
@@ -238,6 +241,12 @@ func StickyKey(req RoutingRequest) string {
 		inClass,
 		outClass,
 	)
+	if req.Provider != "" {
+		// Appended conditionally so requests that do not set Provider keep
+		// byte-identical sticky keys to the pre-Provider behavior — this
+		// preserves any existing affinity warmth from prior sessions.
+		data += "|provider=" + req.Provider
+	}
 
 	hash := sha256.Sum256([]byte(data))
 	// Return first 128 bits (16 bytes) as hex.
