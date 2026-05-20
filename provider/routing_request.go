@@ -125,6 +125,32 @@ type RoutingRequest struct {
 	// the chain-first router otherwise appends when every chain entry is
 	// gated out. Has no effect when PreferredChain is empty.
 	StrictChain bool
+	// Provider scopes routing to a specific provider *instance* (the
+	// config-time name, e.g. "ollama-local-a", "vllm-prod-1"), enforced as
+	// a hard pre-score filter rather than a scoring boost:
+	//
+	//   Model == "" && Provider != ""        → Recommend is restricted to
+	//                                           profiles owned by Provider.
+	//   unqualified Model && Provider != ""  → Lookup uses ModelKey{Provider,
+	//                                           Model} directly.
+	//   qualified Model && Provider == ""    → unchanged (current behavior).
+	//   qualified Model && Provider != ""    → must agree with the qualified
+	//                                           prefix; mismatch returns
+	//                                           ErrProviderMismatch from
+	//                                           Router.Route before candidate
+	//                                           resolution.
+	//
+	// When PreferredChain is non-empty, Provider is IGNORED: chain selectors
+	// carry their own provider identity and authoritative ordering, and the
+	// chain-first path (including its non-strict Recommend tail) must not be
+	// silently scope-narrowed by a per-request hint. This matches the
+	// "invariants enforced inside Router, not via caller convention" pattern
+	// from feedback_invariants_at_provider.
+	//
+	// Provider also participates in StickyKey derivation so two scoped
+	// requests with identical affinity/model/use-case keep independent
+	// sticky entries (scoping by Provider implies separate affinity slots).
+	Provider string
 	// DryRun, when true, returns the routing decision without executing the request.
 	DryRun bool
 }
