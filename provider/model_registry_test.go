@@ -1459,8 +1459,8 @@ func TestModelRegistry_OverrideRejectionHook_FiresOnNonCanonicalToken(t *testing
 		err    error
 	}
 	var (
-		mu          sync.Mutex
-		rejections  []rejection
+		mu         sync.Mutex
+		rejections []rejection
 	)
 	mr.SetOverrideRejectionHook(func(k ModelKey, tokens []string, err error) {
 		mu.Lock()
@@ -1919,13 +1919,13 @@ func TestModelRegistry_CapabilityOverride_NilSkipped(t *testing.T) {
 // empty candidate set.
 func TestRecommend_RestrictToProvider(t *testing.T) {
 	provA := &mrMockProvider{
-		name: "ollama-a",
-		caps: CapChat | CapGenerate,
+		name:   "ollama-a",
+		caps:   CapChat | CapGenerate,
 		models: []ModelInfo{{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion"}}},
 	}
 	provB := &mrMockProvider{
-		name: "ollama-b",
-		caps: CapChat | CapGenerate,
+		name:   "ollama-b",
+		caps:   CapChat | CapGenerate,
 		models: []ModelInfo{{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion"}}},
 	}
 

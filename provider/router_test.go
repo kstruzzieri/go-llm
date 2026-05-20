@@ -37,8 +37,8 @@ type rtMockProvider struct {
 	lastEmbedReq EmbedRequest
 }
 
-func (m *rtMockProvider) Name() string             { return m.name }
-func (m *rtMockProvider) Capabilities() Capability { return m.caps }
+func (m *rtMockProvider) Name() string                   { return m.name }
+func (m *rtMockProvider) Capabilities() Capability       { return m.caps }
 func (m *rtMockProvider) Health(_ context.Context) error { return m.healthErr }
 func (m *rtMockProvider) Models(_ context.Context) ([]ModelInfo, error) {
 	return m.models, nil
