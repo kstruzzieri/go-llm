@@ -324,6 +324,108 @@ func TestEmbed_ProviderForwarded(t *testing.T) {
 	}
 }
 
+// TestRoute_ProviderMatrix is the table-driven contract test consolidating
+// every (Model × Provider × PreferredChain) combination Router.Route must
+// honor. New scoping cases land here, not in scattered tests.
+func TestRoute_ProviderMatrix(t *testing.T) {
+	cases := []struct {
+		name        string
+		model       string
+		provider    string
+		chain       []string
+		wantProv    string
+		wantErrSent error // nil for success, otherwise errors.Is target
+	}{
+		{
+			name:     "empty_model_empty_provider_picks_any",
+			model:    "",
+			provider: "",
+			wantProv: "", // either; assert via err==nil only
+		},
+		{
+			name:     "empty_model_provider_set_scopes_recommend",
+			model:    "",
+			provider: "ollama-b",
+			wantProv: "ollama-b",
+		},
+		{
+			name:     "unqualified_model_empty_provider_lookupany",
+			model:    "qwen3:8b",
+			provider: "",
+			wantProv: "", // either; assert via err==nil only
+		},
+		{
+			name:     "unqualified_model_provider_set_pins_lookup",
+			model:    "qwen3:8b",
+			provider: "ollama-a",
+			wantProv: "ollama-a",
+		},
+		{
+			name:     "qualified_model_empty_provider_unchanged",
+			model:    "ollama-b/qwen3:8b",
+			provider: "",
+			wantProv: "ollama-b",
+		},
+		{
+			name:     "qualified_model_matching_provider_accepted",
+			model:    "ollama-a/qwen3:8b",
+			provider: "ollama-a",
+			wantProv: "ollama-a",
+		},
+		{
+			name:        "qualified_model_conflicting_provider_rejected",
+			model:       "ollama-a/qwen3:8b",
+			provider:    "ollama-b",
+			wantErrSent: ErrProviderMismatch,
+		},
+		{
+			name:     "chain_set_provider_ignored_no_conflict_error",
+			model:    "ollama-a/qwen3:8b",
+			provider: "ollama-b",
+			chain:    []string{"ollama-a/qwen3:8b"},
+			wantProv: "ollama-a",
+		},
+		{
+			name:     "chain_set_empty_model_provider_still_ignored",
+			model:    "",
+			provider: "ollama-b",
+			chain:    []string{"ollama-a/qwen3:8b"},
+			wantProv: "ollama-a",
+		},
+		{
+			name:     "chain_recommend_tail_ignores_provider",
+			model:    "",
+			provider: "nonexistent",
+			chain:    []string{"missing/qwen3:8b"},
+			wantProv: "ollama-a", // non-strict tail is unrestricted by Provider
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			router, _, _ := setupTwoProviderRouter(t)
+			plan, err := router.Route(context.Background(), RoutingRequest{
+				Model:          tc.model,
+				Provider:       tc.provider,
+				PreferredChain: tc.chain,
+				UseCase:        "chat",
+				RequiredCaps:   CapChat,
+			})
+			if tc.wantErrSent != nil {
+				if !errors.Is(err, tc.wantErrSent) {
+					t.Fatalf("err = %v, want errors.Is(%v)", err, tc.wantErrSent)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Route: %v", err)
+			}
+			if tc.wantProv != "" && plan.Profile.Key.Provider != tc.wantProv {
+				t.Errorf("plan.Profile.Key.Provider = %q, want %q", plan.Profile.Key.Provider, tc.wantProv)
+			}
+		})
+	}
+}
+
 // TestRoutingRequest_ProviderField_Preserved asserts that a RoutingRequest
 // carrying a Provider that matches the qualified Model routes successfully
 // (no error, no behavior change) — the field exists, is wired through, and
