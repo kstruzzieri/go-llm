@@ -83,6 +83,11 @@ model names will observe different models at runtime.**
   keep independent sticky entries. Empty `Provider` produces byte-identical
   keys to pre-change behavior, preserving existing affinity warmth.
 - **JSON wire** — unset `provider` fields are omitted on the wire
-  (`omitempty`). Keyed Go struct literals are additive-compatible.
-  Unkeyed composite literals of the exported request structs would need
-  positional adjustment — none observed in the in-tree consumers.
+  (`omitempty`). Keyed Go struct literals (`provider.ChatRequest{Model: ...,
+  Messages: ...}`) are additive-compatible. Unkeyed composite literals
+  (`provider.ChatRequest{"qwen3:8b", []ChatMessage{...}, ...}`) will fail
+  to compile because positional arguments now shift by one slot; convert
+  to keyed literals (recommended) or insert an explicit empty `Provider`
+  positional value. None of the in-tree consumers (Firn IDE, Flux ML,
+  Quantum Trader call sites observed in this repo) use unkeyed literals
+  for these structs; external consumers should audit their call sites.

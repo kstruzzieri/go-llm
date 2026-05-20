@@ -147,9 +147,12 @@ type RoutingRequest struct {
 	// "invariants enforced inside Router, not via caller convention" pattern
 	// from feedback_invariants_at_provider.
 	//
-	// Provider also participates in StickyKey derivation so two scoped
-	// requests with identical affinity/model/use-case keep independent
-	// sticky entries (scoping by Provider implies separate affinity slots).
+	// Provider participates in StickyKey derivation on the non-chain path
+	// so two scoped requests with identical affinity/model/use-case keep
+	// independent sticky entries (scoping by Provider implies separate
+	// affinity slots). Chain routes are unconditionally non-sticky (see
+	// router_chain.go), so StickyKey is not invoked under PreferredChain
+	// regardless of whether Provider is set.
 	Provider string
 	// DryRun, when true, returns the routing decision without executing the request.
 	DryRun bool
