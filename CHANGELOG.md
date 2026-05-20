@@ -88,6 +88,9 @@ model names will observe different models at runtime.**
   (`provider.ChatRequest{"qwen3:8b", []ChatMessage{...}, ...}`) will fail
   to compile because positional arguments now shift by one slot; convert
   to keyed literals (recommended) or insert an explicit empty `Provider`
-  positional value. None of the in-tree consumers (Firn IDE, Flux ML,
-  Quantum Trader call sites observed in this repo) use unkeyed literals
-  for these structs; external consumers should audit their call sites.
+  positional value. All call sites within this repo (`analysis/*`,
+  `provider/route_plan.go`, `provider/router.go`, etc.) use keyed
+  literals and are unaffected. External consumers — Firn IDE, Flux ML,
+  Quantum Trader — live in separate repos and should audit their own
+  call sites; they will get a compile error rather than silent
+  misbehavior on `go get -u`.
