@@ -13,7 +13,6 @@ import (
 	"errors"
 	"fmt"
 	"math"
-	"strings"
 )
 
 // routeChain is the chain-first counterpart to the global-scoring branch in
@@ -115,9 +114,7 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 // existing ModelRegistry.Lookup / LookupAny paths, mirroring the selector
 // semantics already implemented in Router.resolveCandidates.
 func (r *Router) resolveChainEntry(ctx context.Context, selector string) ([]*ModelProfile, error) {
-	if strings.Contains(selector, "/") {
-		parts := strings.SplitN(selector, "/", 2)
-		key := ModelKey{Provider: parts[0], Model: parts[1]}
+	if key, ok := parseModelSelector(selector); ok {
 		profile, err := r.registry.Lookup(ctx, key)
 		if err != nil {
 			return nil, err
@@ -171,11 +168,11 @@ func (r *Router) recordChainLookupFailure(selector string, err error) {
 	if !IsInfrastructureError(err) {
 		return
 	}
-	if !strings.Contains(selector, "/") {
+	key, ok := parseModelSelector(selector)
+	if !ok {
 		return
 	}
-	parts := strings.SplitN(selector, "/", 2)
-	cb := r.getOrCreateBreaker(parts[0])
+	cb := r.getOrCreateBreaker(key.Provider)
 	cb.RecordFailure(err)
 }
 

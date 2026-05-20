@@ -221,6 +221,20 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	}
 	r.mu.RUnlock()
 
+	// Invariant: when PreferredChain is empty and the caller supplies BOTH
+	// a qualified Model ("provider/model") and a Provider field, the two
+	// must agree on provider identity. Mismatch is a caller-side bug — we
+	// reject loudly with ErrProviderMismatch rather than silently routing
+	// to one or the other. Under PreferredChain the chain selectors are
+	// authoritative and Provider is suppressed; see RoutingRequest.Provider
+	// docs and feedback_invariants_at_provider.
+	if len(req.PreferredChain) == 0 && req.Provider != "" {
+		if key, ok := parseModelSelector(req.Model); ok && key.Provider != req.Provider {
+			return nil, fmt.Errorf("%w: model selector %q conflicts with Provider %q",
+				ErrProviderMismatch, req.Model, req.Provider)
+		}
+	}
+
 	if len(req.PreferredChain) > 0 {
 		return r.routeChain(ctx, req)
 	}
@@ -533,6 +547,18 @@ func (r *Router) WarmthSnapshot() []WarmModel {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+// parseModelSelector parses a "provider/model" string into a ModelKey,
+// returning ok=false when the input is unqualified (no "/" separator).
+// Shared by Router.Route, Router.resolveCandidates, and the chain-routing
+// path so selector semantics cannot drift between them.
+func parseModelSelector(selector string) (ModelKey, bool) {
+	providerName, model, ok := strings.Cut(selector, "/")
+	if !ok {
+		return ModelKey{}, false
+	}
+	return ModelKey{Provider: providerName, Model: model}, true
+}
 
 // resolveCandidates resolves model profiles from the request's Model field.
 //   - Empty model: use Recommend with RequiredCaps and AvailableRAM
