@@ -104,6 +104,69 @@ func TestRoute_PreferredChain_SuppressesProviderFilter(t *testing.T) {
 	}
 }
 
+// TestRoute_EmptyModel_ProviderScopesRecommend verifies that an empty Model
+// with a non-empty Provider restricts the Recommend candidate set to that
+// provider, even when another provider has capable models too.
+func TestRoute_EmptyModel_ProviderScopesRecommend(t *testing.T) {
+	router, _, _ := setupTwoProviderRouter(t)
+
+	plan, err := router.Route(context.Background(), RoutingRequest{
+		UseCase:      "chat",
+		Provider:     "ollama-b",
+		RequiredCaps: CapChat,
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Provider != "ollama-b" {
+		t.Errorf("plan.Profile.Key.Provider = %q, want ollama-b", plan.Profile.Key.Provider)
+	}
+}
+
+// TestRoute_UnqualifiedModel_ProviderResolvesByKey verifies that an
+// unqualified Model with a Provider pins resolution to ModelKey{Provider,
+// Model} via Lookup, bypassing LookupAny's multi-provider scan. Pins
+// ollama-b specifically so it fails clearly before the provider-aware
+// implementation if Lookup-by-key is not used.
+func TestRoute_UnqualifiedModel_ProviderResolvesByKey(t *testing.T) {
+	router, _, _ := setupTwoProviderRouter(t)
+
+	plan, err := router.Route(context.Background(), RoutingRequest{
+		Model:        "qwen3:8b",
+		Provider:     "ollama-b",
+		UseCase:      "chat",
+		RequiredCaps: CapChat,
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Provider != "ollama-b" {
+		t.Errorf("plan.Profile.Key.Provider = %q, want ollama-b", plan.Profile.Key.Provider)
+	}
+	if plan.Model != "qwen3:8b" {
+		t.Errorf("plan.Model = %q, want qwen3:8b", plan.Model)
+	}
+}
+
+// TestRoute_QualifiedModel_MatchingProviderAccepted verifies that a Provider
+// matching the qualified Model prefix is accepted (parity with qualified-only).
+func TestRoute_QualifiedModel_MatchingProviderAccepted(t *testing.T) {
+	router, _, _ := setupTwoProviderRouter(t)
+
+	plan, err := router.Route(context.Background(), RoutingRequest{
+		Model:        "ollama-a/qwen3:8b",
+		Provider:     "ollama-a",
+		UseCase:      "chat",
+		RequiredCaps: CapChat,
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Provider != "ollama-a" {
+		t.Errorf("plan.Profile.Key.Provider = %q, want ollama-a", plan.Profile.Key.Provider)
+	}
+}
+
 // TestRoutingRequest_ProviderField_Preserved asserts that a RoutingRequest
 // carrying a Provider that matches the qualified Model routes successfully
 // (no error, no behavior change) — the field exists, is wired through, and

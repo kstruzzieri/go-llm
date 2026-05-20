@@ -560,22 +560,28 @@ func parseModelSelector(selector string) (ModelKey, bool) {
 	return ModelKey{Provider: providerName, Model: model}, true
 }
 
-// resolveCandidates resolves model profiles from the request's Model field.
-//   - Empty model: use Recommend with RequiredCaps and AvailableRAM
-//   - Contains "/": qualified lookup via ModelRegistry.Lookup
-//   - Otherwise: unqualified lookup via ModelRegistry.LookupAny
+// resolveCandidates resolves model profiles from the request's Model field,
+// optionally scoped by req.Provider to a specific provider instance:
+//   - Empty Model: use Recommend (scoped by Provider when non-empty)
+//   - Qualified Model ("provider/model"): Lookup by ModelKey
+//   - Unqualified Model + Provider set: Lookup by ModelKey{Provider, Model}
+//   - Unqualified Model + Provider empty: LookupAny across all providers
+//
+// The qualified-Model + non-empty Provider conflict case is rejected upstream
+// in Router.Route before this is called; by the time we reach the qualified
+// branch here, either req.Provider is empty or it agrees with the qualified
+// prefix, so we do not need to re-read req.Provider in that branch.
 func (r *Router) resolveCandidates(ctx context.Context, req RoutingRequest) ([]*ModelProfile, error) {
 	if req.Model == "" {
 		return r.registry.Recommend(ctx, RecommendOpts{
-			RequiredCaps: req.RequiredCaps,
-			AvailableRAM: r.availableRAM,
-			PreferWarm:   req.PreferWarm,
+			RequiredCaps:       req.RequiredCaps,
+			AvailableRAM:       r.availableRAM,
+			PreferWarm:         req.PreferWarm,
+			RestrictToProvider: req.Provider, // empty == unrestricted
 		})
 	}
 
-	if strings.Contains(req.Model, "/") {
-		parts := strings.SplitN(req.Model, "/", 2)
-		key := ModelKey{Provider: parts[0], Model: parts[1]}
+	if key, ok := parseModelSelector(req.Model); ok {
 		profile, err := r.registry.Lookup(ctx, key)
 		if err != nil {
 			return nil, err
@@ -583,6 +589,14 @@ func (r *Router) resolveCandidates(ctx context.Context, req RoutingRequest) ([]*
 		return []*ModelProfile{profile}, nil
 	}
 
+	if req.Provider != "" {
+		key := ModelKey{Provider: req.Provider, Model: req.Model}
+		profile, err := r.registry.Lookup(ctx, key)
+		if err != nil {
+			return nil, err
+		}
+		return []*ModelProfile{profile}, nil
+	}
 	return r.registry.LookupAny(ctx, req.Model)
 }
 
