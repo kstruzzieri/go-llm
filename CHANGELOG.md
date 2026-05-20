@@ -55,3 +55,34 @@ model names will observe different models at runtime.**
 
 - Catalog: `qwen3-coder-next` gains a `latest` variant alias kept in
   sync with `80b` (guarded by test).
+
+### Router: provider-instance pinning (#81)
+
+- **`provider.RoutingRequest.Provider`** — new optional `string` field that
+  hard-scopes routing to a specific provider *instance* (the config-time
+  name, e.g. `ollama-local-a`, `vllm-prod-1`). Acts as a pre-score filter:
+  empty `Model` + `Provider` scopes `Recommend`; unqualified `Model` +
+  `Provider` pins `ModelKey{Provider, Model}` via `Lookup`; qualified
+  `Model` (`provider/model`) + non-empty `Provider` must agree on identity
+  or `Router.Route` returns the new `ErrProviderMismatch` sentinel before
+  candidate resolution. `PreferredChain` is authoritative when set —
+  chain selectors carry their own provider identity and the per-request
+  `Provider` hint is ignored under chain routing.
+- **`provider.ChatRequest.Provider`, `GenerateRequest.Provider`,
+  `EmbedRequest.Provider`** — optional `string` fields (`json:"provider,omitempty"`)
+  forwarded by `Router.Chat / ChatStream / Generate / GenerateStream / Embed`
+  into `RoutingRequest.Provider`. Router selection metadata only; not
+  forwarded to the concrete provider's execution call (the provider already
+  knows its own identity).
+- **`provider.RecommendOpts.RestrictToProvider`** — single-string hard
+  filter on the recommendation path. Distinct from the still-unused soft
+  `PreferredProviders`. An unknown provider name surfaces as a provider
+  resolution error rather than degrading to a silent empty result.
+- **Sticky-key derivation** — `RoutingRequest.Provider` participates in
+  `StickyKey` so two scoped requests with identical affinity/model/use-case
+  keep independent sticky entries. Empty `Provider` produces byte-identical
+  keys to pre-change behavior, preserving existing affinity warmth.
+- **JSON wire** — unset `provider` fields are omitted on the wire
+  (`omitempty`). Keyed Go struct literals are additive-compatible.
+  Unkeyed composite literals of the exported request structs would need
+  positional adjustment — none observed in the in-tree consumers.

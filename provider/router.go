@@ -403,6 +403,7 @@ func (r *Router) RecordWarmthUse(key ModelKey) {
 func (r *Router) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, error) {
 	rr := RoutingRequest{
 		Model:    req.Model,
+		Provider: req.Provider,
 		UseCase:  "chat",
 		Messages: req.Messages,
 		Options:  req.Options,
@@ -426,6 +427,7 @@ func (r *Router) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 func (r *Router) ChatStream(ctx context.Context, req ChatRequest, fn func(ChatResponse) error) error {
 	rr := RoutingRequest{
 		Model:    req.Model,
+		Provider: req.Provider,
 		UseCase:  "chat",
 		Messages: req.Messages,
 		Options:  req.Options,
@@ -451,6 +453,7 @@ func (r *Router) ChatStream(ctx context.Context, req ChatRequest, fn func(ChatRe
 func (r *Router) Generate(ctx context.Context, req GenerateRequest) (*GenerateResponse, error) {
 	rr := RoutingRequest{
 		Model:        req.Model,
+		Provider:     req.Provider,
 		UseCase:      "generate",
 		Prompt:       req.Prompt,
 		System:       req.System,
@@ -476,6 +479,7 @@ func (r *Router) Generate(ctx context.Context, req GenerateRequest) (*GenerateRe
 func (r *Router) GenerateStream(ctx context.Context, req GenerateRequest, fn func(GenerateResponse) error) error {
 	rr := RoutingRequest{
 		Model:        req.Model,
+		Provider:     req.Provider,
 		UseCase:      "generate",
 		Prompt:       req.Prompt,
 		System:       req.System,
@@ -501,6 +505,7 @@ func (r *Router) GenerateStream(ctx context.Context, req GenerateRequest, fn fun
 func (r *Router) Embed(ctx context.Context, req EmbedRequest) (*EmbedResponse, error) {
 	rr := RoutingRequest{
 		Model:        req.Model,
+		Provider:     req.Provider,
 		UseCase:      "embedding",
 		Input:        req.Input,
 		RequiredCaps: CapEmbed,

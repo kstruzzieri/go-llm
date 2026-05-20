@@ -17,7 +17,7 @@ func setupTwoProviderRouter(t *testing.T) (*Router, *rtMockProvider, *rtMockProv
 		name: "ollama-a",
 		caps: CapChat | CapGenerate | CapEmbed | CapStream,
 		models: []ModelInfo{
-			{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion"}},
+			{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion", "embedding"}},
 		},
 		chatResp:  &ChatResponse{Model: "qwen3:8b", Content: "from A", Done: true},
 		genResp:   &GenerateResponse{Model: "qwen3:8b", Response: "gen-from-A", Done: true},
@@ -27,7 +27,7 @@ func setupTwoProviderRouter(t *testing.T) (*Router, *rtMockProvider, *rtMockProv
 		name: "ollama-b",
 		caps: CapChat | CapGenerate | CapEmbed | CapStream,
 		models: []ModelInfo{
-			{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion"}},
+			{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion", "embedding"}},
 		},
 		chatResp:  &ChatResponse{Model: "qwen3:8b", Content: "from B", Done: true},
 		genResp:   &GenerateResponse{Model: "qwen3:8b", Response: "gen-from-B", Done: true},
@@ -190,6 +190,137 @@ func TestStickyKey_IncludesProvider(t *testing.T) {
 
 	if got := len(router.StickyRoutes()); got != 2 {
 		t.Fatalf("sticky route count = %d, want 2 provider-scoped entries", got)
+	}
+}
+
+// TestChat_ProviderForwarded verifies that ChatRequest.Provider is forwarded
+// into the routing request so that the Chat convenience method honors the
+// per-request provider pin. Uses two providers with the same model name and
+// asserts the response content matches the pinned provider's mock content
+// AND that Provider was NOT stamped onto the concrete execution request
+// (the provider already knows its identity by the time Chat is called).
+func TestChat_ProviderForwarded(t *testing.T) {
+	router, _, provB := setupTwoProviderRouter(t)
+
+	resp, err := router.Chat(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Provider: "ollama-b",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Content != "from B" {
+		t.Errorf("resp.Content = %q, want %q (provB pinned)", resp.Content, "from B")
+	}
+	if provB.getChatCalls() != 1 {
+		t.Errorf("provB.chatCalls = %d, want 1", provB.getChatCalls())
+	}
+	if got := provB.getLastChatRequest().Provider; got != "" {
+		t.Errorf("executed ChatRequest.Provider = %q, want empty (selection metadata must not be forwarded)", got)
+	}
+}
+
+// TestChatStream_ProviderForwarded mirrors TestChat_ProviderForwarded for
+// the streaming Chat convenience method.
+func TestChatStream_ProviderForwarded(t *testing.T) {
+	router, _, provB := setupTwoProviderRouter(t)
+
+	var got ChatResponse
+	err := router.ChatStream(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Provider: "ollama-b",
+		Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+	}, func(resp ChatResponse) error {
+		got = resp
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if got.Content != "from B" {
+		t.Errorf("stream content = %q, want %q", got.Content, "from B")
+	}
+	if provB.getChatCalls() != 1 {
+		t.Errorf("provB.chatCalls = %d, want 1", provB.getChatCalls())
+	}
+	if got := provB.getLastChatRequest().Provider; got != "" {
+		t.Errorf("executed ChatStream request Provider = %q, want empty", got)
+	}
+}
+
+// TestGenerate_ProviderForwarded mirrors TestChat_ProviderForwarded for
+// the Generate convenience method.
+func TestGenerate_ProviderForwarded(t *testing.T) {
+	router, _, provB := setupTwoProviderRouter(t)
+
+	resp, err := router.Generate(context.Background(), GenerateRequest{
+		Model:    "qwen3:8b",
+		Provider: "ollama-b",
+		Prompt:   "hi",
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if resp.Response != "gen-from-B" {
+		t.Errorf("resp.Response = %q, want %q", resp.Response, "gen-from-B")
+	}
+	if provB.getGenCalls() != 1 {
+		t.Errorf("provB.genCalls = %d, want 1", provB.getGenCalls())
+	}
+	if got := provB.getLastGenerateRequest().Provider; got != "" {
+		t.Errorf("executed GenerateRequest.Provider = %q, want empty (selection metadata must not be forwarded)", got)
+	}
+}
+
+// TestGenerateStream_ProviderForwarded mirrors TestGenerate_ProviderForwarded
+// for the streaming Generate convenience method.
+func TestGenerateStream_ProviderForwarded(t *testing.T) {
+	router, _, provB := setupTwoProviderRouter(t)
+
+	var got GenerateResponse
+	err := router.GenerateStream(context.Background(), GenerateRequest{
+		Model:    "qwen3:8b",
+		Provider: "ollama-b",
+		Prompt:   "hi",
+	}, func(resp GenerateResponse) error {
+		got = resp
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("GenerateStream: %v", err)
+	}
+	if got.Response != "gen-from-B" {
+		t.Errorf("stream response = %q, want %q", got.Response, "gen-from-B")
+	}
+	if provB.getGenCalls() != 1 {
+		t.Errorf("provB.genCalls = %d, want 1", provB.getGenCalls())
+	}
+	if got := provB.getLastGenerateRequest().Provider; got != "" {
+		t.Errorf("executed GenerateStream request Provider = %q, want empty", got)
+	}
+}
+
+// TestEmbed_ProviderForwarded mirrors the others for Embed.
+func TestEmbed_ProviderForwarded(t *testing.T) {
+	router, _, provB := setupTwoProviderRouter(t)
+
+	resp, err := router.Embed(context.Background(), EmbedRequest{
+		Model:    "qwen3:8b",
+		Provider: "ollama-b",
+		Input:    []string{"x"},
+	})
+	if err != nil {
+		t.Fatalf("Embed: %v", err)
+	}
+	if resp.Provider != "ollama-b" {
+		t.Errorf("resp.Provider = %q, want ollama-b", resp.Provider)
+	}
+	if provB.getEmbedCalls() != 1 {
+		t.Errorf("provB.embedCalls = %d, want 1", provB.getEmbedCalls())
+	}
+	if got := provB.getLastEmbedRequest().Provider; got != "" {
+		t.Errorf("executed EmbedRequest.Provider = %q, want empty (selection metadata must not be forwarded)", got)
 	}
 }
 

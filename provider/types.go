@@ -171,8 +171,16 @@ type ToolCallFunction struct {
 }
 
 // ChatRequest is the provider-agnostic request for a chat completion.
+//
+// Provider, when non-empty, pins router selection to a specific provider
+// *instance*. It is router selection metadata only: Router.Chat / ChatStream
+// copy it into RoutingRequest.Provider and do NOT forward it to the
+// concrete provider's execution call (the provider already knows its own
+// identity by the time it is invoked). Empty preserves today's behavior and
+// is omitted from JSON.
 type ChatRequest struct {
 	Model    string        `json:"model"`
+	Provider string        `json:"provider,omitempty"`
 	Messages []ChatMessage `json:"messages"`
 	Options  ModelOptions  `json:"options,omitempty"`
 	Tools    []Tool        `json:"tools,omitempty"`
@@ -198,13 +206,18 @@ type ChatResponse struct {
 // ---------------------------------------------------------------------------
 
 // GenerateRequest is the provider-agnostic request for raw text generation.
+//
+// Provider, when non-empty, pins router selection to a specific provider
+// *instance*. Router selection metadata only — see ChatRequest.Provider for
+// the contract; behavior is identical for Generate / GenerateStream.
 type GenerateRequest struct {
-	Model   string       `json:"model"`
-	Prompt  string       `json:"prompt"`
-	System  string       `json:"system,omitempty"`
-	Suffix  string       `json:"suffix,omitempty"` // presence triggers FIM mode
-	Options ModelOptions `json:"options,omitempty"`
-	Stream  bool         `json:"stream"`
+	Model    string       `json:"model"`
+	Provider string       `json:"provider,omitempty"`
+	Prompt   string       `json:"prompt"`
+	System   string       `json:"system,omitempty"`
+	Suffix   string       `json:"suffix,omitempty"` // presence triggers FIM mode
+	Options  ModelOptions `json:"options,omitempty"`
+	Stream   bool         `json:"stream"`
 }
 
 // GenerateResponse is the provider-agnostic response from text generation.
@@ -225,9 +238,13 @@ type GenerateResponse struct {
 // ---------------------------------------------------------------------------
 
 // EmbedRequest is the provider-agnostic request for embedding generation.
+//
+// Provider, when non-empty, pins router selection to a specific provider
+// *instance*. Router selection metadata only — see ChatRequest.Provider.
 type EmbedRequest struct {
-	Model string   `json:"model"`
-	Input []string `json:"input"`
+	Model    string   `json:"model"`
+	Provider string   `json:"provider,omitempty"`
+	Input    []string `json:"input"`
 }
 
 // EmbedResponse is the provider-agnostic response from embedding generation.
