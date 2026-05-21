@@ -22,6 +22,7 @@ MCP protocol handshake or picks the wrong tool 10% of the time.
 ```
 cmd/llm-bench/
 ├── main.go           # CLI entry point
+├── capture.go        # Conversation-store trace export + redaction
 ├── trace.go          # Trace loading + validation
 ├── runner.go         # Per-model replay loop
 ├── scorer.go         # Pluggable scoring strategies
@@ -132,6 +133,28 @@ manual review because the "right answer" is domain-specific.
 - Extend `feedback/` or `conversation/` store to export replayable traces
 - Redaction pass for sensitive data (paths, tokens, customer info)
 - Initial capture target: 20–30 traces spanning all three consumer apps
+
+First implementation slice:
+
+- `go run ./cmd/llm-bench -capture -capture-db <sqlite-db>` exports
+  persisted `conversation/` rows into one JSON trace per conversation
+  using a read-only SQLite connection and no store migrations.
+- Output defaults to `docs/llm/traces/`, which is gitignored and should
+  remain local unless explicitly reviewed and exported.
+- The captured final assistant answer is stored as
+  `golden.final_answer_substring`; prompt turns stop before that answer
+  so simple one-user-turn traces can replay against the current harness.
+- Capture redacts absolute local paths, obvious secret assignments,
+  bearer tokens, authorization headers, URL credentials, private key
+  blocks, and email addresses before files are written.
+- Conversations without a system prompt, user turn, final assistant
+  answer, or parseable tool-call JSON are skipped with a warning.
+- Tool-call names and tool-result turns are captured, but tool schemas are
+  not recoverable from `conversation/` today; full replay of tool-use
+  traces requires the follow-up schema/tool-loop work.
+- Feedback-driven sampling is deferred until feedback rows can be tied
+  to conversations; today `feedback_retrievals` and `feedback_signals`
+  do not carry a conversation id.
 
 ### Phase 3 — LLM-as-judge scorer (follow-up PR)
 
