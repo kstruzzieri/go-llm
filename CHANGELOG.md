@@ -82,10 +82,12 @@ model names will observe different models at runtime.**
   `StickyKey` so two scoped requests with identical affinity/model/use-case
   keep independent sticky entries. Empty `Provider` produces byte-identical
   keys to pre-change behavior, preserving existing affinity warmth.
-- **JSON wire** — unset `provider` fields are omitted on the wire
-  (`omitempty`). Keyed Go struct literals (`provider.ChatRequest{Model: ...,
-  Messages: ...}`) are additive-compatible. Unkeyed composite literals
-  (`provider.ChatRequest{"qwen3:8b", []ChatMessage{...}, ...}`) will fail
+- **JSON wire / Go literals** — unset request-level `provider` fields are
+  omitted on the wire (`omitempty`). Keyed Go struct literals
+  (`provider.ChatRequest{Model: ..., Messages: ...}`) are
+  additive-compatible. Unkeyed composite literals for the changed exported
+  structs (`provider.RoutingRequest{...}`, `provider.ChatRequest{...}`,
+  `provider.GenerateRequest{...}`, `provider.EmbedRequest{...}`) will fail
   to compile because positional arguments now shift by one slot; convert
   to keyed literals (recommended) or insert an explicit empty `Provider`
   positional value. All call sites within this repo (`analysis/*`,
