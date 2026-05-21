@@ -125,6 +125,35 @@ type RoutingRequest struct {
 	// the chain-first router otherwise appends when every chain entry is
 	// gated out. Has no effect when PreferredChain is empty.
 	StrictChain bool
+	// Provider scopes routing to a specific provider *instance* (the
+	// config-time name, e.g. "ollama-local-a", "vllm-prod-1"), enforced as
+	// a hard pre-score filter rather than a scoring boost:
+	//
+	//   Model == "" && Provider != ""        → Recommend is restricted to
+	//                                           profiles owned by Provider.
+	//   unqualified Model && Provider != ""  → Lookup uses ModelKey{Provider,
+	//                                           Model} directly.
+	//   qualified Model && Provider == ""    → unchanged (current behavior).
+	//   qualified Model && Provider != ""    → must agree with the qualified
+	//                                           prefix; mismatch returns
+	//                                           ErrProviderMismatch from
+	//                                           Router.Route before candidate
+	//                                           resolution.
+	//
+	// When PreferredChain is non-empty, Provider is IGNORED: chain selectors
+	// carry their own provider identity and authoritative ordering, and the
+	// chain-first path (including its non-strict Recommend tail) must not be
+	// silently scope-narrowed by a per-request hint. This matches the
+	// "invariants enforced inside Router, not via caller convention" pattern
+	// from feedback_invariants_at_provider.
+	//
+	// Provider participates in StickyKey derivation on the non-chain path
+	// so two scoped requests with identical affinity/model/use-case keep
+	// independent sticky entries (scoping by Provider implies separate
+	// affinity slots). Chain routes are unconditionally non-sticky (see
+	// router_chain.go), so StickyKey is not invoked under PreferredChain
+	// regardless of whether Provider is set.
+	Provider string
 	// DryRun, when true, returns the routing decision without executing the request.
 	DryRun bool
 }
@@ -192,7 +221,20 @@ func outputBudgetClass(tokens int) string {
 // session affinity and cache reuse.
 //
 // The key is derived from: affinity_key, model, use_case, required_caps,
-// priority, input budget class, and output budget class.
+// priority, input budget class, output budget class, and Provider when set.
+// Including Provider ensures that scoped requests (RoutingRequest.Provider
+// pinning two distinct instances with the same model name) keep independent
+// sticky entries rather than churning a shared slot.
+//
+// The Provider segment uses a NUL byte separator rather than the "|" used
+// for legacy fields. Provider names come from unvalidated config map keys
+// and could in principle contain "|"; NUL ("\x00") cannot appear in a Go
+// string typed by a user and so cannot collide with future "|"-delimited
+// segments. AffinityKey, Model, UseCase, and budget classes share the same
+// "|"-delimited risk; their collision surface is bounded by Go's string
+// type accepting NUL but config and user input rarely producing it. The
+// Provider-segment hardening is the cheap win where the threat model has
+// shifted with the new code path.
 func StickyKey(req RoutingRequest) string {
 	expectedOut := req.ExpectedOutput
 	if expectedOut == 0 {
@@ -212,6 +254,16 @@ func StickyKey(req RoutingRequest) string {
 		inClass,
 		outClass,
 	)
+	if req.Provider != "" {
+		// Appended conditionally so requests that do not set Provider keep
+		// byte-identical sticky keys to the pre-Provider behavior — this
+		// preserves any existing affinity warmth from prior sessions.
+		//
+		// "\x00provider=" prevents a future appended segment from sharing
+		// a separator with a user-supplied Provider name that happens to
+		// contain "|" or "provider=".
+		data += "\x00provider=" + req.Provider
+	}
 
 	hash := sha256.Sum256([]byte(data))
 	// Return first 128 bits (16 bytes) as hex.

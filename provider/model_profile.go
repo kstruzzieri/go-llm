@@ -224,6 +224,16 @@ type RecommendOpts struct {
 	// Reserved for Phase 2 — not yet used by Recommend.
 	PreferredProviders []string
 
+	// RestrictToProvider, when non-empty, is a HARD filter limiting Recommend
+	// results to profiles whose Key.Provider matches exactly. Distinct from
+	// PreferredProviders (a soft preference): RestrictToProvider produces no
+	// cross-provider degradation when no candidate matches, and an unknown
+	// provider name surfaces as a provider resolution error rather than a
+	// silent empty result. Used by Router.resolveCandidates to thread
+	// RoutingRequest.Provider through the recommend path without rewriting
+	// the ranking pipeline.
+	RestrictToProvider string
+
 	// RequiredCaps is a bitmask of capabilities the model must support.
 	// Models missing any of the required capabilities are filtered out.
 	RequiredCaps Capability

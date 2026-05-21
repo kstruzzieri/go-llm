@@ -1459,8 +1459,8 @@ func TestModelRegistry_OverrideRejectionHook_FiresOnNonCanonicalToken(t *testing
 		err    error
 	}
 	var (
-		mu          sync.Mutex
-		rejections  []rejection
+		mu         sync.Mutex
+		rejections []rejection
 	)
 	mr.SetOverrideRejectionHook(func(k ModelKey, tokens []string, err error) {
 		mu.Lock()
@@ -1904,5 +1904,76 @@ func TestModelRegistry_CapabilityOverride_NilSkipped(t *testing.T) {
 
 	if overrideProfile.Caps != baselineProfile.Caps {
 		t.Errorf("Caps with nil-returning override = %v, want %v (must match baseline)", overrideProfile.Caps, baselineProfile.Caps)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRecommend_RestrictToProvider
+// ---------------------------------------------------------------------------
+
+// TestRecommend_RestrictToProvider verifies that RecommendOpts.RestrictToProvider
+// hard-filters candidates to a single provider instance, even when multiple
+// providers advertise capable models. Distinct from PreferredProviders (which
+// is currently a soft preference and remains unused). Unknown provider names
+// surface as provider resolution errors rather than degrading silently to an
+// empty candidate set.
+func TestRecommend_RestrictToProvider(t *testing.T) {
+	provA := &mrMockProvider{
+		name:   "ollama-a",
+		caps:   CapChat | CapGenerate,
+		models: []ModelInfo{{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion"}}},
+	}
+	provB := &mrMockProvider{
+		name:   "ollama-b",
+		caps:   CapChat | CapGenerate,
+		models: []ModelInfo{{Name: "qwen3:8b", Family: "qwen3", ParameterSize: "8B", QuantLevel: "Q4_K_M", ContextWindow: 32768, Capabilities: []string{"completion"}}},
+	}
+
+	reg := NewRegistry()
+	if err := reg.Register(provA); err != nil {
+		t.Fatalf("Register provA: %v", err)
+	}
+	if err := reg.Register(provB); err != nil {
+		t.Fatalf("Register provB: %v", err)
+	}
+	ctx := context.Background()
+	if err := reg.RefreshModels(ctx, "ollama-a"); err != nil {
+		t.Fatalf("RefreshModels a: %v", err)
+	}
+	if err := reg.RefreshModels(ctx, "ollama-b"); err != nil {
+		t.Fatalf("RefreshModels b: %v", err)
+	}
+
+	mr, err := NewModelRegistry(reg, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+
+	// Unscoped: both providers' profiles appear.
+	all, err := mr.Recommend(ctx, RecommendOpts{RequiredCaps: CapChat})
+	if err != nil {
+		t.Fatalf("Recommend (unscoped): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unscoped len = %d, want 2", len(all))
+	}
+
+	// Scoped to ollama-a: only ollama-a's profile appears.
+	scoped, err := mr.Recommend(ctx, RecommendOpts{RequiredCaps: CapChat, RestrictToProvider: "ollama-a"})
+	if err != nil {
+		t.Fatalf("Recommend (scoped): %v", err)
+	}
+	if len(scoped) != 1 {
+		t.Fatalf("scoped len = %d, want 1", len(scoped))
+	}
+	if scoped[0].Key.Provider != "ollama-a" {
+		t.Errorf("scoped[0].Provider = %q, want ollama-a", scoped[0].Key.Provider)
+	}
+
+	// Scoped to a non-existent provider: surface the typo as a provider
+	// resolution error instead of silently degrading to an empty candidate set.
+	_, err = mr.Recommend(ctx, RecommendOpts{RequiredCaps: CapChat, RestrictToProvider: "nonexistent"})
+	if err == nil {
+		t.Fatal("Recommend (nonexistent) returned nil error, want provider resolution error")
 	}
 }

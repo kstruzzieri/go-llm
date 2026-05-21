@@ -258,8 +258,14 @@ func (r *ModelRegistry) All(ctx context.Context) ([]*ModelProfile, error) {
 // criteria. Results are filtered by required capabilities and available
 // RAM, then sorted by quality tier descending. The Router makes the
 // final selection from this candidate list.
+//
+// When opts.RestrictToProvider is non-empty, Recommend builds the initial
+// candidate set from only the named provider (via recommendSourceProfiles)
+// rather than walking All() and filtering after probing unrelated providers.
+// An unknown RestrictToProvider value surfaces as a provider resolution
+// error rather than degrading silently to an empty result.
 func (r *ModelRegistry) Recommend(ctx context.Context, opts RecommendOpts) ([]*ModelProfile, error) {
-	all, err := r.All(ctx)
+	all, err := r.recommendSourceProfiles(ctx, opts.RestrictToProvider)
 	if err != nil {
 		return nil, fmt.Errorf("provider: recommend: %w", err)
 	}
@@ -295,6 +301,38 @@ func (r *ModelRegistry) Recommend(ctx context.Context, opts RecommendOpts) ([]*M
 	sortProfiles(candidates)
 
 	return candidates, nil
+}
+
+// recommendSourceProfiles produces the initial profile set Recommend will
+// filter and rank. When providerName is empty, it returns the cross-provider
+// All() view. When non-empty, it scopes to that single provider instance —
+// resolving and probing only that provider, so unrelated provider outages
+// cannot break a scoped recommendation. An unknown providerName surfaces
+// as a provider resolution error.
+func (r *ModelRegistry) recommendSourceProfiles(ctx context.Context, providerName string) ([]*ModelProfile, error) {
+	if providerName == "" {
+		return r.All(ctx)
+	}
+
+	prov, err := r.providers.Resolve(ModelKey{Provider: providerName})
+	if err != nil {
+		return nil, fmt.Errorf("restricted provider %q: %w", providerName, err)
+	}
+
+	models, err := prov.Models(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("query models from restricted provider %q: %w", providerName, err)
+	}
+
+	profiles := make([]*ModelProfile, 0, len(models))
+	for _, mi := range models {
+		profile, lookupErr := r.Lookup(ctx, ModelKey{Provider: providerName, Model: mi.Name})
+		if lookupErr != nil {
+			continue
+		}
+		profiles = append(profiles, profile)
+	}
+	return profiles, nil
 }
 
 // FIMConfigFor returns the local FIM policy for a given model, or nil if no

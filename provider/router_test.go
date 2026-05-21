@@ -28,22 +28,26 @@ type rtMockProvider struct {
 	embedErr  error
 	healthErr error
 
-	mu        sync.Mutex
-	chatCalls int
-	genCalls  int
-	embedCalls int
+	mu           sync.Mutex
+	chatCalls    int
+	genCalls     int
+	embedCalls   int
+	lastChatReq  ChatRequest
+	lastGenReq   GenerateRequest
+	lastEmbedReq EmbedRequest
 }
 
-func (m *rtMockProvider) Name() string             { return m.name }
-func (m *rtMockProvider) Capabilities() Capability { return m.caps }
+func (m *rtMockProvider) Name() string                   { return m.name }
+func (m *rtMockProvider) Capabilities() Capability       { return m.caps }
 func (m *rtMockProvider) Health(_ context.Context) error { return m.healthErr }
 func (m *rtMockProvider) Models(_ context.Context) ([]ModelInfo, error) {
 	return m.models, nil
 }
 
-func (m *rtMockProvider) Chat(_ context.Context, _ ChatRequest) (*ChatResponse, error) {
+func (m *rtMockProvider) Chat(_ context.Context, req ChatRequest) (*ChatResponse, error) {
 	m.mu.Lock()
 	m.chatCalls++
+	m.lastChatReq = req
 	m.mu.Unlock()
 	if m.chatErr != nil {
 		return nil, m.chatErr
@@ -52,9 +56,10 @@ func (m *rtMockProvider) Chat(_ context.Context, _ ChatRequest) (*ChatResponse, 
 	return &resp, nil
 }
 
-func (m *rtMockProvider) ChatStream(_ context.Context, _ ChatRequest, fn func(ChatResponse) error) error {
+func (m *rtMockProvider) ChatStream(_ context.Context, req ChatRequest, fn func(ChatResponse) error) error {
 	m.mu.Lock()
 	m.chatCalls++
+	m.lastChatReq = req
 	m.mu.Unlock()
 	if m.chatErr != nil {
 		return m.chatErr
@@ -62,9 +67,10 @@ func (m *rtMockProvider) ChatStream(_ context.Context, _ ChatRequest, fn func(Ch
 	return fn(ChatResponse{Model: m.chatResp.Model, Content: m.chatResp.Content, Done: true})
 }
 
-func (m *rtMockProvider) Generate(_ context.Context, _ GenerateRequest) (*GenerateResponse, error) {
+func (m *rtMockProvider) Generate(_ context.Context, req GenerateRequest) (*GenerateResponse, error) {
 	m.mu.Lock()
 	m.genCalls++
+	m.lastGenReq = req
 	m.mu.Unlock()
 	if m.genErr != nil {
 		return nil, m.genErr
@@ -73,9 +79,10 @@ func (m *rtMockProvider) Generate(_ context.Context, _ GenerateRequest) (*Genera
 	return &resp, nil
 }
 
-func (m *rtMockProvider) GenerateStream(_ context.Context, _ GenerateRequest, fn func(GenerateResponse) error) error {
+func (m *rtMockProvider) GenerateStream(_ context.Context, req GenerateRequest, fn func(GenerateResponse) error) error {
 	m.mu.Lock()
 	m.genCalls++
+	m.lastGenReq = req
 	m.mu.Unlock()
 	if m.genErr != nil {
 		return m.genErr
@@ -83,9 +90,10 @@ func (m *rtMockProvider) GenerateStream(_ context.Context, _ GenerateRequest, fn
 	return fn(GenerateResponse{Model: m.genResp.Model, Response: m.genResp.Response, Done: true})
 }
 
-func (m *rtMockProvider) Embed(_ context.Context, _ EmbedRequest) (*EmbedResponse, error) {
+func (m *rtMockProvider) Embed(_ context.Context, req EmbedRequest) (*EmbedResponse, error) {
 	m.mu.Lock()
 	m.embedCalls++
+	m.lastEmbedReq = req
 	m.mu.Unlock()
 	if m.embedErr != nil {
 		return nil, m.embedErr
@@ -98,6 +106,36 @@ func (m *rtMockProvider) getChatCalls() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.chatCalls
+}
+
+func (m *rtMockProvider) getGenCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.genCalls
+}
+
+func (m *rtMockProvider) getEmbedCalls() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.embedCalls
+}
+
+func (m *rtMockProvider) getLastChatRequest() ChatRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastChatReq
+}
+
+func (m *rtMockProvider) getLastGenerateRequest() GenerateRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastGenReq
+}
+
+func (m *rtMockProvider) getLastEmbedRequest() EmbedRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastEmbedReq
 }
 
 // ---------------------------------------------------------------------------

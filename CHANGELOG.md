@@ -55,3 +55,44 @@ model names will observe different models at runtime.**
 
 - Catalog: `qwen3-coder-next` gains a `latest` variant alias kept in
   sync with `80b` (guarded by test).
+
+### Router: provider-instance pinning (#81)
+
+- **`provider.RoutingRequest.Provider`** — new optional `string` field that
+  hard-scopes routing to a specific provider *instance* (the config-time
+  name, e.g. `ollama-local-a`, `vllm-prod-1`). Acts as a pre-score filter:
+  empty `Model` + `Provider` scopes `Recommend`; unqualified `Model` +
+  `Provider` pins `ModelKey{Provider, Model}` via `Lookup`; qualified
+  `Model` (`provider/model`) + non-empty `Provider` must agree on identity
+  or `Router.Route` returns the new `ErrProviderMismatch` sentinel before
+  candidate resolution. `PreferredChain` is authoritative when set —
+  chain selectors carry their own provider identity and the per-request
+  `Provider` hint is ignored under chain routing.
+- **`provider.ChatRequest.Provider`, `GenerateRequest.Provider`,
+  `EmbedRequest.Provider`** — optional `string` fields (`json:"provider,omitempty"`)
+  forwarded by `Router.Chat / ChatStream / Generate / GenerateStream / Embed`
+  into `RoutingRequest.Provider`. Router selection metadata only; not
+  forwarded to the concrete provider's execution call (the provider already
+  knows its own identity).
+- **`provider.RecommendOpts.RestrictToProvider`** — single-string hard
+  filter on the recommendation path. Distinct from the still-unused soft
+  `PreferredProviders`. An unknown provider name surfaces as a provider
+  resolution error rather than degrading to a silent empty result.
+- **Sticky-key derivation** — `RoutingRequest.Provider` participates in
+  `StickyKey` so two scoped requests with identical affinity/model/use-case
+  keep independent sticky entries. Empty `Provider` produces byte-identical
+  keys to pre-change behavior, preserving existing affinity warmth.
+- **JSON wire / Go literals** — unset request-level `provider` fields are
+  omitted on the wire (`omitempty`). Keyed Go struct literals
+  (`provider.ChatRequest{Model: ..., Messages: ...}`) are
+  additive-compatible. Unkeyed composite literals for the changed exported
+  structs (`provider.RoutingRequest{...}`, `provider.ChatRequest{...}`,
+  `provider.GenerateRequest{...}`, `provider.EmbedRequest{...}`) will fail
+  to compile because positional arguments now shift by one slot; convert
+  to keyed literals (recommended) or insert an explicit empty `Provider`
+  positional value. All call sites within this repo (`analysis/*`,
+  `provider/route_plan.go`, `provider/router.go`, etc.) use keyed
+  literals and are unaffected. External consumers — Firn IDE, Flux ML,
+  Quantum Trader — live in separate repos and should audit their own
+  call sites; they will get a compile error rather than silent
+  misbehavior on `go get -u`.

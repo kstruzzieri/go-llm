@@ -35,6 +35,13 @@ var ErrBudgetExceeded = errors.New("router: budget exceeded")
 // ErrRouterClosed is returned when Route is called on a shut-down router.
 var ErrRouterClosed = errors.New("router: router is closed")
 
+// ErrProviderMismatch is returned when a RoutingRequest sets both a
+// provider-qualified Model (e.g. "ollama-a/qwen3:8b") and a Provider field
+// ("ollama-b") that disagree. This is a caller-side invariant violation and
+// is detected inside Router.Route before any candidate resolution to prevent
+// silently routing to the wrong provider instance.
+var ErrProviderMismatch = errors.New("router: provider mismatch between qualified model and Provider field")
+
 // ---------------------------------------------------------------------------
 // BreakerState
 // ---------------------------------------------------------------------------
