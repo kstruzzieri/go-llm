@@ -7,9 +7,12 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/completion"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -97,6 +100,121 @@ func TestNewServerUsesConfiguredOllamaProvider(t *testing.T) {
 	}
 	if s.Completer() == nil {
 		t.Fatal("Completer() = nil, want resolved completion provider")
+	}
+}
+
+func TestNewServerRegistersConfiguredProvidersAndOverridesCapabilities(t *testing.T) {
+	ollamaMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"template":"{{ .Prompt }}{{ .Suffix }}","capabilities":["completion","insert"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ollamaMock.Close()
+
+	var sawBearer atomic.Bool
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") == "Bearer test-token" {
+			sawBearer.Store(true)
+		}
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-chat","object":"model"},{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeProviderWiringConfig(t, t.TempDir(), ollamaMock.URL, openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if s.providerRegistry == nil {
+		t.Fatal("providerRegistry = nil")
+	}
+	if got, want := s.providerRegistry.Names(), []string{"ollama", "vllm-local"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("providerRegistry.Names() = %v, want %v", got, want)
+	}
+	if _, ok := s.providerRegistry.Get("vllm-local"); !ok {
+		t.Fatal("OpenAI-compatible provider instance vllm-local was not registered")
+	}
+	if !sawBearer.Load() {
+		t.Fatal("OpenAI-compatible provider did not use configured API key")
+	}
+
+	resolved := s.snapshotResolved()
+	if got := resolved["completion"].Provider; got != "vllm-local" {
+		t.Fatalf("resolved completion provider = %q, want vllm-local", got)
+	}
+
+	profile, err := s.modelRegistry.Lookup(context.Background(), provider.ModelKey{Provider: "vllm-local", Model: "local-chat"})
+	if err != nil {
+		t.Fatalf("Lookup(vllm-local/local-chat) error = %v", err)
+	}
+	if !profile.Caps.Has(provider.CapChat) || !profile.Caps.Has(provider.CapStream) {
+		t.Fatalf("local-chat caps = %v, want chat+stream override", profile.Caps)
+	}
+	if profile.Caps.Has(provider.CapGenerate) {
+		t.Fatalf("local-chat caps = %v, want config override to remove generate", profile.Caps)
+	}
+}
+
+func TestNewCompletionProviderPinsResolvedProvider(t *testing.T) {
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeOpenAICompatOnlyConfig(t, t.TempDir(), openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	router := newRecordingRouteEngine("routed-fim")
+	s.mu.Lock()
+	s.router = router
+	s.mu.Unlock()
+
+	p, err := s.newCompletionProvider(context.Background(), "local-fim", "vllm-local")
+	if err != nil {
+		t.Fatalf("newCompletionProvider() error = %v", err)
+	}
+	resp, err := p.Complete(context.Background(), completion.FIMRequest{
+		Prefix: "func f() int { return ",
+		Suffix: " }",
+	})
+	if err != nil {
+		t.Fatalf("Complete() error = %v", err)
+	}
+	if resp.Completion != "routed-fim" {
+		t.Fatalf("Completion = %q, want routed-fim", resp.Completion)
+	}
+	if router.last.Model != "vllm-local/local-fim" {
+		t.Fatalf("RoutingRequest.Model = %q, want vllm-local/local-fim", router.last.Model)
+	}
+	if router.last.Provider != "" {
+		t.Fatalf("RoutingRequest.Provider = %q, want empty because qualified Model is authoritative", router.last.Provider)
 	}
 }
 
@@ -285,6 +403,66 @@ func writeTestConfig(t *testing.T, dir, baseURL string) string {
     "embedding": "embedding",
     "agent": "fast",
     "analysis": "general"
+  }
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
+func writeProviderWiringConfig(t *testing.T, dir, ollamaURL, openAIURL string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "models.json")
+	data := `{
+  "providers": {
+    "ollama": {
+      "base_url": "` + ollamaURL + `",
+      "timeout": "17s",
+      "api_format": "ollama"
+    },
+    "vllm-local": {
+      "base_url": "` + openAIURL + `",
+      "timeout": "17s",
+      "api_format": "openai-compat",
+      "api_key": "test-token"
+    }
+  },
+  "models": {
+    "general": {"name": "local-chat", "provider": "vllm-local", "type": "dense", "capabilities": ["chat", "stream"]},
+    "completion": {"name": "local-fim", "provider": "vllm-local", "type": "dense", "capabilities": ["generate", "stream", "insert"]},
+    "embedding": {"name": "qwen3:8b", "provider": "ollama", "type": "embedding"}
+  },
+  "defaults": {
+    "chat": "general",
+    "completion": "completion",
+    "embedding": "embedding"
+  }
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+	return path
+}
+
+func writeOpenAICompatOnlyConfig(t *testing.T, dir, openAIURL string) string {
+	t.Helper()
+
+	path := filepath.Join(dir, "models.json")
+	data := `{
+  "providers": {
+    "vllm-local": {
+      "base_url": "` + openAIURL + `",
+      "timeout": "17s",
+      "api_format": "openai-compat"
+    }
+  },
+  "models": {
+    "completion": {"name": "local-fim", "provider": "vllm-local", "type": "dense", "capabilities": ["generate", "stream", "insert"]}
+  },
+  "defaults": {
+    "completion": "completion"
   }
 }`
 	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {

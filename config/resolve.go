@@ -5,11 +5,50 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // ModelChecker abstracts checking model availability against a backend.
 type ModelChecker interface {
 	AvailableModels(ctx context.Context) ([]string, error)
+}
+
+// ProviderModelChecker is an optional provider-aware extension for callers
+// that can report model availability per configured provider instance.
+type ProviderModelChecker interface {
+	AvailableModelKeys(ctx context.Context) ([]provider.ModelKey, error)
+}
+
+type modelAvailability struct {
+	names map[string]bool
+	keys  map[provider.ModelKey]bool
+}
+
+func availabilityFromNames(names []string) modelAvailability {
+	return modelAvailability{names: toSet(names)}
+}
+
+func availabilityFromKeys(keys []provider.ModelKey) modelAvailability {
+	available := modelAvailability{
+		names: make(map[string]bool, len(keys)),
+		keys:  make(map[provider.ModelKey]bool, len(keys)),
+	}
+	for _, key := range keys {
+		if key.Provider == "" || key.Model == "" {
+			continue
+		}
+		available.names[key.Model] = true
+		available.keys[key] = true
+	}
+	return available
+}
+
+func (a modelAvailability) has(providerName, model string) bool {
+	if a.keys != nil {
+		return a.keys[provider.ModelKey{Provider: providerName, Model: model}]
+	}
+	return a.names[model]
 }
 
 // ResolvedModel is the result of resolving a role to an available model.
@@ -37,12 +76,11 @@ func (c *Config) Resolve(ctx context.Context, checker ModelChecker, useCase stri
 		return ResolvedModel{}, fmt.Errorf("config: unknown use-case %q", useCase)
 	}
 
-	models, err := checker.AvailableModels(ctx)
+	available, err := availableModels(ctx, checker)
 	if err != nil {
 		return ResolvedModel{}, fmt.Errorf("config: checking available models: %w", err)
 	}
 
-	available := toSet(models)
 	return c.resolveRole(role, available, nil)
 }
 
@@ -52,12 +90,11 @@ func (c *Config) ResolveAll(ctx context.Context, checker ModelChecker) (map[stri
 	if checker == nil {
 		return nil, fmt.Errorf("config: model checker is required")
 	}
-	models, err := checker.AvailableModels(ctx)
+	available, err := availableModels(ctx, checker)
 	if err != nil {
 		return nil, fmt.Errorf("config: checking available models: %w", err)
 	}
 
-	available := toSet(models)
 	results := make(map[string]ResolvedModel, len(c.Defaults))
 	var errs []string
 
@@ -84,13 +121,28 @@ func (c *Config) ResolveAll(ctx context.Context, checker ModelChecker) (map[stri
 	return results, nil
 }
 
+func availableModels(ctx context.Context, checker ModelChecker) (modelAvailability, error) {
+	if keyed, ok := checker.(ProviderModelChecker); ok {
+		keys, err := keyed.AvailableModelKeys(ctx)
+		if err != nil {
+			return modelAvailability{}, err
+		}
+		return availabilityFromKeys(keys), nil
+	}
+	models, err := checker.AvailableModels(ctx)
+	if err != nil {
+		return modelAvailability{}, err
+	}
+	return availabilityFromNames(models), nil
+}
+
 // resolveRole tries the primary model for the given role, then walks its
 // Fallbacks slice, returning the first model found in the available set.
 // The onStack set tracks the current DFS path to detect circular fallbacks
 // while allowing diamond-shaped shared fallback nodes to be visited from
 // multiple parents (defensive — Load validates against cycles, but this
 // protects programmatic use).
-func (c *Config) resolveRole(role string, available map[string]bool, onStack map[string]bool) (ResolvedModel, error) {
+func (c *Config) resolveRole(role string, available modelAvailability, onStack map[string]bool) (ResolvedModel, error) {
 	if onStack == nil {
 		onStack = make(map[string]bool)
 	}
@@ -116,7 +168,7 @@ func (c *Config) resolveRole(role string, available map[string]bool, onStack map
 	}
 
 	// Try primary model.
-	if available[m.Name] {
+	if available.has(m.Provider, m.Name) {
 		return ResolvedModel{Name: m.Name, Role: role, Provider: m.Provider, IsFallback: false}, nil
 	}
 

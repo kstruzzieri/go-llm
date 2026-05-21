@@ -54,10 +54,8 @@ func (s *Server) handleListModels(ctx context.Context, req *gomcp.CallToolReques
 		_ = s.refreshResolved(ctx) // non-fatal: partial results kept
 	}
 	// Self-heal the providerRegistry's model index so the Recommend safety-net
-	// tail works after Ollama recovers from boot-time unreachability.
-	if providerRegistry := s.providerRegistrySnapshot(); providerRegistry != nil {
-		_ = providerRegistry.RefreshModels(ctx, "ollama") // non-fatal
-	}
+	// tail works after providers recover from boot-time unreachability.
+	s.refreshProviderModelIndexes(ctx)
 
 	data, err := json.Marshal(models)
 	if err != nil {
@@ -111,9 +109,7 @@ func (s *Server) handlePullModel(ctx context.Context, req *gomcp.CallToolRequest
 	}
 	// Self-heal the providerRegistry's model index so the freshly pulled
 	// model becomes routable immediately.
-	if providerRegistry := s.providerRegistrySnapshot(); providerRegistry != nil {
-		_ = providerRegistry.RefreshModels(ctx, "ollama") // non-fatal
-	}
+	s.refreshProviderModelIndexes(ctx)
 
 	return toolResult(fmt.Sprintf("model %q pulled successfully", args.Name)), nil
 }

@@ -63,7 +63,7 @@ func TestFIMViaRouter_Smoke(t *testing.T) {
 	s.router = rec
 	s.mu.Unlock()
 
-	p, err := s.newCompletionProvider(ctx, model)
+	p, err := s.newCompletionProvider(ctx, model, "ollama")
 	if err != nil {
 		t.Fatalf("newCompletionProvider: %v", err)
 	}
@@ -89,8 +89,8 @@ func TestFIMViaRouter_Smoke(t *testing.T) {
 	if rec.last.RequiredCaps != wantCaps {
 		t.Errorf("RequiredCaps = %v, want %v", rec.last.RequiredCaps, wantCaps)
 	}
-	if rec.last.Model != model {
-		t.Errorf("Model = %q, want %q", rec.last.Model, model)
+	if want := "ollama/" + model; rec.last.Model != want {
+		t.Errorf("Model = %q, want %q", rec.last.Model, want)
 	}
 	if rec.last.Priority != provider.PriorityHigh {
 		t.Errorf("Priority = %v, want %v", rec.last.Priority, provider.PriorityHigh)
