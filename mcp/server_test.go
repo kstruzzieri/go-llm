@@ -128,7 +128,7 @@ func TestNewServerRegistersConfiguredProvidersAndOverridesCapabilities(t *testin
 		switch r.URL.Path {
 		case "/v1/models":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-chat","object":"model"},{"id":"local-fim","object":"model"}]}`))
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-chat","object":"model"},{"id":"local-carved","object":"model"},{"id":"local-fim","object":"model"}]}`))
 		default:
 			http.NotFound(w, r)
 		}
@@ -164,11 +164,19 @@ func TestNewServerRegistersConfiguredProvidersAndOverridesCapabilities(t *testin
 	if err != nil {
 		t.Fatalf("Lookup(vllm-local/local-chat) error = %v", err)
 	}
+	if !profile.Caps.Has(provider.CapChat | provider.CapGenerate | provider.CapStream) {
+		t.Fatalf("local-chat caps = %v, want openai-compatible type-derived chat+generate+stream override", profile.Caps)
+	}
+
+	profile, err = s.modelRegistry.Lookup(context.Background(), provider.ModelKey{Provider: "vllm-local", Model: "local-carved"})
+	if err != nil {
+		t.Fatalf("Lookup(vllm-local/local-carved) error = %v", err)
+	}
 	if !profile.Caps.Has(provider.CapChat) || !profile.Caps.Has(provider.CapStream) {
-		t.Fatalf("local-chat caps = %v, want chat+stream override", profile.Caps)
+		t.Fatalf("local-carved caps = %v, want chat+stream override", profile.Caps)
 	}
 	if profile.Caps.Has(provider.CapGenerate) {
-		t.Fatalf("local-chat caps = %v, want config override to remove generate", profile.Caps)
+		t.Fatalf("local-carved caps = %v, want config override to remove generate", profile.Caps)
 	}
 }
 
@@ -430,7 +438,8 @@ func writeProviderWiringConfig(t *testing.T, dir, ollamaURL, openAIURL string) s
     }
   },
   "models": {
-    "general": {"name": "local-chat", "provider": "vllm-local", "type": "dense", "capabilities": ["chat", "stream"]},
+    "general": {"name": "local-chat", "provider": "vllm-local", "type": "dense"},
+    "carved": {"name": "local-carved", "provider": "vllm-local", "type": "dense", "capabilities": ["chat", "stream"]},
     "completion": {"name": "local-fim", "provider": "vllm-local", "type": "dense", "capabilities": ["generate", "stream", "insert"]},
     "embedding": {"name": "qwen3:8b", "provider": "ollama", "type": "embedding"}
   },

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -44,6 +45,48 @@ func TestListModelsToolBasic(t *testing.T) {
 	}
 	if len(models) != 2 {
 		t.Errorf("model count = %d, want 2", len(models))
+	}
+}
+
+func TestListModelsToolUsesProviderRegistryWhenOllamaUnavailable(t *testing.T) {
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeOpenAICompatOnlyConfig(t, t.TempDir(), openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	result, err := s.handleListModels(context.Background(), &gomcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handleListModels() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleListModels() isError = true, content = %v", extractText(result))
+	}
+
+	var models []struct {
+		Provider string `json:"provider"`
+		Name     string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &models); err != nil {
+		t.Fatalf("unmarshal models: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("model count = %d, want 1", len(models))
+	}
+	if models[0].Provider != "vllm-local" || models[0].Name != "local-fim" {
+		t.Fatalf("model = %+v, want vllm-local/local-fim", models[0])
 	}
 }
 

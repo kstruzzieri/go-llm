@@ -453,12 +453,30 @@ func (s *Server) installCapabilityOverrides(mr *provider.ModelRegistry) {
 	sort.Strings(roles)
 	for _, role := range roles {
 		m := s.cfg.Models[role]
-		if len(m.Capabilities) == 0 || m.Provider == "" || m.Name == "" {
+		if m.Provider == "" || m.Name == "" {
 			continue
 		}
-		caps := make([]string, len(m.Capabilities))
-		copy(caps, m.Capabilities)
-		overrides[provider.ModelKey{Provider: m.Provider, Model: m.Name}] = caps
+		caps := m.Capabilities
+		if len(caps) == 0 {
+			pCfg, ok := s.cfg.Providers[m.Provider]
+			if !ok {
+				continue
+			}
+			apiFormat := pCfg.APIFormat
+			if apiFormat == "" {
+				apiFormat = "ollama"
+			}
+			if apiFormat != "openai-compat" {
+				continue
+			}
+			caps = m.ResolvedCapabilities()
+		}
+		if len(caps) == 0 {
+			continue
+		}
+		copied := make([]string, len(caps))
+		copy(copied, caps)
+		overrides[provider.ModelKey{Provider: m.Provider, Model: m.Name}] = copied
 	}
 	if len(overrides) == 0 {
 		return

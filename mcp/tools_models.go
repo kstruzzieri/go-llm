@@ -4,14 +4,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
+
+type listedModelInfo struct {
+	provider.ModelInfo
+	Provider string `json:"provider,omitempty"`
+}
 
 func (s *Server) registerModelTools() {
 	s.mcpServer.AddTool(&gomcp.Tool{
 		Name:        "list_models",
-		Description: "List all available Ollama models. Also refreshes the model resolution cache.",
+		Description: "List all available provider models. Also refreshes the model resolution cache.",
 		InputSchema: map[string]any{
 			"type":       "object",
 			"properties": map[string]any{},
@@ -44,24 +52,88 @@ func (s *Server) registerModelTools() {
 }
 
 func (s *Server) handleListModels(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-	models, err := s.client.ListModels(ctx)
-	if err != nil {
-		return toolError("ollama", "%v", err), nil
-	}
-
 	// Refresh model resolution cache since model availability may have changed.
 	if s.cfg != nil {
 		_ = s.refreshResolved(ctx) // non-fatal: partial results kept
 	}
-	// Self-heal the providerRegistry's model index so the Recommend safety-net
-	// tail works after providers recover from boot-time unreachability.
-	s.refreshProviderModelIndexes(ctx)
+
+	models, err := s.listModels(ctx)
+	if err != nil {
+		return toolError("provider", "%v", err), nil
+	}
 
 	data, err := json.Marshal(models)
 	if err != nil {
-		return toolError("ollama", "marshal models: %v", err), nil
+		return toolError("provider", "marshal models: %v", err), nil
 	}
 	return toolResult(string(data)), nil
+}
+
+func (s *Server) listModels(ctx context.Context) ([]listedModelInfo, error) {
+	if pReg := s.providerRegistrySnapshot(); pReg != nil {
+		return listProviderRegistryModels(ctx, pReg)
+	}
+	return s.listLegacyOllamaModels(ctx)
+}
+
+func listProviderRegistryModels(ctx context.Context, pReg *provider.Registry) ([]listedModelInfo, error) {
+	var out []listedModelInfo
+	var firstErr error
+	for _, p := range pReg.All() {
+		models, err := p.Models(ctx)
+		if err != nil {
+			if firstErr == nil {
+				firstErr = fmt.Errorf("list models for provider %q: %w", p.Name(), err)
+			}
+			continue
+		}
+		for _, model := range models {
+			if model.Name == "" {
+				continue
+			}
+			out = append(out, listedModelInfo{
+				ModelInfo: model,
+				Provider:  p.Name(),
+			})
+			_ = pReg.AddModelToIndex(model.Name, p.Name())
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Provider == out[j].Provider {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Provider < out[j].Provider
+	})
+	if len(out) == 0 && firstErr != nil {
+		return nil, firstErr
+	}
+	return out, nil
+}
+
+func (s *Server) listLegacyOllamaModels(ctx context.Context) ([]listedModelInfo, error) {
+	models, err := s.client.ListModels(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]listedModelInfo, 0, len(models))
+	for _, model := range models {
+		if model.Name == "" {
+			continue
+		}
+		out = append(out, listedModelInfo{
+			ModelInfo: provider.ModelInfo{
+				Name:          model.Name,
+				Family:        model.Family,
+				ParameterSize: model.ParamSize,
+				QuantLevel:    model.QuantLevel,
+				Template:      model.Template,
+				Capabilities:  model.Capabilities,
+				Digest:        model.Digest,
+			},
+			Provider: "ollama",
+		})
+	}
+	return out, nil
 }
 
 func (s *Server) handleShowModel(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
