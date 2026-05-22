@@ -1,0 +1,428 @@
+package main
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kstruzzieri/go-llm/conversation"
+)
+
+type fakeConversationStore struct {
+	summaries     []conversation.Summary
+	conversations map[string]conversation.Conversation
+}
+
+func (s fakeConversationStore) List(context.Context) ([]conversation.Summary, error) {
+	out := make([]conversation.Summary, len(s.summaries))
+	copy(out, s.summaries)
+	return out, nil
+}
+
+func (s fakeConversationStore) Load(_ context.Context, id string) (*conversation.Conversation, error) {
+	conv, ok := s.conversations[id]
+	if !ok {
+		return nil, errors.New("missing conversation")
+	}
+	return &conv, nil
+}
+
+func TestConversationToTraceRedactsAndConvertsToolCalls(t *testing.T) {
+	conv := conversation.Conversation{
+		ID:        "abc-123",
+		CreatedAt: time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC),
+		UpdatedAt: time.Date(2026, 5, 1, 12, 5, 0, 0, time.UTC),
+		Messages: []conversation.Message{
+			{Role: "system", Content: "Use workspace /Users/keith/project and token=system-secret."},
+			{Role: "user", Content: "Read /Users/keith/project/secret.go for user@example.com"},
+			{
+				Role: "assistant",
+				ToolCalls: json.RawMessage(`[
+					{
+						"id": "call_1",
+						"type": "function",
+						"function": {
+							"name": "read_file",
+							"arguments": {
+								"path": "/Users/keith/project/secret.go",
+								"api_key": "abc123",
+								"notes": ["email user@example.com"]
+							}
+						}
+					}
+				]`),
+			},
+			{
+				Role:       "tool",
+				ToolName:   "read_file",
+				ToolCallID: "call_1",
+				Content:    `{"path":"/Users/keith/project/secret.go","token":"tool-secret"}`,
+			},
+			{Role: "assistant", Content: "Done from /tmp/out.txt with password=hunter2."},
+		},
+	}
+
+	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor())
+	if err != nil {
+		t.Fatalf("conversationToTrace() error: %v", err)
+	}
+
+	if trace.ID != "conversation-abc-123" {
+		t.Fatalf("trace ID = %q", trace.ID)
+	}
+	if trace.Source != "test-source" {
+		t.Fatalf("trace source = %q", trace.Source)
+	}
+	assertClean(t, trace.System)
+	if strings.Contains(trace.System, "system-secret") {
+		t.Fatalf("system was not redacted: %q", trace.System)
+	}
+	if len(trace.Turns) != 3 {
+		t.Fatalf("turn count = %d, want 3", len(trace.Turns))
+	}
+	assertClean(t, trace.Turns[0].Content)
+	assertClean(t, trace.Turns[2].Content)
+	assertClean(t, trace.Golden.FinalAnswerSubstring)
+
+	if len(trace.Turns[1].ToolCalls) != 1 {
+		t.Fatalf("tool calls = %#v", trace.Turns[1].ToolCalls)
+	}
+	call := trace.Turns[1].ToolCalls[0]
+	if call.Name != "read_file" {
+		t.Fatalf("tool name = %q", call.Name)
+	}
+	var args map[string]any
+	if err := json.Unmarshal(call.Arguments, &args); err != nil {
+		t.Fatalf("unmarshal args: %v", err)
+	}
+	if args["path"] != "[REDACTED_PATH]/secret.go" {
+		t.Fatalf("path arg = %#v", args["path"])
+	}
+	if args["api_key"] != "[REDACTED_SECRET]" {
+		t.Fatalf("api_key arg = %#v", args["api_key"])
+	}
+	notes := args["notes"].([]any)
+	if notes[0] != "email [REDACTED_EMAIL]" {
+		t.Fatalf("notes = %#v", notes)
+	}
+	if len(trace.Golden.ToolCalls) != 1 || trace.Golden.ToolCalls[0] != "read_file" {
+		t.Fatalf("golden tool calls = %#v", trace.Golden.ToolCalls)
+	}
+}
+
+func TestConversationToTraceUsesFallbackSystem(t *testing.T) {
+	conv := conversation.Conversation{
+		ID: "no-system",
+		Messages: []conversation.Message{
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: "hi"},
+		},
+	}
+
+	trace, err := conversationToTrace(conv, "test-source", "Fallback system", defaultRedactor())
+	if err != nil {
+		t.Fatalf("conversationToTrace() error: %v", err)
+	}
+	if trace.System != "Fallback system" {
+		t.Fatalf("system = %q", trace.System)
+	}
+}
+
+func TestConversationToTraceRejectsMalformedConversations(t *testing.T) {
+	tests := []struct {
+		name    string
+		conv    conversation.Conversation
+		wantErr error
+	}{
+		{
+			name:    "missing id",
+			conv:    conversation.Conversation{Messages: []conversation.Message{{Role: "system", Content: "sys"}}},
+			wantErr: errConversationMissingID,
+		},
+		{
+			name: "missing system",
+			conv: conversation.Conversation{
+				ID:       "missing-system",
+				Messages: []conversation.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}},
+			},
+			wantErr: errConversationMissingSystem,
+		},
+		{
+			name: "missing user",
+			conv: conversation.Conversation{
+				ID:       "missing-user",
+				Messages: []conversation.Message{{Role: "system", Content: "sys"}, {Role: "assistant", Content: "hello"}},
+			},
+			wantErr: errConversationMissingUser,
+		},
+		{
+			name: "missing assistant",
+			conv: conversation.Conversation{
+				ID:       "missing-assistant",
+				Messages: []conversation.Message{{Role: "system", Content: "sys"}, {Role: "user", Content: "hi"}},
+			},
+			wantErr: errConversationMissingAssistant,
+		},
+		{
+			name: "invalid tool calls",
+			conv: conversation.Conversation{
+				ID: "bad-tool",
+				Messages: []conversation.Message{
+					{Role: "system", Content: "sys"},
+					{Role: "user", Content: "hi"},
+					{Role: "assistant", ToolCalls: json.RawMessage(`{"not":"an array"}`)},
+					{Role: "assistant", Content: "done"},
+				},
+			},
+			wantErr: errConversationInvalidToolCall,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := conversationToTrace(tt.conv, "source", "", defaultRedactor())
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestCaptureConversationsSkipsMalformedAndWritesDeterministicOutput(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	store := fakeConversationStore{
+		summaries: []conversation.Summary{
+			{ID: "bad", UpdatedAt: now.Add(2 * time.Minute)},
+			{ID: "good", UpdatedAt: now.Add(time.Minute)},
+		},
+		conversations: map[string]conversation.Conversation{
+			"bad": {
+				ID:       "bad",
+				Messages: []conversation.Message{{Role: "user", Content: "hi"}},
+			},
+			"good": {
+				ID:        "good",
+				UpdatedAt: now,
+				Messages: []conversation.Message{
+					{Role: "system", Content: "sys"},
+					{Role: "user", Content: "hello"},
+					{Role: "assistant", Content: "world"},
+				},
+			},
+		},
+	}
+
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	result1, err := captureConversations(context.Background(), store, captureOptions{OutputDir: dir1, Source: "test"})
+	if err != nil {
+		t.Fatalf("captureConversations first run: %v", err)
+	}
+	result2, err := captureConversations(context.Background(), store, captureOptions{OutputDir: dir2, Source: "test"})
+	if err != nil {
+		t.Fatalf("captureConversations second run: %v", err)
+	}
+
+	if len(result1.Written) != 1 || len(result1.Skipped) != 1 {
+		t.Fatalf("first result = %#v", result1)
+	}
+	if len(result2.Written) != 1 || len(result2.Skipped) != 1 {
+		t.Fatalf("second result = %#v", result2)
+	}
+
+	file1 := filepath.Join(dir1, "conversation-good.json")
+	file2 := filepath.Join(dir2, "conversation-good.json")
+	data1, err := os.ReadFile(file1)
+	if err != nil {
+		t.Fatalf("read first trace: %v", err)
+	}
+	data2, err := os.ReadFile(file2)
+	if err != nil {
+		t.Fatalf("read second trace: %v", err)
+	}
+	if string(data1) != string(data2) {
+		t.Fatalf("capture output differed:\n%s\n---\n%s", data1, data2)
+	}
+}
+
+func TestCaptureLimitCountsWrittenTraces(t *testing.T) {
+	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	store := fakeConversationStore{
+		summaries: []conversation.Summary{
+			{ID: "bad", UpdatedAt: now.Add(3 * time.Minute)},
+			{ID: "good-1", UpdatedAt: now.Add(2 * time.Minute)},
+			{ID: "good-2", UpdatedAt: now.Add(time.Minute)},
+		},
+		conversations: map[string]conversation.Conversation{
+			"bad": {
+				ID:       "bad",
+				Messages: []conversation.Message{{Role: "user", Content: "hi"}},
+			},
+			"good-1": validTestConversation("good-1", "first", now),
+			"good-2": validTestConversation("good-2", "second", now),
+		},
+	}
+
+	dir := t.TempDir()
+	result, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir: dir,
+		Source:    "test",
+		Limit:     1,
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(result.Written) != 1 {
+		t.Fatalf("written = %#v, want 1 trace", result.Written)
+	}
+	if len(result.Skipped) != 1 {
+		t.Fatalf("skipped = %#v, want 1 skipped malformed conversation", result.Skipped)
+	}
+	if filepath.Base(result.Written[0]) != "conversation-good-1.json" {
+		t.Fatalf("written file = %q", result.Written[0])
+	}
+	if _, err := os.Stat(filepath.Join(dir, "conversation-good-2.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("good-2 should not be written after limit, stat err=%v", err)
+	}
+}
+
+func TestRunCaptureDoesNotMigrateSourceDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "source.sqlite")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("open source db: %v", err)
+	}
+	if _, err := db.Exec(`
+		CREATE TABLE conversations (
+			id         TEXT PRIMARY KEY,
+			title      TEXT NOT NULL DEFAULT '',
+			messages   TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+	); err != nil {
+		t.Fatalf("create conversations table: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO conversations (id, title, messages, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		"conv-1",
+		"test",
+		`[
+			{"role":"system","content":"sys"},
+			{"role":"user","content":"hello"},
+			{"role":"assistant","content":"world"}
+		]`,
+		int64(1000),
+		int64(2000),
+	); err != nil {
+		t.Fatalf("insert conversation: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close source db: %v", err)
+	}
+
+	result, err := runCapture(context.Background(), captureOptions{
+		DBPath:    dbPath,
+		OutputDir: t.TempDir(),
+		Source:    "test",
+	})
+	if err != nil {
+		t.Fatalf("runCapture: %v", err)
+	}
+	if len(result.Written) != 1 {
+		t.Fatalf("written = %#v, want 1 trace", result.Written)
+	}
+
+	db, err = sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatalf("reopen source db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	var versionTables int
+	if err := db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'conversation_schema_version'`,
+	).Scan(&versionTables); err != nil {
+		t.Fatalf("query schema version table: %v", err)
+	}
+	if versionTables != 0 {
+		t.Fatalf("capture created conversation_schema_version table")
+	}
+}
+
+func TestRedactorRedactsObviousSensitiveValues(t *testing.T) {
+	input := `Path /Users/keith/src/private.txt token=abc123 Authorization: Bearer bearer-secret user@example.com
+OPENAI_API_KEY=sk-1234567890abcdefghi GITHUB_TOKEN=ghp_1234567890abcdefABCD ANTHROPIC_API_KEY='sk-ant-1234567890abcdef'
+{"apiKey":"json-secret","authToken":"json-token","privateKey":"json-private-key"}
+//registry.npmjs.org/:_authToken=npm_1234567890abcdef
+https://user:pass@example.com
+-----BEGIN OPENSSH PRIVATE KEY-----
+private key body
+-----END OPENSSH PRIVATE KEY-----`
+	got := defaultRedactor().Redact(input)
+
+	assertClean(t, got)
+	for _, want := range []string{
+		"[REDACTED_PATH]/private.txt",
+		"token=[REDACTED_SECRET]",
+		"Authorization: [REDACTED_SECRET]",
+		"[REDACTED_EMAIL]",
+		"OPENAI_API_KEY=[REDACTED_SECRET]",
+		"GITHUB_TOKEN=[REDACTED_SECRET]",
+		`ANTHROPIC_API_KEY='[REDACTED_SECRET]'`,
+		`"apiKey":"[REDACTED_SECRET]"`,
+		`"authToken":"[REDACTED_SECRET]"`,
+		`"privateKey":"[REDACTED_SECRET]"`,
+		"//registry.npmjs.org/:_authToken=[REDACTED_SECRET]",
+		"https://[REDACTED_SECRET]@example.com",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("redacted text %q missing %q", got, want)
+		}
+	}
+}
+
+func validTestConversation(id, answer string, updatedAt time.Time) conversation.Conversation {
+	return conversation.Conversation{
+		ID:        id,
+		UpdatedAt: updatedAt,
+		Messages: []conversation.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "hello"},
+			{Role: "assistant", Content: answer},
+		},
+	}
+}
+
+func assertClean(t *testing.T, text string) {
+	t.Helper()
+	for _, forbidden := range []string{
+		"/Users/keith",
+		"/tmp/",
+		"abc123",
+		"bearer-secret",
+		"sk-1234567890abcdefghi",
+		"ghp_1234567890abcdefABCD",
+		"sk-ant-1234567890abcdef",
+		"json-secret",
+		"json-token",
+		"json-private-key",
+		"npm_1234567890abcdef",
+		"user:pass@",
+		"private key body",
+		"hunter2",
+		"tool-secret",
+		"user@example.com",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("text %q still contains %q", text, forbidden)
+		}
+	}
+}

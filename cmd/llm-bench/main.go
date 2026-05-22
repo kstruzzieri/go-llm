@@ -25,6 +25,12 @@ import (
 )
 
 func main() {
+	capture := flag.Bool("capture", false, "Export persisted conversations as redacted benchmark traces and exit")
+	captureDB := flag.String("capture-db", "", "SQLite database path containing conversation tables (required with -capture)")
+	captureOut := flag.String("capture-out", filepath.Join("docs", "llm", "traces"), "Directory for captured trace JSON files")
+	captureLimit := flag.Int("capture-limit", 0, "Maximum conversations to export in capture mode (0 = all)")
+	captureSource := flag.String("capture-source", defaultCaptureSource, "Trace source label for captured conversations")
+	captureSystem := flag.String("capture-system", "", "Fallback system prompt when a conversation has no stored system message")
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
@@ -32,6 +38,30 @@ func main() {
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-trace timeout")
 	flag.Parse()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer cancel()
+
+	if *capture {
+		result, err := runCapture(ctx, captureOptions{
+			DBPath:         *captureDB,
+			OutputDir:      *captureOut,
+			Limit:          *captureLimit,
+			Source:         *captureSource,
+			FallbackSystem: *captureSystem,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: capture: %v", err)
+		}
+		for _, skipped := range result.Skipped {
+			fmt.Fprintf(os.Stderr, "llm-bench: capture skipped %s\n", skipped)
+		}
+		if len(result.Written) == 0 {
+			log.Fatalf("llm-bench: capture wrote no traces")
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: capture wrote %d trace(s) to %s\n", len(result.Written), *captureOut)
+		return
+	}
 
 	if *tracesGlob == "" || *modelsArg == "" {
 		flag.Usage()
@@ -50,9 +80,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("llm-bench: parse models: %v", err)
 	}
-
-	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer cancel()
 
 	traces, err := loadTraces(tracePaths)
 	if err != nil {

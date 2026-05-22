@@ -71,6 +71,45 @@ shows `Errors = 0` with `Mean Quality = 1.00` for each model on the
 `smoke-minimal-001` trace. This only verifies harness plumbing and basic
 model reachability, not real MCP-agent quality.
 
+## Local trace capture
+
+Captured traces are written under `docs/llm/traces/`, which is gitignored
+because traces can contain local paths, prompts, and tool results. Export
+from a SQLite database that contains the `conversation/` tables with:
+
+```bash
+go run ./cmd/llm-bench \
+  -capture \
+  -capture-db /path/to/go-llm.sqlite \
+  -capture-out docs/llm/traces \
+  -capture-source firn-ide
+```
+
+If older conversations do not include a persisted system message, provide
+the exact prompt used by that app:
+
+```bash
+go run ./cmd/llm-bench \
+  -capture \
+  -capture-db /path/to/go-llm.sqlite \
+  -capture-system 'You are the local coding assistant...' \
+  -capture-limit 50
+```
+
+The capture pass exports one JSON trace per valid conversation, moves the
+captured final assistant answer into `golden.final_answer_substring`,
+redacts absolute local paths, obvious secret values, bearer tokens,
+authorization headers, URL credentials, private key blocks, and email
+addresses, and skips conversations that cannot form a replayable trace.
+The first capture PR uses `conversation/` as the source of truth;
+feedback-linked sampling comes later because the current `feedback/`
+schema does not store a conversation id.
+
+Tool-call names and tool-result turns are preserved, but tool schemas are
+not exported yet because the current `conversation/` records do not store
+them. Multi-turn/tool-use traces are useful calibration fixtures now;
+full replay of those traces requires the Phase 2 tool-loop/schema work.
+
 ## Date stamp
 
 Research was conducted April 16, 2026 and refreshed against the live
