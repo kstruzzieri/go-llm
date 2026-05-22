@@ -18,15 +18,16 @@ const benchKeepAlive = "30m"
 
 // Sentinel errors so tests assert on identity rather than message text.
 var (
-	errNoUserTurn       = errors.New("trace has no user turn")
-	errMultiUserTurn    = errors.New("multi-turn replay not yet supported")
-	errEmptyBaseURL     = errors.New("empty ollama base URL")
-	errMissingGolden    = errors.New("scorer requires golden.final_answer_substring")
-	errEmptySystem      = errors.New("trace has empty system prompt")
-	errNoTurns          = errors.New("trace has no turns")
-	errInvalidTraceTool = errors.New("trace has invalid tool definition")
-	errUnsupportedTurns = errors.New("trace has unsupported extra turns")
-	errUnsupportedProv  = errors.New("unsupported provider")
+	errNoUserTurn        = errors.New("trace has no user turn")
+	errEmptyBaseURL      = errors.New("empty ollama base URL")
+	errMissingGolden     = errors.New("scorer requires golden.final_answer_substring")
+	errEmptySystem       = errors.New("trace has empty system prompt")
+	errNoTurns           = errors.New("trace has no turns")
+	errInvalidTraceTool  = errors.New("trace has invalid tool definition")
+	errMissingToolResult = errors.New("trace is missing frozen tool result")
+	errToolCallMismatch  = errors.New("candidate tool call does not match trace")
+	errUnsupportedTurns  = errors.New("trace has unsupported extra turns")
+	errUnsupportedProv   = errors.New("unsupported provider")
 )
 
 // Runner executes traces against a list of candidate models and collects
@@ -111,45 +112,82 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	}
 }
 
-// replay sends the trace's turns to the model and captures the assistant's
-// responses. This is a SKELETON — the tool-call loop is not yet wired up.
-// Feeding tool results back to the model and extracting real ToolCalls
-// from the Ollama response requires more plumbing than this scaffold.
-//
-// Until the tool loop lands, replay only supports the minimal trace shape:
-// a single user turn plus the top-level system prompt. Any additional
-// assistant/tool turns would be silently truncated by this scaffold, so
-// replay refuses them rather than producing misleading aggregates.
+// replay sends user turns to the model, replaces scripted assistant turns with
+// candidate responses, and feeds captured tool-result turns back after matching
+// candidate tool calls. Tool results are frozen replay fixtures: the candidate
+// chooses whether and which tool to call, but llm-bench never executes tools.
 func replay(ctx context.Context, client *ollama.Client, model string, trace Trace) ([]Turn, error) {
-	var firstUser *Turn
-	userTurns := 0
-	for i := range trace.Turns {
-		if trace.Turns[i].Role == "user" {
-			userTurns++
-			if firstUser == nil {
-				firstUser = &trace.Turns[i]
-			}
-		}
-	}
-	if firstUser == nil {
+	if !hasUserTurn(trace.Turns) {
 		return nil, fmt.Errorf("trace %q: %w", trace.ID, errNoUserTurn)
-	}
-	if userTurns > 1 {
-		return nil, fmt.Errorf("trace %q has %d user turns: %w", trace.ID, userTurns, errMultiUserTurn)
-	}
-	if len(trace.Turns) != 1 {
-		return nil, fmt.Errorf("trace %q has %d turns: %w", trace.ID, len(trace.Turns), errUnsupportedTurns)
 	}
 
 	messages := []ollama.ChatMessage{
 		{Role: "system", Content: trace.System},
-		{Role: "user", Content: firstUser.Content},
 	}
 	tools, err := decodeTraceTools(trace.Tools)
 	if err != nil {
 		return nil, fmt.Errorf("trace %q: %w", trace.ID, err)
 	}
 
+	var transcript []Turn
+	for i := 0; i < len(trace.Turns); {
+		turn := trace.Turns[i]
+		if turn.Role != "user" {
+			return nil, fmt.Errorf("trace %q turn %d role %q: %w", trace.ID, i, turn.Role, errUnsupportedTurns)
+		}
+		messages = append(messages, ollama.ChatMessage{Role: "user", Content: turn.Content})
+		i++
+
+		for {
+			var expected Turn
+			expectedIndex := -1
+			if i < len(trace.Turns) && trace.Turns[i].Role == "assistant" {
+				expected = trace.Turns[i]
+				expectedIndex = i
+				i++
+			}
+
+			msg, actualTurn, err := chatReplayTurn(ctx, client, model, messages, tools)
+			if err != nil {
+				return nil, err
+			}
+			messages = append(messages, msg)
+			transcript = append(transcript, actualTurn)
+
+			if len(msg.ToolCalls) == 0 {
+				if len(expected.ToolCalls) > 0 {
+					i = skipScriptedToolLoop(trace.Turns, i)
+				}
+				break
+			}
+
+			if len(expected.ToolCalls) == 0 {
+				return nil, fmt.Errorf("trace %q turn %d: %w", trace.ID, i, errMissingToolResult)
+			}
+
+			toolMessages, toolTurns, next, err := frozenToolResults(trace.ID, expectedIndex, expected, trace.Turns, i, msg.ToolCalls)
+			if err != nil {
+				return nil, err
+			}
+			i = next
+			messages = append(messages, toolMessages...)
+			transcript = append(transcript, toolTurns...)
+		}
+	}
+
+	return transcript, nil
+}
+
+func hasUserTurn(turns []Turn) bool {
+	for _, turn := range turns {
+		if turn.Role == "user" {
+			return true
+		}
+	}
+	return false
+}
+
+func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool) (ollama.ChatMessage, Turn, error) {
 	resp, err := client.Chat(ctx, ollama.ChatRequest{
 		Model:     model,
 		Messages:  messages,
@@ -157,15 +195,85 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 		KeepAlive: benchKeepAlive,
 	})
 	if err != nil {
-		return nil, err
+		return ollama.ChatMessage{}, Turn{}, err
 	}
 
-	turn, err := assistantTurnFromMessage(resp.Message)
+	msg := normalizeAssistantMessage(resp.Message)
+	turn, err := assistantTurnFromMessage(msg)
 	if err != nil {
-		return nil, err
+		return ollama.ChatMessage{}, Turn{}, err
+	}
+	return msg, turn, nil
+}
+
+func normalizeAssistantMessage(msg ollama.ChatMessage) ollama.ChatMessage {
+	if msg.Role == "" {
+		msg.Role = "assistant"
+	}
+	return msg
+}
+
+func frozenToolResults(traceID string, expectedIndex int, expected Turn, turns []Turn, start int, calls []ollama.ToolCall) ([]ollama.ChatMessage, []Turn, int, error) {
+	if len(calls) != len(expected.ToolCalls) {
+		return nil, nil, start, fmt.Errorf("trace %q assistant turn %d: got %d candidate tool calls for %d frozen calls: %w",
+			traceID, expectedIndex, len(calls), len(expected.ToolCalls), errToolCallMismatch)
+	}
+	if start+len(expected.ToolCalls) > len(turns) {
+		return nil, nil, start, fmt.Errorf("trace %q assistant turn %d: %w", traceID, expectedIndex, errMissingToolResult)
 	}
 
-	return []Turn{turn}, nil
+	messages := make([]ollama.ChatMessage, 0, len(calls))
+	transcript := make([]Turn, 0, len(calls))
+	for i, call := range calls {
+		expectedCall := expected.ToolCalls[i]
+		callName := strings.TrimSpace(call.Function.Name)
+		if callName == "" || callName != strings.TrimSpace(expectedCall.Name) {
+			return nil, nil, start, fmt.Errorf("trace %q assistant turn %d tool %d: got %q, want %q: %w",
+				traceID, expectedIndex, i, callName, expectedCall.Name, errToolCallMismatch)
+		}
+
+		result := turns[start+i]
+		if result.Role != "tool" {
+			return nil, nil, start, fmt.Errorf("trace %q assistant turn %d tool %d: %w", traceID, expectedIndex, i, errMissingToolResult)
+		}
+		resultName := strings.TrimSpace(result.Name)
+		if resultName != "" && resultName != callName {
+			return nil, nil, start, fmt.Errorf("trace %q assistant turn %d tool %d result: got %q, want %q: %w",
+				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)
+		}
+
+		callID := call.ID
+		if callID == "" {
+			callID = result.ToolCallID
+		}
+		messages = append(messages, ollama.ChatMessage{
+			Role:       "tool",
+			Content:    result.Content,
+			ToolName:   callName,
+			ToolCallID: callID,
+		})
+		transcript = append(transcript, Turn{
+			Role:       "tool",
+			Content:    result.Content,
+			Name:       callName,
+			ToolCallID: callID,
+			Raw:        result.Raw,
+		})
+	}
+
+	next := start + len(expected.ToolCalls)
+	if next < len(turns) && turns[next].Role == "tool" {
+		return nil, nil, start, fmt.Errorf("trace %q assistant turn %d: extra frozen tool result: %w",
+			traceID, expectedIndex, errUnsupportedTurns)
+	}
+	return messages, transcript, next, nil
+}
+
+func skipScriptedToolLoop(turns []Turn, start int) int {
+	for start < len(turns) && turns[start].Role != "user" {
+		start++
+	}
+	return start
 }
 
 func decodeTraceTools(rawTools []json.RawMessage) ([]ollama.Tool, error) {

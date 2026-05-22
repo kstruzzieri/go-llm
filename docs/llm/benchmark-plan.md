@@ -149,9 +149,11 @@ First implementation slice:
   blocks, and email addresses before files are written.
 - Conversations without a system prompt, user turn, final assistant
   answer, or parseable tool-call JSON are skipped with a warning.
-- Tool-call names and tool-result turns are captured, but tool schemas are
-  not recoverable from `conversation/` today; full replay of tool-use
-  traces requires the follow-up schema/tool-loop work.
+- Tool-call names and tool-result turns are captured, and `llm-bench`
+  can replay multi-turn/tool-use traces by injecting frozen tool results
+  after matching candidate tool calls. Tool schemas are still not
+  recoverable from `conversation/` today; schema sourcing remains
+  follow-up capture work.
 - Feedback-driven sampling is deferred until feedback rows can be tied
   to conversations; today `feedback_retrievals` and `feedback_signals`
   do not carry a conversation id.
