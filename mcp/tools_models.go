@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -33,6 +34,10 @@ func (s *Server) registerModelTools() {
 			"type": "object",
 			"properties": map[string]any{
 				"name": map[string]any{"type": "string", "description": "Model name (e.g. qwen3:8b)"},
+				"provider": map[string]any{
+					"type":        "string",
+					"description": "Provider instance name when the model name is ambiguous",
+				},
 			},
 			"required": []string{"name"},
 		},
@@ -138,7 +143,8 @@ func (s *Server) listLegacyOllamaModels(ctx context.Context) ([]listedModelInfo,
 
 func (s *Server) handleShowModel(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
 	var args struct {
-		Name string `json:"name"`
+		Name     string `json:"name"`
+		Provider string `json:"provider,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
@@ -147,16 +153,111 @@ func (s *Server) handleShowModel(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("validation", "name must not be empty"), nil
 	}
 
-	info, err := s.client.ShowModel(ctx, args.Name)
+	info, err := s.showModel(ctx, args.Name, args.Provider)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return toolError("provider", "%v", err), nil
 	}
 
 	data, err := json.Marshal(info)
 	if err != nil {
-		return toolError("ollama", "marshal model info: %v", err), nil
+		return toolError("provider", "marshal model info: %v", err), nil
 	}
 	return toolResult(string(data)), nil
+}
+
+func (s *Server) showModel(ctx context.Context, name, providerName string) (any, error) {
+	key, ok, err := s.modelKeyForShowModel(ctx, name, providerName)
+	if err != nil {
+		return nil, err
+	}
+	if ok {
+		return s.lookupProviderModelInfo(ctx, key)
+	}
+
+	info, err := s.client.ShowModel(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return info, nil
+}
+
+func (s *Server) modelKeyForShowModel(ctx context.Context, name, providerName string) (provider.ModelKey, bool, error) {
+	if providerName != "" {
+		return provider.ModelKey{Provider: providerName, Model: name}, true, nil
+	}
+	if key, ok := s.parseKnownModelSelector(name); ok {
+		return key, true, nil
+	}
+
+	inferredProvider, err := s.inferProviderForExplicitModel(ctx, name)
+	if err != nil {
+		return provider.ModelKey{}, false, err
+	}
+	if inferredProvider != "" {
+		return provider.ModelKey{Provider: inferredProvider, Model: name}, true, nil
+	}
+	return provider.ModelKey{}, false, nil
+}
+
+func (s *Server) lookupProviderModelInfo(ctx context.Context, key provider.ModelKey) (listedModelInfo, error) {
+	s.mu.RLock()
+	modelRegistry := s.modelRegistry
+	s.mu.RUnlock()
+	if modelRegistry != nil {
+		profile, err := modelRegistry.Lookup(ctx, key)
+		if err == nil {
+			return listedModelInfo{
+				ModelInfo: modelInfoFromProfile(profile),
+				Provider:  key.Provider,
+			}, nil
+		}
+	}
+
+	pReg := s.providerRegistrySnapshot()
+	if pReg == nil {
+		return listedModelInfo{}, fmt.Errorf("provider registry unavailable")
+	}
+	p, ok := pReg.Get(key.Provider)
+	if !ok {
+		return listedModelInfo{}, fmt.Errorf("provider %q not found", key.Provider)
+	}
+
+	models, err := p.Models(ctx)
+	if err != nil {
+		return listedModelInfo{}, err
+	}
+	for _, model := range models {
+		if model.Name == key.Model {
+			return listedModelInfo{
+				ModelInfo: model,
+				Provider:  key.Provider,
+			}, nil
+		}
+	}
+	return listedModelInfo{}, fmt.Errorf("model %q not found on provider %q", key.Model, key.Provider)
+}
+
+func modelInfoFromProfile(profile *provider.ModelProfile) provider.ModelInfo {
+	if profile == nil {
+		return provider.ModelInfo{}
+	}
+	return provider.ModelInfo{
+		Name:          profile.Key.Model,
+		Family:        profile.Family,
+		ParameterSize: profile.Resources.ParameterSize,
+		QuantLevel:    profile.Resources.QuantLevel,
+		Template:      profile.Template,
+		Capabilities:  capabilityNames(profile.Caps),
+		ContextWindow: profile.ContextWindow,
+		Digest:        profile.Digest,
+	}
+}
+
+func capabilityNames(caps provider.Capability) []string {
+	if caps == 0 {
+		return nil
+	}
+	return strings.Split(caps.String(), "|")
 }
 
 func (s *Server) handlePullModel(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {

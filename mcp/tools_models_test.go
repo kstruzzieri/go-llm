@@ -131,6 +131,66 @@ func TestShowModelToolBasic(t *testing.T) {
 	}
 }
 
+func TestShowModelToolUsesProviderRegistry(t *testing.T) {
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeOpenAICompatOnlyConfig(t, t.TempDir(), openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	result, err := s.handleShowModel(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{
+			Arguments: json.RawMessage(`{"name":"local-fim"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleShowModel() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleShowModel() isError = true, content = %v", extractText(result))
+	}
+
+	var info struct {
+		Provider     string   `json:"provider"`
+		Name         string   `json:"name"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &info); err != nil {
+		t.Fatalf("unmarshal model info: %v", err)
+	}
+	if info.Provider != "vllm-local" || info.Name != "local-fim" {
+		t.Fatalf("model info = %+v, want vllm-local/local-fim", info)
+	}
+	if !containsAll(info.Capabilities, "generate", "stream", "insert") {
+		t.Fatalf("capabilities = %v, want generate, stream, insert", info.Capabilities)
+	}
+}
+
+func containsAll(got []string, want ...string) bool {
+	seen := make(map[string]bool, len(got))
+	for _, item := range got {
+		seen[item] = true
+	}
+	for _, item := range want {
+		if !seen[item] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestShowModelToolEmptyName(t *testing.T) {
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

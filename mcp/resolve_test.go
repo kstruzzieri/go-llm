@@ -25,6 +25,32 @@ func TestResolveModelExplicit(t *testing.T) {
 	}
 }
 
+func TestResolveModelTargetDoesNotTreatUnknownSlashPrefixAsProvider(t *testing.T) {
+	s := &Server{
+		cfg: &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"vllm-local": {BaseURL: "http://localhost:8080", APIFormat: "openai-compat"},
+			},
+			Models: map[string]config.ModelConfig{
+				"completion": {Name: "org/local-fim", Provider: "vllm-local", Type: "dense"},
+			},
+			Defaults: map[string]string{"completion": "completion"},
+		},
+		resolved: make(map[string]config.ResolvedModel),
+	}
+
+	got, err := s.resolveModelTarget(context.Background(), "org/local-fim", "completion")
+	if err != nil {
+		t.Fatalf("resolveModelTarget() error = %v", err)
+	}
+	if got.Name != "org/local-fim" {
+		t.Fatalf("Name = %q, want org/local-fim", got.Name)
+	}
+	if got.Provider != "vllm-local" {
+		t.Fatalf("Provider = %q, want vllm-local", got.Provider)
+	}
+}
+
 func TestResolveModelFromCache(t *testing.T) {
 	s := &Server{
 		cfg: &config.Config{}, // non-nil config

@@ -180,6 +180,50 @@ func TestNewServerRegistersConfiguredProvidersAndOverridesCapabilities(t *testin
 	}
 }
 
+func TestModelKeyForCompletionInfersConfiguredProvider(t *testing.T) {
+	ollamaMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["embedding"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ollamaMock.Close()
+
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-chat","object":"model"},{"id":"local-carved","object":"model"},{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeProviderWiringConfig(t, t.TempDir(), ollamaMock.URL, openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	key, err := s.modelKeyForCompletion(context.Background(), "local-fim", "")
+	if err != nil {
+		t.Fatalf("modelKeyForCompletion() error = %v", err)
+	}
+	if key.Provider != "vllm-local" || key.Model != "local-fim" {
+		t.Fatalf("modelKeyForCompletion() = %v, want vllm-local/local-fim", key)
+	}
+}
+
 func TestNewCompletionProviderPinsResolvedProvider(t *testing.T) {
 	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

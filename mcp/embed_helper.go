@@ -62,8 +62,12 @@ func (s *Server) routedEmbed(ctx context.Context, model string, inputs []string,
 	if router == nil {
 		return nil, routedEmbedError{category: embedToolConfig, err: fmt.Errorf("router unavailable")}
 	}
+	selector, err := s.routeModelSelector(ctx, model, "embedding")
+	if err != nil {
+		return nil, routedEmbedError{category: embedToolConfig, err: err}
+	}
 	rr := provider.RoutingRequest{
-		Model:          model,
+		Model:          selector,
 		UseCase:        "embedding",
 		RequiredCaps:   provider.CapEmbed,
 		Input:          inputs,

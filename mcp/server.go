@@ -518,7 +518,7 @@ func (s *Server) newCompletionProvider(ctx context.Context, model, providerName 
 		return nil, fmt.Errorf("mcp: model registry unavailable")
 	}
 
-	key, err := s.modelKeyForCompletion(model, providerName)
+	key, err := s.modelKeyForCompletion(ctx, model, providerName)
 	if err != nil {
 		return nil, err
 	}
@@ -531,8 +531,8 @@ func (s *Server) newCompletionProvider(ctx context.Context, model, providerName 
 		return nil, err
 	}
 
-	// modelRegistry.Lookup proved this model exists for ollamaProv via
-	// /api/show. Seed the providerRegistry's routing index so Router can
+	// modelRegistry.Lookup proved this model exists for its provider. Seed
+	// the providerRegistry's routing index so Router can
 	// dispatch to it even when the bulk /api/tags-based RefreshModels at
 	// startup failed (partial Ollama outage). Idempotent; failure here is
 	// non-fatal — Router's own ProvidersForModel error will surface
@@ -544,27 +544,20 @@ func (s *Server) newCompletionProvider(ctx context.Context, model, providerName 
 	return completion.NewProviderWithGenerator(s.fimGenerator(s.fimPriority()), key.String(), cfg)
 }
 
-func (s *Server) modelKeyForCompletion(model, providerName string) (provider.ModelKey, error) {
+func (s *Server) modelKeyForCompletion(ctx context.Context, model, providerName string) (provider.ModelKey, error) {
 	if providerName != "" {
 		return provider.ModelKey{Provider: providerName, Model: model}, nil
 	}
-	if key, ok := parseModelSelector(model); ok {
+	if key, ok := s.parseKnownModelSelector(model); ok {
 		return key, nil
 	}
 
-	s.mu.RLock()
-	ollamaProv := s.ollamaProv
-	providerRegistry := s.providerRegistry
-	s.mu.RUnlock()
-
-	if ollamaProv != nil {
-		return provider.ModelKey{Provider: ollamaProv.Name(), Model: model}, nil
+	inferredProvider, err := s.inferProviderForExplicitModel(ctx, model)
+	if err != nil {
+		return provider.ModelKey{}, err
 	}
-	if providerRegistry != nil {
-		names := providerRegistry.Names()
-		if len(names) == 1 {
-			return provider.ModelKey{Provider: names[0], Model: model}, nil
-		}
+	if inferredProvider != "" {
+		return provider.ModelKey{Provider: inferredProvider, Model: model}, nil
 	}
 	return provider.ModelKey{}, fmt.Errorf("mcp: provider required for model %q", model)
 }

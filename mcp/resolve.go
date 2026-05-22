@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -31,15 +32,30 @@ func (s *Server) resolveModel(ctx context.Context, explicit, useCase string) (st
 	return target.Name, nil
 }
 
+func (s *Server) routeModelSelector(ctx context.Context, explicit, useCase string) (string, error) {
+	if explicit == "" {
+		return "", nil
+	}
+	target, err := s.resolveModelTarget(ctx, explicit, useCase)
+	if err != nil {
+		return "", err
+	}
+	return target.selector(), nil
+}
+
 // resolveModelTarget is resolveModel's provider-aware sibling. Explicit
 // qualified selectors preserve their provider component; configured defaults
 // return the provider instance captured by config.ResolvedModel.
 func (s *Server) resolveModelTarget(ctx context.Context, explicit, useCase string) (resolvedModelTarget, error) {
 	if explicit != "" {
-		if key, ok := parseModelSelector(explicit); ok {
+		if key, ok := s.parseKnownModelSelector(explicit); ok {
 			return resolvedModelTarget{Name: key.Model, Provider: key.Provider}, nil
 		}
-		return resolvedModelTarget{Name: explicit}, nil
+		providerName, err := s.inferProviderForExplicitModel(ctx, explicit)
+		if err != nil {
+			return resolvedModelTarget{}, err
+		}
+		return resolvedModelTarget{Name: explicit, Provider: providerName}, nil
 	}
 
 	// No config available — model must be provided explicitly.
@@ -205,6 +221,99 @@ func parseModelSelector(selector string) (provider.ModelKey, bool) {
 		return provider.ModelKey{}, false
 	}
 	return provider.ModelKey{Provider: providerName, Model: model}, true
+}
+
+func (s *Server) parseKnownModelSelector(selector string) (provider.ModelKey, bool) {
+	key, ok := parseModelSelector(selector)
+	if !ok || !s.providerKnown(key.Provider) {
+		return provider.ModelKey{}, false
+	}
+	return key, true
+}
+
+func (s *Server) providerKnown(providerName string) bool {
+	if providerName == "" {
+		return false
+	}
+	if pReg := s.providerRegistrySnapshot(); pReg != nil {
+		if _, ok := pReg.Get(providerName); ok {
+			return true
+		}
+	}
+	if s.cfg != nil {
+		_, ok := s.cfg.Providers[providerName]
+		return ok
+	}
+	return false
+}
+
+func (s *Server) inferProviderForExplicitModel(ctx context.Context, model string) (string, error) {
+	if providerName, ok, err := s.inferProviderFromConfig(model); ok || err != nil {
+		return providerName, err
+	}
+
+	pReg := s.providerRegistrySnapshot()
+	if pReg == nil {
+		return "", nil
+	}
+	if providerName, ok, err := inferProviderFromRegistryIndex(pReg, model); ok || err != nil {
+		return providerName, err
+	}
+
+	for _, name := range pReg.Names() {
+		_ = pReg.RefreshModels(ctx, name)
+	}
+	if providerName, ok, err := inferProviderFromRegistryIndex(pReg, model); ok || err != nil {
+		return providerName, err
+	}
+
+	names := pReg.Names()
+	if len(names) == 1 {
+		return names[0], nil
+	}
+	return "", nil
+}
+
+func (s *Server) inferProviderFromConfig(model string) (string, bool, error) {
+	if s.cfg == nil {
+		return "", false, nil
+	}
+	providers := make(map[string]bool)
+	for _, m := range s.cfg.Models {
+		if m.Name == model && m.Provider != "" {
+			providers[m.Provider] = true
+		}
+	}
+	return singleProvider(model, providers)
+}
+
+func inferProviderFromRegistryIndex(pReg *provider.Registry, model string) (string, bool, error) {
+	providers, err := pReg.ProvidersForModel(model)
+	if err != nil {
+		return "", false, nil
+	}
+	names := make(map[string]bool, len(providers))
+	for _, p := range providers {
+		names[p.Name()] = true
+	}
+	return singleProvider(model, names)
+}
+
+func singleProvider(model string, providers map[string]bool) (string, bool, error) {
+	switch len(providers) {
+	case 0:
+		return "", false, nil
+	case 1:
+		for providerName := range providers {
+			return providerName, true, nil
+		}
+	}
+	names := make([]string, 0, len(providers))
+	for providerName := range providers {
+		names = append(names, providerName)
+	}
+	sort.Strings(names)
+	return "", false, fmt.Errorf("mcp: provider required for ambiguous model %q (available from: %s)", model, strings.Join(names, ", "))
 }
 
 func modelSelector(providerName, model string) string {

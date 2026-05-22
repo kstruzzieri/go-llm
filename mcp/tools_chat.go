@@ -116,9 +116,13 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	if args.Temperature != nil {
 		opts.Temperature = args.Temperature
 	}
+	model, err := s.routeModelSelector(ctx, args.Model, "chat")
+	if err != nil {
+		return toolError("config", "%v", err), nil
+	}
 
 	rr := provider.RoutingRequest{
-		Model:          args.Model,
+		Model:          model,
 		UseCase:        "chat",
 		RequiredCaps:   provider.CapChat,
 		Messages:       pmsgs,
