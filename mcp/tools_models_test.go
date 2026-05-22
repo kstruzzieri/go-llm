@@ -11,6 +11,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestListModelsToolBasic(t *testing.T) {
@@ -95,6 +96,9 @@ func TestShowModelToolBasic(t *testing.T) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
 		case "/api/show":
 			w.Header().Set("Content-Type", "application/json")
 			// Ollama's /api/show response nests model details under "details".
@@ -175,6 +179,39 @@ func TestShowModelToolUsesProviderRegistry(t *testing.T) {
 	}
 	if !containsAll(info.Capabilities, "generate", "stream", "insert") {
 		t.Fatalf("capabilities = %v, want generate, stream, insert", info.Capabilities)
+	}
+}
+
+func TestShowModelToolQueriesLiveInventoryBeforeCachedProfile(t *testing.T) {
+	reg := provider.NewRegistry()
+	p := &mutableModelProvider{
+		fakeRouteProvider: &fakeRouteProvider{name: "vllm-local"},
+		models:            []provider.ModelInfo{{Name: "old-model"}},
+	}
+	if err := reg.Register(p); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	mr, err := provider.NewModelRegistry(reg, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error = %v", err)
+	}
+	s := &Server{
+		providerRegistry: reg,
+		modelRegistry:    mr,
+	}
+
+	key := provider.ModelKey{Provider: "vllm-local", Model: "old-model"}
+	if _, err := s.lookupProviderModelInfo(context.Background(), key); err != nil {
+		t.Fatalf("initial lookupProviderModelInfo() error = %v", err)
+	}
+
+	p.models = []provider.ModelInfo{{Name: "new-model"}}
+	_, err = s.lookupProviderModelInfo(context.Background(), key)
+	if err == nil {
+		t.Fatal("lookupProviderModelInfo() error = nil, want stale cached model rejected")
+	}
+	if !strings.Contains(err.Error(), `model "old-model" not found`) {
+		t.Fatalf("lookupProviderModelInfo() error = %q, want stale model not found", err)
 	}
 }
 

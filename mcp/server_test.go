@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +12,8 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/completion"
 	"github.com/kstruzzieri/go-llm/config"
@@ -195,6 +198,77 @@ func TestNewServerUsesConfiguredOllamaProvider(t *testing.T) {
 	}
 	if s.Completer() == nil {
 		t.Fatal("Completer() = nil, want resolved completion provider")
+	}
+}
+
+func TestNewServerUsesSingleNamedOllamaProviderForLegacyClient(t *testing.T) {
+	var pullHit atomic.Bool
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"local-model"}]}`))
+		case "/api/show":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["completion"]}`))
+		case "/api/pull":
+			pullHit.Store(true)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"success"}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer mock.Close()
+
+	path := filepath.Join(t.TempDir(), "models.json")
+	data := `{
+  "providers": {
+    "local-ollama": {
+      "base_url": "` + mock.URL + `",
+      "timeout": "17s",
+      "api_format": "ollama"
+    }
+  },
+  "models": {
+    "general": {"name": "local-model", "provider": "local-ollama", "type": "dense"}
+  },
+  "defaults": {
+    "chat": "general"
+  }
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+
+	s, err := NewServer(context.Background(), WithConfig(path), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	if s.ollamaURL != mock.URL {
+		t.Fatalf("ollamaURL = %q, want named Ollama provider URL %q", s.ollamaURL, mock.URL)
+	}
+	if !s.ollamaAvailable {
+		t.Fatal("ollamaAvailable = false, want true")
+	}
+
+	result, err := s.handlePullModel(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{
+			Arguments: json.RawMessage(`{"name":"local-model"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handlePullModel() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handlePullModel() isError = true, content = %v", extractText(result))
+	}
+	if !pullHit.Load() {
+		t.Fatal("pull_model did not use the named Ollama provider URL")
 	}
 }
 

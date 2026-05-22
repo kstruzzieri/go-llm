@@ -183,7 +183,7 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// unless the caller explicitly overrode the base URL.
 	clientOpts := []ollama.Option{ollama.WithBaseURL(s.ollamaURL)}
 	if s.cfg != nil {
-		if cfgProvider := s.cfg.Provider("ollama"); cfgProvider != nil && (cfgProvider.APIFormat == "" || cfgProvider.APIFormat == "ollama") {
+		if cfgProvider := s.legacyOllamaProviderConfig(); cfgProvider != nil {
 			if !s.ollamaURLExplicit && cfgProvider.BaseURL != "" {
 				s.ollamaURL = cfgProvider.BaseURL
 				clientOpts[0] = ollama.WithBaseURL(s.ollamaURL)
@@ -262,6 +262,35 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	s.registerResources()
 
 	return s, nil
+}
+
+func (s *Server) legacyOllamaProviderConfig() *config.ProviderConfig {
+	if s.cfg == nil {
+		return nil
+	}
+	if cfgProvider := s.cfg.Provider("ollama"); cfgProvider != nil && providerConfigIsOllama(*cfgProvider) {
+		return cfgProvider
+	}
+
+	keys := make([]string, 0, len(s.cfg.Providers))
+	for key, cfgProvider := range s.cfg.Providers {
+		if key == "ollama" {
+			continue
+		}
+		if providerConfigIsOllama(cfgProvider) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) != 1 {
+		return nil
+	}
+	cfgProvider := s.cfg.Providers[keys[0]]
+	return &cfgProvider
+}
+
+func providerConfigIsOllama(cfgProvider config.ProviderConfig) bool {
+	return cfgProvider.APIFormat == "" || cfgProvider.APIFormat == "ollama"
 }
 
 // rebuildDerivedClients rebuilds the completer, indexer, and retriever from
