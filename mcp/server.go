@@ -392,6 +392,9 @@ func (s *Server) configuredProviders() ([]provider.Provider, provider.Provider, 
 	registered := make([]provider.Provider, 0, len(keys))
 	var ollamaProv provider.Provider
 	for _, key := range keys {
+		if err := config.ValidateProviderName(key); err != nil {
+			return nil, nil, fmt.Errorf("mcp: provider config: %w", err)
+		}
 		cfg := providerConfigs[key]
 		if cfg.APIFormat == "" {
 			cfg.APIFormat = "ollama"

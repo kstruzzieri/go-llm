@@ -123,6 +123,45 @@ func TestConfiguredProvidersDoesNotOverrideOpenAICompatProviderNamedOllama(t *te
 	}
 }
 
+func TestConfiguredProvidersRejectsInvalidProviderKeys(t *testing.T) {
+	tests := []struct {
+		name    string
+		key     string
+		wantErr string
+	}{
+		{
+			name:    "empty",
+			key:     "",
+			wantErr: "provider name must not be empty",
+		},
+		{
+			name:    "slash",
+			key:     "team/local",
+			wantErr: `provider name "team/local" must not contain "/"`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{
+				cfg: &config.Config{
+					Providers: map[string]config.ProviderConfig{
+						tt.key: {BaseURL: "http://localhost:11434", APIFormat: "ollama"},
+					},
+				},
+			}
+
+			_, _, err := s.configuredProviders()
+			if err == nil {
+				t.Fatal("configuredProviders() error = nil, want invalid provider key error")
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
 func TestNewServerUsesConfiguredOllamaProvider(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
