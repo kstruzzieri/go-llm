@@ -9,6 +9,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestResolveModelExplicit(t *testing.T) {
@@ -23,6 +24,82 @@ func TestResolveModelExplicit(t *testing.T) {
 	if got != "explicit-model" {
 		t.Errorf("resolveModel() = %q, want %q", got, "explicit-model")
 	}
+}
+
+func TestResolveModelTargetDoesNotTreatUnknownSlashPrefixAsProvider(t *testing.T) {
+	s := &Server{
+		cfg: &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"vllm-local": {BaseURL: "http://localhost:8080", APIFormat: "openai-compat"},
+			},
+			Models: map[string]config.ModelConfig{
+				"completion": {Name: "org/local-fim", Provider: "vllm-local", Type: "dense"},
+			},
+			Defaults: map[string]string{"completion": "completion"},
+		},
+		resolved: make(map[string]config.ResolvedModel),
+	}
+
+	got, err := s.resolveModelTarget(context.Background(), "org/local-fim", "completion")
+	if err != nil {
+		t.Fatalf("resolveModelTarget() error = %v", err)
+	}
+	if got.Name != "org/local-fim" {
+		t.Fatalf("Name = %q, want org/local-fim", got.Name)
+	}
+	if got.Provider != "vllm-local" {
+		t.Fatalf("Provider = %q, want vllm-local", got.Provider)
+	}
+}
+
+func TestProviderRegistryModelCheckerRefreshesModelIndex(t *testing.T) {
+	reg := provider.NewRegistry()
+	p := &mutableModelProvider{
+		fakeRouteProvider: &fakeRouteProvider{name: "vllm-local"},
+		models:            []provider.ModelInfo{{Name: "old-model"}},
+	}
+	if err := reg.Register(p); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	checker := providerRegistryModelChecker{registry: reg}
+
+	keys, err := checker.AvailableModelKeys(context.Background())
+	if err != nil {
+		t.Fatalf("AvailableModelKeys() error = %v", err)
+	}
+	if len(keys) != 1 || keys[0].Model != "old-model" {
+		t.Fatalf("initial keys = %+v, want old-model", keys)
+	}
+
+	p.models = []provider.ModelInfo{{Name: "new-model"}}
+	keys, err = checker.AvailableModelKeys(context.Background())
+	if err != nil {
+		t.Fatalf("AvailableModelKeys() after update error = %v", err)
+	}
+	if len(keys) != 1 || keys[0].Model != "new-model" {
+		t.Fatalf("updated keys = %+v, want new-model", keys)
+	}
+	if _, err := reg.ProvidersForModel("old-model"); err == nil {
+		t.Fatal("ProvidersForModel(old-model) error = nil, want stale entry removed")
+	}
+	providers, err := reg.ProvidersForModel("new-model")
+	if err != nil {
+		t.Fatalf("ProvidersForModel(new-model) error = %v", err)
+	}
+	if len(providers) != 1 || providers[0].Name() != "vllm-local" {
+		t.Fatalf("ProvidersForModel(new-model) = %+v, want vllm-local", providers)
+	}
+}
+
+type mutableModelProvider struct {
+	*fakeRouteProvider
+	models []provider.ModelInfo
+}
+
+func (p *mutableModelProvider) Models(context.Context) ([]provider.ModelInfo, error) {
+	out := make([]provider.ModelInfo, len(p.models))
+	copy(out, p.models)
+	return out, nil
 }
 
 func TestResolveModelFromCache(t *testing.T) {

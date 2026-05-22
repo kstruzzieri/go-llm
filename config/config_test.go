@@ -510,6 +510,16 @@ func TestLoad_Validation(t *testing.T) {
 			wantErr: "config: at least one provider is required",
 		},
 		{
+			name:    "empty provider name",
+			json:    `{"providers": {"": {"base_url": "http://localhost:11434"}}, "models": {"m": {"name": "x", "type": "dense"}}, "defaults": {}}`,
+			wantErr: "config: provider name must not be empty",
+		},
+		{
+			name:    "provider name contains slash",
+			json:    `{"providers": {"team/local": {"base_url": "http://localhost:11434"}}, "models": {"m": {"name": "x", "type": "dense", "provider": "team/local"}}, "defaults": {}}`,
+			wantErr: `config: provider name "team/local" must not contain "/"`,
+		},
+		{
 			name:    "empty base_url",
 			json:    `{"providers": {"ollama": {"base_url": ""}}, "models": {"m": {"name": "x", "type": "dense"}}, "defaults": {}}`,
 			wantErr: `config: provider "ollama": base_url is required`,

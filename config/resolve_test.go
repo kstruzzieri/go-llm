@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 type mockChecker struct {
@@ -14,6 +16,28 @@ type mockChecker struct {
 
 func (m *mockChecker) AvailableModels(_ context.Context) ([]string, error) {
 	return m.models, m.err
+}
+
+type mockProviderChecker struct {
+	keys []provider.ModelKey
+	err  error
+}
+
+func (m *mockProviderChecker) AvailableModels(_ context.Context) ([]string, error) {
+	seen := map[string]bool{}
+	var models []string
+	for _, key := range m.keys {
+		if key.Model == "" || seen[key.Model] {
+			continue
+		}
+		seen[key.Model] = true
+		models = append(models, key.Model)
+	}
+	return models, m.err
+}
+
+func (m *mockProviderChecker) AvailableModelKeys(_ context.Context) ([]provider.ModelKey, error) {
+	return m.keys, m.err
 }
 
 func loadTestConfig(t *testing.T) *Config {
@@ -134,6 +158,39 @@ func TestResolve_FallbackCrossProvider(t *testing.T) {
 	}
 	if !got.IsFallback {
 		t.Error("IsFallback = false, want true")
+	}
+}
+
+func TestResolve_ProviderAwareAvailability(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"ollama": {BaseURL: "http://localhost:11434"},
+			"vllm":   {BaseURL: "http://localhost:8080", APIFormat: "openai-compat"},
+		},
+		Models: map[string]ModelConfig{
+			"chat": {Name: "shared-model", Provider: "vllm", Type: "dense"},
+		},
+		Defaults: map[string]string{"chat": "chat"},
+	}
+	checker := &mockProviderChecker{keys: []provider.ModelKey{
+		{Provider: "ollama", Model: "shared-model"},
+	}}
+
+	_, err := cfg.Resolve(context.Background(), checker, "chat")
+	if err == nil {
+		t.Fatal("Resolve() error = nil, want provider-specific miss")
+	}
+	if !strings.Contains(err.Error(), `role "chat"`) {
+		t.Fatalf("error = %q, want unresolved chat role", err)
+	}
+
+	checker.keys = append(checker.keys, provider.ModelKey{Provider: "vllm", Model: "shared-model"})
+	got, err := cfg.Resolve(context.Background(), checker, "chat")
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if got.Provider != "vllm" || got.Name != "shared-model" {
+		t.Fatalf("Resolve() = %+v, want vllm/shared-model", got)
 	}
 }
 
@@ -420,4 +477,3 @@ func TestConfig_RoleFallbackChain_UnknownRole(t *testing.T) {
 		t.Fatal("expected unknown-role error, got nil")
 	}
 }
-

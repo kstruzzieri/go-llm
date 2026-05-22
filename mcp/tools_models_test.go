@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestListModelsToolBasic(t *testing.T) {
@@ -47,11 +49,56 @@ func TestListModelsToolBasic(t *testing.T) {
 	}
 }
 
+func TestListModelsToolUsesProviderRegistryWhenOllamaUnavailable(t *testing.T) {
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeOpenAICompatOnlyConfig(t, t.TempDir(), openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	result, err := s.handleListModels(context.Background(), &gomcp.CallToolRequest{})
+	if err != nil {
+		t.Fatalf("handleListModels() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleListModels() isError = true, content = %v", extractText(result))
+	}
+
+	var models []struct {
+		Provider string `json:"provider"`
+		Name     string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &models); err != nil {
+		t.Fatalf("unmarshal models: %v", err)
+	}
+	if len(models) != 1 {
+		t.Fatalf("model count = %d, want 1", len(models))
+	}
+	if models[0].Provider != "vllm-local" || models[0].Name != "local-fim" {
+		t.Fatalf("model = %+v, want vllm-local/local-fim", models[0])
+	}
+}
+
 func TestShowModelToolBasic(t *testing.T) {
 	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/":
 			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
 		case "/api/show":
 			w.Header().Set("Content-Type", "application/json")
 			// Ollama's /api/show response nests model details under "details".
@@ -86,6 +133,99 @@ func TestShowModelToolBasic(t *testing.T) {
 	if info.Family != "qwen3" {
 		t.Errorf("family = %q, want %q", info.Family, "qwen3")
 	}
+}
+
+func TestShowModelToolUsesProviderRegistry(t *testing.T) {
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeOpenAICompatOnlyConfig(t, t.TempDir(), openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	result, err := s.handleShowModel(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{
+			Arguments: json.RawMessage(`{"name":"local-fim"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handleShowModel() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handleShowModel() isError = true, content = %v", extractText(result))
+	}
+
+	var info struct {
+		Provider     string   `json:"provider"`
+		Name         string   `json:"name"`
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.Unmarshal([]byte(extractText(result)), &info); err != nil {
+		t.Fatalf("unmarshal model info: %v", err)
+	}
+	if info.Provider != "vllm-local" || info.Name != "local-fim" {
+		t.Fatalf("model info = %+v, want vllm-local/local-fim", info)
+	}
+	if !containsAll(info.Capabilities, "generate", "stream", "insert") {
+		t.Fatalf("capabilities = %v, want generate, stream, insert", info.Capabilities)
+	}
+}
+
+func TestShowModelToolQueriesLiveInventoryBeforeCachedProfile(t *testing.T) {
+	reg := provider.NewRegistry()
+	p := &mutableModelProvider{
+		fakeRouteProvider: &fakeRouteProvider{name: "vllm-local"},
+		models:            []provider.ModelInfo{{Name: "old-model"}},
+	}
+	if err := reg.Register(p); err != nil {
+		t.Fatalf("Register() error = %v", err)
+	}
+	mr, err := provider.NewModelRegistry(reg, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error = %v", err)
+	}
+	s := &Server{
+		providerRegistry: reg,
+		modelRegistry:    mr,
+	}
+
+	key := provider.ModelKey{Provider: "vllm-local", Model: "old-model"}
+	if _, err := s.lookupProviderModelInfo(context.Background(), key); err != nil {
+		t.Fatalf("initial lookupProviderModelInfo() error = %v", err)
+	}
+
+	p.models = []provider.ModelInfo{{Name: "new-model"}}
+	_, err = s.lookupProviderModelInfo(context.Background(), key)
+	if err == nil {
+		t.Fatal("lookupProviderModelInfo() error = nil, want stale cached model rejected")
+	}
+	if !strings.Contains(err.Error(), `model "old-model" not found`) {
+		t.Fatalf("lookupProviderModelInfo() error = %q, want stale model not found", err)
+	}
+}
+
+func containsAll(got []string, want ...string) bool {
+	seen := make(map[string]bool, len(got))
+	for _, item := range got {
+		seen[item] = true
+	}
+	for _, item := range want {
+		if !seen[item] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestShowModelToolEmptyName(t *testing.T) {

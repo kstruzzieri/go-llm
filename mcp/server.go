@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -18,6 +19,7 @@ import (
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -181,13 +183,13 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// unless the caller explicitly overrode the base URL.
 	clientOpts := []ollama.Option{ollama.WithBaseURL(s.ollamaURL)}
 	if s.cfg != nil {
-		if provider := s.cfg.Provider("ollama"); provider != nil {
-			if !s.ollamaURLExplicit && provider.BaseURL != "" {
-				s.ollamaURL = provider.BaseURL
+		if cfgProvider := s.legacyOllamaProviderConfig(); cfgProvider != nil {
+			if !s.ollamaURLExplicit && cfgProvider.BaseURL != "" {
+				s.ollamaURL = cfgProvider.BaseURL
 				clientOpts[0] = ollama.WithBaseURL(s.ollamaURL)
 			}
-			if provider.Timeout.Duration > 0 {
-				clientOpts = append(clientOpts, ollama.WithTimeout(provider.Timeout.Duration))
+			if cfgProvider.Timeout.Duration > 0 {
+				clientOpts = append(clientOpts, ollama.WithTimeout(cfgProvider.Timeout.Duration))
 			}
 		}
 	}
@@ -198,7 +200,9 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 
 	// Step 3b: Build the provider-level model registry even in degraded mode
 	// so explicit completion requests can recover once Ollama comes back.
-	_ = s.ensureModelRegistry()
+	if err := s.ensureModelRegistry(); err != nil {
+		return nil, err
+	}
 
 	// Step 4: Open RAG store if not disabled (before model resolution
 	// so that rebuildDerivedClients can wire up indexer/retriever).
@@ -216,22 +220,26 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 
 	// Step 4b: build warmth source and Router after fallible store setup.
 	// NewRouter does not perform network I/O, so this is safe even when
-	// Ollama is unreachable. The warmth source's polling goroutine starts
-	// immediately and is fail-open.
+	// local providers are unreachable. The warmth source's polling goroutine
+	// starts immediately and is fail-open when the default Ollama instance
+	// is registered.
 	if s.modelRegistry != nil && s.providerRegistry != nil {
-		s.warmthSource = provider.NewOllamaWarmthSource(s.ollamaURL, "ollama")
-		s.router = provider.NewRouter(s.modelRegistry, s.providerRegistry,
-			provider.WithWarmthSource(s.warmthSource),
-		)
-		// Best-effort: populate the providerRegistry's model index so the
-		// Recommend safety-net tail can produce candidates. Failures are
-		// tolerated; handleListModels self-heals on the next call.
-		_ = s.providerRegistry.RefreshModels(ctx, "ollama")
+		opts := []provider.RouterOption{}
+		if s.ollamaProv != nil && s.ollamaProv.Name() == "ollama" {
+			s.warmthSource = provider.NewOllamaWarmthSource(s.ollamaURL, "ollama")
+			opts = append(opts, provider.WithWarmthSource(s.warmthSource))
+		}
+		s.router = provider.NewRouter(s.modelRegistry, s.providerRegistry, opts...)
+		// Best-effort: populate the providerRegistry's model index for every
+		// registered provider so model-name lookup and Recommend can produce
+		// candidates. Failures are tolerated; refreshResolved and list_models
+		// also self-heal on later calls.
+		s.refreshProviderModelIndexes(ctx)
 	}
 
 	// Step 5: Resolve models and rebuild derived clients (non-fatal).
 	// Uses refreshResolved which stores partial results and calls rebuildDerivedClients.
-	if s.cfg != nil && s.ollamaAvailable {
+	if s.cfg != nil {
 		_ = s.refreshResolved(ctx) // non-fatal: partial results are kept
 	} else {
 		// No resolution possible — still build derived clients with defaults.
@@ -258,6 +266,35 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	return s, nil
 }
 
+func (s *Server) legacyOllamaProviderConfig() *config.ProviderConfig {
+	if s.cfg == nil {
+		return nil
+	}
+	if cfgProvider := s.cfg.Provider("ollama"); cfgProvider != nil && providerConfigIsOllama(*cfgProvider) {
+		return cfgProvider
+	}
+
+	keys := make([]string, 0, len(s.cfg.Providers))
+	for key, cfgProvider := range s.cfg.Providers {
+		if key == "ollama" {
+			continue
+		}
+		if providerConfigIsOllama(cfgProvider) {
+			keys = append(keys, key)
+		}
+	}
+	sort.Strings(keys)
+	if len(keys) != 1 {
+		return nil
+	}
+	cfgProvider := s.cfg.Providers[keys[0]]
+	return &cfgProvider
+}
+
+func providerConfigIsOllama(cfgProvider config.ProviderConfig) bool {
+	return cfgProvider.APIFormat == "" || cfgProvider.APIFormat == "ollama"
+}
+
 // rebuildDerivedClients rebuilds the completer, indexer, and retriever from
 // the currently resolved models. Network-backed completion construction runs
 // outside the server lock so canceled callers do not block other handlers.
@@ -278,7 +315,7 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 	// Rebuild completer from resolved "completion" model.
 	var completer *completion.Provider
 	if rm, ok := resolved["completion"]; ok && rm.Name != "" {
-		if c, err := s.newCompletionProvider(ctx, rm.Name); err == nil {
+		if c, err := s.newCompletionProvider(ctx, rm.Name, rm.Provider); err == nil {
 			completer = c
 		}
 	}
@@ -288,7 +325,7 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 	// callers do not discover the outage only on first use.
 	embeddingModel := ""
 	if rm, ok := resolved["embedding"]; ok && rm.Name != "" {
-		embeddingModel = rm.Name
+		embeddingModel = modelSelector(rm.Provider, rm.Name)
 	}
 
 	var indexer *rag.Indexer
@@ -325,25 +362,28 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 
 func (s *Server) ensureModelRegistry() error {
 	s.mu.RLock()
-	if s.modelRegistry != nil && s.ollamaProv != nil && s.providerRegistry != nil {
+	if s.modelRegistry != nil && s.providerRegistry != nil {
 		s.mu.RUnlock()
 		return nil
 	}
-	client := s.client
 	s.mu.RUnlock()
 
-	if client == nil {
-		return fmt.Errorf("mcp: model registry unavailable")
-	}
-
-	ollamaProv := provider.NewOllamaProvider(client)
 	pReg := provider.NewRegistry()
-	if err := pReg.Register(ollamaProv); err != nil {
-		return fmt.Errorf("mcp: model registry unavailable: %w", err)
+	registered, ollamaProv, err := s.configuredProviders()
+	if err != nil {
+		return err
+	}
+	for _, p := range registered {
+		if err := pReg.Register(p); err != nil {
+			return fmt.Errorf("mcp: model registry unavailable: %w", err)
+		}
 	}
 	mr, err := provider.NewModelRegistry(pReg, nil)
 	if err != nil {
 		return fmt.Errorf("mcp: model registry unavailable: %w", err)
+	}
+	if err := s.installCapabilityOverrides(mr); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
@@ -360,6 +400,167 @@ func (s *Server) ensureModelRegistry() error {
 	return nil
 }
 
+func (s *Server) configuredProviders() ([]provider.Provider, provider.Provider, error) {
+	providerConfigs := map[string]config.ProviderConfig{}
+	if s.cfg == nil {
+		providerConfigs["ollama"] = config.ProviderConfig{
+			BaseURL:   s.ollamaURL,
+			APIFormat: "ollama",
+		}
+	} else {
+		if len(s.cfg.Providers) == 0 {
+			return nil, nil, fmt.Errorf("mcp: model registry unavailable: no providers configured")
+		}
+		for key, cfg := range s.cfg.Providers {
+			providerConfigs[key] = cfg
+		}
+	}
+
+	keys := make([]string, 0, len(providerConfigs))
+	for key := range providerConfigs {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+
+	registered := make([]provider.Provider, 0, len(keys))
+	var ollamaProv provider.Provider
+	for _, key := range keys {
+		if err := config.ValidateProviderName(key); err != nil {
+			return nil, nil, fmt.Errorf("mcp: provider config: %w", err)
+		}
+		cfg := providerConfigs[key]
+		if cfg.APIFormat == "" {
+			cfg.APIFormat = "ollama"
+		}
+		if key == "ollama" && cfg.APIFormat == "ollama" && s.ollamaURLExplicit {
+			cfg.BaseURL = s.ollamaURL
+		}
+
+		prov, err := configuredProvider(key, cfg)
+		if err != nil {
+			return nil, nil, err
+		}
+		registered = append(registered, prov)
+		if cfg.APIFormat == "ollama" && key == "ollama" {
+			ollamaProv = prov
+		}
+	}
+	return registered, ollamaProv, nil
+}
+
+func configuredProvider(key string, cfg config.ProviderConfig) (provider.Provider, error) {
+	switch cfg.APIFormat {
+	case "", "ollama":
+		opts := []ollama.Option{ollama.WithBaseURL(cfg.BaseURL)}
+		if cfg.Timeout.Duration > 0 {
+			opts = append(opts, ollama.WithTimeout(cfg.Timeout.Duration))
+		}
+		return provider.NewOllamaProvider(
+			ollama.NewClient(opts...),
+			provider.WithProviderName(key),
+		), nil
+	case "openai-compat":
+		opts := []openaicompat.ClientOption{}
+		if cfg.Timeout.Duration > 0 {
+			opts = append(opts, openaicompat.WithHTTPClient(&http.Client{Timeout: cfg.Timeout.Duration}))
+		}
+		if cfg.APIKey != "" {
+			opts = append(opts, openaicompat.WithAPIKey(cfg.APIKey))
+		}
+		return openaicompat.NewProvider(
+			openaicompat.NewClient(cfg.BaseURL, opts...),
+			openaicompat.WithProviderName(key),
+		), nil
+	default:
+		return nil, fmt.Errorf("mcp: provider %q: unsupported api_format %q", key, cfg.APIFormat)
+	}
+}
+
+type capabilityOverrideEntry struct {
+	role   string
+	caps   []string
+	parsed provider.Capability
+}
+
+func (s *Server) installCapabilityOverrides(mr *provider.ModelRegistry) error {
+	if mr == nil || s.cfg == nil {
+		return nil
+	}
+
+	overrides := make(map[provider.ModelKey]capabilityOverrideEntry)
+	roles := make([]string, 0, len(s.cfg.Models))
+	for role := range s.cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		m := s.cfg.Models[role]
+		if m.Provider == "" || m.Name == "" {
+			continue
+		}
+		caps := m.Capabilities
+		if len(caps) == 0 {
+			pCfg, ok := s.cfg.Providers[m.Provider]
+			if !ok {
+				continue
+			}
+			apiFormat := pCfg.APIFormat
+			if apiFormat == "" {
+				apiFormat = "ollama"
+			}
+			if apiFormat != "openai-compat" {
+				continue
+			}
+			caps = m.ResolvedCapabilities()
+		}
+		if len(caps) == 0 {
+			continue
+		}
+		parsedCaps, err := provider.ParseCapsStrict(caps)
+		if err != nil {
+			return fmt.Errorf("mcp: model %q capability override for %s/%s: %w", role, m.Provider, m.Name, err)
+		}
+
+		key := provider.ModelKey{Provider: m.Provider, Model: m.Name}
+		if existing, ok := overrides[key]; ok {
+			if existing.parsed != parsedCaps {
+				return fmt.Errorf(
+					"mcp: conflicting capability overrides for %s/%s: model %q declares %v, model %q declares %v",
+					key.Provider,
+					key.Model,
+					existing.role,
+					existing.caps,
+					role,
+					caps,
+				)
+			}
+			continue
+		}
+
+		copied := make([]string, len(caps))
+		copy(copied, caps)
+		overrides[key] = capabilityOverrideEntry{
+			role:   role,
+			caps:   copied,
+			parsed: parsedCaps,
+		}
+	}
+	if len(overrides) == 0 {
+		return nil
+	}
+
+	mr.SetCapabilityOverride(func(key provider.ModelKey) []string {
+		entry, ok := overrides[key]
+		if !ok {
+			return nil
+		}
+		out := make([]string, len(entry.caps))
+		copy(out, entry.caps)
+		return out
+	})
+	return nil
+}
+
 // Completer returns the current FIM completion provider (may be nil).
 // Safe for concurrent use.
 func (s *Server) Completer() *completion.Provider {
@@ -372,20 +573,23 @@ func (s *Server) Completer() *completion.Provider {
 // looking up its merged ModelProfile via the model registry and deriving a
 // ProviderConfig. Returns an error when the registry is unavailable, the
 // lookup fails, or the model does not support native FIM at runtime.
-func (s *Server) newCompletionProvider(ctx context.Context, model string) (*completion.Provider, error) {
+func (s *Server) newCompletionProvider(ctx context.Context, model, providerName string) (*completion.Provider, error) {
 	if err := s.ensureModelRegistry(); err != nil {
 		return nil, err
 	}
 
 	s.mu.RLock()
 	modelRegistry := s.modelRegistry
-	ollamaProv := s.ollamaProv
+	providerRegistry := s.providerRegistry
 	s.mu.RUnlock()
-	if modelRegistry == nil || ollamaProv == nil {
+	if modelRegistry == nil || providerRegistry == nil {
 		return nil, fmt.Errorf("mcp: model registry unavailable")
 	}
 
-	key := provider.ModelKey{Provider: ollamaProv.Name(), Model: model}
+	key, err := s.modelKeyForCompletion(ctx, model, providerName)
+	if err != nil {
+		return nil, err
+	}
 	profile, err := modelRegistry.Lookup(ctx, key)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: lookup profile %q: %w", model, err)
@@ -395,17 +599,45 @@ func (s *Server) newCompletionProvider(ctx context.Context, model string) (*comp
 		return nil, err
 	}
 
-	// modelRegistry.Lookup proved this model exists for ollamaProv via
-	// /api/show. Seed the providerRegistry's routing index so Router can
+	// modelRegistry.Lookup proved this model exists for its provider. Seed
+	// the providerRegistry's routing index so Router can
 	// dispatch to it even when the bulk /api/tags-based RefreshModels at
 	// startup failed (partial Ollama outage). Idempotent; failure here is
 	// non-fatal — Router's own ProvidersForModel error will surface
 	// naturally if the seed didn't take.
 	if pReg := s.providerRegistrySnapshot(); pReg != nil {
-		_ = pReg.AddModelToIndex(model, ollamaProv.Name())
+		_ = pReg.AddModelToIndex(key.Model, key.Provider)
 	}
 
-	return completion.NewProviderWithGenerator(s.fimGenerator(s.fimPriority()), model, cfg)
+	return completion.NewProviderWithGenerator(s.fimGenerator(s.fimPriority()), key.String(), cfg)
+}
+
+func (s *Server) modelKeyForCompletion(ctx context.Context, model, providerName string) (provider.ModelKey, error) {
+	if providerName != "" {
+		return provider.ModelKey{Provider: providerName, Model: model}, nil
+	}
+	if key, ok := s.parseKnownModelSelector(model); ok {
+		return key, nil
+	}
+
+	inferredProvider, err := s.inferProviderForExplicitModel(ctx, model)
+	if err != nil {
+		return provider.ModelKey{}, err
+	}
+	if inferredProvider != "" {
+		return provider.ModelKey{Provider: inferredProvider, Model: model}, nil
+	}
+	return provider.ModelKey{}, fmt.Errorf("mcp: provider required for model %q", model)
+}
+
+func (s *Server) refreshProviderModelIndexes(ctx context.Context) {
+	pReg := s.providerRegistrySnapshot()
+	if pReg == nil {
+		return
+	}
+	for _, name := range pReg.Names() {
+		_ = pReg.RefreshModels(ctx, name)
+	}
 }
 
 // Indexer returns the current RAG indexer (nil if RAG disabled).

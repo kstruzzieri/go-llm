@@ -102,6 +102,18 @@ var validAPIFormats = map[string]bool{
 	"openai-compat": true,
 }
 
+// ValidateProviderName verifies that a configured provider key is safe to use
+// as a registry identity and in provider/model selectors.
+func ValidateProviderName(name string) error {
+	if name == "" {
+		return fmt.Errorf("provider name must not be empty")
+	}
+	if strings.Contains(name, "/") {
+		return fmt.Errorf("provider name %q must not contain %q", name, "/")
+	}
+	return nil
+}
+
 // validCapabilityNames is the schema vocabulary for ModelConfig.Capabilities,
 // derived from provider.CanonicalCapabilityNames so the two never drift.
 // User config accepts ONLY canonical single-bit names; catalog aliases like
@@ -363,6 +375,9 @@ func (cfg *Config) validate() error {
 	}
 	sort.Strings(providerKeys)
 	for _, key := range providerKeys {
+		if err := ValidateProviderName(key); err != nil {
+			return fmt.Errorf("config: %w", err)
+		}
 		p := cfg.Providers[key]
 		if p.BaseURL == "" {
 			return fmt.Errorf("config: provider %q: base_url is required", key)

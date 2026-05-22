@@ -60,9 +60,13 @@ func (s *Server) handleGenerate(ctx context.Context, req *gomcp.CallToolRequest)
 	if args.MaxTokens > 0 {
 		expectedOutput = args.MaxTokens
 	}
+	model, err := s.routeModelSelector(ctx, args.Model, "chat")
+	if err != nil {
+		return toolError("config", "%v", err), nil
+	}
 
 	rr := provider.RoutingRequest{
-		Model:          args.Model,
+		Model:          model,
 		UseCase:        "chat", // generate routes via the chat use-case
 		RequiredCaps:   provider.CapGenerate,
 		Prompt:         args.Prompt,

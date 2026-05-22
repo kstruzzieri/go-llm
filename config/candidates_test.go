@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestResolveCandidates_PrimaryOnly(t *testing.T) {
@@ -20,6 +22,9 @@ func TestResolveCandidates_PrimaryOnly(t *testing.T) {
 	}
 	if got[0].Name != "qwen3-embedding:8b" {
 		t.Errorf("Name = %q, want %q", got[0].Name, "qwen3-embedding:8b")
+	}
+	if got[0].Provider != "ollama" {
+		t.Errorf("Provider = %q, want %q", got[0].Provider, "ollama")
 	}
 	if got[0].Role != "embedding" {
 		t.Errorf("Role = %q, want %q", got[0].Role, "embedding")
@@ -155,7 +160,7 @@ func TestResolveCandidates_UnknownUseCase(t *testing.T) {
 func TestResolveCandidates_UnknownDefaultRole(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a"},
+			"a": {Name: "model-a", Provider: "ollama"},
 		},
 		Defaults: map[string]string{
 			"test": "missing",
@@ -175,7 +180,7 @@ func TestResolveCandidates_UnknownDefaultRole(t *testing.T) {
 func TestResolveCandidates_UnknownFallbackRole(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a", Fallbacks: []string{"missing"}},
+			"a": {Name: "model-a", Provider: "ollama", Fallbacks: []string{"missing"}},
 		},
 		Defaults: map[string]string{
 			"test": "a",
@@ -216,8 +221,8 @@ func TestResolveCandidates_CheckerError(t *testing.T) {
 func TestResolveCandidates_CircularFallback(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a", Fallbacks: []string{"b"}},
-			"b": {Name: "model-b", Fallbacks: []string{"a"}}, // cycle: a → b → a
+			"a": {Name: "model-a", Provider: "ollama", Fallbacks: []string{"b"}},
+			"b": {Name: "model-b", Provider: "ollama", Fallbacks: []string{"a"}}, // cycle: a → b → a
 		},
 		Defaults: map[string]string{
 			"test": "a",
@@ -253,10 +258,10 @@ func TestResolveCandidates_DiamondNoDuplicates(t *testing.T) {
 	// d should appear only once in candidates.
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"a": {Name: "model-a", Fallbacks: []string{"b", "c"}},
-			"b": {Name: "model-b", Fallbacks: []string{"d"}},
-			"c": {Name: "model-c", Fallbacks: []string{"d"}},
-			"d": {Name: "model-d"},
+			"a": {Name: "model-a", Provider: "ollama", Fallbacks: []string{"b", "c"}},
+			"b": {Name: "model-b", Provider: "ollama", Fallbacks: []string{"d"}},
+			"c": {Name: "model-c", Provider: "ollama", Fallbacks: []string{"d"}},
+			"d": {Name: "model-d", Provider: "ollama"},
 		},
 		Defaults: map[string]string{
 			"test": "a",
@@ -319,10 +324,49 @@ func TestResolveCandidates_ConsistentWithResolve(t *testing.T) {
 			if candidates[0].Role != resolved.Role {
 				t.Errorf("first candidate Role = %q, Resolve Role = %q", candidates[0].Role, resolved.Role)
 			}
+			if candidates[0].Provider != resolved.Provider {
+				t.Errorf("first candidate Provider = %q, Resolve Provider = %q", candidates[0].Provider, resolved.Provider)
+			}
 			if candidates[0].IsFallback != resolved.IsFallback {
 				t.Errorf("first candidate IsFallback = %v, Resolve IsFallback = %v", candidates[0].IsFallback, resolved.IsFallback)
 			}
 		})
+	}
+}
+
+func TestResolveCandidates_ProviderAwareAvailability(t *testing.T) {
+	cfg := &Config{
+		Providers: map[string]ProviderConfig{
+			"ollama": {BaseURL: "http://localhost:11434"},
+			"vllm":   {BaseURL: "http://localhost:8080", APIFormat: "openai-compat"},
+		},
+		Models: map[string]ModelConfig{
+			"chat": {Name: "shared-model", Provider: "vllm", Type: "dense"},
+		},
+		Defaults: map[string]string{"chat": "chat"},
+	}
+	checker := &mockProviderChecker{keys: []provider.ModelKey{
+		{Provider: "ollama", Model: "shared-model"},
+	}}
+
+	got, err := cfg.ResolveCandidates(context.Background(), checker, "chat")
+	if err != nil {
+		t.Fatalf("ResolveCandidates() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("len(candidates) = %d, want 0 for provider-specific miss", len(got))
+	}
+
+	checker.keys = append(checker.keys, provider.ModelKey{Provider: "vllm", Model: "shared-model"})
+	got, err = cfg.ResolveCandidates(context.Background(), checker, "chat")
+	if err != nil {
+		t.Fatalf("ResolveCandidates() error = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(got))
+	}
+	if got[0].Provider != "vllm" || got[0].Name != "shared-model" {
+		t.Fatalf("candidate = %+v, want vllm/shared-model", got[0])
 	}
 }
 
@@ -331,8 +375,8 @@ func TestResolveCandidates_DuplicateModelNames(t *testing.T) {
 	// since the orchestration layer cares about roles, not just model names.
 	cfg := &Config{
 		Models: map[string]ModelConfig{
-			"primary": {Name: "shared-model", Fallbacks: []string{"backup"}},
-			"backup":  {Name: "shared-model"},
+			"primary": {Name: "shared-model", Provider: "ollama", Fallbacks: []string{"backup"}},
+			"backup":  {Name: "shared-model", Provider: "ollama"},
 		},
 		Defaults: map[string]string{
 			"test": "primary",
