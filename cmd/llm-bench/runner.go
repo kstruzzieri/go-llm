@@ -30,6 +30,11 @@ var (
 	errUnsupportedTurns         = errors.New("trace has unsupported extra turns")
 	errEmptyAssistantReply      = errors.New("candidate returned empty assistant reply (no content, no tool calls)")
 	errUnsupportedProv          = errors.New("unsupported provider")
+	errEmptyJudgeModel          = errors.New("empty judge model")
+	errMissingJudgeCriteria     = errors.New("judge scorer requires golden.final_answer_criteria or golden.final_answer_substring")
+	errJudgeSelfPreference      = errors.New("judge model must differ from candidate model")
+	errMalformedJudgeResponse   = errors.New("malformed judge response")
+	errNoAssistantFinalAnswer   = errors.New("judge scorer requires an assistant final answer")
 )
 
 // Runner executes traces against a list of candidate models and collects
@@ -94,20 +99,22 @@ func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Tra
 }
 
 func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target ModelTarget, trace Trace) Result {
-	runCtx, cancel := context.WithTimeout(ctx, r.Timeout)
-	defer cancel()
+	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
 	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
-	out, err := replayWith(runCtx, client, target.Model, trace, opts)
+	out, err := replayWith(replayCtx, client, target.Model, trace, opts)
+	cancel()
 	if err != nil {
 		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: out.Transcript}
 	}
 
-	score, err := r.Scorer.Score(runCtx, trace, Result{
+	scoreStart := time.Now()
+	score, err := r.Scorer.Score(ctx, trace, Result{
 		Model:      target.Display,
 		TraceID:    trace.ID,
 		Transcript: out.Transcript,
 	})
+	scorerMs := time.Since(scoreStart).Milliseconds()
 	if err != nil {
 		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: out.Transcript}
 	}
@@ -121,6 +128,9 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	if len(out.Notes) > 0 {
 		score.Notes = appendNotes(score.Notes, out.Notes)
 	}
+	// Latency reflects replay only; ScorerLatencyMs keeps judge/scorer work visible
+	// without polluting the target model latency metric.
+	score.ScorerLatencyMs = scorerMs
 
 	return Result{
 		Model:      target.Display,

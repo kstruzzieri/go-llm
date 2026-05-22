@@ -39,7 +39,7 @@ not "what `go-llm` requires."
 
 - **`qwen3-coder-next`** — primary code generation (80B / 3.9B active MoE)
 - **`qwen3-embedding:8b`** — embeddings (#1 MTEB multilingual)
-- **`gemma4:31b`** (dense) — agent / tool-use / reasoning (86.4% τ2-bench,
+- **`gemma4:31b`** (dense) — agent / judge / reasoning (86.4% τ2-bench,
   80.0% LiveCodeBench, native function calling)
 - **`qwen3.6:35b-a3b`** — fast MoE (73.4% SWE-bench, 3B active)
 - **`qwen3:8b`** — lightweight / FIM
@@ -70,6 +70,27 @@ the command exits `0`, writes `/tmp/llm-bench-smoke.md`, and the report
 shows `Errors = 0` with `Mean Quality = 1.00` for each model on the
 `smoke-minimal-001` trace. This only verifies harness plumbing and basic
 model reachability, not real MCP-agent quality.
+
+To score free-form answers with the local judge model instead of the
+substring baseline, switch the scorer and keep the judge model separate
+from the candidate under test:
+
+```bash
+go run ./cmd/llm-bench \
+  -traces 'cmd/llm-bench/testdata/smoke/*.json' \
+  -models 'ollama/qwen3.6:35b-a3b' \
+  -scorer llm-judge \
+  -judge-model gemma4:31b \
+  -judge-timeout 5m \
+  -report /tmp/llm-bench-judge-smoke.md
+```
+
+`llm-judge` records an error instead of scoring a trace when the candidate
+model and judge model are the same, which avoids self-preference in
+calibration runs. Judge latency is excluded from the model latency metric
+in the report and shown separately as scorer latency. Use
+`-judge-ollama-url` when the judge should run on a different Ollama
+instance than the candidate models.
 
 ## Local trace capture
 

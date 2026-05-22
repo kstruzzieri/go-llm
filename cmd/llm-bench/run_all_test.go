@@ -113,3 +113,47 @@ func TestRunAllSucceedsEndToEnd(t *testing.T) {
 		t.Errorf("AnswerQuality = %f, want 1.0", r.Score.AnswerQuality)
 	}
 }
+
+type latencyPoisonScorer struct{}
+
+func (s latencyPoisonScorer) Score(context.Context, Trace, Result) (Score, error) {
+	time.Sleep(20 * time.Millisecond)
+	return Score{
+		AnswerQuality: 1.0,
+		LatencyMs:     int64((24 * time.Hour) / time.Millisecond),
+	}, nil
+}
+
+func TestRunAllLatencyExcludesScorerWork(t *testing.T) {
+	srv := newFakeChatServer(t, "answer")
+	runner := &Runner{
+		OllamaURL: srv.URL,
+		Timeout:   5 * time.Second,
+		Scorer:    latencyPoisonScorer{},
+	}
+
+	targets := []ModelTarget{{Display: "m1", Provider: "ollama", Model: "m1"}}
+	traces := []Trace{{
+		ID:     "t1",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "q"}},
+		Golden: Golden{FinalAnswerSubstring: "answer"},
+	}}
+
+	results, err := runner.RunAll(context.Background(), targets, traces)
+	if err != nil {
+		t.Fatalf("RunAll() error: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	if results[0].Err != nil {
+		t.Fatalf("unexpected result error: %v", results[0].Err)
+	}
+	if results[0].Score.LatencyMs >= int64(time.Hour/time.Millisecond) {
+		t.Fatalf("LatencyMs = %d, scorer latency leaked into replay latency", results[0].Score.LatencyMs)
+	}
+	if results[0].Score.ScorerLatencyMs <= 0 {
+		t.Fatalf("ScorerLatencyMs = %d, want scorer work to be visible", results[0].Score.ScorerLatencyMs)
+	}
+}

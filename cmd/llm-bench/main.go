@@ -20,8 +20,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/config"
 )
 
 func main() {
@@ -34,9 +37,12 @@ func main() {
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
+	judgeModel := flag.String("judge-model", "", "Ollama model used by -scorer llm-judge; default uses models.json role judge or gemma4:31b")
+	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for -scorer llm-judge (default: -ollama-url)")
+	judgeTimeout := flag.Duration("judge-timeout", 5*time.Minute, "Timeout for each llm-judge scoring request")
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
-	timeout := flag.Duration("timeout", 5*time.Minute, "Per-trace timeout")
+	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -86,7 +92,20 @@ func main() {
 		log.Fatalf("llm-bench: load traces: %v", err)
 	}
 
-	scorer, err := newScorer(*scorerName)
+	resolvedJudgeModel := strings.TrimSpace(*judgeModel)
+	if *scorerName == "llm-judge" && resolvedJudgeModel == "" {
+		resolvedJudgeModel = defaultJudgeModelName()
+	}
+	resolvedJudgeURL := strings.TrimSpace(*judgeOllamaURL)
+	if *scorerName == "llm-judge" && resolvedJudgeURL == "" {
+		resolvedJudgeURL = *ollamaURL
+	}
+
+	scorer, err := newScorer(ctx, *scorerName, scorerOptions{
+		ollamaURL:    resolvedJudgeURL,
+		judgeModel:   resolvedJudgeModel,
+		judgeTimeout: *judgeTimeout,
+	})
 	if err != nil {
 		log.Fatalf("llm-bench: scorer: %v", err)
 	}
@@ -107,7 +126,10 @@ func main() {
 		modelNames = append(modelNames, target.Display)
 	}
 
-	report := formatReport(modelNames, results)
+	report := formatReport(modelNames, results, reportOptions{
+		Scorer:     *scorerName,
+		JudgeModel: resolvedJudgeModel,
+	})
 
 	if *reportPath == "" {
 		fmt.Print(report)
@@ -118,4 +140,14 @@ func main() {
 		log.Fatalf("llm-bench: write report: %v", err)
 	}
 	fmt.Fprintf(os.Stderr, "llm-bench: report written to %s\n", *reportPath)
+}
+
+func defaultJudgeModelName() string {
+	cfg, err := config.Default()
+	if err == nil {
+		if m := cfg.RoleConfig("judge"); m != nil && strings.TrimSpace(m.Name) != "" {
+			return strings.TrimSpace(m.Name)
+		}
+	}
+	return fallbackJudgeModel
 }
