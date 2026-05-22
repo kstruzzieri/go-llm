@@ -349,6 +349,42 @@ func TestNewServerRegistersConfiguredProvidersAndOverridesCapabilities(t *testin
 	}
 }
 
+func TestNewServerRejectsConflictingCapabilityOverrides(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "models.json")
+	data := `{
+  "providers": {
+    "vllm-local": {
+      "base_url": "http://127.0.0.1:1",
+      "timeout": "17s",
+      "api_format": "openai-compat"
+    }
+  },
+  "models": {
+    "chat": {"name": "shared-model", "provider": "vllm-local", "type": "dense", "capabilities": ["chat", "stream"]},
+    "completion": {"name": "shared-model", "provider": "vllm-local", "type": "dense", "capabilities": ["generate", "stream", "insert"]}
+  },
+  "defaults": {
+    "chat": "chat",
+    "completion": "completion"
+  }
+}`
+	if err := os.WriteFile(path, []byte(data), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
+	}
+
+	_, err := NewServer(context.Background(),
+		WithConfig(path),
+		WithOllamaURL("http://127.0.0.1:1"),
+		WithRAGDisabled(),
+	)
+	if err == nil {
+		t.Fatal("NewServer() error = nil, want conflicting capability override error")
+	}
+	if !strings.Contains(err.Error(), "conflicting capability overrides for vllm-local/shared-model") {
+		t.Fatalf("NewServer() error = %q, want conflicting capability override message", err)
+	}
+}
+
 func TestModelKeyForCompletionInfersConfiguredProvider(t *testing.T) {
 	ollamaMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

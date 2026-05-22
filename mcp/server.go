@@ -200,7 +200,9 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 
 	// Step 3b: Build the provider-level model registry even in degraded mode
 	// so explicit completion requests can recover once Ollama comes back.
-	_ = s.ensureModelRegistry()
+	if err := s.ensureModelRegistry(); err != nil {
+		return nil, err
+	}
 
 	// Step 4: Open RAG store if not disabled (before model resolution
 	// so that rebuildDerivedClients can wire up indexer/retriever).
@@ -380,7 +382,9 @@ func (s *Server) ensureModelRegistry() error {
 	if err != nil {
 		return fmt.Errorf("mcp: model registry unavailable: %w", err)
 	}
-	s.installCapabilityOverrides(mr)
+	if err := s.installCapabilityOverrides(mr); err != nil {
+		return err
+	}
 
 	s.mu.Lock()
 	if s.ollamaProv == nil {
@@ -472,12 +476,18 @@ func configuredProvider(key string, cfg config.ProviderConfig) (provider.Provide
 	}
 }
 
-func (s *Server) installCapabilityOverrides(mr *provider.ModelRegistry) {
+type capabilityOverrideEntry struct {
+	role   string
+	caps   []string
+	parsed provider.Capability
+}
+
+func (s *Server) installCapabilityOverrides(mr *provider.ModelRegistry) error {
 	if mr == nil || s.cfg == nil {
-		return
+		return nil
 	}
 
-	overrides := make(map[provider.ModelKey][]string)
+	overrides := make(map[provider.ModelKey]capabilityOverrideEntry)
 	roles := make([]string, 0, len(s.cfg.Models))
 	for role := range s.cfg.Models {
 		roles = append(roles, role)
@@ -506,23 +516,49 @@ func (s *Server) installCapabilityOverrides(mr *provider.ModelRegistry) {
 		if len(caps) == 0 {
 			continue
 		}
+		parsedCaps, err := provider.ParseCapsStrict(caps)
+		if err != nil {
+			return fmt.Errorf("mcp: model %q capability override for %s/%s: %w", role, m.Provider, m.Name, err)
+		}
+
+		key := provider.ModelKey{Provider: m.Provider, Model: m.Name}
+		if existing, ok := overrides[key]; ok {
+			if existing.parsed != parsedCaps {
+				return fmt.Errorf(
+					"mcp: conflicting capability overrides for %s/%s: model %q declares %v, model %q declares %v",
+					key.Provider,
+					key.Model,
+					existing.role,
+					existing.caps,
+					role,
+					caps,
+				)
+			}
+			continue
+		}
+
 		copied := make([]string, len(caps))
 		copy(copied, caps)
-		overrides[provider.ModelKey{Provider: m.Provider, Model: m.Name}] = copied
+		overrides[key] = capabilityOverrideEntry{
+			role:   role,
+			caps:   copied,
+			parsed: parsedCaps,
+		}
 	}
 	if len(overrides) == 0 {
-		return
+		return nil
 	}
 
 	mr.SetCapabilityOverride(func(key provider.ModelKey) []string {
-		caps, ok := overrides[key]
+		entry, ok := overrides[key]
 		if !ok {
 			return nil
 		}
-		out := make([]string, len(caps))
-		copy(out, caps)
+		out := make([]string, len(entry.caps))
+		copy(out, entry.caps)
 		return out
 	})
+	return nil
 }
 
 // Completer returns the current FIM completion provider (may be nil).
