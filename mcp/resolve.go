@@ -193,7 +193,7 @@ func (c providerRegistryModelChecker) AvailableModelKeys(ctx context.Context) ([
 	var keys []provider.ModelKey
 	var firstErr error
 	for _, p := range c.registry.All() {
-		models, err := p.Models(ctx)
+		models, err := c.registry.RefreshModelsAndList(ctx, p.Name())
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("mcp: list models for provider %q: %w", p.Name(), err)
@@ -206,7 +206,6 @@ func (c providerRegistryModelChecker) AvailableModelKeys(ctx context.Context) ([
 			}
 			key := provider.ModelKey{Provider: p.Name(), Model: model.Name}
 			keys = append(keys, key)
-			_ = c.registry.AddModelToIndex(model.Name, p.Name())
 		}
 	}
 	if len(keys) == 0 && firstErr != nil {

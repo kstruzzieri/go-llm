@@ -85,7 +85,7 @@ func listProviderRegistryModels(ctx context.Context, pReg *provider.Registry) ([
 	var out []listedModelInfo
 	var firstErr error
 	for _, p := range pReg.All() {
-		models, err := p.Models(ctx)
+		models, err := pReg.RefreshModelsAndList(ctx, p.Name())
 		if err != nil {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("list models for provider %q: %w", p.Name(), err)
@@ -100,7 +100,6 @@ func listProviderRegistryModels(ctx context.Context, pReg *provider.Registry) ([
 				ModelInfo: model,
 				Provider:  p.Name(),
 			})
-			_ = pReg.AddModelToIndex(model.Name, p.Name())
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool {

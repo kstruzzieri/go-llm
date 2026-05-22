@@ -184,17 +184,27 @@ func (r *Registry) AddModelToIndex(model, providerName string) error {
 // the registry's model index. This must be called after registration to populate
 // the model index for ProvidersForModel lookups.
 func (r *Registry) RefreshModels(ctx context.Context, providerName string) error {
+	_, err := r.RefreshModelsAndList(ctx, providerName)
+	return err
+}
+
+// RefreshModelsAndList queries the named provider for its available models,
+// replaces that provider's model-index entries, and returns the fresh model
+// list. Callers that need both the current model list and a coherent registry
+// index should use this instead of calling Models followed by AddModelToIndex;
+// the latter is intentionally append-only for single-model recovery paths.
+func (r *Registry) RefreshModelsAndList(ctx context.Context, providerName string) ([]ModelInfo, error) {
 	r.mu.RLock()
 	p, ok := r.providers[providerName]
 	r.mu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("provider: refresh models: provider %q not found", providerName)
+		return nil, fmt.Errorf("provider: refresh models: provider %q not found", providerName)
 	}
 
 	models, err := p.Models(ctx)
 	if err != nil {
-		return fmt.Errorf("provider: refresh models for %q: %w", providerName, err)
+		return nil, fmt.Errorf("provider: refresh models for %q: %w", providerName, err)
 	}
 
 	r.mu.Lock()
@@ -217,8 +227,13 @@ func (r *Registry) RefreshModels(ctx context.Context, providerName string) error
 
 	// Add new entries.
 	for _, m := range models {
+		if m.Name == "" {
+			continue
+		}
 		r.modelIndex[m.Name] = append(r.modelIndex[m.Name], providerName)
 	}
 
-	return nil
+	out := make([]ModelInfo, len(models))
+	copy(out, models)
+	return out, nil
 }

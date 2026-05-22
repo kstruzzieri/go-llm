@@ -396,7 +396,7 @@ func (s *Server) configuredProviders() ([]provider.Provider, provider.Provider, 
 		if cfg.APIFormat == "" {
 			cfg.APIFormat = "ollama"
 		}
-		if key == "ollama" && s.ollamaURLExplicit {
+		if key == "ollama" && cfg.APIFormat == "ollama" && s.ollamaURLExplicit {
 			cfg.BaseURL = s.ollamaURL
 		}
 

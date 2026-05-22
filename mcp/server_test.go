@@ -67,6 +67,62 @@ func TestNewServerWithOptions(t *testing.T) {
 	}
 }
 
+func TestConfiguredProvidersDoesNotOverrideOpenAICompatProviderNamedOllama(t *testing.T) {
+	var openAIHit atomic.Bool
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		openAIHit.Store(true)
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	var overrideHit atomic.Bool
+	overrideMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		overrideHit.Store(true)
+		http.NotFound(w, r)
+	}))
+	defer overrideMock.Close()
+
+	s := &Server{
+		ollamaURL:         overrideMock.URL,
+		ollamaURLExplicit: true,
+		cfg: &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"ollama": {BaseURL: openAIMock.URL, APIFormat: "openai-compat"},
+			},
+		},
+	}
+
+	registered, ollamaProv, err := s.configuredProviders()
+	if err != nil {
+		t.Fatalf("configuredProviders() error = %v", err)
+	}
+	if ollamaProv != nil {
+		t.Fatal("ollamaProv = non-nil, want nil for openai-compatible provider named ollama")
+	}
+	if len(registered) != 1 {
+		t.Fatalf("registered providers = %d, want 1", len(registered))
+	}
+	models, err := registered[0].Models(context.Background())
+	if err != nil {
+		t.Fatalf("Models() error = %v", err)
+	}
+	if len(models) != 1 || models[0].Name != "local-fim" {
+		t.Fatalf("Models() = %+v, want local-fim from openai-compatible endpoint", models)
+	}
+	if !openAIHit.Load() {
+		t.Fatal("openai-compatible base URL was not used")
+	}
+	if overrideHit.Load() {
+		t.Fatal("WithOllamaURL override was incorrectly applied to openai-compatible provider named ollama")
+	}
+}
+
 func TestNewServerUsesConfiguredOllamaProvider(t *testing.T) {
 	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
