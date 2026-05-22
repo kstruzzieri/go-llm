@@ -47,11 +47,10 @@ func newScorer(name string) (Scorer, error) {
 // before drawing conclusions.
 type ExactMatchScorer struct{}
 
-// Score implements Scorer. ToolArgsValid is left unset (zero) because the
-// tool loop has not yet been wired in Phase 1, so per-call argument
-// validation against trace.Tools schemas is not computable. The Notes
-// field records this so aggregate consumers can distinguish "not scored"
-// from "scored zero".
+// Score implements Scorer. ToolArgsValid is left unset (zero) until replay
+// validates candidate arguments against trace.Tools schemas. The Notes field
+// records this so aggregate consumers can distinguish "not scored" from
+// "scored zero".
 func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
 	needle := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
 	if needle == "" {
@@ -60,7 +59,7 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 
 	score := Score{
 		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "ToolArgsValid not computed (tool loop pending; see benchmark-plan.md Phase 2)",
+		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
 	}
 
 	finalText := lastAssistantContent(actual.Transcript)
