@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -34,6 +35,37 @@ func rolesAndContent(messages []ollama.ChatMessage) []string {
 	return result
 }
 
+// requestLog is a goroutine-safe accumulator for request payloads observed
+// by an httptest handler. Tests read snapshots from the test goroutine
+// while the handler appends from the server goroutine — without this
+// indirection, `go test -race` would flag the shared-slice access even
+// though HTTP round-tripping currently happens to establish happens-
+// before.
+type requestLog struct {
+	mu       sync.Mutex
+	requests []ollama.ChatRequest
+}
+
+func (r *requestLog) append(req ollama.ChatRequest) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requests = append(r.requests, req)
+}
+
+func (r *requestLog) snapshot() []ollama.ChatRequest {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]ollama.ChatRequest, len(r.requests))
+	copy(out, r.requests)
+	return out
+}
+
+func (r *requestLog) len() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.requests)
+}
+
 func TestReplayRefusesTraceWithoutUserTurn(t *testing.T) {
 	srv, called := newBlockedServer(t)
 	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
@@ -50,25 +82,25 @@ func TestReplayRefusesTraceWithoutUserTurn(t *testing.T) {
 }
 
 func TestReplaySupportsMultipleUserTurns(t *testing.T) {
-	var requests []ollama.ChatRequest
+	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		requests = append(requests, req)
+		log.append(req)
 
 		resp := ollama.ChatResponse{
 			Model: "test-model",
 			Done:  true,
 		}
-		switch len(requests) {
+		switch log.len() {
 		case 1:
 			resp.Message = ollama.ChatMessage{Role: "assistant", Content: "model ack"}
 		case 2:
 			resp.Message = ollama.ChatMessage{Role: "assistant", Content: "final answer"}
 		default:
-			t.Fatalf("unexpected request %d", len(requests))
+			t.Fatalf("unexpected request %d", log.len())
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Fatalf("encode response: %v", err)
@@ -97,6 +129,7 @@ func TestReplaySupportsMultipleUserTurns(t *testing.T) {
 	if transcript[0].Content != "model ack" || transcript[1].Content != "final answer" {
 		t.Fatalf("transcript = %#v, want candidate assistant turns", transcript)
 	}
+	requests := log.snapshot()
 	if len(requests) != 2 {
 		t.Fatalf("requests len = %d, want 2", len(requests))
 	}
@@ -113,19 +146,19 @@ func TestReplaySupportsMultipleUserTurns(t *testing.T) {
 }
 
 func TestReplayInjectsFrozenToolResults(t *testing.T) {
-	var requests []ollama.ChatRequest
+	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		requests = append(requests, req)
+		log.append(req)
 
 		resp := ollama.ChatResponse{
 			Model: "test-model",
 			Done:  true,
 		}
-		switch len(requests) {
+		switch log.len() {
 		case 1:
 			if len(req.Tools) != 1 || req.Tools[0].Function.Name != "read_file" {
 				t.Fatalf("tools = %#v, want read_file", req.Tools)
@@ -159,7 +192,7 @@ func TestReplayInjectsFrozenToolResults(t *testing.T) {
 			}
 			resp.Message = ollama.ChatMessage{Role: "assistant", Content: "router summary"}
 		default:
-			t.Fatalf("unexpected request %d", len(requests))
+			t.Fatalf("unexpected request %d", log.len())
 		}
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
 			t.Fatalf("encode response: %v", err)
@@ -205,10 +238,82 @@ func TestReplayInjectsFrozenToolResults(t *testing.T) {
 	}
 }
 
-func TestReplayErrorsWhenCandidateToolCallDoesNotMatchFrozenResult(t *testing.T) {
-	var requests int
+// TestReplayLeavesToolCallIDEmptyWhenCandidateOmitsIt verifies the
+// regression fix for the captured-ID fallback: when the candidate omits
+// an `id` on the tool call, the injected tool-result message must not
+// borrow the captured trace's `ToolCallID` (which belonged to a different
+// conversation and would mislead any model that routes by ID).
+func TestReplayLeavesToolCallIDEmptyWhenCandidateOmitsIt(t *testing.T) {
+	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requests++
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+
+		resp := ollama.ChatResponse{Model: "test-model", Done: true}
+		switch log.len() {
+		case 1:
+			resp.Message = ollama.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						Type: "function",
+						Function: ollama.ToolCallFunction{
+							Name:      "read_file",
+							Arguments: map[string]any{"path": "provider/router.go"},
+						},
+					},
+				},
+			}
+		case 2:
+			tool := req.Messages[3]
+			if tool.ToolCallID != "" {
+				t.Fatalf("tool_call_id = %q, want empty (candidate omitted id; must not borrow captured-call)", tool.ToolCallID)
+			}
+			resp.Message = ollama.ChatMessage{Role: "assistant", Content: "ok"}
+		default:
+			t.Fatalf("unexpected request %d", log.len())
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "no-id-fallback",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file from disk","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}`),
+		},
+		Turns: []Turn{
+			{Role: "user", Content: "Read provider/router.go"},
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file", Arguments: json.RawMessage(`{"path":"provider/router.go"}`)}}},
+			{Role: "tool", Name: "read_file", ToolCallID: "captured-call", Content: "package provider"},
+		},
+	}
+
+	transcript, err := replay(context.Background(), client, "test-model", trace)
+	if err != nil {
+		t.Fatalf("replay() error: %v", err)
+	}
+	if transcript[1].ToolCallID != "" {
+		t.Fatalf("transcript tool_call_id = %q, want empty", transcript[1].ToolCallID)
+	}
+}
+
+func TestReplayErrorsWhenCandidateToolCallDoesNotMatchFrozenResult(t *testing.T) {
+	var requests = struct {
+		sync.Mutex
+		n int
+	}{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Lock()
+		requests.n++
+		requests.Unlock()
 		resp := ollama.ChatResponse{
 			Model: "test-model",
 			Message: ollama.ChatMessage{
@@ -250,8 +355,263 @@ func TestReplayErrorsWhenCandidateToolCallDoesNotMatchFrozenResult(t *testing.T)
 	if !errors.Is(err, errToolCallMismatch) {
 		t.Fatalf("err = %v, want errToolCallMismatch", err)
 	}
-	if requests != 1 {
-		t.Fatalf("requests = %d, want 1", requests)
+	requests.Lock()
+	defer requests.Unlock()
+	if requests.n != 1 {
+		t.Fatalf("requests = %d, want 1", requests.n)
+	}
+}
+
+// TestReplayErrorsWhenCandidateCallsToolForPlainTextScript guards the
+// sentinel correction: a candidate that emits tool calls against a
+// scripted plain-text assistant turn is a *mismatch*, not a missing
+// tool result.
+func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+
+		resp := ollama.ChatResponse{
+			Model: "test-model",
+			Message: ollama.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID:   "candidate-call",
+						Type: "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{}},
+					},
+				},
+			},
+			Done: true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "plain-text-scripted",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{
+			{Role: "user", Content: "What is 2+2?"},
+			{Role: "assistant", Content: "4"},
+		},
+	}
+
+	_, err := replay(context.Background(), client, "test-model", trace)
+	if !errors.Is(err, errToolCallMismatch) {
+		t.Fatalf("err = %v, want errToolCallMismatch", err)
+	}
+	if errors.Is(err, errMissingToolResult) {
+		t.Fatalf("err = %v, must not be errMissingToolResult", err)
+	}
+}
+
+// TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant guards
+// the second sentinel-taxonomy fix: when the trace has no scripted
+// assistant turn after the user turn, a candidate tool call yields
+// errMissingScriptedAssistant, not errMissingToolResult.
+func TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollama.ChatResponse{
+			Model: "test-model",
+			Message: ollama.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID:   "candidate-call",
+						Type: "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{}},
+					},
+				},
+			},
+			Done: true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "no-scripted-assistant",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{
+			{Role: "user", Content: "Read it"},
+		},
+	}
+
+	_, err := replay(context.Background(), client, "test-model", trace)
+	if !errors.Is(err, errMissingScriptedAssistant) {
+		t.Fatalf("err = %v, want errMissingScriptedAssistant", err)
+	}
+}
+
+// TestReplayRecordsBypassNoteWhenCandidateSkipsScriptedTools verifies
+// that silently fast-forwarding past a scripted tool loop records a
+// Notes annotation on the resulting Score — preserving the historical
+// "refuse rather than mislead" intent in observability form.
+func TestReplayRecordsBypassNoteWhenCandidateSkipsScriptedTools(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollama.ChatResponse{
+			Model:   "test-model",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "I already know the answer"},
+			Done:    true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "skip-tool-route",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{
+			{Role: "user", Content: "Read provider/router.go"},
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file", Arguments: json.RawMessage(`{"path":"provider/router.go"}`)}}},
+			{Role: "tool", Name: "read_file", Content: "package provider"},
+			{Role: "assistant", Content: "scripted summary"},
+		},
+	}
+
+	out, err := replayWith(context.Background(), client, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error: %v", err)
+	}
+	if len(out.Notes) == 0 {
+		t.Fatalf("expected divergence Notes, got none")
+	}
+	if len(out.Transcript) != 1 || out.Transcript[0].Content != "I already know the answer" {
+		t.Fatalf("transcript = %#v, want single bypass assistant turn", out.Transcript)
+	}
+}
+
+// TestReplayRejectsEmptyAssistantReply guards the empty-reply sentinel:
+// a candidate that produces no content AND no tool calls fails the
+// replay rather than being scored as a valid empty answer.
+func TestReplayRejectsEmptyAssistantReply(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollama.ChatResponse{
+			Model:   "test-model",
+			Message: ollama.ChatMessage{Role: "assistant"},
+			Done:    true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "empty-reply",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "hi"}},
+	}
+
+	_, err := replay(context.Background(), client, "test-model", trace)
+	if !errors.Is(err, errEmptyAssistantReply) {
+		t.Fatalf("err = %v, want errEmptyAssistantReply", err)
+	}
+}
+
+// TestReplaySupportsMultipleToolRoundsPerUserTurn drives the inner-loop's
+// second iteration: the candidate calls tool A, gets a frozen result,
+// then calls tool B, gets another result, then emits a final text
+// answer — all within a single user turn.
+func TestReplaySupportsMultipleToolRoundsPerUserTurn(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+
+		resp := ollama.ChatResponse{Model: "test-model", Done: true}
+		switch log.len() {
+		case 1:
+			resp.Message = ollama.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID: "call-a", Type: "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{"path": "a"}},
+					},
+				},
+			}
+		case 2:
+			resp.Message = ollama.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID: "call-b", Type: "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{"path": "b"}},
+					},
+				},
+			}
+		case 3:
+			resp.Message = ollama.ChatMessage{Role: "assistant", Content: "summary of a and b"}
+		default:
+			t.Fatalf("unexpected request %d", log.len())
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "two-rounds",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{
+			{Role: "user", Content: "summarize files a and b"},
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file", Arguments: json.RawMessage(`{"path":"a"}`)}}},
+			{Role: "tool", Name: "read_file", Content: "contents-a"},
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file", Arguments: json.RawMessage(`{"path":"b"}`)}}},
+			{Role: "tool", Name: "read_file", Content: "contents-b"},
+		},
+	}
+
+	transcript, err := replay(context.Background(), client, "test-model", trace)
+	if err != nil {
+		t.Fatalf("replay() error: %v", err)
+	}
+	if log.len() != 3 {
+		t.Fatalf("requests = %d, want 3 (two tool rounds + final answer)", log.len())
+	}
+	// Transcript shape: [assistant-call-a, tool-a, assistant-call-b, tool-b, assistant-text]
+	if len(transcript) != 5 {
+		t.Fatalf("transcript len = %d, want 5: %#v", len(transcript), transcript)
+	}
+	if got := extractToolNames(transcript); !reflect.DeepEqual(got, []string{"read_file", "read_file"}) {
+		t.Fatalf("extractToolNames() = %v, want [read_file read_file]", got)
+	}
+	if transcript[4].Role != "assistant" || transcript[4].Content != "summary of a and b" {
+		t.Fatalf("final transcript = %#v, want assistant summary", transcript[4])
 	}
 }
 
@@ -306,6 +666,49 @@ func TestReplayForwardsTraceTools(t *testing.T) {
 	}
 	if len(transcript) != 1 || transcript[0].Content != "done" {
 		t.Fatalf("transcript = %#v, want single assistant turn with content", transcript)
+	}
+}
+
+// TestReplayPropagatesNumCtxAndPerTurnTimeout verifies the new Runner
+// knobs reach Ollama: NumCtx is set on req.Options, and PerTurnTimeout
+// bounds an individual chat round-trip even when the parent context has
+// a much larger budget.
+func TestReplayPropagatesNumCtxOption(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Options == nil {
+			t.Fatalf("Options = nil, want NumCtx propagated")
+		}
+		if req.Options.NumCtx != 32768 {
+			t.Fatalf("NumCtx = %d, want 32768", req.Options.NumCtx)
+		}
+		resp := ollama.ChatResponse{
+			Model:   "test-model",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "ok"},
+			Done:    true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "numctx",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "hi"}},
+	}
+
+	out, err := replayWith(context.Background(), client, "test-model", trace, replayOptions{NumCtx: 32768})
+	if err != nil {
+		t.Fatalf("replayWith() error: %v", err)
+	}
+	if len(out.TurnLatenciesMs) != 1 {
+		t.Fatalf("TurnLatenciesMs len = %d, want 1", len(out.TurnLatenciesMs))
 	}
 }
 
