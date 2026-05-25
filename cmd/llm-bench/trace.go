@@ -2,10 +2,17 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 )
+
+// errToolNameNotDeclared signals a scripted assistant tool call whose
+// name doesn't appear in trace.Tools — the candidate would never see a
+// schema for the tool it's supposed to invoke.
+var errToolNameNotDeclared = errors.New("trace tool call references undeclared tool name")
 
 // Trace is a replayable conversation captured from a real MCP / chat session.
 // See docs/llm/benchmark-plan.md for the format and capture strategy.
@@ -75,5 +82,72 @@ func validateTrace(t Trace) error {
 	if len(t.Turns) == 0 {
 		return errNoTurns
 	}
+	if err := validateToolNamesDeclared(t); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateToolNamesDeclared rejects a trace whose scripted assistant
+// tool calls reference a tool name not declared in trace.Tools. Empty
+// trace.Tools is a permitted shape (traces with no tools at all); the
+// check only applies once any tool schema is declared.
+func validateToolNamesDeclared(t Trace) error {
+	if len(t.Tools) == 0 {
+		return nil
+	}
+	declared, err := declaredToolNames(t.Tools)
+	if err != nil {
+		return err
+	}
+	for i, turn := range t.Turns {
+		if turn.Role != "assistant" {
+			continue
+		}
+		for j, call := range turn.ToolCalls {
+			name := strings.TrimSpace(call.Name)
+			if name == "" {
+				continue
+			}
+			if _, ok := declared[name]; !ok {
+				return fmt.Errorf("turn %d tool_call %d %q: %w", i, j, name, errToolNameNotDeclared)
+			}
+		}
+	}
+	return nil
+}
+
+// declaredToolNames extracts the tool names from trace.Tools using a
+// minimal decode that tolerates both the provider-tool shape ("function"
+// wrapper) and the MCP-style shape (top-level "name").
+func declaredToolNames(rawTools []json.RawMessage) (map[string]struct{}, error) {
+	names := make(map[string]struct{}, len(rawTools))
+	for i, raw := range rawTools {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &fields); err != nil {
+			return nil, fmt.Errorf("trace tool[%d]: %w", i, err)
+		}
+		if fn, ok := fields["function"]; ok {
+			var inner struct {
+				Name string `json:"name"`
+			}
+			if err := json.Unmarshal(fn, &inner); err != nil {
+				return nil, fmt.Errorf("trace tool[%d].function: %w", i, err)
+			}
+			if n := strings.TrimSpace(inner.Name); n != "" {
+				names[n] = struct{}{}
+			}
+			continue
+		}
+		if raw, ok := fields["name"]; ok {
+			var n string
+			if err := json.Unmarshal(raw, &n); err != nil {
+				return nil, fmt.Errorf("trace tool[%d].name: %w", i, err)
+			}
+			if n = strings.TrimSpace(n); n != "" {
+				names[n] = struct{}{}
+			}
+		}
+	}
+	return names, nil
 }
