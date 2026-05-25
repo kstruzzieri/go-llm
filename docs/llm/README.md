@@ -107,9 +107,15 @@ schema does not store a conversation id.
 
 Tool-call names and tool-result turns are preserved, and `llm-bench`
 can replay multi-turn conversations with frozen tool results when the
-trace includes the needed tool schemas. The current `conversation/`
-capture path does not export schemas because those records do not store
-them, so schema sourcing remains follow-up capture work.
+trace includes the needed tool schemas. Replay matches candidate tool
+calls against the scripted assistant turn in lock-step (same count,
+same names, same order); mismatches surface as `errToolCallMismatch`,
+divergence into plain text bypasses the scripted tool route and is
+recorded in `Score.Notes`, and tool-argument schema validation against
+`trace.Tools` remains scorer-side follow-up work. The current
+`conversation/` capture path does not export schemas because those
+records do not store them, so schema sourcing remains follow-up capture
+work.
 
 ## Date stamp
 
