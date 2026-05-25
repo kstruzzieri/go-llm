@@ -18,16 +18,18 @@ const benchKeepAlive = "30m"
 
 // Sentinel errors so tests assert on identity rather than message text.
 var (
-	errNoUserTurn        = errors.New("trace has no user turn")
-	errEmptyBaseURL      = errors.New("empty ollama base URL")
-	errMissingGolden     = errors.New("scorer requires golden.final_answer_substring")
-	errEmptySystem       = errors.New("trace has empty system prompt")
-	errNoTurns           = errors.New("trace has no turns")
-	errInvalidTraceTool  = errors.New("trace has invalid tool definition")
-	errMissingToolResult = errors.New("trace is missing frozen tool result")
-	errToolCallMismatch  = errors.New("candidate tool call does not match trace")
-	errUnsupportedTurns  = errors.New("trace has unsupported extra turns")
-	errUnsupportedProv   = errors.New("unsupported provider")
+	errNoUserTurn               = errors.New("trace has no user turn")
+	errEmptyBaseURL             = errors.New("empty ollama base URL")
+	errMissingGolden            = errors.New("scorer requires golden.final_answer_substring")
+	errEmptySystem              = errors.New("trace has empty system prompt")
+	errNoTurns                  = errors.New("trace has no turns")
+	errInvalidTraceTool         = errors.New("trace has invalid tool definition")
+	errMissingToolResult        = errors.New("trace is missing frozen tool result")
+	errMissingScriptedAssistant = errors.New("trace is missing scripted assistant turn for candidate tool call")
+	errToolCallMismatch         = errors.New("candidate tool call does not match trace")
+	errUnsupportedTurns         = errors.New("trace has unsupported extra turns")
+	errEmptyAssistantReply      = errors.New("candidate returned empty assistant reply (no content, no tool calls)")
+	errUnsupportedProv          = errors.New("unsupported provider")
 )
 
 // Runner executes traces against a list of candidate models and collects
@@ -35,7 +37,17 @@ var (
 type Runner struct {
 	OllamaURL string
 	Timeout   time.Duration
-	Scorer    Scorer
+	// PerTurnTimeout bounds a single chatReplayTurn round-trip. Zero means
+	// no per-turn bound — only Timeout applies to the whole replay. Set
+	// this when running models that may stall mid-loop to keep one bad
+	// trace from draining the full per-trace budget.
+	PerTurnTimeout time.Duration
+	// NumCtx, when non-zero, is passed to Ollama as the context-window
+	// directive. Zero leaves the model's configured default in place;
+	// long multi-turn replays may silently truncate prompts from the
+	// model's perspective without this set.
+	NumCtx int
+	Scorer Scorer
 }
 
 // Result is a single (model, trace) evaluation.
@@ -85,40 +97,87 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	runCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 	defer cancel()
 
-	replayStart := time.Now()
-	transcript, err := replay(runCtx, client, target.Model, trace)
-	replayMs := time.Since(replayStart).Milliseconds()
+	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
+	out, err := replayWith(runCtx, client, target.Model, trace, opts)
 	if err != nil {
-		return Result{Model: target.Display, TraceID: trace.ID, Err: err}
+		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: out.Transcript}
 	}
 
 	score, err := r.Scorer.Score(runCtx, trace, Result{
 		Model:      target.Display,
 		TraceID:    trace.ID,
-		Transcript: transcript,
+		Transcript: out.Transcript,
 	})
 	if err != nil {
-		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: transcript}
+		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: out.Transcript}
 	}
-	// Latency reflects replay only, not scorer work. When llm-judge lands,
-	// the judge round-trip must not pollute the model-latency metric.
-	score.LatencyMs = replayMs
+	// LatencyMs sums per-turn chat round-trips only; scorer work is
+	// excluded so llm-judge round-trips can't pollute the model-latency
+	// metric. TurnLatenciesMs preserves the per-turn breakdown so a slow
+	// first turn (cold load) is distinguishable from a slow tail turn
+	// (long context).
+	score.LatencyMs = sumInt64(out.TurnLatenciesMs)
+	score.TurnLatenciesMs = out.TurnLatenciesMs
+	if len(out.Notes) > 0 {
+		score.Notes = appendNotes(score.Notes, out.Notes)
+	}
 
 	return Result{
 		Model:      target.Display,
 		TraceID:    trace.ID,
 		Score:      score,
-		Transcript: transcript,
+		Transcript: out.Transcript,
 	}
 }
 
-// replay sends user turns to the model, replaces scripted assistant turns with
-// candidate responses, and feeds captured tool-result turns back after matching
-// candidate tool calls. Tool results are frozen replay fixtures: the candidate
-// chooses whether and which tool to call, but llm-bench never executes tools.
+// replayOutput bundles the side effects of a single replay.
+type replayOutput struct {
+	Transcript      []Turn
+	Notes           []string
+	TurnLatenciesMs []int64
+}
+
+// replayOptions are the per-replay knobs threaded down from Runner.
+// Zero values preserve current behavior: no per-turn bound, no NumCtx.
+type replayOptions struct {
+	PerTurnTimeout time.Duration
+	NumCtx         int
+}
+
+// replay is the legacy entry point retained for tests and callers that
+// don't need the Runner-level knobs (PerTurnTimeout, NumCtx).
 func replay(ctx context.Context, client *ollama.Client, model string, trace Trace) ([]Turn, error) {
+	out, err := replayWith(ctx, client, model, trace, replayOptions{})
+	return out.Transcript, err
+}
+
+// replayWith sends user turns to the model, replaces scripted assistant
+// turns with candidate responses, and feeds captured tool-result turns
+// back after matching candidate tool calls.
+//
+// Tool results are frozen replay fixtures: the candidate chooses whether
+// and which tool to call, but llm-bench never executes tools. The match
+// is strict and lock-step — the candidate must emit the same number of
+// tool calls in the same order, with the same names, as the scripted
+// assistant turn it is replacing. Argument-shape divergence is not
+// rejected here (schema validation is scorer-side follow-up).
+//
+// Divergence handling:
+//   - Candidate emits tool calls when the scripted turn was plain text:
+//     errToolCallMismatch.
+//   - Candidate emits tool calls when there is no scripted assistant turn
+//     after the user turn: errMissingScriptedAssistant.
+//   - Candidate emits plain text when the scripted route used tools:
+//     scripted tool group is skipped and a Notes annotation records the
+//     bypass; the candidate's reply replaces the scripted final answer.
+//   - Candidate emits a fully empty reply (no content, no tool calls):
+//     errEmptyAssistantReply.
+//
+// All accumulated divergence notes are appended to the resulting Score's
+// Notes so aggregate consumers can see why a candidate diverged.
+func replayWith(ctx context.Context, client *ollama.Client, model string, trace Trace, opts replayOptions) (replayOutput, error) {
 	if !hasUserTurn(trace.Turns) {
-		return nil, fmt.Errorf("trace %q: %w", trace.ID, errNoUserTurn)
+		return replayOutput{}, fmt.Errorf("trace %q: %w", trace.ID, errNoUserTurn)
 	}
 
 	messages := []ollama.ChatMessage{
@@ -126,16 +185,17 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 	}
 	tools, err := decodeTraceTools(trace.Tools)
 	if err != nil {
-		return nil, fmt.Errorf("trace %q: %w", trace.ID, err)
+		return replayOutput{}, fmt.Errorf("trace %q: %w", trace.ID, err)
 	}
 
-	var transcript []Turn
+	out := replayOutput{}
 	for i := 0; i < len(trace.Turns); {
 		turn := trace.Turns[i]
 		if turn.Role != "user" {
-			return nil, fmt.Errorf("trace %q turn %d role %q: %w", trace.ID, i, turn.Role, errUnsupportedTurns)
+			return out, fmt.Errorf("trace %q turn %d role %q: %w", trace.ID, i, turn.Role, errUnsupportedTurns)
 		}
 		messages = append(messages, ollama.ChatMessage{Role: "user", Content: turn.Content})
+		userIndex := i
 		i++
 
 		for {
@@ -147,35 +207,50 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 				i++
 			}
 
-			msg, actualTurn, err := chatReplayTurn(ctx, client, model, messages, tools)
+			msg, actualTurn, latencyMs, err := chatReplayTurn(ctx, client, model, messages, tools, opts)
+			out.TurnLatenciesMs = append(out.TurnLatenciesMs, latencyMs)
 			if err != nil {
-				return nil, err
+				return out, err
 			}
 			messages = append(messages, msg)
-			transcript = append(transcript, actualTurn)
+			out.Transcript = append(out.Transcript, actualTurn)
 
 			if len(msg.ToolCalls) == 0 {
+				if msg.Content == "" {
+					return out, fmt.Errorf("trace %q turn %d: %w", trace.ID, userIndex, errEmptyAssistantReply)
+				}
 				if len(expected.ToolCalls) > 0 {
-					i = skipScriptedToolLoop(trace.Turns, i)
+					skipped, next := skipScriptedToolLoop(trace.Turns, i)
+					if skipped > 0 {
+						out.Notes = append(out.Notes,
+							fmt.Sprintf("trace %q user turn %d: candidate bypassed scripted tool route (%d turn(s) skipped from index %d)",
+								trace.ID, userIndex, skipped, i))
+					}
+					i = next
 				}
 				break
 			}
 
+			if expectedIndex == -1 {
+				return out, fmt.Errorf("trace %q user turn %d: candidate emitted %d tool call(s) with no scripted assistant turn to match: %w",
+					trace.ID, userIndex, len(msg.ToolCalls), errMissingScriptedAssistant)
+			}
 			if len(expected.ToolCalls) == 0 {
-				return nil, fmt.Errorf("trace %q turn %d: %w", trace.ID, i, errMissingToolResult)
+				return out, fmt.Errorf("trace %q assistant turn %d: candidate emitted %d tool call(s) for plain-text scripted reply: %w",
+					trace.ID, expectedIndex, len(msg.ToolCalls), errToolCallMismatch)
 			}
 
 			toolMessages, toolTurns, next, err := frozenToolResults(trace.ID, expectedIndex, expected, trace.Turns, i, msg.ToolCalls)
 			if err != nil {
-				return nil, err
+				return out, err
 			}
 			i = next
 			messages = append(messages, toolMessages...)
-			transcript = append(transcript, toolTurns...)
+			out.Transcript = append(out.Transcript, toolTurns...)
 		}
 	}
 
-	return transcript, nil
+	return out, nil
 }
 
 func hasUserTurn(turns []Turn) bool {
@@ -187,23 +262,37 @@ func hasUserTurn(turns []Turn) bool {
 	return false
 }
 
-func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool) (ollama.ChatMessage, Turn, error) {
-	resp, err := client.Chat(ctx, ollama.ChatRequest{
+func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, error) {
+	turnCtx := ctx
+	if opts.PerTurnTimeout > 0 {
+		var cancel context.CancelFunc
+		turnCtx, cancel = context.WithTimeout(ctx, opts.PerTurnTimeout)
+		defer cancel()
+	}
+
+	req := ollama.ChatRequest{
 		Model:     model,
 		Messages:  messages,
 		Tools:     tools,
 		KeepAlive: benchKeepAlive,
-	})
+	}
+	if opts.NumCtx > 0 {
+		req.Options = &ollama.ModelOptions{NumCtx: opts.NumCtx}
+	}
+
+	start := time.Now()
+	resp, err := client.Chat(turnCtx, req)
+	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
-		return ollama.ChatMessage{}, Turn{}, err
+		return ollama.ChatMessage{}, Turn{}, latencyMs, err
 	}
 
 	msg := normalizeAssistantMessage(resp.Message)
 	turn, err := assistantTurnFromMessage(msg)
 	if err != nil {
-		return ollama.ChatMessage{}, Turn{}, err
+		return ollama.ChatMessage{}, Turn{}, latencyMs, err
 	}
-	return msg, turn, nil
+	return msg, turn, latencyMs, nil
 }
 
 func normalizeAssistantMessage(msg ollama.ChatMessage) ollama.ChatMessage {
@@ -213,6 +302,12 @@ func normalizeAssistantMessage(msg ollama.ChatMessage) ollama.ChatMessage {
 	return msg
 }
 
+// frozenToolResults pairs each candidate tool call with the corresponding
+// frozen tool-result turn from the trace and produces both the wire
+// messages and the transcript turns. The candidate's call ID is the
+// authoritative correlator: an empty candidate ID stays empty rather
+// than borrowing the captured trace's ID (which belonged to a different
+// conversation and would mislead any model that routes by ID).
 func frozenToolResults(traceID string, expectedIndex int, expected Turn, turns []Turn, start int, calls []ollama.ToolCall) ([]ollama.ChatMessage, []Turn, int, error) {
 	if len(calls) != len(expected.ToolCalls) {
 		return nil, nil, start, fmt.Errorf("trace %q assistant turn %d: got %d candidate tool calls for %d frozen calls: %w",
@@ -242,21 +337,17 @@ func frozenToolResults(traceID string, expectedIndex int, expected Turn, turns [
 				traceID, expectedIndex, i, resultName, callName, errToolCallMismatch)
 		}
 
-		callID := call.ID
-		if callID == "" {
-			callID = result.ToolCallID
-		}
 		messages = append(messages, ollama.ChatMessage{
 			Role:       "tool",
 			Content:    result.Content,
 			ToolName:   callName,
-			ToolCallID: callID,
+			ToolCallID: call.ID,
 		})
 		transcript = append(transcript, Turn{
 			Role:       "tool",
 			Content:    result.Content,
 			Name:       callName,
-			ToolCallID: callID,
+			ToolCallID: call.ID,
 			Raw:        result.Raw,
 		})
 	}
@@ -269,11 +360,17 @@ func frozenToolResults(traceID string, expectedIndex int, expected Turn, turns [
 	return messages, transcript, next, nil
 }
 
-func skipScriptedToolLoop(turns []Turn, start int) int {
-	for start < len(turns) && turns[start].Role != "user" {
-		start++
+// skipScriptedToolLoop fast-forwards past a scripted tool group when the
+// candidate diverged from the scripted route by replying with plain text.
+// Returns the number of turns skipped (for Notes annotation) and the new
+// index. Skips up to the next user turn since the outer replay loop only
+// accepts user turns at the top level.
+func skipScriptedToolLoop(turns []Turn, start int) (int, int) {
+	i := start
+	for i < len(turns) && turns[i].Role != "user" {
+		i++
 	}
-	return start
+	return i - start, i
 }
 
 func decodeTraceTools(rawTools []json.RawMessage) ([]ollama.Tool, error) {
@@ -377,4 +474,23 @@ func newOllamaClient(baseURL string) (*ollama.Client, error) {
 		return nil, errEmptyBaseURL
 	}
 	return ollama.NewClient(ollama.WithBaseURL(baseURL)), nil
+}
+
+func sumInt64(xs []int64) int64 {
+	var total int64
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+
+func appendNotes(existing string, extras []string) string {
+	if len(extras) == 0 {
+		return existing
+	}
+	joined := strings.Join(extras, "; ")
+	if existing == "" {
+		return joined
+	}
+	return existing + "; " + joined
 }
