@@ -329,6 +329,18 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 			Delta:          delta,
 			Agree:          delta <= calibrationAgreementDelta,
 		}
+		if opts.StabilityRuns > 1 {
+			scores := []float64{score.AnswerQuality}
+			for i := 1; i < opts.StabilityRuns; i++ {
+				extra, sErr := opts.Scorer.Score(ctx, trace, actual)
+				if sErr != nil {
+					return CalibrationResult{}, fmt.Errorf("calibrate: stability run %d for %s/%s: %w",
+						i, m.Artifact.TraceID, m.Artifact.CandidateModel, sErr)
+				}
+				scores = append(scores, extra.AnswerQuality)
+			}
+			outcome.StabilitySpread = maxFloat(scores) - minFloat(scores)
+		}
 		res.PerLabel = append(res.PerLabel, outcome)
 		if outcome.Agree {
 			res.AgreeCount++
@@ -409,4 +421,24 @@ func sufficiencyLabel(res CalibrationResult) string {
 		return "SUFFICIENT"
 	}
 	return "INSUFFICIENT"
+}
+
+func maxFloat(vs []float64) float64 {
+	m := vs[0]
+	for _, v := range vs[1:] {
+		if v > m {
+			m = v
+		}
+	}
+	return m
+}
+
+func minFloat(vs []float64) float64 {
+	m := vs[0]
+	for _, v := range vs[1:] {
+		if v < m {
+			m = v
+		}
+	}
+	return m
 }

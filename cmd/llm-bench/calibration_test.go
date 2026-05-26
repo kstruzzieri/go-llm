@@ -303,6 +303,57 @@ func TestRunCalibrate_ReportFilenameIsSlugified(t *testing.T) {
 	}
 }
 
+// fakeStabilityScorer returns a sequence of scores per Score() call.
+type fakeStabilityScorer struct {
+	callCount int
+	sequence  []float64
+}
+
+func (s *fakeStabilityScorer) Score(ctx context.Context, t Trace, r Result) (Score, error) {
+	if s.callCount >= len(s.sequence) {
+		s.callCount++
+		return Score{AnswerQuality: s.sequence[len(s.sequence)-1]}, nil
+	}
+	v := s.sequence[s.callCount]
+	s.callCount++
+	return Score{AnswerQuality: v}, nil
+}
+
+func TestRunCalibrate_StabilityRunsReportSpread(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	a := Artifact{TraceID: "t", CandidateModel: "ollama/c", ActualFinalAnswer: "x"}
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(arts, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{Label{
+		TraceID: "t", CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+		ExpectedAnswerQuality: 1.0, Labeler: "manual",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	fs := &fakeStabilityScorer{sequence: []float64{0.8, 1.0, 0.6}} // spread = 0.4
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts, Scorer: fs,
+		JudgeModel: "ollama/judge", MinLabels: 1, StabilityRuns: 3,
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if len(res.PerLabel) != 1 {
+		t.Fatalf("PerLabel=%d; want 1", len(res.PerLabel))
+	}
+	if res.PerLabel[0].StabilitySpread != 0.4 {
+		t.Fatalf("StabilitySpread=%v; want 0.4", res.PerLabel[0].StabilitySpread)
+	}
+	// Stability runs do NOT affect agreement (primary calls were already cached/Counted).
+	if res.AgreeCount != 1 {
+		t.Fatalf("AgreeCount=%d; want 1 (stability runs are diagnostic only)", res.AgreeCount)
+	}
+}
+
 // writeJSONL is a tiny test helper local to calibration_test.go.
 func writeJSONL(path string, records []any) error {
 	f, err := os.Create(path)
