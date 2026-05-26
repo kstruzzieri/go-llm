@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -118,10 +121,30 @@ type judgeModelChecker interface {
 // LLMJudgeScorer asks a separate local Ollama model to score final-answer
 // quality against the trace's golden rubric. Replay latency and target-model
 // tokens remain owned by Runner.runOne.
+//
+// Cache is the optional judge response cache. It is typed as the
+// judgeCacheStore interface so callers MUST assign only non-nil concrete
+// values; assigning a typed-nil pointer (e.g. the (*sqliteJudgeCache)(nil)
+// returned by openJudgeCache("")) produces a non-nil interface that will
+// panic on use. Wiring code is responsible for guarding against the
+// typed-nil interface trap before assignment.
 type LLMJudgeScorer struct {
-	Client       judgeChatClient
-	JudgeModel   string
-	JudgeTimeout time.Duration
+	Client           judgeChatClient
+	JudgeModel       string
+	JudgeModelDigest string // optional; empty when /api/show was unavailable
+	JudgeTimeout     time.Duration
+	Cache            judgeCacheStore  // optional; nil disables caching
+	BypassCache      bool             // when true, Score skips both Get and Put
+	Clock            func() time.Time // injectable; defaults to time.Now().UTC()
+}
+
+// now returns the scorer's notion of the current time. Injected via Clock
+// in tests so cache CreatedAt/LastUsedAt timestamps are deterministic.
+func (s *LLMJudgeScorer) now() time.Time {
+	if s.Clock != nil {
+		return s.Clock()
+	}
+	return time.Now().UTC()
 }
 
 func newLLMJudgeScorer(client judgeChatClient, judgeModel string, judgeTimeout time.Duration) (*LLMJudgeScorer, error) {
@@ -242,16 +265,118 @@ func materializeJudgement(base Score, judgeModel, rawContent string) (Score, err
 	return base, nil
 }
 
+// Score composes: build → check cache (if enabled) → callJudge or hit →
+// materialize → put-to-cache (if enabled).
+//
+// Cache-hit path MUST pass `base` (fresh from buildJudgeCall on THIS call's
+// trace + actual) into materializeJudgement — not a base reconstructed
+// from the cached entry. This is the load-bearing invariant covered by
+// TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch:
+// AnswerQuality and the judge justification are reused from the cached
+// response content, but ToolSequenceMatch / Notes are always recomputed
+// from the current actual transcript so tool-loop regressions can never
+// be masked by a stale cache entry.
+//
+// Cache errors (Get and Put) are non-fatal: they are logged to stderr and
+// bypassed. The judge call still proceeds on a Get error; the result is
+// still returned on a Put error.
 func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
 	req, base, err := s.buildJudgeCall(trace, actual)
 	if err != nil {
 		return Score{}, err
 	}
+	var cacheKey string
+	if s.Cache != nil && !s.BypassCache {
+		cacheKey = canonicalCacheKey(judgeCacheRequest{
+			Version:          judgeCacheKeyVersion,
+			JudgeModel:       normalizeModelSelector(s.JudgeModel),
+			JudgeModelDigest: s.JudgeModelDigest,
+			SystemPrompt:     judgeSystemPrompt,
+			UserPrompt:       judgeUserPromptOf(req),
+			Format:           req.Format,
+			Temperature:      judgeTemperature,
+			NumPredict:       judgeTokenBudget,
+		})
+		if hit, ok, getErr := s.Cache.Get(ctx, cacheKey); getErr != nil {
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
+		} else if ok {
+			return materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
+		}
+	}
 	content, err := s.callJudge(ctx, req)
 	if err != nil {
 		return Score{}, err
 	}
-	return materializeJudgement(base, s.JudgeModel, content)
+	materialized, err := materializeJudgement(base, s.JudgeModel, content)
+	if err != nil {
+		return Score{}, err
+	}
+	if s.Cache != nil && !s.BypassCache && cacheKey != "" {
+		sum := sha256.Sum256([]byte(judgeUserPromptOf(req)))
+		now := s.now()
+		if putErr := s.Cache.Put(ctx, judgeCacheEntry{
+			CacheKey:         cacheKey,
+			JudgeModel:       s.JudgeModel,
+			JudgeModelDigest: s.JudgeModelDigest,
+			TraceID:          trace.ID,
+			CandidateModel:   actual.Model,
+			PromptHash:       hex.EncodeToString(sum[:]),
+			RequestJSON:      prettyRequestJSON(req),
+			ResponseContent:  content,
+			AnswerQuality:    materialized.AnswerQuality,
+			Justification:    judgeJustificationFromNotes(materialized.Notes),
+			CreatedAt:        now,
+			LastUsedAt:       now,
+		}); putErr != nil {
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache put bypassed: %v\n", putErr)
+		}
+	}
+	return materialized, nil
+}
+
+// judgeUserPromptOf extracts the user prompt that buildJudgeCall composed.
+// We rely on the convention that buildJudgeCall always emits
+// [system, user] in that order; this helper returns the first message with
+// role "user" so a future ordering tweak surfaces obviously rather than
+// silently mixing system and user content into the cache key.
+func judgeUserPromptOf(req ollama.ChatRequest) string {
+	for _, m := range req.Messages {
+		if m.Role == "user" {
+			return m.Content
+		}
+	}
+	return ""
+}
+
+// prettyRequestJSON serializes the judge ChatRequest for cache-audit
+// inspection. Best-effort: returns "" on marshal failure rather than
+// failing the Score call, since the cache row is observational only.
+func prettyRequestJSON(req ollama.ChatRequest) string {
+	raw, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(raw)
+}
+
+// judgeJustificationFromNotes recovers the justification fragment that
+// materializeJudgement appended via joinScoreNotes. Mirror: the last note
+// segment that starts with "llm-judge=" carries the justification after a
+// colon-space delimiter. Returns "" if no such segment is present so the
+// cache row's justification column never carries the model-identity
+// prefix.
+func judgeJustificationFromNotes(notes string) string {
+	parts := strings.Split(notes, "; ")
+	for i := len(parts) - 1; i >= 0; i-- {
+		p := parts[i]
+		if !strings.HasPrefix(p, "llm-judge=") {
+			continue
+		}
+		if idx := strings.Index(p, ": "); idx >= 0 {
+			return p[idx+2:]
+		}
+	}
+	return ""
 }
 
 const judgeSystemPrompt = `You are an impartial evaluator for local LLM benchmark replays.

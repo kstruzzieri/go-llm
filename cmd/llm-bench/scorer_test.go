@@ -522,3 +522,61 @@ func TestParseJudgeResponseRejectsNegativeScore(t *testing.T) {
 		t.Fatalf("err = %v, want errMalformedJudgeResponse", err)
 	}
 }
+
+// TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch
+// pins the load-bearing invariant of the cache integration: a cache hit
+// reuses the judge's response content (so AnswerQuality and justification
+// are stable), but ToolSequenceMatch is recomputed fresh from the current
+// actual transcript so tool-loop changes can never be masked by a stale
+// cache entry.
+func TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch(t *testing.T) {
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{
+		resp: &ollama.ChatResponse{
+			Message: ollama.ChatMessage{
+				Content: `{"answer_quality":0.7,"justification":"meh"}`,
+			},
+		},
+	}
+	scorer := &LLMJudgeScorer{
+		Client:           judge,
+		JudgeModel:       "ollama/gemma4:31b",
+		JudgeModelDigest: "sha256:abc",
+		Cache:            c,
+		Clock:            func() time.Time { return time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC) },
+	}
+	trace := Trace{
+		ID:     "tx",
+		System: "s",
+		Turns:  []Turn{{Role: "user", Content: "hi"}},
+		Golden: Golden{ToolCalls: []string{"read_file"}, FinalAnswerCriteria: "c"},
+	}
+	actualA := Result{Model: "ollama/cand", Transcript: []Turn{
+		{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file"}}},
+		{Role: "assistant", Content: "done"},
+	}}
+	s1, err := scorer.Score(context.Background(), trace, actualA)
+	if err != nil {
+		t.Fatalf("first Score: %v", err)
+	}
+	if s1.ToolSequenceMatch != 1.0 {
+		t.Fatalf("first ToolSequenceMatch=%v; want 1.0", s1.ToolSequenceMatch)
+	}
+	if judge.called != 1 {
+		t.Fatalf("judge called %d times; want 1", judge.called)
+	}
+
+	s2, err := scorer.Score(context.Background(), trace, actualA)
+	if err != nil {
+		t.Fatalf("second Score: %v", err)
+	}
+	if judge.called != 1 {
+		t.Fatalf("judge called %d times after cache-hit; want still 1", judge.called)
+	}
+	if s2.AnswerQuality != s1.AnswerQuality {
+		t.Fatalf("cache returned different AnswerQuality: %v vs %v", s2.AnswerQuality, s1.AnswerQuality)
+	}
+	if s2.ToolSequenceMatch != 1.0 {
+		t.Fatalf("cache-hit ToolSequenceMatch=%v; want 1.0 (recomputed fresh)", s2.ToolSequenceMatch)
+	}
+}
