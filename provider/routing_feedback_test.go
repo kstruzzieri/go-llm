@@ -651,3 +651,179 @@ func TestRoutingFeedbackRecordPropagatesValidationErrors(t *testing.T) {
 		t.Fatalf("err = %v, want ErrInvalidFeedbackKey", err)
 	}
 }
+
+func mkAttempt(provider, model string, status AttemptStatus, latencyMs int64, errClass string) RouteAttempt {
+	return RouteAttempt{
+		Key:        ModelKey{Provider: provider, Model: model},
+		Status:     status,
+		LatencyMs:  latencyMs,
+		ErrorClass: errClass,
+	}
+}
+
+func TestRecordOutcomeNilAttemptsIsNoOp(t *testing.T) {
+	rf := NewRoutingFeedback(mustStore(t, MemoryStoreConfig{}))
+	if err := rf.RecordOutcome(context.Background(), "chat", RouteOutcome{}); err != nil {
+		t.Fatalf("nil Attempts: %v", err)
+	}
+}
+
+func TestRecordOutcomeAllUnknownIsNoOp(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{
+			mkAttempt("p", "m", AttemptStatusUnknown, 100, ""),
+		},
+	}
+	if err := rf.RecordOutcome(context.Background(), "chat", out); err != nil {
+		t.Fatalf("all-Unknown: %v", err)
+	}
+	agg, _ := store.Get(context.Background(), FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"})
+	if agg.SampleCount != 0 {
+		t.Fatalf("SampleCount = %d, want 0", agg.SampleCount)
+	}
+}
+
+func TestRecordOutcomeRejectsEmptyUseCase(t *testing.T) {
+	rf := NewRoutingFeedback(mustStore(t, MemoryStoreConfig{}))
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{mkAttempt("p", "m", AttemptStatusSucceeded, 100, "")},
+	}
+	err := rf.RecordOutcome(context.Background(), "", out)
+	if !errors.Is(err, ErrInvalidFeedbackKey) {
+		t.Fatalf("err = %v, want ErrInvalidFeedbackKey", err)
+	}
+}
+
+func TestRecordOutcomeRejectsInvalidAttemptStatusAtomically(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{
+			mkAttempt("p", "m", AttemptStatusSucceeded, 100, ""),
+			mkAttempt("p2", "m2", AttemptStatus(99), 100, ""),
+		},
+	}
+	err := rf.RecordOutcome(context.Background(), "chat", out)
+	if !errors.Is(err, ErrUnknownAttemptStatus) {
+		t.Fatalf("err = %v, want ErrUnknownAttemptStatus", err)
+	}
+	// Neither attempt should have produced signals — atomic rejection.
+	for _, k := range []FeedbackKey{
+		{Provider: "p", Model: "m", UseCase: "chat"},
+		{Provider: "p2", Model: "m2", UseCase: "chat"},
+	} {
+		agg, _ := store.Get(context.Background(), k)
+		if agg.SampleCount != 0 {
+			t.Fatalf("key %+v SampleCount = %d, want 0", k, agg.SampleCount)
+		}
+	}
+}
+
+func TestRecordOutcomeSuccessOnlyEmitsSuccessAndLatency(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{mkAttempt("p", "m", AttemptStatusSucceeded, 820, "")},
+		RouteID:  "route-1",
+	}
+	if err := rf.RecordOutcome(context.Background(), "chat", out); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	key := FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.SampleCount != 2 {
+		t.Fatalf("SampleCount = %d, want 2", agg.SampleCount)
+	}
+	if agg.ScoredCount != 1 {
+		t.Fatalf("ScoredCount = %d, want 1", agg.ScoredCount)
+	}
+}
+
+func TestRecordOutcomeFailureCarriesErrorClass(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{mkAttempt("p", "m", AttemptStatusFailed, 30000, "timeout")},
+	}
+	if err := rf.RecordOutcome(context.Background(), "chat", out); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	key := FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	// Failure (-0.7) + Latency (0): scoredCount = 1, mean = -0.7, score = 0.15.
+	if math.Abs(agg.Score-0.15) > 1e-15 {
+		t.Fatalf("Score = %v, want 0.15", agg.Score)
+	}
+}
+
+func TestRecordOutcomeFailedAttemptEmptyErrorClassNormalizesToUnknown(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{mkAttempt("p", "m", AttemptStatusFailed, 100, "")},
+	}
+	if err := rf.RecordOutcome(context.Background(), "chat", out); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	// Decomposition emitted Failure + Latency at the same key. Failure
+	// must have been recorded with ErrorClass="unknown" (otherwise
+	// validateSignal would have rejected it).
+	key := FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.SampleCount != 2 || agg.ScoredCount != 1 {
+		t.Fatalf("counts = (sample=%d, scored=%d), want (2,1)", agg.SampleCount, agg.ScoredCount)
+	}
+}
+
+func TestRecordOutcomePrimaryFailFallbackSucceedKeysSeparately(t *testing.T) {
+	// This is the design-review fix test: a primary failure followed by a
+	// fallback success debits the primary and credits the fallback —
+	// rather than crediting the planned model for a rescued request.
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{
+			mkAttempt("ollama-a", "qwen3:8b", AttemptStatusFailed, 200, "5xx"),
+			mkAttempt("ollama-b", "qwen3:8b", AttemptStatusSucceeded, 900, ""),
+		},
+	}
+	if err := rf.RecordOutcome(context.Background(), "chat", out); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	primary := FeedbackKey{Provider: "ollama-a", Model: "qwen3:8b", UseCase: "chat"}
+	fallback := FeedbackKey{Provider: "ollama-b", Model: "qwen3:8b", UseCase: "chat"}
+
+	primaryAgg, _ := store.Get(context.Background(), primary)
+	if math.Abs(primaryAgg.Score-0.15) > 1e-15 {
+		t.Errorf("primary.Score = %v, want 0.15 (Failure)", primaryAgg.Score)
+	}
+	if primaryAgg.SampleCount != 2 {
+		t.Errorf("primary.SampleCount = %d, want 2", primaryAgg.SampleCount)
+	}
+
+	fallbackAgg, _ := store.Get(context.Background(), fallback)
+	if fallbackAgg.Score != 0.75 {
+		t.Errorf("fallback.Score = %v, want 0.75 (Success)", fallbackAgg.Score)
+	}
+	if fallbackAgg.SampleCount != 2 {
+		t.Errorf("fallback.SampleCount = %d, want 2", fallbackAgg.SampleCount)
+	}
+}
+
+func TestRecordOutcomeLatencyOmittedWhenNotMeasured(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{mkAttempt("p", "m", AttemptStatusSucceeded, 0, "")},
+	}
+	if err := rf.RecordOutcome(context.Background(), "chat", out); err != nil {
+		t.Fatalf("RecordOutcome: %v", err)
+	}
+	key := FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.SampleCount != 1 {
+		t.Fatalf("SampleCount = %d, want 1 (no Latency emitted when LatencyMs <= 0)", agg.SampleCount)
+	}
+}

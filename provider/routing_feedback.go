@@ -128,6 +128,92 @@ func (rf *RoutingFeedback) Record(ctx context.Context, key FeedbackKey, sig Feed
 	return rf.store.Record(ctx, key, sig)
 }
 
+// RecordOutcome decomposes out.Attempts into typed per-attempt signals and
+// persists them atomically via the underlying store's RecordBatch.
+//
+// Decomposition rules (see spec § "Decomposition rules — worked examples"):
+//   - One signal pass per attempt in out.Attempts (in order).
+//   - AttemptStatusSucceeded: emit Success at key derived from
+//     attempt.Key + useCase.
+//   - AttemptStatusFailed:    emit Failure (carrying ErrorClass; empty
+//     normalizes to "unknown") at the same key.
+//   - AttemptStatusUnknown:   skip (no signal emitted).
+//   - Any other AttemptStatus value: return ErrUnknownAttemptStatus and
+//     persist no signals from this outcome.
+//   - LatencyMs > 0: additionally emit a Latency signal at the same key.
+//
+// All emitted signals share a single sampled-once-up-front timestamp and
+// the same RouteID copied from out.RouteID, so decomposition order has no
+// effect on UpdatedAt or route correlation.
+//
+// useCase must be non-empty; an empty useCase cannot form a FeedbackKey
+// and returns ErrInvalidFeedbackKey.
+//
+// If out.Attempts is empty or nil, RecordOutcome is a no-op and returns
+// nil — the seam's pre-PR2 zero-value-safe property.
+func (rf *RoutingFeedback) RecordOutcome(ctx context.Context, useCase string, out RouteOutcome) error {
+	if useCase == "" {
+		return fmt.Errorf("%w: useCase is required", ErrInvalidFeedbackKey)
+	}
+	if len(out.Attempts) == 0 {
+		return nil
+	}
+	now := time.Now()
+	items := make([]FeedbackItem, 0, len(out.Attempts)*2)
+	for i, attempt := range out.Attempts {
+		key := FeedbackKey{
+			Provider: attempt.Key.Provider,
+			Model:    attempt.Key.Model,
+			UseCase:  useCase,
+		}
+		switch attempt.Status {
+		case AttemptStatusUnknown:
+			continue
+		case AttemptStatusSucceeded:
+			items = append(items, FeedbackItem{
+				Key: key,
+				Signal: FeedbackSignal{
+					Kind:    RoutingSignalSuccess,
+					At:      now,
+					RouteID: out.RouteID,
+				},
+			})
+		case AttemptStatusFailed:
+			errClass := attempt.ErrorClass
+			if errClass == "" {
+				errClass = "unknown"
+			}
+			items = append(items, FeedbackItem{
+				Key: key,
+				Signal: FeedbackSignal{
+					Kind:       RoutingSignalFailure,
+					ErrorClass: errClass,
+					At:         now,
+					RouteID:    out.RouteID,
+				},
+			})
+		default:
+			return fmt.Errorf("%w: attempt[%d].Status=%d", ErrUnknownAttemptStatus, i, attempt.Status)
+		}
+		if attempt.LatencyMs > 0 {
+			items = append(items, FeedbackItem{
+				Key: key,
+				Signal: FeedbackSignal{
+					Kind:      RoutingSignalLatency,
+					LatencyMs: attempt.LatencyMs,
+					At:        now,
+					RouteID:   out.RouteID,
+				},
+			})
+		}
+	}
+	if len(items) == 0 {
+		// All attempts were AttemptStatusUnknown.
+		return nil
+	}
+	return rf.store.RecordBatch(ctx, items)
+}
+
 // ErrInvalidFeedbackKey is returned when a FeedbackKey has an empty
 // Provider, Model, or UseCase field, or when RoutingFeedback.RecordOutcome
 // is called with an empty useCase argument.
