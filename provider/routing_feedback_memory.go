@@ -88,28 +88,70 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 	}, nil
 }
 
-// Get returns the aggregate for key. Until Task 6 lands the full formula,
-// this returns SampleCount = len(signals[key]), UpdatedAt = latest At, and
-// Score = configured neutral. The Get-side formula upgrade lands in Task 6.
+// Get returns the aggregate for key. If no signals are stored, returns a
+// neutral aggregate (Score == cfg.neutralScore, other fields zero).
+// Otherwise computes Score from the score-bearing subset of signals
+// (effective strength != 0) using a [-1,+1]-clipped mean mapped to [0,1].
+// Latency signals (default strength 0) contribute to SampleCount only.
 func (s *MemoryStore) Get(_ context.Context, key FeedbackKey) (Aggregate, error) {
 	s.mu.Lock()
-	sigs := s.signals[key]
-	count := len(sigs)
-	var latestAt time.Time
+	sigs := append([]FeedbackSignal(nil), s.signals[key]...)
+	s.mu.Unlock()
+
+	if len(sigs) == 0 {
+		return Aggregate{Score: s.cfg.neutralScore}, nil
+	}
+
+	var (
+		sum      float64
+		scored   int
+		latestAt time.Time
+	)
 	for _, sig := range sigs {
+		strength := effectiveStrength(sig)
 		if sig.At.After(latestAt) {
 			latestAt = sig.At
 		}
+		if strength == 0 {
+			continue
+		}
+		sum += clip(strength, -1, +1)
+		scored++
 	}
-	s.mu.Unlock()
-	if count == 0 {
-		return Aggregate{Score: s.cfg.neutralScore}, nil
+	if scored == 0 {
+		return Aggregate{
+			Score:       s.cfg.neutralScore,
+			SampleCount: len(sigs),
+			UpdatedAt:   latestAt,
+		}, nil
 	}
+	mean := sum / float64(scored)
 	return Aggregate{
-		Score:       s.cfg.neutralScore,
-		SampleCount: count,
+		Score:       0.5 + 0.5*mean,
+		SampleCount: len(sigs),
+		ScoredCount: scored,
 		UpdatedAt:   latestAt,
 	}, nil
+}
+
+// effectiveStrength returns the signal's strength, falling back to the
+// default for its kind when Strength is nil. An unknown kind returns 0.
+func effectiveStrength(sig FeedbackSignal) float64 {
+	if sig.Strength != nil {
+		return *sig.Strength
+	}
+	return defaultStrength[sig.Kind]
+}
+
+// clip returns x clamped to the closed interval [lo, hi].
+func clip(x, lo, hi float64) float64 {
+	if x < lo {
+		return lo
+	}
+	if x > hi {
+		return hi
+	}
+	return x
 }
 
 // Record persists a single signal. Validates the key and signal, defaults

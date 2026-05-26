@@ -375,3 +375,124 @@ func TestRecordUnboundedMode(t *testing.T) {
 		t.Fatalf("SampleCount = %d, want 50", agg.SampleCount)
 	}
 }
+
+func mustStore(t *testing.T, cfg MemoryStoreConfig) *MemoryStore {
+	t.Helper()
+	s, err := NewMemoryStore(cfg)
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	return s
+}
+
+func TestGetSingleSuccess(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	if err := s.Record(context.Background(), validKey(),
+		FeedbackSignal{Kind: RoutingSignalSuccess}); err != nil {
+		t.Fatal(err)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.Score != 0.75 {
+		t.Fatalf("Score = %v, want 0.75", agg.Score)
+	}
+	if agg.SampleCount != 1 || agg.ScoredCount != 1 {
+		t.Fatalf("counts = (sample=%d, scored=%d), want (1,1)", agg.SampleCount, agg.ScoredCount)
+	}
+}
+
+func TestGetSingleFailure(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	if err := s.Record(context.Background(), validKey(),
+		FeedbackSignal{Kind: RoutingSignalFailure, ErrorClass: "5xx"}); err != nil {
+		t.Fatal(err)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	// 0.5 + 0.5*(-0.7) = 0.15; allow 1 ULP of float64 rounding.
+	const want = 0.15
+	if math.Abs(agg.Score-want) > 1e-15 {
+		t.Fatalf("Score = %v, want %v", agg.Score, want)
+	}
+	if agg.ScoredCount != 1 {
+		t.Fatalf("ScoredCount = %d, want 1", agg.ScoredCount)
+	}
+}
+
+func TestGetLatencyDoesNotShiftScore(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	mustRecord(t, s, RoutingSignalSuccess, "", 0)
+	mustRecord(t, s, RoutingSignalLatency, "", 820)
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.Score != 0.75 {
+		t.Fatalf("Score = %v, want 0.75 (Latency must not dilute)", agg.Score)
+	}
+	if agg.SampleCount != 2 || agg.ScoredCount != 1 {
+		t.Fatalf("counts = (sample=%d, scored=%d), want (2,1)", agg.SampleCount, agg.ScoredCount)
+	}
+}
+
+func TestGetAllLatencyIsNeutralWithSampleCount(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	for i := 0; i < 3; i++ {
+		mustRecord(t, s, RoutingSignalLatency, "", 100)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.Score != 0.5 {
+		t.Fatalf("Score = %v, want 0.5", agg.Score)
+	}
+	if agg.SampleCount != 3 || agg.ScoredCount != 0 {
+		t.Fatalf("counts = (sample=%d, scored=%d), want (3,0)", agg.SampleCount, agg.ScoredCount)
+	}
+}
+
+func TestGetExplicitNeutralStrengthCountsAsSampleOnly(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	zero := 0.0
+	if err := s.Record(context.Background(), validKey(),
+		FeedbackSignal{Kind: RoutingSignalSuccess, Strength: &zero}); err != nil {
+		t.Fatal(err)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.Score != 0.5 {
+		t.Fatalf("Score = %v, want 0.5 (explicit-neutral Success is sample-only)", agg.Score)
+	}
+	if agg.SampleCount != 1 || agg.ScoredCount != 0 {
+		t.Fatalf("counts = (sample=%d, scored=%d), want (1,0)", agg.SampleCount, agg.ScoredCount)
+	}
+}
+
+func TestGetStrengthClipping(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	too := -5.0
+	if err := s.Record(context.Background(), validKey(),
+		FeedbackSignal{Kind: RoutingSignalSuccess, Strength: &too}); err != nil {
+		t.Fatal(err)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	// Clipping at -1.0 → mean = -1.0 → score = 0.0.
+	if agg.Score != 0.0 {
+		t.Fatalf("Score = %v, want 0.0 (clipped at -1)", agg.Score)
+	}
+}
+
+// mustRecord is a helper that records a well-formed signal of the given
+// kind and fails the test on error. ErrorClass and LatencyMs are
+// auto-applied based on kind so payload validation is satisfied.
+func mustRecord(t *testing.T, s *MemoryStore, kind RoutingSignalKind, errorClass string, latencyMs int64) {
+	t.Helper()
+	sig := FeedbackSignal{Kind: kind}
+	switch kind {
+	case RoutingSignalFailure:
+		if errorClass == "" {
+			errorClass = "5xx"
+		}
+		sig.ErrorClass = errorClass
+	case RoutingSignalLatency:
+		if latencyMs == 0 {
+			latencyMs = 100
+		}
+		sig.LatencyMs = latencyMs
+	}
+	if err := s.Record(context.Background(), validKey(), sig); err != nil {
+		t.Fatalf("Record(%s): %v", kind, err)
+	}
+}
