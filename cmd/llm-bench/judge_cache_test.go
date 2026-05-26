@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -148,4 +150,31 @@ func TestOpenJudgeCache_EmptyPathReturnsNilCache(t *testing.T) {
 	if c != nil {
 		t.Fatalf("openJudgeCache(\"\") returned non-nil cache; want nil (disabled)")
 	}
+}
+
+func TestSQLiteJudgeCache_ConcurrentGetPut_NoRace(t *testing.T) {
+	c, _ := newTestCache(t)
+	ctx := context.Background()
+	const workers = 8
+	const iters = 50
+	var wg sync.WaitGroup
+	wg.Add(workers)
+	for w := 0; w < workers; w++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < iters; i++ {
+				key := fmt.Sprintf("k-%d-%d", id, i%10) // intentional collisions across workers
+				now := time.Now().UTC()
+				_ = c.Put(ctx, judgeCacheEntry{
+					CacheKey: key, JudgeModel: "m", JudgeModelDigest: "d",
+					TraceID: "t", CandidateModel: "cand",
+					PromptHash: "ph", RequestJSON: "{}", ResponseContent: "{}",
+					AnswerQuality: 0.5, Justification: "j",
+					CreatedAt: now, LastUsedAt: now,
+				})
+				_, _, _ = c.Get(ctx, key)
+			}
+		}(w)
+	}
+	wg.Wait()
 }
