@@ -4,10 +4,12 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // fakeRunner implements calibrationRunner with canned Results so we don't
@@ -148,6 +150,73 @@ func TestLoadLabelsAndArtifacts_MatchAndStale(t *testing.T) {
 	}
 	if len(stale) != 1 || stale[0].ArtifactHash != "sha256:stale" {
 		t.Fatalf("stale = %+v; want 1 stale label", stale)
+	}
+}
+
+// fakeScorer returns canned answer-quality values per (trace, candidate).
+type fakeScorer struct {
+	judgeByTrace map[string]float64
+	called       int
+}
+
+func (s *fakeScorer) Score(ctx context.Context, t Trace, r Result) (Score, error) {
+	s.called++
+	return Score{AnswerQuality: s.judgeByTrace[t.ID]}, nil
+}
+
+func TestRunCalibrate_AgreementMatchesByHand(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	reportDir := filepath.Join(dir, "reports")
+
+	// 4 artifacts, 4 labels:
+	// - label 0: expected 1.0, judge 1.0 → agree (Δ=0)
+	// - label 1: expected 1.0, judge 0.6 → disagree (Δ=0.4 > 0.25)
+	// - label 2: expected 0.5, judge 0.7 → agree (Δ=0.2 ≤ 0.25)
+	// - label 3: expected 0.0, judge 0.25 → agree (Δ=0.25 == 0.25)
+	var artifacts []any
+	var labelRecs []any
+	judge := map[string]float64{}
+	expected := []float64{1.0, 1.0, 0.5, 0.0}
+	judged := []float64{1.0, 0.6, 0.7, 0.25}
+	for i := 0; i < 4; i++ {
+		traceID := fmt.Sprintf("t%d", i)
+		a := Artifact{TraceID: traceID, CandidateModel: "ollama/c", ActualFinalAnswer: traceID}
+		a.ArtifactHash = artifactHash(a)
+		artifacts = append(artifacts, a)
+		labelRecs = append(labelRecs, Label{
+			TraceID: traceID, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+			ExpectedAnswerQuality: expected[i], Labeler: "manual",
+		})
+		judge[traceID] = judged[i]
+	}
+	if err := writeJSONL(arts, artifacts); err != nil {
+		t.Fatalf("seed arts: %v", err)
+	}
+	if err := writeJSONL(labels, labelRecs); err != nil {
+		t.Fatalf("seed labels: %v", err)
+	}
+
+	fs := &fakeScorer{judgeByTrace: judge}
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath:    labels,
+		ArtifactsPath: arts,
+		Scorer:        fs,
+		JudgeModel:    "ollama/judge",
+		ReportDir:     reportDir,
+		MinLabels:     2, // lower threshold for the test
+		Clock:         func() time.Time { return time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if res.MatchedCount != 4 || res.AgreeCount != 3 {
+		t.Fatalf("MatchedCount=%d AgreeCount=%d; want 4 / 3", res.MatchedCount, res.AgreeCount)
+	}
+	// 3 of 4 agreed = 75% < 85% threshold → FAIL.
+	if res.Verdict != "FAIL" {
+		t.Fatalf("Verdict=%q; want FAIL (3/4 = 75%% below 85%% threshold)", res.Verdict)
 	}
 }
 

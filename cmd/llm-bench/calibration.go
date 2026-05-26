@@ -216,3 +216,197 @@ func loadLabels(path string) ([]Label, error) {
 	}
 	return out, nil
 }
+
+const (
+	calibrationAgreementDelta   = 0.25
+	calibrationPassThreshold    = 0.85
+	calibrationDefaultMinLabels = 50
+)
+
+// calibrateOptions configures runCalibrate.
+//
+// MinLabels defaults to calibrationDefaultMinLabels (50) when zero so a
+// sufficient sample backs the agreement verdict. StabilityRuns is reserved
+// for Task 20 (judge stability spread) and currently ignored. Clock is an
+// optional time source for deterministic report filenames.
+type calibrateOptions struct {
+	LabelsPath    string
+	ArtifactsPath string
+	Scorer        Scorer
+	JudgeModel    string
+	ReportDir     string
+	MinLabels     int // defaults to calibrationDefaultMinLabels when zero
+	StabilityRuns int // when >1, runs judge that many times with bypass-cache (Task 20)
+	Clock         func() time.Time
+}
+
+// CalibrationResult is the in-memory summary returned by runCalibrate. The
+// markdown report contains the same data plus per-label rows.
+type CalibrationResult struct {
+	JudgeModel    string
+	MatchedCount  int
+	StaleCount    int
+	AgreeCount    int
+	AgreementRate float64
+	MinLabels     int
+	Verdict       string // PASS / FAIL / INSUFFICIENT_LABELS
+	ReportPath    string
+	PerLabel      []perLabelOutcome
+}
+
+// perLabelOutcome is one row of the calibration report: a label paired with
+// the judge's verdict on the same frozen artifact. StabilitySpread is
+// reserved for Task 20 (multi-run judge spread) and zero otherwise.
+type perLabelOutcome struct {
+	TraceID         string
+	CandidateModel  string
+	Expected        float64
+	Judge           float64
+	Delta           float64
+	Agree           bool
+	StabilitySpread float64
+}
+
+// runCalibrate loads (labels, artifacts), invokes the scorer once per
+// matched (label, artifact) pair, and computes the agreement rate against
+// human ExpectedAnswerQuality values. The verdict is INSUFFICIENT_LABELS
+// when MatchedCount < MinLabels, otherwise PASS when AgreementRate is at
+// least calibrationPassThreshold (0.85), else FAIL.
+//
+// The synthesized Trace inside the loop uses a placeholder System and a
+// single empty user turn so Scorer.Score's signature is satisfied. The
+// frozen ActualTranscript from the Artifact is what the scorer actually
+// reads from; live LLMJudgeScorer would need a transcript with an
+// assistant final answer, which the captured Artifact provides.
+//
+// When ReportDir is non-empty the markdown report is written and its path
+// stored on the returned result; otherwise no report is emitted.
+func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult, error) {
+	if opts.Scorer == nil {
+		return CalibrationResult{}, errors.New("calibrate: nil scorer")
+	}
+	if opts.MinLabels == 0 {
+		opts.MinLabels = calibrationDefaultMinLabels
+	}
+	matched, stale, err := loadLabelsMatchedAgainst(opts.LabelsPath, opts.ArtifactsPath)
+	if err != nil {
+		return CalibrationResult{}, err
+	}
+	res := CalibrationResult{
+		JudgeModel:   opts.JudgeModel,
+		MatchedCount: len(matched),
+		StaleCount:   len(stale),
+		MinLabels:    opts.MinLabels,
+	}
+	for _, m := range matched {
+		// Construct a synthetic Trace and Result from the Label+Artifact
+		// so we can call Scorer.Score against the frozen output.
+		trace := Trace{
+			ID:     m.Artifact.TraceID,
+			System: "calibration",
+			Turns:  []Turn{{Role: "user", Content: ""}},
+			Golden: Golden{FinalAnswerCriteria: "frozen calibration artifact"},
+		}
+		actual := Result{
+			Model:      m.Artifact.CandidateModel,
+			TraceID:    m.Artifact.TraceID,
+			Transcript: m.Artifact.ActualTranscript,
+		}
+		score, scoreErr := opts.Scorer.Score(ctx, trace, actual)
+		if scoreErr != nil {
+			return CalibrationResult{}, fmt.Errorf("calibrate: scorer for %s/%s: %w",
+				m.Artifact.TraceID, m.Artifact.CandidateModel, scoreErr)
+		}
+		delta := score.AnswerQuality - m.Label.ExpectedAnswerQuality
+		if delta < 0 {
+			delta = -delta
+		}
+		outcome := perLabelOutcome{
+			TraceID:        m.Artifact.TraceID,
+			CandidateModel: m.Artifact.CandidateModel,
+			Expected:       m.Label.ExpectedAnswerQuality,
+			Judge:          score.AnswerQuality,
+			Delta:          delta,
+			Agree:          delta <= calibrationAgreementDelta,
+		}
+		res.PerLabel = append(res.PerLabel, outcome)
+		if outcome.Agree {
+			res.AgreeCount++
+		}
+	}
+	if res.MatchedCount > 0 {
+		res.AgreementRate = float64(res.AgreeCount) / float64(res.MatchedCount)
+	}
+	switch {
+	case res.MatchedCount < opts.MinLabels:
+		res.Verdict = "INSUFFICIENT_LABELS"
+	case res.AgreementRate >= calibrationPassThreshold:
+		res.Verdict = "PASS"
+	default:
+		res.Verdict = "FAIL"
+	}
+	if opts.ReportDir != "" {
+		path, writeErr := writeCalibrationReport(opts.ReportDir, opts.JudgeModel, res, opts.Clock)
+		if writeErr != nil {
+			return res, fmt.Errorf("calibrate: write report: %w", writeErr)
+		}
+		res.ReportPath = path
+	}
+	return res, nil
+}
+
+// slugifyModel makes a path-safe slug from a model selector by replacing
+// '/' and ':' with '_'. Example: "ollama/gemma4:31b" -> "ollama_gemma4_31b".
+func slugifyModel(s string) string {
+	out := strings.ReplaceAll(s, "/", "_")
+	return strings.ReplaceAll(out, ":", "_")
+}
+
+// writeCalibrationReport emits a markdown calibration report to dir with a
+// slugified, dated filename and returns the absolute path. Clock is the
+// time source used to stamp the filename and report header; defaults to
+// time.Now().UTC() when nil.
+func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock func() time.Time) (string, error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("mkdir %q: %w", dir, err)
+	}
+	now := time.Now().UTC()
+	if clock != nil {
+		now = clock()
+	}
+	path := fmt.Sprintf("%s/%s-%s.md", dir, now.Format("2006-01-02"), slugifyModel(judgeModel))
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("open %q: %w", path, err)
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "# Judge calibration — %s — %s\n\n", judgeModel, now.Format("2006-01-02"))
+	fmt.Fprintf(f, "Matched labels: %d / %d required → %s\n", res.MatchedCount, res.MinLabels, sufficiencyLabel(res))
+	fmt.Fprintf(f, "Stale labels: %d\n", res.StaleCount)
+	fmt.Fprintf(f, "Agreement: %d / %d (%.0f%%) → **%s**\n\n",
+		res.AgreeCount, res.MatchedCount, res.AgreementRate*100, res.Verdict)
+	fmt.Fprintln(f, "| trace_id | candidate | expected | judge | Δ | agree | stability |")
+	fmt.Fprintln(f, "|---|---|---|---|---|---|---|")
+	for _, p := range res.PerLabel {
+		agree := "✗"
+		if p.Agree {
+			agree = "✓"
+		}
+		stability := "n/a"
+		if p.StabilitySpread > 0 {
+			stability = fmt.Sprintf("spread=%.2f", p.StabilitySpread)
+		}
+		fmt.Fprintf(f, "| %s | %s | %.2f | %.2f | %.2f | %s | %s |\n",
+			p.TraceID, p.CandidateModel, p.Expected, p.Judge, p.Delta, agree, stability)
+	}
+	return path, nil
+}
+
+// sufficiencyLabel renders the matched-vs-required label-count state as a
+// short string for the report header.
+func sufficiencyLabel(res CalibrationResult) string {
+	if res.MatchedCount >= res.MinLabels {
+		return "SUFFICIENT"
+	}
+	return "INSUFFICIENT"
+}
