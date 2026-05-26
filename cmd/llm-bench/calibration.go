@@ -237,7 +237,7 @@ type calibrateOptions struct {
 	JudgeModel    string
 	ReportDir     string
 	MinLabels     int // defaults to calibrationDefaultMinLabels when zero
-	StabilityRuns int // when >1, runs judge that many times with bypass-cache (Task 20)
+	StabilityRuns int // when >1, runs the judge N times per artifact and reports max-min spread as a diagnostic (does NOT gate the PASS/FAIL verdict); uses bypass-cache (Task 23)
 	Clock         func() time.Time
 }
 
