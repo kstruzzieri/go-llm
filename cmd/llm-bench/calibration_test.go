@@ -122,3 +122,47 @@ func TestArtifactHash_PrefixIsSha256(t *testing.T) {
 		t.Fatalf("artifactHash length = %d; want 71", len(h))
 	}
 }
+
+func TestLoadLabelsAndArtifacts_MatchAndStale(t *testing.T) {
+	dir := t.TempDir()
+	labels := filepath.Join(dir, "labels.jsonl")
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	art := Artifact{TraceID: "t1", CandidateModel: "ollama/c", ActualFinalAnswer: "x"}
+	art.ArtifactHash = artifactHash(art)
+	if err := writeJSONL(arts, []any{art}); err != nil {
+		t.Fatalf("seed arts: %v", err)
+	}
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: art.ArtifactHash, ExpectedAnswerQuality: 1.0, Labeler: "manual"},
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: "sha256:stale", ExpectedAnswerQuality: 0.5, Labeler: "manual"},
+	}); err != nil {
+		t.Fatalf("seed labels: %v", err)
+	}
+
+	matched, stale, err := loadLabelsMatchedAgainst(labels, arts)
+	if err != nil {
+		t.Fatalf("loadLabelsMatchedAgainst: %v", err)
+	}
+	if len(matched) != 1 || matched[0].Label.ArtifactHash != art.ArtifactHash {
+		t.Fatalf("matched = %+v; want 1 entry with art.ArtifactHash", matched)
+	}
+	if len(stale) != 1 || stale[0].ArtifactHash != "sha256:stale" {
+		t.Fatalf("stale = %+v; want 1 stale label", stale)
+	}
+}
+
+// writeJSONL is a tiny test helper local to calibration_test.go.
+func writeJSONL(path string, records []any) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, r := range records {
+		if err := enc.Encode(r); err != nil {
+			return err
+		}
+	}
+	return nil
+}

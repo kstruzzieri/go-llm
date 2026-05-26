@@ -143,3 +143,76 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	}
 	return nil
 }
+
+// matchedLabel pairs a Label with its current Artifact so the calibration
+// loop can re-score the frozen output without re-running the candidate.
+type matchedLabel struct {
+	Label    Label
+	Artifact Artifact
+}
+
+// loadLabelsMatchedAgainst loads both files and partitions labels into
+// (matched, stale). A label is "stale" iff its ArtifactHash is not present
+// in artifactsPath. Stale labels are not errors — they're reported and
+// excluded from agreement.
+func loadLabelsMatchedAgainst(labelsPath, artifactsPath string) ([]matchedLabel, []Label, error) {
+	arts, err := loadArtifacts(artifactsPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load artifacts: %w", err)
+	}
+	byHash := make(map[string]Artifact, len(arts))
+	for _, a := range arts {
+		byHash[a.ArtifactHash] = a
+	}
+	labels, err := loadLabels(labelsPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("load labels: %w", err)
+	}
+	var matched []matchedLabel
+	var stale []Label
+	for _, l := range labels {
+		a, ok := byHash[l.ArtifactHash]
+		if !ok {
+			stale = append(stale, l)
+			continue
+		}
+		matched = append(matched, matchedLabel{Label: l, Artifact: a})
+	}
+	return matched, stale, nil
+}
+
+func loadArtifacts(path string) ([]Artifact, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", path, err)
+	}
+	defer f.Close()
+	var out []Artifact
+	dec := json.NewDecoder(f)
+	for dec.More() {
+		var a Artifact
+		if err := dec.Decode(&a); err != nil {
+			return nil, fmt.Errorf("decode artifact: %w", err)
+		}
+		out = append(out, a)
+	}
+	return out, nil
+}
+
+func loadLabels(path string) ([]Label, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", path, err)
+	}
+	defer f.Close()
+	var out []Label
+	dec := json.NewDecoder(f)
+	for dec.More() {
+		var l Label
+		if err := dec.Decode(&l); err != nil {
+			return nil, fmt.Errorf("decode label: %w", err)
+		}
+		out = append(out, l)
+	}
+	return out, nil
+}
