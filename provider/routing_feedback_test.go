@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"strings"
@@ -145,5 +146,50 @@ func TestNewRouteIDReturnsEmptyOnRandFailure(t *testing.T) {
 
 	if got := newRouteID(); got != "" {
 		t.Fatalf("newRouteID() = %q, want empty string on RNG failure", got)
+	}
+}
+
+func TestNewMemoryStoreAppliesDefaults(t *testing.T) {
+	s, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	if s == nil {
+		t.Fatal("NewMemoryStore returned nil store")
+	}
+	// Zero values must resolve to the documented defaults. We verify
+	// indirectly through Get on an empty key (Score == DefaultNeutralScore).
+	agg, err := s.Get(context.Background(), FeedbackKey{Provider: "p", Model: "m", UseCase: "c"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if agg.Score != DefaultNeutralScore {
+		t.Fatalf("Score = %v, want %v", agg.Score, DefaultNeutralScore)
+	}
+}
+
+func TestNewMemoryStoreRejectsOutOfRangeNeutralScore(t *testing.T) {
+	cases := []float64{-0.01, 1.01, -1.0, 2.0}
+	for _, n := range cases {
+		t.Run("", func(t *testing.T) {
+			_, err := NewMemoryStore(MemoryStoreConfig{NeutralScore: n})
+			if err == nil {
+				t.Fatalf("NewMemoryStore(NeutralScore=%v) returned nil error", n)
+			}
+		})
+	}
+}
+
+func TestNewMemoryStoreCustomNeutralScore(t *testing.T) {
+	s, err := NewMemoryStore(MemoryStoreConfig{NeutralScore: 0.42})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	agg, err := s.Get(context.Background(), FeedbackKey{Provider: "p", Model: "m", UseCase: "c"})
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if agg.Score != 0.42 {
+		t.Fatalf("Score = %v, want 0.42", agg.Score)
 	}
 }
