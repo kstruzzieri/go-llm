@@ -739,6 +739,20 @@ func TestRecordOutcomeSuccessOnlyEmitsSuccessAndLatency(t *testing.T) {
 	if agg.ScoredCount != 1 {
 		t.Fatalf("ScoredCount = %d, want 1", agg.ScoredCount)
 	}
+	// Verify RouteID propagation: every emitted signal must carry the
+	// outcome's RouteID. Aggregate has no RouteID field, so we inspect
+	// store.signals directly.
+	store.mu.Lock()
+	sigs := store.signals[key]
+	store.mu.Unlock()
+	if len(sigs) != 2 {
+		t.Fatalf("stored signals = %d, want 2", len(sigs))
+	}
+	for i, sig := range sigs {
+		if sig.RouteID != "route-1" {
+			t.Errorf("sigs[%d].RouteID = %q, want \"route-1\"", i, sig.RouteID)
+		}
+	}
 }
 
 func TestRecordOutcomeFailureCarriesErrorClass(t *testing.T) {
@@ -825,5 +839,31 @@ func TestRecordOutcomeLatencyOmittedWhenNotMeasured(t *testing.T) {
 	agg, _ := store.Get(context.Background(), key)
 	if agg.SampleCount != 1 {
 		t.Fatalf("SampleCount = %d, want 1 (no Latency emitted when LatencyMs <= 0)", agg.SampleCount)
+	}
+}
+
+func TestRecordOutcomeRejectsNegativeLatencyAtomically(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	out := RouteOutcome{
+		Attempts: []RouteAttempt{
+			mkAttempt("p", "m", AttemptStatusSucceeded, 100, ""),
+			mkAttempt("p2", "m2", AttemptStatusSucceeded, -1, ""),
+		},
+	}
+	err := rf.RecordOutcome(context.Background(), "chat", out)
+	if !errors.Is(err, ErrInvalidSignalPayload) {
+		t.Fatalf("err = %v, want ErrInvalidSignalPayload", err)
+	}
+	// Atomicity: neither attempt's signals should have been persisted,
+	// even though the first attempt was valid.
+	for _, k := range []FeedbackKey{
+		{Provider: "p", Model: "m", UseCase: "chat"},
+		{Provider: "p2", Model: "m2", UseCase: "chat"},
+	} {
+		agg, _ := store.Get(context.Background(), k)
+		if agg.SampleCount != 0 {
+			t.Fatalf("key %+v SampleCount = %d, want 0 (atomic rejection)", k, agg.SampleCount)
+		}
 	}
 }

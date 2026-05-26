@@ -141,6 +141,7 @@ func (rf *RoutingFeedback) Record(ctx context.Context, key FeedbackKey, sig Feed
 //   - Any other AttemptStatus value: return ErrUnknownAttemptStatus and
 //     persist no signals from this outcome.
 //   - LatencyMs > 0: additionally emit a Latency signal at the same key.
+//   - LatencyMs < 0: return ErrInvalidSignalPayload (no signals persisted).
 //
 // All emitted signals share a single sampled-once-up-front timestamp and
 // the same RouteID copied from out.RouteID, so decomposition order has no
@@ -165,6 +166,9 @@ func (rf *RoutingFeedback) RecordOutcome(ctx context.Context, useCase string, ou
 			Provider: attempt.Key.Provider,
 			Model:    attempt.Key.Model,
 			UseCase:  useCase,
+		}
+		if attempt.LatencyMs < 0 {
+			return fmt.Errorf("%w: attempt[%d].LatencyMs=%d", ErrInvalidSignalPayload, i, attempt.LatencyMs)
 		}
 		switch attempt.Status {
 		case AttemptStatusUnknown:
