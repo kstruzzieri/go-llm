@@ -88,3 +88,40 @@ func TestRouteOutcomeJSONOmitsEmptyNewFields(t *testing.T) {
 		}
 	}
 }
+
+func TestNewRouteIDProducesDistinct32CharHex(t *testing.T) {
+	id1 := newRouteID()
+	id2 := newRouteID()
+	if len(id1) != 32 {
+		t.Fatalf("newRouteID() length = %d, want 32", len(id1))
+	}
+	if id1 == id2 {
+		t.Fatalf("two consecutive newRouteID() values collided: %q", id1)
+	}
+	for _, c := range id1 {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Fatalf("newRouteID() returned non-hex char %q in %q", c, id1)
+		}
+	}
+}
+
+func TestBuildOutcomePopulatesRouteID(t *testing.T) {
+	rp := &RoutePlan{
+		Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+		Score:   0.42,
+		Reason:  "test",
+	}
+	out := rp.buildOutcome(0)
+	if out == nil {
+		t.Fatal("buildOutcome returned nil")
+	}
+	if out.RouteID == "" {
+		t.Fatal("buildOutcome did not set RouteID")
+	}
+	if len(out.RouteID) != 32 {
+		t.Fatalf("RouteID length = %d, want 32", len(out.RouteID))
+	}
+	if len(out.Attempts) != 0 {
+		t.Fatalf("Attempts populated by buildOutcome (len=%d); PR2 owns this", len(out.Attempts))
+	}
+}

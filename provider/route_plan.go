@@ -8,6 +8,8 @@ package provider
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 )
@@ -43,7 +45,7 @@ type RoutePlan struct {
 	Fallbacks []RoutePlan
 	Reason    string
 	Degraded  bool
-	wasSticky bool         // internal: propagated to RouteOutcome
+	wasSticky bool          // internal: propagated to RouteOutcome
 	recorder  RouteRecorder // internal: set by Router
 }
 
@@ -402,6 +404,8 @@ func (rp *RoutePlan) buildOutcome(fallbacksUsed int) *RouteOutcome {
 		WasSticky:     rp.wasSticky,
 		Score:         rp.Score,
 		Reason:        rp.Reason,
+		RouteID:       newRouteID(),
+		// Attempts: nil — PR2 will populate from handleResult.
 	}
 }
 
@@ -471,4 +475,16 @@ func (rp *RoutePlan) recordWarmthUse(key ModelKey) {
 // emitted, provider fallback is no longer safe.
 func hasVisibleContent(content, thinking string, toolCalls []ToolCall) bool {
 	return content != "" || thinking != "" || len(toolCalls) > 0
+}
+
+// newRouteID returns a 16-byte random hex string (32 chars) suitable as an
+// opaque correlation ID on RouteOutcome.RouteID. crypto/rand failures are
+// silently coerced to an empty string — RouteID is informational; we do
+// not want routing paths to fail because the OS RNG returned an error.
+func newRouteID() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b[:])
 }
