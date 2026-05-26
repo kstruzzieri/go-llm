@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -123,5 +124,26 @@ func TestBuildOutcomePopulatesRouteID(t *testing.T) {
 	}
 	if len(out.Attempts) != 0 {
 		t.Fatalf("Attempts populated by buildOutcome (len=%d); PR2 owns this", len(out.Attempts))
+	}
+}
+
+// routeIDFailingReader is an io.Reader stub for TestNewRouteIDReturnsEmptyOnRandFailure;
+// every Read returns an error so newRouteID exercises its empty-string-on-error
+// branch deterministically.
+type routeIDFailingReader struct{}
+
+func (routeIDFailingReader) Read(_ []byte) (int, error) {
+	return 0, errRouteIDForcedFailure
+}
+
+var errRouteIDForcedFailure = errors.New("forced route id read failure")
+
+func TestNewRouteIDReturnsEmptyOnRandFailure(t *testing.T) {
+	orig := routeIDRand
+	routeIDRand = routeIDFailingReader{}
+	t.Cleanup(func() { routeIDRand = orig })
+
+	if got := newRouteID(); got != "" {
+		t.Fatalf("newRouteID() = %q, want empty string on RNG failure", got)
 	}
 }

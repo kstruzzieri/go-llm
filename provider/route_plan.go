@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // ---------------------------------------------------------------------------
@@ -477,13 +478,18 @@ func hasVisibleContent(content, thinking string, toolCalls []ToolCall) bool {
 	return content != "" || thinking != "" || len(toolCalls) > 0
 }
 
+// routeIDRand is the entropy source for newRouteID. It is a package-level
+// variable so tests can substitute a failing reader and exercise the
+// empty-string-on-error branch.
+var routeIDRand io.Reader = rand.Reader
+
 // newRouteID returns a 16-byte random hex string (32 chars) suitable as an
 // opaque correlation ID on RouteOutcome.RouteID. crypto/rand failures are
 // silently coerced to an empty string — RouteID is informational; we do
 // not want routing paths to fail because the OS RNG returned an error.
 func newRouteID() string {
 	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
+	if _, err := routeIDRand.Read(b[:]); err != nil {
 		return ""
 	}
 	return hex.EncodeToString(b[:])
