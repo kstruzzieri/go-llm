@@ -333,7 +333,13 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		if opts.StabilityRuns > 1 {
 			scores := []float64{score.AnswerQuality}
 			for i := 1; i < opts.StabilityRuns; i++ {
-				extra, sErr := opts.Scorer.Score(ctx, trace, actual)
+				bypassScorer := opts.Scorer
+				if cs, ok := opts.Scorer.(*LLMJudgeScorer); ok {
+					clone := *cs
+					clone.BypassCache = true
+					bypassScorer = &clone
+				}
+				extra, sErr := bypassScorer.Score(ctx, trace, actual)
 				if sErr != nil {
 					return CalibrationResult{}, fmt.Errorf("calibrate: stability run %d for %s/%s: %w",
 						i, m.Artifact.TraceID, m.Artifact.CandidateModel, sErr)

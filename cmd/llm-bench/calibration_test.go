@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 // fakeRunner implements calibrationRunner with canned Results so we don't
@@ -351,6 +353,47 @@ func TestRunCalibrate_StabilityRunsReportSpread(t *testing.T) {
 	// Stability runs do NOT affect agreement (primary calls were already cached/Counted).
 	if res.AgreeCount != 1 {
 		t.Fatalf("AgreeCount=%d; want 1 (stability runs are diagnostic only)", res.AgreeCount)
+	}
+}
+
+func TestRunCalibrate_StabilityRunsDoNotPersistJudgeCache(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	a := Artifact{
+		TraceID: "t", CandidateModel: "ollama/c",
+		ActualFinalAnswer: "x",
+		ActualTranscript:  []Turn{{Role: "user", Content: "ask"}, {Role: "assistant", Content: "x"}},
+	}
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(arts, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{Label{
+		TraceID: "t", CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+		ExpectedAnswerQuality: 1.0, Labeler: "manual",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
+		Content: `{"answer_quality":1.0,"justification":"j"}`,
+	}}}
+	scorer := &LLMJudgeScorer{Client: judge, JudgeModel: "ollama/judge", Cache: c, BypassCache: false}
+	_, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts, Scorer: scorer,
+		JudgeModel: "ollama/judge", MinLabels: 1, StabilityRuns: 3,
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	// Primary run wrote 1 row; stability runs (M-1 = 2 extra calls) must NOT write rows.
+	var count int
+	if err := c.db.QueryRow(`SELECT COUNT(*) FROM judge_cache`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("cache row count = %d; want 1 (stability runs must bypass write)", count)
 	}
 }
 
