@@ -34,16 +34,46 @@ func main() {
 	captureLimit := flag.Int("capture-limit", 0, "Maximum conversations to export in capture mode (0 = all)")
 	captureSource := flag.String("capture-source", defaultCaptureSource, "Trace source label for captured conversations")
 	captureSystem := flag.String("capture-system", "", "Fallback system prompt when a conversation has no stored system message")
-	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required)")
+
+	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
+	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
+	labelsPath := flag.String("labels", filepath.Join("docs", "llm", "calibration", "labels.jsonl"), "Path to labels.jsonl (Phase 2)")
+	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
+	artifactsPath := flag.String("artifacts", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Path to artifacts.jsonl (Phase 2)")
+	calibrateReportDir := flag.String("calibrate-report-dir", filepath.Join("docs", "llm", "calibration", "reports"), "Directory for calibration reports")
+	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
+
+	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
 	judgeModel := flag.String("judge-model", "", "Ollama model used by -scorer llm-judge; default uses models.json role judge or gemma4:31b")
 	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for -scorer llm-judge (default: -ollama-url)")
 	judgeTimeout := flag.Duration("judge-timeout", 5*time.Minute, "Timeout for each llm-judge scoring request")
+	judgeCachePath := flag.String("judge-cache", defaultJudgeCachePath(), "SQLite path for judge response cache; empty disables")
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
 	flag.Parse()
+
+	modes := 0
+	if *capture {
+		modes++
+	}
+	if *calibrateCapture {
+		modes++
+	}
+	if *calibrate {
+		modes++
+	}
+	if modes > 1 {
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate are mutually exclusive")
+	}
+	_ = labelsPath
+	_ = labelsOut
+	_ = artifactsPath
+	_ = calibrateReportDir
+	_ = judgeStabilityRuns
+	_ = judgeCachePath
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -150,4 +180,15 @@ func defaultJudgeModelName() string {
 		}
 	}
 	return fallbackJudgeModel
+}
+
+// defaultJudgeCachePath returns the platform-appropriate location for the
+// judge response cache. Falls back to "" (cache disabled) if the user
+// cache dir cannot be resolved.
+func defaultJudgeCachePath() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "go-llm", "judge-cache.db")
 }
