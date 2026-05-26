@@ -41,6 +41,26 @@ func (f fakeJudgeModelChecker) AvailableModels(context.Context) ([]string, error
 	return f.models, nil
 }
 
+func (f fakeJudgeModelChecker) ShowModel(_ context.Context, name string) (*ollama.ModelInfo, error) {
+	return &ollama.ModelInfo{Name: name}, nil
+}
+
+type fakeJudgeChecker struct {
+	available []string
+	showFn    func(name string) (*ollama.ModelInfo, error)
+}
+
+func (f *fakeJudgeChecker) AvailableModels(_ context.Context) ([]string, error) {
+	return f.available, nil
+}
+
+func (f *fakeJudgeChecker) ShowModel(_ context.Context, name string) (*ollama.ModelInfo, error) {
+	if f.showFn == nil {
+		return &ollama.ModelInfo{Name: name, Digest: ""}, nil
+	}
+	return f.showFn(name)
+}
+
 func TestNewScorerAppliesJudgeTimeoutToHTTPClient(t *testing.T) {
 	const judgeTimeout = 25 * time.Millisecond
 	const serverDelay = 250 * time.Millisecond
@@ -454,6 +474,37 @@ func TestValidateJudgeModelPreservesNamespacedModelIDs(t *testing.T) {
 	}, "ollama/hf.co/org/model:tag")
 	if err == nil {
 		t.Fatal("validateJudgeModel() error = nil, want distinct namespaced model rejection")
+	}
+}
+
+func TestResolveJudgeDigest_ReturnsDigestWhenAvailable(t *testing.T) {
+	checker := &fakeJudgeChecker{
+		available: []string{"ollama/gemma4:31b"},
+		showFn: func(name string) (*ollama.ModelInfo, error) {
+			return &ollama.ModelInfo{Name: name, Digest: "sha256:deadbeef"}, nil
+		},
+	}
+	digest, err := resolveJudgeDigest(context.Background(), checker, "ollama/gemma4:31b")
+	if err != nil {
+		t.Fatalf("resolveJudgeDigest: %v", err)
+	}
+	if digest != "sha256:deadbeef" {
+		t.Fatalf("digest = %q; want sha256:deadbeef", digest)
+	}
+}
+
+func TestResolveJudgeDigest_EmptyOnError(t *testing.T) {
+	checker := &fakeJudgeChecker{
+		showFn: func(name string) (*ollama.ModelInfo, error) {
+			return nil, errors.New("api/show unavailable")
+		},
+	}
+	digest, err := resolveJudgeDigest(context.Background(), checker, "ollama/gemma4:31b")
+	if err != nil {
+		t.Fatalf("resolveJudgeDigest: %v", err) // expected to swallow and return empty
+	}
+	if digest != "" {
+		t.Fatalf("digest = %q; want empty on error", digest)
 	}
 }
 

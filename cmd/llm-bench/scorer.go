@@ -116,6 +116,22 @@ type judgeChatClient interface {
 
 type judgeModelChecker interface {
 	AvailableModels(ctx context.Context) ([]string, error)
+	ShowModel(ctx context.Context, name string) (*ollama.ModelInfo, error)
+}
+
+// resolveJudgeDigest returns the judge model's content digest, or empty
+// string if the provider's /api/show response is unavailable or omits one.
+// Errors from /api/show are deliberately swallowed: a missing digest is
+// degraded R1 mitigation, not a hard failure.
+func resolveJudgeDigest(ctx context.Context, checker judgeModelChecker, judgeModel string) (string, error) {
+	info, err := checker.ShowModel(ctx, judgeModel)
+	if err != nil {
+		return "", nil
+	}
+	if info == nil {
+		return "", nil
+	}
+	return info.Digest, nil
 }
 
 // LLMJudgeScorer asks a separate local Ollama model to score final-answer
