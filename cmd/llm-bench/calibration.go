@@ -226,9 +226,10 @@ const (
 // calibrateOptions configures runCalibrate.
 //
 // MinLabels defaults to calibrationDefaultMinLabels (50) when zero so a
-// sufficient sample backs the agreement verdict. StabilityRuns is reserved
-// for Task 20 (judge stability spread) and currently ignored. Clock is an
-// optional time source for deterministic report filenames.
+// sufficient sample backs the agreement verdict. StabilityRuns, when >1,
+// runs the judge N times per artifact and reports the max-min agreement
+// spread as a diagnostic; it does NOT gate the PASS/FAIL verdict. Clock is
+// an optional time source for deterministic report filenames.
 type calibrateOptions struct {
 	LabelsPath    string
 	ArtifactsPath string
