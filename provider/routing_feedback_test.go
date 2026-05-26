@@ -200,6 +200,38 @@ func validKey() FeedbackKey {
 	return FeedbackKey{Provider: "p", Model: "m", UseCase: "c"}
 }
 
+func mustStore(t *testing.T, cfg MemoryStoreConfig) *MemoryStore {
+	t.Helper()
+	s, err := NewMemoryStore(cfg)
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	return s
+}
+
+// mustRecord is a helper that records a well-formed signal of the given
+// kind and fails the test on error. ErrorClass and LatencyMs are
+// auto-applied based on kind so payload validation is satisfied.
+func mustRecord(t *testing.T, s *MemoryStore, kind RoutingSignalKind, errorClass string, latencyMs int64) {
+	t.Helper()
+	sig := FeedbackSignal{Kind: kind}
+	switch kind {
+	case RoutingSignalFailure:
+		if errorClass == "" {
+			errorClass = "5xx"
+		}
+		sig.ErrorClass = errorClass
+	case RoutingSignalLatency:
+		if latencyMs == 0 {
+			latencyMs = 100
+		}
+		sig.LatencyMs = latencyMs
+	}
+	if err := s.Record(context.Background(), validKey(), sig); err != nil {
+		t.Fatalf("Record(%s): %v", kind, err)
+	}
+}
+
 func TestRecordRejectsInvalidKeyFields(t *testing.T) {
 	s, err := NewMemoryStore(MemoryStoreConfig{})
 	if err != nil {
@@ -376,15 +408,6 @@ func TestRecordUnboundedMode(t *testing.T) {
 	}
 }
 
-func mustStore(t *testing.T, cfg MemoryStoreConfig) *MemoryStore {
-	t.Helper()
-	s, err := NewMemoryStore(cfg)
-	if err != nil {
-		t.Fatalf("NewMemoryStore: %v", err)
-	}
-	return s
-}
-
 func TestGetSingleSuccess(t *testing.T) {
 	s := mustStore(t, MemoryStoreConfig{})
 	if err := s.Record(context.Background(), validKey(),
@@ -474,25 +497,20 @@ func TestGetStrengthClipping(t *testing.T) {
 	}
 }
 
-// mustRecord is a helper that records a well-formed signal of the given
-// kind and fails the test on error. ErrorClass and LatencyMs are
-// auto-applied based on kind so payload validation is satisfied.
-func mustRecord(t *testing.T, s *MemoryStore, kind RoutingSignalKind, errorClass string, latencyMs int64) {
-	t.Helper()
-	sig := FeedbackSignal{Kind: kind}
-	switch kind {
-	case RoutingSignalFailure:
-		if errorClass == "" {
-			errorClass = "5xx"
-		}
-		sig.ErrorClass = errorClass
-	case RoutingSignalLatency:
-		if latencyMs == 0 {
-			latencyMs = 100
-		}
-		sig.LatencyMs = latencyMs
+func TestGetMixedSuccessAndFailure(t *testing.T) {
+	// Exercises the multi-scored division path: two score-bearing signals
+	// with opposite signs. Without this case, the formula could regress
+	// into scored==1 special-casing without any TestGet* failure.
+	s := mustStore(t, MemoryStoreConfig{})
+	mustRecord(t, s, RoutingSignalSuccess, "", 0) // +0.5
+	mustRecord(t, s, RoutingSignalFailure, "", 0) // -0.7 (5xx)
+	agg, _ := s.Get(context.Background(), validKey())
+	// mean = (0.5 + (-0.7)) / 2 = -0.1; score = 0.5 + 0.5 * -0.1 = 0.45.
+	const want = 0.45
+	if math.Abs(agg.Score-want) > 1e-15 {
+		t.Fatalf("Score = %v, want %v (within 1e-15)", agg.Score, want)
 	}
-	if err := s.Record(context.Background(), validKey(), sig); err != nil {
-		t.Fatalf("Record(%s): %v", kind, err)
+	if agg.SampleCount != 2 || agg.ScoredCount != 2 {
+		t.Fatalf("counts = (sample=%d, scored=%d), want (2,2)", agg.SampleCount, agg.ScoredCount)
 	}
 }
