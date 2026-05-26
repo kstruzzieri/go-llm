@@ -238,6 +238,7 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: build judge prompt: %w", trace.ID, err)
 	}
 
+	think := false
 	req := ollama.ChatRequest{
 		Model: s.JudgeModel,
 		Messages: []ollama.ChatMessage{
@@ -245,6 +246,7 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 			{Role: "user", Content: prompt},
 		},
 		Format: "json",
+		Think:  &think,
 		Options: &ollama.ModelOptions{
 			Temperature: judgeTemperature,
 			NumPredict:  judgeTokenBudget,
@@ -327,6 +329,7 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 			SystemPrompt:     judgeSystemPrompt,
 			UserPrompt:       judgeUserPromptOf(req),
 			Format:           req.Format,
+			Think:            req.Think,
 			Temperature:      judgeTemperature,
 			NumPredict:       judgeTokenBudget,
 		})

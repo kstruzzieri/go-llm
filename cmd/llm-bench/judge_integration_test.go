@@ -57,7 +57,7 @@ func TestCalibrateAgainstLiveOllama(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer f.Close()
+		defer func() { _ = f.Close() }()
 		enc := json.NewEncoder(f)
 		for _, r := range recs {
 			if err := enc.Encode(r); err != nil {
@@ -71,7 +71,7 @@ func TestCalibrateAgainstLiveOllama(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	cache, _ := openJudgeCache(filepath.Join(dir, "judge.db"))
-	defer cache.Close()
+	defer func() { _ = cache.Close() }()
 
 	scorer, err := newScorer(ctx, "llm-judge", scorerOptions{
 		ollamaURL:    ollamaURL,

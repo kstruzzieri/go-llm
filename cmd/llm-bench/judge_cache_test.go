@@ -47,6 +47,16 @@ func TestCanonicalCacheKey_DigestSensitive(t *testing.T) {
 	}
 }
 
+func TestCanonicalCacheKey_ThinkSensitive(t *testing.T) {
+	base := judgeCacheRequest{Version: judgeCacheKeyVersion, JudgeModel: "m", SystemPrompt: "s", UserPrompt: "u", Format: "json", Temperature: 0.1, NumPredict: 100}
+	thinkFalse := false
+	noThink := base
+	noThink.Think = &thinkFalse
+	if canonicalCacheKey(base) == canonicalCacheKey(noThink) {
+		t.Fatalf("think mode change did not invalidate key")
+	}
+}
+
 func TestCanonicalCacheKey_ExcludesExecutionOnlyFields(t *testing.T) {
 	// Sanity: judgeCacheRequest is the cache key envelope. If anyone adds
 	// KeepAlive / JudgeTimeout / OllamaURL to it, this test will be deleted
@@ -119,7 +129,7 @@ func TestSQLiteJudgeCache_MigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-open: %v", err)
 	}
-	defer c2.Close()
+	defer func() { _ = c2.Close() }()
 }
 
 func TestOpenJudgeCache_CorruptDBReturnsWrappedErrorNoAutoRepair(t *testing.T) {

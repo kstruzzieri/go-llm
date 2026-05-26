@@ -92,7 +92,7 @@ type calibrateCaptureOptions struct {
 // Artifact per non-failed Result to OutputPath as JSONL. Artifacts have
 // no ExpectedAnswerQuality — labels are a separate file the operator
 // hand-edits.
-func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) error {
+func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (retErr error) {
 	if opts.Runner == nil {
 		return fmt.Errorf("calibrate-capture: nil runner")
 	}
@@ -121,7 +121,11 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) erro
 	if err != nil {
 		return fmt.Errorf("calibrate-capture: open output: %w", err)
 	}
-	defer f.Close()
+	defer func() {
+		if closeErr := f.Close(); retErr == nil && closeErr != nil {
+			retErr = fmt.Errorf("calibrate-capture: close output: %w", closeErr)
+		}
+	}()
 	enc := json.NewEncoder(f)
 	for _, r := range results {
 		if r.Err != nil {
@@ -186,7 +190,7 @@ func loadArtifacts(path string) ([]Artifact, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var out []Artifact
 	dec := json.NewDecoder(f)
 	for dec.More() {
@@ -204,7 +208,7 @@ func loadLabels(path string) ([]Label, error) {
 	if err != nil {
 		return nil, fmt.Errorf("open %q: %w", path, err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	var out []Label
 	dec := json.NewDecoder(f)
 	for dec.More() {
@@ -250,6 +254,7 @@ type CalibrationResult struct {
 	AgreeCount    int
 	AgreementRate float64
 	MinLabels     int
+	StabilityRuns int
 	Verdict       string // PASS / FAIL / INSUFFICIENT_LABELS
 	ReportPath    string
 	PerLabel      []perLabelOutcome
@@ -294,10 +299,11 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		return CalibrationResult{}, err
 	}
 	res := CalibrationResult{
-		JudgeModel:   opts.JudgeModel,
-		MatchedCount: len(matched),
-		StaleCount:   len(stale),
-		MinLabels:    opts.MinLabels,
+		JudgeModel:    opts.JudgeModel,
+		MatchedCount:  len(matched),
+		StaleCount:    len(stale),
+		MinLabels:     opts.MinLabels,
+		StabilityRuns: opts.StabilityRuns,
 	}
 	for _, m := range matched {
 		// Construct a synthetic Trace and Result from the Label+Artifact
@@ -331,8 +337,8 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 			Agree:          delta <= calibrationAgreementDelta,
 		}
 		if opts.StabilityRuns > 1 {
-			scores := []float64{score.AnswerQuality}
-			for i := 1; i < opts.StabilityRuns; i++ {
+			scores := make([]float64, 0, opts.StabilityRuns)
+			for i := 0; i < opts.StabilityRuns; i++ {
 				bypassScorer := opts.Scorer
 				if cs, ok := opts.Scorer.(*LLMJudgeScorer); ok {
 					clone := *cs
@@ -342,7 +348,7 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 				extra, sErr := bypassScorer.Score(ctx, trace, actual)
 				if sErr != nil {
 					return CalibrationResult{}, fmt.Errorf("calibrate: stability run %d for %s/%s: %w",
-						i, m.Artifact.TraceID, m.Artifact.CandidateModel, sErr)
+						i+1, m.Artifact.TraceID, m.Artifact.CandidateModel, sErr)
 				}
 				scores = append(scores, extra.AnswerQuality)
 			}
@@ -382,8 +388,8 @@ func slugifyModel(s string) string {
 }
 
 // writeCalibrationReport emits a markdown calibration report to dir with a
-// slugified, dated filename and returns the absolute path. Clock is the
-// time source used to stamp the filename and report header; defaults to
+// slugified, dated filename and returns the report path. Clock is the time
+// source used to stamp the filename and report header; defaults to
 // time.Now().UTC() when nil.
 func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock func() time.Time) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -393,30 +399,29 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 	if clock != nil {
 		now = clock()
 	}
-	path := fmt.Sprintf("%s/%s-%s.md", dir, now.Format("2006-01-02"), slugifyModel(judgeModel))
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return "", fmt.Errorf("open %q: %w", path, err)
-	}
-	defer f.Close()
-	fmt.Fprintf(f, "# Judge calibration — %s — %s\n\n", judgeModel, now.Format("2006-01-02"))
-	fmt.Fprintf(f, "Matched labels: %d / %d required → %s\n", res.MatchedCount, res.MinLabels, sufficiencyLabel(res))
-	fmt.Fprintf(f, "Stale labels: %d\n", res.StaleCount)
-	fmt.Fprintf(f, "Agreement: %d / %d (%.0f%%) → **%s**\n\n",
+	path := filepath.Join(dir, fmt.Sprintf("%s-%s.md", now.Format("2006-01-02"), slugifyModel(judgeModel)))
+	var b strings.Builder
+	fmt.Fprintf(&b, "# Judge calibration — %s — %s\n\n", judgeModel, now.Format("2006-01-02"))
+	fmt.Fprintf(&b, "Matched labels: %d / %d required → %s\n", res.MatchedCount, res.MinLabels, sufficiencyLabel(res))
+	fmt.Fprintf(&b, "Stale labels: %d\n", res.StaleCount)
+	fmt.Fprintf(&b, "Agreement: %d / %d (%.0f%%) → **%s**\n\n",
 		res.AgreeCount, res.MatchedCount, res.AgreementRate*100, res.Verdict)
-	fmt.Fprintln(f, "| trace_id | candidate | expected | judge | Δ | agree | stability |")
-	fmt.Fprintln(f, "|---|---|---|---|---|---|---|")
+	fmt.Fprintln(&b, "| trace_id | candidate | expected | judge | Δ | agree | stability |")
+	fmt.Fprintln(&b, "|---|---|---|---|---|---|---|")
 	for _, p := range res.PerLabel {
 		agree := "✗"
 		if p.Agree {
 			agree = "✓"
 		}
 		stability := "n/a"
-		if p.StabilitySpread > 0 {
+		if res.StabilityRuns > 1 {
 			stability = fmt.Sprintf("spread=%.2f", p.StabilitySpread)
 		}
-		fmt.Fprintf(f, "| %s | %s | %.2f | %.2f | %.2f | %s | %s |\n",
+		fmt.Fprintf(&b, "| %s | %s | %.2f | %.2f | %.2f | %s | %s |\n",
 			p.TraceID, p.CandidateModel, p.Expected, p.Judge, p.Delta, agree, stability)
+	}
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		return "", fmt.Errorf("write %q: %w", path, err)
 	}
 	return path, nil
 }

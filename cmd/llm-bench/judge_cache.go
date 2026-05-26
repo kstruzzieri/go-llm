@@ -16,7 +16,7 @@ import (
 
 // judgeCacheKeyVersion is bumped to force-invalidate every entry. Increment
 // when changing the canonical request shape (new field, semantic shift).
-const judgeCacheKeyVersion = 1
+const judgeCacheKeyVersion = 2
 
 // judgeCacheRequest is the canonical envelope hashed to produce the cache
 // key. Fields here MUST be limited to inputs that affect judgment semantics.
@@ -29,6 +29,7 @@ type judgeCacheRequest struct {
 	SystemPrompt     string  `json:"system_prompt"`
 	UserPrompt       string  `json:"user_prompt"`
 	Format           string  `json:"format"`
+	Think            *bool   `json:"think,omitempty"`
 	Temperature      float64 `json:"temperature"`
 	NumPredict       int     `json:"num_predict"`
 }

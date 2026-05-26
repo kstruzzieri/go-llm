@@ -232,6 +232,9 @@ func TestBuildJudgeCall_PopulatesBaseScoreAndRequest(t *testing.T) {
 	if req.Format != "json" {
 		t.Fatalf("req.Format = %q; want json", req.Format)
 	}
+	if req.Think == nil || *req.Think {
+		t.Fatalf("req.Think = %v; want explicit false", req.Think)
+	}
 	if base.ToolSequenceMatch != 1.0 {
 		t.Fatalf("baseScore.ToolSequenceMatch = %v; want 1.0", base.ToolSequenceMatch)
 	}

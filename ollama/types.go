@@ -51,6 +51,7 @@ type ChatRequest struct {
 	Messages  []ChatMessage `json:"messages"`
 	Stream    bool          `json:"stream"`
 	Format    string        `json:"format,omitempty"` // e.g. "json" for structured output
+	Think     *bool         `json:"think,omitempty"`  // controls reasoning models that support Ollama's thinking mode
 	Options   *ModelOptions `json:"options,omitempty"`
 	Tools     []Tool        `json:"tools,omitempty"`      // available tools
 	KeepAlive string        `json:"keep_alive,omitempty"` // e.g. "5m", "30m", "-1" (keep forever); empty = Ollama default

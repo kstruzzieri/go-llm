@@ -175,8 +175,8 @@ func main() {
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: calibrate verdict=%s agreement=%d/%d report=%s\n",
 			res.Verdict, res.AgreeCount, res.MatchedCount, res.ReportPath)
-		if res.Verdict == "FAIL" {
-			os.Exit(3)
+		if code := calibrationExitCode(res.Verdict); code != 0 {
+			os.Exit(code)
 		}
 		return
 	}
@@ -276,6 +276,13 @@ func defaultJudgeModelName() string {
 		}
 	}
 	return fallbackJudgeModel
+}
+
+func calibrationExitCode(verdict string) int {
+	if verdict == "PASS" {
+		return 0
+	}
+	return 3
 }
 
 // defaultJudgeCachePath returns the platform-appropriate location for the
