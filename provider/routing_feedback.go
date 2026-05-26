@@ -1,8 +1,8 @@
-// Package provider — routing_feedback.go defines the RoutingFeedback seam:
-// a provider/model/use-case keyed signal store distinct from the chunk-key
-// oriented feedback.SignalStore. PR1 (Epic #48 Phase 5) ships types,
-// interface, in-memory wiring, and the RouteAttempt model; subsequent PRs
-// wire outcomes, persist signals, and read scores into routing decisions.
+// routing_feedback.go defines the RoutingFeedback seam: a provider/model/
+// use-case keyed signal store distinct from the chunk-key oriented
+// feedback.SignalStore. PR1 (Epic #48 Phase 5) ships types, interface, and
+// the in-memory wiring; subsequent PRs persist signals and read scores into
+// routing decisions.
 package provider
 
 import (
@@ -60,10 +60,12 @@ type FeedbackSignal struct {
 	Meta         map[string]string
 }
 
-// Aggregate is the read-side view of accumulated routing feedback. Score is
-// in [0, 1] with 0.5 neutral. ScoredCount is the subset of SampleCount with
-// non-zero effective strength.
+// Aggregate is the read-side view of accumulated routing feedback. ScoredCount
+// is the subset of SampleCount with non-zero effective strength.
 type Aggregate struct {
+	// Score in [0, 1]; neutral is store-configured (default 0.5). Computed
+	// from signals whose effective strength is non-zero. Returns the
+	// configured neutral value when ScoredCount == 0.
 	Score       float64
 	SampleCount int
 	ScoredCount int
@@ -80,8 +82,16 @@ type FeedbackItem struct {
 // the in-memory implementation for a SQLite-backed one without touching the
 // interface.
 type RoutingFeedbackStore interface {
+	// Get returns the current aggregate for key, or a neutral aggregate
+	// when no signals are stored under it.
 	Get(ctx context.Context, key FeedbackKey) (Aggregate, error)
+
+	// Record persists a single signal. Implementations must validate the
+	// key and signal against the same rules enforced by RoutingFeedback.
 	Record(ctx context.Context, key FeedbackKey, sig FeedbackSignal) error
+
+	// RecordBatch persists multiple signals as a single atomic state
+	// transition: if any item fails validation, no item is persisted.
 	RecordBatch(ctx context.Context, items []FeedbackItem) error
 }
 
@@ -100,12 +110,29 @@ func NewRoutingFeedback(store RoutingFeedbackStore) *RoutingFeedback {
 	return &RoutingFeedback{store: store}
 }
 
-// Sentinel errors returned by the seam.
-var (
-	ErrInvalidFeedbackKey    = errors.New("provider: invalid feedback key")
-	ErrUnknownSignalKind     = errors.New("provider: unknown routing signal kind")
-	ErrInvalidSignalStrength = errors.New("provider: invalid signal strength")
-	ErrInvalidSignalPayload  = errors.New("provider: invalid signal payload")
-	ErrMetaTooLarge          = errors.New("provider: signal meta too large")
-	ErrUnknownAttemptStatus  = errors.New("provider: unknown attempt status")
-)
+// ErrInvalidFeedbackKey is returned when a FeedbackKey has an empty
+// Provider, Model, or UseCase field, or when RoutingFeedback.RecordOutcome
+// is called with an empty useCase argument.
+var ErrInvalidFeedbackKey = errors.New("provider: invalid feedback key")
+
+// ErrUnknownSignalKind is returned when a FeedbackSignal carries a Kind
+// that is not one of the declared RoutingSignalKind constants.
+var ErrUnknownSignalKind = errors.New("provider: unknown routing signal kind")
+
+// ErrInvalidSignalStrength is returned when a non-nil FeedbackSignal.Strength
+// holds a NaN or infinite value.
+var ErrInvalidSignalStrength = errors.New("provider: invalid signal strength")
+
+// ErrInvalidSignalPayload is returned when a FeedbackSignal's payload
+// fields violate kind-specific invariants — e.g. a Latency signal without
+// a positive LatencyMs, or a non-Failure signal carrying an ErrorClass.
+var ErrInvalidSignalPayload = errors.New("provider: invalid signal payload")
+
+// ErrMetaTooLarge is returned when a FeedbackSignal.Meta exceeds the
+// store's configured key count or per-value byte limits.
+var ErrMetaTooLarge = errors.New("provider: signal meta too large")
+
+// ErrUnknownAttemptStatus is returned by RoutingFeedback.RecordOutcome
+// when a RouteAttempt.Status (introduced in Task 2 / provider/types.go)
+// holds a value outside the declared AttemptStatus constants.
+var ErrUnknownAttemptStatus = errors.New("provider: unknown attempt status")
