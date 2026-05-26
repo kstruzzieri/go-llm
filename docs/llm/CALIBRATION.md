@@ -32,6 +32,12 @@ Writes one JSON object per line to `artifacts.jsonl`:
   "trace_id": "fim-go-handler-001",
   "candidate_model": "ollama/qwen3-coder-next:latest",
   "artifact_hash": "sha256:...",
+  "trace": {
+    "id": "fim-go-handler-001",
+    "system": "...",
+    "turns": [{"role": "user", "content": "..."}],
+    "golden": {"final_answer_criteria": "...", "tool_calls": ["read_file"]}
+  },
   "actual_final_answer": "...",
   "actual_tool_calls": ["read_file", "search_code"],
   "actual_transcript": [{"role": "...", "content": "..."}],

@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -95,6 +97,11 @@ type sqliteJudgeCache struct {
 func openJudgeCache(path string) (*sqliteJudgeCache, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, nil
+	}
+	if dir := filepath.Dir(path); dir != "." && dir != "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("%w %q: mkdir parent: %v", errJudgeCacheOpen, path, err)
+		}
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {

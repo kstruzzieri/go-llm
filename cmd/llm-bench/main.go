@@ -112,10 +112,7 @@ func main() {
 		runner := &Runner{
 			OllamaURL: *ollamaURL,
 			Timeout:   *timeout,
-			// ExactMatchScorer is unused by capture (we only need
-			// Runner.RunAll to produce Results); Runner currently
-			// requires a non-nil Scorer.
-			Scorer: &ExactMatchScorer{},
+			Scorer:    &CaptureScorer{},
 		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
 			Runner:     runner,

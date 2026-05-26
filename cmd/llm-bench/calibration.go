@@ -21,6 +21,7 @@ type Artifact struct {
 	TraceID           string    `json:"trace_id"`
 	CandidateModel    string    `json:"candidate_model"`
 	ArtifactHash      string    `json:"artifact_hash"`
+	Trace             Trace     `json:"trace"`
 	ActualFinalAnswer string    `json:"actual_final_answer"`
 	ActualToolCalls   []string  `json:"actual_tool_calls"`
 	ActualTranscript  []Turn    `json:"actual_transcript"`
@@ -49,6 +50,7 @@ type Label struct {
 type artifactHashInput struct {
 	TraceID           string   `json:"trace_id"`
 	CandidateModel    string   `json:"candidate_model"`
+	Trace             Trace    `json:"trace"`
 	ActualFinalAnswer string   `json:"actual_final_answer"`
 	ActualToolCalls   []string `json:"actual_tool_calls"`
 	ActualTranscript  []Turn   `json:"actual_transcript"`
@@ -61,6 +63,7 @@ func artifactHash(a Artifact) string {
 	raw, _ := json.Marshal(artifactHashInput{
 		TraceID:           normalizeModelSelector(a.TraceID),
 		CandidateModel:    normalizeModelSelector(a.CandidateModel),
+		Trace:             a.Trace,
 		ActualFinalAnswer: a.ActualFinalAnswer,
 		ActualToolCalls:   a.ActualToolCalls,
 		ActualTranscript:  a.ActualTranscript,
@@ -113,6 +116,10 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	if opts.Clock != nil {
 		now = opts.Clock
 	}
+	traceByID := make(map[string]Trace, len(opts.Traces))
+	for _, trace := range opts.Traces {
+		traceByID[trace.ID] = trace
+	}
 
 	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
 		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
@@ -132,9 +139,14 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			// Skip failed runs — they cannot be labeled coherently.
 			continue
 		}
+		trace, ok := traceByID[r.TraceID]
+		if !ok {
+			return fmt.Errorf("calibrate-capture: result %s/%s has no matching trace context", r.TraceID, r.Model)
+		}
 		artifact := Artifact{
 			TraceID:           r.TraceID,
 			CandidateModel:    r.Model,
+			Trace:             trace,
 			ActualFinalAnswer: lastAssistantContent(r.Transcript),
 			ActualToolCalls:   extractToolNames(r.Transcript),
 			ActualTranscript:  r.Transcript,
@@ -306,13 +318,9 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		StabilityRuns: opts.StabilityRuns,
 	}
 	for _, m := range matched {
-		// Construct a synthetic Trace and Result from the Label+Artifact
-		// so we can call Scorer.Score against the frozen output.
-		trace := Trace{
-			ID:     m.Artifact.TraceID,
-			System: "calibration",
-			Turns:  []Turn{{Role: "user", Content: ""}},
-			Golden: Golden{FinalAnswerCriteria: "frozen calibration artifact"},
+		trace, traceErr := calibrationTraceFromArtifact(m.Artifact)
+		if traceErr != nil {
+			return CalibrationResult{}, traceErr
 		}
 		actual := Result{
 			Model:      m.Artifact.CandidateModel,
@@ -378,6 +386,26 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		res.ReportPath = path
 	}
 	return res, nil
+}
+
+func calibrationTraceFromArtifact(a Artifact) (Trace, error) {
+	trace := a.Trace
+	if strings.TrimSpace(trace.ID) == "" {
+		return Trace{}, fmt.Errorf("calibrate: artifact %s/%s missing original trace context", a.TraceID, a.CandidateModel)
+	}
+	if trace.ID != a.TraceID {
+		return Trace{}, fmt.Errorf("calibrate: artifact %s/%s trace ID mismatch: %q", a.TraceID, a.CandidateModel, trace.ID)
+	}
+	if strings.TrimSpace(trace.System) == "" {
+		return Trace{}, fmt.Errorf("calibrate: artifact %s/%s missing original trace system prompt", a.TraceID, a.CandidateModel)
+	}
+	if len(trace.Turns) == 0 {
+		return Trace{}, fmt.Errorf("calibrate: artifact %s/%s missing original trace turns", a.TraceID, a.CandidateModel)
+	}
+	if strings.TrimSpace(trace.Golden.FinalAnswerCriteria) == "" && strings.TrimSpace(trace.Golden.FinalAnswerSubstring) == "" {
+		return Trace{}, fmt.Errorf("calibrate: artifact %s/%s missing original trace golden rubric", a.TraceID, a.CandidateModel)
+	}
+	return trace, nil
 }
 
 // slugifyModel makes a path-safe slug from a model selector by replacing

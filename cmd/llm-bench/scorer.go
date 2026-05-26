@@ -121,6 +121,17 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 	return score, nil
 }
 
+// CaptureScorer lets capture-only flows replay candidates through Runner
+// without making scoring prerequisites part of artifact collection.
+type CaptureScorer struct{}
+
+func (s *CaptureScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
+	return Score{
+		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		Notes:             "capture mode: scoring skipped",
+	}, nil
+}
+
 type judgeChatClient interface {
 	Chat(ctx context.Context, req ollama.ChatRequest) (*ollama.ChatResponse, error)
 }

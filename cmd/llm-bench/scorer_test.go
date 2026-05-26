@@ -107,6 +107,18 @@ func TestExactMatchScorerRequiresGoldenSubstring(t *testing.T) {
 	}
 }
 
+func TestCaptureScorerAcceptsCriteriaOnlyTrace(t *testing.T) {
+	s := &CaptureScorer{}
+	trace := Trace{
+		ID:     "criteria-only",
+		Golden: Golden{FinalAnswerCriteria: "use the rubric, not a substring"},
+	}
+	actual := Result{Transcript: []Turn{{Role: "assistant", Content: "answer"}}}
+	if _, err := s.Score(context.Background(), trace, actual); err != nil {
+		t.Fatalf("CaptureScorer.Score() error = %v; want nil", err)
+	}
+}
+
 func TestExactMatchScorerSubstringHit(t *testing.T) {
 	s := &ExactMatchScorer{}
 	trace := Trace{

@@ -132,6 +132,18 @@ func TestSQLiteJudgeCache_MigrationIdempotent(t *testing.T) {
 	defer func() { _ = c2.Close() }()
 }
 
+func TestOpenJudgeCache_CreatesParentDirectory(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "missing", "nested", "judge.db")
+	c, err := openJudgeCache(path)
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	defer func() { _ = c.Close() }()
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("cache file stat: %v", err)
+	}
+}
+
 func TestOpenJudgeCache_CorruptDBReturnsWrappedErrorNoAutoRepair(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "corrupt.db")

@@ -34,9 +34,17 @@ func TestCalibrateAgainstLiveOllama(t *testing.T) {
 	// Build a tiny 10-artifact micro-set with hand-crafted easy correctness.
 	var artifacts, labelRecs []any
 	for i := 0; i < 10; i++ {
+		traceID := "easy-" + strings.Repeat("a", i+1)
+		trace := Trace{
+			ID:     traceID,
+			System: "answer arithmetic questions exactly",
+			Turns:  []Turn{{Role: "user", Content: "what is 2+2?"}},
+			Golden: Golden{FinalAnswerCriteria: "answer exactly 4"},
+		}
 		a := Artifact{
-			TraceID:           "easy-" + strings.Repeat("a", i+1),
+			TraceID:           traceID,
 			CandidateModel:    "ollama/probe-candidate",
+			Trace:             trace,
 			ActualFinalAnswer: "4",
 			ActualToolCalls:   nil,
 			ActualTranscript: []Turn{

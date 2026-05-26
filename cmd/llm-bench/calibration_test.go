@@ -75,6 +75,9 @@ func TestRunCalibrateCapture_WritesOneArtifactPerResult(t *testing.T) {
 		if a.CandidateModel != "ollama/cand" {
 			t.Fatalf("artifact %d candidate = %q", i, a.CandidateModel)
 		}
+		if a.Trace.ID != a.TraceID {
+			t.Fatalf("artifact %d trace context ID = %q; want %q", i, a.Trace.ID, a.TraceID)
+		}
 	}
 	if artifacts[0].ActualFinalAnswer != "answer one" {
 		t.Fatalf("artifact[0].ActualFinalAnswer = %q", artifacts[0].ActualFinalAnswer)
@@ -116,6 +119,16 @@ func TestArtifactHash_SensitiveToToolCallSequence(t *testing.T) {
 	}
 }
 
+func TestArtifactHash_SensitiveToGoldenRubric(t *testing.T) {
+	base := testCalibrationArtifact("t", "answer")
+	h1 := artifactHash(base)
+	base.Trace.Golden.FinalAnswerCriteria = "different rubric"
+	h2 := artifactHash(base)
+	if h1 == h2 {
+		t.Fatalf("artifactHash not sensitive to original trace rubric")
+	}
+}
+
 func TestArtifactHash_PrefixIsSha256(t *testing.T) {
 	h := artifactHash(Artifact{TraceID: "t", CandidateModel: "c"})
 	if !strings.HasPrefix(h, "sha256:") {
@@ -127,12 +140,19 @@ func TestArtifactHash_PrefixIsSha256(t *testing.T) {
 	}
 }
 
+func TestCalibrationTraceFromArtifactRequiresOriginalRubric(t *testing.T) {
+	artifact := Artifact{TraceID: "t", CandidateModel: "ollama/c"}
+	_, err := calibrationTraceFromArtifact(artifact)
+	if err == nil || !strings.Contains(err.Error(), "missing original trace context") {
+		t.Fatalf("calibrationTraceFromArtifact err = %v; want missing trace context", err)
+	}
+}
+
 func TestLoadLabelsAndArtifacts_MatchAndStale(t *testing.T) {
 	dir := t.TempDir()
 	labels := filepath.Join(dir, "labels.jsonl")
 	arts := filepath.Join(dir, "artifacts.jsonl")
-	art := Artifact{TraceID: "t1", CandidateModel: "ollama/c", ActualFinalAnswer: "x"}
-	art.ArtifactHash = artifactHash(art)
+	art := testCalibrationArtifact("t1", "x")
 	if err := writeJSONL(arts, []any{art}); err != nil {
 		t.Fatalf("seed arts: %v", err)
 	}
@@ -166,6 +186,62 @@ func (s *fakeScorer) Score(ctx context.Context, t Trace, r Result) (Score, error
 	return Score{AnswerQuality: s.judgeByTrace[t.ID]}, nil
 }
 
+func testCalibrationArtifact(traceID, answer string) Artifact {
+	trace := Trace{
+		ID:     traceID,
+		System: "system for " + traceID,
+		Turns:  []Turn{{Role: "user", Content: "question for " + traceID}},
+		Golden: Golden{FinalAnswerCriteria: "rubric for " + traceID},
+	}
+	artifact := Artifact{
+		TraceID:           traceID,
+		CandidateModel:    "ollama/c",
+		Trace:             trace,
+		ActualFinalAnswer: answer,
+		ActualTranscript:  []Turn{{Role: "assistant", Content: answer}},
+	}
+	artifact.ArtifactHash = artifactHash(artifact)
+	return artifact
+}
+
+type recordingScorer struct {
+	trace Trace
+}
+
+func (s *recordingScorer) Score(ctx context.Context, t Trace, r Result) (Score, error) {
+	s.trace = t
+	return Score{AnswerQuality: 1.0}, nil
+}
+
+func TestRunCalibrate_UsesArtifactTraceRubric(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	artifact := testCalibrationArtifact("trace-rubric", "answer")
+	artifact.Trace.Golden.FinalAnswerCriteria = "trace-specific rubric"
+	artifact.ArtifactHash = artifactHash(artifact)
+	if err := writeJSONL(arts, []any{artifact}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{Label{
+		TraceID: artifact.TraceID, CandidateModel: artifact.CandidateModel, ArtifactHash: artifact.ArtifactHash,
+		ExpectedAnswerQuality: 1.0, Labeler: "manual",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	scorer := &recordingScorer{}
+	_, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts, Scorer: scorer,
+		JudgeModel: "ollama/judge", MinLabels: 1,
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if scorer.trace.Golden.FinalAnswerCriteria != "trace-specific rubric" {
+		t.Fatalf("scored rubric = %q; want original trace rubric", scorer.trace.Golden.FinalAnswerCriteria)
+	}
+}
+
 func TestRunCalibrate_AgreementMatchesByHand(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "artifacts.jsonl")
@@ -184,8 +260,7 @@ func TestRunCalibrate_AgreementMatchesByHand(t *testing.T) {
 	judged := []float64{1.0, 0.6, 0.7, 0.25}
 	for i := 0; i < 4; i++ {
 		traceID := fmt.Sprintf("t%d", i)
-		a := Artifact{TraceID: traceID, CandidateModel: "ollama/c", ActualFinalAnswer: traceID}
-		a.ArtifactHash = artifactHash(a)
+		a := testCalibrationArtifact(traceID, traceID)
 		artifacts = append(artifacts, a)
 		labelRecs = append(labelRecs, Label{
 			TraceID: traceID, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
@@ -231,8 +306,7 @@ func TestRunCalibrate_InsufficientLabelsNeverPasses(t *testing.T) {
 	var artifacts, labelRecs []any
 	for i := 0; i < 3; i++ {
 		traceID := fmt.Sprintf("t%d", i)
-		a := Artifact{TraceID: traceID, CandidateModel: "ollama/c", ActualFinalAnswer: traceID}
-		a.ArtifactHash = artifactHash(a)
+		a := testCalibrationArtifact(traceID, traceID)
 		artifacts = append(artifacts, a)
 		labelRecs = append(labelRecs, Label{
 			TraceID: traceID, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
@@ -290,8 +364,7 @@ func TestRunCalibrate_ReportFilenameIsSlugified(t *testing.T) {
 	arts := filepath.Join(dir, "artifacts.jsonl")
 	labels := filepath.Join(dir, "labels.jsonl")
 	reportDir := filepath.Join(dir, "reports")
-	a := Artifact{TraceID: "t", CandidateModel: "ollama/c", ActualFinalAnswer: "x"}
-	a.ArtifactHash = artifactHash(a)
+	a := testCalibrationArtifact("t", "x")
 	if err := writeJSONL(arts, []any{a}); err != nil {
 		t.Fatal(err)
 	}
@@ -337,8 +410,7 @@ func TestRunCalibrate_StabilityRunsReportSpread(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "artifacts.jsonl")
 	labels := filepath.Join(dir, "labels.jsonl")
-	a := Artifact{TraceID: "t", CandidateModel: "ollama/c", ActualFinalAnswer: "x"}
-	a.ArtifactHash = artifactHash(a)
+	a := testCalibrationArtifact("t", "x")
 	if err := writeJSONL(arts, []any{a}); err != nil {
 		t.Fatal(err)
 	}
@@ -375,11 +447,8 @@ func TestRunCalibrate_StabilityRunsDoNotPersistJudgeCache(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "artifacts.jsonl")
 	labels := filepath.Join(dir, "labels.jsonl")
-	a := Artifact{
-		TraceID: "t", CandidateModel: "ollama/c",
-		ActualFinalAnswer: "x",
-		ActualTranscript:  []Turn{{Role: "user", Content: "ask"}, {Role: "assistant", Content: "x"}},
-	}
+	a := testCalibrationArtifact("t", "x")
+	a.ActualTranscript = []Turn{{Role: "user", Content: "ask"}, {Role: "assistant", Content: "x"}}
 	a.ArtifactHash = artifactHash(a)
 	if err := writeJSONL(arts, []any{a}); err != nil {
 		t.Fatal(err)
