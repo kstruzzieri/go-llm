@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"time"
 )
 
@@ -105,9 +106,10 @@ type RoutingFeedback struct {
 	store RoutingFeedbackStore
 }
 
-// NewRoutingFeedback wraps a store; the name avoids the too-vague
-// provider.New(...) that conflicts with other constructible types in this
-// package.
+// NewRoutingFeedback wraps a store; methods return ErrNilRoutingFeedbackStore
+// if store is nil so wiring mistakes fail without panicking request paths.
+// The name avoids the too-vague provider.New(...) that conflicts with other
+// constructible types in this package.
 func NewRoutingFeedback(store RoutingFeedbackStore) *RoutingFeedback {
 	return &RoutingFeedback{store: store}
 }
@@ -118,14 +120,22 @@ func NewRoutingFeedback(store RoutingFeedbackStore) *RoutingFeedback {
 // expected to wrap this call with fail-open behavior so a store failure
 // never blocks routing decisions.
 func (rf *RoutingFeedback) Score(ctx context.Context, key FeedbackKey) (Aggregate, error) {
-	return rf.store.Get(ctx, key)
+	store, err := rf.requireStore()
+	if err != nil {
+		return Aggregate{}, err
+	}
+	return store.Get(ctx, key)
 }
 
 // Record persists a single signal via the underlying store. Validation
 // happens inside the store implementation, so error sentinels match
 // (ErrInvalidFeedbackKey, ErrUnknownSignalKind, ...).
 func (rf *RoutingFeedback) Record(ctx context.Context, key FeedbackKey, sig FeedbackSignal) error {
-	return rf.store.Record(ctx, key, sig)
+	store, err := rf.requireStore()
+	if err != nil {
+		return err
+	}
+	return store.Record(ctx, key, sig)
 }
 
 // RecordOutcome decomposes out.Attempts into typed per-attempt signals and
@@ -153,6 +163,10 @@ func (rf *RoutingFeedback) Record(ctx context.Context, key FeedbackKey, sig Feed
 // If out.Attempts is empty or nil, RecordOutcome is a no-op and returns
 // nil — the seam's pre-PR2 zero-value-safe property.
 func (rf *RoutingFeedback) RecordOutcome(ctx context.Context, useCase string, out RouteOutcome) error {
+	store, err := rf.requireStore()
+	if err != nil {
+		return err
+	}
 	if len(out.Attempts) == 0 {
 		return nil
 	}
@@ -215,13 +229,37 @@ func (rf *RoutingFeedback) RecordOutcome(ctx context.Context, useCase string, ou
 		// All attempts were AttemptStatusUnknown.
 		return nil
 	}
-	return rf.store.RecordBatch(ctx, items)
+	return store.RecordBatch(ctx, items)
+}
+
+func (rf *RoutingFeedback) requireStore() (RoutingFeedbackStore, error) {
+	if rf == nil || isNilRoutingFeedbackStore(rf.store) {
+		return nil, ErrNilRoutingFeedbackStore
+	}
+	return rf.store, nil
+}
+
+func isNilRoutingFeedbackStore(store RoutingFeedbackStore) bool {
+	if store == nil {
+		return true
+	}
+	v := reflect.ValueOf(store)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // ErrInvalidFeedbackKey is returned when a FeedbackKey has an empty
 // Provider, Model, or UseCase field, or when RoutingFeedback.RecordOutcome
 // is called with an empty useCase argument.
 var ErrInvalidFeedbackKey = errors.New("provider: invalid feedback key")
+
+// ErrNilRoutingFeedbackStore is returned when RoutingFeedback is constructed
+// without a usable store or a method is called on a nil RoutingFeedback.
+var ErrNilRoutingFeedbackStore = errors.New("provider: nil routing feedback store")
 
 // ErrUnknownSignalKind is returned when a FeedbackSignal carries a Kind
 // that is not one of the declared RoutingSignalKind constants.

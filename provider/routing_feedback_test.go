@@ -693,6 +693,35 @@ func TestRoutingFeedbackRecordPropagatesValidationErrors(t *testing.T) {
 	}
 }
 
+func TestRoutingFeedbackRejectsNilStore(t *testing.T) {
+	rf := NewRoutingFeedback(nil)
+	if _, err := rf.Score(context.Background(), validKey()); !errors.Is(err, ErrNilRoutingFeedbackStore) {
+		t.Fatalf("Score err = %v, want ErrNilRoutingFeedbackStore", err)
+	}
+	if err := rf.Record(context.Background(), validKey(),
+		FeedbackSignal{Kind: RoutingSignalSuccess}); !errors.Is(err, ErrNilRoutingFeedbackStore) {
+		t.Fatalf("Record err = %v, want ErrNilRoutingFeedbackStore", err)
+	}
+	if err := rf.RecordOutcome(context.Background(), "chat", RouteOutcome{}); !errors.Is(err, ErrNilRoutingFeedbackStore) {
+		t.Fatalf("RecordOutcome err = %v, want ErrNilRoutingFeedbackStore", err)
+	}
+}
+
+func TestRoutingFeedbackRejectsTypedNilStore(t *testing.T) {
+	var store *MemoryStore
+	rf := NewRoutingFeedback(store)
+	if _, err := rf.Score(context.Background(), validKey()); !errors.Is(err, ErrNilRoutingFeedbackStore) {
+		t.Fatalf("Score err = %v, want ErrNilRoutingFeedbackStore", err)
+	}
+}
+
+func TestRoutingFeedbackRejectsNilReceiver(t *testing.T) {
+	var rf *RoutingFeedback
+	if _, err := rf.Score(context.Background(), validKey()); !errors.Is(err, ErrNilRoutingFeedbackStore) {
+		t.Fatalf("Score err = %v, want ErrNilRoutingFeedbackStore", err)
+	}
+}
+
 func mkAttempt(provider, model string, status AttemptStatus, latencyMs int64, errClass string) RouteAttempt {
 	return RouteAttempt{
 		Key:        ModelKey{Provider: provider, Model: model},
