@@ -112,6 +112,22 @@ func NewRoutingFeedback(store RoutingFeedbackStore) *RoutingFeedback {
 	return &RoutingFeedback{store: store}
 }
 
+// Score returns the aggregate for key. If the underlying store has no
+// signals for key, returns the store's configured neutral aggregate.
+// Store read errors are returned to the caller; the PR3 scoring path is
+// expected to wrap this call with fail-open behavior so a store failure
+// never blocks routing decisions.
+func (rf *RoutingFeedback) Score(ctx context.Context, key FeedbackKey) (Aggregate, error) {
+	return rf.store.Get(ctx, key)
+}
+
+// Record persists a single signal via the underlying store. Validation
+// happens inside the store implementation, so error sentinels match
+// (ErrInvalidFeedbackKey, ErrUnknownSignalKind, ...).
+func (rf *RoutingFeedback) Record(ctx context.Context, key FeedbackKey, sig FeedbackSignal) error {
+	return rf.store.Record(ctx, key, sig)
+}
+
 // ErrInvalidFeedbackKey is returned when a FeedbackKey has an empty
 // Provider, Model, or UseCase field, or when RoutingFeedback.RecordOutcome
 // is called with an empty useCase argument.

@@ -620,3 +620,34 @@ func TestRecordBatchTinyCapKeepsAtomicity(t *testing.T) {
 		t.Fatalf("SampleCount = %d, want 1 (tiny cap retains newest only)", agg.SampleCount)
 	}
 }
+
+func TestRoutingFeedbackScoreDelegates(t *testing.T) {
+	store := mustStore(t, MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+
+	agg, err := rf.Score(context.Background(), validKey())
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if agg.Score != DefaultNeutralScore {
+		t.Fatalf("Score = %v, want %v", agg.Score, DefaultNeutralScore)
+	}
+
+	if err := rf.Record(context.Background(), validKey(),
+		FeedbackSignal{Kind: RoutingSignalSuccess}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	agg, _ = rf.Score(context.Background(), validKey())
+	if agg.Score != 0.75 {
+		t.Fatalf("after Record Score = %v, want 0.75", agg.Score)
+	}
+}
+
+func TestRoutingFeedbackRecordPropagatesValidationErrors(t *testing.T) {
+	rf := NewRoutingFeedback(mustStore(t, MemoryStoreConfig{}))
+	err := rf.Record(context.Background(), FeedbackKey{},
+		FeedbackSignal{Kind: RoutingSignalSuccess})
+	if !errors.Is(err, ErrInvalidFeedbackKey) {
+		t.Fatalf("err = %v, want ErrInvalidFeedbackKey", err)
+	}
+}
