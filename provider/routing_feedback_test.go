@@ -566,9 +566,43 @@ func TestRecordBatchSharesTimestampDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	after := time.Now()
-	agg, _ := s.Get(context.Background(), validKey())
-	if agg.UpdatedAt.Before(before) || agg.UpdatedAt.After(after.Add(time.Second)) {
-		t.Fatalf("UpdatedAt %v outside [%v, %v]", agg.UpdatedAt, before, after)
+
+	// The "shared" property is the one that matters: both signals in the
+	// batch must carry the same `At`. UpdatedAt alone could pass even if
+	// RecordBatch internally re-sampled time.Now() between items.
+	s.mu.Lock()
+	sigs := s.signals[validKey()]
+	s.mu.Unlock()
+	if len(sigs) != 2 {
+		t.Fatalf("stored signals = %d, want 2", len(sigs))
+	}
+	if !sigs[0].At.Equal(sigs[1].At) {
+		t.Fatalf("signals[0].At = %v, signals[1].At = %v; want equal (shared now)", sigs[0].At, sigs[1].At)
+	}
+	if sigs[0].At.Before(before) || sigs[0].At.After(after) {
+		t.Fatalf("At %v outside [%v, %v]", sigs[0].At, before, after)
+	}
+}
+
+func TestRecordBatchDistinctKeys(t *testing.T) {
+	// Exercises the per-key map-insertion path that single-key batches do
+	// not — RecordOutcome (Task 9) produces batches keyed by attempt.Key,
+	// so distinct keys are the primary use case.
+	s := mustStore(t, MemoryStoreConfig{})
+	keyA := FeedbackKey{Provider: "a", Model: "m", UseCase: "c"}
+	keyB := FeedbackKey{Provider: "b", Model: "m", UseCase: "c"}
+	items := []FeedbackItem{
+		{Key: keyA, Signal: FeedbackSignal{Kind: RoutingSignalSuccess}},
+		{Key: keyB, Signal: FeedbackSignal{Kind: RoutingSignalFailure, ErrorClass: "timeout"}},
+	}
+	if err := s.RecordBatch(context.Background(), items); err != nil {
+		t.Fatalf("RecordBatch: %v", err)
+	}
+	for _, k := range []FeedbackKey{keyA, keyB} {
+		agg, _ := s.Get(context.Background(), k)
+		if agg.SampleCount != 1 {
+			t.Fatalf("key %+v SampleCount = %d, want 1", k, agg.SampleCount)
+		}
 	}
 }
 
