@@ -323,9 +323,9 @@ func materializeJudgement(base Score, judgeModel, rawContent string) (Score, jud
 // from the current actual transcript so tool-loop regressions can never
 // be masked by a stale cache entry.
 //
-// Cache errors (Get and Put) are non-fatal: they are logged to stderr and
-// bypassed. The judge call still proceeds on a Get error; the result is
-// still returned on a Put error.
+// Cache errors (Get and Put) and malformed cache-hit payloads are non-fatal:
+// they are logged to stderr and bypassed. The judge call still proceeds on a
+// Get error or malformed hit; the result is still returned on a Put error.
 func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
 	req, base, err := s.buildJudgeCall(trace, actual)
 	if err != nil {
@@ -349,9 +349,10 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 		} else if ok {
 			matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
 			if hitErr != nil {
-				return Score{}, hitErr
+				fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
+			} else {
+				return matHit, nil
 			}
-			return matHit, nil
 		}
 	}
 	content, err := s.callJudge(ctx, req)

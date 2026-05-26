@@ -718,6 +718,60 @@ func TestLLMJudgeScorer_BypassCache_AlwaysCallsJudgeAndDoesNotPersist(t *testing
 	}
 }
 
+func TestLLMJudgeScorer_MalformedCacheHitFallsBackToJudge(t *testing.T) {
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
+		Content: `{"answer_quality":0.9,"justification":"fresh"}`,
+	}}}
+	scorer := &LLMJudgeScorer{
+		Client:     judge,
+		JudgeModel: "ollama/gemma4:31b",
+		Cache:      c,
+	}
+	trace := Trace{ID: "bad-cache", System: "s", Turns: []Turn{{Role: "user", Content: "h"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/cand", TraceID: "bad-cache", Transcript: []Turn{{Role: "assistant", Content: "a"}}}
+	req, _, err := scorer.buildJudgeCall(trace, actual)
+	if err != nil {
+		t.Fatalf("buildJudgeCall: %v", err)
+	}
+	cacheKey := canonicalCacheKey(judgeCacheRequest{
+		Version:      judgeCacheKeyVersion,
+		JudgeModel:   normalizeModelSelector(scorer.JudgeModel),
+		SystemPrompt: judgeSystemPrompt,
+		UserPrompt:   judgeUserPromptOf(req),
+		Format:       req.Format,
+		Think:        req.Think,
+		Temperature:  judgeTemperature,
+		NumPredict:   judgeTokenBudget,
+	})
+	now := time.Date(2026, 5, 26, 0, 0, 0, 0, time.UTC)
+	if err := c.Put(context.Background(), judgeCacheEntry{
+		CacheKey:        cacheKey,
+		JudgeModel:      scorer.JudgeModel,
+		TraceID:         trace.ID,
+		CandidateModel:  actual.Model,
+		PromptHash:      "bad",
+		RequestJSON:     "{}",
+		ResponseContent: "not-json",
+		AnswerQuality:   0,
+		Justification:   "bad",
+		CreatedAt:       now,
+		LastUsedAt:      now,
+	}); err != nil {
+		t.Fatalf("seed bad cache row: %v", err)
+	}
+	score, err := scorer.Score(context.Background(), trace, actual)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if judge.called != 1 {
+		t.Fatalf("judge called %d times; want 1 fallback call", judge.called)
+	}
+	if score.AnswerQuality != 0.9 {
+		t.Fatalf("AnswerQuality = %v; want fresh judge score 0.9", score.AnswerQuality)
+	}
+}
+
 // TestLLMJudgeScorer_CacheHit_FreshToolSequenceMatch is the load-bearing
 // invariant of the judge-cache architecture: on a cache hit the judge MUST
 // NOT be re-invoked, but the returned Score's ToolSequenceMatch MUST come
