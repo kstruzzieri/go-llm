@@ -8,6 +8,8 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
+	"math"
 	"time"
 )
 
@@ -136,3 +138,82 @@ var ErrMetaTooLarge = errors.New("provider: signal meta too large")
 // when a RouteAttempt.Status (introduced in Task 2 / provider/types.go)
 // holds a value outside the declared AttemptStatus constants.
 var ErrUnknownAttemptStatus = errors.New("provider: unknown attempt status")
+
+// validateKey enforces non-empty key triple semantics.
+func validateKey(k FeedbackKey) error {
+	if k.Provider == "" || k.Model == "" || k.UseCase == "" {
+		return fmt.Errorf("%w: %+v", ErrInvalidFeedbackKey, k)
+	}
+	return nil
+}
+
+// validateSignal enforces shape/payload invariants:
+//   - Kind is one of the known constants.
+//   - Strength, if non-nil, is finite (no NaN/Inf).
+//   - LatencyMs is positive iff Kind is Latency.
+//   - ErrorClass is set iff Kind is Failure.
+//   - Meta does not exceed maxKeys keys or maxValBytes bytes per value.
+func validateSignal(sig FeedbackSignal, maxKeys, maxValBytes int) error {
+	switch sig.Kind {
+	case RoutingSignalSuccess, RoutingSignalFailure, RoutingSignalLatency:
+		// ok
+	default:
+		return fmt.Errorf("%w: %q", ErrUnknownSignalKind, sig.Kind)
+	}
+	if sig.Strength != nil {
+		v := *sig.Strength
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return fmt.Errorf("%w: %v", ErrInvalidSignalStrength, v)
+		}
+	}
+	switch sig.Kind {
+	case RoutingSignalLatency:
+		if sig.LatencyMs <= 0 {
+			return fmt.Errorf("%w: latency signal requires LatencyMs > 0", ErrInvalidSignalPayload)
+		}
+	default:
+		if sig.LatencyMs != 0 {
+			return fmt.Errorf("%w: non-latency signal must not carry LatencyMs", ErrInvalidSignalPayload)
+		}
+	}
+	switch sig.Kind {
+	case RoutingSignalFailure:
+		if sig.ErrorClass == "" {
+			return fmt.Errorf("%w: failure signal requires ErrorClass", ErrInvalidSignalPayload)
+		}
+	default:
+		if sig.ErrorClass != "" {
+			return fmt.Errorf("%w: non-failure signal must not carry ErrorClass", ErrInvalidSignalPayload)
+		}
+	}
+	if maxKeys > 0 && len(sig.Meta) > maxKeys {
+		return fmt.Errorf("%w: %d meta keys exceeds limit %d", ErrMetaTooLarge, len(sig.Meta), maxKeys)
+	}
+	if maxValBytes > 0 {
+		for k, v := range sig.Meta {
+			if len(v) > maxValBytes {
+				return fmt.Errorf("%w: meta[%q] %d bytes exceeds limit %d",
+					ErrMetaTooLarge, k, len(v), maxValBytes)
+			}
+		}
+	}
+	return nil
+}
+
+// cloneSignal returns a deep copy with store-owned Strength and Meta
+// memory so callers cannot retroactively mutate stored signals.
+func cloneSignal(sig FeedbackSignal) FeedbackSignal {
+	out := sig
+	if sig.Strength != nil {
+		v := *sig.Strength
+		out.Strength = &v
+	}
+	if sig.Meta != nil {
+		m := make(map[string]string, len(sig.Meta))
+		for k, v := range sig.Meta {
+			m[k] = v
+		}
+		out.Meta = m
+	}
+	return out
+}

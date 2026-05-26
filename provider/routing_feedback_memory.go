@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // Defaults applied by NewMemoryStore when MemoryStoreConfig fields are
@@ -87,18 +88,53 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 	}, nil
 }
 
-// Get returns the aggregate for key. Empty keys yield a neutral aggregate
-// (Score == cfg.NeutralScore, all other fields zero). Full aggregation logic
-// is implemented in a subsequent task; this skeleton returns neutral.
-func (s *MemoryStore) Get(_ context.Context, _ FeedbackKey) (Aggregate, error) {
+// Get returns the aggregate for key. Until Task 6 lands the full formula,
+// this returns SampleCount = len(signals[key]), UpdatedAt = latest At, and
+// Score = configured neutral. The Get-side formula upgrade lands in Task 6.
+func (s *MemoryStore) Get(_ context.Context, key FeedbackKey) (Aggregate, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	return Aggregate{Score: s.cfg.neutralScore}, nil
+	sigs := s.signals[key]
+	count := len(sigs)
+	var latestAt time.Time
+	for _, sig := range sigs {
+		if sig.At.After(latestAt) {
+			latestAt = sig.At
+		}
+	}
+	s.mu.Unlock()
+	if count == 0 {
+		return Aggregate{Score: s.cfg.neutralScore}, nil
+	}
+	return Aggregate{
+		Score:       s.cfg.neutralScore,
+		SampleCount: count,
+		UpdatedAt:   latestAt,
+	}, nil
 }
 
-// Record / RecordBatch are implemented in subsequent tasks.
-func (s *MemoryStore) Record(_ context.Context, _ FeedbackKey, _ FeedbackSignal) error {
-	return fmt.Errorf("provider: MemoryStore.Record not yet implemented")
+// Record persists a single signal. Validates the key and signal, defaults
+// At to time.Now when zero, deep-copies caller-owned Strength and Meta,
+// appends under lock, and applies FIFO retention when the per-key bound
+// is finite.
+func (s *MemoryStore) Record(_ context.Context, key FeedbackKey, sig FeedbackSignal) error {
+	if err := validateKey(key); err != nil {
+		return err
+	}
+	if err := validateSignal(sig, s.cfg.maxMetaKeys, s.cfg.maxMetaValueBytes); err != nil {
+		return err
+	}
+	stored := cloneSignal(sig)
+	if stored.At.IsZero() {
+		stored.At = time.Now()
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signals[key] = append(s.signals[key], stored)
+	if s.cfg.maxRetainedSamples > 0 && len(s.signals[key]) > s.cfg.maxRetainedSamples {
+		drop := len(s.signals[key]) - s.cfg.maxRetainedSamples
+		s.signals[key] = s.signals[key][drop:]
+	}
+	return nil
 }
 
 // RecordBatch is implemented in a subsequent task.
