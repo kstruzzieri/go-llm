@@ -220,6 +220,44 @@ func TestRunCalibrate_AgreementMatchesByHand(t *testing.T) {
 	}
 }
 
+func TestRunCalibrate_InsufficientLabelsNeverPasses(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+
+	// Seed only 3 matched artifacts/labels, all perfect agreement.
+	var artifacts, labelRecs []any
+	for i := 0; i < 3; i++ {
+		traceID := fmt.Sprintf("t%d", i)
+		a := Artifact{TraceID: traceID, CandidateModel: "ollama/c", ActualFinalAnswer: traceID}
+		a.ArtifactHash = artifactHash(a)
+		artifacts = append(artifacts, a)
+		labelRecs = append(labelRecs, Label{
+			TraceID: traceID, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+			ExpectedAnswerQuality: 1.0, Labeler: "manual",
+		})
+	}
+	if err := writeJSONL(arts, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, labelRecs); err != nil {
+		t.Fatal(err)
+	}
+
+	fs := &fakeScorer{judgeByTrace: map[string]float64{"t0": 1, "t1": 1, "t2": 1}}
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts, Scorer: fs,
+		JudgeModel: "ollama/judge",
+		// Use default MinLabels=50; we only have 3.
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if res.Verdict != "INSUFFICIENT_LABELS" {
+		t.Fatalf("Verdict=%q; want INSUFFICIENT_LABELS even at 100%% agreement on 3 matched", res.Verdict)
+	}
+}
+
 // writeJSONL is a tiny test helper local to calibration_test.go.
 func writeJSONL(path string, records []any) error {
 	f, err := os.Create(path)
