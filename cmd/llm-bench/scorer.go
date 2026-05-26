@@ -205,8 +205,10 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 }
 
 // callJudge issues the judge ChatRequest and returns the raw response
-// content. The only I/O step; honors JudgeTimeout. Errors are returned
-// unwrapped so callers can attribute model identity in their wrap.
+// content. The only I/O step; honors JudgeTimeout. Errors are wrapped
+// with the judge model identity so callers (Score and the future cache
+// wrapper) MUST NOT re-attribute model identity in their own wraps —
+// doing so produces double-prefixed messages.
 func (s *LLMJudgeScorer) callJudge(ctx context.Context, req ollama.ChatRequest) (string, error) {
 	judgeCtx := ctx
 	var cancel context.CancelFunc
@@ -228,6 +230,8 @@ func (s *LLMJudgeScorer) callJudge(ctx context.Context, req ollama.ChatRequest) 
 // into baseScore. Pure; no I/O. Used identically by cache-hit and
 // cache-miss paths so AnswerQuality/Notes derive from the judge text but
 // ToolSequenceMatch comes from baseScore (recomputed fresh each call).
+// Parse errors are wrapped with the judge model identity; callers MUST
+// NOT re-attribute.
 func materializeJudgement(base Score, judgeModel, rawContent string) (Score, error) {
 	judgement, err := parseJudgeResponse(rawContent)
 	if err != nil {
