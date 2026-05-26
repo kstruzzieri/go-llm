@@ -175,6 +175,27 @@ func TestLoadLabelsAndArtifacts_MatchAndStale(t *testing.T) {
 	}
 }
 
+func TestLoadLabelsAndArtifacts_DuplicateMatchedLabelRejected(t *testing.T) {
+	dir := t.TempDir()
+	labels := filepath.Join(dir, "labels.jsonl")
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	art := testCalibrationArtifact("t1", "x")
+	if err := writeJSONL(arts, []any{art}); err != nil {
+		t.Fatalf("seed arts: %v", err)
+	}
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: art.ArtifactHash, ExpectedAnswerQuality: 1.0, Labeler: "manual"},
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: art.ArtifactHash, ExpectedAnswerQuality: 0.5, Labeler: "manual"},
+	}); err != nil {
+		t.Fatalf("seed labels: %v", err)
+	}
+
+	_, _, err := loadLabelsMatchedAgainst(labels, arts)
+	if err == nil || !strings.Contains(err.Error(), "duplicate label for artifact_hash") {
+		t.Fatalf("loadLabelsMatchedAgainst err = %v; want duplicate label error", err)
+	}
+}
+
 // fakeScorer returns canned answer-quality values per (trace, candidate).
 type fakeScorer struct {
 	judgeByTrace map[string]float64
@@ -420,7 +441,7 @@ func TestRunCalibrate_StabilityRunsReportSpread(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	fs := &fakeStabilityScorer{sequence: []float64{0.8, 1.0, 0.6, 0.7}} // primary=0.8, stability spread = 0.4
+	fs := &fakeStabilityScorer{sequence: []float64{0.8, 1.0, 0.6}} // primary=0.8, spread across 3 runs = 0.4
 	res, err := runCalibrate(context.Background(), calibrateOptions{
 		LabelsPath: labels, ArtifactsPath: arts, Scorer: fs,
 		JudgeModel: "ollama/judge", MinLabels: 1, StabilityRuns: 3,
@@ -434,10 +455,10 @@ func TestRunCalibrate_StabilityRunsReportSpread(t *testing.T) {
 	if res.PerLabel[0].StabilitySpread != 0.4 {
 		t.Fatalf("StabilitySpread=%v; want 0.4", res.PerLabel[0].StabilitySpread)
 	}
-	if fs.callCount != 4 {
-		t.Fatalf("Score calls=%d; want 4 (1 primary + 3 stability)", fs.callCount)
+	if fs.callCount != 3 {
+		t.Fatalf("Score calls=%d; want 3 total stability samples", fs.callCount)
 	}
-	// Stability runs do NOT affect agreement (primary call is counted).
+	// Stability spread does NOT affect agreement (primary sample is counted).
 	if res.AgreeCount != 1 {
 		t.Fatalf("AgreeCount=%d; want 1 (stability runs are diagnostic only)", res.AgreeCount)
 	}
@@ -471,16 +492,16 @@ func TestRunCalibrate_StabilityRunsDoNotPersistJudgeCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runCalibrate: %v", err)
 	}
-	if judge.called != 4 {
-		t.Fatalf("judge called %d times; want 4 (1 primary + 3 bypassed stability runs)", judge.called)
+	if judge.called != 3 {
+		t.Fatalf("judge called %d times; want 3 total bypassed stability samples", judge.called)
 	}
-	// Primary run wrote 1 row; stability runs must NOT write rows.
+	// Stability mode bypasses cache for all samples and must NOT write rows.
 	var count int
 	if err := c.db.QueryRow(`SELECT COUNT(*) FROM judge_cache`).Scan(&count); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 {
-		t.Fatalf("cache row count = %d; want 1 (stability runs must bypass write)", count)
+	if count != 0 {
+		t.Fatalf("cache row count = %d; want 0 (stability runs must bypass write)", count)
 	}
 }
 

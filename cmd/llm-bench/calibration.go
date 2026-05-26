@@ -30,7 +30,8 @@ type Artifact struct {
 
 // Label is the human-supplied truth for one frozen Artifact. ArtifactHash
 // links them: a Label with a hash that doesn't match any current Artifact
-// is "stale" and excluded from agreement.
+// is "stale" and excluded from agreement. Duplicate matched ArtifactHash
+// values are rejected so each artifact contributes at most once.
 type Label struct {
 	TraceID               string    `json:"trace_id"`
 	CandidateModel        string    `json:"candidate_model"`
@@ -186,12 +187,17 @@ func loadLabelsMatchedAgainst(labelsPath, artifactsPath string) ([]matchedLabel,
 	}
 	var matched []matchedLabel
 	var stale []Label
+	seenMatched := make(map[string]struct{}, len(labels))
 	for _, l := range labels {
 		a, ok := byHash[l.ArtifactHash]
 		if !ok {
 			stale = append(stale, l)
 			continue
 		}
+		if _, ok := seenMatched[l.ArtifactHash]; ok {
+			return nil, nil, fmt.Errorf("duplicate label for artifact_hash %q", l.ArtifactHash)
+		}
+		seenMatched[l.ArtifactHash] = struct{}{}
 		matched = append(matched, matchedLabel{Label: l, Artifact: a})
 	}
 	return matched, stale, nil
@@ -243,7 +249,7 @@ const (
 //
 // MinLabels defaults to calibrationDefaultMinLabels (50) when zero so a
 // sufficient sample backs the agreement verdict. StabilityRuns, when >1,
-// runs the judge N times per artifact and reports the max-min agreement
+// runs the judge exactly N times per artifact and reports the max-min agreement
 // spread as a diagnostic; it does NOT gate the PASS/FAIL verdict. Clock is
 // an optional time source for deterministic report filenames.
 type calibrateOptions struct {
@@ -253,7 +259,7 @@ type calibrateOptions struct {
 	JudgeModel    string
 	ReportDir     string
 	MinLabels     int // defaults to calibrationDefaultMinLabels when zero
-	StabilityRuns int // when >1, runs the judge N times per artifact and reports max-min spread as a diagnostic (does NOT gate the PASS/FAIL verdict); uses bypass-cache (Task 23)
+	StabilityRuns int // when >1, runs the judge exactly N times per artifact and reports max-min spread as a diagnostic (does NOT gate the PASS/FAIL verdict); uses bypass-cache (Task 23)
 	Clock         func() time.Time
 }
 
@@ -327,7 +333,8 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 			TraceID:    m.Artifact.TraceID,
 			Transcript: m.Artifact.ActualTranscript,
 		}
-		score, scoreErr := opts.Scorer.Score(ctx, trace, actual)
+		scorer := calibrationScorer(opts.Scorer, opts.StabilityRuns)
+		score, scoreErr := scorer.Score(ctx, trace, actual)
 		if scoreErr != nil {
 			return CalibrationResult{}, fmt.Errorf("calibrate: scorer for %s/%s: %w",
 				m.Artifact.TraceID, m.Artifact.CandidateModel, scoreErr)
@@ -345,15 +352,9 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 			Agree:          delta <= calibrationAgreementDelta,
 		}
 		if opts.StabilityRuns > 1 {
-			scores := make([]float64, 0, opts.StabilityRuns)
-			for i := 0; i < opts.StabilityRuns; i++ {
-				bypassScorer := opts.Scorer
-				if cs, ok := opts.Scorer.(*LLMJudgeScorer); ok {
-					clone := *cs
-					clone.BypassCache = true
-					bypassScorer = &clone
-				}
-				extra, sErr := bypassScorer.Score(ctx, trace, actual)
+			scores := []float64{score.AnswerQuality}
+			for i := 1; i < opts.StabilityRuns; i++ {
+				extra, sErr := scorer.Score(ctx, trace, actual)
 				if sErr != nil {
 					return CalibrationResult{}, fmt.Errorf("calibrate: stability run %d for %s/%s: %w",
 						i+1, m.Artifact.TraceID, m.Artifact.CandidateModel, sErr)
@@ -386,6 +387,18 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		res.ReportPath = path
 	}
 	return res, nil
+}
+
+func calibrationScorer(s Scorer, stabilityRuns int) Scorer {
+	if stabilityRuns <= 1 {
+		return s
+	}
+	if cs, ok := s.(*LLMJudgeScorer); ok {
+		clone := *cs
+		clone.BypassCache = true
+		return &clone
+	}
+	return s
 }
 
 func calibrationTraceFromArtifact(a Artifact) (Trace, error) {

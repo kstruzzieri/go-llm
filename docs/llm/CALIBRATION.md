@@ -64,7 +64,8 @@ adds `expected_answer_quality` ∈ {0.0, 0.5, 1.0}:
 
 The `artifact_hash` MUST match the corresponding artifact's hash — that's
 how the calibration loop knows the label is still valid for the frozen
-output.
+output. Each current artifact hash may appear only once in `labels.jsonl`;
+duplicate matched labels are rejected so one artifact cannot be double-counted.
 
 ### How to label
 
@@ -105,9 +106,10 @@ Mitigation: pin candidates to non-floating tags or digests.
 llm-bench -calibrate ... -judge-stability-runs 3
 ```
 
-Runs the judge `M=3` times per artifact (cache bypassed, results NOT
-persisted) and reports `max - min` spread per artifact. Does not affect
-the PASS/FAIL verdict — it's a separate "is the judge stable?" check.
+Runs the judge exactly `M=3` times per artifact (cache bypassed, results
+NOT persisted) and reports `max - min` spread across those samples. The
+first sample is also the score used for agreement. Does not affect the
+PASS/FAIL verdict — it's a separate "is the judge stable?" check.
 
 ## Floating-tag caution
 
