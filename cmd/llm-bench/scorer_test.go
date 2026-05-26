@@ -137,6 +137,52 @@ func TestToolSequenceScoreDeduplicatesActualToolNames(t *testing.T) {
 	}
 }
 
+// TestLLMJudgeScorer_HappyPath_PreRefactorBaseline pins the end-to-end happy
+// path behavior of LLMJudgeScorer.Score before the upcoming refactor splits
+// it into helpers. Keep this test green through the refactor as a regression
+// anchor.
+func TestLLMJudgeScorer_HappyPath_PreRefactorBaseline(t *testing.T) {
+	trace := Trace{
+		ID:     "baseline-trace",
+		System: "you are an assistant",
+		Turns: []Turn{
+			{Role: "user", Content: "what is 2+2?"},
+		},
+		Golden: Golden{
+			ToolCalls:           nil,
+			FinalAnswerCriteria: "exactly 4",
+		},
+	}
+	actual := Result{
+		Model:   "ollama/qwen3-coder-next:latest",
+		TraceID: "baseline-trace",
+		Transcript: []Turn{
+			{Role: "assistant", Content: "the answer is 4"},
+		},
+	}
+	judge := &fakeJudgeClient{
+		resp: &ollama.ChatResponse{
+			Message: ollama.ChatMessage{
+				Content: `{"answer_quality":1.0,"justification":"correct"}`,
+			},
+		},
+	}
+	scorer := &LLMJudgeScorer{
+		Client:     judge,
+		JudgeModel: "ollama/gemma4:31b",
+	}
+	score, err := scorer.Score(context.Background(), trace, actual)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if score.AnswerQuality != 1.0 {
+		t.Fatalf("AnswerQuality = %v; want 1.0", score.AnswerQuality)
+	}
+	if !strings.Contains(score.Notes, "correct") {
+		t.Fatalf("Notes missing justification: %q", score.Notes)
+	}
+}
+
 func TestLLMJudgeScorerScoresFromJSON(t *testing.T) {
 	client := &fakeJudgeClient{
 		resp: &ollama.ChatResponse{
