@@ -179,7 +179,39 @@ func (s *MemoryStore) Record(_ context.Context, key FeedbackKey, sig FeedbackSig
 	return nil
 }
 
-// RecordBatch is implemented in a subsequent task.
-func (s *MemoryStore) RecordBatch(_ context.Context, _ []FeedbackItem) error {
-	return fmt.Errorf("provider: MemoryStore.RecordBatch not yet implemented")
+// RecordBatch persists multiple signals as a single atomic state transition.
+// All items are validated up front; if any item fails validation, no item
+// is persisted. Defaulting of At (when zero) uses a single time.Now() value
+// sampled at the start of the call so all items in the batch share a
+// timestamp. Per-key FIFO retention is applied inside the same lock so
+// readers never observe a partially-applied batch.
+func (s *MemoryStore) RecordBatch(_ context.Context, items []FeedbackItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	cloned := make([]FeedbackItem, len(items))
+	for i, item := range items {
+		if err := validateKey(item.Key); err != nil {
+			return err
+		}
+		if err := validateSignal(item.Signal, s.cfg.maxMetaKeys, s.cfg.maxMetaValueBytes); err != nil {
+			return err
+		}
+		cloned[i] = FeedbackItem{Key: item.Key, Signal: cloneSignal(item.Signal)}
+	}
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range cloned {
+		if cloned[i].Signal.At.IsZero() {
+			cloned[i].Signal.At = now
+		}
+		k := cloned[i].Key
+		s.signals[k] = append(s.signals[k], cloned[i].Signal)
+		if s.cfg.maxRetainedSamples > 0 && len(s.signals[k]) > s.cfg.maxRetainedSamples {
+			drop := len(s.signals[k]) - s.cfg.maxRetainedSamples
+			s.signals[k] = s.signals[k][drop:]
+		}
+	}
+	return nil
 }

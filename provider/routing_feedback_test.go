@@ -514,3 +514,75 @@ func TestGetMixedSuccessAndFailure(t *testing.T) {
 		t.Fatalf("counts = (sample=%d, scored=%d), want (2,2)", agg.SampleCount, agg.ScoredCount)
 	}
 }
+
+func TestRecordBatchAppliesValidItems(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	items := []FeedbackItem{
+		{Key: validKey(), Signal: FeedbackSignal{Kind: RoutingSignalSuccess}},
+		{Key: validKey(), Signal: FeedbackSignal{Kind: RoutingSignalLatency, LatencyMs: 100}},
+	}
+	if err := s.RecordBatch(context.Background(), items); err != nil {
+		t.Fatalf("RecordBatch: %v", err)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.SampleCount != 2 || agg.ScoredCount != 1 {
+		t.Fatalf("counts = (sample=%d, scored=%d), want (2,1)", agg.SampleCount, agg.ScoredCount)
+	}
+}
+
+func TestRecordBatchRejectsAnyInvalidItemAtomically(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	items := []FeedbackItem{
+		{Key: validKey(), Signal: FeedbackSignal{Kind: RoutingSignalSuccess}},
+		{Key: FeedbackKey{}, Signal: FeedbackSignal{Kind: RoutingSignalSuccess}}, // invalid key
+	}
+	if err := s.RecordBatch(context.Background(), items); !errors.Is(err, ErrInvalidFeedbackKey) {
+		t.Fatalf("err = %v, want ErrInvalidFeedbackKey", err)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.SampleCount != 0 {
+		t.Fatalf("SampleCount = %d, want 0 (no item should have been persisted)", agg.SampleCount)
+	}
+}
+
+func TestRecordBatchEmptyIsNoOp(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	if err := s.RecordBatch(context.Background(), nil); err != nil {
+		t.Fatalf("nil items: %v", err)
+	}
+	if err := s.RecordBatch(context.Background(), []FeedbackItem{}); err != nil {
+		t.Fatalf("empty items: %v", err)
+	}
+}
+
+func TestRecordBatchSharesTimestampDefault(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{})
+	items := []FeedbackItem{
+		{Key: validKey(), Signal: FeedbackSignal{Kind: RoutingSignalSuccess}},
+		{Key: validKey(), Signal: FeedbackSignal{Kind: RoutingSignalLatency, LatencyMs: 100}},
+	}
+	before := time.Now()
+	if err := s.RecordBatch(context.Background(), items); err != nil {
+		t.Fatal(err)
+	}
+	after := time.Now()
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.UpdatedAt.Before(before) || agg.UpdatedAt.After(after.Add(time.Second)) {
+		t.Fatalf("UpdatedAt %v outside [%v, %v]", agg.UpdatedAt, before, after)
+	}
+}
+
+func TestRecordBatchTinyCapKeepsAtomicity(t *testing.T) {
+	s := mustStore(t, MemoryStoreConfig{MaxRetainedSamples: 1})
+	items := []FeedbackItem{
+		{Key: validKey(), Signal: FeedbackSignal{Kind: RoutingSignalSuccess}},
+		{Key: validKey(), Signal: FeedbackSignal{Kind: RoutingSignalLatency, LatencyMs: 100}},
+	}
+	if err := s.RecordBatch(context.Background(), items); err != nil {
+		t.Fatal(err)
+	}
+	agg, _ := s.Get(context.Background(), validKey())
+	if agg.SampleCount != 1 {
+		t.Fatalf("SampleCount = %d, want 1 (tiny cap retains newest only)", agg.SampleCount)
+	}
+}
