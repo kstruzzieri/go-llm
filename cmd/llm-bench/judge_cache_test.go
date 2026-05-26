@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -116,4 +118,34 @@ func TestSQLiteJudgeCache_MigrationIdempotent(t *testing.T) {
 		t.Fatalf("re-open: %v", err)
 	}
 	defer c2.Close()
+}
+
+func TestOpenJudgeCache_CorruptDBReturnsWrappedErrorNoAutoRepair(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "corrupt.db")
+	// Write garbage bytes to the file before opening.
+	if err := os.WriteFile(path, []byte("not a sqlite file"), 0o600); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	_, err := openJudgeCache(path)
+	if err == nil {
+		t.Fatalf("openJudgeCache(corrupt) returned nil error; want wrapped open or migrate error")
+	}
+	if !errors.Is(err, errJudgeCacheOpen) && !errors.Is(err, errJudgeCacheMigrate) {
+		t.Fatalf("openJudgeCache(corrupt) returned %v; want errJudgeCacheOpen or errJudgeCacheMigrate", err)
+	}
+	// The file must still be on disk (no auto-repair / auto-delete).
+	if _, statErr := os.Stat(path); os.IsNotExist(statErr) {
+		t.Fatalf("openJudgeCache deleted the corrupt file; expected no auto-repair")
+	}
+}
+
+func TestOpenJudgeCache_EmptyPathReturnsNilCache(t *testing.T) {
+	c, err := openJudgeCache("")
+	if err != nil {
+		t.Fatalf("openJudgeCache(\"\"): %v", err)
+	}
+	if c != nil {
+		t.Fatalf("openJudgeCache(\"\") returned non-nil cache; want nil (disabled)")
+	}
 }
