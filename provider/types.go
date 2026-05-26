@@ -425,9 +425,9 @@ type CompletionConfidence struct {
 type AttemptStatus int
 
 const (
-	AttemptStatusUnknown AttemptStatus = iota
-	AttemptStatusSucceeded
-	AttemptStatusFailed
+	AttemptStatusUnknown   AttemptStatus = iota // zero value: no info; skipped by feedback seam
+	AttemptStatusSucceeded                      // attempt completed without error
+	AttemptStatusFailed                         // attempt failed; see RouteAttempt.ErrorClass
 )
 
 // String returns the lowercase tag for this status. Out-of-range values

@@ -2,6 +2,7 @@ package provider
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -26,16 +27,17 @@ func TestDefaultStrength(t *testing.T) {
 
 func TestAttemptStatusString(t *testing.T) {
 	cases := []struct {
+		name string
 		s    AttemptStatus
 		want string
 	}{
-		{AttemptStatusUnknown, "unknown"},
-		{AttemptStatusSucceeded, "succeeded"},
-		{AttemptStatusFailed, "failed"},
-		{AttemptStatus(99), "unknown"},
+		{"unknown", AttemptStatusUnknown, "unknown"},
+		{"succeeded", AttemptStatusSucceeded, "succeeded"},
+		{"failed", AttemptStatusFailed, "failed"},
+		{"out_of_range", AttemptStatus(99), "unknown"},
 	}
 	for _, tc := range cases {
-		t.Run(tc.want, func(t *testing.T) {
+		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.s.String(); got != tc.want {
 				t.Fatalf("String() = %q, want %q", got, tc.want)
 			}
@@ -75,27 +77,14 @@ func TestRouteOutcomeJSONOmitsEmptyNewFields(t *testing.T) {
 		t.Fatalf("Marshal: %v", err)
 	}
 	s := string(b)
-	if got := s; got == "" {
+	if s == "" {
 		t.Fatalf("empty marshal")
 	}
 	// Forward-compatible expectation: zero-value Attempts/RouteID must be
 	// absent from the JSON output so existing consumers see no new keys.
 	for _, key := range []string{`"attempts"`, `"route_id"`} {
-		if contains(s, key) {
+		if strings.Contains(s, key) {
 			t.Errorf("RouteOutcome JSON %s unexpectedly contains %s", s, key)
 		}
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || indexOf(s, substr) >= 0)
-}
-
-func indexOf(s, substr string) int {
-	for i := 0; i+len(substr) <= len(s); i++ {
-		if s[i:i+len(substr)] == substr {
-			return i
-		}
-	}
-	return -1
 }
