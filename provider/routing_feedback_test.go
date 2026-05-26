@@ -104,7 +104,7 @@ func TestNewRouteIDProducesDistinct32CharHex(t *testing.T) {
 		t.Fatalf("two consecutive newRouteID() values collided: %q", id1)
 	}
 	for _, c := range id1 {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
 			t.Fatalf("newRouteID() returned non-hex char %q in %q", c, id1)
 		}
 	}
@@ -178,6 +178,24 @@ func TestNewMemoryStoreRejectsOutOfRangeNeutralScore(t *testing.T) {
 			_, err := NewMemoryStore(MemoryStoreConfig{NeutralScore: n})
 			if err == nil {
 				t.Fatalf("NewMemoryStore(NeutralScore=%v) returned nil error", n)
+			}
+		})
+	}
+}
+
+func TestNewMemoryStoreRejectsInvalidLimits(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  MemoryStoreConfig
+	}{
+		{"retained-less-than-negative-one", MemoryStoreConfig{MaxRetainedSamples: -2}},
+		{"negative-meta-keys", MemoryStoreConfig{MaxMetaKeys: -1}},
+		{"negative-meta-value-bytes", MemoryStoreConfig{MaxMetaValueBytes: -1}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewMemoryStore(tc.cfg); err == nil {
+				t.Fatal("NewMemoryStore returned nil error")
 			}
 		})
 	}
@@ -666,6 +684,9 @@ func TestRecordOutcomeNilAttemptsIsNoOp(t *testing.T) {
 	rf := NewRoutingFeedback(mustStore(t, MemoryStoreConfig{}))
 	if err := rf.RecordOutcome(context.Background(), "chat", RouteOutcome{}); err != nil {
 		t.Fatalf("nil Attempts: %v", err)
+	}
+	if err := rf.RecordOutcome(context.Background(), "", RouteOutcome{}); err != nil {
+		t.Fatalf("nil Attempts with empty useCase: %v", err)
 	}
 }
 

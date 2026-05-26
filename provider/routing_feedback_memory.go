@@ -82,6 +82,15 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 	if resolved.neutralScore < 0 || resolved.neutralScore > 1 {
 		return nil, fmt.Errorf("provider: NeutralScore %v out of range [0,1]", resolved.neutralScore)
 	}
+	if resolved.maxRetainedSamples < -1 {
+		return nil, fmt.Errorf("provider: MaxRetainedSamples %d out of range; use -1 for unbounded", resolved.maxRetainedSamples)
+	}
+	if resolved.maxMetaKeys < 0 {
+		return nil, fmt.Errorf("provider: MaxMetaKeys %d out of range", resolved.maxMetaKeys)
+	}
+	if resolved.maxMetaValueBytes < 0 {
+		return nil, fmt.Errorf("provider: MaxMetaValueBytes %d out of range", resolved.maxMetaValueBytes)
+	}
 	return &MemoryStore{
 		cfg:     resolved,
 		signals: make(map[FeedbackKey][]FeedbackSignal),

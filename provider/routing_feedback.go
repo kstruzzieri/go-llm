@@ -153,11 +153,11 @@ func (rf *RoutingFeedback) Record(ctx context.Context, key FeedbackKey, sig Feed
 // If out.Attempts is empty or nil, RecordOutcome is a no-op and returns
 // nil — the seam's pre-PR2 zero-value-safe property.
 func (rf *RoutingFeedback) RecordOutcome(ctx context.Context, useCase string, out RouteOutcome) error {
-	if useCase == "" {
-		return fmt.Errorf("%w: useCase is required", ErrInvalidFeedbackKey)
-	}
 	if len(out.Attempts) == 0 {
 		return nil
+	}
+	if useCase == "" {
+		return fmt.Errorf("%w: useCase is required", ErrInvalidFeedbackKey)
 	}
 	now := time.Now()
 	items := make([]FeedbackItem, 0, len(out.Attempts)*2)
