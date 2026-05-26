@@ -417,10 +417,54 @@ type CompletionConfidence struct {
 // Route outcome
 // ---------------------------------------------------------------------------
 
+// AttemptStatus encodes the outcome of a single execution attempt within a
+// RoutePlan. AttemptStatusUnknown (the zero value) signals "no information"
+// and is treated by the RoutingFeedback seam as a no-op rather than as a
+// failure. AttemptStatus values out of range serialize as "unknown" but are
+// rejected by the seam's validation.
+type AttemptStatus int
+
+const (
+	AttemptStatusUnknown AttemptStatus = iota
+	AttemptStatusSucceeded
+	AttemptStatusFailed
+)
+
+// String returns the lowercase tag for this status. Out-of-range values
+// stringify as "unknown" so accidental logging is harmless; seam-level
+// validation still rejects them.
+func (s AttemptStatus) String() string {
+	switch s {
+	case AttemptStatusSucceeded:
+		return "succeeded"
+	case AttemptStatusFailed:
+		return "failed"
+	default:
+		return "unknown"
+	}
+}
+
+// MarshalJSON encodes AttemptStatus as its String() tag for human-readable
+// diagnostics in serialized RouteOutcome.Attempts.
+func (s AttemptStatus) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + s.String() + `"`), nil
+}
+
+// RouteAttempt records one execution attempt against a specific
+// provider/model. PR2's RoutePlan.handleResult populates these per attempt;
+// PR1 only declares the type.
+type RouteAttempt struct {
+	Key        ModelKey      `json:"key"`
+	Status     AttemptStatus `json:"status"`
+	LatencyMs  int64         `json:"latency_ms,omitempty"`
+	ErrorClass string        `json:"error_class,omitempty"`
+}
+
 // RouteOutcome captures the Router's decision metadata for a request.
-// It records which model was originally planned, which model actually served
-// the request (after any fallbacks), and scoring information. This is attached
-// to response types so callers can observe routing decisions.
+// Provider responses copy a pointer to a RouteOutcome onto Chat/Generate/
+// Embed responses so callers can observe planned vs actual model, sticky
+// state, score, fallback usage, the per-attempt trace, and a route-scoped
+// correlation ID.
 type RouteOutcome struct {
 	PlannedModel  ModelKey `json:"planned_model"`
 	ActualModel   ModelKey `json:"actual_model"`
@@ -428,6 +472,18 @@ type RouteOutcome struct {
 	WasSticky     bool     `json:"was_sticky"`
 	Score         float64  `json:"score"`
 	Reason        string   `json:"reason"`
+
+	// Attempts is the ordered list of execution attempts (primary first).
+	// Nil/empty pre-PR2 because nothing populates it yet; the
+	// RoutingFeedback seam treats nil as "no per-attempt data" and is a
+	// no-op. Post-PR2, len(Attempts) >= 1 on every executed plan.
+	Attempts []RouteAttempt `json:"attempts,omitempty"`
+
+	// RouteID is an opaque correlation ID generated at plan execution. The
+	// RoutingFeedback seam copies it into FeedbackSignal.RouteID; the
+	// future /v1/completions/feedback endpoint may attach a distinct
+	// client-visible CompletionID without conflating the two.
+	RouteID string `json:"route_id,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
