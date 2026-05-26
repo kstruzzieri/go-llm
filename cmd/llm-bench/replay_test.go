@@ -381,8 +381,8 @@ func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
 				Role: "assistant",
 				ToolCalls: []ollama.ToolCall{
 					{
-						ID:   "candidate-call",
-						Type: "function",
+						ID:       "candidate-call",
+						Type:     "function",
 						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{}},
 					},
 				},
@@ -429,8 +429,8 @@ func TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant(t *testing.T)
 				Role: "assistant",
 				ToolCalls: []ollama.ToolCall{
 					{
-						ID:   "candidate-call",
-						Type: "function",
+						ID:       "candidate-call",
+						Type:     "function",
 						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{}},
 					},
 				},
