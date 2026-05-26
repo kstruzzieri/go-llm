@@ -228,7 +228,7 @@ func TestBuildJudgeCall_SelfPreferenceGuard(t *testing.T) {
 
 func TestMaterializeJudgement_AppendsJustificationToNotes(t *testing.T) {
 	base := Score{ToolSequenceMatch: 0.5, Notes: "pre-existing"}
-	got, err := materializeJudgement(base, "ollama/gemma4:31b", `{"answer_quality":0.5,"justification":"missed caveat"}`)
+	got, _, err := materializeJudgement(base, "ollama/gemma4:31b", `{"answer_quality":0.5,"justification":"missed caveat"}`)
 	if err != nil {
 		t.Fatalf("materializeJudgement: %v", err)
 	}
@@ -578,5 +578,39 @@ func TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch(t *
 	}
 	if s2.ToolSequenceMatch != 1.0 {
 		t.Fatalf("cache-hit ToolSequenceMatch=%v; want 1.0 (recomputed fresh)", s2.ToolSequenceMatch)
+	}
+}
+
+// TestLLMJudgeScorer_CachePutPreservesSemicolonsInJustification pins the
+// fix for the brittle joined-Notes round-trip: a judge justification
+// containing "; " (very common in real model output) must be persisted
+// verbatim into the cache's justification column instead of being
+// silently truncated at the first "; " segment boundary.
+func TestLLMJudgeScorer_CachePutPreservesSemicolonsInJustification(t *testing.T) {
+	c, _ := newTestCache(t)
+	// Justification with embedded "; " — the kind that would have been
+	// truncated by the old judgeJustificationFromNotes round-trip.
+	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
+		Content: `{"answer_quality":0.5,"justification":"covered A; missed B; also dropped C"}`,
+	}}}
+	scorer := &LLMJudgeScorer{
+		Client:           judge,
+		JudgeModel:       "ollama/gemma4:31b",
+		JudgeModelDigest: "sha256:abc",
+		Cache:            c,
+	}
+	trace := Trace{ID: "t-semi", System: "s", Turns: []Turn{{Role: "user", Content: "u"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/cand", Transcript: []Turn{{Role: "assistant", Content: "ans"}}}
+	if _, err := scorer.Score(context.Background(), trace, actual); err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	// Read the row back via the test cache's underlying db.
+	var stored string
+	if err := c.db.QueryRow(`SELECT justification FROM judge_cache WHERE trace_id = ?`, "t-semi").Scan(&stored); err != nil {
+		t.Fatalf("query justification: %v", err)
+	}
+	want := "covered A; missed B; also dropped C"
+	if stored != want {
+		t.Fatalf("Justification truncated: got %q, want %q", stored, want)
 	}
 }

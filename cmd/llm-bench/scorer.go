@@ -255,14 +255,20 @@ func (s *LLMJudgeScorer) callJudge(ctx context.Context, req ollama.ChatRequest) 
 // ToolSequenceMatch comes from baseScore (recomputed fresh each call).
 // Parse errors are wrapped with the judge model identity; callers MUST
 // NOT re-attribute.
-func materializeJudgement(base Score, judgeModel, rawContent string) (Score, error) {
+//
+// The parsed judgeResponse is returned alongside the merged Score so the
+// cache-put path can persist the verbatim justification without round-
+// tripping it through the joined Notes string (which uses "; " as a
+// separator and would silently truncate justifications that contain that
+// substring — common in real judge output like "covered A; missed B").
+func materializeJudgement(base Score, judgeModel, rawContent string) (Score, judgeResponse, error) {
 	judgement, err := parseJudgeResponse(rawContent)
 	if err != nil {
-		return Score{}, fmt.Errorf("judge model %q: %w", judgeModel, err)
+		return Score{}, judgeResponse{}, fmt.Errorf("judge model %q: %w", judgeModel, err)
 	}
 	base.AnswerQuality = judgement.AnswerQuality
 	base.Notes = joinScoreNotes(base.Notes, fmt.Sprintf("llm-judge=%s: %s", judgeModel, judgement.Justification))
-	return base, nil
+	return base, judgement, nil
 }
 
 // Score composes: build → check cache (if enabled) → callJudge or hit →
@@ -300,14 +306,18 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 		if hit, ok, getErr := s.Cache.Get(ctx, cacheKey); getErr != nil {
 			fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
 		} else if ok {
-			return materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
+			matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
+			if hitErr != nil {
+				return Score{}, hitErr
+			}
+			return matHit, nil
 		}
 	}
 	content, err := s.callJudge(ctx, req)
 	if err != nil {
 		return Score{}, err
 	}
-	materialized, err := materializeJudgement(base, s.JudgeModel, content)
+	materialized, judgement, err := materializeJudgement(base, s.JudgeModel, content)
 	if err != nil {
 		return Score{}, err
 	}
@@ -324,7 +334,7 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 			RequestJSON:      prettyRequestJSON(req),
 			ResponseContent:  content,
 			AnswerQuality:    materialized.AnswerQuality,
-			Justification:    judgeJustificationFromNotes(materialized.Notes),
+			Justification:    judgement.Justification,
 			CreatedAt:        now,
 			LastUsedAt:       now,
 		}); putErr != nil {
@@ -357,26 +367,6 @@ func prettyRequestJSON(req ollama.ChatRequest) string {
 		return ""
 	}
 	return string(raw)
-}
-
-// judgeJustificationFromNotes recovers the justification fragment that
-// materializeJudgement appended via joinScoreNotes. Mirror: the last note
-// segment that starts with "llm-judge=" carries the justification after a
-// colon-space delimiter. Returns "" if no such segment is present so the
-// cache row's justification column never carries the model-identity
-// prefix.
-func judgeJustificationFromNotes(notes string) string {
-	parts := strings.Split(notes, "; ")
-	for i := len(parts) - 1; i >= 0; i-- {
-		p := parts[i]
-		if !strings.HasPrefix(p, "llm-judge=") {
-			continue
-		}
-		if idx := strings.Index(p, ": "); idx >= 0 {
-			return p[idx+2:]
-		}
-	}
-	return ""
 }
 
 const judgeSystemPrompt = `You are an impartial evaluator for local LLM benchmark replays.
