@@ -105,10 +105,17 @@ The first capture PR uses `conversation/` as the source of truth;
 feedback-linked sampling comes later because the current `feedback/`
 schema does not store a conversation id.
 
-Tool-call names and tool-result turns are preserved, but tool schemas are
-not exported yet because the current `conversation/` records do not store
-them. Multi-turn/tool-use traces are useful calibration fixtures now;
-full replay of those traces requires the Phase 2 tool-loop/schema work.
+Tool-call names and tool-result turns are preserved, and `llm-bench`
+can replay multi-turn conversations with frozen tool results when the
+trace includes the needed tool schemas. Replay matches candidate tool
+calls against the scripted assistant turn in lock-step (same count,
+same names, same order); mismatches surface as `errToolCallMismatch`,
+divergence into plain text bypasses the scripted tool route and is
+recorded in `Score.Notes`, and tool-argument schema validation against
+`trace.Tools` remains scorer-side follow-up work. The current
+`conversation/` capture path does not export schemas because those
+records do not store them, so schema sourcing remains follow-up capture
+work.
 
 ## Date stamp
 

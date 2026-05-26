@@ -12,7 +12,8 @@ type Score struct {
 	ToolSequenceMatch float64 // [0,1] — how close actual tool calls were to the golden sequence
 	ToolArgsValid     float64 // [0,1] — fraction of tool calls with valid arguments
 	AnswerQuality     float64 // [0,1] — final-answer quality per the active Scorer
-	LatencyMs         int64
+	LatencyMs         int64   // sum of all chat round-trips for this replay
+	TurnLatenciesMs   []int64 // per-turn breakdown; len == number of chat round-trips
 	TotalTokens       int
 	Notes             string
 }
@@ -47,11 +48,10 @@ func newScorer(name string) (Scorer, error) {
 // before drawing conclusions.
 type ExactMatchScorer struct{}
 
-// Score implements Scorer. ToolArgsValid is left unset (zero) because the
-// tool loop has not yet been wired in Phase 1, so per-call argument
-// validation against trace.Tools schemas is not computable. The Notes
-// field records this so aggregate consumers can distinguish "not scored"
-// from "scored zero".
+// Score implements Scorer. ToolArgsValid is left unset (zero) until replay
+// validates candidate arguments against trace.Tools schemas. The Notes field
+// records this so aggregate consumers can distinguish "not scored" from
+// "scored zero".
 func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
 	needle := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
 	if needle == "" {
@@ -60,7 +60,7 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 
 	score := Score{
 		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "ToolArgsValid not computed (tool loop pending; see benchmark-plan.md Phase 2)",
+		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
 	}
 
 	finalText := lastAssistantContent(actual.Transcript)
@@ -74,9 +74,11 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 }
 
 // toolSequenceScore computes a simple Jaccard overlap between the expected
-// and actual tool-call sequences, ignoring order for now. A Levenshtein-
-// based sequence comparison is a follow-up once the tool loop records real
-// ordered calls.
+// and actual tool-call sequences, ignoring order. The tool loop now
+// records real ordered calls, so order-sensitive scoring (e.g.
+// Levenshtein) is a meaningful follow-up — deferred pending the
+// cost/benefit call on whether a coarser sequence-match-vs-divergence
+// signal is enough for the benchmark's purpose.
 func toolSequenceScore(expected, actual []string) float64 {
 	if len(expected) == 0 && len(actual) == 0 {
 		return 1.0

@@ -149,9 +149,18 @@ First implementation slice:
   blocks, and email addresses before files are written.
 - Conversations without a system prompt, user turn, final assistant
   answer, or parseable tool-call JSON are skipped with a warning.
-- Tool-call names and tool-result turns are captured, but tool schemas are
-  not recoverable from `conversation/` today; full replay of tool-use
-  traces requires the follow-up schema/tool-loop work.
+- Tool-call names and tool-result turns are captured, and `llm-bench`
+  can replay multi-turn/tool-use traces by injecting frozen tool results
+  after matching candidate tool calls. Matching is strict and lock-step:
+  the candidate must emit the same number of tool calls in the same
+  order, with the same names, as the scripted assistant turn. Mismatches
+  surface as `errToolCallMismatch`; a candidate that emits tool calls
+  with no scripted assistant turn surfaces as `errMissingScriptedAssistant`;
+  a candidate that bypasses the scripted tool route by replying in plain
+  text has the skip recorded in `Score.Notes` (the historical
+  "refuse rather than mislead" intent, now in observability form).
+  Tool schemas are still not recoverable from `conversation/` today;
+  schema sourcing remains follow-up capture work.
 - Feedback-driven sampling is deferred until feedback rows can be tied
   to conversations; today `feedback_retrievals` and `feedback_signals`
   do not carry a conversation id.
@@ -164,9 +173,10 @@ First implementation slice:
 ### Phase 4 — Live comparison runs
 
 - **Currently-configured model vs candidate** on each role's captured
-  traces. The harness takes `-models <provider>/<name>,...` so any model
-  reachable through an existing `provider.Provider` can participate —
-  swap candidates without editing Go code.
+  traces. The harness takes `-models <provider>/<name>,...`; today only
+  `ollama` is wired (`parseModelTarget` rejects other providers), so the
+  "any model reachable through an existing `provider.Provider`" target
+  remains follow-up work alongside the multi-provider client factory.
 - Initial target comparisons against the reference lineup in `models.json`:
   - `coding` — Qwen3-Coder-Next vs GLM-5.1 on code-gen traces (Setup 2
     experiment; see [setups.md](setups.md))

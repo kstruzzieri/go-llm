@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -30,6 +31,48 @@ func TestValidateTrace(t *testing.T) {
 			name:    "no turns",
 			trace:   Trace{ID: "t3", System: "sys"},
 			wantErr: errNoTurns,
+		},
+		{
+			name: "tool name not declared",
+			trace: Trace{
+				ID:     "t4",
+				System: "sys",
+				Tools: []json.RawMessage{
+					json.RawMessage(`{"name":"read_file","inputSchema":{"type":"object"}}`),
+				},
+				Turns: []Turn{
+					{Role: "user", Content: "q"},
+					{Role: "assistant", ToolCalls: []ToolCall{{Name: "write_file"}}},
+				},
+			},
+			wantErr: errToolNameNotDeclared,
+		},
+		{
+			name: "tool name declared via provider shape",
+			trace: Trace{
+				ID:     "t5",
+				System: "sys",
+				Tools: []json.RawMessage{
+					json.RawMessage(`{"type":"function","function":{"name":"read_file","parameters":{"type":"object"}}}`),
+				},
+				Turns: []Turn{
+					{Role: "user", Content: "q"},
+					{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file"}}},
+				},
+			},
+			wantErr: nil,
+		},
+		{
+			name: "no tools declared bypasses cross-check",
+			trace: Trace{
+				ID:     "t6",
+				System: "sys",
+				Turns: []Turn{
+					{Role: "user", Content: "q"},
+					{Role: "assistant", ToolCalls: []ToolCall{{Name: "anything"}}},
+				},
+			},
+			wantErr: nil,
 		},
 	}
 
