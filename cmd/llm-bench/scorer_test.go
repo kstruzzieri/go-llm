@@ -614,3 +614,40 @@ func TestLLMJudgeScorer_CachePutPreservesSemicolonsInJustification(t *testing.T)
 		t.Fatalf("Justification truncated: got %q, want %q", stored, want)
 	}
 }
+
+// TestLLMJudgeScorer_BypassCache_AlwaysCallsJudgeAndDoesNotPersist pins the
+// BypassCache=true contract: every Score call must invoke the judge (Get is
+// skipped, so cached entries can never satisfy the call), and no row may
+// ever be written to the cache (Put is also skipped). This guards against
+// regressions where BypassCache short-circuits only one side of the cache.
+func TestLLMJudgeScorer_BypassCache_AlwaysCallsJudgeAndDoesNotPersist(t *testing.T) {
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
+		Content: `{"answer_quality":0.5,"justification":"x"}`,
+	}}}
+	scorer := &LLMJudgeScorer{
+		Client:      judge,
+		JudgeModel:  "ollama/gemma4:31b",
+		Cache:       c,
+		BypassCache: true,
+	}
+	trace := Trace{ID: "t", System: "s", Turns: []Turn{{Role: "user", Content: "h"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/cand", Transcript: []Turn{{Role: "assistant", Content: "a"}}}
+
+	for i := 0; i < 3; i++ {
+		if _, err := scorer.Score(context.Background(), trace, actual); err != nil {
+			t.Fatalf("Score #%d: %v", i, err)
+		}
+	}
+	if judge.called != 3 {
+		t.Fatalf("BypassCache=true should call judge each time; called=%d", judge.called)
+	}
+	// Verify nothing was written to the cache by querying any row count.
+	var count int
+	if err := c.db.QueryRow(`SELECT COUNT(*) FROM judge_cache`).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("BypassCache=true persisted %d rows; want 0", count)
+	}
+}
