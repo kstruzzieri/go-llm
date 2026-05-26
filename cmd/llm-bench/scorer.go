@@ -54,7 +54,10 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 	case "exact-match":
 		return &ExactMatchScorer{}, nil
 	case "llm-judge":
-		client, err := newOllamaClient(opts.ollamaURL)
+		if opts.judgeTimeout < 0 {
+			return nil, fmt.Errorf("negative judge timeout %s", opts.judgeTimeout)
+		}
+		client, err := newOllamaClient(opts.ollamaURL, ollama.WithTimeout(opts.judgeTimeout))
 		if err != nil {
 			return nil, fmt.Errorf("llm-judge client: %w", err)
 		}

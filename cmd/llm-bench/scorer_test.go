@@ -4,8 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
 )
@@ -36,6 +39,41 @@ func (f fakeJudgeModelChecker) AvailableModels(context.Context) ([]string, error
 		return nil, f.err
 	}
 	return f.models, nil
+}
+
+func TestNewScorerAppliesJudgeTimeoutToHTTPClient(t *testing.T) {
+	const judgeTimeout = 25 * time.Millisecond
+	const serverDelay = 250 * time.Millisecond
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Errorf("unexpected path: %s", r.URL.Path)
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(serverDelay):
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"models": []map[string]any{{"name": "gemma4:31b"}},
+		})
+	}))
+	defer srv.Close()
+
+	start := time.Now()
+	_, err := newScorer(context.Background(), "llm-judge", scorerOptions{
+		ollamaURL:    srv.URL,
+		judgeModel:   "gemma4:31b",
+		judgeTimeout: judgeTimeout,
+	})
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("newScorer() error = nil, want timeout from judge HTTP client")
+	}
+	if elapsed >= serverDelay/2 {
+		t.Fatalf("newScorer() returned after %s, want HTTP client timeout near %s", elapsed, judgeTimeout)
+	}
 }
 
 func TestExactMatchScorerRequiresGoldenSubstring(t *testing.T) {

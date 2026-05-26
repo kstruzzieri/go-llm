@@ -479,11 +479,12 @@ func assistantTurnFromMessage(msg ollama.ChatMessage) (Turn, error) {
 // newOllamaClient constructs an ollama.Client targeting the configured URL.
 // Multi-provider routing (e.g. LM Studio at a different port) is a
 // follow-up that will introduce a client factory keyed by target.Provider.
-func newOllamaClient(baseURL string) (*ollama.Client, error) {
+func newOllamaClient(baseURL string, opts ...ollama.Option) (*ollama.Client, error) {
 	if strings.TrimSpace(baseURL) == "" {
 		return nil, errEmptyBaseURL
 	}
-	return ollama.NewClient(ollama.WithBaseURL(baseURL)), nil
+	clientOpts := append([]ollama.Option{ollama.WithBaseURL(baseURL)}, opts...)
+	return ollama.NewClient(clientOpts...), nil
 }
 
 func sumInt64(xs []int64) int64 {
