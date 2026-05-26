@@ -6,6 +6,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -865,5 +866,64 @@ func TestRecordOutcomeRejectsNegativeLatencyAtomically(t *testing.T) {
 		if agg.SampleCount != 0 {
 			t.Fatalf("key %+v SampleCount = %d, want 0 (atomic rejection)", k, agg.SampleCount)
 		}
+	}
+}
+
+func TestMemoryStoreConcurrentRecordAndGet(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping concurrency stress under -short")
+	}
+	store := mustStore(t, MemoryStoreConfig{MaxRetainedSamples: -1})
+	const goroutines = 8
+	const iterations = 200
+
+	keys := []FeedbackKey{
+		{Provider: "p1", Model: "m1", UseCase: "chat"},
+		{Provider: "p1", Model: "m2", UseCase: "chat"},
+		{Provider: "p2", Model: "m1", UseCase: "fim"},
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(gid int) {
+			defer wg.Done()
+			for i := 0; i < iterations; i++ {
+				k := keys[(gid+i)%len(keys)]
+				switch i % 3 {
+				case 0:
+					_ = store.Record(context.Background(), k,
+						FeedbackSignal{Kind: RoutingSignalSuccess})
+				case 1:
+					_ = store.RecordBatch(context.Background(), []FeedbackItem{
+						{Key: k, Signal: FeedbackSignal{Kind: RoutingSignalSuccess}},
+						{Key: k, Signal: FeedbackSignal{Kind: RoutingSignalLatency, LatencyMs: 100}},
+					})
+				case 2:
+					_, _ = store.Get(context.Background(), k)
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	// Final invariants: every Record adds exactly 1 sample; every
+	// RecordBatch with 2 items adds exactly 2 samples; Get adds 0. So
+	// total samples across all keys == sum over goroutines of:
+	//   (iterations/3 + 1 if iterations%3 > 0)  *  1     (Record)
+	// + (iterations/3 + 1 if iterations%3 > 1)  *  2     (RecordBatch)
+	// + (iterations/3)                          *  0     (Get)
+	// For iterations=200: 200%3 == 2, so:
+	//   record_calls = 67, batch_calls = 67, get_calls = 66.
+	// Per goroutine samples = 67 + 67*2 = 201.
+	// Total = 8 * 201 = 1608.
+	const wantTotal = 1608
+	var got int
+	for _, k := range keys {
+		agg, _ := store.Get(context.Background(), k)
+		got += agg.SampleCount
+	}
+	if got != wantTotal {
+		t.Fatalf("total samples = %d, want %d (key distribution may have drifted)", got, wantTotal)
 	}
 }
