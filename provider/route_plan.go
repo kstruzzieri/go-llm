@@ -489,7 +489,7 @@ var routeIDRand io.Reader = rand.Reader
 // not want routing paths to fail because the OS RNG returned an error.
 func newRouteID() string {
 	var b [16]byte
-	if _, err := routeIDRand.Read(b[:]); err != nil {
+	if _, err := io.ReadFull(routeIDRand, b[:]); err != nil {
 		return ""
 	}
 	return hex.EncodeToString(b[:])

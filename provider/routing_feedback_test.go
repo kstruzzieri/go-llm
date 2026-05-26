@@ -140,6 +140,18 @@ func (routeIDFailingReader) Read(_ []byte) (int, error) {
 	return 0, errRouteIDForcedFailure
 }
 
+type routeIDShortReader struct {
+	read bool
+}
+
+func (r *routeIDShortReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, errRouteIDForcedFailure
+	}
+	r.read = true
+	return copy(p, []byte{1, 2, 3, 4}), nil
+}
+
 var errRouteIDForcedFailure = errors.New("forced route id read failure")
 
 func TestNewRouteIDReturnsEmptyOnRandFailure(t *testing.T) {
@@ -149,6 +161,16 @@ func TestNewRouteIDReturnsEmptyOnRandFailure(t *testing.T) {
 
 	if got := newRouteID(); got != "" {
 		t.Fatalf("newRouteID() = %q, want empty string on RNG failure", got)
+	}
+}
+
+func TestNewRouteIDReturnsEmptyOnShortRandRead(t *testing.T) {
+	orig := routeIDRand
+	routeIDRand = &routeIDShortReader{}
+	t.Cleanup(func() { routeIDRand = orig })
+
+	if got := newRouteID(); got != "" {
+		t.Fatalf("newRouteID() = %q, want empty string on short RNG read", got)
 	}
 }
 
