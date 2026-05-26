@@ -226,6 +226,23 @@ func TestBuildJudgeCall_SelfPreferenceGuard(t *testing.T) {
 	}
 }
 
+func TestMaterializeJudgement_AppendsJustificationToNotes(t *testing.T) {
+	base := Score{ToolSequenceMatch: 0.5, Notes: "pre-existing"}
+	got, err := materializeJudgement(base, "ollama/gemma4:31b", `{"answer_quality":0.5,"justification":"missed caveat"}`)
+	if err != nil {
+		t.Fatalf("materializeJudgement: %v", err)
+	}
+	if got.AnswerQuality != 0.5 {
+		t.Fatalf("AnswerQuality = %v; want 0.5", got.AnswerQuality)
+	}
+	if got.ToolSequenceMatch != 0.5 {
+		t.Fatalf("ToolSequenceMatch lost from base: %v", got.ToolSequenceMatch)
+	}
+	if !strings.Contains(got.Notes, "missed caveat") {
+		t.Fatalf("Notes missing justification: %q", got.Notes)
+	}
+}
+
 func TestLLMJudgeScorerScoresFromJSON(t *testing.T) {
 	client := &fakeJudgeClient{
 		resp: &ollama.ChatResponse{

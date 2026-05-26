@@ -204,65 +204,50 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 	return req, baseScore, nil
 }
 
-func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
-	if sameModelSelector(s.JudgeModel, actual.Model) {
-		return Score{}, fmt.Errorf("trace %q model %q: %w", trace.ID, actual.Model, errJudgeSelfPreference)
-	}
-
-	criteria := strings.TrimSpace(trace.Golden.FinalAnswerCriteria)
-	substring := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
-	if criteria == "" && substring == "" {
-		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
-	}
-
-	score := Score{
-		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
-	}
-
-	if strings.TrimSpace(lastAssistantContent(actual.Transcript)) == "" {
-		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errNoAssistantFinalAnswer)
-	}
-
-	prompt, err := buildJudgePrompt(trace, actual)
-	if err != nil {
-		return Score{}, fmt.Errorf("trace %q: build judge prompt: %w", trace.ID, err)
-	}
-
+// callJudge issues the judge ChatRequest and returns the raw response
+// content. The only I/O step; honors JudgeTimeout. Errors are returned
+// unwrapped so callers can attribute model identity in their wrap.
+func (s *LLMJudgeScorer) callJudge(ctx context.Context, req ollama.ChatRequest) (string, error) {
 	judgeCtx := ctx
 	var cancel context.CancelFunc
 	if s.JudgeTimeout > 0 {
 		judgeCtx, cancel = context.WithTimeout(ctx, s.JudgeTimeout)
 		defer cancel()
 	}
-
-	resp, err := s.Client.Chat(judgeCtx, ollama.ChatRequest{
-		Model: s.JudgeModel,
-		Messages: []ollama.ChatMessage{
-			{Role: "system", Content: judgeSystemPrompt},
-			{Role: "user", Content: prompt},
-		},
-		Format: "json",
-		Options: &ollama.ModelOptions{
-			Temperature: judgeTemperature,
-			NumPredict:  judgeTokenBudget,
-		},
-		KeepAlive: benchKeepAlive,
-	})
+	resp, err := s.Client.Chat(judgeCtx, req)
 	if err != nil {
-		return Score{}, fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
+		return "", fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
 	}
 	if resp == nil {
-		return Score{}, fmt.Errorf("judge model %q: %w: nil response", s.JudgeModel, errMalformedJudgeResponse)
+		return "", fmt.Errorf("judge model %q: %w: nil response", s.JudgeModel, errMalformedJudgeResponse)
 	}
+	return resp.Message.Content, nil
+}
 
-	judgment, err := parseJudgeResponse(resp.Message.Content)
+// materializeJudgement parses raw judge response content and merges it
+// into baseScore. Pure; no I/O. Used identically by cache-hit and
+// cache-miss paths so AnswerQuality/Notes derive from the judge text but
+// ToolSequenceMatch comes from baseScore (recomputed fresh each call).
+func materializeJudgement(base Score, judgeModel, rawContent string) (Score, error) {
+	judgement, err := parseJudgeResponse(rawContent)
 	if err != nil {
-		return Score{}, fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
+		return Score{}, fmt.Errorf("judge model %q: %w", judgeModel, err)
 	}
-	score.AnswerQuality = judgment.AnswerQuality
-	score.Notes = joinScoreNotes(score.Notes, fmt.Sprintf("llm-judge=%s: %s", s.JudgeModel, judgment.Justification))
-	return score, nil
+	base.AnswerQuality = judgement.AnswerQuality
+	base.Notes = joinScoreNotes(base.Notes, fmt.Sprintf("llm-judge=%s: %s", judgeModel, judgement.Justification))
+	return base, nil
+}
+
+func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
+	req, base, err := s.buildJudgeCall(trace, actual)
+	if err != nil {
+		return Score{}, err
+	}
+	content, err := s.callJudge(ctx, req)
+	if err != nil {
+		return Score{}, err
+	}
+	return materializeJudgement(base, s.JudgeModel, content)
 }
 
 const judgeSystemPrompt = `You are an impartial evaluator for local LLM benchmark replays.
