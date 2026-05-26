@@ -2,8 +2,21 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
+	"unicode/utf8"
+
+	"github.com/kstruzzieri/go-llm/ollama"
+)
+
+const (
+	fallbackJudgeModel       = "gemma4:31b"
+	judgeTemperature         = 0.1
+	judgeTokenBudget         = 512
+	maxJudgeTurnContentBytes = 8192
+	maxJudgeAnswerBytes      = 32768
 )
 
 // Score captures the evaluation dimensions for a single (model, trace) run.
@@ -14,6 +27,7 @@ type Score struct {
 	AnswerQuality     float64 // [0,1] — final-answer quality per the active Scorer
 	LatencyMs         int64   // sum of all chat round-trips for this replay
 	TurnLatenciesMs   []int64 // per-turn breakdown; len == number of chat round-trips
+	ScorerLatencyMs   int64   // wall-clock time spent in the active scorer
 	TotalTokens       int
 	Notes             string
 }
@@ -28,13 +42,33 @@ type Scorer interface {
 	Score(ctx context.Context, trace Trace, actual Result) (Score, error)
 }
 
+type scorerOptions struct {
+	ollamaURL    string
+	judgeModel   string
+	judgeTimeout time.Duration
+}
+
 // newScorer returns the Scorer matching the given name.
-func newScorer(name string) (Scorer, error) {
+func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, error) {
 	switch name {
 	case "exact-match":
 		return &ExactMatchScorer{}, nil
 	case "llm-judge":
-		return nil, fmt.Errorf("llm-judge scorer not yet implemented (see docs/llm/benchmark-plan.md Phase 3)")
+		if opts.judgeTimeout < 0 {
+			return nil, fmt.Errorf("negative judge timeout %s", opts.judgeTimeout)
+		}
+		client, err := newOllamaClient(opts.ollamaURL, ollama.WithTimeout(opts.judgeTimeout))
+		if err != nil {
+			return nil, fmt.Errorf("llm-judge client: %w", err)
+		}
+		scorer, err := newLLMJudgeScorer(client, opts.judgeModel, opts.judgeTimeout)
+		if err != nil {
+			return nil, err
+		}
+		if err := validateJudgeModel(ctx, client, scorer.JudgeModel); err != nil {
+			return nil, err
+		}
+		return scorer, nil
 	case "manual":
 		return nil, fmt.Errorf("manual scorer not yet implemented")
 	default:
@@ -71,6 +105,348 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 	}
 
 	return score, nil
+}
+
+type judgeChatClient interface {
+	Chat(ctx context.Context, req ollama.ChatRequest) (*ollama.ChatResponse, error)
+}
+
+type judgeModelChecker interface {
+	AvailableModels(ctx context.Context) ([]string, error)
+}
+
+// LLMJudgeScorer asks a separate local Ollama model to score final-answer
+// quality against the trace's golden rubric. Replay latency and target-model
+// tokens remain owned by Runner.runOne.
+type LLMJudgeScorer struct {
+	Client       judgeChatClient
+	JudgeModel   string
+	JudgeTimeout time.Duration
+}
+
+func newLLMJudgeScorer(client judgeChatClient, judgeModel string, judgeTimeout time.Duration) (*LLMJudgeScorer, error) {
+	if client == nil {
+		return nil, fmt.Errorf("nil judge client")
+	}
+	judgeModel = strings.TrimSpace(judgeModel)
+	if judgeModel == "" {
+		return nil, errEmptyJudgeModel
+	}
+	if judgeTimeout < 0 {
+		return nil, fmt.Errorf("negative judge timeout %s", judgeTimeout)
+	}
+	return &LLMJudgeScorer{
+		Client:       client,
+		JudgeModel:   judgeModel,
+		JudgeTimeout: judgeTimeout,
+	}, nil
+}
+
+func validateJudgeModel(ctx context.Context, checker judgeModelChecker, judgeModel string) error {
+	if checker == nil {
+		return fmt.Errorf("llm-judge model validation requires a model checker")
+	}
+	models, err := checker.AvailableModels(ctx)
+	if err != nil {
+		return fmt.Errorf("validate judge model %q: %w", judgeModel, err)
+	}
+	for _, model := range models {
+		if sameModelSelector(judgeModel, model) {
+			return nil
+		}
+	}
+	return fmt.Errorf("judge model %q is not available from the configured Ollama server; pull it or pass -judge-model/-judge-ollama-url", judgeModel)
+}
+
+func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
+	if sameModelSelector(s.JudgeModel, actual.Model) {
+		return Score{}, fmt.Errorf("trace %q model %q: %w", trace.ID, actual.Model, errJudgeSelfPreference)
+	}
+
+	criteria := strings.TrimSpace(trace.Golden.FinalAnswerCriteria)
+	substring := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
+	if criteria == "" && substring == "" {
+		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
+	}
+
+	score := Score{
+		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
+	}
+
+	if strings.TrimSpace(lastAssistantContent(actual.Transcript)) == "" {
+		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errNoAssistantFinalAnswer)
+	}
+
+	prompt, err := buildJudgePrompt(trace, actual)
+	if err != nil {
+		return Score{}, fmt.Errorf("trace %q: build judge prompt: %w", trace.ID, err)
+	}
+
+	judgeCtx := ctx
+	var cancel context.CancelFunc
+	if s.JudgeTimeout > 0 {
+		judgeCtx, cancel = context.WithTimeout(ctx, s.JudgeTimeout)
+		defer cancel()
+	}
+
+	resp, err := s.Client.Chat(judgeCtx, ollama.ChatRequest{
+		Model: s.JudgeModel,
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: judgeSystemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		Format: "json",
+		Options: &ollama.ModelOptions{
+			Temperature: judgeTemperature,
+			NumPredict:  judgeTokenBudget,
+		},
+		KeepAlive: benchKeepAlive,
+	})
+	if err != nil {
+		return Score{}, fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
+	}
+	if resp == nil {
+		return Score{}, fmt.Errorf("judge model %q: %w: nil response", s.JudgeModel, errMalformedJudgeResponse)
+	}
+
+	judgment, err := parseJudgeResponse(resp.Message.Content)
+	if err != nil {
+		return Score{}, fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
+	}
+	score.AnswerQuality = judgment.AnswerQuality
+	score.Notes = joinScoreNotes(score.Notes, fmt.Sprintf("llm-judge=%s: %s", s.JudgeModel, judgment.Justification))
+	return score, nil
+}
+
+const judgeSystemPrompt = `You are an impartial evaluator for local LLM benchmark replays.
+Score only the candidate assistant's final answer against the golden rubric.
+Return only valid JSON with this schema:
+{"answer_quality":0.5,"justification":"short reason"}
+
+answer_quality must be a number from 0 to 1:
+0.0 means the answer is wrong or absent.
+0.5 means the answer is partially correct but misses important requirements.
+1.0 means the answer fully satisfies the rubric.
+Penalize unsupported claims, missing requested details, and contradictions.
+Do not reward style, verbosity, or model identity.`
+
+type judgePromptPayload struct {
+	TraceID                       string      `json:"trace_id"`
+	CandidateModel                string      `json:"candidate_model"`
+	System                        string      `json:"system"`
+	SystemTruncated               bool        `json:"system_truncated,omitempty"`
+	PromptTurns                   []judgeTurn `json:"prompt_turns"`
+	GoldenToolCalls               []string    `json:"golden_tool_calls,omitempty"`
+	ActualToolCalls               []string    `json:"actual_tool_calls,omitempty"`
+	FinalAnswerCriteria           string      `json:"final_answer_criteria,omitempty"`
+	FinalAnswerSubstring          string      `json:"final_answer_substring,omitempty"`
+	FinalAnswerSubstringTruncated bool        `json:"final_answer_substring_truncated,omitempty"`
+	ActualFinalAnswer             string      `json:"actual_final_answer"`
+	ActualFinalAnswerTruncated    bool        `json:"actual_final_answer_truncated,omitempty"`
+	ActualReplayTranscript        []judgeTurn `json:"actual_replay_transcript"`
+}
+
+type judgeTurn struct {
+	Role             string   `json:"role"`
+	Content          string   `json:"content,omitempty"`
+	ContentTruncated bool     `json:"content_truncated,omitempty"`
+	ToolCalls        []string `json:"tool_calls,omitempty"`
+	ToolCallID       string   `json:"tool_call_id,omitempty"`
+	Name             string   `json:"name,omitempty"`
+}
+
+func buildJudgePrompt(trace Trace, actual Result) (string, error) {
+	finalAnswer, finalAnswerTruncated := truncateForJudge(lastAssistantContent(actual.Transcript), maxJudgeAnswerBytes)
+	system, systemTruncated := truncateForJudge(trace.System, maxJudgeTurnContentBytes)
+	finalAnswerSubstring, finalAnswerSubstringTruncated := truncateForJudge(strings.TrimSpace(trace.Golden.FinalAnswerSubstring), maxJudgeAnswerBytes)
+	payload := judgePromptPayload{
+		TraceID:                       trace.ID,
+		CandidateModel:                actual.Model,
+		System:                        system,
+		SystemTruncated:               systemTruncated,
+		PromptTurns:                   compactTurnsForJudge(trace.Turns),
+		GoldenToolCalls:               trace.Golden.ToolCalls,
+		ActualToolCalls:               extractToolNames(actual.Transcript),
+		FinalAnswerCriteria:           strings.TrimSpace(trace.Golden.FinalAnswerCriteria),
+		FinalAnswerSubstring:          finalAnswerSubstring,
+		FinalAnswerSubstringTruncated: finalAnswerSubstringTruncated,
+		ActualFinalAnswer:             finalAnswer,
+		ActualFinalAnswerTruncated:    finalAnswerTruncated,
+		ActualReplayTranscript:        compactTurnsForJudge(actual.Transcript),
+	}
+	data, err := json.MarshalIndent(payload, "", "  ")
+	if err != nil {
+		return "", err
+	}
+
+	var b strings.Builder
+	b.WriteString("Evaluate this benchmark replay. Use final_answer_criteria when present; ")
+	b.WriteString("otherwise use final_answer_substring as the expected answer excerpt. ")
+	b.WriteString("Score the final answer only; tool-call quality is scored separately and is included only as context.\n\n")
+	b.Write(data)
+	return b.String(), nil
+}
+
+func compactTurnsForJudge(turns []Turn) []judgeTurn {
+	if len(turns) == 0 {
+		return nil
+	}
+	out := make([]judgeTurn, 0, len(turns))
+	for _, turn := range turns {
+		content, truncated := truncateForJudge(turn.Content, maxJudgeTurnContentBytes)
+		out = append(out, judgeTurn{
+			Role:             turn.Role,
+			Content:          content,
+			ContentTruncated: truncated,
+			ToolCalls:        extractToolNames([]Turn{turn}),
+			ToolCallID:       turn.ToolCallID,
+			Name:             turn.Name,
+		})
+	}
+	return out
+}
+
+func truncateForJudge(s string, limit int) (string, bool) {
+	if limit <= 0 || len(s) <= limit {
+		return s, false
+	}
+	cut := limit
+	for cut > 0 && cut < len(s) && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if cut <= 0 {
+		cut = limit
+	}
+	return s[:cut] + "\n[truncated for judge prompt]", true
+}
+
+type judgeResponse struct {
+	AnswerQuality float64
+	Justification string
+}
+
+func parseJudgeResponse(content string) (judgeResponse, error) {
+	raw := strings.TrimSpace(content)
+	if raw == "" {
+		return judgeResponse{}, fmt.Errorf("%w: empty response", errMalformedJudgeResponse)
+	}
+	raw = firstJSONObject(raw)
+	if raw == "" {
+		return judgeResponse{}, fmt.Errorf("%w: missing JSON object", errMalformedJudgeResponse)
+	}
+
+	var parsed struct {
+		AnswerQuality *float64 `json:"answer_quality"`
+		Score         *float64 `json:"score"`
+		Justification string   `json:"justification"`
+		Notes         string   `json:"notes"`
+	}
+	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+		return judgeResponse{}, fmt.Errorf("%w: %v", errMalformedJudgeResponse, err)
+	}
+	quality := parsed.AnswerQuality
+	if quality == nil {
+		quality = parsed.Score
+	}
+	if quality == nil {
+		return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
+	}
+	if *quality < 0 || *quality > 1 {
+		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, *quality)
+	}
+
+	justification := strings.TrimSpace(parsed.Justification)
+	if justification == "" {
+		justification = strings.TrimSpace(parsed.Notes)
+	}
+	if justification == "" {
+		justification = "no justification returned"
+	}
+
+	return judgeResponse{
+		AnswerQuality: *quality,
+		Justification: normalizeNote(justification),
+	}, nil
+}
+
+func firstJSONObject(s string) string {
+	start := strings.IndexByte(s, '{')
+	if start < 0 {
+		return ""
+	}
+
+	depth := 0
+	inString := false
+	escaped := false
+	for i := start; i < len(s); i++ {
+		ch := s[i]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			switch ch {
+			case '\\':
+				escaped = true
+			case '"':
+				inString = false
+			}
+			continue
+		}
+
+		switch ch {
+		case '"':
+			inString = true
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return s[start : i+1]
+			}
+		}
+	}
+	return ""
+}
+
+func sameModelSelector(a, b string) bool {
+	a = normalizeModelSelector(a)
+	b = normalizeModelSelector(b)
+	if a == "" || b == "" {
+		return false
+	}
+	if a == b {
+		return true
+	}
+	return modelSelectorWithoutBenchProvider(a) == modelSelectorWithoutBenchProvider(b)
+}
+
+func normalizeModelSelector(s string) string {
+	return strings.ToLower(strings.TrimSpace(s))
+}
+
+func modelSelectorWithoutBenchProvider(s string) string {
+	prefix := defaultBenchProvider + "/"
+	if strings.HasPrefix(s, prefix) {
+		return strings.TrimSpace(strings.TrimPrefix(s, prefix))
+	}
+	return s
+}
+
+func joinScoreNotes(parts ...string) string {
+	var cleaned []string
+	for _, part := range parts {
+		part = normalizeNote(part)
+		if part != "" {
+			cleaned = append(cleaned, part)
+		}
+	}
+	return strings.Join(cleaned, "; ")
+}
+
+func normalizeNote(s string) string {
+	return strings.Join(strings.Fields(s), " ")
 }
 
 // toolSequenceScore computes a simple Jaccard overlap between the expected

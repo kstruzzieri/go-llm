@@ -82,8 +82,8 @@ the existing `feedback/` and `conversation/` SQLite stores.
 2. **Tool argument validity** — JSON schema validation against the
    declared tool schemas. Binary pass/fail per call, averaged.
 3. **Final answer quality** — *User-selected scoring strategy*:
-   - `llm-judge` — Claude API scores response against
-     `final_answer_criteria` on a 0–1 rubric.
+   - `llm-judge` — a separate local Ollama judge model scores the
+     response against `final_answer_criteria` on a 0–1 rubric.
    - `exact-match` — substring match (cheap, brittle).
    - `manual` — dump to CSV for human rating.
 4. **Latency** — end-to-end wall time + per-token throughput.
@@ -110,6 +110,7 @@ type Score struct {
     ToolArgsValid       float64 // [0,1]
     AnswerQuality       float64 // [0,1]
     LatencyMs           int64
+    ScorerLatencyMs     int64
     TotalTokens         int
     Notes               string
 }
@@ -165,10 +166,22 @@ First implementation slice:
   to conversations; today `feedback_retrievals` and `feedback_signals`
   do not carry a conversation id.
 
-### Phase 3 — LLM-as-judge scorer (follow-up PR)
+### Phase 3 — LLM-as-judge scorer
 
-- Optional integration with Claude API for `AnswerQuality`
-- Careful prompt engineering + cache the judgments
+- Local Ollama-backed `llm-judge` scorer for `AnswerQuality`
+- Dedicated `-judge-model` selection. When omitted, `cmd/llm-bench`
+  reads the reference `models.json` `judge` role when available, then
+  falls back to `gemma4:31b`.
+- Optional `-judge-ollama-url` and `-judge-timeout` keep judge placement
+  and timeout budget separate from candidate replay.
+- Anti-self-preference guard: a candidate model is skipped rather than
+  judged by itself
+- Judge latency is excluded from `Score.LatencyMs`; that metric remains
+  replay-only. Scorer latency is reported separately.
+- Judge prompts compact trace turns before scoring so stored raw payloads
+  and oversized tool results do not silently dominate the context window.
+- Follow-up: persistent cache keyed by `(judge_model, trace_id,
+  transcript_hash)` so re-running over the same corpus is cheap
 
 ### Phase 4 — Live comparison runs
 
@@ -192,13 +205,12 @@ distinct tradeoffs:
 | Strategy | Cost per trace | Quality of judgment | Reproducibility |
 |---|---|---|---|
 | `exact-match` | ~0 | Low (brittle) | High |
-| `llm-judge` (Claude) | $0.01–0.05 | High | Moderate (varies with Claude updates) |
+| `llm-judge` (local Ollama) | Local inference time | High | Moderate (varies with judge model updates) |
 | `manual` | ~5 min of human time | Highest | Low (rater variance) |
 
-**TODO for Keith**: decide which Scorer ships in Phase 1. The skeleton
-assumes `exact-match` because it has no external dependencies, but for
-the actual comparison runs (Phase 4) we likely want `llm-judge` as the
-primary with `manual` spot-checks.
+The skeleton shipped with `exact-match` because it has no external
+dependencies. For actual comparison runs (Phase 4), use `llm-judge` as
+the primary scorer with `manual` spot-checks.
 
 This is a real decision point, not busywork — the scorer choice
 determines whether the harness is trustworthy enough to override the

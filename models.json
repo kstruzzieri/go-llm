@@ -24,6 +24,15 @@
       "context_window": 256000,
       "fallbacks": ["fast", "lightweight"]
     },
+    "judge": {
+      "name": "gemma4:31b",
+      "provider": "ollama",
+      "description": "Local LLM-as-judge for trace replay scoring; must not score itself in llm-bench",
+      "type": "dense",
+      "parameters": "31B",
+      "context_window": 256000,
+      "fallbacks": ["fast", "lightweight"]
+    },
     "fast": {
       "name": "qwen3.6:35b-a3b",
       "provider": "ollama",

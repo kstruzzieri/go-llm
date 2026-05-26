@@ -19,7 +19,7 @@ go get github.com/kstruzzieri/go-llm
 These pulls match the current reference lineup checked into `models.json`:
 
 ```bash
-# General / agent / analysis (reasoning, multimodal chat, tool use)
+# General / agent / judge / analysis (reasoning, multimodal chat, tool use)
 ollama pull gemma4:31b
 
 # Fast fallback / lower-latency chat
@@ -76,14 +76,17 @@ Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to dis
 |------|-------|-------------|
 | `general` | `gemma4:31b` (~20GB) | Complex reasoning, multimodal chat, long conversations |
 | `agent` | `gemma4:31b` (~20GB) | Tool use, agent loops, function calling |
+| `judge` | `gemma4:31b` (~20GB) | Local LLM-as-judge scoring for captured trace replays |
 | `fast` | `qwen3.6:35b-a3b` (~28GB) | Lower-latency chat and strong fallback path |
 | `coding` | `qwen3-coder-next:latest` (~46GB) | Code generation, review, FIM completions |
 | `lightweight` | `qwen3:8b` (~6GB) | Quick answers, classification, low-stakes tasks |
 | `embedding` | `qwen3-embedding:8b` (~5GB) | Vector embeddings for RAG search |
 
-The `analysis` use-case currently maps to the `general` role in
-`models.json`, so it also resolves to `gemma4:31b` unless you customize
-the defaults.
+The `analysis` use-case currently maps to the `general` role, so it also
+resolves to `gemma4:31b` unless you customize the defaults. The `judge`
+role is present for `cmd/llm-bench -scorer llm-judge`, but it is not in
+`defaults` because consumer apps should not expose it as a normal runtime
+use-case.
 
 ### Swapping Models
 

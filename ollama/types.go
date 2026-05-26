@@ -9,7 +9,7 @@ import (
 
 // Tool defines a tool the model may call during chat.
 type Tool struct {
-	Type     string       `json:"type"`     // always "function"
+	Type     string       `json:"type"` // always "function"
 	Function ToolFunction `json:"function"`
 }
 
@@ -38,11 +38,11 @@ type ToolCallFunction struct {
 
 // ChatMessage represents a single message in a chat conversation.
 type ChatMessage struct {
-	Role       string     `json:"role"`                    // system, user, assistant, tool
+	Role       string     `json:"role"` // system, user, assistant, tool
 	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`    // present when assistant invokes tools
-	ToolName   string     `json:"tool_name,omitempty"`     // set when role="tool" (result)
-	ToolCallID string     `json:"tool_call_id,omitempty"`  // correlates result with originating call
+	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // present when assistant invokes tools
+	ToolName   string     `json:"tool_name,omitempty"`    // set when role="tool" (result)
+	ToolCallID string     `json:"tool_call_id,omitempty"` // correlates result with originating call
 }
 
 // ChatRequest is the request body for the /api/chat endpoint.
@@ -50,6 +50,7 @@ type ChatRequest struct {
 	Model     string        `json:"model"`
 	Messages  []ChatMessage `json:"messages"`
 	Stream    bool          `json:"stream"`
+	Format    string        `json:"format,omitempty"` // e.g. "json" for structured output
 	Options   *ModelOptions `json:"options,omitempty"`
 	Tools     []Tool        `json:"tools,omitempty"`      // available tools
 	KeepAlive string        `json:"keep_alive,omitempty"` // e.g. "5m", "30m", "-1" (keep forever); empty = Ollama default
@@ -73,8 +74,8 @@ type ChatResponse struct {
 type ModelOptions struct {
 	Temperature   float64  `json:"temperature,omitempty"`
 	TopP          float64  `json:"top_p,omitempty"`
-	NumPredict    int      `json:"num_predict,omitempty"`    // max tokens to generate
-	NumCtx        int      `json:"num_ctx,omitempty"`        // context window size
+	NumPredict    int      `json:"num_predict,omitempty"` // max tokens to generate
+	NumCtx        int      `json:"num_ctx,omitempty"`     // context window size
 	Stop          []string `json:"stop,omitempty"`
 	RepeatPenalty float64  `json:"repeat_penalty,omitempty"`
 }
@@ -118,9 +119,9 @@ type ModelInfo struct {
 	ParamSize    string   `json:"parameter_size"`
 	QuantLevel   string   `json:"quantization_level"`
 	Digest       string   `json:"digest"`       // model version hash from /api/show
-	Family       string   `json:"family"`        // model family (e.g. "qwen2", "llama")
-	Template     string   `json:"template"`      // prompt template; non-empty for chat models
-	Capabilities []string `json:"capabilities"`  // e.g. ["completion","tools"]; nil if not reported
+	Family       string   `json:"family"`       // model family (e.g. "qwen2", "llama")
+	Template     string   `json:"template"`     // prompt template; non-empty for chat models
+	Capabilities []string `json:"capabilities"` // e.g. ["completion","tools"]; nil if not reported
 }
 
 // modelDetails is used when parsing /api/show responses.
