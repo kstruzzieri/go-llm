@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCanonicalCacheKey_StableUnderFieldReordering(t *testing.T) {
@@ -48,4 +51,69 @@ func TestCanonicalCacheKey_ExcludesExecutionOnlyFields(t *testing.T) {
 	if strings.TrimSpace(s) == "" {
 		t.Fatalf("empty key")
 	}
+}
+
+func newTestCache(t *testing.T) (*sqliteJudgeCache, string) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "judge.db")
+	c, err := openJudgeCache(path)
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	t.Cleanup(func() { _ = c.Close() })
+	return c, path
+}
+
+func TestSQLiteJudgeCache_PutThenGetReturnsEntry(t *testing.T) {
+	c, _ := newTestCache(t)
+	ctx := context.Background()
+	now := time.Date(2026, 5, 25, 12, 0, 0, 0, time.UTC)
+	entry := judgeCacheEntry{
+		CacheKey: "abc", JudgeModel: "ollama/gemma4:31b",
+		JudgeModelDigest: "sha256:deadbeef",
+		TraceID:          "t1", CandidateModel: "ollama/cand",
+		PromptHash:      "ph",
+		RequestJSON:     `{"v":1}`,
+		ResponseContent: `{"answer_quality":0.5,"justification":"ok"}`,
+		AnswerQuality:   0.5, Justification: "ok",
+		CreatedAt: now, LastUsedAt: now, HitCount: 0,
+	}
+	if err := c.Put(ctx, entry); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, ok, err := c.Get(ctx, "abc")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Get returned ok=false for present key")
+	}
+	if got.ResponseContent != entry.ResponseContent || got.AnswerQuality != 0.5 {
+		t.Fatalf("Get returned wrong entry: %+v", got)
+	}
+	if got.HitCount != 1 {
+		t.Fatalf("HitCount not bumped: %d", got.HitCount)
+	}
+}
+
+func TestSQLiteJudgeCache_GetMissingReturnsOkFalse(t *testing.T) {
+	c, _ := newTestCache(t)
+	_, ok, err := c.Get(context.Background(), "does-not-exist")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if ok {
+		t.Fatalf("Get returned ok=true for missing key")
+	}
+}
+
+func TestSQLiteJudgeCache_MigrationIdempotent(t *testing.T) {
+	_, path := newTestCache(t)
+	// Reopen same path; migration must not error or duplicate version row.
+	c2, err := openJudgeCache(path)
+	if err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	defer c2.Close()
 }
