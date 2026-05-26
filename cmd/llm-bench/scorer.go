@@ -49,6 +49,13 @@ type scorerOptions struct {
 	ollamaURL    string
 	judgeModel   string
 	judgeTimeout time.Duration
+	// judgeCache is the optional judge response cache. Callers MUST avoid
+	// the typed-nil interface trap: assign only a non-nil concrete
+	// implementation (e.g. *sqliteJudgeCache) or leave this field unset.
+	// openJudgeCache("") returns a nil *sqliteJudgeCache by design so the
+	// caller can decide whether to wrap it in this interface field.
+	judgeCache  judgeCacheStore
+	bypassCache bool // when true, the scorer skips both cache Get and Put
 }
 
 // newScorer returns the Scorer matching the given name.
@@ -71,6 +78,10 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 		if err := validateJudgeModel(ctx, client, scorer.JudgeModel); err != nil {
 			return nil, err
 		}
+		digest, _ := resolveJudgeDigest(ctx, client, scorer.JudgeModel)
+		scorer.JudgeModelDigest = digest
+		scorer.Cache = opts.judgeCache
+		scorer.BypassCache = opts.bypassCache
 		return scorer, nil
 	case "manual":
 		return nil, fmt.Errorf("manual scorer not yet implemented")
