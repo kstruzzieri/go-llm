@@ -258,6 +258,51 @@ func TestRunCalibrate_InsufficientLabelsNeverPasses(t *testing.T) {
 	}
 }
 
+func TestSlugifyModel_ReplacesSlashAndColon(t *testing.T) {
+	cases := map[string]string{
+		"ollama/gemma4:31b":              "ollama_gemma4_31b",
+		"ollama/qwen3-coder-next:latest": "ollama_qwen3-coder-next_latest",
+		"bare-name":                      "bare-name",
+	}
+	for in, want := range cases {
+		if got := slugifyModel(in); got != want {
+			t.Errorf("slugifyModel(%q) = %q; want %q", in, got, want)
+		}
+	}
+}
+
+func TestRunCalibrate_ReportFilenameIsSlugified(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	reportDir := filepath.Join(dir, "reports")
+	a := Artifact{TraceID: "t", CandidateModel: "ollama/c", ActualFinalAnswer: "x"}
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(arts, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{Label{
+		TraceID: "t", CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+		ExpectedAnswerQuality: 1.0, Labeler: "manual",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts,
+		Scorer:     &fakeScorer{judgeByTrace: map[string]float64{"t": 1.0}},
+		JudgeModel: "ollama/gemma4:31b",
+		MinLabels:  1,
+		ReportDir:  reportDir,
+		Clock:      func() time.Time { return time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if !strings.HasSuffix(res.ReportPath, "2026-05-25-ollama_gemma4_31b.md") {
+		t.Fatalf("ReportPath=%q; want suffix 2026-05-25-ollama_gemma4_31b.md", res.ReportPath)
+	}
+}
+
 // writeJSONL is a tiny test helper local to calibration_test.go.
 func writeJSONL(path string, records []any) error {
 	f, err := os.Create(path)
