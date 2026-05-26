@@ -651,3 +651,63 @@ func TestLLMJudgeScorer_BypassCache_AlwaysCallsJudgeAndDoesNotPersist(t *testing
 		t.Fatalf("BypassCache=true persisted %d rows; want 0", count)
 	}
 }
+
+// TestLLMJudgeScorer_CacheHit_FreshToolSequenceMatch is the load-bearing
+// invariant of the judge-cache architecture: on a cache hit the judge MUST
+// NOT be re-invoked, but the returned Score's ToolSequenceMatch MUST come
+// from THIS call's baseScore (computed fresh from current trace+actual),
+// never from a cached judgement field. Without this contract, a future
+// refactor that accidentally caches the full Score could silently mask
+// tool-loop regressions, since the cached ToolSequenceMatch would be
+// returned even when the candidate's actual tool calls have changed.
+func TestLLMJudgeScorer_CacheHit_FreshToolSequenceMatch(t *testing.T) {
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{
+		resp: &ollama.ChatResponse{
+			Message: ollama.ChatMessage{
+				Content: `{"answer_quality":0.5,"justification":"j"}`,
+			},
+		},
+	}
+	scorer := &LLMJudgeScorer{
+		Client:     judge,
+		JudgeModel: "ollama/gemma4:31b",
+		Cache:      c,
+	}
+
+	// Trace whose golden expects a single tool call.
+	trace := Trace{
+		ID:     "t",
+		System: "s",
+		Turns:  []Turn{{Role: "user", Content: "hi"}},
+		Golden: Golden{ToolCalls: []string{"read_file"}, FinalAnswerCriteria: "c"},
+	}
+	// First call: actual matches golden → ToolSequenceMatch=1.0 baked into
+	// baseScore and the judgement is persisted to the cache.
+	actualMatch := Result{Model: "ollama/cand", Transcript: []Turn{
+		{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file"}}},
+		{Role: "assistant", Content: "answer"},
+	}}
+	if _, err := scorer.Score(context.Background(), trace, actualMatch); err != nil {
+		t.Fatalf("seed Score: %v", err)
+	}
+	if judge.called != 1 {
+		t.Fatalf("judge called %d; want 1", judge.called)
+	}
+
+	// Second call: same trace + same actual → CACHE HIT. judge NOT re-called.
+	// The ToolSequenceMatch in the returned Score must come from THIS call's
+	// recomputation (against current trace+actual), not from the cached
+	// judgement.
+	s2, err := scorer.Score(context.Background(), trace, actualMatch)
+	if err != nil {
+		t.Fatalf("hit Score: %v", err)
+	}
+	if judge.called != 1 {
+		t.Fatalf("judge re-called on cache hit; called=%d", judge.called)
+	}
+	// ToolSequenceMatch is computed fresh from current trace+actual:
+	if s2.ToolSequenceMatch != 1.0 {
+		t.Fatalf("cache-hit ToolSequenceMatch=%v; want 1.0 (recomputed fresh)", s2.ToolSequenceMatch)
+	}
+}
