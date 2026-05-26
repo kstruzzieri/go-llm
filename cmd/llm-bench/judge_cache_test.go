@@ -163,7 +163,7 @@ func TestSQLiteJudgeCache_ConcurrentGetPut_NoRace(t *testing.T) {
 		go func(id int) {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
-				key := fmt.Sprintf("k-%d-%d", id, i%10) // intentional collisions across workers
+				key := fmt.Sprintf("k-%d-%d", id, i%10) // each worker re-touches its own 10-key window
 				now := time.Now().UTC()
 				_ = c.Put(ctx, judgeCacheEntry{
 					CacheKey: key, JudgeModel: "m", JudgeModelDigest: "d",
