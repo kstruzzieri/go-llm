@@ -158,6 +158,52 @@ func validateJudgeModel(ctx context.Context, checker judgeModelChecker, judgeMod
 	return fmt.Errorf("judge model %q is not available from the configured Ollama server; pull it or pass -judge-model/-judge-ollama-url", judgeModel)
 }
 
+// buildJudgeCall produces the judge ChatRequest and the partial Score that
+// will be merged with the judge's verdict. Pure over (trace, actual): no I/O
+// and no mutation. The cache key is derived from req; baseScore carries the
+// freshly-computed ToolSequenceMatch/Notes that must be recomputed each run
+// even on a cache hit so tool-loop changes are not masked by stale cache.
+func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.ChatRequest, Score, error) {
+	if sameModelSelector(s.JudgeModel, actual.Model) {
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q model %q: %w", trace.ID, actual.Model, errJudgeSelfPreference)
+	}
+
+	criteria := strings.TrimSpace(trace.Golden.FinalAnswerCriteria)
+	substring := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
+	if criteria == "" && substring == "" {
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
+	}
+
+	baseScore := Score{
+		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
+	}
+
+	if strings.TrimSpace(lastAssistantContent(actual.Transcript)) == "" {
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errNoAssistantFinalAnswer)
+	}
+
+	prompt, err := buildJudgePrompt(trace, actual)
+	if err != nil {
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: build judge prompt: %w", trace.ID, err)
+	}
+
+	req := ollama.ChatRequest{
+		Model: s.JudgeModel,
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: judgeSystemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		Format: "json",
+		Options: &ollama.ModelOptions{
+			Temperature: judgeTemperature,
+			NumPredict:  judgeTokenBudget,
+		},
+		KeepAlive: benchKeepAlive,
+	}
+	return req, baseScore, nil
+}
+
 func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
 	if sameModelSelector(s.JudgeModel, actual.Model) {
 		return Score{}, fmt.Errorf("trace %q model %q: %w", trace.ID, actual.Model, errJudgeSelfPreference)

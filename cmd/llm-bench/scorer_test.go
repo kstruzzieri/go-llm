@@ -183,6 +183,49 @@ func TestLLMJudgeScorer_HappyPath_PreRefactorBaseline(t *testing.T) {
 	}
 }
 
+func TestBuildJudgeCall_PopulatesBaseScoreAndRequest(t *testing.T) {
+	trace := Trace{
+		ID:     "t1",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "hi"}},
+		Golden: Golden{
+			ToolCalls:           []string{"read_file"},
+			FinalAnswerCriteria: "fc",
+		},
+	}
+	actual := Result{
+		Model:   "ollama/cand",
+		TraceID: "t1",
+		Transcript: []Turn{
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file"}}},
+			{Role: "assistant", Content: "done"},
+		},
+	}
+	scorer := &LLMJudgeScorer{Client: &fakeJudgeClient{}, JudgeModel: "ollama/judge"}
+	req, base, err := scorer.buildJudgeCall(trace, actual)
+	if err != nil {
+		t.Fatalf("buildJudgeCall: %v", err)
+	}
+	if req.Model != "ollama/judge" {
+		t.Fatalf("req.Model = %q; want ollama/judge", req.Model)
+	}
+	if req.Format != "json" {
+		t.Fatalf("req.Format = %q; want json", req.Format)
+	}
+	if base.ToolSequenceMatch != 1.0 {
+		t.Fatalf("baseScore.ToolSequenceMatch = %v; want 1.0", base.ToolSequenceMatch)
+	}
+}
+
+func TestBuildJudgeCall_SelfPreferenceGuard(t *testing.T) {
+	trace := Trace{ID: "t", System: "s", Turns: []Turn{{Role: "user", Content: "x"}}, Golden: Golden{FinalAnswerCriteria: "fc"}}
+	actual := Result{Model: "ollama/same", TraceID: "t", Transcript: []Turn{{Role: "assistant", Content: "y"}}}
+	scorer := &LLMJudgeScorer{Client: &fakeJudgeClient{}, JudgeModel: "ollama/same"}
+	if _, _, err := scorer.buildJudgeCall(trace, actual); !errors.Is(err, errJudgeSelfPreference) {
+		t.Fatalf("got %v; want errJudgeSelfPreference", err)
+	}
+}
+
 func TestLLMJudgeScorerScoresFromJSON(t *testing.T) {
 	client := &fakeJudgeClient{
 		resp: &ollama.ChatResponse{
