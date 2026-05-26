@@ -231,8 +231,9 @@ func TestRecordRejectsUnknownKind(t *testing.T) {
 func TestRecordRejectsBadStrength(t *testing.T) {
 	s, _ := NewMemoryStore(MemoryStoreConfig{})
 	nan := math.NaN()
-	inf := math.Inf(1)
-	cases := []*float64{&nan, &inf}
+	posInf := math.Inf(1)
+	negInf := math.Inf(-1)
+	cases := []*float64{&nan, &posInf, &negInf}
 	for _, sp := range cases {
 		err := s.Record(context.Background(), validKey(),
 			FeedbackSignal{Kind: RoutingSignalSuccess, Strength: sp})
@@ -251,6 +252,7 @@ func TestRecordRejectsBadPayload(t *testing.T) {
 		{"latency-without-positive-ms", FeedbackSignal{Kind: RoutingSignalLatency, LatencyMs: 0}},
 		{"latency-with-negative-ms", FeedbackSignal{Kind: RoutingSignalLatency, LatencyMs: -1}},
 		{"success-with-latency-ms", FeedbackSignal{Kind: RoutingSignalSuccess, LatencyMs: 100}},
+		{"failure-with-latency-ms", FeedbackSignal{Kind: RoutingSignalFailure, ErrorClass: "5xx", LatencyMs: 100}},
 		{"failure-without-class", FeedbackSignal{Kind: RoutingSignalFailure}},
 		{"success-with-error-class", FeedbackSignal{Kind: RoutingSignalSuccess, ErrorClass: "5xx"}},
 	}
@@ -285,17 +287,17 @@ func TestRecordAcceptsValidSignalAndDefaultsAt(t *testing.T) {
 		FeedbackSignal{Kind: RoutingSignalSuccess}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
-	after := time.Now()
+	// Add a small slack to upper bound for CI clock skew.
+	after := time.Now().Add(time.Second)
 	agg, _ := s.Get(context.Background(), validKey())
 	if agg.SampleCount != 1 {
 		t.Fatalf("SampleCount = %d, want 1", agg.SampleCount)
 	}
-	// UpdatedAt may or may not be exposed depending on the Get formula
-	// in Task 5's intermediate state; only assert if it's non-zero.
-	if !agg.UpdatedAt.IsZero() {
-		if agg.UpdatedAt.Before(before) || agg.UpdatedAt.After(after.Add(time.Second)) {
-			t.Fatalf("UpdatedAt %v outside [%v, %v]", agg.UpdatedAt, before, after)
-		}
+	if agg.UpdatedAt.IsZero() {
+		t.Fatal("UpdatedAt is zero; Record should have defaulted At to time.Now()")
+	}
+	if agg.UpdatedAt.Before(before) || agg.UpdatedAt.After(after) {
+		t.Fatalf("UpdatedAt %v outside [%v, %v]", agg.UpdatedAt, before, after)
 	}
 }
 
@@ -312,17 +314,37 @@ func TestRecordDefensiveCopiesStrengthAndMeta(t *testing.T) {
 		t.Fatalf("Record: %v", err)
 	}
 	// Mutate caller-owned values after Record returns; stored data must
-	// not change.
+	// not change. The store is an in-package neighbor, so we can lock
+	// and inspect s.signals directly — that is what actually proves the
+	// deep-copy worked.
 	strength = -1.0
 	meta["key"] = "v2"
 	meta["extra"] = "v3"
 
-	// We cannot directly read internal signals (no exported accessor); the
-	// canonical assertion is via Get once Task 6 lands the formula. For
-	// Task 5 we assert SampleCount is still 1 and Get does not panic.
-	agg, _ := s.Get(context.Background(), validKey())
-	if agg.SampleCount != 1 {
-		t.Fatalf("SampleCount = %d, want 1", agg.SampleCount)
+	s.mu.Lock()
+	storedSignals := s.signals[validKey()]
+	if len(storedSignals) != 1 {
+		s.mu.Unlock()
+		t.Fatalf("stored signals = %d, want 1", len(storedSignals))
+	}
+	stored := storedSignals[0]
+	if stored.Strength == nil {
+		s.mu.Unlock()
+		t.Fatal("stored Strength is nil")
+	}
+	storedStrength := *stored.Strength
+	storedMetaKey := stored.Meta["key"]
+	_, storedMetaHasExtra := stored.Meta["extra"]
+	s.mu.Unlock()
+
+	if storedStrength != 0.9 {
+		t.Errorf("stored Strength = %v, want 0.9", storedStrength)
+	}
+	if storedMetaKey != "v1" {
+		t.Errorf("stored Meta[key] = %q, want \"v1\"", storedMetaKey)
+	}
+	if storedMetaHasExtra {
+		t.Error("stored Meta unexpectedly saw caller mutation (extra key present)")
 	}
 }
 
