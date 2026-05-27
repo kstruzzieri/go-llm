@@ -13,6 +13,10 @@ import (
 const (
 	mcpClientName    = "llm-bench"
 	mcpClientVersion = "0"
+	// maxToolListPages caps pagination so a misbehaving MCP server can't
+	// keep llm-bench in tools/list forever. 1000 pages × typical page
+	// sizes is far above any plausible real tool catalog.
+	maxToolListPages = 1000
 )
 
 // mcpToolSchemaSource implements toolSchemaSource against an external
@@ -63,11 +67,29 @@ func (s *mcpToolSchemaSource) Snapshot(ctx context.Context) ([]json.RawMessage, 
 	}
 	defer func() { _ = session.Close() }()
 
+	return paginateSnapshot(ctx, session)
+}
+
+// toolListPager abstracts the page-fetching surface so paginateSnapshot
+// can be unit-tested without spinning up an MCP server.
+// *mcp.ClientSession already satisfies this interface.
+type toolListPager interface {
+	ListTools(ctx context.Context, params *mcp.ListToolsParams) (*mcp.ListToolsResult, error)
+}
+
+// paginateSnapshot walks tools/list with two safeguards against a
+// misbehaving server: (1) a hard cap at maxToolListPages, and
+// (2) detection of a repeated NextCursor (cycle).
+func paginateSnapshot(ctx context.Context, pager toolListPager) ([]json.RawMessage, error) {
 	var out []json.RawMessage
 	var cursor string
-	for {
+	seenCursors := make(map[string]struct{})
+	for page := 0; ; page++ {
+		if page >= maxToolListPages {
+			return nil, fmt.Errorf("mcp snapshot: tools/list exceeded %d pages", maxToolListPages)
+		}
 		params := &mcp.ListToolsParams{Cursor: cursor}
-		res, err := session.ListTools(ctx, params)
+		res, err := pager.ListTools(ctx, params)
 		if err != nil {
 			return nil, fmt.Errorf("mcp snapshot: tools/list: %w", err)
 		}
@@ -81,6 +103,13 @@ func (s *mcpToolSchemaSource) Snapshot(ctx context.Context) ([]json.RawMessage, 
 		if res.NextCursor == "" {
 			break
 		}
+		// A server that returns the same NextCursor twice is in a cycle.
+		// We track non-empty cursors only; the initial "" is the
+		// starting state, not a page identity.
+		if _, dup := seenCursors[res.NextCursor]; dup {
+			return nil, fmt.Errorf("mcp snapshot: tools/list cursor cycle on %q", res.NextCursor)
+		}
+		seenCursors[res.NextCursor] = struct{}{}
 		cursor = res.NextCursor
 	}
 	return out, nil

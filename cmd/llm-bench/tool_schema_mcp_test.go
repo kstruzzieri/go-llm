@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -107,5 +108,56 @@ func TestMarshalMinimalToolRejectsNilTool(t *testing.T) {
 func TestMarshalMinimalToolRejectsMissingName(t *testing.T) {
 	if _, err := marshalMinimalTool(&mcp.Tool{Name: " \t "}); err == nil || !strings.Contains(err.Error(), "missing name") {
 		t.Fatalf("want missing-name error; got %v", err)
+	}
+}
+
+// cyclingPager always reports the same NextCursor, simulating a buggy
+// MCP server stuck on a single page.
+type cyclingPager struct {
+	calls int
+}
+
+func (p *cyclingPager) ListTools(_ context.Context, _ *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+	p.calls++
+	return &mcp.ListToolsResult{
+		Tools:      []*mcp.Tool{{Name: "x", InputSchema: map[string]any{"type": "object"}}},
+		NextCursor: "same-cursor",
+	}, nil
+}
+
+func TestPaginateSnapshotDetectsCursorCycle(t *testing.T) {
+	p := &cyclingPager{}
+	_, err := paginateSnapshot(context.Background(), p)
+	if err == nil || !strings.Contains(err.Error(), "cursor cycle") {
+		t.Fatalf("want cursor cycle error; got %v (after %d calls)", err, p.calls)
+	}
+	if p.calls > 3 {
+		t.Fatalf("called %d times before detecting cycle; expected ≤2 (first page + duplicate)", p.calls)
+	}
+}
+
+// alwaysContinuingPager returns a unique NextCursor each call so the
+// pagination loop never terminates on its own — paginateSnapshot must
+// rely on the page cap.
+type alwaysContinuingPager struct {
+	calls int
+}
+
+func (p *alwaysContinuingPager) ListTools(_ context.Context, _ *mcp.ListToolsParams) (*mcp.ListToolsResult, error) {
+	p.calls++
+	return &mcp.ListToolsResult{
+		Tools:      []*mcp.Tool{{Name: fmt.Sprintf("t%d", p.calls), InputSchema: map[string]any{"type": "object"}}},
+		NextCursor: fmt.Sprintf("cursor-%d", p.calls),
+	}, nil
+}
+
+func TestPaginateSnapshotCapsPages(t *testing.T) {
+	p := &alwaysContinuingPager{}
+	_, err := paginateSnapshot(context.Background(), p)
+	if err == nil || !strings.Contains(err.Error(), "exceeded") {
+		t.Fatalf("want exceeded-pages error; got %v", err)
+	}
+	if p.calls != maxToolListPages {
+		t.Fatalf("calls=%d; want %d", p.calls, maxToolListPages)
 	}
 }
