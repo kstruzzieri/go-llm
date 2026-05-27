@@ -109,6 +109,13 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	if len(opts.Targets) == 0 {
 		return errors.New("calibrate-capture: no targets")
 	}
+	traceByID := make(map[string]Trace, len(opts.Traces))
+	for _, trace := range opts.Traces {
+		if _, ok := traceByID[trace.ID]; ok {
+			return fmt.Errorf("calibrate-capture: duplicate trace ID %q", trace.ID)
+		}
+		traceByID[trace.ID] = trace
+	}
 	results, err := opts.Runner.RunAll(ctx, opts.Targets, opts.Traces)
 	if err != nil {
 		return fmt.Errorf("calibrate-capture: run: %w", err)
@@ -117,11 +124,6 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	if opts.Clock != nil {
 		now = opts.Clock
 	}
-	traceByID := make(map[string]Trace, len(opts.Traces))
-	for _, trace := range opts.Traces {
-		traceByID[trace.ID] = trace
-	}
-
 	var artifacts []Artifact
 	failed := 0
 	for _, r := range results {

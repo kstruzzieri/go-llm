@@ -18,9 +18,11 @@ import (
 // need a live Ollama for the capture test.
 type fakeRunner struct {
 	results []Result
+	calls   int
 }
 
 func (f *fakeRunner) RunAll(ctx context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
+	f.calls++
 	return f.results, nil
 }
 
@@ -100,6 +102,32 @@ func TestRunCalibrateCapture_FailsWhenNoArtifactsWritten(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "no artifacts written") {
 		t.Fatalf("runCalibrateCapture err = %v; want no artifacts written", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Fatalf("output stat err = %v; want file not created", statErr)
+	}
+}
+
+func TestRunCalibrateCapture_DuplicateTraceIDRejectedBeforeReplay(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "artifacts.jsonl")
+	runner := &fakeRunner{results: []Result{
+		{Model: "ollama/cand", TraceID: "dup", Transcript: []Turn{{Role: "assistant", Content: "answer"}}},
+	}}
+	traces := []Trace{
+		{ID: "dup", System: "s1", Turns: []Turn{{Role: "user", Content: "u1"}}, Golden: Golden{FinalAnswerCriteria: "c1"}},
+		{ID: "dup", System: "s2", Turns: []Turn{{Role: "user", Content: "u2"}}, Golden: Golden{FinalAnswerCriteria: "c2"}},
+	}
+	targets := []ModelTarget{{Display: "ollama/cand", Provider: "ollama", Model: "cand"}}
+
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: runner, Targets: targets, Traces: traces, OutputPath: out,
+	})
+	if err == nil || !strings.Contains(err.Error(), `duplicate trace ID "dup"`) {
+		t.Fatalf("runCalibrateCapture err = %v; want duplicate trace ID", err)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("RunAll calls = %d; want 0", runner.calls)
 	}
 	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
 		t.Fatalf("output stat err = %v; want file not created", statErr)
