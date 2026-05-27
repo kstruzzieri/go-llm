@@ -161,3 +161,40 @@ func TestPaginateSnapshotCapsPages(t *testing.T) {
 		t.Fatalf("calls=%d; want %d", p.calls, maxToolListPages)
 	}
 }
+
+func TestNewMCPToolSchemaSourceStdioDefersTransport(t *testing.T) {
+	// The constructor must NOT build the transport eagerly. Snapshot
+	// builds it lazily with exec.CommandContext so SIGINT kills the
+	// stdio child — eagerly building with exec.Command would leak the
+	// subprocess on cancellation.
+	src, err := newMCPToolSchemaSourceStdio("nonexistent-binary arg1 arg2")
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	if src.transport != nil {
+		t.Fatalf("stdio source eagerly built a transport; want lazy")
+	}
+	if got, want := src.stdioCmd, []string{"nonexistent-binary", "arg1", "arg2"}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("stdioCmd=%v; want %v", got, want)
+	}
+	tr, err := src.buildTransport(context.Background())
+	if err != nil {
+		t.Fatalf("buildTransport: %v", err)
+	}
+	if _, ok := tr.(*mcp.CommandTransport); !ok {
+		t.Fatalf("buildTransport returned %T; want *mcp.CommandTransport", tr)
+	}
+}
+
+func TestNewMCPToolSchemaSourceHTTPDefersTransport(t *testing.T) {
+	src, err := newMCPToolSchemaSourceHTTP("http://example.invalid")
+	if err != nil {
+		t.Fatalf("constructor: %v", err)
+	}
+	if src.transport != nil {
+		t.Fatalf("http source eagerly built a transport; want lazy")
+	}
+	if src.httpURL != "http://example.invalid" {
+		t.Fatalf("httpURL=%q; want http://example.invalid", src.httpURL)
+	}
+}

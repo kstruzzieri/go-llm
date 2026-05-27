@@ -24,13 +24,18 @@ const (
 // newMCPToolSchemaSourceHTTP — never instantiate the struct literal
 // directly outside tests.
 //
-// Lifecycle: Snapshot opens a fresh ClientSession, paginates through
-// tools/list, marshals each Tool into the minimal {name, description,
-// inputSchema} JSON shape, then closes the session. There is no
-// shared connection — the caller invokes Snapshot exactly once per
-// capture run (see spec §4.2).
+// Lifecycle: Snapshot constructs the transport bound to the caller's
+// context (so SIGINT or a timeout cancels the stdio subprocess),
+// opens a fresh ClientSession, paginates through tools/list, marshals
+// each Tool into the minimal {name, description, inputSchema} JSON
+// shape, then closes the session. There is no shared connection — the
+// caller invokes Snapshot exactly once per capture run (see spec §4.2).
 type mcpToolSchemaSource struct {
+	// transport, when non-nil, bypasses stdioCmd/httpURL — used by
+	// tests with an in-memory transport.
 	transport  mcp.Transport
+	stdioCmd   []string // [0]=binary, [1:]=args; transport built lazily with exec.CommandContext
+	httpURL    string   // transport built lazily with StreamableClientTransport
 	clientName string
 }
 
@@ -39,8 +44,7 @@ func newMCPToolSchemaSourceStdio(command string) (*mcpToolSchemaSource, error) {
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty mcp-stdio-command")
 	}
-	transport := &mcp.CommandTransport{Command: exec.Command(parts[0], parts[1:]...)}
-	return &mcpToolSchemaSource{transport: transport, clientName: mcpClientName}, nil
+	return &mcpToolSchemaSource{stdioCmd: parts, clientName: mcpClientName}, nil
 }
 
 func newMCPToolSchemaSourceHTTP(endpoint string) (*mcpToolSchemaSource, error) {
@@ -48,20 +52,36 @@ func newMCPToolSchemaSourceHTTP(endpoint string) (*mcpToolSchemaSource, error) {
 	if endpoint == "" {
 		return nil, fmt.Errorf("empty mcp-url")
 	}
-	transport := &mcp.StreamableClientTransport{Endpoint: endpoint}
-	return &mcpToolSchemaSource{transport: transport, clientName: mcpClientName}, nil
+	return &mcpToolSchemaSource{httpURL: endpoint, clientName: mcpClientName}, nil
+}
+
+// buildTransport produces the transport bound to ctx. Stdio subprocesses
+// are built with exec.CommandContext so context cancellation terminates
+// the child process — using exec.Command leaves zombies on SIGINT.
+func (s *mcpToolSchemaSource) buildTransport(ctx context.Context) (mcp.Transport, error) {
+	if s.transport != nil {
+		return s.transport, nil
+	}
+	if len(s.stdioCmd) > 0 {
+		return &mcp.CommandTransport{Command: exec.CommandContext(ctx, s.stdioCmd[0], s.stdioCmd[1:]...)}, nil
+	}
+	if s.httpURL != "" {
+		return &mcp.StreamableClientTransport{Endpoint: s.httpURL}, nil
+	}
+	return nil, fmt.Errorf("mcp snapshot: nil transport")
 }
 
 func (s *mcpToolSchemaSource) Snapshot(ctx context.Context) ([]json.RawMessage, error) {
-	if s.transport == nil {
-		return nil, fmt.Errorf("mcp snapshot: nil transport")
+	transport, err := s.buildTransport(ctx)
+	if err != nil {
+		return nil, err
 	}
 	clientName := s.clientName
 	if clientName == "" {
 		clientName = mcpClientName
 	}
 	client := mcp.NewClient(&mcp.Implementation{Name: clientName, Version: mcpClientVersion}, nil)
-	session, err := client.Connect(ctx, s.transport, nil)
+	session, err := client.Connect(ctx, transport, nil)
 	if err != nil {
 		return nil, fmt.Errorf("mcp snapshot: connect: %w", err)
 	}
