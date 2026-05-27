@@ -143,6 +143,17 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 // or by the post-stream code (using the real stream-method error). User-
 // callback errors are captured separately and attributed as
 // AttemptStatusUnknown.
+//
+// The user-supplied fn MUST be called serially in the calling goroutine —
+// closure-captured attempt state is mutated without synchronization. The
+// stock Provider implementations honor this; custom Provider implementations
+// that fan callbacks out to goroutines would race.
+//
+// When fallback occurs, fn may be invoked with chunks from multiple
+// providers (the failed primary's partial chunks AND the fallback's
+// chunks). Each Done chunk's RouteOutcome reflects the chain up to that
+// point; consumers that accumulate chunks across providers should treat
+// the Done chunk's RouteOutcome as authoritative for the final attribution.
 func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse) error) error {
 	if rp.Budget.Decision == BudgetTruncate {
 		return ErrBudgetAdaptationRequired
@@ -191,11 +202,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		if callbackErr != nil {
 			// User aborted via callback. Attribute as Unknown, not a
 			// provider failure.
-			attempts = append(attempts, RouteAttempt{
-				Key:       rp.Profile.Key,
-				Status:    AttemptStatusUnknown,
-				LatencyMs: time.Since(primaryStart).Milliseconds(),
-			})
+			attempts = append(attempts, makeUnknownAttempt(rp.Profile.Key, time.Since(primaryStart)))
 		} else {
 			attempts = append(attempts,
 				makeAttempt(rp.Profile.Key, err, time.Since(primaryStart)))
@@ -210,7 +217,6 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildChatRequest(true)
 				delivered = false
-				fallbacksUsed = i + 1
 				fbStart := time.Now()
 				fbStreamDone := false
 				var fbCallbackErr error
@@ -222,13 +228,19 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 					if chunk.Done && !chunk.Partial && !fbStreamDone {
 						pendingAttempts := append(attempts,
 							makeAttempt(fb.Profile.Key, nil, time.Since(fbStart)))
-						pendingOutcome := rp.buildOutcome(fallbacksUsed, pendingAttempts)
+						// Done implies this fallback served the request, so it
+						// is the SELECTED fallback. Pending-only until the
+						// callback returns nil — keeps the idempotent
+						// finalization contract.
+						pendingFallbacksUsed := i + 1
+						pendingOutcome := rp.buildOutcome(pendingFallbacksUsed, pendingAttempts)
 						chunk.RouteOutcome = pendingOutcome
 						if e := fn(chunk); e != nil {
 							fbCallbackErr = e
 							return e
 						}
 						attempts = pendingAttempts
+						fallbacksUsed = pendingFallbacksUsed
 						fbStreamDone = true
 						outcome = pendingOutcome
 						rp.recordResult(nil, fallbacksUsed, attempts, outcome)
@@ -245,11 +257,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 
 				if !fbStreamDone {
 					if fbCallbackErr != nil {
-						attempts = append(attempts, RouteAttempt{
-							Key:       fb.Profile.Key,
-							Status:    AttemptStatusUnknown,
-							LatencyMs: time.Since(fbStart).Milliseconds(),
-						})
+						attempts = append(attempts, makeUnknownAttempt(fb.Profile.Key, time.Since(fbStart)))
 					} else {
 						attempts = append(attempts,
 							makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
@@ -257,6 +265,9 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 				}
 
 				if err == nil {
+					// Stream returned cleanly without a Done chunk; this
+					// fallback still served the (incomplete) response.
+					fallbacksUsed = i + 1
 					break
 				}
 				if IsInfrastructureError(err) {
@@ -339,6 +350,16 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 // or by the post-stream code (using the real stream-method error). User-
 // callback errors are captured separately and attributed as
 // AttemptStatusUnknown.
+//
+// The user-supplied fn MUST be called serially in the calling goroutine —
+// closure-captured attempt state is mutated without synchronization. The
+// stock Provider implementations honor this; custom Provider implementations
+// that fan callbacks out to goroutines would race.
+//
+// When fallback occurs, fn may be invoked with chunks from multiple
+// providers. Each Done chunk's RouteOutcome reflects the chain up to that
+// point; consumers that accumulate chunks across providers should treat
+// the Done chunk's RouteOutcome as authoritative for the final attribution.
 func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(GenerateResponse) error) error {
 	if rp.Budget.Decision == BudgetTruncate {
 		return ErrBudgetAdaptationRequired
@@ -387,11 +408,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		if callbackErr != nil {
 			// User aborted via callback. Attribute as Unknown, not a
 			// provider failure.
-			attempts = append(attempts, RouteAttempt{
-				Key:       rp.Profile.Key,
-				Status:    AttemptStatusUnknown,
-				LatencyMs: time.Since(primaryStart).Milliseconds(),
-			})
+			attempts = append(attempts, makeUnknownAttempt(rp.Profile.Key, time.Since(primaryStart)))
 		} else {
 			attempts = append(attempts,
 				makeAttempt(rp.Profile.Key, err, time.Since(primaryStart)))
@@ -406,7 +423,6 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 			for i, fb := range rp.Fallbacks {
 				fbReq := fb.buildGenerateRequest(true)
 				delivered = false
-				fallbacksUsed = i + 1
 				fbStart := time.Now()
 				fbStreamDone := false
 				var fbCallbackErr error
@@ -418,13 +434,19 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 					if chunk.Done && !chunk.Partial && !fbStreamDone {
 						pendingAttempts := append(attempts,
 							makeAttempt(fb.Profile.Key, nil, time.Since(fbStart)))
-						pendingOutcome := rp.buildOutcome(fallbacksUsed, pendingAttempts)
+						// Done implies this fallback served the request, so it
+						// is the SELECTED fallback. Pending-only until the
+						// callback returns nil — keeps the idempotent
+						// finalization contract.
+						pendingFallbacksUsed := i + 1
+						pendingOutcome := rp.buildOutcome(pendingFallbacksUsed, pendingAttempts)
 						chunk.RouteOutcome = pendingOutcome
 						if e := fn(chunk); e != nil {
 							fbCallbackErr = e
 							return e
 						}
 						attempts = pendingAttempts
+						fallbacksUsed = pendingFallbacksUsed
 						fbStreamDone = true
 						outcome = pendingOutcome
 						rp.recordResult(nil, fallbacksUsed, attempts, outcome)
@@ -441,11 +463,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 
 				if !fbStreamDone {
 					if fbCallbackErr != nil {
-						attempts = append(attempts, RouteAttempt{
-							Key:       fb.Profile.Key,
-							Status:    AttemptStatusUnknown,
-							LatencyMs: time.Since(fbStart).Milliseconds(),
-						})
+						attempts = append(attempts, makeUnknownAttempt(fb.Profile.Key, time.Since(fbStart)))
 					} else {
 						attempts = append(attempts,
 							makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
@@ -453,6 +471,9 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 				}
 
 				if err == nil {
+					// Stream returned cleanly without a Done chunk; this
+					// fallback still served the (incomplete) response.
+					fallbacksUsed = i + 1
 					break
 				}
 				if IsInfrastructureError(err) {
@@ -540,22 +561,17 @@ func (rp *RoutePlan) handleResult(err error, fallbacksUsed int, attempts []Route
 	return outcome
 }
 
+// recordResult attributes warmth and (on success) success signals against the
+// last-touched model, then forwards the prebuilt outcome to the feedback seam.
+// Warmth derives from attempts[last].Key when available — the last attempt is
+// always the most recently touched model regardless of outcome, so the OS page
+// cache is hot for that model whether it succeeded, failed, or was cancelled.
+// Falls back to rp.Profile.Key only when called directly by tests with a nil
+// attempts slice; production Execute* methods always populate it.
 func (rp *RoutePlan) recordResult(err error, fallbacksUsed int, attempts []RouteAttempt, outcome *RouteOutcome) {
-	// Derive the most recently attempted key for warmth/success attribution.
-	// attempts[last].Key is correct in every case Execute* produces: success,
-	// infra failure, cancellation after a fallback was tried. The previous
-	// fallbacksUsed-arithmetic mis-attributed warmth to the primary when a
-	// fallback was attempted but never successfully selected.
-	//
-	// While the Execute* call sites still pass attempts=nil (Tasks 5-9 fill
-	// these in), fall back to the legacy fallbacksUsed-based derivation so
-	// existing tests and consumer behavior continue to observe RecordSuccess
-	// against the actually-selected fallback.
 	actualKey := rp.Profile.Key
 	if len(attempts) > 0 {
 		actualKey = attempts[len(attempts)-1].Key
-	} else if fallbacksUsed > 0 && fallbacksUsed <= len(rp.Fallbacks) {
-		actualKey = rp.Fallbacks[fallbacksUsed-1].Profile.Key
 	}
 
 	if err == nil {
@@ -570,13 +586,15 @@ func (rp *RoutePlan) recordResult(err error, fallbacksUsed int, attempts []Route
 }
 
 // buildOutcome constructs a RouteOutcome from the plan, fallback index, and
-// per-attempt trace. ActualModel reflects the *selected* fallback (the model
-// whose response is in the user's hand). Attempts records every provider
-// call that happened, in order.
+// per-attempt trace. ActualModel reflects the model whose response served
+// the request — the last attempt's key when it succeeded, otherwise the
+// planned (primary) model. This keeps ActualModel consistent across both
+// non-streaming and streaming Execute methods regardless of how the
+// fallbacksUsed counter was updated mid-stream.
 func (rp *RoutePlan) buildOutcome(fallbacksUsed int, attempts []RouteAttempt) *RouteOutcome {
 	actualKey := rp.Profile.Key
-	if fallbacksUsed > 0 && fallbacksUsed <= len(rp.Fallbacks) {
-		actualKey = rp.Fallbacks[fallbacksUsed-1].Profile.Key
+	if n := len(attempts); n > 0 && attempts[n-1].Status == AttemptStatusSucceeded {
+		actualKey = attempts[n-1].Key
 	}
 	return &RouteOutcome{
 		PlannedModel:  rp.Profile.Key,
@@ -667,6 +685,9 @@ var routeIDRand io.Reader = rand.Reader
 // opaque correlation ID on RouteOutcome.RouteID. crypto/rand failures are
 // silently coerced to an empty string — RouteID is informational; we do
 // not want routing paths to fail because the OS RNG returned an error.
+//
+// TODO(#48-phase5-pr3): once-logged warning on first RNG failure so
+// operators discover the cause when correlation IDs disappear.
 func newRouteID() string {
 	var b [16]byte
 	if _, err := io.ReadFull(routeIDRand, b[:]); err != nil {
@@ -684,26 +705,62 @@ func newRouteID() string {
 //   - Negative duration clamps to LatencyMs=0.
 func makeAttempt(key ModelKey, err error, duration time.Duration) RouteAttempt {
 	class, status := classifyError(err)
-	ms := duration.Milliseconds()
-	if ms < 0 {
-		ms = 0
-	}
 	return RouteAttempt{
 		Key:        key,
 		Status:     status,
-		LatencyMs:  ms,
+		LatencyMs:  clampMs(duration),
 		ErrorClass: string(class),
 	}
 }
 
+// makeUnknownAttempt builds a RouteAttempt with AttemptStatusUnknown — used
+// by streaming Execute methods when a user-callback error aborts the stream
+// before a Done chunk. The attribution must NOT classify as a provider
+// failure (the provider may have been healthy), and Unknown signals are
+// no-ops in RoutingFeedback. Shares clampMs with makeAttempt so negative
+// monotonic-clock excursions can't produce negative LatencyMs.
+func makeUnknownAttempt(key ModelKey, duration time.Duration) RouteAttempt {
+	return RouteAttempt{
+		Key:       key,
+		Status:    AttemptStatusUnknown,
+		LatencyMs: clampMs(duration),
+	}
+}
+
+// clampMs converts a duration to milliseconds, clamping negative values to 0
+// to guard against non-monotonic clock excursions.
+func clampMs(duration time.Duration) int64 {
+	ms := duration.Milliseconds()
+	if ms < 0 {
+		return 0
+	}
+	return ms
+}
+
+// feedbackWriteTimeout bounds how long recordOutcomeFeedback will wait for
+// the store before giving up. Picked to be generous for an in-memory store
+// and survivable for a SQLite store under contention. Without this bound a
+// stuck store (locked WAL, frozen filesystem) would block every routed
+// request indefinitely.
+const feedbackWriteTimeout = 1 * time.Second
+
 // recordOutcomeFeedback delegates to RoutingFeedback.RecordOutcome when a
 // feedback wrapper is configured AND the routing request has a non-empty
 // UseCase. Errors are swallowed — the seam is observational, never
-// load-bearing for routing. Uses context.Background() so cancellation of
-// the request's ctx does not cut short the feedback write.
+// load-bearing for routing. Uses a fresh context with a bounded timeout
+// (not the request ctx) so cancellation of the caller's ctx does not cut
+// short the feedback write, and so a slow/stuck store does not block the
+// routing path indefinitely.
+//
+// TODO(#48-phase5-pr3): expose a counter or once-logged warning when the
+// store returns a non-nil error. Today's silent-swallow makes a broken
+// store look identical to a working empty store from the operator's view.
+// Tracked for the PR that adds the SQLite-backed store.
 func (rp *RoutePlan) recordOutcomeFeedback(outcome *RouteOutcome) {
 	if rp.feedback == nil || outcome == nil || rp.Request.UseCase == "" {
 		return
 	}
-	_ = rp.feedback.RecordOutcome(context.Background(), rp.Request.UseCase, *outcome)
+	ctx, cancel := context.WithTimeout(context.Background(), feedbackWriteTimeout)
+	defer cancel()
+	_ = rp.feedback.RecordOutcome(ctx, rp.Request.UseCase, *outcome)
 }

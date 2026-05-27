@@ -44,6 +44,16 @@ func TestClassifyError(t *testing.T) {
 		{"wrapped-status-code-interface-503", fmt.Errorf("wrapped: %w", testStatusCodeError(503)), ErrorClass5xx, AttemptStatusFailed},
 		{"status-code-interface-404", testStatusCodeError(404), ErrorClass4xx, AttemptStatusFailed},
 		{"wrapped-ollama-api-error-429", fmt.Errorf("provider: ollama: chat: %w", &ollama.APIError{StatusCode: 429}), ErrorClassRateLimit, AttemptStatusFailed},
+		// Wrapped *HTTPStatusError must also traverse the unwrap chain — guards
+		// against a future refactor that drops the errors.As path.
+		{"wrapped-http-503", fmt.Errorf("provider: %w", &HTTPStatusError{StatusCode: 503}), ErrorClass5xx, AttemptStatusFailed},
+		{"wrapped-net-error", fmt.Errorf("dial: %w", &net.OpError{Op: "dial", Err: errors.New("refused")}), ErrorClassNetwork, AttemptStatusFailed},
+		{"wrapped-canceled", fmt.Errorf("provider: %w", context.Canceled), "", AttemptStatusUnknown},
+		// Status codes outside [400,599] fall through to unknown — pins the
+		// vocabulary's deliberate gap so future refactors can't widen it
+		// silently.
+		{"http-200-unexpected", &HTTPStatusError{StatusCode: 200}, ErrorClassUnknown, AttemptStatusFailed},
+		{"http-301-unexpected", &HTTPStatusError{StatusCode: 301}, ErrorClassUnknown, AttemptStatusFailed},
 		{"unknown", errors.New("something else"), ErrorClassUnknown, AttemptStatusFailed},
 	}
 	for _, tc := range cases {

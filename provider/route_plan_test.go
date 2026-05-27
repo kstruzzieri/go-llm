@@ -36,8 +36,8 @@ type rpMockProvider struct {
 	mu               sync.Mutex
 }
 
-func (m *rpMockProvider) Name() string         { return m.name }
-func (m *rpMockProvider) Capabilities() Capability { return m.caps }
+func (m *rpMockProvider) Name() string                   { return m.name }
+func (m *rpMockProvider) Capabilities() Capability       { return m.caps }
 func (m *rpMockProvider) Health(_ context.Context) error { return m.healthErr }
 func (m *rpMockProvider) Models(_ context.Context) ([]ModelInfo, error) {
 	return m.models, nil
@@ -198,9 +198,9 @@ func newTestPlan(prov *rpMockProvider, rec *rpMockRecorder) *RoutePlan {
 			UseCase:  "chat",
 			Messages: []ChatMessage{{Role: "user", Content: "hello"}},
 		},
-		Score:  0.85,
-		Budget: BudgetResult{Decision: BudgetOK},
-		Reason: "best candidate",
+		Score:    0.85,
+		Budget:   BudgetResult{Decision: BudgetOK},
+		Reason:   "best candidate",
 		recorder: rec,
 	}
 }
@@ -1045,7 +1045,11 @@ func TestExecuteChatStreamDonePartialDefersToPostStream(t *testing.T) {
 	// is finalized as Unknown via a real RoutingFeedback store.
 }
 
-func TestExecuteChatStreamCallbackErrorAttributedAsUnknown(t *testing.T) {
+func TestExecuteChatStreamPropagatesCallbackError(t *testing.T) {
+	// Renamed from TestExecuteChatStreamCallbackErrorAttributedAsUnknown:
+	// this test only verifies error propagation. The Unknown-attribution
+	// invariant is verified end-to-end via the feedback store in
+	// TestExecuteChatStreamCallbackErrorDoesNotRecordProviderFailure.
 	prov := &rpMockProvider{
 		name: "ollama", caps: CapChat,
 		chatStreamChunks: []ChatResponse{
@@ -1067,10 +1071,6 @@ func TestExecuteChatStreamCallbackErrorAttributedAsUnknown(t *testing.T) {
 	if !errors.Is(err, callbackErr) {
 		t.Fatalf("err = %v, want callbackErr", err)
 	}
-	// We can't inspect attempts here; the load-bearing test is in Task 11's
-	// integration coverage with a real feedback store. The point of THIS
-	// test is to confirm the error path completes without panic and the
-	// callback error is propagated as-is.
 }
 
 func TestExecuteChatStreamFallbackOnPrimaryInfraError(t *testing.T) {
@@ -1112,6 +1112,44 @@ func TestExecuteChatStreamFallbackOnPrimaryInfraError(t *testing.T) {
 	}
 	if att[1].Status != AttemptStatusSucceeded || att[1].Key.Provider != "ollama-b" {
 		t.Errorf("att[1] = %+v, want Succeeded/ollama-b", att[1])
+	}
+}
+
+func TestBuildOutcomeActualModelOnAllFail(t *testing.T) {
+	// When every attempt failed, ActualModel must fall back to PlannedModel
+	// (primary), not to the last-tried fallback. This locks in the streaming
+	// fix where fallbacksUsed is no longer eagerly set at the top of each
+	// iteration — buildOutcome derives ActualModel from
+	// attempts[last].Status == Succeeded.
+	rp := newTestPlan(&rpMockProvider{name: "ollama-a", caps: CapChat}, &rpMockRecorder{})
+	rp.Profile.Key = ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}
+	attempts := []RouteAttempt{
+		{Key: ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}, Status: AttemptStatusFailed, ErrorClass: "5xx"},
+		{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}, Status: AttemptStatusFailed, ErrorClass: "5xx"},
+	}
+	// fallbacksUsed=2 reflects "two fallbacks were tried" but none succeeded.
+	out := rp.buildOutcome(2, attempts)
+	if out.ActualModel != rp.Profile.Key {
+		t.Errorf("ActualModel = %+v, want PlannedModel %+v (no attempt succeeded)", out.ActualModel, rp.Profile.Key)
+	}
+	if out.PlannedModel != rp.Profile.Key {
+		t.Errorf("PlannedModel = %+v, want %+v", out.PlannedModel, rp.Profile.Key)
+	}
+}
+
+func TestBuildOutcomeActualModelOnFallbackSuccess(t *testing.T) {
+	// Inverse: when the last attempt succeeded, ActualModel reflects that
+	// model's key — regardless of fallbacksUsed counter value.
+	rp := newTestPlan(&rpMockProvider{name: "ollama-a", caps: CapChat}, &rpMockRecorder{})
+	rp.Profile.Key = ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}
+	fbKey := ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}
+	attempts := []RouteAttempt{
+		{Key: rp.Profile.Key, Status: AttemptStatusFailed, ErrorClass: "5xx"},
+		{Key: fbKey, Status: AttemptStatusSucceeded},
+	}
+	out := rp.buildOutcome(1, attempts)
+	if out.ActualModel != fbKey {
+		t.Errorf("ActualModel = %+v, want fallback %+v", out.ActualModel, fbKey)
 	}
 }
 
@@ -1330,8 +1368,10 @@ func TestExecuteChatEndToEndRecordsPerAttemptFeedback(t *testing.T) {
 
 	// Verify the stored signals carry the right ErrorClass for the
 	// primary failure. Inspect under lock since signals isn't exported.
+	// Copy under the lock to avoid aliasing the store's slice — matches
+	// the production MemoryStore.Get pattern.
 	store.mu.Lock()
-	pSigs := store.signals[primaryKey]
+	pSigs := append([]FeedbackSignal(nil), store.signals[primaryKey]...)
 	store.mu.Unlock()
 	var failureCount int
 	for _, sig := range pSigs {
