@@ -391,13 +391,89 @@ func redactToolSchemas(tools []json.RawMessage, redactor redactor) ([]json.RawMe
 	}
 	out := make([]json.RawMessage, len(tools))
 	for i, raw := range tools {
-		redacted, err := redactRawJSON(raw, redactor)
+		redacted, err := redactToolSchema(raw, redactor)
 		if err != nil {
 			return nil, fmt.Errorf("tool[%d]: %w", i, err)
 		}
 		out[i] = redacted
 	}
 	return out, nil
+}
+
+func redactToolSchema(raw json.RawMessage, redactor redactor) (json.RawMessage, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage(`{}`), nil
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	value = redactSchemaJSONValue(value, redactor, false)
+
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+func redactSchemaJSONValue(value any, redactor redactor, sensitiveProperty bool) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, nested := range v {
+			keySensitive := sensitiveProperty || isSensitiveKey(key)
+			if sensitiveProperty && isSensitiveSchemaValueKey(key) {
+				v[key] = redactSensitiveSchemaValue(nested, redactor)
+				continue
+			}
+			redacted := redactSchemaJSONValue(nested, redactor, keySensitive)
+			if _, ok := redacted.(string); ok && isSensitiveKey(key) {
+				v[key] = redactor.secretPlaceholder
+				continue
+			}
+			v[key] = redacted
+		}
+		return v
+	case []any:
+		for i, nested := range v {
+			v[i] = redactSchemaJSONValue(nested, redactor, sensitiveProperty)
+		}
+		return v
+	case string:
+		return redactor.Redact(v)
+	default:
+		return value
+	}
+}
+
+func redactSensitiveSchemaValue(value any, redactor redactor) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, nested := range v {
+			v[key] = redactSensitiveSchemaValue(nested, redactor)
+		}
+		return v
+	case []any:
+		for i, nested := range v {
+			v[i] = redactSensitiveSchemaValue(nested, redactor)
+		}
+		return v
+	case string:
+		return redactor.secretPlaceholder
+	default:
+		return value
+	}
+}
+
+func isSensitiveSchemaValueKey(key string) bool {
+	switch strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_")) {
+	case "default", "examples", "enum", "const":
+		return true
+	default:
+		return false
+	}
 }
 
 func redactJSONValue(value any, redactor redactor) any {

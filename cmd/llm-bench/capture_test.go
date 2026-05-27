@@ -484,6 +484,12 @@ func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
 				"token":{
 					"type":"string",
 					"default":"ghp_1234567890abcdefABCD"
+				},
+				"api_key":{
+					"type":"string",
+					"default":"abc123",
+					"examples":["abc123"],
+					"enum":["abc123"]
 				}
 			}
 		}
@@ -516,6 +522,9 @@ func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
 	}
 	toolJSON := string(trace.Tools[0])
 	assertClean(t, toolJSON)
+	if strings.Contains(toolJSON, "abc123") {
+		t.Fatalf("schema default/example/enum kept low-entropy secret: %q", toolJSON)
+	}
 	for _, want := range []string{"[REDACTED_PATH]/secret.go", "[REDACTED_EMAIL]", "[REDACTED_SECRET]"} {
 		if !strings.Contains(toolJSON, want) {
 			t.Fatalf("redacted tool schema %q missing %q", toolJSON, want)
