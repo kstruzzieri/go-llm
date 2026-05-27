@@ -183,6 +183,22 @@ First implementation slice:
 - Follow-up: persistent cache keyed by `(judge_model, trace_id,
   transcript_hash)` so re-running over the same corpus is cheap
 
+### Calibration
+
+The judge scorer is calibrated against human labels via a two-phase
+workflow documented in [CALIBRATION.md](CALIBRATION.md). Headline numbers:
+
+- Primary agreement criterion: `|judge - expected| ≤ 0.25`.
+- Pass threshold: ≥85% agreement on ≥50 matched non-stale labels.
+- Below 50 matched non-stale labels: verdict is `INSUFFICIENT_LABELS`
+  (never PASS).
+- Stale labels (label `artifact_hash` ≠ frozen `artifacts.jsonl` hash) are
+  listed in the report and excluded from agreement.
+- Stability runs (`-judge-stability-runs M`) are diagnostic only and do
+  not gate the verdict.
+
+Active labeling (`-calibrate-suggest`) is a planned follow-up.
+
 ### Phase 4 — Live comparison runs
 
 - **Currently-configured model vs candidate** on each role's captured

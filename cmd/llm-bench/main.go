@@ -34,16 +34,40 @@ func main() {
 	captureLimit := flag.Int("capture-limit", 0, "Maximum conversations to export in capture mode (0 = all)")
 	captureSource := flag.String("capture-source", defaultCaptureSource, "Trace source label for captured conversations")
 	captureSystem := flag.String("capture-system", "", "Fallback system prompt when a conversation has no stored system message")
-	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required)")
+
+	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
+	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
+	labelsPath := flag.String("labels", filepath.Join("docs", "llm", "calibration", "labels.jsonl"), "Path to labels.jsonl (Phase 2)")
+	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
+	artifactsPath := flag.String("artifacts", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Path to artifacts.jsonl (Phase 2)")
+	calibrateReportDir := flag.String("calibrate-report-dir", filepath.Join("docs", "llm", "calibration", "reports"), "Directory for calibration reports")
+	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
+
+	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
 	judgeModel := flag.String("judge-model", "", "Ollama model used by -scorer llm-judge; default uses models.json role judge or gemma4:31b")
 	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for -scorer llm-judge (default: -ollama-url)")
 	judgeTimeout := flag.Duration("judge-timeout", 5*time.Minute, "Timeout for each llm-judge scoring request")
+	judgeCachePath := flag.String("judge-cache", defaultJudgeCachePath(), "SQLite path for judge response cache; empty disables")
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
 	flag.Parse()
+
+	modes := 0
+	if *capture {
+		modes++
+	}
+	if *calibrateCapture {
+		modes++
+	}
+	if *calibrate {
+		modes++
+	}
+	if modes > 1 {
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate are mutually exclusive")
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -66,6 +90,91 @@ func main() {
 			log.Fatalf("llm-bench: capture wrote no traces")
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: capture wrote %d trace(s) to %s\n", len(result.Written), *captureOut)
+		return
+	}
+
+	if *calibrateCapture {
+		if *tracesGlob == "" || *modelsArg == "" {
+			log.Fatalf("llm-bench: -calibrate-capture requires -traces and -models")
+		}
+		tracePaths, err := filepath.Glob(*tracesGlob)
+		if err != nil {
+			log.Fatalf("llm-bench: glob: %v", err)
+		}
+		traces, err := loadTraces(tracePaths)
+		if err != nil {
+			log.Fatalf("llm-bench: load traces: %v", err)
+		}
+		targets, err := parseModelTargets(*modelsArg)
+		if err != nil {
+			log.Fatalf("llm-bench: parse models: %v", err)
+		}
+		runner := &Runner{
+			OllamaURL: *ollamaURL,
+			Timeout:   *timeout,
+			Scorer:    &CaptureScorer{},
+		}
+		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
+			Runner:     runner,
+			Targets:    targets,
+			Traces:     traces,
+			OutputPath: *labelsOut,
+		}); err != nil {
+			log.Fatalf("llm-bench: calibrate-capture: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: calibrate-capture wrote artifacts to %s\n", *labelsOut)
+		return
+	}
+
+	if *calibrate {
+		judgeURL := strings.TrimSpace(*judgeOllamaURL)
+		if judgeURL == "" {
+			judgeURL = *ollamaURL
+		}
+		judgeName := strings.TrimSpace(*judgeModel)
+		if judgeName == "" {
+			judgeName = defaultJudgeModelName()
+		}
+		// Typed-nil interface trap: openJudgeCache may return
+		// (*sqliteJudgeCache)(nil), which would still satisfy the
+		// judgeCacheStore interface as a non-nil interface value.
+		// Only assign the interface variable when the concrete
+		// pointer is genuinely non-nil.
+		var cacheStore judgeCacheStore
+		if c, err := openJudgeCache(*judgeCachePath); err != nil {
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled: %v\n", err)
+		} else if c != nil {
+			cacheStore = c
+			defer func() { _ = c.Close() }()
+		}
+		scorer, err := newScorer(ctx, "llm-judge", scorerOptions{
+			ollamaURL:    judgeURL,
+			judgeModel:   judgeName,
+			judgeTimeout: *judgeTimeout,
+			judgeCache:   cacheStore,
+			// Primary calibration run is cached; stability runs flip
+			// the flag internally (Task 23).
+			bypassCache: false,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: calibrate: %v", err)
+		}
+		res, err := runCalibrate(ctx, calibrateOptions{
+			LabelsPath:    *labelsPath,
+			ArtifactsPath: *artifactsPath,
+			Scorer:        scorer,
+			JudgeModel:    judgeName,
+			ReportDir:     *calibrateReportDir,
+			StabilityRuns: *judgeStabilityRuns,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: calibrate: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: calibrate verdict=%s agreement=%d/%d report=%s\n",
+			res.Verdict, res.AgreeCount, res.MatchedCount, res.ReportPath)
+		if code := calibrationExitCode(res.Verdict); code != 0 {
+			os.Exit(code)
+		}
 		return
 	}
 
@@ -101,10 +210,24 @@ func main() {
 		resolvedJudgeURL = *ollamaURL
 	}
 
+	// Typed-nil interface trap: openJudgeCache may return
+	// (*sqliteJudgeCache)(nil) for an empty path, which would still satisfy
+	// the judgeCacheStore interface as a non-nil interface value. Only
+	// assign the interface variable when the concrete pointer is genuinely
+	// non-nil.
+	var cacheStore judgeCacheStore
+	if c, err := openJudgeCache(*judgeCachePath); err != nil {
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled: %v\n", err)
+	} else if c != nil {
+		cacheStore = c
+		defer func() { _ = c.Close() }()
+	}
+
 	scorer, err := newScorer(ctx, *scorerName, scorerOptions{
 		ollamaURL:    resolvedJudgeURL,
 		judgeModel:   resolvedJudgeModel,
 		judgeTimeout: *judgeTimeout,
+		judgeCache:   cacheStore,
 	})
 	if err != nil {
 		log.Fatalf("llm-bench: scorer: %v", err)
@@ -150,4 +273,22 @@ func defaultJudgeModelName() string {
 		}
 	}
 	return fallbackJudgeModel
+}
+
+func calibrationExitCode(verdict string) int {
+	if verdict == "PASS" {
+		return 0
+	}
+	return 3
+}
+
+// defaultJudgeCachePath returns the platform-appropriate location for the
+// judge response cache. Falls back to "" (cache disabled) if the user
+// cache dir cannot be resolved.
+func defaultJudgeCachePath() string {
+	base, err := os.UserCacheDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "go-llm", "judge-cache.db")
 }
