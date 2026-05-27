@@ -1153,6 +1153,76 @@ func TestBuildOutcomeActualModelOnFallbackSuccess(t *testing.T) {
 	}
 }
 
+func TestExecuteChatStreamPendingAttemptsClonedFromIteration(t *testing.T) {
+	// Regression test for the aliasing bug fixed in c7e6db1 / slices.Clone.
+	// Setup: primary + 3 fallbacks where the first two fail infra (driving
+	// `attempts` to len=3, cap=4 — Go's growth strategy gives spare
+	// capacity at this length) and the third emits a Done chunk. Without
+	// slices.Clone on pendingAttempts, the post-stream Unknown-attempt
+	// append (triggered when the user callback errors on Done) would
+	// overwrite the Succeeded entry in the captured RouteOutcome.Attempts.
+	primary := &rpMockProvider{
+		name: "ollama-a", caps: CapChat,
+		chatStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fb0 := &rpMockProvider{
+		name: "ollama-b", caps: CapChat,
+		chatStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fb1 := &rpMockProvider{
+		name: "ollama-c", caps: CapChat,
+		chatStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fb2 := &rpMockProvider{
+		name: "ollama-d", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			// No visible content before Done so fallback isn't suppressed,
+			// and so this stream finalizes via the Done-chunk path that
+			// uses pendingAttempts.
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Fallbacks = []RoutePlan{
+		{Profile: &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}}, Provider: fb0, Model: "qwen3:8b"},
+		{Profile: &ModelProfile{Key: ModelKey{Provider: "ollama-c", Model: "qwen3:8b"}}, Provider: fb1, Model: "qwen3:8b"},
+		{Profile: &ModelProfile{Key: ModelKey{Provider: "ollama-d", Model: "qwen3:8b"}}, Provider: fb2, Model: "qwen3:8b"},
+	}
+
+	var capturedAttempts []RouteAttempt
+	var capturedKey ModelKey
+	callbackErr := errors.New("user abort on done")
+	err := plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		if c.Done && c.RouteOutcome != nil {
+			capturedAttempts = c.RouteOutcome.Attempts
+			if n := len(capturedAttempts); n > 0 {
+				capturedKey = capturedAttempts[n-1].Key
+			}
+			return callbackErr
+		}
+		return nil
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err = %v, want callbackErr", err)
+	}
+	if len(capturedAttempts) == 0 {
+		t.Fatal("Done chunk did not arrive with an outcome; test setup failed")
+	}
+	// The last entry of the captured slice must still be the Succeeded
+	// attempt for ollama-d. Without slices.Clone it would have been
+	// overwritten to AttemptStatusUnknown by the post-stream append.
+	last := capturedAttempts[len(capturedAttempts)-1]
+	if last.Status != AttemptStatusSucceeded {
+		t.Errorf("captured last attempt Status = %v, want Succeeded (aliasing corruption)", last.Status)
+	}
+	if last.Key.Provider != "ollama-d" {
+		t.Errorf("captured last attempt Key.Provider = %q, want ollama-d (corruption)", last.Key.Provider)
+	}
+	if capturedKey.Provider != "ollama-d" {
+		t.Errorf("captured Key.Provider at Done time = %q, want ollama-d", capturedKey.Provider)
+	}
+}
+
 func TestExecuteChatStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testing.T) {
 	// A fallback provider that returns err==nil without emitting a Done
 	// chunk must still call handleResult so the feedback seam records the
@@ -1367,12 +1437,9 @@ func TestExecuteChatEndToEndRecordsPerAttemptFeedback(t *testing.T) {
 	}
 
 	// Verify the stored signals carry the right ErrorClass for the
-	// primary failure. Inspect under lock since signals isn't exported.
-	// Copy under the lock to avoid aliasing the store's slice — matches
-	// the production MemoryStore.Get pattern.
-	store.mu.Lock()
-	pSigs := append([]FeedbackSignal(nil), store.signals[primaryKey]...)
-	store.mu.Unlock()
+	// primary failure. Uses the public Signals accessor so the test
+	// doesn't depend on internal field names.
+	pSigs := store.Signals(primaryKey)
 	var failureCount int
 	for _, sig := range pSigs {
 		switch sig.Kind {

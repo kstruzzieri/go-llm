@@ -97,6 +97,21 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 	}, nil
 }
 
+// Signals returns a snapshot copy of the raw signals stored for key, in
+// insertion order. Returns nil if no signals are stored. Tests and
+// diagnostic tools can use this to inspect individual signals (kind,
+// strength, error class) without computing an aggregate. The returned
+// slice is independent of the store's internal storage and safe to
+// retain across concurrent Record calls.
+func (s *MemoryStore) Signals(key FeedbackKey) []FeedbackSignal {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.signals[key]) == 0 {
+		return nil
+	}
+	return append([]FeedbackSignal(nil), s.signals[key]...)
+}
+
 // Get returns the aggregate for key. If no signals are stored, returns a
 // neutral aggregate (Score == cfg.neutralScore, other fields zero).
 // Otherwise computes Score from the score-bearing subset of signals
