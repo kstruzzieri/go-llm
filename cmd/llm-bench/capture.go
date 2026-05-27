@@ -509,7 +509,8 @@ func isSchemaPatternKey(key string) bool {
 }
 
 func isSchemaPatternPropertiesKey(key string) bool {
-	return normalizeSchemaKey(key) == "pattern_properties"
+	normalized := normalizeSchemaKey(key)
+	return normalized == "pattern_properties" || normalized == "patternproperties"
 }
 
 func normalizeSchemaKey(key string) string {

@@ -486,15 +486,19 @@ func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
 					"type":"string",
 					"default":"ghp_1234567890abcdefABCD"
 				},
-				"api_key":{
-					"type":"string",
-					"default":"abc123",
-					"examples":["abc123"],
-					"enum":["abc123"]
-				}
+					"api_key":{
+						"type":"string",
+						"default":"abc123",
+						"examples":["abc123"],
+						"enum":["abc123"]
+					}
+				},
+				"patternProperties":{
+					"^/Users/keith/project/.*$":{"type":"string"}
+				},
+				"additionalProperties":false
 			}
-		}
-	}`)}
+		}`)}
 	conv := validTestConversation("schema-redaction", "done", time.Now())
 	store := fakeConversationStore{
 		summaries:     []conversation.Summary{{ID: "schema-redaction", UpdatedAt: conv.UpdatedAt}},
@@ -535,7 +539,10 @@ func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
 	if err != nil {
 		t.Fatalf("toolSchemaByName: %v", err)
 	}
-	if err := schemas["read_file"].Validate(map[string]any{"path": "[REDACTED_PATH]/secret.go"}); err != nil {
+	if err := schemas["read_file"].Validate(map[string]any{
+		"path":                     "[REDACTED_PATH]/secret.go",
+		"[REDACTED_PATH]/metadata": "ok",
+	}); err != nil {
 		t.Fatalf("redacted pattern should match redacted path placeholder: %v\nschema=%s", err, toolJSON)
 	}
 }
