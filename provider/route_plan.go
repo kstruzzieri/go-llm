@@ -47,8 +47,9 @@ type RoutePlan struct {
 	Fallbacks []RoutePlan
 	Reason    string
 	Degraded  bool
-	wasSticky bool          // internal: propagated to RouteOutcome
-	recorder  RouteRecorder // internal: set by Router
+	wasSticky bool             // internal: propagated to RouteOutcome
+	recorder  RouteRecorder    // internal: set by Router
+	feedback  *RoutingFeedback // internal: set by Router via SetFeedback; nil = no recording
 }
 
 // String returns a human-readable summary of the route plan.
@@ -62,6 +63,13 @@ func (rp *RoutePlan) String() string {
 // after constructing the plan.
 func (rp *RoutePlan) SetRecorder(r RouteRecorder) {
 	rp.recorder = r
+}
+
+// SetFeedback sets the RoutingFeedback wrapper used by handleResult to
+// record per-attempt outcomes. The Router calls this from buildPlan.
+// nil disables feedback recording for this plan (default).
+func (rp *RoutePlan) SetFeedback(rf *RoutingFeedback) {
+	rp.feedback = rf
 }
 
 // SetWasSticky marks the plan as having been selected via sticky routing.
@@ -515,4 +523,16 @@ func makeAttempt(key ModelKey, err error, duration time.Duration) RouteAttempt {
 		LatencyMs:  ms,
 		ErrorClass: string(class),
 	}
+}
+
+// recordOutcomeFeedback delegates to RoutingFeedback.RecordOutcome when a
+// feedback wrapper is configured AND the routing request has a non-empty
+// UseCase. Errors are swallowed — the seam is observational, never
+// load-bearing for routing. Uses context.Background() so cancellation of
+// the request's ctx does not cut short the feedback write.
+func (rp *RoutePlan) recordOutcomeFeedback(outcome *RouteOutcome) {
+	if rp.feedback == nil || outcome == nil || rp.Request.UseCase == "" {
+		return
+	}
+	_ = rp.feedback.RecordOutcome(context.Background(), rp.Request.UseCase, *outcome)
 }

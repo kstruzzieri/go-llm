@@ -664,6 +664,90 @@ func TestRoutePlanExecuteEmbed(t *testing.T) {
 	}
 }
 
+func TestRoutePlanRecordOutcomeFeedbackNilSafe(t *testing.T) {
+	cases := []struct {
+		name    string
+		setup   func(*RoutePlan)
+		outcome *RouteOutcome
+	}{
+		{
+			name:    "nil-feedback",
+			setup:   func(rp *RoutePlan) { rp.SetFeedback(nil) },
+			outcome: &RouteOutcome{},
+		},
+		{
+			name:    "nil-outcome",
+			setup:   func(rp *RoutePlan) {},
+			outcome: nil,
+		},
+		{
+			name: "empty-usecase",
+			setup: func(rp *RoutePlan) {
+				rp.Request = RoutingRequest{UseCase: ""}
+				store, _ := NewMemoryStore(MemoryStoreConfig{})
+				rp.SetFeedback(NewRoutingFeedback(store))
+			},
+			outcome: &RouteOutcome{
+				PlannedModel: ModelKey{Provider: "p", Model: "m"},
+				Attempts: []RouteAttempt{
+					{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded},
+				},
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rp := &RoutePlan{Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}}}
+			tc.setup(rp)
+			// Must not panic, must not return any error (helper returns void).
+			rp.recordOutcomeFeedback(tc.outcome)
+		})
+	}
+}
+
+func TestRoutePlanRecordOutcomeFeedbackDelegatesWhenConfigured(t *testing.T) {
+	store, _ := NewMemoryStore(MemoryStoreConfig{})
+	rf := NewRoutingFeedback(store)
+	rp := &RoutePlan{
+		Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+		Request: RoutingRequest{UseCase: "chat"},
+	}
+	rp.SetFeedback(rf)
+
+	outcome := &RouteOutcome{
+		PlannedModel: ModelKey{Provider: "p", Model: "m"},
+		Attempts: []RouteAttempt{
+			// Keep LatencyMs at zero so this helper test only asserts
+			// delegation of the Success signal. Latency emission is covered
+			// by RecordOutcome tests and Task 11's end-to-end test.
+			{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded},
+		},
+	}
+	rp.recordOutcomeFeedback(outcome)
+
+	agg, _ := store.Get(context.Background(), FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"})
+	if agg.SampleCount != 1 {
+		t.Fatalf("SampleCount = %d, want 1 (helper should have recorded the success)", agg.SampleCount)
+	}
+}
+
+func TestRoutePlanRecordOutcomeFeedbackSwallowsStoreErrors(t *testing.T) {
+	// NewRoutingFeedback(nil) returns a wrapper that returns
+	// ErrNilRoutingFeedbackStore on every call. recordOutcomeFeedback must
+	// swallow that error rather than propagating.
+	rp := &RoutePlan{
+		Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+		Request: RoutingRequest{UseCase: "chat"},
+	}
+	rp.SetFeedback(NewRoutingFeedback(nil))
+
+	outcome := &RouteOutcome{
+		Attempts: []RouteAttempt{{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded}},
+	}
+	// Must not panic; must not log; must return void.
+	rp.recordOutcomeFeedback(outcome)
+}
+
 func TestRoutePlanString(t *testing.T) {
 	plan := &RoutePlan{
 		Model: "qwen3:8b",
