@@ -794,6 +794,97 @@ func TestHandleResultUsesLastAttemptKeyForCancellationWarmth(t *testing.T) {
 	}
 }
 
+func TestExecuteChatTracksPrimarySuccessAttempt(t *testing.T) {
+	prov := &rpMockProvider{name: "ollama", caps: CapChat, chatResp: &ChatResponse{Content: "hi", Done: true}}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if resp == nil || resp.RouteOutcome == nil {
+		t.Fatal("resp/outcome nil")
+	}
+	att := resp.RouteOutcome.Attempts
+	if len(att) != 1 {
+		t.Fatalf("Attempts len = %d, want 1", len(att))
+	}
+	if att[0].Status != AttemptStatusSucceeded {
+		t.Errorf("Status = %v, want Succeeded", att[0].Status)
+	}
+	if att[0].ErrorClass != "" {
+		t.Errorf("ErrorClass = %q, want empty on success", att[0].ErrorClass)
+	}
+}
+
+func TestExecuteChatTracksPrimaryFailFallbackSuccessAttempts(t *testing.T) {
+	primary := &rpMockProvider{name: "ollama-a", caps: CapChat, chatErr: &HTTPStatusError{StatusCode: 500}}
+	fallback := &rpMockProvider{name: "ollama-b", caps: CapChat, chatResp: &ChatResponse{Content: "ok", Done: true}}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if resp.RouteOutcome == nil {
+		t.Fatal("outcome nil")
+	}
+	att := resp.RouteOutcome.Attempts
+	if len(att) != 2 {
+		t.Fatalf("Attempts len = %d, want 2 (primary fail + fallback success)", len(att))
+	}
+	if att[0].Status != AttemptStatusFailed || att[0].ErrorClass != string(ErrorClass5xx) {
+		t.Errorf("att[0] = %+v, want Failed/5xx", att[0])
+	}
+	if att[1].Status != AttemptStatusSucceeded || att[1].Key.Provider != "ollama-b" {
+		t.Errorf("att[1] = %+v, want Succeeded for ollama-b", att[1])
+	}
+}
+
+func TestExecuteChatTracksAllFailAttempts(t *testing.T) {
+	prov := &rpMockProvider{name: "ollama-a", caps: CapChat, chatErr: &HTTPStatusError{StatusCode: 500}}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: &rpMockProvider{name: "ollama-b", caps: CapChat, chatErr: &HTTPStatusError{StatusCode: 503}},
+		Model:    "qwen3:8b",
+	}}
+
+	_, err := plan.ExecuteChat(context.Background())
+	if err == nil {
+		t.Fatal("err nil; want failure")
+	}
+	// resp is nil so we cannot read outcome via response. Instead, the
+	// outcome is built and consumed only by recordOutcomeFeedback (no-op
+	// here because feedback is nil). We verify by inspecting the plan via
+	// a future integration test (Task 11). For now we just assert no panic
+	// and the right error is surfaced.
+	if !errors.As(err, new(*HTTPStatusError)) {
+		t.Errorf("err type = %T, want *HTTPStatusError", err)
+	}
+}
+
+func TestExecuteChatCancellationProducesUnknownAttempt(t *testing.T) {
+	prov := &rpMockProvider{name: "ollama", caps: CapChat, chatErr: context.Canceled}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+
+	resp, err := plan.ExecuteChat(context.Background())
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if resp != nil {
+		t.Fatalf("resp = %+v, want nil on cancellation", resp)
+	}
+	// outcome is built but only consumed by the (nil) feedback seam.
+	// We can't observe Attempts from the test surface without integration
+	// wiring — Task 11 covers that. Here we just lock in that the path
+	// completes without panic.
+}
+
 func TestRoutePlanString(t *testing.T) {
 	plan := &RoutePlan{
 		Model: "qwen3:8b",

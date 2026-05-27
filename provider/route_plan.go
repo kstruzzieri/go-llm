@@ -95,8 +95,12 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 		return nil, ErrBudgetAdaptationRequired
 	}
 
+	var attempts []RouteAttempt
 	req := rp.buildChatRequest(false)
+
+	start := time.Now()
 	resp, err := rp.Provider.Chat(ctx, req)
+	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 
 	fallbacksUsed := 0
 	if err != nil && IsInfrastructureError(err) {
@@ -104,7 +108,9 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildChatRequest(false)
+			fbStart := time.Now()
 			resp, err = fb.Provider.Chat(ctx, fbReq)
+			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			if err == nil {
 				fallbacksUsed = i + 1
 				break
@@ -118,7 +124,7 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 		}
 	}
 
-	outcome := rp.handleResult(err, fallbacksUsed, nil)
+	outcome := rp.handleResult(err, fallbacksUsed, attempts)
 	if resp != nil && outcome != nil {
 		resp.RouteOutcome = outcome
 	}
