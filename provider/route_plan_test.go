@@ -3,6 +3,7 @@ package provider
 import (
 	"context"
 	"errors"
+	"net"
 	"sync"
 	"testing"
 )
@@ -1259,5 +1260,197 @@ func TestExecuteGenerateStreamFallbackOnPrimaryInfraError(t *testing.T) {
 	att := lastChunk.RouteOutcome.Attempts
 	if len(att) != 2 || att[0].ErrorClass != string(ErrorClass5xx) || att[1].Status != AttemptStatusSucceeded {
 		t.Fatalf("attempts = %+v, want [Failed/5xx, Succeeded]", att)
+	}
+}
+
+func TestExecuteChatEndToEndRecordsPerAttemptFeedback(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+
+	primary := &rpMockProvider{
+		name: "ollama-a", caps: CapChat,
+		chatErr: &net.OpError{Op: "dial", Err: errors.New("refused")},
+	}
+	fallback := &rpMockProvider{
+		name: "ollama-b", caps: CapChat,
+		chatResp: &ChatResponse{Content: "hello", Done: true},
+	}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Request.UseCase = "chat"
+	plan.Model = "qwen3:8b"
+	plan.Profile.Key.Model = "qwen3:8b"
+	plan.SetFeedback(rf)
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	if resp.RouteOutcome == nil {
+		t.Fatal("response RouteOutcome nil")
+	}
+
+	// Primary key should have one scored Failure (network). Latency is
+	// emitted only when elapsed wall-clock milliseconds are >0, so this
+	// test must not require it.
+	primaryKey := FeedbackKey{Provider: "ollama-a", Model: "qwen3:8b", UseCase: "chat"}
+	pa, _ := store.Get(context.Background(), primaryKey)
+	if pa.SampleCount < 1 || pa.SampleCount > 2 {
+		t.Errorf("primary SampleCount = %d, want 1 or 2 (Failure, optional Latency)", pa.SampleCount)
+	}
+	if pa.ScoredCount != 1 {
+		t.Errorf("primary ScoredCount = %d, want 1 (Failure scores; optional Latency doesn't)", pa.ScoredCount)
+	}
+	// Score for one Failure (-0.7) clipped = -0.7; mean = -0.7; score = 0.15.
+	const wantPrimaryScore = 0.15
+	if abs := pa.Score - wantPrimaryScore; abs > 1e-15 || abs < -1e-15 {
+		t.Errorf("primary Score = %v, want %v (within 1e-15)", pa.Score, wantPrimaryScore)
+	}
+
+	// Fallback key should have one scored Success (+0.5), plus optional
+	// Latency if elapsed milliseconds were measurable.
+	fallbackKey := FeedbackKey{Provider: "ollama-b", Model: "qwen3:8b", UseCase: "chat"}
+	fa, _ := store.Get(context.Background(), fallbackKey)
+	if fa.SampleCount < 1 || fa.SampleCount > 2 {
+		t.Errorf("fallback SampleCount = %d, want 1 or 2 (Success, optional Latency)", fa.SampleCount)
+	}
+	if fa.ScoredCount != 1 {
+		t.Errorf("fallback ScoredCount = %d, want 1", fa.ScoredCount)
+	}
+	if fa.Score != 0.75 {
+		t.Errorf("fallback Score = %v, want 0.75", fa.Score)
+	}
+
+	// Verify the stored signals carry the right ErrorClass for the
+	// primary failure. Inspect under lock since signals isn't exported.
+	store.mu.Lock()
+	pSigs := store.signals[primaryKey]
+	store.mu.Unlock()
+	var failureCount int
+	for _, sig := range pSigs {
+		switch sig.Kind {
+		case RoutingSignalFailure:
+			failureCount++
+			if sig.ErrorClass != "network" {
+				t.Errorf("primary Failure ErrorClass = %q, want %q", sig.ErrorClass, "network")
+			}
+		}
+	}
+	if failureCount != 1 {
+		t.Errorf("primary Failure signals = %d, want 1", failureCount)
+	}
+}
+
+func TestExecuteChatStreamPartialCanceledDoesNotRecordSuccess(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "h"},
+			{Done: true, Partial: true},
+		},
+		chatStreamErr: context.Canceled,
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.SetFeedback(rf)
+
+	var last ChatResponse
+	err = plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		last = c
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	if last.RouteOutcome != nil {
+		t.Fatalf("partial Done chunk carried RouteOutcome; want nil")
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.SampleCount != 0 {
+		t.Fatalf("SampleCount = %d, want 0 (Canceled is AttemptStatusUnknown)", agg.SampleCount)
+	}
+}
+
+func TestExecuteChatStreamCallbackErrorDoesNotRecordProviderFailure(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "h"},
+			{Content: "i", Done: true},
+		},
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.SetFeedback(rf)
+
+	callbackErr := errors.New("user aborted")
+	err = plan.ExecuteChatStream(context.Background(), func(ChatResponse) error {
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err = %v, want callbackErr", err)
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.SampleCount != 0 {
+		t.Fatalf("SampleCount = %d, want 0 (callback abort is AttemptStatusUnknown)", agg.SampleCount)
+	}
+}
+
+func TestExecuteGenerateStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+
+	primary := &rpMockProvider{
+		name: "ollama-a", caps: CapGenerate,
+		genStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fallback := &rpMockProvider{
+		name: "ollama-b", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Response: "partial without Done"},
+		},
+	}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Kind = RouteKindGenerate
+	plan.Request.UseCase = "chat"
+	plan.SetFeedback(rf)
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	if err := plan.ExecuteGenerateStream(context.Background(), func(GenerateResponse) error { return nil }); err != nil {
+		t.Fatalf("ExecuteGenerateStream: %v", err)
+	}
+
+	key := FeedbackKey{Provider: "ollama-b", Model: "qwen3:8b", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.ScoredCount < 1 {
+		t.Errorf("fallback ScoredCount = %d, want >= 1 (Success signal should have been recorded)", agg.ScoredCount)
 	}
 }
