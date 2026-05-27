@@ -1156,3 +1156,108 @@ func TestExecuteChatStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testing.T)
 		t.Errorf("fallback ScoredCount = %d, want >= 1 (Success signal should have been recorded)", agg.ScoredCount)
 	}
 }
+
+func TestExecuteGenerateStreamFinalizesOnNonPartialDone(t *testing.T) {
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Response: "h"},
+			{Response: "i", Done: true},
+		},
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.Kind = RouteKindGenerate
+	var lastChunk GenerateResponse
+	err := plan.ExecuteGenerateStream(context.Background(), func(c GenerateResponse) error {
+		lastChunk = c
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if lastChunk.RouteOutcome == nil {
+		t.Fatal("outcome nil")
+	}
+	att := lastChunk.RouteOutcome.Attempts
+	if len(att) != 1 || att[0].Status != AttemptStatusSucceeded {
+		t.Fatalf("attempts = %+v, want [Succeeded]", att)
+	}
+}
+
+func TestExecuteGenerateStreamDonePartialDefersToPostStream(t *testing.T) {
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Response: "h"},
+			{Done: true, Partial: true},
+		},
+		genStreamErr: context.Canceled,
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.Kind = RouteKindGenerate
+	var lastChunk GenerateResponse
+	err := plan.ExecuteGenerateStream(context.Background(), func(c GenerateResponse) error {
+		lastChunk = c
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want Canceled", err)
+	}
+	if lastChunk.RouteOutcome != nil {
+		t.Errorf("partial-Done chunk got RouteOutcome; want nil")
+	}
+}
+
+func TestExecuteGenerateStreamCallbackErrorAttributedAsUnknown(t *testing.T) {
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Response: "h"},
+			{Response: "i", Done: true},
+		},
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.Kind = RouteKindGenerate
+
+	callbackErr := errors.New("user aborted")
+	err := plan.ExecuteGenerateStream(context.Background(), func(GenerateResponse) error {
+		return callbackErr
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err = %v, want callbackErr", err)
+	}
+}
+
+func TestExecuteGenerateStreamFallbackOnPrimaryInfraError(t *testing.T) {
+	primary := &rpMockProvider{
+		name: "ollama-a", caps: CapGenerate,
+		genStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fallback := &rpMockProvider{
+		name: "ollama-b", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Response: "ok"},
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Kind = RouteKindGenerate
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	var lastChunk GenerateResponse
+	err := plan.ExecuteGenerateStream(context.Background(), func(c GenerateResponse) error {
+		lastChunk = c
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	att := lastChunk.RouteOutcome.Attempts
+	if len(att) != 2 || att[0].ErrorClass != string(ErrorClass5xx) || att[1].Status != AttemptStatusSucceeded {
+		t.Fatalf("attempts = %+v, want [Failed/5xx, Succeeded]", att)
+	}
+}
