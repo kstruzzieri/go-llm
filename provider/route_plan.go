@@ -141,10 +141,11 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 // provider. Fallback is only attempted when the primary fails with an
 // infrastructure error AND no user-visible chunk has yet been delivered
 // (a chunk is "visible" when Content, Thinking, or ToolCalls is non-empty).
-// Each provider call produces exactly one RouteAttempt, finalized either by
-// the Done-chunk handler (when chunk.Partial == false) or by the post-stream
-// code (using the real stream-method error). User-callback errors are
-// captured separately and attributed as AttemptStatusUnknown.
+// Each provider call produces exactly one RouteAttempt. A terminal Done chunk
+// prepares the successful attempt and RouteOutcome, but feedback recording is
+// deferred until the provider stream returns so post-Done provider errors and
+// callback aborts are reconciled against the returned execution result. User-
+// callback errors are captured separately and attributed as AttemptStatusUnknown.
 //
 // Stream callback invocation:
 //   - fn is invoked once per chunk in the calling goroutine. Provider
@@ -197,7 +198,6 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 			attempts = pendingAttempts
 			streamDone = true
 			outcome = pendingOutcome
-			rp.recordResult(nil, attempts, outcome)
 			return nil
 		}
 		if e := fn(chunk); e != nil {
@@ -208,6 +208,13 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	}
 
 	err := rp.Provider.ChatStream(ctx, req, wrappedFn)
+	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
+		// A provider may still surface transport/read errors after it has
+		// delivered a final Done chunk accepted by the callback. Treat the
+		// accepted terminal chunk as authoritative so feedback and the returned
+		// execution result agree.
+		err = nil
+	}
 
 	if !streamDone {
 		if callbackErr != nil {
@@ -257,7 +264,6 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 						fallbacksUsed = pendingFallbacksUsed
 						fbStreamDone = true
 						outcome = pendingOutcome
-						rp.recordResult(nil, attempts, outcome)
 						return nil
 					}
 					if e := fn(chunk); e != nil {
@@ -268,6 +274,10 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 				}
 
 				err = fb.Provider.ChatStream(ctx, fbReq, wrappedFbFn)
+				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
+					// See primary streamDone handling above.
+					err = nil
+				}
 
 				if !fbStreamDone {
 					if fbCallbackErr != nil {
@@ -301,6 +311,8 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	// that ended in a non-infrastructure error / cancellation.
 	if outcome == nil {
 		rp.handleResult(err, fallbacksUsed, attempts)
+	} else if err == nil {
+		rp.recordResult(nil, attempts, outcome)
 	}
 
 	return err
@@ -360,11 +372,12 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 // ExecuteGenerateStream dispatches a streaming generate request to the
 // selected provider. Fallback is only attempted when the primary fails with
 // an infrastructure error AND no user-visible Response chunk has yet been
-// delivered. Each provider call produces exactly one RouteAttempt,
-// finalized either by the Done-chunk handler (when chunk.Partial == false)
-// or by the post-stream code (using the real stream-method error). User-
-// callback errors are captured separately and attributed as
-// AttemptStatusUnknown.
+// delivered. Each provider call produces exactly one RouteAttempt. A terminal
+// Done chunk prepares the successful attempt and RouteOutcome, but feedback
+// recording is deferred until the provider stream returns so post-Done
+// provider errors and callback aborts are reconciled against the returned
+// execution result. User-callback errors are captured separately and
+// attributed as AttemptStatusUnknown.
 //
 // See ExecuteChatStream for the full stream callback contract — the
 // invariants are identical (serial-callback contract, Done-chunk
@@ -405,7 +418,6 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 			attempts = pendingAttempts
 			streamDone = true
 			outcome = pendingOutcome
-			rp.recordResult(nil, attempts, outcome)
 			return nil
 		}
 		if e := fn(chunk); e != nil {
@@ -416,6 +428,13 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	}
 
 	err := rp.Provider.GenerateStream(ctx, req, wrappedFn)
+	if streamDone && err != nil && (callbackErr == nil || !errors.Is(err, callbackErr)) {
+		// A provider may still surface transport/read errors after it has
+		// delivered a final Done chunk accepted by the callback. Treat the
+		// accepted terminal chunk as authoritative so feedback and the returned
+		// execution result agree.
+		err = nil
+	}
 
 	if !streamDone {
 		if callbackErr != nil {
@@ -465,7 +484,6 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 						fallbacksUsed = pendingFallbacksUsed
 						fbStreamDone = true
 						outcome = pendingOutcome
-						rp.recordResult(nil, attempts, outcome)
 						return nil
 					}
 					if e := fn(chunk); e != nil {
@@ -476,6 +494,10 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 				}
 
 				err = fb.Provider.GenerateStream(ctx, fbReq, wrappedFbFn)
+				if fbStreamDone && err != nil && (fbCallbackErr == nil || !errors.Is(err, fbCallbackErr)) {
+					// See primary streamDone handling above.
+					err = nil
+				}
 
 				if !fbStreamDone {
 					if fbCallbackErr != nil {
@@ -509,6 +531,8 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	// that ended in a non-infrastructure error / cancellation.
 	if outcome == nil {
 		rp.handleResult(err, fallbacksUsed, attempts)
+	} else if err == nil {
+		rp.recordResult(nil, attempts, outcome)
 	}
 
 	return err

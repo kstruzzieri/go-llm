@@ -1566,6 +1566,52 @@ func TestExecuteChatStreamFinalDoneCallbackErrorDoesNotRecordSuccess(t *testing.
 	}
 }
 
+func TestExecuteChatStreamPostDoneProviderErrorSuppressedAndRecordsSuccess(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "h"},
+			{Done: true},
+		},
+		chatStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	plan := newTestPlan(prov, rec)
+	plan.SetFeedback(rf)
+
+	var final ChatResponse
+	err = plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		if c.Done {
+			final = c
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil after accepted final Done", err)
+	}
+	if final.RouteOutcome == nil {
+		t.Fatal("final Done chunk RouteOutcome nil")
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.ScoredCount != 1 {
+		t.Fatalf("ScoredCount = %d, want 1 success", agg.ScoredCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 1 {
+		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+	if failures := rec.getFailures(); len(failures) != 0 {
+		t.Fatalf("failures = %d, want 0", len(failures))
+	}
+}
+
 func TestExecuteGenerateStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testing.T) {
 	store, err := NewMemoryStore(MemoryStoreConfig{})
 	if err != nil {
@@ -1644,6 +1690,53 @@ func TestExecuteGenerateStreamFinalDoneCallbackErrorDoesNotRecordSuccess(t *test
 	}
 	if successes := rec.getSuccesses(); len(successes) != 0 {
 		t.Fatalf("successes = %d, want 0", len(successes))
+	}
+}
+
+func TestExecuteGenerateStreamPostDoneProviderErrorSuppressedAndRecordsSuccess(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Response: "h"},
+			{Done: true},
+		},
+		genStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	plan := newTestPlan(prov, rec)
+	plan.Kind = RouteKindGenerate
+	plan.SetFeedback(rf)
+
+	var final GenerateResponse
+	err = plan.ExecuteGenerateStream(context.Background(), func(c GenerateResponse) error {
+		if c.Done {
+			final = c
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil after accepted final Done", err)
+	}
+	if final.RouteOutcome == nil {
+		t.Fatal("final Done chunk RouteOutcome nil")
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.ScoredCount != 1 {
+		t.Fatalf("ScoredCount = %d, want 1 success", agg.ScoredCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 1 {
+		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+	if failures := rec.getFailures(); len(failures) != 0 {
+		t.Fatalf("failures = %d, want 0", len(failures))
 	}
 }
 
