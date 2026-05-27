@@ -245,7 +245,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 				}
 
 				if err == nil {
-					return nil
+					break
 				}
 				if IsInfrastructureError(err) {
 					rp.recordFailure(fb.Profile.Key, err)

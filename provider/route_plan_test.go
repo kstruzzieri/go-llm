@@ -1113,3 +1113,46 @@ func TestExecuteChatStreamFallbackOnPrimaryInfraError(t *testing.T) {
 		t.Errorf("att[1] = %+v, want Succeeded/ollama-b", att[1])
 	}
 }
+
+func TestExecuteChatStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testing.T) {
+	// A fallback provider that returns err==nil without emitting a Done
+	// chunk must still call handleResult so the feedback seam records the
+	// success. Without the fix, return-nil-on-success short-circuited the
+	// post-stream finalization, leaving the feedback store empty.
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+
+	primary := &rpMockProvider{
+		name: "ollama-a", caps: CapChat,
+		chatStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	// Fallback emits one chunk but NO Done chunk, then returns nil.
+	fallback := &rpMockProvider{
+		name: "ollama-b", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "partial without Done"},
+		},
+	}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Request.UseCase = "chat"
+	plan.SetFeedback(rf)
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	if err := plan.ExecuteChatStream(context.Background(), func(ChatResponse) error { return nil }); err != nil {
+		t.Fatalf("ExecuteChatStream: %v", err)
+	}
+
+	// Fallback success should be recorded against ollama-b.
+	key := FeedbackKey{Provider: "ollama-b", Model: "qwen3:8b", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.ScoredCount < 1 {
+		t.Errorf("fallback ScoredCount = %d, want >= 1 (Success signal should have been recorded)", agg.ScoredCount)
+	}
+}
