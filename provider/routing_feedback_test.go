@@ -116,7 +116,7 @@ func TestBuildOutcomePopulatesRouteID(t *testing.T) {
 		Score:   0.42,
 		Reason:  "test",
 	}
-	out := rp.buildOutcome(0)
+	out := rp.buildOutcome(0, nil)
 	if out == nil {
 		t.Fatal("buildOutcome returned nil")
 	}

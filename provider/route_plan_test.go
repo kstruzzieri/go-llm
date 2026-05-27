@@ -748,6 +748,52 @@ func TestRoutePlanRecordOutcomeFeedbackSwallowsStoreErrors(t *testing.T) {
 	rp.recordOutcomeFeedback(outcome)
 }
 
+func TestHandleResultAlwaysBuildsOutcomeOnSuccess(t *testing.T) {
+	rp := newTestPlan(&rpMockProvider{name: "ollama", caps: CapChat}, &rpMockRecorder{})
+	out := rp.handleResult(nil, 0, nil)
+	if out == nil {
+		t.Fatal("outcome is nil; want non-nil on success")
+	}
+	if out.PlannedModel.Provider != "ollama" {
+		t.Errorf("PlannedModel.Provider = %q", out.PlannedModel.Provider)
+	}
+}
+
+func TestHandleResultAlwaysBuildsOutcomeOnCancellation(t *testing.T) {
+	rp := newTestPlan(&rpMockProvider{name: "ollama", caps: CapChat}, &rpMockRecorder{})
+	out := rp.handleResult(context.Canceled, 0, nil)
+	if out == nil {
+		t.Fatal("outcome is nil; want non-nil on cancellation (PR2 always builds)")
+	}
+}
+
+func TestHandleResultAlwaysBuildsOutcomeOnInfraFailure(t *testing.T) {
+	rp := newTestPlan(&rpMockProvider{name: "ollama", caps: CapChat}, &rpMockRecorder{})
+	out := rp.handleResult(&HTTPStatusError{StatusCode: 500}, 0, nil)
+	if out == nil {
+		t.Fatal("outcome is nil; want non-nil on infra failure")
+	}
+}
+
+func TestHandleResultUsesLastAttemptKeyForCancellationWarmth(t *testing.T) {
+	rec := &rpMockRecorder{}
+	rp := newTestPlan(&rpMockProvider{name: "ollama-a", caps: CapChat}, rec)
+	// Fabricate two attempts — primary failed (network), fallback canceled.
+	attempts := []RouteAttempt{
+		{Key: ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}, Status: AttemptStatusFailed, ErrorClass: "network"},
+		{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}, Status: AttemptStatusUnknown},
+	}
+	_ = rp.handleResult(context.Canceled, 0, attempts)
+
+	warmth := rec.getWarmthUses()
+	if len(warmth) != 1 {
+		t.Fatalf("warmthUses = %d, want 1", len(warmth))
+	}
+	if warmth[0].Provider != "ollama-b" {
+		t.Errorf("warmth target = %q, want ollama-b (last attempted key)", warmth[0].Provider)
+	}
+}
+
 func TestRoutePlanString(t *testing.T) {
 	plan := &RoutePlan{
 		Model: "qwen3:8b",

@@ -118,7 +118,7 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 		}
 	}
 
-	outcome := rp.handleResult(err, fallbacksUsed)
+	outcome := rp.handleResult(err, fallbacksUsed, nil)
 	if resp != nil && outcome != nil {
 		resp.RouteOutcome = outcome
 	}
@@ -149,7 +149,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 			delivered = true
 		}
 		if chunk.Done {
-			outcome = rp.handleResult(nil, fallbacksUsed)
+			outcome = rp.handleResult(nil, fallbacksUsed, nil)
 			if outcome != nil {
 				chunk.RouteOutcome = outcome
 			}
@@ -174,7 +174,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 						delivered = true
 					}
 					if chunk.Done {
-						outcome = rp.handleResult(nil, fallbacksUsed)
+						outcome = rp.handleResult(nil, fallbacksUsed, nil)
 						if outcome != nil {
 							chunk.RouteOutcome = outcome
 						}
@@ -202,7 +202,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	// Record signals for streams that completed without a Done chunk, or
 	// that ended in a non-infrastructure error / cancellation.
 	if outcome == nil {
-		rp.handleResult(err, fallbacksUsed)
+		rp.handleResult(err, fallbacksUsed, nil)
 	}
 
 	return err
@@ -241,7 +241,7 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 		}
 	}
 
-	outcome := rp.handleResult(err, fallbacksUsed)
+	outcome := rp.handleResult(err, fallbacksUsed, nil)
 	if resp != nil && outcome != nil {
 		resp.RouteOutcome = outcome
 	}
@@ -271,7 +271,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 			delivered = true
 		}
 		if chunk.Done {
-			outcome = rp.handleResult(nil, fallbacksUsed)
+			outcome = rp.handleResult(nil, fallbacksUsed, nil)
 			if outcome != nil {
 				chunk.RouteOutcome = outcome
 			}
@@ -296,7 +296,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 						delivered = true
 					}
 					if chunk.Done {
-						outcome = rp.handleResult(nil, fallbacksUsed)
+						outcome = rp.handleResult(nil, fallbacksUsed, nil)
 						if outcome != nil {
 							chunk.RouteOutcome = outcome
 						}
@@ -323,7 +323,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 	// Record signals for streams that completed without a Done chunk, or
 	// that ended in a non-infrastructure error / cancellation.
 	if outcome == nil {
-		rp.handleResult(err, fallbacksUsed)
+		rp.handleResult(err, fallbacksUsed, nil)
 	}
 
 	return err
@@ -362,7 +362,7 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 		}
 	}
 
-	outcome := rp.handleResult(err, fallbacksUsed)
+	outcome := rp.handleResult(err, fallbacksUsed, nil)
 	if resp != nil && outcome != nil {
 		resp.RouteOutcome = outcome
 	}
@@ -374,39 +374,52 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 // handleResult — post-execution recorder + outcome builder
 // ---------------------------------------------------------------------------
 
-// handleResult records success/failure/cancellation signals and returns a
-// RouteOutcome for successful executions.
-func (rp *RoutePlan) handleResult(err error, fallbacksUsed int) *RouteOutcome {
+// handleResult records side-channel signals (breaker, warmth, feedback) and
+// returns a *RouteOutcome carrying the per-attempt trace. The outcome is
+// ALWAYS built, regardless of err — failure-path callers have no response
+// to attach the outcome to, but the feedback seam consumes it via
+// recordOutcomeFeedback. Pre-PR2 returned nil on cancellation/failure;
+// PR2 always returns non-nil.
+func (rp *RoutePlan) handleResult(err error, fallbacksUsed int, attempts []RouteAttempt) *RouteOutcome {
+	// Derive the most recently attempted key for warmth/success attribution.
+	// attempts[last].Key is correct in every case Execute* produces: success,
+	// infra failure, cancellation after a fallback was tried. The previous
+	// fallbacksUsed-arithmetic mis-attributed warmth to the primary when a
+	// fallback was attempted but never successfully selected.
+	//
+	// While the Execute* call sites still pass attempts=nil (Tasks 5-9 fill
+	// these in), fall back to the legacy fallbacksUsed-based derivation so
+	// existing tests and consumer behavior continue to observe RecordSuccess
+	// against the actually-selected fallback.
 	actualKey := rp.Profile.Key
-	if fallbacksUsed > 0 && fallbacksUsed <= len(rp.Fallbacks) {
+	if len(attempts) > 0 {
+		actualKey = attempts[len(attempts)-1].Key
+	} else if fallbacksUsed > 0 && fallbacksUsed <= len(rp.Fallbacks) {
 		actualKey = rp.Fallbacks[fallbacksUsed-1].Profile.Key
 	}
 
 	if err == nil {
 		rp.recordSuccess(actualKey, LatencyInfo{})
 		rp.recordWarmthUse(actualKey)
-		return rp.buildOutcome(fallbacksUsed)
+	} else if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		rp.recordWarmthUse(actualKey) // model IS warm even if caller bailed
 	}
+	// Infrastructure failures continue to be recorded inline by Execute methods.
 
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		rp.recordWarmthUse(actualKey) // model IS warm
-		return nil
-	}
-
-	// Infrastructure failures are recorded inline by the Execute methods
-	// (once per provider attempt) rather than here, to avoid double-counting
-	// the last-tried provider in the fallback chain.
-
-	return nil
+	outcome := rp.buildOutcome(fallbacksUsed, attempts)
+	rp.recordOutcomeFeedback(outcome)
+	return outcome
 }
 
-// buildOutcome constructs a RouteOutcome from the plan and fallback index.
-func (rp *RoutePlan) buildOutcome(fallbacksUsed int) *RouteOutcome {
+// buildOutcome constructs a RouteOutcome from the plan, fallback index, and
+// per-attempt trace. ActualModel reflects the *selected* fallback (the model
+// whose response is in the user's hand). Attempts records every provider
+// call that happened, in order.
+func (rp *RoutePlan) buildOutcome(fallbacksUsed int, attempts []RouteAttempt) *RouteOutcome {
 	actualKey := rp.Profile.Key
 	if fallbacksUsed > 0 && fallbacksUsed <= len(rp.Fallbacks) {
 		actualKey = rp.Fallbacks[fallbacksUsed-1].Profile.Key
 	}
-
 	return &RouteOutcome{
 		PlannedModel:  rp.Profile.Key,
 		ActualModel:   actualKey,
@@ -415,7 +428,7 @@ func (rp *RoutePlan) buildOutcome(fallbacksUsed int) *RouteOutcome {
 		Score:         rp.Score,
 		Reason:        rp.Reason,
 		RouteID:       newRouteID(),
-		// Attempts: nil — PR2 will populate from handleResult.
+		Attempts:      attempts,
 	}
 }
 
