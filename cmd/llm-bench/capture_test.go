@@ -470,6 +470,59 @@ func TestCaptureConversationsAttachesSnapshotTools(t *testing.T) {
 	}
 }
 
+func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{
+		"name":"read_file",
+		"description":"Read /Users/keith/project/secret.go for user@example.com with api_key=abc123",
+		"inputSchema":{
+			"type":"object",
+			"properties":{
+				"path":{
+					"type":"string",
+					"description":"Local path such as /Users/keith/project/secret.go"
+				},
+				"token":{
+					"type":"string",
+					"default":"ghp_1234567890abcdefABCD"
+				}
+			}
+		}
+	}`)}
+	conv := validTestConversation("schema-redaction", "done", time.Now())
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "schema-redaction", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"schema-redaction": conv},
+	}
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        t.TempDir(),
+		ToolSchemaSource: staticToolSchemaSource{tools: tools},
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("Written=%v; want 1 trace", res.Written)
+	}
+	data, err := os.ReadFile(res.Written[0])
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace Trace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		t.Fatalf("unmarshal trace: %v", err)
+	}
+	if len(trace.Tools) != 1 {
+		t.Fatalf("trace.Tools len=%d; want 1", len(trace.Tools))
+	}
+	toolJSON := string(trace.Tools[0])
+	assertClean(t, toolJSON)
+	for _, want := range []string{"[REDACTED_PATH]/secret.go", "[REDACTED_EMAIL]", "[REDACTED_SECRET]"} {
+		if !strings.Contains(toolJSON, want) {
+			t.Fatalf("redacted tool schema %q missing %q", toolJSON, want)
+		}
+	}
+}
+
 func TestCaptureConversationsSkipsConversationWithUndeclaredTool(t *testing.T) {
 	tools := []json.RawMessage{json.RawMessage(`{"name":"read_file","inputSchema":{"type":"object"}}`)}
 	conv := conversation.Conversation{

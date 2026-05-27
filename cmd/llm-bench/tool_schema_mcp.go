@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"unicode"
 
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -40,11 +41,74 @@ type mcpToolSchemaSource struct {
 }
 
 func newMCPToolSchemaSourceStdio(command string) (*mcpToolSchemaSource, error) {
-	parts := strings.Fields(strings.TrimSpace(command))
+	parts, err := parseStdioCommand(command)
+	if err != nil {
+		return nil, fmt.Errorf("mcp-stdio-command: %w", err)
+	}
 	if len(parts) == 0 {
 		return nil, fmt.Errorf("empty mcp-stdio-command")
 	}
 	return &mcpToolSchemaSource{stdioCmd: parts, clientName: mcpClientName}, nil
+}
+
+func parseStdioCommand(command string) ([]string, error) {
+	var parts []string
+	var b strings.Builder
+	var quote rune
+	escaped := false
+	inToken := false
+
+	flush := func() {
+		parts = append(parts, b.String())
+		b.Reset()
+		inToken = false
+	}
+
+	for _, r := range strings.TrimSpace(command) {
+		if escaped {
+			b.WriteRune(r)
+			escaped = false
+			inToken = true
+			continue
+		}
+		if quote != '\'' && r == '\\' {
+			escaped = true
+			inToken = true
+			continue
+		}
+		if quote != 0 {
+			if r == quote {
+				quote = 0
+				continue
+			}
+			b.WriteRune(r)
+			inToken = true
+			continue
+		}
+
+		switch {
+		case r == '\'' || r == '"':
+			quote = r
+			inToken = true
+		case unicode.IsSpace(r):
+			if inToken {
+				flush()
+			}
+		default:
+			b.WriteRune(r)
+			inToken = true
+		}
+	}
+	if escaped {
+		return nil, fmt.Errorf("unterminated escape")
+	}
+	if quote != 0 {
+		return nil, fmt.Errorf("unterminated %q quote", quote)
+	}
+	if inToken {
+		flush()
+	}
+	return parts, nil
 }
 
 func newMCPToolSchemaSourceHTTP(endpoint string) (*mcpToolSchemaSource, error) {

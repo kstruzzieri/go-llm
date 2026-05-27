@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -174,7 +175,7 @@ func TestNewMCPToolSchemaSourceStdioDefersTransport(t *testing.T) {
 	if src.transport != nil {
 		t.Fatalf("stdio source eagerly built a transport; want lazy")
 	}
-	if got, want := src.stdioCmd, []string{"nonexistent-binary", "arg1", "arg2"}; len(got) != len(want) || got[0] != want[0] {
+	if got, want := src.stdioCmd, []string{"nonexistent-binary", "arg1", "arg2"}; !slices.Equal(got, want) {
 		t.Fatalf("stdioCmd=%v; want %v", got, want)
 	}
 	tr, err := src.buildTransport(context.Background())
@@ -183,6 +184,35 @@ func TestNewMCPToolSchemaSourceStdioDefersTransport(t *testing.T) {
 	}
 	if _, ok := tr.(*mcp.CommandTransport); !ok {
 		t.Fatalf("buildTransport returned %T; want *mcp.CommandTransport", tr)
+	}
+}
+
+func TestParseStdioCommandPreservesQuotedArgs(t *testing.T) {
+	got, err := parseStdioCommand(`"/tmp/my server" --config "Project A.json" 'single quoted arg' bare`)
+	if err != nil {
+		t.Fatalf("parseStdioCommand: %v", err)
+	}
+	want := []string{"/tmp/my server", "--config", "Project A.json", "single quoted arg", "bare"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("parseStdioCommand=%v; want %v", got, want)
+	}
+}
+
+func TestParseStdioCommandPreservesEscapesAndEmptyArgs(t *testing.T) {
+	got, err := parseStdioCommand(`server\ path "" "quoted \"value\""`)
+	if err != nil {
+		t.Fatalf("parseStdioCommand: %v", err)
+	}
+	want := []string{"server path", "", `quoted "value"`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("parseStdioCommand=%v; want %v", got, want)
+	}
+}
+
+func TestNewMCPToolSchemaSourceStdioRejectsUnterminatedQuote(t *testing.T) {
+	_, err := newMCPToolSchemaSourceStdio(`server --config "Project A.json`)
+	if err == nil || !strings.Contains(err.Error(), "unterminated") {
+		t.Fatalf("want unterminated quote error; got %v", err)
 	}
 }
 

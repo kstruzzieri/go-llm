@@ -172,6 +172,7 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 		return captureResult{}, fmt.Errorf("create trace dir %q: %w", outDir, err)
 	}
 
+	redactor := defaultRedactor()
 	snapshotConfigured := opts.ToolSchemaSource != nil
 	var snapshotTools []json.RawMessage
 	if snapshotConfigured {
@@ -179,10 +180,12 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 		if err != nil {
 			return captureResult{}, fmt.Errorf("capture: tool schema snapshot: %w", err)
 		}
-		snapshotTools = tools
+		snapshotTools, err = redactToolSchemas(tools, redactor)
+		if err != nil {
+			return captureResult{}, fmt.Errorf("capture: redact tool schema snapshot: %w", err)
+		}
 	}
 
-	redactor := defaultRedactor()
 	var result captureResult
 	for _, summary := range summaries {
 		if opts.Limit > 0 && len(result.Written) >= opts.Limit {
@@ -380,6 +383,21 @@ func redactRawJSON(raw json.RawMessage, redactor redactor) (json.RawMessage, err
 		return nil, err
 	}
 	return json.RawMessage(data), nil
+}
+
+func redactToolSchemas(tools []json.RawMessage, redactor redactor) ([]json.RawMessage, error) {
+	if len(tools) == 0 {
+		return []json.RawMessage{}, nil
+	}
+	out := make([]json.RawMessage, len(tools))
+	for i, raw := range tools {
+		redacted, err := redactRawJSON(raw, redactor)
+		if err != nil {
+			return nil, fmt.Errorf("tool[%d]: %w", i, err)
+		}
+		out[i] = redacted
+	}
+	return out, nil
 }
 
 func redactJSONValue(value any, redactor redactor) any {
