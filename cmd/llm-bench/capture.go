@@ -424,6 +424,18 @@ func redactSchemaJSONValue(value any, redactor redactor, sensitiveProperty bool)
 	case map[string]any:
 		for key, nested := range v {
 			keySensitive := sensitiveProperty || isSensitiveKey(key)
+			if isSchemaPatternKey(key) {
+				if pattern, ok := nested.(string); ok {
+					v[key] = redactRegexString(pattern, redactor)
+					continue
+				}
+			}
+			if isSchemaPatternPropertiesKey(key) {
+				if patterns, ok := nested.(map[string]any); ok {
+					v[key] = redactPatternProperties(patterns, redactor, keySensitive)
+					continue
+				}
+			}
 			if sensitiveProperty && isSensitiveSchemaValueKey(key) {
 				v[key] = redactSensitiveSchemaValue(nested, redactor)
 				continue
@@ -467,13 +479,41 @@ func redactSensitiveSchemaValue(value any, redactor redactor) any {
 	}
 }
 
+func redactPatternProperties(patterns map[string]any, redactor redactor, sensitiveProperty bool) map[string]any {
+	redacted := make(map[string]any, len(patterns))
+	for pattern, schema := range patterns {
+		redacted[redactRegexString(pattern, redactor)] = redactSchemaJSONValue(schema, redactor, sensitiveProperty || isSensitiveKey(pattern))
+	}
+	return redacted
+}
+
+func redactRegexString(pattern string, redactor redactor) string {
+	redacted := redactor.Redact(pattern)
+	for _, placeholder := range []string{redactor.pathPlaceholder, redactor.secretPlaceholder, redactor.emailPlaceholder} {
+		redacted = strings.ReplaceAll(redacted, placeholder, regexp.QuoteMeta(placeholder))
+	}
+	return redacted
+}
+
 func isSensitiveSchemaValueKey(key string) bool {
-	switch strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_")) {
+	switch normalizeSchemaKey(key) {
 	case "default", "examples", "enum", "const":
 		return true
 	default:
 		return false
 	}
+}
+
+func isSchemaPatternKey(key string) bool {
+	return normalizeSchemaKey(key) == "pattern"
+}
+
+func isSchemaPatternPropertiesKey(key string) bool {
+	return normalizeSchemaKey(key) == "pattern_properties"
+}
+
+func normalizeSchemaKey(key string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
 }
 
 func redactJSONValue(value any, redactor redactor) any {

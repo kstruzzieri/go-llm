@@ -479,7 +479,8 @@ func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
 			"properties":{
 				"path":{
 					"type":"string",
-					"description":"Local path such as /Users/keith/project/secret.go"
+					"description":"Local path such as /Users/keith/project/secret.go",
+					"pattern":"^/Users/keith/project/.*"
 				},
 				"token":{
 					"type":"string",
@@ -529,6 +530,13 @@ func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
 		if !strings.Contains(toolJSON, want) {
 			t.Fatalf("redacted tool schema %q missing %q", toolJSON, want)
 		}
+	}
+	schemas, err := toolSchemaByName(trace.Tools)
+	if err != nil {
+		t.Fatalf("toolSchemaByName: %v", err)
+	}
+	if err := schemas["read_file"].Validate(map[string]any{"path": "[REDACTED_PATH]/secret.go"}); err != nil {
+		t.Fatalf("redacted pattern should match redacted path placeholder: %v\nschema=%s", err, toolJSON)
 	}
 }
 
