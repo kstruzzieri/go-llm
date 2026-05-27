@@ -84,6 +84,28 @@ func TestRunCalibrateCapture_WritesOneArtifactPerResult(t *testing.T) {
 	}
 }
 
+func TestRunCalibrateCapture_FailsWhenNoArtifactsWritten(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "artifacts.jsonl")
+	runner := &fakeRunner{results: []Result{
+		{Model: "ollama/cand", TraceID: "t1", Err: fmt.Errorf("model unavailable")},
+	}}
+	traces := []Trace{
+		{ID: "t1", System: "s", Turns: []Turn{{Role: "user", Content: "u1"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
+	}
+	targets := []ModelTarget{{Display: "ollama/cand", Provider: "ollama", Model: "cand"}}
+
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: runner, Targets: targets, Traces: traces, OutputPath: out,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no artifacts written") {
+		t.Fatalf("runCalibrateCapture err = %v; want no artifacts written", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Fatalf("output stat err = %v; want file not created", statErr)
+	}
+}
+
 func TestArtifactHash_DeterministicAcrossInvocations(t *testing.T) {
 	a := Artifact{
 		TraceID: "t1", CandidateModel: "ollama/cand",
@@ -401,13 +423,64 @@ func TestRunCalibrate_ReportFilenameIsSlugified(t *testing.T) {
 		JudgeModel: "ollama/gemma4:31b",
 		MinLabels:  1,
 		ReportDir:  reportDir,
-		Clock:      func() time.Time { return time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC) },
+		Clock:      func() time.Time { return time.Date(2026, 5, 25, 13, 14, 15, 0, time.UTC) },
 	})
 	if err != nil {
 		t.Fatalf("runCalibrate: %v", err)
 	}
-	if !strings.HasSuffix(res.ReportPath, "2026-05-25-ollama_gemma4_31b.md") {
-		t.Fatalf("ReportPath=%q; want suffix 2026-05-25-ollama_gemma4_31b.md", res.ReportPath)
+	if !strings.HasSuffix(res.ReportPath, "2026-05-25T131415Z-ollama_gemma4_31b.md") {
+		t.Fatalf("ReportPath=%q; want suffix 2026-05-25T131415Z-ollama_gemma4_31b.md", res.ReportPath)
+	}
+}
+
+func TestRunCalibrate_ReportFilenameDoesNotOverwriteSameTimestamp(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	reportDir := filepath.Join(dir, "reports")
+	a := testCalibrationArtifact("t", "x")
+	if err := writeJSONL(arts, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{Label{
+		TraceID: "t", CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+		ExpectedAnswerQuality: 1.0, Labeler: "manual",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	run := func() CalibrationResult {
+		t.Helper()
+		res, err := runCalibrate(context.Background(), calibrateOptions{
+			LabelsPath: labels, ArtifactsPath: arts,
+			Scorer:     &fakeScorer{judgeByTrace: map[string]float64{"t": 1.0}},
+			JudgeModel: "ollama/gemma4:31b",
+			MinLabels:  1,
+			ReportDir:  reportDir,
+			Clock:      func() time.Time { return time.Date(2026, 5, 25, 13, 14, 15, 0, time.UTC) },
+		})
+		if err != nil {
+			t.Fatalf("runCalibrate: %v", err)
+		}
+		return res
+	}
+
+	first := run()
+	if err := os.WriteFile(first.ReportPath, []byte("sentinel"), 0o600); err != nil {
+		t.Fatalf("write sentinel: %v", err)
+	}
+	second := run()
+	if first.ReportPath == second.ReportPath {
+		t.Fatalf("ReportPath reused %q; want unique path", first.ReportPath)
+	}
+	if !strings.HasSuffix(second.ReportPath, "2026-05-25T131415Z-ollama_gemma4_31b-2.md") {
+		t.Fatalf("second ReportPath=%q; want -2 suffix", second.ReportPath)
+	}
+	got, err := os.ReadFile(first.ReportPath)
+	if err != nil {
+		t.Fatalf("read first report: %v", err)
+	}
+	if string(got) != "sentinel" {
+		t.Fatalf("first report was overwritten: %q", got)
 	}
 }
 

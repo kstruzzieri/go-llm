@@ -88,7 +88,9 @@ llm-bench -calibrate \
 ```
 
 Writes a markdown report to
-`docs/llm/calibration/reports/YYYY-MM-DD-<slug>.md`. Verdict is one of:
+`docs/llm/calibration/reports/YYYY-MM-DDTHHMMSSZ-<slug>.md`. If a report
+already exists for the same timestamp and judge model, a numeric suffix is
+added so prior reports are not overwritten. Verdict is one of:
 
 - **PASS** — agreement ≥85% on ≥50 matched non-stale labels.
 - **FAIL** — agreement <85% on ≥50 matched non-stale labels.

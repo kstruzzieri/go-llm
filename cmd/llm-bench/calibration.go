@@ -122,22 +122,12 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		traceByID[trace.ID] = trace
 	}
 
-	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
-		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
-	}
-	f, err := os.OpenFile(opts.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
-	if err != nil {
-		return fmt.Errorf("calibrate-capture: open output: %w", err)
-	}
-	defer func() {
-		if closeErr := f.Close(); retErr == nil && closeErr != nil {
-			retErr = fmt.Errorf("calibrate-capture: close output: %w", closeErr)
-		}
-	}()
-	enc := json.NewEncoder(f)
+	var artifacts []Artifact
+	failed := 0
 	for _, r := range results {
 		if r.Err != nil {
 			// Skip failed runs — they cannot be labeled coherently.
+			failed++
 			continue
 		}
 		trace, ok := traceByID[r.TraceID]
@@ -154,6 +144,26 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			CapturedAt:        now(),
 		}
 		artifact.ArtifactHash = artifactHash(artifact)
+		artifacts = append(artifacts, artifact)
+	}
+	if len(artifacts) == 0 {
+		return fmt.Errorf("calibrate-capture: no artifacts written; %d results returned, %d failed", len(results), failed)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
+		return fmt.Errorf("calibrate-capture: mkdir: %w", err)
+	}
+	f, err := os.OpenFile(opts.OutputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("calibrate-capture: open output: %w", err)
+	}
+	defer func() {
+		if closeErr := f.Close(); retErr == nil && closeErr != nil {
+			retErr = fmt.Errorf("calibrate-capture: close output: %w", closeErr)
+		}
+	}()
+	enc := json.NewEncoder(f)
+	for _, artifact := range artifacts {
 		if err := enc.Encode(artifact); err != nil {
 			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
 		}
@@ -429,8 +439,8 @@ func slugifyModel(s string) string {
 }
 
 // writeCalibrationReport emits a markdown calibration report to dir with a
-// slugified, dated filename and returns the report path. Clock is the time
-// source used to stamp the filename and report header; defaults to
+// slugified, timestamped filename and returns the report path. Clock is the
+// time source used to stamp the filename and report header; defaults to
 // time.Now().UTC() when nil.
 func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock func() time.Time) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -438,9 +448,8 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 	}
 	now := time.Now().UTC()
 	if clock != nil {
-		now = clock()
+		now = clock().UTC()
 	}
-	path := filepath.Join(dir, fmt.Sprintf("%s-%s.md", now.Format("2006-01-02"), slugifyModel(judgeModel)))
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Judge calibration — %s — %s\n\n", judgeModel, now.Format("2006-01-02"))
 	fmt.Fprintf(&b, "Matched labels: %d / %d required → %s\n", res.MatchedCount, res.MinLabels, sufficiencyLabel(res))
@@ -461,10 +470,40 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 		fmt.Fprintf(&b, "| %s | %s | %.2f | %.2f | %.2f | %s | %s |\n",
 			p.TraceID, p.CandidateModel, p.Expected, p.Judge, p.Delta, agree, stability)
 	}
-	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+	f, path, err := createCalibrationReportFile(dir, judgeModel, now)
+	if err != nil {
+		return "", err
+	}
+	if _, err := f.WriteString(b.String()); err != nil {
+		_ = f.Close()
 		return "", fmt.Errorf("write %q: %w", path, err)
 	}
+	if err := f.Close(); err != nil {
+		return "", fmt.Errorf("close %q: %w", path, err)
+	}
 	return path, nil
+}
+
+func createCalibrationReportFile(dir, judgeModel string, now time.Time) (*os.File, string, error) {
+	for attempt := 0; ; attempt++ {
+		path := calibrationReportPath(dir, judgeModel, now, attempt)
+		f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if err == nil {
+			return f, path, nil
+		}
+		if errors.Is(err, os.ErrExist) {
+			continue
+		}
+		return nil, "", fmt.Errorf("create %q: %w", path, err)
+	}
+}
+
+func calibrationReportPath(dir, judgeModel string, now time.Time, attempt int) string {
+	stem := fmt.Sprintf("%s-%s", now.Format("2006-01-02T150405Z"), slugifyModel(judgeModel))
+	if attempt > 0 {
+		stem = fmt.Sprintf("%s-%d", stem, attempt+1)
+	}
+	return filepath.Join(dir, stem+".md")
 }
 
 // sufficiencyLabel renders the matched-vs-required label-count state as a
