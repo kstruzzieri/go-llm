@@ -470,6 +470,71 @@ func TestCaptureConversationsAttachesSnapshotTools(t *testing.T) {
 	}
 }
 
+func TestCaptureConversationsSkipsConversationWithUndeclaredTool(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{"name":"read_file","inputSchema":{"type":"object"}}`)}
+	conv := conversation.Conversation{
+		ID:        "bad",
+		Messages:  buildToolCallConvo("undeclared_tool"),
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "bad", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"bad": conv},
+	}
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        t.TempDir(),
+		ToolSchemaSource: staticToolSchemaSource{tools: tools},
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 0 {
+		t.Fatalf("Written=%v; want 0", res.Written)
+	}
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "not in MCP snapshot") {
+		t.Fatalf("Skipped=%v; want one entry citing 'not in MCP snapshot'", res.Skipped)
+	}
+}
+
+func TestCaptureConversationsConfiguredEmptySnapshotSkipsToolConversation(t *testing.T) {
+	conv := conversation.Conversation{
+		ID:        "empty-snapshot",
+		Messages:  buildToolCallConvo("read_file"),
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "empty-snapshot", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"empty-snapshot": conv},
+	}
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        t.TempDir(),
+		ToolSchemaSource: staticToolSchemaSource{}, // configured source, authoritative empty snapshot
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 0 {
+		t.Fatalf("Written=%v; want 0", res.Written)
+	}
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "not in MCP snapshot") {
+		t.Fatalf("Skipped=%v; want one entry citing 'not in MCP snapshot'", res.Skipped)
+	}
+}
+
+// buildToolCallConvo returns a minimal valid conversation whose assistant
+// turn calls a single named tool. Used by skip-on-undeclared tests.
+func buildToolCallConvo(toolName string) []conversation.Message {
+	args := []byte(`{}`)
+	tc := []byte(`[{"name":"` + toolName + `","arguments":` + string(args) + `}]`)
+	return []conversation.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "go"},
+		{Role: "assistant", Content: "", ToolCalls: tc},
+		{Role: "tool", Content: "result", ToolCallID: "1", ToolName: toolName},
+		{Role: "assistant", Content: "done"},
+	}
+}
+
 func TestCaptureConversationsNilSourceLeavesEmptyTools(t *testing.T) {
 	conv := conversation.Conversation{
 		ID:        "c1",

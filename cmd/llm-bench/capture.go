@@ -197,7 +197,12 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 
 		trace, err := conversationToTrace(*conv, source, opts.FallbackSystem, redactor, snapshotTools, snapshotConfigured)
 		if err != nil {
-			result.Skipped = append(result.Skipped, fmt.Sprintf("%s: %v", summary.ID, err))
+			if errors.Is(err, errToolNameNotDeclared) {
+				name := undeclaredToolName(err)
+				result.Skipped = append(result.Skipped, fmt.Sprintf("%s: tool %q not in MCP snapshot", summary.ID, name))
+			} else {
+				result.Skipped = append(result.Skipped, fmt.Sprintf("%s: %v", summary.ID, err))
+			}
 			continue
 		}
 
@@ -229,7 +234,6 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 	if tools == nil {
 		tools = []json.RawMessage{}
 	}
-	_ = schemaSnapshotConfigured // Task 9 will use this to drive skip-on-undeclared
 
 	trace := Trace{
 		ID:         "conversation-" + conv.ID,
@@ -243,6 +247,9 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 			FinalAnswerCriteria:  "Assistant answer should satisfy the captured final assistant response.",
 			FinalAnswerSubstring: finalAnswer,
 		},
+	}
+	if schemaSnapshotConfigured && len(trace.Tools) == 0 && len(trace.Golden.ToolCalls) > 0 {
+		return Trace{}, fmt.Errorf("tool %q: %w", trace.Golden.ToolCalls[0], errToolNameNotDeclared)
 	}
 	if err := validateTrace(trace); err != nil {
 		return Trace{}, err
@@ -513,6 +520,23 @@ func pathBase(path string) string {
 		return ""
 	}
 	return path[idx+1:]
+}
+
+// undeclaredToolName recovers the offending tool name embedded in the
+// wrapped error chain by validateToolNamesDeclared. Returns "" if the
+// chain doesn't include a quoted name (defensive — the validator
+// always quotes the name today).
+func undeclaredToolName(err error) string {
+	msg := err.Error()
+	first := strings.Index(msg, `"`)
+	if first < 0 {
+		return ""
+	}
+	last := strings.Index(msg[first+1:], `"`)
+	if last < 0 {
+		return ""
+	}
+	return msg[first+1 : first+1+last]
 }
 
 func isSensitiveKey(key string) bool {
