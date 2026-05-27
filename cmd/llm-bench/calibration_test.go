@@ -130,6 +130,16 @@ func TestArtifactHash_SensitiveToFinalAnswer(t *testing.T) {
 	}
 }
 
+func TestArtifactHash_SensitiveToTraceIDCase(t *testing.T) {
+	base := Artifact{TraceID: "Foo", CandidateModel: "c"}
+	h1 := artifactHash(base)
+	base.TraceID = "foo"
+	h2 := artifactHash(base)
+	if h1 == h2 {
+		t.Fatalf("artifactHash should preserve TraceID case")
+	}
+}
+
 func TestArtifactHash_SensitiveToToolCallSequence(t *testing.T) {
 	base := Artifact{TraceID: "t", CandidateModel: "c"}
 	base.ActualToolCalls = []string{"a", "b"}
@@ -215,6 +225,21 @@ func TestLoadLabelsAndArtifacts_DuplicateMatchedLabelRejected(t *testing.T) {
 	_, _, err := loadLabelsMatchedAgainst(labels, arts)
 	if err == nil || !strings.Contains(err.Error(), "duplicate label for artifact_hash") {
 		t.Fatalf("loadLabelsMatchedAgainst err = %v; want duplicate label error", err)
+	}
+}
+
+func TestLoadLabels_InvalidExpectedAnswerQualityRejected(t *testing.T) {
+	dir := t.TempDir()
+	labels := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: "sha256:h", ExpectedAnswerQuality: 2.0, Labeler: "manual"},
+	}); err != nil {
+		t.Fatalf("seed labels: %v", err)
+	}
+
+	_, err := loadLabels(labels)
+	if err == nil || !strings.Contains(err.Error(), "invalid expected_answer_quality") {
+		t.Fatalf("loadLabels err = %v; want invalid expected_answer_quality", err)
 	}
 }
 

@@ -46,8 +46,8 @@ type Label struct {
 }
 
 // artifactHashInput is the canonical struct hashed to produce ArtifactHash.
-// Order-sensitive on tool calls and transcript turns; ID and candidate
-// model normalized to lowercase to avoid spurious mismatch from case.
+// Order-sensitive on trace IDs, tool calls, and transcript turns; candidate
+// model is normalized to lowercase to avoid spurious mismatch from case.
 type artifactHashInput struct {
 	TraceID           string   `json:"trace_id"`
 	CandidateModel    string   `json:"candidate_model"`
@@ -62,7 +62,7 @@ type artifactHashInput struct {
 // tool-call sequence order.
 func artifactHash(a Artifact) string {
 	raw, _ := json.Marshal(artifactHashInput{
-		TraceID:           normalizeModelSelector(a.TraceID),
+		TraceID:           a.TraceID,
 		CandidateModel:    normalizeModelSelector(a.CandidateModel),
 		Trace:             a.Trace,
 		ActualFinalAnswer: a.ActualFinalAnswer,
@@ -244,9 +244,17 @@ func loadLabels(path string) ([]Label, error) {
 		if err := dec.Decode(&l); err != nil {
 			return nil, fmt.Errorf("decode label: %w", err)
 		}
+		if !validExpectedAnswerQuality(l.ExpectedAnswerQuality) {
+			return nil, fmt.Errorf("invalid expected_answer_quality for label %s/%s: %.2f (want one of 0.0, 0.5, 1.0)",
+				l.TraceID, l.CandidateModel, l.ExpectedAnswerQuality)
+		}
 		out = append(out, l)
 	}
 	return out, nil
+}
+
+func validExpectedAnswerQuality(v float64) bool {
+	return v == 0 || v == 0.5 || v == 1
 }
 
 const (

@@ -66,6 +66,7 @@ The `artifact_hash` MUST match the corresponding artifact's hash — that's
 how the calibration loop knows the label is still valid for the frozen
 output. Each current artifact hash may appear only once in `labels.jsonl`;
 duplicate matched labels are rejected so one artifact cannot be double-counted.
+Labels with `expected_answer_quality` outside `{0.0, 0.5, 1.0}` are rejected.
 
 ### How to label
 
