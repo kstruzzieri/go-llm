@@ -36,6 +36,8 @@ func main() {
 	captureSystem := flag.String("capture-system", "", "Fallback system prompt when a conversation has no stored system message")
 	mcpStdioCommand := flag.String("mcp-stdio-command", "", "Run this command and snapshot its MCP tools/list (mutually exclusive with -mcp-url)")
 	mcpURL := flag.String("mcp-url", "", "Snapshot MCP tools/list from this HTTP endpoint (mutually exclusive with -mcp-stdio-command)")
+	captureSample := flag.String("capture-sample", "", "Stratified capture spec, e.g. n=50,stratify=token-length:turn-count (mutually exclusive with -capture-limit)")
+	captureSampleSeed := flag.Int64("capture-sample-seed", 0, "Deterministic seed for -capture-sample (0 = time.Now().UnixNano())")
 
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
@@ -75,6 +77,13 @@ func main() {
 	defer cancel()
 
 	if *capture {
+		if err := validateCaptureSampleAndLimit(*captureLimit, *captureSample); err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		if err := resolveCaptureSample(*captureSample); err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		_ = captureSampleSeed // wired up in track B2
 		src, err := resolveToolSchemaSource(*mcpStdioCommand, *mcpURL)
 		if err != nil {
 			log.Fatalf("llm-bench: %v", err)
@@ -301,6 +310,27 @@ func defaultJudgeCachePath() string {
 		return ""
 	}
 	return filepath.Join(base, "go-llm", "judge-cache.db")
+}
+
+// validateCaptureSampleAndLimit rejects the case where both flags are
+// non-zero. Spec §4.4 requires they be mutually exclusive: -capture-limit
+// is the simple "first N" path; -capture-sample is the stratified path.
+func validateCaptureSampleAndLimit(limit int, sample string) error {
+	if limit > 0 && strings.TrimSpace(sample) != "" {
+		return fmt.Errorf("-capture-limit and -capture-sample are mutually exclusive")
+	}
+	return nil
+}
+
+// resolveCaptureSample is a B1 placeholder. B2 (sampling.go) replaces
+// the body with real parsing + allocator. Until then, supplying a
+// non-empty spec is a hard error rather than a silent no-op so users
+// can't think sampling is happening.
+func resolveCaptureSample(spec string) error {
+	if strings.TrimSpace(spec) == "" {
+		return nil
+	}
+	return fmt.Errorf("-capture-sample: sampling not yet implemented (track B2)")
 }
 
 // resolveToolSchemaSource picks a tool-schema source from CLI flags.

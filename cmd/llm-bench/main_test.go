@@ -41,3 +41,21 @@ func TestResolveToolSchemaSourceBothEmptyIsNil(t *testing.T) {
 		t.Fatalf("want nil source when no transport configured; got %T", src)
 	}
 }
+
+func TestCaptureSampleAndLimitMutuallyExclusive(t *testing.T) {
+	if err := validateCaptureSampleAndLimit(10, "n=20"); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("want mutex error; got %v", err)
+	}
+}
+
+func TestCaptureSampleNotYetImplementedReturnsError(t *testing.T) {
+	if err := resolveCaptureSample("n=20"); err == nil || !strings.Contains(err.Error(), "sampling not yet implemented") {
+		t.Fatalf("want not-yet-implemented error; got %v", err)
+	}
+}
+
+func TestCaptureSampleEmptyOK(t *testing.T) {
+	if err := resolveCaptureSample(""); err != nil {
+		t.Fatalf("empty spec: %v", err)
+	}
+}
