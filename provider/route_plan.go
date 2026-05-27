@@ -163,7 +163,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 		if !delivered && hasVisibleContent(chunk.Content, chunk.Thinking, chunk.ToolCalls) {
 			delivered = true
 		}
-		if chunk.Done && !chunk.Partial {
+		if chunk.Done && !chunk.Partial && !streamDone {
 			attempts = append(attempts,
 				makeAttempt(rp.Profile.Key, nil, time.Since(primaryStart)))
 			streamDone = true
@@ -213,7 +213,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 					if !delivered && hasVisibleContent(chunk.Content, chunk.Thinking, chunk.ToolCalls) {
 						delivered = true
 					}
-					if chunk.Done && !chunk.Partial {
+					if chunk.Done && !chunk.Partial && !fbStreamDone {
 						attempts = append(attempts,
 							makeAttempt(fb.Profile.Key, nil, time.Since(fbStart)))
 						fbStreamDone = true
@@ -347,7 +347,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 		if !delivered && chunk.Response != "" {
 			delivered = true
 		}
-		if chunk.Done && !chunk.Partial {
+		if chunk.Done && !chunk.Partial && !streamDone {
 			attempts = append(attempts,
 				makeAttempt(rp.Profile.Key, nil, time.Since(primaryStart)))
 			streamDone = true
@@ -397,7 +397,7 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 					if !delivered && chunk.Response != "" {
 						delivered = true
 					}
-					if chunk.Done && !chunk.Partial {
+					if chunk.Done && !chunk.Partial && !fbStreamDone {
 						attempts = append(attempts,
 							makeAttempt(fb.Profile.Key, nil, time.Since(fbStart)))
 						fbStreamDone = true

@@ -1454,3 +1454,165 @@ func TestExecuteGenerateStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testin
 		t.Errorf("fallback ScoredCount = %d, want >= 1 (Success signal should have been recorded)", agg.ScoredCount)
 	}
 }
+
+func TestExecuteChatStreamDuplicateDoneRecordsAttemptOnce(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Done: true},
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(prov, rec)
+	plan.SetFeedback(rf)
+
+	if err := plan.ExecuteChatStream(context.Background(), func(ChatResponse) error { return nil }); err != nil {
+		t.Fatalf("ExecuteChatStream: %v", err)
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.ScoredCount != 1 {
+		t.Fatalf("ScoredCount = %d, want 1 (duplicate Done must not replay outcome)", agg.ScoredCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 1 {
+		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+}
+
+func TestExecuteGenerateStreamDuplicateDoneRecordsAttemptOnce(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Done: true},
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(prov, rec)
+	plan.Kind = RouteKindGenerate
+	plan.SetFeedback(rf)
+
+	if err := plan.ExecuteGenerateStream(context.Background(), func(GenerateResponse) error { return nil }); err != nil {
+		t.Fatalf("ExecuteGenerateStream: %v", err)
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.ScoredCount != 1 {
+		t.Fatalf("ScoredCount = %d, want 1 (duplicate Done must not replay outcome)", agg.ScoredCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 1 {
+		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+}
+
+func TestExecuteChatStreamFallbackDuplicateDoneRecordsAttemptOnce(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	primary := &rpMockProvider{
+		name:          "ollama-a",
+		caps:          CapChat,
+		chatStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fallback := &rpMockProvider{
+		name: "ollama-b", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Done: true},
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(primary, rec)
+	plan.Profile.Key.Model = "qwen3:8b"
+	plan.SetFeedback(rf)
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	if err := plan.ExecuteChatStream(context.Background(), func(ChatResponse) error { return nil }); err != nil {
+		t.Fatalf("ExecuteChatStream: %v", err)
+	}
+
+	primaryKey := FeedbackKey{Provider: "ollama-a", Model: "qwen3:8b", UseCase: "chat"}
+	primaryAgg, _ := store.Get(context.Background(), primaryKey)
+	if primaryAgg.ScoredCount != 1 {
+		t.Fatalf("primary ScoredCount = %d, want 1", primaryAgg.ScoredCount)
+	}
+	fallbackKey := FeedbackKey{Provider: "ollama-b", Model: "qwen3:8b", UseCase: "chat"}
+	fallbackAgg, _ := store.Get(context.Background(), fallbackKey)
+	if fallbackAgg.ScoredCount != 1 {
+		t.Fatalf("fallback ScoredCount = %d, want 1", fallbackAgg.ScoredCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 1 {
+		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+}
+
+func TestExecuteGenerateStreamFallbackDuplicateDoneRecordsAttemptOnce(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	primary := &rpMockProvider{
+		name:         "ollama-a",
+		caps:         CapGenerate,
+		genStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fallback := &rpMockProvider{
+		name: "ollama-b", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Done: true},
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(primary, rec)
+	plan.Kind = RouteKindGenerate
+	plan.Profile.Key.Model = "qwen3:8b"
+	plan.SetFeedback(rf)
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	if err := plan.ExecuteGenerateStream(context.Background(), func(GenerateResponse) error { return nil }); err != nil {
+		t.Fatalf("ExecuteGenerateStream: %v", err)
+	}
+
+	primaryKey := FeedbackKey{Provider: "ollama-a", Model: "qwen3:8b", UseCase: "chat"}
+	primaryAgg, _ := store.Get(context.Background(), primaryKey)
+	if primaryAgg.ScoredCount != 1 {
+		t.Fatalf("primary ScoredCount = %d, want 1", primaryAgg.ScoredCount)
+	}
+	fallbackKey := FeedbackKey{Provider: "ollama-b", Model: "qwen3:8b", UseCase: "chat"}
+	fallbackAgg, _ := store.Get(context.Background(), fallbackKey)
+	if fallbackAgg.ScoredCount != 1 {
+		t.Fatalf("fallback ScoredCount = %d, want 1", fallbackAgg.ScoredCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 1 {
+		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+}
