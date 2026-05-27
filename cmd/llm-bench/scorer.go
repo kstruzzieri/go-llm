@@ -251,7 +251,7 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 
 	think := false
 	req := ollama.ChatRequest{
-		Model: s.JudgeModel,
+		Model: modelSelectorWithoutBenchProvider(s.JudgeModel),
 		Messages: []ollama.ChatMessage{
 			{Role: "system", Content: judgeSystemPrompt},
 			{Role: "user", Content: prompt},
@@ -619,9 +619,10 @@ func normalizeModelSelector(s string) string {
 }
 
 func modelSelectorWithoutBenchProvider(s string) string {
+	s = strings.TrimSpace(s)
 	prefix := defaultBenchProvider + "/"
-	if strings.HasPrefix(s, prefix) {
-		return strings.TrimSpace(strings.TrimPrefix(s, prefix))
+	if strings.HasPrefix(strings.ToLower(s), prefix) {
+		return strings.TrimSpace(s[len(prefix):])
 	}
 	return s
 }

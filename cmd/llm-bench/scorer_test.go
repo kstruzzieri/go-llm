@@ -213,6 +213,9 @@ func TestLLMJudgeScorer_HappyPath_PreRefactorBaseline(t *testing.T) {
 	if !strings.Contains(score.Notes, "correct") {
 		t.Fatalf("Notes missing justification: %q", score.Notes)
 	}
+	if judge.req.Model != "gemma4:31b" {
+		t.Fatalf("judge request model = %q; want gemma4:31b", judge.req.Model)
+	}
 }
 
 func TestBuildJudgeCall_PopulatesBaseScoreAndRequest(t *testing.T) {
@@ -238,8 +241,8 @@ func TestBuildJudgeCall_PopulatesBaseScoreAndRequest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildJudgeCall: %v", err)
 	}
-	if req.Model != "ollama/judge" {
-		t.Fatalf("req.Model = %q; want ollama/judge", req.Model)
+	if req.Model != "judge" {
+		t.Fatalf("req.Model = %q; want judge", req.Model)
 	}
 	if req.Format != "json" {
 		t.Fatalf("req.Format = %q; want json", req.Format)
@@ -249,6 +252,20 @@ func TestBuildJudgeCall_PopulatesBaseScoreAndRequest(t *testing.T) {
 	}
 	if base.ToolSequenceMatch != 1.0 {
 		t.Fatalf("baseScore.ToolSequenceMatch = %v; want 1.0", base.ToolSequenceMatch)
+	}
+}
+
+func TestBuildJudgeCall_StripsBenchProviderFromJudgeRequestModel(t *testing.T) {
+	trace := Trace{ID: "t", System: "s", Turns: []Turn{{Role: "user", Content: "x"}}, Golden: Golden{FinalAnswerCriteria: "fc"}}
+	actual := Result{Model: "ollama/cand", TraceID: "t", Transcript: []Turn{{Role: "assistant", Content: "y"}}}
+	scorer := &LLMJudgeScorer{Client: &fakeJudgeClient{}, JudgeModel: "ollama/hf.co/org/model:tag"}
+
+	req, _, err := scorer.buildJudgeCall(trace, actual)
+	if err != nil {
+		t.Fatalf("buildJudgeCall: %v", err)
+	}
+	if req.Model != "hf.co/org/model:tag" {
+		t.Fatalf("req.Model = %q; want hf.co/org/model:tag", req.Model)
 	}
 }
 
