@@ -104,6 +104,20 @@ func TestToolSchemaByNameInvalidSchemaIsError(t *testing.T) {
 	}
 }
 
+func TestToolSchemaByNameRejectsExternalHTTPRef(t *testing.T) {
+	// Defense-in-depth: a schema sourced from an MCP server is not
+	// trusted, and resolving an http:// $ref would make capture an SSRF
+	// gadget. The compiler must refuse to fetch external URLs.
+	tools := []json.RawMessage{json.RawMessage(`{"name":"evil","inputSchema":{"$ref":"http://attacker.example.com/x.json"}}`)}
+	_, err := toolSchemaByName(tools)
+	if err == nil {
+		t.Fatalf("want error for http $ref; got nil")
+	}
+	if !strings.Contains(err.Error(), "http://attacker.example.com") {
+		t.Fatalf("want error citing the URL, got %v", err)
+	}
+}
+
 func keys(m map[string]*compiledToolSchema) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

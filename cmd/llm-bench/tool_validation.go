@@ -86,6 +86,18 @@ func extractNameAndInputSchema(raw json.RawMessage) (string, json.RawMessage, er
 	return strings.TrimSpace(name), schemaRaw, nil
 }
 
+// denyAllLoader refuses any external $ref. Tool schemas originate from
+// MCP servers the user may not fully trust; allowing network resolution
+// would turn capture into a confused-deputy SSRF gadget. jsonschema/v6
+// already returns "no URLLoader set" by default, but the library's
+// default behavior is documented as subject to change — wiring this
+// loader explicitly pins the security posture.
+type denyAllLoader struct{}
+
+func (denyAllLoader) Load(url string) (any, error) {
+	return nil, fmt.Errorf("external $ref %q not allowed", url)
+}
+
 func compileSchema(name string, raw json.RawMessage) (*jsonschema.Schema, error) {
 	if len(raw) == 0 {
 		// A tool with no inputSchema accepts any arguments.
@@ -96,6 +108,7 @@ func compileSchema(name string, raw json.RawMessage) (*jsonschema.Schema, error)
 		return nil, fmt.Errorf("unmarshal schema: %w", err)
 	}
 	c := jsonschema.NewCompiler()
+	c.UseLoader(denyAllLoader{})
 	resource := fmt.Sprintf("mem://%s.json", schemaSafeName(name))
 	if err := c.AddResource(resource, schemaDoc); err != nil {
 		return nil, fmt.Errorf("compile: %w", err)
