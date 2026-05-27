@@ -33,6 +33,33 @@ func TestToolSchemaByNameParsesMCPShape(t *testing.T) {
 	}
 }
 
+func TestToolSchemaByNameParsesMCPSnakeCaseInputSchema(t *testing.T) {
+	tools := []json.RawMessage{
+		json.RawMessage(`{
+			"name": "read_file",
+			"description": "read file",
+			"input_schema": {
+				"type": "object",
+				"properties": {"path": {"type": "string"}},
+				"required": ["path"]
+			}
+		}`),
+	}
+	schemas, err := toolSchemaByName(tools)
+	if err != nil {
+		t.Fatalf("toolSchemaByName: %v", err)
+	}
+	if _, ok := schemas["read_file"]; !ok {
+		t.Fatalf("missing schema for read_file (got keys %v)", keys(schemas))
+	}
+	if err := schemas["read_file"].Validate(map[string]any{"path": "foo"}); err != nil {
+		t.Fatalf("validate good input: %v", err)
+	}
+	if err := schemas["read_file"].Validate(map[string]any{}); err == nil {
+		t.Fatalf("validate missing-required: want error, got nil")
+	}
+}
+
 func TestToolSchemaByNameParsesProviderShape(t *testing.T) {
 	tools := []json.RawMessage{
 		json.RawMessage(`{
@@ -166,6 +193,30 @@ func TestValidateToolArgumentsRejectsBadArgs(t *testing.T) {
 	}
 	if score != 0.0 {
 		t.Fatalf("score=%v; want 0.0 (0 valid of 1)", score)
+	}
+	if !strings.Contains(notes, "read_file") {
+		t.Fatalf("notes=%q; want a note mentioning read_file", notes)
+	}
+}
+
+func TestValidateToolArgumentsUsesMCPSnakeCaseInputSchema(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{
+		"name":"read_file",
+		"input_schema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
+	}`)}
+	schemas, _ := toolSchemaByName(tools)
+	trace := Trace{Tools: tools, Golden: Golden{ToolCalls: []string{"read_file"}}}
+	actual := []Turn{
+		{Role: "assistant", ToolCalls: []ToolCall{
+			{Name: "read_file", Arguments: json.RawMessage(`{}`)},
+		}},
+	}
+	score, computed, notes := validateToolArguments(schemas, trace, actual)
+	if !computed {
+		t.Fatalf("computed=false; want true")
+	}
+	if score != 0.0 {
+		t.Fatalf("score=%v; want 0.0 (missing required arg)", score)
 	}
 	if !strings.Contains(notes, "read_file") {
 		t.Fatalf("notes=%q; want a note mentioning read_file", notes)

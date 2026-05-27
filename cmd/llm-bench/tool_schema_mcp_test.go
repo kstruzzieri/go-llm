@@ -97,3 +97,15 @@ func TestMCPToolSchemaSourceSnapshotRequiresTransport(t *testing.T) {
 		t.Fatalf("want missing-transport error; got %v", err)
 	}
 }
+
+func TestMarshalMinimalToolRejectsNilTool(t *testing.T) {
+	if _, err := marshalMinimalTool(nil); err == nil || !strings.Contains(err.Error(), "nil tool") {
+		t.Fatalf("want nil-tool error; got %v", err)
+	}
+}
+
+func TestMarshalMinimalToolRejectsMissingName(t *testing.T) {
+	if _, err := marshalMinimalTool(&mcp.Tool{Name: " \t "}); err == nil || !strings.Contains(err.Error(), "missing name") {
+		t.Fatalf("want missing-name error; got %v", err)
+	}
+}

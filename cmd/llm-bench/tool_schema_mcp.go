@@ -74,7 +74,7 @@ func (s *mcpToolSchemaSource) Snapshot(ctx context.Context) ([]json.RawMessage, 
 		for _, tool := range res.Tools {
 			raw, err := marshalMinimalTool(tool)
 			if err != nil {
-				return nil, fmt.Errorf("mcp snapshot: marshal tool %q: %w", tool.Name, err)
+				return nil, fmt.Errorf("mcp snapshot: marshal tool %q: %w", toolNameForError(tool), err)
 			}
 			out = append(out, raw)
 		}
@@ -92,14 +92,32 @@ func (s *mcpToolSchemaSource) Snapshot(ctx context.Context) ([]json.RawMessage, 
 // those fields aren't relevant to argument validation and would inflate
 // trace files unnecessarily.
 func marshalMinimalTool(tool *mcp.Tool) (json.RawMessage, error) {
+	if tool == nil {
+		return nil, fmt.Errorf("nil tool")
+	}
+	name := strings.TrimSpace(tool.Name)
+	if name == "" {
+		return nil, fmt.Errorf("missing name")
+	}
 	type minimal struct {
 		Name        string `json:"name"`
 		Description string `json:"description,omitempty"`
 		InputSchema any    `json:"inputSchema"`
 	}
-	m := minimal{Name: tool.Name, Description: tool.Description, InputSchema: tool.InputSchema}
+	m := minimal{Name: name, Description: tool.Description, InputSchema: tool.InputSchema}
 	if m.InputSchema == nil {
 		m.InputSchema = map[string]any{"type": "object"}
 	}
 	return json.Marshal(m)
+}
+
+func toolNameForError(tool *mcp.Tool) string {
+	if tool == nil {
+		return "<nil>"
+	}
+	name := strings.TrimSpace(tool.Name)
+	if name == "" {
+		return "<empty>"
+	}
+	return name
 }

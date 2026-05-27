@@ -28,6 +28,7 @@ func (c *compiledToolSchema) Validate(args any) error {
 // declaredToolNames in trace.go:
 //
 //   - MCP-style: {"name": "...", "description": "...", "inputSchema": {...}}
+//     or {"name": "...", "description": "...", "input_schema": {...}}
 //   - Provider/function-call style: {"type":"function","function":{"name":"...","parameters":{...}}}
 //
 // An entry with neither shape, an empty name, or an inputSchema that
@@ -78,7 +79,11 @@ func extractNameAndInputSchema(raw json.RawMessage) (string, json.RawMessage, er
 			return "", nil, fmt.Errorf("name: %w", err)
 		}
 	}
-	return strings.TrimSpace(name), fields["inputSchema"], nil
+	schemaRaw := fields["inputSchema"]
+	if len(schemaRaw) == 0 {
+		schemaRaw = fields["input_schema"]
+	}
+	return strings.TrimSpace(name), schemaRaw, nil
 }
 
 func compileSchema(name string, raw json.RawMessage) (*jsonschema.Schema, error) {
