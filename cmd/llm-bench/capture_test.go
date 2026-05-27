@@ -68,7 +68,7 @@ func TestConversationToTraceRedactsAndConvertsToolCalls(t *testing.T) {
 		},
 	}
 
-	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor())
+	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor(), nil, false)
 	if err != nil {
 		t.Fatalf("conversationToTrace() error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestConversationToTraceUsesFallbackSystem(t *testing.T) {
 		},
 	}
 
-	trace, err := conversationToTrace(conv, "test-source", "Fallback system", defaultRedactor())
+	trace, err := conversationToTrace(conv, "test-source", "Fallback system", defaultRedactor(), nil, false)
 	if err != nil {
 		t.Fatalf("conversationToTrace() error: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestConversationToTraceRejectsMalformedConversations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := conversationToTrace(tt.conv, "source", "", defaultRedactor())
+			_, err := conversationToTrace(tt.conv, "source", "", defaultRedactor(), nil, false)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -424,5 +424,76 @@ func assertClean(t *testing.T, text string) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("text %q still contains %q", text, forbidden)
 		}
+	}
+}
+
+func TestCaptureConversationsAttachesSnapshotTools(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{"name":"read_file","inputSchema":{"type":"object"}}`)}
+	conv := conversation.Conversation{
+		ID: "c1",
+		Messages: []conversation.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "go"},
+			{Role: "assistant", Content: "done"},
+		},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "c1", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"c1": conv},
+	}
+	outDir := t.TempDir()
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        outDir,
+		ToolSchemaSource: staticToolSchemaSource{tools: tools},
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("Written=%v; want 1 trace", res.Written)
+	}
+	data, err := os.ReadFile(res.Written[0])
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace Trace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		t.Fatalf("unmarshal trace: %v", err)
+	}
+	if len(trace.Tools) != 1 {
+		t.Fatalf("trace.Tools len=%d; want 1", len(trace.Tools))
+	}
+	if !strings.Contains(string(trace.Tools[0]), "read_file") {
+		t.Fatalf("trace.Tools[0]=%q; want a read_file entry", string(trace.Tools[0]))
+	}
+}
+
+func TestCaptureConversationsNilSourceLeavesEmptyTools(t *testing.T) {
+	conv := conversation.Conversation{
+		ID:        "c1",
+		Messages:  []conversation.Message{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}, {Role: "assistant", Content: "a"}},
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "c1", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"c1": conv},
+	}
+	outDir := t.TempDir()
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir: outDir, // ToolSchemaSource left nil
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("Written=%v; want 1", res.Written)
+	}
+	data, _ := os.ReadFile(res.Written[0])
+	var trace Trace
+	_ = json.Unmarshal(data, &trace)
+	if len(trace.Tools) != 0 {
+		t.Fatalf("trace.Tools=%v; want empty when no source configured", trace.Tools)
 	}
 }

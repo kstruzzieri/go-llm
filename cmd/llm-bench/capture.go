@@ -30,11 +30,12 @@ var (
 )
 
 type captureOptions struct {
-	DBPath         string
-	OutputDir      string
-	Limit          int
-	Source         string
-	FallbackSystem string
+	DBPath           string
+	OutputDir        string
+	Limit            int
+	Source           string
+	FallbackSystem   string
+	ToolSchemaSource toolSchemaSource // nil = no snapshot; configured empty snapshot is authoritative
 }
 
 type captureResult struct {
@@ -171,6 +172,16 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 		return captureResult{}, fmt.Errorf("create trace dir %q: %w", outDir, err)
 	}
 
+	snapshotConfigured := opts.ToolSchemaSource != nil
+	var snapshotTools []json.RawMessage
+	if snapshotConfigured {
+		tools, err := opts.ToolSchemaSource.Snapshot(ctx)
+		if err != nil {
+			return captureResult{}, fmt.Errorf("capture: tool schema snapshot: %w", err)
+		}
+		snapshotTools = tools
+	}
+
 	redactor := defaultRedactor()
 	var result captureResult
 	for _, summary := range summaries {
@@ -184,7 +195,7 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 			continue
 		}
 
-		trace, err := conversationToTrace(*conv, source, opts.FallbackSystem, redactor)
+		trace, err := conversationToTrace(*conv, source, opts.FallbackSystem, redactor, snapshotTools, snapshotConfigured)
 		if err != nil {
 			result.Skipped = append(result.Skipped, fmt.Sprintf("%s: %v", summary.ID, err))
 			continue
@@ -205,7 +216,7 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 	return result, nil
 }
 
-func conversationToTrace(conv conversation.Conversation, source, fallbackSystem string, redactor redactor) (Trace, error) {
+func conversationToTrace(conv conversation.Conversation, source, fallbackSystem string, redactor redactor, tools []json.RawMessage, schemaSnapshotConfigured bool) (Trace, error) {
 	if strings.TrimSpace(conv.ID) == "" {
 		return Trace{}, errConversationMissingID
 	}
@@ -215,16 +226,18 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 		return Trace{}, err
 	}
 
+	if tools == nil {
+		tools = []json.RawMessage{}
+	}
+	_ = schemaSnapshotConfigured // Task 9 will use this to drive skip-on-undeclared
+
 	trace := Trace{
 		ID:         "conversation-" + conv.ID,
 		Source:     source,
 		CapturedAt: captureTime(conv),
 		System:     system,
-		// conversation.Message persists tool calls and results, but not the
-		// tool schemas needed for future tool-loop replay. H2 will add a
-		// schema source; for now capture preserves expected call names only.
-		Tools: []json.RawMessage{},
-		Turns: turns,
+		Tools:      tools,
+		Turns:      turns,
 		Golden: Golden{
 			ToolCalls:            goldenToolCalls(turns),
 			FinalAnswerCriteria:  "Assistant answer should satisfy the captured final assistant response.",
