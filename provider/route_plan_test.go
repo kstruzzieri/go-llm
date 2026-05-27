@@ -948,3 +948,40 @@ func TestExecuteGenerateTracksPrimaryFailFallbackSuccessAttempts(t *testing.T) {
 		t.Errorf("att[1].Status = %v, want Succeeded", att[1].Status)
 	}
 }
+
+func TestExecuteEmbedTracksPrimarySuccessAttempt(t *testing.T) {
+	prov := &rpMockProvider{name: "ollama", caps: CapEmbed, embedResp: &EmbedResponse{Embeddings: [][]float64{{0.1}}}}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.Kind = RouteKindEmbed
+	resp, err := plan.ExecuteEmbed(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if resp.RouteOutcome == nil || len(resp.RouteOutcome.Attempts) != 1 {
+		t.Fatalf("Attempts len = %d, want 1", len(resp.RouteOutcome.Attempts))
+	}
+	if resp.RouteOutcome.Attempts[0].Status != AttemptStatusSucceeded {
+		t.Errorf("Status = %v, want Succeeded", resp.RouteOutcome.Attempts[0].Status)
+	}
+}
+
+func TestExecuteEmbedTracksPrimaryFailFallbackSuccessAttempts(t *testing.T) {
+	primary := &rpMockProvider{name: "ollama-a", caps: CapEmbed, embedErr: &HTTPStatusError{StatusCode: 500}}
+	fallback := &rpMockProvider{name: "ollama-b", caps: CapEmbed, embedResp: &EmbedResponse{Embeddings: [][]float64{{0.2}}}}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Kind = RouteKindEmbed
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "embed-1"}},
+		Provider: fallback,
+		Model:    "embed-1",
+	}}
+
+	resp, err := plan.ExecuteEmbed(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	att := resp.RouteOutcome.Attempts
+	if len(att) != 2 || att[0].ErrorClass != string(ErrorClass5xx) || att[1].Status != AttemptStatusSucceeded {
+		t.Fatalf("attempts = %+v, want [Failed/5xx, Succeeded]", att)
+	}
+}
