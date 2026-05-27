@@ -97,19 +97,27 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 // before drawing conclusions.
 type ExactMatchScorer struct{}
 
-// Score implements Scorer. ToolArgsValid is left unset (zero) until replay
-// validates candidate arguments against trace.Tools schemas. The Notes field
-// records this so aggregate consumers can distinguish "not scored" from
-// "scored zero".
+// Score implements Scorer. ToolArgsValid is populated by validating each
+// candidate tool call against the JSON Schema declared in trace.Tools;
+// ToolArgsValidComputed records whether the score is meaningful (see
+// validateToolArguments for the truth table).
 func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
 	needle := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
 	if needle == "" {
 		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingGolden)
 	}
 
+	schemas, schemaErr := toolSchemaByName(trace.Tools)
+	if schemaErr != nil {
+		return Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
+	}
+	toolArgsScore, toolArgsComputed, toolArgsNotes := validateToolArguments(schemas, trace, actual.Transcript)
+
 	score := Score{
-		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
+		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		ToolArgsValid:         toolArgsScore,
+		ToolArgsValidComputed: toolArgsComputed,
+		Notes:                 toolArgsNotes,
 	}
 
 	finalText := lastAssistantContent(actual.Transcript)

@@ -96,6 +96,45 @@ func TestNewScorerAppliesJudgeTimeoutToHTTPClient(t *testing.T) {
 	}
 }
 
+func TestExactMatchScorerPopulatesToolArgsValid(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{
+		"name": "read_file",
+		"inputSchema": {"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
+	}`)}
+	trace := Trace{
+		ID:     "t",
+		System: "sys",
+		Tools:  tools,
+		Turns: []Turn{{Role: "user", Content: "?"}, {Role: "assistant", ToolCalls: []ToolCall{
+			{Name: "read_file", Arguments: json.RawMessage(`{}`)},
+		}}},
+		Golden: Golden{ToolCalls: []string{"read_file"}, FinalAnswerSubstring: "ok"},
+	}
+	actual := Result{
+		Model: "ollama/x",
+		Transcript: []Turn{
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{Name: "read_file", Arguments: json.RawMessage(`{}`)},
+			}},
+			{Role: "assistant", Content: "ok"},
+		},
+	}
+
+	score, err := (&ExactMatchScorer{}).Score(context.Background(), trace, actual)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if !score.ToolArgsValidComputed {
+		t.Fatalf("ToolArgsValidComputed=false; want true")
+	}
+	if score.ToolArgsValid != 0.0 {
+		t.Fatalf("ToolArgsValid=%v; want 0.0 (missing required arg)", score.ToolArgsValid)
+	}
+	if strings.Contains(score.Notes, "schema validation pending") {
+		t.Fatalf("Notes still claims validation pending: %q", score.Notes)
+	}
+}
+
 func TestScoreToolArgsValidComputedFieldDefaultsZero(t *testing.T) {
 	s := Score{}
 	if s.ToolArgsValidComputed {
