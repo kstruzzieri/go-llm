@@ -905,3 +905,46 @@ func TestRoutePlanString(t *testing.T) {
 		t.Errorf("String() = %q, want %q", got, want)
 	}
 }
+
+func TestExecuteGenerateTracksPrimarySuccessAttempt(t *testing.T) {
+	prov := &rpMockProvider{name: "ollama", caps: CapGenerate, genResp: &GenerateResponse{Response: "hi", Done: true}}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	plan.Kind = RouteKindGenerate
+	resp, err := plan.ExecuteGenerate(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if resp.RouteOutcome == nil || len(resp.RouteOutcome.Attempts) != 1 {
+		t.Fatalf("Attempts len = %d, want 1", len(resp.RouteOutcome.Attempts))
+	}
+	if resp.RouteOutcome.Attempts[0].Status != AttemptStatusSucceeded {
+		t.Errorf("Status = %v, want Succeeded", resp.RouteOutcome.Attempts[0].Status)
+	}
+}
+
+func TestExecuteGenerateTracksPrimaryFailFallbackSuccessAttempts(t *testing.T) {
+	primary := &rpMockProvider{name: "ollama-a", caps: CapGenerate, genErr: &HTTPStatusError{StatusCode: 500}}
+	fallback := &rpMockProvider{name: "ollama-b", caps: CapGenerate, genResp: &GenerateResponse{Response: "ok", Done: true}}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Kind = RouteKindGenerate
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	resp, err := plan.ExecuteGenerate(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	att := resp.RouteOutcome.Attempts
+	if len(att) != 2 {
+		t.Fatalf("Attempts len = %d, want 2", len(att))
+	}
+	if att[0].ErrorClass != string(ErrorClass5xx) {
+		t.Errorf("att[0].ErrorClass = %q, want 5xx", att[0].ErrorClass)
+	}
+	if att[1].Status != AttemptStatusSucceeded {
+		t.Errorf("att[1].Status = %v, want Succeeded", att[1].Status)
+	}
+}

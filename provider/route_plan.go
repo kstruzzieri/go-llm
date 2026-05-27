@@ -225,8 +225,12 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 		return nil, ErrBudgetAdaptationRequired
 	}
 
+	var attempts []RouteAttempt
 	req := rp.buildGenerateRequest(false)
+
+	start := time.Now()
 	resp, err := rp.Provider.Generate(ctx, req)
+	attempts = append(attempts, makeAttempt(rp.Profile.Key, err, time.Since(start)))
 
 	fallbacksUsed := 0
 	if err != nil && IsInfrastructureError(err) {
@@ -234,7 +238,9 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 
 		for i, fb := range rp.Fallbacks {
 			fbReq := fb.buildGenerateRequest(false)
+			fbStart := time.Now()
 			resp, err = fb.Provider.Generate(ctx, fbReq)
+			attempts = append(attempts, makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
 			if err == nil {
 				fallbacksUsed = i + 1
 				break
@@ -247,7 +253,7 @@ func (rp *RoutePlan) ExecuteGenerate(ctx context.Context) (*GenerateResponse, er
 		}
 	}
 
-	outcome := rp.handleResult(err, fallbacksUsed, nil)
+	outcome := rp.handleResult(err, fallbacksUsed, attempts)
 	if resp != nil && outcome != nil {
 		resp.RouteOutcome = outcome
 	}
