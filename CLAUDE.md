@@ -45,6 +45,7 @@ Keep minimal. Allowed external dependencies:
 - `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
 - `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (only imported by `mcp/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
+- `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)
 
 Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc.)
 
