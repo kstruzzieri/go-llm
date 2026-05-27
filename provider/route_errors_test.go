@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"testing"
+	"time"
 )
 
 func TestClassifyError(t *testing.T) {
@@ -61,5 +62,59 @@ func TestErrorClassModelUnloadedReservedNotProduced(t *testing.T) {
 		if class == ErrorClassModelUnloaded {
 			t.Fatalf("classifyError(%v) returned reserved %q", err, class)
 		}
+	}
+}
+
+func TestMakeAttemptHappyPath(t *testing.T) {
+	key := ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}
+	got := makeAttempt(key, nil, 820*time.Millisecond)
+	if got.Key != key {
+		t.Errorf("Key = %v, want %v", got.Key, key)
+	}
+	if got.Status != AttemptStatusSucceeded {
+		t.Errorf("Status = %v, want Succeeded", got.Status)
+	}
+	if got.LatencyMs != 820 {
+		t.Errorf("LatencyMs = %d, want 820", got.LatencyMs)
+	}
+	if got.ErrorClass != "" {
+		t.Errorf("ErrorClass = %q, want empty", got.ErrorClass)
+	}
+}
+
+func TestMakeAttemptFailedNetwork(t *testing.T) {
+	key := ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}
+	err := &net.OpError{Op: "dial", Err: errors.New("refused")}
+	got := makeAttempt(key, err, 200*time.Millisecond)
+	if got.Status != AttemptStatusFailed {
+		t.Errorf("Status = %v, want Failed", got.Status)
+	}
+	if got.LatencyMs != 200 {
+		t.Errorf("LatencyMs = %d, want 200", got.LatencyMs)
+	}
+	if got.ErrorClass != string(ErrorClassNetwork) {
+		t.Errorf("ErrorClass = %q, want %q", got.ErrorClass, ErrorClassNetwork)
+	}
+}
+
+func TestMakeAttemptCanceled(t *testing.T) {
+	key := ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}
+	got := makeAttempt(key, context.Canceled, 100*time.Millisecond)
+	if got.Status != AttemptStatusUnknown {
+		t.Errorf("Status = %v, want Unknown", got.Status)
+	}
+	if got.LatencyMs != 100 {
+		t.Errorf("LatencyMs = %d, want 100", got.LatencyMs)
+	}
+	if got.ErrorClass != "" {
+		t.Errorf("ErrorClass = %q, want empty (Canceled gets no class)", got.ErrorClass)
+	}
+}
+
+func TestMakeAttemptClampsNegativeDuration(t *testing.T) {
+	key := ModelKey{Provider: "ollama-a", Model: "qwen3:8b"}
+	got := makeAttempt(key, nil, -1*time.Second)
+	if got.LatencyMs != 0 {
+		t.Errorf("LatencyMs = %d, want 0 (clamped)", got.LatencyMs)
 	}
 }

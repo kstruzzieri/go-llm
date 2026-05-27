@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -493,4 +494,25 @@ func newRouteID() string {
 		return ""
 	}
 	return hex.EncodeToString(b[:])
+}
+
+// makeAttempt builds a RouteAttempt for one provider call.
+//
+//   - err == nil: Status=Succeeded, no ErrorClass, LatencyMs from duration.
+//   - err != nil: Status and ErrorClass from classifyError(err); LatencyMs
+//     from duration regardless (latency-to-failure is informative for
+//     failure-mode pivots in PR3+).
+//   - Negative duration clamps to LatencyMs=0.
+func makeAttempt(key ModelKey, err error, duration time.Duration) RouteAttempt {
+	class, status := classifyError(err)
+	ms := duration.Milliseconds()
+	if ms < 0 {
+		ms = 0
+	}
+	return RouteAttempt{
+		Key:        key,
+		Status:     status,
+		LatencyMs:  ms,
+		ErrorClass: string(class),
+	}
 }
