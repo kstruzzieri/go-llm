@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -46,6 +49,13 @@ type scorerOptions struct {
 	ollamaURL    string
 	judgeModel   string
 	judgeTimeout time.Duration
+	// judgeCache is the optional judge response cache. Callers MUST avoid
+	// the typed-nil interface trap: assign only a non-nil concrete
+	// implementation (e.g. *sqliteJudgeCache) or leave this field unset.
+	// openJudgeCache("") returns a nil *sqliteJudgeCache by design so the
+	// caller can decide whether to wrap it in this interface field.
+	judgeCache  judgeCacheStore
+	bypassCache bool // when true, the scorer skips both cache Get and Put
 }
 
 // newScorer returns the Scorer matching the given name.
@@ -68,6 +78,10 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 		if err := validateJudgeModel(ctx, client, scorer.JudgeModel); err != nil {
 			return nil, err
 		}
+		digest, _ := resolveJudgeDigest(ctx, client, scorer.JudgeModel)
+		scorer.JudgeModelDigest = digest
+		scorer.Cache = opts.judgeCache
+		scorer.BypassCache = opts.bypassCache
 		return scorer, nil
 	case "manual":
 		return nil, fmt.Errorf("manual scorer not yet implemented")
@@ -107,21 +121,68 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 	return score, nil
 }
 
+// CaptureScorer lets capture-only flows replay candidates through Runner
+// without making scoring prerequisites part of artifact collection.
+type CaptureScorer struct{}
+
+func (s *CaptureScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
+	return Score{
+		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		Notes:             "capture mode: scoring skipped",
+	}, nil
+}
+
 type judgeChatClient interface {
 	Chat(ctx context.Context, req ollama.ChatRequest) (*ollama.ChatResponse, error)
 }
 
 type judgeModelChecker interface {
 	AvailableModels(ctx context.Context) ([]string, error)
+	ShowModel(ctx context.Context, name string) (*ollama.ModelInfo, error)
+}
+
+// resolveJudgeDigest returns the judge model's content digest, or empty
+// string if the provider's /api/show response is unavailable or omits one.
+// Errors from /api/show are deliberately swallowed: a missing digest is
+// degraded R1 mitigation, not a hard failure.
+func resolveJudgeDigest(ctx context.Context, checker judgeModelChecker, judgeModel string) (string, error) {
+	info, err := checker.ShowModel(ctx, judgeModel)
+	if err != nil {
+		return "", nil
+	}
+	if info == nil {
+		return "", nil
+	}
+	return info.Digest, nil
 }
 
 // LLMJudgeScorer asks a separate local Ollama model to score final-answer
 // quality against the trace's golden rubric. Replay latency and target-model
 // tokens remain owned by Runner.runOne.
+//
+// Cache is the optional judge response cache. It is typed as the
+// judgeCacheStore interface so callers MUST assign only non-nil concrete
+// values; assigning a typed-nil pointer (e.g. the (*sqliteJudgeCache)(nil)
+// returned by openJudgeCache("")) produces a non-nil interface that will
+// panic on use. Wiring code is responsible for guarding against the
+// typed-nil interface trap before assignment.
 type LLMJudgeScorer struct {
-	Client       judgeChatClient
-	JudgeModel   string
-	JudgeTimeout time.Duration
+	Client           judgeChatClient
+	JudgeModel       string
+	JudgeModelDigest string // optional; empty when /api/show was unavailable
+	JudgeTimeout     time.Duration
+	Cache            judgeCacheStore  // optional; nil disables caching
+	BypassCache      bool             // when true, Score skips both Get and Put
+	Clock            func() time.Time // injectable; defaults to time.Now().UTC()
+}
+
+// now returns the scorer's notion of the current time. Injected via Clock
+// in tests so cache CreatedAt/LastUsedAt timestamps are deterministic.
+func (s *LLMJudgeScorer) now() time.Time {
+	if s.Clock != nil {
+		return s.Clock()
+	}
+	return time.Now().UTC()
 }
 
 func newLLMJudgeScorer(client judgeChatClient, judgeModel string, judgeTimeout time.Duration) (*LLMJudgeScorer, error) {
@@ -158,65 +219,196 @@ func validateJudgeModel(ctx context.Context, checker judgeModelChecker, judgeMod
 	return fmt.Errorf("judge model %q is not available from the configured Ollama server; pull it or pass -judge-model/-judge-ollama-url", judgeModel)
 }
 
-func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
+// buildJudgeCall produces the judge ChatRequest and the partial Score that
+// will be merged with the judge's verdict. Pure over (trace, actual): no I/O
+// and no mutation. The cache key is derived from req; baseScore carries the
+// freshly-computed ToolSequenceMatch/Notes that must be recomputed each run
+// even on a cache hit so tool-loop changes are not masked by stale cache.
+func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.ChatRequest, Score, error) {
 	if sameModelSelector(s.JudgeModel, actual.Model) {
-		return Score{}, fmt.Errorf("trace %q model %q: %w", trace.ID, actual.Model, errJudgeSelfPreference)
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q model %q: %w", trace.ID, actual.Model, errJudgeSelfPreference)
 	}
 
 	criteria := strings.TrimSpace(trace.Golden.FinalAnswerCriteria)
 	substring := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
 	if criteria == "" && substring == "" {
-		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
 	}
 
-	score := Score{
+	baseScore := Score{
 		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
 		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
 	}
 
 	if strings.TrimSpace(lastAssistantContent(actual.Transcript)) == "" {
-		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errNoAssistantFinalAnswer)
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errNoAssistantFinalAnswer)
 	}
 
 	prompt, err := buildJudgePrompt(trace, actual)
 	if err != nil {
-		return Score{}, fmt.Errorf("trace %q: build judge prompt: %w", trace.ID, err)
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: build judge prompt: %w", trace.ID, err)
 	}
 
+	think := false
+	req := ollama.ChatRequest{
+		Model: modelSelectorWithoutBenchProvider(s.JudgeModel),
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: judgeSystemPrompt},
+			{Role: "user", Content: prompt},
+		},
+		Format: "json",
+		Think:  &think,
+		Options: &ollama.ModelOptions{
+			Temperature: judgeTemperature,
+			NumPredict:  judgeTokenBudget,
+		},
+		KeepAlive: benchKeepAlive,
+	}
+	return req, baseScore, nil
+}
+
+// callJudge issues the judge ChatRequest and returns the raw response
+// content. The only I/O step; honors JudgeTimeout. Errors are wrapped
+// with the judge model identity so callers (Score and the future cache
+// wrapper) MUST NOT re-attribute model identity in their own wraps —
+// doing so produces double-prefixed messages.
+func (s *LLMJudgeScorer) callJudge(ctx context.Context, req ollama.ChatRequest) (string, error) {
 	judgeCtx := ctx
 	var cancel context.CancelFunc
 	if s.JudgeTimeout > 0 {
 		judgeCtx, cancel = context.WithTimeout(ctx, s.JudgeTimeout)
 		defer cancel()
 	}
-
-	resp, err := s.Client.Chat(judgeCtx, ollama.ChatRequest{
-		Model: s.JudgeModel,
-		Messages: []ollama.ChatMessage{
-			{Role: "system", Content: judgeSystemPrompt},
-			{Role: "user", Content: prompt},
-		},
-		Format: "json",
-		Options: &ollama.ModelOptions{
-			Temperature: judgeTemperature,
-			NumPredict:  judgeTokenBudget,
-		},
-		KeepAlive: benchKeepAlive,
-	})
+	resp, err := s.Client.Chat(judgeCtx, req)
 	if err != nil {
-		return Score{}, fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
+		return "", fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
 	}
 	if resp == nil {
-		return Score{}, fmt.Errorf("judge model %q: %w: nil response", s.JudgeModel, errMalformedJudgeResponse)
+		return "", fmt.Errorf("judge model %q: %w: nil response", s.JudgeModel, errMalformedJudgeResponse)
 	}
+	return resp.Message.Content, nil
+}
 
-	judgment, err := parseJudgeResponse(resp.Message.Content)
+// materializeJudgement parses raw judge response content and merges it
+// into baseScore. Pure; no I/O. Used identically by cache-hit and
+// cache-miss paths so AnswerQuality/Notes derive from the judge text but
+// ToolSequenceMatch comes from baseScore (recomputed fresh each call).
+// Parse errors are wrapped with the judge model identity; callers MUST
+// NOT re-attribute.
+//
+// The parsed judgeResponse is returned alongside the merged Score so the
+// cache-put path can persist the verbatim justification without round-
+// tripping it through the joined Notes string (which uses "; " as a
+// separator and would silently truncate justifications that contain that
+// substring — common in real judge output like "covered A; missed B").
+func materializeJudgement(base Score, judgeModel, rawContent string) (Score, judgeResponse, error) {
+	judgement, err := parseJudgeResponse(rawContent)
 	if err != nil {
-		return Score{}, fmt.Errorf("judge model %q: %w", s.JudgeModel, err)
+		return Score{}, judgeResponse{}, fmt.Errorf("judge model %q: %w", judgeModel, err)
 	}
-	score.AnswerQuality = judgment.AnswerQuality
-	score.Notes = joinScoreNotes(score.Notes, fmt.Sprintf("llm-judge=%s: %s", s.JudgeModel, judgment.Justification))
-	return score, nil
+	base.AnswerQuality = judgement.AnswerQuality
+	base.Notes = joinScoreNotes(base.Notes, fmt.Sprintf("llm-judge=%s: %s", judgeModel, judgement.Justification))
+	return base, judgement, nil
+}
+
+// Score composes: build → check cache (if enabled) → callJudge or hit →
+// materialize → put-to-cache (if enabled).
+//
+// Cache-hit path MUST pass `base` (fresh from buildJudgeCall on THIS call's
+// trace + actual) into materializeJudgement — not a base reconstructed
+// from the cached entry. This is the load-bearing invariant covered by
+// TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch:
+// AnswerQuality and the judge justification are reused from the cached
+// response content, but ToolSequenceMatch / Notes are always recomputed
+// from the current actual transcript so tool-loop regressions can never
+// be masked by a stale cache entry.
+//
+// Cache errors (Get and Put) and malformed cache-hit payloads are non-fatal:
+// they are logged to stderr and bypassed. The judge call still proceeds on a
+// Get error or malformed hit; the result is still returned on a Put error.
+func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) (Score, error) {
+	req, base, err := s.buildJudgeCall(trace, actual)
+	if err != nil {
+		return Score{}, err
+	}
+	var cacheKey string
+	if s.Cache != nil && !s.BypassCache {
+		cacheKey = canonicalCacheKey(judgeCacheRequest{
+			Version:          judgeCacheKeyVersion,
+			JudgeModel:       normalizeModelSelector(s.JudgeModel),
+			JudgeModelDigest: s.JudgeModelDigest,
+			SystemPrompt:     judgeSystemPrompt,
+			UserPrompt:       judgeUserPromptOf(req),
+			Format:           req.Format,
+			Think:            req.Think,
+			Temperature:      judgeTemperature,
+			NumPredict:       judgeTokenBudget,
+		})
+		if hit, ok, getErr := s.Cache.Get(ctx, cacheKey); getErr != nil {
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
+		} else if ok {
+			matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
+			if hitErr != nil {
+				fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
+			} else {
+				return matHit, nil
+			}
+		}
+	}
+	content, err := s.callJudge(ctx, req)
+	if err != nil {
+		return Score{}, err
+	}
+	materialized, judgement, err := materializeJudgement(base, s.JudgeModel, content)
+	if err != nil {
+		return Score{}, err
+	}
+	if s.Cache != nil && !s.BypassCache && cacheKey != "" {
+		sum := sha256.Sum256([]byte(judgeUserPromptOf(req)))
+		now := s.now()
+		if putErr := s.Cache.Put(ctx, judgeCacheEntry{
+			CacheKey:         cacheKey,
+			JudgeModel:       s.JudgeModel,
+			JudgeModelDigest: s.JudgeModelDigest,
+			TraceID:          trace.ID,
+			CandidateModel:   actual.Model,
+			PromptHash:       hex.EncodeToString(sum[:]),
+			RequestJSON:      prettyRequestJSON(req),
+			ResponseContent:  content,
+			AnswerQuality:    materialized.AnswerQuality,
+			Justification:    judgement.Justification,
+			CreatedAt:        now,
+			LastUsedAt:       now,
+		}); putErr != nil {
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache put bypassed: %v\n", putErr)
+		}
+	}
+	return materialized, nil
+}
+
+// judgeUserPromptOf extracts the user prompt that buildJudgeCall composed.
+// We rely on the convention that buildJudgeCall always emits
+// [system, user] in that order; this helper returns the first message with
+// role "user" so a future ordering tweak surfaces obviously rather than
+// silently mixing system and user content into the cache key.
+func judgeUserPromptOf(req ollama.ChatRequest) string {
+	for _, m := range req.Messages {
+		if m.Role == "user" {
+			return m.Content
+		}
+	}
+	return ""
+}
+
+// prettyRequestJSON serializes the judge ChatRequest for cache-audit
+// inspection. Best-effort: returns "" on marshal failure rather than
+// failing the Score call, since the cache row is observational only.
+func prettyRequestJSON(req ollama.ChatRequest) string {
+	raw, err := json.MarshalIndent(req, "", "  ")
+	if err != nil {
+		return ""
+	}
+	return string(raw)
 }
 
 const judgeSystemPrompt = `You are an impartial evaluator for local LLM benchmark replays.
@@ -427,9 +619,10 @@ func normalizeModelSelector(s string) string {
 }
 
 func modelSelectorWithoutBenchProvider(s string) string {
+	s = strings.TrimSpace(s)
 	prefix := defaultBenchProvider + "/"
-	if strings.HasPrefix(s, prefix) {
-		return strings.TrimSpace(strings.TrimPrefix(s, prefix))
+	if strings.HasPrefix(strings.ToLower(s), prefix) {
+		return strings.TrimSpace(s[len(prefix):])
 	}
 	return s
 }
