@@ -138,32 +138,63 @@ func (rp *RoutePlan) ExecuteChat(ctx context.Context) (*ChatResponse, error) {
 
 // ExecuteChatStream dispatches a streaming chat request to the selected
 // provider. Fallback is only attempted before the first user-visible chunk
-// has been delivered.
+// has been delivered. Each provider call produces exactly one RouteAttempt,
+// finalized either by the Done-chunk handler (when chunk.Partial == false)
+// or by the post-stream code (using the real stream-method error). User-
+// callback errors are captured separately and attributed as
+// AttemptStatusUnknown.
 func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse) error) error {
 	if rp.Budget.Decision == BudgetTruncate {
 		return ErrBudgetAdaptationRequired
 	}
 
+	var attempts []RouteAttempt
 	req := rp.buildChatRequest(true)
 
 	delivered := false
 	fallbacksUsed := 0
 	var outcome *RouteOutcome
 
+	primaryStart := time.Now()
+	streamDone := false
+	var callbackErr error
+
 	wrappedFn := func(chunk ChatResponse) error {
 		if !delivered && hasVisibleContent(chunk.Content, chunk.Thinking, chunk.ToolCalls) {
 			delivered = true
 		}
-		if chunk.Done {
-			outcome = rp.handleResult(nil, fallbacksUsed, nil)
+		if chunk.Done && !chunk.Partial {
+			attempts = append(attempts,
+				makeAttempt(rp.Profile.Key, nil, time.Since(primaryStart)))
+			streamDone = true
+			outcome = rp.handleResult(nil, fallbacksUsed, attempts)
 			if outcome != nil {
 				chunk.RouteOutcome = outcome
 			}
 		}
-		return fn(chunk)
+		if e := fn(chunk); e != nil {
+			callbackErr = e
+			return e
+		}
+		return nil
 	}
 
 	err := rp.Provider.ChatStream(ctx, req, wrappedFn)
+
+	if !streamDone {
+		if callbackErr != nil {
+			// User aborted via callback. Attribute as Unknown, not a
+			// provider failure.
+			attempts = append(attempts, RouteAttempt{
+				Key:       rp.Profile.Key,
+				Status:    AttemptStatusUnknown,
+				LatencyMs: time.Since(primaryStart).Milliseconds(),
+			})
+		} else {
+			attempts = append(attempts,
+				makeAttempt(rp.Profile.Key, err, time.Since(primaryStart)))
+		}
+	}
 
 	if err != nil && IsInfrastructureError(err) {
 		rp.recordFailure(rp.Profile.Key, err)
@@ -174,21 +205,45 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 				fbReq := fb.buildChatRequest(true)
 				delivered = false
 				fallbacksUsed = i + 1
+				fbStart := time.Now()
+				fbStreamDone := false
+				var fbCallbackErr error
 
 				wrappedFbFn := func(chunk ChatResponse) error {
 					if !delivered && hasVisibleContent(chunk.Content, chunk.Thinking, chunk.ToolCalls) {
 						delivered = true
 					}
-					if chunk.Done {
-						outcome = rp.handleResult(nil, fallbacksUsed, nil)
+					if chunk.Done && !chunk.Partial {
+						attempts = append(attempts,
+							makeAttempt(fb.Profile.Key, nil, time.Since(fbStart)))
+						fbStreamDone = true
+						outcome = rp.handleResult(nil, fallbacksUsed, attempts)
 						if outcome != nil {
 							chunk.RouteOutcome = outcome
 						}
 					}
-					return fn(chunk)
+					if e := fn(chunk); e != nil {
+						fbCallbackErr = e
+						return e
+					}
+					return nil
 				}
 
 				err = fb.Provider.ChatStream(ctx, fbReq, wrappedFbFn)
+
+				if !fbStreamDone {
+					if fbCallbackErr != nil {
+						attempts = append(attempts, RouteAttempt{
+							Key:       fb.Profile.Key,
+							Status:    AttemptStatusUnknown,
+							LatencyMs: time.Since(fbStart).Milliseconds(),
+						})
+					} else {
+						attempts = append(attempts,
+							makeAttempt(fb.Profile.Key, err, time.Since(fbStart)))
+					}
+				}
+
 				if err == nil {
 					return nil
 				}
@@ -208,7 +263,7 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 	// Record signals for streams that completed without a Done chunk, or
 	// that ended in a non-infrastructure error / cancellation.
 	if outcome == nil {
-		rp.handleResult(err, fallbacksUsed, nil)
+		rp.handleResult(err, fallbacksUsed, attempts)
 	}
 
 	return err

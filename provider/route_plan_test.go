@@ -985,3 +985,131 @@ func TestExecuteEmbedTracksPrimaryFailFallbackSuccessAttempts(t *testing.T) {
 		t.Fatalf("attempts = %+v, want [Failed/5xx, Succeeded]", att)
 	}
 }
+
+func TestExecuteChatStreamFinalizesOnNonPartialDone(t *testing.T) {
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "h"},
+			{Content: "i", Done: true}, // Partial defaults to false
+		},
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	var got []ChatResponse
+	err := plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		got = append(got, c)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	final := got[len(got)-1]
+	if final.RouteOutcome == nil {
+		t.Fatal("final chunk RouteOutcome nil")
+	}
+	att := final.RouteOutcome.Attempts
+	if len(att) != 1 || att[0].Status != AttemptStatusSucceeded {
+		t.Fatalf("attempts = %+v, want [Succeeded]", att)
+	}
+}
+
+func TestExecuteChatStreamDonePartialDefersToPostStream(t *testing.T) {
+	// Ollama emits {Done: true, Partial: true} on cancellation, then
+	// returns ctx.Err(). The handler must NOT finalize on partial-Done;
+	// post-stream code finalizes with the real error.
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "h"},
+			{Done: true, Partial: true}, // synthetic partial Done
+		},
+		chatStreamErr: context.Canceled,
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+	var lastChunk ChatResponse
+	err := plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		lastChunk = c
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want Canceled", err)
+	}
+	// The partial-Done chunk must NOT have carried a RouteOutcome.
+	if lastChunk.RouteOutcome != nil {
+		t.Errorf("partial-Done chunk got RouteOutcome; want nil (post-stream finalizes)")
+	}
+	// We can't observe Attempts via the response (no resp returned for
+	// streams), but the test's purpose is the negative assertion above
+	// + ensuring no panic. Task 11 integration test asserts the attempt
+	// is finalized as Unknown via a real RoutingFeedback store.
+}
+
+func TestExecuteChatStreamCallbackErrorAttributedAsUnknown(t *testing.T) {
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "h"},
+			{Content: "i", Done: true},
+		},
+	}
+	plan := newTestPlan(prov, &rpMockRecorder{})
+
+	callbackErr := errors.New("user aborted")
+	gotCalls := 0
+	err := plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		gotCalls++
+		if gotCalls == 1 {
+			return callbackErr // abort after first chunk
+		}
+		return nil
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err = %v, want callbackErr", err)
+	}
+	// We can't inspect attempts here; the load-bearing test is in Task 11's
+	// integration coverage with a real feedback store. The point of THIS
+	// test is to confirm the error path completes without panic and the
+	// callback error is propagated as-is.
+}
+
+func TestExecuteChatStreamFallbackOnPrimaryInfraError(t *testing.T) {
+	primary := &rpMockProvider{
+		name: "ollama-a", caps: CapChat,
+		chatStreamErr: &HTTPStatusError{StatusCode: 500},
+	}
+	fallback := &rpMockProvider{
+		name: "ollama-b", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "ok"},
+			{Content: "", Done: true},
+		},
+	}
+	plan := newTestPlan(primary, &rpMockRecorder{})
+	plan.Fallbacks = []RoutePlan{{
+		Profile:  &ModelProfile{Key: ModelKey{Provider: "ollama-b", Model: "qwen3:8b"}},
+		Provider: fallback,
+		Model:    "qwen3:8b",
+	}}
+
+	var lastChunk ChatResponse
+	err := plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		lastChunk = c
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("err = %v, want nil after fallback success", err)
+	}
+	if lastChunk.RouteOutcome == nil {
+		t.Fatal("final-chunk outcome nil")
+	}
+	att := lastChunk.RouteOutcome.Attempts
+	if len(att) != 2 {
+		t.Fatalf("attempts len = %d, want 2 (primary Failed + fallback Succeeded)", len(att))
+	}
+	if att[0].Status != AttemptStatusFailed || att[0].ErrorClass != string(ErrorClass5xx) {
+		t.Errorf("att[0] = %+v, want Failed/5xx", att[0])
+	}
+	if att[1].Status != AttemptStatusSucceeded || att[1].Key.Provider != "ollama-b" {
+		t.Errorf("att[1] = %+v, want Succeeded/ollama-b", att[1])
+	}
+}
