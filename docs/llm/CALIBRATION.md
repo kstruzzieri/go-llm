@@ -102,6 +102,9 @@ A label is "stale" iff its `artifact_hash` doesn't match the current
 `artifacts.jsonl`. Stale labels are listed in the report and excluded from
 agreement. Usual cause: candidate model upgraded silently (floating tag).
 Mitigation: pin candidates to non-floating tags or digests.
+Labels whose candidate model is the same selector as the judge model are also
+skipped and reported separately; they are excluded from agreement and label
+sufficiency math.
 
 ### Stability runs (diagnostic)
 

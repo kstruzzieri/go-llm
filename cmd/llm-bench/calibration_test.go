@@ -393,6 +393,58 @@ func TestRunCalibrate_AgreementMatchesByHand(t *testing.T) {
 	}
 }
 
+func TestRunCalibrate_SkipsSelfJudgedArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	reportDir := filepath.Join(dir, "reports")
+
+	self := testCalibrationArtifact("self", "self answer")
+	self.CandidateModel = "ollama/judge"
+	self.ArtifactHash = artifactHash(self)
+	other := testCalibrationArtifact("other", "other answer")
+	if err := writeJSONL(arts, []any{self, other}); err != nil {
+		t.Fatalf("seed arts: %v", err)
+	}
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "self", CandidateModel: self.CandidateModel, ArtifactHash: self.ArtifactHash, ExpectedAnswerQuality: 1.0, Labeler: "manual"},
+		Label{TraceID: "other", CandidateModel: other.CandidateModel, ArtifactHash: other.ArtifactHash, ExpectedAnswerQuality: 1.0, Labeler: "manual"},
+	}); err != nil {
+		t.Fatalf("seed labels: %v", err)
+	}
+
+	fs := &fakeScorer{judgeByTrace: map[string]float64{"other": 1.0}}
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath:    labels,
+		ArtifactsPath: arts,
+		Scorer:        fs,
+		JudgeModel:    "judge",
+		ReportDir:     reportDir,
+		MinLabels:     1,
+		Clock:         func() time.Time { return time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if res.MatchedCount != 1 || res.SelfJudgedSkipCount != 1 || res.AgreeCount != 1 {
+		t.Fatalf("MatchedCount=%d SelfJudgedSkipCount=%d AgreeCount=%d; want 1 / 1 / 1",
+			res.MatchedCount, res.SelfJudgedSkipCount, res.AgreeCount)
+	}
+	if fs.called != 1 {
+		t.Fatalf("Score calls=%d; want 1", fs.called)
+	}
+	if len(res.PerLabel) != 1 || res.PerLabel[0].TraceID != "other" {
+		t.Fatalf("PerLabel=%+v; want only non-self artifact", res.PerLabel)
+	}
+	report, err := os.ReadFile(res.ReportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(report), "Self-judged labels skipped: 1") {
+		t.Fatalf("report missing self-judged skip count:\n%s", report)
+	}
+}
+
 func TestRunCalibrate_InsufficientLabelsNeverPasses(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "artifacts.jsonl")

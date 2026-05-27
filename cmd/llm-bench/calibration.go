@@ -286,16 +286,17 @@ type calibrateOptions struct {
 // CalibrationResult is the in-memory summary returned by runCalibrate. The
 // markdown report contains the same data plus per-label rows.
 type CalibrationResult struct {
-	JudgeModel    string
-	MatchedCount  int
-	StaleCount    int
-	AgreeCount    int
-	AgreementRate float64
-	MinLabels     int
-	StabilityRuns int
-	Verdict       string // PASS / FAIL / INSUFFICIENT_LABELS
-	ReportPath    string
-	PerLabel      []perLabelOutcome
+	JudgeModel          string
+	MatchedCount        int
+	StaleCount          int
+	SelfJudgedSkipCount int
+	AgreeCount          int
+	AgreementRate       float64
+	MinLabels           int
+	StabilityRuns       int
+	Verdict             string // PASS / FAIL / INSUFFICIENT_LABELS
+	ReportPath          string
+	PerLabel            []perLabelOutcome
 }
 
 // perLabelOutcome is one row of the calibration report: a label paired with
@@ -338,12 +339,15 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 	}
 	res := CalibrationResult{
 		JudgeModel:    opts.JudgeModel,
-		MatchedCount:  len(matched),
 		StaleCount:    len(stale),
 		MinLabels:     opts.MinLabels,
 		StabilityRuns: opts.StabilityRuns,
 	}
 	for _, m := range matched {
+		if sameModelSelector(opts.JudgeModel, m.Artifact.CandidateModel) {
+			res.SelfJudgedSkipCount++
+			continue
+		}
 		trace, traceErr := calibrationTraceFromArtifact(m.Artifact)
 		if traceErr != nil {
 			return CalibrationResult{}, traceErr
@@ -387,6 +391,7 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		if outcome.Agree {
 			res.AgreeCount++
 		}
+		res.MatchedCount++
 	}
 	if res.MatchedCount > 0 {
 		res.AgreementRate = float64(res.AgreeCount) / float64(res.MatchedCount)
@@ -464,6 +469,7 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 	fmt.Fprintf(&b, "# Judge calibration — %s — %s\n\n", judgeModel, now.Format("2006-01-02"))
 	fmt.Fprintf(&b, "Matched labels: %d / %d required → %s\n", res.MatchedCount, res.MinLabels, sufficiencyLabel(res))
 	fmt.Fprintf(&b, "Stale labels: %d\n", res.StaleCount)
+	fmt.Fprintf(&b, "Self-judged labels skipped: %d\n", res.SelfJudgedSkipCount)
 	fmt.Fprintf(&b, "Agreement: %d / %d (%.0f%%) → **%s**\n\n",
 		res.AgreeCount, res.MatchedCount, res.AgreementRate*100, res.Verdict)
 	fmt.Fprintln(&b, "| trace_id | candidate | expected | judge | Δ | agree | stability |")
