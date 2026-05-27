@@ -117,6 +117,13 @@ type Provider interface {
 
 	// ChatStream sends a chat completion request and invokes fn for each
 	// partial response chunk. The final chunk has Done set to true.
+	//
+	// fn MUST be called serially in the calling goroutine, never from a
+	// separately-spawned goroutine. RoutePlan.ExecuteChatStream wraps fn
+	// with closure-captured attempt state that is mutated without
+	// synchronization; a Provider that fans callbacks out to goroutines
+	// would race against that state. Returning an error from fn must abort
+	// the stream and propagate the error from ChatStream's return value.
 	ChatStream(ctx context.Context, req ChatRequest, fn func(ChatResponse) error) error
 
 	// Generate sends a raw text generation request and returns the response.
@@ -124,6 +131,9 @@ type Provider interface {
 
 	// GenerateStream sends a generation request and invokes fn for each
 	// partial response chunk. The final chunk has Done set to true.
+	//
+	// The fn-invocation contract matches ChatStream's: serial, in the
+	// calling goroutine, errors abort and propagate.
 	GenerateStream(ctx context.Context, req GenerateRequest, fn func(GenerateResponse) error) error
 
 	// Embed generates vector embeddings for the given input texts.
@@ -466,12 +476,30 @@ type RouteAttempt struct {
 // state, score, fallback usage, the per-attempt trace, and a route-scoped
 // correlation ID.
 type RouteOutcome struct {
-	PlannedModel  ModelKey `json:"planned_model"`
-	ActualModel   ModelKey `json:"actual_model"`
-	FallbacksUsed int      `json:"fallbacks_used"`
-	WasSticky     bool     `json:"was_sticky"`
-	Score         float64  `json:"score"`
-	Reason        string   `json:"reason"`
+	// PlannedModel is the model the Router selected at plan time. Stable
+	// across the request: never updated by fallback execution.
+	PlannedModel ModelKey `json:"planned_model"`
+
+	// ActualModel is the model whose response served the request — the
+	// last attempt's key when it succeeded. When no attempt succeeded
+	// (every provider in the chain failed, was cancelled, or the request
+	// errored before any provider call), ActualModel equals PlannedModel
+	// as a defensive default; consumers should consult Attempts to learn
+	// what actually happened. Pre-PR2 semantics derived this field from
+	// FallbacksUsed alone, which produced inconsistent values between
+	// non-streaming and streaming Execute methods; PR2 derives it from
+	// the per-attempt trace for consistency.
+	ActualModel ModelKey `json:"actual_model"`
+
+	// FallbacksUsed counts the fallbacks promoted to "selected" before
+	// success. 0 means the primary served (or every attempt failed); 1
+	// means Fallbacks[0] served, and so on. Use len(Attempts) - 1 to
+	// learn how many fallbacks were tried (vs. how many served).
+	FallbacksUsed int `json:"fallbacks_used"`
+
+	WasSticky bool    `json:"was_sticky"`
+	Score     float64 `json:"score"`
+	Reason    string  `json:"reason"`
 
 	// Attempts is the ordered list of execution attempts (primary first).
 	// Nil/empty pre-PR2 because nothing populates it yet; the

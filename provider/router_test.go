@@ -835,3 +835,44 @@ func TestRouterBuildReason(t *testing.T) {
 		t.Errorf("reason = %q, should contain score", reason)
 	}
 }
+
+func TestRouterWithRoutingFeedbackPlumbsToPlan(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+
+	// Construct a router with the new option. setupTestRouter already
+	// accepts RouterOption values and registers the qwen3:8b fixture model.
+	r, _ := setupTestRouter(t, WithRoutingFeedback(rf))
+
+	// Drive a Route call that succeeds. The test fixture should already
+	// register a model that the router will select. Inspect the returned
+	// plan's feedback field via a small accessor or by behavior: execute
+	// the plan and check that store.Get returns a non-zero SampleCount.
+	plan, err := r.Route(context.Background(), RoutingRequest{
+		Model:   "qwen3:8b",
+		UseCase: "chat",
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.feedback != rf {
+		t.Errorf("plan.feedback = %v, want injected rf", plan.feedback)
+	}
+}
+
+func TestRouterWithoutRoutingFeedbackProducesNilPlanFeedback(t *testing.T) {
+	r, _ := setupTestRouter(t)
+	plan, err := r.Route(context.Background(), RoutingRequest{
+		Model:   "qwen3:8b",
+		UseCase: "chat",
+	})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.feedback != nil {
+		t.Errorf("plan.feedback = %v, want nil (no option configured)", plan.feedback)
+	}
+}

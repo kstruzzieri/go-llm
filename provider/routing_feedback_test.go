@@ -116,7 +116,7 @@ func TestBuildOutcomePopulatesRouteID(t *testing.T) {
 		Score:   0.42,
 		Reason:  "test",
 	}
-	out := rp.buildOutcome(0)
+	out := rp.buildOutcome(0, nil)
 	if out == nil {
 		t.Fatal("buildOutcome returned nil")
 	}
@@ -418,6 +418,47 @@ func TestRecordDefensiveCopiesStrengthAndMeta(t *testing.T) {
 	}
 	if storedMetaHasExtra {
 		t.Error("stored Meta unexpectedly saw caller mutation (extra key present)")
+	}
+}
+
+func TestSignalsDeepCopiesStrengthAndMeta(t *testing.T) {
+	s, _ := NewMemoryStore(MemoryStoreConfig{})
+	key := validKey()
+	strength := +0.9
+	if err := s.Record(context.Background(), key, FeedbackSignal{
+		Kind:     RoutingSignalSuccess,
+		Strength: &strength,
+		Meta:     map[string]string{"key": "v1"},
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	snapshot := s.Signals(key)
+	if len(snapshot) != 1 {
+		t.Fatalf("Signals len = %d, want 1", len(snapshot))
+	}
+	if snapshot[0].Strength == nil {
+		t.Fatal("snapshot Strength is nil")
+	}
+	*snapshot[0].Strength = -1.0
+	snapshot[0].Meta["key"] = "redacted"
+	snapshot[0].Meta["extra"] = "caller-only"
+
+	next := s.Signals(key)
+	if len(next) != 1 {
+		t.Fatalf("Signals after mutation len = %d, want 1", len(next))
+	}
+	if next[0].Strength == nil {
+		t.Fatal("stored Strength is nil")
+	}
+	if got := *next[0].Strength; got != 0.9 {
+		t.Fatalf("stored Strength = %v, want 0.9", got)
+	}
+	if got := next[0].Meta["key"]; got != "v1" {
+		t.Fatalf("stored Meta[key] = %q, want \"v1\"", got)
+	}
+	if _, ok := next[0].Meta["extra"]; ok {
+		t.Fatal("stored Meta unexpectedly saw caller-only key")
 	}
 }
 

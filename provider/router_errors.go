@@ -113,6 +113,28 @@ func (e *HTTPStatusError) Error() string {
 	return fmt.Sprintf("HTTP %d", e.StatusCode)
 }
 
+// HTTPStatusCode exposes the status code through the shared status-code error
+// contract used by routing classification. Built-in provider clients can
+// implement the same method without importing this package.
+func (e *HTTPStatusError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}
+
+type httpStatusCodeError interface {
+	HTTPStatusCode() int
+}
+
+func httpStatusCode(err error) (int, bool) {
+	var statusErr httpStatusCodeError
+	if errors.As(err, &statusErr) {
+		return statusErr.HTTPStatusCode(), true
+	}
+	return 0, false
+}
+
 // ---------------------------------------------------------------------------
 // Infrastructure error classification
 // ---------------------------------------------------------------------------
@@ -151,12 +173,12 @@ func IsInfrastructureError(err error) bool {
 	}
 
 	// HTTP status errors: 5xx and 429 are infrastructure, other 4xx are not.
-	var httpErr *HTTPStatusError
-	if errors.As(err, &httpErr) {
-		if httpErr.StatusCode >= 500 {
+	// Provider-specific wrappers expose their status through HTTPStatusCode.
+	if statusCode, ok := httpStatusCode(err); ok {
+		if statusCode >= 500 {
 			return true
 		}
-		if httpErr.StatusCode == 429 {
+		if statusCode == 429 {
 			return true
 		}
 		return false
