@@ -48,18 +48,19 @@ type routerDefaults struct {
 // Router implements RouteRecorder so that RoutePlans can feed post-execution
 // signals back to the circuit breakers, warmth tracker, and sticky cache.
 type Router struct {
-	mu           sync.RWMutex
-	registry     *ModelRegistry
-	providers    *Registry
-	breakers     map[string]*CircuitBreaker
-	warmth       WarmthSource
-	tokenBudget  *TokenBudgetValidator
-	sticky       *stickyCache
-	availableRAM float64
-	defaultOpts  routerDefaults
-	closed       bool
-	done         chan struct{}
-	closeOnce    sync.Once
+	mu              sync.RWMutex
+	registry        *ModelRegistry
+	providers       *Registry
+	breakers        map[string]*CircuitBreaker
+	warmth          WarmthSource
+	tokenBudget     *TokenBudgetValidator
+	sticky          *stickyCache
+	availableRAM    float64
+	defaultOpts     routerDefaults
+	closed          bool
+	done            chan struct{}
+	closeOnce       sync.Once
+	routingFeedback *RoutingFeedback
 }
 
 // Compile-time assertion that Router implements RouteRecorder.
@@ -146,6 +147,15 @@ func WithTokenBudgetValidator(v *TokenBudgetValidator) RouterOption {
 	return func(r *Router) {
 		r.tokenBudget = v
 	}
+}
+
+// WithRoutingFeedback configures the router to record per-attempt
+// outcomes via the RoutingFeedback wrapper. Default is nil (no recording).
+// The wrapper itself is nil-safe — if a future caller passes a
+// *RoutingFeedback constructed with a nil store, RecordOutcome returns
+// ErrNilRoutingFeedbackStore which recordOutcomeFeedback swallows.
+func WithRoutingFeedback(rf *RoutingFeedback) RouterOption {
+	return func(r *Router) { r.routingFeedback = rf }
 }
 
 // ---------------------------------------------------------------------------
@@ -720,6 +730,7 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	}
 	plan.SetWasSticky(wasSticky)
 	plan.SetRecorder(r)
+	plan.SetFeedback(r.routingFeedback) // ← PR2 addition; nil is fine, SetFeedback handles it
 
 	// Build fallback chain.
 	for _, fb := range fallbacks {
