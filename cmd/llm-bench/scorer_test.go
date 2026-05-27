@@ -510,9 +510,11 @@ func TestValidateJudgeModelPreservesNamespacedModelIDs(t *testing.T) {
 }
 
 func TestResolveJudgeDigest_ReturnsDigestWhenAvailable(t *testing.T) {
+	var gotName string
 	checker := &fakeJudgeChecker{
 		available: []string{"ollama/gemma4:31b"},
 		showFn: func(name string) (*ollama.ModelInfo, error) {
+			gotName = name
 			return &ollama.ModelInfo{Name: name, Digest: "sha256:deadbeef"}, nil
 		},
 	}
@@ -522,6 +524,29 @@ func TestResolveJudgeDigest_ReturnsDigestWhenAvailable(t *testing.T) {
 	}
 	if digest != "sha256:deadbeef" {
 		t.Fatalf("digest = %q; want sha256:deadbeef", digest)
+	}
+	if gotName != "gemma4:31b" {
+		t.Fatalf("ShowModel name = %q; want gemma4:31b", gotName)
+	}
+}
+
+func TestResolveJudgeDigest_StripsOnlyBenchProvider(t *testing.T) {
+	var gotName string
+	checker := &fakeJudgeChecker{
+		showFn: func(name string) (*ollama.ModelInfo, error) {
+			gotName = name
+			return &ollama.ModelInfo{Name: name, Digest: "sha256:namespaced"}, nil
+		},
+	}
+	digest, err := resolveJudgeDigest(context.Background(), checker, "ollama/hf.co/org/model:tag")
+	if err != nil {
+		t.Fatalf("resolveJudgeDigest: %v", err)
+	}
+	if digest != "sha256:namespaced" {
+		t.Fatalf("digest = %q; want sha256:namespaced", digest)
+	}
+	if gotName != "hf.co/org/model:tag" {
+		t.Fatalf("ShowModel name = %q; want hf.co/org/model:tag", gotName)
 	}
 }
 

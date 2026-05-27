@@ -146,7 +146,7 @@ type judgeModelChecker interface {
 // Errors from /api/show are deliberately swallowed: a missing digest is
 // degraded R1 mitigation, not a hard failure.
 func resolveJudgeDigest(ctx context.Context, checker judgeModelChecker, judgeModel string) (string, error) {
-	info, err := checker.ShowModel(ctx, judgeModel)
+	info, err := checker.ShowModel(ctx, modelSelectorWithoutBenchProvider(judgeModel))
 	if err != nil {
 		return "", nil
 	}
