@@ -106,10 +106,15 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 func (s *MemoryStore) Signals(key FeedbackKey) []FeedbackSignal {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.signals[key]) == 0 {
+	signals := s.signals[key]
+	if len(signals) == 0 {
 		return nil
 	}
-	return append([]FeedbackSignal(nil), s.signals[key]...)
+	out := make([]FeedbackSignal, len(signals))
+	for i, sig := range signals {
+		out[i] = cloneSignal(sig)
+	}
+	return out
 }
 
 // Get returns the aggregate for key. If no signals are stored, returns a
