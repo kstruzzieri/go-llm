@@ -34,6 +34,8 @@ func main() {
 	captureLimit := flag.Int("capture-limit", 0, "Maximum conversations to export in capture mode (0 = all)")
 	captureSource := flag.String("capture-source", defaultCaptureSource, "Trace source label for captured conversations")
 	captureSystem := flag.String("capture-system", "", "Fallback system prompt when a conversation has no stored system message")
+	mcpStdioCommand := flag.String("mcp-stdio-command", "", "Run this command and snapshot its MCP tools/list (mutually exclusive with -mcp-url)")
+	mcpURL := flag.String("mcp-url", "", "Snapshot MCP tools/list from this HTTP endpoint (mutually exclusive with -mcp-stdio-command)")
 
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
@@ -73,12 +75,20 @@ func main() {
 	defer cancel()
 
 	if *capture {
+		src, err := resolveToolSchemaSource(*mcpStdioCommand, *mcpURL)
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		if src == nil {
+			fmt.Fprintln(os.Stderr, "llm-bench: no -mcp-stdio-command or -mcp-url set; captured traces will have empty trace.Tools and ToolArgsValid will be reported as not-computed")
+		}
 		result, err := runCapture(ctx, captureOptions{
-			DBPath:         *captureDB,
-			OutputDir:      *captureOut,
-			Limit:          *captureLimit,
-			Source:         *captureSource,
-			FallbackSystem: *captureSystem,
+			DBPath:           *captureDB,
+			OutputDir:        *captureOut,
+			Limit:            *captureLimit,
+			Source:           *captureSource,
+			FallbackSystem:   *captureSystem,
+			ToolSchemaSource: src,
 		})
 		if err != nil {
 			log.Fatalf("llm-bench: capture: %v", err)
@@ -291,4 +301,21 @@ func defaultJudgeCachePath() string {
 		return ""
 	}
 	return filepath.Join(base, "go-llm", "judge-cache.db")
+}
+
+// resolveToolSchemaSource picks a tool-schema source from CLI flags.
+// Returns nil if neither flag is set; an error if both are.
+func resolveToolSchemaSource(stdioCmd, httpURL string) (toolSchemaSource, error) {
+	stdioCmd = strings.TrimSpace(stdioCmd)
+	httpURL = strings.TrimSpace(httpURL)
+	if stdioCmd != "" && httpURL != "" {
+		return nil, fmt.Errorf("-mcp-stdio-command and -mcp-url are mutually exclusive")
+	}
+	if stdioCmd != "" {
+		return newMCPToolSchemaSourceStdio(stdioCmd)
+	}
+	if httpURL != "" {
+		return newMCPToolSchemaSourceHTTP(httpURL)
+	}
+	return nil, nil
 }
