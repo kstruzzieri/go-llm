@@ -74,6 +74,16 @@ func TestIsInfrastructureError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "wrapped status-code interface 429",
+			err:  fmt.Errorf("provider error: %w", testStatusCodeError(429)),
+			want: true,
+		},
+		{
+			name: "status-code interface 404",
+			err:  testStatusCodeError(404),
+			want: false,
+		},
+		{
 			name: "wrapped context.Canceled",
 			err:  fmt.Errorf("request failed: %w", context.Canceled),
 			want: false,

@@ -3,10 +3,23 @@ package provider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/ollama"
 )
+
+type testStatusCodeError int
+
+func (e testStatusCodeError) Error() string {
+	return fmt.Sprintf("HTTP %d", int(e))
+}
+
+func (e testStatusCodeError) HTTPStatusCode() int {
+	return int(e)
+}
 
 func TestClassifyError(t *testing.T) {
 	cases := []struct {
@@ -27,6 +40,10 @@ func TestClassifyError(t *testing.T) {
 		{"http-400", &HTTPStatusError{StatusCode: 400, Status: "400 Bad Request"}, ErrorClass4xx, AttemptStatusFailed},
 		{"http-404", &HTTPStatusError{StatusCode: 404, Status: "404 Not Found"}, ErrorClass4xx, AttemptStatusFailed},
 		{"http-499", &HTTPStatusError{StatusCode: 499, Status: "499"}, ErrorClass4xx, AttemptStatusFailed},
+		{"status-code-interface-429", testStatusCodeError(429), ErrorClassRateLimit, AttemptStatusFailed},
+		{"wrapped-status-code-interface-503", fmt.Errorf("wrapped: %w", testStatusCodeError(503)), ErrorClass5xx, AttemptStatusFailed},
+		{"status-code-interface-404", testStatusCodeError(404), ErrorClass4xx, AttemptStatusFailed},
+		{"wrapped-ollama-api-error-429", fmt.Errorf("provider: ollama: chat: %w", &ollama.APIError{StatusCode: 429}), ErrorClassRateLimit, AttemptStatusFailed},
 		{"unknown", errors.New("something else"), ErrorClassUnknown, AttemptStatusFailed},
 	}
 	for _, tc := range cases {

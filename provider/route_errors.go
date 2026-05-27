@@ -56,9 +56,9 @@ const (
 //	errors.Is(err, context.Canceled)              → ("",            Unknown)
 //	errors.Is(err, context.DeadlineExceeded)      → ("timeout",     Failed)
 //	*net.OpError / *net.DNSError                  → ("network",     Failed)
-//	*HTTPStatusError 429                          → ("rate_limit",  Failed)
-//	*HTTPStatusError 500..599                     → ("5xx",         Failed)
-//	*HTTPStatusError 400..499 (not 429)           → ("4xx",         Failed)
+//	HTTPStatusCode() == 429                       → ("rate_limit",  Failed)
+//	HTTPStatusCode() == 500..599                  → ("5xx",         Failed)
+//	HTTPStatusCode() == 400..499 (not 429)        → ("4xx",         Failed)
 //	any other err                                 → ("unknown",     Failed)
 //
 // model_unloaded is reserved but never returned in PR2.
@@ -82,14 +82,13 @@ func classifyError(err error) (ErrorClass, AttemptStatus) {
 		return ErrorClassNetwork, AttemptStatusFailed
 	}
 
-	var httpErr *HTTPStatusError
-	if errors.As(err, &httpErr) {
+	if statusCode, ok := httpStatusCode(err); ok {
 		switch {
-		case httpErr.StatusCode == 429:
+		case statusCode == 429:
 			return ErrorClassRateLimit, AttemptStatusFailed
-		case httpErr.StatusCode >= 500 && httpErr.StatusCode <= 599:
+		case statusCode >= 500 && statusCode <= 599:
 			return ErrorClass5xx, AttemptStatusFailed
-		case httpErr.StatusCode >= 400 && httpErr.StatusCode <= 499:
+		case statusCode >= 400 && statusCode <= 499:
 			return ErrorClass4xx, AttemptStatusFailed
 		}
 	}

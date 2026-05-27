@@ -1417,6 +1417,48 @@ func TestExecuteChatStreamCallbackErrorDoesNotRecordProviderFailure(t *testing.T
 	}
 }
 
+func TestExecuteChatStreamFinalDoneCallbackErrorDoesNotRecordSuccess(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapChat,
+		chatStreamChunks: []ChatResponse{
+			{Content: "h"},
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(prov, rec)
+	plan.SetFeedback(rf)
+
+	callbackErr := errors.New("client disconnected on final chunk")
+	err = plan.ExecuteChatStream(context.Background(), func(c ChatResponse) error {
+		if c.Done {
+			if c.RouteOutcome == nil {
+				t.Fatal("final Done chunk RouteOutcome nil")
+			}
+			return callbackErr
+		}
+		return nil
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err = %v, want callbackErr", err)
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.SampleCount != 0 {
+		t.Fatalf("SampleCount = %d, want 0 (final callback abort is AttemptStatusUnknown)", agg.SampleCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 0 {
+		t.Fatalf("successes = %d, want 0", len(successes))
+	}
+}
+
 func TestExecuteGenerateStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testing.T) {
 	store, err := NewMemoryStore(MemoryStoreConfig{})
 	if err != nil {
@@ -1452,6 +1494,49 @@ func TestExecuteGenerateStreamFallbackSuccessWithoutDoneRecordsAttempt(t *testin
 	agg, _ := store.Get(context.Background(), key)
 	if agg.ScoredCount < 1 {
 		t.Errorf("fallback ScoredCount = %d, want >= 1 (Success signal should have been recorded)", agg.ScoredCount)
+	}
+}
+
+func TestExecuteGenerateStreamFinalDoneCallbackErrorDoesNotRecordSuccess(t *testing.T) {
+	store, err := NewMemoryStore(MemoryStoreConfig{})
+	if err != nil {
+		t.Fatalf("NewMemoryStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	rec := &rpMockRecorder{}
+
+	prov := &rpMockProvider{
+		name: "ollama", caps: CapGenerate,
+		genStreamChunks: []GenerateResponse{
+			{Response: "h"},
+			{Done: true},
+		},
+	}
+	plan := newTestPlan(prov, rec)
+	plan.Kind = RouteKindGenerate
+	plan.SetFeedback(rf)
+
+	callbackErr := errors.New("client disconnected on final chunk")
+	err = plan.ExecuteGenerateStream(context.Background(), func(c GenerateResponse) error {
+		if c.Done {
+			if c.RouteOutcome == nil {
+				t.Fatal("final Done chunk RouteOutcome nil")
+			}
+			return callbackErr
+		}
+		return nil
+	})
+	if !errors.Is(err, callbackErr) {
+		t.Fatalf("err = %v, want callbackErr", err)
+	}
+
+	key := FeedbackKey{Provider: "ollama", Model: "test-model", UseCase: "chat"}
+	agg, _ := store.Get(context.Background(), key)
+	if agg.SampleCount != 0 {
+		t.Fatalf("SampleCount = %d, want 0 (final callback abort is AttemptStatusUnknown)", agg.SampleCount)
+	}
+	if successes := rec.getSuccesses(); len(successes) != 0 {
+		t.Fatalf("successes = %d, want 0", len(successes))
 	}
 }
 

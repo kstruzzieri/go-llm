@@ -164,13 +164,19 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 			delivered = true
 		}
 		if chunk.Done && !chunk.Partial && !streamDone {
-			attempts = append(attempts,
+			pendingAttempts := append(attempts,
 				makeAttempt(rp.Profile.Key, nil, time.Since(primaryStart)))
-			streamDone = true
-			outcome = rp.handleResult(nil, fallbacksUsed, attempts)
-			if outcome != nil {
-				chunk.RouteOutcome = outcome
+			pendingOutcome := rp.buildOutcome(fallbacksUsed, pendingAttempts)
+			chunk.RouteOutcome = pendingOutcome
+			if e := fn(chunk); e != nil {
+				callbackErr = e
+				return e
 			}
+			attempts = pendingAttempts
+			streamDone = true
+			outcome = pendingOutcome
+			rp.recordResult(nil, fallbacksUsed, attempts, outcome)
+			return nil
 		}
 		if e := fn(chunk); e != nil {
 			callbackErr = e
@@ -214,13 +220,19 @@ func (rp *RoutePlan) ExecuteChatStream(ctx context.Context, fn func(ChatResponse
 						delivered = true
 					}
 					if chunk.Done && !chunk.Partial && !fbStreamDone {
-						attempts = append(attempts,
+						pendingAttempts := append(attempts,
 							makeAttempt(fb.Profile.Key, nil, time.Since(fbStart)))
-						fbStreamDone = true
-						outcome = rp.handleResult(nil, fallbacksUsed, attempts)
-						if outcome != nil {
-							chunk.RouteOutcome = outcome
+						pendingOutcome := rp.buildOutcome(fallbacksUsed, pendingAttempts)
+						chunk.RouteOutcome = pendingOutcome
+						if e := fn(chunk); e != nil {
+							fbCallbackErr = e
+							return e
 						}
+						attempts = pendingAttempts
+						fbStreamDone = true
+						outcome = pendingOutcome
+						rp.recordResult(nil, fallbacksUsed, attempts, outcome)
+						return nil
 					}
 					if e := fn(chunk); e != nil {
 						fbCallbackErr = e
@@ -348,13 +360,19 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 			delivered = true
 		}
 		if chunk.Done && !chunk.Partial && !streamDone {
-			attempts = append(attempts,
+			pendingAttempts := append(attempts,
 				makeAttempt(rp.Profile.Key, nil, time.Since(primaryStart)))
-			streamDone = true
-			outcome = rp.handleResult(nil, fallbacksUsed, attempts)
-			if outcome != nil {
-				chunk.RouteOutcome = outcome
+			pendingOutcome := rp.buildOutcome(fallbacksUsed, pendingAttempts)
+			chunk.RouteOutcome = pendingOutcome
+			if e := fn(chunk); e != nil {
+				callbackErr = e
+				return e
 			}
+			attempts = pendingAttempts
+			streamDone = true
+			outcome = pendingOutcome
+			rp.recordResult(nil, fallbacksUsed, attempts, outcome)
+			return nil
 		}
 		if e := fn(chunk); e != nil {
 			callbackErr = e
@@ -398,13 +416,19 @@ func (rp *RoutePlan) ExecuteGenerateStream(ctx context.Context, fn func(Generate
 						delivered = true
 					}
 					if chunk.Done && !chunk.Partial && !fbStreamDone {
-						attempts = append(attempts,
+						pendingAttempts := append(attempts,
 							makeAttempt(fb.Profile.Key, nil, time.Since(fbStart)))
-						fbStreamDone = true
-						outcome = rp.handleResult(nil, fallbacksUsed, attempts)
-						if outcome != nil {
-							chunk.RouteOutcome = outcome
+						pendingOutcome := rp.buildOutcome(fallbacksUsed, pendingAttempts)
+						chunk.RouteOutcome = pendingOutcome
+						if e := fn(chunk); e != nil {
+							fbCallbackErr = e
+							return e
 						}
+						attempts = pendingAttempts
+						fbStreamDone = true
+						outcome = pendingOutcome
+						rp.recordResult(nil, fallbacksUsed, attempts, outcome)
+						return nil
 					}
 					if e := fn(chunk); e != nil {
 						fbCallbackErr = e
@@ -511,6 +535,12 @@ func (rp *RoutePlan) ExecuteEmbed(ctx context.Context) (*EmbedResponse, error) {
 // recordOutcomeFeedback. Pre-PR2 returned nil on cancellation/failure;
 // PR2 always returns non-nil.
 func (rp *RoutePlan) handleResult(err error, fallbacksUsed int, attempts []RouteAttempt) *RouteOutcome {
+	outcome := rp.buildOutcome(fallbacksUsed, attempts)
+	rp.recordResult(err, fallbacksUsed, attempts, outcome)
+	return outcome
+}
+
+func (rp *RoutePlan) recordResult(err error, fallbacksUsed int, attempts []RouteAttempt, outcome *RouteOutcome) {
 	// Derive the most recently attempted key for warmth/success attribution.
 	// attempts[last].Key is correct in every case Execute* produces: success,
 	// infra failure, cancellation after a fallback was tried. The previous
@@ -536,9 +566,7 @@ func (rp *RoutePlan) handleResult(err error, fallbacksUsed int, attempts []Route
 	}
 	// Infrastructure failures continue to be recorded inline by Execute methods.
 
-	outcome := rp.buildOutcome(fallbacksUsed, attempts)
 	rp.recordOutcomeFeedback(outcome)
-	return outcome
 }
 
 // buildOutcome constructs a RouteOutcome from the plan, fallback index, and
