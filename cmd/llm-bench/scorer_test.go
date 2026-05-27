@@ -96,6 +96,20 @@ func TestNewScorerAppliesJudgeTimeoutToHTTPClient(t *testing.T) {
 	}
 }
 
+func TestScoreToolArgsValidComputedFieldDefaultsZero(t *testing.T) {
+	s := Score{}
+	if s.ToolArgsValidComputed {
+		t.Fatalf("zero value should be false")
+	}
+}
+
+func TestScoreToolArgsValidComputedFieldAssignable(t *testing.T) {
+	s := Score{ToolArgsValid: 1.0, ToolArgsValidComputed: true}
+	if !s.ToolArgsValidComputed || s.ToolArgsValid != 1.0 {
+		t.Fatalf("assignment lost data: %+v", s)
+	}
+}
+
 func TestExactMatchScorerRequiresGoldenSubstring(t *testing.T) {
 	s := &ExactMatchScorer{}
 	trace := Trace{ID: "t1", Golden: Golden{FinalAnswerCriteria: "describe the bug"}}

@@ -25,14 +25,15 @@ const (
 // Score captures the evaluation dimensions for a single (model, trace) run.
 // See docs/llm/benchmark-plan.md for the scoring rationale.
 type Score struct {
-	ToolSequenceMatch float64 // [0,1] — how close actual tool calls were to the golden sequence
-	ToolArgsValid     float64 // [0,1] — fraction of tool calls with valid arguments
-	AnswerQuality     float64 // [0,1] — final-answer quality per the active Scorer
-	LatencyMs         int64   // sum of all chat round-trips for this replay
-	TurnLatenciesMs   []int64 // per-turn breakdown; len == number of chat round-trips
-	ScorerLatencyMs   int64   // wall-clock time spent in the active scorer
-	TotalTokens       int
-	Notes             string
+	ToolSequenceMatch     float64 // [0,1] — how close actual tool calls were to the golden sequence
+	ToolArgsValid         float64 // [0,1] — fraction of tool calls with valid arguments
+	ToolArgsValidComputed bool    // when false, ToolArgsValid is a placeholder (0.0) — see validateToolArguments
+	AnswerQuality         float64 // [0,1] — final-answer quality per the active Scorer
+	LatencyMs             int64   // sum of all chat round-trips for this replay
+	TurnLatenciesMs       []int64 // per-turn breakdown; len == number of chat round-trips
+	ScorerLatencyMs       int64   // wall-clock time spent in the active scorer
+	TotalTokens           int
+	Notes                 string
 }
 
 // Scorer is the pluggable strategy for evaluating a replay result.
