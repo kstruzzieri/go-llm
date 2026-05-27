@@ -106,3 +106,90 @@ func schemaSafeName(name string) string {
 	repl := strings.NewReplacer("/", "_", ":", "_", " ", "_")
 	return repl.Replace(name)
 }
+
+// validateToolArguments produces the ToolArgsValid score for one replay.
+//
+// The score is the fraction of candidate tool calls whose arguments
+// validate against the schema declared in trace.Tools. The semantics
+// table (see spec §4.3) collapses to:
+//
+//   - No calls expected, none made → (1.0, computed=true)
+//   - Calls expected, none made     → (0.0, computed=false)
+//   - Calls made, no schemas at all → (0.0, computed=false)
+//   - Calls made, partial schema coverage → score over all calls (unknown counts as invalid), computed=true
+//   - All calls pass                → (1.0, computed=true)
+//
+// The notes field is a "; "-joined list of human-readable diagnostics
+// for individual call failures; on the vacuous-true and not-computed
+// paths it explains why ToolArgsValid is what it is. Callers should
+// treat notes as informational only — the load-bearing signals are
+// (score, computed).
+func validateToolArguments(schemas map[string]*compiledToolSchema, trace Trace, actual []Turn) (float64, bool, string) {
+	actualCalls := assistantToolCalls(actual)
+	if len(actualCalls) == 0 {
+		if len(trace.Golden.ToolCalls) == 0 {
+			return 1.0, true, "no tool calls expected or made"
+		}
+		return 0.0, false, "ToolArgsValid not computed (expected tool calls but replay made none)"
+	}
+	if len(schemas) == 0 {
+		return 0.0, false, "ToolArgsValid not computed (trace has no tool schemas)"
+	}
+
+	var notes []string
+	valid := 0
+	for _, call := range actualCalls {
+		schema, ok := schemas[call.Name]
+		if !ok {
+			notes = append(notes, fmt.Sprintf("no schema for %s", call.Name))
+			continue
+		}
+		args, err := decodeArguments(call.Arguments)
+		if err != nil {
+			notes = append(notes, fmt.Sprintf("%s{unparseable args: %v}", call.Name, err))
+			continue
+		}
+		if err := schema.Validate(args); err != nil {
+			notes = append(notes, fmt.Sprintf("%s{%s}", call.Name, summarizeValidationError(err)))
+			continue
+		}
+		valid++
+	}
+	score := float64(valid) / float64(len(actualCalls))
+	return score, true, strings.Join(notes, "; ")
+}
+
+func assistantToolCalls(turns []Turn) []ToolCall {
+	var out []ToolCall
+	for _, t := range turns {
+		if t.Role != "assistant" {
+			continue
+		}
+		out = append(out, t.ToolCalls...)
+	}
+	return out
+}
+
+func decodeArguments(raw json.RawMessage) (any, error) {
+	if len(raw) == 0 {
+		return map[string]any{}, nil
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// summarizeValidationError compresses a jsonschema/v6 ValidationError
+// into a one-line note suitable for the Score.Notes field. The library
+// returns multi-line tree output by default; we want something that
+// reads well next to other "; "-joined notes.
+func summarizeValidationError(err error) string {
+	msg := strings.ReplaceAll(err.Error(), "\n", " ")
+	msg = strings.Join(strings.Fields(msg), " ")
+	if len(msg) > 200 {
+		msg = msg[:200] + "…"
+	}
+	return msg
+}
