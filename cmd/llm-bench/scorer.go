@@ -244,9 +244,17 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
 	}
 
+	schemas, schemaErr := toolSchemaByName(trace.Tools)
+	if schemaErr != nil {
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
+	}
+	toolArgsScore, toolArgsComputed, toolArgsNotes := validateToolArguments(schemas, trace, actual.Transcript)
+
 	baseScore := Score{
-		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
+		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		ToolArgsValid:         toolArgsScore,
+		ToolArgsValidComputed: toolArgsComputed,
+		Notes:                 toolArgsNotes,
 	}
 
 	if strings.TrimSpace(lastAssistantContent(actual.Transcript)) == "" {

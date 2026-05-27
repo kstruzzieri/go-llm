@@ -96,6 +96,49 @@ func TestNewScorerAppliesJudgeTimeoutToHTTPClient(t *testing.T) {
 	}
 }
 
+type stubChatClient struct{}
+
+func (stubChatClient) Chat(context.Context, ollama.ChatRequest) (*ollama.ChatResponse, error) {
+	return nil, nil
+}
+
+func TestLLMJudgeBuildJudgeCallPopulatesToolArgsValidInBaseScore(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{
+		"name": "search_code",
+		"inputSchema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+	}`)}
+	trace := Trace{
+		ID:     "tj",
+		System: "sys",
+		Tools:  tools,
+		Turns:  []Turn{{Role: "user", Content: "?"}},
+		Golden: Golden{ToolCalls: []string{"search_code"}, FinalAnswerCriteria: "non-empty"},
+	}
+	actual := Result{
+		Model: "ollama/x",
+		Transcript: []Turn{
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{Name: "search_code", Arguments: json.RawMessage(`{"query":"foo"}`)},
+			}},
+			{Role: "assistant", Content: "found"},
+		},
+	}
+	scorer := &LLMJudgeScorer{Client: stubChatClient{}, JudgeModel: "ollama/gemma4:31b"}
+	_, base, err := scorer.buildJudgeCall(trace, actual)
+	if err != nil {
+		t.Fatalf("buildJudgeCall: %v", err)
+	}
+	if !base.ToolArgsValidComputed {
+		t.Fatalf("ToolArgsValidComputed=false; want true")
+	}
+	if base.ToolArgsValid != 1.0 {
+		t.Fatalf("ToolArgsValid=%v; want 1.0", base.ToolArgsValid)
+	}
+	if strings.Contains(base.Notes, "schema validation pending") {
+		t.Fatalf("Notes still references validation pending: %q", base.Notes)
+	}
+}
+
 func TestExactMatchScorerPopulatesToolArgsValid(t *testing.T) {
 	tools := []json.RawMessage{json.RawMessage(`{
 		"name": "read_file",
