@@ -55,7 +55,6 @@ func parseStdioCommand(command string) ([]string, error) {
 	var parts []string
 	var b strings.Builder
 	var quote rune
-	escaped := false
 	inToken := false
 
 	flush := func() {
@@ -64,15 +63,16 @@ func parseStdioCommand(command string) ([]string, error) {
 		inToken = false
 	}
 
-	for _, r := range strings.TrimSpace(command) {
-		if escaped {
-			b.WriteRune(r)
-			escaped = false
-			inToken = true
-			continue
-		}
+	runes := []rune(strings.TrimSpace(command))
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
 		if quote != '\'' && r == '\\' {
-			escaped = true
+			if i+1 < len(runes) && isStdioEscapedRune(quote, runes[i+1]) {
+				b.WriteRune(runes[i+1])
+				i++
+			} else {
+				b.WriteRune(r)
+			}
 			inToken = true
 			continue
 		}
@@ -99,9 +99,6 @@ func parseStdioCommand(command string) ([]string, error) {
 			inToken = true
 		}
 	}
-	if escaped {
-		return nil, fmt.Errorf("unterminated escape")
-	}
 	if quote != 0 {
 		return nil, fmt.Errorf("unterminated %q quote", quote)
 	}
@@ -109,6 +106,18 @@ func parseStdioCommand(command string) ([]string, error) {
 		flush()
 	}
 	return parts, nil
+}
+
+func isStdioEscapedRune(quote rune, next rune) bool {
+	// Only consume escapes for parser delimiters; other backslashes are
+	// preserved as Windows path separators.
+	if quote == '"' {
+		return next == '"'
+	}
+	if quote == 0 {
+		return unicode.IsSpace(next) || next == '\'' || next == '"'
+	}
+	return false
 }
 
 func newMCPToolSchemaSourceHTTP(endpoint string) (*mcpToolSchemaSource, error) {

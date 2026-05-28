@@ -209,6 +209,17 @@ func TestParseStdioCommandPreservesEscapesAndEmptyArgs(t *testing.T) {
 	}
 }
 
+func TestParseStdioCommandPreservesWindowsBackslashes(t *testing.T) {
+	got, err := parseStdioCommand(`"C:\Program Files\mcp\server.exe" --no-rag .\go-llm-mcp.exe C:\tmp\`)
+	if err != nil {
+		t.Fatalf("parseStdioCommand: %v", err)
+	}
+	want := []string{`C:\Program Files\mcp\server.exe`, "--no-rag", `.\go-llm-mcp.exe`, `C:\tmp\`}
+	if !slices.Equal(got, want) {
+		t.Fatalf("parseStdioCommand=%v; want %v", got, want)
+	}
+}
+
 func TestNewMCPToolSchemaSourceStdioRejectsUnterminatedQuote(t *testing.T) {
 	_, err := newMCPToolSchemaSourceStdio(`server --config "Project A.json`)
 	if err == nil || !strings.Contains(err.Error(), "unterminated") {
