@@ -1,8 +1,16 @@
 // routing_feedback_sqlite_migration.go owns the schema migrations for the
 // SQLite-backed routing-feedback store. Schema lives in a version-tracking
-// table (routing_feedback_schema_version) that the migration runner
-// inserts into atomically inside each migration's own transaction, so a
-// crash between DDL and version-record cannot leave a half-applied state.
+// table (routing_feedback_schema_version).
+//
+// Atomicity guarantee, per migration: each entry in feedbackMigrations
+// runs its DDL and version-record INSERT inside one transaction, so a
+// crash between those two cannot leave a half-applied state for that
+// migration. Across migrations the guarantee is only "no partial
+// individual step" — a crash between v1 and v2 commits leaves v1 applied
+// and the next startup picks up at v2. The pre-migration-detection path
+// (recording v1 for a DB that already has routing_feedback_signals)
+// uses its own transaction; a crash between that and v2's commit also
+// safely resumes at v2.
 //
 // Pattern mirrors rag/migration.go so future migrations follow the same
 // shape; intentional duplication beats coupling provider/ to rag/ types.
@@ -11,6 +19,7 @@ package provider
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -87,11 +96,16 @@ func runFeedbackMigrations(db *sql.DB) error {
 		return err
 	}
 
-	if currentVersion == 0 && tableExists(db, "routing_feedback_signals") {
+	exists, err := tableExists(db, "routing_feedback_signals")
+	if err != nil {
+		return fmt.Errorf("provider: probe routing_feedback_signals existence: %w", err)
+	}
+	if currentVersion == 0 && exists {
 		// Database predates the migration runner. Validate the existing
 		// schema matches v1 before marking it as applied; blessing an
 		// incompatible table would surface as a confusing "no such
-		// column" error far from the actual cause.
+		// column" error far from the actual cause — or worse, silently
+		// accept rows that v1's CHECK constraints would have rejected.
 		if err := validateExistingSignalsSchema(db); err != nil {
 			return fmt.Errorf("provider: pre-existing routing_feedback_signals table is incompatible with v1 schema: %w", err)
 		}
@@ -138,33 +152,62 @@ func currentFeedbackSchemaVersion(db *sql.DB) (int, error) {
 	return version, nil
 }
 
-// tableExists checks whether a table by the given name exists. Mirrors
-// the rag helper of the same name; provider-local copy to avoid an
-// upward dependency on rag/.
-func tableExists(db *sql.DB, name string) bool {
+// tableExists checks whether a table by the given name exists. Returns
+// (false, nil) when the table is absent; (false, err) when the
+// underlying probe fails so callers can distinguish "not present" from
+// "could not determine" — a closed or corrupt DB would otherwise be
+// silently treated as "table missing" and cascade into a worse error
+// later in the migration loop. Mirrors the rag helper of the same name;
+// provider-local copy to avoid an upward dependency on rag/.
+func tableExists(db *sql.DB, name string) (bool, error) {
 	var count int
-	err := db.QueryRow(
+	if err := db.QueryRow(
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
-	).Scan(&count)
-	return err == nil && count > 0
+	).Scan(&count); err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
-// validateExistingSignalsSchema runs a no-op SELECT against every column
-// the v1 schema declares. SQLite reports "no such column" if any column
-// is missing or named differently. Used by runFeedbackMigrations when a
-// pre-existing routing_feedback_signals table is detected without a
-// schema_version row.
+// validateExistingSignalsSchema checks that a pre-existing
+// routing_feedback_signals table both has every v1 column AND carries
+// the kind-specific composite CHECK constraint that enforces v1's
+// payload invariants. Used by runFeedbackMigrations when the table is
+// detected without a schema_version row.
 //
-// The SELECT 0 LIMIT 0 form scans no rows; we only care about the column
-// resolution at prepare time.
+// Two checks:
+//  1. A SELECT 0 LIMIT 0 against every v1 column — SQLite reports "no
+//     such column" if any column is missing or renamed.
+//  2. A sqlite_master.sql lookup to verify the composite kind/latency/
+//     error_class CHECK is present. Without this, a pre-existing table
+//     that had the right columns but lacked the CHECK would be blessed
+//     as v1 and silently accept rows v1 would have rejected.
 func validateExistingSignalsSchema(db *sql.DB) error {
-	_, err := db.Exec(`SELECT
+	if _, err := db.Exec(`SELECT
 		id, provider, model, use_case, kind, strength, at_ns,
 		latency_ms, error_class, route_id, completion_id, meta
 		FROM routing_feedback_signals
-		WHERE 0 LIMIT 0`)
-	if err != nil {
-		return err
+		WHERE 0 LIMIT 0`); err != nil {
+		return fmt.Errorf("column check: %w", err)
+	}
+	var ddl string
+	if err := db.QueryRow(
+		`SELECT sql FROM sqlite_master WHERE type='table' AND name='routing_feedback_signals'`,
+	).Scan(&ddl); err != nil {
+		return fmt.Errorf("sqlite_master lookup: %w", err)
+	}
+	// The composite CHECK fingerprint — case-insensitive, whitespace-
+	// tolerant. We only require the disjunction's distinguishing tokens
+	// be present, not byte-for-byte identical, so a DBA-normalised DDL
+	// (different newlines, different quoting) still passes.
+	lower := strings.ToLower(ddl)
+	for _, want := range []string{
+		"kind = 'success'", "kind = 'failure'", "kind = 'latency'",
+		"latency_ms = 0", "latency_ms > 0", "error_class",
+	} {
+		if !strings.Contains(lower, want) {
+			return fmt.Errorf("missing v1 CHECK fingerprint %q in pre-existing DDL", want)
+		}
 	}
 	return nil
 }

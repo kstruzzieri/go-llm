@@ -33,7 +33,11 @@ func TestRunFeedbackMigrationsFreshDB(t *testing.T) {
 	if v != len(feedbackMigrations) {
 		t.Errorf("schema version = %d, want %d", v, len(feedbackMigrations))
 	}
-	if !tableExists(db, "routing_feedback_signals") {
+	exists, err := tableExists(db, "routing_feedback_signals")
+	if err != nil {
+		t.Fatalf("tableExists: %v", err)
+	}
+	if !exists {
 		t.Errorf("routing_feedback_signals table missing after migration")
 	}
 }
@@ -56,9 +60,46 @@ func TestRunFeedbackMigrationsIdempotent(t *testing.T) {
 func TestRunFeedbackMigrationsPreMigrationCompatibleDB(t *testing.T) {
 	db := newMigrationTestDB(t)
 	// Simulate a DB that has the full v1 routing_feedback_signals schema
-	// but no schema_version row (e.g., created by a future tool before
-	// the migration runner existed). Must mark v1 as applied so the
-	// runner doesn't try to re-CREATE the table.
+	// including the composite CHECK but no schema_version row (e.g.,
+	// created by a future tool before the migration runner existed).
+	// Must mark v1 as applied so the runner doesn't try to re-CREATE.
+	if _, err := db.Exec(`CREATE TABLE routing_feedback_signals (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		provider TEXT NOT NULL,
+		model TEXT NOT NULL,
+		use_case TEXT NOT NULL,
+		kind TEXT NOT NULL CHECK (kind IN ('success', 'failure', 'latency')),
+		strength REAL,
+		at_ns INTEGER NOT NULL,
+		latency_ms INTEGER NOT NULL DEFAULT 0 CHECK (latency_ms >= 0),
+		error_class TEXT NOT NULL DEFAULT '',
+		route_id TEXT NOT NULL DEFAULT '',
+		completion_id TEXT NOT NULL DEFAULT '',
+		meta TEXT NOT NULL DEFAULT '{}',
+		CHECK (
+			(kind = 'success' AND latency_ms = 0 AND error_class = '') OR
+			(kind = 'failure' AND latency_ms = 0 AND error_class <> '') OR
+			(kind = 'latency' AND latency_ms > 0 AND error_class = '')
+		)
+	)`); err != nil {
+		t.Fatalf("seed signals table: %v", err)
+	}
+	if err := runFeedbackMigrations(db); err != nil {
+		t.Fatalf("runFeedbackMigrations: %v", err)
+	}
+	v, _ := currentFeedbackSchemaVersion(db)
+	if v < 1 {
+		t.Errorf("compatible pre-migration DB should be recorded at >=v1, got %d", v)
+	}
+}
+
+// TestRunFeedbackMigrationsRejectsPreExistingTableMissingChecks proves
+// validateExistingSignalsSchema is not satisfied by columns alone — a
+// pre-existing table with the right columns but lacking v1's composite
+// CHECK is rejected. Otherwise the migration runner would bless a
+// schema that silently accepts rows the in-memory store would reject.
+func TestRunFeedbackMigrationsRejectsPreExistingTableMissingChecks(t *testing.T) {
+	db := newMigrationTestDB(t)
 	if _, err := db.Exec(`CREATE TABLE routing_feedback_signals (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		provider TEXT NOT NULL,
@@ -75,12 +116,9 @@ func TestRunFeedbackMigrationsPreMigrationCompatibleDB(t *testing.T) {
 	)`); err != nil {
 		t.Fatalf("seed signals table: %v", err)
 	}
-	if err := runFeedbackMigrations(db); err != nil {
-		t.Fatalf("runFeedbackMigrations: %v", err)
-	}
-	v, _ := currentFeedbackSchemaVersion(db)
-	if v < 1 {
-		t.Errorf("compatible pre-migration DB should be recorded at >=v1, got %d", v)
+	err := runFeedbackMigrations(db)
+	if err == nil {
+		t.Fatalf("accepted pre-existing table missing v1 CHECK fingerprint; want error")
 	}
 }
 
@@ -114,10 +152,12 @@ func TestRunFeedbackMigrationsCorruptVersionTable(t *testing.T) {
 	}
 }
 
-func TestCurrentFeedbackSchemaVersionEmpty(t *testing.T) {
+// TestCurrentFeedbackSchemaVersionEmptyVersionTable confirms that an
+// existing but empty routing_feedback_schema_version table returns 0
+// cleanly (no rows means "version 0"). The "no version table at all"
+// case is covered transitively by TestRunFeedbackMigrationsFreshDB.
+func TestCurrentFeedbackSchemaVersionEmptyVersionTable(t *testing.T) {
 	db := newMigrationTestDB(t)
-	// Without the version table, currentFeedbackSchemaVersion should
-	// return 0 cleanly (no rows means "version 0").
 	if _, err := db.Exec(`CREATE TABLE routing_feedback_schema_version (
 		version INTEGER PRIMARY KEY, description TEXT NOT NULL, applied_at INTEGER NOT NULL)`); err != nil {
 		t.Fatalf("seed version table: %v", err)
