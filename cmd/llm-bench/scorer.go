@@ -107,11 +107,10 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingGolden)
 	}
 
-	schemas, schemaErr := toolSchemaByName(trace.Tools)
+	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, actual.Transcript)
 	if schemaErr != nil {
 		return Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
 	}
-	toolArgsScore, toolArgsComputed, toolArgsNotes := validateToolArguments(schemas, trace, actual.Transcript)
 
 	score := Score{
 		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
@@ -244,11 +243,10 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
 	}
 
-	schemas, schemaErr := toolSchemaByName(trace.Tools)
+	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, actual.Transcript)
 	if schemaErr != nil {
 		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
 	}
-	toolArgsScore, toolArgsComputed, toolArgsNotes := validateToolArguments(schemas, trace, actual.Transcript)
 
 	baseScore := Score{
 		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),

@@ -139,6 +139,40 @@ func TestLLMJudgeBuildJudgeCallPopulatesToolArgsValidInBaseScore(t *testing.T) {
 	}
 }
 
+func TestLLMJudgeBuildJudgeCallIgnoresUnusedInvalidToolSchema(t *testing.T) {
+	tools := []json.RawMessage{
+		json.RawMessage(`{
+			"name": "search_code",
+			"inputSchema": {"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}
+		}`),
+		json.RawMessage(`{"name":"unused_bad","inputSchema":{"$ref":"http://attacker.example.com/schema.json"}}`),
+	}
+	trace := Trace{
+		ID:     "tj-unused-bad",
+		System: "sys",
+		Tools:  tools,
+		Turns:  []Turn{{Role: "user", Content: "?"}},
+		Golden: Golden{ToolCalls: []string{"search_code"}, FinalAnswerCriteria: "non-empty"},
+	}
+	actual := Result{
+		Model: "ollama/x",
+		Transcript: []Turn{
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{Name: "search_code", Arguments: json.RawMessage(`{"query":"foo"}`)},
+			}},
+			{Role: "assistant", Content: "found"},
+		},
+	}
+	scorer := &LLMJudgeScorer{Client: stubChatClient{}, JudgeModel: "ollama/gemma4:31b"}
+	_, base, err := scorer.buildJudgeCall(trace, actual)
+	if err != nil {
+		t.Fatalf("buildJudgeCall: %v", err)
+	}
+	if !base.ToolArgsValidComputed || base.ToolArgsValid != 1.0 {
+		t.Fatalf("ToolArgsValid=%v computed=%v; want 1.0/true", base.ToolArgsValid, base.ToolArgsValidComputed)
+	}
+}
+
 func TestExactMatchScorerPopulatesToolArgsValid(t *testing.T) {
 	tools := []json.RawMessage{json.RawMessage(`{
 		"name": "read_file",
@@ -175,6 +209,66 @@ func TestExactMatchScorerPopulatesToolArgsValid(t *testing.T) {
 	}
 	if strings.Contains(score.Notes, "schema validation pending") {
 		t.Fatalf("Notes still claims validation pending: %q", score.Notes)
+	}
+}
+
+func TestExactMatchScorerIgnoresUnusedInvalidToolSchema(t *testing.T) {
+	tools := []json.RawMessage{
+		json.RawMessage(`{
+			"name": "read_file",
+			"inputSchema": {"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}
+		}`),
+		json.RawMessage(`{"name":"unused_bad","inputSchema":{"$ref":"http://attacker.example.com/schema.json"}}`),
+	}
+	trace := Trace{
+		ID:     "unused-bad",
+		System: "sys",
+		Tools:  tools,
+		Turns: []Turn{{Role: "user", Content: "?"}, {Role: "assistant", ToolCalls: []ToolCall{
+			{Name: "read_file", Arguments: json.RawMessage(`{"path":"x"}`)},
+		}}},
+		Golden: Golden{ToolCalls: []string{"read_file"}, FinalAnswerSubstring: "ok"},
+	}
+	actual := Result{
+		Model: "ollama/x",
+		Transcript: []Turn{
+			{Role: "assistant", ToolCalls: []ToolCall{
+				{Name: "read_file", Arguments: json.RawMessage(`{"path":"x"}`)},
+			}},
+			{Role: "assistant", Content: "ok"},
+		},
+	}
+
+	score, err := (&ExactMatchScorer{}).Score(context.Background(), trace, actual)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if !score.ToolArgsValidComputed || score.ToolArgsValid != 1.0 {
+		t.Fatalf("ToolArgsValid=%v computed=%v; want 1.0/true", score.ToolArgsValid, score.ToolArgsValidComputed)
+	}
+}
+
+func TestExactMatchScorerSkipsSchemaCompilationWhenNoActualToolCalls(t *testing.T) {
+	trace := Trace{
+		ID:     "unused-bad-no-calls",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"unused_bad","inputSchema":{"$ref":"http://attacker.example.com/schema.json"}}`),
+		},
+		Turns:  []Turn{{Role: "user", Content: "?"}},
+		Golden: Golden{FinalAnswerSubstring: "ok"},
+	}
+	actual := Result{
+		Model:      "ollama/x",
+		Transcript: []Turn{{Role: "assistant", Content: "ok"}},
+	}
+
+	score, err := (&ExactMatchScorer{}).Score(context.Background(), trace, actual)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if !score.ToolArgsValidComputed || score.ToolArgsValid != 1.0 {
+		t.Fatalf("ToolArgsValid=%v computed=%v; want 1.0/true", score.ToolArgsValid, score.ToolArgsValidComputed)
 	}
 }
 

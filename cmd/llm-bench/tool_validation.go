@@ -53,6 +53,50 @@ func toolSchemaByName(tools []json.RawMessage) (map[string]*compiledToolSchema, 
 	return out, nil
 }
 
+func scoreToolArguments(trace Trace, actual []Turn) (float64, bool, string, error) {
+	actualCalls := assistantToolCalls(actual)
+	schemas, err := toolSchemaByNameForCalls(trace.Tools, actualCalls)
+	if err != nil {
+		return 0, false, "", err
+	}
+	score, computed, notes := validateToolArguments(schemas, trace, actual)
+	return score, computed, notes, nil
+}
+
+// toolSchemaByNameForCalls compiles only schemas for tools the candidate
+// actually called. Full MCP snapshots can include unused schemas with external
+// refs or other unsupported features; those should not invalidate scoring for
+// unrelated calls.
+func toolSchemaByNameForCalls(tools []json.RawMessage, calls []ToolCall) (map[string]*compiledToolSchema, error) {
+	wanted := make(map[string]struct{})
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Name)
+		if name != "" {
+			wanted[name] = struct{}{}
+		}
+	}
+	out := make(map[string]*compiledToolSchema, len(wanted))
+	if len(wanted) == 0 {
+		return out, nil
+	}
+
+	for i, raw := range tools {
+		name, schemaRaw, err := extractNameAndInputSchema(raw)
+		if err != nil {
+			continue
+		}
+		if _, ok := wanted[name]; !ok {
+			continue
+		}
+		schema, err := compileSchema(name, schemaRaw)
+		if err != nil {
+			return nil, fmt.Errorf("trace tool[%d] %q: %w", i, name, err)
+		}
+		out[name] = &compiledToolSchema{Name: name, Schema: schema}
+	}
+	return out, nil
+}
+
 func extractNameAndInputSchema(raw json.RawMessage) (string, json.RawMessage, error) {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &fields); err != nil {
