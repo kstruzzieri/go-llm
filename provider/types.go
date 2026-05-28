@@ -488,23 +488,29 @@ type RouteAttempt struct {
 // whether the breakdown appears in JSON at all.
 type ScoreBreakdown struct {
 	// FeedbackMode is the operator-facing label for the FeedbackScoringMode
-	// in effect when the plan was built: "off", "shadow", or "enforce".
+	// in effect when the plan was built. Equals FeedbackScoringMode.String()
+	// for one of the three mode constants ("off", "shadow", "enforce").
 	FeedbackMode string `json:"feedback_mode"`
 
 	// FeedbackSnapshotStatus reports why the snapshot was active or
-	// inactive: "off", "no_store", "empty_use_case", "read_error",
-	// or "active". Lets operators distinguish a configuration issue
-	// from a transient store failure without parsing logs.
+	// inactive. Stable closed set — compare against the
+	// FeedbackSnapshotStatus* string constants below. Lets operators
+	// distinguish a configuration issue from a transient store failure
+	// without parsing logs.
 	FeedbackSnapshotStatus string `json:"feedback_snapshot_status"`
 
 	// FeedbackApplied reports whether feedback participated in route
-	// selection. True iff mode == "enforce" and a valid snapshot was
-	// available (no fail-open).
+	// selection for the *winning planned candidate*. True iff mode ==
+	// "enforce" AND the snapshot was active AND the candidate's key was
+	// in the snapshot. False with mode == "enforce" + snapshot active
+	// means the winning candidate's key was absent from the snapshot
+	// (cross-check via FeedbackSampleCount == 0).
 	FeedbackApplied bool `json:"feedback_applied"`
 
 	// FeedbackScore is the raw Aggregate.Score as returned by
 	// RoutingFeedback.Score at plan-build. Zero when feedback was
 	// inactive for this candidate (or when the raw score really is 0.0).
+	// Disambiguate via FeedbackSnapshotStatus and FeedbackSampleCount.
 	FeedbackScore float64 `json:"feedback_score"`
 
 	// FeedbackAdjustedScore is the value actually fed into weighted
@@ -519,8 +525,11 @@ type ScoreBreakdown struct {
 	FeedbackScoredCount int `json:"feedback_scored_count"`
 
 	// FeedbackUpdatedAt is the most recent signal timestamp in the
-	// aggregate. Zero when feedback was inactive for this candidate.
-	FeedbackUpdatedAt time.Time `json:"feedback_updated_at"`
+	// aggregate, or nil when feedback was inactive for this candidate.
+	// Pointer + omitempty so JSON omits the field entirely rather than
+	// emitting Go's zero time ("0001-01-01T00:00:00Z"), which an
+	// operator dashboard might confuse with a real timestamp.
+	FeedbackUpdatedAt *time.Time `json:"feedback_updated_at,omitempty"`
 
 	// ScoreWithoutFeedback and ScoreWithFeedback are the two weighted
 	// scores computed once per candidate. Off mode selects using
@@ -528,10 +537,42 @@ type ScoreBreakdown struct {
 	// ScoreWithoutFeedback but still computes ScoreWithFeedback for
 	// the delta; Enforce mode selects using ScoreWithFeedback when
 	// feedback is active. Both are always populated so operators can
-	// inspect the delta without re-running scoring.
+	// inspect the delta without re-running scoring. When the snapshot
+	// fail-opens (FeedbackSnapshotStatus == "read_error"), the two
+	// scores are equal because deltaActiveSignals also excludes
+	// feedback in that case.
 	ScoreWithoutFeedback float64 `json:"score_without_feedback"`
 	ScoreWithFeedback    float64 `json:"score_with_feedback"`
 }
+
+// FeedbackSnapshotStatus* are the stable string values that
+// ScoreBreakdown.FeedbackSnapshotStatus can hold. Exported as plain
+// string constants (no new public type) so JSON consumers and
+// downstream parsers can compare against a named contract instead of
+// hardcoding literals.
+const (
+	// FeedbackSnapshotStatusOff indicates the FeedbackScoringMode was
+	// FeedbackScoringOff at plan-build — no feedback reads, no breakdown.
+	// (Note: in Off mode the public ScoreBreakdown is nil entirely;
+	// this value is supplied only to operators reading the unexported
+	// snapshot status, e.g., via test fixtures.)
+	FeedbackSnapshotStatusOff = "off"
+	// FeedbackSnapshotStatusNoStore indicates Shadow/Enforce mode but
+	// no RoutingFeedback was configured (WithRoutingFeedback never
+	// called, or called with nil).
+	FeedbackSnapshotStatusNoStore = "no_store"
+	// FeedbackSnapshotStatusEmptyUseCase indicates the route had an
+	// empty RoutingRequest.UseCase, which cannot form a FeedbackKey.
+	FeedbackSnapshotStatusEmptyUseCase = "empty_use_case"
+	// FeedbackSnapshotStatusReadError indicates the store returned a
+	// non-nil error during snapshot construction (or extension during
+	// chain routing); fail-open disabled feedback for the entire route.
+	FeedbackSnapshotStatusReadError = "read_error"
+	// FeedbackSnapshotStatusActive indicates the snapshot read every
+	// requested candidate key successfully and feedback was in effect
+	// for the route.
+	FeedbackSnapshotStatusActive = "active"
+)
 
 // RouteOutcome captures the Router's decision metadata for a request.
 // Provider responses copy a pointer to a RouteOutcome onto Chat/Generate/

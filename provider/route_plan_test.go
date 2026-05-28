@@ -1995,6 +1995,19 @@ func TestRouteOutcomeScoreBreakdownPopulatedInShadowMode(t *testing.T) {
 	if bd.FeedbackScore <= 0.5 {
 		t.Errorf("Shadow mode: FeedbackScore = %v, want > 0.5 (snapshot still active)", bd.FeedbackScore)
 	}
+	// Spec § Behavior contracts 1: Shadow mode must expose the
+	// would-be-applied delta in the breakdown — otherwise the mode
+	// has no operator value during ramp-up. Locks the deltaActiveSignals
+	// vs selectionActiveSignals split.
+	if bd.ScoreWithFeedback == bd.ScoreWithoutFeedback {
+		t.Errorf("Shadow mode: with/without scores identical (%v); breakdown must expose the delta",
+			bd.ScoreWithFeedback)
+	}
+	// Stable enum check against the public string constants.
+	if bd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("Shadow mode: FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
 }
 
 func TestRouteOutcomeScoreBreakdownJSONOmitemptyWhenNil(t *testing.T) {

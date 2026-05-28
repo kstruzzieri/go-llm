@@ -1024,9 +1024,9 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	// skips the stamp.
 	if r.feedbackScoringMode != FeedbackScoringOff && snap != nil {
 		bd := winner.bd
-		plan.SetScoreBreakdown(&bd)
-		plan.SetBuiltUnderMode(r.feedbackScoringMode)
-		plan.SetFeedbackStatus(snap.status)
+		plan.setScoreBreakdown(&bd)
+		plan.setBuiltUnderMode(r.feedbackScoringMode)
+		plan.setFeedbackStatus(snap.status)
 	}
 
 	// Build fallback chain.

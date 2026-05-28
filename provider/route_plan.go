@@ -90,26 +90,30 @@ func (rp *RoutePlan) SetWasSticky(v bool) {
 	rp.wasSticky = v
 }
 
-// SetScoreBreakdown stamps the winning candidate's score breakdown onto
+// setScoreBreakdown stamps the winning candidate's score breakdown onto
 // the plan. The Router calls this from buildPlan; subsequent buildOutcome
 // translates the unexported breakdown into the public ScoreBreakdown.
 // nil disables the public ScoreBreakdown on this plan's outcomes.
-func (rp *RoutePlan) SetScoreBreakdown(bd *scoreBreakdown) {
+// Unexported because it takes an unexported type; external callers
+// cannot legally pass a *scoreBreakdown anyway.
+func (rp *RoutePlan) setScoreBreakdown(bd *scoreBreakdown) {
 	rp.scoreBreakdown = bd
 }
 
-// SetBuiltUnderMode records the FeedbackScoringMode in effect when the
+// setBuiltUnderMode records the FeedbackScoringMode in effect when the
 // Router built this plan so buildOutcome can render the public
-// ScoreBreakdown with the matching operator-facing label.
-func (rp *RoutePlan) SetBuiltUnderMode(mode FeedbackScoringMode) {
+// ScoreBreakdown with the matching operator-facing label. Unexported
+// to keep the RoutePlan public surface narrow; this is plumbing,
+// not API.
+func (rp *RoutePlan) setBuiltUnderMode(mode FeedbackScoringMode) {
 	rp.builtUnderMode = mode
 }
 
-// SetFeedbackStatus records the feedback snapshot status from the route's
+// setFeedbackStatus records the feedback snapshot status from the route's
 // feedback snapshot so buildOutcome can render it on the public
 // ScoreBreakdown for operator visibility into why feedback was active
-// or inactive.
-func (rp *RoutePlan) SetFeedbackStatus(status feedbackSnapshotStatus) {
+// or inactive. Unexported because it takes an unexported type.
+func (rp *RoutePlan) setFeedbackStatus(status feedbackSnapshotStatus) {
 	rp.feedbackStatus = status
 }
 
@@ -706,6 +710,14 @@ func publicScoreBreakdown(bd *scoreBreakdown, mode FeedbackScoringMode, status f
 	if bd == nil {
 		return nil
 	}
+	// Convert the zero-value time.Time to a nil *time.Time so the JSON
+	// boundary omits the field entirely (rather than emitting "0001-01-01T..."
+	// which an operator might confuse with a real timestamp).
+	var updatedAt *time.Time
+	if !bd.feedbackUpdatedAt.IsZero() {
+		t := bd.feedbackUpdatedAt
+		updatedAt = &t
+	}
 	return &ScoreBreakdown{
 		FeedbackMode:           mode.String(),
 		FeedbackSnapshotStatus: string(status),
@@ -714,7 +726,7 @@ func publicScoreBreakdown(bd *scoreBreakdown, mode FeedbackScoringMode, status f
 		FeedbackAdjustedScore:  bd.feedbackAdjusted,
 		FeedbackSampleCount:    bd.feedbackSampleCount,
 		FeedbackScoredCount:    bd.feedbackScoredCount,
-		FeedbackUpdatedAt:      bd.feedbackUpdatedAt,
+		FeedbackUpdatedAt:      updatedAt,
 		ScoreWithoutFeedback:   bd.scoreWithoutFeedback,
 		ScoreWithFeedback:      bd.scoreWithFeedback,
 	}
