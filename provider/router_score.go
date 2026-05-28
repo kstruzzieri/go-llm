@@ -92,8 +92,18 @@ type candidateFeedback struct {
 // ScoredCounts approach the raw value asymptotically. Conservative by
 // design — single successes don't dominate routing decisions until
 // enough samples accumulate.
+//
+// Defends against pathological Aggregates from third-party
+// RoutingFeedbackStore implementations: a NaN/Inf raw Score would
+// otherwise propagate as NaN through computeWeightedScore and poison
+// every candidate's composite (sort with NaN scores is order-dependent
+// garbage). NaN/Inf and out-of-range raw scores both fall back to
+// neutral 0.5 — the same outcome as "no signal yet".
 func adjustFeedbackScore(agg Aggregate) float64 {
 	if agg.ScoredCount < feedbackMinScoredCount {
+		return 0.5
+	}
+	if math.IsNaN(agg.Score) || math.IsInf(agg.Score, 0) || agg.Score < 0 || agg.Score > 1 {
 		return 0.5
 	}
 	confidence := float64(agg.ScoredCount) / float64(agg.ScoredCount+feedbackPriorSamples)
