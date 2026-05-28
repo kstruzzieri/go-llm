@@ -50,45 +50,43 @@ func newFeedbackWarningState() *feedbackWarningState {
 
 // warnFeedbackReadOnce emits one warning the first time a feedback store
 // Get/Score call returns an error during snapshot building. Subsequent
-// calls are silent. Nil logger is a no-op for tests that don't care.
+// calls are silent.
+//
+// The nil-logger guard runs BEFORE sync.Once.Do so a nil logger does not
+// silently consume the once. If a caller wires the emitter before a real
+// logger is attached (init order, test scaffolding), the once stays
+// armed and the first real-logger call still emits.
 func (s *feedbackWarningState) warnFeedbackReadOnce(l feedbackLogger, key FeedbackKey, err error) {
-	if s == nil {
+	if s == nil || l == nil {
 		return
 	}
 	s.readOnce.Do(func() {
-		if l == nil {
-			return
-		}
 		l.Warnf("feedback store read failed for key %+v (further read failures silenced): %v", key, err)
 	})
 }
 
 // warnFeedbackWriteOnce emits one warning the first time
 // RoutingFeedback.RecordOutcome returns a non-nil error. Replaces the
-// silent-swallow that recordOutcomeFeedback shipped in PR2.
+// silent-swallow that recordOutcomeFeedback shipped in PR2. Same
+// nil-logger-before-Do guard as warnFeedbackReadOnce.
 func (s *feedbackWarningState) warnFeedbackWriteOnce(l feedbackLogger, err error) {
-	if s == nil {
+	if s == nil || l == nil {
 		return
 	}
 	s.writeOnce.Do(func() {
-		if l == nil {
-			return
-		}
 		l.Warnf("feedback store RecordOutcome failed (further write failures silenced): %v", err)
 	})
 }
 
 // warnRouteIDRandOnce emits one warning the first time crypto/rand
 // produces an error inside newRouteID. Replaces the silent swallow that
-// route_plan.go shipped in PR2.
+// route_plan.go shipped in PR2. Same nil-logger-before-Do guard as
+// warnFeedbackReadOnce.
 func (s *feedbackWarningState) warnRouteIDRandOnce(l feedbackLogger, err error) {
-	if s == nil {
+	if s == nil || l == nil {
 		return
 	}
 	s.routeIDRndOnce.Do(func() {
-		if l == nil {
-			return
-		}
 		l.Warnf("newRouteID crypto/rand failure (further failures silenced): %v", err)
 	})
 }
