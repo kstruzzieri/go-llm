@@ -2,10 +2,13 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -1899,5 +1902,108 @@ func TestExecuteGenerateStreamFallbackDuplicateDoneRecordsAttemptOnce(t *testing
 	}
 	if successes := rec.getSuccesses(); len(successes) != 1 {
 		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownNilInOffMode(t *testing.T) {
+	router, _ := setupTestRouter(t) // default Off mode
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	if resp.RouteOutcome == nil {
+		t.Fatalf("RouteOutcome nil")
+	}
+	if resp.RouteOutcome.ScoreBreakdown != nil {
+		t.Errorf("Off mode: ScoreBreakdown = %+v, want nil", resp.RouteOutcome.ScoreBreakdown)
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownPopulatedInEnforceMode(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	k := FeedbackKey{Provider: "test", Model: "qwen3:8b", UseCase: "chat"}
+	for i := 0; i < feedbackMinScoredCount+2; i++ {
+		if err := rf.Record(context.Background(), k, FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("Enforce mode: ScoreBreakdown = nil, want non-nil")
+	}
+	if !bd.FeedbackApplied {
+		t.Errorf("FeedbackApplied = false, want true (Enforce + valid snapshot)")
+	}
+	if bd.FeedbackMode != FeedbackScoringEnforce.String() {
+		t.Errorf("FeedbackMode = %q, want %q", bd.FeedbackMode, FeedbackScoringEnforce.String())
+	}
+	if bd.FeedbackSnapshotStatus != string(feedbackSnapshotStatusActive) {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, feedbackSnapshotStatusActive)
+	}
+	if bd.FeedbackScore <= 0.5 {
+		t.Errorf("FeedbackScore = %v, want > 0.5 after seeded successes", bd.FeedbackScore)
+	}
+	if bd.ScoreWithoutFeedback == bd.ScoreWithFeedback {
+		t.Errorf("with/without scores identical %v; expected delta because feedback was non-neutral",
+			bd.ScoreWithFeedback)
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownPopulatedInShadowMode(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	k := FeedbackKey{Provider: "test", Model: "qwen3:8b", UseCase: "chat"}
+	for i := 0; i < feedbackMinScoredCount+2; i++ {
+		if err := rf.Record(context.Background(), k, FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringShadow))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("Shadow mode: ScoreBreakdown = nil, want non-nil")
+	}
+	if bd.FeedbackApplied {
+		t.Errorf("Shadow mode: FeedbackApplied = true, want false")
+	}
+	if bd.FeedbackMode != FeedbackScoringShadow.String() {
+		t.Errorf("FeedbackMode = %q, want %q", bd.FeedbackMode, FeedbackScoringShadow.String())
+	}
+	if bd.FeedbackScore <= 0.5 {
+		t.Errorf("Shadow mode: FeedbackScore = %v, want > 0.5 (snapshot still active)", bd.FeedbackScore)
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownJSONOmitemptyWhenNil(t *testing.T) {
+	out := RouteOutcome{PlannedModel: ModelKey{Provider: "p", Model: "m"}}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "score_breakdown") {
+		t.Errorf("JSON %s contains score_breakdown despite nil pointer", data)
 	}
 }

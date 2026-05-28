@@ -470,6 +470,69 @@ type RouteAttempt struct {
 	ErrorClass string        `json:"error_class,omitempty"`
 }
 
+// ScoreBreakdown exposes the routing-feedback scoring inputs that fed into
+// the Router's candidate selection decision. Populated on RouteOutcome
+// only when feedback scoring is in Shadow or Enforce mode at the time
+// the plan was built; nil on Off mode.
+//
+// The breakdown describes the *planned/root* winning candidate. It is
+// NOT rewritten when execution falls back to a sibling — use Attempts
+// and ActualModel for the execution trace. Read-time snapshot only: the
+// FeedbackScore, FeedbackAdjustedScore, sample counts, and UpdatedAt
+// reflect the store state at plan-build, not at attempt completion.
+//
+// Note on JSON tags: numeric and time fields do NOT use omitempty —
+// a zero score, count, or updated_at is meaningful (e.g., FeedbackScore
+// = 0.0 means "perfectly bad"; FeedbackSampleCount = 0 means "no
+// samples yet"). The pointer field on RouteOutcome already controls
+// whether the breakdown appears in JSON at all.
+type ScoreBreakdown struct {
+	// FeedbackMode is the operator-facing label for the FeedbackScoringMode
+	// in effect when the plan was built: "off", "shadow", or "enforce".
+	FeedbackMode string `json:"feedback_mode"`
+
+	// FeedbackSnapshotStatus reports why the snapshot was active or
+	// inactive: "off", "no_store", "empty_use_case", "read_error",
+	// or "active". Lets operators distinguish a configuration issue
+	// from a transient store failure without parsing logs.
+	FeedbackSnapshotStatus string `json:"feedback_snapshot_status"`
+
+	// FeedbackApplied reports whether feedback participated in route
+	// selection. True iff mode == "enforce" and a valid snapshot was
+	// available (no fail-open).
+	FeedbackApplied bool `json:"feedback_applied"`
+
+	// FeedbackScore is the raw Aggregate.Score as returned by
+	// RoutingFeedback.Score at plan-build. Zero when feedback was
+	// inactive for this candidate (or when the raw score really is 0.0).
+	FeedbackScore float64 `json:"feedback_score"`
+
+	// FeedbackAdjustedScore is the value actually fed into weighted
+	// scoring after confidence gating: 0.5 when below the sample floor,
+	// otherwise shrunk toward 0.5 by the package's prior weight.
+	FeedbackAdjustedScore float64 `json:"feedback_adjusted_score"`
+
+	// FeedbackSampleCount is the total sample count from the snapshot.
+	FeedbackSampleCount int `json:"feedback_sample_count"`
+
+	// FeedbackScoredCount is the score-bearing subset of SampleCount.
+	FeedbackScoredCount int `json:"feedback_scored_count"`
+
+	// FeedbackUpdatedAt is the most recent signal timestamp in the
+	// aggregate. Zero when feedback was inactive for this candidate.
+	FeedbackUpdatedAt time.Time `json:"feedback_updated_at"`
+
+	// ScoreWithoutFeedback and ScoreWithFeedback are the two weighted
+	// scores computed once per candidate. Off mode selects using
+	// ScoreWithoutFeedback; Shadow mode selects using
+	// ScoreWithoutFeedback but still computes ScoreWithFeedback for
+	// the delta; Enforce mode selects using ScoreWithFeedback when
+	// feedback is active. Both are always populated so operators can
+	// inspect the delta without re-running scoring.
+	ScoreWithoutFeedback float64 `json:"score_without_feedback"`
+	ScoreWithFeedback    float64 `json:"score_with_feedback"`
+}
+
 // RouteOutcome captures the Router's decision metadata for a request.
 // Provider responses copy a pointer to a RouteOutcome onto Chat/Generate/
 // Embed responses so callers can observe planned vs actual model, sticky
@@ -512,6 +575,12 @@ type RouteOutcome struct {
 	// future /v1/completions/feedback endpoint may attach a distinct
 	// client-visible CompletionID without conflating the two.
 	RouteID string `json:"route_id,omitempty"`
+
+	// ScoreBreakdown carries the routing-feedback scoring inputs that
+	// fed into plan-build's candidate selection. Non-nil only in
+	// Shadow / Enforce modes. See ScoreBreakdown's docs for read-time
+	// semantics.
+	ScoreBreakdown *ScoreBreakdown `json:"score_breakdown,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

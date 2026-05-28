@@ -95,7 +95,7 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 	if len(working) == 0 {
 		if len(truncatable) > 0 {
 			sortScoredCandidates(truncatable, r.warmth)
-			plan, buildErr := r.buildPlan(truncatable[0], nil, req, false /* not sticky */)
+			plan, buildErr := r.buildPlan(truncatable[0], nil, req, false /* not sticky */, snap)
 			if buildErr != nil {
 				return nil, ErrNoViableCandidate
 			}
@@ -118,7 +118,7 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 		fallbacks = working[1 : 1+maxFb]
 	}
 
-	plan, err := r.buildPlan(winner, fallbacks, req, false /* not sticky */)
+	plan, err := r.buildPlan(winner, fallbacks, req, false /* not sticky */, snap)
 	if err != nil {
 		return nil, fmt.Errorf("router: %w", err)
 	}

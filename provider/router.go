@@ -385,7 +385,7 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 			// Return best truncatable with adaptation error.
 			sortScoredCandidates(truncatable, r.warmth)
 			winner := truncatable[0]
-			plan, buildErr := r.buildPlan(winner, nil, req, false)
+			plan, buildErr := r.buildPlan(winner, nil, req, false, snap)
 			if buildErr != nil {
 				return nil, ErrNoViableCandidate
 			}
@@ -444,7 +444,7 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 		fallbacks = executable[1 : 1+maxFb]
 	}
 
-	plan, buildErr := r.buildPlan(executable[0], fallbacks, req, wasSticky)
+	plan, buildErr := r.buildPlan(executable[0], fallbacks, req, wasSticky, snap)
 	if buildErr != nil {
 		return nil, fmt.Errorf("router: %w", buildErr)
 	}
@@ -992,8 +992,12 @@ func (r *Router) findIncumbentScore(key ModelKey, scored []scoredCandidate) int 
 }
 
 // buildPlan constructs a RoutePlan from the winning candidate, fallback
-// candidates, the original request, and the sticky state.
-func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, req RoutingRequest, wasSticky bool) (*RoutePlan, error) {
+// candidates, the original request, the sticky state, and the route-level
+// feedback snapshot. The snapshot is read for its mode and status fields
+// only — store I/O is the caller's responsibility (Route() / routeChain()
+// build the snapshot exactly once and thread it through). A nil snap is
+// tolerated defensively but should never happen in production.
+func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, req RoutingRequest, wasSticky bool, snap *feedbackSnapshot) (*RoutePlan, error) {
 	prov, err := r.providers.Resolve(winner.profile.Key)
 	if err != nil {
 		return nil, fmt.Errorf("router: provider resolution failed for %s: %w", winner.profile.Key, err)
@@ -1012,6 +1016,18 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	plan.SetWasSticky(wasSticky)
 	plan.SetRecorder(r)
 	plan.SetFeedback(r.routingFeedback) // ← PR2 addition; nil is fine, SetFeedback handles it
+
+	// Stamp the winner's breakdown and the mode used for selection so
+	// buildOutcome can render the public ScoreBreakdown. Off mode skips
+	// the stamp entirely so RouteOutcome.ScoreBreakdown stays nil. A nil
+	// snap (defensive — Route() and routeChain() always pass one) also
+	// skips the stamp.
+	if r.feedbackScoringMode != FeedbackScoringOff && snap != nil {
+		bd := winner.bd
+		plan.SetScoreBreakdown(&bd)
+		plan.SetBuiltUnderMode(r.feedbackScoringMode)
+		plan.SetFeedbackStatus(snap.status)
+	}
 
 	// Build fallback chain.
 	for _, fb := range fallbacks {

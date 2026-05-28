@@ -51,6 +51,18 @@ type RoutePlan struct {
 	wasSticky bool             // internal: propagated to RouteOutcome
 	recorder  RouteRecorder    // internal: set by Router
 	feedback  *RoutingFeedback // internal: set by Router via SetFeedback; nil = no recording
+
+	// scoreBreakdown carries the winning candidate's unexported
+	// scoreBreakdown; buildOutcome translates it into the public
+	// ScoreBreakdown on the RouteOutcome. nil = no public breakdown.
+	scoreBreakdown *scoreBreakdown
+	// builtUnderMode records the FeedbackScoringMode that produced this
+	// plan so buildOutcome can render the matching operator-facing label.
+	builtUnderMode FeedbackScoringMode
+	// feedbackStatus records the route-level feedback snapshot status so
+	// operators can distinguish "off by design" from "off because the
+	// store failed" without parsing logs.
+	feedbackStatus feedbackSnapshotStatus
 }
 
 // String returns a human-readable summary of the route plan.
@@ -76,6 +88,29 @@ func (rp *RoutePlan) SetFeedback(rf *RoutingFeedback) {
 // SetWasSticky marks the plan as having been selected via sticky routing.
 func (rp *RoutePlan) SetWasSticky(v bool) {
 	rp.wasSticky = v
+}
+
+// SetScoreBreakdown stamps the winning candidate's score breakdown onto
+// the plan. The Router calls this from buildPlan; subsequent buildOutcome
+// translates the unexported breakdown into the public ScoreBreakdown.
+// nil disables the public ScoreBreakdown on this plan's outcomes.
+func (rp *RoutePlan) SetScoreBreakdown(bd *scoreBreakdown) {
+	rp.scoreBreakdown = bd
+}
+
+// SetBuiltUnderMode records the FeedbackScoringMode in effect when the
+// Router built this plan so buildOutcome can render the public
+// ScoreBreakdown with the matching operator-facing label.
+func (rp *RoutePlan) SetBuiltUnderMode(mode FeedbackScoringMode) {
+	rp.builtUnderMode = mode
+}
+
+// SetFeedbackStatus records the feedback snapshot status from the route's
+// feedback snapshot so buildOutcome can render it on the public
+// ScoreBreakdown for operator visibility into why feedback was active
+// or inactive.
+func (rp *RoutePlan) SetFeedbackStatus(status feedbackSnapshotStatus) {
+	rp.feedbackStatus = status
 }
 
 // WasSticky reports whether the plan was selected via sticky routing. This
@@ -644,7 +679,7 @@ func (rp *RoutePlan) buildOutcome(fallbacksUsed int, attempts []RouteAttempt) *R
 	if n := len(attempts); n > 0 && attempts[n-1].Status == AttemptStatusSucceeded {
 		actualKey = attempts[n-1].Key
 	}
-	return &RouteOutcome{
+	out := &RouteOutcome{
 		PlannedModel:  rp.Profile.Key,
 		ActualModel:   actualKey,
 		FallbacksUsed: fallbacksUsed,
@@ -653,6 +688,35 @@ func (rp *RoutePlan) buildOutcome(fallbacksUsed int, attempts []RouteAttempt) *R
 		Reason:        rp.Reason,
 		RouteID:       newRouteID(),
 		Attempts:      attempts,
+	}
+	if rp.scoreBreakdown != nil {
+		out.ScoreBreakdown = publicScoreBreakdown(rp.scoreBreakdown, rp.builtUnderMode, rp.feedbackStatus)
+	}
+	return out
+}
+
+// publicScoreBreakdown translates the unexported per-candidate
+// scoreBreakdown into the public ScoreBreakdown for RouteOutcome. The
+// mode argument is the FeedbackScoringMode under which the plan was
+// built (Off mode skips the stamp at the Router call site, so this
+// function is unreachable under Off in production); the status argument
+// is the snapshot's feedbackSnapshotStatus, stamped by the Router from
+// feedbackSnapshot.status at plan-build.
+func publicScoreBreakdown(bd *scoreBreakdown, mode FeedbackScoringMode, status feedbackSnapshotStatus) *ScoreBreakdown {
+	if bd == nil {
+		return nil
+	}
+	return &ScoreBreakdown{
+		FeedbackMode:           mode.String(),
+		FeedbackSnapshotStatus: string(status),
+		FeedbackApplied:        bd.feedbackActive && mode == FeedbackScoringEnforce,
+		FeedbackScore:          bd.feedbackRaw,
+		FeedbackAdjustedScore:  bd.feedbackAdjusted,
+		FeedbackSampleCount:    bd.feedbackSampleCount,
+		FeedbackScoredCount:    bd.feedbackScoredCount,
+		FeedbackUpdatedAt:      bd.feedbackUpdatedAt,
+		ScoreWithoutFeedback:   bd.scoreWithoutFeedback,
+		ScoreWithFeedback:      bd.scoreWithFeedback,
 	}
 }
 
