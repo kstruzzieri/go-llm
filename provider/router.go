@@ -68,6 +68,17 @@ type Router struct {
 	// by this field. See routing_feedback.go and the FeedbackScoringMode
 	// docs for the full truth table.
 	feedbackScoringMode FeedbackScoringMode
+	// feedbackLogger receives once-logged warnings about feedback store
+	// failures and newRouteID RNG failures. Defaults to defaultFeedbackLogger
+	// (wraps log.Default()). Tests in the same package can assign a
+	// capturing implementation directly (router.feedbackLogger = cap)
+	// after setupTestRouter returns — no exported option (would expose
+	// the unexported feedbackLogger interface).
+	feedbackLogger feedbackLogger
+
+	// feedbackWarn holds the sync.Once guards for the three warning types
+	// emitted by the feedback surface.
+	feedbackWarn *feedbackWarningState
 }
 
 // Compile-time assertion that Router implements RouteRecorder.
@@ -246,6 +257,8 @@ func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOptio
 		},
 		done: make(chan struct{}),
 	}
+	r.feedbackLogger = defaultFeedbackLogger
+	r.feedbackWarn = newFeedbackWarningState()
 
 	for _, opt := range opts {
 		opt(r)
