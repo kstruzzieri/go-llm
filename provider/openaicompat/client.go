@@ -180,10 +180,30 @@ func readErrorEnvelope(resp *http.Response) error {
 
 	var env errorEnvelope
 	if json.Unmarshal(body, &env) == nil && env.Error.Message != "" {
-		return fmt.Errorf("openaicompat: %s: %s", resp.Status, env.Error.Message)
+		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: env.Error.Message}
 	}
 	if len(body) > 0 {
-		return fmt.Errorf("openaicompat: %s: %s", resp.Status, string(body))
+		return &statusError{statusCode: resp.StatusCode, status: resp.Status, message: string(body)}
 	}
-	return fmt.Errorf("openaicompat: %s", resp.Status)
+	return &statusError{statusCode: resp.StatusCode, status: resp.Status}
+}
+
+type statusError struct {
+	statusCode int
+	status     string
+	message    string
+}
+
+func (e *statusError) Error() string {
+	if e.message != "" {
+		return fmt.Sprintf("openaicompat: %s: %s", e.status, e.message)
+	}
+	return fmt.Sprintf("openaicompat: %s", e.status)
+}
+
+func (e *statusError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.statusCode
 }

@@ -178,3 +178,12 @@ type APIError struct {
 func (e *APIError) Error() string {
 	return fmt.Sprintf("ollama: HTTP %d: %s", e.StatusCode, e.Message)
 }
+
+// HTTPStatusCode exposes the response status code for router classification
+// without requiring the routing layer to depend on Ollama-specific types.
+func (e *APIError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}

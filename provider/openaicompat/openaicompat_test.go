@@ -3,6 +3,7 @@ package openaicompat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -153,6 +154,9 @@ func TestClient_ErrorEnvelope_Unwrapped(t *testing.T) {
 	if !strings.Contains(err.Error(), "model not found") {
 		t.Errorf("error should surface the OpenAI message, got: %v", err)
 	}
+	if provider.IsInfrastructureError(err) {
+		t.Errorf("400 error should not be classified as infrastructure: %v", err)
+	}
 }
 
 func TestClient_NonJSONError_FallsBackToBody(t *testing.T) {
@@ -173,6 +177,16 @@ func TestClient_NonJSONError_FallsBackToBody(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "502") {
 		t.Errorf("error should mention status, got: %v", err)
+	}
+	if !provider.IsInfrastructureError(err) {
+		t.Errorf("502 error should be classified as infrastructure: %v", err)
+	}
+	var statusErr interface{ HTTPStatusCode() int }
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected wrapped error to expose HTTPStatusCode: %v", err)
+	}
+	if got := statusErr.HTTPStatusCode(); got != http.StatusBadGateway {
+		t.Fatalf("HTTPStatusCode = %d, want %d", got, http.StatusBadGateway)
 	}
 }
 
