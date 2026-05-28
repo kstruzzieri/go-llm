@@ -2020,3 +2020,121 @@ func TestRouteOutcomeScoreBreakdownJSONOmitemptyWhenNil(t *testing.T) {
 		t.Errorf("JSON %s contains score_breakdown despite nil pointer", data)
 	}
 }
+
+func TestBuildOutcomeScoreBreakdownStableAcrossFallback(t *testing.T) {
+	plannedKey := ModelKey{Provider: "primary", Model: "qwen3:8b"}
+	fallbackKey := ModelKey{Provider: "fallback", Model: "qwen3:8b"}
+
+	// Construct a plan by hand with a planted scoreBreakdown that
+	// describes the planned primary.
+	plan := &RoutePlan{
+		Profile: &ModelProfile{Key: plannedKey},
+		Score:   0.85,
+		Reason:  "primary won",
+	}
+	bd := &scoreBreakdown{
+		feedbackActive:       true,
+		feedbackRaw:          0.8,
+		feedbackAdjusted:     0.7,
+		feedbackSampleCount:  30,
+		feedbackScoredCount:  30,
+		feedbackUpdatedAt:    time.Unix(123, 0),
+		scoreWithoutFeedback: 0.6,
+		scoreWithFeedback:    0.85,
+	}
+	plan.setScoreBreakdown(bd)
+	plan.setBuiltUnderMode(FeedbackScoringEnforce)
+	plan.setFeedbackStatus(feedbackSnapshotStatusActive)
+
+	// Simulate execution: primary failed (HTTP 5xx), fallback succeeded.
+	attempts := []RouteAttempt{
+		{Key: plannedKey, Status: AttemptStatusFailed, ErrorClass: string(ErrorClass5xx), LatencyMs: 50},
+		{Key: fallbackKey, Status: AttemptStatusSucceeded, LatencyMs: 100},
+	}
+	out := plan.buildOutcome(1, attempts)
+
+	// Execution trace reflects the fallback.
+	if out.PlannedModel != plannedKey {
+		t.Errorf("PlannedModel = %v, want %v", out.PlannedModel, plannedKey)
+	}
+	if out.ActualModel != fallbackKey {
+		t.Errorf("ActualModel = %v, want %v (after fallback success)", out.ActualModel, fallbackKey)
+	}
+	if out.FallbacksUsed != 1 {
+		t.Errorf("FallbacksUsed = %d, want 1", out.FallbacksUsed)
+	}
+
+	// ScoreBreakdown describes the planned candidate, NOT the fallback.
+	pubBd := out.ScoreBreakdown
+	if pubBd == nil {
+		t.Fatalf("ScoreBreakdown nil")
+	}
+	if pubBd.FeedbackScore != 0.8 {
+		t.Errorf("FeedbackScore = %v, want 0.8 (planned primary's raw score, unchanged by fallback)",
+			pubBd.FeedbackScore)
+	}
+	if pubBd.FeedbackAdjustedScore != 0.7 {
+		t.Errorf("FeedbackAdjustedScore = %v, want 0.7 (planned primary's adjusted, unchanged by fallback)",
+			pubBd.FeedbackAdjustedScore)
+	}
+	if pubBd.ScoreWithoutFeedback != 0.6 {
+		t.Errorf("ScoreWithoutFeedback = %v, want 0.6", pubBd.ScoreWithoutFeedback)
+	}
+	if pubBd.ScoreWithFeedback != 0.85 {
+		t.Errorf("ScoreWithFeedback = %v, want 0.85", pubBd.ScoreWithFeedback)
+	}
+	if !pubBd.FeedbackApplied {
+		t.Errorf("FeedbackApplied = false, want true (Enforce + active snapshot at plan-build)")
+	}
+	if pubBd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			pubBd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
+	// FeedbackUpdatedAt is *time.Time post-Task-9-fix; assert it carries
+	// the planted timestamp (not the fallback's execution time).
+	if pubBd.FeedbackUpdatedAt == nil || !pubBd.FeedbackUpdatedAt.Equal(time.Unix(123, 0)) {
+		t.Errorf("FeedbackUpdatedAt = %v, want pointer to unix 123 (planned primary's, not rewritten)",
+			pubBd.FeedbackUpdatedAt)
+	}
+}
+
+func TestBuildOutcomeScoreBreakdownSnapshotStatusReflectsRoute(t *testing.T) {
+	// When the snapshot fail-opens (status=read_error), the breakdown
+	// is still stamped (the plan exists, the breakdown was built) but
+	// FeedbackApplied is false and the status is preserved.
+	plan := &RoutePlan{
+		Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+		Score:   0.5,
+		Reason:  "fail-open",
+	}
+	bd := &scoreBreakdown{
+		feedbackActive:       false, // snapshot was inactive
+		feedbackRaw:          0,
+		feedbackAdjusted:     0.5,
+		scoreWithoutFeedback: 0.5,
+		scoreWithFeedback:    0.5,
+	}
+	plan.setScoreBreakdown(bd)
+	plan.setBuiltUnderMode(FeedbackScoringEnforce)
+	plan.setFeedbackStatus(feedbackSnapshotStatusReadError)
+
+	attempts := []RouteAttempt{{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded}}
+	out := plan.buildOutcome(0, attempts)
+
+	pubBd := out.ScoreBreakdown
+	if pubBd == nil {
+		t.Fatalf("ScoreBreakdown nil")
+	}
+	if pubBd.FeedbackApplied {
+		t.Errorf("read_error: FeedbackApplied = true, want false")
+	}
+	if pubBd.FeedbackSnapshotStatus != FeedbackSnapshotStatusReadError {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			pubBd.FeedbackSnapshotStatus, FeedbackSnapshotStatusReadError)
+	}
+	// Zero feedbackUpdatedAt should produce nil pointer (Task 9 fix).
+	if pubBd.FeedbackUpdatedAt != nil {
+		t.Errorf("FeedbackUpdatedAt = %v, want nil (zero feedbackUpdatedAt should omit)",
+			pubBd.FeedbackUpdatedAt)
+	}
+}
