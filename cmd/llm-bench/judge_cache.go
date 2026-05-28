@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -49,7 +50,11 @@ func canonicalCacheKey(r judgeCacheRequest) string {
 		// sha256("") and collides every key.
 		panic(fmt.Sprintf("canonicalCacheKey: json.Marshal failed on fixed-shape struct: %v", err))
 	}
-	sum := sha256.Sum256(raw)
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		panic(fmt.Sprintf("canonicalCacheKey: json.Compact failed: %v", err))
+	}
+	sum := sha256.Sum256(compact.Bytes())
 	return hex.EncodeToString(sum[:])
 }
 

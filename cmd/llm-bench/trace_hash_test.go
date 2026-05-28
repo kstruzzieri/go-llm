@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -51,5 +52,21 @@ func TestTraceSetManifestHashSingleTrace(t *testing.T) {
 	got := traceSetManifestHash([]Trace{t1})
 	if len(got) != len("sha256:")+64 {
 		t.Fatalf("expected sha256:<64 hex>; got len=%d", len(got))
+	}
+}
+
+func TestCanonicalTraceHashNormalizesEmbeddedRawWhitespace(t *testing.T) {
+	// Two traces with identical semantics but different Raw whitespace
+	// must hash identically — provenance invariant per spec §5.2.
+	a := Trace{
+		ID:    "x",
+		Turns: []Turn{{Role: "user", Content: "hi", Raw: json.RawMessage(`{"role":"user","content":"hi"}`)}},
+	}
+	b := Trace{
+		ID:    "x",
+		Turns: []Turn{{Role: "user", Content: "hi", Raw: json.RawMessage(`{"role": "user", "content": "hi"}`)}},
+	}
+	if canonicalTraceHash(a) != canonicalTraceHash(b) {
+		t.Fatalf("canonical hash must ignore Raw whitespace; got %s != %s", canonicalTraceHash(a), canonicalTraceHash(b))
 	}
 }

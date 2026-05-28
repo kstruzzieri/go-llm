@@ -163,7 +163,7 @@ func main() {
 		// pointer is genuinely non-nil.
 		var cacheStore judgeCacheStore
 		if c, err := openJudgeCache(*judgeCachePath); err != nil {
-			fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled: %v\n", err)
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled (%s)\n", redactErrorMessage(err.Error()))
 		} else if c != nil {
 			cacheStore = c
 			defer func() { _ = c.Close() }()
@@ -241,7 +241,7 @@ func main() {
 	// non-nil.
 	var cacheStore judgeCacheStore
 	if c, err := openJudgeCache(*judgeCachePath); err != nil {
-		fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled: %v\n", err)
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled (%s)\n", redactErrorMessage(err.Error()))
 	} else if c != nil {
 		cacheStore = c
 		defer func() { _ = c.Close() }()

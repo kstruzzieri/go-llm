@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -27,7 +28,13 @@ func canonicalTraceHash(t Trace) string {
 		// shared hash. Panic loudly.
 		panic(fmt.Sprintf("canonicalTraceHash: json.Marshal failed for trace %q: %v", t.ID, err))
 	}
-	sum := sha256.Sum256(data)
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, data); err != nil {
+		// json.Marshal output is always valid JSON, so json.Compact
+		// cannot fail; panic if encoding/json ever changes.
+		panic(fmt.Sprintf("canonicalTraceHash: json.Compact failed for trace %q: %v", t.ID, err))
+	}
+	sum := sha256.Sum256(compact.Bytes())
 	return hex.EncodeToString(sum[:])
 }
 

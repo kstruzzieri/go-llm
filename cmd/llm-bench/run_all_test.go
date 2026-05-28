@@ -180,6 +180,9 @@ type fakeChatResp struct {
 // absent, matching providers that omit counts entirely.
 func newSequencedFakeChatServer(t *testing.T, replies ...fakeChatResp) *httptest.Server {
 	t.Helper()
+	if len(replies) == 0 {
+		t.Fatalf("newSequencedFakeChatServer: at least one reply required")
+	}
 	var calls atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !strings.HasSuffix(r.URL.Path, "/api/chat") {

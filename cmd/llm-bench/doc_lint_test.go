@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -23,14 +24,16 @@ func readDoc(t *testing.T, name string) string {
 	return string(data)
 }
 
+var analysisBannerPrefixRegexp = regexp.MustCompile(`^> \*\*Status — \d{4}-\d{2}-\d{2}\*\*:`)
+
 func TestAnalysisMDHasHistoricalBanner(t *testing.T) {
 	body := readDoc(t, "analysis.md")
-	if !strings.HasPrefix(body, "> **Status — 2026-05-25**:") {
+	if !analysisBannerPrefixRegexp.MatchString(body) {
 		first := body
 		if len(first) > 80 {
 			first = first[:80]
 		}
-		t.Fatalf("analysis.md must start with the historical banner; first 80 chars: %q", first)
+		t.Fatalf("analysis.md must start with `> **Status — YYYY-MM-DD**:` historical banner; first 80 chars: %q", first)
 	}
 	if !strings.Contains(body, "[harness-results.md](harness-results.md)") {
 		t.Errorf("analysis.md banner must link to harness-results.md")
