@@ -200,3 +200,94 @@ func TestSQLiteJudgeCache_ConcurrentGetPut_NoRace(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestJudgeCacheStatsStartAtZero(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	defer c.Close()
+	hits, misses := c.Stats()
+	if hits != 0 || misses != 0 {
+		t.Fatalf("initial Stats() = (%d,%d); want (0,0)", hits, misses)
+	}
+}
+
+func TestJudgeCacheStatsIncrement(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+
+	if _, ok, err := c.Get(ctx, "key-A"); err != nil || ok {
+		t.Fatalf("first Get: ok=%v err=%v; want ok=false err=nil", ok, err)
+	}
+	hits, misses := c.Stats()
+	if hits != 0 || misses != 1 {
+		t.Fatalf("after one miss Stats() = (%d,%d); want (0,1)", hits, misses)
+	}
+
+	// Use a Put with realistic fields so the migrated table accepts the row.
+	if err := c.Put(ctx, judgeCacheEntry{
+		CacheKey:        "key-A",
+		JudgeModel:      "test-judge",
+		TraceID:         "t",
+		CandidateModel:  "test-cand",
+		PromptHash:      "ph",
+		RequestJSON:     "{}",
+		ResponseContent: "{}",
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, ok, err := c.Get(ctx, "key-A"); err != nil || !ok {
+		t.Fatalf("second Get: ok=%v err=%v; want ok=true err=nil", ok, err)
+	}
+	hits, misses = c.Stats()
+	if hits != 1 || misses != 1 {
+		t.Fatalf("after hit Stats() = (%d,%d); want (1,1)", hits, misses)
+	}
+}
+
+func TestJudgeCacheStatsAreConcurrentSafe(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+
+	if err := c.Put(ctx, judgeCacheEntry{
+		CacheKey:        "k",
+		JudgeModel:      "test-judge",
+		TraceID:         "t",
+		CandidateModel:  "test-cand",
+		PromptHash:      "ph",
+		RequestJSON:     "{}",
+		ResponseContent: "{}",
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	const goroutines = 8
+	const ops = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < ops; j++ {
+				_, _, _ = c.Get(ctx, "k")
+			}
+		}()
+	}
+	wg.Wait()
+	hits, misses := c.Stats()
+	if hits != goroutines*ops || misses != 0 {
+		t.Fatalf("hits=%d misses=%d; want hits=%d misses=0", hits, misses, goroutines*ops)
+	}
+}
