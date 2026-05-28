@@ -854,9 +854,13 @@ func newRouteIDWithWarn(state *feedbackWarningState, logger feedbackLogger) stri
 // silently coerced to an empty string — RouteID is informational; we do
 // not want routing paths to fail because the OS RNG returned an error.
 //
-// Equivalent to newRouteIDWithWarn(nil, nil). Preserved as a bare entry
-// point for callers (tests, helpers) that don't carry a Router-owned
-// warn state.
+// **Test-only entry point.** The production path in `buildOutcome` calls
+// `newRouteIDWithWarn(rp.feedbackWarn, rp.feedbackLogger)` so RNG failures
+// fire the once-logged warning via the Router-owned `feedbackWarn`. This
+// bare variant is equivalent to `newRouteIDWithWarn(nil, nil)` and exists
+// only for tests and helpers that don't carry a Router-owned warn state;
+// it does NOT emit warnings. Do NOT call from production code paths or
+// you will lose visibility on the first RNG failure.
 func newRouteID() string {
 	return newRouteIDWithWarn(nil, nil)
 }
