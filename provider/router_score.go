@@ -185,21 +185,25 @@ func tierToFloat(t Tier) float64 {
 
 // scoreCandidate evaluates a single candidate model against a routing request
 // and returns a scoreBreakdown. This is a standalone function, not a Router
-// method, so it can be tested and used independently.
+// method, so it can be tested and used independently. It performs NO store
+// I/O — the per-route feedback snapshot is built once by the Router and the
+// appropriate *candidateFeedback is passed in (nil when feedback is
+// off/inactive).
 //
 // Parameters:
 //   - profile: the candidate model's metadata
 //   - req: the routing request with capability requirements and use case
 //   - budget: the token budget validation result (headroom feeds scoring)
 //   - warmth: optional warmth source; nil means warmth signal is inactive
-//   - _ : feedback placeholder (reserved for Phase 3)
+//   - feedback: optional per-candidate snapshot view; nil means feedback is
+//     inactive for this candidate (neutral default)
 //   - breaker: circuit breaker for the candidate; never nil (lazily created)
 func scoreCandidate(
 	profile *ModelProfile,
 	req RoutingRequest,
 	budget BudgetResult,
 	warmth WarmthSource,
-	_ interface{},
+	feedback *candidateFeedback,
 	breaker *CircuitBreaker,
 ) scoreBreakdown {
 	var bd scoreBreakdown
@@ -211,8 +215,21 @@ func scoreCandidate(
 	// 2. Headroom from budget validation.
 	bd.headroomScore = budget.HeadroomScore
 
-	// 3. Neutral feedback default (Phase 3 will replace this).
-	bd.feedbackScore = 0.5
+	// 3. Feedback: when a snapshot view is supplied, copy the raw and
+	//    confidence-adjusted values onto the breakdown. When nil, the
+	//    feedback signal stays neutral exactly as in PR2 (the "feedback"
+	//    signal is excluded from activeSignals by the Router).
+	if feedback != nil {
+		bd.feedbackActive = true
+		bd.feedbackRaw = feedback.raw.Score
+		bd.feedbackAdjusted = feedback.adjusted
+		bd.feedbackScore = feedback.adjusted
+		bd.feedbackSampleCount = feedback.raw.SampleCount
+		bd.feedbackScoredCount = feedback.raw.ScoredCount
+		bd.feedbackUpdatedAt = feedback.raw.UpdatedAt
+	} else {
+		bd.feedbackScore = 0.5
+	}
 
 	// 4. Capability gate: if the request requires capabilities the model
 	//    doesn't have, eliminate the candidate immediately. CapInsert is
