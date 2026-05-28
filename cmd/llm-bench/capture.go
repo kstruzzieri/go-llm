@@ -35,7 +35,10 @@ type captureOptions struct {
 	Limit            int
 	Source           string
 	FallbackSystem   string
-	ToolSchemaSource toolSchemaSource // nil = no snapshot; configured empty snapshot is authoritative
+	ToolSchemaSource toolSchemaSource   // nil = no snapshot; configured empty snapshot is authoritative
+	SampleSpec       *captureSampleSpec // nil = no sampling
+	SampleSeed       int64
+	Now              func() time.Time // injectable for deterministic recency tests
 }
 
 type captureResult struct {
@@ -168,9 +171,6 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 		}
 		return summaries[i].ID < summaries[j].ID
 	})
-	if err := os.MkdirAll(outDir, 0o700); err != nil {
-		return captureResult{}, fmt.Errorf("create trace dir %q: %w", outDir, err)
-	}
 
 	redactor := defaultRedactor()
 	snapshotConfigured := opts.ToolSchemaSource != nil
@@ -186,18 +186,26 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 		}
 	}
 
-	var result captureResult
-	for _, summary := range summaries {
-		if opts.Limit > 0 && len(result.Written) >= opts.Limit {
-			break
-		}
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		return captureResult{}, fmt.Errorf("create trace dir %q: %w", outDir, err)
+	}
 
+	var result captureResult
+
+	// Phase A: list → convert → enrich.
+	// Skipped conversations are removed here, before sampling, so they
+	// are never sampling candidates (spec §4.4 ordering).
+	type pendingTrace struct {
+		Trace Trace
+		Path  string
+	}
+	var enriched []pendingTrace
+	for _, summary := range summaries {
 		conv, err := store.Load(ctx, summary.ID)
 		if err != nil {
 			result.Skipped = append(result.Skipped, fmt.Sprintf("%s: %v", summary.ID, err))
 			continue
 		}
-
 		trace, err := conversationToTrace(*conv, source, opts.FallbackSystem, redactor, snapshotTools, snapshotConfigured)
 		if err != nil {
 			if errors.Is(err, errToolNameNotDeclared) {
@@ -208,17 +216,76 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 			}
 			continue
 		}
+		enriched = append(enriched, pendingTrace{
+			Trace: trace,
+			Path:  filepath.Join(outDir, safeTraceFilename(trace.ID)+".json"),
+		})
+	}
 
-		path := filepath.Join(outDir, safeTraceFilename(trace.ID)+".json")
-		data, err := json.MarshalIndent(trace, "", "  ")
+	// Phase B: sample (if requested) or apply -capture-limit.
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
+	var written []pendingTrace
+	var manifest *sampleManifest
+	switch {
+	case opts.SampleSpec != nil:
+		traces := make([]Trace, 0, len(enriched))
+		for _, p := range enriched {
+			traces = append(traces, p.Trace)
+		}
+		seed := opts.SampleSeed
+		if seed == 0 {
+			seed = now().UnixNano()
+		}
+		sampled, m, err := stratifiedSample(traces, *opts.SampleSpec, seed, now())
 		if err != nil {
-			return result, fmt.Errorf("marshal trace %q: %w", trace.ID, err)
+			return result, fmt.Errorf("capture: sample: %w", err)
+		}
+		manifest = &m
+		idx := make(map[string]pendingTrace, len(enriched))
+		for _, p := range enriched {
+			idx[p.Trace.ID] = p
+		}
+		for _, t := range sampled {
+			if p, ok := idx[t.ID]; ok {
+				written = append(written, p)
+			}
+		}
+	case opts.Limit > 0:
+		if opts.Limit > len(enriched) {
+			written = enriched
+		} else {
+			written = enriched[:opts.Limit]
+		}
+	default:
+		written = enriched
+	}
+
+	// Phase C: write traces.
+	for _, p := range written {
+		data, err := json.MarshalIndent(p.Trace, "", "  ")
+		if err != nil {
+			return result, fmt.Errorf("marshal trace %q: %w", p.Trace.ID, err)
 		}
 		data = append(data, '\n')
-		if err := os.WriteFile(path, data, 0o600); err != nil {
-			return result, fmt.Errorf("write trace %q: %w", path, err)
+		if err := os.WriteFile(p.Path, data, 0o600); err != nil {
+			return result, fmt.Errorf("write trace %q: %w", p.Path, err)
 		}
-		result.Written = append(result.Written, path)
+		result.Written = append(result.Written, p.Path)
+	}
+
+	// Write the sample manifest when sampling was requested.
+	if manifest != nil {
+		data, err := json.MarshalIndent(manifest, "", "  ")
+		if err != nil {
+			return result, fmt.Errorf("marshal sample manifest: %w", err)
+		}
+		manifestPath := filepath.Join(outDir, "_sample-manifest.json")
+		if err := os.WriteFile(manifestPath, append(data, '\n'), 0o600); err != nil {
+			return result, fmt.Errorf("write sample manifest: %w", err)
+		}
 	}
 
 	return result, nil
