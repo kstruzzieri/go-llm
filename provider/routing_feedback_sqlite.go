@@ -62,6 +62,19 @@ type SQLiteFeedbackStore struct {
 
 // NewSQLiteFeedbackStore wraps a caller-owned *sql.DB. Runs the schema
 // migrations; the caller retains responsibility for closing the DB.
+//
+// PRAGMA expectations for the caller-owned path: the routing-feedback
+// workload assumes WAL journal mode (better concurrent-read latency)
+// and a positive busy_timeout (bounded wait on contended write locks).
+// Because PRAGMAs in modernc.org/sqlite apply per-connection, callers
+// who want both to take effect across the whole pool must either
+//   - clamp `db.SetMaxOpenConns(1)` (simplest; serializes writes), or
+//   - apply the PRAGMAs via a `sql.Connector` / DSN `_pragma=` form
+//     before passing the *sql.DB in.
+//
+// OpenSQLiteFeedbackStore does the former internally. Caller-owned
+// users sharing a workspace DB with rag/ inherit whatever that
+// package configured.
 func NewSQLiteFeedbackStore(ctx context.Context, db *sql.DB, cfg SQLiteFeedbackStoreConfig) (*SQLiteFeedbackStore, error) {
 	if db == nil {
 		return nil, errors.New("provider: SQLiteFeedbackStore requires non-nil *sql.DB")
@@ -88,9 +101,20 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 	if err != nil {
 		return nil, fmt.Errorf("provider: open sqlite %q: %w", path, err)
 	}
-	if path == ":memory:" {
-		db.SetMaxOpenConns(1)
-	} else {
+	// Clamp the connection pool to one connection regardless of path.
+	// modernc.org/sqlite applies PRAGMAs per-connection; without this,
+	// the WAL + busy_timeout PRAGMAs below would only apply to the
+	// connection that received them, and other connections in the pool
+	// would silently revert to journal_mode=DELETE / busy_timeout=0 —
+	// exactly the contention behavior the PRAGMAs exist to prevent.
+	// Routing-feedback writes are low-rate; serializing through one
+	// connection is acceptable until benchmarks show otherwise.
+	// (:memory: also requires MaxOpenConns(1) because each connection
+	// opens its own private database otherwise — same outcome via a
+	// different mechanism.)
+	db.SetMaxOpenConns(1)
+
+	if path != ":memory:" {
 		if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=WAL"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("provider: set WAL mode: %w", err)
@@ -98,8 +122,7 @@ func OpenSQLiteFeedbackStore(ctx context.Context, path string, cfg SQLiteFeedbac
 		// busy_timeout = 5000ms: bounded wait on a contended write lock
 		// before giving up with SQLITE_BUSY. Avoids tight retry loops in
 		// the calling code while still respecting the feedbackWriteTimeout
-		// the caller passes on the outer ctx. Caller-owned *sql.DB users
-		// can set their own PRAGMA before passing the handle in.
+		// the caller passes on the outer ctx.
 		if _, err := db.ExecContext(ctx, "PRAGMA busy_timeout=5000"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("provider: set busy_timeout: %w", err)
@@ -297,8 +320,11 @@ func (s *SQLiteFeedbackStore) runInTx(ctx context.Context, fn func(*sql.Tx) erro
 	if err != nil {
 		return fmt.Errorf("provider: SQLiteFeedbackStore begin: %w", err)
 	}
+	// Defensive rollback covers the panic path (return early on success
+	// commit). database/sql treats Rollback after Commit as a no-op, so
+	// this is safe.
+	defer func() { _ = tx.Rollback() }()
 	if err := fn(tx); err != nil {
-		_ = tx.Rollback()
 		return err
 	}
 	if err := tx.Commit(); err != nil {
