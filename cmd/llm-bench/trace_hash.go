@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"sort"
 )
 
@@ -19,11 +20,12 @@ func canonicalTraceHash(t Trace) string {
 	clone.ID = ""
 	data, err := json.Marshal(clone)
 	if err != nil {
-		// Trace fields are all JSON-marshalable today; a non-nil error
-		// here means a future field introduced an un-marshalable type.
-		// Surface as an obviously-wrong sentinel rather than crashing
-		// the benchmark; report-time tests will catch it.
-		return "unhashable"
+		// Trace fields are all JSON-marshalable today. A future field
+		// breaking that invariant must be caught: the manifest hash is
+		// the provenance anchor for benchmark artifacts, so silently
+		// returning a sentinel would collapse all corrupt traces to one
+		// shared hash. Panic loudly.
+		panic(fmt.Sprintf("canonicalTraceHash: json.Marshal failed for trace %q: %v", t.ID, err))
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])

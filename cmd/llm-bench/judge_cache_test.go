@@ -291,3 +291,31 @@ func TestJudgeCacheStatsAreConcurrentSafe(t *testing.T) {
 		t.Fatalf("hits=%d misses=%d; want hits=%d misses=0", hits, misses, goroutines*ops)
 	}
 }
+
+func TestJudgeCacheGetPreservesVerdictOnHit(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	defer c.Close()
+	ctx := context.Background()
+	want := judgeCacheEntry{
+		CacheKey: "k", JudgeModel: "j", TraceID: "t", CandidateModel: "cm",
+		PromptHash: "p", RequestJSON: "{}", ResponseContent: `{"answer_quality":0.7}`,
+		AnswerQuality: 0.7, Justification: "good",
+	}
+	if err := c.Put(ctx, want); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, ok, err := c.Get(ctx, "k")
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if got.AnswerQuality != want.AnswerQuality {
+		t.Fatalf("Get returned AnswerQuality=%v; want %v", got.AnswerQuality, want.AnswerQuality)
+	}
+	if got.Justification != want.Justification {
+		t.Fatalf("Get returned Justification=%q; want %q", got.Justification, want.Justification)
+	}
+}

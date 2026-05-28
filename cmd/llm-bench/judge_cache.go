@@ -41,7 +41,14 @@ type judgeCacheRequest struct {
 // encoding/json's stable struct-tag ordering (Go's encoding/json marshals
 // struct fields in declaration order), then SHA-256s the bytes.
 func canonicalCacheKey(r judgeCacheRequest) string {
-	raw, _ := json.Marshal(r) // marshaling a fixed-shape struct cannot fail
+	raw, err := json.Marshal(r)
+	if err != nil {
+		// judgeCacheRequest is a fixed-shape struct of primitive types
+		// (string/int/float/bool); marshaling cannot fail without a future
+		// breaking change. Panic so the cache never silently produces
+		// sha256("") and collides every key.
+		panic(fmt.Sprintf("canonicalCacheKey: json.Marshal failed on fixed-shape struct: %v", err))
+	}
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -111,11 +118,11 @@ func openJudgeCache(path string) (*sqliteJudgeCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
 	}
+	db.SetMaxOpenConns(1) // SQLite does not support concurrent writers; serialize all ops.
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
 	}
-	db.SetMaxOpenConns(1) // SQLite does not support concurrent writers; serialize all ops.
 	if err := migrateJudgeCache(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w: %v", errJudgeCacheMigrate, err)
@@ -234,10 +241,13 @@ func (c *sqliteJudgeCache) Get(ctx context.Context, key string) (judgeCacheEntry
 		`UPDATE judge_cache SET hit_count = hit_count + 1, last_used_at = ? WHERE cache_key = ?`,
 		nowNs, key,
 	); err != nil {
-		return judgeCacheEntry{}, false, fmt.Errorf("%w hit-count for key %s: %v", errJudgeCacheGet, key, err)
+		// Hit-count is observational; surface to stderr but keep the verdict
+		// so the caller is not forced to re-invoke the judge.
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit-count update failed (key=%s): %v\n", key, err)
+	} else {
+		e.HitCount++
+		e.LastUsedAt = time.Unix(0, nowNs).UTC()
 	}
-	e.HitCount++
-	e.LastUsedAt = time.Unix(0, nowNs).UTC()
 	c.hits.Add(1)
 	return e, true, nil
 }
