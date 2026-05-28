@@ -5,6 +5,7 @@ go 1.25.0
 require (
 	github.com/modelcontextprotocol/go-sdk v1.4.1
 	github.com/parquet-go/parquet-go v0.29.0
+	github.com/santhosh-tekuri/jsonschema/v6 v6.0.2
 	golang.org/x/net v0.53.0
 	golang.org/x/sync v0.20.0
 	modernc.org/sqlite v1.46.1

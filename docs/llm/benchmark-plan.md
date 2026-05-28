@@ -106,13 +106,14 @@ type Scorer interface {
 }
 
 type Score struct {
-    ToolSequenceMatch   float64 // [0,1]
-    ToolArgsValid       float64 // [0,1]
-    AnswerQuality       float64 // [0,1]
-    LatencyMs           int64
-    ScorerLatencyMs     int64
-    TotalTokens         int
-    Notes               string
+    ToolSequenceMatch     float64 // [0,1]
+    ToolArgsValid         float64 // [0,1] — JSON Schema validation against trace.Tools
+    ToolArgsValidComputed bool    // false = ToolArgsValid is a placeholder (n/a in reports)
+    AnswerQuality         float64 // [0,1]
+    LatencyMs             int64
+    ScorerLatencyMs       int64
+    TotalTokens           int
+    Notes                 string
 }
 ```
 
@@ -160,11 +161,35 @@ First implementation slice:
   a candidate that bypasses the scripted tool route by replying in plain
   text has the skip recorded in `Score.Notes` (the historical
   "refuse rather than mislead" intent, now in observability form).
-  Tool schemas are still not recoverable from `conversation/` today;
-  schema sourcing remains follow-up capture work.
-- Feedback-driven sampling is deferred until feedback rows can be tied
-  to conversations; today `feedback_retrievals` and `feedback_signals`
-  do not carry a conversation id.
+  Tool schemas are sourced from the live MCP server at capture time
+  via `-mcp-stdio-command` or `-mcp-url`. The chosen transport is
+  invoked once per capture run; `trace.Tools` is populated with the
+  normalized minimal `{name, description, inputSchema}` projection of
+  the resulting `tools/list` snapshot. A conversation whose
+  scripted assistant turn references a tool not in the snapshot is
+  skipped with a `capture skipped <id>: tool 'X' not in MCP snapshot`
+  warning so replay never falsely validates against a stale schema.
+  Replay then evaluates `ToolArgsValid` by JSON Schema validation
+  against the captured `trace.Tools` (see `validateToolArguments` for
+  semantics). When no transport is configured, capture writes
+  `trace.Tools = []` and replay reports `ToolArgsValid` as
+  not-computed.
+- Capture-derivable stratification: `llm-bench -capture -capture-sample
+  <spec>` partitions the enriched trace pool by any cross-product of
+  `token-length`, `turn-count`, `has-tool-calls`,
+  `has-final-answer-criteria`, `source`, and `recency`, then samples
+  uniformly within each cell. The seed (`-capture-sample-seed`) makes
+  the selection reproducible across machines; a `_sample-manifest.json`
+  in the output directory records the seed, parsed spec, cell counts,
+  and the IDs of every trace written.
+- The sampling pipeline runs `list → convert → enrich → sample → write`,
+  so conversations skipped during enrichment (e.g. undeclared tool
+  references) are not eligible for sampling and never appear in the
+  manifest.
+- Feedback-driven sampling is still deferred: today
+  `feedback_retrievals` and `feedback_signals` do not carry a
+  conversation id. Once retrieval/session provenance lands, a future
+  capture flag can join sampling against that source.
 
 ### Phase 3 — LLM-as-judge scorer
 

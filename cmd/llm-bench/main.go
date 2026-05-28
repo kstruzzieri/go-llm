@@ -34,6 +34,10 @@ func main() {
 	captureLimit := flag.Int("capture-limit", 0, "Maximum conversations to export in capture mode (0 = all)")
 	captureSource := flag.String("capture-source", defaultCaptureSource, "Trace source label for captured conversations")
 	captureSystem := flag.String("capture-system", "", "Fallback system prompt when a conversation has no stored system message")
+	mcpStdioCommand := flag.String("mcp-stdio-command", "", "Run this command and snapshot its MCP tools/list (mutually exclusive with -mcp-url)")
+	mcpURL := flag.String("mcp-url", "", "Snapshot MCP tools/list from this HTTP endpoint (mutually exclusive with -mcp-stdio-command)")
+	captureSample := flag.String("capture-sample", "", "Stratified capture spec, e.g. n=50,stratify=token-length:turn-count (mutually exclusive with -capture-limit)")
+	captureSampleSeed := flag.Int64("capture-sample-seed", 0, "Deterministic seed for -capture-sample (0 = time.Now().UnixNano())")
 
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
@@ -73,12 +77,29 @@ func main() {
 	defer cancel()
 
 	if *capture {
+		if err := validateCaptureSampleAndLimit(*captureLimit, *captureSample); err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		sampleSpec, err := resolveCaptureSample(*captureSample)
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		src, err := resolveToolSchemaSource(*mcpStdioCommand, *mcpURL)
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		if src == nil {
+			fmt.Fprintln(os.Stderr, "llm-bench: no -mcp-stdio-command or -mcp-url set; captured traces will have empty trace.Tools and ToolArgsValid will be reported as not-computed")
+		}
 		result, err := runCapture(ctx, captureOptions{
-			DBPath:         *captureDB,
-			OutputDir:      *captureOut,
-			Limit:          *captureLimit,
-			Source:         *captureSource,
-			FallbackSystem: *captureSystem,
+			DBPath:           *captureDB,
+			OutputDir:        *captureOut,
+			Limit:            *captureLimit,
+			Source:           *captureSource,
+			FallbackSystem:   *captureSystem,
+			ToolSchemaSource: src,
+			SampleSpec:       sampleSpec,
+			SampleSeed:       *captureSampleSeed,
 		})
 		if err != nil {
 			log.Fatalf("llm-bench: capture: %v", err)
@@ -291,4 +312,45 @@ func defaultJudgeCachePath() string {
 		return ""
 	}
 	return filepath.Join(base, "go-llm", "judge-cache.db")
+}
+
+// validateCaptureSampleAndLimit rejects the case where both flags are
+// non-zero. Spec §4.4 requires they be mutually exclusive: -capture-limit
+// is the simple "first N" path; -capture-sample is the stratified path.
+func validateCaptureSampleAndLimit(limit int, sample string) error {
+	if limit > 0 && strings.TrimSpace(sample) != "" {
+		return fmt.Errorf("-capture-limit and -capture-sample are mutually exclusive")
+	}
+	return nil
+}
+
+// resolveCaptureSample parses the -capture-sample flag into a
+// *captureSampleSpec. Returns (nil, nil) when spec is empty (no
+// sampling requested). Any parse error is returned as a non-nil error.
+func resolveCaptureSample(spec string) (*captureSampleSpec, error) {
+	if strings.TrimSpace(spec) == "" {
+		return nil, nil
+	}
+	parsed, err := parseCaptureSample(spec)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
+}
+
+// resolveToolSchemaSource picks a tool-schema source from CLI flags.
+// Returns nil if neither flag is set; an error if both are.
+func resolveToolSchemaSource(stdioCmd, httpURL string) (toolSchemaSource, error) {
+	stdioCmd = strings.TrimSpace(stdioCmd)
+	httpURL = strings.TrimSpace(httpURL)
+	if stdioCmd != "" && httpURL != "" {
+		return nil, fmt.Errorf("-mcp-stdio-command and -mcp-url are mutually exclusive")
+	}
+	if stdioCmd != "" {
+		return newMCPToolSchemaSourceStdio(stdioCmd)
+	}
+	if httpURL != "" {
+		return newMCPToolSchemaSourceHTTP(httpURL)
+	}
+	return nil, nil
 }
