@@ -84,3 +84,20 @@ func TestRedactStringStripsJustificationThroughNewline(t *testing.T) {
 		t.Errorf("redactString consumed past newline: %q", got)
 	}
 }
+
+func TestRedactStringStripsColonPrefixedPaths(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"error at module:/tmp/foo missing", "error at module:<redacted-path> missing"},
+		{"cache=/Users/keith.struzzieri/.cache run", "cache=<redacted-path> run"},
+		{"key:/tmp/secret leaked", "key:<redacted-path> leaked"},
+		{"json={\"path\":\"/tmp/x\"}", "json={\"path\":\"<redacted-path>\"}"},
+	}
+	for _, tc := range cases {
+		if got := redactString(tc.in); got != tc.want {
+			t.Errorf("redactString(%q) = %q; want %q", tc.in, got, tc.want)
+		}
+	}
+}
