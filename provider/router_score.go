@@ -130,9 +130,9 @@ type scoreBreakdown struct {
 	// PR3 feedback-source fields. Populated by scoreCandidate when a
 	// route-level feedback snapshot is active; otherwise zero (and the
 	// "feedback" signal is excluded from activeSignals).
-	feedbackActive      bool      // true iff snapshot active and key found
-	feedbackRaw         float64   // raw Aggregate.Score
-	feedbackAdjusted    float64   // confidence-gated/shrunk value
+	feedbackActive      bool    // true iff snapshot active and key found
+	feedbackRaw         float64 // raw Aggregate.Score
+	feedbackAdjusted    float64 // confidence-gated/shrunk value
 	feedbackSampleCount int
 	feedbackScoredCount int
 	feedbackUpdatedAt   time.Time
