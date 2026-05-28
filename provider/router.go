@@ -178,7 +178,8 @@ type FeedbackScoringMode int
 
 const (
 	// FeedbackScoringOff disables both feedback reads and feedback
-	// breakdown emission. activeSignals does not include "feedback".
+	// breakdown emission. selectionActiveSignals / deltaActiveSignals
+	// both exclude "feedback".
 	FeedbackScoringOff FeedbackScoringMode = iota
 	// FeedbackScoringShadow reads feedback per route, emits ScoreBreakdown
 	// with raw/adjusted values, but route selection uses the
@@ -344,7 +345,13 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	}
 
 	// 3. Hard gates + budget + score all candidates.
-	scored := r.scoreAll(ctx, candidates, req)
+	//    PR3: build the per-route feedback snapshot exactly ONCE here and
+	//    thread it through scoreAll. scoreCandidate stays I/O-free. For
+	//    the single-pass branch the snapshot lives only across scoreAll;
+	//    the chain-routing branch (routeChain) builds its own and extends
+	//    it incrementally per step.
+	snap := r.buildFeedbackSnapshot(ctx, candidates, req.UseCase)
+	scored := r.scoreAll(ctx, candidates, req, snap)
 
 	// 4. Partition into executable, truncatable, breakered, budgeted.
 	var executable, truncatable []scoredCandidate
@@ -697,9 +704,22 @@ func (r *Router) resolveCandidates(ctx context.Context, req RoutingRequest) ([]*
 }
 
 // scoreAll evaluates all candidates against the routing request, applying
-// hard gates (capability, breaker, RAM, budget) and computing weighted scores.
-func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req RoutingRequest) []scoredCandidate {
-	active := r.activeSignals()
+// hard gates (capability, breaker, RAM, budget) and computing weighted
+// scores. The caller (Route()) builds the per-route feedback snapshot
+// exactly once and threads it in; scoreCandidate stays I/O-free.
+//
+// Each candidate gets THREE weighted-score computations:
+//   - selection score (chosen via selectionActiveSignals: feedback in
+//     activeSignals iff Enforce + snap.active)
+//   - scoreWithFeedback (deltaActiveSignals: feedback in activeSignals
+//     iff snap.active, regardless of mode — so Shadow exposes a real
+//     delta in the breakdown)
+//   - scoreWithoutFeedback (baseActiveSignals: feedback never in
+//     activeSignals — the PR2 baseline)
+func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req RoutingRequest, snap *feedbackSnapshot) []scoredCandidate {
+	selectActive := r.selectionActiveSignals(snap)
+	deltaActive := r.deltaActiveSignals(snap)
+	baseActive := r.baseActiveSignals()
 	var customWeights *WeightProfile
 	if wp, ok := r.defaultOpts.weightOverrides[req.UseCase]; ok {
 		customWeights = wp
@@ -718,10 +738,13 @@ func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req Rou
 
 		// Score the candidate.
 		breaker := r.getOrCreateBreaker(profile.Key.Provider)
-		bd := scoreCandidate(profile, req, budget, r.warmth, nil, breaker)
+		cf := snap.lookup(FeedbackKey{Provider: profile.Key.Provider, Model: profile.Key.Model, UseCase: req.UseCase})
+		bd := scoreCandidate(profile, req, budget, r.warmth, cf, breaker)
 
-		// Compute weighted score.
-		score := computeWeightedScore(bd, req.UseCase, active, customWeights)
+		// Compute the three weighted score flavors.
+		bd.scoreWithoutFeedback = computeWeightedScore(bd, req.UseCase, baseActive, customWeights)
+		bd.scoreWithFeedback = computeWeightedScore(bd, req.UseCase, deltaActive, customWeights)
+		score := computeWeightedScore(bd, req.UseCase, selectActive, customWeights)
 
 		// Apply breaker penalty (overrides score if -Inf).
 		if math.IsInf(bd.breakerPenalty, -1) {
@@ -739,13 +762,13 @@ func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req Rou
 	return scored
 }
 
-// activeSignals returns the set of scoring signals that are active based
-// on the router's configuration. Signals backed by absent subsystems
-// (e.g. no warmth tracker) are excluded so they don't penalize candidates.
-func (r *Router) activeSignals() map[string]bool {
+// baseActiveSignals returns the always-on scoring signals (everything
+// except "feedback", which is conditional on snapshot/mode). Signals
+// backed by absent subsystems (e.g. no warmth tracker) are excluded so
+// they don't penalize candidates.
+func (r *Router) baseActiveSignals() map[string]bool {
 	active := map[string]bool{
 		"headroom": true,
-		"feedback": true,
 		"quality":  true,
 		"speed":    true,
 		"kvcache":  true,
@@ -753,6 +776,31 @@ func (r *Router) activeSignals() map[string]bool {
 	}
 	if r.warmth != nil {
 		active["warmth"] = true
+	}
+	return active
+}
+
+// selectionActiveSignals is the set used for the score that actually
+// drives candidate selection. Feedback participates only in Enforce
+// mode with a live (non-fail-open) snapshot; Off/Shadow/fail-open all
+// exclude it so pre-PR3 selection math is preserved.
+func (r *Router) selectionActiveSignals(snap *feedbackSnapshot) map[string]bool {
+	active := r.baseActiveSignals()
+	if r.routingFeedback != nil && snap != nil && snap.active && snap.mode == FeedbackScoringEnforce {
+		active["feedback"] = true
+	}
+	return active
+}
+
+// deltaActiveSignals is the set used to compute ScoreWithFeedback for
+// the breakdown. Feedback participates whenever the snapshot is active
+// (Shadow OR Enforce) so the breakdown can expose the would-be-applied
+// delta even in Shadow. Fail-open (snap.active == false) still excludes
+// feedback so the delta reports the same scores as PR2 in that case.
+func (r *Router) deltaActiveSignals(snap *feedbackSnapshot) map[string]bool {
+	active := r.baseActiveSignals()
+	if r.routingFeedback != nil && snap != nil && snap.active {
+		active["feedback"] = true
 	}
 	return active
 }

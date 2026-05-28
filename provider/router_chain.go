@@ -32,6 +32,14 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 	truncatable := make([]scoredCandidate, 0)
 	seen := make(map[ModelKey]bool)
 
+	// PR3: build the route-level feedback snapshot ONCE here. It starts
+	// active with empty byKey (or terminally inactive if Off / no_store /
+	// empty_use_case); each per-step snap.readCandidates either extends
+	// it OR latches fail-open. Either way scoreChainStep + the recommend
+	// tail see the same *feedbackSnapshot for every step, so an early
+	// step's read_error disables feedback for every later step too.
+	snap := r.buildFeedbackSnapshot(ctx, nil, req.UseCase)
+
 	var lookupErrs []error
 	breakerCount, budgetCount := 0, 0
 	resolvedAny := false
@@ -44,7 +52,14 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 			continue
 		}
 
-		stepSurvivors := r.scoreChainStep(profiles, req)
+		// Extend the route-level snapshot with this step's profiles BEFORE
+		// scoring. If an earlier step already latched read_error,
+		// readCandidates is a no-op; if this step is the one that fails,
+		// the snapshot latches and every later step plus the recommend
+		// tail sees an inactive snapshot via the same pointer.
+		snap.readCandidates(ctx, r, profiles, req.UseCase)
+
+		stepSurvivors := r.scoreChainStep(ctx, profiles, req, snap)
 		for _, sc := range stepSurvivors {
 			if seen[sc.profile.Key] {
 				continue
@@ -71,7 +86,7 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 	}
 
 	if !req.StrictChain {
-		tail, terr := r.appendRecommendTail(ctx, req, seen)
+		tail, terr := r.appendRecommendTail(ctx, req, seen, snap)
 		if terr == nil {
 			working = append(working, tail...)
 		}
@@ -125,10 +140,28 @@ func (r *Router) resolveChainEntry(ctx context.Context, selector string) ([]*Mod
 }
 
 // scoreChainStep applies the same hard-gate + scoring pipeline that scoreAll
-// uses for the global-scoring branch, but per chain step. Returns survivors
-// in score-descending order so the caller can append them to the working list.
-func (r *Router) scoreChainStep(profiles []*ModelProfile, req RoutingRequest) []scoredCandidate {
-	active := r.activeSignals()
+// uses for the global-scoring branch, but per chain step. The route-level
+// feedback snapshot is built ONCE by routeChain at entry; callers extend
+// it with this step's profiles via snap.readCandidates() before invoking
+// scoreChainStep, which then stays I/O-free. The selection vs. delta
+// active-signal split mirrors scoreAll.
+//
+// Because snap.readCandidates latches snap.failed=true on the first read
+// error, an early step's fail-open carries forward to every later step
+// AND the recommend tail in the same route — the spec's "any read error
+// disables feedback for the whole route" invariant.
+//
+// Returns survivors in score-descending order so the caller can append
+// them to the working list.
+//
+// The ctx parameter is currently unused by scoreChainStep itself (all I/O
+// already happened in snap.readCandidates), but is kept on the signature
+// for consistency with scoreAll and so a future cancellation hook
+// inside the per-candidate loop does not require another signature change.
+func (r *Router) scoreChainStep(_ context.Context, profiles []*ModelProfile, req RoutingRequest, snap *feedbackSnapshot) []scoredCandidate {
+	selectActive := r.selectionActiveSignals(snap)
+	deltaActive := r.deltaActiveSignals(snap)
+	baseActive := r.baseActiveSignals()
 	var customWeights *WeightProfile
 	if wp, ok := r.defaultOpts.weightOverrides[req.UseCase]; ok {
 		customWeights = wp
@@ -141,8 +174,13 @@ func (r *Router) scoreChainStep(profiles []*ModelProfile, req RoutingRequest) []
 		}
 		budget := r.tokenBudget.Validate(req, profile)
 		breaker := r.getOrCreateBreaker(profile.Key.Provider)
-		bd := scoreCandidate(profile, req, budget, r.warmth, nil, breaker)
-		score := computeWeightedScore(bd, req.UseCase, active, customWeights)
+		cf := snap.lookup(FeedbackKey{Provider: profile.Key.Provider, Model: profile.Key.Model, UseCase: req.UseCase})
+		bd := scoreCandidate(profile, req, budget, r.warmth, cf, breaker)
+
+		bd.scoreWithoutFeedback = computeWeightedScore(bd, req.UseCase, baseActive, customWeights)
+		bd.scoreWithFeedback = computeWeightedScore(bd, req.UseCase, deltaActive, customWeights)
+		score := computeWeightedScore(bd, req.UseCase, selectActive, customWeights)
+
 		if math.IsInf(bd.breakerPenalty, -1) {
 			score = math.Inf(-1)
 		}
@@ -188,7 +226,14 @@ func (r *Router) recordChainLookupFailure(selector string, err error) {
 // constraints and returns scored candidates not already present in seen.
 // Failures (e.g. registry index empty) return an error so the caller can
 // decide whether to ignore (chain has survivors) or surface (chain empty).
-func (r *Router) appendRecommendTail(ctx context.Context, req RoutingRequest, seen map[ModelKey]bool) ([]scoredCandidate, error) {
+//
+// PR3: the route-level feedback snapshot is threaded in by routeChain. The
+// tail's profiles are extended into the same snapshot via snap.readCandidates
+// BEFORE scoreChainStep — keeping the snapshot's fail-open latch consistent
+// across the whole route. If an earlier chain step already latched
+// read_error, this extension is a no-op (and the tail sees inactive
+// feedback identically to the latched chain steps).
+func (r *Router) appendRecommendTail(ctx context.Context, req RoutingRequest, seen map[ModelKey]bool, snap *feedbackSnapshot) ([]scoredCandidate, error) {
 	all, err := r.registry.Recommend(ctx, RecommendOpts{
 		RequiredCaps: req.RequiredCaps,
 		AvailableRAM: r.availableRAM,
@@ -197,7 +242,8 @@ func (r *Router) appendRecommendTail(ctx context.Context, req RoutingRequest, se
 	if err != nil {
 		return nil, err
 	}
-	scored := r.scoreChainStep(all, req)
+	snap.readCandidates(ctx, r, all, req.UseCase)
+	scored := r.scoreChainStep(ctx, all, req, snap)
 
 	tail := make([]scoredCandidate, 0, len(scored))
 	for _, sc := range scored {
