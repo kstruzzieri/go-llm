@@ -61,6 +61,13 @@ type Router struct {
 	done            chan struct{}
 	closeOnce       sync.Once
 	routingFeedback *RoutingFeedback
+	// feedbackScoringMode controls whether RoutingFeedback influences route
+	// selection. PR3 default is FeedbackScoringOff (pre-PR3 behavior).
+	// Independent of routingFeedback: recording (writes) is governed by
+	// WithRoutingFeedback; reading + selection impact (reads) is governed
+	// by this field. See routing_feedback.go and the FeedbackScoringMode
+	// docs for the full truth table.
+	feedbackScoringMode FeedbackScoringMode
 }
 
 // Compile-time assertion that Router implements RouteRecorder.
@@ -146,6 +153,67 @@ func WithAvailableRAM(gb float64) RouterOption {
 func WithTokenBudgetValidator(v *TokenBudgetValidator) RouterOption {
 	return func(r *Router) {
 		r.tokenBudget = v
+	}
+}
+
+// FeedbackScoringMode controls how the Router uses RoutingFeedback reads
+// during candidate scoring and route selection. Independent of whether
+// recording is enabled (WithRoutingFeedback); a deployment can write
+// signals without ever letting them influence routing.
+//
+// Defaults to FeedbackScoringOff so the post-PR3 routing path is the
+// pre-PR3 routing path until an operator opts in.
+type FeedbackScoringMode int
+
+const (
+	// FeedbackScoringOff disables both feedback reads and feedback
+	// breakdown emission. activeSignals does not include "feedback".
+	FeedbackScoringOff FeedbackScoringMode = iota
+	// FeedbackScoringShadow reads feedback per route, emits ScoreBreakdown
+	// with raw/adjusted values, but route selection uses the
+	// score-without-feedback path. Used to evaluate the impact of feedback
+	// before enforcing it.
+	FeedbackScoringShadow
+	// FeedbackScoringEnforce reads feedback per route, emits the same
+	// breakdown, AND lets the feedback signal participate in weighted
+	// scoring for the route. Snapshot fail-open still disables feedback
+	// for the whole route on any read error.
+	FeedbackScoringEnforce
+)
+
+// String returns the operator-facing label for the mode. Unknown values
+// return a labeled fallback so log lines never contain a bare integer.
+func (m FeedbackScoringMode) String() string {
+	switch m {
+	case FeedbackScoringOff:
+		return "off"
+	case FeedbackScoringShadow:
+		return "shadow"
+	case FeedbackScoringEnforce:
+		return "enforce"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(m))
+	}
+}
+
+// WithFeedbackScoringMode sets the FeedbackScoringMode at construction.
+// Default is FeedbackScoringOff. Recording (writes) is configured
+// separately via WithRoutingFeedback; this option controls only reads
+// and selection impact.
+func WithFeedbackScoringMode(mode FeedbackScoringMode) RouterOption {
+	return func(r *Router) { r.feedbackScoringMode = mode }
+}
+
+// WithFeedbackScoring is compatibility sugar: true maps to
+// FeedbackScoringEnforce, false maps to FeedbackScoringOff. Prefer
+// WithFeedbackScoringMode when ramp-up via shadow mode is wanted.
+func WithFeedbackScoring(enabled bool) RouterOption {
+	return func(r *Router) {
+		if enabled {
+			r.feedbackScoringMode = FeedbackScoringEnforce
+		} else {
+			r.feedbackScoringMode = FeedbackScoringOff
+		}
 	}
 }
 
