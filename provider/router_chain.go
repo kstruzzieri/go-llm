@@ -154,11 +154,13 @@ func (r *Router) resolveChainEntry(ctx context.Context, selector string) ([]*Mod
 // Returns survivors in score-descending order so the caller can append
 // them to the working list.
 //
-// The ctx parameter is currently unused by scoreChainStep itself (all I/O
-// already happened in snap.readCandidates), but is kept on the signature
-// for consistency with scoreAll and so a future cancellation hook
-// inside the per-candidate loop does not require another signature change.
-func (r *Router) scoreChainStep(_ context.Context, profiles []*ModelProfile, req RoutingRequest, snap *feedbackSnapshot) []scoredCandidate {
+// ctx is checked once up-front so a cancelled route doesn't pay the
+// full per-candidate loop. All store I/O already happened in
+// snap.readCandidates, so per-iteration ctx checks aren't needed.
+func (r *Router) scoreChainStep(ctx context.Context, profiles []*ModelProfile, req RoutingRequest, snap *feedbackSnapshot) []scoredCandidate {
+	if err := ctx.Err(); err != nil {
+		return nil
+	}
 	selectActive := r.selectionActiveSignals(snap)
 	deltaActive := r.deltaActiveSignals(snap)
 	baseActive := r.baseActiveSignals()
@@ -242,8 +244,22 @@ func (r *Router) appendRecommendTail(ctx context.Context, req RoutingRequest, se
 	if err != nil {
 		return nil, err
 	}
-	snap.readCandidates(ctx, r, all, req.UseCase)
-	scored := r.scoreChainStep(ctx, all, req, snap)
+	// Pre-filter Recommend output against the chain's `seen` set before
+	// extending the route-level snapshot. Without this, every candidate
+	// already selected by an earlier chain step would trigger a wasted
+	// store.Score read in readCandidates — costs O(seen ∩ tail) reads
+	// per route once the store is SQLite-backed. Capability/breaker/
+	// budget filtering still happens inside scoreChainStep + the loop
+	// below; we only dedupe what's cheap to dedupe here.
+	fresh := make([]*ModelProfile, 0, len(all))
+	for _, p := range all {
+		if seen[p.Key] {
+			continue
+		}
+		fresh = append(fresh, p)
+	}
+	snap.readCandidates(ctx, r, fresh, req.UseCase)
+	scored := r.scoreChainStep(ctx, fresh, req, snap)
 
 	tail := make([]scoredCandidate, 0, len(scored))
 	for _, sc := range scored {
