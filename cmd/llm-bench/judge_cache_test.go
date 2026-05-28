@@ -75,8 +75,17 @@ func newTestCache(t *testing.T) (*sqliteJudgeCache, string) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
+	cleanupJudgeCache(t, c)
 	return c, path
+}
+
+func cleanupJudgeCache(t *testing.T, c *sqliteJudgeCache) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("close judge cache: %v", err)
+		}
+	})
 }
 
 func TestSQLiteJudgeCache_PutThenGetReturnsEntry(t *testing.T) {
@@ -129,7 +138,7 @@ func TestSQLiteJudgeCache_MigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-open: %v", err)
 	}
-	defer func() { _ = c2.Close() }()
+	cleanupJudgeCache(t, c2)
 }
 
 func TestOpenJudgeCache_CreatesParentDirectory(t *testing.T) {
@@ -138,7 +147,7 @@ func TestOpenJudgeCache_CreatesParentDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	cleanupJudgeCache(t, c)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("cache file stat: %v", err)
 	}
@@ -199,4 +208,123 @@ func TestSQLiteJudgeCache_ConcurrentGetPut_NoRace(t *testing.T) {
 		}(w)
 	}
 	wg.Wait()
+}
+
+func TestJudgeCacheStatsStartAtZero(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	cleanupJudgeCache(t, c)
+	hits, misses := c.Stats()
+	if hits != 0 || misses != 0 {
+		t.Fatalf("initial Stats() = (%d,%d); want (0,0)", hits, misses)
+	}
+}
+
+func TestJudgeCacheStatsIncrement(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	cleanupJudgeCache(t, c)
+	ctx := context.Background()
+
+	if _, ok, err := c.Get(ctx, "key-A"); err != nil || ok {
+		t.Fatalf("first Get: ok=%v err=%v; want ok=false err=nil", ok, err)
+	}
+	hits, misses := c.Stats()
+	if hits != 0 || misses != 1 {
+		t.Fatalf("after one miss Stats() = (%d,%d); want (0,1)", hits, misses)
+	}
+
+	// Use a Put with realistic fields so the migrated table accepts the row.
+	if err := c.Put(ctx, judgeCacheEntry{
+		CacheKey:        "key-A",
+		JudgeModel:      "test-judge",
+		TraceID:         "t",
+		CandidateModel:  "test-cand",
+		PromptHash:      "ph",
+		RequestJSON:     "{}",
+		ResponseContent: "{}",
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	if _, ok, err := c.Get(ctx, "key-A"); err != nil || !ok {
+		t.Fatalf("second Get: ok=%v err=%v; want ok=true err=nil", ok, err)
+	}
+	hits, misses = c.Stats()
+	if hits != 1 || misses != 1 {
+		t.Fatalf("after hit Stats() = (%d,%d); want (1,1)", hits, misses)
+	}
+}
+
+func TestJudgeCacheStatsAreConcurrentSafe(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	cleanupJudgeCache(t, c)
+	ctx := context.Background()
+
+	if err := c.Put(ctx, judgeCacheEntry{
+		CacheKey:        "k",
+		JudgeModel:      "test-judge",
+		TraceID:         "t",
+		CandidateModel:  "test-cand",
+		PromptHash:      "ph",
+		RequestJSON:     "{}",
+		ResponseContent: "{}",
+	}); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+
+	const goroutines = 8
+	const ops = 50
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			defer wg.Done()
+			for j := 0; j < ops; j++ {
+				_, _, _ = c.Get(ctx, "k")
+			}
+		}()
+	}
+	wg.Wait()
+	hits, misses := c.Stats()
+	if hits != goroutines*ops || misses != 0 {
+		t.Fatalf("hits=%d misses=%d; want hits=%d misses=0", hits, misses, goroutines*ops)
+	}
+}
+
+func TestJudgeCacheGetPreservesVerdictOnHit(t *testing.T) {
+	dir := t.TempDir()
+	c, err := openJudgeCache(filepath.Join(dir, "cache.db"))
+	if err != nil {
+		t.Fatalf("openJudgeCache: %v", err)
+	}
+	cleanupJudgeCache(t, c)
+	ctx := context.Background()
+	want := judgeCacheEntry{
+		CacheKey: "k", JudgeModel: "j", TraceID: "t", CandidateModel: "cm",
+		PromptHash: "p", RequestJSON: "{}", ResponseContent: `{"answer_quality":0.7}`,
+		AnswerQuality: 0.7, Justification: "good",
+	}
+	if err := c.Put(ctx, want); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, ok, err := c.Get(ctx, "k")
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if got.AnswerQuality != want.AnswerQuality {
+		t.Fatalf("Get returned AnswerQuality=%v; want %v", got.AnswerQuality, want.AnswerQuality)
+	}
+	if got.Justification != want.Justification {
+		t.Fatalf("Get returned Justification=%q; want %q", got.Justification, want.Justification)
+	}
 }

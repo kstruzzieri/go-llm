@@ -1,3 +1,8 @@
+> **Status — 2026-05-25**: This document is historical. It captured the
+> April 2026 model landscape before the harness existed. For the current
+> validated lineup decision, see [harness-results.md](harness-results.md)
+> and the linked per-run artifacts under [benchmarks/](benchmarks/).
+
 # LLM Landscape Analysis — April 2026
 
 ## Context
