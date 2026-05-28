@@ -2096,6 +2096,18 @@ func TestBuildOutcomeScoreBreakdownStableAcrossFallback(t *testing.T) {
 		t.Errorf("FeedbackUpdatedAt = %v, want pointer to unix 123 (planned primary's, not rewritten)",
 			pubBd.FeedbackUpdatedAt)
 	}
+	// Mode + counts are translator-read fields; pin them so a future
+	// regression that re-stamps from the fallback's snapshot is caught.
+	if pubBd.FeedbackMode != FeedbackScoringEnforce.String() {
+		t.Errorf("FeedbackMode = %q, want %q (planned primary's mode, not rewritten)",
+			pubBd.FeedbackMode, FeedbackScoringEnforce.String())
+	}
+	if pubBd.FeedbackSampleCount != 30 {
+		t.Errorf("FeedbackSampleCount = %d, want 30 (planned primary's, not rewritten)", pubBd.FeedbackSampleCount)
+	}
+	if pubBd.FeedbackScoredCount != 30 {
+		t.Errorf("FeedbackScoredCount = %d, want 30 (planned primary's, not rewritten)", pubBd.FeedbackScoredCount)
+	}
 }
 
 func TestBuildOutcomeScoreBreakdownSnapshotStatusReflectsRoute(t *testing.T) {
@@ -2136,6 +2148,12 @@ func TestBuildOutcomeScoreBreakdownSnapshotStatusReflectsRoute(t *testing.T) {
 	if pubBd.FeedbackUpdatedAt != nil {
 		t.Errorf("FeedbackUpdatedAt = %v, want nil (zero feedbackUpdatedAt should omit)",
 			pubBd.FeedbackUpdatedAt)
+	}
+	// Operator-facing mode label must say "enforce" even on fail-open so
+	// dashboards can distinguish "Enforce + read_error" from "Shadow"
+	// (both produce FeedbackApplied=false but for different reasons).
+	if pubBd.FeedbackMode != FeedbackScoringEnforce.String() {
+		t.Errorf("FeedbackMode = %q, want %q", pubBd.FeedbackMode, FeedbackScoringEnforce.String())
 	}
 }
 

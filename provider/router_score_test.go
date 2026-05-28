@@ -486,6 +486,21 @@ func TestScoreCandidateNilFeedbackMatchesPR2(t *testing.T) {
 	if bd.feedbackActive {
 		t.Errorf("nil feedback: feedbackActive = true, want false")
 	}
+	// Lock in zero-value on every PR3 feedback field so a future regression
+	// that leaks values into the nil branch gets caught here rather than
+	// surfacing as a confusing public ScoreBreakdown.
+	if bd.feedbackRaw != 0 {
+		t.Errorf("nil feedback: feedbackRaw = %v, want 0", bd.feedbackRaw)
+	}
+	if bd.feedbackAdjusted != 0 {
+		t.Errorf("nil feedback: feedbackAdjusted = %v, want 0", bd.feedbackAdjusted)
+	}
+	if bd.feedbackSampleCount != 0 || bd.feedbackScoredCount != 0 {
+		t.Errorf("nil feedback: counts = (%d,%d), want (0,0)", bd.feedbackSampleCount, bd.feedbackScoredCount)
+	}
+	if !bd.feedbackUpdatedAt.IsZero() {
+		t.Errorf("nil feedback: feedbackUpdatedAt = %v, want zero", bd.feedbackUpdatedAt)
+	}
 }
 
 // TestScoreCandidateActiveFeedbackPopulatesBreakdown asserts that when
