@@ -10,16 +10,38 @@ import (
 // not to catch every conceivable path — operator hygiene plus this
 // renderer-side check is the defense-in-depth design from spec §5.2.
 var (
-	pathPattern         = regexp.MustCompile(`(?:(?:/tmp|/Users/[^/\s]+)(?:/[^\s]+)?|\$HOME)`)
-	justificationPrefix = regexp.MustCompile(`(?i)\bjustification\s*:\s*(?:"[^"]*"|'[^']*'|[^;.\n]+)[;.]?`)
+	// pathPattern requires a path-start boundary so that identifiers
+	// containing /tmp-like substrings (e.g. "org/tmp-model:v1") are not
+	// incorrectly redacted. The leading group captures the boundary character
+	// (whitespace, punctuation, or start-of-string); group 1 is the path.
+	pathPattern = regexp.MustCompile(`(?:^|[\s,;'"(\[<])(/tmp(?:/[^\s]+)?|/Users/[^/\s]+(?:/[^\s]+)?|\$HOME)`)
+
+	// justificationPrefix strips through the end of the line so that
+	// multi-clause values like "completed.task; foo" are fully removed.
+	justificationPrefix = regexp.MustCompile(`(?i)\bjustification\s*:\s*(?:"[^"]*"|'[^']*'|[^\n]+)`)
 )
+
+// redactPaths replaces local-path occurrences with <redacted-path> while
+// preserving the boundary character (whitespace, comma, paren, etc.).
+// Identifiers containing /tmp-like substrings (e.g. "org/tmp-model:v1")
+// are left intact because the regex requires a path-start boundary.
+func redactPaths(s string) string {
+	return pathPattern.ReplaceAllStringFunc(s, func(m string) string {
+		sub := pathPattern.FindStringSubmatch(m)
+		if len(sub) < 2 {
+			return m
+		}
+		boundary := strings.TrimSuffix(m, sub[1])
+		return boundary + "<redacted-path>"
+	})
+}
 
 // redactString returns s with local paths and judge justification
 // fragments replaced by sanitized placeholders. Idempotent — running it
 // twice yields the same result. Used as the renderer's chokepoint per
 // spec §5.2 sanitization rules.
 func redactString(s string) string {
-	s = pathPattern.ReplaceAllString(s, "<redacted-path>")
+	s = redactPaths(s)
 	s = justificationPrefix.ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
 }

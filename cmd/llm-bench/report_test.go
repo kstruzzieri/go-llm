@@ -160,6 +160,16 @@ func TestFormatReportDoesNotLeakRawErrorOrJustification(t *testing.T) {
 	}
 }
 
+func TestFormatReportAllErrorsRowDoesNotRenderNaN(t *testing.T) {
+	report := formatReport([]string{"m1"}, []Result{
+		{Model: "m1", TraceID: "t1", Err: errors.New("context deadline exceeded")},
+		{Model: "m1", TraceID: "t2", Err: errors.New("connection refused")},
+	}, reportOptions{Scorer: "llm-judge", JudgeModel: "gemma4:31b"})
+	if strings.Contains(report, "NaN") {
+		t.Fatalf("report contains NaN with all errors:\n%s", report)
+	}
+}
+
 func TestFormatReportProvenanceBlock(t *testing.T) {
 	report := formatReport([]string{"m1"}, []Result{
 		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5}},

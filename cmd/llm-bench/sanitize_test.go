@@ -58,3 +58,29 @@ func TestRedactStringPreservesAllowedSubstrings(t *testing.T) {
 		t.Fatalf("redactString stripped allowed content: %q", got)
 	}
 }
+
+func TestRedactStringDoesNotMatchPathSubstringInsideIdentifier(t *testing.T) {
+	cases := []string{
+		"model org/tmp-model:v1 ran",
+		"selector pipeline/tmpfile-cache idle",
+		"name a/Users-shared-cache:v3",
+	}
+	for _, in := range cases {
+		if got := redactString(in); got != in {
+			t.Errorf("redactString(%q) = %q; want unchanged", in, got)
+		}
+	}
+}
+
+func TestRedactStringStripsJustificationThroughNewline(t *testing.T) {
+	in := `score: 0.9; justification: completed.task; foo bar` + "\nnext line"
+	got := redactString(in)
+	for _, forbidden := range []string{"task", "foo bar"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("redactString left %q in: %q", forbidden, got)
+		}
+	}
+	if !strings.Contains(got, "next line") {
+		t.Errorf("redactString consumed past newline: %q", got)
+	}
+}

@@ -69,7 +69,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		for _, r := range rs {
 			if r.Err != nil {
 				fmt.Fprintf(&b, "| %s | — | — | — | — | — | %s |\n",
-					markdownCell(r.TraceID), redactErrorMessage(r.Err.Error()))
+					markdownCell(r.TraceID), markdownCell(redactErrorMessage(r.Err.Error())))
 				continue
 			}
 			fmt.Fprintf(&b, "| %s | %.2f | %.2f | %s | %d | %d | %s |\n",
@@ -82,7 +82,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 	}
 
 	out := b.String()
-	out = pathPattern.ReplaceAllString(out, "<redacted-path>")
+	out = redactPaths(out)
 	return out
 }
 
@@ -154,14 +154,18 @@ func aggregate(rs []Result) modelAggregate {
 	if a.toolArgsComputed > 0 {
 		a.meanToolArgs = taSum / float64(a.toolArgsComputed)
 	}
-	qPs := percentiles(qVals, 0.25, 0.5, 0.75, 0.9)
-	a.qualityP25 = qPs[0]
-	a.qualityP50 = qPs[1]
-	a.qualityP75 = qPs[2]
-	a.qualityP90 = qPs[3]
-	lPs := int64Percentiles(lVals, 0.5, 0.9)
-	a.latencyP50 = lPs[0]
-	a.latencyP90 = lPs[1]
+	if len(qVals) > 0 {
+		qPs := percentiles(qVals, 0.25, 0.5, 0.75, 0.9)
+		a.qualityP25 = qPs[0]
+		a.qualityP50 = qPs[1]
+		a.qualityP75 = qPs[2]
+		a.qualityP90 = qPs[3]
+	}
+	if len(lVals) > 0 {
+		lPs := int64Percentiles(lVals, 0.5, 0.9)
+		a.latencyP50 = lPs[0]
+		a.latencyP90 = lPs[1]
+	}
 	return a
 }
 
