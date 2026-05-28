@@ -106,6 +106,8 @@ func TestRedactStringStripsColonPrefixedPaths(t *testing.T) {
 		{"cache=/Users/keith.struzzieri/.cache run", "cache=<redacted-path> run"},
 		{"key:/tmp/secret leaked", "key:<redacted-path> leaked"},
 		{"json={\"path\":\"/tmp/x\"}", "json={\"path\":\"<redacted-path>\"}"},
+		{"read `/tmp/foo.json` failed", "read `<redacted-path>` failed"},
+		{"cache `$HOME/.cache`", "cache `<redacted-path>/.cache`"},
 	}
 	for _, tc := range cases {
 		if got := redactString(tc.in); got != tc.want {

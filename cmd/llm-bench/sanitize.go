@@ -14,7 +14,7 @@ var (
 	// containing /tmp-like substrings (e.g. "org/tmp-model:v1") are not
 	// incorrectly redacted. The leading group captures the boundary character
 	// (whitespace, punctuation, or start-of-string); group 1 is the path.
-	pathPattern = regexp.MustCompile(`(?:^|[\s,;:=>}\]'"(\[<])(/tmp(?:/[^\s"'<>\]\[{},;]+)?|/Users/[^/\s"'<>\]\[{},;]+(?:/[^\s"'<>\]\[{},;]+)?|\$HOME)`)
+	pathPattern = regexp.MustCompile("(?:^|[\\s,;:=>}\\]`'\"(\\[<])(/tmp(?:/[^\\s`\"'<>\\]\\[{},;]+)?|/Users/[^/\\s`\"'<>\\]\\[{},;]+(?:/[^\\s`\"'<>\\]\\[{},;]+)?|\\$HOME)")
 
 	// justificationPrefix strips through the end of the line so that
 	// multi-clause values like "completed.task; foo" are fully removed.
