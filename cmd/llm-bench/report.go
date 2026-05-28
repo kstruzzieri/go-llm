@@ -24,15 +24,21 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		fmt.Fprintf(&b, "Judge model: `%s`\n\n", markdownCell(opts.JudgeModel))
 	}
 
-	if opts.TraceSetManifestHash != "" || opts.JudgeCacheHits+opts.JudgeCacheMisses > 0 {
+	emitCacheLine := opts.Scorer == "llm-judge"
+	emitProvenance := opts.TraceSetManifestHash != "" || emitCacheLine
+	if emitProvenance {
 		fmt.Fprintf(&b, "## Provenance\n\n")
 		if opts.TraceSetManifestHash != "" {
 			fmt.Fprintf(&b, "- Trace set manifest hash: `%s`\n", markdownCell(opts.TraceSetManifestHash))
 		}
-		if opts.JudgeCacheHits+opts.JudgeCacheMisses > 0 {
+		if emitCacheLine {
 			total := opts.JudgeCacheHits + opts.JudgeCacheMisses
-			rate := 100 * float64(opts.JudgeCacheHits) / float64(total)
-			fmt.Fprintf(&b, "- Judge cache hit rate: %.1f%% (%d/%d)\n", rate, opts.JudgeCacheHits, total)
+			if total > 0 {
+				rate := 100 * float64(opts.JudgeCacheHits) / float64(total)
+				fmt.Fprintf(&b, "- Judge cache hit rate: %.1f%% (%d/%d)\n", rate, opts.JudgeCacheHits, total)
+			} else {
+				fmt.Fprintf(&b, "- Judge cache: no activity recorded (cache may be disabled or no traces ran)\n")
+			}
 		}
 		fmt.Fprintln(&b)
 	}

@@ -187,3 +187,17 @@ func TestFormatReportProvenanceBlock(t *testing.T) {
 		t.Error("missing trace set manifest hash in provenance")
 	}
 }
+
+func TestFormatReportProvenanceReportsCacheDisabledForLLMJudge(t *testing.T) {
+	report := formatReport([]string{"m1"}, []Result{
+		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5}},
+	}, reportOptions{
+		Scorer:               "llm-judge",
+		JudgeModel:           "gemma4:31b",
+		TraceSetManifestHash: "sha256:abc123",
+		// JudgeCacheHits/Misses both zero → cache disabled or unused
+	})
+	if !strings.Contains(report, "Judge cache: no activity recorded") {
+		t.Fatalf("expected cache-disabled signal in provenance:\n%s", report)
+	}
+}
