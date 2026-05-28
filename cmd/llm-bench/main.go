@@ -80,10 +80,10 @@ func main() {
 		if err := validateCaptureSampleAndLimit(*captureLimit, *captureSample); err != nil {
 			log.Fatalf("llm-bench: %v", err)
 		}
-		if err := resolveCaptureSample(*captureSample); err != nil {
+		sampleSpec, err := resolveCaptureSample(*captureSample)
+		if err != nil {
 			log.Fatalf("llm-bench: %v", err)
 		}
-		_ = captureSampleSeed // wired up in track B2
 		src, err := resolveToolSchemaSource(*mcpStdioCommand, *mcpURL)
 		if err != nil {
 			log.Fatalf("llm-bench: %v", err)
@@ -98,6 +98,8 @@ func main() {
 			Source:           *captureSource,
 			FallbackSystem:   *captureSystem,
 			ToolSchemaSource: src,
+			SampleSpec:       sampleSpec,
+			SampleSeed:       *captureSampleSeed,
 		})
 		if err != nil {
 			log.Fatalf("llm-bench: capture: %v", err)
@@ -322,15 +324,18 @@ func validateCaptureSampleAndLimit(limit int, sample string) error {
 	return nil
 }
 
-// resolveCaptureSample is a B1 placeholder. B2 (sampling.go) replaces
-// the body with real parsing + allocator. Until then, supplying a
-// non-empty spec is a hard error rather than a silent no-op so users
-// can't think sampling is happening.
-func resolveCaptureSample(spec string) error {
+// resolveCaptureSample parses the -capture-sample flag into a
+// *captureSampleSpec. Returns (nil, nil) when spec is empty (no
+// sampling requested). Any parse error is returned as a non-nil error.
+func resolveCaptureSample(spec string) (*captureSampleSpec, error) {
 	if strings.TrimSpace(spec) == "" {
-		return nil
+		return nil, nil
 	}
-	return fmt.Errorf("-capture-sample: sampling not yet implemented (track B2)")
+	parsed, err := parseCaptureSample(spec)
+	if err != nil {
+		return nil, err
+	}
+	return &parsed, nil
 }
 
 // resolveToolSchemaSource picks a tool-schema source from CLI flags.

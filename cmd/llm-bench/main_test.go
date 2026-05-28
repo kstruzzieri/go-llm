@@ -48,14 +48,22 @@ func TestCaptureSampleAndLimitMutuallyExclusive(t *testing.T) {
 	}
 }
 
-func TestCaptureSampleNotYetImplementedReturnsError(t *testing.T) {
-	if err := resolveCaptureSample("n=20"); err == nil || !strings.Contains(err.Error(), "sampling not yet implemented") {
-		t.Fatalf("want not-yet-implemented error; got %v", err)
+func TestResolveCaptureSampleParsesValidSpec(t *testing.T) {
+	spec, err := resolveCaptureSample("n=10,stratify=token-length")
+	if err != nil {
+		t.Fatalf("resolveCaptureSample: %v", err)
+	}
+	if spec == nil || spec.N != 10 {
+		t.Fatalf("spec=%+v; want N=10", spec)
 	}
 }
 
-func TestCaptureSampleEmptyOK(t *testing.T) {
-	if err := resolveCaptureSample(""); err != nil {
-		t.Fatalf("empty spec: %v", err)
+func TestResolveCaptureSampleEmptyReturnsNil(t *testing.T) {
+	spec, err := resolveCaptureSample("")
+	if err != nil {
+		t.Fatalf("resolveCaptureSample(empty): %v", err)
+	}
+	if spec != nil {
+		t.Fatalf("want nil spec for empty input; got %+v", spec)
 	}
 }

@@ -174,9 +174,22 @@ First implementation slice:
   semantics). When no transport is configured, capture writes
   `trace.Tools = []` and replay reports `ToolArgsValid` as
   not-computed.
-- Feedback-driven sampling is deferred until feedback rows can be tied
-  to conversations; today `feedback_retrievals` and `feedback_signals`
-  do not carry a conversation id.
+- Capture-derivable stratification: `llm-bench -capture -capture-sample
+  <spec>` partitions the enriched trace pool by any cross-product of
+  `token-length`, `turn-count`, `has-tool-calls`,
+  `has-final-answer-criteria`, `source`, and `recency`, then samples
+  uniformly within each cell. The seed (`-capture-sample-seed`) makes
+  the selection reproducible across machines; a `_sample-manifest.json`
+  in the output directory records the seed, parsed spec, cell counts,
+  and the IDs of every trace written.
+- The sampling pipeline runs `list → convert → enrich → sample → write`,
+  so conversations skipped during enrichment (e.g. undeclared tool
+  references) are not eligible for sampling and never appear in the
+  manifest.
+- Feedback-driven sampling is still deferred: today
+  `feedback_retrievals` and `feedback_signals` do not carry a
+  conversation id. Once retrieval/session provenance lands, a future
+  capture flag can join sampling against that source.
 
 ### Phase 3 — LLM-as-judge scorer
 

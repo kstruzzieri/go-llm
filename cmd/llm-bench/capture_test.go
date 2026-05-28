@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -17,6 +18,7 @@ import (
 type fakeConversationStore struct {
 	summaries     []conversation.Summary
 	conversations map[string]conversation.Conversation
+	loaded        *[]string
 }
 
 func (s fakeConversationStore) List(context.Context) ([]conversation.Summary, error) {
@@ -26,6 +28,9 @@ func (s fakeConversationStore) List(context.Context) ([]conversation.Summary, er
 }
 
 func (s fakeConversationStore) Load(_ context.Context, id string) (*conversation.Conversation, error) {
+	if s.loaded != nil {
+		*s.loaded = append(*s.loaded, id)
+	}
 	conv, ok := s.conversations[id]
 	if !ok {
 		return nil, errors.New("missing conversation")
@@ -253,6 +258,7 @@ func TestCaptureConversationsSkipsMalformedAndWritesDeterministicOutput(t *testi
 
 func TestCaptureLimitCountsWrittenTraces(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	var loaded []string
 	store := fakeConversationStore{
 		summaries: []conversation.Summary{
 			{ID: "bad", UpdatedAt: now.Add(3 * time.Minute)},
@@ -267,6 +273,7 @@ func TestCaptureLimitCountsWrittenTraces(t *testing.T) {
 			"good-1": validTestConversation("good-1", "first", now),
 			"good-2": validTestConversation("good-2", "second", now),
 		},
+		loaded: &loaded,
 	}
 
 	dir := t.TempDir()
@@ -286,6 +293,9 @@ func TestCaptureLimitCountsWrittenTraces(t *testing.T) {
 	}
 	if filepath.Base(result.Written[0]) != "conversation-good-1.json" {
 		t.Fatalf("written file = %q", result.Written[0])
+	}
+	if got, want := strings.Join(loaded, ","), "bad,good-1"; got != want {
+		t.Fatalf("loaded conversations = %s, want %s", got, want)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "conversation-good-2.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("good-2 should not be written after limit, stat err=%v", err)
@@ -638,4 +648,71 @@ func TestCaptureConversationsNilSourceLeavesEmptyTools(t *testing.T) {
 	if len(trace.Tools) != 0 {
 		t.Fatalf("trace.Tools=%v; want empty when no source configured", trace.Tools)
 	}
+}
+
+func TestCaptureConversationsAppliesSampleAfterEnrichment(t *testing.T) {
+	// 4 conversations, one of them with an undeclared tool that will be
+	// dropped during enrichment. Spec asks for n=2 — the manifest must
+	// list exactly the 2 written traces (not 2 of the 4 original
+	// candidates).
+	tools := []json.RawMessage{json.RawMessage(`{"name":"read_file","inputSchema":{"type":"object"}}`)}
+	store := makeStoreWithOneUndeclared("undeclared_tool", 4)
+	outDir := t.TempDir()
+	spec, _ := parseCaptureSample("n=2,stratify=turn-count")
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        outDir,
+		ToolSchemaSource: staticToolSchemaSource{tools: tools},
+		SampleSpec:       &spec,
+		SampleSeed:       42,
+		Now:              time.Now,
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 2 {
+		t.Fatalf("Written=%d; want 2 (post-sample)", len(res.Written))
+	}
+	manifestPath := filepath.Join(outDir, "_sample-manifest.json")
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		t.Fatalf("read manifest: %v", err)
+	}
+	var manifest sampleManifest
+	if err := json.Unmarshal(data, &manifest); err != nil {
+		t.Fatalf("unmarshal manifest: %v", err)
+	}
+	if len(manifest.SampledIDs) != 2 {
+		t.Fatalf("manifest.SampledIDs=%v; want 2", manifest.SampledIDs)
+	}
+	for _, id := range manifest.SampledIDs {
+		if strings.Contains(id, "undeclared") {
+			t.Fatalf("manifest lists dropped trace %q", id)
+		}
+	}
+}
+
+// makeStoreWithOneUndeclared returns a fakeConversationStore with N
+// conversations. Each is a valid 5-message tool-call convo using
+// "read_file"; the last conversation instead uses the supplied
+// undeclared tool name (so it will fail validateTrace under any
+// snapshot that doesn't declare it).
+func makeStoreWithOneUndeclared(undeclared string, n int) fakeConversationStore {
+	now := time.Now()
+	summaries := make([]conversation.Summary, n)
+	conversations := make(map[string]conversation.Conversation, n)
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("c-%03d", i)
+		toolName := "read_file"
+		if i == n-1 {
+			toolName = undeclared
+		}
+		conv := conversation.Conversation{
+			ID:        id,
+			Messages:  buildToolCallConvo(toolName),
+			UpdatedAt: now.Add(-time.Duration(i) * time.Minute),
+		}
+		summaries[i] = conversation.Summary{ID: id, UpdatedAt: conv.UpdatedAt}
+		conversations[id] = conv
+	}
+	return fakeConversationStore{summaries: summaries, conversations: conversations}
 }
