@@ -757,6 +757,158 @@ func (r *Router) activeSignals() map[string]bool {
 	return active
 }
 
+// ---------------------------------------------------------------------------
+// Feedback snapshot
+// ---------------------------------------------------------------------------
+
+// feedbackSnapshotStatus is the operator-facing reason why a route's
+// feedback snapshot was (or was not) active. Unexported per the spec's
+// PR3-public-surface restriction; the public ScoreBreakdown surfaces
+// the same value as a plain string field so operators can distinguish
+// "feedback off by design" from "feedback off because the store failed"
+// without parsing logs.
+type feedbackSnapshotStatus string
+
+const (
+	// feedbackSnapshotStatusOff indicates the FeedbackScoringMode was Off.
+	feedbackSnapshotStatusOff feedbackSnapshotStatus = "off"
+	// feedbackSnapshotStatusNoStore indicates Shadow/Enforce mode but no
+	// RoutingFeedback was configured (WithRoutingFeedback never called,
+	// or called with nil).
+	feedbackSnapshotStatusNoStore feedbackSnapshotStatus = "no_store"
+	// feedbackSnapshotStatusEmptyUseCase indicates the route had an
+	// empty req.UseCase, which cannot form a FeedbackKey.
+	feedbackSnapshotStatusEmptyUseCase feedbackSnapshotStatus = "empty_use_case"
+	// feedbackSnapshotStatusReadError indicates the store returned a
+	// non-nil error during snapshot construction; fail-open disabled
+	// feedback for the route.
+	feedbackSnapshotStatusReadError feedbackSnapshotStatus = "read_error"
+	// feedbackSnapshotStatusActive indicates the snapshot read every
+	// candidate key successfully and feedback is in effect for the route.
+	feedbackSnapshotStatusActive feedbackSnapshotStatus = "active"
+)
+
+// feedbackSnapshot is the per-Route()-call view of routing-feedback
+// aggregates for all candidate keys touched by the route. All store I/O
+// happens through the snapshot — initially in buildFeedbackSnapshot for
+// the first candidate set, then incrementally via readCandidates for
+// chain routing's later steps. Consumers (scoreCandidate) read via
+// lookup() and never touch the store directly. The snapshot lives only
+// for the duration of one Route() (or routeChain() walk); a future TTL
+// cache would slot in here without changing scoreCandidate.
+//
+// Fail-open is route-level and latching: the first store read error
+// flips failed=true, sets status=read_error, clears byKey, and prevents
+// any further reads for the rest of the route. This preserves the spec
+// contract that one read failure disables feedback for the whole route
+// — including any later chain steps or the recommend tail. The
+// non-Off / non-no_store / non-empty_use_case states (active, read_error)
+// are terminal once set; only the initial unconfigured states can
+// transition to active.
+type feedbackSnapshot struct {
+	active bool
+	failed bool // latches true on first read error; bars further reads
+	mode   FeedbackScoringMode
+	status feedbackSnapshotStatus
+	byKey  map[FeedbackKey]*candidateFeedback
+}
+
+// lookup returns the per-key feedback for a candidate, or nil if the
+// key was not in the snapshot (or the snapshot is inactive).
+func (s *feedbackSnapshot) lookup(key FeedbackKey) *candidateFeedback {
+	if s == nil || !s.active {
+		return nil
+	}
+	return s.byKey[key]
+}
+
+// readCandidates extends the snapshot with reads for any profile whose
+// FeedbackKey is not yet known. Called by routeChain before each
+// scoreChainStep / appendRecommendTail so that lazily-resolved chain
+// step profiles get read into the same route-level snapshot. Fail-open
+// latches inactive for the whole route on the first read error: once
+// snap.failed == true, the snapshot stays inactive and subsequent calls
+// are no-ops, so an early read_error disables feedback for every later
+// chain step AND the recommend tail.
+//
+// No-op when the snapshot is already inactive (off / no_store /
+// empty_use_case / read_error) — nothing to add and nothing to lose.
+func (s *feedbackSnapshot) readCandidates(ctx context.Context, r *Router, profiles []*ModelProfile, useCase string) {
+	if s == nil || s.failed || !s.active || r.routingFeedback == nil || useCase == "" {
+		return
+	}
+	seen := make(map[FeedbackKey]struct{}, len(profiles))
+	for _, p := range profiles {
+		key := FeedbackKey{Provider: p.Key.Provider, Model: p.Key.Model, UseCase: useCase}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, already := s.byKey[key]; already {
+			continue
+		}
+		agg, err := r.routingFeedback.Score(ctx, key)
+		if err != nil {
+			if r.feedbackWarn != nil {
+				r.feedbackWarn.warnFeedbackReadOnce(r.feedbackLogger, key, err)
+			}
+			s.active = false
+			s.failed = true
+			s.status = feedbackSnapshotStatusReadError
+			s.byKey = nil
+			return
+		}
+		s.byKey[key] = &candidateFeedback{
+			raw:      agg,
+			adjusted: adjustFeedbackScore(agg),
+		}
+	}
+}
+
+// buildFeedbackSnapshot constructs the per-route feedback snapshot. The
+// initial candidate set is optional: pass `nil` for chain routing (where
+// chain step profiles are resolved lazily and added incrementally via
+// snap.readCandidates), or pass the full candidate slice for the
+// single-pass scoreAll path.
+//
+// Returns an inactive (active=false) snapshot when:
+//   - mode is FeedbackScoringOff           -> status = "off"
+//   - routingFeedback is nil               -> status = "no_store"
+//   - useCase is empty                     -> status = "empty_use_case"
+//   - any store read returns an error      -> status = "read_error", failed=true
+//
+// Fail-open writes a once-logged warning via feedbackLogger so a
+// persistently broken store is visible without flooding logs.
+//
+// IMPORTANT: this is called exactly ONCE per Route() — the same snapshot
+// is then threaded into every scoreAll / scoreChainStep / appendRecommendTail
+// call for the same route. That guarantees an early read error disables
+// feedback for the whole route, including any later chain steps.
+func (r *Router) buildFeedbackSnapshot(ctx context.Context, candidates []*ModelProfile, useCase string) *feedbackSnapshot {
+	snap := &feedbackSnapshot{mode: r.feedbackScoringMode}
+	switch {
+	case r.feedbackScoringMode == FeedbackScoringOff:
+		snap.status = feedbackSnapshotStatusOff
+		return snap
+	case r.routingFeedback == nil:
+		snap.status = feedbackSnapshotStatusNoStore
+		return snap
+	case useCase == "":
+		snap.status = feedbackSnapshotStatusEmptyUseCase
+		return snap
+	}
+	// Begin in the "active with empty byKey" state so readCandidates can
+	// extend it. The initial readCandidates call below either populates
+	// byKey with the supplied candidates or latches read_error.
+	snap.active = true
+	snap.status = feedbackSnapshotStatusActive
+	snap.byKey = make(map[FeedbackKey]*candidateFeedback, len(candidates))
+	if len(candidates) > 0 {
+		snap.readCandidates(ctx, r, candidates, useCase)
+	}
+	return snap
+}
+
 // getOrCreateBreaker returns the circuit breaker for the named provider,
 // creating one if it doesn't exist. Uses double-check locking.
 func (r *Router) getOrCreateBreaker(provider string) *CircuitBreaker {

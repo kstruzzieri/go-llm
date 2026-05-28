@@ -9,6 +9,7 @@ package provider
 import (
 	"math"
 	"sort"
+	"time"
 )
 
 // warmthBonusMax is the maximum bonus applied to candidates whose model is
@@ -61,6 +62,45 @@ func defaultWeightProfile(useCase string) *WeightProfile {
 }
 
 // ---------------------------------------------------------------------------
+// Feedback confidence gating
+// ---------------------------------------------------------------------------
+
+// Feedback confidence-gating defaults. PR3's package-level constants
+// (intentionally not knobs): the SampleCount floor below which adjusted
+// feedback is forced neutral, and the prior-samples weight used in the
+// shrinkage formula. PR4 will evaluate whether these defaults are too
+// conservative before any public tuning surface is added.
+const (
+	feedbackMinScoredCount = 3
+	feedbackPriorSamples   = 10
+)
+
+// candidateFeedback is the per-key view extracted from a route-level
+// feedback snapshot. It is a value type (no pointer-aliasing into the
+// snapshot's internal map) so the consumer can mutate freely; all I/O
+// already happened during snapshot construction.
+type candidateFeedback struct {
+	raw      Aggregate // as returned by the store
+	adjusted float64   // confidence-gated/shrunk value used for weighted scoring
+}
+
+// adjustFeedbackScore returns 0.5 when ScoredCount is below the floor,
+// otherwise shrinks the raw score toward 0.5 using a Bayesian-style
+// confidence weight: confidence := ScoredCount / (ScoredCount + prior).
+//
+// At ScoredCount == prior the shrinkage is exactly halfway; large
+// ScoredCounts approach the raw value asymptotically. Conservative by
+// design — single successes don't dominate routing decisions until
+// enough samples accumulate.
+func adjustFeedbackScore(agg Aggregate) float64 {
+	if agg.ScoredCount < feedbackMinScoredCount {
+		return 0.5
+	}
+	confidence := float64(agg.ScoredCount) / float64(agg.ScoredCount+feedbackPriorSamples)
+	return 0.5 + (agg.Score-0.5)*confidence
+}
+
+// ---------------------------------------------------------------------------
 // scoreBreakdown
 // ---------------------------------------------------------------------------
 
@@ -76,6 +116,22 @@ type scoreBreakdown struct {
 	costPenalty    float64 // default 0
 	breakerPenalty float64 // 0 or -Inf
 	capabilityGate bool    // false = eliminated
+
+	// PR3 feedback-source fields. Populated by scoreCandidate when a
+	// route-level feedback snapshot is active; otherwise zero (and the
+	// "feedback" signal is excluded from activeSignals).
+	feedbackActive      bool      // true iff snapshot active and key found
+	feedbackRaw         float64   // raw Aggregate.Score
+	feedbackAdjusted    float64   // confidence-gated/shrunk value
+	feedbackSampleCount int
+	feedbackScoredCount int
+	feedbackUpdatedAt   time.Time
+
+	// PR3 score-with/without-feedback deltas. Computed once per
+	// candidate in scoreAll/scoreChainStep after computeWeightedScore so
+	// the breakdown can report both numbers without re-running scoring.
+	scoreWithoutFeedback float64
+	scoreWithFeedback    float64
 }
 
 // ---------------------------------------------------------------------------
