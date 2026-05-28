@@ -18,6 +18,7 @@ import (
 type fakeConversationStore struct {
 	summaries     []conversation.Summary
 	conversations map[string]conversation.Conversation
+	loaded        *[]string
 }
 
 func (s fakeConversationStore) List(context.Context) ([]conversation.Summary, error) {
@@ -27,6 +28,9 @@ func (s fakeConversationStore) List(context.Context) ([]conversation.Summary, er
 }
 
 func (s fakeConversationStore) Load(_ context.Context, id string) (*conversation.Conversation, error) {
+	if s.loaded != nil {
+		*s.loaded = append(*s.loaded, id)
+	}
 	conv, ok := s.conversations[id]
 	if !ok {
 		return nil, errors.New("missing conversation")
@@ -254,6 +258,7 @@ func TestCaptureConversationsSkipsMalformedAndWritesDeterministicOutput(t *testi
 
 func TestCaptureLimitCountsWrittenTraces(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	var loaded []string
 	store := fakeConversationStore{
 		summaries: []conversation.Summary{
 			{ID: "bad", UpdatedAt: now.Add(3 * time.Minute)},
@@ -268,6 +273,7 @@ func TestCaptureLimitCountsWrittenTraces(t *testing.T) {
 			"good-1": validTestConversation("good-1", "first", now),
 			"good-2": validTestConversation("good-2", "second", now),
 		},
+		loaded: &loaded,
 	}
 
 	dir := t.TempDir()
@@ -287,6 +293,9 @@ func TestCaptureLimitCountsWrittenTraces(t *testing.T) {
 	}
 	if filepath.Base(result.Written[0]) != "conversation-good-1.json" {
 		t.Fatalf("written file = %q", result.Written[0])
+	}
+	if got, want := strings.Join(loaded, ","), "bad,good-1"; got != want {
+		t.Fatalf("loaded conversations = %s, want %s", got, want)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "conversation-good-2.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("good-2 should not be written after limit, stat err=%v", err)

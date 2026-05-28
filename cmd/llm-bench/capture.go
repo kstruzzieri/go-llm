@@ -220,6 +220,9 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 			Trace: trace,
 			Path:  filepath.Join(outDir, safeTraceFilename(trace.ID)+".json"),
 		})
+		if opts.SampleSpec == nil && opts.Limit > 0 && len(enriched) >= opts.Limit {
+			break
+		}
 	}
 
 	// Phase B: sample (if requested) or apply -capture-limit.
