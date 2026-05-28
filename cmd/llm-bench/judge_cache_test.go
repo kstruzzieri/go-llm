@@ -75,8 +75,17 @@ func newTestCache(t *testing.T) (*sqliteJudgeCache, string) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
+	cleanupJudgeCache(t, c)
 	return c, path
+}
+
+func cleanupJudgeCache(t *testing.T, c *sqliteJudgeCache) {
+	t.Helper()
+	t.Cleanup(func() {
+		if err := c.Close(); err != nil {
+			t.Errorf("close judge cache: %v", err)
+		}
+	})
 }
 
 func TestSQLiteJudgeCache_PutThenGetReturnsEntry(t *testing.T) {
@@ -129,7 +138,7 @@ func TestSQLiteJudgeCache_MigrationIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-open: %v", err)
 	}
-	defer func() { _ = c2.Close() }()
+	cleanupJudgeCache(t, c2)
 }
 
 func TestOpenJudgeCache_CreatesParentDirectory(t *testing.T) {
@@ -138,7 +147,7 @@ func TestOpenJudgeCache_CreatesParentDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	defer func() { _ = c.Close() }()
+	cleanupJudgeCache(t, c)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("cache file stat: %v", err)
 	}
@@ -207,7 +216,7 @@ func TestJudgeCacheStatsStartAtZero(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	defer c.Close()
+	cleanupJudgeCache(t, c)
 	hits, misses := c.Stats()
 	if hits != 0 || misses != 0 {
 		t.Fatalf("initial Stats() = (%d,%d); want (0,0)", hits, misses)
@@ -220,7 +229,7 @@ func TestJudgeCacheStatsIncrement(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	defer c.Close()
+	cleanupJudgeCache(t, c)
 	ctx := context.Background()
 
 	if _, ok, err := c.Get(ctx, "key-A"); err != nil || ok {
@@ -258,7 +267,7 @@ func TestJudgeCacheStatsAreConcurrentSafe(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	defer c.Close()
+	cleanupJudgeCache(t, c)
 	ctx := context.Background()
 
 	if err := c.Put(ctx, judgeCacheEntry{
@@ -298,7 +307,7 @@ func TestJudgeCacheGetPreservesVerdictOnHit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("openJudgeCache: %v", err)
 	}
-	defer c.Close()
+	cleanupJudgeCache(t, c)
 	ctx := context.Background()
 	want := judgeCacheEntry{
 		CacheKey: "k", JudgeModel: "j", TraceID: "t", CandidateModel: "cm",

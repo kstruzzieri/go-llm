@@ -35,6 +35,18 @@ func TestRedactStringsStripsJudgeJustification(t *testing.T) {
 	}
 }
 
+func TestRedactStringStripsLLMJudgeNoteSuffix(t *testing.T) {
+	got := redactString("tool arg mismatch: missing query; llm-judge=gemma4:31b: model picked the wrong tool; leaked detail")
+	for _, forbidden := range []string{"llm-judge=", "model picked", "leaked detail"} {
+		if strings.Contains(got, forbidden) {
+			t.Fatalf("redactString left %q in judge note: %q", forbidden, got)
+		}
+	}
+	if got != "tool arg mismatch: missing query" {
+		t.Fatalf("redactString stripped the wrong content; got %q", got)
+	}
+}
+
 func TestRedactErrorMessage(t *testing.T) {
 	cases := []struct {
 		in   string

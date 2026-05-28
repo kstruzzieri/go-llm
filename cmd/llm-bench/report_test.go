@@ -147,9 +147,10 @@ func TestFormatReportDoesNotLeakRawErrorOrJustification(t *testing.T) {
 	report := formatReport([]string{"m1"}, []Result{
 		{Model: "m1", TraceID: "t1", Err: errors.New("dial tcp /tmp/foo: connection refused")},
 		{Model: "m1", TraceID: "t2", Score: Score{Notes: `justification: "model picked the wrong tool"`, AnswerQuality: 0.7}},
+		{Model: "m1", TraceID: "t3", Score: Score{Notes: `llm-judge=gemma4:31b: exposed judge rationale`, AnswerQuality: 0.8}},
 	}, reportOptions{Scorer: "llm-judge", JudgeModel: "gemma4:31b"})
 
-	forbidden := []string{"/tmp/", "/Users/", "justification:", "connection refused"}
+	forbidden := []string{"/tmp/", "/Users/", "justification:", "connection refused", "exposed judge rationale"}
 	for _, f := range forbidden {
 		if strings.Contains(report, f) {
 			t.Errorf("forbidden substring %q leaked into report:\n%s", f, report)

@@ -19,6 +19,12 @@ var (
 	// justificationPrefix strips through the end of the line so that
 	// multi-clause values like "completed.task; foo" are fully removed.
 	justificationPrefix = regexp.MustCompile(`(?i)\bjustification\s*:\s*(?:"[^"]*"|'[^']*'|[^\n]+)`)
+
+	// materializeJudgement appends llm-judge=<model>: <justification> to
+	// Score.Notes. Drop that whole suffix because the model tag is useful
+	// internally but the following free-form judge reasoning is not artifact
+	// safe, and model names themselves can contain colons.
+	judgeNotePrefix = regexp.MustCompile(`(?i)(?:^|;\s*)llm-judge=[^\n]*`)
 )
 
 // redactPaths replaces local-path occurrences with <redacted-path> while
@@ -42,6 +48,7 @@ func redactPaths(s string) string {
 // spec §5.2 sanitization rules.
 func redactString(s string) string {
 	s = redactPaths(s)
+	s = judgeNotePrefix.ReplaceAllString(s, "")
 	s = justificationPrefix.ReplaceAllString(s, "")
 	return strings.TrimSpace(s)
 }
