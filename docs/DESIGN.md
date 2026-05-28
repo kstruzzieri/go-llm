@@ -579,6 +579,7 @@ require (
     golang.org/x/net                        // h2c HTTP/2 cleartext (mcp/ only)
     github.com/modelcontextprotocol/go-sdk  // Official MCP Go SDK (mcp/ only)
     github.com/parquet-go/parquet-go         // Parquet file writer (rag/parquet/ only)
+    github.com/santhosh-tekuri/jsonschema/v6 // JSON Schema validator (cmd/llm-bench/ only)
 )
 ```
 

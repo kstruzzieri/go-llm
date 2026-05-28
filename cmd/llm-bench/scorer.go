@@ -25,14 +25,15 @@ const (
 // Score captures the evaluation dimensions for a single (model, trace) run.
 // See docs/llm/benchmark-plan.md for the scoring rationale.
 type Score struct {
-	ToolSequenceMatch float64 // [0,1] — how close actual tool calls were to the golden sequence
-	ToolArgsValid     float64 // [0,1] — fraction of tool calls with valid arguments
-	AnswerQuality     float64 // [0,1] — final-answer quality per the active Scorer
-	LatencyMs         int64   // sum of all chat round-trips for this replay
-	TurnLatenciesMs   []int64 // per-turn breakdown; len == number of chat round-trips
-	ScorerLatencyMs   int64   // wall-clock time spent in the active scorer
-	TotalTokens       int
-	Notes             string
+	ToolSequenceMatch     float64 // [0,1] — how close actual tool calls were to the golden sequence
+	ToolArgsValid         float64 // [0,1] — fraction of tool calls with valid arguments
+	ToolArgsValidComputed bool    // when false, ToolArgsValid is a placeholder (0.0) — see validateToolArguments
+	AnswerQuality         float64 // [0,1] — final-answer quality per the active Scorer
+	LatencyMs             int64   // sum of all chat round-trips for this replay
+	TurnLatenciesMs       []int64 // per-turn breakdown; len == number of chat round-trips
+	ScorerLatencyMs       int64   // wall-clock time spent in the active scorer
+	TotalTokens           int
+	Notes                 string
 }
 
 // Scorer is the pluggable strategy for evaluating a replay result.
@@ -96,19 +97,26 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 // before drawing conclusions.
 type ExactMatchScorer struct{}
 
-// Score implements Scorer. ToolArgsValid is left unset (zero) until replay
-// validates candidate arguments against trace.Tools schemas. The Notes field
-// records this so aggregate consumers can distinguish "not scored" from
-// "scored zero".
+// Score implements Scorer. ToolArgsValid is populated by validating each
+// candidate tool call against the JSON Schema declared in trace.Tools;
+// ToolArgsValidComputed records whether the score is meaningful (see
+// validateToolArguments for the truth table).
 func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
 	needle := strings.TrimSpace(trace.Golden.FinalAnswerSubstring)
 	if needle == "" {
 		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingGolden)
 	}
 
+	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, actual.Transcript)
+	if schemaErr != nil {
+		return Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
+	}
+
 	score := Score{
-		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
+		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		ToolArgsValid:         toolArgsScore,
+		ToolArgsValidComputed: toolArgsComputed,
+		Notes:                 toolArgsNotes,
 	}
 
 	finalText := lastAssistantContent(actual.Transcript)
@@ -235,9 +243,16 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
 	}
 
+	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, actual.Transcript)
+	if schemaErr != nil {
+		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
+	}
+
 	baseScore := Score{
-		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "ToolArgsValid not computed (schema validation pending; see benchmark-plan.md metrics)",
+		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		ToolArgsValid:         toolArgsScore,
+		ToolArgsValidComputed: toolArgsComputed,
+		Notes:                 toolArgsNotes,
 	}
 
 	if strings.TrimSpace(lastAssistantContent(actual.Transcript)) == "" {

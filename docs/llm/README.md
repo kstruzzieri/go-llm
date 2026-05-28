@@ -132,11 +132,12 @@ trace includes the needed tool schemas. Replay matches candidate tool
 calls against the scripted assistant turn in lock-step (same count,
 same names, same order); mismatches surface as `errToolCallMismatch`,
 divergence into plain text bypasses the scripted tool route and is
-recorded in `Score.Notes`, and tool-argument schema validation against
-`trace.Tools` remains scorer-side follow-up work. The current
-`conversation/` capture path does not export schemas because those
-records do not store them, so schema sourcing remains follow-up capture
-work.
+recorded in `Score.Notes`. Tool-argument schema validation against
+`trace.Tools` is computed by the scorer when schemas are present.
+Capture can populate `trace.Tools` from a live MCP server with
+`-mcp-stdio-command` or `-mcp-url`; without either flag, capture writes
+empty tools and replay marks `ToolArgsValid` as not-computed for actual
+tool calls.
 
 ## Date stamp
 

@@ -30,11 +30,12 @@ var (
 )
 
 type captureOptions struct {
-	DBPath         string
-	OutputDir      string
-	Limit          int
-	Source         string
-	FallbackSystem string
+	DBPath           string
+	OutputDir        string
+	Limit            int
+	Source           string
+	FallbackSystem   string
+	ToolSchemaSource toolSchemaSource // nil = no snapshot; configured empty snapshot is authoritative
 }
 
 type captureResult struct {
@@ -172,6 +173,19 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 	}
 
 	redactor := defaultRedactor()
+	snapshotConfigured := opts.ToolSchemaSource != nil
+	var snapshotTools []json.RawMessage
+	if snapshotConfigured {
+		tools, err := opts.ToolSchemaSource.Snapshot(ctx)
+		if err != nil {
+			return captureResult{}, fmt.Errorf("capture: tool schema snapshot: %w", err)
+		}
+		snapshotTools, err = redactToolSchemas(tools, redactor)
+		if err != nil {
+			return captureResult{}, fmt.Errorf("capture: redact tool schema snapshot: %w", err)
+		}
+	}
+
 	var result captureResult
 	for _, summary := range summaries {
 		if opts.Limit > 0 && len(result.Written) >= opts.Limit {
@@ -184,9 +198,14 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 			continue
 		}
 
-		trace, err := conversationToTrace(*conv, source, opts.FallbackSystem, redactor)
+		trace, err := conversationToTrace(*conv, source, opts.FallbackSystem, redactor, snapshotTools, snapshotConfigured)
 		if err != nil {
-			result.Skipped = append(result.Skipped, fmt.Sprintf("%s: %v", summary.ID, err))
+			if errors.Is(err, errToolNameNotDeclared) {
+				name := undeclaredToolName(err)
+				result.Skipped = append(result.Skipped, fmt.Sprintf("%s: tool %q not in MCP snapshot", summary.ID, name))
+			} else {
+				result.Skipped = append(result.Skipped, fmt.Sprintf("%s: %v", summary.ID, err))
+			}
 			continue
 		}
 
@@ -205,7 +224,7 @@ func captureConversations(ctx context.Context, store conversationStore, opts cap
 	return result, nil
 }
 
-func conversationToTrace(conv conversation.Conversation, source, fallbackSystem string, redactor redactor) (Trace, error) {
+func conversationToTrace(conv conversation.Conversation, source, fallbackSystem string, redactor redactor, tools []json.RawMessage, schemaSnapshotConfigured bool) (Trace, error) {
 	if strings.TrimSpace(conv.ID) == "" {
 		return Trace{}, errConversationMissingID
 	}
@@ -215,21 +234,25 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 		return Trace{}, err
 	}
 
+	if tools == nil {
+		tools = []json.RawMessage{}
+	}
+
 	trace := Trace{
 		ID:         "conversation-" + conv.ID,
 		Source:     source,
 		CapturedAt: captureTime(conv),
 		System:     system,
-		// conversation.Message persists tool calls and results, but not the
-		// tool schemas needed for future tool-loop replay. H2 will add a
-		// schema source; for now capture preserves expected call names only.
-		Tools: []json.RawMessage{},
-		Turns: turns,
+		Tools:      tools,
+		Turns:      turns,
 		Golden: Golden{
 			ToolCalls:            goldenToolCalls(turns),
 			FinalAnswerCriteria:  "Assistant answer should satisfy the captured final assistant response.",
 			FinalAnswerSubstring: finalAnswer,
 		},
+	}
+	if schemaSnapshotConfigured && len(trace.Tools) == 0 && len(trace.Golden.ToolCalls) > 0 {
+		return Trace{}, fmt.Errorf("tool %q: %w", trace.Golden.ToolCalls[0], errToolNameNotDeclared)
 	}
 	if err := validateTrace(trace); err != nil {
 		return Trace{}, err
@@ -360,6 +383,138 @@ func redactRawJSON(raw json.RawMessage, redactor redactor) (json.RawMessage, err
 		return nil, err
 	}
 	return json.RawMessage(data), nil
+}
+
+func redactToolSchemas(tools []json.RawMessage, redactor redactor) ([]json.RawMessage, error) {
+	if len(tools) == 0 {
+		return []json.RawMessage{}, nil
+	}
+	out := make([]json.RawMessage, len(tools))
+	for i, raw := range tools {
+		redacted, err := redactToolSchema(raw, redactor)
+		if err != nil {
+			return nil, fmt.Errorf("tool[%d]: %w", i, err)
+		}
+		out[i] = redacted
+	}
+	return out, nil
+}
+
+func redactToolSchema(raw json.RawMessage, redactor redactor) (json.RawMessage, error) {
+	trimmed := strings.TrimSpace(string(raw))
+	if trimmed == "" || trimmed == "null" {
+		return json.RawMessage(`{}`), nil
+	}
+
+	var value any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return nil, err
+	}
+	value = redactSchemaJSONValue(value, redactor, false)
+
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(data), nil
+}
+
+func redactSchemaJSONValue(value any, redactor redactor, sensitiveProperty bool) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, nested := range v {
+			keySensitive := sensitiveProperty || isSensitiveKey(key)
+			if isSchemaPatternKey(key) {
+				if pattern, ok := nested.(string); ok {
+					v[key] = redactRegexString(pattern, redactor)
+					continue
+				}
+			}
+			if isSchemaPatternPropertiesKey(key) {
+				if patterns, ok := nested.(map[string]any); ok {
+					v[key] = redactPatternProperties(patterns, redactor, keySensitive)
+					continue
+				}
+			}
+			if sensitiveProperty && isSensitiveSchemaValueKey(key) {
+				v[key] = redactSensitiveSchemaValue(nested, redactor)
+				continue
+			}
+			redacted := redactSchemaJSONValue(nested, redactor, keySensitive)
+			if _, ok := redacted.(string); ok && isSensitiveKey(key) {
+				v[key] = redactor.secretPlaceholder
+				continue
+			}
+			v[key] = redacted
+		}
+		return v
+	case []any:
+		for i, nested := range v {
+			v[i] = redactSchemaJSONValue(nested, redactor, sensitiveProperty)
+		}
+		return v
+	case string:
+		return redactor.Redact(v)
+	default:
+		return value
+	}
+}
+
+func redactSensitiveSchemaValue(value any, redactor redactor) any {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, nested := range v {
+			v[key] = redactSensitiveSchemaValue(nested, redactor)
+		}
+		return v
+	case []any:
+		for i, nested := range v {
+			v[i] = redactSensitiveSchemaValue(nested, redactor)
+		}
+		return v
+	case string:
+		return redactor.secretPlaceholder
+	default:
+		return value
+	}
+}
+
+func redactPatternProperties(patterns map[string]any, redactor redactor, sensitiveProperty bool) map[string]any {
+	redacted := make(map[string]any, len(patterns))
+	for pattern, schema := range patterns {
+		redacted[redactRegexString(pattern, redactor)] = redactSchemaJSONValue(schema, redactor, sensitiveProperty || isSensitiveKey(pattern))
+	}
+	return redacted
+}
+
+func redactRegexString(pattern string, redactor redactor) string {
+	redacted := redactor.Redact(pattern)
+	for _, placeholder := range []string{redactor.pathPlaceholder, redactor.secretPlaceholder, redactor.emailPlaceholder} {
+		redacted = strings.ReplaceAll(redacted, placeholder, regexp.QuoteMeta(placeholder))
+	}
+	return redacted
+}
+
+func isSensitiveSchemaValueKey(key string) bool {
+	switch normalizeSchemaKey(key) {
+	case "default", "examples", "enum", "const":
+		return true
+	default:
+		return false
+	}
+}
+
+func isSchemaPatternKey(key string) bool {
+	return normalizeSchemaKey(key) == "pattern"
+}
+
+func isSchemaPatternPropertiesKey(key string) bool {
+	normalized := normalizeSchemaKey(key)
+	return normalized == "pattern_properties" || normalized == "patternproperties"
+}
+
+func normalizeSchemaKey(key string) string {
+	return strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(key, "-", "_"), " ", "_"))
 }
 
 func redactJSONValue(value any, redactor redactor) any {
@@ -500,6 +655,23 @@ func pathBase(path string) string {
 		return ""
 	}
 	return path[idx+1:]
+}
+
+// undeclaredToolName recovers the offending tool name embedded in the
+// wrapped error chain by validateToolNamesDeclared. Returns "" if the
+// chain doesn't include a quoted name (defensive — the validator
+// always quotes the name today).
+func undeclaredToolName(err error) string {
+	msg := err.Error()
+	first := strings.Index(msg, `"`)
+	if first < 0 {
+		return ""
+	}
+	last := strings.Index(msg[first+1:], `"`)
+	if last < 0 {
+		return ""
+	}
+	return msg[first+1 : first+1+last]
 }
 
 func isSensitiveKey(key string) bool {

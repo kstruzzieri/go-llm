@@ -68,7 +68,7 @@ func TestConversationToTraceRedactsAndConvertsToolCalls(t *testing.T) {
 		},
 	}
 
-	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor())
+	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor(), nil, false)
 	if err != nil {
 		t.Fatalf("conversationToTrace() error: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestConversationToTraceUsesFallbackSystem(t *testing.T) {
 		},
 	}
 
-	trace, err := conversationToTrace(conv, "test-source", "Fallback system", defaultRedactor())
+	trace, err := conversationToTrace(conv, "test-source", "Fallback system", defaultRedactor(), nil, false)
 	if err != nil {
 		t.Fatalf("conversationToTrace() error: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestConversationToTraceRejectsMalformedConversations(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := conversationToTrace(tt.conv, "source", "", defaultRedactor())
+			_, err := conversationToTrace(tt.conv, "source", "", defaultRedactor(), nil, false)
 			if !errors.Is(err, tt.wantErr) {
 				t.Fatalf("err = %v, want %v", err, tt.wantErr)
 			}
@@ -424,5 +424,218 @@ func assertClean(t *testing.T, text string) {
 		if strings.Contains(text, forbidden) {
 			t.Fatalf("text %q still contains %q", text, forbidden)
 		}
+	}
+}
+
+func TestCaptureConversationsAttachesSnapshotTools(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{"name":"read_file","inputSchema":{"type":"object"}}`)}
+	conv := conversation.Conversation{
+		ID: "c1",
+		Messages: []conversation.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "go"},
+			{Role: "assistant", Content: "done"},
+		},
+		CreatedAt: time.Now(),
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "c1", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"c1": conv},
+	}
+	outDir := t.TempDir()
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        outDir,
+		ToolSchemaSource: staticToolSchemaSource{tools: tools},
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("Written=%v; want 1 trace", res.Written)
+	}
+	data, err := os.ReadFile(res.Written[0])
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace Trace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		t.Fatalf("unmarshal trace: %v", err)
+	}
+	if len(trace.Tools) != 1 {
+		t.Fatalf("trace.Tools len=%d; want 1", len(trace.Tools))
+	}
+	if !strings.Contains(string(trace.Tools[0]), "read_file") {
+		t.Fatalf("trace.Tools[0]=%q; want a read_file entry", string(trace.Tools[0]))
+	}
+}
+
+func TestCaptureConversationsRedactsSnapshotTools(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{
+		"name":"read_file",
+		"description":"Read /Users/keith/project/secret.go for user@example.com with api_key=abc123",
+		"inputSchema":{
+			"type":"object",
+			"properties":{
+				"path":{
+					"type":"string",
+					"description":"Local path such as /Users/keith/project/secret.go",
+					"pattern":"^/Users/keith/project/.*"
+				},
+				"token":{
+					"type":"string",
+					"default":"ghp_1234567890abcdefABCD"
+				},
+					"api_key":{
+						"type":"string",
+						"default":"abc123",
+						"examples":["abc123"],
+						"enum":["abc123"]
+					}
+				},
+				"patternProperties":{
+					"^/Users/keith/project/.*$":{"type":"string"}
+				},
+				"additionalProperties":false
+			}
+		}`)}
+	conv := validTestConversation("schema-redaction", "done", time.Now())
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "schema-redaction", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"schema-redaction": conv},
+	}
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        t.TempDir(),
+		ToolSchemaSource: staticToolSchemaSource{tools: tools},
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("Written=%v; want 1 trace", res.Written)
+	}
+	data, err := os.ReadFile(res.Written[0])
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace Trace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		t.Fatalf("unmarshal trace: %v", err)
+	}
+	if len(trace.Tools) != 1 {
+		t.Fatalf("trace.Tools len=%d; want 1", len(trace.Tools))
+	}
+	toolJSON := string(trace.Tools[0])
+	assertClean(t, toolJSON)
+	if strings.Contains(toolJSON, "abc123") {
+		t.Fatalf("schema default/example/enum kept low-entropy secret: %q", toolJSON)
+	}
+	for _, want := range []string{"[REDACTED_PATH]/secret.go", "[REDACTED_EMAIL]", "[REDACTED_SECRET]"} {
+		if !strings.Contains(toolJSON, want) {
+			t.Fatalf("redacted tool schema %q missing %q", toolJSON, want)
+		}
+	}
+	schemas, err := toolSchemaByName(trace.Tools)
+	if err != nil {
+		t.Fatalf("toolSchemaByName: %v", err)
+	}
+	if err := schemas["read_file"].Validate(map[string]any{
+		"path":                     "[REDACTED_PATH]/secret.go",
+		"[REDACTED_PATH]/metadata": "ok",
+	}); err != nil {
+		t.Fatalf("redacted pattern should match redacted path placeholder: %v\nschema=%s", err, toolJSON)
+	}
+}
+
+func TestCaptureConversationsSkipsConversationWithUndeclaredTool(t *testing.T) {
+	tools := []json.RawMessage{json.RawMessage(`{"name":"read_file","inputSchema":{"type":"object"}}`)}
+	conv := conversation.Conversation{
+		ID:        "bad",
+		Messages:  buildToolCallConvo("undeclared_tool"),
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "bad", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"bad": conv},
+	}
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        t.TempDir(),
+		ToolSchemaSource: staticToolSchemaSource{tools: tools},
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 0 {
+		t.Fatalf("Written=%v; want 0", res.Written)
+	}
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "not in MCP snapshot") {
+		t.Fatalf("Skipped=%v; want one entry citing 'not in MCP snapshot'", res.Skipped)
+	}
+}
+
+func TestCaptureConversationsConfiguredEmptySnapshotSkipsToolConversation(t *testing.T) {
+	conv := conversation.Conversation{
+		ID:        "empty-snapshot",
+		Messages:  buildToolCallConvo("read_file"),
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "empty-snapshot", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"empty-snapshot": conv},
+	}
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir:        t.TempDir(),
+		ToolSchemaSource: staticToolSchemaSource{}, // configured source, authoritative empty snapshot
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 0 {
+		t.Fatalf("Written=%v; want 0", res.Written)
+	}
+	if len(res.Skipped) != 1 || !strings.Contains(res.Skipped[0], "not in MCP snapshot") {
+		t.Fatalf("Skipped=%v; want one entry citing 'not in MCP snapshot'", res.Skipped)
+	}
+}
+
+// buildToolCallConvo returns a minimal valid conversation whose assistant
+// turn calls a single named tool. Used by skip-on-undeclared tests.
+func buildToolCallConvo(toolName string) []conversation.Message {
+	args := []byte(`{}`)
+	tc := []byte(`[{"name":"` + toolName + `","arguments":` + string(args) + `}]`)
+	return []conversation.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "go"},
+		{Role: "assistant", Content: "", ToolCalls: tc},
+		{Role: "tool", Content: "result", ToolCallID: "1", ToolName: toolName},
+		{Role: "assistant", Content: "done"},
+	}
+}
+
+func TestCaptureConversationsNilSourceLeavesEmptyTools(t *testing.T) {
+	conv := conversation.Conversation{
+		ID:        "c1",
+		Messages:  []conversation.Message{{Role: "system", Content: "s"}, {Role: "user", Content: "u"}, {Role: "assistant", Content: "a"}},
+		UpdatedAt: time.Now(),
+	}
+	store := fakeConversationStore{
+		summaries:     []conversation.Summary{{ID: "c1", UpdatedAt: conv.UpdatedAt}},
+		conversations: map[string]conversation.Conversation{"c1": conv},
+	}
+	outDir := t.TempDir()
+	res, err := captureConversations(context.Background(), store, captureOptions{
+		OutputDir: outDir, // ToolSchemaSource left nil
+	})
+	if err != nil {
+		t.Fatalf("captureConversations: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("Written=%v; want 1", res.Written)
+	}
+	data, _ := os.ReadFile(res.Written[0])
+	var trace Trace
+	_ = json.Unmarshal(data, &trace)
+	if len(trace.Tools) != 0 {
+		t.Fatalf("trace.Tools=%v; want empty when no source configured", trace.Tools)
 	}
 }
