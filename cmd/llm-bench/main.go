@@ -163,7 +163,7 @@ func main() {
 		// pointer is genuinely non-nil.
 		var cacheStore judgeCacheStore
 		if c, err := openJudgeCache(*judgeCachePath); err != nil {
-			fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled: %v\n", err)
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled (%s)\n", redactErrorMessage(err.Error()))
 		} else if c != nil {
 			cacheStore = c
 			defer func() { _ = c.Close() }()
@@ -222,6 +222,9 @@ func main() {
 		log.Fatalf("llm-bench: load traces: %v", err)
 	}
 
+	traceSetHash := traceSetManifestHash(traces)
+	log.Printf("llm-bench: trace set manifest hash %s (n=%d)", traceSetHash, len(traces))
+
 	resolvedJudgeModel := strings.TrimSpace(*judgeModel)
 	if *scorerName == "llm-judge" && resolvedJudgeModel == "" {
 		resolvedJudgeModel = defaultJudgeModelName()
@@ -238,7 +241,7 @@ func main() {
 	// non-nil.
 	var cacheStore judgeCacheStore
 	if c, err := openJudgeCache(*judgeCachePath); err != nil {
-		fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled: %v\n", err)
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache disabled (%s)\n", redactErrorMessage(err.Error()))
 	} else if c != nil {
 		cacheStore = c
 		defer func() { _ = c.Close() }()
@@ -265,14 +268,22 @@ func main() {
 		log.Fatalf("llm-bench: run: %v", err)
 	}
 
+	var judgeCacheHits, judgeCacheMisses int64
+	if cacheStore != nil {
+		judgeCacheHits, judgeCacheMisses = cacheStore.Stats()
+	}
+
 	modelNames := make([]string, 0, len(targets))
 	for _, target := range targets {
 		modelNames = append(modelNames, target.Display)
 	}
 
 	report := formatReport(modelNames, results, reportOptions{
-		Scorer:     *scorerName,
-		JudgeModel: resolvedJudgeModel,
+		Scorer:               *scorerName,
+		JudgeModel:           resolvedJudgeModel,
+		JudgeCacheHits:       judgeCacheHits,
+		JudgeCacheMisses:     judgeCacheMisses,
+		TraceSetManifestHash: traceSetHash,
 	})
 
 	if *reportPath == "" {

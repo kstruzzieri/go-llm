@@ -131,6 +131,7 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	// Latency reflects replay only; ScorerLatencyMs keeps judge/scorer work visible
 	// without polluting the target model latency metric.
 	score.ScorerLatencyMs = scorerMs
+	score.TotalTokens = out.TotalTokens
 
 	return Result{
 		Model:      target.Display,
@@ -145,6 +146,7 @@ type replayOutput struct {
 	Transcript      []Turn
 	Notes           []string
 	TurnLatenciesMs []int64
+	TotalTokens     int
 }
 
 // replayOptions are the per-replay knobs threaded down from Runner.
@@ -217,11 +219,12 @@ func replayWith(ctx context.Context, client *ollama.Client, model string, trace 
 				i++
 			}
 
-			msg, actualTurn, latencyMs, err := chatReplayTurn(ctx, client, model, messages, tools, opts)
+			msg, actualTurn, latencyMs, tokens, err := chatReplayTurn(ctx, client, model, messages, tools, opts)
 			out.TurnLatenciesMs = append(out.TurnLatenciesMs, latencyMs)
 			if err != nil {
 				return out, err
 			}
+			out.TotalTokens += tokens
 			messages = append(messages, msg)
 			out.Transcript = append(out.Transcript, actualTurn)
 
@@ -272,7 +275,7 @@ func hasUserTurn(turns []Turn) bool {
 	return false
 }
 
-func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, error) {
+func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, int, error) {
 	turnCtx := ctx
 	if opts.PerTurnTimeout > 0 {
 		var cancel context.CancelFunc
@@ -294,15 +297,16 @@ func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, me
 	resp, err := client.Chat(turnCtx, req)
 	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
-		return ollama.ChatMessage{}, Turn{}, latencyMs, err
+		return ollama.ChatMessage{}, Turn{}, latencyMs, 0, err
 	}
 
 	msg := normalizeAssistantMessage(resp.Message)
 	turn, err := assistantTurnFromMessage(msg)
 	if err != nil {
-		return ollama.ChatMessage{}, Turn{}, latencyMs, err
+		return ollama.ChatMessage{}, Turn{}, latencyMs, 0, err
 	}
-	return msg, turn, latencyMs, nil
+	tokens := resp.PromptEvalCount + resp.EvalCount
+	return msg, turn, latencyMs, tokens, nil
 }
 
 func normalizeAssistantMessage(msg ollama.ChatMessage) ollama.ChatMessage {

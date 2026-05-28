@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -11,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -40,8 +42,19 @@ type judgeCacheRequest struct {
 // encoding/json's stable struct-tag ordering (Go's encoding/json marshals
 // struct fields in declaration order), then SHA-256s the bytes.
 func canonicalCacheKey(r judgeCacheRequest) string {
-	raw, _ := json.Marshal(r) // marshaling a fixed-shape struct cannot fail
-	sum := sha256.Sum256(raw)
+	raw, err := json.Marshal(r)
+	if err != nil {
+		// judgeCacheRequest is a fixed-shape struct of primitive types
+		// (string/int/float/bool); marshaling cannot fail without a future
+		// breaking change. Panic so the cache never silently produces
+		// sha256("") and collides every key.
+		panic(fmt.Sprintf("canonicalCacheKey: json.Marshal failed on fixed-shape struct: %v", err))
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, raw); err != nil {
+		panic(fmt.Sprintf("canonicalCacheKey: json.Compact failed: %v", err))
+	}
+	sum := sha256.Sum256(compact.Bytes())
 	return hex.EncodeToString(sum[:])
 }
 
@@ -70,6 +83,7 @@ type judgeCacheEntry struct {
 type judgeCacheStore interface {
 	Get(ctx context.Context, key string) (judgeCacheEntry, bool, error)
 	Put(ctx context.Context, e judgeCacheEntry) error
+	Stats() (hits, misses int64)
 	Close() error
 }
 
@@ -87,7 +101,9 @@ var (
 // to construct one (it handles migrations); callers MUST treat all returned
 // errors as non-fatal and degrade to an uncached judge call.
 type sqliteJudgeCache struct {
-	db *sql.DB
+	db     *sql.DB
+	hits   atomic.Int64
+	misses atomic.Int64
 }
 
 // openJudgeCache opens (and migrates) the judge cache DB at path. Empty
@@ -107,6 +123,7 @@ func openJudgeCache(path string) (*sqliteJudgeCache, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
 	}
+	db.SetMaxOpenConns(1) // SQLite does not support concurrent writers; serialize all ops.
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("%w %q: %v", errJudgeCacheOpen, path, err)
@@ -190,6 +207,13 @@ func migrateJudgeCache(db *sql.DB) error {
 	return nil
 }
 
+// Stats returns the running hit/miss counters since this cache was
+// opened. Counters are atomic and safe under concurrent Get callers.
+// Per spec §5.2 these participate in the benchmark provenance block.
+func (c *sqliteJudgeCache) Stats() (int64, int64) {
+	return c.hits.Load(), c.misses.Load()
+}
+
 // Get returns the entry for key plus ok=true on hit, ok=false on miss.
 // On a hit, hit_count is bumped and last_used_at is set to now; the
 // returned entry reflects the post-bump values so caller telemetry sees
@@ -208,6 +232,7 @@ func (c *sqliteJudgeCache) Get(ctx context.Context, key string) (judgeCacheEntry
 		&createdNs, &lastUsedNs, &e.HitCount,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
+		c.misses.Add(1)
 		return judgeCacheEntry{}, false, nil
 	}
 	if err != nil {
@@ -221,10 +246,14 @@ func (c *sqliteJudgeCache) Get(ctx context.Context, key string) (judgeCacheEntry
 		`UPDATE judge_cache SET hit_count = hit_count + 1, last_used_at = ? WHERE cache_key = ?`,
 		nowNs, key,
 	); err != nil {
-		return judgeCacheEntry{}, false, fmt.Errorf("%w hit-count for key %s: %v", errJudgeCacheGet, key, err)
+		// Hit-count is observational; surface to stderr but keep the verdict
+		// so the caller is not forced to re-invoke the judge.
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit-count update failed (key=%s): %v\n", key, err)
+	} else {
+		e.HitCount++
+		e.LastUsedAt = time.Unix(0, nowNs).UTC()
 	}
-	e.HitCount++
-	e.LastUsedAt = time.Unix(0, nowNs).UTC()
+	c.hits.Add(1)
 	return e, true, nil
 }
 
