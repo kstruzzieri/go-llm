@@ -63,6 +63,19 @@ type RoutePlan struct {
 	// operators can distinguish "off by design" from "off because the
 	// store failed" without parsing logs.
 	feedbackStatus feedbackSnapshotStatus
+
+	// feedbackLogger is the optional once-logged-warning sink used by
+	// newRouteIDWithWarn (RNG failures) and recordOutcomeFeedback (store
+	// write failures). nil disables emission and the bare PR2 fallback
+	// behavior (empty RouteID / silent swallow) applies. Set by buildPlan
+	// via setFeedbackTelemetry.
+	feedbackLogger feedbackLogger
+
+	// feedbackWarn holds the sync.Once guards backing the above logger so
+	// a persistently broken store cannot flood operator logs. Per-Router
+	// instance; shared with every plan the Router constructs. nil
+	// disables emission. Set by buildPlan via setFeedbackTelemetry.
+	feedbackWarn *feedbackWarningState
 }
 
 // String returns a human-readable summary of the route plan.
@@ -115,6 +128,18 @@ func (rp *RoutePlan) setBuiltUnderMode(mode FeedbackScoringMode) {
 // or inactive. Unexported because it takes an unexported type.
 func (rp *RoutePlan) setFeedbackStatus(status feedbackSnapshotStatus) {
 	rp.feedbackStatus = status
+}
+
+// setFeedbackTelemetry records the once-logged-warning state and logger
+// the plan will use when newRouteIDWithWarn hits a crypto/rand failure or
+// when recordOutcomeFeedback observes a store error. nil values disable
+// warnings (silent fallback to PR2 behavior: empty RouteID, silent-swallow
+// on write). Unexported because it takes an unexported *feedbackWarningState
+// and feedbackLogger; the convention matches the other unexported setters
+// (setScoreBreakdown / setBuiltUnderMode / setFeedbackStatus).
+func (rp *RoutePlan) setFeedbackTelemetry(state *feedbackWarningState, logger feedbackLogger) {
+	rp.feedbackWarn = state
+	rp.feedbackLogger = logger
 }
 
 // WasSticky reports whether the plan was selected via sticky routing. This
@@ -690,7 +715,7 @@ func (rp *RoutePlan) buildOutcome(fallbacksUsed int, attempts []RouteAttempt) *R
 		WasSticky:     rp.wasSticky,
 		Score:         rp.Score,
 		Reason:        rp.Reason,
-		RouteID:       newRouteID(),
+		RouteID:       newRouteIDWithWarn(rp.feedbackWarn, rp.feedbackLogger),
 		Attempts:      attempts,
 	}
 	if rp.scoreBreakdown != nil {
@@ -805,19 +830,35 @@ func hasVisibleContent(content, thinking string, toolCalls []ToolCall) bool {
 // empty-string-on-error branch.
 var routeIDRand io.Reader = rand.Reader
 
+// newRouteIDWithWarn is the warning-emitting variant of newRouteID.
+// state and logger may both be nil; nil disables the once-logged warning
+// emission but preserves the empty-string-on-error fallback (so callers
+// that don't carry a Router-owned warn state — tests, helpers — keep
+// PR2's silent-empty-string behavior).
+//
+// Reuses the package-level routeIDRand io.Reader so tests can inject
+// failure modes without going through a constructor seam.
+func newRouteIDWithWarn(state *feedbackWarningState, logger feedbackLogger) string {
+	var b [16]byte
+	if _, err := io.ReadFull(routeIDRand, b[:]); err != nil {
+		if state != nil {
+			state.warnRouteIDRandOnce(logger, err)
+		}
+		return ""
+	}
+	return hex.EncodeToString(b[:])
+}
+
 // newRouteID returns a 16-byte random hex string (32 chars) suitable as an
 // opaque correlation ID on RouteOutcome.RouteID. crypto/rand failures are
 // silently coerced to an empty string — RouteID is informational; we do
 // not want routing paths to fail because the OS RNG returned an error.
 //
-// TODO: once-logged warning on first RNG failure so operators discover the
-// cause when correlation IDs disappear.
+// Equivalent to newRouteIDWithWarn(nil, nil). Preserved as a bare entry
+// point for callers (tests, helpers) that don't carry a Router-owned
+// warn state.
 func newRouteID() string {
-	var b [16]byte
-	if _, err := io.ReadFull(routeIDRand, b[:]); err != nil {
-		return ""
-	}
-	return hex.EncodeToString(b[:])
+	return newRouteIDWithWarn(nil, nil)
 }
 
 // makeAttempt builds a RouteAttempt for one provider call.
@@ -873,21 +914,25 @@ var feedbackWriteTimeout = 1 * time.Second
 
 // recordOutcomeFeedback delegates to RoutingFeedback.RecordOutcome when a
 // feedback wrapper is configured AND the routing request has a non-empty
-// UseCase. Errors are swallowed — the seam is observational, never
-// load-bearing for routing. Uses a fresh context with a bounded timeout
-// (not the request ctx) so cancellation of the caller's ctx does not cut
-// short the feedback write, and so a slow/stuck store does not block the
-// routing path indefinitely.
+// UseCase. The seam is observational, never load-bearing for routing;
+// errors do not bubble up to the caller. Uses a fresh context with a
+// bounded timeout (not the request ctx) so cancellation of the caller's
+// ctx does not cut short the feedback write, and so a slow/stuck store
+// does not block the routing path indefinitely.
 //
-// TODO: expose a counter or once-logged warning when the store returns a
-// non-nil error. Today's silent-swallow makes a broken store look identical
-// to a working empty store from the operator's view. Track in the PR that
-// adds the SQLite-backed store.
+// On non-nil store error: emits a once-logged warning via feedbackWarn /
+// feedbackLogger (set by buildPlan through setFeedbackTelemetry). Replaces
+// PR2's silent-swallow; nil warn state preserves the silent fallback for
+// plans constructed without telemetry wiring.
 func (rp *RoutePlan) recordOutcomeFeedback(outcome *RouteOutcome) {
 	if rp.feedback == nil || outcome == nil || rp.Request.UseCase == "" {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), feedbackWriteTimeout)
 	defer cancel()
-	_ = rp.feedback.RecordOutcome(ctx, rp.Request.UseCase, *outcome)
+	if err := rp.feedback.RecordOutcome(ctx, rp.Request.UseCase, *outcome); err != nil {
+		if rp.feedbackWarn != nil {
+			rp.feedbackWarn.warnFeedbackWriteOnce(rp.feedbackLogger, err)
+		}
+	}
 }

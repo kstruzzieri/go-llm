@@ -2138,3 +2138,71 @@ func TestBuildOutcomeScoreBreakdownSnapshotStatusReflectsRoute(t *testing.T) {
 			pubBd.FeedbackUpdatedAt)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Task 11 — once-logged warnings on RNG failure / feedback store write
+// ---------------------------------------------------------------------------
+
+// TestNewRouteIDLogsOnceOnRandFailure substitutes a failing RNG and a
+// capturing logger, then asserts the once-logged warning fires exactly
+// once across many calls. Reuses routeIDFailingReader (defined in
+// routing_feedback_test.go).
+func TestNewRouteIDLogsOnceOnRandFailure(t *testing.T) {
+	cap := &capturingLogger{}
+	state := newFeedbackWarningState()
+
+	old := routeIDRand
+	t.Cleanup(func() { routeIDRand = old })
+	routeIDRand = routeIDFailingReader{}
+
+	for i := 0; i < 50; i++ {
+		id := newRouteIDWithWarn(state, cap)
+		if id != "" {
+			t.Errorf("expected empty id on RNG failure, got %q", id)
+		}
+	}
+	if got := len(cap.snapshot()); got != 1 {
+		t.Errorf("warnRouteIDRandOnce fired %d times, want 1", got)
+	}
+}
+
+// recordFailingStore implements RoutingFeedbackStore for the Task 11
+// write-error test. Get returns a neutral aggregate (so Route succeeds);
+// Record / RecordBatch always fail so recordOutcomeFeedback hits its
+// once-logged warning path.
+type recordFailingStore struct{ err error }
+
+func (s *recordFailingStore) Get(_ context.Context, _ FeedbackKey) (Aggregate, error) {
+	return Aggregate{Score: DefaultNeutralScore}, nil
+}
+
+func (s *recordFailingStore) Record(_ context.Context, _ FeedbackKey, _ FeedbackSignal) error {
+	return s.err
+}
+
+func (s *recordFailingStore) RecordBatch(_ context.Context, _ []FeedbackItem) error {
+	return s.err
+}
+
+// TestRecordOutcomeFeedbackLogsOnceOnStoreError drives ExecuteChat
+// repeatedly against a store that always fails on Record/RecordBatch and
+// asserts the once-logged warning fires exactly once across the loop.
+func TestRecordOutcomeFeedbackLogsOnceOnStoreError(t *testing.T) {
+	router, _ := setupTestRouter(t)
+	router.routingFeedback = NewRoutingFeedback(&recordFailingStore{err: errors.New("disk full")})
+	cap := &capturingLogger{}
+	router.feedbackLogger = cap
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := plan.ExecuteChat(context.Background()); err != nil {
+			t.Fatalf("ExecuteChat: %v", err)
+		}
+	}
+	if got := len(cap.snapshot()); got != 1 {
+		t.Errorf("warnFeedbackWriteOnce fired %d times, want 1", got)
+	}
+}

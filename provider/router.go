@@ -1016,6 +1016,13 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	plan.SetWasSticky(wasSticky)
 	plan.SetRecorder(r)
 	plan.SetFeedback(r.routingFeedback) // ← PR2 addition; nil is fine, SetFeedback handles it
+	// Stamp the per-Router warn state and logger onto the plan so
+	// newRouteIDWithWarn (called from buildOutcome) and
+	// recordOutcomeFeedback can fire once-logged warnings on RNG /
+	// store failures. Wired unconditionally — the warn state is per-
+	// Router and doesn't track feedback scoring on/off; a nil
+	// routingFeedback still wants RNG-failure warnings.
+	plan.setFeedbackTelemetry(r.feedbackWarn, r.feedbackLogger)
 
 	// Stamp the winner's breakdown and the mode used for selection so
 	// buildOutcome can render the public ScoreBreakdown. Off mode skips
