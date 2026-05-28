@@ -168,6 +168,12 @@ func TestFormatReportAllErrorsRowDoesNotRenderNaN(t *testing.T) {
 	if strings.Contains(report, "NaN") {
 		t.Fatalf("report contains NaN with all errors:\n%s", report)
 	}
+	// Strengthened: zero-observation rows must render n/a in the
+	// quality, toolseq, and latency cells so a casual reader cannot
+	// mistake them for genuine zero scores.
+	if !strings.Contains(report, "| m1 | n/a | n/a | n/a (computed=0) | n/a | n/a | 0 |") {
+		t.Errorf("expected all-errors row to render n/a across metric cells:\n%s", report)
+	}
 }
 
 func TestFormatReportProvenanceBlock(t *testing.T) {

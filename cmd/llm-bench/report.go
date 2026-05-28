@@ -51,18 +51,28 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		agg := aggregate(rs)
 		scored := len(rs) - agg.errors
 
-		qCell := fmt.Sprintf("%.2f / %.2f / %.2f / %.2f / %.2f",
-			agg.meanQuality, agg.qualityP25, agg.qualityP50, agg.qualityP75, agg.qualityP90)
+		qCell := "n/a"
+		if scored > 0 {
+			qCell = fmt.Sprintf("%.2f / %.2f / %.2f / %.2f / %.2f",
+				agg.meanQuality, agg.qualityP25, agg.qualityP50, agg.qualityP75, agg.qualityP90)
+		}
+		toolSeqCell := "n/a"
+		if scored > 0 {
+			toolSeqCell = fmt.Sprintf("%.2f", agg.meanToolSeq)
+		}
 		toolArgsCell := fmt.Sprintf("%s (computed=%d)",
 			metricCell(agg.meanToolArgs, agg.toolArgsComputed > 0), agg.toolArgsComputed)
-		latencyCell := fmt.Sprintf("%d / %d", agg.latencyP50, agg.latencyP90)
+		latencyCell := "n/a"
+		if scored > 0 {
+			latencyCell = fmt.Sprintf("%d / %d", agg.latencyP50, agg.latencyP90)
+		}
 		tokensCell := "n/a"
 		if agg.totalTokensAvailable > 0 {
 			tokensCell = fmt.Sprintf("%d", agg.totalTokensSum)
 		}
 
-		fmt.Fprintf(&b, "| %s | %s | %.2f | %s | %s | %s | %d |\n",
-			markdownCell(m), qCell, agg.meanToolSeq, toolArgsCell, latencyCell, tokensCell, scored)
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %d |\n",
+			markdownCell(m), qCell, toolSeqCell, toolArgsCell, latencyCell, tokensCell, scored)
 	}
 
 	fmt.Fprintf(&b, "\n## Per-trace detail\n\n")
