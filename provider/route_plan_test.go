@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net"
 	"strings"
 	"sync"
@@ -2107,6 +2108,42 @@ func TestBuildOutcomeScoreBreakdownStableAcrossFallback(t *testing.T) {
 	}
 	if pubBd.FeedbackScoredCount != 30 {
 		t.Errorf("FeedbackScoredCount = %d, want 30 (planned primary's, not rewritten)", pubBd.FeedbackScoredCount)
+	}
+}
+
+func TestBuildOutcomeScoreBreakdownSanitizesNonFiniteRawFeedbackScore(t *testing.T) {
+	cases := []float64{math.NaN(), math.Inf(1), math.Inf(-1)}
+	for _, raw := range cases {
+		t.Run("", func(t *testing.T) {
+			plan := &RoutePlan{
+				Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+				Score:   0.5,
+				Reason:  "custom store score",
+			}
+			bd := &scoreBreakdown{
+				feedbackActive:       true,
+				feedbackRaw:          raw,
+				feedbackAdjusted:     0.5,
+				feedbackSampleCount:  5,
+				feedbackScoredCount:  5,
+				scoreWithoutFeedback: 0.5,
+				scoreWithFeedback:    0.5,
+			}
+			plan.setScoreBreakdown(bd)
+			plan.setBuiltUnderMode(FeedbackScoringShadow)
+			plan.setFeedbackStatus(feedbackSnapshotStatusActive)
+
+			out := plan.buildOutcome(0, []RouteAttempt{{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded}})
+			if out.ScoreBreakdown == nil {
+				t.Fatalf("ScoreBreakdown nil")
+			}
+			if out.ScoreBreakdown.FeedbackScore != DefaultNeutralScore {
+				t.Fatalf("FeedbackScore = %v, want neutral %v", out.ScoreBreakdown.FeedbackScore, DefaultNeutralScore)
+			}
+			if _, err := json.Marshal(out); err != nil {
+				t.Fatalf("json.Marshal(RouteOutcome) = %v", err)
+			}
+		})
 	}
 }
 

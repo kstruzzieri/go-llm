@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"slices"
 	"time"
 )
@@ -747,7 +748,7 @@ func publicScoreBreakdown(bd *scoreBreakdown, mode FeedbackScoringMode, status f
 		FeedbackMode:           mode.String(),
 		FeedbackSnapshotStatus: string(status),
 		FeedbackApplied:        bd.feedbackActive && mode == FeedbackScoringEnforce,
-		FeedbackScore:          bd.feedbackRaw,
+		FeedbackScore:          sanitizeScoreForJSON(bd.feedbackRaw),
 		FeedbackAdjustedScore:  bd.feedbackAdjusted,
 		FeedbackSampleCount:    bd.feedbackSampleCount,
 		FeedbackScoredCount:    bd.feedbackScoredCount,
@@ -755,6 +756,13 @@ func publicScoreBreakdown(bd *scoreBreakdown, mode FeedbackScoringMode, status f
 		ScoreWithoutFeedback:   bd.scoreWithoutFeedback,
 		ScoreWithFeedback:      bd.scoreWithFeedback,
 	}
+}
+
+func sanitizeScoreForJSON(score float64) float64 {
+	if math.IsNaN(score) || math.IsInf(score, 0) {
+		return DefaultNeutralScore
+	}
+	return clip(score, 0, 1)
 }
 
 // ---------------------------------------------------------------------------

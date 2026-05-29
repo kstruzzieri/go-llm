@@ -507,10 +507,11 @@ type ScoreBreakdown struct {
 	// (cross-check via FeedbackSampleCount == 0).
 	FeedbackApplied bool `json:"feedback_applied"`
 
-	// FeedbackScore is the raw Aggregate.Score as returned by
-	// RoutingFeedback.Score at plan-build. Zero when feedback was
-	// inactive for this candidate (or when the raw score really is 0.0).
-	// Disambiguate via FeedbackSnapshotStatus and FeedbackSampleCount.
+	// FeedbackScore is the Aggregate.Score observed at plan-build,
+	// sanitized to a finite [0,1] value before crossing the JSON boundary.
+	// Zero when feedback was inactive for this candidate (or when the
+	// sanitized raw score really is 0.0). Disambiguate via
+	// FeedbackSnapshotStatus and FeedbackSampleCount.
 	FeedbackScore float64 `json:"feedback_score"`
 
 	// FeedbackAdjustedScore is the value actually fed into weighted
