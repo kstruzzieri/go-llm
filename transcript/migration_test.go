@@ -77,3 +77,60 @@ func TestMigrate_Idempotent(t *testing.T) {
 		t.Fatalf("second migrate: %v", err)
 	}
 }
+
+func TestMigrate_LegacyFiveColumnTableGetsAuditColumns(t *testing.T) {
+	db := openMem(t)
+	// Simulate a conversation/ store DB: exact five-column baseline + one row.
+	if _, err := db.Exec(`CREATE TABLE conversations (
+		id         TEXT PRIMARY KEY,
+		title      TEXT NOT NULL DEFAULT '',
+		messages   TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	if _, err := db.Exec(
+		`INSERT INTO conversations (id, title, messages, created_at, updated_at) VALUES (?,?,?,?,?)`,
+		"legacy-1", "old", `[{"role":"user","content":"hi"}]`, int64(1), int64(2),
+	); err != nil {
+		t.Fatalf("insert legacy row: %v", err)
+	}
+
+	if err := migrate(context.Background(), db); err != nil {
+		t.Fatalf("migrate: %v", err)
+	}
+
+	conv := columns(t, db, "conversations")
+	for _, c := range []string{"conversation_key", "identity_source", "latest_call_id", "message_count", "stitch_status"} {
+		if !conv[c] {
+			t.Errorf("legacy conversations missing audit column %q after migrate", c)
+		}
+	}
+
+	// Pre-existing row survives and stays capture-readable (five base columns).
+	var (
+		id, title, messages string
+		created, updated    int64
+	)
+	if err := db.QueryRow(
+		`SELECT id, title, messages, created_at, updated_at FROM conversations WHERE id = ?`, "legacy-1",
+	).Scan(&id, &title, &messages, &created, &updated); err != nil {
+		t.Fatalf("read legacy row: %v", err)
+	}
+	if id != "legacy-1" || title != "old" || messages != `[{"role":"user","content":"hi"}]` {
+		t.Errorf("legacy row mutated: id=%q title=%q messages=%q", id, title, messages)
+	}
+
+	// Backfilled audit defaults are usable.
+	var convKey string
+	var msgCount int
+	if err := db.QueryRow(
+		`SELECT conversation_key, message_count FROM conversations WHERE id = ?`, "legacy-1",
+	).Scan(&convKey, &msgCount); err != nil {
+		t.Fatalf("read audit cols: %v", err)
+	}
+	if convKey != "" || msgCount != 0 {
+		t.Errorf("legacy audit defaults = (%q,%d), want (\"\",0)", convKey, msgCount)
+	}
+}
