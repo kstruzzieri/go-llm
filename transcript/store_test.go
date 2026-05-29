@@ -201,3 +201,53 @@ func TestRecord_PersistsRouteOutcomeJSON(t *testing.T) {
 		t.Errorf("route_outcome_json = %v, want %s", got, ro)
 	}
 }
+
+func TestRecord_ProjectionErrorStillPersistsRaw(t *testing.T) {
+	s, _ := Open(context.Background(), ":memory:")
+	defer func() { _ = s.Close() }()
+	// Force projection failure: remove the canonical table after open. The raw
+	// append still succeeds (raw_chat_calls intact).
+	if _, err := s.db.Exec(`DROP TABLE conversations`); err != nil {
+		t.Fatalf("drop conversations: %v", err)
+	}
+
+	if err := s.Record(context.Background(), RecordInput{
+		Request:  []conversation.Message{{Role: "user", Content: "hi"}},
+		Response: conversation.Message{Role: "assistant", Content: "yo"},
+	}); err != nil {
+		t.Fatalf("Record should swallow projection error and return nil, got %v", err)
+	}
+
+	var status string
+	var perr sql.NullString
+	if err := s.db.QueryRow(`SELECT projection_status, projection_error FROM raw_chat_calls`).Scan(&status, &perr); err != nil {
+		t.Fatalf("read raw row: %v", err)
+	}
+	if status != "error" || !perr.Valid || perr.String == "" {
+		t.Errorf("raw row status=%q err=%v, want error + non-empty reason", status, perr)
+	}
+}
+
+func TestRecord_RawAppendErrorPersistsNothing(t *testing.T) {
+	s, _ := Open(context.Background(), ":memory:")
+	defer func() { _ = s.Close() }()
+	// Force raw-append failure: remove the raw table.
+	if _, err := s.db.Exec(`DROP TABLE raw_chat_calls`); err != nil {
+		t.Fatalf("drop raw_chat_calls: %v", err)
+	}
+
+	if err := s.Record(context.Background(), RecordInput{
+		Request:  []conversation.Message{{Role: "user", Content: "hi"}},
+		Response: conversation.Message{Role: "assistant", Content: "yo"},
+	}); err == nil {
+		t.Fatal("Record should return an error when the raw append fails")
+	}
+
+	var convRows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM conversations`).Scan(&convRows); err != nil {
+		t.Fatal(err)
+	}
+	if convRows != 0 {
+		t.Errorf("conversations rows = %d, want 0 (nothing persisted)", convRows)
+	}
+}
