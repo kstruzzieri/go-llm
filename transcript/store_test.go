@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/conversation"
@@ -249,5 +250,55 @@ func TestRecord_RawAppendErrorPersistsNothing(t *testing.T) {
 	}
 	if convRows != 0 {
 		t.Errorf("conversations rows = %d, want 0 (nothing persisted)", convRows)
+	}
+}
+
+func TestRecord_ConcurrentSameKeyNoRaceSingleRow(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "t.db")
+	s, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	const n = 16
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Identical history under a fixed explicit id → first creates, the
+			// rest are idempotent; serialization must prevent a double-fork.
+			_ = s.Record(context.Background(), RecordInput{
+				ConversationID: "conv-fixed",
+				Request:        []conversation.Message{{Role: "user", Content: "hi"}},
+				Response:       conversation.Message{Role: "assistant", Content: "yo"},
+			})
+		}()
+	}
+	wg.Wait()
+
+	var rows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM conversations`).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 1 {
+		t.Errorf("conversation rows = %d, want 1 (no interleaved double-fork/insert)", rows)
+	}
+
+	var rawRows int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM raw_chat_calls`).Scan(&rawRows); err != nil {
+		t.Fatal(err)
+	}
+	if rawRows != n {
+		t.Errorf("raw rows = %d, want %d (one durable row per call)", rawRows, n)
+	}
+
+	var projectionErrors int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM raw_chat_calls WHERE projection_status != 'ok'`).Scan(&projectionErrors); err != nil {
+		t.Fatal(err)
+	}
+	if projectionErrors != 0 {
+		t.Errorf("raw rows with non-ok projection_status = %d, want 0", projectionErrors)
 	}
 }
