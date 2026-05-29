@@ -3,8 +3,11 @@ package transcript
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/conversation"
 )
 
 func TestOpen_RejectsEmptyPath(t *testing.T) {
@@ -39,5 +42,53 @@ func TestOpen_FileUsesWAL(t *testing.T) {
 	}
 	if mode != "wal" {
 		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+}
+
+func TestRecord_CreatesCanonicalAndRawRow(t *testing.T) {
+	s, err := Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	in := RecordInput{
+		Request:  []conversation.Message{{Role: "user", Content: "hello"}},
+		Response: conversation.Message{Role: "assistant", Content: "hi there"},
+		Model:    "qwen3:8b",
+		Provider: "ollama",
+	}
+	if err := s.Record(context.Background(), in); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+
+	var (
+		msgsJSON, status string
+		msgCount         int
+	)
+	if err := s.db.QueryRow(
+		`SELECT messages, message_count, stitch_status FROM conversations`,
+	).Scan(&msgsJSON, &msgCount, &status); err != nil {
+		t.Fatalf("read canonical: %v", err)
+	}
+	if status != statusCreated || msgCount != 2 {
+		t.Errorf("canonical status=%q count=%d, want created/2", status, msgCount)
+	}
+	var stored []conversation.Message
+	if err := json.Unmarshal([]byte(msgsJSON), &stored); err != nil {
+		t.Fatalf("unmarshal stored messages: %v", err)
+	}
+	if len(stored) != 2 || stored[1].Role != "assistant" || stored[1].Content != "hi there" {
+		t.Errorf("stored messages = %+v", stored)
+	}
+
+	var model, provider, pstatus string
+	if err := s.db.QueryRow(
+		`SELECT model, provider, projection_status FROM raw_chat_calls`,
+	).Scan(&model, &provider, &pstatus); err != nil {
+		t.Fatalf("read raw: %v", err)
+	}
+	if model != "qwen3:8b" || provider != "ollama" || pstatus != "ok" {
+		t.Errorf("raw row model=%q provider=%q status=%q, want qwen3:8b/ollama/ok", model, provider, pstatus)
 	}
 }
