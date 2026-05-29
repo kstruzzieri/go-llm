@@ -43,6 +43,29 @@ func (f *fakeChainProvider) Embed(ctx context.Context, req EmbedRequest) (*Embed
 	return &EmbedResponse{Provider: f.name, Model: req.Model, Embeddings: [][]float64{{1}}}, nil
 }
 
+type keyedChainFeedbackStore struct {
+	aggregates map[FeedbackKey]Aggregate
+	errors     map[FeedbackKey]error
+}
+
+func (s *keyedChainFeedbackStore) Get(_ context.Context, key FeedbackKey) (Aggregate, error) {
+	if err := s.errors[key]; err != nil {
+		return Aggregate{}, err
+	}
+	if agg, ok := s.aggregates[key]; ok {
+		return agg, nil
+	}
+	return Aggregate{Score: DefaultNeutralScore}, nil
+}
+
+func (s *keyedChainFeedbackStore) Record(_ context.Context, _ FeedbackKey, _ FeedbackSignal) error {
+	return nil
+}
+
+func (s *keyedChainFeedbackStore) RecordBatch(_ context.Context, _ []FeedbackItem) error {
+	return nil
+}
+
 // newChainTestRegistry builds a ModelRegistry pre-seeded with profiles
 // matching the given (provider, model) pairs.
 func newChainTestRegistry(t *testing.T, pairs ...ModelKey) (*ModelRegistry, *Registry) {
@@ -197,6 +220,78 @@ func TestRouter_routeChain_WithinStepScoring(t *testing.T) {
 	}
 	if len(plan.Fallbacks) != 1 || plan.Fallbacks[0].Profile.Key.Provider != "slow" {
 		t.Errorf("fallback should be slow/shared:8b, got %v", plan.Fallbacks)
+	}
+}
+
+func TestRouter_routeChain_LaterFeedbackReadErrorRescoresEarlierSteps(t *testing.T) {
+	mr, provReg := newChainTestRegistry(t,
+		ModelKey{Provider: "fast", Model: "shared:8b"},
+		ModelKey{Provider: "slow", Model: "shared:8b"},
+		ModelKey{Provider: "failer", Model: "tail:8b"},
+	)
+	seedChainProfile(t, mr, &ModelProfile{
+		Key: ModelKey{Provider: "fast", Model: "shared:8b"}, Caps: CapChat,
+		Quality: TierGood, Speed: TierBest, ContextWindow: 8192,
+	})
+	seedChainProfile(t, mr, &ModelProfile{
+		Key: ModelKey{Provider: "slow", Model: "shared:8b"}, Caps: CapChat,
+		Quality: TierGood, Speed: TierBasic, ContextWindow: 8192,
+	})
+	seedChainProfile(t, mr, &ModelProfile{
+		Key: ModelKey{Provider: "failer", Model: "tail:8b"}, Caps: CapChat,
+		Quality: TierGood, Speed: TierGood, ContextWindow: 8192,
+	})
+
+	store := &keyedChainFeedbackStore{
+		aggregates: map[FeedbackKey]Aggregate{
+			{Provider: "fast", Model: "shared:8b", UseCase: "chat"}: {
+				Score: 0, SampleCount: 100, ScoredCount: 100,
+			},
+			{Provider: "slow", Model: "shared:8b", UseCase: "chat"}: {
+				Score: 1, SampleCount: 100, ScoredCount: 100,
+			},
+		},
+		errors: map[FeedbackKey]error{
+			{Provider: "failer", Model: "tail:8b", UseCase: "chat"}: errors.New("disk full"),
+		},
+	}
+
+	r := NewRouter(mr, provReg,
+		WithRoutingFeedback(NewRoutingFeedback(store)),
+		WithFeedbackScoringMode(FeedbackScoringEnforce),
+		WithWeightOverrides(map[string]*WeightProfile{
+			"chat": {Feedback: 100, Speed: 1},
+		}),
+	)
+	cleanupRouter(t, r)
+
+	req := RoutingRequest{
+		UseCase:        "chat",
+		RequiredCaps:   CapChat,
+		PreferredChain: []string{"shared:8b", "failer/tail:8b"},
+		StrictChain:    true,
+		Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+	}
+	plan, err := r.Route(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan.Profile.Key.Provider != "fast" {
+		t.Fatalf("primary provider = %q, want fast (later read_error must neutralize earlier feedback)",
+			plan.Profile.Key.Provider)
+	}
+	if plan.feedbackStatus != feedbackSnapshotStatusReadError {
+		t.Fatalf("feedbackStatus = %q, want %q", plan.feedbackStatus, feedbackSnapshotStatusReadError)
+	}
+	if plan.scoreBreakdown == nil {
+		t.Fatalf("scoreBreakdown nil, want read_error-stamped breakdown")
+	}
+	if plan.scoreBreakdown.feedbackActive {
+		t.Errorf("feedbackActive = true after read_error; want false")
+	}
+	if plan.Score != plan.scoreBreakdown.scoreWithoutFeedback {
+		t.Errorf("plan.Score = %v, scoreWithoutFeedback = %v; fail-open selection used stale feedback",
+			plan.Score, plan.scoreBreakdown.scoreWithoutFeedback)
 	}
 }
 

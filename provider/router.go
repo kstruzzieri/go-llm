@@ -178,12 +178,12 @@ type FeedbackScoringMode int
 
 const (
 	// FeedbackScoringOff disables both feedback reads and feedback
-	// breakdown emission. selectionActiveSignals / deltaActiveSignals
-	// both exclude "feedback".
+	// breakdown emission. Selection still preserves the pre-PR3 neutral
+	// feedback denominator.
 	FeedbackScoringOff FeedbackScoringMode = iota
 	// FeedbackScoringShadow reads feedback per route, emits ScoreBreakdown
 	// with raw/adjusted values, but route selection uses the
-	// score-without-feedback path. Used to evaluate the impact of feedback
+	// neutral-feedback baseline. Used to evaluate the impact of feedback
 	// before enforcing it.
 	FeedbackScoringShadow
 	// FeedbackScoringEnforce reads feedback per route, emits the same
@@ -709,13 +709,12 @@ func (r *Router) resolveCandidates(ctx context.Context, req RoutingRequest) ([]*
 // exactly once and threads it in; scoreCandidate stays I/O-free.
 //
 // Each candidate gets THREE weighted-score computations:
-//   - selection score (chosen via selectionActiveSignals: feedback in
-//     activeSignals iff Enforce + snap.active)
-//   - scoreWithFeedback (deltaActiveSignals: feedback in activeSignals
-//     iff snap.active, regardless of mode — so Shadow exposes a real
-//     delta in the breakdown)
-//   - scoreWithoutFeedback (baseActiveSignals: feedback never in
-//     activeSignals — the PR2 baseline)
+//   - selection score (Enforce + active snapshot uses the snapshot's
+//     adjusted feedback; Off/Shadow/fail-open use neutral feedback)
+//   - scoreWithFeedback (the snapshot-adjusted score when feedback was
+//     read, otherwise the same neutral-feedback baseline)
+//   - scoreWithoutFeedback (neutral feedbackScore=0.5 with the pre-PR3
+//     feedback denominator preserved)
 func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req RoutingRequest, snap *feedbackSnapshot) []scoredCandidate {
 	selectActive := r.selectionActiveSignals(snap)
 	deltaActive := r.deltaActiveSignals(snap)
@@ -742,9 +741,11 @@ func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req Rou
 		bd := scoreCandidate(profile, req, budget, r.warmth, cf, breaker)
 
 		// Compute the three weighted score flavors.
-		bd.scoreWithoutFeedback = computeWeightedScore(bd, req.UseCase, baseActive, customWeights)
+		neutralBD := scoreBreakdownWithNeutralFeedback(bd)
+		bd.scoreWithoutFeedback = computeWeightedScore(neutralBD, req.UseCase, baseActive, customWeights)
 		bd.scoreWithFeedback = computeWeightedScore(bd, req.UseCase, deltaActive, customWeights)
-		score := computeWeightedScore(bd, req.UseCase, selectActive, customWeights)
+		scoreBD := scoreBreakdownForSelection(bd, snap)
+		score := computeWeightedScore(scoreBD, req.UseCase, selectActive, customWeights)
 
 		// Apply breaker penalty (overrides score if -Inf).
 		if math.IsInf(bd.breakerPenalty, -1) {
@@ -762,12 +763,14 @@ func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req Rou
 	return scored
 }
 
-// baseActiveSignals returns the always-on scoring signals (everything
-// except "feedback", which is conditional on snapshot/mode). Signals
+// baseActiveSignals returns the always-on PR2 scoring baseline. Feedback
+// stays active here at the neutral 0.5 value so Off/Shadow/fail-open
+// preserve the pre-PR3 denominator and sticky-routing margins. Signals
 // backed by absent subsystems (e.g. no warmth tracker) are excluded so
 // they don't penalize candidates.
 func (r *Router) baseActiveSignals() map[string]bool {
 	active := map[string]bool{
+		"feedback": true,
 		"headroom": true,
 		"quality":  true,
 		"speed":    true,
@@ -781,28 +784,19 @@ func (r *Router) baseActiveSignals() map[string]bool {
 }
 
 // selectionActiveSignals is the set used for the score that actually
-// drives candidate selection. Feedback participates only in Enforce
-// mode with a live (non-fail-open) snapshot; Off/Shadow/fail-open all
-// exclude it so pre-PR3 selection math is preserved.
+// drives candidate selection. Feedback's denominator is always present;
+// scoreBreakdownForSelection decides whether the value is the live
+// snapshot-adjusted feedback (Enforce + active) or neutral 0.5.
 func (r *Router) selectionActiveSignals(snap *feedbackSnapshot) map[string]bool {
-	active := r.baseActiveSignals()
-	if r.routingFeedback != nil && snap != nil && snap.active && snap.mode == FeedbackScoringEnforce {
-		active["feedback"] = true
-	}
-	return active
+	return r.baseActiveSignals()
 }
 
-// deltaActiveSignals is the set used to compute ScoreWithFeedback for
-// the breakdown. Feedback participates whenever the snapshot is active
-// (Shadow OR Enforce) so the breakdown can expose the would-be-applied
-// delta even in Shadow. Fail-open (snap.active == false) still excludes
-// feedback so the delta reports the same scores as PR2 in that case.
+// deltaActiveSignals is the set used to compute ScoreWithFeedback for the
+// breakdown. The denominator always includes feedback; the scoreBreakdown
+// value is live when a snapshot read supplied candidate feedback and
+// neutral otherwise.
 func (r *Router) deltaActiveSignals(snap *feedbackSnapshot) map[string]bool {
-	active := r.baseActiveSignals()
-	if r.routingFeedback != nil && snap != nil && snap.active {
-		active["feedback"] = true
-	}
-	return active
+	return r.baseActiveSignals()
 }
 
 // ---------------------------------------------------------------------------

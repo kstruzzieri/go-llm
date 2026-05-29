@@ -532,15 +532,16 @@ type ScoreBreakdown struct {
 	FeedbackUpdatedAt *time.Time `json:"feedback_updated_at,omitempty"`
 
 	// ScoreWithoutFeedback and ScoreWithFeedback are the two weighted
-	// scores computed once per candidate. Off mode selects using
-	// ScoreWithoutFeedback; Shadow mode selects using
-	// ScoreWithoutFeedback but still computes ScoreWithFeedback for
-	// the delta; Enforce mode selects using ScoreWithFeedback when
-	// feedback is active. Both are always populated so operators can
-	// inspect the delta without re-running scoring. When the snapshot
-	// fail-opens (FeedbackSnapshotStatus == "read_error"), the two
-	// scores are equal because deltaActiveSignals also excludes
-	// feedback in that case.
+	// scores computed once per candidate. ScoreWithoutFeedback preserves
+	// the pre-PR3 neutral feedbackScore=0.5 denominator; it does not remove
+	// the feedback weight from normalization. Off mode selects using
+	// ScoreWithoutFeedback; Shadow mode selects using ScoreWithoutFeedback
+	// but still computes ScoreWithFeedback for the delta; Enforce mode
+	// selects using ScoreWithFeedback when feedback is active. Both are
+	// always populated so operators can inspect the delta without re-running
+	// scoring. When the snapshot fail-opens
+	// (FeedbackSnapshotStatus == "read_error"), the two scores are equal
+	// because ScoreWithFeedback also uses the neutral baseline.
 	ScoreWithoutFeedback float64 `json:"score_without_feedback"`
 	ScoreWithFeedback    float64 `json:"score_with_feedback"`
 }

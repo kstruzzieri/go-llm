@@ -42,10 +42,10 @@ func BenchmarkSQLiteFeedbackStoreRecordBatch(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		// Stamp At freshly per iteration so retention's
-		// ORDER BY at_ns DESC, id DESC actually orders rows by time and
-		// the trim hits a real ordering — not the degenerate
-		// "every row shares one at_ns" case.
+		// Stamp At freshly per iteration so read-side aggregation walks a
+		// realistic time-ordered range rather than the degenerate
+		// "every row shares one at_ns" case. Retention itself is FIFO by
+		// insertion id to match MemoryStore.
 		now := time.Now()
 		for j := range items {
 			items[j] = FeedbackItem{Key: k, Signal: FeedbackSignal{Kind: RoutingSignalSuccess, At: now.Add(time.Duration(j) * time.Microsecond)}}

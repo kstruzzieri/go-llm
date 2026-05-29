@@ -187,7 +187,7 @@ func resolveSQLiteConfig(cfg SQLiteFeedbackStoreConfig) (resolvedConfig, error) 
 
 // Get aggregates signals for key via a single SELECT. Returns a neutral
 // aggregate when no rows exist.
-func (s *SQLiteFeedbackStore) Get(ctx context.Context, key FeedbackKey) (Aggregate, error) {
+func (s *SQLiteFeedbackStore) Get(ctx context.Context, key FeedbackKey) (agg Aggregate, err error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT kind, strength, at_ns FROM routing_feedback_signals
 		   WHERE provider = ? AND model = ? AND use_case = ?
@@ -197,7 +197,11 @@ func (s *SQLiteFeedbackStore) Get(ctx context.Context, key FeedbackKey) (Aggrega
 	if err != nil {
 		return Aggregate{}, fmt.Errorf("provider: SQLiteFeedbackStore.Get: %w", err)
 	}
-	defer rows.Close()
+	defer func() {
+		if closeErr := rows.Close(); err == nil && closeErr != nil {
+			err = fmt.Errorf("provider: SQLiteFeedbackStore.Get close rows: %w", closeErr)
+		}
+	}()
 
 	var (
 		sum         float64
@@ -364,10 +368,10 @@ func insertSignalTx(ctx context.Context, tx *sql.Tx, key FeedbackKey, sig Feedba
 	return nil
 }
 
-// applyRetentionTx deletes all but the newest maxRetained rows for key,
-// ordered by (at_ns DESC, id DESC) so same-timestamp batch rows have a
-// deterministic FIFO tiebreaker. No-op when maxRetained <= 0 (the
-// "unbounded" semantics from MemoryStoreConfig).
+// applyRetentionTx deletes all but the newest maxRetained inserted rows for
+// key, ordered by id DESC to match MemoryStore's FIFO retention even when a
+// caller records backdated or delayed signals. No-op when maxRetained <= 0
+// (the "unbounded" semantics from MemoryStoreConfig).
 func applyRetentionTx(ctx context.Context, tx *sql.Tx, key FeedbackKey, maxRetained int) error {
 	if maxRetained <= 0 {
 		return nil
@@ -378,7 +382,7 @@ func applyRetentionTx(ctx context.Context, tx *sql.Tx, key FeedbackKey, maxRetai
 		     AND id NOT IN (
 		       SELECT id FROM routing_feedback_signals
 		         WHERE provider = ? AND model = ? AND use_case = ?
-		         ORDER BY at_ns DESC, id DESC
+		         ORDER BY id DESC
 		         LIMIT ?
 		     )`,
 		key.Provider, key.Model, key.UseCase,

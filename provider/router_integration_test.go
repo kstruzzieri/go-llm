@@ -96,10 +96,10 @@ func TestIntegrationRouteAndExecuteChat(t *testing.T) {
 
 	// --- Step 1: Route with AffinityKey and execute chat ---
 	req := RoutingRequest{
-		Model:       "qwen3:8b",
-		UseCase:     "chat",
-		AffinityKey: "session-abc",
-		Messages:    []ChatMessage{{Role: "user", Content: "hello"}},
+		Model:        "qwen3:8b",
+		UseCase:      "chat",
+		AffinityKey:  "session-abc",
+		Messages:     []ChatMessage{{Role: "user", Content: "hello"}},
 		RequiredCaps: CapChat,
 	}
 
@@ -438,11 +438,11 @@ func TestIntegrationDryRun(t *testing.T) {
 	ctx := context.Background()
 
 	req := RoutingRequest{
-		Model:       "dry-model:8b",
-		UseCase:     "chat",
-		AffinityKey: "session-dry-run",
-		DryRun:      true,
-		Messages:    []ChatMessage{{Role: "user", Content: "test dry run"}},
+		Model:        "dry-model:8b",
+		UseCase:      "chat",
+		AffinityKey:  "session-dry-run",
+		DryRun:       true,
+		Messages:     []ChatMessage{{Role: "user", Content: "test dry run"}},
 		RequiredCaps: CapChat,
 	}
 
@@ -1104,7 +1104,8 @@ func TestRouterEnforceModeFeedsBackIntoNextRoute_SQLite(t *testing.T) {
 //
 // No direction assertion: positive adjusted feedback can produce a lower
 // with-feedback weighted average depending on candidate weights. The
-// invariants are (delta != 0) AND (selection score == without-feedback).
+// invariants are (delta != 0) AND (selection score == neutral-feedback
+// baseline).
 // ---------------------------------------------------------------------------
 
 func TestRouterShadowModeExposesDeltaButDoesNotChangeSelection(t *testing.T) {
@@ -1142,7 +1143,7 @@ func TestRouterShadowModeExposesDeltaButDoesNotChangeSelection(t *testing.T) {
 	// Plan-resolved Shadow assertion: breakdown must expose a non-zero
 	// delta even though selection used scoreWithoutFeedback. No direction
 	// assertion — positive adjusted feedback can still produce a lower
-	// with-feedback weighted average than the no-feedback weighted average
+	// with-feedback weighted average than the neutral-feedback baseline
 	// depending on candidate weights. The only spec invariant is that the
 	// breakdown exposes a non-zero delta.
 	if bd.ScoreWithFeedback == bd.ScoreWithoutFeedback {
@@ -1199,7 +1200,7 @@ func TestRouterEnforceModeFailOpenSurfacesReadErrorOnRouteOutcome(t *testing.T) 
 			bd.FeedbackMode, FeedbackScoringEnforce.String())
 	}
 	// Selection score must equal scoreWithoutFeedback on fail-open: the
-	// route used the PR2 baseline weights with no feedback contribution.
+	// route used the PR2 neutral-feedback baseline.
 	if resp.RouteOutcome.Score != bd.ScoreWithoutFeedback {
 		t.Errorf("fail-open: RouteOutcome.Score (%v) != ScoreWithoutFeedback (%v); selection used wrong path",
 			resp.RouteOutcome.Score, bd.ScoreWithoutFeedback)
@@ -1248,18 +1249,10 @@ func TestRouterShadowModeNoSignalsYet(t *testing.T) {
 	if bd.FeedbackSampleCount != 0 || bd.FeedbackScoredCount != 0 {
 		t.Errorf("empty store: counts = (%d,%d), want (0,0)", bd.FeedbackSampleCount, bd.FeedbackScoredCount)
 	}
-	// IMPORTANT — operator-confusing invariant: ScoreWithFeedback !=
-	// ScoreWithoutFeedback even when the store is empty. The two weighted
-	// sums are computed with different active-signal sets:
-	//   - ScoreWithoutFeedback excludes "feedback" entirely; the remaining
-	//     weights renormalize the composite.
-	//   - ScoreWithFeedback includes "feedback" at the neutral 0.5 value;
-	//     other signals' relative weights shrink to make room for it.
-	// So a non-zero delta in Shadow does NOT imply "feedback contributed."
-	// The right signal for "no data yet" is FeedbackSampleCount == 0 +
-	// FeedbackScore == 0.5, not a zero delta. Operators must read the
-	// breakdown holistically; documenting via this assertion so a future
-	// "make delta zero on empty store" change doesn't slip in.
+	if bd.ScoreWithFeedback != bd.ScoreWithoutFeedback {
+		t.Errorf("empty Shadow: ScoreWithFeedback=%v, ScoreWithoutFeedback=%v; want equal neutral-feedback baseline",
+			bd.ScoreWithFeedback, bd.ScoreWithoutFeedback)
+	}
 	if bd.FeedbackUpdatedAt != nil {
 		t.Errorf("empty Shadow: FeedbackUpdatedAt = %v, want nil", bd.FeedbackUpdatedAt)
 	}

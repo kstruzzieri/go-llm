@@ -883,32 +883,32 @@ func TestRouterWithoutRoutingFeedbackProducesNilPlanFeedback(t *testing.T) {
 //
 // Three helpers replaced the pre-PR3 activeSignals():
 //
-//   - baseActiveSignals       — feedback NEVER active (PR2 baseline)
-//   - selectionActiveSignals  — feedback active iff Enforce + snap.active
-//   - deltaActiveSignals      — feedback active iff snap.active (any mode)
+//   - baseActiveSignals       — feedback denominator active at neutral 0.5
+//   - selectionActiveSignals  — same denominator; value chosen by mode/status
+//   - deltaActiveSignals      — same denominator; live value when available
 //
 // The truth-table tests below pin every interesting (mode, active) cell
 // so future refactors cannot silently regress fail-open or Shadow-mode
 // delta exposure.
 
-func TestRouterScoringSelectionActiveExcludesFeedbackWhenOff(t *testing.T) {
+func TestRouterScoringSelectionActiveIncludesNeutralFeedbackWhenOff(t *testing.T) {
 	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
 	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringOff))
 
 	active := router.selectionActiveSignals(&feedbackSnapshot{mode: FeedbackScoringOff})
-	if active["feedback"] {
-		t.Errorf("Off mode: selectionActiveSignals[\"feedback\"] = true, want false")
+	if !active["feedback"] {
+		t.Errorf("Off mode: selectionActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
 	}
 }
 
-func TestRouterScoringSelectionActiveExcludesFeedbackWhenShadow(t *testing.T) {
+func TestRouterScoringSelectionActiveIncludesNeutralFeedbackWhenShadow(t *testing.T) {
 	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
 	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringShadow))
 
 	snap := &feedbackSnapshot{mode: FeedbackScoringShadow, active: true, byKey: map[FeedbackKey]*candidateFeedback{}}
 	active := router.selectionActiveSignals(snap)
-	if active["feedback"] {
-		t.Errorf("Shadow mode: selectionActiveSignals[\"feedback\"] = true, want false (selection uses without-feedback)")
+	if !active["feedback"] {
+		t.Errorf("Shadow mode: selectionActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
 	}
 }
 
@@ -923,14 +923,14 @@ func TestRouterScoringSelectionActiveIncludesFeedbackWhenEnforce(t *testing.T) {
 	}
 }
 
-func TestRouterScoringSelectionActiveExcludesFeedbackOnFailOpen(t *testing.T) {
+func TestRouterScoringSelectionActiveIncludesNeutralFeedbackOnFailOpen(t *testing.T) {
 	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
 	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
 
 	snap := &feedbackSnapshot{mode: FeedbackScoringEnforce, active: false}
 	active := router.selectionActiveSignals(snap)
-	if active["feedback"] {
-		t.Errorf("Enforce mode + inactive snapshot (fail-open): selectionActiveSignals[\"feedback\"] = true, want false")
+	if !active["feedback"] {
+		t.Errorf("Enforce mode + inactive snapshot: selectionActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
 	}
 }
 
@@ -948,14 +948,50 @@ func TestRouterScoringDeltaActiveIncludesFeedbackInShadow(t *testing.T) {
 	}
 }
 
-func TestRouterScoringDeltaActiveExcludesFeedbackOnFailOpen(t *testing.T) {
+func TestRouterScoringDeltaActiveIncludesNeutralFeedbackOnFailOpen(t *testing.T) {
 	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
 	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
 
 	snap := &feedbackSnapshot{mode: FeedbackScoringEnforce, active: false}
 	active := router.deltaActiveSignals(snap)
-	if active["feedback"] {
-		t.Errorf("inactive snapshot (fail-open): deltaActiveSignals[\"feedback\"] = true, want false")
+	if !active["feedback"] {
+		t.Errorf("inactive snapshot: deltaActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
+	}
+}
+
+func TestRouterScoringShadowSelectionUsesNeutralFeedbackValue(t *testing.T) {
+	bd := scoreBreakdown{
+		feedbackActive: true,
+		feedbackScore:  1.0,
+	}
+	snap := &feedbackSnapshot{mode: FeedbackScoringShadow, active: true}
+	got := scoreBreakdownForSelection(bd, snap)
+	if got.feedbackScore != 0.5 {
+		t.Errorf("Shadow selection feedbackScore = %v, want neutral 0.5", got.feedbackScore)
+	}
+}
+
+func TestRouterOffModeNeutralFeedbackPreservesStickyMarginScale(t *testing.T) {
+	router, _ := setupTestRouter(t, WithFeedbackScoringMode(FeedbackScoringOff))
+	active := router.selectionActiveSignals(&feedbackSnapshot{mode: FeedbackScoringOff})
+	wp := &WeightProfile{Headroom: 1, Feedback: 1}
+	incumbent := scoreBreakdown{headroomScore: 0, feedbackScore: 0.5}
+	challenger := scoreBreakdown{headroomScore: 0.29, feedbackScore: 0.5}
+
+	incumbentScore := computeWeightedScore(incumbent, "chat", active, wp)
+	challengerScore := computeWeightedScore(challenger, "chat", active, wp)
+	if challengerScore-incumbentScore > router.defaultOpts.hysteresisMargin {
+		t.Fatalf("neutral-feedback gap = %v, want <= sticky margin %v",
+			challengerScore-incumbentScore, router.defaultOpts.hysteresisMargin)
+	}
+
+	withoutFeedback := router.baseActiveSignals()
+	delete(withoutFeedback, "feedback")
+	incumbentNoFeedback := computeWeightedScore(incumbent, "chat", withoutFeedback, wp)
+	challengerNoFeedback := computeWeightedScore(challenger, "chat", withoutFeedback, wp)
+	if challengerNoFeedback-incumbentNoFeedback <= router.defaultOpts.hysteresisMargin {
+		t.Fatalf("test setup failed: no-feedback gap = %v, want > sticky margin %v",
+			challengerNoFeedback-incumbentNoFeedback, router.defaultOpts.hysteresisMargin)
 	}
 }
 

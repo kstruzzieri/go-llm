@@ -106,6 +106,40 @@ func runRoutingFeedbackStoreContract(t *testing.T, name string, factory func(t *
 			t.Errorf("retention SampleCount = %d, want 3 (cap honored even on same timestamp)", agg.SampleCount)
 		}
 	})
+	t.Run(name+"/RetentionFIFOBackdatedInsert", func(t *testing.T) {
+		store := factory(t)
+		k := FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"}
+		positive := 1.0
+		negative := -1.0
+		base := time.Unix(100, 0)
+		for i := 0; i < 3; i++ {
+			if err := store.Record(context.Background(), k, FeedbackSignal{
+				Kind:     RoutingSignalSuccess,
+				Strength: &positive,
+				At:       base.Add(time.Duration(i) * time.Second),
+			}); err != nil {
+				t.Fatalf("Record positive %d: %v", i, err)
+			}
+		}
+		if err := store.Record(context.Background(), k, FeedbackSignal{
+			Kind:     RoutingSignalSuccess,
+			Strength: &negative,
+			At:       base.Add(-time.Hour),
+		}); err != nil {
+			t.Fatalf("Record backdated: %v", err)
+		}
+		agg, err := store.Get(context.Background(), k)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if agg.SampleCount != 3 {
+			t.Errorf("SampleCount = %d, want 3 after retention", agg.SampleCount)
+		}
+		want := 0.5 + 0.5*(1.0/3.0)
+		if abs(agg.Score-want) > 1e-9 {
+			t.Errorf("Score = %v, want %v (newest inserted backdated signal retained)", agg.Score, want)
+		}
+	})
 }
 
 func TestMemoryStoreContract(t *testing.T) {
@@ -173,7 +207,7 @@ func TestOpenSQLiteFeedbackStoreInMemory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenSQLiteFeedbackStore(:memory:): %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if err := store.Record(context.Background(), FeedbackKey{Provider: "p", Model: "m", UseCase: "chat"},
 		FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
 		t.Errorf("Record after Open: %v", err)

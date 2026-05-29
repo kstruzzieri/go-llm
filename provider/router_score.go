@@ -128,8 +128,8 @@ type scoreBreakdown struct {
 	capabilityGate bool    // false = eliminated
 
 	// PR3 feedback-source fields. Populated by scoreCandidate when a
-	// route-level feedback snapshot is active; otherwise zero (and the
-	// "feedback" signal is excluded from activeSignals).
+	// route-level feedback snapshot is active for this key; otherwise
+	// zero while feedbackScore remains the neutral PR2 baseline.
 	feedbackActive      bool    // true iff snapshot active and key found
 	feedbackRaw         float64 // raw Aggregate.Score
 	feedbackAdjusted    float64 // confidence-gated/shrunk value
@@ -187,8 +187,8 @@ func tierToFloat(t Tier) float64 {
 // and returns a scoreBreakdown. This is a standalone function, not a Router
 // method, so it can be tested and used independently. It performs NO store
 // I/O — the per-route feedback snapshot is built once by the Router and the
-// appropriate *candidateFeedback is passed in (nil when feedback is
-// off/inactive).
+// appropriate *candidateFeedback is passed in (nil when no route-level
+// feedback data is active for this candidate).
 //
 // Parameters:
 //   - profile: the candidate model's metadata
@@ -217,8 +217,7 @@ func scoreCandidate(
 
 	// 3. Feedback: when a snapshot view is supplied, copy the raw and
 	//    confidence-adjusted values onto the breakdown. When nil, the
-	//    feedback signal stays neutral exactly as in PR2 (the "feedback"
-	//    signal is excluded from activeSignals by the Router).
+	//    feedback signal stays neutral exactly as in PR2.
 	if feedback != nil {
 		bd.feedbackActive = true
 		bd.feedbackRaw = feedback.raw.Score
@@ -260,6 +259,18 @@ func scoreCandidate(
 	}
 
 	return bd
+}
+
+func scoreBreakdownWithNeutralFeedback(bd scoreBreakdown) scoreBreakdown {
+	bd.feedbackScore = 0.5
+	return bd
+}
+
+func scoreBreakdownForSelection(bd scoreBreakdown, snap *feedbackSnapshot) scoreBreakdown {
+	if snap != nil && snap.active && snap.mode == FeedbackScoringEnforce {
+		return bd
+	}
+	return scoreBreakdownWithNeutralFeedback(bd)
 }
 
 func profileSatisfiesRequiredCaps(profile *ModelProfile, required Capability) bool {
