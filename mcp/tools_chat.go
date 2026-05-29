@@ -4,11 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/transcript"
 )
 
 // chatArgs are the parameters for the chat tool.
@@ -148,6 +152,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
+	s.persistTranscript(ctx, req, args, resp)
 	return toolResult(resp.Content), nil
 }
 
@@ -197,4 +202,75 @@ func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
 		}
 	}
 	return out
+}
+
+// persistTranscript records a successful chat call to the transcript store when
+// one is configured. Best-effort: any failure is logged and never surfaces to
+// the caller. The original args.Messages (pre-RAG) are recorded; the ephemeral
+// RAG-injected system message is intentionally excluded.
+func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, resp *provider.ChatResponse) {
+	store := s.transcriptStoreSnapshot()
+	if store == nil {
+		return
+	}
+
+	reqMsgs, err := conversation.FromChatMessages(args.Messages)
+	if err != nil {
+		log.Printf("mcp: transcript skip (convert request): %v", err)
+		return
+	}
+
+	var toolCalls json.RawMessage
+	if len(resp.ToolCalls) > 0 {
+		if raw, merr := json.Marshal(resp.ToolCalls); merr == nil {
+			toolCalls = raw
+		} else {
+			log.Printf("mcp: transcript marshal tool calls: %v", merr)
+		}
+	}
+	var routeOutcome json.RawMessage
+	if resp.RouteOutcome != nil {
+		if raw, merr := json.Marshal(resp.RouteOutcome); merr == nil {
+			routeOutcome = raw
+		} else {
+			log.Printf("mcp: transcript marshal route outcome: %v", merr)
+		}
+	}
+
+	in := transcript.RecordInput{
+		ConversationID: strings.TrimSpace(args.ConversationID),
+		Request:        reqMsgs,
+		Response: conversation.Message{
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: toolCalls,
+		},
+		Model:        resp.Model,
+		Provider:     resp.Provider,
+		RouteOutcome: routeOutcome,
+		SessionHint:  sessionHintFromRequest(req),
+	}
+	if rerr := store.Record(ctx, in); rerr != nil {
+		log.Printf("mcp: transcript record: %v", rerr)
+	}
+}
+
+// sessionHintFromRequest returns a stable MCP session identifier when the
+// transport provides one (streamable HTTP), or "" otherwise (stdio/in-memory).
+// "" is a safe fallback: conversationKey then derives identity from message
+// content (transcript §5).
+//
+// GetSession returns the concrete *ServerSession boxed in the Session
+// interface, so a request created without a session (stdio/in-memory, tests) is
+// a typed nil: the interface is non-nil but the pointer is nil. Comparing the
+// interface to nil would spuriously pass and ID() would then panic on the nil
+// receiver. Assert to the concrete type and nil-check the pointer instead.
+func sessionHintFromRequest(req *gomcp.CallToolRequest) string {
+	if req == nil {
+		return ""
+	}
+	if sess, ok := req.GetSession().(*gomcp.ServerSession); ok && sess != nil {
+		return sess.ID()
+	}
+	return ""
 }
