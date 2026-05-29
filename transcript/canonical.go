@@ -66,3 +66,41 @@ func sha256Hex(s string) string {
 	sum := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(sum[:])
 }
+
+// canonicalMessagesJSON returns a stable JSON encoding of a message slice for
+// hashing (derived keys §5.3 and fork ids §7).
+func canonicalMessagesJSON(msgs []conversation.Message) string {
+	cs := make([]canonicalMsg, len(msgs))
+	for i, m := range msgs {
+		cs[i] = canonicalMessage(m)
+	}
+	b, _ := json.Marshal(cs) // canonicalMsg has only string fields; cannot fail
+	return string(b)
+}
+
+// messagesEqual reports whether two histories are element-wise canonically equal.
+func messagesEqual(a, b []conversation.Message) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if canonicalMessage(a[i]) != canonicalMessage(b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// isStrictPrefix reports whether prefix is an element-wise canonical prefix of
+// full and strictly shorter (a genuine extension, never equality).
+func isStrictPrefix(prefix, full []conversation.Message) bool {
+	if len(prefix) >= len(full) {
+		return false
+	}
+	for i := range prefix {
+		if canonicalMessage(prefix[i]) != canonicalMessage(full[i]) {
+			return false
+		}
+	}
+	return true
+}

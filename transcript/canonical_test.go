@@ -48,3 +48,40 @@ func TestSHA256Hex_Deterministic(t *testing.T) {
 		t.Errorf("sha256Hex length = %d, want 64", len(got))
 	}
 }
+
+func TestMessagesEqual(t *testing.T) {
+	a := []conversation.Message{{Role: "user", Content: "hi"}}
+	b := []conversation.Message{{Role: "user", Content: "hi"}}
+	c := []conversation.Message{{Role: "user", Content: "bye"}}
+	if !messagesEqual(a, b) {
+		t.Error("equal slices reported unequal")
+	}
+	if messagesEqual(a, c) {
+		t.Error("different content reported equal")
+	}
+	if messagesEqual(a, append(a, b...)) {
+		t.Error("different lengths reported equal")
+	}
+}
+
+func TestIsStrictPrefix(t *testing.T) {
+	short := []conversation.Message{{Role: "user", Content: "hi"}}
+	long := []conversation.Message{{Role: "user", Content: "hi"}, {Role: "assistant", Content: "hello"}}
+	if !isStrictPrefix(short, long) {
+		t.Error("short should be a strict prefix of long")
+	}
+	if isStrictPrefix(long, short) {
+		t.Error("long is not a prefix of short")
+	}
+	if isStrictPrefix(short, short) {
+		t.Error("equal slices are not a STRICT prefix")
+	}
+}
+
+func TestCanonicalMessagesJSON_StableAcrossToolCallFormatting(t *testing.T) {
+	a := []conversation.Message{{Role: "assistant", ToolCalls: json.RawMessage(`{"b":2,"a":1}`)}}
+	b := []conversation.Message{{Role: "assistant", ToolCalls: json.RawMessage(`{"a":1,"b":2}`)}}
+	if canonicalMessagesJSON(a) != canonicalMessagesJSON(b) {
+		t.Error("canonicalMessagesJSON should be stable across tool-call key order")
+	}
+}
