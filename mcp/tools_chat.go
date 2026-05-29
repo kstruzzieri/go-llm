@@ -13,11 +13,12 @@ import (
 
 // chatArgs are the parameters for the chat tool.
 type chatArgs struct {
-	Messages    []ollama.ChatMessage `json:"messages"`
-	Model       string               `json:"model,omitempty"`
-	UseRAG      bool                 `json:"use_rag,omitempty"`
-	RAGTopK     int                  `json:"rag_top_k,omitempty"`
-	Temperature *float64             `json:"temperature,omitempty"`
+	Messages       []ollama.ChatMessage `json:"messages"`
+	Model          string               `json:"model,omitempty"`
+	UseRAG         bool                 `json:"use_rag,omitempty"`
+	RAGTopK        int                  `json:"rag_top_k,omitempty"`
+	Temperature    *float64             `json:"temperature,omitempty"`
+	ConversationID string               `json:"conversation_id,omitempty"`
 }
 
 func (s *Server) registerChatTools() {
@@ -42,10 +43,11 @@ func (s *Server) registerChatTools() {
 						"required": []string{"role", "content"},
 					},
 				},
-				"model":       map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
-				"use_rag":     map[string]any{"type": "boolean", "description": "Prepend RAG context from the vector store"},
-				"rag_top_k":   map[string]any{"type": "integer", "description": "Number of RAG results (default: 5)"},
-				"temperature": map[string]any{"type": "number", "description": "Sampling temperature"},
+				"model":           map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
+				"use_rag":         map[string]any{"type": "boolean", "description": "Prepend RAG context from the vector store"},
+				"rag_top_k":       map[string]any{"type": "integer", "description": "Number of RAG results (default: 5)"},
+				"temperature":     map[string]any{"type": "number", "description": "Sampling temperature"},
+				"conversation_id": map[string]any{"type": "string", "description": "Optional stable id to group calls of one conversation; omit to derive identity from message content"},
 			},
 			"required": []string{"messages"},
 		},
