@@ -86,3 +86,37 @@ func TestForkID_ContentAddressed(t *testing.T) {
 		t.Error("forkID should differ for different histories")
 	}
 }
+
+func TestDecideStitch_LeaseGuard(t *testing.T) {
+	const leaseWindow = 12 * time.Hour
+	const short = 2
+	base := time.UnixMilli(0)
+	now := base.Add(13 * time.Hour) // 1h past the lease window vs updatedAt=0
+
+	incoming := msgs("a", "b", "c", "d")
+
+	t.Run("stale and short forks", func(t *testing.T) {
+		stub := candidate{id: "k", messages: msgs("a", "b"), messageCount: 2, updatedAt: 0}
+		dec := decideStitch("k", incoming, []candidate{stub}, now, leaseWindow, short)
+		if dec.status != statusForked {
+			t.Errorf("stale+short prefix should fork, got %+v", dec)
+		}
+	})
+
+	t.Run("fresh extends", func(t *testing.T) {
+		fresh := candidate{id: "k", messages: msgs("a", "b"), messageCount: 2, updatedAt: now.Add(-time.Minute).UnixMilli()}
+		dec := decideStitch("k", incoming, []candidate{fresh}, now, leaseWindow, short)
+		if dec.status != statusExtended {
+			t.Errorf("fresh prefix should extend, got %+v", dec)
+		}
+	})
+
+	t.Run("long extends even when stale", func(t *testing.T) {
+		long := candidate{id: "k", messages: msgs("a", "b", "c"), messageCount: 3, updatedAt: 0}
+		incomingLong := msgs("a", "b", "c", "d", "e")
+		dec := decideStitch("k", incomingLong, []candidate{long}, now, leaseWindow, short)
+		if dec.status != statusExtended {
+			t.Errorf("stale but long prefix should extend, got %+v", dec)
+		}
+	})
+}
