@@ -194,7 +194,7 @@ func TestNewMemoryStoreAppliesDefaults(t *testing.T) {
 }
 
 func TestNewMemoryStoreRejectsOutOfRangeNeutralScore(t *testing.T) {
-	cases := []float64{-0.01, 1.01, -1.0, 2.0}
+	cases := []float64{-0.01, 1.01, -1.0, 2.0, math.NaN(), math.Inf(1), math.Inf(-1)}
 	for _, n := range cases {
 		t.Run("", func(t *testing.T) {
 			_, err := NewMemoryStore(MemoryStoreConfig{NeutralScore: n})

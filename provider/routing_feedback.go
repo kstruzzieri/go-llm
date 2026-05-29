@@ -291,6 +291,13 @@ func validateKey(k FeedbackKey) error {
 	return nil
 }
 
+func validateNeutralScore(score float64) error {
+	if math.IsNaN(score) || math.IsInf(score, 0) || score < 0 || score > 1 {
+		return fmt.Errorf("provider: NeutralScore %v out of range [0,1]", score)
+	}
+	return nil
+}
+
 // validateSignal enforces shape/payload invariants:
 //   - Kind is one of the known constants.
 //   - Strength, if non-nil, is finite (no NaN/Inf).

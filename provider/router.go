@@ -61,6 +61,24 @@ type Router struct {
 	done            chan struct{}
 	closeOnce       sync.Once
 	routingFeedback *RoutingFeedback
+	// feedbackScoringMode controls whether RoutingFeedback influences route
+	// selection. PR3 default is FeedbackScoringOff (pre-PR3 behavior).
+	// Independent of routingFeedback: recording (writes) is governed by
+	// WithRoutingFeedback; reading + selection impact (reads) is governed
+	// by this field. See routing_feedback.go and the FeedbackScoringMode
+	// docs for the full truth table.
+	feedbackScoringMode FeedbackScoringMode
+	// feedbackLogger receives once-logged warnings about feedback store
+	// failures and newRouteID RNG failures. Defaults to defaultFeedbackLogger
+	// (wraps log.Default()). Tests in the same package can assign a
+	// capturing implementation directly (router.feedbackLogger = cap)
+	// after setupTestRouter returns — no exported option (would expose
+	// the unexported feedbackLogger interface).
+	feedbackLogger feedbackLogger
+
+	// feedbackWarn holds the sync.Once guards for the three warning types
+	// emitted by the feedback surface.
+	feedbackWarn *feedbackWarningState
 }
 
 // Compile-time assertion that Router implements RouteRecorder.
@@ -149,6 +167,68 @@ func WithTokenBudgetValidator(v *TokenBudgetValidator) RouterOption {
 	}
 }
 
+// FeedbackScoringMode controls how the Router uses RoutingFeedback reads
+// during candidate scoring and route selection. Independent of whether
+// recording is enabled (WithRoutingFeedback); a deployment can write
+// signals without ever letting them influence routing.
+//
+// Defaults to FeedbackScoringOff so the post-PR3 routing path is the
+// pre-PR3 routing path until an operator opts in.
+type FeedbackScoringMode int
+
+const (
+	// FeedbackScoringOff disables both feedback reads and feedback
+	// breakdown emission. Selection still preserves the pre-PR3 neutral
+	// feedback denominator.
+	FeedbackScoringOff FeedbackScoringMode = iota
+	// FeedbackScoringShadow reads feedback per route, emits ScoreBreakdown
+	// with raw/adjusted values, but route selection uses the
+	// neutral-feedback baseline. Used to evaluate the impact of feedback
+	// before enforcing it.
+	FeedbackScoringShadow
+	// FeedbackScoringEnforce reads feedback per route, emits the same
+	// breakdown, AND lets the feedback signal participate in weighted
+	// scoring for the route. Snapshot fail-open still disables feedback
+	// for the whole route on any read error.
+	FeedbackScoringEnforce
+)
+
+// String returns the operator-facing label for the mode. Unknown values
+// return a labeled fallback so log lines never contain a bare integer.
+func (m FeedbackScoringMode) String() string {
+	switch m {
+	case FeedbackScoringOff:
+		return "off"
+	case FeedbackScoringShadow:
+		return "shadow"
+	case FeedbackScoringEnforce:
+		return "enforce"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(m))
+	}
+}
+
+// WithFeedbackScoringMode sets the FeedbackScoringMode at construction.
+// Default is FeedbackScoringOff. Recording (writes) is configured
+// separately via WithRoutingFeedback; this option controls only reads
+// and selection impact.
+func WithFeedbackScoringMode(mode FeedbackScoringMode) RouterOption {
+	return func(r *Router) { r.feedbackScoringMode = mode }
+}
+
+// WithFeedbackScoring is compatibility sugar: true maps to
+// FeedbackScoringEnforce, false maps to FeedbackScoringOff. Prefer
+// WithFeedbackScoringMode when ramp-up via shadow mode is wanted.
+func WithFeedbackScoring(enabled bool) RouterOption {
+	return func(r *Router) {
+		if enabled {
+			r.feedbackScoringMode = FeedbackScoringEnforce
+		} else {
+			r.feedbackScoringMode = FeedbackScoringOff
+		}
+	}
+}
+
 // WithRoutingFeedback configures the router to record per-attempt
 // outcomes via the RoutingFeedback wrapper. Default is nil (no recording).
 // The wrapper itself is nil-safe — if a future caller passes a
@@ -178,6 +258,8 @@ func NewRouter(registry *ModelRegistry, providers *Registry, opts ...RouterOptio
 		},
 		done: make(chan struct{}),
 	}
+	r.feedbackLogger = defaultFeedbackLogger
+	r.feedbackWarn = newFeedbackWarningState()
 
 	for _, opt := range opts {
 		opt(r)
@@ -263,7 +345,13 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	}
 
 	// 3. Hard gates + budget + score all candidates.
-	scored := r.scoreAll(ctx, candidates, req)
+	//    PR3: build the per-route feedback snapshot exactly ONCE here and
+	//    thread it through scoreAll. scoreCandidate stays I/O-free. For
+	//    the single-pass branch the snapshot lives only across scoreAll;
+	//    the chain-routing branch (routeChain) builds its own and extends
+	//    it incrementally per step.
+	snap := r.buildFeedbackSnapshot(ctx, candidates, req.UseCase)
+	scored := r.scoreAll(ctx, candidates, req, snap)
 
 	// 4. Partition into executable, truncatable, breakered, budgeted.
 	var executable, truncatable []scoredCandidate
@@ -297,7 +385,7 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 			// Return best truncatable with adaptation error.
 			sortScoredCandidates(truncatable, r.warmth)
 			winner := truncatable[0]
-			plan, buildErr := r.buildPlan(winner, nil, req, false)
+			plan, buildErr := r.buildPlan(winner, nil, req, false, snap)
 			if buildErr != nil {
 				return nil, ErrNoViableCandidate
 			}
@@ -356,7 +444,7 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 		fallbacks = executable[1 : 1+maxFb]
 	}
 
-	plan, buildErr := r.buildPlan(executable[0], fallbacks, req, wasSticky)
+	plan, buildErr := r.buildPlan(executable[0], fallbacks, req, wasSticky, snap)
 	if buildErr != nil {
 		return nil, fmt.Errorf("router: %w", buildErr)
 	}
@@ -616,9 +704,21 @@ func (r *Router) resolveCandidates(ctx context.Context, req RoutingRequest) ([]*
 }
 
 // scoreAll evaluates all candidates against the routing request, applying
-// hard gates (capability, breaker, RAM, budget) and computing weighted scores.
-func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req RoutingRequest) []scoredCandidate {
-	active := r.activeSignals()
+// hard gates (capability, breaker, RAM, budget) and computing weighted
+// scores. The caller (Route()) builds the per-route feedback snapshot
+// exactly once and threads it in; scoreCandidate stays I/O-free.
+//
+// Each candidate gets THREE weighted-score computations:
+//   - selection score (Enforce + active snapshot uses the snapshot's
+//     adjusted feedback; Off/Shadow/fail-open use neutral feedback)
+//   - scoreWithFeedback (the snapshot-adjusted score when feedback was
+//     read, otherwise the same neutral-feedback baseline)
+//   - scoreWithoutFeedback (neutral feedbackScore=0.5 with the pre-PR3
+//     feedback denominator preserved)
+func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req RoutingRequest, snap *feedbackSnapshot) []scoredCandidate {
+	selectActive := r.selectionActiveSignals(snap)
+	deltaActive := r.deltaActiveSignals(snap)
+	baseActive := r.baseActiveSignals()
 	var customWeights *WeightProfile
 	if wp, ok := r.defaultOpts.weightOverrides[req.UseCase]; ok {
 		customWeights = wp
@@ -637,10 +737,15 @@ func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req Rou
 
 		// Score the candidate.
 		breaker := r.getOrCreateBreaker(profile.Key.Provider)
-		bd := scoreCandidate(profile, req, budget, r.warmth, nil, breaker)
+		cf := snap.lookup(FeedbackKey{Provider: profile.Key.Provider, Model: profile.Key.Model, UseCase: req.UseCase})
+		bd := scoreCandidate(profile, req, budget, r.warmth, cf, breaker)
 
-		// Compute weighted score.
-		score := computeWeightedScore(bd, req.UseCase, active, customWeights)
+		// Compute the three weighted score flavors.
+		neutralBD := scoreBreakdownWithNeutralFeedback(bd)
+		bd.scoreWithoutFeedback = computeWeightedScore(neutralBD, req.UseCase, baseActive, customWeights)
+		bd.scoreWithFeedback = computeWeightedScore(bd, req.UseCase, deltaActive, customWeights)
+		scoreBD := scoreBreakdownForSelection(bd, snap)
+		score := computeWeightedScore(scoreBD, req.UseCase, selectActive, customWeights)
 
 		// Apply breaker penalty (overrides score if -Inf).
 		if math.IsInf(bd.breakerPenalty, -1) {
@@ -658,13 +763,15 @@ func (r *Router) scoreAll(_ context.Context, candidates []*ModelProfile, req Rou
 	return scored
 }
 
-// activeSignals returns the set of scoring signals that are active based
-// on the router's configuration. Signals backed by absent subsystems
-// (e.g. no warmth tracker) are excluded so they don't penalize candidates.
-func (r *Router) activeSignals() map[string]bool {
+// baseActiveSignals returns the always-on PR2 scoring baseline. Feedback
+// stays active here at the neutral 0.5 value so Off/Shadow/fail-open
+// preserve the pre-PR3 denominator and sticky-routing margins. Signals
+// backed by absent subsystems (e.g. no warmth tracker) are excluded so
+// they don't penalize candidates.
+func (r *Router) baseActiveSignals() map[string]bool {
 	active := map[string]bool{
-		"headroom": true,
 		"feedback": true,
+		"headroom": true,
 		"quality":  true,
 		"speed":    true,
 		"kvcache":  true,
@@ -674,6 +781,174 @@ func (r *Router) activeSignals() map[string]bool {
 		active["warmth"] = true
 	}
 	return active
+}
+
+// selectionActiveSignals is the set used for the score that actually
+// drives candidate selection. Feedback's denominator is always present;
+// scoreBreakdownForSelection decides whether the value is the live
+// snapshot-adjusted feedback (Enforce + active) or neutral 0.5.
+func (r *Router) selectionActiveSignals(snap *feedbackSnapshot) map[string]bool {
+	return r.baseActiveSignals()
+}
+
+// deltaActiveSignals is the set used to compute ScoreWithFeedback for the
+// breakdown. The denominator always includes feedback; the scoreBreakdown
+// value is live when a snapshot read supplied candidate feedback and
+// neutral otherwise.
+func (r *Router) deltaActiveSignals(snap *feedbackSnapshot) map[string]bool {
+	return r.baseActiveSignals()
+}
+
+// ---------------------------------------------------------------------------
+// Feedback snapshot
+// ---------------------------------------------------------------------------
+
+// feedbackSnapshotStatus is the operator-facing reason why a route's
+// feedback snapshot was (or was not) active. Unexported per the spec's
+// PR3-public-surface restriction; the public ScoreBreakdown surfaces
+// the same value as a plain string field so operators can distinguish
+// "feedback off by design" from "feedback off because the store failed"
+// without parsing logs.
+type feedbackSnapshotStatus string
+
+const (
+	// feedbackSnapshotStatusOff indicates the FeedbackScoringMode was Off.
+	feedbackSnapshotStatusOff feedbackSnapshotStatus = "off"
+	// feedbackSnapshotStatusNoStore indicates Shadow/Enforce mode but no
+	// RoutingFeedback was configured (WithRoutingFeedback never called,
+	// or called with nil).
+	feedbackSnapshotStatusNoStore feedbackSnapshotStatus = "no_store"
+	// feedbackSnapshotStatusEmptyUseCase indicates the route had an
+	// empty req.UseCase, which cannot form a FeedbackKey.
+	feedbackSnapshotStatusEmptyUseCase feedbackSnapshotStatus = "empty_use_case"
+	// feedbackSnapshotStatusReadError indicates the store returned a
+	// non-nil error during snapshot construction; fail-open disabled
+	// feedback for the route.
+	feedbackSnapshotStatusReadError feedbackSnapshotStatus = "read_error"
+	// feedbackSnapshotStatusActive indicates the snapshot read every
+	// candidate key successfully and feedback is in effect for the route.
+	feedbackSnapshotStatusActive feedbackSnapshotStatus = "active"
+)
+
+// feedbackSnapshot is the per-Route()-call view of routing-feedback
+// aggregates for all candidate keys touched by the route. All store I/O
+// happens through the snapshot — initially in buildFeedbackSnapshot for
+// the first candidate set, then incrementally via readCandidates for
+// chain routing's later steps. Consumers (scoreCandidate) read via
+// lookup() and never touch the store directly. The snapshot lives only
+// for the duration of one Route() (or routeChain() walk); a future TTL
+// cache would slot in here without changing scoreCandidate.
+//
+// Fail-open is route-level and latching: the first store read error
+// flips failed=true, sets status=read_error, clears byKey, and prevents
+// any further reads for the rest of the route. This preserves the spec
+// contract that one read failure disables feedback for the whole route
+// — including any later chain steps or the recommend tail. The
+// non-Off / non-no_store / non-empty_use_case states (active, read_error)
+// are terminal once set; only the initial unconfigured states can
+// transition to active.
+type feedbackSnapshot struct {
+	active bool
+	failed bool // latches true on first read error; bars further reads
+	mode   FeedbackScoringMode
+	status feedbackSnapshotStatus
+	byKey  map[FeedbackKey]*candidateFeedback
+}
+
+// lookup returns the per-key feedback for a candidate, or nil if the
+// key was not in the snapshot (or the snapshot is inactive).
+func (s *feedbackSnapshot) lookup(key FeedbackKey) *candidateFeedback {
+	if s == nil || !s.active {
+		return nil
+	}
+	return s.byKey[key]
+}
+
+// readCandidates extends the snapshot with reads for any profile whose
+// FeedbackKey is not yet known. Called by routeChain before each
+// scoreChainStep / appendRecommendTail so that lazily-resolved chain
+// step profiles get read into the same route-level snapshot. Fail-open
+// latches inactive for the whole route on the first read error: once
+// snap.failed == true, the snapshot stays inactive and subsequent calls
+// are no-ops, so an early read_error disables feedback for every later
+// chain step AND the recommend tail.
+//
+// No-op when the snapshot is already inactive (off / no_store /
+// empty_use_case / read_error) — nothing to add and nothing to lose.
+func (s *feedbackSnapshot) readCandidates(ctx context.Context, r *Router, profiles []*ModelProfile, useCase string) {
+	if s == nil || s.failed || !s.active || r.routingFeedback == nil || useCase == "" {
+		return
+	}
+	seen := make(map[FeedbackKey]struct{}, len(profiles))
+	for _, p := range profiles {
+		key := FeedbackKey{Provider: p.Key.Provider, Model: p.Key.Model, UseCase: useCase}
+		if _, dup := seen[key]; dup {
+			continue
+		}
+		seen[key] = struct{}{}
+		if _, already := s.byKey[key]; already {
+			continue
+		}
+		agg, err := r.routingFeedback.Score(ctx, key)
+		if err != nil {
+			if r.feedbackWarn != nil {
+				r.feedbackWarn.warnFeedbackReadOnce(r.feedbackLogger, key, err)
+			}
+			s.active = false
+			s.failed = true
+			s.status = feedbackSnapshotStatusReadError
+			s.byKey = nil
+			return
+		}
+		s.byKey[key] = &candidateFeedback{
+			raw:      agg,
+			adjusted: adjustFeedbackScore(agg),
+		}
+	}
+}
+
+// buildFeedbackSnapshot constructs the per-route feedback snapshot. The
+// initial candidate set is optional: pass `nil` for chain routing (where
+// chain step profiles are resolved lazily and added incrementally via
+// snap.readCandidates), or pass the full candidate slice for the
+// single-pass scoreAll path.
+//
+// Returns an inactive (active=false) snapshot when:
+//   - mode is FeedbackScoringOff           -> status = "off"
+//   - routingFeedback is nil               -> status = "no_store"
+//   - useCase is empty                     -> status = "empty_use_case"
+//   - any store read returns an error      -> status = "read_error", failed=true
+//
+// Fail-open writes a once-logged warning via feedbackLogger so a
+// persistently broken store is visible without flooding logs.
+//
+// IMPORTANT: this is called exactly ONCE per Route() — the same snapshot
+// is then threaded into every scoreAll / scoreChainStep / appendRecommendTail
+// call for the same route. That guarantees an early read error disables
+// feedback for the whole route, including any later chain steps.
+func (r *Router) buildFeedbackSnapshot(ctx context.Context, candidates []*ModelProfile, useCase string) *feedbackSnapshot {
+	snap := &feedbackSnapshot{mode: r.feedbackScoringMode}
+	switch {
+	case r.feedbackScoringMode == FeedbackScoringOff:
+		snap.status = feedbackSnapshotStatusOff
+		return snap
+	case r.routingFeedback == nil:
+		snap.status = feedbackSnapshotStatusNoStore
+		return snap
+	case useCase == "":
+		snap.status = feedbackSnapshotStatusEmptyUseCase
+		return snap
+	}
+	// Begin in the "active with empty byKey" state so readCandidates can
+	// extend it. The initial readCandidates call below either populates
+	// byKey with the supplied candidates or latches read_error.
+	snap.active = true
+	snap.status = feedbackSnapshotStatusActive
+	snap.byKey = make(map[FeedbackKey]*candidateFeedback, len(candidates))
+	if len(candidates) > 0 {
+		snap.readCandidates(ctx, r, candidates, useCase)
+	}
+	return snap
 }
 
 // getOrCreateBreaker returns the circuit breaker for the named provider,
@@ -711,8 +986,12 @@ func (r *Router) findIncumbentScore(key ModelKey, scored []scoredCandidate) int 
 }
 
 // buildPlan constructs a RoutePlan from the winning candidate, fallback
-// candidates, the original request, and the sticky state.
-func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, req RoutingRequest, wasSticky bool) (*RoutePlan, error) {
+// candidates, the original request, the sticky state, and the route-level
+// feedback snapshot. The snapshot is read for its mode and status fields
+// only — store I/O is the caller's responsibility (Route() / routeChain()
+// build the snapshot exactly once and thread it through). A nil snap is
+// tolerated defensively but should never happen in production.
+func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, req RoutingRequest, wasSticky bool, snap *feedbackSnapshot) (*RoutePlan, error) {
 	prov, err := r.providers.Resolve(winner.profile.Key)
 	if err != nil {
 		return nil, fmt.Errorf("router: provider resolution failed for %s: %w", winner.profile.Key, err)
@@ -731,6 +1010,25 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	plan.SetWasSticky(wasSticky)
 	plan.SetRecorder(r)
 	plan.SetFeedback(r.routingFeedback) // ← PR2 addition; nil is fine, SetFeedback handles it
+	// Stamp the per-Router warn state and logger onto the plan so
+	// newRouteIDWithWarn (called from buildOutcome) and
+	// recordOutcomeFeedback can fire once-logged warnings on RNG /
+	// store failures. Wired unconditionally — the warn state is per-
+	// Router and doesn't track feedback scoring on/off; a nil
+	// routingFeedback still wants RNG-failure warnings.
+	plan.setFeedbackTelemetry(r.feedbackWarn, r.feedbackLogger)
+
+	// Stamp the winner's breakdown and the mode used for selection so
+	// buildOutcome can render the public ScoreBreakdown. Off mode skips
+	// the stamp entirely so RouteOutcome.ScoreBreakdown stays nil. A nil
+	// snap (defensive — Route() and routeChain() always pass one) also
+	// skips the stamp.
+	if r.feedbackScoringMode != FeedbackScoringOff && snap != nil {
+		bd := winner.bd
+		plan.setScoreBreakdown(&bd)
+		plan.setBuiltUnderMode(r.feedbackScoringMode)
+		plan.setFeedbackStatus(snap.status)
+	}
 
 	// Build fallback chain.
 	for _, fb := range fallbacks {

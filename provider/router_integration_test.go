@@ -2,10 +2,13 @@ package provider
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"strings"
 	"testing"
 	"time"
+
+	_ "modernc.org/sqlite"
 )
 
 // ---------------------------------------------------------------------------
@@ -93,10 +96,10 @@ func TestIntegrationRouteAndExecuteChat(t *testing.T) {
 
 	// --- Step 1: Route with AffinityKey and execute chat ---
 	req := RoutingRequest{
-		Model:       "qwen3:8b",
-		UseCase:     "chat",
-		AffinityKey: "session-abc",
-		Messages:    []ChatMessage{{Role: "user", Content: "hello"}},
+		Model:        "qwen3:8b",
+		UseCase:      "chat",
+		AffinityKey:  "session-abc",
+		Messages:     []ChatMessage{{Role: "user", Content: "hello"}},
 		RequiredCaps: CapChat,
 	}
 
@@ -435,11 +438,11 @@ func TestIntegrationDryRun(t *testing.T) {
 	ctx := context.Background()
 
 	req := RoutingRequest{
-		Model:       "dry-model:8b",
-		UseCase:     "chat",
-		AffinityKey: "session-dry-run",
-		DryRun:      true,
-		Messages:    []ChatMessage{{Role: "user", Content: "test dry run"}},
+		Model:        "dry-model:8b",
+		UseCase:      "chat",
+		AffinityKey:  "session-dry-run",
+		DryRun:       true,
+		Messages:     []ChatMessage{{Role: "user", Content: "test dry run"}},
 		RequiredCaps: CapChat,
 	}
 
@@ -944,5 +947,313 @@ func TestIntegrationMultiProviderScoring(t *testing.T) {
 	}
 	if resp.RouteOutcome == nil {
 		t.Error("RouteOutcome is nil")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRouterEnforceModeFeedsBackIntoNextRoute_MemoryStore
+//
+// End-to-end Enforce-mode loop with MemoryStore: the first Route observes
+// no signals (adjusted is neutral 0.5 because ScoredCount < feedbackMinScoredCount);
+// successive Route -> Execute cycles accumulate Success signals; the final
+// Route observes FeedbackApplied=true with a non-zero delta between
+// ScoreWithFeedback and ScoreWithoutFeedback.
+// ---------------------------------------------------------------------------
+
+func TestRouterEnforceModeFeedsBackIntoNextRoute_MemoryStore(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	// First Route + Execute records a Success signal.
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("first Route: %v", err)
+	}
+	resp1, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("first ExecuteChat: %v", err)
+	}
+	if resp1.RouteOutcome == nil || resp1.RouteOutcome.ScoreBreakdown == nil {
+		t.Fatalf("first route: ScoreBreakdown nil")
+	}
+	// First call sees no prior signals (ScoredCount=0 < feedbackMinScoredCount)
+	// so the confidence-gated adjusted score must still be neutral 0.5.
+	if resp1.RouteOutcome.ScoreBreakdown.FeedbackAdjustedScore != 0.5 {
+		t.Errorf("first route: adjusted = %v, want 0.5 (below scored floor)",
+			resp1.RouteOutcome.ScoreBreakdown.FeedbackAdjustedScore)
+	}
+
+	// Drive enough additional successes to exceed feedbackMinScoredCount.
+	for i := 0; i < feedbackMinScoredCount+1; i++ {
+		plan, err = router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+		if err != nil {
+			t.Fatalf("loop Route %d: %v", i, err)
+		}
+		if _, err := plan.ExecuteChat(context.Background()); err != nil {
+			t.Fatalf("loop ExecuteChat %d: %v", i, err)
+		}
+	}
+
+	// Final route observes accumulated signals.
+	plan, err = router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("final Route: %v", err)
+	}
+	respN, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("final ExecuteChat: %v", err)
+	}
+	bd := respN.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("final route: ScoreBreakdown nil")
+	}
+	if !bd.FeedbackApplied {
+		t.Errorf("FeedbackApplied = false; want true (Enforce + accumulated signals)")
+	}
+	if bd.FeedbackScore <= 0.5 {
+		t.Errorf("FeedbackScore = %v, want > 0.5", bd.FeedbackScore)
+	}
+	if bd.ScoreWithFeedback == bd.ScoreWithoutFeedback {
+		t.Errorf("with == without (%v); expected non-zero delta", bd.ScoreWithFeedback)
+	}
+	if bd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRouterEnforceModeFeedsBackIntoNextRoute_SQLite
+//
+// Persistence-parity counterpart to the MemoryStore test: the same Route ->
+// Execute -> record loop runs against a caller-owned :memory: *sql.DB wrapped
+// by NewSQLiteFeedbackStore. Proves the in-transaction write path lets the
+// next Route observe the previous Execute's signal immediately.
+// ---------------------------------------------------------------------------
+
+func TestRouterEnforceModeFeedsBackIntoNextRoute_SQLite(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+
+	store, err := NewSQLiteFeedbackStore(context.Background(), db, SQLiteFeedbackStoreConfig{MaxRetainedSamples: 100})
+	if err != nil {
+		t.Fatalf("NewSQLiteFeedbackStore: %v", err)
+	}
+	rf := NewRoutingFeedback(store)
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	for i := 0; i < feedbackMinScoredCount+2; i++ {
+		plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+		if err != nil {
+			t.Fatalf("loop Route %d: %v", i, err)
+		}
+		if _, err := plan.ExecuteChat(context.Background()); err != nil {
+			t.Fatalf("loop ExecuteChat %d: %v", i, err)
+		}
+		// No sleep: PR3 uses in-transaction writes (BEGIN…COMMIT inside
+		// SQLiteFeedbackStore.RecordBatch), and Task 5's benchmark proved
+		// the commit is synchronous + complete by the time RecordBatch
+		// returns. The next Route's snapshot read sees the committed row
+		// immediately. Adding a Sleep here would only mask a future
+		// regression that broke that guarantee.
+	}
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("final Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("final ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil || !bd.FeedbackApplied {
+		t.Fatalf("ScoreBreakdown=%+v, want non-nil with FeedbackApplied=true", bd)
+	}
+	if bd.FeedbackScore <= 0.5 {
+		t.Errorf("FeedbackScore = %v, want > 0.5", bd.FeedbackScore)
+	}
+	if bd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
+	// Parity with the MemoryStore twin: the SQLite path must also expose
+	// a non-zero delta in Enforce mode. A regression where in-transaction
+	// write commits but a stale aggregate is read by the next snapshot
+	// (e.g. introduced by a future cache layer) would still surface
+	// FeedbackApplied=true here without this check.
+	if bd.ScoreWithFeedback == bd.ScoreWithoutFeedback {
+		t.Errorf("SQLite Enforce: with == without (%v); expected delta because feedback was non-neutral",
+			bd.ScoreWithFeedback)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRouterShadowModeExposesDeltaButDoesNotChangeSelection
+//
+// In Shadow mode, even strong seeded feedback must:
+//   (a) NOT shift FeedbackApplied (stays false because selection uses
+//       scoreWithoutFeedback), and
+//   (b) STILL produce a non-trivial delta in the breakdown so operators
+//       can compare the "would-be-applied" value against the actual
+//       selection. RouteOutcome.Score must equal ScoreWithoutFeedback.
+//
+// No direction assertion: positive adjusted feedback can produce a lower
+// with-feedback weighted average depending on candidate weights. The
+// invariants are (delta != 0) AND (selection score == neutral-feedback
+// baseline).
+// ---------------------------------------------------------------------------
+
+func TestRouterShadowModeExposesDeltaButDoesNotChangeSelection(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	k := FeedbackKey{Provider: "test", Model: "qwen3:8b", UseCase: "chat"}
+	for i := 0; i < feedbackMinScoredCount+5; i++ {
+		if err := rf.Record(context.Background(), k, FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
+			t.Fatalf("seed Record: %v", err)
+		}
+	}
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringShadow))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("Shadow mode: ScoreBreakdown nil, want non-nil")
+	}
+	if bd.FeedbackApplied {
+		t.Errorf("Shadow mode: FeedbackApplied = true, want false")
+	}
+	if bd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("Shadow mode: FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
+	if bd.FeedbackScore <= 0.5 {
+		t.Errorf("Shadow mode: FeedbackScore = %v, want > 0.5 (snapshot active)", bd.FeedbackScore)
+	}
+	// Plan-resolved Shadow assertion: breakdown must expose a non-zero
+	// delta even though selection used scoreWithoutFeedback. No direction
+	// assertion — positive adjusted feedback can still produce a lower
+	// with-feedback weighted average than the neutral-feedback baseline
+	// depending on candidate weights. The only spec invariant is that the
+	// breakdown exposes a non-zero delta.
+	if bd.ScoreWithFeedback == bd.ScoreWithoutFeedback {
+		t.Errorf("Shadow mode: with == without (%v); breakdown must expose the would-be-applied delta",
+			bd.ScoreWithFeedback)
+	}
+	// Selection score must equal scoreWithoutFeedback in Shadow.
+	if resp.RouteOutcome.Score != bd.ScoreWithoutFeedback {
+		t.Errorf("Shadow mode: RouteOutcome.Score (%v) != ScoreWithoutFeedback (%v); selection diverged from spec",
+			resp.RouteOutcome.Score, bd.ScoreWithoutFeedback)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRouterEnforceModeFailOpenSurfacesReadErrorOnRouteOutcome
+//
+// End-to-end fail-open: Enforce mode + a RoutingFeedbackStore whose Get
+// always errors. Route + ExecuteChat still succeed; the public
+// ScoreBreakdown is stamped with FeedbackApplied=false and
+// FeedbackSnapshotStatus="read_error", so an operator dashboard can tell
+// "fail-open" apart from "feedback off by design" without parsing logs.
+// This is the hostile-case integration test the readiness review asked
+// for; the internals are already covered by
+// TestSnapshotReadCandidatesAfterLatchIsNoOp (unit) and
+// TestBuildOutcomeScoreBreakdownSnapshotStatusReflectsRoute (translator),
+// but neither exercises the public seam consumers actually read.
+// ---------------------------------------------------------------------------
+
+func TestRouterEnforceModeFailOpenSurfacesReadErrorOnRouteOutcome(t *testing.T) {
+	rf := NewRoutingFeedback(&flakyStore{err: errors.New("disk full")})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v (fail-open must NOT propagate to the caller)", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("Enforce + fail-open: ScoreBreakdown nil; want stamped with read_error status")
+	}
+	if bd.FeedbackApplied {
+		t.Errorf("Enforce + fail-open: FeedbackApplied = true, want false (selection used scoreWithoutFeedback)")
+	}
+	if bd.FeedbackSnapshotStatus != FeedbackSnapshotStatusReadError {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, FeedbackSnapshotStatusReadError)
+	}
+	if bd.FeedbackMode != FeedbackScoringEnforce.String() {
+		t.Errorf("FeedbackMode = %q, want %q (operator distinguishes Enforce-fail-open from Shadow-active)",
+			bd.FeedbackMode, FeedbackScoringEnforce.String())
+	}
+	// Selection score must equal scoreWithoutFeedback on fail-open: the
+	// route used the PR2 neutral-feedback baseline.
+	if resp.RouteOutcome.Score != bd.ScoreWithoutFeedback {
+		t.Errorf("fail-open: RouteOutcome.Score (%v) != ScoreWithoutFeedback (%v); selection used wrong path",
+			resp.RouteOutcome.Score, bd.ScoreWithoutFeedback)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// TestRouterShadowModeNoSignalsYet
+//
+// Shadow mode + a configured but empty store: the snapshot status is
+// "active" (the reads succeeded), but no signals have been recorded.
+// FeedbackScore stays neutral 0.5 and the with/without delta is zero.
+// An operator looking at a fresh deployment sees mode=shadow,
+// status=active, score=0.5, delta=0 — distinguishable from a fail-open
+// (which would have status=read_error) and from a never-configured store
+// (status=no_store). Avoids the "everything looks neutral, must be
+// broken" misdiagnosis.
+// ---------------------------------------------------------------------------
+
+func TestRouterShadowModeNoSignalsYet(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringShadow))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("Shadow + empty store: ScoreBreakdown nil; want stamped with active status")
+	}
+	if bd.FeedbackApplied {
+		t.Errorf("Shadow: FeedbackApplied = true, want false")
+	}
+	if bd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q (reads succeeded, just empty)",
+			bd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
+	if bd.FeedbackScore != 0.5 {
+		t.Errorf("empty store: FeedbackScore = %v, want neutral 0.5", bd.FeedbackScore)
+	}
+	if bd.FeedbackSampleCount != 0 || bd.FeedbackScoredCount != 0 {
+		t.Errorf("empty store: counts = (%d,%d), want (0,0)", bd.FeedbackSampleCount, bd.FeedbackScoredCount)
+	}
+	if bd.ScoreWithFeedback != bd.ScoreWithoutFeedback {
+		t.Errorf("empty Shadow: ScoreWithFeedback=%v, ScoreWithoutFeedback=%v; want equal neutral-feedback baseline",
+			bd.ScoreWithFeedback, bd.ScoreWithoutFeedback)
+	}
+	if bd.FeedbackUpdatedAt != nil {
+		t.Errorf("empty Shadow: FeedbackUpdatedAt = %v, want nil", bd.FeedbackUpdatedAt)
 	}
 }

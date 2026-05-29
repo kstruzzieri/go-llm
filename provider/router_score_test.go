@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"math"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -463,5 +464,79 @@ func TestDefaultWeightProfile_Analysis(t *testing.T) {
 	if wp.Quality != 5 || wp.Speed != 1 || wp.Headroom != 3 {
 		t.Errorf("analysis weights: got Quality=%d Speed=%d Headroom=%d, want 5/1/3",
 			wp.Quality, wp.Speed, wp.Headroom)
+	}
+}
+
+// TestScoreCandidateNilFeedbackMatchesPR2 asserts that when scoreCandidate
+// is called with a nil *candidateFeedback (the path taken by every PR2 call
+// site), the resulting breakdown stays neutral: feedbackScore = 0.5 and
+// feedbackActive = false. This is the no-regression guarantee for Task 7.
+func TestScoreCandidateNilFeedbackMatchesPR2(t *testing.T) {
+	profile := &ModelProfile{
+		Key:     ModelKey{Provider: "test", Model: "qwen3:8b"},
+		Quality: TierGood,
+		Speed:   TierGood,
+		Caps:    CapChat,
+	}
+	req := RoutingRequest{UseCase: "chat", RequiredCaps: CapChat}
+	bd := scoreCandidate(profile, req, BudgetResult{Decision: BudgetOK, HeadroomScore: 0.8}, nil, nil, NewCircuitBreaker())
+	if bd.feedbackScore != 0.5 {
+		t.Errorf("nil feedback: feedbackScore = %v, want 0.5", bd.feedbackScore)
+	}
+	if bd.feedbackActive {
+		t.Errorf("nil feedback: feedbackActive = true, want false")
+	}
+	// Lock in zero-value on every PR3 feedback field so a future regression
+	// that leaks values into the nil branch gets caught here rather than
+	// surfacing as a confusing public ScoreBreakdown.
+	if bd.feedbackRaw != 0 {
+		t.Errorf("nil feedback: feedbackRaw = %v, want 0", bd.feedbackRaw)
+	}
+	if bd.feedbackAdjusted != 0 {
+		t.Errorf("nil feedback: feedbackAdjusted = %v, want 0", bd.feedbackAdjusted)
+	}
+	if bd.feedbackSampleCount != 0 || bd.feedbackScoredCount != 0 {
+		t.Errorf("nil feedback: counts = (%d,%d), want (0,0)", bd.feedbackSampleCount, bd.feedbackScoredCount)
+	}
+	if !bd.feedbackUpdatedAt.IsZero() {
+		t.Errorf("nil feedback: feedbackUpdatedAt = %v, want zero", bd.feedbackUpdatedAt)
+	}
+}
+
+// TestScoreCandidateActiveFeedbackPopulatesBreakdown asserts that when
+// scoreCandidate receives a non-nil *candidateFeedback, the breakdown
+// reflects all source fields: feedbackActive flips true, feedbackScore
+// takes the adjusted value (not the raw), and raw/adjusted/sample/scored/
+// UpdatedAt are copied through verbatim.
+func TestScoreCandidateActiveFeedbackPopulatesBreakdown(t *testing.T) {
+	profile := &ModelProfile{
+		Key:     ModelKey{Provider: "test", Model: "qwen3:8b"},
+		Quality: TierGood,
+		Speed:   TierGood,
+		Caps:    CapChat,
+	}
+	req := RoutingRequest{UseCase: "chat", RequiredCaps: CapChat}
+	cf := &candidateFeedback{
+		raw:      Aggregate{Score: 0.8, SampleCount: 30, ScoredCount: 30, UpdatedAt: time.Unix(123, 0)},
+		adjusted: 0.7,
+	}
+	bd := scoreCandidate(profile, req, BudgetResult{Decision: BudgetOK, HeadroomScore: 0.8}, nil, cf, NewCircuitBreaker())
+	if !bd.feedbackActive {
+		t.Errorf("active feedback: feedbackActive = false")
+	}
+	if bd.feedbackScore != 0.7 {
+		t.Errorf("feedbackScore = %v, want 0.7 (adjusted)", bd.feedbackScore)
+	}
+	if bd.feedbackRaw != 0.8 {
+		t.Errorf("feedbackRaw = %v, want 0.8", bd.feedbackRaw)
+	}
+	if bd.feedbackAdjusted != 0.7 {
+		t.Errorf("feedbackAdjusted = %v, want 0.7", bd.feedbackAdjusted)
+	}
+	if bd.feedbackSampleCount != 30 || bd.feedbackScoredCount != 30 {
+		t.Errorf("counts = (%d,%d), want (30,30)", bd.feedbackSampleCount, bd.feedbackScoredCount)
+	}
+	if !bd.feedbackUpdatedAt.Equal(time.Unix(123, 0)) {
+		t.Errorf("feedbackUpdatedAt = %v, want unix 123", bd.feedbackUpdatedAt)
 	}
 }

@@ -2,10 +2,14 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"math"
 	"net"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // ---------------------------------------------------------------------------
@@ -1899,5 +1903,361 @@ func TestExecuteGenerateStreamFallbackDuplicateDoneRecordsAttemptOnce(t *testing
 	}
 	if successes := rec.getSuccesses(); len(successes) != 1 {
 		t.Fatalf("successes = %d, want 1", len(successes))
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownNilInOffMode(t *testing.T) {
+	router, _ := setupTestRouter(t) // default Off mode
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	if resp.RouteOutcome == nil {
+		t.Fatalf("RouteOutcome nil")
+	}
+	if resp.RouteOutcome.ScoreBreakdown != nil {
+		t.Errorf("Off mode: ScoreBreakdown = %+v, want nil", resp.RouteOutcome.ScoreBreakdown)
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownPopulatedInEnforceMode(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	k := FeedbackKey{Provider: "test", Model: "qwen3:8b", UseCase: "chat"}
+	for i := 0; i < feedbackMinScoredCount+2; i++ {
+		if err := rf.Record(context.Background(), k, FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("Enforce mode: ScoreBreakdown = nil, want non-nil")
+	}
+	if !bd.FeedbackApplied {
+		t.Errorf("FeedbackApplied = false, want true (Enforce + valid snapshot)")
+	}
+	if bd.FeedbackMode != FeedbackScoringEnforce.String() {
+		t.Errorf("FeedbackMode = %q, want %q", bd.FeedbackMode, FeedbackScoringEnforce.String())
+	}
+	if bd.FeedbackSnapshotStatus != string(feedbackSnapshotStatusActive) {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, feedbackSnapshotStatusActive)
+	}
+	if bd.FeedbackScore <= 0.5 {
+		t.Errorf("FeedbackScore = %v, want > 0.5 after seeded successes", bd.FeedbackScore)
+	}
+	if bd.ScoreWithoutFeedback == bd.ScoreWithFeedback {
+		t.Errorf("with/without scores identical %v; expected delta because feedback was non-neutral",
+			bd.ScoreWithFeedback)
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownPopulatedInShadowMode(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	k := FeedbackKey{Provider: "test", Model: "qwen3:8b", UseCase: "chat"}
+	for i := 0; i < feedbackMinScoredCount+2; i++ {
+		if err := rf.Record(context.Background(), k, FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringShadow))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	resp, err := plan.ExecuteChat(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteChat: %v", err)
+	}
+	bd := resp.RouteOutcome.ScoreBreakdown
+	if bd == nil {
+		t.Fatalf("Shadow mode: ScoreBreakdown = nil, want non-nil")
+	}
+	if bd.FeedbackApplied {
+		t.Errorf("Shadow mode: FeedbackApplied = true, want false")
+	}
+	if bd.FeedbackMode != FeedbackScoringShadow.String() {
+		t.Errorf("FeedbackMode = %q, want %q", bd.FeedbackMode, FeedbackScoringShadow.String())
+	}
+	if bd.FeedbackScore <= 0.5 {
+		t.Errorf("Shadow mode: FeedbackScore = %v, want > 0.5 (snapshot still active)", bd.FeedbackScore)
+	}
+	// Spec § Behavior contracts 1: Shadow mode must expose the
+	// would-be-applied delta in the breakdown — otherwise the mode
+	// has no operator value during ramp-up. Locks the deltaActiveSignals
+	// vs selectionActiveSignals split.
+	if bd.ScoreWithFeedback == bd.ScoreWithoutFeedback {
+		t.Errorf("Shadow mode: with/without scores identical (%v); breakdown must expose the delta",
+			bd.ScoreWithFeedback)
+	}
+	// Stable enum check against the public string constants.
+	if bd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("Shadow mode: FeedbackSnapshotStatus = %q, want %q",
+			bd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
+}
+
+func TestRouteOutcomeScoreBreakdownJSONOmitemptyWhenNil(t *testing.T) {
+	out := RouteOutcome{PlannedModel: ModelKey{Provider: "p", Model: "m"}}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("Marshal: %v", err)
+	}
+	if strings.Contains(string(data), "score_breakdown") {
+		t.Errorf("JSON %s contains score_breakdown despite nil pointer", data)
+	}
+}
+
+func TestBuildOutcomeScoreBreakdownStableAcrossFallback(t *testing.T) {
+	plannedKey := ModelKey{Provider: "primary", Model: "qwen3:8b"}
+	fallbackKey := ModelKey{Provider: "fallback", Model: "qwen3:8b"}
+
+	// Construct a plan by hand with a planted scoreBreakdown that
+	// describes the planned primary.
+	plan := &RoutePlan{
+		Profile: &ModelProfile{Key: plannedKey},
+		Score:   0.85,
+		Reason:  "primary won",
+	}
+	bd := &scoreBreakdown{
+		feedbackActive:       true,
+		feedbackRaw:          0.8,
+		feedbackAdjusted:     0.7,
+		feedbackSampleCount:  30,
+		feedbackScoredCount:  30,
+		feedbackUpdatedAt:    time.Unix(123, 0),
+		scoreWithoutFeedback: 0.6,
+		scoreWithFeedback:    0.85,
+	}
+	plan.setScoreBreakdown(bd)
+	plan.setBuiltUnderMode(FeedbackScoringEnforce)
+	plan.setFeedbackStatus(feedbackSnapshotStatusActive)
+
+	// Simulate execution: primary failed (HTTP 5xx), fallback succeeded.
+	attempts := []RouteAttempt{
+		{Key: plannedKey, Status: AttemptStatusFailed, ErrorClass: string(ErrorClass5xx), LatencyMs: 50},
+		{Key: fallbackKey, Status: AttemptStatusSucceeded, LatencyMs: 100},
+	}
+	out := plan.buildOutcome(1, attempts)
+
+	// Execution trace reflects the fallback.
+	if out.PlannedModel != plannedKey {
+		t.Errorf("PlannedModel = %v, want %v", out.PlannedModel, plannedKey)
+	}
+	if out.ActualModel != fallbackKey {
+		t.Errorf("ActualModel = %v, want %v (after fallback success)", out.ActualModel, fallbackKey)
+	}
+	if out.FallbacksUsed != 1 {
+		t.Errorf("FallbacksUsed = %d, want 1", out.FallbacksUsed)
+	}
+
+	// ScoreBreakdown describes the planned candidate, NOT the fallback.
+	pubBd := out.ScoreBreakdown
+	if pubBd == nil {
+		t.Fatalf("ScoreBreakdown nil")
+	}
+	if pubBd.FeedbackScore != 0.8 {
+		t.Errorf("FeedbackScore = %v, want 0.8 (planned primary's raw score, unchanged by fallback)",
+			pubBd.FeedbackScore)
+	}
+	if pubBd.FeedbackAdjustedScore != 0.7 {
+		t.Errorf("FeedbackAdjustedScore = %v, want 0.7 (planned primary's adjusted, unchanged by fallback)",
+			pubBd.FeedbackAdjustedScore)
+	}
+	if pubBd.ScoreWithoutFeedback != 0.6 {
+		t.Errorf("ScoreWithoutFeedback = %v, want 0.6", pubBd.ScoreWithoutFeedback)
+	}
+	if pubBd.ScoreWithFeedback != 0.85 {
+		t.Errorf("ScoreWithFeedback = %v, want 0.85", pubBd.ScoreWithFeedback)
+	}
+	if !pubBd.FeedbackApplied {
+		t.Errorf("FeedbackApplied = false, want true (Enforce + active snapshot at plan-build)")
+	}
+	if pubBd.FeedbackSnapshotStatus != FeedbackSnapshotStatusActive {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			pubBd.FeedbackSnapshotStatus, FeedbackSnapshotStatusActive)
+	}
+	// FeedbackUpdatedAt is *time.Time post-Task-9-fix; assert it carries
+	// the planted timestamp (not the fallback's execution time).
+	if pubBd.FeedbackUpdatedAt == nil || !pubBd.FeedbackUpdatedAt.Equal(time.Unix(123, 0)) {
+		t.Errorf("FeedbackUpdatedAt = %v, want pointer to unix 123 (planned primary's, not rewritten)",
+			pubBd.FeedbackUpdatedAt)
+	}
+	// Mode + counts are translator-read fields; pin them so a future
+	// regression that re-stamps from the fallback's snapshot is caught.
+	if pubBd.FeedbackMode != FeedbackScoringEnforce.String() {
+		t.Errorf("FeedbackMode = %q, want %q (planned primary's mode, not rewritten)",
+			pubBd.FeedbackMode, FeedbackScoringEnforce.String())
+	}
+	if pubBd.FeedbackSampleCount != 30 {
+		t.Errorf("FeedbackSampleCount = %d, want 30 (planned primary's, not rewritten)", pubBd.FeedbackSampleCount)
+	}
+	if pubBd.FeedbackScoredCount != 30 {
+		t.Errorf("FeedbackScoredCount = %d, want 30 (planned primary's, not rewritten)", pubBd.FeedbackScoredCount)
+	}
+}
+
+func TestBuildOutcomeScoreBreakdownSanitizesNonFiniteRawFeedbackScore(t *testing.T) {
+	cases := []float64{math.NaN(), math.Inf(1), math.Inf(-1)}
+	for _, raw := range cases {
+		t.Run("", func(t *testing.T) {
+			plan := &RoutePlan{
+				Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+				Score:   0.5,
+				Reason:  "custom store score",
+			}
+			bd := &scoreBreakdown{
+				feedbackActive:       true,
+				feedbackRaw:          raw,
+				feedbackAdjusted:     0.5,
+				feedbackSampleCount:  5,
+				feedbackScoredCount:  5,
+				scoreWithoutFeedback: 0.5,
+				scoreWithFeedback:    0.5,
+			}
+			plan.setScoreBreakdown(bd)
+			plan.setBuiltUnderMode(FeedbackScoringShadow)
+			plan.setFeedbackStatus(feedbackSnapshotStatusActive)
+
+			out := plan.buildOutcome(0, []RouteAttempt{{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded}})
+			if out.ScoreBreakdown == nil {
+				t.Fatalf("ScoreBreakdown nil")
+			}
+			if out.ScoreBreakdown.FeedbackScore != DefaultNeutralScore {
+				t.Fatalf("FeedbackScore = %v, want neutral %v", out.ScoreBreakdown.FeedbackScore, DefaultNeutralScore)
+			}
+			if _, err := json.Marshal(out); err != nil {
+				t.Fatalf("json.Marshal(RouteOutcome) = %v", err)
+			}
+		})
+	}
+}
+
+func TestBuildOutcomeScoreBreakdownSnapshotStatusReflectsRoute(t *testing.T) {
+	// When the snapshot fail-opens (status=read_error), the breakdown
+	// is still stamped (the plan exists, the breakdown was built) but
+	// FeedbackApplied is false and the status is preserved.
+	plan := &RoutePlan{
+		Profile: &ModelProfile{Key: ModelKey{Provider: "p", Model: "m"}},
+		Score:   0.5,
+		Reason:  "fail-open",
+	}
+	bd := &scoreBreakdown{
+		feedbackActive:       false, // snapshot was inactive
+		feedbackRaw:          0,
+		feedbackAdjusted:     0.5,
+		scoreWithoutFeedback: 0.5,
+		scoreWithFeedback:    0.5,
+	}
+	plan.setScoreBreakdown(bd)
+	plan.setBuiltUnderMode(FeedbackScoringEnforce)
+	plan.setFeedbackStatus(feedbackSnapshotStatusReadError)
+
+	attempts := []RouteAttempt{{Key: ModelKey{Provider: "p", Model: "m"}, Status: AttemptStatusSucceeded}}
+	out := plan.buildOutcome(0, attempts)
+
+	pubBd := out.ScoreBreakdown
+	if pubBd == nil {
+		t.Fatalf("ScoreBreakdown nil")
+	}
+	if pubBd.FeedbackApplied {
+		t.Errorf("read_error: FeedbackApplied = true, want false")
+	}
+	if pubBd.FeedbackSnapshotStatus != FeedbackSnapshotStatusReadError {
+		t.Errorf("FeedbackSnapshotStatus = %q, want %q",
+			pubBd.FeedbackSnapshotStatus, FeedbackSnapshotStatusReadError)
+	}
+	// Zero feedbackUpdatedAt should produce nil pointer (Task 9 fix).
+	if pubBd.FeedbackUpdatedAt != nil {
+		t.Errorf("FeedbackUpdatedAt = %v, want nil (zero feedbackUpdatedAt should omit)",
+			pubBd.FeedbackUpdatedAt)
+	}
+	// Operator-facing mode label must say "enforce" even on fail-open so
+	// dashboards can distinguish "Enforce + read_error" from "Shadow"
+	// (both produce FeedbackApplied=false but for different reasons).
+	if pubBd.FeedbackMode != FeedbackScoringEnforce.String() {
+		t.Errorf("FeedbackMode = %q, want %q", pubBd.FeedbackMode, FeedbackScoringEnforce.String())
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Task 11 — once-logged warnings on RNG failure / feedback store write
+// ---------------------------------------------------------------------------
+
+// TestNewRouteIDLogsOnceOnRandFailure substitutes a failing RNG and a
+// capturing logger, then asserts the once-logged warning fires exactly
+// once across many calls. Reuses routeIDFailingReader (defined in
+// routing_feedback_test.go).
+func TestNewRouteIDLogsOnceOnRandFailure(t *testing.T) {
+	cap := &capturingLogger{}
+	state := newFeedbackWarningState()
+
+	old := routeIDRand
+	t.Cleanup(func() { routeIDRand = old })
+	routeIDRand = routeIDFailingReader{}
+
+	for i := 0; i < 50; i++ {
+		id := newRouteIDWithWarn(state, cap)
+		if id != "" {
+			t.Errorf("expected empty id on RNG failure, got %q", id)
+		}
+	}
+	if got := len(cap.snapshot()); got != 1 {
+		t.Errorf("warnRouteIDRandOnce fired %d times, want 1", got)
+	}
+}
+
+// recordFailingStore implements RoutingFeedbackStore for the Task 11
+// write-error test. Get returns a neutral aggregate (so Route succeeds);
+// Record / RecordBatch always fail so recordOutcomeFeedback hits its
+// once-logged warning path.
+type recordFailingStore struct{ err error }
+
+func (s *recordFailingStore) Get(_ context.Context, _ FeedbackKey) (Aggregate, error) {
+	return Aggregate{Score: DefaultNeutralScore}, nil
+}
+
+func (s *recordFailingStore) Record(_ context.Context, _ FeedbackKey, _ FeedbackSignal) error {
+	return s.err
+}
+
+func (s *recordFailingStore) RecordBatch(_ context.Context, _ []FeedbackItem) error {
+	return s.err
+}
+
+// TestRecordOutcomeFeedbackLogsOnceOnStoreError drives ExecuteChat
+// repeatedly against a store that always fails on Record/RecordBatch and
+// asserts the once-logged warning fires exactly once across the loop.
+func TestRecordOutcomeFeedbackLogsOnceOnStoreError(t *testing.T) {
+	router, _ := setupTestRouter(t)
+	router.routingFeedback = NewRoutingFeedback(&recordFailingStore{err: errors.New("disk full")})
+	cap := &capturingLogger{}
+	router.feedbackLogger = cap
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	for i := 0; i < 10; i++ {
+		if _, err := plan.ExecuteChat(context.Background()); err != nil {
+			t.Fatalf("ExecuteChat: %v", err)
+		}
+	}
+	if got := len(cap.snapshot()); got != 1 {
+		t.Errorf("warnFeedbackWriteOnce fired %d times, want 1", got)
 	}
 }

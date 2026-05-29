@@ -876,3 +876,192 @@ func TestRouterWithoutRoutingFeedbackProducesNilPlanFeedback(t *testing.T) {
 		t.Errorf("plan.feedback = %v, want nil (no option configured)", plan.feedback)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// PR3 Task 8: activeSignals split — selection vs. delta
+// ---------------------------------------------------------------------------
+//
+// Three helpers replaced the pre-PR3 activeSignals():
+//
+//   - baseActiveSignals       — feedback denominator active at neutral 0.5
+//   - selectionActiveSignals  — same denominator; value chosen by mode/status
+//   - deltaActiveSignals      — same denominator; live value when available
+//
+// The truth-table tests below pin every interesting (mode, active) cell
+// so future refactors cannot silently regress fail-open or Shadow-mode
+// delta exposure.
+
+func TestRouterScoringSelectionActiveIncludesNeutralFeedbackWhenOff(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringOff))
+
+	active := router.selectionActiveSignals(&feedbackSnapshot{mode: FeedbackScoringOff})
+	if !active["feedback"] {
+		t.Errorf("Off mode: selectionActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
+	}
+}
+
+func TestRouterScoringSelectionActiveIncludesNeutralFeedbackWhenShadow(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringShadow))
+
+	snap := &feedbackSnapshot{mode: FeedbackScoringShadow, active: true, byKey: map[FeedbackKey]*candidateFeedback{}}
+	active := router.selectionActiveSignals(snap)
+	if !active["feedback"] {
+		t.Errorf("Shadow mode: selectionActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
+	}
+}
+
+func TestRouterScoringSelectionActiveIncludesFeedbackWhenEnforce(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	snap := &feedbackSnapshot{mode: FeedbackScoringEnforce, active: true, byKey: map[FeedbackKey]*candidateFeedback{}}
+	active := router.selectionActiveSignals(snap)
+	if !active["feedback"] {
+		t.Errorf("Enforce mode + active snapshot: selectionActiveSignals[\"feedback\"] = false, want true")
+	}
+}
+
+func TestRouterScoringSelectionActiveIncludesNeutralFeedbackOnFailOpen(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	snap := &feedbackSnapshot{mode: FeedbackScoringEnforce, active: false}
+	active := router.selectionActiveSignals(snap)
+	if !active["feedback"] {
+		t.Errorf("Enforce mode + inactive snapshot: selectionActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
+	}
+}
+
+func TestRouterScoringDeltaActiveIncludesFeedbackInShadow(t *testing.T) {
+	// In Shadow mode, the delta computation MUST include feedback even
+	// though selection doesn't — otherwise ScoreWithFeedback ==
+	// ScoreWithoutFeedback in Shadow and the breakdown is useless.
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringShadow))
+
+	snap := &feedbackSnapshot{mode: FeedbackScoringShadow, active: true, byKey: map[FeedbackKey]*candidateFeedback{}}
+	active := router.deltaActiveSignals(snap)
+	if !active["feedback"] {
+		t.Errorf("Shadow mode + active snapshot: deltaActiveSignals[\"feedback\"] = false, want true (delta needs feedback)")
+	}
+}
+
+func TestRouterScoringDeltaActiveIncludesNeutralFeedbackOnFailOpen(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	snap := &feedbackSnapshot{mode: FeedbackScoringEnforce, active: false}
+	active := router.deltaActiveSignals(snap)
+	if !active["feedback"] {
+		t.Errorf("inactive snapshot: deltaActiveSignals[\"feedback\"] = false, want true for neutral PR2 denominator")
+	}
+}
+
+func TestRouterScoringShadowSelectionUsesNeutralFeedbackValue(t *testing.T) {
+	bd := scoreBreakdown{
+		feedbackActive: true,
+		feedbackScore:  1.0,
+	}
+	snap := &feedbackSnapshot{mode: FeedbackScoringShadow, active: true}
+	got := scoreBreakdownForSelection(bd, snap)
+	if got.feedbackScore != 0.5 {
+		t.Errorf("Shadow selection feedbackScore = %v, want neutral 0.5", got.feedbackScore)
+	}
+}
+
+func TestRouterOffModeNeutralFeedbackPreservesStickyMarginScale(t *testing.T) {
+	router, _ := setupTestRouter(t, WithFeedbackScoringMode(FeedbackScoringOff))
+	active := router.selectionActiveSignals(&feedbackSnapshot{mode: FeedbackScoringOff})
+	wp := &WeightProfile{Headroom: 1, Feedback: 1}
+	incumbent := scoreBreakdown{headroomScore: 0, feedbackScore: 0.5}
+	challenger := scoreBreakdown{headroomScore: 0.29, feedbackScore: 0.5}
+
+	incumbentScore := computeWeightedScore(incumbent, "chat", active, wp)
+	challengerScore := computeWeightedScore(challenger, "chat", active, wp)
+	if challengerScore-incumbentScore > router.defaultOpts.hysteresisMargin {
+		t.Fatalf("neutral-feedback gap = %v, want <= sticky margin %v",
+			challengerScore-incumbentScore, router.defaultOpts.hysteresisMargin)
+	}
+
+	withoutFeedback := router.baseActiveSignals()
+	delete(withoutFeedback, "feedback")
+	incumbentNoFeedback := computeWeightedScore(incumbent, "chat", withoutFeedback, wp)
+	challengerNoFeedback := computeWeightedScore(challenger, "chat", withoutFeedback, wp)
+	if challengerNoFeedback-incumbentNoFeedback <= router.defaultOpts.hysteresisMargin {
+		t.Fatalf("test setup failed: no-feedback gap = %v, want > sticky margin %v",
+			challengerNoFeedback-incumbentNoFeedback, router.defaultOpts.hysteresisMargin)
+	}
+}
+
+func TestRouterScoreAllPopulatesScoreWithAndWithoutFeedback(t *testing.T) {
+	rf := mustNewRoutingFeedback(t, MemoryStoreConfig{})
+	k := FeedbackKey{Provider: "test", Model: "qwen3:8b", UseCase: "chat"}
+	for i := 0; i < feedbackMinScoredCount+2; i++ {
+		if err := rf.Record(context.Background(), k, FeedbackSignal{Kind: RoutingSignalSuccess, At: time.Now()}); err != nil {
+			t.Fatalf("Record: %v", err)
+		}
+	}
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+
+	plan, err := router.Route(context.Background(), RoutingRequest{Model: "test/qwen3:8b", UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("Route: %v", err)
+	}
+	if plan == nil {
+		t.Fatalf("Route returned nil plan")
+	}
+	// The plan's internal scoreBreakdown should expose both scores via
+	// the public ScoreBreakdown after Task 9; here we assert the route
+	// completed without error with feedback active.
+	_ = plan
+}
+
+// TestSnapshotReadCandidatesLatchesOnError proves that once an early
+// readCandidates call fails, subsequent calls are no-ops: the route-level
+// snapshot remains inactive for any chain step / recommend tail that
+// runs later in the same route. This is the central invariant the
+// readiness review called out — a chain route must NOT re-activate
+// feedback for a later step after an earlier step's read_error.
+func TestSnapshotReadCandidatesLatchesOnError(t *testing.T) {
+	rf := NewRoutingFeedback(&flakyStore{err: errors.New("disk full")})
+	router, _ := setupTestRouter(t, WithRoutingFeedback(rf), WithFeedbackScoringMode(FeedbackScoringEnforce))
+	cap := &capturingLogger{}
+	router.feedbackLogger = cap
+
+	// Start the snapshot in an "active with empty byKey" state by passing
+	// nil — mimics how routeChain initialises it.
+	snap := router.buildFeedbackSnapshot(context.Background(), nil, "chat")
+	if !snap.active {
+		t.Fatalf("snapshot inactive immediately after construction; want active(empty byKey)")
+	}
+
+	// First chain step's profiles trigger a read failure; snapshot latches.
+	first := []*ModelProfile{{Key: ModelKey{Provider: "test", Model: "qwen3:8b"}}}
+	snap.readCandidates(context.Background(), router, first, "chat")
+	if snap.active || !snap.failed {
+		t.Fatalf("after first read error: active=%v failed=%v; want active=false failed=true", snap.active, snap.failed)
+	}
+	if snap.status != feedbackSnapshotStatusReadError {
+		t.Errorf("status = %q, want %q", snap.status, feedbackSnapshotStatusReadError)
+	}
+	if got := len(cap.snapshot()); got != 1 {
+		t.Errorf("warnFeedbackReadOnce fired %d times, want 1", got)
+	}
+
+	// Second chain step tries to add fresh candidates — must be a no-op,
+	// no second warning, snapshot stays inactive.
+	second := []*ModelProfile{{Key: ModelKey{Provider: "fallback", Model: "qwen3:8b"}}}
+	snap.readCandidates(context.Background(), router, second, "chat")
+	if snap.active {
+		t.Errorf("snapshot re-activated after latching read_error; want stays inactive")
+	}
+	if got := len(cap.snapshot()); got != 1 {
+		t.Errorf("warning fired again after latch: %d, want still 1", got)
+	}
+	// And the new key must not be present (no read happened).
+	if snap.lookup(FeedbackKey{Provider: "fallback", Model: "qwen3:8b", UseCase: "chat"}) != nil {
+		t.Errorf("inactive snapshot returned non-nil lookup; want nil")
+	}
+}

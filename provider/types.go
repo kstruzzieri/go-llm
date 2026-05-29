@@ -470,6 +470,112 @@ type RouteAttempt struct {
 	ErrorClass string        `json:"error_class,omitempty"`
 }
 
+// ScoreBreakdown exposes the routing-feedback scoring inputs that fed into
+// the Router's candidate selection decision. Populated on RouteOutcome
+// only when feedback scoring is in Shadow or Enforce mode at the time
+// the plan was built; nil on Off mode.
+//
+// The breakdown describes the *planned/root* winning candidate. It is
+// NOT rewritten when execution falls back to a sibling — use Attempts
+// and ActualModel for the execution trace. Read-time snapshot only: the
+// FeedbackScore, FeedbackAdjustedScore, sample counts, and UpdatedAt
+// reflect the store state at plan-build, not at attempt completion.
+//
+// Note on JSON tags: numeric and time fields do NOT use omitempty —
+// a zero score, count, or updated_at is meaningful (e.g., FeedbackScore
+// = 0.0 means "perfectly bad"; FeedbackSampleCount = 0 means "no
+// samples yet"). The pointer field on RouteOutcome already controls
+// whether the breakdown appears in JSON at all.
+type ScoreBreakdown struct {
+	// FeedbackMode is the operator-facing label for the FeedbackScoringMode
+	// in effect when the plan was built. Equals FeedbackScoringMode.String()
+	// for one of the three mode constants ("off", "shadow", "enforce").
+	FeedbackMode string `json:"feedback_mode"`
+
+	// FeedbackSnapshotStatus reports why the snapshot was active or
+	// inactive. Stable closed set — compare against the
+	// FeedbackSnapshotStatus* string constants below. Lets operators
+	// distinguish a configuration issue from a transient store failure
+	// without parsing logs.
+	FeedbackSnapshotStatus string `json:"feedback_snapshot_status"`
+
+	// FeedbackApplied reports whether feedback participated in route
+	// selection for the *winning planned candidate*. True iff mode ==
+	// "enforce" AND the snapshot was active AND the candidate's key was
+	// in the snapshot. False with mode == "enforce" + snapshot active
+	// means the winning candidate's key was absent from the snapshot
+	// (cross-check via FeedbackSampleCount == 0).
+	FeedbackApplied bool `json:"feedback_applied"`
+
+	// FeedbackScore is the Aggregate.Score observed at plan-build,
+	// sanitized to a finite [0,1] value before crossing the JSON boundary.
+	// Zero when feedback was inactive for this candidate (or when the
+	// sanitized raw score really is 0.0). Disambiguate via
+	// FeedbackSnapshotStatus and FeedbackSampleCount.
+	FeedbackScore float64 `json:"feedback_score"`
+
+	// FeedbackAdjustedScore is the value actually fed into weighted
+	// scoring after confidence gating: 0.5 when below the sample floor,
+	// otherwise shrunk toward 0.5 by the package's prior weight.
+	FeedbackAdjustedScore float64 `json:"feedback_adjusted_score"`
+
+	// FeedbackSampleCount is the total sample count from the snapshot.
+	FeedbackSampleCount int `json:"feedback_sample_count"`
+
+	// FeedbackScoredCount is the score-bearing subset of SampleCount.
+	FeedbackScoredCount int `json:"feedback_scored_count"`
+
+	// FeedbackUpdatedAt is the most recent signal timestamp in the
+	// aggregate, or nil when feedback was inactive for this candidate.
+	// Pointer + omitempty so JSON omits the field entirely rather than
+	// emitting Go's zero time ("0001-01-01T00:00:00Z"), which an
+	// operator dashboard might confuse with a real timestamp.
+	FeedbackUpdatedAt *time.Time `json:"feedback_updated_at,omitempty"`
+
+	// ScoreWithoutFeedback and ScoreWithFeedback are the two weighted
+	// scores computed once per candidate. ScoreWithoutFeedback preserves
+	// the pre-PR3 neutral feedbackScore=0.5 denominator; it does not remove
+	// the feedback weight from normalization. Off mode selects using
+	// ScoreWithoutFeedback; Shadow mode selects using ScoreWithoutFeedback
+	// but still computes ScoreWithFeedback for the delta; Enforce mode
+	// selects using ScoreWithFeedback when feedback is active. Both are
+	// always populated so operators can inspect the delta without re-running
+	// scoring. When the snapshot fail-opens
+	// (FeedbackSnapshotStatus == "read_error"), the two scores are equal
+	// because ScoreWithFeedback also uses the neutral baseline.
+	ScoreWithoutFeedback float64 `json:"score_without_feedback"`
+	ScoreWithFeedback    float64 `json:"score_with_feedback"`
+}
+
+// FeedbackSnapshotStatus* are the stable string values that
+// ScoreBreakdown.FeedbackSnapshotStatus can hold. Exported as plain
+// string constants (no new public type) so JSON consumers and
+// downstream parsers can compare against a named contract instead of
+// hardcoding literals.
+const (
+	// FeedbackSnapshotStatusOff indicates the FeedbackScoringMode was
+	// FeedbackScoringOff at plan-build — no feedback reads, no breakdown.
+	// (Note: in Off mode the public ScoreBreakdown is nil entirely;
+	// this value is supplied only to operators reading the unexported
+	// snapshot status, e.g., via test fixtures.)
+	FeedbackSnapshotStatusOff = "off"
+	// FeedbackSnapshotStatusNoStore indicates Shadow/Enforce mode but
+	// no RoutingFeedback was configured (WithRoutingFeedback never
+	// called, or called with nil).
+	FeedbackSnapshotStatusNoStore = "no_store"
+	// FeedbackSnapshotStatusEmptyUseCase indicates the route had an
+	// empty RoutingRequest.UseCase, which cannot form a FeedbackKey.
+	FeedbackSnapshotStatusEmptyUseCase = "empty_use_case"
+	// FeedbackSnapshotStatusReadError indicates the store returned a
+	// non-nil error during snapshot construction (or extension during
+	// chain routing); fail-open disabled feedback for the entire route.
+	FeedbackSnapshotStatusReadError = "read_error"
+	// FeedbackSnapshotStatusActive indicates the snapshot read every
+	// requested candidate key successfully and feedback was in effect
+	// for the route.
+	FeedbackSnapshotStatusActive = "active"
+)
+
 // RouteOutcome captures the Router's decision metadata for a request.
 // Provider responses copy a pointer to a RouteOutcome onto Chat/Generate/
 // Embed responses so callers can observe planned vs actual model, sticky
@@ -512,6 +618,12 @@ type RouteOutcome struct {
 	// future /v1/completions/feedback endpoint may attach a distinct
 	// client-visible CompletionID without conflating the two.
 	RouteID string `json:"route_id,omitempty"`
+
+	// ScoreBreakdown carries the routing-feedback scoring inputs that
+	// fed into plan-build's candidate selection. Non-nil only in
+	// Shadow / Enforce modes. See ScoreBreakdown's docs for read-time
+	// semantics.
+	ScoreBreakdown *ScoreBreakdown `json:"score_breakdown,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
