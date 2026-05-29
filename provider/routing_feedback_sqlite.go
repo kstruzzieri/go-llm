@@ -170,8 +170,8 @@ func resolveSQLiteConfig(cfg SQLiteFeedbackStoreConfig) (resolvedConfig, error) 
 	if r.maxMetaValueBytes == 0 {
 		r.maxMetaValueBytes = DefaultMaxMetaValueBytes
 	}
-	if r.neutralScore < 0 || r.neutralScore > 1 {
-		return r, fmt.Errorf("provider: NeutralScore %v out of range [0,1]", r.neutralScore)
+	if err := validateNeutralScore(r.neutralScore); err != nil {
+		return r, err
 	}
 	if r.maxRetainedSamples < -1 {
 		return r, fmt.Errorf("provider: MaxRetainedSamples %d out of range; use -1 for unbounded", r.maxRetainedSamples)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"sync"
 	"testing"
 	"time"
@@ -199,6 +200,23 @@ func TestOpenSQLiteFeedbackStoreEmptyPath(t *testing.T) {
 	_, err := OpenSQLiteFeedbackStore(context.Background(), "", SQLiteFeedbackStoreConfig{})
 	if err == nil {
 		t.Errorf("OpenSQLiteFeedbackStore(\"\") should error, got nil")
+	}
+}
+
+func TestNewSQLiteFeedbackStoreRejectsInvalidNeutralScore(t *testing.T) {
+	cases := []float64{-0.01, 1.01, -1.0, 2.0, math.NaN(), math.Inf(1), math.Inf(-1)}
+	for _, n := range cases {
+		t.Run("", func(t *testing.T) {
+			db, err := sql.Open("sqlite", ":memory:")
+			if err != nil {
+				t.Fatalf("sql.Open: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			_, err = NewSQLiteFeedbackStore(context.Background(), db, SQLiteFeedbackStoreConfig{NeutralScore: n})
+			if err == nil {
+				t.Fatalf("NewSQLiteFeedbackStore(NeutralScore=%v) returned nil error", n)
+			}
+		})
 	}
 }
 

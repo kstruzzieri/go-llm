@@ -79,8 +79,8 @@ func NewMemoryStore(cfg MemoryStoreConfig) (*MemoryStore, error) {
 	if resolved.maxMetaValueBytes == 0 {
 		resolved.maxMetaValueBytes = DefaultMaxMetaValueBytes
 	}
-	if resolved.neutralScore < 0 || resolved.neutralScore > 1 {
-		return nil, fmt.Errorf("provider: NeutralScore %v out of range [0,1]", resolved.neutralScore)
+	if err := validateNeutralScore(resolved.neutralScore); err != nil {
+		return nil, err
 	}
 	if resolved.maxRetainedSamples < -1 {
 		return nil, fmt.Errorf("provider: MaxRetainedSamples %d out of range; use -1 for unbounded", resolved.maxRetainedSamples)
