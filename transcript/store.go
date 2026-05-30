@@ -9,6 +9,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -24,6 +26,7 @@ import (
 type Store struct {
 	db    *sql.DB
 	ownDB bool
+	path  string
 
 	mu             sync.Mutex // serializes Record (preserves the stitch invariant)
 	now            func() time.Time
@@ -41,6 +44,11 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("transcript: Open requires non-empty path; pass \":memory:\" explicitly")
 	}
+	if path != ":memory:" {
+		if err := prepareTranscriptDBFile(path); err != nil {
+			return nil, err
+		}
+	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("transcript: open sqlite %q: %w", path, err)
@@ -56,18 +64,87 @@ func Open(ctx context.Context, path string) (*Store, error) {
 				return nil, fmt.Errorf("transcript: %s: %w", pragma, err)
 			}
 		}
+		if err := chmodTranscriptDBFiles(path); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
 	}
 	if err := migrate(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	if path != ":memory:" {
+		if err := chmodTranscriptDBFiles(path); err != nil {
+			_ = db.Close()
+			return nil, err
+		}
+	}
 	return &Store{
 		db:             db,
 		ownDB:          true,
+		path:           dbPath(path),
 		now:            time.Now,
 		leaseWindow:    defaultLeaseWindow,
 		shortThreshold: defaultShortThreshold,
 	}, nil
+}
+
+const (
+	transcriptDirMode  os.FileMode = 0o700
+	transcriptFileMode os.FileMode = 0o600
+)
+
+func prepareTranscriptDBFile(path string) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, transcriptDirMode); err != nil {
+			return fmt.Errorf("transcript: create directory %q: %w", dir, err)
+		}
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, transcriptFileMode)
+	if err != nil {
+		return fmt.Errorf("transcript: create sqlite %q: %w", path, err)
+	}
+	if err := f.Chmod(transcriptFileMode); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("transcript: chmod sqlite %q: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("transcript: close sqlite %q: %w", path, err)
+	}
+	return nil
+}
+
+func dbPath(path string) string {
+	if path == ":memory:" {
+		return ""
+	}
+	return path
+}
+
+func chmodTranscriptDBFiles(path string) error {
+	for _, file := range []string{path, path + "-wal", path + "-shm"} {
+		if err := chmodTranscriptFileIfExists(file); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func chmodTranscriptFileIfExists(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("transcript: stat %q: %w", path, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("transcript: %q is a directory", path)
+	}
+	if err := os.Chmod(path, transcriptFileMode); err != nil {
+		return fmt.Errorf("transcript: chmod %q: %w", path, err)
+	}
+	return nil
 }
 
 // Close releases the underlying *sql.DB. Safe to call multiple times.
@@ -87,6 +164,16 @@ func (s *Store) Close() error {
 // failure is logged, recorded on the raw row, and swallowed so a non-nil return
 // always means "nothing was persisted."
 func (s *Store) Record(ctx context.Context, in RecordInput) error {
+	if s.path != "" {
+		if err := chmodTranscriptDBFiles(s.path); err != nil {
+			return err
+		}
+		defer func() {
+			if err := chmodTranscriptDBFiles(s.path); err != nil {
+				log.Printf("transcript: failed to secure sqlite files: %v", err)
+			}
+		}()
+	}
 	callID, err := newCallID()
 	if err != nil {
 		return fmt.Errorf("transcript: generate call id: %w", err)

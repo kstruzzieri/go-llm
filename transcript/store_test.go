@@ -5,7 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 
@@ -44,6 +46,49 @@ func TestOpen_FileUsesWAL(t *testing.T) {
 	}
 	if mode != "wal" {
 		t.Errorf("journal_mode = %q, want wal", mode)
+	}
+}
+
+func TestOpen_FileUsesPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("file mode bits are not portable on Windows")
+	}
+	dir := filepath.Join(t.TempDir(), "private", "nested")
+	path := filepath.Join(dir, "t.db")
+	s, err := Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	assertPerm(t, dir, transcriptDirMode)
+	assertPerm(t, path, transcriptFileMode)
+
+	if err := s.Record(context.Background(), RecordInput{
+		Request:  []conversation.Message{{Role: "user", Content: "hello"}},
+		Response: conversation.Message{Role: "assistant", Content: "hi"},
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	for _, sidecar := range []string{path + "-wal", path + "-shm"} {
+		if _, err := os.Stat(sidecar); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			t.Fatalf("stat sidecar %q: %v", sidecar, err)
+		}
+		assertPerm(t, sidecar, transcriptFileMode)
+	}
+}
+
+func assertPerm(t *testing.T, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %q: %v", path, err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("%s mode = %o, want %o", path, got, want)
 	}
 }
 

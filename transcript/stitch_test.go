@@ -79,7 +79,8 @@ func TestDecideStitch_ExtendsSiblingNotBase(t *testing.T) {
 
 func TestForkID_ContentAddressed(t *testing.T) {
 	incoming := msgs("a", "b")
-	if forkID("k", incoming) != forkID("k", incoming) {
+	sameHistory := msgs("a", "b")
+	if forkID("k", incoming) != forkID("k", sameHistory) {
 		t.Fatal("forkID not deterministic for identical history")
 	}
 	if forkID("k", incoming) == forkID("k", msgs("a", "c")) {

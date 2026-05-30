@@ -242,7 +242,7 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 			}
 		}
 		if dir := filepath.Dir(s.transcriptDBPath); dir != "" && dir != "." {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
 				cleanupTranscriptStartupFailure()
 				return nil, fmt.Errorf("mcp: create transcript directory %q: %w", dir, err)
 			}
