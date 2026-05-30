@@ -21,6 +21,7 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 	"github.com/kstruzzieri/go-llm/rag"
+	"github.com/kstruzzieri/go-llm/transcript"
 )
 
 const (
@@ -48,6 +49,8 @@ type Server struct {
 	configPath        string
 	ragPath           string
 	ragDisabled       bool
+	transcriptDBPath  string
+	transcriptStore   *transcript.Store
 	tlsCert           string
 	tlsKey            string
 
@@ -108,6 +111,17 @@ func WithRAGPath(path string) Option {
 func WithRAGDisabled() Option {
 	return func(s *Server) {
 		s.ragDisabled = true
+	}
+}
+
+// WithTranscriptStore enables opt-in conversation persistence at the given
+// SQLite path. Empty (the default) disables persistence. Every successful chat
+// call is then recorded as a replayable benchmark trace. The DB is local and
+// unredacted; it must not be committed or shared (redaction happens at capture
+// export, not at persistence).
+func WithTranscriptStore(path string) Option {
+	return func(s *Server) {
+		s.transcriptDBPath = path
 	}
 }
 
@@ -218,7 +232,30 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		s.store = store
 	}
 
-	// Step 4b: build warmth source and Router after fallible store setup.
+	// Step 4b: open the optional transcript store (off unless WithTranscriptStore
+	// is set). Failure is fatal: the caller explicitly asked to persist here.
+	if s.transcriptDBPath != "" {
+		cleanupTranscriptStartupFailure := func() {
+			if s.store != nil {
+				_ = s.store.Close()
+				s.store = nil
+			}
+		}
+		if dir := filepath.Dir(s.transcriptDBPath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				cleanupTranscriptStartupFailure()
+				return nil, fmt.Errorf("mcp: create transcript directory %q: %w", dir, err)
+			}
+		}
+		ts, err := transcript.Open(ctx, s.transcriptDBPath)
+		if err != nil {
+			cleanupTranscriptStartupFailure()
+			return nil, fmt.Errorf("mcp: open transcript store: %w", err)
+		}
+		s.transcriptStore = ts
+	}
+
+	// Step 4c: build warmth source and Router after fallible store setup.
 	// NewRouter does not perform network I/O, so this is safe even when
 	// local providers are unreachable. The warmth source's polling goroutine
 	// starts immediately and is fail-open when the default Ollama instance
@@ -662,6 +699,12 @@ func (s *Server) routerSnapshot() routeEngine {
 	return s.router
 }
 
+func (s *Server) transcriptStoreSnapshot() *transcript.Store {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.transcriptStore
+}
+
 // fimPriority returns the configured FIM routing priority, defaulting to
 // provider.PriorityHigh when WithFIMPriority was not invoked.
 //
@@ -748,12 +791,14 @@ func (s *Server) Close() error {
 	s.stateVersion++
 	store := s.store
 	router := s.router
+	tstore := s.transcriptStore
 	s.store = nil
 	s.indexer = nil
 	s.retriever = nil
 	s.completer = nil
 	s.router = nil
 	s.warmthSource = nil
+	s.transcriptStore = nil
 	s.mu.Unlock()
 
 	var routerErr, storeErr error
@@ -763,5 +808,9 @@ func (s *Server) Close() error {
 	if store != nil {
 		storeErr = store.Close()
 	}
-	return errors.Join(routerErr, storeErr)
+	var transcriptErr error
+	if tstore != nil {
+		transcriptErr = tstore.Close()
+	}
+	return errors.Join(routerErr, storeErr, transcriptErr)
 }

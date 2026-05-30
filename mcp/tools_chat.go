@@ -4,20 +4,26 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
+	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/transcript"
 )
 
 // chatArgs are the parameters for the chat tool.
 type chatArgs struct {
-	Messages    []ollama.ChatMessage `json:"messages"`
-	Model       string               `json:"model,omitempty"`
-	UseRAG      bool                 `json:"use_rag,omitempty"`
-	RAGTopK     int                  `json:"rag_top_k,omitempty"`
-	Temperature *float64             `json:"temperature,omitempty"`
+	Messages       []ollama.ChatMessage `json:"messages"`
+	Model          string               `json:"model,omitempty"`
+	UseRAG         bool                 `json:"use_rag,omitempty"`
+	RAGTopK        int                  `json:"rag_top_k,omitempty"`
+	Temperature    *float64             `json:"temperature,omitempty"`
+	ConversationID string               `json:"conversation_id,omitempty"`
 }
 
 func (s *Server) registerChatTools() {
@@ -42,10 +48,11 @@ func (s *Server) registerChatTools() {
 						"required": []string{"role", "content"},
 					},
 				},
-				"model":       map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
-				"use_rag":     map[string]any{"type": "boolean", "description": "Prepend RAG context from the vector store"},
-				"rag_top_k":   map[string]any{"type": "integer", "description": "Number of RAG results (default: 5)"},
-				"temperature": map[string]any{"type": "number", "description": "Sampling temperature"},
+				"model":           map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
+				"use_rag":         map[string]any{"type": "boolean", "description": "Prepend RAG context from the vector store"},
+				"rag_top_k":       map[string]any{"type": "integer", "description": "Number of RAG results (default: 5)"},
+				"temperature":     map[string]any{"type": "number", "description": "Sampling temperature"},
+				"conversation_id": map[string]any{"type": "string", "description": "Optional stable id to group calls of one conversation; omit to derive identity from message content"},
 			},
 			"required": []string{"messages"},
 		},
@@ -146,6 +153,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
+	s.persistTranscript(ctx, req, args, resp)
 	return toolResult(resp.Content), nil
 }
 
@@ -195,4 +203,81 @@ func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
 		}
 	}
 	return out
+}
+
+// persistTranscript records a successful chat call to the transcript store when
+// one is configured. Best-effort: any failure is logged and never surfaces to
+// the caller. The original args.Messages (pre-RAG) are recorded; the ephemeral
+// RAG-injected system message is intentionally excluded.
+func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, resp *provider.ChatResponse) {
+	store := s.transcriptStoreSnapshot()
+	if store == nil {
+		return
+	}
+
+	reqMsgs, err := conversation.FromChatMessages(args.Messages)
+	if err != nil {
+		log.Printf("mcp: transcript skip (convert request): %v", err)
+		return
+	}
+
+	var toolCalls json.RawMessage
+	if len(resp.ToolCalls) > 0 {
+		if raw, merr := json.Marshal(resp.ToolCalls); merr == nil {
+			toolCalls = raw
+		} else {
+			log.Printf("mcp: transcript marshal tool calls: %v", merr)
+		}
+	}
+	var routeOutcome json.RawMessage
+	if resp.RouteOutcome != nil {
+		if raw, merr := json.Marshal(resp.RouteOutcome); merr == nil {
+			routeOutcome = raw
+		} else {
+			log.Printf("mcp: transcript marshal route outcome: %v", merr)
+		}
+	}
+
+	in := transcript.RecordInput{
+		ConversationID: strings.TrimSpace(args.ConversationID),
+		Request:        reqMsgs,
+		Response: conversation.Message{
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: toolCalls,
+		},
+		Model:        resp.Model,
+		Provider:     resp.Provider,
+		RouteOutcome: routeOutcome,
+		SessionHint:  sessionHintFromRequest(req),
+	}
+	// Persistence is best-effort work that runs after the response is produced.
+	// Detach from the request context so a client that cancels immediately after
+	// receiving the answer (IDE clients cancel constantly) doesn't drop the
+	// trace. Bound it so a stuck write can't block the handler return.
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if rerr := store.Record(recordCtx, in); rerr != nil {
+		log.Printf("mcp: transcript record: %v", rerr)
+	}
+}
+
+// sessionHintFromRequest returns a stable MCP session identifier when the
+// transport provides one (streamable HTTP), or "" otherwise (stdio/in-memory).
+// "" is a safe fallback: conversationKey then derives identity from message
+// content (transcript §5).
+//
+// GetSession returns the concrete *ServerSession boxed in the Session
+// interface, so a request created without a session (stdio/in-memory, tests) is
+// a typed nil: the interface is non-nil but the pointer is nil. Comparing the
+// interface to nil would spuriously pass and ID() would then panic on the nil
+// receiver. Assert to the concrete type and nil-check the pointer instead.
+func sessionHintFromRequest(req *gomcp.CallToolRequest) string {
+	if req == nil {
+		return ""
+	}
+	if sess, ok := req.GetSession().(*gomcp.ServerSession); ok && sess != nil {
+		return sess.ID()
+	}
+	return ""
 }
