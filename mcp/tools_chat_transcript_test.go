@@ -110,3 +110,53 @@ func TestHandleChat_NilTranscriptStoreStillSucceeds(t *testing.T) {
 		t.Fatalf("handleChat with nil store should succeed: err=%v isError=%v", err, res.IsError)
 	}
 }
+
+// TestHandleChat_PersistsDespiteCanceledContext guards the best-effort
+// persistence against request-context cancellation: an IDE client that cancels
+// right after receiving the answer must not cause the trace to be dropped. The
+// handler detaches the persistence write from the request context.
+func TestHandleChat_PersistsDespiteCanceledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	ts, err := transcript.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	router := newRecordingRouteEngine("routed-answer")
+	s := &Server{router: router, transcriptStore: ts}
+
+	args, _ := json.Marshal(chatArgs{
+		ConversationID: "conv-cancel",
+		Model:          "ollama/qwen3:8b",
+		Messages:       []ollama.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+
+	// Cancel the request context before the call. The fake router ignores ctx,
+	// so ExecuteChat still succeeds; persistence must survive the cancellation.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	res, err := s.handleChat(ctx, &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{Arguments: args},
+	})
+	if err != nil {
+		t.Fatalf("handleChat: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("handleChat returned tool error: %s", extractText(res))
+	}
+	_ = ts.Close() // flush WAL so a separate read handle sees the row
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open read handle: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer func() { _ = db.Close() }()
+
+	var convCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM conversations WHERE id = ?`, "conv-cancel").Scan(&convCount); err != nil {
+		t.Fatalf("count conversations: %v", err)
+	}
+	if convCount != 1 {
+		t.Errorf("conversations with id=conv-cancel = %d, want 1 (persistence must survive a canceled request context)", convCount)
+	}
+}

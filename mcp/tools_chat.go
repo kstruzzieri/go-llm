@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strings"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -250,7 +251,13 @@ func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolReque
 		RouteOutcome: routeOutcome,
 		SessionHint:  sessionHintFromRequest(req),
 	}
-	if rerr := store.Record(ctx, in); rerr != nil {
+	// Persistence is best-effort work that runs after the response is produced.
+	// Detach from the request context so a client that cancels immediately after
+	// receiving the answer (IDE clients cancel constantly) doesn't drop the
+	// trace. Bound it so a stuck write can't block the handler return.
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if rerr := store.Record(recordCtx, in); rerr != nil {
 		log.Printf("mcp: transcript record: %v", rerr)
 	}
 }
