@@ -21,7 +21,7 @@ func main() {
 	ollamaURL := flag.String("ollama-url", "", "Ollama server URL (default: from config or http://localhost:11434)")
 	configPath := flag.String("config", "", "Path to models.json (default: auto-discover)")
 	ragDB := flag.String("rag-db", "", "RAG database path (default: ~/.local/share/go-llm/rag.db)")
-	conversationDB := flag.String("conversation-db", "", "Transcript database path for opt-in conversation persistence (default: disabled)")
+	conversationDB := flag.String("conversation-db", "", "Transcript database path for opt-in conversation persistence (default: disabled). Stores UNREDACTED prompts and responses locally; do not commit or share the database.")
 	noRAG := flag.Bool("no-rag", false, "Disable RAG tools")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
