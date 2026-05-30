@@ -367,7 +367,7 @@ func (s *Store) upsertCanonical(ctx context.Context, dec stitchDecision, key, so
 }
 
 func (s *Store) finalizeRawOK(ctx context.Context, callID string, dec stitchDecision, key string) error {
-	if dec.status == statusForked && dec.targetID != key {
+	if dec.targetID != key {
 		_, err := s.db.ExecContext(ctx,
 			`UPDATE raw_chat_calls SET projection_status = 'ok',
 			    conversation_id = ?, identity_source = ? WHERE call_id = ?`,

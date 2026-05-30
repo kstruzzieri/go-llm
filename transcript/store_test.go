@@ -225,6 +225,21 @@ func TestRecord_ExtendsForkedSibling(t *testing.T) {
 	if n := countConversations(t, s); n != 2 {
 		t.Fatalf("conversation rows = %d, want 2 (sibling extended, not a 3rd fork)", n)
 	}
+
+	var forkID string
+	if err := s.db.QueryRow(`SELECT id FROM conversations WHERE identity_source = ?`, identityForked).Scan(&forkID); err != nil {
+		t.Fatalf("read forked conversation id: %v", err)
+	}
+	var forkRawRows int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM raw_chat_calls WHERE conversation_id = ? AND identity_source = ?`,
+		forkID, identityForked,
+	).Scan(&forkRawRows); err != nil {
+		t.Fatalf("count fork raw rows: %v", err)
+	}
+	if forkRawRows != 2 {
+		t.Errorf("raw rows under fork id = %d, want 2 (fork creation + later extension)", forkRawRows)
+	}
 }
 
 func TestRecord_PersistsRouteOutcomeJSON(t *testing.T) {
