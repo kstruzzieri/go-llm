@@ -45,6 +45,7 @@ func main() {
 	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
 	artifactsPath := flag.String("artifacts", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Path to artifacts.jsonl (Phase 2)")
 	calibrateReportDir := flag.String("calibrate-report-dir", filepath.Join("docs", "llm", "calibration", "reports"), "Directory for calibration reports")
+	calibrateAgreement := flag.String("calibrate-agreement", string(calibrationAgreementExact), "Calibration agreement mode: exact or tolerance")
 	judgeStabilityRuns := flag.Int("judge-stability-runs", 0, "When >1, run the judge that many times per artifact (cache bypassed) and report spread as a diagnostic")
 
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
@@ -187,6 +188,7 @@ func main() {
 			JudgeModel:    judgeName,
 			ReportDir:     *calibrateReportDir,
 			StabilityRuns: *judgeStabilityRuns,
+			AgreementMode: calibrationAgreementMode(*calibrateAgreement),
 		})
 		if err != nil {
 			log.Fatalf("llm-bench: calibrate: %v", err)

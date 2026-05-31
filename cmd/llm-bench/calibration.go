@@ -265,6 +265,41 @@ const (
 	calibrationDefaultMinLabels = 50
 )
 
+type calibrationAgreementMode string
+
+const (
+	calibrationAgreementExact     calibrationAgreementMode = "exact"
+	calibrationAgreementTolerance calibrationAgreementMode = "tolerance"
+)
+
+func normalizeCalibrationAgreementMode(mode calibrationAgreementMode) (calibrationAgreementMode, error) {
+	if mode == "" {
+		return calibrationAgreementExact, nil
+	}
+	switch mode {
+	case calibrationAgreementExact, calibrationAgreementTolerance:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid calibrate agreement mode %q (want exact or tolerance)", mode)
+	}
+}
+
+type calibrationSubsetSummary struct {
+	Count         int
+	AgreeCount    int
+	AgreementRate float64
+}
+
+type knownFixtureOutcome struct {
+	TraceID  string
+	Expected float64
+	Judge    float64
+	Present  bool
+	Pass     bool
+}
+
+var knownSubtleBugFixtureIDs = []string{"fa-f03", "fa-c05", "fa-g04"}
+
 // calibrateOptions configures runCalibrate.
 //
 // MinLabels defaults to calibrationDefaultMinLabels (50) when zero so a
@@ -280,23 +315,34 @@ type calibrateOptions struct {
 	ReportDir     string
 	MinLabels     int // defaults to calibrationDefaultMinLabels when zero
 	StabilityRuns int // when >1, runs the judge exactly N times per artifact and reports max-min spread as a diagnostic (does NOT gate the PASS/FAIL verdict); uses bypass-cache (Task 23)
+	AgreementMode calibrationAgreementMode
 	Clock         func() time.Time
 }
 
 // CalibrationResult is the in-memory summary returned by runCalibrate. The
 // markdown report contains the same data plus per-label rows.
 type CalibrationResult struct {
-	JudgeModel          string
-	MatchedCount        int
-	StaleCount          int
-	SelfJudgedSkipCount int
-	AgreeCount          int
-	AgreementRate       float64
-	MinLabels           int
-	StabilityRuns       int
-	Verdict             string // PASS / FAIL / INSUFFICIENT_LABELS
-	ReportPath          string
-	PerLabel            []perLabelOutcome
+	JudgeModel               string
+	MatchedCount             int
+	StaleCount               int
+	SelfJudgedSkipCount      int
+	AgreeCount               int
+	AgreementRate            float64
+	AgreementMode            calibrationAgreementMode
+	ToleranceAgreeCount      int
+	ToleranceAgreementRate   float64
+	Overall                  calibrationSubsetSummary
+	R1Anchor                 calibrationSubsetSummary
+	Borderline               calibrationSubsetSummary
+	ClearOne                 calibrationSubsetSummary
+	HarshDisagreementCount   int
+	LenientDisagreementCount int
+	KnownFixtures            map[string]knownFixtureOutcome
+	MinLabels                int
+	StabilityRuns            int
+	Verdict                  string // PASS / FAIL / INSUFFICIENT_LABELS
+	ReportPath               string
+	PerLabel                 []perLabelOutcome
 }
 
 // perLabelOutcome is one row of the calibration report: a label paired with
@@ -309,6 +355,8 @@ type perLabelOutcome struct {
 	Judge           float64
 	Delta           float64
 	Agree           bool
+	ToleranceAgree  bool
+	LabelNotes      string
 	StabilitySpread float64
 }
 
@@ -330,6 +378,10 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 	if opts.Scorer == nil {
 		return CalibrationResult{}, errors.New("calibrate: nil scorer")
 	}
+	agreementMode, err := normalizeCalibrationAgreementMode(opts.AgreementMode)
+	if err != nil {
+		return CalibrationResult{}, err
+	}
 	if opts.MinLabels == 0 {
 		opts.MinLabels = calibrationDefaultMinLabels
 	}
@@ -342,6 +394,11 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		StaleCount:    len(stale),
 		MinLabels:     opts.MinLabels,
 		StabilityRuns: opts.StabilityRuns,
+		AgreementMode: agreementMode,
+		KnownFixtures: make(map[string]knownFixtureOutcome, len(knownSubtleBugFixtureIDs)),
+	}
+	for _, id := range knownSubtleBugFixtureIDs {
+		res.KnownFixtures[id] = knownFixtureOutcome{TraceID: id}
 	}
 	for _, m := range matched {
 		if sameModelSelector(opts.JudgeModel, m.Artifact.CandidateModel) {
@@ -367,13 +424,21 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		if delta < 0 {
 			delta = -delta
 		}
+		exactAgree := score.AnswerQuality == m.Label.ExpectedAnswerQuality
+		toleranceAgree := delta <= calibrationAgreementDelta
+		agree := exactAgree
+		if agreementMode == calibrationAgreementTolerance {
+			agree = toleranceAgree
+		}
 		outcome := perLabelOutcome{
 			TraceID:        m.Artifact.TraceID,
 			CandidateModel: m.Artifact.CandidateModel,
 			Expected:       m.Label.ExpectedAnswerQuality,
 			Judge:          score.AnswerQuality,
 			Delta:          delta,
-			Agree:          delta <= calibrationAgreementDelta,
+			Agree:          agree,
+			ToleranceAgree: toleranceAgree,
+			LabelNotes:     m.Label.LabelNotes,
 		}
 		if opts.StabilityRuns > 1 {
 			scores := []float64{score.AnswerQuality}
@@ -391,11 +456,45 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		if outcome.Agree {
 			res.AgreeCount++
 		}
+		if outcome.ToleranceAgree {
+			res.ToleranceAgreeCount++
+		}
+		addSubsetOutcome(&res.Overall, outcome.Agree)
+		if labelHasToken(outcome.LabelNotes, "r1-anchor") {
+			addSubsetOutcome(&res.R1Anchor, outcome.Agree)
+		}
+		if outcome.Expected == 0 || outcome.Expected == 0.5 {
+			addSubsetOutcome(&res.Borderline, outcome.Agree)
+		}
+		if outcome.Expected == 1 {
+			addSubsetOutcome(&res.ClearOne, outcome.Agree)
+		}
+		if !outcome.Agree {
+			if outcome.Judge < outcome.Expected {
+				res.HarshDisagreementCount++
+			} else if outcome.Judge > outcome.Expected {
+				res.LenientDisagreementCount++
+			}
+		}
+		if _, ok := res.KnownFixtures[outcome.TraceID]; ok {
+			res.KnownFixtures[outcome.TraceID] = knownFixtureOutcome{
+				TraceID:  outcome.TraceID,
+				Expected: outcome.Expected,
+				Judge:    outcome.Judge,
+				Present:  true,
+				Pass:     outcome.Judge != 1,
+			}
+		}
 		res.MatchedCount++
 	}
 	if res.MatchedCount > 0 {
 		res.AgreementRate = float64(res.AgreeCount) / float64(res.MatchedCount)
+		res.ToleranceAgreementRate = float64(res.ToleranceAgreeCount) / float64(res.MatchedCount)
 	}
+	finalizeSubset(&res.Overall)
+	finalizeSubset(&res.R1Anchor)
+	finalizeSubset(&res.Borderline)
+	finalizeSubset(&res.ClearOne)
 	switch {
 	case res.MatchedCount < opts.MinLabels:
 		res.Verdict = "INSUFFICIENT_LABELS"
@@ -412,6 +511,30 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		res.ReportPath = path
 	}
 	return res, nil
+}
+
+func labelHasToken(notes, token string) bool {
+	for _, field := range strings.FieldsFunc(strings.ToLower(notes), func(r rune) bool {
+		return r == ',' || r == ';' || r == ' ' || r == '\t' || r == '\n'
+	}) {
+		if field == token {
+			return true
+		}
+	}
+	return false
+}
+
+func addSubsetOutcome(s *calibrationSubsetSummary, agree bool) {
+	s.Count++
+	if agree {
+		s.AgreeCount++
+	}
+}
+
+func finalizeSubset(s *calibrationSubsetSummary) {
+	if s.Count > 0 {
+		s.AgreementRate = float64(s.AgreeCount) / float64(s.Count)
+	}
 }
 
 func calibrationScorer(s Scorer, stabilityRuns int) Scorer {
@@ -472,6 +595,31 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 	fmt.Fprintf(&b, "Self-judged labels skipped: %d\n", res.SelfJudgedSkipCount)
 	fmt.Fprintf(&b, "Agreement: %d / %d (%.0f%%) → **%s**\n\n",
 		res.AgreeCount, res.MatchedCount, res.AgreementRate*100, res.Verdict)
+	fmt.Fprintf(&b, "Agreement mode: %s\n", res.AgreementMode)
+	fmt.Fprintf(&b, "Old tolerance diagnostic: %d / %d (%.0f%%) would have agreed under |judge - expected| <= %.2f\n\n",
+		res.ToleranceAgreeCount, res.MatchedCount, res.ToleranceAgreementRate*100, calibrationAgreementDelta)
+	fmt.Fprintln(&b, "| subset | agreement |")
+	fmt.Fprintln(&b, "|---|---|")
+	fmt.Fprintf(&b, "| overall | %s |\n", formatSubsetAgreement(res.Overall))
+	fmt.Fprintf(&b, "| R1-60 anchor | %s |\n", formatSubsetAgreement(res.R1Anchor))
+	fmt.Fprintf(&b, "| Borderline/fail subset | %s |\n", formatSubsetAgreement(res.Borderline))
+	fmt.Fprintf(&b, "| clear-1.0 | %s |\n", formatSubsetAgreement(res.ClearOne))
+	fmt.Fprintf(&b, "\nHarsh disagreements: %d\n", res.HarshDisagreementCount)
+	fmt.Fprintf(&b, "Lenient disagreements: %d\n\n", res.LenientDisagreementCount)
+	fmt.Fprintln(&b, "## Known subtle-bug fixtures")
+	fmt.Fprintln(&b, "| trace_id | expected | judge | roll-call |")
+	fmt.Fprintln(&b, "|---|---|---|---|")
+	for _, id := range knownSubtleBugFixtureIDs {
+		f := res.KnownFixtures[id]
+		status := "MISSING"
+		if f.Present && f.Pass {
+			status = "PASS"
+		} else if f.Present {
+			status = "FAIL"
+		}
+		fmt.Fprintf(&b, "| %s | %.2f | %.2f | %s |\n", id, f.Expected, f.Judge, status)
+	}
+	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "| trace_id | candidate | expected | judge | Δ | agree | stability |")
 	fmt.Fprintln(&b, "|---|---|---|---|---|---|---|")
 	for _, p := range res.PerLabel {
@@ -498,6 +646,13 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 		return "", fmt.Errorf("close %q: %w", path, err)
 	}
 	return path, nil
+}
+
+func formatSubsetAgreement(s calibrationSubsetSummary) string {
+	if s.Count == 0 {
+		return "0 / 0 (n/a)"
+	}
+	return fmt.Sprintf("%d / %d (%.0f%%)", s.AgreeCount, s.Count, s.AgreementRate*100)
 }
 
 func createCalibrationReportFile(dir, judgeModel string, now time.Time) (*os.File, string, error) {

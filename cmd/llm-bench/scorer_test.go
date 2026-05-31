@@ -15,7 +15,9 @@ import (
 
 type fakeJudgeClient struct {
 	req    ollama.ChatRequest
+	reqs   []ollama.ChatRequest
 	resp   *ollama.ChatResponse
+	resps  []*ollama.ChatResponse
 	err    error
 	called int
 }
@@ -23,8 +25,16 @@ type fakeJudgeClient struct {
 func (f *fakeJudgeClient) Chat(_ context.Context, req ollama.ChatRequest) (*ollama.ChatResponse, error) {
 	f.called++
 	f.req = req
+	f.reqs = append(f.reqs, req)
 	if f.err != nil {
 		return nil, f.err
+	}
+	if len(f.resps) > 0 {
+		idx := f.called - 1
+		if idx >= len(f.resps) {
+			idx = len(f.resps) - 1
+		}
+		return f.resps[idx], nil
 	}
 	return f.resp, nil
 }
@@ -445,6 +455,40 @@ func TestBuildJudgeCall_PopulatesBaseScoreAndRequest(t *testing.T) {
 	}
 }
 
+func TestBuildJudgeCall_UsesCategoricalJudgeContract(t *testing.T) {
+	trace := Trace{
+		ID:     "categorical-prompt",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "question"}},
+		Golden: Golden{FinalAnswerCriteria: "answer the question correctly"},
+	}
+	actual := Result{
+		Model:      "ollama/candidate",
+		TraceID:    "categorical-prompt",
+		Transcript: []Turn{{Role: "assistant", Content: "answer"}},
+	}
+	scorer := &LLMJudgeScorer{Client: &fakeJudgeClient{}, JudgeModel: "ollama/judge"}
+
+	req, _, err := scorer.buildJudgeCall(trace, actual)
+	if err != nil {
+		t.Fatalf("buildJudgeCall: %v", err)
+	}
+	system := req.Messages[0].Content
+	for _, want := range []string{
+		"answer_quality must be exactly one of `0.0`, `0.5`, or `1.0`",
+		"0.0 means the answer is wrong, fabricated, absent, or materially misleading.",
+		"0.5 means the answer is partially correct but missing important requirements, or contains a contained technical flaw.",
+		"1.0 means the answer fully satisfies the rubric with no material technical error.",
+	} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("judge system prompt missing %q:\n%s", want, system)
+		}
+	}
+	if strings.Contains(system, "must be a number from 0 to 1") {
+		t.Fatalf("judge system prompt still allows continuous scores:\n%s", system)
+	}
+}
+
 func TestBuildJudgeCall_StripsBenchProviderFromJudgeRequestModel(t *testing.T) {
 	trace := Trace{ID: "t", System: "s", Turns: []Turn{{Role: "user", Content: "x"}}, Golden: Golden{FinalAnswerCriteria: "fc"}}
 	actual := Result{Model: "ollama/cand", TraceID: "t", Transcript: []Turn{{Role: "assistant", Content: "y"}}}
@@ -490,7 +534,7 @@ func TestLLMJudgeScorerScoresFromJSON(t *testing.T) {
 		resp: &ollama.ChatResponse{
 			Message: ollama.ChatMessage{
 				Role:    "assistant",
-				Content: `{"answer_quality":0.75,"justification":"Identifies the main issue but misses the fallback detail."}`,
+				Content: `{"answer_quality":0.5,"justification":"Identifies the main issue but misses the fallback detail."}`,
 			},
 		},
 	}
@@ -523,8 +567,8 @@ func TestLLMJudgeScorerScoresFromJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Score() error: %v", err)
 	}
-	if score.AnswerQuality != 0.75 {
-		t.Fatalf("AnswerQuality = %f, want 0.75", score.AnswerQuality)
+	if score.AnswerQuality != 0.5 {
+		t.Fatalf("AnswerQuality = %f, want 0.5", score.AnswerQuality)
 	}
 	if score.ToolSequenceMatch != 1.0 {
 		t.Fatalf("ToolSequenceMatch = %f, want 1.0", score.ToolSequenceMatch)
@@ -797,13 +841,20 @@ func TestParseJudgeResponseExtractsJSON(t *testing.T) {
 	}
 }
 
-func TestParseJudgeResponseIgnoresTrailingText(t *testing.T) {
-	got, err := parseJudgeResponse("{\"answer_quality\":0.25,\"justification\":\"weak\"}\nextra text")
+func TestParseJudgeResponseIgnoresTrailingTextForCategoricalScore(t *testing.T) {
+	got, err := parseJudgeResponse("{\"answer_quality\":0.5,\"justification\":\"partial\"}\nextra text")
 	if err != nil {
 		t.Fatalf("parseJudgeResponse() error: %v", err)
 	}
-	if got.AnswerQuality != 0.25 {
-		t.Fatalf("AnswerQuality = %f, want 0.25", got.AnswerQuality)
+	if got.AnswerQuality != 0.5 {
+		t.Fatalf("AnswerQuality = %f, want 0.5", got.AnswerQuality)
+	}
+}
+
+func TestParseJudgeResponseRejectsOffGridScore(t *testing.T) {
+	_, err := parseJudgeResponse(`{"answer_quality":0.25,"justification":"between labels"}`)
+	if !errors.Is(err, errOffGridJudgeScore) {
+		t.Fatalf("err = %v, want errOffGridJudgeScore", err)
 	}
 }
 
@@ -832,7 +883,7 @@ func TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch(t *
 	judge := &fakeJudgeClient{
 		resp: &ollama.ChatResponse{
 			Message: ollama.ChatMessage{
-				Content: `{"answer_quality":0.7,"justification":"meh"}`,
+				Content: `{"answer_quality":0.5,"justification":"meh"}`,
 			},
 		},
 	}
@@ -950,10 +1001,99 @@ func TestLLMJudgeScorer_BypassCache_AlwaysCallsJudgeAndDoesNotPersist(t *testing
 	}
 }
 
+func TestLLMJudgeScorer_OffGridRetriesOnceWithRepairPrompt(t *testing.T) {
+	judge := &fakeJudgeClient{resps: []*ollama.ChatResponse{
+		{Message: ollama.ChatMessage{Content: `{"answer_quality":0.7,"justification":"continuous"}`}},
+		{Message: ollama.ChatMessage{Content: `{"answer_quality":0.5,"justification":"categorical repair"}`}},
+	}}
+	scorer := &LLMJudgeScorer{Client: judge, JudgeModel: "ollama/judge"}
+	trace := Trace{ID: "repair", System: "s", Turns: []Turn{{Role: "user", Content: "u"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/candidate", Transcript: []Turn{{Role: "assistant", Content: "answer"}}}
+
+	score, err := scorer.Score(context.Background(), trace, actual)
+	if err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	if score.AnswerQuality != 0.5 {
+		t.Fatalf("AnswerQuality=%v; want repaired 0.5", score.AnswerQuality)
+	}
+	if judge.called != 2 {
+		t.Fatalf("judge called %d times; want initial + one repair", judge.called)
+	}
+	if len(judge.reqs) != 2 || !strings.Contains(judgeUserPromptOf(judge.reqs[1]), "Repair instruction") {
+		t.Fatalf("second request missing repair instruction: %+v", judge.reqs)
+	}
+}
+
+func TestLLMJudgeScorer_OffGridRetryFailureSurfacesError(t *testing.T) {
+	judge := &fakeJudgeClient{resps: []*ollama.ChatResponse{
+		{Message: ollama.ChatMessage{Content: `{"answer_quality":0.7,"justification":"continuous"}`}},
+		{Message: ollama.ChatMessage{Content: `{"answer_quality":0.9,"justification":"still continuous"}`}},
+	}}
+	scorer := &LLMJudgeScorer{Client: judge, JudgeModel: "ollama/judge"}
+	trace := Trace{ID: "repair-fail", System: "s", Turns: []Turn{{Role: "user", Content: "u"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/candidate", Transcript: []Turn{{Role: "assistant", Content: "answer"}}}
+
+	_, err := scorer.Score(context.Background(), trace, actual)
+	if !errors.Is(err, errOffGridJudgeScore) {
+		t.Fatalf("err=%v; want errOffGridJudgeScore", err)
+	}
+	if judge.called != 2 {
+		t.Fatalf("judge called %d times; want exactly 2", judge.called)
+	}
+}
+
+func TestLLMJudgeScorer_OffGridRepairCachesOnlyRepairRequest(t *testing.T) {
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{resps: []*ollama.ChatResponse{
+		{Message: ollama.ChatMessage{Content: `{"answer_quality":0.7,"justification":"continuous"}`}},
+		{Message: ollama.ChatMessage{Content: `{"answer_quality":0.5,"justification":"repair valid"}`}},
+	}}
+	scorer := &LLMJudgeScorer{
+		Client:           judge,
+		JudgeModel:       "ollama/judge",
+		JudgeModelDigest: "sha256:shim",
+		Cache:            c,
+		Clock:            func() time.Time { return time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC) },
+	}
+	trace := Trace{ID: "repair-cache", System: "s", Turns: []Turn{{Role: "user", Content: "u"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/candidate", Transcript: []Turn{{Role: "assistant", Content: "answer"}}}
+
+	if _, err := scorer.Score(context.Background(), trace, actual); err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	var requestJSON string
+	var storedQuality float64
+	var rowCount int
+	rows, err := c.db.Query(`SELECT request_json, answer_quality FROM judge_cache WHERE trace_id = ?`, "repair-cache")
+	if err != nil {
+		t.Fatalf("query repair cache row: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		rowCount++
+		if err := rows.Scan(&requestJSON, &storedQuality); err != nil {
+			t.Fatalf("scan repair cache row: %v", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate repair cache rows: %v", err)
+	}
+	if rowCount != 1 {
+		t.Fatalf("cache rows=%d; want 1 valid repaired row", rowCount)
+	}
+	if storedQuality != 0.5 {
+		t.Fatalf("stored answer_quality=%v; want 0.5", storedQuality)
+	}
+	if !strings.Contains(requestJSON, "Repair instruction") {
+		t.Fatalf("cached request_json does not contain repair instruction:\n%s", requestJSON)
+	}
+}
+
 func TestLLMJudgeScorer_MalformedCacheHitFallsBackToJudge(t *testing.T) {
 	c, _ := newTestCache(t)
 	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
-		Content: `{"answer_quality":0.9,"justification":"fresh"}`,
+		Content: `{"answer_quality":1.0,"justification":"fresh"}`,
 	}}}
 	scorer := &LLMJudgeScorer{
 		Client:     judge,
@@ -999,8 +1139,8 @@ func TestLLMJudgeScorer_MalformedCacheHitFallsBackToJudge(t *testing.T) {
 	if judge.called != 1 {
 		t.Fatalf("judge called %d times; want 1 fallback call", judge.called)
 	}
-	if score.AnswerQuality != 0.9 {
-		t.Fatalf("AnswerQuality = %v; want fresh judge score 0.9", score.AnswerQuality)
+	if score.AnswerQuality != 1.0 {
+		t.Fatalf("AnswerQuality = %v; want fresh judge score 1.0", score.AnswerQuality)
 	}
 }
 

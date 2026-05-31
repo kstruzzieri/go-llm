@@ -213,8 +213,11 @@ First implementation slice:
 The judge scorer is calibrated against human labels via a two-phase
 workflow documented in [CALIBRATION.md](CALIBRATION.md). Headline numbers:
 
-- Primary agreement criterion: `|judge - expected| ≤ 0.25`.
-- Pass threshold: ≥85% agreement on ≥50 matched non-stale labels.
+- Primary agreement criterion: exact categorical match, `judge == expected`,
+  where both values are one of `{0.0, 0.5, 1.0}`.
+- Diagnostic only: the report also prints the retired tolerance agreement
+  count, `|judge - expected| ≤ 0.25`.
+- Pass threshold: ≥85% exact agreement on ≥50 matched non-stale labels.
 - Below 50 matched non-stale labels: verdict is `INSUFFICIENT_LABELS`
   (never PASS).
 - Stale labels (label `artifact_hash` ≠ frozen `artifacts.jsonl` hash) are

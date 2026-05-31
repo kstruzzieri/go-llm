@@ -311,8 +311,8 @@ func TestJudgeCacheGetPreservesVerdictOnHit(t *testing.T) {
 	ctx := context.Background()
 	want := judgeCacheEntry{
 		CacheKey: "k", JudgeModel: "j", TraceID: "t", CandidateModel: "cm",
-		PromptHash: "p", RequestJSON: "{}", ResponseContent: `{"answer_quality":0.7}`,
-		AnswerQuality: 0.7, Justification: "good",
+		PromptHash: "p", RequestJSON: "{}", ResponseContent: `{"answer_quality":0.5}`,
+		AnswerQuality: 0.5, Justification: "good",
 	}
 	if err := c.Put(ctx, want); err != nil {
 		t.Fatalf("Put: %v", err)

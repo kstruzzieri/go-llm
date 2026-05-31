@@ -338,22 +338,16 @@ func TestRunCalibrate_UsesArtifactTraceRubric(t *testing.T) {
 	}
 }
 
-func TestRunCalibrate_AgreementMatchesByHand(t *testing.T) {
+func TestRunCalibrate_ExactAgreementIsDefault(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "artifacts.jsonl")
 	labels := filepath.Join(dir, "labels.jsonl")
-	reportDir := filepath.Join(dir, "reports")
 
-	// 4 artifacts, 4 labels:
-	// - label 0: expected 1.0, judge 1.0 → agree (Δ=0)
-	// - label 1: expected 1.0, judge 0.6 → disagree (Δ=0.4 > 0.25)
-	// - label 2: expected 0.5, judge 0.7 → agree (Δ=0.2 ≤ 0.25)
-	// - label 3: expected 0.0, judge 0.25 → agree (Δ=0.25 == 0.25)
 	var artifacts []any
 	var labelRecs []any
 	judge := map[string]float64{}
 	expected := []float64{1.0, 1.0, 0.5, 0.0}
-	judged := []float64{1.0, 0.6, 0.7, 0.25}
+	judged := []float64{1.0, 0.6, 0.5, 0.25}
 	for i := 0; i < 4; i++ {
 		traceID := fmt.Sprintf("t%d", i)
 		a := testCalibrationArtifact(traceID, traceID)
@@ -377,19 +371,130 @@ func TestRunCalibrate_AgreementMatchesByHand(t *testing.T) {
 		ArtifactsPath: arts,
 		Scorer:        fs,
 		JudgeModel:    "ollama/judge",
-		ReportDir:     reportDir,
 		MinLabels:     2, // lower threshold for the test
-		Clock:         func() time.Time { return time.Date(2026, 5, 25, 0, 0, 0, 0, time.UTC) },
 	})
 	if err != nil {
 		t.Fatalf("runCalibrate: %v", err)
 	}
-	if res.MatchedCount != 4 || res.AgreeCount != 3 {
-		t.Fatalf("MatchedCount=%d AgreeCount=%d; want 4 / 3", res.MatchedCount, res.AgreeCount)
+	if res.AgreementMode != calibrationAgreementExact {
+		t.Fatalf("AgreementMode=%q; want exact", res.AgreementMode)
 	}
-	// 3 of 4 agreed = 75% < 85% threshold → FAIL.
+	if res.MatchedCount != 4 || res.AgreeCount != 2 {
+		t.Fatalf("MatchedCount=%d AgreeCount=%d; want 4 / 2 exact matches", res.MatchedCount, res.AgreeCount)
+	}
+	if res.ToleranceAgreeCount != 3 {
+		t.Fatalf("ToleranceAgreeCount=%d; want old tolerance diagnostic: 3", res.ToleranceAgreeCount)
+	}
 	if res.Verdict != "FAIL" {
-		t.Fatalf("Verdict=%q; want FAIL (3/4 = 75%% below 85%% threshold)", res.Verdict)
+		t.Fatalf("Verdict=%q; want FAIL (2/4 exact below 85%% threshold)", res.Verdict)
+	}
+}
+
+func TestRunCalibrate_ToleranceAgreementModeStillAvailable(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	a := testCalibrationArtifact("t", "answer")
+	if err := writeJSONL(arts, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{Label{
+		TraceID: "t", CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+		ExpectedAnswerQuality: 0.5, Labeler: "manual",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts,
+		Scorer:        &fakeScorer{judgeByTrace: map[string]float64{"t": 0.75}},
+		JudgeModel:    "ollama/judge",
+		MinLabels:     1,
+		AgreementMode: calibrationAgreementTolerance,
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if res.AgreeCount != 1 || res.ToleranceAgreeCount != 1 {
+		t.Fatalf("AgreeCount=%d ToleranceAgreeCount=%d; want 1/1 in tolerance mode", res.AgreeCount, res.ToleranceAgreeCount)
+	}
+}
+
+func TestRunCalibrate_StrataHarshLenientAndKnownFixtures(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	reportDir := filepath.Join(dir, "reports")
+
+	rows := []struct {
+		id    string
+		exp   float64
+		judge float64
+		notes string
+	}{
+		{id: "fa-f03", exp: 0.5, judge: 1.0, notes: "r1-anchor"},
+		{id: "fa-c05", exp: 0.0, judge: 0.0, notes: "r1-anchor"},
+		{id: "fa-g04", exp: 0.5, judge: 0.5, notes: "r1-anchor"},
+		{id: "clear-good", exp: 1.0, judge: 0.5, notes: "judge-validation-fixture"},
+	}
+	var artifacts []any
+	var labelsOut []any
+	judged := map[string]float64{}
+	for _, row := range rows {
+		a := testCalibrationArtifact(row.id, "answer "+row.id)
+		artifacts = append(artifacts, a)
+		labelsOut = append(labelsOut, Label{
+			TraceID: row.id, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+			ExpectedAnswerQuality: row.exp, LabelNotes: row.notes, Labeler: "manual",
+		})
+		judged[row.id] = row.judge
+	}
+	if err := writeJSONL(arts, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, labelsOut); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts,
+		Scorer:     &fakeScorer{judgeByTrace: judged},
+		JudgeModel: "ollama/judge", MinLabels: 1, ReportDir: reportDir,
+		Clock: func() time.Time { return time.Date(2026, 5, 31, 0, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if res.Borderline.Count != 3 || res.Borderline.AgreeCount != 2 {
+		t.Fatalf("Borderline=%+v; want 3 count / 2 agree", res.Borderline)
+	}
+	if res.ClearOne.Count != 1 || res.ClearOne.AgreeCount != 0 {
+		t.Fatalf("ClearOne=%+v; want 1 count / 0 agree", res.ClearOne)
+	}
+	if res.R1Anchor.Count != 3 {
+		t.Fatalf("R1Anchor.Count=%d; want 3", res.R1Anchor.Count)
+	}
+	if res.LenientDisagreementCount != 1 || res.HarshDisagreementCount != 1 {
+		t.Fatalf("lenient=%d harsh=%d; want 1/1", res.LenientDisagreementCount, res.HarshDisagreementCount)
+	}
+	got := res.KnownFixtures["fa-f03"]
+	if got.Pass || got.Judge != 1.0 {
+		t.Fatalf("fa-f03 roll-call=%+v; want FAIL because judge emitted 1.0", got)
+	}
+	report, err := os.ReadFile(res.ReportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	for _, want := range []string{
+		"Agreement mode: exact",
+		"Old tolerance diagnostic:",
+		"Borderline/fail subset",
+		"Known subtle-bug fixtures",
+		"| fa-f03 | 0.50 | 1.00 | FAIL |",
+	} {
+		if !strings.Contains(string(report), want) {
+			t.Fatalf("report missing %q:\n%s", want, report)
+		}
 	}
 }
 
@@ -619,7 +724,7 @@ func TestRunCalibrate_StabilityRunsReportSpread(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	fs := &fakeStabilityScorer{sequence: []float64{0.8, 1.0, 0.6}} // primary=0.8, spread across 3 runs = 0.4
+	fs := &fakeStabilityScorer{sequence: []float64{1.0, 0.5, 1.0}} // primary=1.0, spread across 3 runs = 0.5
 	res, err := runCalibrate(context.Background(), calibrateOptions{
 		LabelsPath: labels, ArtifactsPath: arts, Scorer: fs,
 		JudgeModel: "ollama/judge", MinLabels: 1, StabilityRuns: 3,
@@ -630,8 +735,8 @@ func TestRunCalibrate_StabilityRunsReportSpread(t *testing.T) {
 	if len(res.PerLabel) != 1 {
 		t.Fatalf("PerLabel=%d; want 1", len(res.PerLabel))
 	}
-	if res.PerLabel[0].StabilitySpread != 0.4 {
-		t.Fatalf("StabilitySpread=%v; want 0.4", res.PerLabel[0].StabilitySpread)
+	if res.PerLabel[0].StabilitySpread != 0.5 {
+		t.Fatalf("StabilitySpread=%v; want 0.5", res.PerLabel[0].StabilitySpread)
 	}
 	if fs.callCount != 3 {
 		t.Fatalf("Score calls=%d; want 3 total stability samples", fs.callCount)
