@@ -351,7 +351,7 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 		return hit, nil
 	}
 	repairReq := repairOffGridJudgeRequest(req)
-	if hit, ok := s.scoreFromCache(ctx, base, repairReq); ok {
+	if hit, ok := s.scoreFromCacheIfPresent(ctx, base, repairReq); ok {
 		return hit, nil
 	}
 	content, err := s.callJudge(ctx, req)
@@ -403,18 +403,37 @@ func (s *LLMJudgeScorer) scoreFromCache(ctx context.Context, base Score, req oll
 		return Score{}, false
 	}
 	cacheKey := s.cacheKeyForJudgeRequest(req)
-	if hit, ok, getErr := s.Cache.Get(ctx, cacheKey); getErr != nil {
+	hit, ok, getErr := s.Cache.Get(ctx, cacheKey)
+	return s.materializeCacheLookup(base, hit, ok, getErr)
+}
+
+func (s *LLMJudgeScorer) scoreFromCacheIfPresent(ctx context.Context, base Score, req ollama.ChatRequest) (Score, bool) {
+	if s.Cache == nil || s.BypassCache {
+		return Score{}, false
+	}
+	presenceStore, ok := s.Cache.(judgeCachePresenceStore)
+	if !ok {
+		return Score{}, false
+	}
+	cacheKey := s.cacheKeyForJudgeRequest(req)
+	hit, ok, getErr := presenceStore.GetIfPresent(ctx, cacheKey)
+	return s.materializeCacheLookup(base, hit, ok, getErr)
+}
+
+func (s *LLMJudgeScorer) materializeCacheLookup(base Score, hit judgeCacheEntry, ok bool, getErr error) (Score, bool) {
+	if getErr != nil {
 		fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
 		return Score{}, false
-	} else if ok {
-		matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
-		if hitErr != nil {
-			fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
-			return Score{}, false
-		}
-		return matHit, true
 	}
-	return Score{}, false
+	if !ok {
+		return Score{}, false
+	}
+	matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
+	if hitErr != nil {
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
+		return Score{}, false
+	}
+	return matHit, true
 }
 
 func (s *LLMJudgeScorer) cacheKeyForJudgeRequest(req ollama.ChatRequest) string {

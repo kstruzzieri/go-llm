@@ -1106,6 +1106,28 @@ func TestLLMJudgeScorer_OffGridRepairCachesOnlyRepairRequest(t *testing.T) {
 	}
 }
 
+func TestLLMJudgeScorer_NormalCacheMissDoesNotCountRepairProbeMiss(t *testing.T) {
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
+		Content: `{"answer_quality":1.0,"justification":"valid first response"}`,
+	}}}
+	scorer := &LLMJudgeScorer{
+		Client:     judge,
+		JudgeModel: "ollama/judge",
+		Cache:      c,
+	}
+	trace := Trace{ID: "normal-cache-miss", System: "s", Turns: []Turn{{Role: "user", Content: "u"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/candidate", Transcript: []Turn{{Role: "assistant", Content: "answer"}}}
+
+	if _, err := scorer.Score(context.Background(), trace, actual); err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	hits, misses := c.Stats()
+	if hits != 0 || misses != 1 {
+		t.Fatalf("cache stats after normal miss = hits:%d misses:%d; want hits:0 misses:1", hits, misses)
+	}
+}
+
 func TestLLMJudgeScorer_MalformedCacheHitFallsBackToJudge(t *testing.T) {
 	c, _ := newTestCache(t)
 	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
