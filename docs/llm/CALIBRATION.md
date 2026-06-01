@@ -48,7 +48,7 @@ Writes one JSON object per line to `artifacts.jsonl`:
 ## Phase 2 — Label the artifacts
 
 Open `artifacts.jsonl` and create a parallel `labels.jsonl` where each line
-adds `expected_answer_quality` ∈ {0.0, 0.5, 1.0}:
+adds `expected_answer_quality` exactly equal to one of `{0.0, 0.5, 1.0}`:
 
 ```json
 {
@@ -70,11 +70,18 @@ Labels with `expected_answer_quality` outside `{0.0, 0.5, 1.0}` are rejected.
 
 ### How to label
 
-- **1.0** — fully satisfies the rubric: every required element present, no
-  contradictions, no unsupported claims.
-- **0.5** — partially correct: gets the gist or some required elements
-  right but misses something material.
-- **0.0** — wrong or absent.
+- **1.0** — fully satisfies the rubric with no material technical error.
+- **0.5** — partially correct but missing important requirements, or
+  contains a contained technical flaw.
+- **0.0** — wrong, fabricated, absent, or materially misleading.
+
+Round 2 uses `label_notes` tokens for calibration-report stratification
+without changing the label schema:
+
+- `r1-anchor` marks the 60 labels carried from Round 1.
+- `judge-validation-fixture` marks curated P1 adversarial fixtures that
+  validate the judge and stay out of the P2 accepted-run corpus unless they
+  are real captured artifacts.
 
 ## Phase 3 — Calibrate
 
@@ -85,7 +92,8 @@ changes).
 llm-bench -calibrate \
   -labels docs/llm/calibration/labels.jsonl \
   -artifacts docs/llm/calibration/artifacts.jsonl \
-  -judge-model ollama/gemma4:31b
+  -judge-model ollama/gemma4:31b \
+  -calibrate-agreement exact
 ```
 
 Writes a markdown report to
@@ -93,10 +101,25 @@ Writes a markdown report to
 already exists for the same timestamp and judge model, a numeric suffix is
 added so prior reports are not overwritten. Verdict is one of:
 
-- **PASS** — agreement ≥85% on ≥50 matched non-stale labels.
-- **FAIL** — agreement <85% on ≥50 matched non-stale labels.
+- **PASS** — exact categorical agreement ≥85% on ≥50 matched non-stale
+  labels, borderline/fail agreement ≥80% when that subset is present, and
+  no known subtle-bug fixture judged as `1.0`.
+- **FAIL** — enough labels exist, but overall exact agreement, the
+  borderline/fail gate, or a known subtle-bug fixture gate failed.
 - **INSUFFICIENT_LABELS** — fewer than 50 matched non-stale labels.
   Never claims PASS. Label more artifacts and rerun.
+
+Primary agreement is `judge == expected`. The report also prints the retired
+tolerance diagnostic, `|judge - expected| <= 0.25`, so historical comparisons
+remain visible without gating the verdict. `-calibrate-agreement tolerance`
+is retained for historical comparison runs and must not be used for Round 2
+acceptance.
+
+The report includes overall exact agreement, R1-anchor agreement,
+borderline/fail agreement (`expected_answer_quality` of `0.0` or `0.5`),
+clear-1.0 agreement, harsh and lenient disagreement counts, stratified gate
+failures, and a roll-call for the known subtle-bug fixtures (`fa-f03`,
+`fa-c05`, `fa-g04`).
 
 A label is "stale" iff its `artifact_hash` doesn't match the current
 `artifacts.jsonl`. Stale labels are listed in the report and excluded from
@@ -138,5 +161,5 @@ to non-floating tags or digests.
 `-calibrate-suggest` (an "active learning" subcommand that highlights
 artifacts most worth labeling) is a planned follow-up. For now, label
 incrementally — start with 20 artifacts, run `-calibrate`, then label
-artifacts where the judge disagreed with your label or where the answer
-falls in the borderline 0.4–0.6 band.
+artifacts where the judge disagreed with your label or where exact labels
+are hardest to assign, especially borderline/fail cases (`0.0` or `0.5`).

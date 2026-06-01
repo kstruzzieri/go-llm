@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -346,40 +347,36 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 	if err != nil {
 		return Score{}, err
 	}
-	var cacheKey string
-	if s.Cache != nil && !s.BypassCache {
-		cacheKey = canonicalCacheKey(judgeCacheRequest{
-			Version:          judgeCacheKeyVersion,
-			JudgeModel:       normalizeModelSelector(s.JudgeModel),
-			JudgeModelDigest: s.JudgeModelDigest,
-			SystemPrompt:     judgeSystemPrompt,
-			UserPrompt:       judgeUserPromptOf(req),
-			Format:           req.Format,
-			Think:            req.Think,
-			Temperature:      judgeTemperature,
-			NumPredict:       judgeTokenBudget,
-		})
-		if hit, ok, getErr := s.Cache.Get(ctx, cacheKey); getErr != nil {
-			fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
-		} else if ok {
-			matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
-			if hitErr != nil {
-				fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
-			} else {
-				return matHit, nil
-			}
-		}
+	if hit, ok := s.scoreFromCache(ctx, base, req); ok {
+		return hit, nil
+	}
+	repairReq := repairOffGridJudgeRequest(req)
+	if hit, ok := s.scoreFromCacheIfPresent(ctx, base, repairReq); ok {
+		return hit, nil
 	}
 	content, err := s.callJudge(ctx, req)
 	if err != nil {
 		return Score{}, err
 	}
+	requestForCache := req
 	materialized, judgement, err := materializeJudgement(base, s.JudgeModel, content)
+	if errors.Is(err, errOffGridJudgeScore) {
+		if hit, ok := s.scoreFromCache(ctx, base, repairReq); ok {
+			return hit, nil
+		}
+		content, err = s.callJudge(ctx, repairReq)
+		if err != nil {
+			return Score{}, err
+		}
+		materialized, judgement, err = materializeJudgement(base, s.JudgeModel, content)
+		requestForCache = repairReq
+	}
 	if err != nil {
 		return Score{}, err
 	}
-	if s.Cache != nil && !s.BypassCache && cacheKey != "" {
-		sum := sha256.Sum256([]byte(judgeUserPromptOf(req)))
+	if s.Cache != nil && !s.BypassCache {
+		cacheKey := s.cacheKeyForJudgeRequest(requestForCache)
+		sum := sha256.Sum256([]byte(judgeUserPromptOf(requestForCache)))
 		now := s.now()
 		if putErr := s.Cache.Put(ctx, judgeCacheEntry{
 			CacheKey:         cacheKey,
@@ -388,7 +385,7 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 			TraceID:          trace.ID,
 			CandidateModel:   actual.Model,
 			PromptHash:       hex.EncodeToString(sum[:]),
-			RequestJSON:      prettyRequestJSON(req),
+			RequestJSON:      prettyRequestJSON(requestForCache),
 			ResponseContent:  content,
 			AnswerQuality:    materialized.AnswerQuality,
 			Justification:    judgement.Justification,
@@ -399,6 +396,58 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 		}
 	}
 	return materialized, nil
+}
+
+func (s *LLMJudgeScorer) scoreFromCache(ctx context.Context, base Score, req ollama.ChatRequest) (Score, bool) {
+	if s.Cache == nil || s.BypassCache {
+		return Score{}, false
+	}
+	cacheKey := s.cacheKeyForJudgeRequest(req)
+	hit, ok, getErr := s.Cache.Get(ctx, cacheKey)
+	return s.materializeCacheLookup(base, hit, ok, getErr)
+}
+
+func (s *LLMJudgeScorer) scoreFromCacheIfPresent(ctx context.Context, base Score, req ollama.ChatRequest) (Score, bool) {
+	if s.Cache == nil || s.BypassCache {
+		return Score{}, false
+	}
+	presenceStore, ok := s.Cache.(judgeCachePresenceStore)
+	if !ok {
+		return Score{}, false
+	}
+	cacheKey := s.cacheKeyForJudgeRequest(req)
+	hit, ok, getErr := presenceStore.GetIfPresent(ctx, cacheKey)
+	return s.materializeCacheLookup(base, hit, ok, getErr)
+}
+
+func (s *LLMJudgeScorer) materializeCacheLookup(base Score, hit judgeCacheEntry, ok bool, getErr error) (Score, bool) {
+	if getErr != nil {
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
+		return Score{}, false
+	}
+	if !ok {
+		return Score{}, false
+	}
+	matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
+	if hitErr != nil {
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
+		return Score{}, false
+	}
+	return matHit, true
+}
+
+func (s *LLMJudgeScorer) cacheKeyForJudgeRequest(req ollama.ChatRequest) string {
+	return canonicalCacheKey(judgeCacheRequest{
+		Version:          judgeCacheKeyVersion,
+		JudgeModel:       normalizeModelSelector(s.JudgeModel),
+		JudgeModelDigest: s.JudgeModelDigest,
+		SystemPrompt:     judgeSystemPrompt,
+		UserPrompt:       judgeUserPromptOf(req),
+		Format:           req.Format,
+		Think:            req.Think,
+		Temperature:      judgeTemperature,
+		NumPredict:       judgeTokenBudget,
+	})
 }
 
 // judgeUserPromptOf extracts the user prompt that buildJudgeCall composed.
@@ -426,17 +475,31 @@ func prettyRequestJSON(req ollama.ChatRequest) string {
 	return string(raw)
 }
 
-const judgeSystemPrompt = `You are an impartial evaluator for local LLM benchmark replays.
-Score only the candidate assistant's final answer against the golden rubric.
-Return only valid JSON with this schema:
-{"answer_quality":0.5,"justification":"short reason"}
+const judgeSystemPrompt = "You are an impartial evaluator for local LLM benchmark replays.\n" +
+	"Score only the candidate assistant's final answer against the golden rubric.\n" +
+	"Return only valid JSON with this schema:\n" +
+	"{\"answer_quality\":0.5,\"justification\":\"short reason\"}\n\n" +
+	"answer_quality must be exactly one of `0.0`, `0.5`, or `1.0`:\n" +
+	"0.0 means the answer is wrong, fabricated, absent, or materially misleading.\n" +
+	"0.5 means the answer is partially correct but missing important requirements, or contains a contained technical flaw.\n" +
+	"1.0 means the answer fully satisfies the rubric with no material technical error.\n" +
+	"Penalize unsupported claims, missing requested details, contradictions, and material technical errors.\n" +
+	"Do not reward style, verbosity, or model identity."
 
-answer_quality must be a number from 0 to 1:
-0.0 means the answer is wrong or absent.
-0.5 means the answer is partially correct but misses important requirements.
-1.0 means the answer fully satisfies the rubric.
-Penalize unsupported claims, missing requested details, and contradictions.
-Do not reward style, verbosity, or model identity.`
+const offGridJudgeRepairInstruction = "Repair instruction: answer_quality must be exactly one of 0.0, 0.5, or 1.0. Return only valid JSON matching {\"answer_quality\":0.5,\"justification\":\"short reason\"}."
+
+func repairOffGridJudgeRequest(req ollama.ChatRequest) ollama.ChatRequest {
+	repaired := req
+	repaired.Messages = append([]ollama.ChatMessage(nil), req.Messages...)
+	for i := len(repaired.Messages) - 1; i >= 0; i-- {
+		if repaired.Messages[i].Role == "user" {
+			repaired.Messages[i].Content = strings.TrimSpace(repaired.Messages[i].Content) + "\n\n" + offGridJudgeRepairInstruction
+			return repaired
+		}
+	}
+	repaired.Messages = append(repaired.Messages, ollama.ChatMessage{Role: "user", Content: offGridJudgeRepairInstruction})
+	return repaired
+}
 
 type judgePromptPayload struct {
 	TraceID                       string      `json:"trace_id"`
@@ -545,22 +608,21 @@ func parseJudgeResponse(content string) (judgeResponse, error) {
 
 	var parsed struct {
 		AnswerQuality *float64 `json:"answer_quality"`
-		Score         *float64 `json:"score"`
 		Justification string   `json:"justification"`
 		Notes         string   `json:"notes"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		return judgeResponse{}, fmt.Errorf("%w: %v", errMalformedJudgeResponse, err)
 	}
-	quality := parsed.AnswerQuality
-	if quality == nil {
-		quality = parsed.Score
-	}
-	if quality == nil {
+	if parsed.AnswerQuality == nil {
 		return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
 	}
+	quality := parsed.AnswerQuality
 	if *quality < 0 || *quality > 1 {
 		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, *quality)
+	}
+	if !validJudgeAnswerQuality(*quality) {
+		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f must be exactly one of 0.0, 0.5, or 1.0", errOffGridJudgeScore, *quality)
 	}
 
 	justification := strings.TrimSpace(parsed.Justification)
@@ -575,6 +637,10 @@ func parseJudgeResponse(content string) (judgeResponse, error) {
 		AnswerQuality: *quality,
 		Justification: normalizeNote(justification),
 	}, nil
+}
+
+func validJudgeAnswerQuality(v float64) bool {
+	return v == 0 || v == 0.5 || v == 1
 }
 
 func firstJSONObject(s string) string {

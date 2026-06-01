@@ -34,6 +34,7 @@ var (
 	errMissingJudgeCriteria     = errors.New("judge scorer requires golden.final_answer_criteria or golden.final_answer_substring")
 	errJudgeSelfPreference      = errors.New("judge model must differ from candidate model")
 	errMalformedJudgeResponse   = errors.New("malformed judge response")
+	errOffGridJudgeScore        = errors.New("off-grid judge answer_quality")
 	errNoAssistantFinalAnswer   = errors.New("judge scorer requires an assistant final answer")
 )
 

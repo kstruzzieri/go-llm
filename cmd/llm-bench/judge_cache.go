@@ -87,6 +87,13 @@ type judgeCacheStore interface {
 	Close() error
 }
 
+// judgeCachePresenceStore is implemented by stores that can perform a
+// speculative lookup without counting an absent key as a miss. Hits still
+// behave like Get hits: hit counters and last_used_at are updated.
+type judgeCachePresenceStore interface {
+	GetIfPresent(ctx context.Context, key string) (judgeCacheEntry, bool, error)
+}
+
 // Sentinel errors so callers can distinguish the four failure modes per
 // feedback_error_granularity. All four are non-fatal: callers log + bypass
 // to a direct judge call.
@@ -219,6 +226,17 @@ func (c *sqliteJudgeCache) Stats() (int64, int64) {
 // returned entry reflects the post-bump values so caller telemetry sees
 // the same state the DB now holds.
 func (c *sqliteJudgeCache) Get(ctx context.Context, key string) (judgeCacheEntry, bool, error) {
+	return c.get(ctx, key, true)
+}
+
+// GetIfPresent returns the entry for key when present, but an absent key does
+// not increment the miss counter. Use this only for speculative alternate-key
+// probes where a miss should not affect benchmark cache-hit provenance.
+func (c *sqliteJudgeCache) GetIfPresent(ctx context.Context, key string) (judgeCacheEntry, bool, error) {
+	return c.get(ctx, key, false)
+}
+
+func (c *sqliteJudgeCache) get(ctx context.Context, key string, countMiss bool) (judgeCacheEntry, bool, error) {
 	var e judgeCacheEntry
 	var createdNs, lastUsedNs int64
 	err := c.db.QueryRowContext(ctx, `
@@ -232,7 +250,9 @@ func (c *sqliteJudgeCache) Get(ctx context.Context, key string) (judgeCacheEntry
 		&createdNs, &lastUsedNs, &e.HitCount,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
-		c.misses.Add(1)
+		if countMiss {
+			c.misses.Add(1)
+		}
 		return judgeCacheEntry{}, false, nil
 	}
 	if err != nil {
