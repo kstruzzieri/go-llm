@@ -21,6 +21,12 @@ import (
 
 const defaultCaptureSource = "conversation-store"
 
+// conversationTraceIDPrefix is prepended to a conversation's id when it
+// becomes a trace (see conversationToTrace). Calibration strips it to match
+// known-bug fixtures; keep the writer and reader on this single constant so
+// the prefix can never drift between them.
+const conversationTraceIDPrefix = "conversation-"
+
 var (
 	errConversationMissingID        = errors.New("conversation has empty id")
 	errConversationMissingSystem    = errors.New("conversation has no system message")
@@ -309,7 +315,7 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 	}
 
 	trace := Trace{
-		ID:         "conversation-" + conv.ID,
+		ID:         conversationTraceIDPrefix + conv.ID,
 		Source:     source,
 		CapturedAt: captureTime(conv),
 		System:     system,

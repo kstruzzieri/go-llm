@@ -498,6 +498,71 @@ func TestRunCalibrate_StrataHarshLenientAndKnownFixtures(t *testing.T) {
 	}
 }
 
+func TestRunCalibrate_KnownFixturesMatchPrefixedTraceIDs(t *testing.T) {
+	// Captured traces are keyed "conversation-<id>" while the fixture list
+	// is bare ("fa-f03"). The gate must normalize the prefix AND only gate
+	// the known-bug instances (expected < 1.0) — a legitimately-1.0 sibling
+	// artifact on the same trace must not count.
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+
+	rows := []struct {
+		id    string
+		exp   float64
+		judge float64
+	}{
+		{id: "conversation-fa-f03", exp: 0.5, judge: 1.0}, // known bug judged perfect -> FAIL
+		{id: "conversation-fa-c05", exp: 0.5, judge: 0.5}, // known bug caught -> PASS
+		{id: "conversation-fa-g04", exp: 1.0, judge: 1.0}, // only a legit 1.0 artifact -> NOT gated
+	}
+	var artifacts []any
+	var labelsOut []any
+	judged := map[string]float64{}
+	for _, row := range rows {
+		a := testCalibrationArtifact(row.id, "answer "+row.id)
+		artifacts = append(artifacts, a)
+		labelsOut = append(labelsOut, Label{
+			TraceID: row.id, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+			ExpectedAnswerQuality: row.exp, Labeler: "manual",
+		})
+		judged[row.id] = row.judge
+	}
+	if err := writeJSONL(arts, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, labelsOut); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts,
+		Scorer:     &fakeScorer{judgeByTrace: judged},
+		JudgeModel: "ollama/judge", MinLabels: 1,
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if f := res.KnownFixtures["fa-f03"]; !f.Present || f.Pass || f.Judge != 1.0 {
+		t.Fatalf("fa-f03=%+v; want Present + FAIL (prefixed id must match, judge=1.0)", f)
+	}
+	if f := res.KnownFixtures["fa-c05"]; !f.Present || !f.Pass {
+		t.Fatalf("fa-c05=%+v; want Present + PASS (judge caught the bug at 0.5)", f)
+	}
+	if f := res.KnownFixtures["fa-g04"]; f.Present {
+		t.Fatalf("fa-g04=%+v; want NOT Present (no expected<1.0 instance to gate)", f)
+	}
+	gateFound := false
+	for _, gf := range res.StratifiedGateFailures {
+		if strings.Contains(gf, "fa-f03") {
+			gateFound = true
+		}
+	}
+	if !gateFound {
+		t.Fatalf("StratifiedGateFailures=%v; want a fa-f03 known-bug failure", res.StratifiedGateFailures)
+	}
+}
+
 func TestRunCalibrate_StrataGateFailuresAffectVerdict(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "artifacts.jsonl")
