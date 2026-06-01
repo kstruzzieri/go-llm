@@ -217,7 +217,9 @@ workflow documented in [CALIBRATION.md](CALIBRATION.md). Headline numbers:
   where both values are one of `{0.0, 0.5, 1.0}`.
 - Diagnostic only: the report also prints the retired tolerance agreement
   count, `|judge - expected| ≤ 0.25`.
-- Pass threshold: ≥85% exact agreement on ≥50 matched non-stale labels.
+- Pass threshold: ≥85% exact agreement on ≥50 matched non-stale labels,
+  borderline/fail agreement ≥80% when that subset is present, and no known
+  subtle-bug fixture judged as `1.0`.
 - Below 50 matched non-stale labels: verdict is `INSUFFICIENT_LABELS`
   (never PASS).
 - Stale labels (label `artifact_hash` ≠ frozen `artifacts.jsonl` hash) are

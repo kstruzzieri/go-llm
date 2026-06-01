@@ -858,6 +858,16 @@ func TestParseJudgeResponseRejectsOffGridScore(t *testing.T) {
 	}
 }
 
+func TestParseJudgeResponseRejectsScoreOnlyAlias(t *testing.T) {
+	_, err := parseJudgeResponse(`{"score":1.0,"justification":"legacy alias"}`)
+	if !errors.Is(err, errMalformedJudgeResponse) {
+		t.Fatalf("err = %v, want errMalformedJudgeResponse", err)
+	}
+	if err != nil && strings.Contains(err.Error(), "off-grid") {
+		t.Fatalf("err = %v, want schema error instead of off-grid repair", err)
+	}
+}
+
 func TestParseJudgeResponseRejectsOutOfRangeScore(t *testing.T) {
 	_, err := parseJudgeResponse(`{"answer_quality":1.2,"justification":"too high"}`)
 	if !errors.Is(err, errMalformedJudgeResponse) {
@@ -1087,6 +1097,12 @@ func TestLLMJudgeScorer_OffGridRepairCachesOnlyRepairRequest(t *testing.T) {
 	}
 	if !strings.Contains(requestJSON, "Repair instruction") {
 		t.Fatalf("cached request_json does not contain repair instruction:\n%s", requestJSON)
+	}
+	if _, err := scorer.Score(context.Background(), trace, actual); err != nil {
+		t.Fatalf("second Score: %v", err)
+	}
+	if judge.called != 2 {
+		t.Fatalf("judge called %d times after repaired cache hit; want still 2", judge.called)
 	}
 }
 

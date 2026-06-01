@@ -260,9 +260,10 @@ func validExpectedAnswerQuality(v float64) bool {
 }
 
 const (
-	calibrationAgreementDelta   = 0.25
-	calibrationPassThreshold    = 0.85
-	calibrationDefaultMinLabels = 50
+	calibrationAgreementDelta          = 0.25
+	calibrationPassThreshold           = 0.85
+	calibrationBorderlinePassThreshold = 0.80
+	calibrationDefaultMinLabels        = 50
 )
 
 type calibrationAgreementMode string
@@ -338,6 +339,7 @@ type CalibrationResult struct {
 	HarshDisagreementCount   int
 	LenientDisagreementCount int
 	KnownFixtures            map[string]knownFixtureOutcome
+	StratifiedGateFailures   []string
 	MinLabels                int
 	StabilityRuns            int
 	Verdict                  string // PASS / FAIL / INSUFFICIENT_LABELS
@@ -363,8 +365,8 @@ type perLabelOutcome struct {
 // runCalibrate loads (labels, artifacts), invokes the scorer once per
 // matched (label, artifact) pair, and computes the agreement rate against
 // human ExpectedAnswerQuality values. The verdict is INSUFFICIENT_LABELS
-// when MatchedCount < MinLabels, otherwise PASS when AgreementRate is at
-// least calibrationPassThreshold (0.85), else FAIL.
+// when MatchedCount < MinLabels, otherwise PASS only when overall agreement
+// reaches calibrationPassThreshold (0.85) and all stratified gates pass.
 //
 // The synthesized Trace inside the loop uses a placeholder System and a
 // single empty user turn so Scorer.Score's signature is satisfied. The
@@ -495,13 +497,16 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 	finalizeSubset(&res.R1Anchor)
 	finalizeSubset(&res.Borderline)
 	finalizeSubset(&res.ClearOne)
+	res.StratifiedGateFailures = calibrationStratifiedGateFailures(res)
 	switch {
 	case res.MatchedCount < opts.MinLabels:
 		res.Verdict = "INSUFFICIENT_LABELS"
-	case res.AgreementRate >= calibrationPassThreshold:
-		res.Verdict = "PASS"
-	default:
+	case res.AgreementRate < calibrationPassThreshold:
 		res.Verdict = "FAIL"
+	case len(res.StratifiedGateFailures) > 0:
+		res.Verdict = "FAIL"
+	default:
+		res.Verdict = "PASS"
 	}
 	if opts.ReportDir != "" {
 		path, writeErr := writeCalibrationReport(opts.ReportDir, opts.JudgeModel, res, opts.Clock)
@@ -535,6 +540,21 @@ func finalizeSubset(s *calibrationSubsetSummary) {
 	if s.Count > 0 {
 		s.AgreementRate = float64(s.AgreeCount) / float64(s.Count)
 	}
+}
+
+func calibrationStratifiedGateFailures(res CalibrationResult) []string {
+	var failures []string
+	if res.Borderline.Count > 0 && res.Borderline.AgreementRate < calibrationBorderlinePassThreshold {
+		failures = append(failures, fmt.Sprintf("borderline/fail agreement %.0f%% below %.0f%% threshold (%d/%d)",
+			res.Borderline.AgreementRate*100, calibrationBorderlinePassThreshold*100, res.Borderline.AgreeCount, res.Borderline.Count))
+	}
+	for _, id := range knownSubtleBugFixtureIDs {
+		fixture := res.KnownFixtures[id]
+		if fixture.Present && !fixture.Pass {
+			failures = append(failures, fmt.Sprintf("known subtle-bug fixture %s judged 1.0", id))
+		}
+	}
+	return failures
 }
 
 func calibrationScorer(s Scorer, stabilityRuns int) Scorer {
@@ -606,6 +626,16 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 	fmt.Fprintf(&b, "| clear-1.0 | %s |\n", formatSubsetAgreement(res.ClearOne))
 	fmt.Fprintf(&b, "\nHarsh disagreements: %d\n", res.HarshDisagreementCount)
 	fmt.Fprintf(&b, "Lenient disagreements: %d\n\n", res.LenientDisagreementCount)
+	if len(res.StratifiedGateFailures) == 0 {
+		fmt.Fprintln(&b, "Stratified gate failures: none")
+		fmt.Fprintln(&b)
+	} else {
+		fmt.Fprintln(&b, "Stratified gate failures:")
+		for _, failure := range res.StratifiedGateFailures {
+			fmt.Fprintf(&b, "- %s\n", failure)
+		}
+		fmt.Fprintln(&b)
+	}
 	fmt.Fprintln(&b, "## Known subtle-bug fixtures")
 	fmt.Fprintln(&b, "| trace_id | expected | judge | roll-call |")
 	fmt.Fprintln(&b, "|---|---|---|---|")

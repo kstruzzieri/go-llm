@@ -102,9 +102,10 @@ already exists for the same timestamp and judge model, a numeric suffix is
 added so prior reports are not overwritten. Verdict is one of:
 
 - **PASS** — exact categorical agreement ≥85% on ≥50 matched non-stale
-  labels.
-- **FAIL** — exact categorical agreement <85% on ≥50 matched non-stale
-  labels.
+  labels, borderline/fail agreement ≥80% when that subset is present, and
+  no known subtle-bug fixture judged as `1.0`.
+- **FAIL** — enough labels exist, but overall exact agreement, the
+  borderline/fail gate, or a known subtle-bug fixture gate failed.
 - **INSUFFICIENT_LABELS** — fewer than 50 matched non-stale labels.
   Never claims PASS. Label more artifacts and rerun.
 
@@ -116,8 +117,9 @@ acceptance.
 
 The report includes overall exact agreement, R1-anchor agreement,
 borderline/fail agreement (`expected_answer_quality` of `0.0` or `0.5`),
-clear-1.0 agreement, harsh and lenient disagreement counts, and a roll-call
-for the known subtle-bug fixtures (`fa-f03`, `fa-c05`, `fa-g04`).
+clear-1.0 agreement, harsh and lenient disagreement counts, stratified gate
+failures, and a roll-call for the known subtle-bug fixtures (`fa-f03`,
+`fa-c05`, `fa-g04`).
 
 A label is "stale" iff its `artifact_hash` doesn't match the current
 `artifacts.jsonl`. Stale labels are listed in the report and excluded from
@@ -159,5 +161,5 @@ to non-floating tags or digests.
 `-calibrate-suggest` (an "active learning" subcommand that highlights
 artifacts most worth labeling) is a planned follow-up. For now, label
 incrementally — start with 20 artifacts, run `-calibrate`, then label
-artifacts where the judge disagreed with your label or where the answer
-falls in the borderline 0.4–0.6 band.
+artifacts where the judge disagreed with your label or where exact labels
+are hardest to assign, especially borderline/fail cases (`0.0` or `0.5`).

@@ -498,6 +498,71 @@ func TestRunCalibrate_StrataHarshLenientAndKnownFixtures(t *testing.T) {
 	}
 }
 
+func TestRunCalibrate_StrataGateFailuresAffectVerdict(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+
+	var artifacts []any
+	var labelsOut []any
+	judged := map[string]float64{}
+	for i := 0; i < 17; i++ {
+		traceID := fmt.Sprintf("clear-%02d", i)
+		a := testCalibrationArtifact(traceID, "answer "+traceID)
+		artifacts = append(artifacts, a)
+		labelsOut = append(labelsOut, Label{
+			TraceID: traceID, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+			ExpectedAnswerQuality: 1.0, Labeler: "manual",
+		})
+		judged[traceID] = 1.0
+	}
+	borderlineRows := []struct {
+		id    string
+		exp   float64
+		judge float64
+	}{
+		{id: "fa-f03", exp: 0.5, judge: 1.0},
+		{id: "borderline-miss", exp: 0.5, judge: 1.0},
+		{id: "borderline-hit", exp: 0.5, judge: 0.5},
+	}
+	for _, row := range borderlineRows {
+		a := testCalibrationArtifact(row.id, "answer "+row.id)
+		artifacts = append(artifacts, a)
+		labelsOut = append(labelsOut, Label{
+			TraceID: row.id, CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+			ExpectedAnswerQuality: row.exp, Labeler: "manual",
+		})
+		judged[row.id] = row.judge
+	}
+	if err := writeJSONL(arts, artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, labelsOut); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts,
+		Scorer:     &fakeScorer{judgeByTrace: judged},
+		JudgeModel: "ollama/judge", MinLabels: 1,
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	if res.AgreementRate < calibrationPassThreshold {
+		t.Fatalf("test setup invalid: overall agreement=%v, want >= %v", res.AgreementRate, calibrationPassThreshold)
+	}
+	if res.Verdict != "FAIL" {
+		t.Fatalf("Verdict=%q; want FAIL when overall passes but stratified gates fail", res.Verdict)
+	}
+	failures := strings.Join(res.StratifiedGateFailures, "\n")
+	for _, want := range []string{"borderline/fail", "fa-f03"} {
+		if !strings.Contains(failures, want) {
+			t.Fatalf("StratifiedGateFailures=%q; want mention %q", failures, want)
+		}
+	}
+}
+
 func TestRunCalibrate_SkipsSelfJudgedArtifacts(t *testing.T) {
 	dir := t.TempDir()
 	arts := filepath.Join(dir, "artifacts.jsonl")

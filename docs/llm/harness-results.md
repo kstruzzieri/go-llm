@@ -10,7 +10,9 @@ A benchmark run is "accepted" iff **all** of:
 
 1. **Commit is clean** (`dirty: no` in provenance).
 2. **Calibration PASS** — exact categorical agreement ≥85% on ≥50 valid
-   labeled artifacts, with the old tolerance diagnostic reported for context.
+   labeled artifacts, borderline/fail agreement ≥80% when present, no known
+   subtle-bug fixture judged as `1.0`, and the old tolerance diagnostic
+   reported for context.
 3. **Judge cache hit-rate is reported** (any value; reproducibility signal).
 4. **`ToolArgsValid` is `computed=true` for ≥80% of (model, trace) pairs.**
 5. **Trace set manifest hash is recorded.**

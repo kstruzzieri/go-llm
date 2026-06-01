@@ -30,7 +30,8 @@ output.
 - Judge model: `<name>`
 - Labels manifest hash: `sha256:...`
 - Valid labeled artifacts: X (≥50 required → SUFFICIENT)
-- Agreement: X / Y (Z%) — threshold ≥85% → **PASS**
+- Agreement: X / Y (Z%) — overall ≥85%, borderline/fail ≥80% when present,
+  known subtle-bug fixtures pass → **PASS**
 - Stability runs (M=3, diagnostic): max spread observed: 0.NN
 
 ## Results

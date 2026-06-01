@@ -347,18 +347,12 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 	if err != nil {
 		return Score{}, err
 	}
-	if s.Cache != nil && !s.BypassCache {
-		cacheKey := s.cacheKeyForJudgeRequest(req)
-		if hit, ok, getErr := s.Cache.Get(ctx, cacheKey); getErr != nil {
-			fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
-		} else if ok {
-			matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
-			if hitErr != nil {
-				fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
-			} else {
-				return matHit, nil
-			}
-		}
+	if hit, ok := s.scoreFromCache(ctx, base, req); ok {
+		return hit, nil
+	}
+	repairReq := repairOffGridJudgeRequest(req)
+	if hit, ok := s.scoreFromCache(ctx, base, repairReq); ok {
+		return hit, nil
 	}
 	content, err := s.callJudge(ctx, req)
 	if err != nil {
@@ -367,7 +361,9 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 	requestForCache := req
 	materialized, judgement, err := materializeJudgement(base, s.JudgeModel, content)
 	if errors.Is(err, errOffGridJudgeScore) {
-		repairReq := repairOffGridJudgeRequest(req)
+		if hit, ok := s.scoreFromCache(ctx, base, repairReq); ok {
+			return hit, nil
+		}
 		content, err = s.callJudge(ctx, repairReq)
 		if err != nil {
 			return Score{}, err
@@ -400,6 +396,25 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 		}
 	}
 	return materialized, nil
+}
+
+func (s *LLMJudgeScorer) scoreFromCache(ctx context.Context, base Score, req ollama.ChatRequest) (Score, bool) {
+	if s.Cache == nil || s.BypassCache {
+		return Score{}, false
+	}
+	cacheKey := s.cacheKeyForJudgeRequest(req)
+	if hit, ok, getErr := s.Cache.Get(ctx, cacheKey); getErr != nil {
+		fmt.Fprintf(os.Stderr, "llm-bench: judge cache get bypassed: %v\n", getErr)
+		return Score{}, false
+	} else if ok {
+		matHit, _, hitErr := materializeJudgement(base, s.JudgeModel, hit.ResponseContent)
+		if hitErr != nil {
+			fmt.Fprintf(os.Stderr, "llm-bench: judge cache hit bypassed: %v\n", hitErr)
+			return Score{}, false
+		}
+		return matHit, true
+	}
+	return Score{}, false
 }
 
 func (s *LLMJudgeScorer) cacheKeyForJudgeRequest(req ollama.ChatRequest) string {
@@ -574,20 +589,16 @@ func parseJudgeResponse(content string) (judgeResponse, error) {
 
 	var parsed struct {
 		AnswerQuality *float64 `json:"answer_quality"`
-		Score         *float64 `json:"score"`
 		Justification string   `json:"justification"`
 		Notes         string   `json:"notes"`
 	}
 	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
 		return judgeResponse{}, fmt.Errorf("%w: %v", errMalformedJudgeResponse, err)
 	}
-	quality := parsed.AnswerQuality
-	if quality == nil {
-		quality = parsed.Score
-	}
-	if quality == nil {
+	if parsed.AnswerQuality == nil {
 		return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
 	}
+	quality := parsed.AnswerQuality
 	if *quality < 0 || *quality > 1 {
 		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, *quality)
 	}
