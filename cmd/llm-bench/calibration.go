@@ -301,6 +301,13 @@ type knownFixtureOutcome struct {
 
 var knownSubtleBugFixtureIDs = []string{"fa-f03", "fa-c05", "fa-g04"}
 
+// normalizeFixtureTraceID maps a captured trace ID to its bare conversation
+// id so known-bug fixtures match regardless of the conversationTraceIDPrefix
+// that capture prepends (see conversationToTrace).
+func normalizeFixtureTraceID(traceID string) string {
+	return strings.TrimPrefix(traceID, conversationTraceIDPrefix)
+}
+
 // calibrateOptions configures runCalibrate.
 //
 // MinLabels defaults to calibrationDefaultMinLabels (50) when zero so a
@@ -400,7 +407,7 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 		KnownFixtures: make(map[string]knownFixtureOutcome, len(knownSubtleBugFixtureIDs)),
 	}
 	for _, id := range knownSubtleBugFixtureIDs {
-		res.KnownFixtures[id] = knownFixtureOutcome{TraceID: id}
+		res.KnownFixtures[id] = knownFixtureOutcome{TraceID: id, Pass: true}
 	}
 	for _, m := range matched {
 		if sameModelSelector(opts.JudgeModel, m.Artifact.CandidateModel) {
@@ -478,13 +485,22 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 				res.LenientDisagreementCount++
 			}
 		}
-		if _, ok := res.KnownFixtures[outcome.TraceID]; ok {
-			res.KnownFixtures[outcome.TraceID] = knownFixtureOutcome{
-				TraceID:  outcome.TraceID,
-				Expected: outcome.Expected,
-				Judge:    outcome.Judge,
-				Present:  true,
-				Pass:     outcome.Judge != 1,
+		// Known subtle-bug fixtures gate only the bug instances (expected < 1.0)
+		// and match on the normalized (prefix-stripped) trace id. A fixture fails
+		// if ANY of its bug artifacts is judged a perfect 1.0; record the most
+		// concerning (highest-judge) one for the report.
+		if outcome.Expected < 1 {
+			normID := normalizeFixtureTraceID(outcome.TraceID)
+			if fixture, ok := res.KnownFixtures[normID]; ok {
+				if !fixture.Present || outcome.Judge > fixture.Judge {
+					fixture.Expected = outcome.Expected
+					fixture.Judge = outcome.Judge
+				}
+				fixture.Present = true
+				if outcome.Judge == 1 {
+					fixture.Pass = false
+				}
+				res.KnownFixtures[normID] = fixture
 			}
 		}
 		res.MatchedCount++
