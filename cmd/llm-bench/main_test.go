@@ -42,6 +42,36 @@ func TestResolveToolSchemaSourceBothEmptyIsNil(t *testing.T) {
 	}
 }
 
+func TestResolveJudgeTransportConfig_APIKeyFlagWins(t *testing.T) {
+	cfg := resolveJudgeTransportConfig("openai-compat", " https://api.example.com ", "flag-key", func(string) string { return "env-key" })
+	if cfg.apiKey != "flag-key" {
+		t.Fatalf("apiKey = %q; want flag-key (flag overrides env)", cfg.apiKey)
+	}
+	if cfg.baseURL != "https://api.example.com" {
+		t.Fatalf("baseURL = %q; want trimmed value", cfg.baseURL)
+	}
+	if cfg.transport != "openai-compat" {
+		t.Fatalf("transport = %q; want openai-compat", cfg.transport)
+	}
+}
+
+func TestResolveJudgeTransportConfig_APIKeyEnvFallback(t *testing.T) {
+	calls := 0
+	cfg := resolveJudgeTransportConfig("openai-compat", "https://x", "", func(name string) string {
+		calls++
+		if name != judgeAPIKeyEnvVar {
+			t.Errorf("looked up %q; want %q", name, judgeAPIKeyEnvVar)
+		}
+		return "env-key"
+	})
+	if cfg.apiKey != "env-key" {
+		t.Fatalf("apiKey = %q; want env-key fallback", cfg.apiKey)
+	}
+	if calls != 1 {
+		t.Fatalf("env lookups = %d; want exactly 1", calls)
+	}
+}
+
 func TestCaptureSampleAndLimitMutuallyExclusive(t *testing.T) {
 	if err := validateCaptureSampleAndLimit(10, "n=20"); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("want mutex error; got %v", err)

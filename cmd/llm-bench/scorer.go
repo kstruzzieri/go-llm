@@ -7,12 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
 const (
@@ -22,6 +24,10 @@ const (
 	maxJudgeTurnContentBytes = 8192
 	maxJudgeAnswerBytes      = 32768
 )
+
+// openAICompatTransport is the -judge-transport value that routes the judge
+// through provider/openaicompat instead of the default Ollama client.
+const openAICompatTransport = "openai-compat"
 
 // Score captures the evaluation dimensions for a single (model, trace) run.
 // See docs/llm/benchmark-plan.md for the scoring rationale.
@@ -51,6 +57,13 @@ type scorerOptions struct {
 	ollamaURL    string
 	judgeModel   string
 	judgeTimeout time.Duration
+	// judgeTransport selects the judge backend: "" or "ollama" (default) uses
+	// the local Ollama client; "openai-compat" routes through
+	// provider/openaicompat for a frontier judge. judgeBaseURL is required for
+	// the openai-compat transport; judgeAPIKey is the optional Bearer token.
+	judgeTransport string
+	judgeBaseURL   string
+	judgeAPIKey    string
 	// judgeCache is the optional judge response cache. Callers MUST avoid
 	// the typed-nil interface trap: assign only a non-nil concrete
 	// implementation (e.g. *sqliteJudgeCache) or leave this field unset.
@@ -69,18 +82,19 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 		if opts.judgeTimeout < 0 {
 			return nil, fmt.Errorf("negative judge timeout %s", opts.judgeTimeout)
 		}
-		client, err := newOllamaClient(opts.ollamaURL, ollama.WithTimeout(opts.judgeTimeout))
-		if err != nil {
-			return nil, fmt.Errorf("llm-judge client: %w", err)
-		}
-		scorer, err := newLLMJudgeScorer(client, opts.judgeModel, opts.judgeTimeout)
+		transport, err := newJudgeTransport(opts)
 		if err != nil {
 			return nil, err
 		}
-		if err := validateJudgeModel(ctx, client, scorer.JudgeModel); err != nil {
+		scorer, err := newLLMJudgeScorer(transport.chat, opts.judgeModel, opts.judgeTimeout)
+		if err != nil {
 			return nil, err
 		}
-		digest, _ := resolveJudgeDigest(ctx, client, scorer.JudgeModel)
+		scorer.JudgeProvider = transport.providerName
+		if err := validateJudgeModel(ctx, transport.checker, scorer.JudgeModel); err != nil {
+			return nil, err
+		}
+		digest, _ := resolveJudgeDigest(ctx, transport.checker, scorer.JudgeModel)
 		scorer.JudgeModelDigest = digest
 		scorer.Cache = opts.judgeCache
 		scorer.BypassCache = opts.bypassCache
@@ -89,6 +103,50 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 		return nil, fmt.Errorf("manual scorer not yet implemented")
 	default:
 		return nil, fmt.Errorf("unknown scorer %q", name)
+	}
+}
+
+// judgeTransport bundles the judge's chat client, model checker, and provider
+// instance identity so newScorer builds the scorer uniformly regardless of
+// backend. The same concrete value satisfies both the chat and checker seams
+// for each transport (*ollama.Client; *openAICompatJudgeClient).
+type judgeTransport struct {
+	chat         judgeChatClient
+	checker      judgeModelChecker
+	providerName string
+}
+
+// newJudgeTransport resolves opts.judgeTransport to a judge backend. Empty or
+// "ollama" (case-insensitive) is the default local path; "openai-compat"
+// routes a frontier judge through provider/openaicompat. The returned
+// providerName is the provider *instance* identity that gets folded into the
+// cache key and provenance — for openai-compat it is the provider's Name(),
+// not the API kind, so a renamed instance keys distinctly.
+func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
+	switch normalizeModelSelector(opts.judgeTransport) {
+	case "", defaultBenchProvider:
+		client, err := newOllamaClient(opts.ollamaURL, ollama.WithTimeout(opts.judgeTimeout))
+		if err != nil {
+			return judgeTransport{}, fmt.Errorf("llm-judge client: %w", err)
+		}
+		return judgeTransport{chat: client, checker: client, providerName: defaultBenchProvider}, nil
+	case openAICompatTransport:
+		baseURL := strings.TrimSpace(opts.judgeBaseURL)
+		if baseURL == "" {
+			return judgeTransport{}, fmt.Errorf("llm-judge %s transport requires -judge-base-url", openAICompatTransport)
+		}
+		clientOpts := []openaicompat.ClientOption{}
+		if opts.judgeTimeout > 0 {
+			clientOpts = append(clientOpts, openaicompat.WithHTTPClient(&http.Client{Timeout: opts.judgeTimeout}))
+		}
+		if key := strings.TrimSpace(opts.judgeAPIKey); key != "" {
+			clientOpts = append(clientOpts, openaicompat.WithAPIKey(key))
+		}
+		prov := openaicompat.NewProvider(openaicompat.NewClient(baseURL, clientOpts...))
+		adapter := newOpenAICompatJudge(prov)
+		return judgeTransport{chat: adapter, checker: adapter, providerName: prov.Name()}, nil
+	default:
+		return judgeTransport{}, fmt.Errorf("unknown judge transport %q (want %q or %q)", opts.judgeTransport, defaultBenchProvider, openAICompatTransport)
 	}
 }
 
@@ -177,6 +235,7 @@ func resolveJudgeDigest(ctx context.Context, checker judgeModelChecker, judgeMod
 // typed-nil interface trap before assignment.
 type LLMJudgeScorer struct {
 	Client           judgeChatClient
+	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat"); folded into the cache key and persisted for provenance
 	JudgeModel       string
 	JudgeModelDigest string // optional; empty when /api/show was unavailable
 	JudgeTimeout     time.Duration
@@ -380,6 +439,7 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 		now := s.now()
 		if putErr := s.Cache.Put(ctx, judgeCacheEntry{
 			CacheKey:         cacheKey,
+			JudgeProvider:    s.JudgeProvider,
 			JudgeModel:       s.JudgeModel,
 			JudgeModelDigest: s.JudgeModelDigest,
 			TraceID:          trace.ID,
@@ -439,6 +499,7 @@ func (s *LLMJudgeScorer) materializeCacheLookup(base Score, hit judgeCacheEntry,
 func (s *LLMJudgeScorer) cacheKeyForJudgeRequest(req ollama.ChatRequest) string {
 	return canonicalCacheKey(judgeCacheRequest{
 		Version:          judgeCacheKeyVersion,
+		JudgeProvider:    normalizeModelSelector(s.JudgeProvider),
 		JudgeModel:       normalizeModelSelector(s.JudgeModel),
 		JudgeModelDigest: s.JudgeModelDigest,
 		SystemPrompt:     judgeSystemPrompt,

@@ -940,6 +940,48 @@ func TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch(t *
 	}
 }
 
+// TestLLMJudgeScorer_CacheKeyIncludesProvider pins that two scorers differing
+// only in JudgeProvider produce different cache keys, so a frontier judge's
+// verdict can never reuse a same-named local Ollama judge's cached score.
+func TestLLMJudgeScorer_CacheKeyIncludesProvider(t *testing.T) {
+	req := ollama.ChatRequest{Messages: []ollama.ChatMessage{
+		{Role: "system", Content: "s"},
+		{Role: "user", Content: "u"},
+	}}
+	ollamaJudge := &LLMJudgeScorer{JudgeModel: "m", JudgeProvider: "ollama"}
+	compatJudge := &LLMJudgeScorer{JudgeModel: "m", JudgeProvider: "openai-compat"}
+	if ollamaJudge.cacheKeyForJudgeRequest(req) == compatJudge.cacheKeyForJudgeRequest(req) {
+		t.Fatalf("cache key did not vary with JudgeProvider")
+	}
+}
+
+// TestLLMJudgeScorer_CachePutRecordsProvider pins that Score persists the
+// scorer's JudgeProvider into the cache row for per-verdict provenance.
+func TestLLMJudgeScorer_CachePutRecordsProvider(t *testing.T) {
+	c, _ := newTestCache(t)
+	judge := &fakeJudgeClient{resp: &ollama.ChatResponse{Message: ollama.ChatMessage{
+		Content: `{"answer_quality":1.0,"justification":"good"}`,
+	}}}
+	scorer := &LLMJudgeScorer{
+		Client:        judge,
+		JudgeModel:    "claude-x",
+		JudgeProvider: "openai-compat",
+		Cache:         c,
+	}
+	trace := Trace{ID: "t-prov", System: "s", Turns: []Turn{{Role: "user", Content: "u"}}, Golden: Golden{FinalAnswerCriteria: "c"}}
+	actual := Result{Model: "ollama/cand", Transcript: []Turn{{Role: "assistant", Content: "ans"}}}
+	if _, err := scorer.Score(context.Background(), trace, actual); err != nil {
+		t.Fatalf("Score: %v", err)
+	}
+	var stored string
+	if err := c.db.QueryRow(`SELECT judge_provider FROM judge_cache WHERE trace_id = ?`, "t-prov").Scan(&stored); err != nil {
+		t.Fatalf("query judge_provider: %v", err)
+	}
+	if stored != "openai-compat" {
+		t.Fatalf("stored judge_provider=%q; want openai-compat", stored)
+	}
+}
+
 // TestLLMJudgeScorer_CachePutPreservesSemicolonsInJustification pins the
 // fix for the brittle joined-Notes round-trip: a judge justification
 // containing "; " (very common in real model output) must be persisted

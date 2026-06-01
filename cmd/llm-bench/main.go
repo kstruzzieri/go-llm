@@ -55,6 +55,9 @@ func main() {
 	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for -scorer llm-judge (default: -ollama-url)")
 	judgeTimeout := flag.Duration("judge-timeout", 5*time.Minute, "Timeout for each llm-judge scoring request")
 	judgeCachePath := flag.String("judge-cache", defaultJudgeCachePath(), "SQLite path for judge response cache; empty disables")
+	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default) or openai-compat")
+	judgeBaseURL := flag.String("judge-base-url", "", "Base URL for -judge-transport openai-compat (server root, no /v1 suffix)")
+	judgeAPIKey := flag.String("judge-api-key", "", "Bearer token for -judge-transport openai-compat; falls back to $"+judgeAPIKeyEnvVar)
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
@@ -169,11 +172,15 @@ func main() {
 			cacheStore = c
 			defer func() { _ = c.Close() }()
 		}
+		jt := resolveJudgeTransportConfig(*judgeTransport, *judgeBaseURL, *judgeAPIKey, os.Getenv)
 		scorer, err := newScorer(ctx, "llm-judge", scorerOptions{
-			ollamaURL:    judgeURL,
-			judgeModel:   judgeName,
-			judgeTimeout: *judgeTimeout,
-			judgeCache:   cacheStore,
+			ollamaURL:      judgeURL,
+			judgeModel:     judgeName,
+			judgeTimeout:   *judgeTimeout,
+			judgeCache:     cacheStore,
+			judgeTransport: jt.transport,
+			judgeBaseURL:   jt.baseURL,
+			judgeAPIKey:    jt.apiKey,
 			// Primary calibration run is cached; stability runs flip
 			// the flag internally (Task 23).
 			bypassCache: false,
@@ -181,11 +188,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: calibrate: %v", err)
 		}
+		judgeProviderName := defaultBenchProvider
+		if js, ok := scorer.(*LLMJudgeScorer); ok {
+			judgeProviderName = js.JudgeProvider
+		}
 		res, err := runCalibrate(ctx, calibrateOptions{
 			LabelsPath:    *labelsPath,
 			ArtifactsPath: *artifactsPath,
 			Scorer:        scorer,
 			JudgeModel:    judgeName,
+			JudgeProvider: judgeProviderName,
 			ReportDir:     *calibrateReportDir,
 			StabilityRuns: *judgeStabilityRuns,
 			AgreementMode: calibrationAgreementMode(*calibrateAgreement),
@@ -249,11 +261,15 @@ func main() {
 		defer func() { _ = c.Close() }()
 	}
 
+	jt := resolveJudgeTransportConfig(*judgeTransport, *judgeBaseURL, *judgeAPIKey, os.Getenv)
 	scorer, err := newScorer(ctx, *scorerName, scorerOptions{
-		ollamaURL:    resolvedJudgeURL,
-		judgeModel:   resolvedJudgeModel,
-		judgeTimeout: *judgeTimeout,
-		judgeCache:   cacheStore,
+		ollamaURL:      resolvedJudgeURL,
+		judgeModel:     resolvedJudgeModel,
+		judgeTimeout:   *judgeTimeout,
+		judgeCache:     cacheStore,
+		judgeTransport: jt.transport,
+		judgeBaseURL:   jt.baseURL,
+		judgeAPIKey:    jt.apiKey,
 	})
 	if err != nil {
 		log.Fatalf("llm-bench: scorer: %v", err)
@@ -349,6 +365,36 @@ func resolveCaptureSample(spec string) (*captureSampleSpec, error) {
 		return nil, err
 	}
 	return &parsed, nil
+}
+
+// judgeAPIKeyEnvVar is the environment variable consulted for the openai-compat
+// judge Bearer token when -judge-api-key is empty. Preferring the env var keeps
+// the secret out of shell history and process listings.
+const judgeAPIKeyEnvVar = "LLM_BENCH_JUDGE_API_KEY"
+
+// judgeTransportConfig is the resolved judge transport selection fed into
+// scorerOptions.
+type judgeTransportConfig struct {
+	transport string
+	baseURL   string
+	apiKey    string
+}
+
+// resolveJudgeTransportConfig applies flag/env precedence for the judge
+// transport. The API key flag takes precedence; when empty it falls back to
+// LLM_BENCH_JUDGE_API_KEY via lookupEnv (injected for tests). transport and
+// baseURL are trimmed and passed through unchanged — newJudgeTransport
+// validates them per backend.
+func resolveJudgeTransportConfig(transport, baseURL, apiKey string, lookupEnv func(string) string) judgeTransportConfig {
+	cfg := judgeTransportConfig{
+		transport: strings.TrimSpace(transport),
+		baseURL:   strings.TrimSpace(baseURL),
+		apiKey:    strings.TrimSpace(apiKey),
+	}
+	if cfg.apiKey == "" {
+		cfg.apiKey = strings.TrimSpace(lookupEnv(judgeAPIKeyEnvVar))
+	}
+	return cfg
 }
 
 // resolveToolSchemaSource picks a tool-schema source from CLI flags.
