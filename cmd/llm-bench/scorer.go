@@ -291,7 +291,7 @@ func validateJudgeModel(ctx context.Context, checker judgeModelChecker, judgeMod
 			return nil
 		}
 	}
-	return fmt.Errorf("judge model %q is not available from the configured Ollama server; pull it or pass -judge-model/-judge-ollama-url", judgeModel)
+	return fmt.Errorf("judge model %q is not available from the configured judge transport; pass a -judge-model the active -judge-transport exposes (or fix -judge-transport)", judgeModel)
 }
 
 // buildJudgeCall produces the judge ChatRequest and the partial Score that

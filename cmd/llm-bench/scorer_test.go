@@ -940,6 +940,27 @@ func TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch(t *
 	}
 }
 
+type stubModelChecker struct{ models []string }
+
+func (s stubModelChecker) AvailableModels(context.Context) ([]string, error) { return s.models, nil }
+func (s stubModelChecker) ShowModel(context.Context, string) (*ollama.ModelInfo, error) {
+	return nil, nil
+}
+
+// TestValidateJudgeModel_ErrorIsTransportNeutral pins that the "model not
+// available" error does not assume Ollama — it is now shared by the
+// openai-compat and claude-cli transports, where "pull it from the Ollama
+// server" is misleading.
+func TestValidateJudgeModel_ErrorIsTransportNeutral(t *testing.T) {
+	err := validateJudgeModel(context.Background(), stubModelChecker{models: []string{"sonnet", "haiku"}}, "opus")
+	if err == nil {
+		t.Fatalf("validateJudgeModel error = nil; want error for an absent model")
+	}
+	if strings.Contains(strings.ToLower(err.Error()), "ollama") {
+		t.Fatalf("error names Ollama in a transport-neutral check: %v", err)
+	}
+}
+
 // TestParseJudgeResponse_SkipsPrecedingNonVerdictObject reproduces the second
 // live calibration failure ("missing answer_quality"): when judging code,
 // Opus emitted a JSON-ish brace pair (an echoed struct literal / `{}`) BEFORE

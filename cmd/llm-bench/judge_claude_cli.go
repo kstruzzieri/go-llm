@@ -30,6 +30,14 @@ var claudeCLIModelAliases = []string{"opus", "sonnet", "haiku"}
 // (--allowedTools ""), and each call runs in an empty working directory so no
 // CLAUDE.md leaks into the judge context.
 //
+// Cleanliness caveat: this is the Claude Code *agent* in headless mode, not a
+// bare chat completion. Even with the system-prompt override and tools
+// disabled, the harness still injects its own scaffolding context (~tens of
+// thousands of tokens of tool schemas / environment / reminders). Empirically
+// the judge produces clean single-turn verdicts, but a citable calibration
+// should treat this transport as "Claude Code judging", not "raw model
+// judging", and ideally verify the lockdown rather than assume it.
+//
 // Determinism caveat: the CLI exposes no temperature flag, so the judge's
 // configured temperature is NOT honored — the model runs at Claude Code's
 // default. The categorical {0,0.5,1.0} rubric + off-grid repair re-prompt make
