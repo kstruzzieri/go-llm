@@ -29,6 +29,10 @@ const (
 // through provider/openaicompat instead of the default Ollama client.
 const openAICompatTransport = "openai-compat"
 
+// claudeCLITransport is the -judge-transport value that routes the judge
+// through the local `claude` CLI headless mode (subscription, no API billing).
+const claudeCLITransport = "claude-cli"
+
 // Score captures the evaluation dimensions for a single (model, trace) run.
 // See docs/llm/benchmark-plan.md for the scoring rationale.
 type Score struct {
@@ -145,8 +149,11 @@ func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
 		prov := openaicompat.NewProvider(openaicompat.NewClient(baseURL, clientOpts...))
 		adapter := newOpenAICompatJudge(prov)
 		return judgeTransport{chat: adapter, checker: adapter, providerName: prov.Name()}, nil
+	case claudeCLITransport:
+		adapter := newClaudeCLIJudge(opts.judgeModel)
+		return judgeTransport{chat: adapter, checker: adapter, providerName: claudeCLIProviderName}, nil
 	default:
-		return judgeTransport{}, fmt.Errorf("unknown judge transport %q (want %q or %q)", opts.judgeTransport, defaultBenchProvider, openAICompatTransport)
+		return judgeTransport{}, fmt.Errorf("unknown judge transport %q (want %q, %q, or %q)", opts.judgeTransport, defaultBenchProvider, openAICompatTransport, claudeCLITransport)
 	}
 }
 
@@ -657,65 +664,95 @@ type judgeResponse struct {
 	Justification string
 }
 
+// parseJudgeResponse extracts the verdict from a judge response. A frontier
+// judge sometimes precedes the verdict with other balanced {...} blobs — an
+// echoed struct literal, `{}`, a quoted example — so the FIRST object is not
+// reliably the verdict (observed live as "missing answer_quality"). We scan
+// each candidate object and select the one that actually carries
+// answer_quality; objects that don't parse or lack the field are skipped.
+// Comment stripping is handled by firstJSONObject.
 func parseJudgeResponse(content string) (judgeResponse, error) {
 	raw := strings.TrimSpace(content)
 	if raw == "" {
 		return judgeResponse{}, fmt.Errorf("%w: empty response", errMalformedJudgeResponse)
 	}
-	raw = firstJSONObject(raw)
-	if raw == "" {
+
+	sawObject := false
+	for pos := 0; pos < len(raw); {
+		idx := strings.IndexByte(raw[pos:], '{')
+		if idx < 0 {
+			break
+		}
+		abs := pos + idx
+		obj := firstJSONObject(raw[abs:])
+		if obj == "" {
+			pos = abs + 1
+			continue
+		}
+		sawObject = true
+		var parsed struct {
+			AnswerQuality *float64 `json:"answer_quality"`
+			Justification string   `json:"justification"`
+			Notes         string   `json:"notes"`
+		}
+		if err := json.Unmarshal([]byte(obj), &parsed); err != nil || parsed.AnswerQuality == nil {
+			// Not the verdict object (malformed, or a non-verdict blob like an
+			// echoed struct literal). Resume scanning after this object's start.
+			pos = abs + 1
+			continue
+		}
+		quality := *parsed.AnswerQuality
+		if quality < 0 || quality > 1 {
+			return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, quality)
+		}
+		if !validJudgeAnswerQuality(quality) {
+			return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f must be exactly one of 0.0, 0.5, or 1.0", errOffGridJudgeScore, quality)
+		}
+		justification := strings.TrimSpace(parsed.Justification)
+		if justification == "" {
+			justification = strings.TrimSpace(parsed.Notes)
+		}
+		if justification == "" {
+			justification = "no justification returned"
+		}
+		return judgeResponse{
+			AnswerQuality: quality,
+			Justification: normalizeNote(justification),
+		}, nil
+	}
+
+	if !sawObject {
 		return judgeResponse{}, fmt.Errorf("%w: missing JSON object", errMalformedJudgeResponse)
 	}
-
-	var parsed struct {
-		AnswerQuality *float64 `json:"answer_quality"`
-		Justification string   `json:"justification"`
-		Notes         string   `json:"notes"`
-	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return judgeResponse{}, fmt.Errorf("%w: %v", errMalformedJudgeResponse, err)
-	}
-	if parsed.AnswerQuality == nil {
-		return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
-	}
-	quality := parsed.AnswerQuality
-	if *quality < 0 || *quality > 1 {
-		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, *quality)
-	}
-	if !validJudgeAnswerQuality(*quality) {
-		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f must be exactly one of 0.0, 0.5, or 1.0", errOffGridJudgeScore, *quality)
-	}
-
-	justification := strings.TrimSpace(parsed.Justification)
-	if justification == "" {
-		justification = strings.TrimSpace(parsed.Notes)
-	}
-	if justification == "" {
-		justification = "no justification returned"
-	}
-
-	return judgeResponse{
-		AnswerQuality: *quality,
-		Justification: normalizeNote(justification),
-	}, nil
+	return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
 }
 
 func validJudgeAnswerQuality(v float64) bool {
 	return v == 0 || v == 0.5 || v == 1
 }
 
+// firstJSONObject extracts the first balanced {...} object from s and returns
+// it with JSON-illegal // line comments and /* */ block comments stripped.
+// LLM judges (especially when the judged content itself contains code) sometimes
+// emit comments — observed live with a frontier judge producing
+// `{"answer_quality":1.0, // matches\n ...}`, which json.Unmarshal rejects.
+// Comments are stripped only OUTSIDE string literals, so a // or /* that lives
+// inside the justification string is preserved verbatim. Comment-aware scanning
+// also prevents a brace inside a comment from corrupting the depth count.
 func firstJSONObject(s string) string {
 	start := strings.IndexByte(s, '{')
 	if start < 0 {
 		return ""
 	}
 
+	var b strings.Builder
 	depth := 0
 	inString := false
 	escaped := false
 	for i := start; i < len(s); i++ {
 		ch := s[i]
 		if inString {
+			b.WriteByte(ch)
 			if escaped {
 				escaped = false
 				continue
@@ -729,6 +766,25 @@ func firstJSONObject(s string) string {
 			continue
 		}
 
+		// Outside a string: skip // line and /* */ block comments so the
+		// extracted object is valid JSON and braces inside comments do not
+		// affect depth.
+		if ch == '/' && i+1 < len(s) && s[i+1] == '/' {
+			i += 2
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			continue // loop i++ steps past the newline (or EOF)
+		}
+		if ch == '/' && i+1 < len(s) && s[i+1] == '*' {
+			i += 2
+			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+				i++
+			}
+			i++      // position on the closing '/'
+			continue // loop i++ steps past it
+		}
+
 		switch ch {
 		case '"':
 			inString = true
@@ -736,9 +792,10 @@ func firstJSONObject(s string) string {
 			depth++
 		case '}':
 			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
+		}
+		b.WriteByte(ch)
+		if ch == '}' && depth == 0 {
+			return b.String()
 		}
 	}
 	return ""

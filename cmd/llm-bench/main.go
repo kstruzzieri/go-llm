@@ -55,7 +55,7 @@ func main() {
 	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for -scorer llm-judge (default: -ollama-url)")
 	judgeTimeout := flag.Duration("judge-timeout", 5*time.Minute, "Timeout for each llm-judge scoring request")
 	judgeCachePath := flag.String("judge-cache", defaultJudgeCachePath(), "SQLite path for judge response cache; empty disables")
-	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default) or openai-compat")
+	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default), openai-compat, or claude-cli (headless `claude -p`, subscription)")
 	judgeBaseURL := flag.String("judge-base-url", "", "Base URL for -judge-transport openai-compat (server root, no /v1 suffix)")
 	judgeAPIKey := flag.String("judge-api-key", "", "Bearer token for -judge-transport openai-compat; falls back to $"+judgeAPIKeyEnvVar)
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")

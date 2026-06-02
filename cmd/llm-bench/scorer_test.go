@@ -940,6 +940,62 @@ func TestLLMJudgeScorer_CacheHit_ReusesContentButRecomputesToolSequenceMatch(t *
 	}
 }
 
+// TestParseJudgeResponse_SkipsPrecedingNonVerdictObject reproduces the second
+// live calibration failure ("missing answer_quality"): when judging code,
+// Opus emitted a JSON-ish brace pair (an echoed struct literal / `{}`) BEFORE
+// the verdict. The first balanced object must NOT win — the parser must select
+// the object that actually carries answer_quality.
+func TestParseJudgeResponse_SkipsPrecedingNonVerdictObject(t *testing.T) {
+	content := "The candidate wrote `type T struct{}` and returned `{}`. Verdict:\n" +
+		`{"answer_quality":0.0,"justification":"materially wrong"}`
+	got, err := parseJudgeResponse(content)
+	if err != nil {
+		t.Fatalf("parseJudgeResponse: %v", err)
+	}
+	if got.AnswerQuality != 0.0 {
+		t.Fatalf("answer_quality = %v; want 0.0", got.AnswerQuality)
+	}
+	if got.Justification != "materially wrong" {
+		t.Fatalf("justification = %q; want \"materially wrong\"", got.Justification)
+	}
+}
+
+// TestParseJudgeResponse_ToleratesLineComments reproduces the live calibration
+// failure: a frontier judge (Opus) emitted a // line comment OUTSIDE the JSON
+// (json.Unmarshal: "invalid character '/' looking for beginning of object key
+// string"). Comments outside strings must be stripped, but a // that lives
+// INSIDE the justification string (common when judging code) must survive.
+func TestParseJudgeResponse_ToleratesLineComments(t *testing.T) {
+	content := "{\n  \"answer_quality\": 1.0, // perfect, matches golden\n  \"justification\": \"candidate produced `// Open opens the store` verbatim\"\n}"
+	got, err := parseJudgeResponse(content)
+	if err != nil {
+		t.Fatalf("parseJudgeResponse: %v", err)
+	}
+	if got.AnswerQuality != 1.0 {
+		t.Fatalf("answer_quality = %v; want 1.0", got.AnswerQuality)
+	}
+	if !strings.Contains(got.Justification, "// Open opens the store") {
+		t.Fatalf("justification lost the in-string // content: %q", got.Justification)
+	}
+}
+
+// TestParseJudgeResponse_ToleratesBlockCommentsWithBraces pins that block
+// comments are stripped AND that a brace inside a comment does not throw off
+// the balanced-object scan (the comment-aware extractor must not count it).
+func TestParseJudgeResponse_ToleratesBlockCommentsWithBraces(t *testing.T) {
+	content := "```json\n{\n  /* note: a } here is not a real brace */\n  \"answer_quality\": 0.5,\n  \"justification\": \"partial\"\n}\n```"
+	got, err := parseJudgeResponse(content)
+	if err != nil {
+		t.Fatalf("parseJudgeResponse: %v", err)
+	}
+	if got.AnswerQuality != 0.5 {
+		t.Fatalf("answer_quality = %v; want 0.5", got.AnswerQuality)
+	}
+	if got.Justification != "partial" {
+		t.Fatalf("justification = %q; want \"partial\"", got.Justification)
+	}
+}
+
 // TestLLMJudgeScorer_CacheKeyIncludesProvider pins that two scorers differing
 // only in JudgeProvider produce different cache keys, so a frontier judge's
 // verdict can never reuse a same-named local Ollama judge's cached score.
