@@ -51,8 +51,8 @@ func main() {
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
-	judgeModel := flag.String("judge-model", "", "Ollama model used by -scorer llm-judge; default uses models.json role judge or gemma4:31b")
-	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for -scorer llm-judge (default: -ollama-url)")
+	judgeModel := flag.String("judge-model", "", "Judge model/selector used by -scorer llm-judge; default uses models.json role judge or gemma4:31b")
+	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for the Ollama judge transport (default: -ollama-url)")
 	judgeTimeout := flag.Duration("judge-timeout", 5*time.Minute, "Timeout for each llm-judge scoring request")
 	judgeCachePath := flag.String("judge-cache", defaultJudgeCachePath(), "SQLite path for judge response cache; empty disables")
 	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default), openai-compat, or claude-cli (headless `claude -p`, subscription)")
@@ -274,6 +274,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("llm-bench: scorer: %v", err)
 	}
+	judgeProviderName := defaultBenchProvider
+	if js, ok := scorer.(*LLMJudgeScorer); ok {
+		judgeProviderName = js.JudgeProvider
+	}
 
 	runner := &Runner{
 		OllamaURL: *ollamaURL,
@@ -299,6 +303,7 @@ func main() {
 	report := formatReport(modelNames, results, reportOptions{
 		Scorer:               *scorerName,
 		JudgeModel:           resolvedJudgeModel,
+		JudgeProvider:        judgeProviderName,
 		JudgeCacheHits:       judgeCacheHits,
 		JudgeCacheMisses:     judgeCacheMisses,
 		TraceSetManifestHash: traceSetHash,

@@ -96,6 +96,34 @@ llm-bench -calibrate \
   -calibrate-agreement exact
 ```
 
+For a frontier judge, keep the same labels/artifacts and switch only the judge
+transport:
+
+```
+LLM_BENCH_JUDGE_API_KEY=... llm-bench -calibrate \
+  -labels docs/llm/calibration/labels.jsonl \
+  -artifacts docs/llm/calibration/artifacts.jsonl \
+  -judge-transport openai-compat \
+  -judge-base-url https://api.openai.com \
+  -judge-model <model-listed-by-/v1/models> \
+  -calibrate-agreement exact
+```
+
+For subscription-backed Claude Code diagnostics:
+
+```
+llm-bench -calibrate \
+  -labels docs/llm/calibration/labels.jsonl \
+  -artifacts docs/llm/calibration/artifacts.jsonl \
+  -judge-transport claude-cli \
+  -judge-model opus \
+  -calibrate-agreement exact
+```
+
+`claude-cli` reports provider provenance as `claude-cli` and caches against
+the Claude CLI version when available. It is not a raw API transport and cannot
+pin temperature, so run stability diagnostics before citing a pass.
+
 Writes a markdown report to
 `docs/llm/calibration/reports/YYYY-MM-DDTHHMMSSZ-<slug>.md`. If a report
 already exists for the same timestamp and judge model, a numeric suffix is

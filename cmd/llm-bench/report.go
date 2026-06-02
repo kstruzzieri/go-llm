@@ -31,6 +31,9 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		if opts.TraceSetManifestHash != "" {
 			fmt.Fprintf(&b, "- Trace set manifest hash: `%s`\n", markdownCell(opts.TraceSetManifestHash))
 		}
+		if opts.Scorer == "llm-judge" && opts.JudgeProvider != "" {
+			fmt.Fprintf(&b, "- Judge provider: `%s`\n", markdownCell(opts.JudgeProvider))
+		}
 		if emitCacheLine {
 			total := opts.JudgeCacheHits + opts.JudgeCacheMisses
 			if total > 0 {
@@ -106,6 +109,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 type reportOptions struct {
 	Scorer               string
 	JudgeModel           string
+	JudgeProvider        string
 	JudgeCacheHits       int64
 	JudgeCacheMisses     int64
 	TraceSetManifestHash string
