@@ -72,27 +72,49 @@ func (s *ManualScorer) Score(_ context.Context, trace Trace, actual Result) (Sco
 	}, nil
 }
 
+// manualReportCoverage records how completely the report covers the labels, so
+// a citable artifact never silently under-counts: Stale labels (hash no longer
+// matches an artifact) and Errored scorings are surfaced rather than dropped.
+type manualReportCoverage struct {
+	Scored  int
+	Stale   int
+	Errored int
+}
+
 // runManualReport scores every frozen labeled artifact with the human labels
 // and returns a per-model quality baseline report. It reads the same
 // (labels, artifacts) pair the calibration flow uses, so the scored outputs
-// are exactly the ones the human judged — no fresh replay, no judge.
+// are exactly the ones the human judged — no fresh replay, no judge. Stale
+// labels and scoring errors are surfaced in the coverage line; a duplicate
+// (trace, model) is a hard error because the manual scorer keys on it.
 func runManualReport(ctx context.Context, labelsPath, artifactsPath string) (string, error) {
-	matched, _, err := loadLabelsMatchedAgainst(labelsPath, artifactsPath)
+	matched, stale, err := loadLabelsMatchedAgainst(labelsPath, artifactsPath)
 	if err != nil {
 		return "", err
 	}
 	if len(matched) == 0 {
 		return "", fmt.Errorf("no labels matched artifacts in %q / %q", labelsPath, artifactsPath)
 	}
-	labels, err := loadLabels(labelsPath)
-	if err != nil {
-		return "", err
+
+	// Build the scorer from the matched (non-stale) labels, guarding against
+	// two artifacts colliding on the (trace, model) key the scorer uses.
+	seen := make(map[manualLabelKey]string, len(matched))
+	labels := make([]Label, 0, len(matched))
+	for _, m := range matched {
+		key := manualScorerKey(m.Label.TraceID, m.Label.CandidateModel)
+		id := m.Label.TraceID + "/" + m.Label.CandidateModel
+		if prev, ok := seen[key]; ok {
+			return "", fmt.Errorf("manual report: %s and %s map to the same (trace, model); one artifact per (trace, model) is required", prev, id)
+		}
+		seen[key] = id
+		labels = append(labels, m.Label)
 	}
 	scorer := newManualScorer(labels)
 
 	results := make([]Result, 0, len(matched))
 	modelSeen := map[string]bool{}
 	models := make([]string, 0)
+	errored := 0
 	for _, m := range matched {
 		trace, traceErr := calibrationTraceFromArtifact(m.Artifact)
 		if traceErr != nil {
@@ -100,6 +122,9 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string) (str
 		}
 		actual := Result{Model: m.Artifact.CandidateModel, TraceID: m.Artifact.TraceID, Transcript: m.Artifact.ActualTranscript}
 		score, scoreErr := scorer.Score(ctx, trace, actual)
+		if scoreErr != nil {
+			errored++
+		}
 		results = append(results, Result{Model: m.Artifact.CandidateModel, TraceID: m.Artifact.TraceID, Score: score, Err: scoreErr})
 		if !modelSeen[m.Artifact.CandidateModel] {
 			modelSeen[m.Artifact.CandidateModel] = true
@@ -107,5 +132,6 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string) (str
 		}
 	}
 	sort.Strings(models)
-	return formatManualQualityReport(models, results), nil
+	cov := manualReportCoverage{Scored: len(matched) - errored, Stale: len(stale), Errored: errored}
+	return formatManualQualityReport(models, results, cov), nil
 }

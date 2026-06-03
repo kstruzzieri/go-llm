@@ -110,7 +110,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 // labeled artifacts carry no timing, so latency is a separate measurement
 // pass. Showing a zero latency column would be misleading, so it is dropped
 // and the omission is stated.
-func formatManualQualityReport(models []string, results []Result) string {
+func formatManualQualityReport(models []string, results []Result, cov manualReportCoverage) string {
 	byModel := make(map[string][]Result, len(models))
 	for _, r := range results {
 		byModel[r.Model] = append(byModel[r.Model], r)
@@ -121,7 +121,8 @@ func formatManualQualityReport(models []string, results []Result) string {
 	fmt.Fprintf(&b, "Generated: %s\n\n", time.Now().UTC().Format(time.RFC3339))
 	fmt.Fprintln(&b, "AnswerQuality is the human label (`expected_answer_quality`): gold-standard, deterministic, on-box — no LLM judge, no model call, nothing leaves the box.")
 	fmt.Fprintln(&b, "Latency is NOT included here — frozen artifacts carry no timing; measure latency in a separate pass.")
-	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "\nCoverage: %d scored, stale: %d (excluded — label hash no longer matches an artifact), scoring errors: %d.\n\n",
+		cov.Scored, cov.Stale, cov.Errored)
 	fmt.Fprintln(&b, "## Quality by model")
 	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | n |")
 	fmt.Fprintln(&b, "|---|---|---|")

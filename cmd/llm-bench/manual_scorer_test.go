@@ -36,11 +36,58 @@ func TestFormatManualQualityReport_AggregatesPerModelAndFlagsLatency(t *testing.
 		{Model: "qwen3:8b", TraceID: "t2", Score: Score{AnswerQuality: 0.5}},
 		{Model: "gemma4:31b", TraceID: "t1", Score: Score{AnswerQuality: 1.0}},
 	}
-	out := formatManualQualityReport([]string{"qwen3:8b", "gemma4:31b"}, results)
-	for _, want := range []string{"qwen3:8b", "gemma4:31b", "human label", "Latency is NOT included"} {
+	out := formatManualQualityReport([]string{"qwen3:8b", "gemma4:31b"}, results, manualReportCoverage{Scored: 3, Stale: 1, Errored: 0})
+	for _, want := range []string{"qwen3:8b", "gemma4:31b", "human label", "Latency is NOT included", "stale"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("report missing %q:\n%s", want, out)
 		}
+	}
+}
+
+func TestRunManualReport_SurfacesStaleAndScoredCounts(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	a1 := testCalibrationArtifact("t1", "answer one")
+	a2 := testCalibrationArtifact("t2", "answer two")
+	if err := writeJSONL(arts, []any{a1, a2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: a1.ArtifactHash, ExpectedAnswerQuality: 1.0},
+		Label{TraceID: "t2", CandidateModel: "ollama/c", ArtifactHash: a2.ArtifactHash, ExpectedAnswerQuality: 0.5},
+		Label{TraceID: "t3", CandidateModel: "ollama/c", ArtifactHash: "stale-no-match", ExpectedAnswerQuality: 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := runManualReport(context.Background(), labels, arts)
+	if err != nil {
+		t.Fatalf("runManualReport: %v", err)
+	}
+	if !strings.Contains(report, "stale: 1") {
+		t.Fatalf("report does not surface the 1 stale label:\n%s", report)
+	}
+}
+
+func TestRunManualReport_RejectsAmbiguousTraceModel(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	// Two artifacts share (trace, model) but differ in content -> distinct
+	// hashes -> both match their labels -> ambiguous for a (trace, model) key.
+	a1 := testCalibrationArtifact("t1", "answer A")
+	a2 := testCalibrationArtifact("t1", "answer B")
+	if err := writeJSONL(arts, []any{a1, a2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: a1.ArtifactHash, ExpectedAnswerQuality: 1.0},
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: a2.ArtifactHash, ExpectedAnswerQuality: 0.5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runManualReport(context.Background(), labels, arts); err == nil {
+		t.Fatalf("runManualReport accepted two artifacts sharing (trace, model); want a loud ambiguity error")
 	}
 }
 
