@@ -320,6 +320,7 @@ type calibrateOptions struct {
 	ArtifactsPath string
 	Scorer        Scorer
 	JudgeModel    string
+	JudgeProvider string // provider instance identity for report provenance (e.g. "ollama", "openai-compat:<endpoint-id>")
 	ReportDir     string
 	MinLabels     int // defaults to calibrationDefaultMinLabels when zero
 	StabilityRuns int // when >1, runs the judge exactly N times per artifact and reports max-min spread as a diagnostic (does NOT gate the PASS/FAIL verdict); uses bypass-cache (Task 23)
@@ -331,6 +332,7 @@ type calibrateOptions struct {
 // markdown report contains the same data plus per-label rows.
 type CalibrationResult struct {
 	JudgeModel               string
+	JudgeProvider            string
 	MatchedCount             int
 	StaleCount               int
 	SelfJudgedSkipCount      int
@@ -400,6 +402,7 @@ func runCalibrate(ctx context.Context, opts calibrateOptions) (CalibrationResult
 	}
 	res := CalibrationResult{
 		JudgeModel:    opts.JudgeModel,
+		JudgeProvider: opts.JudgeProvider,
 		StaleCount:    len(stale),
 		MinLabels:     opts.MinLabels,
 		StabilityRuns: opts.StabilityRuns,
@@ -626,6 +629,9 @@ func writeCalibrationReport(dir, judgeModel string, res CalibrationResult, clock
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Judge calibration — %s — %s\n\n", judgeModel, now.Format("2006-01-02"))
+	if provider := strings.TrimSpace(res.JudgeProvider); provider != "" {
+		fmt.Fprintf(&b, "Judge provider: %s\n", provider)
+	}
 	fmt.Fprintf(&b, "Matched labels: %d / %d required → %s\n", res.MatchedCount, res.MinLabels, sufficiencyLabel(res))
 	fmt.Fprintf(&b, "Stale labels: %d\n", res.StaleCount)
 	fmt.Fprintf(&b, "Self-judged labels skipped: %d\n", res.SelfJudgedSkipCount)

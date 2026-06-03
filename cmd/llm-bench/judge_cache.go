@@ -20,14 +20,23 @@ import (
 
 // judgeCacheKeyVersion is bumped to force-invalidate every entry. Increment
 // when changing the canonical request shape (new field, semantic shift).
-const judgeCacheKeyVersion = 2
+// v3 adds JudgeProvider so frontier (openai-compat:<endpoint-id>) and local
+// (ollama) verdicts for an identically-named, digest-less judge model cannot
+// alias.
+const judgeCacheKeyVersion = 3
 
 // judgeCacheRequest is the canonical envelope hashed to produce the cache
 // key. Fields here MUST be limited to inputs that affect judgment semantics.
 // KeepAlive, JudgeTimeout, OllamaURL are deliberately excluded — they
 // affect execution, not the judge's verdict.
+//
+// JudgeProvider is the judge provider *instance* identity (e.g. "ollama" or
+// "openai-compat:<endpoint-id>"), not the API kind. Two providers serving the
+// same model name produce different keys so a frontier-judge verdict never
+// reuses another provider's cached score.
 type judgeCacheRequest struct {
 	Version          int     `json:"version"`
+	JudgeProvider    string  `json:"judge_provider"`
 	JudgeModel       string  `json:"judge_model"`
 	JudgeModelDigest string  `json:"judge_model_digest"`
 	SystemPrompt     string  `json:"system_prompt"`
@@ -63,6 +72,7 @@ func canonicalCacheKey(r judgeCacheRequest) string {
 // parsed verdict (denormalized so cache audits don't need to re-parse).
 type judgeCacheEntry struct {
 	CacheKey         string
+	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat:<endpoint-id>")
 	JudgeModel       string
 	JudgeModelDigest string
 	TraceID          string
@@ -187,6 +197,13 @@ func migrateJudgeCache(db *sql.DB) error {
             CREATE INDEX idx_judge_cache_model_trace ON judge_cache(judge_model, trace_id);
             `,
 		},
+		{
+			version:     2,
+			description: "add judge_provider column for provider-instance provenance",
+			ddl: `
+            ALTER TABLE judge_cache ADD COLUMN judge_provider TEXT NOT NULL DEFAULT '';
+            `,
+		},
 	}
 	for _, m := range migrations {
 		if m.version <= current {
@@ -240,12 +257,12 @@ func (c *sqliteJudgeCache) get(ctx context.Context, key string, countMiss bool) 
 	var e judgeCacheEntry
 	var createdNs, lastUsedNs int64
 	err := c.db.QueryRowContext(ctx, `
-        SELECT cache_key, judge_model, judge_model_digest, trace_id, candidate_model,
+        SELECT cache_key, judge_provider, judge_model, judge_model_digest, trace_id, candidate_model,
                prompt_hash, request_json, response_content, answer_quality, justification,
                created_at, last_used_at, hit_count
         FROM judge_cache WHERE cache_key = ?`, key,
 	).Scan(
-		&e.CacheKey, &e.JudgeModel, &e.JudgeModelDigest, &e.TraceID, &e.CandidateModel,
+		&e.CacheKey, &e.JudgeProvider, &e.JudgeModel, &e.JudgeModelDigest, &e.TraceID, &e.CandidateModel,
 		&e.PromptHash, &e.RequestJSON, &e.ResponseContent, &e.AnswerQuality, &e.Justification,
 		&createdNs, &lastUsedNs, &e.HitCount,
 	)
@@ -283,14 +300,14 @@ func (c *sqliteJudgeCache) get(ctx context.Context, key string, countMiss bool) 
 // a Get-hit.
 func (c *sqliteJudgeCache) Put(ctx context.Context, e judgeCacheEntry) error {
 	_, err := c.db.ExecContext(ctx, `
-        INSERT INTO judge_cache (cache_key, judge_model, judge_model_digest, trace_id, candidate_model,
+        INSERT INTO judge_cache (cache_key, judge_provider, judge_model, judge_model_digest, trace_id, candidate_model,
             prompt_hash, request_json, response_content, answer_quality, justification,
             created_at, last_used_at, hit_count)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(cache_key) DO UPDATE SET
             last_used_at = excluded.last_used_at,
             hit_count    = judge_cache.hit_count + 1`,
-		e.CacheKey, e.JudgeModel, e.JudgeModelDigest, e.TraceID, e.CandidateModel,
+		e.CacheKey, e.JudgeProvider, e.JudgeModel, e.JudgeModelDigest, e.TraceID, e.CandidateModel,
 		e.PromptHash, e.RequestJSON, e.ResponseContent, e.AnswerQuality, e.Justification,
 		e.CreatedAt.UnixNano(), e.LastUsedAt.UnixNano(), e.HitCount,
 	)

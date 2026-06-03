@@ -183,10 +183,14 @@ func TestFormatReportProvenanceBlock(t *testing.T) {
 	}, reportOptions{
 		Scorer:               "llm-judge",
 		JudgeModel:           "gemma4:31b",
+		JudgeProvider:        "ollama",
 		JudgeCacheHits:       7,
 		JudgeCacheMisses:     3,
 		TraceSetManifestHash: "sha256:abc123",
 	})
+	if !strings.Contains(report, "Judge provider: `ollama`") {
+		t.Error("missing judge provider in provenance")
+	}
 	if !strings.Contains(report, "Judge cache hit rate: 70.0%") {
 		t.Error("missing judge cache hit rate in provenance")
 	}

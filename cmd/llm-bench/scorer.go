@@ -7,12 +7,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
 const (
@@ -22,6 +25,14 @@ const (
 	maxJudgeTurnContentBytes = 8192
 	maxJudgeAnswerBytes      = 32768
 )
+
+// openAICompatTransport is the -judge-transport value that routes the judge
+// through provider/openaicompat instead of the default Ollama client.
+const openAICompatTransport = "openai-compat"
+
+// claudeCLITransport is the -judge-transport value that routes the judge
+// through the local `claude` CLI headless mode (subscription, no API billing).
+const claudeCLITransport = "claude-cli"
 
 // Score captures the evaluation dimensions for a single (model, trace) run.
 // See docs/llm/benchmark-plan.md for the scoring rationale.
@@ -51,6 +62,16 @@ type scorerOptions struct {
 	ollamaURL    string
 	judgeModel   string
 	judgeTimeout time.Duration
+	// judgeTransport selects the judge backend: "" or "ollama" (default) uses
+	// the local Ollama client; "openai-compat" routes through
+	// provider/openaicompat for a frontier judge. judgeBaseURL is required for
+	// the openai-compat transport; judgeAPIKey is the optional Bearer token.
+	judgeTransport string
+	judgeBaseURL   string
+	judgeAPIKey    string
+	// manualLabelsPath is the human labels JSONL consumed by the "manual"
+	// scorer (AnswerQuality = expected_answer_quality).
+	manualLabelsPath string
 	// judgeCache is the optional judge response cache. Callers MUST avoid
 	// the typed-nil interface trap: assign only a non-nil concrete
 	// implementation (e.g. *sqliteJudgeCache) or leave this field unset.
@@ -69,27 +90,112 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 		if opts.judgeTimeout < 0 {
 			return nil, fmt.Errorf("negative judge timeout %s", opts.judgeTimeout)
 		}
-		client, err := newOllamaClient(opts.ollamaURL, ollama.WithTimeout(opts.judgeTimeout))
-		if err != nil {
-			return nil, fmt.Errorf("llm-judge client: %w", err)
-		}
-		scorer, err := newLLMJudgeScorer(client, opts.judgeModel, opts.judgeTimeout)
+		transport, err := newJudgeTransport(opts)
 		if err != nil {
 			return nil, err
 		}
-		if err := validateJudgeModel(ctx, client, scorer.JudgeModel); err != nil {
+		scorer, err := newLLMJudgeScorer(transport.chat, opts.judgeModel, opts.judgeTimeout)
+		if err != nil {
 			return nil, err
 		}
-		digest, _ := resolveJudgeDigest(ctx, client, scorer.JudgeModel)
+		scorer.JudgeProvider = transport.providerName
+		if err := validateJudgeModel(ctx, transport.checker, scorer.JudgeModel); err != nil {
+			return nil, err
+		}
+		digest, _ := resolveJudgeDigest(ctx, transport.checker, scorer.JudgeModel)
 		scorer.JudgeModelDigest = digest
 		scorer.Cache = opts.judgeCache
 		scorer.BypassCache = opts.bypassCache
 		return scorer, nil
 	case "manual":
-		return nil, fmt.Errorf("manual scorer not yet implemented")
+		if strings.TrimSpace(opts.manualLabelsPath) == "" {
+			return nil, fmt.Errorf("manual scorer requires -labels (human labels JSONL)")
+		}
+		labels, err := loadLabels(opts.manualLabelsPath)
+		if err != nil {
+			return nil, fmt.Errorf("manual scorer: load labels: %w", err)
+		}
+		if len(labels) == 0 {
+			return nil, fmt.Errorf("manual scorer: no labels in %q", opts.manualLabelsPath)
+		}
+		return newManualScorer(labels)
 	default:
 		return nil, fmt.Errorf("unknown scorer %q", name)
 	}
+}
+
+// judgeTransport bundles the judge's chat client, model checker, and provider
+// instance identity so newScorer builds the scorer uniformly regardless of
+// backend. The same concrete value satisfies both the chat and checker seams
+// for each transport (*ollama.Client; *openAICompatJudgeClient).
+type judgeTransport struct {
+	chat         judgeChatClient
+	checker      judgeModelChecker
+	providerName string
+}
+
+// newJudgeTransport resolves opts.judgeTransport to a judge backend. Empty or
+// "ollama" (case-insensitive) is the default local path; "openai-compat"
+// routes a frontier judge through provider/openaicompat. The returned
+// providerName is the provider *instance* identity that gets folded into the
+// cache key and provenance. For openai-compat it is endpoint-scoped so two
+// base URLs that expose the same model id cannot reuse each other's digest-less
+// cached verdicts.
+func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
+	switch normalizeModelSelector(opts.judgeTransport) {
+	case "", defaultBenchProvider:
+		client, err := newOllamaClient(opts.ollamaURL, ollama.WithTimeout(opts.judgeTimeout))
+		if err != nil {
+			return judgeTransport{}, fmt.Errorf("llm-judge client: %w", err)
+		}
+		return judgeTransport{chat: client, checker: client, providerName: defaultBenchProvider}, nil
+	case openAICompatTransport:
+		baseURL := strings.TrimSpace(opts.judgeBaseURL)
+		if baseURL == "" {
+			return judgeTransport{}, fmt.Errorf("llm-judge %s transport requires -judge-base-url", openAICompatTransport)
+		}
+		clientOpts := []openaicompat.ClientOption{}
+		if opts.judgeTimeout > 0 {
+			clientOpts = append(clientOpts, openaicompat.WithHTTPClient(&http.Client{Timeout: opts.judgeTimeout}))
+		}
+		if key := strings.TrimSpace(opts.judgeAPIKey); key != "" {
+			clientOpts = append(clientOpts, openaicompat.WithAPIKey(key))
+		}
+		providerName := openAICompatJudgeProviderName(baseURL)
+		prov := openaicompat.NewProvider(
+			openaicompat.NewClient(baseURL, clientOpts...),
+			openaicompat.WithProviderName(providerName),
+		)
+		adapter := newOpenAICompatJudge(prov)
+		return judgeTransport{chat: adapter, checker: adapter, providerName: prov.Name()}, nil
+	case claudeCLITransport:
+		adapter := newClaudeCLIJudge(opts.judgeModel)
+		return judgeTransport{chat: adapter, checker: adapter, providerName: claudeCLIProviderName}, nil
+	default:
+		return judgeTransport{}, fmt.Errorf("unknown judge transport %q (want %q, %q, or %q)", opts.judgeTransport, defaultBenchProvider, openAICompatTransport, claudeCLITransport)
+	}
+}
+
+func openAICompatJudgeProviderName(baseURL string) string {
+	canonical := canonicalJudgeBaseURL(baseURL)
+	sum := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("%s:%s", openAICompatTransport, hex.EncodeToString(sum[:])[:12])
+}
+
+func canonicalJudgeBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawPath = ""
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String()
 }
 
 // ExactMatchScorer is a dependency-free baseline. Answer quality is scored
@@ -177,6 +283,7 @@ func resolveJudgeDigest(ctx context.Context, checker judgeModelChecker, judgeMod
 // typed-nil interface trap before assignment.
 type LLMJudgeScorer struct {
 	Client           judgeChatClient
+	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat:<endpoint-id>"); folded into the cache key and persisted for provenance
 	JudgeModel       string
 	JudgeModelDigest string // optional; empty when /api/show was unavailable
 	JudgeTimeout     time.Duration
@@ -225,7 +332,7 @@ func validateJudgeModel(ctx context.Context, checker judgeModelChecker, judgeMod
 			return nil
 		}
 	}
-	return fmt.Errorf("judge model %q is not available from the configured Ollama server; pull it or pass -judge-model/-judge-ollama-url", judgeModel)
+	return fmt.Errorf("judge model %q is not available from the configured judge transport; pass a -judge-model the active -judge-transport exposes (or fix -judge-transport)", judgeModel)
 }
 
 // buildJudgeCall produces the judge ChatRequest and the partial Score that
@@ -380,6 +487,7 @@ func (s *LLMJudgeScorer) Score(ctx context.Context, trace Trace, actual Result) 
 		now := s.now()
 		if putErr := s.Cache.Put(ctx, judgeCacheEntry{
 			CacheKey:         cacheKey,
+			JudgeProvider:    s.JudgeProvider,
 			JudgeModel:       s.JudgeModel,
 			JudgeModelDigest: s.JudgeModelDigest,
 			TraceID:          trace.ID,
@@ -439,6 +547,7 @@ func (s *LLMJudgeScorer) materializeCacheLookup(base Score, hit judgeCacheEntry,
 func (s *LLMJudgeScorer) cacheKeyForJudgeRequest(req ollama.ChatRequest) string {
 	return canonicalCacheKey(judgeCacheRequest{
 		Version:          judgeCacheKeyVersion,
+		JudgeProvider:    normalizeModelSelector(s.JudgeProvider),
 		JudgeModel:       normalizeModelSelector(s.JudgeModel),
 		JudgeModelDigest: s.JudgeModelDigest,
 		SystemPrompt:     judgeSystemPrompt,
@@ -596,65 +705,125 @@ type judgeResponse struct {
 	Justification string
 }
 
+// parseJudgeResponse extracts the verdict from a judge response. A frontier
+// judge sometimes precedes the verdict with other balanced {...} blobs — an
+// echoed struct literal, `{}`, a quoted example — so the FIRST object is not
+// reliably the verdict (observed live as "missing answer_quality"). We scan
+// each candidate object and select the one that actually carries
+// answer_quality; when multiple verdict-shaped objects are present, the last
+// one wins so quoted candidate text cannot self-score before the judge's final
+// verdict. Comment stripping is handled by firstJSONObject.
 func parseJudgeResponse(content string) (judgeResponse, error) {
 	raw := strings.TrimSpace(content)
 	if raw == "" {
 		return judgeResponse{}, fmt.Errorf("%w: empty response", errMalformedJudgeResponse)
 	}
-	raw = firstJSONObject(raw)
-	if raw == "" {
+
+	sawObject := false
+	sawVerdictObject := false
+	var lastVerdict judgeResponse
+	haveLastVerdict := false
+	var lastVerdictErr error
+	for pos := 0; pos < len(raw); {
+		idx := strings.IndexByte(raw[pos:], '{')
+		if idx < 0 {
+			break
+		}
+		abs := pos + idx
+		obj, consumed := firstJSONObjectWithEnd(raw[abs:])
+		if obj == "" {
+			pos = abs + 1
+			continue
+		}
+		sawObject = true
+		nextPos := abs + consumed
+		if nextPos <= pos {
+			nextPos = abs + 1
+		}
+		var parsed struct {
+			AnswerQuality *float64 `json:"answer_quality"`
+			Justification string   `json:"justification"`
+			Notes         string   `json:"notes"`
+		}
+		if err := json.Unmarshal([]byte(obj), &parsed); err != nil || parsed.AnswerQuality == nil {
+			// Not the verdict object (malformed, or a non-verdict blob like an
+			// echoed struct literal). Resume scanning after this object.
+			pos = nextPos
+			continue
+		}
+		sawVerdictObject = true
+		quality := *parsed.AnswerQuality
+		if quality < 0 || quality > 1 {
+			lastVerdictErr = fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, quality)
+			haveLastVerdict = false
+			pos = nextPos
+			continue
+		}
+		if !validJudgeAnswerQuality(quality) {
+			lastVerdictErr = fmt.Errorf("%w: answer_quality %.3f must be exactly one of 0.0, 0.5, or 1.0", errOffGridJudgeScore, quality)
+			haveLastVerdict = false
+			pos = nextPos
+			continue
+		}
+		justification := strings.TrimSpace(parsed.Justification)
+		if justification == "" {
+			justification = strings.TrimSpace(parsed.Notes)
+		}
+		if justification == "" {
+			justification = "no justification returned"
+		}
+		lastVerdict = judgeResponse{
+			AnswerQuality: quality,
+			Justification: normalizeNote(justification),
+		}
+		haveLastVerdict = true
+		lastVerdictErr = nil
+		pos = nextPos
+	}
+
+	if haveLastVerdict {
+		return lastVerdict, nil
+	}
+	if !sawObject {
 		return judgeResponse{}, fmt.Errorf("%w: missing JSON object", errMalformedJudgeResponse)
 	}
-
-	var parsed struct {
-		AnswerQuality *float64 `json:"answer_quality"`
-		Justification string   `json:"justification"`
-		Notes         string   `json:"notes"`
+	if sawVerdictObject && lastVerdictErr != nil {
+		return judgeResponse{}, lastVerdictErr
 	}
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-		return judgeResponse{}, fmt.Errorf("%w: %v", errMalformedJudgeResponse, err)
-	}
-	if parsed.AnswerQuality == nil {
-		return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
-	}
-	quality := parsed.AnswerQuality
-	if *quality < 0 || *quality > 1 {
-		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, *quality)
-	}
-	if !validJudgeAnswerQuality(*quality) {
-		return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f must be exactly one of 0.0, 0.5, or 1.0", errOffGridJudgeScore, *quality)
-	}
-
-	justification := strings.TrimSpace(parsed.Justification)
-	if justification == "" {
-		justification = strings.TrimSpace(parsed.Notes)
-	}
-	if justification == "" {
-		justification = "no justification returned"
-	}
-
-	return judgeResponse{
-		AnswerQuality: *quality,
-		Justification: normalizeNote(justification),
-	}, nil
+	return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
 }
 
 func validJudgeAnswerQuality(v float64) bool {
 	return v == 0 || v == 0.5 || v == 1
 }
 
+// firstJSONObject extracts the first balanced {...} object from s and returns
+// it with JSON-illegal // line comments and /* */ block comments stripped.
+// LLM judges (especially when the judged content itself contains code) sometimes
+// emit comments — observed live with a frontier judge producing
+// `{"answer_quality":1.0, // matches\n ...}`, which json.Unmarshal rejects.
+// Comments are stripped only OUTSIDE string literals, so a // or /* that lives
+// inside the justification string is preserved verbatim. Comment-aware scanning
+// also prevents a brace inside a comment from corrupting the depth count.
 func firstJSONObject(s string) string {
+	obj, _ := firstJSONObjectWithEnd(s)
+	return obj
+}
+
+func firstJSONObjectWithEnd(s string) (string, int) {
 	start := strings.IndexByte(s, '{')
 	if start < 0 {
-		return ""
+		return "", 0
 	}
 
+	var b strings.Builder
 	depth := 0
 	inString := false
 	escaped := false
 	for i := start; i < len(s); i++ {
 		ch := s[i]
 		if inString {
+			b.WriteByte(ch)
 			if escaped {
 				escaped = false
 				continue
@@ -668,6 +837,25 @@ func firstJSONObject(s string) string {
 			continue
 		}
 
+		// Outside a string: skip // line and /* */ block comments so the
+		// extracted object is valid JSON and braces inside comments do not
+		// affect depth.
+		if ch == '/' && i+1 < len(s) && s[i+1] == '/' {
+			i += 2
+			for i < len(s) && s[i] != '\n' {
+				i++
+			}
+			continue // loop i++ steps past the newline (or EOF)
+		}
+		if ch == '/' && i+1 < len(s) && s[i+1] == '*' {
+			i += 2
+			for i+1 < len(s) && (s[i] != '*' || s[i+1] != '/') {
+				i++
+			}
+			i++      // position on the closing '/'
+			continue // loop i++ steps past it
+		}
+
 		switch ch {
 		case '"':
 			inString = true
@@ -675,12 +863,13 @@ func firstJSONObject(s string) string {
 			depth++
 		case '}':
 			depth--
-			if depth == 0 {
-				return s[start : i+1]
-			}
+		}
+		b.WriteByte(ch)
+		if ch == '}' && depth == 0 {
+			return b.String(), i + 1
 		}
 	}
-	return ""
+	return "", 0
 }
 
 func sameModelSelector(a, b string) bool {

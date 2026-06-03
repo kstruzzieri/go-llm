@@ -41,6 +41,7 @@ func main() {
 
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
+	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	labelsPath := flag.String("labels", filepath.Join("docs", "llm", "calibration", "labels.jsonl"), "Path to labels.jsonl (Phase 2)")
 	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
 	artifactsPath := flag.String("artifacts", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Path to artifacts.jsonl (Phase 2)")
@@ -51,10 +52,13 @@ func main() {
 	tracesGlob := flag.String("traces", "", "Glob pattern for trace JSON files (required for normal runs and -calibrate-capture)")
 	modelsArg := flag.String("models", "", "Comma-separated model selectors (provider/model or bare model name; required)")
 	scorerName := flag.String("scorer", "exact-match", "Scoring strategy: exact-match, llm-judge, manual")
-	judgeModel := flag.String("judge-model", "", "Ollama model used by -scorer llm-judge; default uses models.json role judge or gemma4:31b")
-	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for -scorer llm-judge (default: -ollama-url)")
+	judgeModel := flag.String("judge-model", "", "Judge model/selector used by -scorer llm-judge; default uses models.json role judge or gemma4:31b")
+	judgeOllamaURL := flag.String("judge-ollama-url", "", "Ollama base URL for the Ollama judge transport (default: -ollama-url)")
 	judgeTimeout := flag.Duration("judge-timeout", 5*time.Minute, "Timeout for each llm-judge scoring request")
 	judgeCachePath := flag.String("judge-cache", defaultJudgeCachePath(), "SQLite path for judge response cache; empty disables")
+	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default), openai-compat, or claude-cli (headless `claude -p`, subscription)")
+	judgeBaseURL := flag.String("judge-base-url", "", "Base URL for -judge-transport openai-compat (server root, no /v1 suffix)")
+	judgeAPIKey := flag.String("judge-api-key", "", "Bearer token for -judge-transport openai-compat; falls back to $"+judgeAPIKeyEnvVar)
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
@@ -70,8 +74,11 @@ func main() {
 	if *calibrate {
 		modes++
 	}
+	if *manualReport {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -169,11 +176,15 @@ func main() {
 			cacheStore = c
 			defer func() { _ = c.Close() }()
 		}
+		jt := resolveJudgeTransportConfig(*judgeTransport, *judgeBaseURL, *judgeAPIKey, os.Getenv)
 		scorer, err := newScorer(ctx, "llm-judge", scorerOptions{
-			ollamaURL:    judgeURL,
-			judgeModel:   judgeName,
-			judgeTimeout: *judgeTimeout,
-			judgeCache:   cacheStore,
+			ollamaURL:      judgeURL,
+			judgeModel:     judgeName,
+			judgeTimeout:   *judgeTimeout,
+			judgeCache:     cacheStore,
+			judgeTransport: jt.transport,
+			judgeBaseURL:   jt.baseURL,
+			judgeAPIKey:    jt.apiKey,
 			// Primary calibration run is cached; stability runs flip
 			// the flag internally (Task 23).
 			bypassCache: false,
@@ -181,11 +192,16 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: calibrate: %v", err)
 		}
+		judgeProviderName := defaultBenchProvider
+		if js, ok := scorer.(*LLMJudgeScorer); ok {
+			judgeProviderName = js.JudgeProvider
+		}
 		res, err := runCalibrate(ctx, calibrateOptions{
 			LabelsPath:    *labelsPath,
 			ArtifactsPath: *artifactsPath,
 			Scorer:        scorer,
 			JudgeModel:    judgeName,
+			JudgeProvider: judgeProviderName,
 			ReportDir:     *calibrateReportDir,
 			StabilityRuns: *judgeStabilityRuns,
 			AgreementMode: calibrationAgreementMode(*calibrateAgreement),
@@ -198,6 +214,22 @@ func main() {
 		if code := calibrationExitCode(res.Verdict); code != 0 {
 			os.Exit(code)
 		}
+		return
+	}
+
+	if *manualReport {
+		report, err := runManualReport(ctx, *labelsPath, *artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: manual-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: manual quality report written to %s\n", *reportPath)
 		return
 	}
 
@@ -249,14 +281,23 @@ func main() {
 		defer func() { _ = c.Close() }()
 	}
 
+	jt := resolveJudgeTransportConfig(*judgeTransport, *judgeBaseURL, *judgeAPIKey, os.Getenv)
 	scorer, err := newScorer(ctx, *scorerName, scorerOptions{
-		ollamaURL:    resolvedJudgeURL,
-		judgeModel:   resolvedJudgeModel,
-		judgeTimeout: *judgeTimeout,
-		judgeCache:   cacheStore,
+		ollamaURL:        resolvedJudgeURL,
+		judgeModel:       resolvedJudgeModel,
+		judgeTimeout:     *judgeTimeout,
+		judgeCache:       cacheStore,
+		judgeTransport:   jt.transport,
+		judgeBaseURL:     jt.baseURL,
+		judgeAPIKey:      jt.apiKey,
+		manualLabelsPath: *labelsPath,
 	})
 	if err != nil {
 		log.Fatalf("llm-bench: scorer: %v", err)
+	}
+	judgeProviderName := defaultBenchProvider
+	if js, ok := scorer.(*LLMJudgeScorer); ok {
+		judgeProviderName = js.JudgeProvider
 	}
 
 	runner := &Runner{
@@ -283,6 +324,7 @@ func main() {
 	report := formatReport(modelNames, results, reportOptions{
 		Scorer:               *scorerName,
 		JudgeModel:           resolvedJudgeModel,
+		JudgeProvider:        judgeProviderName,
 		JudgeCacheHits:       judgeCacheHits,
 		JudgeCacheMisses:     judgeCacheMisses,
 		TraceSetManifestHash: traceSetHash,
@@ -349,6 +391,36 @@ func resolveCaptureSample(spec string) (*captureSampleSpec, error) {
 		return nil, err
 	}
 	return &parsed, nil
+}
+
+// judgeAPIKeyEnvVar is the environment variable consulted for the openai-compat
+// judge Bearer token when -judge-api-key is empty. Preferring the env var keeps
+// the secret out of shell history and process listings.
+const judgeAPIKeyEnvVar = "LLM_BENCH_JUDGE_API_KEY"
+
+// judgeTransportConfig is the resolved judge transport selection fed into
+// scorerOptions.
+type judgeTransportConfig struct {
+	transport string
+	baseURL   string
+	apiKey    string
+}
+
+// resolveJudgeTransportConfig applies flag/env precedence for the judge
+// transport. The API key flag takes precedence; when empty it falls back to
+// LLM_BENCH_JUDGE_API_KEY via lookupEnv (injected for tests). transport and
+// baseURL are trimmed and passed through unchanged — newJudgeTransport
+// validates them per backend.
+func resolveJudgeTransportConfig(transport, baseURL, apiKey string, lookupEnv func(string) string) judgeTransportConfig {
+	cfg := judgeTransportConfig{
+		transport: strings.TrimSpace(transport),
+		baseURL:   strings.TrimSpace(baseURL),
+		apiKey:    strings.TrimSpace(apiKey),
+	}
+	if cfg.apiKey == "" {
+		cfg.apiKey = strings.TrimSpace(lookupEnv(judgeAPIKeyEnvVar))
+	}
+	return cfg
 }
 
 // resolveToolSchemaSource picks a tool-schema source from CLI flags.

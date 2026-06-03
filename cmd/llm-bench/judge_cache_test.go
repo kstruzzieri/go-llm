@@ -47,6 +47,18 @@ func TestCanonicalCacheKey_DigestSensitive(t *testing.T) {
 	}
 }
 
+func TestCanonicalCacheKey_ProviderSensitive(t *testing.T) {
+	// A frontier judge served via openai-compat and a local Ollama judge can
+	// share a model name (e.g. neither carries a digest). The provider must
+	// participate in the key so their verdicts never alias each other.
+	base := judgeCacheRequest{Version: judgeCacheKeyVersion, JudgeProvider: "ollama", JudgeModel: "m", SystemPrompt: "s", UserPrompt: "u", Format: "json", Temperature: 0.1, NumPredict: 100}
+	diff := base
+	diff.JudgeProvider = "openai-compat"
+	if canonicalCacheKey(base) == canonicalCacheKey(diff) {
+		t.Fatalf("judge provider change did not invalidate key")
+	}
+}
+
 func TestCanonicalCacheKey_ThinkSensitive(t *testing.T) {
 	base := judgeCacheRequest{Version: judgeCacheKeyVersion, JudgeModel: "m", SystemPrompt: "s", UserPrompt: "u", Format: "json", Temperature: 0.1, NumPredict: 100}
 	thinkFalse := false
@@ -117,6 +129,29 @@ func TestSQLiteJudgeCache_PutThenGetReturnsEntry(t *testing.T) {
 	}
 	if got.HitCount != 1 {
 		t.Fatalf("HitCount not bumped: %d", got.HitCount)
+	}
+}
+
+func TestSQLiteJudgeCache_PersistsJudgeProvider(t *testing.T) {
+	c, _ := newTestCache(t)
+	ctx := context.Background()
+	now := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+	entry := judgeCacheEntry{
+		CacheKey: "pk", JudgeProvider: "openai-compat", JudgeModel: "claude-x",
+		TraceID: "t", CandidateModel: "ollama/cand", PromptHash: "ph",
+		RequestJSON: "{}", ResponseContent: `{"answer_quality":1.0}`,
+		AnswerQuality: 1.0, Justification: "j",
+		CreatedAt: now, LastUsedAt: now,
+	}
+	if err := c.Put(ctx, entry); err != nil {
+		t.Fatalf("Put: %v", err)
+	}
+	got, ok, err := c.Get(ctx, "pk")
+	if err != nil || !ok {
+		t.Fatalf("Get: ok=%v err=%v", ok, err)
+	}
+	if got.JudgeProvider != "openai-compat" {
+		t.Fatalf("JudgeProvider = %q; want openai-compat", got.JudgeProvider)
 	}
 }
 

@@ -498,6 +498,43 @@ func TestRunCalibrate_StrataHarshLenientAndKnownFixtures(t *testing.T) {
 	}
 }
 
+func TestRunCalibrate_ReportRecordsJudgeProvider(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	reportDir := filepath.Join(dir, "reports")
+
+	a := testCalibrationArtifact("t1", "answer t1")
+	if err := writeJSONL(arts, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{Label{
+		TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash,
+		ExpectedAnswerQuality: 1.0, Labeler: "manual",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := runCalibrate(context.Background(), calibrateOptions{
+		LabelsPath: labels, ArtifactsPath: arts,
+		Scorer:        &fakeScorer{judgeByTrace: map[string]float64{"t1": 1.0}},
+		JudgeModel:    "claude-x",
+		JudgeProvider: "openai-compat",
+		MinLabels:     1, ReportDir: reportDir,
+		Clock: func() time.Time { return time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC) },
+	})
+	if err != nil {
+		t.Fatalf("runCalibrate: %v", err)
+	}
+	report, err := os.ReadFile(res.ReportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(report), "Judge provider: openai-compat") {
+		t.Fatalf("report missing judge provider provenance line:\n%s", report)
+	}
+}
+
 func TestRunCalibrate_KnownFixturesMatchPrefixedTraceIDs(t *testing.T) {
 	// Captured traces are keyed "conversation-<id>" while the fixture list
 	// is bare ("fa-f03"). The gate must normalize the prefix AND only gate

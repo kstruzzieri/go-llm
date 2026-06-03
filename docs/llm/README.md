@@ -92,6 +92,43 @@ in the report and shown separately as scorer latency. Use
 `-judge-ollama-url` when the judge should run on a different Ollama
 instance than the candidate models.
 
+`llm-judge` can also use a frontier judge without replaying candidate models
+through a non-Ollama backend:
+
+```bash
+go run ./cmd/llm-bench \
+  -traces 'cmd/llm-bench/testdata/smoke/*.json' \
+  -models 'ollama/qwen3.6:35b-a3b' \
+  -scorer llm-judge \
+  -judge-transport openai-compat \
+  -judge-base-url https://api.openai.com \
+  -judge-model '<model-listed-by-/v1/models>' \
+  -report /tmp/llm-bench-frontier-judge.md
+```
+
+For `openai-compat`, set the Bearer token with
+`LLM_BENCH_JUDGE_API_KEY`; `-judge-api-key` exists for local experiments but
+can leak through shell history or process listings. Report provenance records
+the judge provider as `openai-compat:<endpoint-id>` so two endpoints with the
+same model id do not share cached digest-less verdicts.
+
+For local subscription-backed diagnostics, `-judge-transport claude-cli`
+adapts `claude -p` headless mode:
+
+```bash
+go run ./cmd/llm-bench \
+  -traces 'cmd/llm-bench/testdata/smoke/*.json' \
+  -models 'ollama/qwen3.6:35b-a3b' \
+  -scorer llm-judge \
+  -judge-transport claude-cli \
+  -judge-model opus \
+  -report /tmp/llm-bench-claude-cli-judge.md
+```
+
+Treat `claude-cli` provenance as "Claude Code CLI judge", not a raw model API:
+the CLI does not expose a temperature pin, and its headless runtime is still an
+agent surface. Use `-judge-stability-runs 3` before citing a borderline pass.
+
 ## Local trace capture
 
 Captured traces are written under `docs/llm/traces/`, which is gitignored
