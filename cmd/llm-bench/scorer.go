@@ -118,7 +118,7 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 		if len(labels) == 0 {
 			return nil, fmt.Errorf("manual scorer: no labels in %q", opts.manualLabelsPath)
 		}
-		return newManualScorer(labels), nil
+		return newManualScorer(labels)
 	default:
 		return nil, fmt.Errorf("unknown scorer %q", name)
 	}

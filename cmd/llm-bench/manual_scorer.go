@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 )
 
 // ManualScorer scores AnswerQuality from human labels rather than an LLM judge
@@ -39,14 +40,30 @@ func manualScorerKey(traceID, model string) manualLabelKey {
 	}
 }
 
-// newManualScorer indexes the labels by canonical (trace, model) key. A later
-// label for the same key wins, matching last-write-wins JSONL semantics.
-func newManualScorer(labels []Label) *ManualScorer {
+// newManualScorer indexes the labels by canonical (trace, model) key. Duplicate
+// labels for a key are rejected because the live replay path has no artifact
+// hash to bind the score to a specific labeled output.
+func newManualScorer(labels []Label) (*ManualScorer, error) {
 	m := make(map[manualLabelKey]manualLabel, len(labels))
+	seen := make(map[manualLabelKey]string, len(labels))
 	for _, l := range labels {
-		m[manualScorerKey(l.TraceID, l.CandidateModel)] = manualLabel{quality: l.ExpectedAnswerQuality, notes: l.LabelNotes}
+		key := manualScorerKey(l.TraceID, l.CandidateModel)
+		source := manualLabelSource(l)
+		if prev, ok := seen[key]; ok {
+			return nil, fmt.Errorf("manual scorer: ambiguous labels for (trace, model) key %q/%q: %s and %s", key.traceID, key.model, prev, source)
+		}
+		seen[key] = source
+		m[key] = manualLabel{quality: l.ExpectedAnswerQuality, notes: l.LabelNotes}
 	}
-	return &ManualScorer{labels: m}
+	return &ManualScorer{labels: m}, nil
+}
+
+func manualLabelSource(l Label) string {
+	source := fmt.Sprintf("trace %q model %q", l.TraceID, l.CandidateModel)
+	if hash := strings.TrimSpace(l.ArtifactHash); hash != "" {
+		source += fmt.Sprintf(" artifact_hash %q", hash)
+	}
+	return source
 }
 
 // Score implements Scorer. AnswerQuality is the human label; a missing label is
@@ -109,7 +126,10 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string) (str
 		seen[key] = id
 		labels = append(labels, m.Label)
 	}
-	scorer := newManualScorer(labels)
+	scorer, err := newManualScorer(labels)
+	if err != nil {
+		return "", err
+	}
 
 	results := make([]Result, 0, len(matched))
 	modelSeen := map[string]bool{}

@@ -30,6 +30,26 @@ func TestNewScorer_ManualRequiresLabels(t *testing.T) {
 	}
 }
 
+func TestNewScorer_ManualRejectsAmbiguousTraceModelLabels(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONL(path, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: "sha256:first", ExpectedAnswerQuality: 1.0},
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: "sha256:second", ExpectedAnswerQuality: 0.5},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := newScorer(context.Background(), "manual", scorerOptions{manualLabelsPath: path})
+	if err == nil {
+		t.Fatalf("newScorer(manual) accepted ambiguous labels for the same trace/model; want error")
+	}
+	for _, want := range []string{"ambiguous", "(trace, model)", "sha256:first", "sha256:second"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
+	}
+}
+
 func TestFormatManualQualityReport_AggregatesPerModelAndFlagsLatency(t *testing.T) {
 	results := []Result{
 		{Model: "qwen3:8b", TraceID: "t1", Score: Score{AnswerQuality: 1.0}},
@@ -92,9 +112,12 @@ func TestRunManualReport_RejectsAmbiguousTraceModel(t *testing.T) {
 }
 
 func TestManualScorer_ReturnsHumanLabelAsAnswerQuality(t *testing.T) {
-	s := newManualScorer([]Label{
+	s, err := newManualScorer([]Label{
 		{TraceID: "conversation-fa-l02", CandidateModel: "qwen3:8b", ExpectedAnswerQuality: 0.5, LabelNotes: "partial"},
 	})
+	if err != nil {
+		t.Fatalf("newManualScorer: %v", err)
+	}
 	trace := Trace{ID: "conversation-fa-l02"}
 	actual := Result{Model: "qwen3:8b", Transcript: []Turn{{Role: "assistant", Content: "ans"}}}
 	score, err := s.Score(context.Background(), trace, actual)
@@ -109,9 +132,12 @@ func TestManualScorer_ReturnsHumanLabelAsAnswerQuality(t *testing.T) {
 func TestManualScorer_MatchesProviderPrefixedAndCasedModel(t *testing.T) {
 	// Labels are stored bare ("qwen3:8b"); a run's actual.Model may carry the
 	// bench provider prefix ("ollama/qwen3:8b") or different casing.
-	s := newManualScorer([]Label{
+	s, err := newManualScorer([]Label{
 		{TraceID: "t1", CandidateModel: "qwen3:8b", ExpectedAnswerQuality: 1.0},
 	})
+	if err != nil {
+		t.Fatalf("newManualScorer: %v", err)
+	}
 	score, err := s.Score(context.Background(), Trace{ID: "t1"}, Result{Model: "ollama/QWEN3:8b"})
 	if err != nil {
 		t.Fatalf("Score: %v", err)
@@ -122,9 +148,12 @@ func TestManualScorer_MatchesProviderPrefixedAndCasedModel(t *testing.T) {
 }
 
 func TestManualScorer_MissingLabelFailsLoud(t *testing.T) {
-	s := newManualScorer([]Label{
+	s, err := newManualScorer([]Label{
 		{TraceID: "t1", CandidateModel: "qwen3:8b", ExpectedAnswerQuality: 1.0},
 	})
+	if err != nil {
+		t.Fatalf("newManualScorer: %v", err)
+	}
 	if _, err := s.Score(context.Background(), Trace{ID: "t1"}, Result{Model: "gemma4:31b"}); err == nil {
 		t.Fatalf("Score for an unlabeled (trace, model) returned nil error; want a loud miss")
 	}
