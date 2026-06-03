@@ -283,13 +283,14 @@ func main() {
 
 	jt := resolveJudgeTransportConfig(*judgeTransport, *judgeBaseURL, *judgeAPIKey, os.Getenv)
 	scorer, err := newScorer(ctx, *scorerName, scorerOptions{
-		ollamaURL:      resolvedJudgeURL,
-		judgeModel:     resolvedJudgeModel,
-		judgeTimeout:   *judgeTimeout,
-		judgeCache:     cacheStore,
-		judgeTransport: jt.transport,
-		judgeBaseURL:   jt.baseURL,
-		judgeAPIKey:    jt.apiKey,
+		ollamaURL:        resolvedJudgeURL,
+		judgeModel:       resolvedJudgeModel,
+		judgeTimeout:     *judgeTimeout,
+		judgeCache:       cacheStore,
+		judgeTransport:   jt.transport,
+		judgeBaseURL:     jt.baseURL,
+		judgeAPIKey:      jt.apiKey,
+		manualLabelsPath: *labelsPath,
 	})
 	if err != nil {
 		log.Fatalf("llm-bench: scorer: %v", err)

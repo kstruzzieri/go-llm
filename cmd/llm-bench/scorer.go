@@ -682,8 +682,9 @@ type judgeResponse struct {
 // echoed struct literal, `{}`, a quoted example — so the FIRST object is not
 // reliably the verdict (observed live as "missing answer_quality"). We scan
 // each candidate object and select the one that actually carries
-// answer_quality; objects that don't parse or lack the field are skipped.
-// Comment stripping is handled by firstJSONObject.
+// answer_quality; when multiple verdict-shaped objects are present, the last
+// one wins so quoted candidate text cannot self-score before the judge's final
+// verdict. Comment stripping is handled by firstJSONObject.
 func parseJudgeResponse(content string) (judgeResponse, error) {
 	raw := strings.TrimSpace(content)
 	if raw == "" {
@@ -691,18 +692,26 @@ func parseJudgeResponse(content string) (judgeResponse, error) {
 	}
 
 	sawObject := false
+	sawVerdictObject := false
+	var lastVerdict judgeResponse
+	haveLastVerdict := false
+	var lastVerdictErr error
 	for pos := 0; pos < len(raw); {
 		idx := strings.IndexByte(raw[pos:], '{')
 		if idx < 0 {
 			break
 		}
 		abs := pos + idx
-		obj := firstJSONObject(raw[abs:])
+		obj, consumed := firstJSONObjectWithEnd(raw[abs:])
 		if obj == "" {
 			pos = abs + 1
 			continue
 		}
 		sawObject = true
+		nextPos := abs + consumed
+		if nextPos <= pos {
+			nextPos = abs + 1
+		}
 		var parsed struct {
 			AnswerQuality *float64 `json:"answer_quality"`
 			Justification string   `json:"justification"`
@@ -710,16 +719,23 @@ func parseJudgeResponse(content string) (judgeResponse, error) {
 		}
 		if err := json.Unmarshal([]byte(obj), &parsed); err != nil || parsed.AnswerQuality == nil {
 			// Not the verdict object (malformed, or a non-verdict blob like an
-			// echoed struct literal). Resume scanning after this object's start.
-			pos = abs + 1
+			// echoed struct literal). Resume scanning after this object.
+			pos = nextPos
 			continue
 		}
+		sawVerdictObject = true
 		quality := *parsed.AnswerQuality
 		if quality < 0 || quality > 1 {
-			return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, quality)
+			lastVerdictErr = fmt.Errorf("%w: answer_quality %.3f outside [0,1]", errMalformedJudgeResponse, quality)
+			haveLastVerdict = false
+			pos = nextPos
+			continue
 		}
 		if !validJudgeAnswerQuality(quality) {
-			return judgeResponse{}, fmt.Errorf("%w: answer_quality %.3f must be exactly one of 0.0, 0.5, or 1.0", errOffGridJudgeScore, quality)
+			lastVerdictErr = fmt.Errorf("%w: answer_quality %.3f must be exactly one of 0.0, 0.5, or 1.0", errOffGridJudgeScore, quality)
+			haveLastVerdict = false
+			pos = nextPos
+			continue
 		}
 		justification := strings.TrimSpace(parsed.Justification)
 		if justification == "" {
@@ -728,14 +744,23 @@ func parseJudgeResponse(content string) (judgeResponse, error) {
 		if justification == "" {
 			justification = "no justification returned"
 		}
-		return judgeResponse{
+		lastVerdict = judgeResponse{
 			AnswerQuality: quality,
 			Justification: normalizeNote(justification),
-		}, nil
+		}
+		haveLastVerdict = true
+		lastVerdictErr = nil
+		pos = nextPos
 	}
 
+	if haveLastVerdict {
+		return lastVerdict, nil
+	}
 	if !sawObject {
 		return judgeResponse{}, fmt.Errorf("%w: missing JSON object", errMalformedJudgeResponse)
+	}
+	if sawVerdictObject && lastVerdictErr != nil {
+		return judgeResponse{}, lastVerdictErr
 	}
 	return judgeResponse{}, fmt.Errorf("%w: missing answer_quality", errMalformedJudgeResponse)
 }
@@ -753,9 +778,14 @@ func validJudgeAnswerQuality(v float64) bool {
 // inside the justification string is preserved verbatim. Comment-aware scanning
 // also prevents a brace inside a comment from corrupting the depth count.
 func firstJSONObject(s string) string {
+	obj, _ := firstJSONObjectWithEnd(s)
+	return obj
+}
+
+func firstJSONObjectWithEnd(s string) (string, int) {
 	start := strings.IndexByte(s, '{')
 	if start < 0 {
-		return ""
+		return "", 0
 	}
 
 	var b strings.Builder
@@ -791,7 +821,7 @@ func firstJSONObject(s string) string {
 		}
 		if ch == '/' && i+1 < len(s) && s[i+1] == '*' {
 			i += 2
-			for i+1 < len(s) && !(s[i] == '*' && s[i+1] == '/') {
+			for i+1 < len(s) && (s[i] != '*' || s[i+1] != '/') {
 				i++
 			}
 			i++      // position on the closing '/'
@@ -808,10 +838,10 @@ func firstJSONObject(s string) string {
 		}
 		b.WriteByte(ch)
 		if ch == '}' && depth == 0 {
-			return b.String()
+			return b.String(), i + 1
 		}
 	}
-	return ""
+	return "", 0
 }
 
 func sameModelSelector(a, b string) bool {

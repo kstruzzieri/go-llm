@@ -1,9 +1,73 @@
 package main
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("LLM_BENCH_TEST_MAIN") == "1" {
+		main()
+		return
+	}
+	os.Exit(m.Run())
+}
+
+func TestMainManualScorerUsesLabelsFlag(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"message": map[string]string{
+				"role":    "assistant",
+				"content": "smoke-ok",
+			},
+			"done":              true,
+			"prompt_eval_count": 1,
+			"eval_count":        1,
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	labels := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "smoke-minimal-001", CandidateModel: "fake", ExpectedAnswerQuality: 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(dir, "report.md")
+
+	cmd := exec.Command(os.Args[0],
+		"-traces", "testdata/smoke/minimal.json",
+		"-models", "fake",
+		"-scorer", "manual",
+		"-labels", labels,
+		"-ollama-url", server.URL,
+		"-judge-cache", "",
+		"-report", report,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -scorer manual failed: %v\n%s", err, out)
+	}
+	reportBytes, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(reportBytes), "manual-label") {
+		t.Fatalf("report did not include manual scorer notes:\n%s", reportBytes)
+	}
+}
 
 func TestResolveToolSchemaSourceStdio(t *testing.T) {
 	src, err := resolveToolSchemaSource("echo mock-server", "")
