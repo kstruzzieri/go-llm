@@ -68,6 +68,9 @@ type scorerOptions struct {
 	judgeTransport string
 	judgeBaseURL   string
 	judgeAPIKey    string
+	// manualLabelsPath is the human labels JSONL consumed by the "manual"
+	// scorer (AnswerQuality = expected_answer_quality).
+	manualLabelsPath string
 	// judgeCache is the optional judge response cache. Callers MUST avoid
 	// the typed-nil interface trap: assign only a non-nil concrete
 	// implementation (e.g. *sqliteJudgeCache) or leave this field unset.
@@ -104,7 +107,17 @@ func newScorer(ctx context.Context, name string, opts scorerOptions) (Scorer, er
 		scorer.BypassCache = opts.bypassCache
 		return scorer, nil
 	case "manual":
-		return nil, fmt.Errorf("manual scorer not yet implemented")
+		if strings.TrimSpace(opts.manualLabelsPath) == "" {
+			return nil, fmt.Errorf("manual scorer requires -labels (human labels JSONL)")
+		}
+		labels, err := loadLabels(opts.manualLabelsPath)
+		if err != nil {
+			return nil, fmt.Errorf("manual scorer: load labels: %w", err)
+		}
+		if len(labels) == 0 {
+			return nil, fmt.Errorf("manual scorer: no labels in %q", opts.manualLabelsPath)
+		}
+		return newManualScorer(labels), nil
 	default:
 		return nil, fmt.Errorf("unknown scorer %q", name)
 	}

@@ -41,6 +41,7 @@ func main() {
 
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
+	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	labelsPath := flag.String("labels", filepath.Join("docs", "llm", "calibration", "labels.jsonl"), "Path to labels.jsonl (Phase 2)")
 	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
 	artifactsPath := flag.String("artifacts", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Path to artifacts.jsonl (Phase 2)")
@@ -73,8 +74,11 @@ func main() {
 	if *calibrate {
 		modes++
 	}
+	if *manualReport {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -210,6 +214,22 @@ func main() {
 		if code := calibrationExitCode(res.Verdict); code != 0 {
 			os.Exit(code)
 		}
+		return
+	}
+
+	if *manualReport {
+		report, err := runManualReport(ctx, *labelsPath, *artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: manual-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: manual quality report written to %s\n", *reportPath)
 		return
 	}
 

@@ -105,6 +105,41 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 	return out
 }
 
+// formatManualQualityReport renders a per-model AnswerQuality comparison from
+// human labels (the manual scorer). It deliberately omits latency: frozen
+// labeled artifacts carry no timing, so latency is a separate measurement
+// pass. Showing a zero latency column would be misleading, so it is dropped
+// and the omission is stated.
+func formatManualQualityReport(models []string, results []Result) string {
+	byModel := make(map[string][]Result, len(models))
+	for _, r := range results {
+		byModel[r.Model] = append(byModel[r.Model], r)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "# llm-bench — human-judged quality baseline (manual scorer)\n\n")
+	fmt.Fprintf(&b, "Generated: %s\n\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintln(&b, "AnswerQuality is the human label (`expected_answer_quality`): gold-standard, deterministic, on-box — no LLM judge, no model call, nothing leaves the box.")
+	fmt.Fprintln(&b, "Latency is NOT included here — frozen artifacts carry no timing; measure latency in a separate pass.")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "## Quality by model")
+	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | n |")
+	fmt.Fprintln(&b, "|---|---|---|")
+	for _, m := range models {
+		rs := byModel[m]
+		agg := aggregate(rs)
+		scored := len(rs) - agg.errors
+		qCell := "n/a"
+		if scored > 0 {
+			qCell = fmt.Sprintf("%.2f / %.2f / %.2f / %.2f / %.2f",
+				agg.meanQuality, agg.qualityP25, agg.qualityP50, agg.qualityP75, agg.qualityP90)
+		}
+		fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), qCell, scored)
+	}
+	fmt.Fprintln(&b)
+	return redactPaths(b.String())
+}
+
 // reportOptions carries metadata that formatReport embeds in report headers.
 type reportOptions struct {
 	Scorer               string
