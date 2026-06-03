@@ -320,7 +320,7 @@ type calibrateOptions struct {
 	ArtifactsPath string
 	Scorer        Scorer
 	JudgeModel    string
-	JudgeProvider string // provider instance identity for report provenance (e.g. "ollama", "openai-compat")
+	JudgeProvider string // provider instance identity for report provenance (e.g. "ollama", "openai-compat:<endpoint-id>")
 	ReportDir     string
 	MinLabels     int // defaults to calibrationDefaultMinLabels when zero
 	StabilityRuns int // when >1, runs the judge exactly N times per artifact and reports max-min spread as a diagnostic (does NOT gate the PASS/FAIL verdict); uses bypass-cache (Task 23)

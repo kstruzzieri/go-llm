@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -137,8 +138,9 @@ type judgeTransport struct {
 // "ollama" (case-insensitive) is the default local path; "openai-compat"
 // routes a frontier judge through provider/openaicompat. The returned
 // providerName is the provider *instance* identity that gets folded into the
-// cache key and provenance — for openai-compat it is the provider's Name(),
-// not the API kind, so a renamed instance keys distinctly.
+// cache key and provenance. For openai-compat it is endpoint-scoped so two
+// base URLs that expose the same model id cannot reuse each other's digest-less
+// cached verdicts.
 func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
 	switch normalizeModelSelector(opts.judgeTransport) {
 	case "", defaultBenchProvider:
@@ -159,7 +161,11 @@ func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
 		if key := strings.TrimSpace(opts.judgeAPIKey); key != "" {
 			clientOpts = append(clientOpts, openaicompat.WithAPIKey(key))
 		}
-		prov := openaicompat.NewProvider(openaicompat.NewClient(baseURL, clientOpts...))
+		providerName := openAICompatJudgeProviderName(baseURL)
+		prov := openaicompat.NewProvider(
+			openaicompat.NewClient(baseURL, clientOpts...),
+			openaicompat.WithProviderName(providerName),
+		)
 		adapter := newOpenAICompatJudge(prov)
 		return judgeTransport{chat: adapter, checker: adapter, providerName: prov.Name()}, nil
 	case claudeCLITransport:
@@ -168,6 +174,28 @@ func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
 	default:
 		return judgeTransport{}, fmt.Errorf("unknown judge transport %q (want %q, %q, or %q)", opts.judgeTransport, defaultBenchProvider, openAICompatTransport, claudeCLITransport)
 	}
+}
+
+func openAICompatJudgeProviderName(baseURL string) string {
+	canonical := canonicalJudgeBaseURL(baseURL)
+	sum := sha256.Sum256([]byte(canonical))
+	return fmt.Sprintf("%s:%s", openAICompatTransport, hex.EncodeToString(sum[:])[:12])
+}
+
+func canonicalJudgeBaseURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return raw
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	u.Host = strings.ToLower(u.Host)
+	u.User = nil
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawPath = ""
+	u.Path = strings.TrimRight(u.Path, "/")
+	return u.String()
 }
 
 // ExactMatchScorer is a dependency-free baseline. Answer quality is scored
@@ -255,7 +283,7 @@ func resolveJudgeDigest(ctx context.Context, checker judgeModelChecker, judgeMod
 // typed-nil interface trap before assignment.
 type LLMJudgeScorer struct {
 	Client           judgeChatClient
-	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat"); folded into the cache key and persisted for provenance
+	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat:<endpoint-id>"); folded into the cache key and persisted for provenance
 	JudgeModel       string
 	JudgeModelDigest string // optional; empty when /api/show was unavailable
 	JudgeTimeout     time.Duration

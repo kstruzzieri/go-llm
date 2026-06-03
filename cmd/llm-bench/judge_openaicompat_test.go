@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -155,14 +156,31 @@ func TestNewJudgeTransport_OpenAICompat(t *testing.T) {
 	if err != nil {
 		t.Fatalf("newJudgeTransport: %v", err)
 	}
-	if tr.providerName != "openai-compat" {
-		t.Fatalf("providerName = %q; want openai-compat", tr.providerName)
+	if want := openAICompatJudgeProviderName("https://api.example.com"); tr.providerName != want {
+		t.Fatalf("providerName = %q; want %q", tr.providerName, want)
 	}
 	if _, ok := tr.chat.(*openAICompatJudgeClient); !ok {
 		t.Fatalf("chat is %T; want *openAICompatJudgeClient", tr.chat)
 	}
 	if _, ok := tr.checker.(*openAICompatJudgeClient); !ok {
 		t.Fatalf("checker is %T; want *openAICompatJudgeClient", tr.checker)
+	}
+}
+
+func TestNewJudgeTransport_OpenAICompatProviderNameDistinguishesBaseURL(t *testing.T) {
+	first, err := newJudgeTransport(scorerOptions{judgeTransport: "openai-compat", judgeBaseURL: "https://judge-a.example.com"})
+	if err != nil {
+		t.Fatalf("newJudgeTransport first: %v", err)
+	}
+	second, err := newJudgeTransport(scorerOptions{judgeTransport: "openai-compat", judgeBaseURL: "https://judge-b.example.com"})
+	if err != nil {
+		t.Fatalf("newJudgeTransport second: %v", err)
+	}
+	if first.providerName == second.providerName {
+		t.Fatalf("providerName reused across distinct base URLs: %q", first.providerName)
+	}
+	if !strings.HasPrefix(first.providerName, openAICompatTransport+":") {
+		t.Fatalf("providerName = %q; want %s:<endpoint-id>", first.providerName, openAICompatTransport)
 	}
 }
 
@@ -184,7 +202,7 @@ func TestNewJudgeTransport_UnknownRejected(t *testing.T) {
 
 // TestNewScorer_OpenAICompatSetsJudgeProvider drives newScorer end-to-end on
 // the openai-compat path: /v1/models validation passes and the returned scorer
-// records JudgeProvider="openai-compat".
+// records an endpoint-scoped JudgeProvider.
 func TestNewScorer_OpenAICompatSetsJudgeProvider(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/models" {
@@ -208,8 +226,8 @@ func TestNewScorer_OpenAICompatSetsJudgeProvider(t *testing.T) {
 	if !ok {
 		t.Fatalf("scorer type %T; want *LLMJudgeScorer", sc)
 	}
-	if js.JudgeProvider != "openai-compat" {
-		t.Fatalf("JudgeProvider = %q; want openai-compat", js.JudgeProvider)
+	if !strings.HasPrefix(js.JudgeProvider, openAICompatTransport+":") {
+		t.Fatalf("JudgeProvider = %q; want %s:<endpoint-id>", js.JudgeProvider, openAICompatTransport)
 	}
 }
 

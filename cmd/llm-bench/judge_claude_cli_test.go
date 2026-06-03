@@ -66,6 +66,9 @@ func TestClaudeCLIJudge_ChatExecsLockedDownAndReturnsResult(t *testing.T) {
 	if !argHasValue(gotArgs, "--allowedTools", "") {
 		t.Fatalf("--allowedTools not disabled: %v", gotArgs)
 	}
+	if !argHasValue(gotArgs, "--tools", "") {
+		t.Fatalf("--tools not disabled: %v", gotArgs)
+	}
 	if !argHasValue(gotArgs, "--output-format", "json") {
 		t.Fatalf("--output-format not json: %v", gotArgs)
 	}

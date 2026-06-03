@@ -26,9 +26,9 @@ var claudeCLIModelAliases = []string{"opus", "sonnet", "haiku"}
 // claudeCLIJudgeClient adapts the `claude` CLI (headless `-p` mode) to the
 // Ollama-typed judge seams. It runs on the user's Claude subscription (no API
 // billing) and is locked down for judging: the judge system prompt REPLACES
-// Claude Code's default system prompt (--system-prompt), tools are disabled
-// (--allowedTools ""), and each call runs in an empty working directory so no
-// CLAUDE.md leaks into the judge context.
+// Claude Code's default system prompt (--system-prompt), tools are removed
+// (--tools "") and not auto-allowed (--allowedTools ""), and each call runs in
+// an empty working directory so no CLAUDE.md leaks into the judge context.
 //
 // Cleanliness caveat: this is the Claude Code *agent* in headless mode, not a
 // bare chat completion. Even with the system-prompt override and tools
@@ -66,6 +66,7 @@ func (j *claudeCLIJudgeClient) Chat(ctx context.Context, req ollama.ChatRequest)
 		"-p",
 		"--system-prompt", system,
 		"--allowedTools", "",
+		"--tools", "",
 		"--output-format", "json",
 		"--model", j.model,
 	}

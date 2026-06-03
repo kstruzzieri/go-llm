@@ -16,7 +16,7 @@ output.
 - **Trace set**: `<label>`, count: N, manifest hash: `sha256:...`
 - **Models under test**: `<comma list, provider/name>`
 - **Scorer**: `llm-judge`
-  - Judge provider: `<ollama | openai-compat | claude-cli>`
+  - Judge provider: `<ollama | openai-compat:<endpoint-id> | claude-cli>`
   - Judge model: `<name>`
   - Judge model digest (when available via /api/show): `<digest>`
   - Judge cache hit rate: X%

@@ -20,8 +20,9 @@ import (
 
 // judgeCacheKeyVersion is bumped to force-invalidate every entry. Increment
 // when changing the canonical request shape (new field, semantic shift).
-// v3 adds JudgeProvider so frontier (openai-compat) and local (ollama)
-// verdicts for an identically-named, digest-less judge model cannot alias.
+// v3 adds JudgeProvider so frontier (openai-compat:<endpoint-id>) and local
+// (ollama) verdicts for an identically-named, digest-less judge model cannot
+// alias.
 const judgeCacheKeyVersion = 3
 
 // judgeCacheRequest is the canonical envelope hashed to produce the cache
@@ -30,10 +31,9 @@ const judgeCacheKeyVersion = 3
 // affect execution, not the judge's verdict.
 //
 // JudgeProvider is the judge provider *instance* identity (e.g. "ollama" or
-// the openai-compat instance name), not the API kind. Two providers serving
-// the same model name produce different keys so a frontier-judge verdict
-// never reuses a local one's cached score (see feedback: provider instance
-// vs kind).
+// "openai-compat:<endpoint-id>"), not the API kind. Two providers serving the
+// same model name produce different keys so a frontier-judge verdict never
+// reuses another provider's cached score.
 type judgeCacheRequest struct {
 	Version          int     `json:"version"`
 	JudgeProvider    string  `json:"judge_provider"`
@@ -72,7 +72,7 @@ func canonicalCacheKey(r judgeCacheRequest) string {
 // parsed verdict (denormalized so cache audits don't need to re-parse).
 type judgeCacheEntry struct {
 	CacheKey         string
-	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat")
+	JudgeProvider    string // provider instance identity (e.g. "ollama", "openai-compat:<endpoint-id>")
 	JudgeModel       string
 	JudgeModelDigest string
 	TraceID          string

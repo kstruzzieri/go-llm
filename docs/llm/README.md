@@ -108,7 +108,9 @@ go run ./cmd/llm-bench \
 
 For `openai-compat`, set the Bearer token with
 `LLM_BENCH_JUDGE_API_KEY`; `-judge-api-key` exists for local experiments but
-can leak through shell history or process listings.
+can leak through shell history or process listings. Report provenance records
+the judge provider as `openai-compat:<endpoint-id>` so two endpoints with the
+same model id do not share cached digest-less verdicts.
 
 For local subscription-backed diagnostics, `-judge-transport claude-cli`
 adapts `claude -p` headless mode:

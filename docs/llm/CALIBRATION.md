@@ -109,6 +109,10 @@ LLM_BENCH_JUDGE_API_KEY=... llm-bench -calibrate \
   -calibrate-agreement exact
 ```
 
+`openai-compat` reports provider provenance as `openai-compat:<endpoint-id>`;
+the endpoint id is derived from the base URL so two compatible endpoints with
+the same model id do not share cached digest-less verdicts.
+
 For subscription-backed Claude Code diagnostics:
 
 ```
