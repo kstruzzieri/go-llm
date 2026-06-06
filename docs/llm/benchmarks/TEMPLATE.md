@@ -25,7 +25,9 @@ output.
   - If `manual`:
     - Label manifest hash: `sha256:...`
     - Artifact manifest hash: `sha256:...`
-    - Paired label coverage: X/Y retained traces complete
+    - Valid labeled artifacts: X (≥50 required → SUFFICIENT)
+    - Paired label coverage: X/Y retained traces complete (≥20 complete
+      traces required → SUFFICIENT)
     - Stale/missing labels: N stale, N missing
     - Labeler / reviewer: `<name> / <name>`
 - **Exact command** (match the declared scorer path):
@@ -34,8 +36,11 @@ output.
   llm-bench -traces '<glob>' -models '...' -scorer llm-judge -judge-model ... \
     -judge-transport <ollama|openai-compat|claude-cli> -judge-cache <path> -report <path>
 
-  # manual-label path (quality from human labels over frozen artifacts):
+  # manual-label path, quality from human labels over frozen artifacts:
   llm-bench -manual-report -labels <labels.jsonl> -artifacts <artifacts.jsonl> -report <path>
+
+  # manual-label path, separate replay metrics over the same trace set:
+  llm-bench -traces '<glob>' -models '...' -scorer exact-match -report <path>
   ```
 
 ## Calibration / Labeling (embedded — not linked to a gitignored file)
@@ -46,7 +51,8 @@ output.
   known subtle-bug fixtures pass → **PASS**
 - Stability runs (M=3, diagnostic): max spread observed: 0.NN
 - Manual-label path: paired labels complete for X/Y retained traces; stale and
-  missing labels excluded and reported.
+  missing labels excluded and reported; ≥50 valid labeled artifacts and ≥20
+  complete retained traces.
 
 ## Results
 | Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90) | TotalTokens | n |

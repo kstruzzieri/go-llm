@@ -19,9 +19,10 @@ A benchmark run is "accepted" iff **all** of:
      or a documented multi-vote/stability policy passes. Single-draw unpinned
      judge runs are diagnostic only.
    - **Manual-label path:** human labels are fully paired across the retained
-     candidate lineup, label/artifact manifest hashes are recorded, stale or
-     missing labels are excluded and reported, and the labeler/reviewer is
-     named in provenance.
+     candidate lineup, with at least 50 valid labeled artifacts and at least
+     20 fully paired retained traces. Label/artifact manifest hashes are
+     recorded, stale or missing labels are excluded and reported, and the
+     labeler/reviewer is named in provenance.
 3. **Tool-call evidence is non-vacuous when tool-use is claimed.**
    `ToolArgsValid` coverage is reported both overall and on the expected
    tool-call subset. For accepted tool-use benchmarks, `ToolArgsValid` is `computed=true`
