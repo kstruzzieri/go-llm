@@ -69,6 +69,48 @@ func TestMainManualScorerUsesLabelsFlag(t *testing.T) {
 	}
 }
 
+func TestMainPairedReportEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	reportPath := filepath.Join(dir, "report.md")
+
+	a1A, l1A := labeledArtifact("t1", "ollama/a", "x", 1.0, "keith")
+	a1B, l1B := labeledArtifact("t1", "ollama/b", "x", 0.0, "keith")
+	if err := writeJSONL(artsPath, []any{a1A, a1B}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labelsPath, []any{l1A, l1B}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-paired-report",
+		"-labels", labelsPath,
+		"-artifacts", artsPath,
+		"-baseline", "ollama/a",
+		"-report", reportPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -paired-report failed: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	for _, want := range []string{
+		"Quality by model (paired-complete)",
+		"Model vs baseline (ollama/a)",
+		"Bootstrap: seed=1, n=10000",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("paired report missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestResolveToolSchemaSourceStdio(t *testing.T) {
 	src, err := resolveToolSchemaSource("echo mock-server", "")
 	if err != nil {

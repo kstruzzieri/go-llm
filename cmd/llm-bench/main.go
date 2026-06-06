@@ -42,6 +42,8 @@ func main() {
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
+	pairedReport := flag.Bool("paired-report", false, "Emit the paired-label report: paired-complete means, completeness worklist, win/loss/tie matrix, bootstrap delta CIs, resolution diagnostic (uses -labels, -artifacts, -baseline, -report)")
+	baseline := flag.String("baseline", "", "Baseline model selector for -paired-report deltas (default: first lineup model, derived from artifacts)")
 	labelsPath := flag.String("labels", filepath.Join("docs", "llm", "calibration", "labels.jsonl"), "Path to labels.jsonl (Phase 2)")
 	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
 	artifactsPath := flag.String("artifacts", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Path to artifacts.jsonl (Phase 2)")
@@ -77,8 +79,11 @@ func main() {
 	if *manualReport {
 		modes++
 	}
+	if *pairedReport {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -230,6 +235,22 @@ func main() {
 			log.Fatalf("llm-bench: write report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: manual quality report written to %s\n", *reportPath)
+		return
+	}
+
+	if *pairedReport {
+		report, err := runPairedReport(*labelsPath, *artifactsPath, *baseline)
+		if err != nil {
+			log.Fatalf("llm-bench: paired-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: paired-label report written to %s\n", *reportPath)
 		return
 	}
 
