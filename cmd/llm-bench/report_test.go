@@ -141,6 +141,85 @@ func TestAggregateSumsTokens(t *testing.T) {
 	}
 }
 
+func TestAggregateSumsGenAndPromptEvalTokens(t *testing.T) {
+	rs := []Result{
+		{Score: Score{GenTokens: 100, PromptEvalTokens: 40, TotalTokens: 140}},
+		{Score: Score{GenTokens: 0, PromptEvalTokens: 0, TotalTokens: 0}}, // unavailable — does NOT count
+		{Score: Score{GenTokens: 50, PromptEvalTokens: 20, TotalTokens: 70}},
+	}
+	agg := aggregate(rs)
+	if agg.genTokensSum != 150 || agg.genTokensAvailable != 2 {
+		t.Errorf("gen tokens sum/available = %d/%d; want 150/2", agg.genTokensSum, agg.genTokensAvailable)
+	}
+	if agg.promptEvalTokensSum != 60 || agg.promptEvalTokensAvailable != 2 {
+		t.Errorf("prompt-eval tokens sum/available = %d/%d; want 60/2", agg.promptEvalTokensSum, agg.promptEvalTokensAvailable)
+	}
+}
+
+func TestAggregateSumsThinkingTokensOnlyWhenComputed(t *testing.T) {
+	rs := []Result{
+		{Score: Score{GenTokens: 100, ThinkingTokens: 30, ThinkingTokensComputed: true}},
+		{Score: Score{GenTokens: 50, ThinkingTokens: 0, ThinkingTokensComputed: false}}, // Ollama: not exposed
+	}
+	agg := aggregate(rs)
+	if agg.thinkingTokensSum != 30 || agg.thinkingTokensAvailable != 1 {
+		t.Errorf("thinking tokens sum/available = %d/%d; want 30/1 (only computed rows count)", agg.thinkingTokensSum, agg.thinkingTokensAvailable)
+	}
+}
+
+func TestFormatTokenBreakdown_ShowsGenVsPromptEval(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "t1", Score: Score{GenTokens: 100, PromptEvalTokens: 40, TotalTokens: 140}},
+		{Model: "m", TraceID: "t2", Score: Score{GenTokens: 50, PromptEvalTokens: 20, TotalTokens: 70}},
+	}
+	out := formatTokenBreakdown([]string{"m"}, results)
+	for _, want := range []string{
+		"## Token breakdown (gen vs prompt-eval)",
+		"thinking",
+		"| m | 150 / 75 | 60 / 30 | n/a | 2 |",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("token breakdown missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatTokenBreakdown_ShowsThinkingWhenComputed(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "t1", Score: Score{GenTokens: 100, PromptEvalTokens: 40, ThinkingTokens: 30, ThinkingTokensComputed: true}},
+	}
+	out := formatTokenBreakdown([]string{"m"}, results)
+	if !strings.Contains(out, "| m | 100 / 100 | 40 / 40 | 30 / 30 | 1 |") {
+		t.Errorf("thinking column should populate when computed:\n%s", out)
+	}
+}
+
+// Thinking has an explicit computed flag, so unlike gen/prompt-eval (where 0 is
+// treated as "not reported"), a computed thinking value of 0 is a REAL
+// measurement and must render as 0/0, not n/a — this lets a reader distinguish
+// "measured zero reasoning" from "provider does not isolate reasoning".
+func TestFormatTokenBreakdown_ComputedZeroThinkingIsRealZeroNotNA(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "t1", Score: Score{GenTokens: 100, PromptEvalTokens: 40, ThinkingTokens: 0, ThinkingTokensComputed: true}},
+	}
+	out := formatTokenBreakdown([]string{"m"}, results)
+	if !strings.Contains(out, "| m | 100 / 100 | 40 / 40 | 0 / 0 | 1 |") {
+		t.Errorf("computed thinking=0 must render as a real 0/0 (measured), not n/a:\n%s", out)
+	}
+}
+
+func TestFormatReport_EmitsTokenBreakdownAndNoNaN(t *testing.T) {
+	out := formatReport([]string{"m"}, []Result{
+		{Model: "m", TraceID: "t1", Score: Score{GenTokens: 10, PromptEvalTokens: 5, TotalTokens: 15}},
+	}, reportOptions{Scorer: "exact-match"})
+	if !strings.Contains(out, "## Token breakdown (gen vs prompt-eval)") {
+		t.Errorf("report should include the token breakdown section:\n%s", out)
+	}
+	if strings.Contains(out, "NaN") {
+		t.Errorf("token breakdown must never render NaN:\n%s", out)
+	}
+}
+
 func TestFormatReportSummaryMatchesTemplateColumns(t *testing.T) {
 	report := formatReport([]string{"m1"}, []Result{
 		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5, ToolSequenceMatch: 1, ToolArgsValid: 1, ToolArgsValidComputed: true, LatencyMs: 100, TotalTokens: 42}},

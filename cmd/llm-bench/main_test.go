@@ -196,7 +196,12 @@ func TestMainEmitsToolUseSubsetSection(t *testing.T) {
 	}
 	// The smoke trace expects no tool calls, so the subset has 0 expected pairs
 	// and the claim is insufficient — but the section must still be emitted.
-	for _, want := range []string{"## Tool-use (expected-tool-call subset)", "expected-tool-call pairs"} {
+	// The mock reports eval_count/prompt_eval_count, so the token breakdown must
+	// isolate gen vs prompt-eval (not just a combined total).
+	for _, want := range []string{
+		"## Tool-use (expected-tool-call subset)", "expected-tool-call pairs",
+		"## Token breakdown (gen vs prompt-eval)",
+	} {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("report missing %q:\n%s", want, body)
 		}
