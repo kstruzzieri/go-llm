@@ -108,6 +108,11 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		b.WriteString(formatPartitionedQuality(models, results, opts.Corpus.TraceToPartition))
 	}
 
+	if opts.ToolCallExpected != nil {
+		fmt.Fprintln(&b)
+		b.WriteString(formatToolUseSubset(toolUseSubsetRows(models, results, opts.ToolCallExpected)))
+	}
+
 	fmt.Fprintf(&b, "\n## Per-trace detail\n\n")
 	for _, m := range models {
 		fmt.Fprintf(&b, "### %s\n\n", markdownCell(m))
@@ -313,6 +318,10 @@ type reportOptions struct {
 	// counts and partition-separated quality, and captions the combined
 	// results table as not-comparable-across-partitions.
 	Corpus *corpusReportData
+	// ToolCallExpected maps trace ID → whether that trace's golden expects tool
+	// calls. When set, the report adds an expected-tool-call subset section so
+	// vacuous no-call rows can't masquerade as tool-use evidence.
+	ToolCallExpected map[string]bool
 }
 
 // corpusReportData carries the manifest-derived view the report needs:

@@ -306,6 +306,11 @@ func main() {
 	traceSetHash := traceSetManifestHash(traces)
 	log.Printf("llm-bench: trace set manifest hash %s (n=%d)", traceSetHash, len(traces))
 
+	toolCallExpected := make(map[string]bool, len(traces))
+	for _, tr := range traces {
+		toolCallExpected[tr.ID] = expectsToolCalls(tr)
+	}
+
 	resolvedJudgeModel := strings.TrimSpace(*judgeModel)
 	if *scorerName == "llm-judge" && resolvedJudgeModel == "" {
 		resolvedJudgeModel = defaultJudgeModelName()
@@ -376,6 +381,7 @@ func main() {
 		JudgeCacheMisses:     judgeCacheMisses,
 		TraceSetManifestHash: traceSetHash,
 		Corpus:               corpusData,
+		ToolCallExpected:     toolCallExpected,
 	})
 
 	if *reportPath == "" {
