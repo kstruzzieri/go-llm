@@ -61,6 +61,10 @@ func main() {
 	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default), openai-compat, or claude-cli (headless `claude -p`, subscription)")
 	judgeBaseURL := flag.String("judge-base-url", "", "Base URL for -judge-transport openai-compat (server root, no /v1 suffix)")
 	judgeAPIKey := flag.String("judge-api-key", "", "Bearer token for -judge-transport openai-compat; falls back to $"+judgeAPIKeyEnvVar)
+	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
+	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
+	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
+	corpusOnlyEvidence := flag.Bool("corpus-only-evidence", false, "Restrict the corpus run to entries flagged allowed_as_model_evidence")
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
@@ -277,6 +281,28 @@ func main() {
 		log.Fatalf("llm-bench: load traces: %v", err)
 	}
 
+	var corpusData *corpusReportData
+	if strings.TrimSpace(*corpusManifestPath) != "" {
+		manifest, err := loadManifest(*corpusManifestPath)
+		if err != nil {
+			log.Fatalf("llm-bench: load corpus manifest: %v", err)
+		}
+		parts, err := parseCorpusPartitions(*corpusPartitions)
+		if err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
+		sel := corpusSelection{Partitions: parts, Categories: splitCommaList(*corpusCategories), OnlyModelEvidence: *corpusOnlyEvidence}
+		run, data, missing := buildCorpusRun(manifest, sel, traces)
+		for _, id := range missing {
+			fmt.Fprintf(os.Stderr, "llm-bench: corpus manifest selects trace %q not present in -traces; skipping\n", id)
+		}
+		if len(run) == 0 {
+			log.Fatalf("llm-bench: corpus selection matched no loaded traces")
+		}
+		traces = run
+		corpusData = data
+	}
+
 	traceSetHash := traceSetManifestHash(traces)
 	log.Printf("llm-bench: trace set manifest hash %s (n=%d)", traceSetHash, len(traces))
 
@@ -349,6 +375,7 @@ func main() {
 		JudgeCacheHits:       judgeCacheHits,
 		JudgeCacheMisses:     judgeCacheMisses,
 		TraceSetManifestHash: traceSetHash,
+		Corpus:               corpusData,
 	})
 
 	if *reportPath == "" {

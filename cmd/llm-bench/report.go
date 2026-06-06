@@ -10,9 +10,21 @@ import (
 
 // formatReport renders per-model aggregates as a Markdown table.
 func formatReport(models []string, results []Result, opts reportOptions) string {
+	// Per-trace detail shows every result; the combined summary aggregate,
+	// when a corpus is present, excludes judge-validation (scorer-calibration
+	// evidence — never model workload, even in the diagnostic combined view).
 	byModel := make(map[string][]Result, len(models))
 	for _, r := range results {
 		byModel[r.Model] = append(byModel[r.Model], r)
+	}
+	summaryResults := results
+	excludedJudgeValidation := 0
+	if opts.Corpus != nil {
+		summaryResults, excludedJudgeValidation = excludeJudgeValidation(results, opts.Corpus.TraceToPartition)
+	}
+	summaryByModel := make(map[string][]Result, len(models))
+	for _, r := range summaryResults {
+		summaryByModel[r.Model] = append(summaryByModel[r.Model], r)
 	}
 
 	var b strings.Builder
@@ -47,11 +59,22 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		fmt.Fprintln(&b)
 	}
 
+	if opts.Corpus != nil {
+		b.WriteString(formatCorpusComposition(opts.Corpus.Counts))
+	}
+
 	fmt.Fprintf(&b, "## Results\n\n")
+	if opts.Corpus != nil {
+		fmt.Fprintln(&b, "> Combined across model-evidence partitions (natural + challenge) — diagnostic only; partitions are not comparable, do not cite this as a single number. See the per-partition section below.")
+		if excludedJudgeValidation > 0 {
+			fmt.Fprintf(&b, ">\n> %d judge-validation result(s) excluded from this aggregate (scorer-calibration evidence, not model workload).\n", excludedJudgeValidation)
+		}
+		fmt.Fprintln(&b)
+	}
 	fmt.Fprintf(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |\n")
 	fmt.Fprintf(&b, "|---|---|---|---|---|---|---|---|\n")
 	for _, m := range models {
-		rs := byModel[m]
+		rs := summaryByModel[m]
 		agg := aggregate(rs)
 		scored := len(rs) - agg.errors
 
@@ -78,6 +101,11 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		failuresCell := fmt.Sprintf("%d/%d (%d timeout)", agg.errors, agg.errors+scored, agg.timeouts)
 		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %d | %s |\n",
 			markdownCell(m), qCell, toolSeqCell, toolArgsCell, latencyCell, tokensCell, scored, failuresCell)
+	}
+
+	if opts.Corpus != nil {
+		fmt.Fprintln(&b)
+		b.WriteString(formatPartitionedQuality(models, results, opts.Corpus.TraceToPartition))
 	}
 
 	fmt.Fprintf(&b, "\n## Per-trace detail\n\n")
@@ -281,6 +309,98 @@ type reportOptions struct {
 	JudgeCacheHits       int64
 	JudgeCacheMisses     int64
 	TraceSetManifestHash string
+	// Corpus, when set, makes the report corpus-aware: it adds composition
+	// counts and partition-separated quality, and captions the combined
+	// results table as not-comparable-across-partitions.
+	Corpus *corpusReportData
+}
+
+// corpusReportData carries the manifest-derived view the report needs:
+// composition counts and a trace→partition map for separation.
+type corpusReportData struct {
+	Counts           corpusCounts
+	TraceToPartition map[string]CorpusPartition
+}
+
+// formatCorpusComposition renders the manifest's partition and category counts.
+func formatCorpusComposition(c corpusCounts) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "## Corpus composition")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "| Partition | Traces |")
+	fmt.Fprintln(&b, "|---|---|")
+	for _, p := range corpusPartitionOrder {
+		fmt.Fprintf(&b, "| %s | %d |\n", p, c.ByPartition[p])
+	}
+	fmt.Fprintf(&b, "| **total** | %d |\n", c.Total)
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "| Category | Traces |")
+	fmt.Fprintln(&b, "|---|---|")
+	for _, cat := range c.sortedCategories() {
+		fmt.Fprintf(&b, "| %s | %d |\n", markdownCell(cat), c.ByCategory[cat])
+	}
+	fmt.Fprintln(&b)
+	return b.String()
+}
+
+// formatPartitionedQuality renders per-model quality separately for the natural
+// and challenge partitions. The two are never averaged into one number, and
+// judge-validation traces (scorer-calibration evidence) are excluded from model
+// quality entirely.
+func formatPartitionedQuality(models []string, results []Result, traceToPartition map[string]CorpusPartition) string {
+	byPartition := make(map[CorpusPartition][]Result)
+	unclassified := 0
+	for _, r := range results {
+		p, ok := traceToPartition[r.TraceID]
+		if !ok {
+			unclassified++
+			continue
+		}
+		byPartition[p] = append(byPartition[p], r)
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "## Quality by model — by partition")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "> Natural and challenge corpora answer different questions and are never averaged into one number. Judge-validation traces are scorer-calibration evidence and are excluded from model quality.")
+	fmt.Fprintln(&b)
+	for _, p := range []CorpusPartition{PartitionNatural, PartitionChallenge} {
+		fmt.Fprintf(&b, "### %s\n\n", p)
+		rs := byPartition[p]
+		if len(rs) == 0 {
+			fmt.Fprintln(&b, "(no traces in this partition)")
+			fmt.Fprintln(&b)
+			continue
+		}
+		emitPartitionQualityTable(&b, models, rs)
+	}
+	if unclassified > 0 {
+		fmt.Fprintf(&b, "_%d result(s) had no manifest partition and were omitted from the partitioned view._\n\n", unclassified)
+	}
+	return b.String()
+}
+
+// emitPartitionQualityTable writes one per-model quality+failures table for a
+// single partition's results.
+func emitPartitionQualityTable(b *strings.Builder, models []string, results []Result) {
+	byModel := make(map[string][]Result, len(models))
+	for _, r := range results {
+		byModel[r.Model] = append(byModel[r.Model], r)
+	}
+	fmt.Fprintln(b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | n | Failures/total (timeout) |")
+	fmt.Fprintln(b, "|---|---|---|---|")
+	for _, m := range models {
+		rs := byModel[m]
+		agg := aggregate(rs)
+		scored := len(rs) - agg.errors
+		qCell := "n/a"
+		if scored > 0 {
+			qCell = fmt.Sprintf("%.2f / %.2f / %.2f / %.2f / %.2f",
+				agg.meanQuality, agg.qualityP25, agg.qualityP50, agg.qualityP75, agg.qualityP90)
+		}
+		failuresCell := fmt.Sprintf("%d/%d (%d timeout)", agg.errors, agg.errors+scored, agg.timeouts)
+		fmt.Fprintf(b, "| %s | %s | %d | %s |\n", markdownCell(m), qCell, scored, failuresCell)
+	}
+	fmt.Fprintln(b)
 }
 
 // modelAggregate holds computed statistics for one model's result set.
