@@ -22,6 +22,8 @@ output.
     - Judge model digest (when available via /api/show): `<digest>`
     - Judge cache hit rate: X%
     - Judge cache key version: V
+    - Judge stability policy: `<temperature-pinned/deterministic | multi-vote/stability policy>`
+    - Judge stability verdict: `<PASS | FAIL>` with evidence summary
   - If `manual`:
     - Label manifest hash: `sha256:...`
     - Artifact manifest hash: `sha256:...`
@@ -49,7 +51,11 @@ output.
 - Valid labeled artifacts: X (≥50 required → SUFFICIENT)
 - Agreement: X / Y (Z%) — overall ≥85%, borderline/fail ≥80% when present,
   known subtle-bug fixtures pass → **PASS**
-- Stability runs (M=3, diagnostic): max spread observed: 0.NN
+- Automated-judge stability: `<PASS | FAIL>` — transport is
+  `<temperature-pinned/deterministic | unpinned>`, policy is
+  `<single deterministic draw | median-of-N votes | repeated stability run>`,
+  evidence `<max spread, repeated-pass reports, or deterministic transport proof>`.
+  Single-draw unpinned runs are diagnostic only.
 - Manual-label path: paired labels complete for X/Y retained traces; stale and
   missing labels excluded and reported; ≥50 valid labeled artifacts and ≥20
   complete retained traces.
