@@ -208,6 +208,50 @@ func TestMainEmitsToolUseSubsetSection(t *testing.T) {
 	}
 }
 
+func TestMainFIMLatencyEndToEnd(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/generate" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"model":      "fake",
+			"response":   "  return a + b",
+			"done":       true,
+			"eval_count": 5,
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	casePath := filepath.Join(dir, "c1.json")
+	if err := os.WriteFile(casePath, []byte(`{"id":"c1","prefix":"func add(a,b int) int {\n","suffix":"\n}"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(dir, "fim.md")
+	cmd := exec.Command(os.Args[0],
+		"-fim-latency",
+		"-fim-cases", casePath,
+		"-models", "fake",
+		"-ollama-url", server.URL,
+		"-report", report,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -fim-latency failed: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	for _, want := range []string{"FIM / inline-completion latency", "separate from chat", "## FIM latency by model"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("FIM report missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestResolveToolSchemaSourceStdio(t *testing.T) {
 	src, err := resolveToolSchemaSource("echo mock-server", "")
 	if err != nil {
