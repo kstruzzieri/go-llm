@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+// TestFormatReport_FailureAwareLatency pins that latency is reported
+// failure-aware: a per-model failures/total (timeout) count is shown, and the
+// latency column is labeled successful-only (since errored/timed-out replays
+// are excluded from the latency aggregate, making p90 otherwise optimistic).
+func TestFormatReport_FailureAwareLatency(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "t1", Score: Score{AnswerQuality: 1.0, LatencyMs: 100}},
+		{Model: "m", TraceID: "t2", Err: errors.New("context deadline exceeded")}, // timeout
+		{Model: "m", TraceID: "t3", Err: errors.New("connection refused")},        // non-timeout
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{Scorer: "exact-match"})
+	for _, want := range []string{"successful-only", "Failures/total (timeout)", "2/3 (1 timeout)"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("report missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestFormatReportIncludesToolArgsMetric verifies that ToolArgsValid is
 // rendered in both the summary and per-trace sections when it is computed.
 func TestFormatReportIncludesToolArgsMetric(t *testing.T) {
@@ -128,7 +146,7 @@ func TestFormatReportSummaryMatchesTemplateColumns(t *testing.T) {
 		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5, ToolSequenceMatch: 1, ToolArgsValid: 1, ToolArgsValidComputed: true, LatencyMs: 100, TotalTokens: 42}},
 	}, reportOptions{Scorer: "llm-judge", JudgeModel: "gemma4:31b"})
 
-	want := "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90) | TotalTokens | n |"
+	want := "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |"
 	if !strings.Contains(report, want) {
 		t.Fatalf("rendered report missing TEMPLATE column header.\nWant: %q\nGot:\n%s", want, report)
 	}
