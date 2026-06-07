@@ -204,10 +204,11 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		ToolCalls: toProviderToolCalls(msg.ToolCalls),
 		Done:      true,
 		Usage: provider.Usage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
-			ReasoningTokens:  resp.Usage.reasoningTokens(),
+			PromptTokens:            resp.Usage.PromptTokens,
+			CompletionTokens:        resp.Usage.CompletionTokens,
+			TotalTokens:             resp.Usage.TotalTokens,
+			ReasoningTokens:         resp.Usage.reasoningTokens(),
+			ReasoningTokensReported: resp.Usage.reasoningTokensReported(),
 		},
 	}, nil
 }
@@ -298,10 +299,11 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		}
 		if chunk.Usage != nil {
 			lastUsage = provider.Usage{
-				PromptTokens:     chunk.Usage.PromptTokens,
-				CompletionTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:      chunk.Usage.TotalTokens,
-				ReasoningTokens:  chunk.Usage.reasoningTokens(),
+				PromptTokens:            chunk.Usage.PromptTokens,
+				CompletionTokens:        chunk.Usage.CompletionTokens,
+				TotalTokens:             chunk.Usage.TotalTokens,
+				ReasoningTokens:         chunk.Usage.reasoningTokens(),
+				ReasoningTokensReported: chunk.Usage.reasoningTokensReported(),
 			}
 		}
 		if len(chunk.Choices) == 0 {

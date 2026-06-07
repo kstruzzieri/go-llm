@@ -179,13 +179,11 @@ func TestOpenAICompatCandidateClient_ChatSurfacesReasoningTokens(t *testing.T) {
 	}
 }
 
-// A present-but-zero reasoning count (a reasoning model that did no thinking)
-// is deliberately treated as uncomputed: zero contributes nothing to
-// thinking-token cost, and gating on a positive count keeps the common
-// no-details path and the zero-details path behaving identically. This guard
-// pins that decision so a later switch to presence-based semantics can't change
-// it silently.
-func TestOpenAICompatCandidateClient_ChatZeroReasoningTokensStayUncomputed(t *testing.T) {
+// A present-but-zero reasoning count is still a measured value. The benchmark
+// report uses ThinkingTokensComputed to distinguish "measured zero reasoning"
+// from "provider does not isolate reasoning", so a zero count from an explicit
+// completion_tokens_details block must stay computed.
+func TestOpenAICompatCandidateClient_ChatZeroReasoningTokensAreComputed(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
@@ -223,8 +221,8 @@ func TestOpenAICompatCandidateClient_ChatZeroReasoningTokensStayUncomputed(t *te
 	if resp.ThinkingTokens != 0 {
 		t.Errorf("ThinkingTokens = %d; want 0", resp.ThinkingTokens)
 	}
-	if resp.ThinkingTokensComputed {
-		t.Error("ThinkingTokensComputed = true; want false for a present-but-zero reasoning count")
+	if !resp.ThinkingTokensComputed {
+		t.Error("ThinkingTokensComputed = false; want true for a reported zero reasoning count")
 	}
 }
 

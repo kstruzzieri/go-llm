@@ -117,12 +117,8 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req ollama.ChatRe
 	}
 	// Map provider reasoning tokens onto the bench's thinking-token accounting.
 	// ThinkingTokensComputed gates whether downstream treats the count as a
-	// measured value; we mark it computed only when reasoning tokens are
-	// positive. A backend that omits completion_tokens_details (the common
-	// case) reports zero and stays uncomputed, preserving the pre-#158
-	// behavior. The edge of a present-but-zero count (reasoning model that did
-	// no thinking) is likewise treated as uncomputed — zero contributes nothing
-	// to thinking-token cost either way.
+	// measured value, so preserve the provider's reported/presence bit rather
+	// than inferring availability from a positive token count.
 	reasoning := presp.Usage.ReasoningTokens
 	return candidateChatResponse{
 		Message: ollama.ChatMessage{
@@ -133,7 +129,7 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req ollama.ChatRe
 		PromptEvalCount:        presp.Usage.PromptTokens,
 		EvalCount:              presp.Usage.CompletionTokens,
 		ThinkingTokens:         reasoning,
-		ThinkingTokensComputed: reasoning > 0,
+		ThinkingTokensComputed: presp.Usage.ReasoningTokensReported,
 	}, nil
 }
 

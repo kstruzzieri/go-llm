@@ -232,6 +232,10 @@ func (u usage) reasoningTokens() int {
 	return u.CompletionTokensDetails.ReasoningTokens
 }
 
+func (u usage) reasoningTokensReported() bool {
+	return u.CompletionTokensDetails != nil
+}
+
 // errorEnvelope is the OpenAI-shape error response body. Servers return
 // this with non-2xx HTTP statuses to surface model/auth/format problems.
 type errorEnvelope struct {

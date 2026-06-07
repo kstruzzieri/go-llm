@@ -304,14 +304,17 @@ type ModelInfo struct {
 // (discarded) chain-of-thought, when the backend reports it. The Ollama path
 // folds reasoning into CompletionTokens and leaves this zero; OpenAI-compatible
 // backends that emit usage.completion_tokens_details.reasoning_tokens populate
-// it so downstream consumers can isolate thinking-token cost. Zero means either
-// no reasoning tokens or a backend that does not report them — best-effort
-// enrichment, not a guarantee.
+// it so downstream consumers can isolate thinking-token cost.
+//
+// ReasoningTokensReported is true when the backend explicitly reported the
+// reasoning-token field. It distinguishes a measured zero from a backend that
+// does not report isolated reasoning tokens.
 type Usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
-	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
+	PromptTokens            int  `json:"prompt_tokens"`
+	CompletionTokens        int  `json:"completion_tokens"`
+	TotalTokens             int  `json:"total_tokens"`
+	ReasoningTokens         int  `json:"reasoning_tokens,omitempty"`
+	ReasoningTokensReported bool `json:"reasoning_tokens_reported,omitempty"`
 }
 
 // LatencyInfo captures timing breakdowns from the provider backend.

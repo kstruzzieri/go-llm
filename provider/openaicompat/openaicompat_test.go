@@ -302,6 +302,9 @@ func TestProvider_Chat_ParsesReasoningTokens(t *testing.T) {
 	if resp.Usage.ReasoningTokens != 6 {
 		t.Errorf("Usage.ReasoningTokens = %d, want 6 (parsed from completion_tokens_details.reasoning_tokens)", resp.Usage.ReasoningTokens)
 	}
+	if !resp.Usage.ReasoningTokensReported {
+		t.Error("Usage.ReasoningTokensReported = false, want true when completion_tokens_details is present")
+	}
 }
 
 func TestProvider_Chat_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
@@ -330,6 +333,9 @@ func TestProvider_Chat_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
 	}
 	if resp.Usage.ReasoningTokens != 0 {
 		t.Errorf("Usage.ReasoningTokens = %d, want 0 when completion_tokens_details absent", resp.Usage.ReasoningTokens)
+	}
+	if resp.Usage.ReasoningTokensReported {
+		t.Error("Usage.ReasoningTokensReported = true, want false when completion_tokens_details is absent")
 	}
 }
 
@@ -689,6 +695,9 @@ func TestProvider_ChatStream_ParsesReasoningTokens(t *testing.T) {
 	if last.Usage.ReasoningTokens != 3 {
 		t.Errorf("last.Usage.ReasoningTokens = %d, want 3 (parsed from final-chunk completion_tokens_details.reasoning_tokens)", last.Usage.ReasoningTokens)
 	}
+	if !last.Usage.ReasoningTokensReported {
+		t.Error("last.Usage.ReasoningTokensReported = false, want true when completion_tokens_details is present")
+	}
 }
 
 func TestProvider_ChatStream_ParsesReasoningTokensFromUsageOnlyChunk(t *testing.T) {
@@ -724,6 +733,9 @@ func TestProvider_ChatStream_ParsesReasoningTokensFromUsageOnlyChunk(t *testing.
 	if last.Usage.ReasoningTokens != 3 {
 		t.Errorf("last.Usage.ReasoningTokens = %d, want 3 (parsed from usage-only completion_tokens_details.reasoning_tokens)", last.Usage.ReasoningTokens)
 	}
+	if !last.Usage.ReasoningTokensReported {
+		t.Error("last.Usage.ReasoningTokensReported = false, want true when completion_tokens_details is present")
+	}
 }
 
 func TestProvider_ChatStream_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
@@ -751,6 +763,9 @@ func TestProvider_ChatStream_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
 	last := got[len(got)-1]
 	if last.Usage.ReasoningTokens != 0 {
 		t.Errorf("last.Usage.ReasoningTokens = %d, want 0 when completion_tokens_details absent", last.Usage.ReasoningTokens)
+	}
+	if last.Usage.ReasoningTokensReported {
+		t.Error("last.Usage.ReasoningTokensReported = true, want false when completion_tokens_details is absent")
 	}
 }
 
