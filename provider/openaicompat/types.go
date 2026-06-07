@@ -217,23 +217,22 @@ type usage struct {
 	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
 }
 
-// completionTokensDetails carries the reasoning-token count reported by
-// reasoning models via usage.completion_tokens_details.reasoning_tokens.
+// completionTokensDetails carries optional completion-token breakdowns.
 type completionTokensDetails struct {
-	ReasoningTokens int `json:"reasoning_tokens"`
+	ReasoningTokens *int `json:"reasoning_tokens,omitempty"`
 }
 
 // reasoningTokens returns the reasoning-token count the server reported, or 0
-// when it omitted the completion_tokens_details block entirely.
+// when it omitted the reasoning_tokens field.
 func (u usage) reasoningTokens() int {
-	if u.CompletionTokensDetails == nil {
+	if u.CompletionTokensDetails == nil || u.CompletionTokensDetails.ReasoningTokens == nil {
 		return 0
 	}
-	return u.CompletionTokensDetails.ReasoningTokens
+	return *u.CompletionTokensDetails.ReasoningTokens
 }
 
 func (u usage) reasoningTokensReported() bool {
-	return u.CompletionTokensDetails != nil
+	return u.CompletionTokensDetails != nil && u.CompletionTokensDetails.ReasoningTokens != nil
 }
 
 // errorEnvelope is the OpenAI-shape error response body. Servers return

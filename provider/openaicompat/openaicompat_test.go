@@ -285,7 +285,7 @@ func TestProvider_Chat_ParsesReasoningTokens(t *testing.T) {
 				PromptTokens:            4,
 				CompletionTokens:        9,
 				TotalTokens:             13,
-				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 6},
+				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: intPtr(6)},
 			},
 		},
 	})
@@ -336,6 +336,43 @@ func TestProvider_Chat_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
 	}
 	if resp.Usage.ReasoningTokensReported {
 		t.Error("Usage.ReasoningTokensReported = true, want false when completion_tokens_details is absent")
+	}
+}
+
+func TestProvider_Chat_NoReasoningTokensWhenDetailsOmitField(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"answer"},
+				"finish_reason":"stop"
+			}],
+			"usage":{
+				"prompt_tokens":4,
+				"completion_tokens":9,
+				"total_tokens":13,
+				"completion_tokens_details":{"accepted_prediction_tokens":0}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+	resp, err := p.Chat(context.Background(), provider.ChatRequest{
+		Model:    "served",
+		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Usage.ReasoningTokens != 0 {
+		t.Errorf("Usage.ReasoningTokens = %d, want 0 when reasoning_tokens is absent", resp.Usage.ReasoningTokens)
+	}
+	if resp.Usage.ReasoningTokensReported {
+		t.Error("Usage.ReasoningTokensReported = true, want false when reasoning_tokens is absent")
 	}
 }
 
@@ -673,7 +710,7 @@ func TestProvider_ChatStream_ParsesReasoningTokens(t *testing.T) {
 				PromptTokens:            2,
 				CompletionTokens:        5,
 				TotalTokens:             7,
-				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 3},
+				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: intPtr(3)},
 			}},
 		})
 	}))
@@ -711,7 +748,7 @@ func TestProvider_ChatStream_ParsesReasoningTokensFromUsageOnlyChunk(t *testing.
 				PromptTokens:            2,
 				CompletionTokens:        5,
 				TotalTokens:             7,
-				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 3},
+				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: intPtr(3)},
 			}},
 		})
 	}))
