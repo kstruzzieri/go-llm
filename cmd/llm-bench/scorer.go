@@ -906,9 +906,12 @@ func normalizeModelSelector(s string) string {
 
 func modelSelectorWithoutBenchProvider(s string) string {
 	s = strings.TrimSpace(s)
-	prefix := defaultBenchProvider + "/"
-	if strings.HasPrefix(strings.ToLower(s), prefix) {
-		return strings.TrimSpace(s[len(prefix):])
+	lower := strings.ToLower(s)
+	for _, provider := range []string{defaultBenchProvider, openAICompatTransport} {
+		prefix := provider + "/"
+		if strings.HasPrefix(lower, prefix) {
+			return strings.TrimSpace(s[len(prefix):])
+		}
 	}
 	return s
 }

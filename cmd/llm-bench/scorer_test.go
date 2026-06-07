@@ -657,6 +657,35 @@ func TestLLMJudgeScorerRejectsNamespacedSelfJudging(t *testing.T) {
 	}
 }
 
+func TestLLMJudgeScorerRejectsOpenAICompatSelfJudging(t *testing.T) {
+	client := &fakeJudgeClient{
+		resp: &ollama.ChatResponse{Message: ollama.ChatMessage{Content: `{"answer_quality":1,"justification":"ok"}`}},
+	}
+	s, err := newLLMJudgeScorer(client, "fake", 0)
+	if err != nil {
+		t.Fatalf("newLLMJudgeScorer() error: %v", err)
+	}
+
+	trace := Trace{
+		ID:     "openai-compat-self-judge",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "q"}},
+		Golden: Golden{FinalAnswerCriteria: "answer correctly"},
+	}
+	actual := Result{
+		Model:      "openai-compat/fake",
+		Transcript: []Turn{{Role: "assistant", Content: "answer"}},
+	}
+
+	_, err = s.Score(context.Background(), trace, actual)
+	if !errors.Is(err, errJudgeSelfPreference) {
+		t.Fatalf("err = %v, want errJudgeSelfPreference", err)
+	}
+	if client.called != 0 {
+		t.Fatalf("judge client called despite openai-compat self-judging guard")
+	}
+}
+
 func TestLLMJudgeScorerRequiresRubric(t *testing.T) {
 	s, err := newLLMJudgeScorer(&fakeJudgeClient{}, "gemma4:31b", 0)
 	if err != nil {
@@ -722,6 +751,15 @@ func TestValidateJudgeModelAcceptsProviderQualifiedSelector(t *testing.T) {
 	err := validateJudgeModel(context.Background(), fakeJudgeModelChecker{
 		models: []string{"gemma4:31b"},
 	}, "ollama/gemma4:31b")
+	if err != nil {
+		t.Fatalf("validateJudgeModel() error: %v", err)
+	}
+}
+
+func TestValidateJudgeModelAcceptsOpenAICompatQualifiedSelector(t *testing.T) {
+	err := validateJudgeModel(context.Background(), fakeJudgeModelChecker{
+		models: []string{"fake"},
+	}, "openai-compat/fake")
 	if err != nil {
 		t.Fatalf("validateJudgeModel() error: %v", err)
 	}
