@@ -252,6 +252,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		callbackErr    error
 		streamErr      error
 		finished       bool
+		seenUsage      bool
 		toolCalls      streamToolCallAccumulator
 	)
 
@@ -298,6 +299,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 			lastModel = chunk.Model
 		}
 		if chunk.Usage != nil {
+			seenUsage = true
 			lastUsage = provider.Usage{
 				PromptTokens:            chunk.Usage.PromptTokens,
 				CompletionTokens:        chunk.Usage.CompletionTokens,
@@ -356,6 +358,9 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 	}
 	if streamErr != nil {
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", streamErr)
+	}
+	if finished && !seenUsage {
+		return fmt.Errorf("provider: openaicompat: chat stream: ended before usage chunk")
 	}
 	if finished {
 		model := lastModel

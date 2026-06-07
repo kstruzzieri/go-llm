@@ -706,6 +706,7 @@ func TestProvider_ChatStream_RequestsUsageInStreamOptions(t *testing.T) {
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -854,6 +855,7 @@ func TestProvider_ChatStream_SingleToolCall_AssembledOnDone(t *testing.T) {
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -915,6 +917,7 @@ func TestProvider_ChatStream_FragmentedToolCall_AssembledOnDone(t *testing.T) {
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -976,6 +979,7 @@ func TestProvider_ChatStream_FragmentedToolCall_LockedEncodingMode(t *testing.T)
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -1029,6 +1033,7 @@ func TestProvider_ChatStream_FragmentedToolCall_NilIndexUsesLastKnown(t *testing
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -1079,6 +1084,7 @@ func TestProvider_ChatStream_MultiToolFragmented_AssembledIndependently(t *testi
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -1128,6 +1134,7 @@ func TestProvider_ChatStream_FragmentedToolCall_OrderByFirstAppearance(t *testin
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -1230,6 +1237,7 @@ func TestProvider_ChatStream_MalformedChunk_Skipped(t *testing.T) {
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", marshalJSON(t, chatChunk{
 			Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{}, FinishReason: stringPtr("stop")}},
 		}))
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", marshalJSON(t, chatUsageChunk()))
 		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 		f.Flush()
 	}))
@@ -1294,6 +1302,32 @@ func TestProvider_ChatStream_ReadErrorAfterFinishReason_ReturnsError(t *testing.
 	}
 	if sawDone {
 		t.Fatal("must not synthesize successful Done when the stream errors before usage/[DONE]")
+	}
+}
+
+func TestProvider_ChatStream_DoneWithoutUsage_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var sawDone bool
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			sawDone = true
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ended before usage chunk") {
+		t.Fatalf("expected missing usage error, got %v", err)
+	}
+	if sawDone {
+		t.Fatal("must not synthesize successful Done when requested streaming usage is missing")
 	}
 }
 
@@ -1830,6 +1864,12 @@ func writeSSE(t *testing.T, w http.ResponseWriter, chunks []chatChunk) {
 	}
 	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+func chatUsageChunk() chatChunk {
+	return chatChunk{
+		Usage: &usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}
 }
 
 func marshalJSON(t *testing.T, v any) string {
