@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 func main() {
@@ -284,7 +285,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: parse models: %v", err)
 		}
-		client, err := newOllamaClient(*ollamaURL)
+		client, err := newOllamaClient(*ollamaURL, ollama.WithTimeout(*timeout))
 		if err != nil {
 			log.Fatalf("llm-bench: client: %v", err)
 		}
