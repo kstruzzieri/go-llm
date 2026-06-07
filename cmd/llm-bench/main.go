@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 func main() {
@@ -43,6 +44,10 @@ func main() {
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	pairedReport := flag.Bool("paired-report", false, "Emit the paired-label report: paired-complete means, completeness worklist, win/loss/tie matrix, bootstrap delta CIs, resolution diagnostic (uses -labels, -artifacts, -baseline, -report)")
+	fimLatency := flag.Bool("fim-latency", false, "Measure FIM / inline-completion latency separately from chat latency (uses -fim-cases, -models, -fim-num-predict, -fim-warmup, -report)")
+	fimCases := flag.String("fim-cases", "", "Glob for FIM case JSON files (prefix/suffix), required with -fim-latency")
+	fimNumPredict := flag.Int("fim-num-predict", defaultFIMNumPredict, "Max tokens to generate per FIM completion (interactive regime is short)")
+	fimWarmup := flag.Bool("fim-warmup", true, "Issue one discarded generate per model before timing so FIM latency reflects the warm regime")
 	baseline := flag.String("baseline", "", "Baseline model selector for -paired-report deltas (default: first lineup model, derived from artifacts)")
 	labelsPath := flag.String("labels", filepath.Join("docs", "llm", "calibration", "labels.jsonl"), "Path to labels.jsonl (Phase 2)")
 	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
@@ -86,8 +91,11 @@ func main() {
 	if *pairedReport {
 		modes++
 	}
+	if *fimLatency {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -255,6 +263,52 @@ func main() {
 			log.Fatalf("llm-bench: write report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: paired-label report written to %s\n", *reportPath)
+		return
+	}
+
+	if *fimLatency {
+		if *fimCases == "" || *modelsArg == "" {
+			log.Fatalf("llm-bench: -fim-latency requires -fim-cases and -models")
+		}
+		casePaths, err := filepath.Glob(*fimCases)
+		if err != nil {
+			log.Fatalf("llm-bench: glob %q: %v", *fimCases, err)
+		}
+		if len(casePaths) == 0 {
+			log.Fatalf("llm-bench: no FIM cases matched %q", *fimCases)
+		}
+		cases, err := loadFIMCases(casePaths)
+		if err != nil {
+			log.Fatalf("llm-bench: load FIM cases: %v", err)
+		}
+		targets, err := parseModelTargets(*modelsArg)
+		if err != nil {
+			log.Fatalf("llm-bench: parse models: %v", err)
+		}
+		client, err := newOllamaClient(*ollamaURL, ollama.WithTimeout(*timeout))
+		if err != nil {
+			log.Fatalf("llm-bench: client: %v", err)
+		}
+		models := make([]string, 0, len(targets))
+		for _, target := range targets {
+			models = append(models, target.Display)
+		}
+		results := runFIMLatency(ctx, fimRunOptions{
+			Generator:  ollamaFIMGenerator{client: client},
+			Models:     models,
+			Cases:      cases,
+			NumPredict: *fimNumPredict,
+			Warmup:     *fimWarmup,
+		})
+		report := formatFIMReport(models, results)
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: FIM latency report written to %s\n", *reportPath)
 		return
 	}
 
