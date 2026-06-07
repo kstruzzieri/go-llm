@@ -179,7 +179,7 @@ func TestReplayWith_IsolatesGenAndPromptEvalTokens(t *testing.T) {
 			{Role: "user", Content: "second"},
 		},
 	}
-	out, err := replayWith(context.Background(), client, "test-model", trace, replayOptions{})
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
 	if err != nil {
 		t.Fatalf("replayWith: %v", err)
 	}
@@ -542,7 +542,7 @@ func TestReplayRecordsBypassNoteWhenCandidateSkipsScriptedTools(t *testing.T) {
 		},
 	}
 
-	out, err := replayWith(context.Background(), client, "test-model", trace, replayOptions{})
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
 	if err != nil {
 		t.Fatalf("replayWith() error: %v", err)
 	}
@@ -752,7 +752,7 @@ func TestReplayPropagatesNumCtxOption(t *testing.T) {
 		Turns:  []Turn{{Role: "user", Content: "hi"}},
 	}
 
-	out, err := replayWith(context.Background(), client, "test-model", trace, replayOptions{NumCtx: 32768})
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{NumCtx: 32768})
 	if err != nil {
 		t.Fatalf("replayWith() error: %v", err)
 	}

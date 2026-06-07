@@ -43,6 +43,12 @@ var (
 type Runner struct {
 	OllamaURL string
 	Timeout   time.Duration
+	// OpenAICompatBaseURL is required when any candidate target uses the
+	// openai-compat provider. Ollama candidates ignore it.
+	OpenAICompatBaseURL string
+	// OpenAICompatAPIKey is an optional Bearer token for openai-compat
+	// candidate targets. Prefer LLM_BENCH_CANDIDATE_API_KEY over shell history.
+	OpenAICompatAPIKey string
 	// PerTurnTimeout bounds a single chatReplayTurn round-trip. Zero means
 	// no per-turn bound — only Timeout applies to the whole replay. Set
 	// this when running models that may stall mid-loop to keep one bad
@@ -58,11 +64,12 @@ type Runner struct {
 
 // Result is a single (model, trace) evaluation.
 type Result struct {
-	Model      string
-	TraceID    string
-	Score      Score
-	Err        error
-	Transcript []Turn
+	Model             string
+	TraceID           string
+	CandidateProvider string
+	Score             Score
+	Err               error
+	Transcript        []Turn
 }
 
 // RunAll replays every trace against every model. Iterates models in the
@@ -77,13 +84,19 @@ func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Tra
 			return results, err
 		}
 
-		client, err := newOllamaClient(r.OllamaURL)
+		transport, err := newCandidateTransport(target, candidateTransportOptions{
+			ollamaURL:           r.OllamaURL,
+			openAICompatBaseURL: r.OpenAICompatBaseURL,
+			openAICompatAPIKey:  r.OpenAICompatAPIKey,
+			timeout:             r.Timeout,
+		})
 		if err != nil {
 			for _, trace := range traces {
 				results = append(results, Result{
-					Model:   target.Display,
-					TraceID: trace.ID,
-					Err:     fmt.Errorf("client for %q: %w", target.Display, err),
+					Model:             target.Display,
+					TraceID:           trace.ID,
+					CandidateProvider: target.Provider,
+					Err:               fmt.Errorf("client for %q: %w", target.Display, err),
 				})
 			}
 			continue
@@ -93,31 +106,32 @@ func (r *Runner) RunAll(ctx context.Context, targets []ModelTarget, traces []Tra
 			if err := ctx.Err(); err != nil {
 				return results, err
 			}
-			results = append(results, r.runOne(ctx, client, target, trace))
+			results = append(results, r.runOne(ctx, transport, target, trace))
 		}
 	}
 	return results, nil
 }
 
-func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target ModelTarget, trace Trace) Result {
+func (r *Runner) runOne(ctx context.Context, transport candidateTransport, target ModelTarget, trace Trace) Result {
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
 	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
-	out, err := replayWith(replayCtx, client, target.Model, trace, opts)
+	out, err := replayWith(replayCtx, transport.chat, target.Model, trace, opts)
 	cancel()
 	if err != nil {
-		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: out.Transcript}
+		return Result{Model: target.Display, TraceID: trace.ID, CandidateProvider: transport.providerName, Err: err, Transcript: out.Transcript}
 	}
 
 	scoreStart := time.Now()
 	score, err := r.Scorer.Score(ctx, trace, Result{
-		Model:      target.Display,
-		TraceID:    trace.ID,
-		Transcript: out.Transcript,
+		Model:             target.Display,
+		TraceID:           trace.ID,
+		CandidateProvider: transport.providerName,
+		Transcript:        out.Transcript,
 	})
 	scorerMs := time.Since(scoreStart).Milliseconds()
 	if err != nil {
-		return Result{Model: target.Display, TraceID: trace.ID, Err: err, Transcript: out.Transcript}
+		return Result{Model: target.Display, TraceID: trace.ID, CandidateProvider: transport.providerName, Err: err, Transcript: out.Transcript}
 	}
 	// LatencyMs sums per-turn chat round-trips only; scorer work is
 	// excluded so llm-judge round-trips can't pollute the model-latency
@@ -139,10 +153,11 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	score.ThinkingTokensComputed = out.ThinkingComputed
 
 	return Result{
-		Model:      target.Display,
-		TraceID:    trace.ID,
-		Score:      score,
-		Transcript: out.Transcript,
+		Model:             target.Display,
+		TraceID:           trace.ID,
+		CandidateProvider: transport.providerName,
+		Score:             score,
+		Transcript:        out.Transcript,
 	}
 }
 
@@ -179,7 +194,7 @@ type replayOptions struct {
 // replay is the legacy entry point retained for tests and callers that
 // don't need the Runner-level knobs (PerTurnTimeout, NumCtx).
 func replay(ctx context.Context, client *ollama.Client, model string, trace Trace) ([]Turn, error) {
-	out, err := replayWith(ctx, client, model, trace, replayOptions{})
+	out, err := replayWith(ctx, ollamaCandidateClient{client: client}, model, trace, replayOptions{})
 	return out.Transcript, err
 }
 
@@ -207,7 +222,7 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 //
 // All accumulated divergence notes are appended to the resulting Score's
 // Notes so aggregate consumers can see why a candidate diverged.
-func replayWith(ctx context.Context, client *ollama.Client, model string, trace Trace, opts replayOptions) (replayOutput, error) {
+func replayWith(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
 	if !hasUserTurn(trace.Turns) {
 		return replayOutput{}, fmt.Errorf("trace %q: %w", trace.ID, errNoUserTurn)
 	}
@@ -301,7 +316,7 @@ func hasUserTurn(turns []Turn) bool {
 	return false
 }
 
-func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, tokenUsage, error) {
+func chatReplayTurn(ctx context.Context, client candidateChatClient, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, tokenUsage, error) {
 	turnCtx := ctx
 	if opts.PerTurnTimeout > 0 {
 		var cancel context.CancelFunc
@@ -331,10 +346,12 @@ func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, me
 	if err != nil {
 		return ollama.ChatMessage{}, Turn{}, latencyMs, tokenUsage{}, err
 	}
-	// Ollama reports prompt_eval_count and eval_count separately; thinking
-	// tokens are folded into eval_count (not isolable here). The OpenAI-compat
-	// candidate transport (#136) will populate Thinking from reasoning usage.
-	usage := tokenUsage{PromptEval: resp.PromptEvalCount, Gen: resp.EvalCount}
+	usage := tokenUsage{
+		PromptEval:       resp.PromptEvalCount,
+		Gen:              resp.EvalCount,
+		Thinking:         resp.ThinkingTokens,
+		ThinkingComputed: resp.ThinkingTokensComputed,
+	}
 	return msg, turn, latencyMs, usage, nil
 }
 
