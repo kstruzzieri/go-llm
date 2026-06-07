@@ -61,6 +61,14 @@ case "$mode" in
     ;;
 esac
 
+# Run from the module root so `golangci-lint run` and `go test ./...` resolve
+# packages regardless of the caller's working directory. golangci-lint lints
+# the module subtree rooted at the CWD; invoked from a Go-free directory (for
+# example scripts/), it aborts with "no go files to analyze". Resolving the
+# root via git keeps the checks correct from any invocation path.
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
 require_cmd golangci-lint
 require_cmd go
 
