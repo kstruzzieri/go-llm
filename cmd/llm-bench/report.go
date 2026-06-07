@@ -322,7 +322,7 @@ func formatTokenBreakdown(models []string, results []Result) string {
 	fmt.Fprintln(&b)
 	fmt.Fprintln(&b, "> Generation (eval_count) vs prompt-eval (prompt_eval_count) tokens. Thinking tokens are shown only when the provider isolates them — Ollama folds reasoning into generation, so attribute latency to output/token volume, not thinking; the OpenAI-compat transport reports reasoning tokens when the model exposes them.")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "| Model | Gen tokens (sum / mean) | Prompt-eval tokens (sum / mean) | Thinking tokens (sum / mean) | n |")
+	fmt.Fprintln(&b, "| Model | Gen tokens (sum / mean, n) | Prompt-eval tokens (sum / mean, n) | Thinking tokens (sum / mean, n) | Successful rows |")
 	fmt.Fprintln(&b, "|---|---|---|---|---|")
 	for _, m := range models {
 		rs := byModel[m]
@@ -339,13 +339,14 @@ func formatTokenBreakdown(models []string, results []Result) string {
 	return b.String()
 }
 
-// tokenSumMeanCell renders "sum / mean" for a token aggregate, or "n/a" when no
-// rows reported that token kind (so an unavailable metric never shows a fake 0).
+// tokenSumMeanCell renders "sum / mean (n=available)" for a token aggregate, or
+// "n/a" when no rows reported that token kind (so an unavailable metric never
+// shows a fake 0).
 func tokenSumMeanCell(sum, available int) string {
 	if available == 0 {
 		return "n/a"
 	}
-	return fmt.Sprintf("%d / %d", sum, sum/available)
+	return fmt.Sprintf("%d / %d (n=%d)", sum, sum/available, available)
 }
 
 // reportOptions carries metadata that formatReport embeds in report headers.
