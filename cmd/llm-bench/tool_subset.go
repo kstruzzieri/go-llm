@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -96,7 +97,7 @@ func formatToolUseSubset(rows []toolUseSubsetRow) string {
 		coverageCell := "n/a"
 		subsetCell := "n/a"
 		if r.ExpectedPairs > 0 {
-			coverageCell = fmt.Sprintf("%.0f%% (%d/%d)", r.Coverage*100, r.ComputedPairs, r.ExpectedPairs)
+			coverageCell = fmt.Sprintf("%s (%d/%d)", formatCoveragePercent(r.Coverage), r.ComputedPairs, r.ExpectedPairs)
 		}
 		if r.ComputedPairs > 0 {
 			subsetCell = fmt.Sprintf("%.2f", r.MeanArgsValid)
@@ -115,7 +116,14 @@ func toolUseClaimVerdict(expectedPairs int, coverage float64) (bool, string) {
 		return false, fmt.Sprintf("insufficient: %d expected-tool-call pairs (need >=%d)", expectedPairs, toolUseClaimMinExpectedPairs)
 	}
 	if coverage < toolUseClaimMinCoverage {
-		return false, fmt.Sprintf("insufficient: %.0f%% computed coverage (need >=%.0f%%)", coverage*100, toolUseClaimMinCoverage*100)
+		return false, fmt.Sprintf("insufficient: %s computed coverage (need >=%.0f%%)", formatCoveragePercent(coverage), toolUseClaimMinCoverage*100)
 	}
-	return true, fmt.Sprintf("supported: %d pairs, %.0f%% computed", expectedPairs, coverage*100)
+	return true, fmt.Sprintf("supported: %d pairs, %s computed", expectedPairs, formatCoveragePercent(coverage))
+}
+
+func formatCoveragePercent(coverage float64) string {
+	tenths := math.Floor(coverage*1000+1e-9) / 10
+	s := fmt.Sprintf("%.1f", tenths)
+	s = strings.TrimSuffix(s, ".0")
+	return s + "%"
 }
