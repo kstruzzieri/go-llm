@@ -11,16 +11,15 @@ import (
 // formatReport renders per-model aggregates as a Markdown table.
 func formatReport(models []string, results []Result, opts reportOptions) string {
 	// Per-trace detail shows every result; the combined summary aggregate,
-	// when a corpus is present, excludes judge-validation (scorer-calibration
-	// evidence — never model workload, even in the diagnostic combined view).
+	// when a corpus is present, includes only rows allowed as model evidence.
 	byModel := make(map[string][]Result, len(models))
 	for _, r := range results {
 		byModel[r.Model] = append(byModel[r.Model], r)
 	}
 	summaryResults := results
-	excludedJudgeValidation := 0
+	var corpusExclusions corpusResultExclusions
 	if opts.Corpus != nil {
-		summaryResults, excludedJudgeValidation = excludeJudgeValidation(results, opts.Corpus.TraceToPartition)
+		summaryResults, corpusExclusions = modelEvidenceResults(results, opts.Corpus)
 	}
 	summaryByModel := make(map[string][]Result, len(models))
 	for _, r := range summaryResults {
@@ -61,13 +60,20 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 
 	if opts.Corpus != nil {
 		b.WriteString(formatCorpusComposition(opts.Corpus.Counts))
+		b.WriteString(formatCorpusSelectionGaps(opts.Corpus))
 	}
 
 	fmt.Fprintf(&b, "## Results\n\n")
 	if opts.Corpus != nil {
 		fmt.Fprintln(&b, "> Combined across model-evidence partitions (natural + challenge) — diagnostic only; partitions are not comparable, do not cite this as a single number. See the per-partition section below.")
-		if excludedJudgeValidation > 0 {
-			fmt.Fprintf(&b, ">\n> %d judge-validation result(s) excluded from this aggregate (scorer-calibration evidence, not model workload).\n", excludedJudgeValidation)
+		if corpusExclusions.JudgeValidation > 0 {
+			fmt.Fprintf(&b, ">\n> %d judge-validation result(s) excluded from this aggregate (scorer-calibration evidence, not model workload).\n", corpusExclusions.JudgeValidation)
+		}
+		if corpusExclusions.NonModelEvidence > 0 {
+			fmt.Fprintf(&b, ">\n> %d non-model-evidence result(s) excluded from this aggregate.\n", corpusExclusions.NonModelEvidence)
+		}
+		if corpusExclusions.Unclassified > 0 {
+			fmt.Fprintf(&b, ">\n> %d unclassified result(s) excluded from this aggregate (no corpus manifest entry).\n", corpusExclusions.Unclassified)
 		}
 		fmt.Fprintln(&b)
 	}
@@ -105,7 +111,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 
 	if opts.Corpus != nil {
 		fmt.Fprintln(&b)
-		b.WriteString(formatPartitionedQuality(models, results, opts.Corpus.TraceToPartition))
+		b.WriteString(formatPartitionedQuality(models, results, opts.Corpus))
 	}
 
 	if opts.ToolCallExpected != nil {
@@ -368,10 +374,20 @@ type reportOptions struct {
 }
 
 // corpusReportData carries the manifest-derived view the report needs:
-// composition counts and a trace→partition map for separation.
+// composition counts, model-evidence eligibility, and corpus selection gaps.
 type corpusReportData struct {
-	Counts           corpusCounts
-	TraceToPartition map[string]CorpusPartition
+	Counts               corpusCounts
+	TraceToPartition     map[string]CorpusPartition
+	TraceToModelEvidence map[string]bool
+	MissingSelected      []string
+	UnclassifiedLoaded   []string
+}
+
+func (d *corpusReportData) allowsModelEvidence(traceID string) bool {
+	if d == nil || d.TraceToModelEvidence == nil {
+		return true
+	}
+	return d.TraceToModelEvidence[traceID]
 }
 
 // formatCorpusComposition renders the manifest's partition and category counts.
@@ -395,17 +411,44 @@ func formatCorpusComposition(c corpusCounts) string {
 	return b.String()
 }
 
+func formatCorpusSelectionGaps(data *corpusReportData) string {
+	if data == nil || (len(data.MissingSelected) == 0 && len(data.UnclassifiedLoaded) == 0) {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "## Corpus selection gaps")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "| Gap | Trace |")
+	fmt.Fprintln(&b, "|---|---|")
+	for _, id := range data.MissingSelected {
+		fmt.Fprintf(&b, "| selected-but-missing | %s |\n", markdownCell(id))
+	}
+	for _, id := range data.UnclassifiedLoaded {
+		fmt.Fprintf(&b, "| loaded-without-manifest | %s |\n", markdownCell(id))
+	}
+	fmt.Fprintln(&b)
+	return b.String()
+}
+
 // formatPartitionedQuality renders per-model quality separately for the natural
 // and challenge partitions. The two are never averaged into one number, and
 // judge-validation traces (scorer-calibration evidence) are excluded from model
 // quality entirely.
-func formatPartitionedQuality(models []string, results []Result, traceToPartition map[string]CorpusPartition) string {
+func formatPartitionedQuality(models []string, results []Result, data *corpusReportData) string {
 	byPartition := make(map[CorpusPartition][]Result)
 	unclassified := 0
+	nonModelEvidence := 0
 	for _, r := range results {
-		p, ok := traceToPartition[r.TraceID]
+		p, ok := data.TraceToPartition[r.TraceID]
 		if !ok {
 			unclassified++
+			continue
+		}
+		if p == PartitionJudgeValidation {
+			continue
+		}
+		if !data.allowsModelEvidence(r.TraceID) {
+			nonModelEvidence++
 			continue
 		}
 		byPartition[p] = append(byPartition[p], r)
@@ -413,7 +456,7 @@ func formatPartitionedQuality(models []string, results []Result, traceToPartitio
 	var b strings.Builder
 	fmt.Fprintln(&b, "## Quality by model — by partition")
 	fmt.Fprintln(&b)
-	fmt.Fprintln(&b, "> Natural and challenge corpora answer different questions and are never averaged into one number. Judge-validation traces are scorer-calibration evidence and are excluded from model quality.")
+	fmt.Fprintln(&b, "> Natural and challenge corpora answer different questions and are never averaged into one number. Judge-validation and non-model-evidence traces are excluded from model quality.")
 	fmt.Fprintln(&b)
 	for _, p := range []CorpusPartition{PartitionNatural, PartitionChallenge} {
 		fmt.Fprintf(&b, "### %s\n\n", p)
@@ -427,6 +470,9 @@ func formatPartitionedQuality(models []string, results []Result, traceToPartitio
 	}
 	if unclassified > 0 {
 		fmt.Fprintf(&b, "_%d result(s) had no manifest partition and were omitted from the partitioned view._\n\n", unclassified)
+	}
+	if nonModelEvidence > 0 {
+		fmt.Fprintf(&b, "_%d non-model-evidence result(s) omitted from partitioned model quality._\n\n", nonModelEvidence)
 	}
 	return b.String()
 }

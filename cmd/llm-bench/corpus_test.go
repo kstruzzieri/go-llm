@@ -147,7 +147,10 @@ func TestFormatPartitionedQuality_SeparatesNaturalAndChallenge(t *testing.T) {
 	traceToPartition := map[string]CorpusPartition{
 		"t1": PartitionNatural, "t2": PartitionChallenge, "t3": PartitionJudgeValidation,
 	}
-	out := formatPartitionedQuality([]string{"ollama/a"}, results, traceToPartition)
+	out := formatPartitionedQuality([]string{"ollama/a"}, results, &corpusReportData{
+		TraceToPartition:     traceToPartition,
+		TraceToModelEvidence: map[string]bool{"t1": true, "t2": true, "t3": false},
+	})
 	for _, want := range []string{
 		"## Quality by model — by partition",
 		"never averaged",
@@ -294,6 +297,72 @@ func TestFormatReport_ExcludesJudgeValidationFromCombinedAggregate(t *testing.T)
 	}
 	if !strings.Contains(out, "judge-validation result(s) excluded") {
 		t.Errorf("report should note the judge-validation exclusion:\n%s", out)
+	}
+}
+
+func TestFormatReport_ExcludesNonEvidenceNaturalChallengeFromModelQuality(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "t1", Score: Score{AnswerQuality: 1.0}}, // natural evidence
+		{Model: "m", TraceID: "t2", Score: Score{AnswerQuality: 0.0}}, // natural, but not model evidence
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{
+		Scorer: "manual",
+		Corpus: &corpusReportData{
+			Counts: corpusCounts{
+				ByPartition: map[CorpusPartition]int{PartitionNatural: 2},
+				ByCategory:  map[string]int{"chat": 2},
+				Total:       2,
+			},
+			TraceToPartition:     map[string]CorpusPartition{"t1": PartitionNatural, "t2": PartitionNatural},
+			TraceToModelEvidence: map[string]bool{"t1": true, "t2": false},
+		},
+	})
+	resultsSection := sectionBetween(out, "## Results", "## Quality by model")
+	if !strings.Contains(resultsSection, "| m | 1.00 / 1.00 / 1.00 / 1.00 / 1.00 |") {
+		t.Errorf("combined aggregate should include only allowed model evidence:\n%s", resultsSection)
+	}
+	if strings.Contains(resultsSection, "| m | 0.50") {
+		t.Errorf("non-evidence natural/challenge row leaked into model quality:\n%s", resultsSection)
+	}
+	if !strings.Contains(out, "non-model-evidence result(s) excluded") {
+		t.Errorf("report should note non-model-evidence exclusions:\n%s", out)
+	}
+	natural := sectionBetween(out, "### natural", "### challenge")
+	if !strings.Contains(natural, "| m | 1.00 / 1.00 / 1.00 / 1.00 / 1.00 | 1 |") {
+		t.Errorf("natural partition quality should include only t1 evidence row:\n%s", natural)
+	}
+}
+
+func TestBuildCorpusRun_ReportDataSurfacesMissingAndUnclassified(t *testing.T) {
+	m := sampleCorpusManifest()                           // t1 natural, t2 challenge, t3 judge-validation
+	loaded := []Trace{{ID: "t1"}, {ID: "t2"}, {ID: "t4"}} // t3 missing; t4 not in manifest
+	run, data, missing := buildCorpusRun(m, corpusSelection{}, loaded)
+
+	if len(run) != 2 {
+		t.Fatalf("run length = %d; want 2 selected loaded traces", len(run))
+	}
+	if !reflect.DeepEqual(missing, []string{"t3"}) {
+		t.Fatalf("missing = %v; want [t3]", missing)
+	}
+	if !reflect.DeepEqual(data.MissingSelected, []string{"t3"}) {
+		t.Fatalf("data.MissingSelected = %v; want [t3]", data.MissingSelected)
+	}
+	if !reflect.DeepEqual(data.UnclassifiedLoaded, []string{"t4"}) {
+		t.Fatalf("data.UnclassifiedLoaded = %v; want [t4]", data.UnclassifiedLoaded)
+	}
+
+	out := formatReport([]string{"m"}, []Result{
+		{Model: "m", TraceID: "t1", Score: Score{AnswerQuality: 1.0}},
+		{Model: "m", TraceID: "t2", Score: Score{AnswerQuality: 0.0}},
+	}, reportOptions{Scorer: "manual", Corpus: data})
+	for _, want := range []string{
+		"## Corpus selection gaps",
+		"| selected-but-missing | t3 |",
+		"| loaded-without-manifest | t4 |",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q:\n%s", want, out)
+		}
 	}
 }
 
