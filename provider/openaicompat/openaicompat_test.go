@@ -691,6 +691,41 @@ func TestProvider_ChatStream_ParsesReasoningTokens(t *testing.T) {
 	}
 }
 
+func TestProvider_ChatStream_ParsesReasoningTokensFromUsageOnlyChunk(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{Content: "hi"}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
+			}}},
+			{Model: "m", Choices: []chatChunkChoice{}, Usage: &usage{
+				PromptTokens:            2,
+				CompletionTokens:        5,
+				TotalTokens:             7,
+				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 3},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var got []provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	last := got[len(got)-1]
+	if !last.Done {
+		t.Fatalf("last chunk should be Done, got %+v", last)
+	}
+	if last.Usage.ReasoningTokens != 3 {
+		t.Errorf("last.Usage.ReasoningTokens = %d, want 3 (parsed from usage-only completion_tokens_details.reasoning_tokens)", last.Usage.ReasoningTokens)
+	}
+}
+
 func TestProvider_ChatStream_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
 	// Backward-compatibility guard for the streaming path: a final usage block
 	// without completion_tokens_details must yield ReasoningTokens == 0.

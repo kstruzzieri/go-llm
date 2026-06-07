@@ -307,6 +307,9 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		if len(chunk.Choices) == 0 {
 			continue
 		}
+		if finished {
+			continue
+		}
 		choice := chunk.Choices[0]
 
 		if len(choice.Delta.ToolCalls) > 0 {
@@ -324,21 +327,28 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 				callbackErr = err
 				break
 			}
-			if err := fn(provider.ChatResponse{
-				Model:     lastModel,
-				Provider:  p.name,
-				ToolCalls: lastToolCalls,
-				Done:      true,
-				Usage:     lastUsage,
-			}); err != nil {
-				callbackErr = err
-			}
-			break
+			continue
 		}
 	}
 
 	if callbackErr != nil {
 		return callbackErr
+	}
+	if finished {
+		model := lastModel
+		if model == "" {
+			model = req.Model
+		}
+		if err := fn(provider.ChatResponse{
+			Model:     model,
+			Provider:  p.name,
+			ToolCalls: lastToolCalls,
+			Done:      true,
+			Usage:     lastUsage,
+		}); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	if ctx.Err() != nil {
