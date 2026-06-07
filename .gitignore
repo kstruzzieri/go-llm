@@ -5,6 +5,7 @@ docs/spikes/
 docs/superpowers/
 docs/llm/traces/
 .DS_Store
+/.worktrees/
 
 # llm-bench harness — local artifacts
 /llm-bench
