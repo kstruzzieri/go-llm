@@ -233,6 +233,10 @@ func buildCorpusRun(m Manifest, sel corpusSelection, loaded []Trace) (run []Trac
 	for _, tr := range loaded {
 		loadedByID[tr.ID] = tr
 	}
+	manifestByID := make(map[string]ManifestEntry, len(m.Entries))
+	for _, e := range m.Entries {
+		manifestByID[e.TraceID] = e
+	}
 	keep := make(map[string]struct{})
 	for _, id := range m.Select(sel) {
 		if tr, ok := loadedByID[id]; ok {
@@ -242,24 +246,50 @@ func buildCorpusRun(m Manifest, sel corpusSelection, loaded []Trace) (run []Trac
 			missing = append(missing, id)
 		}
 	}
+	var unclassifiedLoaded []string
+	for _, tr := range loaded {
+		if _, ok := manifestByID[tr.ID]; !ok {
+			unclassifiedLoaded = append(unclassifiedLoaded, tr.ID)
+		}
+	}
 	sub := m.entriesFor(keep)
 	data = &corpusReportData{
-		Counts:           sub.Counts(),
-		TraceToPartition: sub.partitionByTrace(),
+		Counts:               sub.Counts(),
+		TraceToPartition:     sub.partitionByTrace(),
+		TraceToModelEvidence: sub.modelEvidenceByTrace(),
+		MissingSelected:      append([]string(nil), missing...),
+		UnclassifiedLoaded:   unclassifiedLoaded,
 	}
 	return run, data, missing
 }
 
-// excludeJudgeValidation returns results whose trace is NOT in the
-// judge-validation partition, plus the count excluded. Judge-validation traces
-// are scorer-calibration evidence and must never enter model-quality
-// aggregates, so the combined summary table filters them out.
-func excludeJudgeValidation(results []Result, traceToPartition map[string]CorpusPartition) ([]Result, int) {
+type corpusResultExclusions struct {
+	JudgeValidation  int
+	NonModelEvidence int
+	Unclassified     int
+}
+
+// modelEvidenceResults returns only results that may enter model-quality
+// aggregates. Corpus reports exclude judge-validation, loaded-without-manifest,
+// and manifest rows explicitly marked not allowed as model evidence.
+func modelEvidenceResults(results []Result, data *corpusReportData) ([]Result, corpusResultExclusions) {
+	if data == nil {
+		return results, corpusResultExclusions{}
+	}
 	var kept []Result
-	excluded := 0
+	var excluded corpusResultExclusions
 	for _, r := range results {
-		if traceToPartition[r.TraceID] == PartitionJudgeValidation {
-			excluded++
+		p, ok := data.TraceToPartition[r.TraceID]
+		if !ok {
+			excluded.Unclassified++
+			continue
+		}
+		if p == PartitionJudgeValidation {
+			excluded.JudgeValidation++
+			continue
+		}
+		if !data.allowsModelEvidence(r.TraceID) {
+			excluded.NonModelEvidence++
 			continue
 		}
 		kept = append(kept, r)
@@ -272,6 +302,16 @@ func (m Manifest) partitionByTrace() map[string]CorpusPartition {
 	out := make(map[string]CorpusPartition, len(m.Entries))
 	for _, e := range m.Entries {
 		out[e.TraceID] = e.Partition
+	}
+	return out
+}
+
+// modelEvidenceByTrace maps each trace ID to whether it may contribute to
+// accepted-run model-quality evidence.
+func (m Manifest) modelEvidenceByTrace() map[string]bool {
+	out := make(map[string]bool, len(m.Entries))
+	for _, e := range m.Entries {
+		out[e.TraceID] = e.AllowedAsModelEvidence
 	}
 	return out
 }
