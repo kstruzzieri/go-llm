@@ -56,14 +56,14 @@ func TestChat(t *testing.T) {
 	}
 }
 
-func TestChatDoesNotSendMessageThinking(t *testing.T) {
+func TestChatSendsMessageThinking(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if got := req.Messages[0].Thinking; got != "" {
-			t.Fatalf("request message thinking = %q; want empty because thinking is response-only", got)
+		if got := req.Messages[0].Thinking; got != "private reasoning" {
+			t.Fatalf("request message thinking = %q; want preserved thinking history", got)
 		}
 
 		_ = json.NewEncoder(w).Encode(ChatResponse{
@@ -134,14 +134,14 @@ func TestChatStream(t *testing.T) {
 	}
 }
 
-func TestChatStreamDoesNotSendMessageThinking(t *testing.T) {
+func TestChatStreamSendsMessageThinking(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ChatRequest
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			t.Fatalf("decode request: %v", err)
 		}
-		if got := req.Messages[0].Thinking; got != "" {
-			t.Fatalf("stream request message thinking = %q; want empty because thinking is response-only", got)
+		if got := req.Messages[0].Thinking; got != "private reasoning" {
+			t.Fatalf("stream request message thinking = %q; want preserved thinking history", got)
 		}
 
 		_, _ = fmt.Fprint(w, `{"model":"test-model","message":{"role":"assistant","content":"ok"},"done":false}`+"\n")
