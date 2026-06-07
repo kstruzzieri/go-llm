@@ -696,6 +696,37 @@ func TestProvider_ChatStream_DeliversChunksThenDone(t *testing.T) {
 	}
 }
 
+func TestProvider_ChatStream_RequestsUsageInStreamOptions(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := json.NewDecoder(r.Body).Decode(&gotBody); err != nil {
+			t.Errorf("decode request body: %v", err)
+		}
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
+			}}},
+			chatUsageChunk(),
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	if err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(provider.ChatResponse) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+
+	streamOptions, ok := gotBody["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("stream_options missing or wrong type in request body: %#v", gotBody)
+	}
+	if streamOptions["include_usage"] != true {
+		t.Fatalf("stream_options.include_usage = %#v, want true", streamOptions["include_usage"])
+	}
+}
+
 // TestProvider_ChatStream_ParsesReasoningTokens verifies the streaming Chat
 // path surfaces reasoning tokens from the final chunk's usage block. Per the
 // OpenAI streaming spec, usage is only emitted on the terminal chunk (when
@@ -824,6 +855,7 @@ func TestProvider_ChatStream_SingleToolCall_AssembledOnDone(t *testing.T) {
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -885,6 +917,7 @@ func TestProvider_ChatStream_FragmentedToolCall_AssembledOnDone(t *testing.T) {
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -946,6 +979,7 @@ func TestProvider_ChatStream_FragmentedToolCall_LockedEncodingMode(t *testing.T)
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -999,6 +1033,7 @@ func TestProvider_ChatStream_FragmentedToolCall_NilIndexUsesLastKnown(t *testing
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -1049,6 +1084,7 @@ func TestProvider_ChatStream_MultiToolFragmented_AssembledIndependently(t *testi
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -1098,6 +1134,7 @@ func TestProvider_ChatStream_FragmentedToolCall_OrderByFirstAppearance(t *testin
 			{Model: "m", Choices: []chatChunkChoice{{
 				Delta: chatMessage{}, FinishReason: stringPtr("tool_calls"),
 			}}},
+			chatUsageChunk(),
 		})
 	}))
 	defer srv.Close()
@@ -1200,6 +1237,7 @@ func TestProvider_ChatStream_MalformedChunk_Skipped(t *testing.T) {
 		_, _ = fmt.Fprintf(w, "data: %s\n\n", marshalJSON(t, chatChunk{
 			Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{}, FinishReason: stringPtr("stop")}},
 		}))
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", marshalJSON(t, chatUsageChunk()))
 		_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 		f.Flush()
 	}))
@@ -1234,6 +1272,62 @@ func TestProvider_ChatStream_SSEReadError_ReturnsError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "sse read") {
 		t.Fatalf("expected propagated SSE read error, got %v", err)
+	}
+}
+
+func TestProvider_ChatStream_ReadErrorAfterFinishReason_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", marshalJSON(t, chatChunk{
+			Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{}, FinishReason: stringPtr("stop")}},
+		}))
+		flusher.Flush()
+		_, _ = fmt.Fprintf(w, "data: %s\n\n", strings.Repeat("x", 1024*1024+1))
+		flusher.Flush()
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var sawDone bool
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			sawDone = true
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "sse read") {
+		t.Fatalf("expected propagated SSE read error after finish_reason, got %v", err)
+	}
+	if sawDone {
+		t.Fatal("must not synthesize successful Done when the stream errors before usage/[DONE]")
+	}
+}
+
+func TestProvider_ChatStream_DoneWithoutUsage_ReturnsError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
+			}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var sawDone bool
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		if r.Done {
+			sawDone = true
+		}
+		return nil
+	})
+	if err == nil || !strings.Contains(err.Error(), "ended before usage chunk") {
+		t.Fatalf("expected missing usage error, got %v", err)
+	}
+	if sawDone {
+		t.Fatal("must not synthesize successful Done when requested streaming usage is missing")
 	}
 }
 
@@ -1770,6 +1864,12 @@ func writeSSE(t *testing.T, w http.ResponseWriter, chunks []chatChunk) {
 	}
 	_, _ = fmt.Fprintf(w, "data: [DONE]\n\n")
 	flusher.Flush()
+}
+
+func chatUsageChunk() chatChunk {
+	return chatChunk{
+		Usage: &usage{PromptTokens: 1, CompletionTokens: 1, TotalTokens: 2},
+	}
 }
 
 func marshalJSON(t *testing.T, v any) string {
