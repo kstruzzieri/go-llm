@@ -111,6 +111,55 @@ func TestMainPairedReportEndToEnd(t *testing.T) {
 	}
 }
 
+func TestMainCorpusManifestPartitionsReport(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"message":           map[string]string{"role": "assistant", "content": "smoke-ok"},
+			"done":              true,
+			"prompt_eval_count": 1,
+			"eval_count":        1,
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	manifest := filepath.Join(dir, "manifest.jsonl")
+	if err := writeManifest(manifest, Manifest{Entries: []ManifestEntry{
+		{TraceID: "smoke-minimal-001", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	report := filepath.Join(dir, "report.md")
+
+	cmd := exec.Command(os.Args[0],
+		"-traces", "testdata/smoke/minimal.json",
+		"-models", "fake",
+		"-scorer", "exact-match",
+		"-corpus-manifest", manifest,
+		"-ollama-url", server.URL,
+		"-judge-cache", "",
+		"-report", report,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -corpus-manifest failed: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	for _, want := range []string{"## Corpus composition", "## Quality by model — by partition", "### natural"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("corpus report missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestResolveToolSchemaSourceStdio(t *testing.T) {
 	src, err := resolveToolSchemaSource("echo mock-server", "")
 	if err != nil {
