@@ -424,6 +424,140 @@ func TestProvider_Chat_ThinkNone_KeepsTagsInline(t *testing.T) {
 	}
 }
 
+// TestProvider_Chat_SurfacesNativeReasoningContent verifies that when a backend
+// separates reasoning into the structured message.reasoning_content field
+// (vLLM / DeepSeek / some llama-server builds), the text is surfaced through
+// ChatResponse.Thinking and Content stays the clean final answer — no inline
+// tag stripping needed because the server already separated the two.
+func TestProvider_Chat_SurfacesNativeReasoningContent(t *testing.T) {
+	srv := newMockServer(t, mockServerOpts{
+		chatResponse: chatResponse{
+			Model: "deepseek-r1",
+			Choices: []chatChoice{{
+				Message: chatMessage{
+					Role:             "assistant",
+					Content:          "final answer",
+					ReasoningContent: "native chain of thought",
+				},
+				FinishReason: "stop",
+			}},
+		},
+	})
+	defer srv.close()
+
+	p := NewProvider(NewClient(srv.url))
+	resp, err := p.Chat(context.Background(), provider.ChatRequest{Model: "deepseek-r1"})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Thinking != "native chain of thought" {
+		t.Errorf("Thinking = %q, want native reasoning_content surfaced", resp.Thinking)
+	}
+	if resp.Content != "final answer" {
+		t.Errorf("Content = %q, want %q (content unchanged when reasoning is in its own field)", resp.Content, "final answer")
+	}
+}
+
+// TestProvider_Chat_NativeReasoningWinsOverInline locks the precedence rule: a
+// structured reasoning_content field is authoritative over inline <think> tags
+// (the structured field is unambiguous; inline extraction is a heuristic). The
+// inline tags are still stripped from Content so the answer is clean.
+func TestProvider_Chat_NativeReasoningWinsOverInline(t *testing.T) {
+	srv := newMockServer(t, mockServerOpts{
+		chatResponse: chatResponse{
+			Choices: []chatChoice{{
+				Message: chatMessage{
+					Role:             "assistant",
+					Content:          "<think>inline</think>final answer",
+					ReasoningContent: "structured reasoning",
+				},
+			}},
+		},
+	})
+	defer srv.close()
+
+	p := NewProvider(NewClient(srv.url))
+	resp, err := p.Chat(context.Background(), provider.ChatRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Thinking != "structured reasoning" {
+		t.Errorf("Thinking = %q, want structured reasoning_content to win over inline tags", resp.Thinking)
+	}
+	if resp.Content != "final answer" {
+		t.Errorf("Content = %q, want inline tags still stripped from content", resp.Content)
+	}
+}
+
+// TestProvider_Chat_NativeReasoningCapturedWithThinkNone verifies the
+// structured field is captured even when inline-tag extraction is disabled
+// (ThinkNone). This mirrors #158, where reasoning *tokens* are captured
+// regardless of think mode — the gate exists to avoid misparsing content, a
+// risk that does not apply to a dedicated wire field.
+func TestProvider_Chat_NativeReasoningCapturedWithThinkNone(t *testing.T) {
+	srv := newMockServer(t, mockServerOpts{
+		chatResponse: chatResponse{
+			Choices: []chatChoice{{
+				Message: chatMessage{Role: "assistant", Content: "answer", ReasoningContent: "native reasoning"},
+			}},
+		},
+	})
+	defer srv.close()
+
+	p := NewProvider(NewClient(srv.url), WithThinkMode(provider.ThinkNone))
+	resp, err := p.Chat(context.Background(), provider.ChatRequest{Model: "m"})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Thinking != "native reasoning" {
+		t.Errorf("Thinking = %q, want native reasoning captured even with ThinkNone", resp.Thinking)
+	}
+	if resp.Content != "answer" {
+		t.Errorf("Content = %q, want %q", resp.Content, "answer")
+	}
+}
+
+// TestProvider_ChatStream_SurfacesNativeReasoningContent verifies streaming
+// delta.reasoning_content is emitted as Thinking deltas, separate from content
+// deltas, mirroring the OllamaProvider streaming contract.
+func TestProvider_ChatStream_SurfacesNativeReasoningContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{ReasoningContent: "step one "}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{ReasoningContent: "step two"}}}},
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{Content: "final"}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
+			}}, Usage: &usage{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var thinking, content string
+	var gotDone bool
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		thinking += r.Thinking
+		content += r.Content
+		if r.Done {
+			gotDone = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	if !gotDone {
+		t.Error("expected a Done chunk")
+	}
+	if thinking != "step one step two" {
+		t.Errorf("accumulated thinking = %q, want %q", thinking, "step one step two")
+	}
+	if content != "final" {
+		t.Errorf("accumulated content = %q, want %q", content, "final")
+	}
+}
+
 func TestProvider_Chat_NoChoices_ReturnsError(t *testing.T) {
 	srv := newMockServer(t, mockServerOpts{
 		chatResponse: chatResponse{ID: "empty", Choices: nil},

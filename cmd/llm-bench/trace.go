@@ -28,9 +28,15 @@ type Trace struct {
 
 // Turn represents a single role/content pair, optionally with tool calls or
 // tool results. Preserved verbatim so the replay is deterministic.
+//
+// Thinking is the reasoning text a candidate separated from its answer
+// (captured on assistant transcript turns); it is kept distinct from Content so
+// the scored answer stays clean. It is omitempty, so trace fixtures that never
+// set it are unaffected.
 type Turn struct {
 	Role       string          `json:"role"`
 	Content    string          `json:"content,omitempty"`
+	Thinking   string          `json:"thinking,omitempty"`
 	ToolCalls  []ToolCall      `json:"tool_calls,omitempty"`
 	ToolCallID string          `json:"tool_call_id,omitempty"`
 	Name       string          `json:"name,omitempty"`

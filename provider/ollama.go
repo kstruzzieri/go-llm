@@ -198,10 +198,19 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 		return nil, fmt.Errorf("provider: ollama: chat: %w", err)
 	}
 
+	// Ollama's separate message.thinking field, when present, is authoritative —
+	// the server already split reasoning from the answer, so it is captured
+	// unconditionally (independent of think mode, mirroring how reasoning tokens
+	// are captured). Inline <think>-tag extraction remains the fallback for the
+	// folded-into-content case, and still cleans Content either way.
 	content := oResp.Message.Content
-	thinking := ""
+	thinking := oResp.Message.Thinking
 	if p.shouldExtractThinking(req.Options) {
-		content, thinking = ExtractThinking(oResp.Message.Content, p.thinkTags)
+		var inline string
+		content, inline = ExtractThinking(oResp.Message.Content, p.thinkTags)
+		if thinking == "" {
+			thinking = inline
+		}
 	}
 
 	return &ChatResponse{
@@ -291,6 +300,19 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 
 		if len(oResp.Message.ToolCalls) > 0 {
 			lastToolCalls = toProviderToolCalls(oResp.Message.ToolCalls)
+		}
+
+		// Emit Ollama's separate reasoning field as a Thinking delta as it
+		// arrives, independent of the inline-tag parser which only sees content.
+		// Unlike the non-streaming path (native field takes precedence over
+		// inline <think> tags), a stream can't reconcile the two mid-flight, so a
+		// backend emitting both would surface both — harmless since backends use
+		// one mechanism or the other.
+		if oResp.Message.Thinking != "" {
+			if err := fn(ChatResponse{Model: oResp.Model, Provider: p.name, Thinking: oResp.Message.Thinking}); err != nil {
+				callbackErr = err
+				return err
+			}
 		}
 
 		// Feed content through the think parser.

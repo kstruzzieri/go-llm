@@ -179,6 +179,46 @@ func TestReplayWith_OpenAICompatStripsThinkNoResidueNote(t *testing.T) {
 	}
 }
 
+// When a backend separates reasoning into its own field, replayWith must carry
+// that text all the way into the transcript Turn.Thinking — captured, not
+// dropped — while Turn.Content stays the clean final answer that gets scored.
+// See #160.
+func TestReplayWith_CapturesNativeReasoningIntoTranscript(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"final","reasoning_content":"why final"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "openai-compat/fake", Provider: "openai-compat", Model: "fake"}, candidateTransportOptions{
+		openAICompatBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	trace := Trace{ID: "reason-capture", System: "sys", Turns: []Turn{{Role: "user", Content: "q"}}}
+	out, err := replayWith(context.Background(), tr.chat, "fake", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith: %v", err)
+	}
+	if len(out.Transcript) == 0 {
+		t.Fatal("transcript empty; want one assistant turn")
+	}
+	last := out.Transcript[len(out.Transcript)-1]
+	if last.Thinking != "why final" {
+		t.Errorf("transcript Turn.Thinking = %q, want reasoning text captured end-to-end", last.Thinking)
+	}
+	if last.Content != "final" {
+		t.Errorf("transcript Turn.Content = %q, want %q (clean answer)", last.Content, "final")
+	}
+}
+
 func TestReplaySupportsMultipleUserTurns(t *testing.T) {
 	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

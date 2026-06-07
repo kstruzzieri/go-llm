@@ -106,6 +106,70 @@ func TestChatStream(t *testing.T) {
 	}
 }
 
+// TestChatPopulatesMessageThinking verifies the raw client maps Ollama's
+// separate message.thinking field (emitted by reasoning models in thinking
+// mode) onto ChatMessage.Thinking, keeping it distinct from the final answer
+// in Content. Before this field existed the reasoning text was silently
+// dropped by the JSON decoder.
+func TestChatPopulatesMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"model":"test-model",
+			"message":{"role":"assistant","content":"The answer is 42.","thinking":"Let me reason about this."},
+			"done":true
+		}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	resp, err := c.Chat(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "user", Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Message.Thinking != "Let me reason about this." {
+		t.Errorf("Message.Thinking = %q, want %q", resp.Message.Thinking, "Let me reason about this.")
+	}
+	if resp.Message.Content != "The answer is 42." {
+		t.Errorf("Message.Content = %q, want %q", resp.Message.Content, "The answer is 42.")
+	}
+}
+
+// TestChatStreamPopulatesMessageThinking verifies thinking deltas stream
+// incrementally on message.thinking, separate from content deltas. Ollama
+// emits reasoning first, then the answer.
+func TestChatStreamPopulatesMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","thinking":"Let me "},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","thinking":"think."},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","content":"Done."},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","content":""},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	var thinking, content string
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Model:    "m",
+		Messages: []ChatMessage{{Role: "user", Content: "Hi"}},
+	}, func(resp ChatResponse) error {
+		thinking += resp.Message.Thinking
+		content += resp.Message.Content
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error: %v", err)
+	}
+	if thinking != "Let me think." {
+		t.Errorf("accumulated thinking = %q, want %q", thinking, "Let me think.")
+	}
+	if content != "Done." {
+		t.Errorf("accumulated content = %q, want %q", content, "Done.")
+	}
+}
+
 func TestChatStreamCallbackError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		chunk := ChatResponse{

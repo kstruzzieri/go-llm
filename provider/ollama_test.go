@@ -444,6 +444,122 @@ func TestOllamaProvider_Chat_ThinkToggleDisabled(t *testing.T) {
 	}
 }
 
+// TestOllamaProvider_Chat_SurfacesNativeThinking verifies that Ollama's
+// separate message.thinking field is surfaced through ChatResponse.Thinking,
+// with Content left as the clean final answer — no inline tags to strip.
+func TestOllamaProvider_Chat_SurfacesNativeThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ollama.ChatResponse{
+			Model:   "qwen3:8b",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "The answer is 42.", Thinking: "Let me reason about this."},
+			Done:    true,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Messages: []ChatMessage{{Role: "user", Content: "What is the meaning of life?"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Thinking != "Let me reason about this." {
+		t.Errorf("Thinking = %q, want native message.thinking surfaced", resp.Thinking)
+	}
+	if resp.Content != "The answer is 42." {
+		t.Errorf("Content = %q, want content unchanged when reasoning is in its own field", resp.Content)
+	}
+}
+
+// TestOllamaProvider_Chat_NativeThinkingWinsOverInline locks the precedence:
+// the structured message.thinking field is authoritative over inline <think>
+// tags, which are still stripped from Content.
+func TestOllamaProvider_Chat_NativeThinkingWinsOverInline(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		resp := ollama.ChatResponse{
+			Model:   "qwen3:8b",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "<think>inline</think>The answer is 42.", Thinking: "structured reasoning"},
+			Done:    true,
+		}
+		_ = json.NewEncoder(w).Encode(resp)
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	resp, err := p.Chat(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Messages: []ChatMessage{{Role: "user", Content: "Q"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Thinking != "structured reasoning" {
+		t.Errorf("Thinking = %q, want structured message.thinking to win over inline tags", resp.Thinking)
+	}
+	if resp.Content != "The answer is 42." {
+		t.Errorf("Content = %q, want inline tags still stripped", resp.Content)
+	}
+}
+
+// TestOllamaProvider_ChatStream_SurfacesNativeThinking verifies streaming
+// message.thinking deltas are emitted as Thinking chunks, separate from content
+// chunks. Ollama streams reasoning before the answer.
+func TestOllamaProvider_ChatStream_SurfacesNativeThinking(t *testing.T) {
+	chunks := []ollama.ChatResponse{
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Thinking: "Let me "}, Done: false},
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Thinking: "think."}, Done: false},
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Content: "The answer is 42."}, Done: false},
+		{Model: "qwen3:8b", Message: ollama.ChatMessage{Role: "assistant", Content: ""}, Done: true},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		for _, chunk := range chunks {
+			data, _ := json.Marshal(chunk)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
+		}
+	}))
+	defer srv.Close()
+
+	c := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	p := NewOllamaProvider(c)
+
+	var thinkingChunks, contentChunks []string
+	var gotDone bool
+	err := p.ChatStream(context.Background(), ChatRequest{
+		Model:    "qwen3:8b",
+		Messages: []ChatMessage{{Role: "user", Content: "Q"}},
+	}, func(resp ChatResponse) error {
+		if resp.Thinking != "" {
+			thinkingChunks = append(thinkingChunks, resp.Thinking)
+		}
+		if resp.Content != "" {
+			contentChunks = append(contentChunks, resp.Content)
+		}
+		if resp.Done {
+			gotDone = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error: %v", err)
+	}
+	if !gotDone {
+		t.Error("expected final chunk with Done=true")
+	}
+	if thinking := strings.Join(thinkingChunks, ""); thinking != "Let me think." {
+		t.Errorf("accumulated thinking = %q, want %q", thinking, "Let me think.")
+	}
+	if content := strings.Join(contentChunks, ""); content != "The answer is 42." {
+		t.Errorf("accumulated content = %q, want %q", content, "The answer is 42.")
+	}
+}
+
 func TestOllamaProvider_Chat_WithOptions(t *testing.T) {
 	var receivedOpts ollama.ModelOptions
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

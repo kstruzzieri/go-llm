@@ -350,6 +350,9 @@ func chatReplayTurn(ctx context.Context, client candidateChatClient, model strin
 	if err != nil {
 		return ollama.ChatMessage{}, Turn{}, latencyMs, tokenUsage{}, err
 	}
+	// Capture reasoning text in the transcript turn (kept separate from Content
+	// and out of the history message msg, which feeds later turns). See #160.
+	turn.Thinking = resp.Thinking
 	usage := tokenUsage{
 		PromptEval:       resp.PromptEvalCount,
 		Gen:              resp.EvalCount,
