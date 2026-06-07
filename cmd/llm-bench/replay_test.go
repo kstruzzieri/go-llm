@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 
@@ -78,6 +79,103 @@ func TestReplayRefusesTraceWithoutUserTurn(t *testing.T) {
 	}
 	if *called {
 		t.Error("replay reached Ollama despite refusing the trace")
+	}
+}
+
+// thinkMarkupResidueNote flags answers that still carry <think> reasoning
+// markup after extraction (e.g. a serving backend that left tags inline or
+// used non-default delimiters), so a reviewer can discount the score.
+func TestThinkMarkupResidueNote(t *testing.T) {
+	if note := thinkMarkupResidueNote("clean final answer"); note != "" {
+		t.Fatalf("clean answer: note = %q; want empty", note)
+	}
+	if note := thinkMarkupResidueNote("<think>leaked reasoning</think>"); note == "" {
+		t.Fatal("well-formed residual <think> markup: note = empty; want a divergence note")
+	}
+	if note := thinkMarkupResidueNote("<think>unclosed reasoning that extraction cannot strip"); note == "" {
+		t.Fatal("unclosed <think> markup: note = empty; want a divergence note")
+	}
+}
+
+// When the serving backend leaves reasoning markup inline (so think extraction
+// can't strip it), replayWith should annotate the result so the residue is
+// visible to reviewers rather than silently scored as the answer.
+func TestReplayWith_NotesResidualThinkMarkup(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollama.ChatResponse{
+			Model:           "test-model",
+			Done:            true,
+			Message:         ollama.ChatMessage{Role: "assistant", Content: "<think>unclosed reasoning leaking into the final answer"},
+			PromptEvalCount: 1,
+			EvalCount:       1,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "think-residue",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "q"}},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith: %v", err)
+	}
+
+	found := false
+	for _, note := range out.Notes {
+		if strings.Contains(note, "<think") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("out.Notes = %#v; want a note flagging residual <think> markup", out.Notes)
+	}
+}
+
+// Companion to TestReplayWith_NotesResidualThinkMarkup: a well-formed <think>
+// block on the openai-compat path is stripped by default extraction, so the
+// scored answer is clean and no residue note is recorded.
+func TestReplayWith_OpenAICompatStripsThinkNoResidueNote(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"<think>private reasoning</think>final"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":4,"completion_tokens":2,"total_tokens":6}
+		}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "openai-compat/fake", Provider: "openai-compat", Model: "fake"}, candidateTransportOptions{
+		openAICompatBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	trace := Trace{
+		ID:     "think-clean",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "q"}},
+	}
+	out, err := replayWith(context.Background(), tr.chat, "fake", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith: %v", err)
+	}
+	if got := lastAssistantContent(out.Transcript); got != "final" {
+		t.Fatalf("final answer = %q; want %q (think block must be stripped before scoring)", got, "final")
+	}
+	for _, note := range out.Notes {
+		if strings.Contains(note, "<think") {
+			t.Fatalf("unexpected residue note for a well-formed think block: %q", note)
+		}
 	}
 }
 

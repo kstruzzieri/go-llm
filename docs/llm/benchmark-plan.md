@@ -249,6 +249,13 @@ go run ./cmd/llm-bench \
   -report ./bench-report.md
 ```
 
+Candidate answers are scored on final content only: inline `<think>...</think>`
+reasoning emitted by a server (for example llama.cpp) is stripped before
+scoring, so results reflect the answer rather than serving-stack reasoning
+formatting — matching the Ollama path, where the server separates reasoning
+into a field the harness drops. A residual `<think` marker surviving the strip
+is recorded in the result notes so a reviewer can discount that answer.
+
 - Initial target comparisons against the reference lineup in `models.json`:
   - `coding` — Qwen3-Coder-Next vs GLM-5.1 on code-gen traces (Setup 2
     experiment; see [setups.md](setups.md))

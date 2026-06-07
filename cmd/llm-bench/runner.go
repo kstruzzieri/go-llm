@@ -304,6 +304,10 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 		}
 	}
 
+	if note := thinkMarkupResidueNote(lastAssistantContent(out.Transcript)); note != "" {
+		out.Notes = append(out.Notes, note)
+	}
+
 	return out, nil
 }
 
@@ -554,4 +558,18 @@ func appendNotes(existing string, extras []string) string {
 		return joined
 	}
 	return existing + "; " + joined
+}
+
+// thinkMarkupResidueNote returns a divergence note when a candidate's final
+// answer still contains a "<think" marker after think extraction — for example
+// an unclosed or malformed tag the default extractor's <think>...</think>
+// regex can't match, or a backend that emits reasoning inline instead of
+// separating it. The empty string means no residue. It is advisory: callers
+// append it to Score.Notes so a reviewer can discount answers polluted by
+// serving-stack reasoning formatting rather than model output.
+func thinkMarkupResidueNote(finalAnswer string) string {
+	if strings.Contains(finalAnswer, "<think") {
+		return "candidate final answer retains <think> reasoning markup; serving backend did not separate reasoning"
+	}
+	return ""
 }

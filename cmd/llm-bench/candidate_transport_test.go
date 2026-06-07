@@ -131,3 +131,41 @@ func TestOpenAICompatCandidateClient_ChatTranslatesReplayRequestAndResponse(t *t
 		t.Fatalf("ThinkingTokensComputed = true; want false until provider exposes dedicated reasoning token counts")
 	}
 }
+
+// A reasoning model served via llama.cpp can emit <think>...</think> inline in
+// content. The candidate transport must strip it so the scored transcript holds
+// the final answer, not serving-stack-specific reasoning formatting.
+func TestOpenAICompatCandidateClient_StripsInlineThinkTags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"<think>secret chain of thought</think>final answer"},
+				"finish_reason":"stop"
+			}],
+			"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}
+		}`))
+	}))
+	defer srv.Close()
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "openai-compat/fake", Provider: "openai-compat", Model: "fake"}, candidateTransportOptions{
+		openAICompatBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+		Model:    "fake",
+		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Message.Content != "final answer" {
+		t.Fatalf("content = %q; want %q (inline <think> reasoning must be stripped)", resp.Message.Content, "final answer")
+	}
+}
