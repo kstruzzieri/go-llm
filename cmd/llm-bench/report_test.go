@@ -220,6 +220,35 @@ func TestFormatReport_EmitsTokenBreakdownAndNoNaN(t *testing.T) {
 	}
 }
 
+func TestFormatReport_TokenBreakdownExcludesJudgeValidation(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "natural", Score: Score{GenTokens: 100, PromptEvalTokens: 40, TotalTokens: 140}},
+		{Model: "m", TraceID: "challenge", Score: Score{GenTokens: 50, PromptEvalTokens: 20, TotalTokens: 70}},
+		{Model: "m", TraceID: "judge", Score: Score{GenTokens: 1000, PromptEvalTokens: 500, TotalTokens: 1500}},
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{
+		Scorer: "exact-match",
+		Corpus: &corpusReportData{
+			Counts: corpusCounts{
+				ByPartition: map[CorpusPartition]int{PartitionNatural: 1, PartitionChallenge: 1, PartitionJudgeValidation: 1},
+				ByCategory:  map[string]int{"chat": 3},
+				Total:       3,
+			},
+			TraceToPartition: map[string]CorpusPartition{
+				"natural":   PartitionNatural,
+				"challenge": PartitionChallenge,
+				"judge":     PartitionJudgeValidation,
+			},
+		},
+	})
+	if !strings.Contains(out, "| m | 150 / 75 | 60 / 30 | n/a | 2 |") {
+		t.Fatalf("token breakdown should aggregate only natural+challenge rows:\n%s", out)
+	}
+	if strings.Contains(out, "| m | 1150 /") {
+		t.Fatalf("judge-validation tokens leaked into token breakdown:\n%s", out)
+	}
+}
+
 func TestFormatReportSummaryMatchesTemplateColumns(t *testing.T) {
 	report := formatReport([]string{"m1"}, []Result{
 		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5, ToolSequenceMatch: 1, ToolArgsValid: 1, ToolArgsValidComputed: true, LatencyMs: 100, TotalTokens: 42}},

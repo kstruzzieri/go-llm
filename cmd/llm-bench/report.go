@@ -114,7 +114,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 	}
 
 	fmt.Fprintln(&b)
-	b.WriteString(formatTokenBreakdown(models, results))
+	b.WriteString(formatTokenBreakdown(models, summaryResults))
 
 	fmt.Fprintf(&b, "\n## Per-trace detail\n\n")
 	for _, m := range models {
