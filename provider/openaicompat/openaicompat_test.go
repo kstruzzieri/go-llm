@@ -273,6 +273,66 @@ func TestProvider_Chat_Success(t *testing.T) {
 	}
 }
 
+func TestProvider_Chat_ParsesReasoningTokens(t *testing.T) {
+	srv := newMockServer(t, mockServerOpts{
+		chatResponse: chatResponse{
+			Model: "deepseek-r1",
+			Choices: []chatChoice{{
+				Message:      chatMessage{Role: "assistant", Content: "answer"},
+				FinishReason: "stop",
+			}},
+			Usage: usage{
+				PromptTokens:            4,
+				CompletionTokens:        9,
+				TotalTokens:             13,
+				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 6},
+			},
+		},
+	})
+	defer srv.close()
+
+	p := NewProvider(NewClient(srv.url))
+	resp, err := p.Chat(context.Background(), provider.ChatRequest{
+		Model:    "deepseek-r1",
+		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Usage.ReasoningTokens != 6 {
+		t.Errorf("Usage.ReasoningTokens = %d, want 6 (parsed from completion_tokens_details.reasoning_tokens)", resp.Usage.ReasoningTokens)
+	}
+}
+
+func TestProvider_Chat_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
+	// Backward-compatibility guard: a server that omits completion_tokens_details
+	// (the common case) must yield ReasoningTokens == 0, behaving exactly as
+	// before this field existed.
+	srv := newMockServer(t, mockServerOpts{
+		chatResponse: chatResponse{
+			Model: "qwen3:8b",
+			Choices: []chatChoice{{
+				Message:      chatMessage{Role: "assistant", Content: "answer"},
+				FinishReason: "stop",
+			}},
+			Usage: usage{PromptTokens: 4, CompletionTokens: 9, TotalTokens: 13},
+		},
+	})
+	defer srv.close()
+
+	p := NewProvider(NewClient(srv.url))
+	resp, err := p.Chat(context.Background(), provider.ChatRequest{
+		Model:    "qwen3:8b",
+		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Usage.ReasoningTokens != 0 {
+		t.Errorf("Usage.ReasoningTokens = %d, want 0 when completion_tokens_details absent", resp.Usage.ReasoningTokens)
+	}
+}
+
 func TestProvider_Chat_ExtractsInlineThinking(t *testing.T) {
 	srv := newMockServer(t, mockServerOpts{
 		chatResponse: chatResponse{
@@ -590,6 +650,72 @@ func TestProvider_ChatStream_DeliversChunksThenDone(t *testing.T) {
 		if chunk.Provider != "inst-1" {
 			t.Errorf("chunk.Provider = %q, want inst-1 (instance name stamp must hold across stream)", chunk.Provider)
 		}
+	}
+}
+
+// TestProvider_ChatStream_ParsesReasoningTokens verifies the streaming Chat
+// path surfaces reasoning tokens from the final chunk's usage block. Per the
+// OpenAI streaming spec, usage is only emitted on the terminal chunk (when
+// stream_options.include_usage is set), so the Done response carries it.
+func TestProvider_ChatStream_ParsesReasoningTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{Content: "hi"}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
+			}}, Usage: &usage{
+				PromptTokens:            2,
+				CompletionTokens:        5,
+				TotalTokens:             7,
+				CompletionTokensDetails: &completionTokensDetails{ReasoningTokens: 3},
+			}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var got []provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	last := got[len(got)-1]
+	if !last.Done {
+		t.Fatalf("last chunk should be Done, got %+v", last)
+	}
+	if last.Usage.ReasoningTokens != 3 {
+		t.Errorf("last.Usage.ReasoningTokens = %d, want 3 (parsed from final-chunk completion_tokens_details.reasoning_tokens)", last.Usage.ReasoningTokens)
+	}
+}
+
+func TestProvider_ChatStream_NoReasoningTokensWhenDetailsAbsent(t *testing.T) {
+	// Backward-compatibility guard for the streaming path: a final usage block
+	// without completion_tokens_details must yield ReasoningTokens == 0.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeSSE(t, w, []chatChunk{
+			{Model: "m", Choices: []chatChunkChoice{{Delta: chatMessage{Content: "hi"}}}},
+			{Model: "m", Choices: []chatChunkChoice{{
+				Delta: chatMessage{}, FinishReason: stringPtr("stop"),
+			}}, Usage: &usage{PromptTokens: 2, CompletionTokens: 5, TotalTokens: 7}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL), WithThinkMode(provider.ThinkNone))
+	var got []provider.ChatResponse
+	err := p.ChatStream(context.Background(), provider.ChatRequest{Model: "m"}, func(r provider.ChatResponse) error {
+		got = append(got, r)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream: %v", err)
+	}
+	last := got[len(got)-1]
+	if last.Usage.ReasoningTokens != 0 {
+		t.Errorf("last.Usage.ReasoningTokens = %d, want 0 when completion_tokens_details absent", last.Usage.ReasoningTokens)
 	}
 }
 

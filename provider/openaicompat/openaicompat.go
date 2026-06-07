@@ -207,6 +207,7 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
+			ReasoningTokens:  resp.Usage.reasoningTokens(),
 		},
 	}, nil
 }
@@ -300,6 +301,7 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 				PromptTokens:     chunk.Usage.PromptTokens,
 				CompletionTokens: chunk.Usage.CompletionTokens,
 				TotalTokens:      chunk.Usage.TotalTokens,
+				ReasoningTokens:  chunk.Usage.reasoningTokens(),
 			}
 		}
 		if len(chunk.Choices) == 0 {

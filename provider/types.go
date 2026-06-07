@@ -299,10 +299,19 @@ type ModelInfo struct {
 // ---------------------------------------------------------------------------
 
 // Usage reports token consumption for a request.
+//
+// ReasoningTokens is the count of tokens a reasoning model spent on its
+// (discarded) chain-of-thought, when the backend reports it. The Ollama path
+// folds reasoning into CompletionTokens and leaves this zero; OpenAI-compatible
+// backends that emit usage.completion_tokens_details.reasoning_tokens populate
+// it so downstream consumers can isolate thinking-token cost. Zero means either
+// no reasoning tokens or a backend that does not report them — best-effort
+// enrichment, not a guarantee.
 type Usage struct {
 	PromptTokens     int `json:"prompt_tokens"`
 	CompletionTokens int `json:"completion_tokens"`
 	TotalTokens      int `json:"total_tokens"`
+	ReasoningTokens  int `json:"reasoning_tokens,omitempty"`
 }
 
 // LatencyInfo captures timing breakdowns from the provider backend.

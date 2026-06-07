@@ -204,10 +204,32 @@ type modelEntry struct {
 
 // usage is OpenAI's token accounting shape. Embedding responses omit
 // completion_tokens; chat/completion responses populate all three.
+//
+// CompletionTokensDetails is an OpenAI extension (also emitted by some
+// llama-server / vLLM builds) that breaks completion_tokens down further.
+// It is a pointer so absence (the server omits the block) is distinguishable
+// from a present-but-zero reasoning count; servers that don't report it leave
+// it nil and the reasoning accessor yields zero.
 type usage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                      `json:"prompt_tokens"`
+	CompletionTokens        int                      `json:"completion_tokens"`
+	TotalTokens             int                      `json:"total_tokens"`
+	CompletionTokensDetails *completionTokensDetails `json:"completion_tokens_details,omitempty"`
+}
+
+// completionTokensDetails carries the reasoning-token count reported by
+// reasoning models via usage.completion_tokens_details.reasoning_tokens.
+type completionTokensDetails struct {
+	ReasoningTokens int `json:"reasoning_tokens"`
+}
+
+// reasoningTokens returns the reasoning-token count the server reported, or 0
+// when it omitted the completion_tokens_details block entirely.
+func (u usage) reasoningTokens() int {
+	if u.CompletionTokensDetails == nil {
+		return 0
+	}
+	return u.CompletionTokensDetails.ReasoningTokens
 }
 
 // errorEnvelope is the OpenAI-shape error response body. Servers return

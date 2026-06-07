@@ -132,6 +132,102 @@ func TestOpenAICompatCandidateClient_ChatTranslatesReplayRequestAndResponse(t *t
 	}
 }
 
+// When the server reports usage.completion_tokens_details.reasoning_tokens,
+// the candidate transport must surface it as ThinkingTokens with
+// ThinkingTokensComputed = true, closing the gap with the Ollama path (which
+// folds reasoning into eval_count). See #158.
+func TestOpenAICompatCandidateClient_ChatSurfacesReasoningTokens(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"final answer"},
+				"finish_reason":"stop"
+			}],
+			"usage":{
+				"prompt_tokens":11,
+				"completion_tokens":20,
+				"total_tokens":31,
+				"completion_tokens_details":{"reasoning_tokens":13}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "openai-compat/fake", Provider: "openai-compat", Model: "fake"}, candidateTransportOptions{
+		openAICompatBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+		Model:    "fake",
+		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.ThinkingTokens != 13 {
+		t.Errorf("ThinkingTokens = %d; want 13 (mapped from completion_tokens_details.reasoning_tokens)", resp.ThinkingTokens)
+	}
+	if !resp.ThinkingTokensComputed {
+		t.Error("ThinkingTokensComputed = false; want true when the server reports reasoning tokens")
+	}
+}
+
+// A present-but-zero reasoning count (a reasoning model that did no thinking)
+// is deliberately treated as uncomputed: zero contributes nothing to
+// thinking-token cost, and gating on a positive count keeps the common
+// no-details path and the zero-details path behaving identically. This guard
+// pins that decision so a later switch to presence-based semantics can't change
+// it silently.
+func TestOpenAICompatCandidateClient_ChatZeroReasoningTokensStayUncomputed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"final answer"},
+				"finish_reason":"stop"
+			}],
+			"usage":{
+				"prompt_tokens":11,
+				"completion_tokens":7,
+				"total_tokens":18,
+				"completion_tokens_details":{"reasoning_tokens":0}
+			}
+		}`))
+	}))
+	defer srv.Close()
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "openai-compat/fake", Provider: "openai-compat", Model: "fake"}, candidateTransportOptions{
+		openAICompatBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+		Model:    "fake",
+		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.ThinkingTokens != 0 {
+		t.Errorf("ThinkingTokens = %d; want 0", resp.ThinkingTokens)
+	}
+	if resp.ThinkingTokensComputed {
+		t.Error("ThinkingTokensComputed = true; want false for a present-but-zero reasoning count")
+	}
+}
+
 // A reasoning model served via llama.cpp can emit <think>...</think> inline in
 // content. The candidate transport must strip it so the scored transcript holds
 // the final answer, not serving-stack-specific reasoning formatting.
