@@ -341,6 +341,29 @@ func TestFormatReportProvenanceBlock(t *testing.T) {
 	}
 }
 
+func TestFormatReportProvenanceReportsCandidateProviders(t *testing.T) {
+	report := formatReport([]string{"ollama/a", "openai-compat/b"}, []Result{
+		{Model: "ollama/a", TraceID: "t1", CandidateProvider: "ollama", Score: Score{AnswerQuality: 1}},
+		{Model: "openai-compat/b", TraceID: "t1", CandidateProvider: "openai-compat:abc123", Score: Score{AnswerQuality: 1}},
+	}, reportOptions{
+		TraceSetManifestHash: "sha256:test",
+		CandidateProviders: map[string]string{
+			"ollama/a":        "ollama",
+			"openai-compat/b": "openai-compat:abc123",
+		},
+	})
+
+	if !strings.Contains(report, "Candidate providers") {
+		t.Fatalf("missing candidate providers provenance:\n%s", report)
+	}
+	if !strings.Contains(report, "`ollama/a: ollama`") {
+		t.Fatalf("missing ollama candidate provider:\n%s", report)
+	}
+	if !strings.Contains(report, "`openai-compat/b: openai-compat:abc123`") {
+		t.Fatalf("missing openai-compat candidate provider:\n%s", report)
+	}
+}
+
 func TestFormatReportProvenanceReportsCacheDisabledForLLMJudge(t *testing.T) {
 	report := formatReport([]string{"m1"}, []Result{
 		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5}},
