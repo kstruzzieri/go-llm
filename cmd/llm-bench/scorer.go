@@ -44,8 +44,16 @@ type Score struct {
 	LatencyMs             int64   // sum of all chat round-trips for this replay
 	TurnLatenciesMs       []int64 // per-turn breakdown; len == number of chat round-trips
 	ScorerLatencyMs       int64   // wall-clock time spent in the active scorer
-	TotalTokens           int
-	Notes                 string
+	TotalTokens           int     // prompt-eval + generation tokens (kept for back-compat)
+	PromptEvalTokens      int     // tokens in the prompt (Ollama prompt_eval_count / OpenAI usage.prompt_tokens)
+	GenTokens             int     // tokens generated (Ollama eval_count / OpenAI usage.completion_tokens)
+	ThinkingTokens        int     // reasoning tokens when the provider isolates them; see ThinkingTokensComputed
+	// ThinkingTokensComputed is false when the provider does not separately
+	// expose thinking tokens (e.g. Ollama folds them into GenTokens). It mirrors
+	// the ToolArgsValidComputed idiom so the report can distinguish "no thinking"
+	// from "not reported".
+	ThinkingTokensComputed bool
+	Notes                  string
 }
 
 // Scorer is the pluggable strategy for evaluating a replay result.

@@ -133,6 +133,10 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	// without polluting the target model latency metric.
 	score.ScorerLatencyMs = scorerMs
 	score.TotalTokens = out.TotalTokens
+	score.PromptEvalTokens = out.PromptEvalTokens
+	score.GenTokens = out.GenTokens
+	score.ThinkingTokens = out.ThinkingTokens
+	score.ThinkingTokensComputed = out.ThinkingComputed
 
 	return Result{
 		Model:      target.Display,
@@ -142,12 +146,27 @@ func (r *Runner) runOne(ctx context.Context, client *ollama.Client, target Model
 	}
 }
 
+// tokenUsage is the per-turn token breakdown reported by the provider. Gen and
+// PromptEval map to Ollama eval_count/prompt_eval_count and to OpenAI-compat
+// usage.completion_tokens/prompt_tokens. ThinkingComputed is false when the
+// provider does not isolate reasoning tokens (e.g. Ollama folds them into Gen).
+type tokenUsage struct {
+	PromptEval       int
+	Gen              int
+	Thinking         int
+	ThinkingComputed bool
+}
+
 // replayOutput bundles the side effects of a single replay.
 type replayOutput struct {
-	Transcript      []Turn
-	Notes           []string
-	TurnLatenciesMs []int64
-	TotalTokens     int
+	Transcript       []Turn
+	Notes            []string
+	TurnLatenciesMs  []int64
+	TotalTokens      int // prompt-eval + gen (back-compat)
+	PromptEvalTokens int
+	GenTokens        int
+	ThinkingTokens   int
+	ThinkingComputed bool // true once any turn reported isolated thinking tokens
 }
 
 // replayOptions are the per-replay knobs threaded down from Runner.
@@ -220,12 +239,18 @@ func replayWith(ctx context.Context, client *ollama.Client, model string, trace 
 				i++
 			}
 
-			msg, actualTurn, latencyMs, tokens, err := chatReplayTurn(ctx, client, model, messages, tools, opts)
+			msg, actualTurn, latencyMs, usage, err := chatReplayTurn(ctx, client, model, messages, tools, opts)
 			out.TurnLatenciesMs = append(out.TurnLatenciesMs, latencyMs)
 			if err != nil {
 				return out, err
 			}
-			out.TotalTokens += tokens
+			out.PromptEvalTokens += usage.PromptEval
+			out.GenTokens += usage.Gen
+			out.TotalTokens += usage.PromptEval + usage.Gen
+			if usage.ThinkingComputed {
+				out.ThinkingTokens += usage.Thinking
+				out.ThinkingComputed = true
+			}
 			messages = append(messages, msg)
 			out.Transcript = append(out.Transcript, actualTurn)
 
@@ -276,7 +301,7 @@ func hasUserTurn(turns []Turn) bool {
 	return false
 }
 
-func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, int, error) {
+func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, tokenUsage, error) {
 	turnCtx := ctx
 	if opts.PerTurnTimeout > 0 {
 		var cancel context.CancelFunc
@@ -298,16 +323,19 @@ func chatReplayTurn(ctx context.Context, client *ollama.Client, model string, me
 	resp, err := client.Chat(turnCtx, req)
 	latencyMs := time.Since(start).Milliseconds()
 	if err != nil {
-		return ollama.ChatMessage{}, Turn{}, latencyMs, 0, err
+		return ollama.ChatMessage{}, Turn{}, latencyMs, tokenUsage{}, err
 	}
 
 	msg := normalizeAssistantMessage(resp.Message)
 	turn, err := assistantTurnFromMessage(msg)
 	if err != nil {
-		return ollama.ChatMessage{}, Turn{}, latencyMs, 0, err
+		return ollama.ChatMessage{}, Turn{}, latencyMs, tokenUsage{}, err
 	}
-	tokens := resp.PromptEvalCount + resp.EvalCount
-	return msg, turn, latencyMs, tokens, nil
+	// Ollama reports prompt_eval_count and eval_count separately; thinking
+	// tokens are folded into eval_count (not isolable here). The OpenAI-compat
+	// candidate transport (#136) will populate Thinking from reasoning usage.
+	usage := tokenUsage{PromptEval: resp.PromptEvalCount, Gen: resp.EvalCount}
+	return msg, turn, latencyMs, usage, nil
 }
 
 func normalizeAssistantMessage(msg ollama.ChatMessage) ollama.ChatMessage {

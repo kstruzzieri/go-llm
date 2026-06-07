@@ -145,6 +145,55 @@ func TestReplaySupportsMultipleUserTurns(t *testing.T) {
 	}
 }
 
+// replayWith must isolate prompt-eval and generation tokens (not just a
+// combined total) and accumulate each across turns; TotalTokens stays the sum
+// for back-compat.
+func TestReplayWith_IsolatesGenAndPromptEvalTokens(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+		resp := ollama.ChatResponse{
+			Model:           "test-model",
+			Done:            true,
+			Message:         ollama.ChatMessage{Role: "assistant", Content: "ans"},
+			PromptEvalCount: 10,
+			EvalCount:       20,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "two-turn",
+		System: "sys",
+		Turns: []Turn{
+			{Role: "user", Content: "first"},
+			{Role: "assistant", Content: "captured ack"},
+			{Role: "user", Content: "second"},
+		},
+	}
+	out, err := replayWith(context.Background(), client, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith: %v", err)
+	}
+	if out.PromptEvalTokens != 20 {
+		t.Errorf("PromptEvalTokens = %d; want 20 (10 x 2 turns)", out.PromptEvalTokens)
+	}
+	if out.GenTokens != 40 {
+		t.Errorf("GenTokens = %d; want 40 (20 x 2 turns)", out.GenTokens)
+	}
+	if out.TotalTokens != 60 {
+		t.Errorf("TotalTokens = %d; want 60 (prompt+gen, back-compat)", out.TotalTokens)
+	}
+}
+
 func TestReplayInjectsFrozenToolResults(t *testing.T) {
 	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

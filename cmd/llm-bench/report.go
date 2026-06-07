@@ -113,6 +113,9 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		b.WriteString(formatToolUseSubset(toolUseSubsetRows(models, summaryResults, opts.ToolCallExpected)))
 	}
 
+	fmt.Fprintln(&b)
+	b.WriteString(formatTokenBreakdown(models, summaryResults))
+
 	fmt.Fprintf(&b, "\n## Per-trace detail\n\n")
 	for _, m := range models {
 		fmt.Fprintf(&b, "### %s\n\n", markdownCell(m))
@@ -306,6 +309,46 @@ func joinMarkdownCells(xs []string) string {
 	return strings.Join(cells, ", ")
 }
 
+// formatTokenBreakdown renders per-model generation vs prompt-eval token sums
+// and means (and thinking when the provider isolates it), so latency drivers can
+// be attributed to generation rather than total volume.
+func formatTokenBreakdown(models []string, results []Result) string {
+	byModel := make(map[string][]Result, len(models))
+	for _, r := range results {
+		byModel[r.Model] = append(byModel[r.Model], r)
+	}
+	var b strings.Builder
+	fmt.Fprintln(&b, "## Token breakdown (gen vs prompt-eval)")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "> Generation (eval_count) vs prompt-eval (prompt_eval_count) tokens. Thinking tokens are shown only when the provider isolates them — Ollama folds reasoning into generation, so attribute latency to output/token volume, not thinking; the OpenAI-compat transport reports reasoning tokens when the model exposes them.")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "| Model | Gen tokens (sum / mean, n) | Prompt-eval tokens (sum / mean, n) | Thinking tokens (sum / mean, n) | Successful rows |")
+	fmt.Fprintln(&b, "|---|---|---|---|---|")
+	for _, m := range models {
+		rs := byModel[m]
+		agg := aggregate(rs)
+		scored := len(rs) - agg.errors
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %d |\n",
+			markdownCell(m),
+			tokenSumMeanCell(agg.genTokensSum, agg.genTokensAvailable),
+			tokenSumMeanCell(agg.promptEvalTokensSum, agg.promptEvalTokensAvailable),
+			tokenSumMeanCell(agg.thinkingTokensSum, agg.thinkingTokensAvailable),
+			scored)
+	}
+	fmt.Fprintln(&b)
+	return b.String()
+}
+
+// tokenSumMeanCell renders "sum / mean (n=available)" for a token aggregate, or
+// "n/a" when no rows reported that token kind (so an unavailable metric never
+// shows a fake 0).
+func tokenSumMeanCell(sum, available int) string {
+	if available == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%d / %d (n=%d)", sum, sum/available, available)
+}
+
 // reportOptions carries metadata that formatReport embeds in report headers.
 type reportOptions struct {
 	Scorer               string
@@ -430,6 +473,13 @@ type modelAggregate struct {
 	meanScorerLatencyMs  int64
 	totalTokensSum       int
 	totalTokensAvailable int
+
+	genTokensSum              int
+	genTokensAvailable        int
+	promptEvalTokensSum       int
+	promptEvalTokensAvailable int
+	thinkingTokensSum         int
+	thinkingTokensAvailable   int
 }
 
 func aggregate(rs []Result) modelAggregate {
@@ -464,6 +514,25 @@ func aggregate(rs []Result) modelAggregate {
 		if r.Score.TotalTokens > 0 {
 			a.totalTokensSum += r.Score.TotalTokens
 			a.totalTokensAvailable++
+		}
+		if r.Score.GenTokens > 0 {
+			a.genTokensSum += r.Score.GenTokens
+			a.genTokensAvailable++
+		}
+		if r.Score.PromptEvalTokens > 0 {
+			a.promptEvalTokensSum += r.Score.PromptEvalTokens
+			a.promptEvalTokensAvailable++
+		}
+		// Thinking uses the explicit Computed flag, NOT a >0 guard like gen and
+		// prompt-eval. Those use >0 only as a proxy for "reported" (a real
+		// generation always has >0 tokens, so 0 means missing). Thinking has a
+		// genuine availability signal, so a computed 0 is a REAL measurement
+		// (reasoning ran/was off and produced nothing) that must render as 0/0,
+		// letting a reader tell "measured zero reasoning" from "provider does
+		// not isolate reasoning" (n/a).
+		if r.Score.ThinkingTokensComputed {
+			a.thinkingTokensSum += r.Score.ThinkingTokens
+			a.thinkingTokensAvailable++
 		}
 	}
 	if scored > 0 {
