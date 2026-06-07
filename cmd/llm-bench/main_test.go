@@ -210,6 +210,59 @@ func TestMainEmitsToolUseSubsetSection(t *testing.T) {
 	}
 }
 
+func TestMainOpenAICompatCandidateEndToEnd(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"smoke-ok"},
+				"finish_reason":"stop"
+			}],
+			"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
+		}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	report := filepath.Join(dir, "report.md")
+	cmd := exec.Command(os.Args[0],
+		"-traces", "testdata/smoke/minimal.json",
+		"-models", "openai-compat/fake",
+		"-candidate-base-url", srv.URL,
+		"-candidate-api-key", "flag-key",
+		"-scorer", "exact-match",
+		"-judge-cache", "",
+		"-report", report,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench openai-compat candidate failed: %v\n%s", err, out)
+	}
+	if gotAuth != "Bearer flag-key" {
+		t.Fatalf("Authorization = %q; want Bearer flag-key", gotAuth)
+	}
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(body), "openai-compat/fake") {
+		t.Fatalf("report missing candidate model:\n%s", body)
+	}
+	if !strings.Contains(string(body), "Candidate providers") {
+		t.Fatalf("report missing candidate provider provenance:\n%s", body)
+	}
+}
+
 func TestMainFIMLatencyEndToEnd(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/generate" {
@@ -251,6 +304,27 @@ func TestMainFIMLatencyEndToEnd(t *testing.T) {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("FIM report missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestMainFIMLatencyRejectsOpenAICompatCandidate(t *testing.T) {
+	dir := t.TempDir()
+	casePath := filepath.Join(dir, "case.json")
+	if err := os.WriteFile(casePath, []byte(`{"id":"c1","prefix":"package main\n","suffix":"\n"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(os.Args[0],
+		"-fim-latency",
+		"-fim-cases", casePath,
+		"-models", "openai-compat/fake",
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("llm-bench -fim-latency unexpectedly succeeded:\n%s", out)
+	}
+	if !strings.Contains(string(out), "-fim-latency supports only ollama candidates") {
+		t.Fatalf("error missing FIM provider guard:\n%s", out)
 	}
 }
 
@@ -360,6 +434,33 @@ func TestResolveJudgeTransportConfig_APIKeyEnvFallback(t *testing.T) {
 		calls++
 		if name != judgeAPIKeyEnvVar {
 			t.Errorf("looked up %q; want %q", name, judgeAPIKeyEnvVar)
+		}
+		return "env-key"
+	})
+	if cfg.apiKey != "env-key" {
+		t.Fatalf("apiKey = %q; want env-key fallback", cfg.apiKey)
+	}
+	if calls != 1 {
+		t.Fatalf("env lookups = %d; want exactly 1", calls)
+	}
+}
+
+func TestResolveCandidateTransportConfig_APIKeyFlagWins(t *testing.T) {
+	cfg := resolveCandidateTransportConfig(" https://api.example.com ", "flag-key", func(string) string { return "env-key" })
+	if cfg.apiKey != "flag-key" {
+		t.Fatalf("apiKey = %q; want flag-key (flag overrides env)", cfg.apiKey)
+	}
+	if cfg.baseURL != "https://api.example.com" {
+		t.Fatalf("baseURL = %q; want trimmed value", cfg.baseURL)
+	}
+}
+
+func TestResolveCandidateTransportConfig_APIKeyEnvFallback(t *testing.T) {
+	calls := 0
+	cfg := resolveCandidateTransportConfig("https://x", "", func(name string) string {
+		calls++
+		if name != candidateAPIKeyEnvVar {
+			t.Errorf("looked up %q; want %q", name, candidateAPIKeyEnvVar)
 		}
 		return "env-key"
 	})

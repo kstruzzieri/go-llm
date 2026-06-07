@@ -118,6 +118,67 @@ func TestRunAllSucceedsEndToEnd(t *testing.T) {
 	}
 }
 
+func TestRunAllOpenAICompatCandidateEndToEnd(t *testing.T) {
+	var sawChat bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/chat/completions" {
+			http.NotFound(w, r)
+			return
+		}
+		sawChat = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"answer with needle inside"},
+				"finish_reason":"stop"
+			}],
+			"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+		}`))
+	}))
+	defer srv.Close()
+
+	runner := &Runner{
+		OllamaURL:           "http://unused.invalid",
+		OpenAICompatBaseURL: srv.URL,
+		Timeout:             5 * time.Second,
+		Scorer:              &ExactMatchScorer{},
+	}
+
+	targets := []ModelTarget{{Display: "openai-compat/fake", Provider: "openai-compat", Model: "fake"}}
+	traces := []Trace{{
+		ID:     "t1",
+		System: "sys",
+		Turns:  []Turn{{Role: "user", Content: "q"}},
+		Golden: Golden{FinalAnswerSubstring: "needle"},
+	}}
+
+	results, err := runner.RunAll(context.Background(), targets, traces)
+	if err != nil {
+		t.Fatalf("RunAll() error: %v", err)
+	}
+	if !sawChat {
+		t.Fatalf("openai-compat chat endpoint was not called")
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	if results[0].Err != nil {
+		t.Fatalf("unexpected result error: %v", results[0].Err)
+	}
+	if results[0].CandidateProvider == "" || !strings.HasPrefix(results[0].CandidateProvider, openAICompatTransport+":") {
+		t.Fatalf("CandidateProvider = %q; want %s:<endpoint-id>", results[0].CandidateProvider, openAICompatTransport)
+	}
+	if got, want := results[0].Score.TotalTokens, 18; got != want {
+		t.Fatalf("TotalTokens = %d; want %d", got, want)
+	}
+	if results[0].Score.ThinkingTokensComputed {
+		t.Fatalf("ThinkingTokensComputed = true; want false for current openai-compat candidate usage")
+	}
+}
+
 type latencyPoisonScorer struct{}
 
 func (s latencyPoisonScorer) Score(context.Context, Trace, Result) (Score, error) {

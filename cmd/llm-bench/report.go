@@ -37,7 +37,8 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 	}
 
 	emitCacheLine := opts.Scorer == "llm-judge"
-	emitProvenance := opts.TraceSetManifestHash != "" || emitCacheLine
+	emitCandidateProviders := len(opts.CandidateProviders) > 0
+	emitProvenance := opts.TraceSetManifestHash != "" || emitCacheLine || emitCandidateProviders
 	if emitProvenance {
 		fmt.Fprintf(&b, "## Provenance\n\n")
 		if opts.TraceSetManifestHash != "" {
@@ -45,6 +46,19 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 		if opts.Scorer == "llm-judge" && opts.JudgeProvider != "" {
 			fmt.Fprintf(&b, "- Judge provider: `%s`\n", markdownCell(opts.JudgeProvider))
+		}
+		if emitCandidateProviders {
+			var parts []string
+			for _, model := range models {
+				providerName := strings.TrimSpace(opts.CandidateProviders[model])
+				if providerName == "" {
+					continue
+				}
+				parts = append(parts, fmt.Sprintf("`%s: %s`", markdownCell(model), markdownCell(providerName)))
+			}
+			if len(parts) > 0 {
+				fmt.Fprintf(&b, "- Candidate providers: %s\n", strings.Join(parts, ", "))
+			}
 		}
 		if emitCacheLine {
 			total := opts.JudgeCacheHits + opts.JudgeCacheMisses
@@ -363,6 +377,7 @@ type reportOptions struct {
 	JudgeCacheHits       int64
 	JudgeCacheMisses     int64
 	TraceSetManifestHash string
+	CandidateProviders   map[string]string
 	// Corpus, when set, makes the report corpus-aware: it adds composition
 	// counts and partition-separated quality, and captions the combined
 	// results table as not-comparable-across-partitions.

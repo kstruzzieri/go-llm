@@ -66,6 +66,8 @@ func main() {
 	judgeTransport := flag.String("judge-transport", "", "Judge backend for -scorer llm-judge: ollama (default), openai-compat, or claude-cli (headless `claude -p`, subscription)")
 	judgeBaseURL := flag.String("judge-base-url", "", "Base URL for -judge-transport openai-compat (server root, no /v1 suffix)")
 	judgeAPIKey := flag.String("judge-api-key", "", "Bearer token for -judge-transport openai-compat; falls back to $"+judgeAPIKeyEnvVar)
+	candidateBaseURL := flag.String("candidate-base-url", "", "Base URL for openai-compat candidate targets (server root, no /v1 suffix)")
+	candidateAPIKey := flag.String("candidate-api-key", "", "Bearer token for openai-compat candidate targets; falls back to $"+candidateAPIKeyEnvVar)
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
@@ -74,6 +76,8 @@ func main() {
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
 	flag.Parse()
+
+	ct := resolveCandidateTransportConfig(*candidateBaseURL, *candidateAPIKey, os.Getenv)
 
 	modes := 0
 	if *capture {
@@ -156,9 +160,11 @@ func main() {
 			log.Fatalf("llm-bench: parse models: %v", err)
 		}
 		runner := &Runner{
-			OllamaURL: *ollamaURL,
-			Timeout:   *timeout,
-			Scorer:    &CaptureScorer{},
+			OllamaURL:           *ollamaURL,
+			OpenAICompatBaseURL: ct.baseURL,
+			OpenAICompatAPIKey:  ct.apiKey,
+			Timeout:             *timeout,
+			Scorer:              &CaptureScorer{},
 		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
 			Runner:     runner,
@@ -285,6 +291,9 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: parse models: %v", err)
 		}
+		if err := validateFIMTargets(targets); err != nil {
+			log.Fatalf("llm-bench: %v", err)
+		}
 		client, err := newOllamaClient(*ollamaURL, ollama.WithTimeout(*timeout))
 		if err != nil {
 			log.Fatalf("llm-bench: client: %v", err)
@@ -407,14 +416,22 @@ func main() {
 	}
 
 	runner := &Runner{
-		OllamaURL: *ollamaURL,
-		Timeout:   *timeout,
-		Scorer:    scorer,
+		OllamaURL:           *ollamaURL,
+		OpenAICompatBaseURL: ct.baseURL,
+		OpenAICompatAPIKey:  ct.apiKey,
+		Timeout:             *timeout,
+		Scorer:              scorer,
 	}
 
 	results, err := runner.RunAll(ctx, targets, traces)
 	if err != nil {
 		log.Fatalf("llm-bench: run: %v", err)
+	}
+	candidateProviders := make(map[string]string, len(results))
+	for _, result := range results {
+		if strings.TrimSpace(result.CandidateProvider) != "" {
+			candidateProviders[result.Model] = result.CandidateProvider
+		}
 	}
 
 	var judgeCacheHits, judgeCacheMisses int64
@@ -434,6 +451,7 @@ func main() {
 		JudgeCacheHits:       judgeCacheHits,
 		JudgeCacheMisses:     judgeCacheMisses,
 		TraceSetManifestHash: traceSetHash,
+		CandidateProviders:   candidateProviders,
 		Corpus:               corpusData,
 		ToolCallExpected:     toolCallExpected,
 	})
@@ -501,6 +519,15 @@ func resolveCaptureSample(spec string) (*captureSampleSpec, error) {
 	return &parsed, nil
 }
 
+func validateFIMTargets(targets []ModelTarget) error {
+	for _, target := range targets {
+		if target.Provider != defaultBenchProvider {
+			return fmt.Errorf("-fim-latency supports only ollama candidates; got %q", target.Display)
+		}
+	}
+	return nil
+}
+
 // judgeAPIKeyEnvVar is the environment variable consulted for the openai-compat
 // judge Bearer token when -judge-api-key is empty. Preferring the env var keeps
 // the secret out of shell history and process listings.
@@ -527,6 +554,31 @@ func resolveJudgeTransportConfig(transport, baseURL, apiKey string, lookupEnv fu
 	}
 	if cfg.apiKey == "" {
 		cfg.apiKey = strings.TrimSpace(lookupEnv(judgeAPIKeyEnvVar))
+	}
+	return cfg
+}
+
+// candidateAPIKeyEnvVar is the environment variable consulted for
+// openai-compat candidate Bearer tokens when -candidate-api-key is empty.
+const candidateAPIKeyEnvVar = "LLM_BENCH_CANDIDATE_API_KEY"
+
+// candidateTransportConfig is the resolved OpenAI-compatible candidate
+// endpoint configuration. Ollama candidates ignore these values.
+type candidateTransportConfig struct {
+	baseURL string
+	apiKey  string
+}
+
+// resolveCandidateTransportConfig applies flag/env precedence for candidate
+// OpenAI-compatible endpoints. The API key flag takes precedence; when empty
+// it falls back to LLM_BENCH_CANDIDATE_API_KEY via lookupEnv.
+func resolveCandidateTransportConfig(baseURL, apiKey string, lookupEnv func(string) string) candidateTransportConfig {
+	cfg := candidateTransportConfig{
+		baseURL: strings.TrimSpace(baseURL),
+		apiKey:  strings.TrimSpace(apiKey),
+	}
+	if cfg.apiKey == "" {
+		cfg.apiKey = strings.TrimSpace(lookupEnv(candidateAPIKeyEnvVar))
 	}
 	return cfg
 }

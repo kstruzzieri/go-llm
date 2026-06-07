@@ -49,9 +49,18 @@ func parseModelTarget(raw string) (ModelTarget, error) {
 		}
 	}
 
-	if target.Provider != defaultBenchProvider {
+	if !supportedCandidateProvider(target.Provider) {
 		return ModelTarget{}, fmt.Errorf("%w: %q", errUnsupportedProv, target.Provider)
 	}
 
 	return target, nil
+}
+
+func supportedCandidateProvider(provider string) bool {
+	switch provider {
+	case defaultBenchProvider, openAICompatTransport:
+		return true
+	default:
+		return false
+	}
 }

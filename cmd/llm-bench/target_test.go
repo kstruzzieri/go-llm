@@ -7,7 +7,7 @@ import (
 )
 
 func TestParseModelTargets(t *testing.T) {
-	got, err := parseModelTargets("ollama/qwen3-coder-next:latest, gemma4:31b")
+	got, err := parseModelTargets("ollama/qwen3-coder-next:latest, gemma4:31b, openai-compat/Qwen/Qwen3-Coder")
 	if err != nil {
 		t.Fatalf("parseModelTargets() error: %v", err)
 	}
@@ -22,6 +22,11 @@ func TestParseModelTargets(t *testing.T) {
 			Display:  "gemma4:31b",
 			Provider: "ollama",
 			Model:    "gemma4:31b",
+		},
+		{
+			Display:  "openai-compat/Qwen/Qwen3-Coder",
+			Provider: "openai-compat",
+			Model:    "Qwen/Qwen3-Coder",
 		},
 	}
 
