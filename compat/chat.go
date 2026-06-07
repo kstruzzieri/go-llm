@@ -23,21 +23,27 @@ import (
 // Fields prefixed with x_ are go-llm-specific extensions; standard OpenAI
 // SDKs ignore unknown fields so the wire remains compatible.
 type ChatCompletionRequest struct {
-	Model       string             `json:"model"`
-	Messages    []ChatMessageParam `json:"messages"`
-	Stream      bool               `json:"stream,omitempty"`
-	Temperature *float64           `json:"temperature,omitempty"`
-	TopP        *float64           `json:"top_p,omitempty"`
-	MaxTokens   *int               `json:"max_tokens,omitempty"`
-	Stop        StopSequences      `json:"stop,omitempty"` // string or []string
-	Tools       []OpenAIToolParam  `json:"tools,omitempty"`
-	ToolChoice  any                `json:"tool_choice,omitempty"`
+	Model         string             `json:"model"`
+	Messages      []ChatMessageParam `json:"messages"`
+	Stream        bool               `json:"stream,omitempty"`
+	StreamOptions *StreamOptions     `json:"stream_options,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	TopP          *float64           `json:"top_p,omitempty"`
+	MaxTokens     *int               `json:"max_tokens,omitempty"`
+	Stop          StopSequences      `json:"stop,omitempty"` // string or []string
+	Tools         []OpenAIToolParam  `json:"tools,omitempty"`
+	ToolChoice    any                `json:"tool_choice,omitempty"`
 
 	// Extensions (amendments #6, #10). All optional.
 	UseCase     string `json:"x_use_case,omitempty"`
 	Priority    *int   `json:"x_priority,omitempty"`
 	AffinityKey string `json:"x_affinity_key,omitempty"`
 	DryRun      bool   `json:"x_dry_run,omitempty"`
+}
+
+// StreamOptions mirrors OpenAI's stream_options object.
+type StreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 // ChatMessageParam is a single message in an OpenAI chat request or response.
@@ -114,15 +120,15 @@ type UsageWire struct {
 }
 
 // ChatCompletionChunk is one frame of an OpenAI-shape streaming response.
-// Each chunk carries exactly one ChatChunkChoice today. Usage is not included
-// on per-chunk frames — OpenAI emits usage only on the final frame when
-// stream_options.include_usage is set, which we don't yet expose.
+// Choice chunks carry one ChatChunkChoice. When stream_options.include_usage is
+// set, the final pre-[DONE] frame carries Usage with an empty Choices array.
 type ChatCompletionChunk struct {
 	ID      string            `json:"id"`
 	Object  string            `json:"object"` // "chat.completion.chunk"
 	Created int64             `json:"created"`
 	Model   string            `json:"model"`
 	Choices []ChatChunkChoice `json:"choices"`
+	Usage   *UsageWire        `json:"usage,omitempty"`
 
 	// Extensions.
 	Thinking string `json:"x_thinking,omitempty"`
@@ -260,7 +266,8 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 		rr.Tools = tools
 	}
 	if req.Stream && !req.DryRun {
-		s.serveChatStream(w, r, rr)
+		includeUsage := req.StreamOptions != nil && req.StreamOptions.IncludeUsage
+		s.serveChatStream(w, r, rr, includeUsage)
 		return
 	}
 
@@ -355,7 +362,7 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 //     [DONE] sentinel so clients can detect premature EOS via its absence;
 //     context.Canceled (client disconnect) is treated as normal and its
 //     log is suppressed to prevent spam.
-func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr provider.RoutingRequest) {
+func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr provider.RoutingRequest, includeUsage bool) {
 	rr.RequiredCaps |= provider.CapStream
 
 	release, ok := s.semaphore.acquire(rr.Priority)
@@ -385,8 +392,14 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr prov
 	id := chatResponseID(r.Context())
 	created := time.Now().Unix()
 	modelID := plan.Profile.Key.String()
+	var lastUsage UsageWire
 
 	streamErr := plan.ExecuteChatStream(r.Context(), func(chunk provider.ChatResponse) error {
+		lastUsage = UsageWire{
+			PromptTokens:     chunk.Usage.PromptTokens,
+			CompletionTokens: chunk.Usage.CompletionTokens,
+			TotalTokens:      chunk.Usage.TotalTokens,
+		}
 		delta := ChatMessageParam{
 			Role:      "assistant",
 			Content:   chunk.Content,
@@ -429,6 +442,20 @@ func (s *Server) serveChatStream(w http.ResponseWriter, r *http.Request, rr prov
 			log.Printf("compat: chat stream error rid=%s: %v", requestIDFrom(r.Context()), streamErr)
 		}
 		return
+	}
+
+	if includeUsage {
+		if err := sw.writeEvent(ChatCompletionChunk{
+			ID:      id,
+			Object:  "chat.completion.chunk",
+			Created: created,
+			Model:   modelID,
+			Choices: []ChatChunkChoice{},
+			Usage:   &lastUsage,
+		}); err != nil {
+			log.Printf("compat: chat stream usage write error rid=%s: %v", requestIDFrom(r.Context()), err)
+			return
+		}
 	}
 
 	_ = sw.writeDone()
