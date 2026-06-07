@@ -61,8 +61,8 @@ output.
   complete retained traces.
 
 ## Results
-| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90) | TotalTokens | n |
-| --- | --- | --- | --- | --- | --- | --- |
+| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
 
 Partitioned results:
 - Natural set: reported separately.
