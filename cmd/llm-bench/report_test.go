@@ -176,10 +176,26 @@ func TestFormatTokenBreakdown_ShowsGenVsPromptEval(t *testing.T) {
 	for _, want := range []string{
 		"## Token breakdown (gen vs prompt-eval)",
 		"thinking",
-		"| m | 150 / 75 | 60 / 30 | n/a | 2 |",
+		"| m | 150 / 75 (n=2) | 60 / 30 (n=2) | n/a | 2 |",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("token breakdown missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatTokenBreakdown_ShowsTokenAvailabilityDenominators(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "reported", Score: Score{GenTokens: 100, PromptEvalTokens: 40, TotalTokens: 140}},
+		{Model: "m", TraceID: "unreported", Score: Score{AnswerQuality: 1.0}},
+	}
+	out := formatTokenBreakdown([]string{"m"}, results)
+	for _, want := range []string{
+		"| Model | Gen tokens (sum / mean, n) | Prompt-eval tokens (sum / mean, n) | Thinking tokens (sum / mean, n) | Successful rows |",
+		"| m | 100 / 100 (n=1) | 40 / 40 (n=1) | n/a | 2 |",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("token breakdown missing availability denominator %q:\n%s", want, out)
 		}
 	}
 }
@@ -189,7 +205,7 @@ func TestFormatTokenBreakdown_ShowsThinkingWhenComputed(t *testing.T) {
 		{Model: "m", TraceID: "t1", Score: Score{GenTokens: 100, PromptEvalTokens: 40, ThinkingTokens: 30, ThinkingTokensComputed: true}},
 	}
 	out := formatTokenBreakdown([]string{"m"}, results)
-	if !strings.Contains(out, "| m | 100 / 100 | 40 / 40 | 30 / 30 | 1 |") {
+	if !strings.Contains(out, "| m | 100 / 100 (n=1) | 40 / 40 (n=1) | 30 / 30 (n=1) | 1 |") {
 		t.Errorf("thinking column should populate when computed:\n%s", out)
 	}
 }
@@ -203,7 +219,7 @@ func TestFormatTokenBreakdown_ComputedZeroThinkingIsRealZeroNotNA(t *testing.T) 
 		{Model: "m", TraceID: "t1", Score: Score{GenTokens: 100, PromptEvalTokens: 40, ThinkingTokens: 0, ThinkingTokensComputed: true}},
 	}
 	out := formatTokenBreakdown([]string{"m"}, results)
-	if !strings.Contains(out, "| m | 100 / 100 | 40 / 40 | 0 / 0 | 1 |") {
+	if !strings.Contains(out, "| m | 100 / 100 (n=1) | 40 / 40 (n=1) | 0 / 0 (n=1) | 1 |") {
 		t.Errorf("computed thinking=0 must render as a real 0/0 (measured), not n/a:\n%s", out)
 	}
 }
@@ -217,6 +233,35 @@ func TestFormatReport_EmitsTokenBreakdownAndNoNaN(t *testing.T) {
 	}
 	if strings.Contains(out, "NaN") {
 		t.Errorf("token breakdown must never render NaN:\n%s", out)
+	}
+}
+
+func TestFormatReport_TokenBreakdownExcludesJudgeValidation(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "natural", Score: Score{GenTokens: 100, PromptEvalTokens: 40, TotalTokens: 140}},
+		{Model: "m", TraceID: "challenge", Score: Score{GenTokens: 50, PromptEvalTokens: 20, TotalTokens: 70}},
+		{Model: "m", TraceID: "judge", Score: Score{GenTokens: 1000, PromptEvalTokens: 500, TotalTokens: 1500}},
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{
+		Scorer: "exact-match",
+		Corpus: &corpusReportData{
+			Counts: corpusCounts{
+				ByPartition: map[CorpusPartition]int{PartitionNatural: 1, PartitionChallenge: 1, PartitionJudgeValidation: 1},
+				ByCategory:  map[string]int{"chat": 3},
+				Total:       3,
+			},
+			TraceToPartition: map[string]CorpusPartition{
+				"natural":   PartitionNatural,
+				"challenge": PartitionChallenge,
+				"judge":     PartitionJudgeValidation,
+			},
+		},
+	})
+	if !strings.Contains(out, "| m | 150 / 75 (n=2) | 60 / 30 (n=2) | n/a | 2 |") {
+		t.Fatalf("token breakdown should aggregate only natural+challenge rows:\n%s", out)
+	}
+	if strings.Contains(out, "| m | 1150 /") {
+		t.Fatalf("judge-validation tokens leaked into token breakdown:\n%s", out)
 	}
 }
 
