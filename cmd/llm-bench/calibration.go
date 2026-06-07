@@ -189,13 +189,23 @@ func loadLabelsMatchedAgainst(labelsPath, artifactsPath string) ([]matchedLabel,
 	if err != nil {
 		return nil, nil, fmt.Errorf("load artifacts: %w", err)
 	}
-	byHash := make(map[string]Artifact, len(arts))
-	for _, a := range arts {
-		byHash[a.ArtifactHash] = a
-	}
 	labels, err := loadLabels(labelsPath)
 	if err != nil {
 		return nil, nil, fmt.Errorf("load labels: %w", err)
+	}
+	return matchLabels(labels, arts)
+}
+
+// matchLabels partitions already-loaded labels into (matched, stale) against
+// the artifact set. A label is "matched" when its ArtifactHash is present in
+// arts and "stale" otherwise; stale labels are reported, not errors. Duplicate
+// matched ArtifactHash values are rejected so each artifact contributes at most
+// once. Kept pure (no I/O) so the paired-report path can load artifacts once
+// and retain the full set for lineup/gap detection.
+func matchLabels(labels []Label, arts []Artifact) ([]matchedLabel, []Label, error) {
+	byHash := make(map[string]Artifact, len(arts))
+	for _, a := range arts {
+		byHash[a.ArtifactHash] = a
 	}
 	var matched []matchedLabel
 	var stale []Label

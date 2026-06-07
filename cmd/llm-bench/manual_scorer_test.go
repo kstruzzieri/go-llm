@@ -57,7 +57,7 @@ func TestFormatManualQualityReport_AggregatesPerModelAndFlagsLatency(t *testing.
 		{Model: "gemma4:31b", TraceID: "t1", Score: Score{AnswerQuality: 1.0}},
 	}
 	out := formatManualQualityReport([]string{"qwen3:8b", "gemma4:31b"}, results, manualReportCoverage{Scored: 3, Stale: 1, Errored: 0})
-	for _, want := range []string{"qwen3:8b", "gemma4:31b", "human label", "Latency is NOT included", "stale"} {
+	for _, want := range []string{"qwen3:8b", "gemma4:31b", "human label", "Latency is NOT included", "stale", "all matched labels"} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("report missing %q:\n%s", want, out)
 		}

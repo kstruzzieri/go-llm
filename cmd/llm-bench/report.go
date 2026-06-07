@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"time"
@@ -124,7 +125,7 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 	fmt.Fprintln(&b, "Latency is NOT included here — frozen artifacts carry no timing; measure latency in a separate pass.")
 	fmt.Fprintf(&b, "\nCoverage: %d scored, stale: %d (excluded — label hash no longer matches an artifact), scoring errors: %d.\n\n",
 		cov.Scored, cov.Stale, cov.Errored)
-	fmt.Fprintln(&b, "## Quality by model")
+	fmt.Fprintln(&b, "## Quality by model (all matched labels)")
 	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | n |")
 	fmt.Fprintln(&b, "|---|---|---|")
 	for _, m := range models {
@@ -140,6 +141,136 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 	}
 	fmt.Fprintln(&b)
 	return redactPaths(b.String())
+}
+
+// formatPairedReport renders the paired-label analysis: the paired-complete
+// "Quality by model" headline (accepted-run evidence), the confounded
+// all-matched table for comparison, the completeness worklist, the pairwise
+// win/loss/tie matrix, the model-vs-baseline deltas with bootstrap CIs, and the
+// two-scale resolution diagnostic. Like the manual report it omits latency
+// (frozen artifacts carry no timing).
+func formatPairedReport(pa pairedAnalysis) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# llm-bench — paired-label quality report\n\n")
+	fmt.Fprintf(&b, "Generated: %s\n\n", time.Now().UTC().Format(time.RFC3339))
+	fmt.Fprintln(&b, "AnswerQuality is the human label (`expected_answer_quality`): gold-standard, deterministic, on-box — no LLM judge, no model call.")
+	fmt.Fprintln(&b, "Latency is NOT included here — frozen artifacts carry no timing; measure latency in a separate pass.")
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Provenance")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "- Lineup (from artifacts): %s\n", joinMarkdownCells(pa.Lineup))
+	fmt.Fprintf(&b, "- Baseline: %s\n", markdownCell(pa.Baseline))
+	fmt.Fprintf(&b, "- Paired-complete traces: %d of %d\n", pa.PerModelN, len(pa.AllTraces))
+	if len(pa.Labelers) > 0 {
+		fmt.Fprintf(&b, "- Labelers: %s\n", joinMarkdownCells(pa.Labelers))
+	} else {
+		fmt.Fprintln(&b, "- Labelers: (none recorded)")
+	}
+	fmt.Fprintf(&b, "- Bootstrap: seed=%d, n=%d\n", pa.BootstrapSeed, pa.BootstrapN)
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Quality by model (paired-complete)")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "> Headline accepted-run evidence: means over the %d trace(s) where every lineup model is labeled.\n\n", pa.PerModelN)
+	fmt.Fprintln(&b, "| Model | AnswerQuality (mean) | n |")
+	fmt.Fprintln(&b, "|---|---|---|")
+	for _, m := range pa.Lineup {
+		fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), meanCell(pa.PerModelMean[m]), pa.PerModelN)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Quality by model (all matched labels)")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "> Confounded by trace-difficulty mix (each model averaged over a different trace subset). Shown for comparison, not as accepted-run evidence.")
+	fmt.Fprintln(&b)
+	fmt.Fprintln(&b, "| Model | AnswerQuality (mean) | n |")
+	fmt.Fprintln(&b, "|---|---|---|")
+	for _, m := range pa.Lineup {
+		fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), meanCell(pa.AllMatchedMean[m]), pa.AllMatchedN[m])
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Completeness worklist")
+	fmt.Fprintln(&b)
+	if len(pa.Gaps) == 0 {
+		fmt.Fprintln(&b, "All traces are paired-complete — no gaps.")
+	} else {
+		incomplete := len(pa.AllTraces) - pa.PerModelN
+		fmt.Fprintf(&b, "%d gap(s) block %d trace(s) from counting. Resolve each cell, then re-run.\n\n", len(pa.Gaps), incomplete)
+		fmt.Fprintln(&b, "| Trace | Model | Gap |")
+		fmt.Fprintln(&b, "|---|---|---|")
+		for _, g := range pa.Gaps {
+			fmt.Fprintf(&b, "| %s | %s | %s |\n", markdownCell(g.TraceID), markdownCell(g.Model), markdownCell(string(g.Reason)))
+		}
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Pairwise win/loss/tie (paired-complete)")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "Wins/losses/ties of model A vs model B over the %d paired-complete trace(s).\n\n", pa.PerModelN)
+	fmt.Fprintln(&b, "| Model A | Model B | A wins | A losses | ties |")
+	fmt.Fprintln(&b, "|---|---|---|---|---|")
+	for _, rec := range pa.Pairwise {
+		fmt.Fprintf(&b, "| %s | %s | %d | %d | %d |\n", markdownCell(rec.ModelA), markdownCell(rec.ModelB), rec.Wins, rec.Losses, rec.Ties)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintf(&b, "## Model vs baseline (%s)\n\n", markdownCell(pa.Baseline))
+	fmt.Fprintf(&b, "Mean per-trace quality delta vs baseline with a deterministic bootstrap 95%% CI (seed=%d, n=%d) and win/loss/tie.\n\n", pa.BootstrapSeed, pa.BootstrapN)
+	fmt.Fprintln(&b, "| Model | mean Δ vs baseline | 95% CI | wins | losses | ties |")
+	fmt.Fprintln(&b, "|---|---|---|---|---|---|")
+	for _, bd := range pa.BaselineSummary {
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %d |\n",
+			markdownCell(bd.Model), signedMeanCell(bd.MeanDelta), ciCell(bd.CILow, bd.CIHigh), bd.Wins, bd.Losses, bd.Ties)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "## Resolution diagnostic")
+	fmt.Fprintln(&b)
+	if pa.PerModelN > 0 {
+		fmt.Fprintf(&b, "Over n=%d paired-complete trace(s): one full label flip (0↔1) moves a model's mean by %.2f (1/%d); one rubric step (0.5) moves it by %.2f (0.5/%d). Do not over-read a one-label gap.\n",
+			pa.PerModelN, pa.ResolutionFull, pa.PerModelN, pa.ResolutionStep, pa.PerModelN)
+	} else {
+		fmt.Fprintln(&b, "No paired-complete traces — resolution is undefined. Resolve the completeness worklist first.")
+	}
+	fmt.Fprintln(&b)
+
+	return redactPaths(b.String())
+}
+
+// meanCell renders a mean as 2 decimals, or "n/a" for NaN (no observations).
+func meanCell(v float64) string {
+	if math.IsNaN(v) {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2f", v)
+}
+
+// signedMeanCell renders a delta with an explicit sign so a positive vs
+// negative direction vs the baseline is unambiguous; "n/a" for NaN.
+func signedMeanCell(v float64) string {
+	if math.IsNaN(v) {
+		return "n/a"
+	}
+	return fmt.Sprintf("%+.2f", v)
+}
+
+// ciCell renders a [lo, hi] confidence interval, or "n/a" when undefined.
+func ciCell(lo, hi float64) string {
+	if math.IsNaN(lo) || math.IsNaN(hi) {
+		return "n/a"
+	}
+	return fmt.Sprintf("[%+.2f, %+.2f]", lo, hi)
+}
+
+// joinMarkdownCells escapes each cell and joins with ", " for inline lists.
+func joinMarkdownCells(xs []string) string {
+	cells := make([]string, len(xs))
+	for i, x := range xs {
+		cells[i] = markdownCell(x)
+	}
+	return strings.Join(cells, ", ")
 }
 
 // reportOptions carries metadata that formatReport embeds in report headers.
