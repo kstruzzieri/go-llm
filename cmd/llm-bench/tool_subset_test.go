@@ -137,3 +137,34 @@ func TestFormatReport_EmitsToolUseSubsetOnlyWhenExpectedMapSet(t *testing.T) {
 		t.Errorf("subset section must appear when ToolCallExpected is set:\n%s", withMap)
 	}
 }
+
+func TestFormatReport_ToolUseSubsetExcludesJudgeValidation(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "natural-tool", Score: Score{AnswerQuality: 1.0, ToolArgsValid: 1.0, ToolArgsValidComputed: true}},
+		{Model: "m", TraceID: "judge-tool", Score: Score{AnswerQuality: 1.0, ToolArgsValid: 1.0, ToolArgsValidComputed: true}},
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{
+		Scorer: "exact-match",
+		Corpus: &corpusReportData{
+			Counts: corpusCounts{
+				ByPartition: map[CorpusPartition]int{PartitionNatural: 1, PartitionJudgeValidation: 1},
+				ByCategory:  map[string]int{"tool-use": 2},
+				Total:       2,
+			},
+			TraceToPartition: map[string]CorpusPartition{
+				"natural-tool": PartitionNatural,
+				"judge-tool":   PartitionJudgeValidation,
+			},
+		},
+		ToolCallExpected: map[string]bool{
+			"natural-tool": true,
+			"judge-tool":   true,
+		},
+	})
+	if !strings.Contains(out, "| m | 1 | 100% (1/1) | 1.00 |") {
+		t.Fatalf("tool-use subset should count only model-evidence expected-tool rows:\n%s", out)
+	}
+	if strings.Contains(out, "| m | 2 | 100% (2/2) |") {
+		t.Fatalf("judge-validation row leaked into the tool-use subset:\n%s", out)
+	}
+}
