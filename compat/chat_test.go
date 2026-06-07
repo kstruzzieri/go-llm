@@ -308,6 +308,57 @@ func TestChatCompletions_Streaming(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_StreamingIncludeUsage(t *testing.T) {
+	srv, teardown := newStreamingServer(t, func(ctx context.Context, req provider.ChatRequest, fn func(provider.ChatResponse) error) error {
+		if err := fn(provider.ChatResponse{Model: req.Model, Content: "hi"}); err != nil {
+			return err
+		}
+		return fn(provider.ChatResponse{
+			Model: req.Model,
+			Done:  true,
+			Usage: provider.Usage{
+				PromptTokens:     3,
+				CompletionTokens: 5,
+				TotalTokens:      8,
+			},
+		})
+	})
+	defer teardown()
+
+	body := map[string]any{
+		"model":  "ollama/qwen3:8b",
+		"stream": true,
+		"stream_options": map[string]any{
+			"include_usage": true,
+		},
+		"messages": []map[string]string{
+			{"role": "user", "content": "hi"},
+		},
+	}
+	rec := doChatRequest(t, srv, body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	chunks := decodeSSEChunks(t, rec.Body.String())
+	if len(chunks) != 3 {
+		t.Fatalf("got %d chunks, want 3: %q", len(chunks), rec.Body.String())
+	}
+	final := chunks[1]
+	if final.Choices[0].FinishReason == nil || *final.Choices[0].FinishReason != "stop" {
+		t.Fatalf("finish_reason = %v, want stop", final.Choices[0].FinishReason)
+	}
+	usageChunk := chunks[2]
+	if len(usageChunk.Choices) != 0 {
+		t.Fatalf("usage chunk choices = %d, want 0", len(usageChunk.Choices))
+	}
+	if usageChunk.Usage == nil {
+		t.Fatal("usage chunk missing usage")
+	}
+	if usageChunk.Usage.PromptTokens != 3 || usageChunk.Usage.CompletionTokens != 5 || usageChunk.Usage.TotalTokens != 8 {
+		t.Fatalf("usage = %+v, want 3/5/8", *usageChunk.Usage)
+	}
+}
+
 // TestChatCompletions_Streaming_ModelQualified verifies that every streaming
 // chunk carries the qualified "provider/model" form in the Model field,
 // matching the non-streaming branch's plan.Profile.Key.String() convention.
