@@ -185,12 +185,20 @@ func newJudgeTransport(opts scorerOptions) (judgeTransport, error) {
 }
 
 func openAICompatJudgeProviderName(baseURL string) string {
-	canonical := canonicalJudgeBaseURL(baseURL)
+	return openAICompatEndpointProviderName(baseURL)
+}
+
+func openAICompatCandidateProviderName(baseURL string) string {
+	return openAICompatEndpointProviderName(baseURL)
+}
+
+func openAICompatEndpointProviderName(baseURL string) string {
+	canonical := canonicalOpenAICompatBaseURL(baseURL)
 	sum := sha256.Sum256([]byte(canonical))
 	return fmt.Sprintf("%s:%s", openAICompatTransport, hex.EncodeToString(sum[:])[:12])
 }
 
-func canonicalJudgeBaseURL(raw string) string {
+func canonicalOpenAICompatBaseURL(raw string) string {
 	raw = strings.TrimSpace(raw)
 	u, err := url.Parse(raw)
 	if err != nil || u.Scheme == "" || u.Host == "" {
