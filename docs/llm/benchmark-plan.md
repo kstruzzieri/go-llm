@@ -233,9 +233,22 @@ Active labeling (`-calibrate-suggest`) is a planned follow-up.
 
 - **Currently-configured model vs candidate** on each role's captured
   traces. The harness takes `-models <provider>/<name>,...`; today only
-  `ollama` is wired (`parseModelTarget` rejects other providers), so the
-  "any model reachable through an existing `provider.Provider`" target
-  remains follow-up work alongside the multi-provider client factory.
+  `ollama` and `openai-compat` candidate transports are wired; broader
+  provider routing remains follow-up work alongside the multi-provider
+  client factory.
+
+OpenAI-compatible candidate replay uses the `openai-compat/<model>`
+selector plus an endpoint:
+
+```bash
+go run ./cmd/llm-bench \
+  -traces 'docs/llm/traces/*.json' \
+  -models 'openai-compat/Qwen/Qwen3-Coder' \
+  -candidate-base-url 'http://localhost:8080' \
+  -scorer exact-match \
+  -report ./bench-report.md
+```
+
 - Initial target comparisons against the reference lineup in `models.json`:
   - `coding` — Qwen3-Coder-Next vs GLM-5.1 on code-gen traces (Setup 2
     experiment; see [setups.md](setups.md))
