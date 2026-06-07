@@ -115,14 +115,21 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req ollama.ChatRe
 	if err != nil {
 		return candidateChatResponse{}, err
 	}
+	// Map provider reasoning tokens onto the bench's thinking-token accounting.
+	// ThinkingTokensComputed gates whether downstream treats the count as a
+	// measured value, so preserve the provider's reported/presence bit rather
+	// than inferring availability from a positive token count.
+	reasoning := presp.Usage.ReasoningTokens
 	return candidateChatResponse{
 		Message: ollama.ChatMessage{
 			Role:      "assistant",
 			Content:   presp.Content,
 			ToolCalls: toolCalls,
 		},
-		PromptEvalCount: presp.Usage.PromptTokens,
-		EvalCount:       presp.Usage.CompletionTokens,
+		PromptEvalCount:        presp.Usage.PromptTokens,
+		EvalCount:              presp.Usage.CompletionTokens,
+		ThinkingTokens:         reasoning,
+		ThinkingTokensComputed: presp.Usage.ReasoningTokensReported,
 	}, nil
 }
 

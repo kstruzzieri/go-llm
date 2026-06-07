@@ -204,9 +204,11 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 		ToolCalls: toProviderToolCalls(msg.ToolCalls),
 		Done:      true,
 		Usage: provider.Usage{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-			TotalTokens:      resp.Usage.TotalTokens,
+			PromptTokens:            resp.Usage.PromptTokens,
+			CompletionTokens:        resp.Usage.CompletionTokens,
+			TotalTokens:             resp.Usage.TotalTokens,
+			ReasoningTokens:         resp.Usage.reasoningTokens(),
+			ReasoningTokensReported: resp.Usage.reasoningTokensReported(),
 		},
 	}, nil
 }
@@ -297,12 +299,17 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 		}
 		if chunk.Usage != nil {
 			lastUsage = provider.Usage{
-				PromptTokens:     chunk.Usage.PromptTokens,
-				CompletionTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:      chunk.Usage.TotalTokens,
+				PromptTokens:            chunk.Usage.PromptTokens,
+				CompletionTokens:        chunk.Usage.CompletionTokens,
+				TotalTokens:             chunk.Usage.TotalTokens,
+				ReasoningTokens:         chunk.Usage.reasoningTokens(),
+				ReasoningTokensReported: chunk.Usage.reasoningTokensReported(),
 			}
 		}
 		if len(chunk.Choices) == 0 {
+			continue
+		}
+		if finished {
 			continue
 		}
 		choice := chunk.Choices[0]
@@ -322,21 +329,28 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 				callbackErr = err
 				break
 			}
-			if err := fn(provider.ChatResponse{
-				Model:     lastModel,
-				Provider:  p.name,
-				ToolCalls: lastToolCalls,
-				Done:      true,
-				Usage:     lastUsage,
-			}); err != nil {
-				callbackErr = err
-			}
-			break
+			continue
 		}
 	}
 
 	if callbackErr != nil {
 		return callbackErr
+	}
+	if finished {
+		model := lastModel
+		if model == "" {
+			model = req.Model
+		}
+		if err := fn(provider.ChatResponse{
+			Model:     model,
+			Provider:  p.name,
+			ToolCalls: lastToolCalls,
+			Done:      true,
+			Usage:     lastUsage,
+		}); err != nil {
+			return err
+		}
+		return nil
 	}
 
 	if ctx.Err() != nil {
