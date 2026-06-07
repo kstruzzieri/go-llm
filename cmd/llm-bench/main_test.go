@@ -160,6 +160,49 @@ func TestMainCorpusManifestPartitionsReport(t *testing.T) {
 	}
 }
 
+func TestMainEmitsToolUseSubsetSection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/chat" {
+			http.NotFound(w, r)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"message":           map[string]string{"role": "assistant", "content": "smoke-ok"},
+			"done":              true,
+			"prompt_eval_count": 1,
+			"eval_count":        1,
+		})
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	report := filepath.Join(dir, "report.md")
+	cmd := exec.Command(os.Args[0],
+		"-traces", "testdata/smoke/minimal.json",
+		"-models", "fake",
+		"-scorer", "exact-match",
+		"-ollama-url", server.URL,
+		"-judge-cache", "",
+		"-report", report,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench run failed: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(report)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	// The smoke trace expects no tool calls, so the subset has 0 expected pairs
+	// and the claim is insufficient — but the section must still be emitted.
+	for _, want := range []string{"## Tool-use (expected-tool-call subset)", "expected-tool-call pairs"} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("report missing %q:\n%s", want, body)
+		}
+	}
+}
+
 func TestResolveToolSchemaSourceStdio(t *testing.T) {
 	src, err := resolveToolSchemaSource("echo mock-server", "")
 	if err != nil {
