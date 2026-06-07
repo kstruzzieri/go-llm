@@ -56,6 +56,34 @@ func TestChat(t *testing.T) {
 	}
 }
 
+func TestChatDoesNotSendMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if got := req.Messages[0].Thinking; got != "" {
+			t.Fatalf("request message thinking = %q; want empty because thinking is response-only", got)
+		}
+
+		_ = json.NewEncoder(w).Encode(ChatResponse{
+			Model:   "test-model",
+			Message: ChatMessage{Role: "assistant", Content: "ok"},
+			Done:    true,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	_, err := c.Chat(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "assistant", Content: "answer", Thinking: "private reasoning"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+}
+
 func TestChatStream(t *testing.T) {
 	chunks := []ChatResponse{
 		{Model: "test-model", Message: ChatMessage{Role: "assistant", Content: "Hel"}, Done: false},
@@ -103,6 +131,33 @@ func TestChatStream(t *testing.T) {
 	}
 	if !received[2].Done {
 		t.Error("last chunk should have done=true")
+	}
+}
+
+func TestChatStreamDoesNotSendMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if got := req.Messages[0].Thinking; got != "" {
+			t.Fatalf("stream request message thinking = %q; want empty because thinking is response-only", got)
+		}
+
+		_, _ = fmt.Fprint(w, `{"model":"test-model","message":{"role":"assistant","content":"ok"},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"test-model","message":{"role":"assistant"},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "assistant", Content: "answer", Thinking: "private reasoning"}},
+	}, func(ChatResponse) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error: %v", err)
 	}
 }
 

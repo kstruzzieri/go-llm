@@ -15,6 +15,7 @@ func (c *Client) Chat(ctx context.Context, req ChatRequest) (*ChatResponse, erro
 		return nil, fmt.Errorf("ollama: chat: at least one message is required")
 	}
 	req.Stream = false
+	req = stripMessageThinking(req)
 	var resp ChatResponse
 	if err := c.doJSON(ctx, "POST", "/api/chat", req, &resp); err != nil {
 		return nil, fmt.Errorf("ollama: chat: %w", err)
@@ -36,6 +37,7 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, fn func(ChatRe
 		return fmt.Errorf("ollama: chat stream: callback function is required")
 	}
 	req.Stream = true
+	req = stripMessageThinking(req)
 	return c.doStream(ctx, "/api/chat", req, func(raw json.RawMessage) error {
 		var resp ChatResponse
 		if err := json.Unmarshal(raw, &resp); err != nil {
@@ -43,4 +45,21 @@ func (c *Client) ChatStream(ctx context.Context, req ChatRequest, fn func(ChatRe
 		}
 		return fn(resp)
 	})
+}
+
+func stripMessageThinking(req ChatRequest) ChatRequest {
+	var msgs []ChatMessage
+	for i, msg := range req.Messages {
+		if msg.Thinking == "" {
+			continue
+		}
+		if msgs == nil {
+			msgs = append([]ChatMessage(nil), req.Messages...)
+		}
+		msgs[i].Thinking = ""
+	}
+	if msgs != nil {
+		req.Messages = msgs
+	}
+	return req
 }

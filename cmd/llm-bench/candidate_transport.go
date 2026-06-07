@@ -67,10 +67,9 @@ func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (
 		// Leave ThinkMode at its default (extract). A reasoning model served via
 		// llama.cpp can emit <think>...</think> inline in content; extraction
 		// strips it so the scored transcript holds the final answer rather than
-		// serving-stack-specific reasoning formatting. This matches the Ollama
-		// candidate path, where the server separates reasoning into a field the
-		// raw client drops. Reasoning text is discarded either way; isolating
-		// reasoning *tokens* is tracked separately (#158).
+		// serving-stack-specific reasoning formatting. The stripped reasoning is
+		// carried separately on candidateChatResponse.Thinking so replay history
+		// stays reasoning-free while transcripts retain the reasoning text.
 		prov := openaicompat.NewProvider(
 			openaicompat.NewClient(baseURL, clientOpts...),
 			openaicompat.WithProviderName(providerName),
