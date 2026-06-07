@@ -10,26 +10,39 @@ import (
 
 // lineupFromArtifacts returns the candidate-model lineup as the distinct,
 // normalized, sorted set of CandidateModel values across the artifact set.
+// Distinctness uses modelKey, matching the paired cell logic, so bare model
+// selectors and the default bench-provider-prefixed form collapse to one model.
 //
 // The lineup is derived from artifacts — NOT from matched labels — so a model
 // that was captured but has zero fresh labels still appears (and shows as
 // all-gap in the completeness worklist) instead of vanishing.
 func lineupFromArtifacts(arts []Artifact) []string {
-	seen := make(map[string]struct{}, len(arts))
-	var out []string
+	displayByKey := make(map[string]string, len(arts))
 	for _, a := range arts {
-		m := normalizeModelSelector(a.CandidateModel)
-		if m == "" {
+		display := normalizeModelSelector(a.CandidateModel)
+		key := modelKey(a.CandidateModel)
+		if key == "" {
 			continue
 		}
-		if _, ok := seen[m]; ok {
-			continue
+		if current, ok := displayByKey[key]; !ok || preferLineupDisplay(display, current) {
+			displayByKey[key] = display
 		}
-		seen[m] = struct{}{}
-		out = append(out, m)
+	}
+	out := make([]string, 0, len(displayByKey))
+	for _, display := range displayByKey {
+		out = append(out, display)
 	}
 	sort.Strings(out)
 	return out
+}
+
+func preferLineupDisplay(candidate, current string) bool {
+	candidatePrefixed := strings.HasPrefix(candidate, defaultBenchProvider+"/")
+	currentPrefixed := strings.HasPrefix(current, defaultBenchProvider+"/")
+	if candidatePrefixed != currentPrefixed {
+		return candidatePrefixed
+	}
+	return candidate < current
 }
 
 // bootstrapDeltaCI returns a percentile (2.5%, 97.5%) confidence interval for
