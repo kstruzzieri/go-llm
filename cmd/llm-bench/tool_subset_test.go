@@ -119,6 +119,26 @@ func TestFormatToolUseSubset_NAWhenNoExpectedPairs(t *testing.T) {
 	}
 }
 
+func TestFormatToolUseSubset_BorderlineCoverageDoesNotRoundUpToGate(t *testing.T) {
+	coverage := float64(35) / float64(44)
+	_, reason := toolUseClaimVerdict(44, coverage)
+	out := formatToolUseSubset([]toolUseSubsetRow{{
+		Model:          "m",
+		ExpectedPairs:  44,
+		ComputedPairs:  35,
+		Coverage:       coverage,
+		MeanArgsValid:  1.0,
+		ClaimSupported: false,
+		ClaimReason:    reason,
+	}})
+	if !strings.Contains(out, "| m | 44 | 79.5% (35/44) | 1.00 | insufficient: 79.5% computed coverage (need >=80%) |") {
+		t.Fatalf("borderline coverage should not round up to the 80%% gate:\n%s", out)
+	}
+	if strings.Contains(out, "80% (35/44)") || strings.Contains(out, "insufficient: 80% computed coverage") {
+		t.Fatalf("borderline coverage rounded up to the gate:\n%s", out)
+	}
+}
+
 func TestFormatReport_EmitsToolUseSubsetOnlyWhenExpectedMapSet(t *testing.T) {
 	results := []Result{
 		{Model: "m", TraceID: "t1", Score: Score{AnswerQuality: 1.0, ToolArgsValid: 1.0, ToolArgsValidComputed: true}},
@@ -135,5 +155,36 @@ func TestFormatReport_EmitsToolUseSubsetOnlyWhenExpectedMapSet(t *testing.T) {
 	})
 	if !strings.Contains(withMap, "## Tool-use (expected-tool-call subset)") {
 		t.Errorf("subset section must appear when ToolCallExpected is set:\n%s", withMap)
+	}
+}
+
+func TestFormatReport_ToolUseSubsetExcludesJudgeValidation(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "natural-tool", Score: Score{AnswerQuality: 1.0, ToolArgsValid: 1.0, ToolArgsValidComputed: true}},
+		{Model: "m", TraceID: "judge-tool", Score: Score{AnswerQuality: 1.0, ToolArgsValid: 1.0, ToolArgsValidComputed: true}},
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{
+		Scorer: "exact-match",
+		Corpus: &corpusReportData{
+			Counts: corpusCounts{
+				ByPartition: map[CorpusPartition]int{PartitionNatural: 1, PartitionJudgeValidation: 1},
+				ByCategory:  map[string]int{"tool-use": 2},
+				Total:       2,
+			},
+			TraceToPartition: map[string]CorpusPartition{
+				"natural-tool": PartitionNatural,
+				"judge-tool":   PartitionJudgeValidation,
+			},
+		},
+		ToolCallExpected: map[string]bool{
+			"natural-tool": true,
+			"judge-tool":   true,
+		},
+	})
+	if !strings.Contains(out, "| m | 1 | 100% (1/1) | 1.00 |") {
+		t.Fatalf("tool-use subset should count only model-evidence expected-tool rows:\n%s", out)
+	}
+	if strings.Contains(out, "| m | 2 | 100% (2/2) |") {
+		t.Fatalf("judge-validation row leaked into the tool-use subset:\n%s", out)
 	}
 }

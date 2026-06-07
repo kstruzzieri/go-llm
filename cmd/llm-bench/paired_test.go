@@ -41,6 +41,27 @@ func TestLineupFromArtifacts_SortedDedupedNormalized(t *testing.T) {
 	}
 }
 
+func TestComputePairedAnalysis_DedupesBareAndProviderPrefixedArtifacts(t *testing.T) {
+	a1, l1 := labeledArtifact("t1", "ollama/a", "x", 1.0, "keith")
+	a2, l2 := labeledArtifact("t2", "a", "x", 0.0, "keith")
+	arts := []Artifact{a1, a2}
+	matched, stale := mustMatch(t, []Label{l1, l2}, arts)
+
+	pa, err := computePairedAnalysis(matched, stale, arts, "", 1, 10000)
+	if err != nil {
+		t.Fatalf("computePairedAnalysis: %v", err)
+	}
+	if want := []string{"ollama/a"}; !reflect.DeepEqual(pa.Lineup, want) {
+		t.Fatalf("Lineup = %v; want %v", pa.Lineup, want)
+	}
+	if pa.PerModelN != 2 {
+		t.Fatalf("PerModelN = %d; want both labeled traces counted under one canonical model", pa.PerModelN)
+	}
+	if pa.AllMatchedN["ollama/a"] != 2 {
+		t.Fatalf("AllMatchedN[ollama/a] = %d; want 2", pa.AllMatchedN["ollama/a"])
+	}
+}
+
 // A model that appears only in artifacts with no fresh labels must still be in
 // the lineup — otherwise matched-label inference would hide it completely.
 func TestLineupFromArtifacts_IncludesModelWithoutLabels(t *testing.T) {

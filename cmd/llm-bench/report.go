@@ -110,7 +110,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 
 	if opts.ToolCallExpected != nil {
 		fmt.Fprintln(&b)
-		b.WriteString(formatToolUseSubset(toolUseSubsetRows(models, results, opts.ToolCallExpected)))
+		b.WriteString(formatToolUseSubset(toolUseSubsetRows(models, summaryResults, opts.ToolCallExpected)))
 	}
 
 	fmt.Fprintln(&b)
