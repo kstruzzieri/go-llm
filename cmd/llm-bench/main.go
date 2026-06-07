@@ -531,6 +531,31 @@ func resolveJudgeTransportConfig(transport, baseURL, apiKey string, lookupEnv fu
 	return cfg
 }
 
+// candidateAPIKeyEnvVar is the environment variable consulted for
+// openai-compat candidate Bearer tokens when -candidate-api-key is empty.
+const candidateAPIKeyEnvVar = "LLM_BENCH_CANDIDATE_API_KEY"
+
+// candidateTransportConfig is the resolved OpenAI-compatible candidate
+// endpoint configuration. Ollama candidates ignore these values.
+type candidateTransportConfig struct {
+	baseURL string
+	apiKey  string
+}
+
+// resolveCandidateTransportConfig applies flag/env precedence for candidate
+// OpenAI-compatible endpoints. The API key flag takes precedence; when empty
+// it falls back to LLM_BENCH_CANDIDATE_API_KEY via lookupEnv.
+func resolveCandidateTransportConfig(baseURL, apiKey string, lookupEnv func(string) string) candidateTransportConfig {
+	cfg := candidateTransportConfig{
+		baseURL: strings.TrimSpace(baseURL),
+		apiKey:  strings.TrimSpace(apiKey),
+	}
+	if cfg.apiKey == "" {
+		cfg.apiKey = strings.TrimSpace(lookupEnv(candidateAPIKeyEnvVar))
+	}
+	return cfg
+}
+
 // resolveToolSchemaSource picks a tool-schema source from CLI flags.
 // Returns nil if neither flag is set; an error if both are.
 func resolveToolSchemaSource(stdioCmd, httpURL string) (toolSchemaSource, error) {

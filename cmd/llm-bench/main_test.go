@@ -371,6 +371,33 @@ func TestResolveJudgeTransportConfig_APIKeyEnvFallback(t *testing.T) {
 	}
 }
 
+func TestResolveCandidateTransportConfig_APIKeyFlagWins(t *testing.T) {
+	cfg := resolveCandidateTransportConfig(" https://api.example.com ", "flag-key", func(string) string { return "env-key" })
+	if cfg.apiKey != "flag-key" {
+		t.Fatalf("apiKey = %q; want flag-key (flag overrides env)", cfg.apiKey)
+	}
+	if cfg.baseURL != "https://api.example.com" {
+		t.Fatalf("baseURL = %q; want trimmed value", cfg.baseURL)
+	}
+}
+
+func TestResolveCandidateTransportConfig_APIKeyEnvFallback(t *testing.T) {
+	calls := 0
+	cfg := resolveCandidateTransportConfig("https://x", "", func(name string) string {
+		calls++
+		if name != candidateAPIKeyEnvVar {
+			t.Errorf("looked up %q; want %q", name, candidateAPIKeyEnvVar)
+		}
+		return "env-key"
+	})
+	if cfg.apiKey != "env-key" {
+		t.Fatalf("apiKey = %q; want env-key fallback", cfg.apiKey)
+	}
+	if calls != 1 {
+		t.Fatalf("env lookups = %d; want exactly 1", calls)
+	}
+}
+
 func TestCaptureSampleAndLimitMutuallyExclusive(t *testing.T) {
 	if err := validateCaptureSampleAndLimit(10, "n=20"); err == nil || !strings.Contains(err.Error(), "mutually exclusive") {
 		t.Fatalf("want mutex error; got %v", err)
