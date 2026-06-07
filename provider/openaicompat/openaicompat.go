@@ -336,23 +336,6 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 	if callbackErr != nil {
 		return callbackErr
 	}
-	if finished {
-		model := lastModel
-		if model == "" {
-			model = req.Model
-		}
-		if err := fn(provider.ChatResponse{
-			Model:     model,
-			Provider:  p.name,
-			ToolCalls: lastToolCalls,
-			Done:      true,
-			Usage:     lastUsage,
-		}); err != nil {
-			return err
-		}
-		return nil
-	}
-
 	if ctx.Err() != nil {
 		if chunksReceived > 0 && !finished {
 			_ = parser.Flush()
@@ -373,6 +356,22 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 	}
 	if streamErr != nil {
 		return fmt.Errorf("provider: openaicompat: chat stream: %w", streamErr)
+	}
+	if finished {
+		model := lastModel
+		if model == "" {
+			model = req.Model
+		}
+		if err := fn(provider.ChatResponse{
+			Model:     model,
+			Provider:  p.name,
+			ToolCalls: lastToolCalls,
+			Done:      true,
+			Usage:     lastUsage,
+		}); err != nil {
+			return err
+		}
+		return nil
 	}
 	if !finished {
 		return fmt.Errorf("provider: openaicompat: chat stream: ended before final chunk")
@@ -668,6 +667,9 @@ func toChatRequest(req provider.ChatRequest, stream bool) chatRequest {
 		Messages: msgs,
 		Stream:   stream,
 		Tools:    toWireTools(req.Tools),
+	}
+	if stream {
+		r.StreamOptions = &chatStreamOptions{IncludeUsage: true}
 	}
 	applyOptionsChat(&r, req.Options)
 	return r

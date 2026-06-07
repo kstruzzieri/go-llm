@@ -9,14 +9,19 @@ import "encoding/json"
 // chatRequest is the outbound shape for POST /v1/chat/completions. Only the
 // fields go-llm sends are declared; OpenAI ignores unknown request fields.
 type chatRequest struct {
-	Model       string        `json:"model"`
-	Messages    []chatMessage `json:"messages"`
-	Stream      bool          `json:"stream,omitempty"`
-	Temperature *float64      `json:"temperature,omitempty"`
-	TopP        *float64      `json:"top_p,omitempty"`
-	MaxTokens   int           `json:"max_tokens,omitempty"`
-	Stop        []string      `json:"stop,omitempty"`
-	Tools       []chatTool    `json:"tools,omitempty"`
+	Model         string             `json:"model"`
+	Messages      []chatMessage      `json:"messages"`
+	Stream        bool               `json:"stream,omitempty"`
+	StreamOptions *chatStreamOptions `json:"stream_options,omitempty"`
+	Temperature   *float64           `json:"temperature,omitempty"`
+	TopP          *float64           `json:"top_p,omitempty"`
+	MaxTokens     int                `json:"max_tokens,omitempty"`
+	Stop          []string           `json:"stop,omitempty"`
+	Tools         []chatTool         `json:"tools,omitempty"`
+}
+
+type chatStreamOptions struct {
+	IncludeUsage bool `json:"include_usage,omitempty"`
 }
 
 // chatMessage is the wire shape of one message in a chat request or response.
