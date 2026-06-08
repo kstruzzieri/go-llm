@@ -2,10 +2,15 @@
 
 ## Reference lineup (shipped in `models.json`)
 
-Adopted from the April 2026 analysis (see [analysis.md](analysis.md)).
-This is **Setup 1 — Balanced Daily Driver** from [setups.md](setups.md):
-drop-in upgrades, all-Ollama, full co-residency, zero architectural
-change to `go-llm`.
+Quality-ranked on chat/code Q&A by the accepted **plain-chat/manual
+baseline** [2026-06-07](benchmarks/2026-06-07-balanced-lineup-manual-baseline.md)
+(see [harness-results.md](harness-results.md) for the accepted-run index).
+That run validates the *lineup ranking on plain chat/code Q&A* only —
+**tool-use and agent roles are not yet harness-validated**, and it does
+not by itself justify a role change. Originally adopted from the (now
+historical) [April 2026 analysis](analysis.md). This is **Setup 1 —
+Balanced Daily Driver** from [setups.md](setups.md): drop-in upgrades,
+all-Ollama, full co-residency, zero architectural change to `go-llm`.
 
 | Role | Model | Source |
 |---|---|---|
@@ -20,6 +25,18 @@ change to `go-llm`.
 These specific IDs are **the reference lineup**, not a contract. `go-llm`
 has no hard-coded model list: the router, registry, and every consumer
 read from `models.json`.
+
+### How to verify
+
+To reproduce the current accepted result, use the exact `llm-bench`
+commands in the artifact linked from
+[harness-results.md](harness-results.md) (manual-label quality + paired
+statistics + a separate latency replay). The traces, labels, and
+artifacts are gitignored; capture your own corpus via
+`llm-bench -capture -mcp-stdio-command "..."` before reproducing, then
+label and run the manual-report path. The accepted run is a plain-chat
+baseline — a tool-use or agent ranking requires a tool-bearing corpus,
+which is Round-2 work.
 
 ## Customizing the lineup
 
@@ -161,10 +178,12 @@ Setup 2 (GLM-5.1 in LM Studio) and Setup 3 (MiniMax M2.7) from
 [setups.md](setups.md) remain candidate upgrades. They're deferred,
 not rejected. The benchmark harness
 ([benchmark-plan.md](benchmark-plan.md)) is the decision gate: if a
-frontier non-Ollama model shows ≥5% quality improvement on real captured
-traces (not synthetic benchmarks), that's the evidence to invest in the
-second-backend abstraction. Until that evidence exists, Setup 1 wins on
-integration cost.
+frontier non-Ollama model demonstrates, on an accepted harness run
+(acceptance criteria in
+[harness-results.md](harness-results.md#acceptance-gate)), a median
+`AnswerQuality` improvement of **≥0.05** with no latency regression beyond
+**1.5× p90**, that's the evidence to invest in the second-backend
+abstraction. Until that evidence exists, Setup 1 wins on integration cost.
 
 ## Files consulted when changing the lineup
 
