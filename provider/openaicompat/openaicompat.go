@@ -185,10 +185,20 @@ func (p *Provider) Chat(ctx context.Context, req provider.ChatRequest) (*provide
 	}
 	msg := resp.Choices[0].Message
 
+	// The structured reasoning_content field, when present, is authoritative —
+	// the server has already separated reasoning from the answer, so it is
+	// captured unconditionally (independent of think mode, mirroring how #158
+	// captures reasoning tokens). Inline <think>-tag extraction remains the
+	// fallback for servers that don't separate reasoning, and still cleans
+	// Content either way.
 	content := msg.Content
-	thinking := ""
+	thinking := msg.ReasoningContent
 	if p.shouldExtractThinking(req.Options) {
-		content, thinking = provider.ExtractThinking(msg.Content, p.thinkTags)
+		var inline string
+		content, inline = provider.ExtractThinking(msg.Content, p.thinkTags)
+		if thinking == "" {
+			thinking = inline
+		}
 	}
 
 	model := resp.Model
@@ -318,6 +328,19 @@ func (p *Provider) ChatStream(ctx context.Context, req provider.ChatRequest, fn 
 
 		if len(choice.Delta.ToolCalls) > 0 {
 			lastToolCalls = toolCalls.Add(choice.Delta.ToolCalls)
+		}
+		// Native reasoning text arrives on its own delta field, separate from
+		// content and from the inline-tag parser. Emit it directly as a Thinking
+		// delta, unconditionally — the server has already classified it. Unlike
+		// the non-streaming path (native field takes precedence over inline
+		// <think> tags), a stream can't reconcile the two mid-flight, so a
+		// backend emitting both would surface both. Backends use one mechanism
+		// or the other, so this asymmetry is harmless in practice.
+		if choice.Delta.ReasoningContent != "" {
+			if err := fn(provider.ChatResponse{Model: lastModel, Provider: p.name, Thinking: choice.Delta.ReasoningContent}); err != nil {
+				callbackErr = err
+				break
+			}
 		}
 		if choice.Delta.Content != "" {
 			if err := parser.Process(choice.Delta.Content); err != nil {

@@ -30,7 +30,13 @@ type candidateChatClient interface {
 }
 
 type candidateChatResponse struct {
-	Message                ollama.ChatMessage
+	Message ollama.ChatMessage
+	// Thinking is the reasoning text a backend separated from the answer
+	// (Ollama message.thinking / openai-compat reasoning_content). It is kept
+	// out of Message deliberately: Message feeds back into conversation history
+	// and must stay free of reasoning to preserve replay determinism. The
+	// runner maps this onto the transcript's Turn.Thinking. See #160.
+	Thinking               string
 	PromptEvalCount        int
 	EvalCount              int
 	ThinkingTokens         int
@@ -61,10 +67,9 @@ func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (
 		// Leave ThinkMode at its default (extract). A reasoning model served via
 		// llama.cpp can emit <think>...</think> inline in content; extraction
 		// strips it so the scored transcript holds the final answer rather than
-		// serving-stack-specific reasoning formatting. This matches the Ollama
-		// candidate path, where the server separates reasoning into a field the
-		// raw client drops. Reasoning text is discarded either way; isolating
-		// reasoning *tokens* is tracked separately (#158).
+		// serving-stack-specific reasoning formatting. The stripped reasoning is
+		// carried separately on candidateChatResponse.Thinking so replay history
+		// stays reasoning-free while transcripts retain the reasoning text.
 		prov := openaicompat.NewProvider(
 			openaicompat.NewClient(baseURL, clientOpts...),
 			openaicompat.WithProviderName(providerName),
@@ -87,8 +92,15 @@ func (c ollamaCandidateClient) Chat(ctx context.Context, req ollama.ChatRequest)
 	if resp == nil {
 		return candidateChatResponse{}, fmt.Errorf("ollama candidate: nil response")
 	}
+	// Lift Ollama's separate reasoning text out of the reply message so it is
+	// captured for the transcript without leaking back into conversation
+	// history when the message is replayed in later turns.
+	msg := resp.Message
+	thinking := msg.Thinking
+	msg.Thinking = ""
 	return candidateChatResponse{
-		Message:         resp.Message,
+		Message:         msg,
+		Thinking:        thinking,
 		PromptEvalCount: resp.PromptEvalCount,
 		EvalCount:       resp.EvalCount,
 	}, nil
@@ -126,6 +138,10 @@ func (c openAICompatCandidateClient) Chat(ctx context.Context, req ollama.ChatRe
 			Content:   presp.Content,
 			ToolCalls: toolCalls,
 		},
+		// presp.Thinking holds reasoning_content (native) or, failing that,
+		// inline-extracted <think> text — captured separately from Message so it
+		// reaches the transcript without polluting replayed history.
+		Thinking:               presp.Thinking,
 		PromptEvalCount:        presp.Usage.PromptTokens,
 		EvalCount:              presp.Usage.CompletionTokens,
 		ThinkingTokens:         reasoning,

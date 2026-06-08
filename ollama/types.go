@@ -40,6 +40,7 @@ type ToolCallFunction struct {
 type ChatMessage struct {
 	Role       string     `json:"role"` // system, user, assistant, tool
 	Content    string     `json:"content"`
+	Thinking   string     `json:"thinking,omitempty"`     // reasoning text some models emit separately from content in Ollama's thinking mode
 	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`   // present when assistant invokes tools
 	ToolName   string     `json:"tool_name,omitempty"`    // set when role="tool" (result)
 	ToolCallID string     `json:"tool_call_id,omitempty"` // correlates result with originating call

@@ -25,12 +25,19 @@ type chatStreamOptions struct {
 }
 
 // chatMessage is the wire shape of one message in a chat request or response.
+//
+// ReasoningContent carries reasoning text that some servers (vLLM, DeepSeek,
+// certain llama-server builds) separate from the answer instead of emitting it
+// inline as <think> tags. On responses it appears on the message; on streaming
+// it appears on the delta. It is response-only enrichment — outbound requests
+// leave it empty (omitempty), so toWire* paths never need to clear it.
 type chatMessage struct {
-	Role       string         `json:"role"`
-	Content    string         `json:"content"`
-	Name       string         `json:"name,omitempty"`
-	ToolCallID string         `json:"tool_call_id,omitempty"`
-	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	Role             string         `json:"role"`
+	Content          string         `json:"content"`
+	ReasoningContent string         `json:"reasoning_content,omitempty"`
+	Name             string         `json:"name,omitempty"`
+	ToolCallID       string         `json:"tool_call_id,omitempty"`
+	ToolCalls        []chatToolCall `json:"tool_calls,omitempty"`
 }
 
 // chatTool is the OpenAI function-calling tool descriptor.

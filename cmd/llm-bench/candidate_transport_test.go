@@ -226,6 +226,93 @@ func TestOpenAICompatCandidateClient_ChatZeroReasoningTokensAreComputed(t *testi
 	}
 }
 
+// When the server separates reasoning into the structured reasoning_content
+// field (rather than inline <think> tags), the candidate must capture that text
+// as candidateChatResponse.Thinking while keeping it OUT of Message — the
+// reply Message feeds back into conversation history and must stay free of
+// reasoning so replay determinism is preserved. See #160.
+func TestOpenAICompatCandidateClient_CapturesReasoningContent(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"chatcmpl-test",
+			"model":"served",
+			"choices":[{
+				"index":0,
+				"message":{"role":"assistant","content":"final answer","reasoning_content":"native chain of thought"},
+				"finish_reason":"stop"
+			}],
+			"usage":{"prompt_tokens":5,"completion_tokens":3,"total_tokens":8}
+		}`))
+	}))
+	defer srv.Close()
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "openai-compat/fake", Provider: "openai-compat", Model: "fake"}, candidateTransportOptions{
+		openAICompatBaseURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+		Model:    "fake",
+		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Thinking != "native chain of thought" {
+		t.Errorf("Thinking = %q, want native reasoning_content captured", resp.Thinking)
+	}
+	if resp.Message.Content != "final answer" {
+		t.Errorf("Message.Content = %q, want %q", resp.Message.Content, "final answer")
+	}
+	if resp.Message.Thinking != "" {
+		t.Errorf("Message.Thinking = %q, want empty (reasoning is carried separately, not in the history message)", resp.Message.Thinking)
+	}
+}
+
+// The Ollama candidate uses the raw client, which now deserializes the separate
+// message.thinking field. The transport must lift that text into
+// candidateChatResponse.Thinking and clear it from Message so conversation
+// history stays free of reasoning. See #160.
+func TestOllamaCandidateClient_CapturesNativeThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"model":"served",
+			"message":{"role":"assistant","content":"final answer","thinking":"native reasoning"},
+			"done":true,
+			"prompt_eval_count":5,
+			"eval_count":3
+		}`))
+	}))
+	defer srv.Close()
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "ollama/served", Provider: defaultBenchProvider, Model: "served"}, candidateTransportOptions{
+		ollamaURL: srv.URL,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	resp, err := tr.chat.Chat(context.Background(), ollama.ChatRequest{
+		Model:    "served",
+		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Thinking != "native reasoning" {
+		t.Errorf("Thinking = %q, want native message.thinking captured", resp.Thinking)
+	}
+	if resp.Message.Content != "final answer" {
+		t.Errorf("Message.Content = %q, want %q", resp.Message.Content, "final answer")
+	}
+	if resp.Message.Thinking != "" {
+		t.Errorf("Message.Thinking = %q, want it cleared so conversation history stays free of reasoning text", resp.Message.Thinking)
+	}
+}
+
 // A reasoning model served via llama.cpp can emit <think>...</think> inline in
 // content. The candidate transport must strip it so the scored transcript holds
 // the final answer, not serving-stack-specific reasoning formatting.
@@ -261,5 +348,11 @@ func TestOpenAICompatCandidateClient_StripsInlineThinkTags(t *testing.T) {
 	}
 	if resp.Message.Content != "final answer" {
 		t.Fatalf("content = %q; want %q (inline <think> reasoning must be stripped)", resp.Message.Content, "final answer")
+	}
+	// The reasoning stripped from Content is now captured (it used to be
+	// discarded), so a backend that inlines <think> tags reaches transcript
+	// parity with one that uses a structured reasoning field. See #160.
+	if resp.Thinking != "secret chain of thought" {
+		t.Errorf("Thinking = %q; want the stripped reasoning captured rather than dropped", resp.Thinking)
 	}
 }
