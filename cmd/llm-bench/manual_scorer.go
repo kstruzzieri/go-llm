@@ -133,6 +133,11 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string, filt
 			return "", fmt.Errorf("corpus selection missing %d selected trace(s) from matched artifacts: %v", len(data.MissingSelected), data.MissingSelected)
 		}
 		matched = filterMatchedByTrace(matched, keep)
+		// Filter stale to the same selection so the coverage "stale" count
+		// reflects the reported partition, matching runPairedReport (otherwise a
+		// partition-scoped manual report overstates stale labels from other
+		// partitions).
+		stale = filterLabelsByTrace(stale, keep)
 		if len(matched) == 0 {
 			return "", fmt.Errorf("corpus selection matched no labeled artifacts")
 		}

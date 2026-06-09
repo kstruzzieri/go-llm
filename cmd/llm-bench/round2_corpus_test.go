@@ -67,6 +67,9 @@ func TestRound2ChallengeCorpus_EnforcesAuthoringContract(t *testing.T) {
 			if !strings.Contains(tr.Golden.FinalAnswerCriteria, "1.0") {
 				t.Errorf("rubric must state the 1.0 success boundary explicitly")
 			}
+			if !strings.Contains(tr.Golden.FinalAnswerCriteria, "0.5") {
+				t.Errorf("rubric must state the 0.5 partial-credit boundary explicitly")
+			}
 			if tr.Source != "round2-challenge" {
 				t.Errorf("source = %q; want round2-challenge", tr.Source)
 			}
