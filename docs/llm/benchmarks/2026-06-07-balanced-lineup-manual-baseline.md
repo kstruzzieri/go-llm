@@ -30,6 +30,14 @@ or agent roles.
 - **Machine**: MacBook Pro M3 Max, 128 GB unified memory
 - **Trace set**: `first-accepted-run` (paired subset), count: **20**,
   trace-set manifest hash: `sha256:64dd2a9fe214c0144c8445915ed18a534f86e080c8a6f559654c6b5e87ea6037`
+  - Retained trace files:
+    `conversation-fa-a05`, `conversation-fa-c02`, `conversation-fa-c04`,
+    `conversation-fa-c05`, `conversation-fa-c07`, `conversation-fa-c08`,
+    `conversation-fa-c09`, `conversation-fa-f02`, `conversation-fa-f03`,
+    `conversation-fa-f04`, `conversation-fa-f06`, `conversation-fa-g01`,
+    `conversation-fa-g03`, `conversation-fa-g04`, `conversation-fa-g05`,
+    `conversation-fa-l02`, `conversation-fa-l03`, `conversation-fa-l05`,
+    `conversation-fa-m02`, `conversation-fa-m04`.
 - **Models under test (generative lineup)**: `ollama/qwen3-coder-next:latest,
   ollama/gemma4:31b, ollama/qwen3.6:35b-a3b, ollama/qwen3:8b` (all Q4_K_M).
   The embedding model (`qwen3-embedding:8b`) is not answer-quality-judged here.
@@ -60,7 +68,23 @@ or agent roles.
     -baseline gemma4:31b -report <scratch>.md
 
   # Latency (separate fresh replay over the same 20-trace set):
-  llm-bench -traces 'docs/llm/traces/first-accepted-run/<20 paired ids>.json' \
+  # `-traces` is one filepath.Glob pattern, so copy the retained files into a
+  # scratch directory before replay. Do not use `conversation-*.json`; it also
+  # matches the four excluded traces listed below.
+  RUN_TRACES="$(mktemp -d "${TMPDIR:-/tmp}/llm-bench-retained.XXXXXX")"
+  for id in \
+    conversation-fa-a05 conversation-fa-c02 conversation-fa-c04 \
+    conversation-fa-c05 conversation-fa-c07 conversation-fa-c08 \
+    conversation-fa-c09 conversation-fa-f02 conversation-fa-f03 \
+    conversation-fa-f04 conversation-fa-f06 conversation-fa-g01 \
+    conversation-fa-g03 conversation-fa-g04 conversation-fa-g05 \
+    conversation-fa-l02 conversation-fa-l03 conversation-fa-l05 \
+    conversation-fa-m02 conversation-fa-m04
+  do
+    cp "docs/llm/traces/first-accepted-run/${id}.json" "$RUN_TRACES/"
+  done
+
+  llm-bench -traces "$RUN_TRACES/*.json" \
     -models 'ollama/qwen3-coder-next:latest,ollama/gemma4:31b,ollama/qwen3.6:35b-a3b,ollama/qwen3:8b' \
     -scorer exact-match -timeout 10m -report <scratch>.md
   ```

@@ -28,15 +28,16 @@ read from `models.json`.
 
 ### How to verify
 
-To reproduce the current accepted result, use the exact `llm-bench`
-commands in the artifact linked from
+To rerun the accepted workflow against the same local evidence, use the
+exact `llm-bench` commands in the artifact linked from
 [harness-results.md](harness-results.md) (manual-label quality + paired
-statistics + a separate latency replay). The traces, labels, and
-artifacts are gitignored; capture your own corpus via
-`llm-bench -capture -mcp-stdio-command "..."` before reproducing, then
-label and run the manual-report path. The accepted run is a plain-chat
-baseline — a tool-use or agent ranking requires a tool-bearing corpus,
-which is Round-2 work.
+statistics + a separate latency replay over the listed retained trace
+IDs). The accepted traces, labels, and artifacts are gitignored local
+files; for a new run, capture your own corpus via
+`llm-bench -capture -mcp-stdio-command "..."`, then label and run the
+manual-report path. The accepted run is a plain-chat baseline — a
+tool-use or agent ranking requires a tool-bearing corpus, which is
+Round-2 work.
 
 ## Customizing the lineup
 
