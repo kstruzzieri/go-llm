@@ -1,0 +1,18 @@
+{
+  "id": "r2c-subtle-correctness-01",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. When asked to review code against a stated contract, decide correctness from the contract and the code alone, and point out any latent bug that would violate the contract at runtime even if the code compiles.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `findCause(err) (*HTTPError, bool)` must, given a wrapped error chain, return the first *HTTPError in the chain (via errors.As) and true, or (nil, false) if none is present. Does this implementation meet the contract? If not, name the bug and give the minimal fix.\n\n```go\ntype HTTPError struct {\n    Code int\n}\n\nfunc findCause(err error) (*HTTPError, bool) {\n    var target *HTTPError\n    if errors.As(err, &target) {\n        return target, true\n    }\n    return nil, false\n}\n```"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that *HTTPError is not a valid errors.As target because HTTPError does not implement the error interface (it has no Error() string method), so errors.As will never match (and in fact panics or fails to compile-match the contract intent), and gives the minimal fix of adding `func (e *HTTPError) Error() string`. 0.5 if it senses something is wrong with the As target but misattributes the cause (e.g. blames pointer-to-pointer or nil handling) while still recommending adding an Error method. 0.0 if it declares the implementation correct as written, or claims it satisfies the contract despite the missing Error() method.",
+    "final_answer_substring": ""
+  }
+}

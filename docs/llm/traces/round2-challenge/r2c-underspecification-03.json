@@ -1,0 +1,18 @@
+{
+  "id": "r2c-underspecification-03",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a careful engineer. Watch for false premises in a request. If the request assumes something that is not necessarily true, flag the assumption before answering rather than accepting it uncritically.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Since Go maps iterate in insertion order, can I rely on ranging over my config map to print the keys in the order I added them?"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer corrects the false premise: Go map iteration order is unspecified and intentionally randomized, NOT insertion order, so you cannot rely on range order; and gives the correct approach (collect the keys into a slice and sort, or maintain a separate ordered slice of insertion order). 0.5 if it expresses doubt about relying on map order but does not clearly state that the 'insertion order' premise is false. 0.0 if it accepts the false premise and confirms that ranging over the map will yield keys in insertion order.",
+    "final_answer_substring": ""
+  }
+}

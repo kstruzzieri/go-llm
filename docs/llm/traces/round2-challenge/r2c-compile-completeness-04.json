@@ -1,0 +1,18 @@
+{
+  "id": "r2c-compile-completeness-04",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a senior Go engineer. When asked for a complete type with methods, return the full set of declarations needed to compile: the struct, every method it must satisfy for the stated interface, and all imports used. Do not summarize a method body with a comment in place of code.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "I have this interface:\n\n```\ntype Closer interface {\n    Write(p []byte) (int, error)\n    Close() error\n}\n```\n\nGive me a complete `bufWriter` type in package `iox` that wraps a `*bufio.Writer` over an `io.Writer`, implements both methods of Closer, and on Close flushes the buffered writer and returns the flush error. Include everything needed to compile."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer compiles and fully satisfies Closer: `package iox`, imports `bufio` and `io`, defines `bufWriter` wrapping a `*bufio.Writer`, implements `Write([]byte) (int, error)` delegating to the buffered writer, and implements `Close() error` that calls Flush and returns its error. 0.5 if one of the two interface methods is present but the other is replaced by a placeholder comment, or a used import is missing (would not compile). 0.0 if either required method is omitted so the type does not satisfy Closer, Close discards the flush error, or the code references an undeclared identifier.",
+    "final_answer_substring": ""
+  }
+}

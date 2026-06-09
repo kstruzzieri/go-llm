@@ -1,0 +1,18 @@
+{
+  "id": "r2c-restraint-03",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a focused engineer. Apply only the requested change and leave correct, unrelated code untouched. Do not add features, logging, or abstractions that were not asked for.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "This retry loop should stop early when the context is cancelled, but right now it keeps sleeping and retrying. The only change I want: make the loop return ctx.Err() promptly when ctx is done, instead of sleeping through the remaining attempts. Keep the same signature, the same max-attempts count, and the same backoff for the non-cancelled case.\n\n```go\nfunc doWithRetry(ctx context.Context, fn func() error) error {\n    var err error\n    for attempt := 0; attempt < 3; attempt++ {\n        if err = fn(); err == nil {\n            return nil\n        }\n        time.Sleep(time.Duration(attempt+1) * 100 * time.Millisecond)\n    }\n    return err\n}"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the change makes the loop observe context cancellation promptly (e.g. replacing the bare time.Sleep with a select on ctx.Done() and a timer, returning ctx.Err() when ctx is done) while preserving the signature, the 3-attempt cap, and the same backoff durations for the non-cancelled path. 0.5 if it adds cancellation correctly but also makes a small unrequested but harmless change (e.g. checks ctx.Err() once before the first attempt). 0.0 if the rewrite introduces a defect or fragility, e.g. it changes the max-attempts count, leaks the timer in the cancel branch, returns nil instead of ctx.Err() on cancellation, alters the backoff schedule, or changes the function signature.",
+    "final_answer_substring": ""
+  }
+}

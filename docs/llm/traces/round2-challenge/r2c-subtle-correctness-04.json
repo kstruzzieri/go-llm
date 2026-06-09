@@ -1,0 +1,18 @@
+{
+  "id": "r2c-subtle-correctness-04",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Judge code against the stated contract, including resource-lifecycle requirements. Flag any latent bug that violates the contract at runtime even if the code compiles and the happy path works.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `totalSize(paths []string) (int64, error)` opens each path in turn, adds its size, and returns the sum. Because `paths` can be arbitrarily long (tens of thousands of entries), it must hold at most one file open at a time so it never exhausts the process file-descriptor limit. Does this implementation meet the contract? If not, name the bug and the minimal fix.\n\n```go\nfunc totalSize(paths []string) (int64, error) {\n    var total int64\n    for _, p := range paths {\n        f, err := os.Open(p)\n        if err != nil {\n            return 0, err\n        }\n        defer f.Close()\n        fi, err := f.Stat()\n        if err != nil {\n            return 0, err\n        }\n        total += fi.Size()\n    }\n    return total, nil\n}\n```"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `defer f.Close()` is inside the loop, so every opened file stays open until totalSize returns rather than being closed at the end of each iteration; with a long paths slice the open descriptors accumulate and the function exhausts the file-descriptor limit (failing with `too many open files`), violating the at-most-one-open-at-a-time clause; and gives the minimal fix of closing per iteration instead of with a loop-scoped defer (e.g. call f.Close() before the next iteration, or move the open+stat+close into a helper function so the defer fires per call). 0.5 if it notices the deferred close is mis-scoped / fires too late but misstates the consequence (e.g. says memory leak rather than descriptor exhaustion) while still recommending a per-iteration close. 0.0 if it declares the function correct, or claims defer inside the loop already closes each file before the next open.",
+    "final_answer_substring": ""
+  }
+}
