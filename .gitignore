@@ -9,6 +9,6 @@ docs/llm/traces/
 
 # llm-bench harness — local artifacts
 /llm-bench
-docs/llm/calibration/labels.jsonl
-docs/llm/calibration/artifacts.jsonl
+docs/llm/calibration/*.jsonl
+docs/llm/calibration/*.json
 docs/llm/calibration/reports/

@@ -40,5 +40,22 @@ runs stay as artifacts in `benchmarks/` but aren't promoted.
 
 ## Accepted runs (newest first)
 
-No accepted runs yet. The first accepted-run PR replaces this paragraph with
-the newest run entry.
+### [2026-06-07 — balanced-lineup-manual-baseline](benchmarks/2026-06-07-balanced-lineup-manual-baseline.md)
+
+- **Scope**: first accepted **plain-chat / manual baseline** for the Setup 1
+  lineup. Validates the *lineup ranking on chat/code Q&A* only — **not** a
+  tool-use or agent benchmark (zero tool-call traces), and **not** grounds for a
+  `models.json` role change. Decision-grade tool/agent ranking is Round-2 work.
+- **Method**: `manual` scorer (human labels, keith/keith), **80 valid labels**,
+  **20 / 20 fully paired** traces, 0 stale; latency from a separate fresh replay
+  on `3b37097` (`dirty: no`); trace-set manifest
+  `sha256:64dd2a9f…ea6037`.
+- **Quality (paired, n=20)**: gemma4:31b 1.00 · qwen3-coder-next 0.90 ·
+  qwen3.6:35b-a3b 0.90 · qwen3:8b 0.78. coder≈qwen3.6 indistinguishable (3/3/14);
+  gemma's +0.10 is CI-resolvable but **survivorship-biased** (top observed on the
+  subset it completed; ≈0.87 completion-aware).
+- **Latency (p50, successful-only)**: coder **17 s** · qwen3:8b 52 s ·
+  qwen3.6 79 s · gemma **127 s** (slowest; 1 replay timeout).
+- **Verdict**: accept as plain-chat/manual baseline; **keep the current lineup**.
+  Tactical read (not a role change): prefer `qwen3-coder-next` for coding/dev-chat
+  (near-top quality, best latency).
