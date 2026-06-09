@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 )
 
 // blindFillMarker delimits the human-fill region inside a worksheet block. The
@@ -11,6 +12,98 @@ import (
 // so candidate output text that happens to contain "score:" cannot be
 // misparsed.
 const blindFillMarker = "--- fill below (score: 0 | 0.5 | 1) ---"
+
+// ingestBlindWorksheet parses a filled blind worksheet into Labels, rejoining
+// trace_id + candidate_model from arts on artifact_hash (R-D3 — the untouched
+// artifacts file is the join key, so no separate restore map). Blocks with a
+// blank score are skipped (partial labeling allowed) and counted. A score
+// outside {0, 0.5, 1.0}, duplicate worksheet block, or hash absent from arts is
+// a loud error. labeler and labeled_at are stamped on every emitted label.
+//
+// Note: the block parser splits on "=== ARTIFACT ". A candidate-output line
+// that itself begins "=== ARTIFACT " could trigger a spurious block boundary.
+// The unknown-artifact_hash loud error (hash not in arts → error) is the
+// designed backstop for this edge case.
+func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (labels []Label, skipped int, err error) {
+	artByHash := make(map[string]Artifact, len(arts))
+	for _, a := range arts {
+		artByHash[a.ArtifactHash] = a
+	}
+
+	var hash string
+	var score, notes string
+	afterMarker := false
+	seenWorksheetHash := map[string]struct{}{}
+	flush := func() error {
+		if hash == "" {
+			return nil
+		}
+		defer func() {
+			hash, score, notes, afterMarker = "", "", "", false
+		}()
+		if _, dup := seenWorksheetHash[hash]; dup {
+			return fmt.Errorf("worksheet contains duplicate artifact_hash %q", hash)
+		}
+		seenWorksheetHash[hash] = struct{}{}
+		if strings.TrimSpace(score) == "" {
+			skipped++
+			return nil
+		}
+		q, perr := parseBlindScore(score)
+		if perr != nil {
+			return fmt.Errorf("artifact %s: %w", hash, perr)
+		}
+		a, ok := artByHash[hash]
+		if !ok {
+			return fmt.Errorf("worksheet references unknown artifact_hash %q (not in -artifacts)", hash)
+		}
+		labels = append(labels, Label{
+			TraceID:               a.TraceID,
+			CandidateModel:        a.CandidateModel,
+			ArtifactHash:          hash,
+			ExpectedAnswerQuality: q,
+			LabelNotes:            strings.TrimSpace(notes),
+			LabeledAt:             time.Now().UTC(),
+			Labeler:               labeler,
+		})
+		return nil
+	}
+
+	for _, line := range strings.Split(worksheet, "\n") {
+		switch {
+		case strings.HasPrefix(line, "=== ARTIFACT "):
+			if ferr := flush(); ferr != nil {
+				return nil, 0, ferr
+			}
+			hash = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "=== ARTIFACT "), " ==="))
+			score, notes, afterMarker = "", "", false
+		case strings.HasPrefix(line, blindFillMarker):
+			afterMarker = true
+		case afterMarker && strings.HasPrefix(line, "score:"):
+			score = strings.TrimSpace(strings.TrimPrefix(line, "score:"))
+		case afterMarker && strings.HasPrefix(line, "notes:"):
+			notes = strings.TrimSpace(strings.TrimPrefix(line, "notes:"))
+		}
+	}
+	if ferr := flush(); ferr != nil {
+		return nil, 0, ferr
+	}
+	return labels, skipped, nil
+}
+
+// parseBlindScore accepts only the three legal label values.
+func parseBlindScore(s string) (float64, error) {
+	switch strings.TrimSpace(s) {
+	case "0", "0.0":
+		return 0, nil
+	case "0.5":
+		return 0.5, nil
+	case "1", "1.0":
+		return 1, nil
+	default:
+		return 0, fmt.Errorf("invalid score %q (want 0, 0.5, or 1)", s)
+	}
+}
 
 // renderBlindWorksheet emits one fill-in block per artifact for blind labeling
 // (R-D3): the trace prompt, committed rubric, and candidate final answer are
