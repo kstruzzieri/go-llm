@@ -241,7 +241,7 @@ func main() {
 	}
 
 	if *manualReport {
-		report, err := runManualReport(ctx, *labelsPath, *artifactsPath)
+		report, err := runManualReport(ctx, *labelsPath, *artifactsPath, nil)
 		if err != nil {
 			log.Fatalf("llm-bench: manual-report: %v", err)
 		}
