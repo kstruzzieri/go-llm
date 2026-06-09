@@ -1,7 +1,10 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -164,4 +167,29 @@ func renderBlindWorksheet(arts []Artifact) string {
 		fmt.Fprintln(&b)
 	}
 	return redactPaths(b.String())
+}
+
+// writeLabelsJSONL writes labels as JSONL (one Label per line). LabeledAt
+// stamping is the caller's responsibility (ingestBlindWorksheet already stamps
+// it). Mirrors the artifacts/manifest writers.
+func writeLabelsJSONL(path string, labels []Label) (retErr error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("labels: mkdir: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return fmt.Errorf("labels: open output: %w", err)
+	}
+	defer func() {
+		if closeErr := f.Close(); retErr == nil && closeErr != nil {
+			retErr = fmt.Errorf("labels: close output: %w", closeErr)
+		}
+	}()
+	enc := json.NewEncoder(f)
+	for _, l := range labels {
+		if err := enc.Encode(l); err != nil {
+			return fmt.Errorf("labels: encode %q: %w", l.ArtifactHash, err)
+		}
+	}
+	return nil
 }

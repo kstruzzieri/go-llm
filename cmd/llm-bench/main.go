@@ -50,7 +50,7 @@ func main() {
 	fimWarmup := flag.Bool("fim-warmup", true, "Issue one discarded generate per model before timing so FIM latency reflects the warm regime")
 	baseline := flag.String("baseline", "", "Baseline model selector for -paired-report deltas (default: first lineup model, derived from artifacts)")
 	labelsPath := flag.String("labels", filepath.Join("docs", "llm", "calibration", "labels.jsonl"), "Path to labels.jsonl (Phase 2)")
-	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl")
+	labelsOut := flag.String("labels-out", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Output path for -calibrate-capture artifacts.jsonl, or labels.jsonl for -blind-ingest (must differ from -artifacts)")
 	artifactsPath := flag.String("artifacts", filepath.Join("docs", "llm", "calibration", "artifacts.jsonl"), "Path to artifacts.jsonl (Phase 2)")
 	calibrateReportDir := flag.String("calibrate-report-dir", filepath.Join("docs", "llm", "calibration", "reports"), "Directory for calibration reports")
 	calibrateAgreement := flag.String("calibrate-agreement", string(calibrationAgreementExact), "Calibration agreement mode: exact or tolerance")
@@ -72,6 +72,10 @@ func main() {
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
 	corpusOnlyEvidence := flag.Bool("corpus-only-evidence", false, "Restrict the corpus run to entries flagged allowed_as_model_evidence")
+	blindRender := flag.Bool("blind-render", false, "Render a blind labeling worksheet from -artifacts (model identity hidden) to -report")
+	blindIngest := flag.Bool("blind-ingest", false, "Parse a filled blind worksheet (-worksheet) into labels.jsonl (-labels-out), rejoining model on artifact_hash from -artifacts")
+	worksheetPath := flag.String("worksheet", "", "Path to a filled blind worksheet (required with -blind-ingest)")
+	labelerName := flag.String("labeler", "manual", "Labeler name stamped on -blind-ingest output labels")
 	reportPath := flag.String("report", "", "Output report path (default: stdout)")
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
@@ -98,8 +102,14 @@ func main() {
 	if *fimLatency {
 		modes++
 	}
+	if *blindRender {
+		modes++
+	}
+	if *blindIngest {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -241,7 +251,11 @@ func main() {
 	}
 
 	if *manualReport {
-		report, err := runManualReport(ctx, *labelsPath, *artifactsPath, nil)
+		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusOnlyEvidence)
+		if err != nil {
+			log.Fatalf("llm-bench: manual-report: %v", err)
+		}
+		report, err := runManualReport(ctx, *labelsPath, *artifactsPath, filter)
 		if err != nil {
 			log.Fatalf("llm-bench: manual-report: %v", err)
 		}
@@ -257,7 +271,11 @@ func main() {
 	}
 
 	if *pairedReport {
-		report, err := runPairedReport(*labelsPath, *artifactsPath, *baseline, nil)
+		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusOnlyEvidence)
+		if err != nil {
+			log.Fatalf("llm-bench: paired-report: %v", err)
+		}
+		report, err := runPairedReport(*labelsPath, *artifactsPath, *baseline, filter)
 		if err != nil {
 			log.Fatalf("llm-bench: paired-report: %v", err)
 		}
@@ -269,6 +287,59 @@ func main() {
 			log.Fatalf("llm-bench: write report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: paired-label report written to %s\n", *reportPath)
+		return
+	}
+
+	if *blindRender {
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: blind-render: load artifacts: %v", err)
+		}
+		if len(arts) == 0 {
+			log.Fatalf("llm-bench: blind-render: no artifacts in %q", *artifactsPath)
+		}
+		worksheet := renderBlindWorksheet(arts)
+		if *reportPath == "" {
+			fmt.Print(worksheet)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(worksheet), 0o600); err != nil {
+			log.Fatalf("llm-bench: write worksheet: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: blind worksheet written to %s\n", *reportPath)
+		return
+	}
+
+	if *blindIngest {
+		if strings.TrimSpace(*worksheetPath) == "" {
+			log.Fatalf("llm-bench: -blind-ingest requires -worksheet")
+		}
+		// -labels-out defaults to the calibrate-capture artifacts path, which is
+		// also -artifacts' default; writing labels there would overwrite the
+		// artifacts file this mode reads from (the R-D3 rejoin source). Require
+		// an explicit -labels-out distinct from -artifacts.
+		if strings.TrimSpace(*labelsOut) == "" || *labelsOut == *artifactsPath {
+			log.Fatalf("llm-bench: -blind-ingest requires an explicit -labels-out that differs from -artifacts (its default points at artifacts.jsonl and would overwrite the artifacts)")
+		}
+		worksheet, err := os.ReadFile(*worksheetPath)
+		if err != nil {
+			log.Fatalf("llm-bench: blind-ingest: read worksheet: %v", err)
+		}
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: blind-ingest: load artifacts: %v", err)
+		}
+		if len(arts) == 0 {
+			log.Fatalf("llm-bench: blind-ingest: no artifacts in %q", *artifactsPath)
+		}
+		labels, skipped, err := ingestBlindWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName))
+		if err != nil {
+			log.Fatalf("llm-bench: blind-ingest: %v", err)
+		}
+		if err := writeLabelsJSONL(*labelsOut, labels); err != nil {
+			log.Fatalf("llm-bench: blind-ingest: write labels: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: blind-ingest wrote %d label(s) to %s (%d block(s) unscored/skipped)\n", len(labels), *labelsOut, skipped)
 		return
 	}
 
@@ -581,6 +652,26 @@ func resolveCandidateTransportConfig(baseURL, apiKey string, lookupEnv func(stri
 		cfg.apiKey = strings.TrimSpace(lookupEnv(candidateAPIKeyEnvVar))
 	}
 	return cfg
+}
+
+// offlineCorpusFilter builds the corpus filter for the offline scorers from the
+// corpus flags. Returns nil (no filtering) when manifestPath is empty.
+func offlineCorpusFilter(manifestPath, partitions, categories string, onlyEvidence bool) (*corpusFilter, error) {
+	if strings.TrimSpace(manifestPath) == "" {
+		return nil, nil
+	}
+	manifest, err := loadManifest(manifestPath)
+	if err != nil {
+		return nil, fmt.Errorf("load corpus manifest: %w", err)
+	}
+	parts, err := parseCorpusPartitions(partitions)
+	if err != nil {
+		return nil, fmt.Errorf("corpus partitions: %w", err)
+	}
+	return &corpusFilter{
+		Manifest:  manifest,
+		Selection: corpusSelection{Partitions: parts, Categories: splitCommaList(categories), OnlyModelEvidence: onlyEvidence},
+	}, nil
 }
 
 // resolveToolSchemaSource picks a tool-schema source from CLI flags.
