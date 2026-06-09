@@ -3,7 +3,9 @@
 docs/plans/
 docs/spikes/
 docs/superpowers/
-docs/llm/traces/
+docs/llm/traces/*
+!docs/llm/traces/round2-challenge/
+!docs/llm/traces/round2-challenge/**
 .DS_Store
 /.worktrees/
 
