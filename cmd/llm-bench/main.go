@@ -257,7 +257,7 @@ func main() {
 	}
 
 	if *pairedReport {
-		report, err := runPairedReport(*labelsPath, *artifactsPath, *baseline)
+		report, err := runPairedReport(*labelsPath, *artifactsPath, *baseline, nil)
 		if err != nil {
 			log.Fatalf("llm-bench: paired-report: %v", err)
 		}

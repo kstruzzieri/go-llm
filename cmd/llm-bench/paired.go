@@ -81,8 +81,9 @@ const (
 // analysis, and renders the paired report. It loads artifacts once and keeps
 // the full set so the lineup and completeness worklist see captured-but-
 // unlabeled models. baseline is the optional baseline model selector (empty →
-// first lineup model).
-func runPairedReport(labelsPath, artifactsPath, baseline string) (string, error) {
+// first lineup model). filter, if non-nil, restricts arts, matched, and stale
+// to the selected corpus partition's evidence before computing the analysis.
+func runPairedReport(labelsPath, artifactsPath, baseline string, filter *corpusFilter) (string, error) {
 	arts, err := loadArtifacts(artifactsPath)
 	if err != nil {
 		return "", fmt.Errorf("paired report: load artifacts: %w", err)
@@ -95,11 +96,52 @@ func runPairedReport(labelsPath, artifactsPath, baseline string) (string, error)
 	if err != nil {
 		return "", fmt.Errorf("paired report: %w", err)
 	}
+	// R-C1: drop judge-validation and non-model-evidence rows (and restrict to
+	// the selected partition) using the replay-path machinery. The lineup,
+	// means, and gaps are then computed over the selected subset only. The
+	// corpus-selection error wording below intentionally mirrors runManualReport
+	// (without the "paired report:" prefix) so both offline scorers report the
+	// same shared-filter failure identically.
+	if filter != nil {
+		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(arts))
+		if data != nil && len(data.MissingSelected) > 0 {
+			return "", fmt.Errorf("corpus selection missing %d selected trace(s) from artifacts: %v", len(data.MissingSelected), data.MissingSelected)
+		}
+		arts = filterArtifactsByTrace(arts, keep)
+		matched = filterMatchedByTrace(matched, keep)
+		stale = filterLabelsByTrace(stale, keep)
+		if len(arts) == 0 {
+			return "", fmt.Errorf("corpus selection matched no captured artifacts")
+		}
+	}
 	pa, err := computePairedAnalysis(matched, stale, arts, baseline, pairedBootstrapSeed, pairedBootstrapN)
 	if err != nil {
 		return "", err
 	}
 	return formatPairedReport(pa), nil
+}
+
+// filterArtifactsByTrace keeps only artifacts whose trace ID is in keep.
+func filterArtifactsByTrace(arts []Artifact, keep map[string]struct{}) []Artifact {
+	out := make([]Artifact, 0, len(arts))
+	for _, a := range arts {
+		if _, ok := keep[a.TraceID]; ok {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// filterLabelsByTrace keeps only labels whose trace ID is in keep. Used for the
+// stale set; stale labels carry their trace ID directly.
+func filterLabelsByTrace(labels []Label, keep map[string]struct{}) []Label {
+	out := make([]Label, 0, len(labels))
+	for _, l := range labels {
+		if _, ok := keep[l.TraceID]; ok {
+			out = append(out, l)
+		}
+	}
+	return out
 }
 
 // gapReason classifies why a (trace, lineup-model) cell is not paired-complete.

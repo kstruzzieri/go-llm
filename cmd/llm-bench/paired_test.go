@@ -499,7 +499,7 @@ func TestRunPairedReport_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := runPairedReport(labelsPath, artsPath, "")
+	out, err := runPairedReport(labelsPath, artsPath, "", nil)
 	if err != nil {
 		t.Fatalf("runPairedReport: %v", err)
 	}
@@ -526,8 +526,46 @@ func TestRunPairedReport_BaselineNotInLineupErrors(t *testing.T) {
 	if err := writeJSONL(labelsPath, []any{l1A}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runPairedReport(labelsPath, artsPath, "ollama/ghost"); err == nil {
+	if _, err := runPairedReport(labelsPath, artsPath, "ollama/ghost", nil); err == nil {
 		t.Fatalf("runPairedReport accepted a baseline not in the lineup; want error")
+	}
+}
+
+func TestRunPairedReport_FilterRestrictsToChallengePartition(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	nat := testCalibrationArtifact("nat1", "natural answer")
+	nat.CandidateModel = "ollama/gemma4:31b"
+	nat.ArtifactHash = artifactHash(nat)
+	chal := testCalibrationArtifact("r2c-fabrication-01", "challenge answer")
+	chal.CandidateModel = "ollama/gemma4:31b"
+	chal.ArtifactHash = artifactHash(chal)
+	if err := writeJSONL(artsPath, []any{nat, chal}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labelsPath, []any{
+		Label{ArtifactHash: nat.ArtifactHash, ExpectedAnswerQuality: 1.0},
+		Label{ArtifactHash: chal.ArtifactHash, ExpectedAnswerQuality: 0.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	filter := &corpusFilter{
+		Manifest: Manifest{Entries: []ManifestEntry{
+			{TraceID: "nat1", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+			{TraceID: "r2c-fabrication-01", Partition: PartitionChallenge, Category: "fabrication", AllowedAsModelEvidence: true},
+		}},
+		Selection: corpusSelection{Partitions: []CorpusPartition{PartitionChallenge}},
+	}
+	out, err := runPairedReport(labelsPath, artsPath, "", filter)
+	if err != nil {
+		t.Fatalf("runPairedReport with challenge filter: %v", err)
+	}
+	if !strings.Contains(out, "Paired-complete traces: 1 of 1") {
+		t.Fatalf("paired report did not restrict to exactly the challenge trace:\n%s", out)
+	}
+	if strings.Contains(out, "nat1") {
+		t.Fatalf("natural trace leaked into the challenge-only paired report:\n%s", out)
 	}
 }
 
