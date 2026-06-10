@@ -32,6 +32,26 @@ func tracesFromArtifacts(arts []Artifact) []Trace {
 // unselected rows drop identically in the offline scorers. keep holds the
 // surviving trace IDs; data preserves selected-but-missing and
 // loaded-without-manifest diagnostics; excl reports what was dropped.
+// missingEvidence returns the subset of missing selected trace IDs whose
+// manifest entry would have counted as model evidence (not judge-validation
+// and allowed_as_model_evidence). The offline scorers fail only on these: a
+// missing canary cannot shrink a model-evidence report because
+// modelEvidenceResults drops judge-validation and non-evidence rows anyway.
+func missingEvidence(m Manifest, missing []string) []string {
+	byID := make(map[string]ManifestEntry, len(m.Entries))
+	for _, e := range m.Entries {
+		byID[e.TraceID] = e
+	}
+	var out []string
+	for _, id := range missing {
+		e, ok := byID[id]
+		if !ok || (e.Partition != PartitionJudgeValidation && e.AllowedAsModelEvidence) {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func corpusEvidenceFilter(m Manifest, sel corpusSelection, traces []Trace) (keep map[string]struct{}, data *corpusReportData, excl corpusResultExclusions) {
 	run, data, _ := buildCorpusRun(m, sel, traces)
 	results := make([]Result, 0, len(run))

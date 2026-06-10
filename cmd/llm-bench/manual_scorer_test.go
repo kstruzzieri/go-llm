@@ -174,6 +174,67 @@ func TestRunManualReport_FilterDropsNonEvidence(t *testing.T) {
 	}
 }
 
+// TestRunManualReport_MissingCanaryDoesNotBlock: the committed Round-2A
+// manifest lists the tool canary (judge-validation, non-evidence) which is
+// never captured by the offline flow; its absence from the artifacts must not
+// fail an unscoped -corpus-manifest report.
+func TestRunManualReport_MissingCanaryDoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	a1 := testCalibrationArtifact("t1", "evidence answer")
+	if err := writeJSONL(arts, []any{a1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: a1.ArtifactHash, ExpectedAnswerQuality: 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	filter := &corpusFilter{
+		Manifest: Manifest{Entries: []ManifestEntry{
+			{TraceID: "t1", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+			{TraceID: "tool-canary-01", Partition: PartitionJudgeValidation, Category: "tool-canary", AllowedAsModelEvidence: false},
+		}},
+		Selection: corpusSelection{},
+	}
+	report, err := runManualReport(context.Background(), labels, arts, filter)
+	if err != nil {
+		t.Fatalf("runManualReport failed on a missing non-evidence canary: %v", err)
+	}
+	if !strings.Contains(report, "ollama/c") {
+		t.Fatalf("report missing the evidence model row:\n%s", report)
+	}
+}
+
+// TestRunManualReport_MissingEvidenceTraceErrors: a manifest-selected
+// *evidence* trace absent from the matched artifacts must still fail loud.
+func TestRunManualReport_MissingEvidenceTraceErrors(t *testing.T) {
+	dir := t.TempDir()
+	arts := filepath.Join(dir, "artifacts.jsonl")
+	labels := filepath.Join(dir, "labels.jsonl")
+	a1 := testCalibrationArtifact("t1", "evidence answer")
+	if err := writeJSONL(arts, []any{a1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labels, []any{
+		Label{TraceID: "t1", CandidateModel: "ollama/c", ArtifactHash: a1.ArtifactHash, ExpectedAnswerQuality: 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	filter := &corpusFilter{
+		Manifest: Manifest{Entries: []ManifestEntry{
+			{TraceID: "t1", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+			{TraceID: "t-absent", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+		}},
+		Selection: corpusSelection{},
+	}
+	_, err := runManualReport(context.Background(), labels, arts, filter)
+	if err == nil || !strings.Contains(err.Error(), "t-absent") {
+		t.Fatalf("err = %v; want loud missing-evidence error naming t-absent", err)
+	}
+}
+
 func TestManualScorer_ReturnsHumanLabelAsAnswerQuality(t *testing.T) {
 	s, err := newManualScorer([]Label{
 		{TraceID: "conversation-fa-l02", CandidateModel: "qwen3:8b", ExpectedAnswerQuality: 0.5, LabelNotes: "partial"},

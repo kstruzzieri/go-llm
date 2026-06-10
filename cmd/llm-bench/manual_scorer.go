@@ -129,8 +129,13 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string, filt
 	// below (data.MissingSelected), which Round 2A's contract test also guards.
 	if filter != nil {
 		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(matchedArtifacts(matched)))
-		if data != nil && len(data.MissingSelected) > 0 {
-			return "", fmt.Errorf("corpus selection missing %d selected trace(s) from matched artifacts: %v", len(data.MissingSelected), data.MissingSelected)
+		if data != nil {
+			// Only a missing *evidence* trace blocks the report: a selected
+			// judge-validation/non-evidence trace (the canary) never enters the
+			// model-evidence aggregates, so its absence cannot shrink the run.
+			if miss := missingEvidence(filter.Manifest, data.MissingSelected); len(miss) > 0 {
+				return "", fmt.Errorf("corpus selection missing %d selected evidence trace(s) from matched artifacts: %v", len(miss), miss)
+			}
 		}
 		matched = filterMatchedByTrace(matched, keep)
 		// Filter stale to the same selection so the coverage "stale" count

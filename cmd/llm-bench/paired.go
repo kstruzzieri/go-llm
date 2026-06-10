@@ -104,8 +104,13 @@ func runPairedReport(labelsPath, artifactsPath, baseline string, filter *corpusF
 	// same shared-filter failure identically.
 	if filter != nil {
 		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(arts))
-		if data != nil && len(data.MissingSelected) > 0 {
-			return "", fmt.Errorf("corpus selection missing %d selected trace(s) from artifacts: %v", len(data.MissingSelected), data.MissingSelected)
+		if data != nil {
+			// Mirrors runManualReport: only a missing evidence trace blocks; a
+			// missing canary (judge-validation, non-evidence) never could have
+			// entered the aggregates, so it does not fail the report.
+			if miss := missingEvidence(filter.Manifest, data.MissingSelected); len(miss) > 0 {
+				return "", fmt.Errorf("corpus selection missing %d selected evidence trace(s) from artifacts: %v", len(miss), miss)
+			}
 		}
 		arts = filterArtifactsByTrace(arts, keep)
 		matched = filterMatchedByTrace(matched, keep)
@@ -291,7 +296,11 @@ func computePairedAnalysis(matched []matchedLabel, stale []Label, arts []Artifac
 		}
 	}
 
-	// Cells that have a stale label (artifact present but label hash mismatched).
+	// Cells that have a stale label (artifact present but label hash
+	// mismatched). Attribution needs the label to carry trace/model:
+	// -blind-ingest stamps both on every label it writes, so only
+	// hand-authored hash-only labels (discouraged per CALIBRATION.md) lose the
+	// stale-label gap reason and fall back to missing-label.
 	staleCell := make(map[cellKey]struct{}, len(stale))
 	for _, l := range stale {
 		staleCell[newCellKey(l.TraceID, l.CandidateModel)] = struct{}{}

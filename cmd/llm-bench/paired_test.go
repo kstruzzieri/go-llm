@@ -569,6 +569,40 @@ func TestRunPairedReport_FilterRestrictsToChallengePartition(t *testing.T) {
 	}
 }
 
+// TestRunPairedReport_MissingCanaryDoesNotBlock mirrors the manual-report
+// case: the manifest's judge-validation canary has no captured artifact and
+// must not fail the paired report.
+func TestRunPairedReport_MissingCanaryDoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	a1 := testCalibrationArtifact("t1", "evidence answer")
+	a1.CandidateModel = "ollama/gemma4:31b"
+	a1.ArtifactHash = artifactHash(a1)
+	if err := writeJSONL(artsPath, []any{a1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labelsPath, []any{
+		Label{ArtifactHash: a1.ArtifactHash, ExpectedAnswerQuality: 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	filter := &corpusFilter{
+		Manifest: Manifest{Entries: []ManifestEntry{
+			{TraceID: "t1", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+			{TraceID: "tool-canary-01", Partition: PartitionJudgeValidation, Category: "tool-canary", AllowedAsModelEvidence: false},
+		}},
+		Selection: corpusSelection{},
+	}
+	out, err := runPairedReport(labelsPath, artsPath, "", filter)
+	if err != nil {
+		t.Fatalf("runPairedReport failed on a missing non-evidence canary: %v", err)
+	}
+	if !strings.Contains(out, "Paired-complete traces: 1 of 1") {
+		t.Fatalf("paired report did not keep exactly the evidence trace:\n%s", out)
+	}
+}
+
 func contains(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {

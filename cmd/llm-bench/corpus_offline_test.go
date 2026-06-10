@@ -48,6 +48,20 @@ func TestCorpusEvidenceFilter_SurfacesSelectedButMissingTrace(t *testing.T) {
 	}
 }
 
+func TestMissingEvidence_IgnoresNonEvidenceEntries(t *testing.T) {
+	m := sampleCorpusManifest()
+	// t3 is judge-validation/non-evidence: its absence cannot shrink a
+	// model-evidence report. t1 is natural evidence: its absence must block.
+	// An ID with no manifest entry is treated as evidence (fail loud).
+	got := missingEvidence(m, []string{"t1", "t3", "ghost"})
+	if !reflect.DeepEqual(got, []string{"t1", "ghost"}) {
+		t.Fatalf("missingEvidence = %v; want [t1 ghost] (t3 canary ignored)", got)
+	}
+	if got := missingEvidence(m, []string{"t3"}); len(got) != 0 {
+		t.Fatalf("missingEvidence(canary only) = %v; want empty", got)
+	}
+}
+
 func TestTracesFromArtifacts_DedupesByTraceID(t *testing.T) {
 	arts := []Artifact{
 		{Trace: Trace{ID: "t1"}},
