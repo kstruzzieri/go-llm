@@ -317,8 +317,9 @@ func main() {
 		// -labels-out defaults to the calibrate-capture artifacts path, which is
 		// also -artifacts' default; writing labels there would overwrite the
 		// artifacts file this mode reads from (the R-D3 rejoin source). Require
-		// an explicit -labels-out distinct from -artifacts.
-		if strings.TrimSpace(*labelsOut) == "" || *labelsOut == *artifactsPath {
+		// an explicit -labels-out distinct from -artifacts. Compare cleaned
+		// paths so spellings like "./artifacts.jsonl" do not slip past.
+		if strings.TrimSpace(*labelsOut) == "" || filepath.Clean(*labelsOut) == filepath.Clean(*artifactsPath) {
 			log.Fatalf("llm-bench: -blind-ingest requires an explicit -labels-out that differs from -artifacts (its default points at artifacts.jsonl and would overwrite the artifacts)")
 		}
 		worksheet, err := os.ReadFile(*worksheetPath)
@@ -335,6 +336,12 @@ func main() {
 		labels, skipped, err := ingestBlindWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName))
 		if err != nil {
 			log.Fatalf("llm-bench: blind-ingest: %v", err)
+		}
+		// An entirely unscored worksheet is a labeler error (nothing filled in);
+		// erroring also keeps an existing -labels-out from being truncated to an
+		// empty file.
+		if len(labels) == 0 {
+			log.Fatalf("llm-bench: blind-ingest: worksheet has no scored blocks (%d unscored); fill the score: lines before ingesting", skipped)
 		}
 		if err := writeLabelsJSONL(*labelsOut, labels); err != nil {
 			log.Fatalf("llm-bench: blind-ingest: write labels: %v", err)

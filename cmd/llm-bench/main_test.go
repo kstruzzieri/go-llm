@@ -512,6 +512,78 @@ func TestMainPairedReportHonorsCorpusManifest(t *testing.T) {
 	}
 }
 
+// TestMainBlindIngestRejectsCleanedPathCollision: a -labels-out that aliases
+// -artifacts through a "./" spelling must still be rejected — the guard
+// compares cleaned paths, not raw flag strings.
+func TestMainBlindIngestRejectsCleanedPathCollision(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+		"-labels-out", dir+"/./artifacts.jsonl",
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted -labels-out aliasing -artifacts via ./ spelling:\n%s", out)
+	}
+	if !strings.Contains(string(out), "differs from -artifacts") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+}
+
+// TestMainBlindIngestRejectsFullyUnscoredWorksheet: ingesting a worksheet with
+// zero scored blocks is a labeler error and must not truncate an existing
+// labels file to empty.
+func TestMainBlindIngestRejectsFullyUnscoredWorksheet(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	labelsOut := filepath.Join(dir, "labels.jsonl")
+	if err := os.WriteFile(labelsOut, []byte("{\"trace_id\":\"prior\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+		"-labels-out", labelsOut,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted a fully unscored worksheet:\n%s", out)
+	}
+	if !strings.Contains(string(out), "no scored blocks") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+	body, rerr := os.ReadFile(labelsOut)
+	if rerr != nil || len(body) == 0 {
+		t.Fatalf("pre-existing labels file was clobbered: err=%v len=%d", rerr, len(body))
+	}
+}
+
 func TestResolveToolSchemaSourceStdio(t *testing.T) {
 	src, err := resolveToolSchemaSource("echo mock-server", "")
 	if err != nil {

@@ -82,6 +82,11 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (la
 			score, notes, afterMarker = "", "", false
 		case strings.HasPrefix(line, blindFillMarker):
 			afterMarker = true
+		case strings.HasPrefix(line, "=== END ==="):
+			// The fill region ends at the block terminator: a stray score:/notes:
+			// line between "=== END ===" and the next block must not attach to
+			// the previous block (it would be reported as unscored instead).
+			afterMarker = false
 		case afterMarker && strings.HasPrefix(line, "score:"):
 			score = strings.TrimSpace(strings.TrimPrefix(line, "score:"))
 		case afterMarker && strings.HasPrefix(line, "notes:"):

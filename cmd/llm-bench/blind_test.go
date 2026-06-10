@@ -97,6 +97,19 @@ func TestIngestBlindWorksheet_SkipsUnscoredAndRejectsBadScore(t *testing.T) {
 	}
 }
 
+func TestIngestBlindWorksheet_IgnoresScoreAfterEnd(t *testing.T) {
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	worksheet := renderBlindWorksheet([]Artifact{a})
+	// A stray score line below the block terminator must not score the block;
+	// the fill region is strictly between the fill marker and "=== END ===".
+	stray := strings.Replace(worksheet, "=== END ===", "=== END ===\nscore: 1", 1)
+	labels, skipped, err := ingestBlindWorksheet(stray, []Artifact{a}, "tester")
+	if err != nil || len(labels) != 0 || skipped != 1 {
+		t.Fatalf("labels=%d skipped=%d err=%v; want stray post-END score ignored (0 labels, 1 skipped)", len(labels), skipped, err)
+	}
+}
+
 func TestIngestBlindWorksheet_RejectsDuplicateHashBlock(t *testing.T) {
 	a := testCalibrationArtifact("t1", "ans")
 	a.ArtifactHash = artifactHash(a)
