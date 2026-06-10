@@ -108,6 +108,52 @@ func TestRunCalibrateCapture_FailsWhenNoArtifactsWritten(t *testing.T) {
 	}
 }
 
+func TestRunCalibrateCapture_PartialCaptureProceedsWithSuccessfulResults(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "artifacts.jsonl")
+	runner := &fakeRunner{results: []Result{
+		{Model: "ollama/cand", TraceID: "t1", Transcript: []Turn{{Role: "assistant", Content: "answer one"}}},
+		{Model: "ollama/cand", TraceID: "t2", Err: fmt.Errorf("context deadline exceeded")},
+		{Model: "ollama/cand", TraceID: "t3", Transcript: []Turn{{Role: "assistant", Content: "answer three"}}},
+	}}
+	traces := []Trace{
+		{ID: "t1", System: "s", Turns: []Turn{{Role: "user", Content: "u1"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
+		{ID: "t2", System: "s", Turns: []Turn{{Role: "user", Content: "u2"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
+		{ID: "t3", System: "s", Turns: []Turn{{Role: "user", Content: "u3"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
+	}
+	targets := []ModelTarget{{Display: "ollama/cand", Provider: "ollama", Model: "cand"}}
+
+	// A partial capture (some pairs failed) is a best-effort success: the
+	// successful artifacts are written so the operator can gap-fill the rest,
+	// and runCalibrateCapture warns rather than erroring.
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: runner, Targets: targets, Traces: traces, OutputPath: out,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture (partial) err = %v; want nil (best-effort)", err)
+	}
+
+	f, err := os.Open(out)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	got := map[string]bool{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		var a Artifact
+		if err := json.Unmarshal(scanner.Bytes(), &a); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		got[a.TraceID] = true
+	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan: %v", err)
+	}
+	if len(got) != 2 || !got["t1"] || !got["t3"] {
+		t.Fatalf("captured traces = %v; want only t1 and t3 (t2 failed)", got)
+	}
+}
+
 func TestRunCalibrateCapture_DuplicateTraceIDRejectedBeforeReplay(t *testing.T) {
 	dir := t.TempDir()
 	out := filepath.Join(dir, "artifacts.jsonl")
