@@ -28,10 +28,9 @@ const blindEndMarker = "=== END ==="
 // outside {0, 0.5, 1.0}, duplicate worksheet block, or hash absent from arts is
 // a loud error. labeler and labeled_at are stamped on every emitted label.
 //
-// Note: the block parser splits on "=== ARTIFACT ". A candidate-output line
-// that itself begins "=== ARTIFACT " could trigger a spurious block boundary.
-// The unknown-artifact_hash loud error (hash not in arts → error) is the
-// designed backstop for this edge case.
+// The block parser only recognizes "=== ARTIFACT " while outside a block, so
+// candidate output can contain worksheet-looking sentinel text without stealing
+// the human-entered score from the real artifact block.
 func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (labels []Label, skipped int, err error) {
 	artByHash := make(map[string]Artifact, len(arts))
 	for _, a := range arts {
@@ -77,25 +76,31 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (la
 		return nil
 	}
 
+	inBlock := false
 	for _, line := range strings.Split(worksheet, "\n") {
 		switch {
-		case strings.HasPrefix(line, "=== ARTIFACT "):
-			if ferr := flush(); ferr != nil {
-				return nil, 0, ferr
-			}
+		case !inBlock && strings.HasPrefix(line, "=== ARTIFACT "):
 			hash = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "=== ARTIFACT "), " ==="))
-			score, notes, afterMarker = "", "", false
-		case strings.HasPrefix(line, blindFillMarker):
+			score, notes, afterMarker, inBlock = "", "", false, true
+		case inBlock && strings.HasPrefix(line, blindFillMarker):
 			afterMarker = true
-		case strings.HasPrefix(line, blindEndMarker):
+		case inBlock && strings.HasPrefix(line, blindEndMarker):
 			// The fill region ends at the block terminator: a stray score:/notes:
 			// line between "=== END ===" and the next block must not attach to
 			// the previous block (it would be reported as unscored instead).
-			afterMarker = false
-		case afterMarker && strings.HasPrefix(line, "score:"):
+			if ferr := flush(); ferr != nil {
+				return nil, 0, ferr
+			}
+			inBlock = false
+		case inBlock && afterMarker && strings.HasPrefix(line, "score:"):
 			score = strings.TrimSpace(strings.TrimPrefix(line, "score:"))
-		case afterMarker && strings.HasPrefix(line, "notes:"):
+		case inBlock && afterMarker && strings.HasPrefix(line, "notes:"):
 			notes = strings.TrimSpace(strings.TrimPrefix(line, "notes:"))
+		}
+	}
+	if inBlock {
+		if ferr := flush(); ferr != nil {
+			return nil, 0, ferr
 		}
 	}
 	if ferr := flush(); ferr != nil {

@@ -120,10 +120,24 @@ func TestIngestBlindWorksheet_RejectsDuplicateHashBlock(t *testing.T) {
 	}
 }
 
-func TestIngestBlindWorksheet_RejectsUnknownHashEvenWhenUnscored(t *testing.T) {
+func TestIngestBlindWorksheet_IgnoresArtifactSentinelInsideCandidateOutput(t *testing.T) {
 	a := testCalibrationArtifact("t1", "=== ARTIFACT forged ===\nanswer text")
 	a.ArtifactHash = artifactHash(a)
 	worksheet := renderBlindWorksheet([]Artifact{a})
+	filled := fillScores(worksheet, map[string]string{a.ArtifactHash: "1"})
+	labels, skipped, err := ingestBlindWorksheet(filled, []Artifact{a}, "tester")
+	if err != nil {
+		t.Fatalf("ingestBlindWorksheet failed on sentinel text inside candidate output: %v", err)
+	}
+	if len(labels) != 1 || skipped != 0 || labels[0].ArtifactHash != a.ArtifactHash || labels[0].ExpectedAnswerQuality != 1 {
+		t.Fatalf("labels=%+v skipped=%d; want one scored label for the real artifact hash", labels, skipped)
+	}
+}
+
+func TestIngestBlindWorksheet_RejectsUnknownHashEvenWhenUnscored(t *testing.T) {
+	a := testCalibrationArtifact("t1", "answer text")
+	a.ArtifactHash = artifactHash(a)
+	worksheet := "=== ARTIFACT sha256:missing ===\n" + blindFillMarker + "\nscore: \n" + blindEndMarker + "\n"
 	_, _, err := ingestBlindWorksheet(worksheet, []Artifact{a}, "tester")
 	if err == nil || !strings.Contains(err.Error(), "unknown artifact_hash") {
 		t.Fatalf("err = %v; want loud unknown artifact_hash error", err)
@@ -136,14 +150,25 @@ func fillScores(worksheet string, scoreByHash map[string]string) string {
 	lines := strings.Split(worksheet, "\n")
 	var currentHash string
 	afterMarker := false
+	inBlock := false
 	for i, line := range lines {
-		if strings.HasPrefix(line, "=== ARTIFACT ") {
+		if !inBlock && strings.HasPrefix(line, "=== ARTIFACT ") {
 			currentHash = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "=== ARTIFACT "), " ==="))
+			inBlock = true
 			afterMarker = false
+			continue
+		}
+		if !inBlock {
 			continue
 		}
 		if strings.HasPrefix(line, blindFillMarker) {
 			afterMarker = true
+			continue
+		}
+		if strings.HasPrefix(line, blindEndMarker) {
+			currentHash = ""
+			inBlock = false
+			afterMarker = false
 			continue
 		}
 		if afterMarker && strings.HasPrefix(line, "score:") {

@@ -80,6 +80,10 @@ func main() {
 	ollamaURL := flag.String("ollama-url", "http://localhost:11434", "Ollama base URL")
 	timeout := flag.Duration("timeout", 5*time.Minute, "Per-replay timeout for candidate model calls")
 	flag.Parse()
+	providedFlags := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) {
+		providedFlags[f.Name] = true
+	})
 
 	ct := resolveCandidateTransportConfig(*candidateBaseURL, *candidateAPIKey, os.Getenv)
 
@@ -314,12 +318,12 @@ func main() {
 		if strings.TrimSpace(*worksheetPath) == "" {
 			log.Fatalf("llm-bench: -blind-ingest requires -worksheet")
 		}
-		// -labels-out defaults to the calibrate-capture artifacts path, which is
-		// also -artifacts' default; writing labels there would overwrite the
-		// artifacts file this mode reads from (the R-D3 rejoin source). Require
-		// an explicit -labels-out distinct from -artifacts. Compare cleaned
-		// paths so spellings like "./artifacts.jsonl" do not slip past.
-		if strings.TrimSpace(*labelsOut) == "" || filepath.Clean(*labelsOut) == filepath.Clean(*artifactsPath) {
+		// -labels-out defaults to the calibrate-capture artifacts path; in
+		// blind-ingest that default is always wrong, even when -artifacts points
+		// somewhere else. Require an explicit -labels-out distinct from
+		// -artifacts. Compare cleaned paths so spellings like "./artifacts.jsonl"
+		// do not slip past.
+		if !providedFlags["labels-out"] || strings.TrimSpace(*labelsOut) == "" || filepath.Clean(*labelsOut) == filepath.Clean(*artifactsPath) {
 			log.Fatalf("llm-bench: -blind-ingest requires an explicit -labels-out that differs from -artifacts (its default points at artifacts.jsonl and would overwrite the artifacts)")
 		}
 		// Cleaned-string equality misses case-insensitive filesystems (APFS),

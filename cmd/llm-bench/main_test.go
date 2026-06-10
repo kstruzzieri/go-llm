@@ -512,6 +512,39 @@ func TestMainPairedReportHonorsCorpusManifest(t *testing.T) {
 	}
 }
 
+// TestMainBlindIngestRequiresExplicitLabelsOutWithCustomArtifacts: even when
+// -artifacts points at a custom Round-2 artifact file, the default -labels-out
+// path is still the calibrate-capture artifacts path and must not be used for
+// blind labels.
+func TestMainBlindIngestRequiresExplicitLabelsOutWithCustomArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.round2.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	worksheet := fillScores(renderBlindWorksheet([]Artifact{a}), map[string]string{a.ArtifactHash: "1"})
+	if err := os.WriteFile(wsPath, []byte(worksheet), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted omitted -labels-out with custom artifacts:\n%s", out)
+	}
+	if !strings.Contains(string(out), "explicit -labels-out") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+}
+
 // TestMainBlindIngestRejectsCleanedPathCollision: a -labels-out that aliases
 // -artifacts through a "./" spelling must still be rejected — the guard
 // compares cleaned paths, not raw flag strings.
