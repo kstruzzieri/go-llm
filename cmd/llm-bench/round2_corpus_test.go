@@ -105,5 +105,8 @@ func TestRound2ChallengeCorpus_EnforcesAuthoringContract(t *testing.T) {
 		if absolutePathPattern.MatchString(blob) {
 			t.Errorf("trace %q contains an absolute local path; sanitize before committing", tr.ID)
 		}
+		if strings.Count(blob, "```")%2 != 0 {
+			t.Errorf("trace %q has an unbalanced ``` code fence; a truncated prompt must not ship", tr.ID)
+		}
 	}
 }

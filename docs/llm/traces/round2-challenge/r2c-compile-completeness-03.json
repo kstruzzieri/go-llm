@@ -12,7 +12,7 @@
   ],
   "golden": {
     "tool_calls": [],
-    "final_answer_criteria": "1.0 iff the function compiles and every path returns the declared (int, error) pair: it trims whitespace, parses with strconv.Atoi (importing strconv), validates the 1..65535 range, returns (0, err) with a formatted error on both the parse-failure and out-of-range paths, and returns (n, nil) on success. 0.5 if the logic is right but an import is missing or one error path is left as a bare `return` / TODO that would not compile. 0.0 if any code path fails to return the declared (int, error) values, the range check is omitted entirely, or it references an undeclared symbol.",
+    "final_answer_criteria": "1.0 iff the function compiles and every path returns the declared (int, error) pair: it trims whitespace, parses with strconv (Atoi or ParseInt; importing strconv), validates the 1..65535 range, returns (0, err) with a formatted error on both the parse-failure and out-of-range paths, and returns (n, nil) on success. 0.5 if the logic is right but an import is missing or one error path is left as a bare `return` / TODO that would not compile. 0.0 if any code path fails to return the declared (int, error) values, the range check is omitted entirely, or it references an undeclared symbol.",
     "final_answer_substring": ""
   }
 }
