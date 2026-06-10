@@ -263,6 +263,45 @@ is recorded in the result notes so a reviewer can discount that answer.
     (Setup 3 experiment)
 - Report in `docs/llm/benchmarks/YYYY-MM-DD-<name>.md`
 
+### Round-2 challenge protocol
+
+The Round-2 corpus adds a challenge partition alongside the natural partition.
+The two partitions are always reported separately — never averaged — so that
+saturation on natural traces does not mask model differences on harder inputs.
+
+**Rubric-first commit barrier.** Trace files and their `golden` rubrics are
+committed to the repository before any candidate replay is run. Committing
+rubrics after seeing outputs is disqualifying; the barrier is enforced by
+convention.
+
+**Solvable-from-context gate.** Every challenge trace must be answerable
+from the information present in the trace context alone. A trace that
+requires knowledge the model cannot reach is excluded before labeling.
+
+**Numeric validity gates (checked after labeling, before citing the run):**
+
+1. **No-trivia upper bound.** Every challenge trace must have at least one
+   candidate labeled `1.0`. A trace where every candidate scores below `1.0`
+   is not a valid difficulty signal — it may be unsolvable or badly specified.
+2. **De-saturation.** The maximum per-model challenge-partition mean must be
+   strictly below `1.00`. A fully-saturated challenge partition provides no
+   differentiation and should be enriched before the run is cited.
+3. **Floor separation.** The weakest model's challenge mean must be strictly
+   the lowest across all candidates and must be at least `0.15` below the
+   top model's challenge mean. A compressed floor indicates insufficient
+   partition difficulty.
+
+**Blind labeling.** Labels for Round-2 artifacts are produced via
+the blind workflow: render a worksheet (model identity hidden), score each
+block against the committed rubric, then ingest. See [CALIBRATION.md](CALIBRATION.md)
+for the `-blind-render` / `-blind-ingest` command sequence and the
+`-labels-out` guard.
+
+**Separate reporting.** Natural and challenge partitions are always reported
+with separate `-corpus-partitions` invocations. The corpus manifest
+(`-corpus-manifest`) and `-corpus-only-evidence` flags scope each run to
+its partition and exclude the tool canary from model-evidence math.
+
 ## User decision required
 
 The `AnswerQuality` scorer is the load-bearing piece. Three choices with

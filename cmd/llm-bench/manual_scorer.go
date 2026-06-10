@@ -104,7 +104,13 @@ type manualReportCoverage struct {
 // are exactly the ones the human judged — no fresh replay, no judge. Stale
 // labels and scoring errors are surfaced in the coverage line; a duplicate
 // (trace, model) is a hard error because the manual scorer keys on it.
-func runManualReport(ctx context.Context, labelsPath, artifactsPath string) (string, error) {
+//
+// When filter is non-nil the manifest is applied to drop judge-validation and
+// non-model-evidence rows before scoring (R-C1). The artifact-hash rejoin
+// (R-D3) backfills TraceID and CandidateModel from the matched Artifact onto
+// every label before building the scorer, so blind labels (artifact_hash only,
+// no candidate_model) score correctly.
+func runManualReport(ctx context.Context, labelsPath, artifactsPath string, filter *corpusFilter) (string, error) {
 	matched, stale, err := loadLabelsMatchedAgainst(labelsPath, artifactsPath)
 	if err != nil {
 		return "", err
@@ -113,18 +119,53 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string) (str
 		return "", fmt.Errorf("no labels matched artifacts in %q / %q", labelsPath, artifactsPath)
 	}
 
-	// Build the scorer from the matched (non-stale) labels, guarding against
-	// two artifacts colliding on the (trace, model) key the scorer uses.
+	// R-C1: drop judge-validation and non-model-evidence rows using the same
+	// machinery as the live-replay path. R-D3: the manifest is keyed on trace
+	// IDs, which the matched artifacts carry, so no separate restore map.
+	// The exclusions return is intentionally discarded: with the manifest as the
+	// authoritative evidence set, a matched artifact whose trace is absent from
+	// the manifest (excl.Unclassified) is dropped on purpose. The inverse — a
+	// manifest-selected *evidence* trace absent from the artifacts — is the loud
+	// failure below, which Round 2A's contract test also guards; a missing
+	// non-evidence trace (the canary) is excluded and noted in the report.
+	var corpusNote string
+	if filter != nil {
+		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(matchedArtifacts(matched)))
+		if data != nil {
+			evidence, nonEvidence := splitMissingByEvidence(filter.Manifest, data.MissingSelected)
+			if len(evidence) > 0 {
+				return "", fmt.Errorf("corpus selection missing %d selected evidence trace(s) from matched artifacts: %v", len(evidence), evidence)
+			}
+			corpusNote = missingCorpusNote(nonEvidence)
+		}
+		matched = filterMatchedByTrace(matched, keep)
+		// Filter stale to the same selection so the coverage "stale" count
+		// reflects the reported partition, matching runPairedReport (otherwise a
+		// partition-scoped manual report overstates stale labels from other
+		// partitions).
+		stale = filterLabelsByTrace(stale, keep)
+		if len(matched) == 0 {
+			return "", fmt.Errorf("corpus selection matched no labeled artifacts")
+		}
+	}
+
+	// R-D3 rejoin: the label may be blind (no candidate_model / trace_id); the
+	// matched Artifact is the authoritative identity. Backfill both before
+	// keying the scorer, so blind labels score and prefixed/cased labels stay
+	// consistent. Guard against two artifacts colliding on (trace, model).
 	seen := make(map[manualLabelKey]string, len(matched))
 	labels := make([]Label, 0, len(matched))
 	for _, m := range matched {
-		key := manualScorerKey(m.Label.TraceID, m.Label.CandidateModel)
-		id := m.Label.TraceID + "/" + m.Label.CandidateModel
+		lbl := m.Label
+		lbl.TraceID = m.Artifact.TraceID
+		lbl.CandidateModel = m.Artifact.CandidateModel
+		key := manualScorerKey(lbl.TraceID, lbl.CandidateModel)
+		id := lbl.TraceID + "/" + lbl.CandidateModel
 		if prev, ok := seen[key]; ok {
 			return "", fmt.Errorf("manual report: %s and %s map to the same (trace, model); one artifact per (trace, model) is required", prev, id)
 		}
 		seen[key] = id
-		labels = append(labels, m.Label)
+		labels = append(labels, lbl)
 	}
 	scorer, err := newManualScorer(labels)
 	if err != nil {
@@ -153,5 +194,26 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string) (str
 	}
 	sort.Strings(models)
 	cov := manualReportCoverage{Scored: len(matched) - errored, Stale: len(stale), Errored: errored}
-	return formatManualQualityReport(models, results, cov), nil
+	return formatManualQualityReport(models, results, cov) + corpusNote, nil
+}
+
+// matchedArtifacts extracts the Artifact from each matched label.
+func matchedArtifacts(ms []matchedLabel) []Artifact {
+	out := make([]Artifact, 0, len(ms))
+	for _, m := range ms {
+		out = append(out, m.Artifact)
+	}
+	return out
+}
+
+// filterMatchedByTrace keeps only matched labels whose artifact trace ID is in
+// keep (the corpus evidence selection).
+func filterMatchedByTrace(ms []matchedLabel, keep map[string]struct{}) []matchedLabel {
+	out := make([]matchedLabel, 0, len(ms))
+	for _, m := range ms {
+		if _, ok := keep[m.Artifact.TraceID]; ok {
+			out = append(out, m)
+		}
+	}
+	return out
 }

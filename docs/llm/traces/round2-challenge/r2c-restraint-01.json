@@ -1,0 +1,18 @@
+{
+  "id": "r2c-restraint-01",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a careful code reviewer making the smallest correct change. Fix exactly what the user asks; do not rewrite, rename, or restructure surrounding code that is already correct. Preserve existing behavior outside the requested fix.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "This function leaks the file handle on the early-return path. Add the missing close so the handle is always released, but otherwise leave the function exactly as it is.\n\n```go\nfunc readFirstLine(path string) (string, error) {\n    f, err := os.Open(path)\n    if err != nil {\n        return \"\", err\n    }\n    sc := bufio.NewScanner(f)\n    if !sc.Scan() {\n        return \"\", sc.Err()\n    }\n    line := sc.Text()\n    f.Close()\n    return line, nil\n}\n```"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the fix adds the missing release on the early-return path (e.g. a single `defer f.Close()` placed after the open, optionally removing the now-redundant explicit f.Close()) and changes nothing else: same signature, same scanner logic, same returns. 0.5 if it fixes the leak but makes one small unrequested change (e.g. renames a variable or reorders unrelated lines) that is still correct. 0.0 if it rewrites the function beyond the leak fix in a way that introduces a defect or fragility, e.g. swallowing or shadowing sc.Err(), changing the signature, switching to os.ReadFile and altering the first-line semantics, or ignoring the deferred Close error while restructuring error handling.",
+    "final_answer_substring": ""
+  }
+}

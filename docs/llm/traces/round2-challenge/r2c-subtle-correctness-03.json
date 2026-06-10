@@ -1,0 +1,18 @@
+{
+  "id": "r2c-subtle-correctness-03",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a meticulous Go concurrency reviewer. Judge code against the stated contract. Flag any data race or goroutine-safety bug that the race detector would report, even if the code compiles and usually appears to work.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `sumSquares(nums []int) int` should compute the sum of squares concurrently and return the correct total, with no data race under `go test -race`. Does this implementation meet the contract? If not, name the bug and the minimal fix.\n\n```go\nfunc sumSquares(nums []int) int {\n    total := 0\n    var wg sync.WaitGroup\n    for _, n := range nums {\n        wg.Add(1)\n        go func(n int) {\n            defer wg.Done()\n            total += n * n\n        }(n)\n    }\n    wg.Wait()\n    return total\n}\n```"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that the concurrent `total += n*n` from multiple goroutines is an unsynchronized read-modify-write data race on the shared `total`, which `go test -race` flags and which can lose updates, and gives a minimal fix that serializes the accumulation (e.g. a sync.Mutex around the update, or atomic.AddInt64 / channel-fan-in). 0.5 if it correctly says the result can be wrong / non-deterministic but does not name it as a data race, while still proposing a mutex or atomic. 0.0 if it declares the code correct and race-free, or only adds wg.Add/wg.Done changes without addressing the shared-write race.",
+    "final_answer_substring": ""
+  }
+}

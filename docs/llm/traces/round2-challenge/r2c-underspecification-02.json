@@ -1,0 +1,18 @@
+{
+  "id": "r2c-underspecification-02",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a careful engineer. If a request is ambiguous in a way that changes the correct answer, name the ambiguity or state the bounded assumption under which you answer. Do not silently pick one interpretation and present it as the only answer.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "What's the fastest way to sort our records by date?"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer surfaces that 'fastest' and the right approach depend on unstated context (where the records live and how many there are: an in-memory slice vs. rows in a database, dataset size, whether the date field is already indexed/parsed) and either asks for that or answers under explicit bounded assumptions (e.g. 'if this is an in-memory slice of N records, use sort.Slice on a parsed time key; if it's in SQL, add an index and ORDER BY'). 0.5 if it gives a reasonable single answer but only briefly gestures at the missing context without making the assumption explicit. 0.0 if it confidently prescribes one specific technique as 'the fastest way' without acknowledging that the answer depends on storage location, dataset size, or indexing.",
+    "final_answer_substring": ""
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "r2c-subtle-correctness-02",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Judge code against the stated contract and edge cases. Flag any off-by-one or boundary error that produces a wrong result or a runtime panic, even if the code compiles.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `lastN(s []int, n int) []int` returns the last n elements of s in original order. If n >= len(s) it returns all of s; if n <= 0 it returns an empty slice. It must never panic. Does this meet the contract?\n\n```go\nfunc lastN(s []int, n int) []int {\n    if n <= 0 {\n        return []int{}\n    }\n    return s[len(s)-n:]\n}\n```"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that when n > len(s) the expression len(s)-n is negative, so s[len(s)-n:] panics with a slice-bounds error, violating the never-panic and n>=len(s) clauses; and gives the minimal fix of clamping n to len(s) (e.g. `if n > len(s) { n = len(s) }`) before slicing. 0.5 if it notices the large-n case is mishandled but misstates the consequence (e.g. says it returns wrong elements rather than panics) while still proposing the clamp. 0.0 if it declares the function correct, or claims it already handles n > len(s) safely.",
+    "final_answer_substring": ""
+  }
+}

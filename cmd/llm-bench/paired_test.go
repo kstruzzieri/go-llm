@@ -499,7 +499,7 @@ func TestRunPairedReport_EndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	out, err := runPairedReport(labelsPath, artsPath, "")
+	out, err := runPairedReport(labelsPath, artsPath, "", nil)
 	if err != nil {
 		t.Fatalf("runPairedReport: %v", err)
 	}
@@ -526,8 +526,83 @@ func TestRunPairedReport_BaselineNotInLineupErrors(t *testing.T) {
 	if err := writeJSONL(labelsPath, []any{l1A}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runPairedReport(labelsPath, artsPath, "ollama/ghost"); err == nil {
+	if _, err := runPairedReport(labelsPath, artsPath, "ollama/ghost", nil); err == nil {
 		t.Fatalf("runPairedReport accepted a baseline not in the lineup; want error")
+	}
+}
+
+func TestRunPairedReport_FilterRestrictsToChallengePartition(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	nat := testCalibrationArtifact("nat1", "natural answer")
+	nat.CandidateModel = "ollama/gemma4:31b"
+	nat.ArtifactHash = artifactHash(nat)
+	chal := testCalibrationArtifact("r2c-fabrication-01", "challenge answer")
+	chal.CandidateModel = "ollama/gemma4:31b"
+	chal.ArtifactHash = artifactHash(chal)
+	if err := writeJSONL(artsPath, []any{nat, chal}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labelsPath, []any{
+		Label{ArtifactHash: nat.ArtifactHash, ExpectedAnswerQuality: 1.0},
+		Label{ArtifactHash: chal.ArtifactHash, ExpectedAnswerQuality: 0.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	filter := &corpusFilter{
+		Manifest: Manifest{Entries: []ManifestEntry{
+			{TraceID: "nat1", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+			{TraceID: "r2c-fabrication-01", Partition: PartitionChallenge, Category: "fabrication", AllowedAsModelEvidence: true},
+		}},
+		Selection: corpusSelection{Partitions: []CorpusPartition{PartitionChallenge}},
+	}
+	out, err := runPairedReport(labelsPath, artsPath, "", filter)
+	if err != nil {
+		t.Fatalf("runPairedReport with challenge filter: %v", err)
+	}
+	if !strings.Contains(out, "Paired-complete traces: 1 of 1") {
+		t.Fatalf("paired report did not restrict to exactly the challenge trace:\n%s", out)
+	}
+	if strings.Contains(out, "nat1") {
+		t.Fatalf("natural trace leaked into the challenge-only paired report:\n%s", out)
+	}
+}
+
+// TestRunPairedReport_MissingCanaryDoesNotBlock mirrors the manual-report
+// case: the manifest's judge-validation canary has no captured artifact and
+// must not fail the paired report.
+func TestRunPairedReport_MissingCanaryDoesNotBlock(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	a1 := testCalibrationArtifact("t1", "evidence answer")
+	a1.CandidateModel = "ollama/gemma4:31b"
+	a1.ArtifactHash = artifactHash(a1)
+	if err := writeJSONL(artsPath, []any{a1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labelsPath, []any{
+		Label{ArtifactHash: a1.ArtifactHash, ExpectedAnswerQuality: 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	filter := &corpusFilter{
+		Manifest: Manifest{Entries: []ManifestEntry{
+			{TraceID: "t1", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+			{TraceID: "tool-canary-01", Partition: PartitionJudgeValidation, Category: "tool-canary", AllowedAsModelEvidence: false},
+		}},
+		Selection: corpusSelection{},
+	}
+	out, err := runPairedReport(labelsPath, artsPath, "", filter)
+	if err != nil {
+		t.Fatalf("runPairedReport failed on a missing non-evidence canary: %v", err)
+	}
+	if !strings.Contains(out, "Paired-complete traces: 1 of 1") {
+		t.Fatalf("paired report did not keep exactly the evidence trace:\n%s", out)
+	}
+	if !strings.Contains(out, "tool-canary-01") {
+		t.Fatalf("paired report does not note the excluded missing canary (audit trail):\n%s", out)
 	}
 }
 

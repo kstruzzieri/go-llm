@@ -1,0 +1,18 @@
+{
+  "id": "r2c-underspecification-01",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a careful engineer. When a request is missing information needed to answer correctly, identify the missing piece or state the bounded assumption you are making, rather than committing to a single answer as if the request were fully specified.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "We're getting 'too many open files' under load. Should I just raise the OS file-descriptor ulimit to fix it?"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer flags that the right action depends on information not given (whether the exhaustion is from a genuine leak / unclosed connections vs. a legitimately high but bounded concurrency level) and either asks for that or states bounded assumptions: raising ulimit is a stopgap that masks a leak but is appropriate if descriptors are closed correctly and the workload simply needs more. 0.5 if it gives general advice that mostly addresses the leak-vs-legitimate distinction but still lands on a single confident yes/no without flagging the missing diagnosis. 0.0 if it confidently answers a flat 'yes, just raise the ulimit' (or a flat 'no') as the fix without acknowledging that the correct action depends on whether there is an underlying descriptor leak.",
+    "final_answer_substring": ""
+  }
+}

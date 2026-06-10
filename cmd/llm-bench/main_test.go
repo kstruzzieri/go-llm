@@ -378,6 +378,281 @@ func TestMainFIMLatencyUsesTimeoutFlag(t *testing.T) {
 	}
 }
 
+func TestOfflineCorpusFilter_NilWhenNoManifestPath(t *testing.T) {
+	f, err := offlineCorpusFilter("", "", "", false)
+	if err != nil || f != nil {
+		t.Fatalf("offlineCorpusFilter(no manifest) = (%v, %v); want (nil, nil)", f, err)
+	}
+}
+
+func TestOfflineCorpusFilter_LoadsManifestAndSelection(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "manifest.jsonl")
+	if err := writeManifest(path, sampleCorpusManifest()); err != nil {
+		t.Fatal(err)
+	}
+	f, err := offlineCorpusFilter(path, "challenge", "", true)
+	if err != nil {
+		t.Fatalf("offlineCorpusFilter: %v", err)
+	}
+	if f == nil || len(f.Manifest.Entries) != 3 {
+		t.Fatalf("filter = %+v; want loaded manifest with 3 entries", f)
+	}
+	if len(f.Selection.Partitions) != 1 || f.Selection.Partitions[0] != PartitionChallenge || !f.Selection.OnlyModelEvidence {
+		t.Fatalf("selection = %+v; want challenge + only-evidence", f.Selection)
+	}
+}
+
+// TestMainManualReportHonorsCorpusManifest drives -manual-report through main()
+// with a manifest that flags one natural (evidence) row and one canary
+// judge-validation (non-evidence) row. With -corpus-only-evidence the canary
+// must not appear in the report — the CLI dispatch must build and thread the
+// filter (R-C1 lived in CLI mode dispatch, not only the pure helper).
+func TestMainManualReportHonorsCorpusManifest(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	manifestPath := filepath.Join(dir, "manifest.jsonl")
+	reportPath := filepath.Join(dir, "report.md")
+
+	nat := testCalibrationArtifact("nat-row", "natural answer")
+	canary := testCalibrationArtifact("canary-row", "canary answer")
+	if err := writeJSONL(artsPath, []any{nat, canary}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labelsPath, []any{
+		Label{TraceID: "nat-row", CandidateModel: "ollama/c", ArtifactHash: nat.ArtifactHash, ExpectedAnswerQuality: 1.0},
+		Label{TraceID: "canary-row", CandidateModel: "ollama/c", ArtifactHash: canary.ArtifactHash, ExpectedAnswerQuality: 0.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifest(manifestPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "nat-row", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+		{TraceID: "canary-row", Partition: PartitionJudgeValidation, Category: "tool-canary", AllowedAsModelEvidence: false},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-manual-report",
+		"-labels", labelsPath,
+		"-artifacts", artsPath,
+		"-corpus-manifest", manifestPath,
+		"-corpus-only-evidence",
+		"-report", reportPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -manual-report -corpus-manifest failed: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if strings.Contains(string(body), "canary") {
+		t.Fatalf("canary (judge-validation, non-evidence) leaked into the manual report:\n%s", body)
+	}
+}
+
+// TestMainPairedReportHonorsCorpusManifest drives -paired-report through main()
+// with -corpus-partitions challenge so only the challenge trace survives. The
+// completeness header must read "1 of 1" and the natural trace must not appear.
+func TestMainPairedReportHonorsCorpusManifest(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	manifestPath := filepath.Join(dir, "manifest.jsonl")
+	reportPath := filepath.Join(dir, "report.md")
+
+	nat := testCalibrationArtifact("nat1", "natural answer")
+	nat.CandidateModel = "ollama/gemma4:31b"
+	nat.ArtifactHash = artifactHash(nat)
+	chal := testCalibrationArtifact("r2c-fabrication-01", "challenge answer")
+	chal.CandidateModel = "ollama/gemma4:31b"
+	chal.ArtifactHash = artifactHash(chal)
+	if err := writeJSONL(artsPath, []any{nat, chal}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeJSONL(labelsPath, []any{
+		Label{ArtifactHash: nat.ArtifactHash, ExpectedAnswerQuality: 1.0},
+		Label{ArtifactHash: chal.ArtifactHash, ExpectedAnswerQuality: 0.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManifest(manifestPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "nat1", Partition: PartitionNatural, Category: "chat", AllowedAsModelEvidence: true},
+		{TraceID: "r2c-fabrication-01", Partition: PartitionChallenge, Category: "fabrication", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-paired-report",
+		"-labels", labelsPath,
+		"-artifacts", artsPath,
+		"-corpus-manifest", manifestPath,
+		"-corpus-partitions", "challenge",
+		"-report", reportPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -paired-report -corpus-manifest failed: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	if !strings.Contains(string(body), "Paired-complete traces: 1 of 1") {
+		t.Fatalf("paired report did not restrict to exactly the challenge trace:\n%s", body)
+	}
+	if strings.Contains(string(body), "nat1") {
+		t.Fatalf("natural trace leaked into the challenge-only paired report:\n%s", body)
+	}
+}
+
+// TestMainBlindIngestRequiresExplicitLabelsOutWithCustomArtifacts: even when
+// -artifacts points at a custom Round-2 artifact file, the default -labels-out
+// path is still the calibrate-capture artifacts path and must not be used for
+// blind labels.
+func TestMainBlindIngestRequiresExplicitLabelsOutWithCustomArtifacts(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.round2.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	worksheet := fillScores(renderBlindWorksheet([]Artifact{a}), map[string]string{a.ArtifactHash: "1"})
+	if err := os.WriteFile(wsPath, []byte(worksheet), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted omitted -labels-out with custom artifacts:\n%s", out)
+	}
+	if !strings.Contains(string(out), "explicit -labels-out") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+}
+
+// TestMainBlindIngestRejectsCleanedPathCollision: a -labels-out that aliases
+// -artifacts through a "./" spelling must still be rejected — the guard
+// compares cleaned paths, not raw flag strings.
+func TestMainBlindIngestRejectsCleanedPathCollision(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+		"-labels-out", dir+"/./artifacts.jsonl",
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted -labels-out aliasing -artifacts via ./ spelling:\n%s", out)
+	}
+	if !strings.Contains(string(out), "differs from -artifacts") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+}
+
+// TestMainBlindIngestRejectsSameFileViaSymlink: cleaned-string equality
+// misses symlinks (and APFS case-insensitivity); a -labels-out that is a
+// symlink to -artifacts must be rejected by the os.SameFile backstop.
+func TestMainBlindIngestRejectsSameFileViaSymlink(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "labels-link.jsonl")
+	if err := os.Symlink(artsPath, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+		"-labels-out", linkPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted -labels-out symlinked to -artifacts:\n%s", out)
+	}
+	if !strings.Contains(string(out), "same file as -artifacts") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+}
+
+// TestMainBlindIngestRejectsFullyUnscoredWorksheet: ingesting a worksheet with
+// zero scored blocks is a labeler error and must not truncate an existing
+// labels file to empty.
+func TestMainBlindIngestRejectsFullyUnscoredWorksheet(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	labelsOut := filepath.Join(dir, "labels.jsonl")
+	if err := os.WriteFile(labelsOut, []byte("{\"trace_id\":\"prior\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+		"-labels-out", labelsOut,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted a fully unscored worksheet:\n%s", out)
+	}
+	if !strings.Contains(string(out), "no scored blocks") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+	body, rerr := os.ReadFile(labelsOut)
+	if rerr != nil || len(body) == 0 {
+		t.Fatalf("pre-existing labels file was clobbered: err=%v len=%d", rerr, len(body))
+	}
+}
+
 func TestResolveToolSchemaSourceStdio(t *testing.T) {
 	src, err := resolveToolSchemaSource("echo mock-server", "")
 	if err != nil {

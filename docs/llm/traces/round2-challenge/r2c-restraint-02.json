@@ -1,0 +1,18 @@
+{
+  "id": "r2c-restraint-02",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a careful engineer who makes minimal, targeted edits. Change only what is required to satisfy the request and keep all other behavior identical. Do not introduce new dependencies or refactor working code.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Our `slugify` lowercases and replaces spaces with hyphens, but it currently also drops non-ASCII letters, which we want to keep. The only change I want: stop stripping non-ASCII letters, while still lowercasing and replacing spaces. Don't change the function name, signature, or the space-to-hyphen behavior.\n\n```go\nfunc slugify(s string) string {\n    s = strings.ToLower(s)\n    var b strings.Builder\n    for _, r := range s {\n        switch {\n        case r >= 'a' && r <= 'z', r >= '0' && r <= '9':\n            b.WriteRune(r)\n        case r == ' ':\n            b.WriteRune('-')\n        }\n    }\n    return b.String()\n}\n```"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the change keeps non-ASCII letters (e.g. by adding a unicode.IsLetter / unicode.IsDigit case or otherwise admitting letters beyond a-z) while preserving lowercasing and the space-to-hyphen mapping, and keeps the same function name and signature. 0.5 if it achieves the goal but makes a small unrequested adjustment that is still correct (e.g. also trims leading/trailing hyphens). 0.0 if the edit introduces a regression or fragility, e.g. it now keeps spaces (breaking the hyphen rule), changes the signature, or admits arbitrary symbols/punctuation that the original deliberately excluded.",
+    "final_answer_substring": ""
+  }
+}

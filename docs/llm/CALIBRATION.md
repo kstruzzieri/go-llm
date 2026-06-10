@@ -78,10 +78,54 @@ Labels with `expected_answer_quality` outside `{0.0, 0.5, 1.0}` are rejected.
 Round 2 uses `label_notes` tokens for calibration-report stratification
 without changing the label schema:
 
-- `r1-anchor` marks the 60 labels carried from Round 1.
+- `r1-anchor` marks the labels carried from Round 1.
 - `judge-validation-fixture` marks curated P1 adversarial fixtures that
   validate the judge and stay out of the P2 accepted-run corpus unless they
   are real captured artifacts.
+
+Round 2A adds (and the calibration report stratifies on these):
+
+- `r2-anchor` marks `natural`-partition labels (all freshly captured this
+  round — the Round-1 labels are historical context only; nothing is
+  carried over).
+- `r2-challenge` marks challenge-partition labels.
+- `judge-validation-fixture` marks the tool canary (never model evidence).
+
+### Blind labeling (Round 2A)
+
+Do not edit `labels.jsonl` by hand. Render a blind worksheet (model
+identity hidden) that shows each prompt, committed rubric, candidate
+output, and artifact hash. Score against the rubric, then ingest:
+
+```
+llm-bench -blind-render -artifacts docs/llm/calibration/artifacts.round2.jsonl -report worksheet.txt
+# fill each block's `score:` (0 | 0.5 | 1) and optional `notes:`
+llm-bench -blind-ingest -worksheet worksheet.txt \
+  -artifacts docs/llm/calibration/artifacts.round2.jsonl \
+  -labels-out docs/llm/calibration/labels.round2.jsonl -labeler manual
+```
+
+Ingest rejoins the true `trace_id` + `candidate_model` from the untouched
+artifacts file on `artifact_hash`, so the labeler never sees the model
+and never authors JSON. Unscored blocks are skipped and reported. Labels
+are stamped with `labeled_at`. Note: `-blind-ingest` requires an explicit
+`-labels-out` that differs from `-artifacts` (its default points at
+`artifacts.jsonl` and would overwrite the artifacts file). The rendered
+worksheet is a gitignored working file, not an artifact — discard it after
+ingest.
+
+### Partition-separated accepted run (Round 2A)
+
+The offline scorers honor `-corpus-manifest`, `-corpus-partitions`, and
+`-corpus-only-evidence`. Run each scorer once per partition for the two
+separate model-evidence views; the canary (the `judge-validation`
+partition, non-evidence) drops from both.
+
+```
+llm-bench -manual-report -labels ... -artifacts ... \
+  -corpus-manifest docs/llm/traces/round2-challenge/corpus-manifest.jsonl \
+  -corpus-partitions challenge -corpus-only-evidence -report challenge-quality.md
+```
 
 ## Phase 3 — Calibrate
 
