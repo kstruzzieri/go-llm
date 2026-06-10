@@ -13,4 +13,7 @@ docs/llm/traces/*
 /llm-bench
 docs/llm/calibration/*.jsonl
 docs/llm/calibration/*.json
+docs/llm/calibration/*.txt
+docs/llm/calibration/*.md
 docs/llm/calibration/reports/
+docs/llm/calibration/round2-capture/
