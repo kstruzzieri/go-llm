@@ -2,7 +2,7 @@
   "id": "r2c-subtle-correctness-02",
   "source": "round2-challenge",
   "captured_at": "2026-06-09T00:00:00Z",
-  "system": "You are a meticulous Go reviewer. Judge code against the stated contract and edge cases. Flag any off-by-one or boundary error that produces a wrong result or a runtime panic, even if the code compiles.",
+  "system": "You are a meticulous Go reviewer. Judge code against the stated contract, including its edge cases. Flag any latent bug that would violate the contract at runtime — a wrong result or a panic — even if the code compiles and the common case works.",
   "tools": [],
   "turns": [
     {
