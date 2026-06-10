@@ -3,6 +3,7 @@ package main
 import (
 	"reflect"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -48,17 +49,30 @@ func TestCorpusEvidenceFilter_SurfacesSelectedButMissingTrace(t *testing.T) {
 	}
 }
 
-func TestMissingEvidence_IgnoresNonEvidenceEntries(t *testing.T) {
+func TestSplitMissingByEvidence(t *testing.T) {
 	m := sampleCorpusManifest()
 	// t3 is judge-validation/non-evidence: its absence cannot shrink a
 	// model-evidence report. t1 is natural evidence: its absence must block.
 	// An ID with no manifest entry is treated as evidence (fail loud).
-	got := missingEvidence(m, []string{"t1", "t3", "ghost"})
-	if !reflect.DeepEqual(got, []string{"t1", "ghost"}) {
-		t.Fatalf("missingEvidence = %v; want [t1 ghost] (t3 canary ignored)", got)
+	evidence, nonEvidence := splitMissingByEvidence(m, []string{"t1", "t3", "ghost"})
+	if !reflect.DeepEqual(evidence, []string{"t1", "ghost"}) {
+		t.Fatalf("evidence = %v; want [t1 ghost] (t3 canary excluded)", evidence)
 	}
-	if got := missingEvidence(m, []string{"t3"}); len(got) != 0 {
-		t.Fatalf("missingEvidence(canary only) = %v; want empty", got)
+	if !reflect.DeepEqual(nonEvidence, []string{"t3"}) {
+		t.Fatalf("nonEvidence = %v; want [t3] (surfaced for the report note)", nonEvidence)
+	}
+	if evidence, _ := splitMissingByEvidence(m, []string{"t3"}); len(evidence) != 0 {
+		t.Fatalf("splitMissingByEvidence(canary only) evidence = %v; want empty", evidence)
+	}
+}
+
+func TestMissingCorpusNote(t *testing.T) {
+	if got := missingCorpusNote(nil); got != "" {
+		t.Fatalf("missingCorpusNote(nil) = %q; want empty", got)
+	}
+	got := missingCorpusNote([]string{"tool-canary-01"})
+	if !strings.Contains(got, "tool-canary-01") || !strings.Contains(got, "non-evidence") {
+		t.Fatalf("missingCorpusNote = %q; want canary ID and non-evidence wording", got)
 	}
 }
 

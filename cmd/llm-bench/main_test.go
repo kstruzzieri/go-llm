@@ -544,6 +544,42 @@ func TestMainBlindIngestRejectsCleanedPathCollision(t *testing.T) {
 	}
 }
 
+// TestMainBlindIngestRejectsSameFileViaSymlink: cleaned-string equality
+// misses symlinks (and APFS case-insensitivity); a -labels-out that is a
+// symlink to -artifacts must be rejected by the os.SameFile backstop.
+func TestMainBlindIngestRejectsSameFileViaSymlink(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	a := testCalibrationArtifact("t1", "ans")
+	a.ArtifactHash = artifactHash(a)
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	if err := os.WriteFile(wsPath, []byte(renderBlindWorksheet([]Artifact{a})), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	linkPath := filepath.Join(dir, "labels-link.jsonl")
+	if err := os.Symlink(artsPath, linkPath); err != nil {
+		t.Skipf("symlink not supported: %v", err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-blind-ingest",
+		"-worksheet", wsPath,
+		"-artifacts", artsPath,
+		"-labels-out", linkPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("blind-ingest accepted -labels-out symlinked to -artifacts:\n%s", out)
+	}
+	if !strings.Contains(string(out), "same file as -artifacts") {
+		t.Fatalf("unexpected failure output:\n%s", out)
+	}
+}
+
 // TestMainBlindIngestRejectsFullyUnscoredWorksheet: ingesting a worksheet with
 // zero scored blocks is a labeler error and must not truncate an existing
 // labels file to empty.

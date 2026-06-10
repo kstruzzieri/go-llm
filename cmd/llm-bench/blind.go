@@ -16,6 +16,11 @@ import (
 // misparsed.
 const blindFillMarker = "--- fill below (score: 0 | 0.5 | 1) ---"
 
+// blindEndMarker terminates a worksheet block; the human-fill region runs
+// from blindFillMarker to this line. Renderer and ingest parser must agree on
+// this literal, so it lives in one place.
+const blindEndMarker = "=== END ==="
+
 // ingestBlindWorksheet parses a filled blind worksheet into Labels, rejoining
 // trace_id + candidate_model from arts on artifact_hash (R-D3 — the untouched
 // artifacts file is the join key, so no separate restore map). Blocks with a
@@ -82,7 +87,7 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (la
 			score, notes, afterMarker = "", "", false
 		case strings.HasPrefix(line, blindFillMarker):
 			afterMarker = true
-		case strings.HasPrefix(line, "=== END ==="):
+		case strings.HasPrefix(line, blindEndMarker):
 			// The fill region ends at the block terminator: a stray score:/notes:
 			// line between "=== END ===" and the next block must not attach to
 			// the previous block (it would be reported as unscored instead).
@@ -168,7 +173,7 @@ func renderBlindWorksheet(arts []Artifact) string {
 		fmt.Fprintln(&b, blindFillMarker)
 		fmt.Fprintln(&b, "score: ")
 		fmt.Fprintln(&b, "notes: ")
-		fmt.Fprintln(&b, "=== END ===")
+		fmt.Fprintln(&b, blindEndMarker)
 		fmt.Fprintln(&b)
 	}
 	return redactPaths(b.String())

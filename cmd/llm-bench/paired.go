@@ -102,15 +102,18 @@ func runPairedReport(labelsPath, artifactsPath, baseline string, filter *corpusF
 	// corpus-selection error wording below intentionally mirrors runManualReport
 	// (without the "paired report:" prefix) so both offline scorers report the
 	// same shared-filter failure identically.
+	var corpusNote string
 	if filter != nil {
 		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(arts))
 		if data != nil {
 			// Mirrors runManualReport: only a missing evidence trace blocks; a
 			// missing canary (judge-validation, non-evidence) never could have
-			// entered the aggregates, so it does not fail the report.
-			if miss := missingEvidence(filter.Manifest, data.MissingSelected); len(miss) > 0 {
-				return "", fmt.Errorf("corpus selection missing %d selected evidence trace(s) from artifacts: %v", len(miss), miss)
+			// entered the aggregates, so it is excluded and noted instead.
+			evidence, nonEvidence := splitMissingByEvidence(filter.Manifest, data.MissingSelected)
+			if len(evidence) > 0 {
+				return "", fmt.Errorf("corpus selection missing %d selected evidence trace(s) from artifacts: %v", len(evidence), evidence)
 			}
+			corpusNote = missingCorpusNote(nonEvidence)
 		}
 		arts = filterArtifactsByTrace(arts, keep)
 		matched = filterMatchedByTrace(matched, keep)
@@ -123,7 +126,7 @@ func runPairedReport(labelsPath, artifactsPath, baseline string, filter *corpusF
 	if err != nil {
 		return "", err
 	}
-	return formatPairedReport(pa), nil
+	return formatPairedReport(pa) + corpusNote, nil
 }
 
 // filterArtifactsByTrace keeps only artifacts whose trace ID is in keep.

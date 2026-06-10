@@ -125,17 +125,18 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string, filt
 	// The exclusions return is intentionally discarded: with the manifest as the
 	// authoritative evidence set, a matched artifact whose trace is absent from
 	// the manifest (excl.Unclassified) is dropped on purpose. The inverse — a
-	// manifest-selected trace absent from the artifacts — is the loud failure
-	// below (data.MissingSelected), which Round 2A's contract test also guards.
+	// manifest-selected *evidence* trace absent from the artifacts — is the loud
+	// failure below, which Round 2A's contract test also guards; a missing
+	// non-evidence trace (the canary) is excluded and noted in the report.
+	var corpusNote string
 	if filter != nil {
 		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(matchedArtifacts(matched)))
 		if data != nil {
-			// Only a missing *evidence* trace blocks the report: a selected
-			// judge-validation/non-evidence trace (the canary) never enters the
-			// model-evidence aggregates, so its absence cannot shrink the run.
-			if miss := missingEvidence(filter.Manifest, data.MissingSelected); len(miss) > 0 {
-				return "", fmt.Errorf("corpus selection missing %d selected evidence trace(s) from matched artifacts: %v", len(miss), miss)
+			evidence, nonEvidence := splitMissingByEvidence(filter.Manifest, data.MissingSelected)
+			if len(evidence) > 0 {
+				return "", fmt.Errorf("corpus selection missing %d selected evidence trace(s) from matched artifacts: %v", len(evidence), evidence)
 			}
+			corpusNote = missingCorpusNote(nonEvidence)
 		}
 		matched = filterMatchedByTrace(matched, keep)
 		// Filter stale to the same selection so the coverage "stale" count
@@ -193,7 +194,7 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string, filt
 	}
 	sort.Strings(models)
 	cov := manualReportCoverage{Scored: len(matched) - errored, Stale: len(stale), Errored: errored}
-	return formatManualQualityReport(models, results, cov), nil
+	return formatManualQualityReport(models, results, cov) + corpusNote, nil
 }
 
 // matchedArtifacts extracts the Artifact from each matched label.

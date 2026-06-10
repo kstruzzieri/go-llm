@@ -205,6 +205,9 @@ func TestRunManualReport_MissingCanaryDoesNotBlock(t *testing.T) {
 	if !strings.Contains(report, "ollama/c") {
 		t.Fatalf("report missing the evidence model row:\n%s", report)
 	}
+	if !strings.Contains(report, "tool-canary-01") {
+		t.Fatalf("report does not note the excluded missing canary (audit trail):\n%s", report)
+	}
 }
 
 // TestRunManualReport_MissingEvidenceTraceErrors: a manifest-selected

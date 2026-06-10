@@ -322,6 +322,14 @@ func main() {
 		if strings.TrimSpace(*labelsOut) == "" || filepath.Clean(*labelsOut) == filepath.Clean(*artifactsPath) {
 			log.Fatalf("llm-bench: -blind-ingest requires an explicit -labels-out that differs from -artifacts (its default points at artifacts.jsonl and would overwrite the artifacts)")
 		}
+		// Cleaned-string equality misses case-insensitive filesystems (APFS),
+		// symlinks, and hardlinks. If both paths resolve to the same existing
+		// file, refuse for the same reason.
+		if outInfo, statErr := os.Stat(*labelsOut); statErr == nil {
+			if artInfo, statErr := os.Stat(*artifactsPath); statErr == nil && os.SameFile(outInfo, artInfo) {
+				log.Fatalf("llm-bench: -blind-ingest: -labels-out resolves to the same file as -artifacts; choose a different output path")
+			}
+		}
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-ingest: read worksheet: %v", err)

@@ -1,5 +1,7 @@
 package main
 
+import "fmt"
+
 // corpusFilter pairs a loaded manifest with a selection so the offline scorers
 // (-manual-report, -paired-report) can drop judge-validation and
 // non-model-evidence rows exactly as the live-replay path does. A nil
@@ -32,24 +34,38 @@ func tracesFromArtifacts(arts []Artifact) []Trace {
 // unselected rows drop identically in the offline scorers. keep holds the
 // surviving trace IDs; data preserves selected-but-missing and
 // loaded-without-manifest diagnostics; excl reports what was dropped.
-// missingEvidence returns the subset of missing selected trace IDs whose
-// manifest entry would have counted as model evidence (not judge-validation
-// and allowed_as_model_evidence). The offline scorers fail only on these: a
-// missing canary cannot shrink a model-evidence report because
-// modelEvidenceResults drops judge-validation and non-evidence rows anyway.
-func missingEvidence(m Manifest, missing []string) []string {
+// splitMissingByEvidence partitions the missing selected trace IDs by whether
+// their manifest entry counts as model evidence (not judge-validation and
+// allowed_as_model_evidence). The offline scorers fail only on missing
+// evidence traces — a missing canary cannot shrink a model-evidence report
+// because modelEvidenceResults drops judge-validation and non-evidence rows
+// anyway — but they note missing non-evidence traces in the report so the
+// exclusion is auditable. An ID without a manifest entry is treated as
+// evidence (fail loud).
+func splitMissingByEvidence(m Manifest, missing []string) (evidence, nonEvidence []string) {
 	byID := make(map[string]ManifestEntry, len(m.Entries))
 	for _, e := range m.Entries {
 		byID[e.TraceID] = e
 	}
-	var out []string
 	for _, id := range missing {
 		e, ok := byID[id]
 		if !ok || (e.Partition != PartitionJudgeValidation && e.AllowedAsModelEvidence) {
-			out = append(out, id)
+			evidence = append(evidence, id)
+		} else {
+			nonEvidence = append(nonEvidence, id)
 		}
 	}
-	return out
+	return evidence, nonEvidence
+}
+
+// missingCorpusNote renders the report footnote for selected non-evidence
+// traces that are absent from the artifacts (expected for the tool canary,
+// which the offline flow never captures). Empty input renders nothing.
+func missingCorpusNote(nonEvidence []string) string {
+	if len(nonEvidence) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\nNote: %d selected non-evidence trace(s) absent from artifacts and excluded (expected for the tool canary): %v\n", len(nonEvidence), nonEvidence)
 }
 
 func corpusEvidenceFilter(m Manifest, sel corpusSelection, traces []Trace) (keep map[string]struct{}, data *corpusReportData, excl corpusResultExclusions) {

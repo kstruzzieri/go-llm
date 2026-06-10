@@ -601,6 +601,9 @@ func TestRunPairedReport_MissingCanaryDoesNotBlock(t *testing.T) {
 	if !strings.Contains(out, "Paired-complete traces: 1 of 1") {
 		t.Fatalf("paired report did not keep exactly the evidence trace:\n%s", out)
 	}
+	if !strings.Contains(out, "tool-canary-01") {
+		t.Fatalf("paired report does not note the excluded missing canary (audit trail):\n%s", out)
+	}
 }
 
 func contains(xs []string, s string) bool {
