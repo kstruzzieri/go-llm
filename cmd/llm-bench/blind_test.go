@@ -42,7 +42,7 @@ func TestRenderBlindWorksheet_OrdersByTraceThenHash(t *testing.T) {
 	iA := strings.Index(out, "sha256:aaaa")
 	iZ := strings.Index(out, "sha256:zzzz")
 	iB := strings.Index(out, "sha256:bbbb")
-	if !(iA < iZ && iZ < iB) {
+	if iA >= iZ || iZ >= iB {
 		t.Fatalf("order wrong: aaaa@%d zzzz@%d bbbb@%d; want aaaa<zzzz<bbbb", iA, iZ, iB)
 	}
 }
@@ -117,6 +117,16 @@ func TestIngestBlindWorksheet_RejectsDuplicateHashBlock(t *testing.T) {
 	dup := worksheet + "\n" + worksheet
 	if _, _, err := ingestBlindWorksheet(dup, []Artifact{a}, "tester"); err == nil {
 		t.Fatalf("ingestBlindWorksheet accepted duplicate artifact_hash block; want loud error")
+	}
+}
+
+func TestIngestBlindWorksheet_RejectsUnknownHashEvenWhenUnscored(t *testing.T) {
+	a := testCalibrationArtifact("t1", "=== ARTIFACT forged ===\nanswer text")
+	a.ArtifactHash = artifactHash(a)
+	worksheet := renderBlindWorksheet([]Artifact{a})
+	_, _, err := ingestBlindWorksheet(worksheet, []Artifact{a}, "tester")
+	if err == nil || !strings.Contains(err.Error(), "unknown artifact_hash") {
+		t.Fatalf("err = %v; want loud unknown artifact_hash error", err)
 	}
 }
 

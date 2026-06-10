@@ -53,6 +53,10 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (la
 			return fmt.Errorf("worksheet contains duplicate artifact_hash %q", hash)
 		}
 		seenWorksheetHash[hash] = struct{}{}
+		a, ok := artByHash[hash]
+		if !ok {
+			return fmt.Errorf("worksheet references unknown artifact_hash %q (not in -artifacts)", hash)
+		}
 		if strings.TrimSpace(score) == "" {
 			skipped++
 			return nil
@@ -60,10 +64,6 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (la
 		q, perr := parseBlindScore(score)
 		if perr != nil {
 			return fmt.Errorf("artifact %s: %w", hash, perr)
-		}
-		a, ok := artByHash[hash]
-		if !ok {
-			return fmt.Errorf("worksheet references unknown artifact_hash %q (not in -artifacts)", hash)
 		}
 		labels = append(labels, Label{
 			TraceID:               a.TraceID,
