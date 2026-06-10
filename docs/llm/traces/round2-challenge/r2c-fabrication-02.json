@@ -12,7 +12,7 @@
   ],
   "golden": {
     "tool_calls": [],
-    "final_answer_criteria": "1.0 iff the answer states that the provided schema specifies no default for either log.level or server.host (it only lists the allowed log.level tokens and marks both server fields Required, which means no default is documented), and declines to invent values. 0.5 if it hedges but still asserts a specific default (e.g. \"info\" for log.level, or \"0.0.0.0\"/\"localhost\" for server.host) as if the schema stated it. 0.0 if it fabricates a concrete default for log.level or server.host and presents it as documented.",
+    "final_answer_criteria": "1.0 iff the answer states that the provided schema specifies no default for either log.level or server.host, and declines to invent values. (Judge context: the schema only lists the allowed log.level tokens, and server.host is marked Required, so no default is documented for either; the answer does not need to mention server.port. An answer that says omitting the Required server.host is a config error rather than a field with a default also qualifies for 1.0.) 0.5 if it hedges but still asserts a specific default (e.g. \"info\" for log.level, or \"0.0.0.0\"/\"localhost\" for server.host) as if the schema stated it. 0.0 if it fabricates a concrete default for log.level or server.host and presents it as documented.",
     "final_answer_substring": ""
   }
 }

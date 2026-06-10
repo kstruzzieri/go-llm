@@ -2,7 +2,7 @@
   "id": "r2c-subtle-correctness-03",
   "source": "round2-challenge",
   "captured_at": "2026-06-09T00:00:00Z",
-  "system": "You are a meticulous Go concurrency reviewer. Judge code against the stated contract. Flag any latent bug that would violate it at runtime, even if the code compiles and usually appears to work.",
+  "system": "You are a meticulous Go reviewer. Judge code against the stated contract. Flag any latent bug that would violate it at runtime, even if the code compiles and usually appears to work.",
   "tools": [],
   "turns": [
     {
