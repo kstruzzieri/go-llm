@@ -12,7 +12,7 @@
   ],
   "golden": {
     "tool_calls": [],
-    "final_answer_criteria": "1.0 iff the answer identifies that *HTTPError is not a valid errors.As target because HTTPError does not implement the error interface (it has no Error() string method), so errors.As will never match (and in fact panics or fails to compile-match the contract intent), and gives the minimal fix of adding `func (e *HTTPError) Error() string`. 0.5 if it senses something is wrong with the As target but misattributes the cause (e.g. blames pointer-to-pointer or nil handling) while still recommending adding an Error method. 0.0 if it declares the implementation correct as written, or claims it satisfies the contract despite the missing Error() method.",
+    "final_answer_criteria": "1.0 iff the answer identifies that *HTTPError is an invalid errors.As target because HTTPError (and *HTTPError) has no Error() string method and so does not implement the error interface; consequently the call panics at runtime on every invocation (errors.As validates the target type before walking the chain), rather than silently returning (nil, false); and gives the minimal fix of adding `func (e *HTTPError) Error() string`. 0.5 if it senses the As target is wrong but misattributes the cause (e.g. blames pointer-to-pointer or nil handling) while still recommending adding an Error method. 0.0 if it declares the implementation correct as written, claims it satisfies the contract despite the missing Error() method, or asserts that errors.As simply returns (nil, false) / never matches without recognizing the runtime panic.",
     "final_answer_substring": ""
   }
 }
