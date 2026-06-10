@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,5 +109,54 @@ func TestRound2ChallengeCorpus_EnforcesAuthoringContract(t *testing.T) {
 		if strings.Count(blob, "```")%2 != 0 {
 			t.Errorf("trace %q has an unbalanced ``` code fence; a truncated prompt must not ship", tr.ID)
 		}
+	}
+}
+
+// TestRound2ToolCanary_ComputesToolArgsValid proves the tool path end to end:
+// the committed canary carries a real MCP tools/list snapshot (frozen into
+// trace.Tools by -capture), and the harness can compute ToolArgsValid from it.
+// A schema-valid call to the first expected tool must score 1.0. This is the
+// R-C4 pipeline-validation gate; it makes no model-quality claim (the canary is
+// judge-validation, excluded from model evidence).
+func TestRound2ToolCanary_ComputesToolArgsValid(t *testing.T) {
+	traces, err := loadTraces([]string{filepath.Join(round2ChallengeDir, "tool-canary-01.json")})
+	if err != nil {
+		t.Fatalf("load canary: %v", err)
+	}
+	tr := traces[0]
+	if len(tr.Tools) == 0 || len(tr.Golden.ToolCalls) == 0 {
+		t.Fatalf("canary must carry tool schemas and expected tool calls; tools=%d calls=%d", len(tr.Tools), len(tr.Golden.ToolCalls))
+	}
+	// The actual turn is synthesized, not replayed: this gate proves the scoring
+	// path computes from the committed schema, not what any model would emit.
+	// rag_search's only required argument is "query"; a schema-valid call.
+	actual := []Turn{{
+		Role: "assistant",
+		ToolCalls: []ToolCall{{
+			Name:      tr.Golden.ToolCalls[0],
+			Arguments: json.RawMessage(`{"query":"provider retry budget"}`),
+		}},
+	}}
+	score, computed, notes, err := scoreToolArguments(tr, actual)
+	if err != nil {
+		t.Fatalf("scoreToolArguments: %v", err)
+	}
+	if !computed {
+		t.Fatalf("ToolArgsValid not computed from the committed canary schema: %s", notes)
+	}
+	if score != 1.0 {
+		t.Fatalf("ToolArgsValid = %v; want 1.0 for a schema-valid canary call (%s)", score, notes)
+	}
+}
+
+// TestRound2ToolCanary_ExcludedFromModelEvidence pins the canary to the
+// judge-validation partition so it can never enter a model-quality view.
+func TestRound2ToolCanary_ExcludedFromModelEvidence(t *testing.T) {
+	manifest, err := loadManifest(filepath.Join(round2ChallengeDir, "corpus-manifest.jsonl"))
+	if err != nil {
+		t.Fatalf("load corpus manifest: %v", err)
+	}
+	if part := manifest.partitionByTrace()["tool-canary-01"]; part != PartitionJudgeValidation {
+		t.Fatalf("tool-canary-01 partition = %q; want judge-validation (never model evidence)", part)
 	}
 }

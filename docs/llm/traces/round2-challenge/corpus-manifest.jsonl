@@ -40,4 +40,4 @@
 {"trace_id":"r2c-underspecification-01","partition":"challenge","category":"underspecification","source":"round2-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r2c-underspecification-02","partition":"challenge","category":"underspecification","source":"round2-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r2c-underspecification-03","partition":"challenge","category":"underspecification","source":"round2-challenge","allowed_as_model_evidence":true}
-{"trace_id":"tool-canary-01","partition":"judge-validation","category":"tool-canary","source":"round2-tool-canary","allowed_as_model_evidence":false}
+{"trace_id":"tool-canary-01","partition":"judge-validation","category":"tool-canary","source":"round2-tool-canary-fixture","allowed_as_model_evidence":false}

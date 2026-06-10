@@ -1,0 +1,482 @@
+{
+  "id": "tool-canary-01",
+  "source": "round2-tool-canary-fixture",
+  "captured_at": "2025-06-09T12:00:00Z",
+  "system": "You are a code assistant with access to a repository search tool. Use rag_search to ground answers in the codebase before replying.",
+  "tools": [
+    {
+      "description": "Analyze a trading strategy's performance metrics.",
+      "inputSchema": {
+        "properties": {
+          "metrics": {
+            "description": "Strategy metrics (e.g. sharpe_ratio, max_drawdown)",
+            "type": "object"
+          },
+          "model": {
+            "description": "Model name (uses configured analysis default if omitted)",
+            "type": "string"
+          },
+          "name": {
+            "description": "Strategy name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "metrics"
+        ],
+        "type": "object"
+      },
+      "name": "analyze_strategy"
+    },
+    {
+      "description": "Analyze ML training metrics and provide insights.",
+      "inputSchema": {
+        "properties": {
+          "metrics": {
+            "description": "TrainingMetrics JSON (epoch, loss, loss_history, reward_mean, etc.)",
+            "type": "object"
+          },
+          "model": {
+            "description": "Model name (uses configured analysis default if omitted)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "metrics"
+        ],
+        "type": "object"
+      },
+      "name": "analyze_training"
+    },
+    {
+      "description": "Chat completion with optional RAG context. Returns the assistant's response.",
+      "inputSchema": {
+        "properties": {
+          "conversation_id": {
+            "description": "Optional stable id to group calls of one conversation; omit to derive identity from message content",
+            "type": "string"
+          },
+          "messages": {
+            "description": "Chat messages (each with role and content)",
+            "items": {
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "role": {
+                  "enum": [
+                    "system",
+                    "user",
+                    "assistant",
+                    "tool"
+                  ],
+                  "type": "string"
+                },
+                "tool_call_id": {
+                  "type": "string"
+                },
+                "tool_calls": {
+                  "type": "array"
+                },
+                "tool_name": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "role",
+                "content"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "model": {
+            "description": "Model name (uses configured default if omitted)",
+            "type": "string"
+          },
+          "rag_top_k": {
+            "description": "Number of RAG results (default: 5)",
+            "type": "integer"
+          },
+          "temperature": {
+            "description": "Sampling temperature",
+            "type": "number"
+          },
+          "use_rag": {
+            "description": "Prepend RAG context from the vector store",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "messages"
+        ],
+        "type": "object"
+      },
+      "name": "chat"
+    },
+    {
+      "description": "Review code using the local LLM with optional RAG context from the codebase.",
+      "inputSchema": {
+        "properties": {
+          "code": {
+            "description": "Code to review",
+            "type": "string"
+          },
+          "focus": {
+            "description": "Focus area (e.g. security, performance)",
+            "type": "string"
+          },
+          "language": {
+            "description": "Programming language",
+            "type": "string"
+          },
+          "model": {
+            "description": "Model name (uses configured analysis default if omitted)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "name": "code_review"
+    },
+    {
+      "description": "Compare multiple trading strategies side by side.",
+      "inputSchema": {
+        "properties": {
+          "model": {
+            "description": "Model name (uses configured analysis default if omitted)",
+            "type": "string"
+          },
+          "strategies": {
+            "description": "Map of strategy name to metrics object",
+            "type": "object"
+          }
+        },
+        "required": [
+          "strategies"
+        ],
+        "type": "object"
+      },
+      "name": "compare_strategies"
+    },
+    {
+      "description": "Fill-in-the-middle code completion. Returns the generated code to insert between prefix and suffix.",
+      "inputSchema": {
+        "properties": {
+          "file_path": {
+            "description": "File path for language detection",
+            "type": "string"
+          },
+          "language": {
+            "description": "Language hint (auto-detected from file_path if omitted)",
+            "type": "string"
+          },
+          "max_tokens": {
+            "description": "Maximum tokens to generate (default: 128)",
+            "type": "integer"
+          },
+          "model": {
+            "description": "Model name (uses configured completion default if omitted)",
+            "type": "string"
+          },
+          "prefix": {
+            "description": "Code before the cursor",
+            "type": "string"
+          },
+          "suffix": {
+            "description": "Code after the cursor",
+            "type": "string"
+          }
+        },
+        "required": [
+          "prefix",
+          "suffix"
+        ],
+        "type": "object"
+      },
+      "name": "complete_code"
+    },
+    {
+      "description": "Generate an embedding vector for a single text.",
+      "inputSchema": {
+        "properties": {
+          "model": {
+            "description": "Embedding model (uses configured default if omitted)",
+            "type": "string"
+          },
+          "text": {
+            "description": "Text to embed",
+            "type": "string"
+          }
+        },
+        "required": [
+          "text"
+        ],
+        "type": "object"
+      },
+      "name": "embed"
+    },
+    {
+      "description": "Generate embeddings for multiple texts (max 100).",
+      "inputSchema": {
+        "properties": {
+          "model": {
+            "description": "Embedding model (uses configured default if omitted)",
+            "type": "string"
+          },
+          "texts": {
+            "description": "Texts to embed (max 100)",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "texts"
+        ],
+        "type": "object"
+      },
+      "name": "embed_batch"
+    },
+    {
+      "description": "Explain a detected ML training anomaly.",
+      "inputSchema": {
+        "properties": {
+          "anomaly": {
+            "description": "AnomalyInfo JSON (type, severity, description, metrics)",
+            "type": "object"
+          },
+          "model": {
+            "description": "Model name (uses configured analysis default if omitted)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "anomaly"
+        ],
+        "type": "object"
+      },
+      "name": "explain_anomaly"
+    },
+    {
+      "description": "Explain a code snippet using the local LLM.",
+      "inputSchema": {
+        "properties": {
+          "code": {
+            "description": "Code to explain",
+            "type": "string"
+          },
+          "model": {
+            "description": "Model name (uses configured analysis default if omitted)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code"
+        ],
+        "type": "object"
+      },
+      "name": "explain_code"
+    },
+    {
+      "description": "Raw text generation without chat formatting. Returns the generated text.",
+      "inputSchema": {
+        "properties": {
+          "max_tokens": {
+            "description": "Maximum tokens to generate",
+            "type": "integer"
+          },
+          "model": {
+            "description": "Model name (uses configured chat default if omitted)",
+            "type": "string"
+          },
+          "prompt": {
+            "description": "The prompt to generate from",
+            "type": "string"
+          },
+          "system": {
+            "description": "System prompt",
+            "type": "string"
+          },
+          "temperature": {
+            "description": "Sampling temperature",
+            "type": "number"
+          }
+        },
+        "required": [
+          "prompt"
+        ],
+        "type": "object"
+      },
+      "name": "generate"
+    },
+    {
+      "description": "List all available provider models. Also refreshes the model resolution cache.",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "list_models"
+    },
+    {
+      "description": "Download a model from the Ollama registry.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "description": "Model name to pull (e.g. qwen3:8b)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "pull_model"
+    },
+    {
+      "description": "Remove all chunks for a source from the vector store.",
+      "inputSchema": {
+        "properties": {
+          "source": {
+            "description": "Source identifier to delete",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
+        ],
+        "type": "object"
+      },
+      "name": "rag_delete"
+    },
+    {
+      "description": "Index all supported files in a directory tree into the RAG vector store.",
+      "inputSchema": {
+        "properties": {
+          "concurrency": {
+            "description": "Number of concurrent workers (default: 4)",
+            "type": "integer"
+          },
+          "extensions": {
+            "description": "File extensions to include (e.g. [\".go\", \".py\"])",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "path": {
+            "description": "Directory path to index",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "rag_index_directory"
+    },
+    {
+      "description": "Index a single file into the RAG vector store.",
+      "inputSchema": {
+        "properties": {
+          "path": {
+            "description": "File path to index",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
+        "type": "object"
+      },
+      "name": "rag_index_file"
+    },
+    {
+      "description": "Search the RAG index for relevant chunks.",
+      "inputSchema": {
+        "properties": {
+          "query": {
+            "description": "Search query",
+            "type": "string"
+          },
+          "top_k": {
+            "description": "Number of results (default: 5)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "query"
+        ],
+        "type": "object"
+      },
+      "name": "rag_search"
+    },
+    {
+      "description": "Get vector store statistics (chunk count, source count, dimensions, storage size).",
+      "inputSchema": {
+        "properties": {},
+        "type": "object"
+      },
+      "name": "rag_stats"
+    },
+    {
+      "description": "Get detailed information about a specific model.",
+      "inputSchema": {
+        "properties": {
+          "name": {
+            "description": "Model name (e.g. qwen3:8b)",
+            "type": "string"
+          },
+          "provider": {
+            "description": "Provider instance name when the model name is ambiguous",
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ],
+        "type": "object"
+      },
+      "name": "show_model"
+    }
+  ],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Where is the provider retry budget configured in this repository?"
+    },
+    {
+      "role": "assistant",
+      "content": "Let me search the repository for the retry budget configuration.",
+      "tool_calls": [
+        {
+          "name": "rag_search",
+          "arguments": {
+            "query": "provider retry budget configuration",
+            "top_k": 5
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "provider/router.go: RetryBudget defaults to three attempts and is set via RouterConfig.RetryBudget.",
+      "tool_call_id": "call_1",
+      "name": "rag_search"
+    }
+  ],
+  "golden": {
+    "tool_calls": [
+      "rag_search"
+    ],
+    "final_answer_criteria": "Assistant answer should satisfy the captured final assistant response.",
+    "final_answer_substring": "The provider retry budget is configured in provider/router.go through RouterConfig.RetryBudget, which defaults to three attempts."
+  }
+}
