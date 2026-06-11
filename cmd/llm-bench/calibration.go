@@ -265,6 +265,12 @@ func loadLabels(path string) ([]Label, error) {
 		if err := dec.Decode(&l); err != nil {
 			return nil, fmt.Errorf("decode label: %w", err)
 		}
+		// This is the single domain guard for every downstream mode (manual,
+		// paired, calibration, discrimination): an out-of-domain value aborts the
+		// load. KNOWN GAP: an omitted expected_answer_quality field JSON-decodes
+		// to 0.0 — a valid score — so a forgotten label is indistinguishable from
+		// a deliberate 0.0. Closing it needs a presence signal (*float64) on
+		// Label; deferred because it touches the shared label schema.
 		if !validExpectedAnswerQuality(l.ExpectedAnswerQuality) {
 			return nil, fmt.Errorf("invalid expected_answer_quality for label %s/%s: %.2f (want one of 0.0, 0.5, 1.0)",
 				l.TraceID, l.CandidateModel, l.ExpectedAnswerQuality)

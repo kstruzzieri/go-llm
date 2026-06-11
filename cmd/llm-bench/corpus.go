@@ -135,12 +135,13 @@ func (m Manifest) Counts() corpusCounts {
 	return c
 }
 
-// corpusSelection filters a manifest into a run. Empty Partitions/Categories
-// mean "all"; OnlyModelEvidence restricts to entries flagged as accepted-run
-// model evidence.
+// corpusSelection filters a manifest into a run. Empty
+// Partitions/Categories/Sources mean "all"; OnlyModelEvidence restricts to
+// entries flagged as accepted-run model evidence. Predicates AND together.
 type corpusSelection struct {
 	Partitions        []CorpusPartition
 	Categories        []string
+	Sources           []string
 	OnlyModelEvidence bool
 }
 
@@ -155,6 +156,10 @@ func (m Manifest) Select(sel corpusSelection) []string {
 	for _, c := range sel.Categories {
 		catOK[c] = struct{}{}
 	}
+	srcOK := make(map[string]struct{}, len(sel.Sources))
+	for _, s := range sel.Sources {
+		srcOK[s] = struct{}{}
+	}
 	var out []string
 	for _, e := range m.Entries {
 		if len(partOK) > 0 {
@@ -164,6 +169,11 @@ func (m Manifest) Select(sel corpusSelection) []string {
 		}
 		if len(catOK) > 0 {
 			if _, ok := catOK[e.Category]; !ok {
+				continue
+			}
+		}
+		if len(srcOK) > 0 {
+			if _, ok := srcOK[e.Source]; !ok {
 				continue
 			}
 		}

@@ -7,7 +7,7 @@ This repository uses a Docker-backed local CI runner so lint, race tests, and co
 Enable the pre-push hook once per clone:
 
 ```bash
-git config core.hooksPath .githooks
+scripts/setup-local-ci
 ```
 
 Run the same suite the hook runs:
@@ -77,6 +77,12 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode fu
 ```
 
 That means pushes fail locally if lint, race tests, or compile-smoke checks fail.
+
+The setup script only updates this clone's local Git config:
+
+```bash
+git config core.hooksPath .githooks
+```
 
 ## GitHub Actions
 

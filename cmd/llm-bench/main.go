@@ -44,6 +44,11 @@ func main() {
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	pairedReport := flag.Bool("paired-report", false, "Emit the paired-label report: paired-complete means, completeness worklist, win/loss/tie matrix, bootstrap delta CIs, resolution diagnostic (uses -labels, -artifacts, -baseline, -report)")
+	discriminationReport := flag.Bool("discrimination-report", false, "Classify each trace (spec §9.1: valid-discriminator/saturated/unsolved/floor-only/no-signal/unpaired), emit the per-stratum funnel + K-gate, and write the derived valid-discriminator manifest (uses -labels, -artifacts, -corpus-manifest, -top-models, -floor-model, -gate-source, -discriminator-manifest-out, -report; does NOT honor -corpus-sources/-partitions/-categories — it always classifies all strata so the funnel shows every source)")
+	topModels := flag.String("top-models", "", "Comma-separated top-cluster selectors for -discrimination-report (transport prefix optional; e.g. gemma4:31b or ollama/gemma4:31b)")
+	floorModel := flag.String("floor-model", "", "Floor model selector for -discrimination-report (transport prefix optional)")
+	gateSource := flag.String("gate-source", "", "Provenance source the §9.2 K-gate is decided on for -discrimination-report (empty = round3-challenge)")
+	discriminatorManifestOut := flag.String("discriminator-manifest-out", "", "Output path for the derived valid-discriminator manifest (gitignored); contains all valid-discriminator sources, so pair with -corpus-sources for stratum-specific -manual-report/-paired-report views")
 	fimLatency := flag.Bool("fim-latency", false, "Measure FIM / inline-completion latency separately from chat latency (uses -fim-cases, -models, -fim-num-predict, -fim-warmup, -report)")
 	fimCases := flag.String("fim-cases", "", "Glob for FIM case JSON files (prefix/suffix), required with -fim-latency")
 	fimNumPredict := flag.Int("fim-num-predict", defaultFIMNumPredict, "Max tokens to generate per FIM completion (interactive regime is short)")
@@ -71,6 +76,7 @@ func main() {
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
+	corpusSources := flag.String("corpus-sources", "", "Comma-separated provenance sources to include from the corpus manifest (e.g. round3-challenge, round2-challenge, first-accepted-run; empty = all)")
 	corpusOnlyEvidence := flag.Bool("corpus-only-evidence", false, "Restrict the corpus run to entries flagged allowed_as_model_evidence")
 	blindRender := flag.Bool("blind-render", false, "Render a blind labeling worksheet from -artifacts (model identity hidden) to -report")
 	blindIngest := flag.Bool("blind-ingest", false, "Parse a filled blind worksheet (-worksheet) into labels.jsonl (-labels-out), rejoining model on artifact_hash from -artifacts")
@@ -112,8 +118,11 @@ func main() {
 	if *blindIngest {
 		modes++
 	}
+	if *discriminationReport {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -255,7 +264,7 @@ func main() {
 	}
 
 	if *manualReport {
-		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusOnlyEvidence)
+		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: manual-report: %v", err)
 		}
@@ -275,7 +284,7 @@ func main() {
 	}
 
 	if *pairedReport {
-		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusOnlyEvidence)
+		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: paired-report: %v", err)
 		}
@@ -291,6 +300,36 @@ func main() {
 			log.Fatalf("llm-bench: write report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: paired-label report written to %s\n", *reportPath)
+		return
+	}
+
+	if *discriminationReport {
+		if strings.TrimSpace(*corpusManifestPath) == "" {
+			log.Fatalf("llm-bench: -discrimination-report requires -corpus-manifest")
+		}
+		if strings.TrimSpace(*corpusSources) != "" {
+			log.Printf("llm-bench: ignoring -corpus-sources in -discrimination-report mode (all strata are classified so the funnel shows every source)")
+		}
+		report, err := runDiscriminationReport(discriminationOptions{
+			LabelsPath:               *labelsPath,
+			ArtifactsPath:            *artifactsPath,
+			ManifestPath:             *corpusManifestPath,
+			TopModels:                splitCommaList(*topModels),
+			FloorModel:               *floorModel,
+			GateSource:               *gateSource,
+			DiscriminatorManifestOut: *discriminatorManifestOut,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: discrimination-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: discrimination report written to %s\n", *reportPath)
 		return
 	}
 
@@ -444,7 +483,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: %v", err)
 		}
-		sel := corpusSelection{Partitions: parts, Categories: splitCommaList(*corpusCategories), OnlyModelEvidence: *corpusOnlyEvidence}
+		sel := corpusSelection{Partitions: parts, Categories: splitCommaList(*corpusCategories), Sources: splitCommaList(*corpusSources), OnlyModelEvidence: *corpusOnlyEvidence}
 		run, data, missing := buildCorpusRun(manifest, sel, traces)
 		for _, id := range missing {
 			fmt.Fprintf(os.Stderr, "llm-bench: corpus manifest selects trace %q not present in -traces; skipping\n", id)
@@ -675,7 +714,7 @@ func resolveCandidateTransportConfig(baseURL, apiKey string, lookupEnv func(stri
 
 // offlineCorpusFilter builds the corpus filter for the offline scorers from the
 // corpus flags. Returns nil (no filtering) when manifestPath is empty.
-func offlineCorpusFilter(manifestPath, partitions, categories string, onlyEvidence bool) (*corpusFilter, error) {
+func offlineCorpusFilter(manifestPath, partitions, categories, sources string, onlyEvidence bool) (*corpusFilter, error) {
 	if strings.TrimSpace(manifestPath) == "" {
 		return nil, nil
 	}
@@ -689,7 +728,7 @@ func offlineCorpusFilter(manifestPath, partitions, categories string, onlyEviden
 	}
 	return &corpusFilter{
 		Manifest:  manifest,
-		Selection: corpusSelection{Partitions: parts, Categories: splitCommaList(categories), OnlyModelEvidence: onlyEvidence},
+		Selection: corpusSelection{Partitions: parts, Categories: splitCommaList(categories), Sources: splitCommaList(sources), OnlyModelEvidence: onlyEvidence},
 	}, nil
 }
 

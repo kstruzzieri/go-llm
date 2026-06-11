@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -110,6 +111,111 @@ func TestMainPairedReportEndToEnd(t *testing.T) {
 		if !strings.Contains(string(body), want) {
 			t.Fatalf("paired report missing %q:\n%s", want, body)
 		}
+	}
+}
+
+func TestMainDiscriminationReportEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	manifestPath := filepath.Join(dir, "manifest.jsonl")
+	reportPath := filepath.Join(dir, "report.md")
+	discriminatorsPath := filepath.Join(dir, "discriminators.jsonl")
+
+	arts := []Artifact{
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/gemma4:31b"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/qwen3-coder-next:latest"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/qwen3.6:35b-a3b"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "openai-compat/glm-5.1"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/qwen3:8b"),
+	}
+	writeArtifactsJSONL(t, artsPath, arts)
+	writeDiscriminationLabelsJSONL(t, labelsPath, arts, []float64{1.0, 0.5, 0.5, 0.5, 0.0})
+	if err := writeManifest(manifestPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "r2c-subtle-correctness-01", Partition: PartitionChallenge, Category: "subtle-correctness", Source: "round2-challenge", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-discrimination-report",
+		"-labels", labelsPath,
+		"-artifacts", artsPath,
+		"-corpus-manifest", manifestPath,
+		"-top-models", "ollama/gemma4:31b,ollama/qwen3-coder-next:latest,ollama/qwen3.6:35b-a3b,openai-compat/glm-5.1",
+		"-floor-model", "ollama/qwen3:8b",
+		"-discriminator-manifest-out", discriminatorsPath,
+		"-report", reportPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -discrimination-report failed: %v\n%s", err, out)
+	}
+	body, err := os.ReadFile(reportPath)
+	if err != nil {
+		t.Fatalf("read report: %v", err)
+	}
+	for _, want := range []string{
+		"valid-discriminator",
+		"K-gate (spec §9.2): N/A — no round3-challenge stratum present",
+		"Derived manifest note: contains every valid-discriminator trace across all reported sources",
+	} {
+		if !strings.Contains(string(body), want) {
+			t.Fatalf("discrimination report missing %q:\n%s", want, body)
+		}
+	}
+	derived, err := loadManifest(discriminatorsPath)
+	if err != nil {
+		t.Fatalf("derived manifest must load: %v", err)
+	}
+	if len(derived.Entries) != 1 || derived.Entries[0].TraceID != "r2c-subtle-correctness-01" {
+		t.Fatalf("derived manifest = %+v; want the valid discriminator", derived.Entries)
+	}
+}
+
+// TestMainDiscriminationReportWarnsOnIgnoredCorpusSources: -corpus-sources is a
+// no-op in discrimination mode (all strata are classified). Passing it must warn
+// rather than silently ignore the flag.
+func TestMainDiscriminationReportWarnsOnIgnoredCorpusSources(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	manifestPath := filepath.Join(dir, "manifest.jsonl")
+	reportPath := filepath.Join(dir, "report.md")
+
+	arts := []Artifact{
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/gemma4:31b"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/qwen3-coder-next:latest"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/qwen3.6:35b-a3b"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "openai-compat/glm-5.1"),
+		mkArtifact(t, "r2c-subtle-correctness-01", "ollama/qwen3:8b"),
+	}
+	writeArtifactsJSONL(t, artsPath, arts)
+	writeDiscriminationLabelsJSONL(t, labelsPath, arts, []float64{1.0, 0.5, 0.5, 0.5, 0.0})
+	if err := writeManifest(manifestPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "r2c-subtle-correctness-01", Partition: PartitionChallenge, Category: "subtle-correctness", Source: "round2-challenge", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := exec.Command(os.Args[0],
+		"-discrimination-report",
+		"-labels", labelsPath,
+		"-artifacts", artsPath,
+		"-corpus-manifest", manifestPath,
+		"-corpus-sources", "round3-challenge",
+		"-top-models", "ollama/gemma4:31b,ollama/qwen3-coder-next:latest,ollama/qwen3.6:35b-a3b,openai-compat/glm-5.1",
+		"-floor-model", "ollama/qwen3:8b",
+		"-report", reportPath,
+	)
+	cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("llm-bench -discrimination-report failed: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "ignoring -corpus-sources") {
+		t.Fatalf("discrimination mode must warn that -corpus-sources is ignored:\n%s", out)
 	}
 }
 
@@ -378,8 +484,39 @@ func TestMainFIMLatencyUsesTimeoutFlag(t *testing.T) {
 	}
 }
 
+// TestRunManualReport_EmptySelectionErrorNamesSelection: an unknown
+// -corpus-sources (or any selection that matches nothing) fails loud, but the
+// error must name the selection so the operator can spot the typo instead of
+// guessing why the report is empty.
+func TestRunManualReport_EmptySelectionErrorNamesSelection(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	a := testCalibrationArtifact("nat-row", "answer")
+	if err := writeJSONL(artsPath, []any{a}); err != nil {
+		t.Fatal(err)
+	}
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONL(labelsPath, []any{
+		Label{TraceID: "nat-row", CandidateModel: "ollama/c", ArtifactHash: a.ArtifactHash, ExpectedAnswerQuality: 1.0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	m := Manifest{Entries: []ManifestEntry{
+		{TraceID: "nat-row", Partition: PartitionNatural, Category: "chat", Source: "round1", AllowedAsModelEvidence: true},
+	}}
+	filter := &corpusFilter{Manifest: m, Selection: corpusSelection{Sources: []string{"bogus-source"}}}
+
+	_, err := runManualReport(context.Background(), labelsPath, artsPath, filter)
+	if err == nil {
+		t.Fatal("want error when the selection matches no labeled artifacts; got nil")
+	}
+	if !strings.Contains(err.Error(), "bogus-source") {
+		t.Fatalf("empty-selection error must name the offending selection; got %q", err)
+	}
+}
+
 func TestOfflineCorpusFilter_NilWhenNoManifestPath(t *testing.T) {
-	f, err := offlineCorpusFilter("", "", "", false)
+	f, err := offlineCorpusFilter("", "", "", "", false)
 	if err != nil || f != nil {
 		t.Fatalf("offlineCorpusFilter(no manifest) = (%v, %v); want (nil, nil)", f, err)
 	}
@@ -391,7 +528,7 @@ func TestOfflineCorpusFilter_LoadsManifestAndSelection(t *testing.T) {
 	if err := writeManifest(path, sampleCorpusManifest()); err != nil {
 		t.Fatal(err)
 	}
-	f, err := offlineCorpusFilter(path, "challenge", "", true)
+	f, err := offlineCorpusFilter(path, "challenge", "", "", true)
 	if err != nil {
 		t.Fatalf("offlineCorpusFilter: %v", err)
 	}
@@ -770,5 +907,27 @@ func TestResolveCaptureSampleEmptyReturnsNil(t *testing.T) {
 	}
 	if spec != nil {
 		t.Fatalf("want nil spec for empty input; got %+v", spec)
+	}
+}
+
+func TestOfflineCorpusFilter_PassesSourcesThrough(t *testing.T) {
+	dir := t.TempDir()
+	mPath := filepath.Join(dir, "m.jsonl")
+	if err := writeManifest(mPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "a", Partition: PartitionChallenge, Category: "type-semantics", Source: "round3-challenge", AllowedAsModelEvidence: true},
+		{TraceID: "b", Partition: PartitionChallenge, Category: "fabrication", Source: "round2-challenge", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	filter, err := offlineCorpusFilter(mPath, "", "", "round3-challenge", false)
+	if err != nil {
+		t.Fatalf("offlineCorpusFilter: %v", err)
+	}
+	if got := filter.Selection.Sources; !reflect.DeepEqual(got, []string{"round3-challenge"}) {
+		t.Fatalf("Selection.Sources = %v; want [round3-challenge]", got)
+	}
+	keep := filter.Manifest.Select(filter.Selection)
+	if !reflect.DeepEqual(keep, []string{"a"}) {
+		t.Fatalf("selection keeps %v; want [a] (round3 source only)", keep)
 	}
 }
