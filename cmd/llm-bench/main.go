@@ -71,6 +71,7 @@ func main() {
 	corpusManifestPath := flag.String("corpus-manifest", "", "Path to a corpus manifest JSONL (partition/category per trace); enables partition-separated reporting")
 	corpusPartitions := flag.String("corpus-partitions", "", "Comma-separated partitions to include from the corpus manifest (natural, challenge, judge-validation; empty = all)")
 	corpusCategories := flag.String("corpus-categories", "", "Comma-separated categories to include from the corpus manifest (empty = all)")
+	corpusSources := flag.String("corpus-sources", "", "Comma-separated provenance sources to include from the corpus manifest (e.g. round3-challenge, round2-challenge, first-accepted-run; empty = all)")
 	corpusOnlyEvidence := flag.Bool("corpus-only-evidence", false, "Restrict the corpus run to entries flagged allowed_as_model_evidence")
 	blindRender := flag.Bool("blind-render", false, "Render a blind labeling worksheet from -artifacts (model identity hidden) to -report")
 	blindIngest := flag.Bool("blind-ingest", false, "Parse a filled blind worksheet (-worksheet) into labels.jsonl (-labels-out), rejoining model on artifact_hash from -artifacts")
@@ -255,7 +256,7 @@ func main() {
 	}
 
 	if *manualReport {
-		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusOnlyEvidence)
+		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: manual-report: %v", err)
 		}
@@ -275,7 +276,7 @@ func main() {
 	}
 
 	if *pairedReport {
-		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusOnlyEvidence)
+		filter, err := offlineCorpusFilter(*corpusManifestPath, *corpusPartitions, *corpusCategories, *corpusSources, *corpusOnlyEvidence)
 		if err != nil {
 			log.Fatalf("llm-bench: paired-report: %v", err)
 		}
@@ -444,7 +445,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: %v", err)
 		}
-		sel := corpusSelection{Partitions: parts, Categories: splitCommaList(*corpusCategories), OnlyModelEvidence: *corpusOnlyEvidence}
+		sel := corpusSelection{Partitions: parts, Categories: splitCommaList(*corpusCategories), Sources: splitCommaList(*corpusSources), OnlyModelEvidence: *corpusOnlyEvidence}
 		run, data, missing := buildCorpusRun(manifest, sel, traces)
 		for _, id := range missing {
 			fmt.Fprintf(os.Stderr, "llm-bench: corpus manifest selects trace %q not present in -traces; skipping\n", id)
@@ -675,7 +676,7 @@ func resolveCandidateTransportConfig(baseURL, apiKey string, lookupEnv func(stri
 
 // offlineCorpusFilter builds the corpus filter for the offline scorers from the
 // corpus flags. Returns nil (no filtering) when manifestPath is empty.
-func offlineCorpusFilter(manifestPath, partitions, categories string, onlyEvidence bool) (*corpusFilter, error) {
+func offlineCorpusFilter(manifestPath, partitions, categories, sources string, onlyEvidence bool) (*corpusFilter, error) {
 	if strings.TrimSpace(manifestPath) == "" {
 		return nil, nil
 	}
@@ -689,7 +690,7 @@ func offlineCorpusFilter(manifestPath, partitions, categories string, onlyEviden
 	}
 	return &corpusFilter{
 		Manifest:  manifest,
-		Selection: corpusSelection{Partitions: parts, Categories: splitCommaList(categories), OnlyModelEvidence: onlyEvidence},
+		Selection: corpusSelection{Partitions: parts, Categories: splitCommaList(categories), Sources: splitCommaList(sources), OnlyModelEvidence: onlyEvidence},
 	}, nil
 }
 

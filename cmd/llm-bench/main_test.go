@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -379,7 +380,7 @@ func TestMainFIMLatencyUsesTimeoutFlag(t *testing.T) {
 }
 
 func TestOfflineCorpusFilter_NilWhenNoManifestPath(t *testing.T) {
-	f, err := offlineCorpusFilter("", "", "", false)
+	f, err := offlineCorpusFilter("", "", "", "", false)
 	if err != nil || f != nil {
 		t.Fatalf("offlineCorpusFilter(no manifest) = (%v, %v); want (nil, nil)", f, err)
 	}
@@ -391,7 +392,7 @@ func TestOfflineCorpusFilter_LoadsManifestAndSelection(t *testing.T) {
 	if err := writeManifest(path, sampleCorpusManifest()); err != nil {
 		t.Fatal(err)
 	}
-	f, err := offlineCorpusFilter(path, "challenge", "", true)
+	f, err := offlineCorpusFilter(path, "challenge", "", "", true)
 	if err != nil {
 		t.Fatalf("offlineCorpusFilter: %v", err)
 	}
@@ -770,5 +771,27 @@ func TestResolveCaptureSampleEmptyReturnsNil(t *testing.T) {
 	}
 	if spec != nil {
 		t.Fatalf("want nil spec for empty input; got %+v", spec)
+	}
+}
+
+func TestOfflineCorpusFilter_PassesSourcesThrough(t *testing.T) {
+	dir := t.TempDir()
+	mPath := filepath.Join(dir, "m.jsonl")
+	if err := writeManifest(mPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "a", Partition: PartitionChallenge, Category: "type-semantics", Source: "round3-challenge", AllowedAsModelEvidence: true},
+		{TraceID: "b", Partition: PartitionChallenge, Category: "fabrication", Source: "round2-challenge", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	filter, err := offlineCorpusFilter(mPath, "", "", "round3-challenge", false)
+	if err != nil {
+		t.Fatalf("offlineCorpusFilter: %v", err)
+	}
+	if got := filter.Selection.Sources; !reflect.DeepEqual(got, []string{"round3-challenge"}) {
+		t.Fatalf("Selection.Sources = %v; want [round3-challenge]", got)
+	}
+	keep := filter.Manifest.Select(filter.Selection)
+	if !reflect.DeepEqual(keep, []string{"a"}) {
+		t.Fatalf("selection keeps %v; want [a] (round3 source only)", keep)
 	}
 }
