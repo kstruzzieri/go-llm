@@ -26,6 +26,13 @@ These specific IDs are **the reference lineup**, not a contract. `go-llm`
 has no hard-coded model list: the router, registry, and every consumer
 read from `models.json`.
 
+The latest frontier probe,
+[2026-06-10 Round-2 frontier challenge](benchmarks/2026-06-10-round-2-frontier-challenge.md),
+was **inconclusive**: GLM-5.1 saturated the challenge partition at 1.00, so the
+corpus failed the de-saturation validity gate and did not justify a
+second-backend investment. The current lineup remains unchanged pending a
+harder Round-3 corpus.
+
 ### How to verify
 
 To rerun the accepted workflow against the same local evidence, use the
@@ -36,8 +43,9 @@ IDs). The accepted traces, labels, and artifacts are gitignored local
 files; for a new run, capture your own corpus via
 `llm-bench -capture -mcp-stdio-command "..."`, then label and run the
 manual-report path. The accepted run is a plain-chat baseline — a
-tool-use or agent ranking requires a tool-bearing corpus, which is
-Round-2 work.
+tool-use or agent ranking requires a tool-bearing corpus. The Round-2
+frontier challenge was useful as a diagnostic but was not accepted because
+its challenge partition was too easy for the frontier candidate.
 
 ## Customizing the lineup
 
@@ -177,7 +185,10 @@ enforces they stay identical.
 
 Setup 2 (GLM-5.1 in LM Studio) and Setup 3 (MiniMax M2.7) from
 [setups.md](setups.md) remain candidate upgrades. They're deferred,
-not rejected. The benchmark harness
+not rejected. The Round-2 GLM-5.1 probe was inconclusive because the
+challenge corpus saturated at the top model; the next GLM/MiniMax attempt
+needs a harder corpus before latency or provider-integration work can change
+the decision. The benchmark harness
 ([benchmark-plan.md](benchmark-plan.md)) is the decision gate: if a
 frontier non-Ollama model demonstrates, on an accepted harness run
 (acceptance criteria in

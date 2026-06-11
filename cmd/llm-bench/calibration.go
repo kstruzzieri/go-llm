@@ -129,6 +129,9 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	for _, r := range results {
 		if r.Err != nil {
 			// Skip failed runs — they cannot be labeled coherently.
+			// Surface the per-pair reason: a silently dropped result makes a
+			// partial corpus look complete and hides timeout-vs-refusal.
+			fmt.Fprintf(os.Stderr, "calibrate-capture: skipped %s/%s: %v\n", r.TraceID, r.Model, r.Err)
 			failed++
 			continue
 		}
@@ -150,6 +153,12 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 	}
 	if len(artifacts) == 0 {
 		return fmt.Errorf("calibrate-capture: no artifacts written; %d results returned, %d failed", len(results), failed)
+	}
+	if failed > 0 {
+		// Partial capture is a valid best-effort outcome (the caller can gap-fill
+		// the missing pairs), so this is a warning, not an error — but it must be
+		// loud: a partial corpus that prints only the success line reads as complete.
+		fmt.Fprintf(os.Stderr, "calibrate-capture: WARNING partial capture — wrote %d artifact(s), %d of %d runs failed\n", len(artifacts), failed, len(results))
 	}
 
 	if err := os.MkdirAll(filepath.Dir(opts.OutputPath), 0o755); err != nil {
