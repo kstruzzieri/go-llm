@@ -123,6 +123,15 @@ func TestRunCalibrateCapture_PartialCaptureProceedsWithSuccessfulResults(t *test
 	}
 	targets := []ModelTarget{{Display: "ollama/cand", Provider: "ollama", Model: "cand"}}
 
+	stderrPath := filepath.Join(dir, "stderr.txt")
+	stderrFile, err := os.Create(stderrPath)
+	if err != nil {
+		t.Fatalf("create stderr capture: %v", err)
+	}
+	oldStderr := os.Stderr
+	os.Stderr = stderrFile
+	defer func() { os.Stderr = oldStderr }()
+
 	// A partial capture (some pairs failed) is a best-effort success: the
 	// successful artifacts are written so the operator can gap-fill the rest,
 	// and runCalibrateCapture warns rather than erroring.
@@ -130,6 +139,24 @@ func TestRunCalibrateCapture_PartialCaptureProceedsWithSuccessfulResults(t *test
 		Runner: runner, Targets: targets, Traces: traces, OutputPath: out,
 	}); err != nil {
 		t.Fatalf("runCalibrateCapture (partial) err = %v; want nil (best-effort)", err)
+	}
+	os.Stderr = oldStderr
+	if err := stderrFile.Close(); err != nil {
+		t.Fatalf("close stderr capture: %v", err)
+	}
+	stderr, err := os.ReadFile(stderrPath)
+	if err != nil {
+		t.Fatalf("read stderr capture: %v", err)
+	}
+	stderrText := string(stderr)
+	for _, want := range []string{
+		"calibrate-capture: skipped t2/ollama/cand: context deadline exceeded",
+		"calibrate-capture: WARNING partial capture",
+		"wrote 2 artifact(s), 1 of 3 runs failed",
+	} {
+		if !strings.Contains(stderrText, want) {
+			t.Fatalf("stderr missing %q:\n%s", want, stderrText)
+		}
 	}
 
 	f, err := os.Open(out)
