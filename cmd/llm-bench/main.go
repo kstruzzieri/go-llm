@@ -44,6 +44,10 @@ func main() {
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	pairedReport := flag.Bool("paired-report", false, "Emit the paired-label report: paired-complete means, completeness worklist, win/loss/tie matrix, bootstrap delta CIs, resolution diagnostic (uses -labels, -artifacts, -baseline, -report)")
+	discriminationReport := flag.Bool("discrimination-report", false, "Classify each trace (spec §9.1: valid-discriminator/saturated/unsolved/floor-only/no-signal/unpaired), emit the per-stratum funnel + K-gate, and write the derived valid-discriminator manifest (uses -labels, -artifacts, -corpus-manifest, -top-models, -floor-model, -discriminator-manifest-out, -report)")
+	topModels := flag.String("top-models", "", "Comma-separated top-cluster selectors for -discrimination-report (exactly as they appear as candidate_model in artifacts)")
+	floorModel := flag.String("floor-model", "", "Floor model selector for -discrimination-report")
+	discriminatorManifestOut := flag.String("discriminator-manifest-out", "", "Output path for the derived valid-discriminator manifest (gitignored); consumed by -manual-report/-paired-report -corpus-manifest")
 	fimLatency := flag.Bool("fim-latency", false, "Measure FIM / inline-completion latency separately from chat latency (uses -fim-cases, -models, -fim-num-predict, -fim-warmup, -report)")
 	fimCases := flag.String("fim-cases", "", "Glob for FIM case JSON files (prefix/suffix), required with -fim-latency")
 	fimNumPredict := flag.Int("fim-num-predict", defaultFIMNumPredict, "Max tokens to generate per FIM completion (interactive regime is short)")
@@ -113,8 +117,11 @@ func main() {
 	if *blindIngest {
 		modes++
 	}
+	if *discriminationReport {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -292,6 +299,32 @@ func main() {
 			log.Fatalf("llm-bench: write report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: paired-label report written to %s\n", *reportPath)
+		return
+	}
+
+	if *discriminationReport {
+		if strings.TrimSpace(*corpusManifestPath) == "" {
+			log.Fatalf("llm-bench: -discrimination-report requires -corpus-manifest")
+		}
+		report, err := runDiscriminationReport(discriminationOptions{
+			LabelsPath:               *labelsPath,
+			ArtifactsPath:            *artifactsPath,
+			ManifestPath:             *corpusManifestPath,
+			TopModels:                splitCommaList(*topModels),
+			FloorModel:               *floorModel,
+			DiscriminatorManifestOut: *discriminatorManifestOut,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: discrimination-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: discrimination report written to %s\n", *reportPath)
 		return
 	}
 
