@@ -110,27 +110,23 @@ const round3DiscriminatorGateK = 10
 // buildTraceModelQualityFromMatched groups matched labels into
 // traceID -> canonical-model -> quality, after dropping judge-validation and
 // non-model-evidence rows via the shared corpusEvidenceFilter. It rejects a
-// duplicate (trace, model) the same way runManualReport does — the classifier
-// must see exactly one quality per (trace, model).
+// duplicate (trace, model) — the classifier must see exactly one quality per
+// (trace, model), keyed identically to the quality map.
 func buildTraceModelQualityFromMatched(matched []matchedLabel, filter *corpusFilter) (map[string]map[string]float64, error) {
 	if filter != nil {
-		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(matchedArtifacts(matched)))
-		if data != nil && len(data.MissingSelected) > 0 {
-			// Unlike manual/paired reports, discrimination is allowed to
-			// run on partially-labeled sets. Missing selected evidence
-			// remains visible in the authored-vs-captured funnel rather
-			// than aborting the report.
-			_ = data
-		}
+		keep, _, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(matchedArtifacts(matched)))
+		// Unlike manual/paired reports, discrimination tolerates partial
+		// labeling: missing-selected evidence does not abort the report. Gaps
+		// surface in the authored-vs-captured funnel downstream.
 		matched = filterMatchedByTrace(matched, keep)
 	}
 
 	qual := make(map[string]map[string]float64)
-	seen := make(map[manualLabelKey]string)
+	seen := make(map[manualLabelKey]string, len(matched))
 	for _, m := range matched {
 		tid := m.Artifact.TraceID
 		model := normalizeModelSelector(m.Artifact.CandidateModel)
-		key := manualScorerKey(tid, m.Artifact.CandidateModel)
+		key := manualLabelKey{traceID: tid, model: model}
 		id := tid + "/" + model
 		if prev, ok := seen[key]; ok {
 			return nil, fmt.Errorf("discrimination: %s and %s map to the same (trace, model); one artifact per (trace, model) is required", prev, id)

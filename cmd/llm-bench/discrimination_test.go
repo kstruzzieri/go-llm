@@ -2,6 +2,7 @@ package main
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -141,7 +142,11 @@ func TestBuildTraceModelQuality_RejectsDuplicatePair(t *testing.T) {
 		mkArtifact(t, "r3c-x-01", "ollama/gemma4:31b"), // same (trace, model)
 	}
 	matched := matchedLabelsForDiscrimination(arts, []float64{1.0, 0.5})
-	if _, err := buildTraceModelQualityFromMatched(matched, nil); err == nil {
+	_, err := buildTraceModelQualityFromMatched(matched, nil)
+	if err == nil {
 		t.Fatal("want error on duplicate (trace, model); got nil")
+	}
+	if !strings.Contains(err.Error(), "discrimination:") {
+		t.Fatalf("error %q must carry the discrimination: prefix", err)
 	}
 }
