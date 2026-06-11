@@ -82,3 +82,66 @@ func TestDiscriminationStates_Enumerated(t *testing.T) {
 		t.Fatalf("allDiscriminationStates() = %v; want %v", allDiscriminationStates(), want)
 	}
 }
+
+// mkArtifact builds a hash-self-consistent Artifact for discrimination tests.
+// Quality lives on the paired Label (see matchedLabelsForDiscrimination), never on the Artifact.
+func mkArtifact(t *testing.T, traceID, model string) Artifact {
+	t.Helper()
+	a := Artifact{
+		TraceID:        traceID,
+		CandidateModel: model,
+		Trace:          Trace{ID: traceID, Source: "round3-challenge", System: "s", Turns: []Turn{{Role: "user", Content: "q"}}},
+	}
+	a.ArtifactHash = artifactHash(a)
+	return a
+}
+
+// matchedLabelsForDiscrimination pairs each artifact with a Label carrying its
+// quality, by artifact_hash, returning the []matchedLabel the real entry point consumes.
+func matchedLabelsForDiscrimination(arts []Artifact, quals []float64) []matchedLabel {
+	out := make([]matchedLabel, len(arts))
+	for i, a := range arts {
+		out[i] = matchedLabel{
+			Artifact: a,
+			Label:    Label{ArtifactHash: a.ArtifactHash, ExpectedAnswerQuality: quals[i]},
+		}
+	}
+	return out
+}
+
+func TestBuildTraceModelQuality_DropsNonEvidenceAndKeysCanonical(t *testing.T) {
+	arts := []Artifact{
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/gemma4:31b"),
+		mkArtifact(t, "r3c-type-semantics-01", "openai-compat/glm-5.1"),
+		mkArtifact(t, "tool-canary-01", "ollama/gemma4:31b"), // judge-validation, must drop
+	}
+	matched := matchedLabelsForDiscrimination(arts, []float64{1.0, 0.5, 1.0})
+	m := Manifest{Entries: []ManifestEntry{
+		{TraceID: "r3c-type-semantics-01", Partition: PartitionChallenge, Category: "type-semantics", Source: "round3-challenge", AllowedAsModelEvidence: true},
+		{TraceID: "tool-canary-01", Partition: PartitionJudgeValidation, Category: "tool-canary", Source: "round3-challenge", AllowedAsModelEvidence: false},
+	}}
+
+	qual, err := buildTraceModelQualityFromMatched(matched, &corpusFilter{Manifest: m, Selection: corpusSelection{}})
+	if err != nil {
+		t.Fatalf("buildTraceModelQualityFromMatched: %v", err)
+	}
+	if _, ok := qual["tool-canary-01"]; ok {
+		t.Fatalf("canary must be dropped from model-evidence quality map")
+	}
+	got := qual["r3c-type-semantics-01"]
+	want := map[string]float64{"ollama/gemma4:31b": 1.0, "openai-compat/glm-5.1": 0.5}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("trace quality = %v; want %v (canonical-model keyed)", got, want)
+	}
+}
+
+func TestBuildTraceModelQuality_RejectsDuplicatePair(t *testing.T) {
+	arts := []Artifact{
+		mkArtifact(t, "r3c-x-01", "ollama/gemma4:31b"),
+		mkArtifact(t, "r3c-x-01", "ollama/gemma4:31b"), // same (trace, model)
+	}
+	matched := matchedLabelsForDiscrimination(arts, []float64{1.0, 0.5})
+	if _, err := buildTraceModelQualityFromMatched(matched, nil); err == nil {
+		t.Fatal("want error on duplicate (trace, model); got nil")
+	}
+}

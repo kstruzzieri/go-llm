@@ -107,4 +107,53 @@ func topAllEqual(top map[string]float64, topModels []string) bool {
 // labels / ≥20 fully paired retained traces — see §9.2 / L9).
 const round3DiscriminatorGateK = 10
 
-var _ = fmt.Sprintf // retained for report formatting added in Task A5
+// buildTraceModelQualityFromMatched groups matched labels into
+// traceID -> canonical-model -> quality, after dropping judge-validation and
+// non-model-evidence rows via the shared corpusEvidenceFilter. It rejects a
+// duplicate (trace, model) the same way runManualReport does — the classifier
+// must see exactly one quality per (trace, model).
+func buildTraceModelQualityFromMatched(matched []matchedLabel, filter *corpusFilter) (map[string]map[string]float64, error) {
+	if filter != nil {
+		keep, data, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(matchedArtifacts(matched)))
+		if data != nil && len(data.MissingSelected) > 0 {
+			// Unlike manual/paired reports, discrimination is allowed to
+			// run on partially-labeled sets. Missing selected evidence
+			// remains visible in the authored-vs-captured funnel rather
+			// than aborting the report.
+			_ = data
+		}
+		matched = filterMatchedByTrace(matched, keep)
+	}
+
+	qual := make(map[string]map[string]float64)
+	seen := make(map[manualLabelKey]string)
+	for _, m := range matched {
+		tid := m.Artifact.TraceID
+		model := normalizeModelSelector(m.Artifact.CandidateModel)
+		key := manualScorerKey(tid, m.Artifact.CandidateModel)
+		id := tid + "/" + model
+		if prev, ok := seen[key]; ok {
+			return nil, fmt.Errorf("discrimination: %s and %s map to the same (trace, model); one artifact per (trace, model) is required", prev, id)
+		}
+		seen[key] = id
+		if qual[tid] == nil {
+			qual[tid] = make(map[string]float64)
+		}
+		qual[tid][model] = m.Label.ExpectedAnswerQuality
+	}
+	return qual, nil
+}
+
+// buildTraceModelQuality loads (labels, artifacts) and returns the per-trace
+// per-model quality map. It is the IO wrapper around
+// buildTraceModelQualityFromMatched used by runDiscriminationReport.
+func buildTraceModelQuality(labelsPath, artifactsPath string, filter *corpusFilter) (map[string]map[string]float64, error) {
+	matched, _, err := loadLabelsMatchedAgainst(labelsPath, artifactsPath)
+	if err != nil {
+		return nil, err
+	}
+	if len(matched) == 0 {
+		return nil, fmt.Errorf("discrimination: no labels matched artifacts in %q / %q", labelsPath, artifactsPath)
+	}
+	return buildTraceModelQualityFromMatched(matched, filter)
+}
