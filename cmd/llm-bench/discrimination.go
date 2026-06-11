@@ -222,6 +222,12 @@ func runDiscriminationReport(opts discriminationOptions) (string, error) {
 	}
 	floorCanon := normalizeModelSelector(opts.FloorModel)
 
+	// sourceByTrace yields "" for a trace absent from the manifest. That cannot
+	// happen here: buildTraceModelQuality routes through corpusEvidenceFilter,
+	// which only keeps manifest-known trace IDs, so every tid in qual has a
+	// source. An empty-source stratum would otherwise surface visibly in the
+	// funnel (it never matches round3ChallengeSource, so it cannot inflate the
+	// K-gate).
 	sourceByTrace := make(map[string]string, len(manifest.Entries))
 	for _, e := range manifest.Entries {
 		sourceByTrace[e.TraceID] = e.Source
