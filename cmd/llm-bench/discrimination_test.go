@@ -15,7 +15,11 @@ func writeArtifactsJSONL(t *testing.T, path string, arts []Artifact) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Fatalf("close %s: %v", path, err)
+		}
+	}()
 	enc := json.NewEncoder(f)
 	for _, a := range arts {
 		if err := enc.Encode(a); err != nil {
@@ -30,7 +34,11 @@ func writeDiscriminationLabelsJSONL(t *testing.T, path string, arts []Artifact, 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer f.Close()
+	defer func() {
+		if err := f.Close(); err != nil {
+			t.Fatalf("close %s: %v", path, err)
+		}
+	}()
 	enc := json.NewEncoder(f)
 	for i, a := range arts {
 		if err := enc.Encode(Label{

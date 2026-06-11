@@ -382,7 +382,7 @@ go test ./... -v
 Enable the Docker-backed pre-push hook once per clone:
 
 ```bash
-git config core.hooksPath .githooks
+scripts/setup-local-ci
 ```
 
 Run the same full suite manually:
