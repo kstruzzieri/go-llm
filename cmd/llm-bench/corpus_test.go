@@ -366,6 +366,36 @@ func TestBuildCorpusRun_ReportDataSurfacesMissingAndUnclassified(t *testing.T) {
 	}
 }
 
+func TestSelect_FiltersBySource(t *testing.T) {
+	m := Manifest{Entries: []ManifestEntry{
+		{TraceID: "a", Partition: PartitionChallenge, Category: "type-semantics", Source: "round3-challenge", AllowedAsModelEvidence: true},
+		{TraceID: "b", Partition: PartitionChallenge, Category: "fabrication", Source: "round2-challenge", AllowedAsModelEvidence: true},
+		{TraceID: "c", Partition: PartitionNatural, Category: "explanation", Source: "first-accepted-run", AllowedAsModelEvidence: true},
+	}}
+
+	got := m.Select(corpusSelection{Sources: []string{"round3-challenge"}})
+	if !reflect.DeepEqual(got, []string{"a"}) {
+		t.Fatalf("Select(sources=[round3-challenge]) = %v; want [a]", got)
+	}
+
+	got = m.Select(corpusSelection{Sources: []string{"round3-challenge", "round2-challenge"}})
+	if !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("Select(sources=[round3,round2]) = %v; want [a b]", got)
+	}
+
+	// Empty Sources means "all sources" — composes with partition predicate.
+	got = m.Select(corpusSelection{Partitions: []CorpusPartition{PartitionChallenge}})
+	if !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("Select(partition=challenge, sources=nil) = %v; want [a b]", got)
+	}
+
+	// Source predicate ANDs with partition: round2 source AND natural partition = none.
+	got = m.Select(corpusSelection{Partitions: []CorpusPartition{PartitionNatural}, Sources: []string{"round2-challenge"}})
+	if len(got) != 0 {
+		t.Fatalf("Select(natural AND round2-challenge) = %v; want empty", got)
+	}
+}
+
 func TestSplitCommaList(t *testing.T) {
 	if got := splitCommaList(""); got != nil {
 		t.Fatalf("splitCommaList(\"\") = %v; want nil", got)
