@@ -44,10 +44,11 @@ func main() {
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	pairedReport := flag.Bool("paired-report", false, "Emit the paired-label report: paired-complete means, completeness worklist, win/loss/tie matrix, bootstrap delta CIs, resolution diagnostic (uses -labels, -artifacts, -baseline, -report)")
-	discriminationReport := flag.Bool("discrimination-report", false, "Classify each trace (spec §9.1: valid-discriminator/saturated/unsolved/floor-only/no-signal/unpaired), emit the per-stratum funnel + K-gate, and write the derived valid-discriminator manifest (uses -labels, -artifacts, -corpus-manifest, -top-models, -floor-model, -discriminator-manifest-out, -report; does NOT honor -corpus-sources/-partitions/-categories — it always classifies all strata so the funnel shows every source)")
-	topModels := flag.String("top-models", "", "Comma-separated top-cluster selectors for -discrimination-report (exactly as they appear as candidate_model in artifacts)")
-	floorModel := flag.String("floor-model", "", "Floor model selector for -discrimination-report")
-	discriminatorManifestOut := flag.String("discriminator-manifest-out", "", "Output path for the derived valid-discriminator manifest (gitignored); consumed by -manual-report/-paired-report -corpus-manifest")
+	discriminationReport := flag.Bool("discrimination-report", false, "Classify each trace (spec §9.1: valid-discriminator/saturated/unsolved/floor-only/no-signal/unpaired), emit the per-stratum funnel + K-gate, and write the derived valid-discriminator manifest (uses -labels, -artifacts, -corpus-manifest, -top-models, -floor-model, -gate-source, -discriminator-manifest-out, -report; does NOT honor -corpus-sources/-partitions/-categories — it always classifies all strata so the funnel shows every source)")
+	topModels := flag.String("top-models", "", "Comma-separated top-cluster selectors for -discrimination-report (transport prefix optional; e.g. gemma4:31b or ollama/gemma4:31b)")
+	floorModel := flag.String("floor-model", "", "Floor model selector for -discrimination-report (transport prefix optional)")
+	gateSource := flag.String("gate-source", "", "Provenance source the §9.2 K-gate is decided on for -discrimination-report (empty = round3-challenge)")
+	discriminatorManifestOut := flag.String("discriminator-manifest-out", "", "Output path for the derived valid-discriminator manifest (gitignored); contains all valid-discriminator sources, so pair with -corpus-sources for stratum-specific -manual-report/-paired-report views")
 	fimLatency := flag.Bool("fim-latency", false, "Measure FIM / inline-completion latency separately from chat latency (uses -fim-cases, -models, -fim-num-predict, -fim-warmup, -report)")
 	fimCases := flag.String("fim-cases", "", "Glob for FIM case JSON files (prefix/suffix), required with -fim-latency")
 	fimNumPredict := flag.Int("fim-num-predict", defaultFIMNumPredict, "Max tokens to generate per FIM completion (interactive regime is short)")
@@ -306,12 +307,16 @@ func main() {
 		if strings.TrimSpace(*corpusManifestPath) == "" {
 			log.Fatalf("llm-bench: -discrimination-report requires -corpus-manifest")
 		}
+		if strings.TrimSpace(*corpusSources) != "" {
+			log.Printf("llm-bench: ignoring -corpus-sources in -discrimination-report mode (all strata are classified so the funnel shows every source)")
+		}
 		report, err := runDiscriminationReport(discriminationOptions{
 			LabelsPath:               *labelsPath,
 			ArtifactsPath:            *artifactsPath,
 			ManifestPath:             *corpusManifestPath,
 			TopModels:                splitCommaList(*topModels),
 			FloorModel:               *floorModel,
+			GateSource:               *gateSource,
 			DiscriminatorManifestOut: *discriminatorManifestOut,
 		})
 		if err != nil {

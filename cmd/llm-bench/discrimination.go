@@ -53,6 +53,11 @@ func allDiscriminationStates() []discriminationState {
 // missing, the trace cannot be split into floor-only vs no-signal, so it is
 // also stateUnpaired rather than a guessed agreement.
 func classifyTrace(top map[string]float64, topModels []string, floor float64, floorOK bool) discriminationState {
+	// Step 0: no declared top cluster cannot be classified. Without this the
+	// "all top == 1.0" check below is vacuously true and misreports saturated.
+	if len(topModels) == 0 {
+		return stateUnpaired
+	}
 	// Step 1: any top model missing a label.
 	for _, m := range topModels {
 		if _, ok := top[m]; !ok {
@@ -112,11 +117,13 @@ func topAllEqual(top map[string]float64, topModels []string) bool {
 // labels / ≥20 fully paired retained traces — see §9.2 / L9).
 const round3DiscriminatorGateK = 10
 
-// round3ChallengeSource is the provenance source whose valid-discriminator
-// count the §9.2 K-gate is evaluated against. Kept as a named const so the
-// gate's coupling to the R3-fresh stratum is explicit. Other strata (e.g. the
-// round2-challenge regression anchor) are still classified and tabulated, but
-// the PASS/INCONCLUSIVE verdict is decided only on this source.
+// round3ChallengeSource is the default provenance source whose
+// valid-discriminator count the §9.2 K-gate is evaluated against (override per
+// run with discriminationOptions.GateSource / -gate-source). Kept as a named
+// const so the gate's default coupling to the R3-fresh stratum is explicit.
+// Other strata (e.g. the round2-challenge regression anchor) are still
+// classified and tabulated, but the PASS/INCONCLUSIVE verdict is decided only
+// on the gate source.
 const round3ChallengeSource = "round3-challenge"
 
 // buildTraceModelQualityFromMatched groups matched labels into
@@ -124,6 +131,13 @@ const round3ChallengeSource = "round3-challenge"
 // non-model-evidence rows via the shared corpusEvidenceFilter. It rejects a
 // duplicate (trace, model) — the classifier must see exactly one quality per
 // (trace, model), keyed identically to the quality map.
+//
+// The {0.0, 0.5, 1.0} domain that classifyTrace's == 1.0 logic depends on is
+// enforced once, at load, by loadLabels (calibration.go) for every mode; an
+// out-of-domain label aborts before reaching here, so this function does not
+// re-validate. The remaining label-schema limitation (an omitted
+// expected_answer_quality decodes to a real-looking 0.0) is global, documented
+// at loadLabels, and out of scope for discrimination.
 func buildTraceModelQualityFromMatched(matched []matchedLabel, filter *corpusFilter) (map[string]map[string]float64, error) {
 	if filter != nil {
 		keep, _, _ := corpusEvidenceFilter(filter.Manifest, filter.Selection, tracesFromArtifacts(matchedArtifacts(matched)))
@@ -174,6 +188,7 @@ type discriminationOptions struct {
 	TopModels                []string // canonical-or-prefixed selectors, ANDed as the top cluster
 	FloorModel               string
 	DiscriminatorManifestOut string // gitignored derived subset manifest; "" disables
+	GateSource               string // provenance source the §9.2 K-gate is decided on; "" = round3ChallengeSource
 }
 
 // traceClassification is one trace's resolved state plus the inputs that
@@ -183,6 +198,7 @@ type traceClassification struct {
 	Source        string
 	State         discriminationState
 	MissingModels []string
+	FloorInverted bool // floor model outscored the tied top cluster (a data anomaly)
 }
 
 // stratumFunnel tallies one provenance source: authored (manifest entries),
@@ -216,18 +232,42 @@ func runDiscriminationReport(opts discriminationOptions) (string, error) {
 		return "", err
 	}
 
-	topCanon := make([]string, len(opts.TopModels))
-	for i, m := range opts.TopModels {
-		topCanon[i] = normalizeModelSelector(m)
+	// Resolve panel selectors against the captured keyspace. An exact match wins;
+	// otherwise the transport prefix is ignored (consistent with
+	// modelSelectorsEqual used elsewhere) so "gemma4:31b" resolves to a captured
+	// "ollama/gemma4:31b" instead of silently classifying the trace as unpaired.
+	// An ambiguous selector (same base model under two transports) is an operator
+	// input error and fails loud, not a silent gate deflation. The resolved top
+	// cluster is de-duplicated so two spellings of one model cannot double-list.
+	present := presentModelKeys(qual)
+	topCanon := make([]string, 0, len(opts.TopModels))
+	seenTop := make(map[string]struct{}, len(opts.TopModels))
+	for _, m := range opts.TopModels {
+		r, rerr := resolvePanelSelector(m, present)
+		if rerr != nil {
+			return "", rerr
+		}
+		if _, dup := seenTop[r]; dup {
+			continue
+		}
+		seenTop[r] = struct{}{}
+		topCanon = append(topCanon, r)
 	}
-	floorCanon := normalizeModelSelector(opts.FloorModel)
+	floorCanon, ferr := resolvePanelSelector(opts.FloorModel, present)
+	if ferr != nil {
+		return "", ferr
+	}
+
+	gateSource := strings.TrimSpace(opts.GateSource)
+	if gateSource == "" {
+		gateSource = round3ChallengeSource
+	}
 
 	// sourceByTrace yields "" for a trace absent from the manifest. That cannot
 	// happen here: buildTraceModelQuality routes through corpusEvidenceFilter,
 	// which only keeps manifest-known trace IDs, so every tid in qual has a
 	// source. An empty-source stratum would otherwise surface visibly in the
-	// funnel (it never matches round3ChallengeSource, so it cannot inflate the
-	// K-gate).
+	// funnel (it never matches gateSource, so it cannot inflate the K-gate).
 	sourceByTrace := make(map[string]string, len(manifest.Entries))
 	for _, e := range manifest.Entries {
 		sourceByTrace[e.TraceID] = e.Source
@@ -244,6 +284,7 @@ func runDiscriminationReport(opts discriminationOptions) (string, error) {
 			Source:        sourceByTrace[tid],
 			State:         state,
 			MissingModels: missingModelsForClassification(models, topCanon, floorCanon, state),
+			FloorInverted: floorBeatsTop(models, topCanon, floorQ, floorOK),
 		})
 	}
 	sort.Slice(classifications, func(i, j int) bool {
@@ -257,7 +298,87 @@ func runDiscriminationReport(opts discriminationOptions) (string, error) {
 	if err := writeDiscriminatorManifest(opts.DiscriminatorManifestOut, manifest, classifications); err != nil {
 		return "", err
 	}
-	return formatDiscriminationReport(classifications, funnels, topCanon, floorCanon), nil
+	return formatDiscriminationReport(classifications, funnels, topCanon, floorCanon, gateSource, opts.DiscriminatorManifestOut), nil
+}
+
+// presentModelKeys is the set of canonical model keys actually appearing in the
+// quality map. Panel selectors resolve against it.
+func presentModelKeys(qual map[string]map[string]float64) map[string]struct{} {
+	keys := make(map[string]struct{})
+	for _, models := range qual {
+		for k := range models {
+			keys[k] = struct{}{}
+		}
+	}
+	return keys
+}
+
+// resolvePanelSelector maps a user-supplied -top-models/-floor-model selector to
+// the captured artifact key it denotes. An exact normalized match wins;
+// otherwise the transport prefix is ignored (matching modelSelectorsEqual used
+// elsewhere in the tool), so "gemma4:31b" resolves to a captured
+// "ollama/gemma4:31b". A selector matching the same base model under two
+// transports is ambiguous operator input and errors loudly. An unresolved
+// selector returns its normalized form, which is absent from the keyspace and so
+// surfaces as unpaired/missing rather than being silently mis-bound.
+func resolvePanelSelector(sel string, present map[string]struct{}) (string, error) {
+	n := normalizeModelSelector(sel)
+	if _, ok := present[n]; ok {
+		return n, nil
+	}
+	target := strings.ToLower(modelSelectorWithoutBenchProvider(sel))
+	var matches []string
+	for k := range present {
+		if strings.ToLower(modelSelectorWithoutBenchProvider(k)) == target {
+			matches = append(matches, k)
+		}
+	}
+	if len(matches) > 1 {
+		sort.Strings(matches)
+		return "", fmt.Errorf("discrimination: panel selector %q is ambiguous; it matches %v — qualify it with the transport prefix", sel, matches)
+	}
+	if len(matches) == 1 {
+		return matches[0], nil
+	}
+	return n, nil
+}
+
+// floorBeatsTop reports whether the floor model strictly outscored the best top
+// model — an anomaly (a cheap floor model beating the frontier panel) worth
+// flagging in any state it can occur, not just floor-only. It requires every top
+// model present (an incomplete top cannot be cleanly compared).
+func floorBeatsTop(models map[string]float64, topModels []string, floorQ float64, floorOK bool) bool {
+	if !floorOK || len(topModels) == 0 {
+		return false
+	}
+	maxTop, ok := models[topModels[0]]
+	if !ok {
+		return false
+	}
+	for _, m := range topModels[1:] {
+		v, ok := models[m]
+		if !ok {
+			return false
+		}
+		if v > maxTop {
+			maxTop = v
+		}
+	}
+	return floorQ > maxTop
+}
+
+// validDiscriminatorIDs is the set of trace IDs that classified as
+// valid-discriminator. It is the single source of truth for both the derived
+// manifest's contents and the report's valid-discriminator count, so the two
+// cannot drift.
+func validDiscriminatorIDs(cls []traceClassification) map[string]struct{} {
+	ids := make(map[string]struct{})
+	for _, c := range cls {
+		if c.State == stateValidDiscriminator {
+			ids[c.TraceID] = struct{}{}
+		}
+	}
+	return ids
 }
 
 // missingModelsForClassification returns the declared panel members whose
@@ -298,10 +419,22 @@ func buildStratumFunnels(m Manifest, captured map[string]bool, cls []traceClassi
 		}
 		return f
 	}
+	// Count each trace once per source; a trace listed under multiple manifest
+	// entries must not inflate Authored/Captured past the unique trace count.
+	authoredSeen := map[string]map[string]bool{}
 	for _, e := range m.Entries {
 		if e.Partition == PartitionJudgeValidation || !e.AllowedAsModelEvidence {
 			continue
 		}
+		seen := authoredSeen[e.Source]
+		if seen == nil {
+			seen = map[string]bool{}
+			authoredSeen[e.Source] = seen
+		}
+		if seen[e.TraceID] {
+			continue
+		}
+		seen[e.TraceID] = true
 		f := get(e.Source)
 		f.Authored++
 		if captured[e.TraceID] {
@@ -327,13 +460,7 @@ func writeDiscriminatorManifest(path string, m Manifest, cls []traceClassificati
 	if strings.TrimSpace(path) == "" {
 		return nil
 	}
-	valid := make(map[string]struct{})
-	for _, c := range cls {
-		if c.State == stateValidDiscriminator {
-			valid[c.TraceID] = struct{}{}
-		}
-	}
-	sub := m.entriesFor(valid)
+	sub := m.entriesFor(validDiscriminatorIDs(cls))
 	if len(sub.Entries) == 0 {
 		// Truncate/clear any stale file from a previous run, but still allow
 		// the discrimination report to be emitted. loadManifest rejects an
@@ -345,10 +472,10 @@ func writeDiscriminatorManifest(path string, m Manifest, cls []traceClassificati
 }
 
 // formatDiscriminationReport renders the funnel table, the §9.2 K-gate verdict
-// (decided on round3ChallengeSource), and the per-trace classification table.
-// cls is expected pre-sorted by (source, trace) by the caller. The whole output
-// is run through redactPaths before return.
-func formatDiscriminationReport(cls []traceClassification, funnels []stratumFunnel, topCanon []string, floorCanon string) string {
+// (decided on gateSource when that stratum exists), and the per-trace
+// classification table. cls is expected pre-sorted by (source, trace) by the
+// caller. The whole output is run through redactPaths before return.
+func formatDiscriminationReport(cls []traceClassification, funnels []stratumFunnel, topCanon []string, floorCanon, gateSource, discriminatorManifestOut string) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "# llm-bench — discrimination report (spec §9)")
 	fmt.Fprintln(&b)
@@ -366,26 +493,56 @@ func formatDiscriminationReport(cls []traceClassification, funnels []stratumFunn
 	}
 	fmt.Fprintln(&b)
 
-	// K-gate verdict on the R3-fresh stratum.
-	r3Valid := 0
+	// K-gate verdict on the gate stratum. Round-2 anchor discovery and other
+	// non-gated reports are valid uses of this tool, but they do not have a gate
+	// stratum present.
+	gateValid := 0
+	hasGate := false
+	sourcesSeen := make([]string, 0, len(funnels))
 	for _, f := range funnels {
-		if f.Source == round3ChallengeSource {
-			r3Valid = f.States[stateValidDiscriminator]
+		sourcesSeen = append(sourcesSeen, f.Source)
+		if f.Source == gateSource {
+			hasGate = true
+			gateValid = f.States[stateValidDiscriminator]
 		}
 	}
-	verdict := "PASS"
-	if r3Valid < round3DiscriminatorGateK {
-		verdict = "INCONCLUSIVE (under-resolved; do not cite as a frontier-vs-local conclusion)"
+	if !hasGate {
+		seen := "(none)"
+		if len(sourcesSeen) > 0 {
+			seen = strings.Join(sourcesSeen, ", ")
+		}
+		// Naming the sources present makes a manifest source typo (which would
+		// otherwise read as a benign "nothing to gate") auditable at a glance.
+		fmt.Fprintf(&b, "## K-gate (spec §9.2): N/A — no %s stratum present (sources seen: %s)\n\n", gateSource, seen)
+	} else {
+		verdict := "PASS"
+		if gateValid < round3DiscriminatorGateK {
+			verdict = "INCONCLUSIVE (under-resolved; do not cite as a frontier-vs-local conclusion)"
+		}
+		fmt.Fprintf(&b, "## K-gate (spec §9.2): VALID_DISCRIMINATORS=%d of K=%d → %s\n\n", gateValid, round3DiscriminatorGateK, verdict)
 	}
-	fmt.Fprintf(&b, "## K-gate (spec §9.2): VALID_DISCRIMINATORS=%d of K=%d → %s\n\n", r3Valid, round3DiscriminatorGateK, verdict)
+
+	if strings.TrimSpace(discriminatorManifestOut) != "" {
+		if len(validDiscriminatorIDs(cls)) == 0 {
+			// The derived manifest was truncated to empty; loadManifest rejects an
+			// empty file, so do not send the operator off to consume it.
+			fmt.Fprintln(&b, "Derived manifest: 0 valid discriminators — the derived manifest is empty and has nothing to consume downstream.")
+		} else {
+			fmt.Fprintf(&b, "Derived manifest note: contains every valid-discriminator trace across all reported sources. For the gate stratum's top-resolution view, consume it with `-corpus-sources %s`; use other source filters for anchor or regression views.\n", gateSource)
+		}
+		fmt.Fprintln(&b)
+	}
 
 	fmt.Fprintln(&b, "## Per-trace classification")
 	fmt.Fprintln(&b, "| Trace | Source | State | Details |")
 	fmt.Fprintln(&b, "|---|---|---|---|")
 	for _, c := range cls {
 		details := ""
-		if len(c.MissingModels) > 0 {
+		switch {
+		case len(c.MissingModels) > 0:
 			details = "missing: " + strings.Join(c.MissingModels, ", ")
+		case c.FloorInverted:
+			details = "anomaly: floor outscored top cluster"
 		}
 		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", markdownCell(c.TraceID), markdownCell(c.Source), c.State, markdownCell(details))
 	}

@@ -145,7 +145,8 @@ func runManualReport(ctx context.Context, labelsPath, artifactsPath string, filt
 		// partitions).
 		stale = filterLabelsByTrace(stale, keep)
 		if len(matched) == 0 {
-			return "", fmt.Errorf("corpus selection matched no labeled artifacts")
+			return "", fmt.Errorf("corpus selection matched no labeled artifacts (partitions=%v categories=%v sources=%v only-evidence=%v) — check for a typo in the selection",
+				filter.Selection.Partitions, filter.Selection.Categories, filter.Selection.Sources, filter.Selection.OnlyModelEvidence)
 		}
 	}
 
