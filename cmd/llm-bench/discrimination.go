@@ -1,6 +1,11 @@
 package main
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+	"sort"
+	"strings"
+)
 
 // discriminationState is the per-trace classification from the Round-3 design
 // spec §9.1. The states are mutually exclusive; an ordered decision procedure
@@ -152,4 +157,216 @@ func buildTraceModelQuality(labelsPath, artifactsPath string, filter *corpusFilt
 		return nil, fmt.Errorf("discrimination: no labels matched artifacts in %q / %q", labelsPath, artifactsPath)
 	}
 	return buildTraceModelQualityFromMatched(matched, filter)
+}
+
+// discriminationOptions configures runDiscriminationReport.
+type discriminationOptions struct {
+	LabelsPath               string
+	ArtifactsPath            string
+	ManifestPath             string
+	TopModels                []string // canonical-or-prefixed selectors, ANDed as the top cluster
+	FloorModel               string
+	DiscriminatorManifestOut string // gitignored derived subset manifest; "" disables
+}
+
+// traceClassification is one trace's resolved state plus the inputs that
+// produced it, kept for the auditable per-trace table.
+type traceClassification struct {
+	TraceID       string
+	Source        string
+	State         discriminationState
+	MissingModels []string
+}
+
+// stratumFunnel tallies one provenance source: authored (manifest entries),
+// captured (traces with ≥1 model-evidence label), and the per-state counts.
+type stratumFunnel struct {
+	Source   string
+	Authored int
+	Captured int
+	States   map[discriminationState]int
+}
+
+func runDiscriminationReport(opts discriminationOptions) (string, error) {
+	if len(opts.TopModels) == 0 {
+		return "", fmt.Errorf("discrimination: -top-models is required")
+	}
+	if strings.TrimSpace(opts.FloorModel) == "" {
+		return "", fmt.Errorf("discrimination: -floor-model is required")
+	}
+	manifest, err := loadManifest(opts.ManifestPath)
+	if err != nil {
+		return "", fmt.Errorf("discrimination: load manifest: %w", err)
+	}
+	filter := &corpusFilter{Manifest: manifest, Selection: corpusSelection{}}
+	qual, err := buildTraceModelQuality(opts.LabelsPath, opts.ArtifactsPath, filter)
+	if err != nil {
+		return "", err
+	}
+
+	topCanon := make([]string, len(opts.TopModels))
+	for i, m := range opts.TopModels {
+		topCanon[i] = normalizeModelSelector(m)
+	}
+	floorCanon := normalizeModelSelector(opts.FloorModel)
+
+	sourceByTrace := make(map[string]string, len(manifest.Entries))
+	for _, e := range manifest.Entries {
+		sourceByTrace[e.TraceID] = e.Source
+	}
+
+	var classifications []traceClassification
+	captured := make(map[string]bool)
+	for tid, models := range qual {
+		captured[tid] = true
+		floorQ, floorOK := models[floorCanon]
+		state := classifyTrace(models, topCanon, floorQ, floorOK)
+		classifications = append(classifications, traceClassification{
+			TraceID:       tid,
+			Source:        sourceByTrace[tid],
+			State:         state,
+			MissingModels: missingModelsForClassification(models, topCanon, floorCanon, state),
+		})
+	}
+	sort.Slice(classifications, func(i, j int) bool {
+		if classifications[i].Source != classifications[j].Source {
+			return classifications[i].Source < classifications[j].Source
+		}
+		return classifications[i].TraceID < classifications[j].TraceID
+	})
+
+	funnels := buildStratumFunnels(manifest, captured, classifications)
+	if err := writeDiscriminatorManifest(opts.DiscriminatorManifestOut, manifest, classifications); err != nil {
+		return "", err
+	}
+	return formatDiscriminationReport(classifications, funnels, topCanon, floorCanon), nil
+}
+
+// missingModelsForClassification returns the declared panel members whose
+// labels were missing when the trace resolved to unpaired/missing. This keeps
+// missing coverage auditable in the per-trace table instead of hiding it in a
+// state count.
+func missingModelsForClassification(models map[string]float64, topModels []string, floorModel string, state discriminationState) []string {
+	if state != stateUnpaired {
+		return nil
+	}
+	var missing []string
+	for _, m := range topModels {
+		if _, ok := models[m]; !ok {
+			missing = append(missing, m)
+		}
+	}
+	if len(missing) > 0 {
+		return missing
+	}
+	if _, ok := models[floorModel]; !ok {
+		missing = append(missing, floorModel)
+	}
+	return missing
+}
+
+// buildStratumFunnels tallies authored/captured/state counts per source. Only
+// model-evidence challenge entries are counted as authored (judge-validation
+// canaries are excluded from the discrimination view).
+func buildStratumFunnels(m Manifest, captured map[string]bool, cls []traceClassification) []stratumFunnel {
+	bySource := map[string]*stratumFunnel{}
+	order := []string{}
+	get := func(src string) *stratumFunnel {
+		f, ok := bySource[src]
+		if !ok {
+			f = &stratumFunnel{Source: src, States: map[discriminationState]int{}}
+			bySource[src] = f
+			order = append(order, src)
+		}
+		return f
+	}
+	for _, e := range m.Entries {
+		if e.Partition == PartitionJudgeValidation || !e.AllowedAsModelEvidence {
+			continue
+		}
+		f := get(e.Source)
+		f.Authored++
+		if captured[e.TraceID] {
+			f.Captured++
+		}
+	}
+	for _, c := range cls {
+		get(c.Source).States[c.State]++
+	}
+	sort.Strings(order)
+	out := make([]stratumFunnel, 0, len(order))
+	for _, src := range order {
+		out = append(out, *bySource[src])
+	}
+	return out
+}
+
+// writeDiscriminatorManifest emits the valid-discriminator subset as a
+// gitignored manifest in the same ManifestEntry format, preserving manifest
+// order so downstream -manual-report / -paired-report can consume it directly
+// via -corpus-manifest. Empty path disables.
+func writeDiscriminatorManifest(path string, m Manifest, cls []traceClassification) error {
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	valid := make(map[string]struct{})
+	for _, c := range cls {
+		if c.State == stateValidDiscriminator {
+			valid[c.TraceID] = struct{}{}
+		}
+	}
+	sub := m.entriesFor(valid)
+	if len(sub.Entries) == 0 {
+		// Truncate/clear any stale file from a previous run, but still allow
+		// the discrimination report to be emitted. loadManifest rejects an
+		// empty file, which is the right failure if someone accidentally tries
+		// to consume a zero-discriminator selector downstream.
+		return os.WriteFile(path, nil, 0o600)
+	}
+	return writeManifest(path, sub)
+}
+
+func formatDiscriminationReport(cls []traceClassification, funnels []stratumFunnel, topCanon []string, floorCanon string) string {
+	var b strings.Builder
+	fmt.Fprintln(&b, "# llm-bench — discrimination report (spec §9)")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "Top cluster: %s\n", strings.Join(topCanon, ", "))
+	fmt.Fprintf(&b, "Floor model: %s\n\n", floorCanon)
+
+	fmt.Fprintln(&b, "## Funnel by stratum (source)")
+	fmt.Fprintln(&b, "| Source | Authored | Captured | valid-discriminator | saturated | unsolved | floor-only | no-signal | unpaired/missing |")
+	fmt.Fprintln(&b, "|---|--:|--:|--:|--:|--:|--:|--:|--:|")
+	for _, f := range funnels {
+		fmt.Fprintf(&b, "| %s | %d | %d | %d | %d | %d | %d | %d | %d |\n",
+			markdownCell(f.Source), f.Authored, f.Captured,
+			f.States[stateValidDiscriminator], f.States[stateSaturated], f.States[stateUnsolved],
+			f.States[stateFloorOnly], f.States[stateNoSignal], f.States[stateUnpaired])
+	}
+	fmt.Fprintln(&b)
+
+	// K-gate verdict on the R3-fresh stratum.
+	r3Valid := 0
+	for _, f := range funnels {
+		if f.Source == "round3-challenge" {
+			r3Valid = f.States[stateValidDiscriminator]
+		}
+	}
+	verdict := "PASS"
+	if r3Valid < round3DiscriminatorGateK {
+		verdict = "INCONCLUSIVE (under-resolved; do not cite as a frontier-vs-local conclusion)"
+	}
+	fmt.Fprintf(&b, "## K-gate (spec §9.2): VALID_DISCRIMINATORS=%d of K=%d → %s\n\n", r3Valid, round3DiscriminatorGateK, verdict)
+
+	fmt.Fprintln(&b, "## Per-trace classification")
+	fmt.Fprintln(&b, "| Trace | Source | State | Details |")
+	fmt.Fprintln(&b, "|---|---|---|---|")
+	for _, c := range cls {
+		details := ""
+		if len(c.MissingModels) > 0 {
+			details = "missing: " + strings.Join(c.MissingModels, ", ")
+		}
+		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", markdownCell(c.TraceID), markdownCell(c.Source), c.State, markdownCell(details))
+	}
+	fmt.Fprintln(&b)
+	return redactPaths(b.String())
 }

@@ -1,10 +1,49 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
 )
+
+func writeArtifactsJSONL(t *testing.T, path string, arts []Artifact) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for _, a := range arts {
+		if err := enc.Encode(a); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func writeDiscriminationLabelsJSONL(t *testing.T, path string, arts []Artifact, quals []float64) {
+	t.Helper()
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	enc := json.NewEncoder(f)
+	for i, a := range arts {
+		if err := enc.Encode(Label{
+			TraceID:               a.TraceID,
+			CandidateModel:        a.CandidateModel,
+			ArtifactHash:          a.ArtifactHash,
+			ExpectedAnswerQuality: quals[i],
+			Labeler:               "test",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
 
 func TestClassifyTrace_AllStates(t *testing.T) {
 	top := []string{"gemma", "coder", "qwen36", "glm"}
@@ -148,5 +187,103 @@ func TestBuildTraceModelQuality_RejectsDuplicatePair(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "discrimination:") {
 		t.Fatalf("error %q must carry the discrimination: prefix", err)
+	}
+}
+
+func TestRunDiscriminationReport_ClassifiesFunnelAndWritesDerivedManifest(t *testing.T) {
+	dir := t.TempDir()
+
+	// Two R3-fresh traces: one valid discriminator, one saturated.
+	arts := []Artifact{
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/gemma4:31b"),
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/qwen3-coder-next:latest"),
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/qwen3.6:35b-a3b"),
+		mkArtifact(t, "r3c-type-semantics-01", "openai-compat/glm-5.1"),
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/qwen3:8b"),
+		mkArtifact(t, "r3c-stdlib-contract-01", "ollama/gemma4:31b"),
+		mkArtifact(t, "r3c-stdlib-contract-01", "ollama/qwen3-coder-next:latest"),
+		mkArtifact(t, "r3c-stdlib-contract-01", "ollama/qwen3.6:35b-a3b"),
+		mkArtifact(t, "r3c-stdlib-contract-01", "openai-compat/glm-5.1"),
+		mkArtifact(t, "r3c-stdlib-contract-01", "ollama/qwen3:8b"),
+	}
+	quals := []float64{1.0, 0.5, 0.5, 0.5, 0.0, /*sat*/ 1.0, 1.0, 1.0, 1.0, 1.0}
+
+	artPath := filepath.Join(dir, "artifacts.jsonl")
+	labelPath := filepath.Join(dir, "labels.jsonl")
+	writeArtifactsJSONL(t, artPath, arts)
+	writeDiscriminationLabelsJSONL(t, labelPath, arts, quals)
+
+	mPath := filepath.Join(dir, "m.jsonl")
+	if err := writeManifest(mPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "r3c-type-semantics-01", Partition: PartitionChallenge, Category: "type-semantics", Source: "round3-challenge", AllowedAsModelEvidence: true},
+		{TraceID: "r3c-stdlib-contract-01", Partition: PartitionChallenge, Category: "stdlib-contract", Source: "round3-challenge", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	outPath := filepath.Join(dir, "discriminators.jsonl")
+	report, err := runDiscriminationReport(discriminationOptions{
+		LabelsPath:               labelPath,
+		ArtifactsPath:            artPath,
+		ManifestPath:             mPath,
+		TopModels:                []string{"ollama/gemma4:31b", "ollama/qwen3-coder-next:latest", "ollama/qwen3.6:35b-a3b", "openai-compat/glm-5.1"},
+		FloorModel:               "ollama/qwen3:8b",
+		DiscriminatorManifestOut: outPath,
+	})
+	if err != nil {
+		t.Fatalf("runDiscriminationReport: %v", err)
+	}
+	if !strings.Contains(report, "valid-discriminator") || !strings.Contains(report, "saturated") {
+		t.Fatalf("report missing classification states:\n%s", report)
+	}
+	if !strings.Contains(report, "round3-challenge") {
+		t.Fatalf("report missing R3-fresh stratum")
+	}
+	// K-gate line present with the count (1 valid of 2).
+	if !strings.Contains(report, "VALID_DISCRIMINATORS=1") {
+		t.Fatalf("report missing valid-discriminator count line:\n%s", report)
+	}
+
+	derived, err := loadManifest(outPath)
+	if err != nil {
+		t.Fatalf("derived manifest must load: %v", err)
+	}
+	if len(derived.Entries) != 1 || derived.Entries[0].TraceID != "r3c-type-semantics-01" {
+		t.Fatalf("derived manifest = %+v; want only the valid discriminator", derived.Entries)
+	}
+}
+
+func TestRunDiscriminationReport_FailsLoudOnMissingTopLabel(t *testing.T) {
+	dir := t.TempDir()
+	// glm label absent for the trace -> unpaired/missing, surfaced loudly.
+	arts := []Artifact{
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/gemma4:31b"),
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/qwen3-coder-next:latest"),
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/qwen3.6:35b-a3b"),
+		mkArtifact(t, "r3c-type-semantics-01", "ollama/qwen3:8b"),
+	}
+	quals := []float64{1.0, 0.5, 0.5, 0.0}
+	artPath := filepath.Join(dir, "artifacts.jsonl")
+	labelPath := filepath.Join(dir, "labels.jsonl")
+	writeArtifactsJSONL(t, artPath, arts)
+	writeDiscriminationLabelsJSONL(t, labelPath, arts, quals)
+	mPath := filepath.Join(dir, "m.jsonl")
+	if err := writeManifest(mPath, Manifest{Entries: []ManifestEntry{
+		{TraceID: "r3c-type-semantics-01", Partition: PartitionChallenge, Category: "type-semantics", Source: "round3-challenge", AllowedAsModelEvidence: true},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := runDiscriminationReport(discriminationOptions{
+		LabelsPath:    labelPath,
+		ArtifactsPath: artPath,
+		ManifestPath:  mPath,
+		TopModels:     []string{"ollama/gemma4:31b", "ollama/qwen3-coder-next:latest", "ollama/qwen3.6:35b-a3b", "openai-compat/glm-5.1"},
+		FloorModel:    "ollama/qwen3:8b",
+	})
+	if err != nil {
+		t.Fatalf("runDiscriminationReport: %v", err)
+	}
+	if !strings.Contains(report, "| r3c-type-semantics-01 | round3-challenge | unpaired/missing | missing: openai-compat/glm-5.1 |") {
+		t.Fatalf("missing top label must be surfaced loudly with the model name:\n%s", report)
 	}
 }
