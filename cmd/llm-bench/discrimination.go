@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -295,7 +296,7 @@ func runDiscriminationReport(opts discriminationOptions) (string, error) {
 	})
 
 	funnels := buildStratumFunnels(manifest, captured, classifications)
-	if err := writeDiscriminatorManifest(opts.DiscriminatorManifestOut, manifest, classifications); err != nil {
+	if err := writeDiscriminatorManifest(opts.DiscriminatorManifestOut, opts.ManifestPath, manifest, classifications); err != nil {
 		return "", err
 	}
 	return formatDiscriminationReport(classifications, funnels, topCanon, floorCanon, gateSource, opts.DiscriminatorManifestOut), nil
@@ -456,19 +457,52 @@ func buildStratumFunnels(m Manifest, captured map[string]bool, cls []traceClassi
 // gitignored manifest in the same ManifestEntry format, preserving manifest
 // order so downstream -manual-report / -paired-report can consume it directly
 // via -corpus-manifest. Empty path disables.
-func writeDiscriminatorManifest(path string, m Manifest, cls []traceClassification) error {
-	if strings.TrimSpace(path) == "" {
+func writeDiscriminatorManifest(path, sourceManifestPath string, m Manifest, cls []traceClassification) error {
+	path = strings.TrimSpace(path)
+	if path == "" {
 		return nil
 	}
-	sub := m.entriesFor(validDiscriminatorIDs(cls))
-	if len(sub.Entries) == 0 {
-		// Truncate/clear any stale file from a previous run, but still allow
-		// the discrimination report to be emitted. loadManifest rejects an
-		// empty file, which is the right failure if someone accidentally tries
-		// to consume a zero-discriminator selector downstream.
-		return os.WriteFile(path, nil, 0o600)
+	if err := validateDiscriminatorManifestOutputPath(path, sourceManifestPath); err != nil {
+		return err
 	}
+	sub := m.entriesFor(validDiscriminatorIDs(cls))
 	return writeManifest(path, sub)
+}
+
+func validateDiscriminatorManifestOutputPath(path, sourceManifestPath string) error {
+	sourceManifestPath = strings.TrimSpace(sourceManifestPath)
+	if sourceManifestPath == "" {
+		return nil
+	}
+	if sameCleanedPath(path, sourceManifestPath) {
+		return fmt.Errorf("discrimination: -discriminator-manifest-out %q must differ from -corpus-manifest %q", path, sourceManifestPath)
+	}
+	sourceInfo, err := os.Stat(sourceManifestPath)
+	if err != nil {
+		return fmt.Errorf("discrimination: stat -corpus-manifest %q: %w", sourceManifestPath, err)
+	}
+	outInfo, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("discrimination: stat -discriminator-manifest-out %q: %w", path, err)
+	}
+	if os.SameFile(outInfo, sourceInfo) {
+		return fmt.Errorf("discrimination: -discriminator-manifest-out %q resolves to the same file as -corpus-manifest %q; choose a different output path", path, sourceManifestPath)
+	}
+	return nil
+}
+
+func sameCleanedPath(a, b string) bool {
+	cleanA := filepath.Clean(a)
+	cleanB := filepath.Clean(b)
+	absA, errA := filepath.Abs(cleanA)
+	absB, errB := filepath.Abs(cleanB)
+	if errA == nil && errB == nil {
+		return absA == absB
+	}
+	return cleanA == cleanB
 }
 
 // formatDiscriminationReport renders the funnel table, the §9.2 K-gate verdict

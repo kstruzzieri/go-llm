@@ -556,7 +556,7 @@ func TestRunDiscriminationReport_SuppressesNoteWhenZeroDiscriminators(t *testing
 	labels, artifacts, manifest := discriminationFixture(t, "r3c-saturated-01", "round3-challenge",
 		[5]float64{1.0, 1.0, 1.0, 1.0, 1.0}) // saturated -> zero valid discriminators
 	dir := t.TempDir()
-	outPath := filepath.Join(dir, "discriminators.jsonl")
+	outPath := filepath.Join(dir, "missing-parent", "discriminators.jsonl")
 	report, err := runDiscriminationReport(discriminationOptions{
 		LabelsPath:               labels,
 		ArtifactsPath:            artifacts,
@@ -573,6 +573,73 @@ func TestRunDiscriminationReport_SuppressesNoteWhenZeroDiscriminators(t *testing
 	}
 	if !strings.Contains(report, "0 valid discriminators") {
 		t.Fatalf("zero-discriminator report must state the empty result:\n%s", report)
+	}
+	info, err := os.Stat(outPath)
+	if err != nil {
+		t.Fatalf("zero-discriminator derived manifest must be written under missing parent: %v", err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("zero-discriminator derived manifest size = %d; want 0", info.Size())
+	}
+}
+
+func TestRunDiscriminationReport_RejectsOutputOverCorpusManifest(t *testing.T) {
+	labels, artifacts, manifest := discriminationFixture(t, "r3c-saturated-01", "round3-challenge",
+		[5]float64{1.0, 1.0, 1.0, 1.0, 1.0}) // saturated -> zero valid discriminators would truncate without a guard
+	before, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runDiscriminationReport(discriminationOptions{
+		LabelsPath:               labels,
+		ArtifactsPath:            artifacts,
+		ManifestPath:             manifest,
+		TopModels:                []string{"ollama/gemma4:31b", "ollama/qwen3-coder-next:latest", "ollama/qwen3.6:35b-a3b", "openai-compat/glm-5.1"},
+		FloorModel:               "ollama/qwen3:8b",
+		DiscriminatorManifestOut: manifest,
+	})
+	if err == nil || !strings.Contains(err.Error(), "-discriminator-manifest-out") || !strings.Contains(err.Error(), "-corpus-manifest") {
+		t.Fatalf("same source/output manifest path must be rejected loudly; got %v", err)
+	}
+	after, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("source corpus manifest was modified despite rejected output path")
+	}
+}
+
+func TestRunDiscriminationReport_RejectsOutputSymlinkToCorpusManifest(t *testing.T) {
+	labels, artifacts, manifest := discriminationFixture(t, "r3c-saturated-01", "round3-challenge",
+		[5]float64{1.0, 1.0, 1.0, 1.0, 1.0})
+	linkPath := filepath.Join(filepath.Dir(manifest), "manifest-link.jsonl")
+	if err := os.Symlink(manifest, linkPath); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	before, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runDiscriminationReport(discriminationOptions{
+		LabelsPath:               labels,
+		ArtifactsPath:            artifacts,
+		ManifestPath:             manifest,
+		TopModels:                []string{"ollama/gemma4:31b", "ollama/qwen3-coder-next:latest", "ollama/qwen3.6:35b-a3b", "openai-compat/glm-5.1"},
+		FloorModel:               "ollama/qwen3:8b",
+		DiscriminatorManifestOut: linkPath,
+	})
+	if err == nil || !strings.Contains(err.Error(), "same file") {
+		t.Fatalf("output symlink to source manifest must be rejected loudly; got %v", err)
+	}
+	after, err := os.ReadFile(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(before) {
+		t.Fatalf("source corpus manifest was modified through output symlink")
 	}
 }
 
