@@ -243,6 +243,9 @@ func TestRunDiscriminationReport_ClassifiesFunnelAndWritesDerivedManifest(t *tes
 	if !strings.Contains(report, "VALID_DISCRIMINATORS=1") {
 		t.Fatalf("report missing valid-discriminator count line:\n%s", report)
 	}
+	if !strings.Contains(report, "| r3c-stdlib-contract-01 | round3-challenge | saturated |  |") {
+		t.Fatalf("saturated trace must appear as a per-trace row:\n%s", report)
+	}
 
 	derived, err := loadManifest(outPath)
 	if err != nil {

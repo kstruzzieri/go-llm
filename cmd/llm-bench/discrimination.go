@@ -112,6 +112,13 @@ func topAllEqual(top map[string]float64, topModels []string) bool {
 // labels / ≥20 fully paired retained traces — see §9.2 / L9).
 const round3DiscriminatorGateK = 10
 
+// round3ChallengeSource is the provenance source whose valid-discriminator
+// count the §9.2 K-gate is evaluated against. Kept as a named const so the
+// gate's coupling to the R3-fresh stratum is explicit. Other strata (e.g. the
+// round2-challenge regression anchor) are still classified and tabulated, but
+// the PASS/INCONCLUSIVE verdict is decided only on this source.
+const round3ChallengeSource = "round3-challenge"
+
 // buildTraceModelQualityFromMatched groups matched labels into
 // traceID -> canonical-model -> quality, after dropping judge-validation and
 // non-model-evidence rows via the shared corpusEvidenceFilter. It rejects a
@@ -187,6 +194,11 @@ type stratumFunnel struct {
 	States   map[discriminationState]int
 }
 
+// runDiscriminationReport loads (labels, artifacts, manifest), classifies every
+// captured trace via classifyTrace, tallies a per-source authored/captured/state
+// funnel, writes the derived valid-discriminator manifest, and returns the
+// rendered report. TopModels and FloorModel are required. It tolerates partial
+// labeling: missing cells classify as unpaired/missing rather than aborting.
 func runDiscriminationReport(opts discriminationOptions) (string, error) {
 	if len(opts.TopModels) == 0 {
 		return "", fmt.Errorf("discrimination: -top-models is required")
@@ -326,6 +338,10 @@ func writeDiscriminatorManifest(path string, m Manifest, cls []traceClassificati
 	return writeManifest(path, sub)
 }
 
+// formatDiscriminationReport renders the funnel table, the §9.2 K-gate verdict
+// (decided on round3ChallengeSource), and the per-trace classification table.
+// cls is expected pre-sorted by (source, trace) by the caller. The whole output
+// is run through redactPaths before return.
 func formatDiscriminationReport(cls []traceClassification, funnels []stratumFunnel, topCanon []string, floorCanon string) string {
 	var b strings.Builder
 	fmt.Fprintln(&b, "# llm-bench — discrimination report (spec §9)")
@@ -347,7 +363,7 @@ func formatDiscriminationReport(cls []traceClassification, funnels []stratumFunn
 	// K-gate verdict on the R3-fresh stratum.
 	r3Valid := 0
 	for _, f := range funnels {
-		if f.Source == "round3-challenge" {
+		if f.Source == round3ChallengeSource {
 			r3Valid = f.States[stateValidDiscriminator]
 		}
 	}
