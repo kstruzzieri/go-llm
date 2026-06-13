@@ -46,7 +46,11 @@ type candidateChatResponse struct {
 func newCandidateTransport(target ModelTarget, opts candidateTransportOptions) (candidateTransport, error) {
 	switch normalizeModelSelector(target.Provider) {
 	case defaultBenchProvider:
-		client, err := newOllamaClient(opts.ollamaURL)
+		var clientOpts []ollama.Option
+		if opts.timeout > 0 {
+			clientOpts = append(clientOpts, ollama.WithTimeout(opts.timeout))
+		}
+		client, err := newOllamaClient(opts.ollamaURL, clientOpts...)
 		if err != nil {
 			return candidateTransport{}, fmt.Errorf("candidate %q client: %w", target.Display, err)
 		}
