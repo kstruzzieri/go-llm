@@ -6,6 +6,8 @@ docs/superpowers/
 docs/llm/traces/*
 !docs/llm/traces/round2-challenge/
 !docs/llm/traces/round2-challenge/**
+!docs/llm/traces/round3-challenge/
+!docs/llm/traces/round3-challenge/**
 .DS_Store
 /.worktrees/
 
@@ -17,6 +19,7 @@ docs/llm/calibration/*.txt
 docs/llm/calibration/*.md
 docs/llm/calibration/reports/
 docs/llm/calibration/round2-capture/
+docs/llm/calibration/round3-capture/
 docs/llm/traces/real-workflow-local/
 docs/llm/calibration/fim-cases/
 docs/llm/calibration/real-workflow-capture/

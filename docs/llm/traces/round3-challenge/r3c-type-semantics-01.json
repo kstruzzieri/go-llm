@@ -1,0 +1,18 @@
+{
+  "id": "r3c-type-semantics-01",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `Decode(data []byte) (Config, error)` must unmarshal JSON into Config and return a non-nil error if the `Timeout` field is absent. Config and the helper are:\n\n```go\ntype Config struct {\n    Name    string `json:\"name\"`\n    Timeout int    `json:\"timeout\"`\n}\n\nfunc Decode(data []byte) (Config, error) {\n    var c Config\n    if err := json.Unmarshal(data, &c); err != nil {\n        return Config{}, err\n    }\n    if c.Timeout == 0 {\n        return Config{}, errors.New(\"timeout required\")\n    }\n    return c, nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that an int zero-value is indistinguishable from an explicitly supplied `\"timeout\": 0`, so `c.Timeout == 0` conflates \"field absent\" with \"field present and zero\"; therefore the contract, which requires an error iff absent, is violated for `{\"name\":\"x\",\"timeout\":0}` because it wrongly errors. The answer must give a minimal fix that distinguishes key presence, such as changing Timeout to `*int` and checking `c.Timeout == nil`, decoding into a map or json.RawMessage, or using custom UnmarshalJSON to detect the key. 0.5 iff it correctly identifies the absent-vs-zero conflation but proposes a fix that still cannot distinguish them, such as only validating `c.Timeout < 0` or adding a default without detecting absence; OR it identifies the right mechanism and gives a correct pointer/map/raw-message fix but also rewrites unrelated Name validation. 0.0 iff it declares the implementation correct, claims `c.Timeout == 0` correctly detects absence, blames JSON tags or casing, or proposes an unsafe fix such as panicking on zero. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the exported `Decode` signature, changes `Config` beyond the field-type change the fix requires, introduces a nonexistent helper, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "trace_id": "r3c-type-semantics-01",
+  "oracles": ["opus-selfsolve"],
+  "non_trivial": true,
+  "ambiguity": "none - contract states error iff absent, Config and Go version are in the prompt",
+  "expected_failure_modes": ["claims == 0 detects absence", "fix validates <0 only", "renames or adds unrelated Name validation"],
+  "solvable_from_context": true
+}
