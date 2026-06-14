@@ -1,0 +1,18 @@
+{
+  "id": "r3c-type-semantics-06",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `CloneCounts` must accept any map type whose underlying type is `map[string]int` and must return the same concrete map type so callers keep methods on their named map type. The implementation is:\n\n```go\ntype Counts map[string]int\n\nfunc (c Counts) Total() int {\n    n := 0\n    for _, v := range c {\n        n += v\n    }\n    return n\n}\n\nfunc CloneCounts[M ~map[string]int](m M) map[string]int {\n    out := make(map[string]int, len(m))\n    for k, v := range m {\n        out[k] = v\n    }\n    return out\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that the generic constraint accepts named map types, but the function returns the unnamed type `map[string]int`, erasing the caller's concrete type `M`; for `Counts`, the clone no longer has the `Total` method without an explicit conversion. The answer must give a minimal fix such as changing the return type to `M` and constructing `out := make(M, len(m))`, or returning `M(out)` after building a compatible map. 0.5 iff it identifies the loss of the named map type but gives a noisy fix that copies through an intermediate map unnecessarily or requires callers to convert the result manually. 0.0 iff it declares the implementation correct, claims a value of type `map[string]int` has methods from `Counts`, removes the generic constraint and supports only `Counts`, or claims the loop changes map key ordering as the contract bug. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the key or value type, drops support for arbitrary `M ~map[string]int`, mutates the input map instead of cloning, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

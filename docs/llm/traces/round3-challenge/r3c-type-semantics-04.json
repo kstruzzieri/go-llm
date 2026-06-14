@@ -1,0 +1,18 @@
+{
+  "id": "r3c-type-semantics-04",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `PayloadLen(v any) (int, bool)` returns the byte length and true for `[]byte` and for any defined type whose underlying type is `[]byte`. For example, `type Payload []byte` must be accepted. The implementation is:\n\n```go\ntype Payload []byte\n\nfunc PayloadLen(v any) (int, bool) {\n    b, ok := v.([]byte)\n    if !ok {\n        return 0, false\n    }\n    return len(b), true\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that a type assertion to `[]byte` only succeeds when the dynamic type is assignable to `[]byte`; a defined type such as `Payload` with underlying type `[]byte` does not satisfy that assertion without conversion. Therefore `PayloadLen(Payload{1,2})` returns `(0,false)` even though the contract requires success. The answer must give a minimal fix compatible with the stated API, such as using reflection to accept slice types whose element kind is `uint8` and then using `Len`, or explicitly handling known named payload types if the accepted set is finite; it may also mention a generic `T ~[]byte` API as an alternative only if the API is allowed to change. 0.5 iff it identifies exact dynamic type matching but proposes only `case Payload:` while still claiming to support any defined byte-slice type, or proposes changing callers to cast manually. 0.0 iff it declares the implementation correct, claims type assertions match all underlying types, confuses `byte` with rune/string handling, or removes the bool result. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the exported function signature as the only fix, accepts strings despite the contract saying byte slices, uses unsafe pointer conversion unnecessarily, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}
