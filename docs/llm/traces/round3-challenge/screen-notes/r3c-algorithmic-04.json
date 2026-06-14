@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-algorithmic-04",
+  "oracles": [
+    "Exact float64 equality is not aligned with the contract's less-than-half-cent equivalence rule.",
+    "The prompt states the tolerance, so the fix is bounded rather than arbitrary."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to test whether models translate a numeric business rule into a precise comparison."
+}

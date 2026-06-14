@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-algorithmic-02",
+  "oracles": [
+    "Integer division discards the remainder, so the shares can sum to less than total.",
+    "The contract explicitly says earlier shares receive extra cents, giving an objective fix."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch plausible but contract-wrong fixes that put all remainder on the last share."
+}

@@ -1,0 +1,18 @@
+{
+  "id": "r3c-algorithmic-02",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `SplitCents(total, n)` returns `n` non-negative shares whose sum is exactly `total`. Shares must differ by at most one cent, with earlier shares receiving the extra cents. Callers pass `total >= 0` and `n > 0`. The implementation is:\n\n```go\nfunc SplitCents(total, n int) []int {\n    each := total / n\n    out := make([]int, n)\n    for i := range out {\n        out[i] = each\n    }\n    return out\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that integer division drops the remainder, so when `total` is not divisible by `n` the returned shares sum to less than `total` and the required extra cents are never assigned. The answer must give the minimal fix of computing `base := total / n` and `rem := total % n`, assigning `base+1` to the first `rem` shares and `base` to the rest. 0.5 iff it correctly identifies lost remainder but gives a partial fix, such as putting the entire remainder on the last share contrary to the earlier-shares requirement, or using floats and rounding without proving the exact sum. 0.0 iff it declares the implementation correct, ignores the exact-sum requirement, suggests random distribution of remainders, or changes the function to return fewer than n shares. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the API, introduces negative shares, changes cents to floating dollars, adds arbitrary fees, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

@@ -18,3 +18,7 @@
 {"trace_id":"r3c-contract-edge-02","partition":"challenge","category":"contract-edge","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-contract-edge-03","partition":"challenge","category":"contract-edge","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-contract-edge-04","partition":"challenge","category":"contract-edge","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-algorithmic-01","partition":"challenge","category":"algorithmic","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-algorithmic-02","partition":"challenge","category":"algorithmic","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-algorithmic-03","partition":"challenge","category":"algorithmic","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-algorithmic-04","partition":"challenge","category":"algorithmic","source":"round3-challenge","allowed_as_model_evidence":true}
