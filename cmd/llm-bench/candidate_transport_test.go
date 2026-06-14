@@ -28,6 +28,50 @@ func TestNewCandidateTransport_OllamaDefault(t *testing.T) {
 	}
 }
 
+// The Ollama candidate transport must honor candidateTransportOptions.timeout
+// the same way the openai-compat branch does. The Ollama client defaults to a
+// 5-minute HTTP timeout, so a dropped opts.timeout silently caps every Ollama
+// candidate at 5 minutes regardless of -timeout. That bit gemma4:31b on a long
+// RAG-baked replay prefill: the request exceeded the default header timeout and
+// the cell was dropped even though -timeout was 20m. See real-workflow shakedown.
+func TestOllamaCandidateClient_HonorsTimeout(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		// Sleep well past opts.timeout before writing any headers. With the
+		// timeout honored, the client aborts the request; with it dropped, the
+		// client waits out the default 5-minute window and the request succeeds.
+		time.Sleep(1 * time.Second)
+		_, _ = w.Write([]byte(`{"model":"served","message":{"role":"assistant","content":"late"},"done":true}`))
+	}))
+	defer srv.Close()
+
+	tr, err := newCandidateTransport(ModelTarget{Display: "ollama/served", Provider: defaultBenchProvider, Model: "served"}, candidateTransportOptions{
+		ollamaURL: srv.URL,
+		timeout:   50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("newCandidateTransport: %v", err)
+	}
+
+	start := time.Now()
+	_, err = tr.chat.Chat(context.Background(), ollama.ChatRequest{
+		Model:    "served",
+		Messages: []ollama.ChatMessage{{Role: "user", Content: "q"}},
+	})
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("Chat returned nil error after %v; want a timeout error (opts.timeout was ignored)", elapsed)
+	}
+	// Assert it was the HTTP client timeout that fired, not some unrelated
+	// error that happens to be non-nil — otherwise the test could pass for the
+	// wrong reason and stop guarding the timeout wiring.
+	if !strings.Contains(err.Error(), "deadline exceeded") && !strings.Contains(err.Error(), "Client.Timeout") {
+		t.Fatalf("Chat error = %v; want an HTTP client timeout (deadline exceeded / Client.Timeout)", err)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("Chat took %v; want it aborted near the 50ms opts.timeout (timeout not honored)", elapsed)
+	}
+}
+
 func TestNewCandidateTransport_OpenAICompatRequiresBaseURL(t *testing.T) {
 	_, err := newCandidateTransport(ModelTarget{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}, candidateTransportOptions{})
 	if err == nil || !strings.Contains(err.Error(), "-candidate-base-url") {

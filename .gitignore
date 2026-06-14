@@ -17,3 +17,6 @@ docs/llm/calibration/*.txt
 docs/llm/calibration/*.md
 docs/llm/calibration/reports/
 docs/llm/calibration/round2-capture/
+docs/llm/traces/real-workflow-local/
+docs/llm/calibration/fim-cases/
+docs/llm/calibration/real-workflow-capture/
