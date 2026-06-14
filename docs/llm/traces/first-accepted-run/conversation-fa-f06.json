@@ -1,0 +1,18 @@
+{
+  "id": "conversation-fa-f06",
+  "source": "first-accepted-run",
+  "captured_at": "2026-05-30T20:15:37.94Z",
+  "system": "You are concise.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "One sentence: when should a benchmark exclude scorer/judge latency from the model latency metric?"
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "Assistant answer should satisfy the captured final assistant response.",
+    "final_answer_substring": "Exclude scorer/judge latency when the goal is to measure the model's intrinsic inference performance rather than the end-to-end evaluation pipeline."
+  }
+}

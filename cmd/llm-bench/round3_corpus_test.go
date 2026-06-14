@@ -56,13 +56,43 @@ func TestRound3ChallengeCorpus_EnforcesAuthoringContract(t *testing.T) {
 	catByID := map[string]string{}
 	srcByID := map[string]string{}
 	evidenceByID := map[string]bool{}
+	sourceCounts := map[string]int{}
+	var manifestTracePaths []string
 	for _, e := range manifest.Entries {
 		catByID[e.TraceID] = e.Category
 		srcByID[e.TraceID] = e.Source
 		evidenceByID[e.TraceID] = e.AllowedAsModelEvidence
+		sourceCounts[e.Source]++
+		traceDirBySource := map[string]string{
+			"round3-challenge":   round3ChallengeDir,
+			"round2-challenge":   "../../docs/llm/traces/round2-challenge",
+			"first-accepted-run": "../../docs/llm/traces/first-accepted-run",
+		}
+		dir, ok := traceDirBySource[e.Source]
+		if !ok {
+			t.Errorf("manifest source %q for %s has no trace directory mapping", e.Source, e.TraceID)
+			continue
+		}
+		tracePath := filepath.Join(dir, e.TraceID+".json")
+		if _, err := os.Stat(tracePath); err != nil {
+			t.Errorf("manifest entry %s references missing trace file: %v", e.TraceID, err)
+		}
+		manifestTracePaths = append(manifestTracePaths, tracePath)
+	}
+	if _, err := loadTraces(manifestTracePaths); err != nil {
+		t.Fatalf("manifest trace files must load as valid Traces: %v", err)
 	}
 	if evidenceByID["tool-canary-01"] {
 		t.Errorf("tool-canary-01 must not be allowed as model evidence")
+	}
+	if got := sourceCounts["round3-challenge"]; got != 24 {
+		t.Errorf("round3-challenge source count = %d; want 24", got)
+	}
+	if got := sourceCounts["round2-challenge"]; got != 4 {
+		t.Errorf("round2-challenge source count = %d; want 4 (3 anchors + canary)", got)
+	}
+	if got := sourceCounts["first-accepted-run"]; got != 10 {
+		t.Errorf("first-accepted-run source count = %d; want 10", got)
 	}
 
 	for _, tr := range traces {

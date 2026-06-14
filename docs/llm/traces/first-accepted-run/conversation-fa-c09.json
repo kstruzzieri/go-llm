@@ -1,0 +1,18 @@
+{
+  "id": "conversation-fa-c09",
+  "source": "first-accepted-run",
+  "captured_at": "2026-05-30T19:05:04.564Z",
+  "system": "You are a concise senior Go engineer.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "What is a typed-nil interface bug in Go? Show a minimal example where a function returns a nil *T but the caller sees a non-nil interface, and how to avoid it."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "Assistant answer should satisfy the captured final assistant response.",
+    "final_answer_substring": "In Go, an interface is implemented as a pair: **`(value, type)`**. \n\nAn interface is only `nil` if **both** the value and the type are `nil`. If you assign a `nil` pointer of a specific type to an interface, the interface now has a type assigned to it. Consequently, `interface == nil` evaluates to `false`.\n\n### Minimal Example\n\n```go\npackage main\n\nimport \"fmt\"\n\ntype MyError struct{}\n\nfunc (m *MyError) Error() string { return \"something went wrong\" }\n\nfunc getError() error {\n\tvar err *MyError = nil // Typed nil pointer\n\treturn err             // Returns (nil, *MyError)\n}\n\nfunc main() {\n\terr := getError()\n\tif err != nil {\n\t\tfmt.Println(\"Wait, what? err is not nil!\") \n\t\t// This prints because err is (nil, *MyError), not (nil, nil)\n\t}\n}\n```\n\n### Why this happens\n1. `getError` returns the `error` interface.\n2. You created a variable `err` of type `*MyError`.\n3. When you `return err`, Go wraps the `nil` pointer of type `*MyError` into the `error` interface.\n4. The interface now holds: `Value: nil, Type: *MyError`.\n5. The check `err != nil` checks if the interface itself is empty. Since it has a type, it is not empty.\n\n### How to avoid it\n\n#### 1. Return `nil` explicitly\nNever declare a typed pointer variable just to return it as an interface. Return the untyped `nil` literal.\n\n```go\nfunc getError() error {\n\tif everythingIsFine {\n\t\treturn nil // Returns (nil, nil)\n\t}\n\treturn \u0026MyError{}\n}\n```\n\n#### 2. Use a boolean flag or avoid pointer-to-interfaces\nAvoid the pattern of declaring a pointer to a custom error type at the top of a function.\n\n**Bad:**\n```go\nvar err *MyError // avoid this\n```\n\n**Good:**\n```go\n// Return the interface directly\nif fail {\n    return \u0026MyError{}\n}\nreturn nil \n```\n\n### Summary for Senior Review\n*   **The Rule:** Never store a concrete `nil` pointer in an interface variable if you intend to check that interface for `nil`.\n*   **The Fix:** Always return `nil` explicitly instead of a typed pointer that happens to be `nil`."
+  }
+}
