@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-concurrency-lifetime-02",
+  "oracles": [
+    "Returning a map returns a reference to the same map data; the lock only protects access until Snapshot returns.",
+    "The contract requires an independent snapshot, so a copy must be made under the read lock."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch models that treat the RLock as sufficient even though the returned map escapes."
+}

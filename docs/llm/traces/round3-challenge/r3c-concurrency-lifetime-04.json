@@ -1,0 +1,18 @@
+{
+  "id": "r3c-concurrency-lifetime-04",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `StartSampler` records on the requested interval until `ctx` is canceled, then releases its timer resources. This service runs under Go 1.22. The code is:\n\n```go\nfunc StartSampler(ctx context.Context, every time.Duration, record func(time.Time)) {\n    go func() {\n        for {\n            select {\n            case <-ctx.Done():\n                return\n            case t := <-time.Tick(every):\n                record(t)\n            }\n        }\n    }()\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `time.Tick(every)` creates a ticker that cannot be stopped, and because it is called inside the loop/select expression it can allocate a new ticker on each iteration. Under Go 1.22 those ticker resources are not explicitly released on context cancellation, violating the contract. The answer must give the minimal fix of creating one `time.NewTicker(every)` before the loop, deferring or calling `ticker.Stop()` on exit, and selecting on `ticker.C`. 0.5 iff it correctly identifies the ticker lifetime leak but gives a partial fix, such as moving `time.Tick` outside the loop without using `NewTicker`/`Stop`, or using `time.After` repeatedly without discussing allocation. 0.0 iff it declares the implementation correct, says context cancellation stops `time.Tick`, focuses only on goroutine lifetime while missing ticker resources, or proposes sleeping in a busy loop. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the function to block synchronously, changes the record callback contract, introduces a nonexistent stoppable Tick API, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

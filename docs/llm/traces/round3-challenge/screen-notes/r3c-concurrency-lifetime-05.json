@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-concurrency-lifetime-05",
+  "oracles": [
+    "Wait can run before any goroutine calls Add, so RunAll can return early.",
+    "Add must happen before launching the goroutine; the job variable capture is already safe."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch models that focus on loop captures instead of WaitGroup ordering."
+}

@@ -1,0 +1,18 @@
+{
+  "id": "r3c-concurrency-lifetime-03",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `Merge` copies all values from the input channels to one output channel and closes the output exactly once after every input channel is drained. The implementation is:\n\n```go\nfunc Merge(inputs ...<-chan int) <-chan int {\n    out := make(chan int)\n    var wg sync.WaitGroup\n\n    for _, in := range inputs {\n        wg.Add(1)\n        go func(ch <-chan int) {\n            defer wg.Done()\n            defer close(out)\n            for v := range ch {\n                out <- v\n            }\n        }(in)\n    }\n\n    go func() {\n        wg.Wait()\n    }()\n    return out\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that every worker goroutine defers `close(out)`, so multiple workers can close the same channel, causing `close of closed channel` or sends on a closed channel before other inputs are drained. It must also notice the `wg.Wait` goroutine currently does not close anything. The minimal fix is to remove `defer close(out)` from workers and close `out` once in a separate goroutine after `wg.Wait()`. 0.5 iff it identifies duplicate close ownership but gives an incomplete fix, such as guarding close with `sync.Once` while still letting one worker close before other workers finish, or removing close entirely and leaking the output close signal. 0.0 iff it declares the implementation correct, claims `WaitGroup` serializes the deferred closes, blames loop-variable capture, or suggests closing each input channel from Merge. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes Merge to collect all values in memory, changes the element type or API, introduces a nonexistent channel primitive, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}
