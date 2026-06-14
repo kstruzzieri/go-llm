@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Contract: `Decode(data []byte) (Config, error)` must unmarshal JSON into Config and return a non-nil error if the `Timeout` field is absent. Config and the helper are:\n\n```go\ntype Config struct {\n    Name    string `json:\"name\"`\n    Timeout int    `json:\"timeout\"`\n}\n\nfunc Decode(data []byte) (Config, error) {\n    var c Config\n    if err := json.Unmarshal(data, &c); err != nil {\n        return Config{}, err\n    }\n    if c.Timeout == 0 {\n        return Config{}, errors.New(\"timeout required\")\n    }\n    return c, nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+      "content": "Contract: `Decode(data []byte) (Config, error)` must unmarshal JSON into Config and return a non-nil error iff the `Timeout` field is absent. A present timeout value of `0` is valid and must be accepted. Config and the helper are:\n\n```go\ntype Config struct {\n    Name    string `json:\"name\"`\n    Timeout int    `json:\"timeout\"`\n}\n\nfunc Decode(data []byte) (Config, error) {\n    var c Config\n    if err := json.Unmarshal(data, &c); err != nil {\n        return Config{}, err\n    }\n    if c.Timeout == 0 {\n        return Config{}, errors.New(\"timeout required\")\n    }\n    return c, nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
     }
   ],
   "golden": {

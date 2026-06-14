@@ -152,6 +152,11 @@ func TestRound3ChallengeCorpus_EnforcesAuthoringContract(t *testing.T) {
 			if len(note.Oracles) == 0 || !note.NonTrivial || !note.SolvableFromContext {
 				t.Errorf("screen note must assert >=1 oracle, non_trivial, solvable_from_context")
 			}
+			for _, oracle := range note.Oracles {
+				if strings.Count(strings.TrimSpace(oracle), " ") < 3 {
+					t.Errorf("screen note oracle %q must record concrete evidence, not only a model name", oracle)
+				}
+			}
 
 			blob := tr.System
 			for _, turn := range tr.Turns {
