@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-contract-edge-03",
+  "oracles": [
+    "The Store interface says no implicit transaction is available.",
+    "Returning on the first Put error leaves prior successful rows applied, violating all-or-nothing semantics."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to test whether models honor an explicit transactional contract instead of accepting partial success."
+}

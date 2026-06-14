@@ -1,0 +1,18 @@
+{
+  "id": "r3c-contract-edge-04",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: in an update request, `Tags == nil` means leave existing tags unchanged, while a non-nil empty slice means clear all tags. `NormalizeUpdate` may sort provided tags but must preserve that distinction. The implementation is:\n\n```go\ntype Update struct {\n    Tags []string\n}\n\nfunc NormalizeUpdate(u Update) Update {\n    if u.Tags == nil {\n        u.Tags = []string{}\n    }\n    sort.Strings(u.Tags)\n    return u\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that the code converts nil `Tags` to a non-nil empty slice, collapsing the contract's leave-unchanged state into the clear-all-tags state. The answer must give the minimal fix of preserving nil, and sorting only when `u.Tags != nil` or otherwise keeping nil distinct from empty. 0.5 iff it correctly identifies the nil-vs-empty collapse but gives a partial fix, such as preserving nil on input but later marshaling or normalizing it back to empty, or removing sorting entirely without explaining why. 0.0 iff it declares the implementation correct, claims nil and empty slices are equivalent under the stated contract, focuses only on sort order, or suggests treating empty as leave-unchanged instead. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the Update API, renames the field or changes its JSON semantics without being asked, removes support for clearing tags, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

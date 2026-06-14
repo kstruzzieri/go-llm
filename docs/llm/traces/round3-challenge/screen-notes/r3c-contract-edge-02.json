@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-contract-edge-02",
+  "oracles": [
+    "uint64 addition wraps on overflow, so the post-addition comparison can be fooled.",
+    "The overflow-safe check compares delta to limit-used after confirming used is not already above limit."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch arithmetic that looks obvious but fails at the maximum-value boundary."
+}

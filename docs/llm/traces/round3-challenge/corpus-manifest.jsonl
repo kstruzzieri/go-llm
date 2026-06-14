@@ -14,3 +14,7 @@
 {"trace_id":"r3c-stdlib-contract-03","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-stdlib-contract-04","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-stdlib-contract-05","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-contract-edge-01","partition":"challenge","category":"contract-edge","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-contract-edge-02","partition":"challenge","category":"contract-edge","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-contract-edge-03","partition":"challenge","category":"contract-edge","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-contract-edge-04","partition":"challenge","category":"contract-edge","source":"round3-challenge","allowed_as_model_evidence":true}
