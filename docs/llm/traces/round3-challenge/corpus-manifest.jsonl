@@ -22,3 +22,6 @@
 {"trace_id":"r3c-algorithmic-02","partition":"challenge","category":"algorithmic","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-algorithmic-03","partition":"challenge","category":"algorithmic","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-algorithmic-04","partition":"challenge","category":"algorithmic","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r2c-compile-completeness-01","partition":"challenge","category":"compile-completeness","source":"round2-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r2c-restraint-03","partition":"challenge","category":"restraint","source":"round2-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r2c-subtle-correctness-01","partition":"challenge","category":"subtle-correctness","source":"round2-challenge","allowed_as_model_evidence":true}
