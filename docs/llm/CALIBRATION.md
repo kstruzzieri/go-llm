@@ -91,6 +91,24 @@ Round 2A adds (and the calibration report stratifies on these):
 - `r2-challenge` marks challenge-partition labels.
 - `judge-validation-fixture` marks the tool canary (never model evidence).
 
+Round 3 adds source-stratified labels for the harder discriminating corpus:
+
+- `r3-fresh` marks the 24 fresh correctness-depth challenge traces from
+  `docs/llm/traces/round3-challenge/` with `source=round3-challenge`.
+- `r3-anchor` marks the selected Round-2 regression anchors with
+  `source=round2-challenge`; these are known-difficulty checks, not the
+  primary frontier-vs-local claim.
+- `r3-natural` marks the same-epoch natural re-anchor traces with
+  `source=first-accepted-run`.
+
+Round 3 scoring still uses the same `{0.0, 0.5, 1.0}` manual labels, but the
+fresh challenge rubrics pre-register bounded partial-credit patterns per
+trace. The intended shape is: `1.0` for correct diagnosis plus minimal fix
+without a concrete restraint/provenance failure; `0.5` only for the trace's
+listed partial patterns; `0.0` for wrong root cause, fabricated mechanisms,
+unsafe fixes, or the trace's enumerated hard-fail cases. Candidate capture
+must happen after the Round-3 trace/rubric/screen-note commit barrier.
+
 ### Blind labeling (Round 2A)
 
 Do not edit `labels.jsonl` by hand. Render a blind worksheet (model
@@ -126,6 +144,33 @@ llm-bench -manual-report -labels ... -artifacts ... \
   -corpus-manifest docs/llm/traces/round2-challenge/corpus-manifest.jsonl \
   -corpus-partitions challenge -corpus-only-evidence -report challenge-quality.md
 ```
+
+### Round-3 discrimination workflow
+
+Round 3 reports by manifest `source`, not just by partition. Use
+`-corpus-sources round3-challenge` for the fresh challenge stratum,
+`-corpus-sources round2-challenge` for the R2-anchor regression view, and
+`-corpus-sources first-accepted-run` for the natural re-anchor view.
+
+After blind manual labeling, run the discrimination report before citing a
+frontier-vs-local conclusion:
+
+```
+llm-bench -discrimination-report \
+  -labels docs/llm/calibration/labels.round3.jsonl \
+  -artifacts docs/llm/calibration/artifacts.round3.jsonl \
+  -corpus-manifest docs/llm/traces/round3-challenge/corpus-manifest.jsonl \
+  -top-models ollama/gemma4:31b,ollama/qwen3-coder-next:latest,ollama/qwen3.6:35b-a3b,openai-compat/glm-5.1 \
+  -floor-model ollama/qwen3:8b \
+  -discriminator-manifest-out docs/llm/calibration/round3-valid-discriminators.jsonl \
+  -report docs/llm/calibration/round3-discrimination.md
+```
+
+The report classifies each trace as `valid-discriminator`, `saturated`,
+`unsolved`, `floor-only`, `no-signal`, or `unpaired/missing`, then prints the
+per-source funnel and the Round-3 K-gate. The derived discriminator manifest
+is gitignored and is the only allowed selector for the primary
+valid-discriminator paired-delta view; do not hand-filter a spreadsheet.
 
 ## Phase 3 — Calibrate
 
