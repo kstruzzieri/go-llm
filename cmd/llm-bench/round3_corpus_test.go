@@ -35,11 +35,34 @@ func TestRound3ChallengeCorpus_EnforcesAuthoringContract(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load corpus manifest: %v", err)
 	}
+	if len(tracePaths) != 24 {
+		t.Fatalf("found %d fresh r3c traces; want exactly 24", len(tracePaths))
+	}
+	counts := manifest.Counts()
+	for fam, want := range map[string]int{
+		"type-semantics":       6,
+		"concurrency-lifetime": 5,
+		"stdlib-contract":      5,
+		"contract-edge":        4,
+		"algorithmic":          4,
+	} {
+		if got := counts.ByCategory[fam]; got != want {
+			t.Errorf("%s count = %d; want %d", fam, got, want)
+		}
+	}
+	if part := manifest.partitionByTrace()["tool-canary-01"]; part != PartitionJudgeValidation {
+		t.Errorf("tool-canary-01 partition = %q; want judge-validation", part)
+	}
 	catByID := map[string]string{}
 	srcByID := map[string]string{}
+	evidenceByID := map[string]bool{}
 	for _, e := range manifest.Entries {
 		catByID[e.TraceID] = e.Category
 		srcByID[e.TraceID] = e.Source
+		evidenceByID[e.TraceID] = e.AllowedAsModelEvidence
+	}
+	if evidenceByID["tool-canary-01"] {
+		t.Errorf("tool-canary-01 must not be allowed as model evidence")
 	}
 
 	for _, tr := range traces {

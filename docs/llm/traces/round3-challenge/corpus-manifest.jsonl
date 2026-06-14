@@ -35,3 +35,4 @@
 {"trace_id":"conversation-fa-m03","partition":"natural","category":"analysis","source":"first-accepted-run","allowed_as_model_evidence":true}
 {"trace_id":"conversation-fa-n02","partition":"natural","category":"debugging","source":"first-accepted-run","allowed_as_model_evidence":true}
 {"trace_id":"conversation-fa-l05","partition":"natural","category":"chat","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"tool-canary-01","partition":"judge-validation","category":"tool-canary","source":"round2-challenge","allowed_as_model_evidence":false}
