@@ -1,0 +1,18 @@
+{
+  "id": "r3c-stdlib-contract-03",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `FetchJSON` must not leak HTTP response bodies on any successful `Do` call, including non-200 responses. The implementation is:\n\n```go\nfunc FetchJSON(ctx context.Context, client *http.Client, url string, out any) error {\n    req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)\n    if err != nil {\n        return err\n    }\n    resp, err := client.Do(req)\n    if err != nil {\n        return err\n    }\n    if resp.StatusCode != http.StatusOK {\n        return fmt.Errorf(\"unexpected status %d\", resp.StatusCode)\n    }\n    defer resp.Body.Close()\n    return json.NewDecoder(resp.Body).Decode(out)\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `resp.Body.Close()` is deferred only after the status-code check, so non-200 responses from a successful `Do` return without closing the body. The answer must give the minimal fix of deferring or otherwise calling `resp.Body.Close()` immediately after confirming `err == nil` and before any return that uses `resp`, while still decoding the body on 200. 0.5 iff it correctly identifies the unclosed non-200 body but gives an incomplete fix, such as closing only in the non-200 branch while leaving future early returns risky, or moving defer but not explaining it must happen before the status return. 0.0 iff it declares the implementation correct, claims `http.Client` closes response bodies automatically, closes the body before decoding on 200, or ignores non-200 responses. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the function API, removes context use, reads and discards all response bodies as the only fix without closing, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "id": "conversation-fa-c02",
+  "source": "first-accepted-run",
+  "captured_at": "2026-05-30T18:46:42.314Z",
+  "system": "You are a concise senior Go engineer. Prefer idiomatic, production-quality Go.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Explain when to use a buffered vs unbuffered channel in Go, with one concrete example of each."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "Assistant answer should satisfy the captured final assistant response.",
+    "final_answer_substring": "### Unbuffered Channels\n**When to use:** Use unbuffered channels when you need **strong synchronization**. An unbuffered channel guarantees that the sender and receiver have met at the same moment to exchange data (a \"rendezvous\").\n\n**Key characteristic:** The sender blocks until the receiver is ready, and vice versa.\n\n#### Example: Task Completion Signal\nUse an unbuffered channel to ensure a main process doesn't proceed until a background worker has explicitly finished its task.\n\n```go\nfunc main() {\n    done := make(chan bool) // Unbuffered\n\n    go func() {\n        fmt.Println(\"Performing heavy work...\")\n        time.Sleep(time.Second) \n        done \u003c- true // Blocks until main receives\n    }()\n\n    \u003c-done // Blocks until worker sends\n    fmt.Println(\"Work finished, proceeding.\")\n}\n```\n\n---\n\n### Buffered Channels\n**When to use:** Use buffered channels to **decouple the producer and consumer**. They are ideal for smoothing out \"bursty\" traffic or limiting concurrency.\n\n**Key characteristic:** The sender only blocks when the buffer is full; the receiver only blocks when the buffer is empty.\n\n#### Example: Worker Pool (Job Queue)\nUse a buffered channel to hold a queue of pending tasks. This prevents the producer from blocking on every single item, allowing it to queue work faster than the workers can process it (up to the buffer limit).\n\n```go\nfunc worker(id int, jobs \u003c-chan int) {\n    for j := range jobs {\n        fmt.Printf(\"worker %d processing job %d\\n\", id, j)\n    }\n}\n\nfunc main() {\n    const numJobs = 5\n    jobs := make(chan int, numJobs) // Buffered: holds up to 5 jobs\n\n    // Start 3 workers\n    for w := 1; w \u003c= 3; w++ {\n        go worker(w, jobs)\n    }\n\n    // Send jobs without blocking immediately\n    for j := 1; j \u003c= numJobs; j++ {\n        jobs \u003c- j \n    }\n    close(jobs)\n}\n```\n\n### Summary Comparison\n\n| Feature | Unbuffered | Buffered |\n| :--- | :--- | :--- |\n| **Capacity** | 0 | $\u003e 0$ |\n| **Synchronization** | Strong (Synchronous) | Loose (Asynchronous) |\n| **Blocking** | Immediate | When full (sender) / empty (receiver) |\n| **Primary Use Case** | Signaling / Hand-offs | Queuing / Rate limiting |\n| **Risk** | Deadlocks if no receiver exists | Memory bloat if buffer is too large |"
+  }
+}

@@ -302,6 +302,51 @@ with separate `-corpus-partitions` invocations. The corpus manifest
 (`-corpus-manifest`) and `-corpus-only-evidence` flags scope each run to
 its partition and exclude the tool canary from model-evidence math.
 
+### Round-3 discriminating challenge protocol
+
+Round 3 keeps the Round-2 rubric-first and blind-labeling controls, but the
+purpose changes: the corpus is designed to resolve the top cluster, not just
+separate the floor. The fresh challenge stratum is 24 Go-first
+correctness-depth traces across five families:
+
+- `type-semantics`
+- `concurrency-lifetime`
+- `stdlib-contract`
+- `contract-edge`
+- `algorithmic`
+
+Each fresh trace is answerable from the prompt and has a committed
+three-tier rubric before capture. The rubric names the exact `1.0` boundary,
+bounded `0.5` partial-credit patterns, objective `0.0` defects, and concrete
+restraint/provenance hard-fail cases. A structured oracle-screen note records
+that the trace is non-trivial and solvable from context; it is not a candidate
+output and must not use a scored panel model as the oracle.
+
+The Round-3 manifest also references two re-anchor strata:
+
+- `source=round2-challenge`: selected Round-2 valid-discriminator regression
+  anchors. These stabilize difficulty tracking and are not the primary claim.
+- `source=first-accepted-run`: 10 deterministic natural re-anchor traces used
+  to check same-epoch lineup drift.
+
+Round 3 adds a discrimination report before any accepted-run conclusion is
+cited. The report classifies each labeled trace into one of six states:
+`valid-discriminator`, `saturated`, `unsolved`, `floor-only`, `no-signal`, or
+`unpaired/missing`. Only the derived `valid-discriminator` manifest emitted by
+that report may define the primary top-resolution subset. If the fresh
+Round-3 stratum yields fewer than 10 valid discriminators, the result is
+under-resolved for a frontier-vs-local claim even if ordinary quality reports
+can still be read descriptively.
+
+Accepted Round-3 reporting must keep these views separate:
+
+- R3-fresh full stratum (`-corpus-sources round3-challenge`) for the
+  accepted-run quality view.
+- R3-fresh valid-discriminator subset from the derived manifest for the
+  primary top-resolution paired deltas.
+- R2-anchor regression view (`-corpus-sources round2-challenge`).
+- Natural re-anchor view (`-corpus-sources first-accepted-run`).
+
 ## User decision required
 
 The `AnswerQuality` scorer is the load-bearing piece. Three choices with

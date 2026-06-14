@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-type-semantics-01",
+  "oracles": [
+    "The prompt states that a present timeout value of 0 is valid, so `c.Timeout == 0` cannot be used as the absence detector.",
+    "encoding/json decodes both an absent int field and a present zero int field to the same Go zero value unless presence is tracked separately."
+  ],
+  "non_trivial": true,
+  "ambiguity": "none - contract states error iff absent, Config and Go version are in the prompt",
+  "expected_failure_modes": ["claims == 0 detects absence", "fix validates <0 only", "renames or adds unrelated Name validation"],
+  "solvable_from_context": true
+}

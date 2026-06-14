@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-type-semantics-02",
+  "oracles": [
+    "Go interface nilness is two-word dynamic type plus value; a typed nil pointer stored in an interface is not a nil interface.",
+    "The contract is violated on the error path because `return empty, err` returns a non-nil Store interface."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch models that reason about pointer nilness but miss interface dynamic type nilness."
+}

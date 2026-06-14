@@ -1,0 +1,18 @@
+{
+  "id": "conversation-fa-c08",
+  "source": "first-accepted-run",
+  "captured_at": "2026-05-30T19:03:17.174Z",
+  "system": "You are a concise senior Go engineer.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Show how to bound concurrency to N workers over a slice of jobs using golang.org/x/sync/errgroup, returning the first error."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "Assistant answer should satisfy the captured final assistant response.",
+    "final_answer_substring": "The most idiomatic way to bound concurrency with `errgroup` is using the `SetLimit` method.\n\n```go\npackage main\n\nimport (\n\t\"context\"\n\t\"fmt\"\n\t\"golang.org/x/sync/errgroup\"\n)\n\nfunc main() {\n\tjobs := []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}\n\tconcurrencyLimit := 3\n\n\tif err := run(context.Background(), jobs, concurrencyLimit); err != nil {\n\t\tfmt.Printf(\"Error encountered: %v\\n\", err)\n\t}\n}\n\nfunc run(ctx context.Context, jobs []int, limit int) error {\n\t// Create group and bound concurrency\n\tg := new(errgroup.Group)\n\tg.SetLimit(limit)\n\n\tfor _, job := range jobs {\n\t\t// Shadow loop variable for closure (required for Go \u003c 1.22)\n\t\tjob := job \n\n\t\tg.Go(func() error {\n\t\t\t// Check context before starting work\n\t\t\tif err := ctx.Err(); err != nil {\n\t\t\t\treturn err\n\t\t\t}\n\t\t\t\n\t\t\treturn doWork(job)\n\t\t})\n\t}\n\n\t// Wait for all workers to finish or return the first error\n\treturn g.Wait()\n}\n\nfunc doWork(id int) error {\n\tfmt.Printf(\"Processing job %d\\n\", id)\n\tif id == 5 {\n\t\treturn fmt.Errorf(\"job 5 failed\")\n\t}\n\treturn nil\n}\n```\n\n### Key Engineering Notes:\n1.  **`g.SetLimit(n)`**: This handles the semaphore logic internally. If the limit is reached, `g.Go` blocks until a worker slot becomes available.\n2.  **Short-circuiting**: `errgroup.Group` does **not** automatically cancel other goroutines when one fails. If you need the other workers to stop immediately upon the first error, use `errgroup.WithContext(ctx)`.\n3.  **Complexity**: \n    *   **Time**: $O(N)$ where $N$ is the number of jobs.\n    *   **Space**: $O(1)$ additional overhead beyond the job slice, as only $M$ workers exist in memory at once.\n4.  **Loop Variables**: I included `job := job` for compatibility. If you are using **Go 1.22+**, this is no longer necessary as loop variables are per-iteration."
+  }
+}

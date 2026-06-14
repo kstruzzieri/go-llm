@@ -1,0 +1,18 @@
+{
+  "id": "r3c-type-semantics-03",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `Save` and `Load` must round-trip both the username and API key through JSON. The code is:\n\n```go\ntype Credentials struct {\n    Username string `json:\"username\"`\n    apiKey   string `json:\"api_key\"`\n}\n\nfunc Save(c Credentials) ([]byte, error) {\n    return json.Marshal(c)\n}\n\nfunc Load(data []byte) (Credentials, error) {\n    var c Credentials\n    if err := json.Unmarshal(data, &c); err != nil {\n        return Credentials{}, err\n    }\n    return c, nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `encoding/json` ignores unexported struct fields, even when they have a JSON tag, so `apiKey` is neither marshaled nor unmarshaled and the API key cannot round-trip. The answer must give a minimal fix such as exporting the field as `APIKey string `json:\"api_key\"`` or implementing custom MarshalJSON/UnmarshalJSON that explicitly handles the private field. 0.5 iff it correctly identifies that the key is not serialized but gives a partial fix that only handles marshal or only handles unmarshal, or renames the field but omits the JSON tag and changes the wire name. 0.0 iff it declares the implementation correct, claims the `json:\"api_key\"` tag makes an unexported field visible to `encoding/json`, blames pointer vs value receivers, or says the key is missing only when empty. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer stores the key in a different JSON field, changes the Save or Load signatures, replaces JSON with another format, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

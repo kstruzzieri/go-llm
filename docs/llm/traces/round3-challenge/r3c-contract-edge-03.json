@@ -1,0 +1,18 @@
+{
+  "id": "r3c-contract-edge-03",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `ApplyBatch` is all-or-nothing. If any row in the batch cannot be written, no row from that batch may remain applied. The storage API has no implicit transaction. The implementation is:\n\n```go\ntype Store interface {\n    Put(Row) error\n}\n\nfunc ApplyBatch(s Store, rows []Row) error {\n    for _, row := range rows {\n        if err := s.Put(row); err != nil {\n            return err\n        }\n    }\n    return nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that the loop applies rows one by one and returns on the first error, leaving earlier successful writes applied even though the contract requires all-or-nothing and the Store has no implicit transaction. The answer must give a minimal correct fix that provides real atomicity for runtime Put failures, such as using an explicit transaction/staging API that commits only after all rows are accepted, adding rollback semantics for already-applied rows, or otherwise moving the batch onto a rollback-capable store. 0.5 iff it correctly identifies the partial-write violation but gives an incomplete fix, such as validating all rows before any Put even though unpredictable Put failures can still leave partial writes, continuing after errors and returning an aggregate while still leaving partial writes, or saying to retry failed rows without rollback. 0.0 iff it declares the implementation correct, claims returning an error automatically undoes earlier Put calls, ignores the no-implicit-transaction statement, or suggests swallowing errors to complete the batch. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the Store API without explaining that a transaction/staging/rollback capability is required, drops row ordering or durability requirements not in the prompt, invents an existing transaction method, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

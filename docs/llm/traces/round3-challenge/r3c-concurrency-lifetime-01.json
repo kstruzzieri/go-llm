@@ -1,0 +1,18 @@
+{
+  "id": "r3c-concurrency-lifetime-01",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `FetchAll` must start one fetch per URL, return the first fetch error, and make every in-flight fetch observe cancellation when the caller's context is canceled or when any sibling fetch fails. The implementation is:\n\n```go\nfunc FetchAll(ctx context.Context, urls []string) error {\n    ctx, cancel := context.WithCancel(ctx)\n    defer cancel()\n\n    errCh := make(chan error, len(urls))\n    for _, url := range urls {\n        url := url\n        go func() {\n            errCh <- fetchOne(context.Background(), url)\n        }()\n    }\n\n    for range urls {\n        if err := <-errCh; err != nil {\n            cancel()\n            return err\n        }\n    }\n    return nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that the goroutines call `fetchOne(context.Background(), url)`, so they ignore both the caller's context and the derived context that is canceled on sibling failure. The answer must give the minimal fix of passing the derived `ctx` to `fetchOne` from each goroutine, while preserving the `url := url` capture and the buffered error channel shape unless it explains an equivalent safe pattern. 0.5 iff it correctly identifies missing context propagation but gives an incomplete fix, such as passing only the original caller context and losing sibling-failure cancellation, or moving `cancel()` without changing `context.Background()`. 0.0 iff it declares the implementation correct, focuses only on loop-variable capture in Go 1.22, claims `defer cancel()` cancels child goroutines that use `context.Background()`, or proposes killing goroutines directly. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer rewrites the API, removes concurrent fetching, changes fetch ordering guarantees not in the contract, introduces a nonexistent context helper, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

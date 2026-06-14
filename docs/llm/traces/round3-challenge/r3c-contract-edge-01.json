@@ -1,0 +1,18 @@
+{
+  "id": "r3c-contract-edge-01",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `Page` returns at most `limit` items starting at `offset`. If `offset >= len(items)`, it must return an empty slice without panicking. Callers pass non-negative `offset` and `limit`. The implementation is:\n\n```go\nfunc Page(items []string, offset, limit int) []string {\n    if limit == 0 {\n        return nil\n    }\n    end := offset + limit\n    if end > len(items) {\n        end = len(items)\n    }\n    return items[offset:end]\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that the code slices with `items[offset:end]` without first handling `offset >= len(items)`, so `offset > len(items)` panics instead of returning an empty slice. The answer must give the minimal fix of checking `if offset >= len(items) { return []string{} }` or equivalent before computing/slicing the range, while preserving the at-most-limit behavior. 0.5 iff it correctly identifies the out-of-range offset boundary but gives a partial fix, such as clamping offset to `len(items)` without explaining empty semantics, or handling only `offset == len(items)` while missing `offset > len(items)`. 0.0 iff it declares the implementation correct, focuses only on `limit == 0` returning nil, blames negative inputs despite the contract excluding them, or suggests recovering from panic as normal control flow. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the API, sorts or filters items, changes offset semantics to one-based indexing, introduces a nonexistent paging helper, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

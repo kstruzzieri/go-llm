@@ -1,0 +1,18 @@
+{
+  "id": "r3c-stdlib-contract-05",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `ProcessFiles` must close each file before opening the next one because the caller may pass thousands of paths under a low file-descriptor limit. The implementation is:\n\n```go\nfunc ProcessFiles(paths []string, handle func(io.Reader) error) error {\n    for _, path := range paths {\n        f, err := os.Open(path)\n        if err != nil {\n            return err\n        }\n        defer f.Close()\n        if err := handle(f); err != nil {\n            return err\n        }\n    }\n    return nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `defer f.Close()` inside the loop delays every close until `ProcessFiles` returns, so many files can remain open at once and the next file can be opened before the previous one is closed. The answer must give the minimal fix of closing each file before the next iteration, such as using an inner helper function with a defer scoped to one file or explicitly closing after `handle` while preserving error handling. 0.5 iff it correctly identifies defer-in-loop retention but gives a partial fix, such as explicit close on success only while leaking on handle errors, or closing before `handle` reads. 0.0 iff it declares the implementation correct, claims defer runs at the end of each loop iteration, ignores the low file-descriptor requirement, or suggests raising the OS limit as the code fix. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the public API, processes all files concurrently despite the close-before-next contract, skips files on errors without returning them, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

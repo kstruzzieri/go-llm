@@ -1,0 +1,18 @@
+{
+  "id": "conversation-fa-l05",
+  "source": "first-accepted-run",
+  "captured_at": "2026-05-30T20:20:37.403Z",
+  "system": "You are a helpful coding assistant.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Give a clear commit message subject line (under 60 chars) for a change that secures a SQLite DB file with 0600 permissions."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "Assistant answer should satisfy the captured final assistant response.",
+    "final_answer_substring": "Depending on the commit style your project uses, here are a few options:\n\n**Standard / Simple**\n\u003e Restrict SQLite DB permissions to 0600\n\n**Conventional Commits (Security focus)**\n\u003e security: set SQLite DB permissions to 0600\n\n**Conventional Commits (Fix focus)**\n\u003e fix: restrict SQLite DB permissions to 0600\n\n**Concise/Short**\n\u003e Secure SQLite DB file with 0600 permissions"
+  }
+}

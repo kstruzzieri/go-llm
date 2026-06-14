@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-concurrency-lifetime-04",
+  "oracles": [
+    "time.Tick creates a ticker with no Stop method and is evaluated inside the select loop.",
+    "The contract says timer resources are released under Go 1.22, so the code must use time.NewTicker and Stop."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to test resource lifetime rather than only goroutine return on ctx cancellation."
+}

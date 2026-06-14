@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-contract-edge-01",
+  "oracles": [
+    "The code panics when offset is greater than len(items), despite the contract requiring an empty slice.",
+    "Negative inputs are excluded by the prompt, so the intended boundary is offset past end."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch boundary reasoning on a small, realistic pagination helper."
+}
