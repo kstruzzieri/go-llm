@@ -153,7 +153,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
-	s.persistTranscript(ctx, req, args, resp)
+	s.persistTranscript(ctx, req, args, messages, resp)
 	return toolResult(resp.Content), nil
 }
 
@@ -207,15 +207,18 @@ func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
 
 // persistTranscript records a successful chat call to the transcript store when
 // one is configured. Best-effort: any failure is logged and never surfaces to
-// the caller. The original args.Messages (pre-RAG) are recorded; the ephemeral
-// RAG-injected system message is intentionally excluded.
-func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, resp *provider.ChatResponse) {
+// the caller. requestMessages should be the exact model-visible messages used
+// for the successful response; callers pass args.Messages only as a fallback.
+func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, requestMessages []ollama.ChatMessage, resp *provider.ChatResponse) {
 	store := s.transcriptStoreSnapshot()
 	if store == nil {
 		return
 	}
 
-	reqMsgs, err := conversation.FromChatMessages(args.Messages)
+	if len(requestMessages) == 0 {
+		requestMessages = args.Messages
+	}
+	reqMsgs, err := conversation.FromChatMessages(requestMessages)
 	if err != nil {
 		log.Printf("mcp: transcript skip (convert request): %v", err)
 		return

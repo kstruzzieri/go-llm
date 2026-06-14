@@ -12,6 +12,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/transcript"
 
 	_ "modernc.org/sqlite"
@@ -92,6 +93,59 @@ func TestHandleChat_PersistsTranscript(t *testing.T) {
 	}
 	if !routeOutcome.Valid || !json.Valid([]byte(routeOutcome.String)) {
 		t.Errorf("route_outcome_json = %v, want valid JSON", routeOutcome)
+	}
+}
+
+func TestPersistTranscript_RecordsEffectiveMessagesForReplay(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	ts, err := transcript.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	s := &Server{transcriptStore: ts}
+
+	args := chatArgs{
+		ConversationID: "conv-rag",
+		Messages: []ollama.ChatMessage{
+			{Role: "system", Content: "original system"},
+			{Role: "user", Content: "question"},
+		},
+	}
+	effective := []ollama.ChatMessage{
+		{Role: "system", Content: "Relevant context from the codebase:\n\nretrieved chunk"},
+		{Role: "system", Content: "original system"},
+		{Role: "user", Content: "question"},
+	}
+	s.persistTranscript(context.Background(), &gomcp.CallToolRequest{}, args, effective, &provider.ChatResponse{
+		Content:  "answer",
+		Model:    "qwen3:8b",
+		Provider: "fake",
+	})
+	_ = ts.Close()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open read handle: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer func() { _ = db.Close() }()
+
+	var messagesJSON string
+	if err := db.QueryRow(`SELECT messages FROM conversations WHERE id = ?`, "conv-rag").Scan(&messagesJSON); err != nil {
+		t.Fatalf("read canonical messages: %v", err)
+	}
+	var stored []conversation.Message
+	if err := json.Unmarshal([]byte(messagesJSON), &stored); err != nil {
+		t.Fatalf("unmarshal canonical messages: %v", err)
+	}
+	if len(stored) != 4 {
+		t.Fatalf("stored messages len = %d; want 4 (%+v)", len(stored), stored)
+	}
+	if stored[0].Role != "system" || stored[0].Content != "Relevant context from the codebase:\n\nretrieved chunk" {
+		t.Fatalf("stored[0] = %+v, want injected RAG system context", stored[0])
+	}
+	if stored[3].Role != "assistant" || stored[3].Content != "answer" {
+		t.Fatalf("stored final = %+v, want assistant answer", stored[3])
 	}
 }
 

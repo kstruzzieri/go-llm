@@ -191,6 +191,25 @@ type replayOptions struct {
 	NumCtx         int
 }
 
+func replayShouldExposeTools(trace Trace) bool {
+	if len(trace.Golden.ToolCalls) > 0 {
+		return true
+	}
+	for _, turn := range trace.Turns {
+		if turn.Role == "assistant" && len(turn.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func toolsForReplay(trace Trace, tools []ollama.Tool) []ollama.Tool {
+	if replayShouldExposeTools(trace) {
+		return tools
+	}
+	return nil
+}
+
 // replay is the legacy entry point retained for tests and callers that
 // don't need the Runner-level knobs (PerTurnTimeout, NumCtx).
 func replay(ctx context.Context, client *ollama.Client, model string, trace Trace) ([]Turn, error) {
@@ -230,10 +249,11 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 	messages := []ollama.ChatMessage{
 		{Role: "system", Content: trace.System},
 	}
-	tools, err := decodeTraceTools(trace.Tools)
+	decodedTools, err := decodeTraceTools(trace.Tools)
 	if err != nil {
 		return replayOutput{}, fmt.Errorf("trace %q: %w", trace.ID, err)
 	}
+	tools := toolsForReplay(trace, decodedTools)
 
 	out := replayOutput{}
 	for i := 0; i < len(trace.Turns); {

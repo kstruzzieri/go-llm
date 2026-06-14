@@ -139,6 +139,30 @@ func TestConversationToTraceUsesFallbackSystem(t *testing.T) {
 	}
 }
 
+func TestConversationToTraceCombinesMultipleSystemMessages(t *testing.T) {
+	conv := conversation.Conversation{
+		ID: "multi-system",
+		Messages: []conversation.Message{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nretrieved chunk"},
+			{Role: "system", Content: "original system"},
+			{Role: "user", Content: "question"},
+			{Role: "assistant", Content: "answer"},
+		},
+	}
+
+	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor(), nil, false)
+	if err != nil {
+		t.Fatalf("conversationToTrace() error = %v", err)
+	}
+	want := "Relevant context from the codebase:\n\nretrieved chunk\n\noriginal system"
+	if trace.System != want {
+		t.Fatalf("trace.System = %q; want %q", trace.System, want)
+	}
+	if len(trace.Turns) != 1 || trace.Turns[0].Role != "user" || trace.Turns[0].Content != "question" {
+		t.Fatalf("trace.Turns = %#v, want single user turn", trace.Turns)
+	}
+}
+
 func TestConversationToTraceRejectsMalformedConversations(t *testing.T) {
 	tests := []struct {
 		name    string

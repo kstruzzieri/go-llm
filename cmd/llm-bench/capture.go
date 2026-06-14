@@ -337,7 +337,7 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 }
 
 func conversationTurns(messages []conversation.Message, fallbackSystem string, redactor redactor) (string, []Turn, string, error) {
-	var system string
+	var systemParts []string
 	var turns []Turn
 	sawUser := false
 	finalAssistantIndex, finalAnswer := capturedFinalAnswer(messages, redactor)
@@ -349,8 +349,8 @@ func conversationTurns(messages []conversation.Message, fallbackSystem string, r
 		}
 
 		if role == "system" {
-			if system == "" {
-				system = redactor.Redact(msg.Content)
+			if content := strings.TrimSpace(redactor.Redact(msg.Content)); content != "" {
+				systemParts = append(systemParts, content)
 			}
 			continue
 		}
@@ -377,6 +377,7 @@ func conversationTurns(messages []conversation.Message, fallbackSystem string, r
 		turns = append(turns, turn)
 	}
 
+	system := strings.Join(systemParts, "\n\n")
 	if system == "" {
 		system = redactor.Redact(strings.TrimSpace(fallbackSystem))
 	}

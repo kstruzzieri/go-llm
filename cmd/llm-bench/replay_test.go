@@ -604,6 +604,106 @@ func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
 	}
 }
 
+func TestReplayOmitsToolsForPlainCapturedChatTrace(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+		resp := ollama.ChatResponse{
+			Model:   "test-model",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "plain answer"},
+			Done:    true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "captured-plain-chat",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{{Role: "user", Content: "Explain the replay flow"}},
+		Golden: Golden{
+			ToolCalls:            []string{},
+			FinalAnswerSubstring: "plain answer",
+		},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v", err)
+	}
+	if len(out.Transcript) != 1 || out.Transcript[0].Content != "plain answer" {
+		t.Fatalf("transcript = %#v, want one plain assistant answer", out.Transcript)
+	}
+	requests := log.snapshot()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	if len(requests[0].Tools) != 0 {
+		t.Fatalf("plain captured-chat replay sent %d tools; want 0", len(requests[0].Tools))
+	}
+}
+
+func TestReplayPreservesToolsForScriptedToolTrace(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+		resp := ollama.ChatResponse{
+			Model:   "test-model",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "I can answer without tools"},
+			Done:    true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "scripted-tool-trace",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{
+			{Role: "user", Content: "Read provider/router.go"},
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file", Arguments: json.RawMessage(`{"path":"provider/router.go"}`)}}},
+			{Role: "tool", Name: "read_file", Content: "package provider"},
+			{Role: "assistant", Content: "scripted summary"},
+		},
+		Golden: Golden{ToolCalls: []string{"read_file"}, FinalAnswerSubstring: "scripted summary"},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v", err)
+	}
+	if len(out.Notes) == 0 {
+		t.Fatalf("expected bypass note when candidate skipped scripted tool route")
+	}
+	requests := log.snapshot()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	if len(requests[0].Tools) != 1 {
+		t.Fatalf("scripted tool replay sent %d tools; want 1", len(requests[0].Tools))
+	}
+}
+
 // TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant guards
 // the second sentinel-taxonomy fix: when the trace has no scripted
 // assistant turn after the user turn, a candidate tool call yields
@@ -844,7 +944,8 @@ func TestReplayForwardsTraceTools(t *testing.T) {
 		Tools: []json.RawMessage{
 			json.RawMessage(`{"name":"read_file","description":"Read a file from disk","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}`),
 		},
-		Turns: []Turn{{Role: "user", Content: "Read provider/router.go"}},
+		Turns:  []Turn{{Role: "user", Content: "Read provider/router.go"}},
+		Golden: Golden{ToolCalls: []string{"read_file"}},
 	}
 
 	transcript, err := replay(context.Background(), client, "test-model", trace)

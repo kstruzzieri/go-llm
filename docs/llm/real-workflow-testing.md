@@ -21,6 +21,14 @@ Default local paths:
 3. Capture: export a small redacted trace corpus from the transcript DB.
 4. Measure: replay a small model panel, blind-label outputs, and compare reports.
 
+Replay acceptance for this shakedown is stricter than "the command exits":
+`-calibrate-capture` should produce one artifact per retained `(trace, model)`
+pair. A missing-artifact gap caused by `errMissingScriptedAssistant` means a
+plain captured-chat trace exposed tools during replay without scripted tool
+results; fix replay policy before reading model quality. RAG-backed prompts
+must capture the model-visible retrieved context, otherwise replay measures a
+different prompt than the original workflow.
+
 ## First Shakedown Scope
 
 Use 8-12 real prompts over one normal working session. Include at least:
