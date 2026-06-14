@@ -2,7 +2,8 @@
   "trace_id": "r3c-algorithmic-04",
   "oracles": [
     "Exact float64 equality is not aligned with the contract's less-than-half-cent equivalence rule.",
-    "The prompt states the tolerance, so the fix is bounded rather than arbitrary."
+    "The prompt states the tolerance, so the fix is bounded rather than arbitrary.",
+    "Rounding each operand to cents before comparison can reject pairs such as 1.004 and 1.006 even though their distance is below half a cent."
   ],
   "non_trivial": true,
   "solvable_from_context": true,
