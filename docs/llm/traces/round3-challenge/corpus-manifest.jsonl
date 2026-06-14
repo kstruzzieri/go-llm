@@ -25,3 +25,13 @@
 {"trace_id":"r2c-compile-completeness-01","partition":"challenge","category":"compile-completeness","source":"round2-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r2c-restraint-03","partition":"challenge","category":"restraint","source":"round2-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r2c-subtle-correctness-01","partition":"challenge","category":"subtle-correctness","source":"round2-challenge","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-c02","partition":"natural","category":"explanation","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-c09","partition":"natural","category":"explanation","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-f06","partition":"natural","category":"explanation","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-m01","partition":"natural","category":"explanation","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-c08","partition":"natural","category":"code","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-l02","partition":"natural","category":"code","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-g01","partition":"natural","category":"analysis","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-m03","partition":"natural","category":"analysis","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-n02","partition":"natural","category":"debugging","source":"first-accepted-run","allowed_as_model_evidence":true}
+{"trace_id":"conversation-fa-l05","partition":"natural","category":"chat","source":"first-accepted-run","allowed_as_model_evidence":true}
