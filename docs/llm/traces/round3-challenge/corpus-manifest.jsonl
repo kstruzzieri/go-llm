@@ -9,3 +9,8 @@
 {"trace_id":"r3c-concurrency-lifetime-03","partition":"challenge","category":"concurrency-lifetime","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-concurrency-lifetime-04","partition":"challenge","category":"concurrency-lifetime","source":"round3-challenge","allowed_as_model_evidence":true}
 {"trace_id":"r3c-concurrency-lifetime-05","partition":"challenge","category":"concurrency-lifetime","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-stdlib-contract-01","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-stdlib-contract-02","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-stdlib-contract-03","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-stdlib-contract-04","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}
+{"trace_id":"r3c-stdlib-contract-05","partition":"challenge","category":"stdlib-contract","source":"round3-challenge","allowed_as_model_evidence":true}

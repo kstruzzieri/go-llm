@@ -1,0 +1,18 @@
+{
+  "id": "r3c-stdlib-contract-01",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `ReadRecords` must accept newline-delimited records up to 1 MiB each and return a scanner error for I/O errors. The implementation is:\n\n```go\nfunc ReadRecords(r io.Reader) ([]string, error) {\n    s := bufio.NewScanner(r)\n    var records []string\n    for s.Scan() {\n        records = append(records, s.Text())\n    }\n    if err := s.Err(); err != nil {\n        return nil, err\n    }\n    return records, nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `bufio.Scanner` has a default maximum token size of about 64 KiB, so records larger than that and up to the required 1 MiB can fail with `bufio.Scanner: token too long` even when the input is valid under the contract. The answer must give the minimal fix of configuring the scanner buffer with `s.Buffer(initialBuf, maxCapacity)` where maxCapacity is at least 1 MiB, or using a reader approach that explicitly supports the required line length. 0.5 iff it correctly identifies the scanner token limit but gives an incomplete fix, such as increasing only the initial buffer without increasing the max token size, or switching to ReadString without bounding or handling long lines. 0.0 iff it declares the implementation correct, blames `s.Text()` allocation, ignores `s.Err()`, or claims Scanner automatically grows without a limit. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the public API, removes line-delimited parsing, stores the entire input without justification, introduces a nonexistent scanner option, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

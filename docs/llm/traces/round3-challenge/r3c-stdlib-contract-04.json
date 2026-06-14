@@ -1,0 +1,18 @@
+{
+  "id": "r3c-stdlib-contract-04",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `WithTag` returns a new tag slice and must not mutate or alias the caller's backing array. The implementation is:\n\n```go\nfunc WithTag(tags []string, tag string) []string {\n    return append(tags, tag)\n}\n```\n\nThe caller often passes slices with spare capacity. Does this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `append(tags, tag)` may reuse the caller's backing array when `cap(tags) > len(tags)`, so the returned slice aliases caller-owned storage and can mutate data beyond the caller's visible length or be affected by later caller appends. The answer must give a minimal fix that forces independent backing storage before the returned slice escapes, such as cloning first with `out := append([]string(nil), tags...); out = append(out, tag)`, or using the full-slice-capacity idiom `append(tags[:len(tags):len(tags)], tag)` so this append must allocate. 0.5 iff it correctly identifies backing-array aliasing but gives a partial fix, such as copying only after appending to the possibly mutated backing array, or relying on callers to pass a full-capacity slice. 0.0 iff it declares the implementation correct, claims append always allocates, focuses on string immutability as making slice aliasing irrelevant, or suggests mutating `tags` in place. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the API, sorts or deduplicates tags despite no such contract, drops existing tags, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

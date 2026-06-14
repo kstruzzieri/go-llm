@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-stdlib-contract-03",
+  "oracles": [
+    "A successful http.Client.Do returns a response body that the caller must close.",
+    "The non-200 branch returns before defer resp.Body.Close is registered."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch models that only inspect the success decode path."
+}
