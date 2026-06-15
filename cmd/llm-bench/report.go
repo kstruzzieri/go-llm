@@ -91,8 +91,8 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 		fmt.Fprintln(&b)
 	}
-	fmt.Fprintf(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |\n")
-	fmt.Fprintf(&b, "|---|---|---|---|---|---|---|---|\n")
+	fmt.Fprintf(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | Restraint (mean, diverged/eligible) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |\n")
+	fmt.Fprintf(&b, "|---|---|---|---|---|---|---|---|---|\n")
 	for _, m := range models {
 		rs := summaryByModel[m]
 		agg := aggregate(rs)
@@ -109,6 +109,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 		toolArgsCell := fmt.Sprintf("%s (computed=%d)",
 			metricCell(agg.meanToolArgs, agg.toolArgsComputed > 0), agg.toolArgsComputed)
+		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed)
 		latencyCell := "n/a"
 		if scored > 0 {
 			latencyCell = fmt.Sprintf("%d / %d", agg.latencyP50, agg.latencyP90)
@@ -119,8 +120,8 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 
 		failuresCell := fmt.Sprintf("%d/%d (%d timeout)", agg.errors, agg.errors+scored, agg.timeouts)
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %d | %s |\n",
-			markdownCell(m), qCell, toolSeqCell, toolArgsCell, latencyCell, tokensCell, scored, failuresCell)
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %d | %s |\n",
+			markdownCell(m), qCell, toolSeqCell, toolArgsCell, restraintC, latencyCell, tokensCell, scored, failuresCell)
 	}
 
 	if opts.Corpus != nil {
@@ -647,6 +648,16 @@ func aggregate(rs []Result) modelAggregate {
 		a.latencyP90 = lPs[1]
 	}
 	return a
+}
+
+// restraintCell renders mean restraint with its diverged/eligible counts, or
+// "n/a" when no traces were restraint-eligible (RestraintComputed == 0 for the
+// model), mirroring metricCell's not-computed sentinel.
+func restraintCell(mean float64, diverged, eligible int) string {
+	if eligible == 0 {
+		return "n/a"
+	}
+	return fmt.Sprintf("%.2f (%d/%d diverged)", mean, diverged, eligible)
 }
 
 // metricCell renders a metric value as either a 2-decimal number (when

@@ -270,7 +270,7 @@ func TestFormatReportSummaryMatchesTemplateColumns(t *testing.T) {
 		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5, ToolSequenceMatch: 1, ToolArgsValid: 1, ToolArgsValidComputed: true, LatencyMs: 100, TotalTokens: 42}},
 	}, reportOptions{Scorer: "llm-judge", JudgeModel: "gemma4:31b"})
 
-	want := "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |"
+	want := "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | Restraint (mean, diverged/eligible) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |"
 	if !strings.Contains(report, want) {
 		t.Fatalf("rendered report missing TEMPLATE column header.\nWant: %q\nGot:\n%s", want, report)
 	}
@@ -314,7 +314,7 @@ func TestFormatReportAllErrorsRowDoesNotRenderNaN(t *testing.T) {
 	// Strengthened: zero-observation rows must render n/a in the
 	// quality, toolseq, and latency cells so a casual reader cannot
 	// mistake them for genuine zero scores.
-	if !strings.Contains(report, "| m1 | n/a | n/a | n/a (computed=0) | n/a | n/a | 0 |") {
+	if !strings.Contains(report, "| m1 | n/a | n/a | n/a (computed=0) | n/a | n/a | n/a | 0 |") {
 		t.Errorf("expected all-errors row to render n/a across metric cells:\n%s", report)
 	}
 }
@@ -375,6 +375,32 @@ func TestFormatReportProvenanceReportsCacheDisabledForLLMJudge(t *testing.T) {
 	})
 	if !strings.Contains(report, "Judge cache: no activity recorded") {
 		t.Fatalf("expected cache-disabled signal in provenance:\n%s", report)
+	}
+}
+
+func TestFormatReportRestraintColumn(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "a", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1}},
+		{Model: "m", TraceID: "b", Score: Score{AnswerQuality: 0, RestraintComputed: true, Restraint: 0}},
+		{Model: "m", TraceID: "c", Score: Score{AnswerQuality: 1, RestraintComputed: false}},
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{})
+	if !strings.Contains(out, "Restraint") {
+		t.Fatalf("report missing Restraint header:\n%s", out)
+	}
+	// 1 of 2 eligible diverged → mean 0.50, diverged/eligible = 1/2.
+	if !strings.Contains(out, "0.50 (1/2 diverged)") {
+		t.Fatalf("report missing restraint cell %q:\n%s", "0.50 (1/2 diverged)", out)
+	}
+}
+
+func TestFormatReportRestraintNAWhenNoneEligible(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "a", Score: Score{AnswerQuality: 1, RestraintComputed: false}},
+	}
+	out := formatReport([]string{"m"}, results, reportOptions{})
+	if !strings.Contains(out, "| n/a |") {
+		t.Fatalf("report should render n/a restraint cell when no eligible traces:\n%s", out)
 	}
 }
 
