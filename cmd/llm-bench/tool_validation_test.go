@@ -270,3 +270,54 @@ func TestValidateToolArgumentsHandlesNilArguments(t *testing.T) {
 		t.Fatalf("score=%v computed=%v; want 1.0/true (nil args = {})", score, computed)
 	}
 }
+
+func TestRestraintSignals(t *testing.T) {
+	toolCallTurn := Turn{Role: "assistant", ToolCalls: []ToolCall{{Name: "search"}}}
+	plainTurn := Turn{Role: "assistant", Content: "here is the answer"}
+
+	tests := []struct {
+		name          string
+		trace         Trace
+		transcript    []Turn
+		wantRestraint float64
+		wantComputed  bool
+	}{
+		{
+			name:          "golden-empty no tool call: held",
+			trace:         Trace{Golden: Golden{}},
+			transcript:    []Turn{plainTurn},
+			wantRestraint: 1.0,
+			wantComputed:  true,
+		},
+		{
+			name:          "golden-empty with tool call: diverged",
+			trace:         Trace{Golden: Golden{}},
+			transcript:    []Turn{toolCallTurn, plainTurn},
+			wantRestraint: 0.0,
+			wantComputed:  true,
+		},
+		{
+			name:          "golden has tool route: not testable",
+			trace:         Trace{Golden: Golden{ToolCalls: []string{"search"}}},
+			transcript:    []Turn{toolCallTurn},
+			wantRestraint: 0.0,
+			wantComputed:  false,
+		},
+		{
+			name:          "golden-empty empty transcript: held",
+			trace:         Trace{Golden: Golden{}},
+			transcript:    nil,
+			wantRestraint: 1.0,
+			wantComputed:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotRestraint, gotComputed := restraintSignals(tt.trace, tt.transcript)
+			if gotRestraint != tt.wantRestraint || gotComputed != tt.wantComputed {
+				t.Fatalf("restraintSignals = (%v, %v), want (%v, %v)",
+					gotRestraint, gotComputed, tt.wantRestraint, tt.wantComputed)
+			}
+		})
+	}
+}

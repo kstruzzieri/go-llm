@@ -232,6 +232,23 @@ func assistantToolCalls(turns []Turn) []ToolCall {
 	return out
 }
 
+// restraintSignals reports whether tool-restraint was testable for this trace
+// and, if so, whether the candidate held it (emitted no tool call) or diverged
+// (emitted ≥1 tool call). Restraint is only testable when the golden expected NO
+// tool call; a tool-route trace tests tool correctness, not restraint, and
+// returns computed=false. On a golden-empty trace ANY assistant tool call is a
+// divergence — equivalent to what replayWith flags, but recomputed from the
+// transcript so the metric never depends on parsing Score.Notes.
+func restraintSignals(trace Trace, transcript []Turn) (restraint float64, computed bool) {
+	if len(trace.Golden.ToolCalls) != 0 {
+		return 0, false
+	}
+	if len(assistantToolCalls(transcript)) > 0 {
+		return 0, true
+	}
+	return 1, true
+}
+
 func decodeArguments(raw json.RawMessage) (any, error) {
 	if len(raw) == 0 {
 		return map[string]any{}, nil
