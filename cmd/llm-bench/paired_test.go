@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -603,6 +604,64 @@ func TestRunPairedReport_MissingCanaryDoesNotBlock(t *testing.T) {
 	}
 	if !strings.Contains(out, "tool-canary-01") {
 		t.Fatalf("paired report does not note the excluded missing canary (audit trail):\n%s", out)
+	}
+}
+
+func TestComputeRestraintPairing(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	diverged := []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "x"}}}}
+
+	// trace t1: both models held; trace t2: A held, B diverged. Both eligible + tool-exposed.
+	mkArt := func(trace, model string, transcript []Turn) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Tools: withTools, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: transcript,
+		}
+	}
+	arts := []Artifact{
+		mkArt("t1", "a", held), mkArt("t1", "b", held),
+		mkArt("t2", "a", held), mkArt("t2", "b", diverged),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	if rp.CompleteN != 2 {
+		t.Fatalf("CompleteN = %d, want 2", rp.CompleteN)
+	}
+	if rp.PerModelMean["a"] != 1.0 {
+		t.Fatalf("mean[a] = %v, want 1.0", rp.PerModelMean["a"])
+	}
+	if rp.PerModelMean["b"] != 0.5 {
+		t.Fatalf("mean[b] = %v, want 0.5", rp.PerModelMean["b"])
+	}
+	if rp.ToolExposedN != 2 {
+		t.Fatalf("ToolExposedN = %d, want 2", rp.ToolExposedN)
+	}
+	if len(rp.BaselineSummary) != 1 || rp.BaselineSummary[0].Model != "b" {
+		t.Fatalf("BaselineSummary = %+v, want one entry for b", rp.BaselineSummary)
+	}
+	// b vs baseline a: t1 tie (1-1=0), t2 loss (0-1=-1) → mean -0.5, 0W/1L/1T.
+	bd := rp.BaselineSummary[0]
+	if bd.MeanDelta != -0.5 || bd.Wins != 0 || bd.Losses != 1 || bd.Ties != 1 {
+		t.Fatalf("baselineDelta = %+v, want mean=-0.5 0W/1L/1T", bd)
+	}
+}
+
+func TestComputeRestraintPairingExcludesIneligible(t *testing.T) {
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	// t1 eligible (golden empty); t2 ineligible (golden has a tool route).
+	mkArt := func(trace, model string, golden Golden) Artifact {
+		return Artifact{TraceID: trace, CandidateModel: model, Trace: Trace{ID: trace, Golden: golden}, ActualTranscript: held}
+	}
+	arts := []Artifact{
+		mkArt("t1", "a", Golden{FinalAnswerSubstring: "ok"}), mkArt("t1", "b", Golden{FinalAnswerSubstring: "ok"}),
+		mkArt("t2", "a", Golden{ToolCalls: []string{"x"}}), mkArt("t2", "b", Golden{ToolCalls: []string{"x"}}),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+	if rp.CompleteN != 1 {
+		t.Fatalf("CompleteN = %d, want 1 (t2 ineligible)", rp.CompleteN)
 	}
 }
 
