@@ -57,7 +57,13 @@ func TestCaptureTranscriptRoundTripPreservesEffectiveSystemContext(t *testing.T)
 	}
 	if err := ts.Record(context.Background(), transcript.RecordInput{
 		ConversationID: "rag-effective",
+		// Canonical request stays RAG-free (identity/stitching); the effective
+		// model-visible request with the retrieved context rides in RenderedRequest.
 		Request: []conversation.Message{
+			{Role: "system", Content: "original system"},
+			{Role: "user", Content: "question"},
+		},
+		RenderedRequest: []conversation.Message{
 			{Role: "system", Content: "Relevant context from the codebase:\n\nretrieved chunk"},
 			{Role: "system", Content: "original system"},
 			{Role: "user", Content: "question"},

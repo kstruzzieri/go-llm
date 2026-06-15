@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -96,7 +97,7 @@ func TestHandleChat_PersistsTranscript(t *testing.T) {
 	}
 }
 
-func TestPersistTranscript_RecordsEffectiveMessagesForReplay(t *testing.T) {
+func TestPersistTranscript_KeepsRAGOutOfCanonicalButInRendered(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "conv.db")
 	ts, err := transcript.Open(context.Background(), path)
 	if err != nil {
@@ -130,22 +131,116 @@ func TestPersistTranscript_RecordsEffectiveMessagesForReplay(t *testing.T) {
 	db.SetMaxOpenConns(1)
 	defer func() { _ = db.Close() }()
 
-	var messagesJSON string
-	if err := db.QueryRow(`SELECT messages FROM conversations WHERE id = ?`, "conv-rag").Scan(&messagesJSON); err != nil {
+	var messagesJSON, renderedJSON string
+	if err := db.QueryRow(`SELECT messages, rendered_messages FROM conversations WHERE id = ?`, "conv-rag").Scan(&messagesJSON, &renderedJSON); err != nil {
 		t.Fatalf("read canonical messages: %v", err)
+	}
+
+	// Canonical messages must stay RAG-free so identity and stitching are stable.
+	var canonical []conversation.Message
+	if err := json.Unmarshal([]byte(messagesJSON), &canonical); err != nil {
+		t.Fatalf("unmarshal canonical messages: %v", err)
+	}
+	if len(canonical) != 3 {
+		t.Fatalf("canonical messages len = %d; want 3 (RAG excluded) (%+v)", len(canonical), canonical)
+	}
+	if canonical[0].Role != "system" || canonical[0].Content != "original system" {
+		t.Fatalf("canonical[0] = %+v, want original system prompt without RAG", canonical[0])
+	}
+	if canonical[2].Role != "assistant" || canonical[2].Content != "answer" {
+		t.Fatalf("canonical final = %+v, want assistant answer", canonical[2])
+	}
+
+	// Rendered messages carry the effective RAG-injected prompt for replay.
+	var rendered []conversation.Message
+	if err := json.Unmarshal([]byte(renderedJSON), &rendered); err != nil {
+		t.Fatalf("unmarshal rendered messages: %v", err)
+	}
+	if len(rendered) != 4 {
+		t.Fatalf("rendered messages len = %d; want 4 (RAG included) (%+v)", len(rendered), rendered)
+	}
+	if rendered[0].Role != "system" || rendered[0].Content != "Relevant context from the codebase:\n\nretrieved chunk" {
+		t.Fatalf("rendered[0] = %+v, want injected RAG system context", rendered[0])
+	}
+}
+
+// TestPersistTranscript_MultiTurnRAGStitchesIntoOneConversation is the
+// regression for the forked-session bug: when use_rag returns different chunks
+// across turns of one session (no explicit conversation_id), persisting the
+// pre-RAG canonical request must keep both turns in a single stitched
+// conversation instead of forking on the per-turn RAG system message.
+func TestPersistTranscript_MultiTurnRAGStitchesIntoOneConversation(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	ts, err := transcript.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	s := &Server{transcriptStore: ts}
+
+	// Turn 1: retrieval chunk A.
+	s.persistTranscript(context.Background(), &gomcp.CallToolRequest{},
+		chatArgs{Messages: []ollama.ChatMessage{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+		}},
+		[]ollama.ChatMessage{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nchunk A"},
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+		},
+		&provider.ChatResponse{Content: "a1", Model: "qwen3:8b", Provider: "fake"})
+
+	// Turn 2: same session continues, retrieval now returns chunk B.
+	s.persistTranscript(context.Background(), &gomcp.CallToolRequest{},
+		chatArgs{Messages: []ollama.ChatMessage{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+			{Role: "assistant", Content: "a1"},
+			{Role: "user", Content: "q2"},
+		}},
+		[]ollama.ChatMessage{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nchunk B"},
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+			{Role: "assistant", Content: "a1"},
+			{Role: "user", Content: "q2"},
+		},
+		&provider.ChatResponse{Content: "a2", Model: "qwen3:8b", Provider: "fake"})
+	_ = ts.Close()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open read handle: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	defer func() { _ = db.Close() }()
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM conversations`).Scan(&count); err != nil {
+		t.Fatalf("count conversations: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("conversations = %d; want 1 (RAG chunks must not fork the session)", count)
+	}
+
+	var messagesJSON, status string
+	if err := db.QueryRow(`SELECT messages, stitch_status FROM conversations`).Scan(&messagesJSON, &status); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != "extended" {
+		t.Fatalf("stitch_status = %q; want extended", status)
 	}
 	var stored []conversation.Message
 	if err := json.Unmarshal([]byte(messagesJSON), &stored); err != nil {
-		t.Fatalf("unmarshal canonical messages: %v", err)
+		t.Fatalf("unmarshal messages: %v", err)
 	}
-	if len(stored) != 4 {
-		t.Fatalf("stored messages len = %d; want 4 (%+v)", len(stored), stored)
+	if len(stored) != 5 {
+		t.Fatalf("stitched messages len = %d; want 5 (sys,q1,a1,q2,a2) (%+v)", len(stored), stored)
 	}
-	if stored[0].Role != "system" || stored[0].Content != "Relevant context from the codebase:\n\nretrieved chunk" {
-		t.Fatalf("stored[0] = %+v, want injected RAG system context", stored[0])
-	}
-	if stored[3].Role != "assistant" || stored[3].Content != "answer" {
-		t.Fatalf("stored final = %+v, want assistant answer", stored[3])
+	for _, m := range stored {
+		if strings.Contains(m.Content, "Relevant context from the codebase") {
+			t.Fatalf("canonical history leaked RAG context: %+v", stored)
+		}
 	}
 }
 

@@ -185,6 +185,49 @@ func TestConversationToTraceDeduplicatesRepeatedSystemMessages(t *testing.T) {
 	}
 }
 
+// TestCaptureFallsBackToMessagesWhenNoRenderedColumn covers a legacy/foreign
+// conversations DB that predates the rendered_messages column: capture must
+// detect its absence and read the canonical messages without erroring.
+func TestCaptureFallsBackToMessagesWhenNoRenderedColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE conversations (
+		id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', messages TEXT NOT NULL,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	msgs := `[{"role":"system","content":"legacy sys"},{"role":"user","content":"q"},{"role":"assistant","content":"a"}]`
+	if _, err := db.Exec(`INSERT INTO conversations (id, title, messages, created_at, updated_at) VALUES (?,?,?,?,?)`,
+		"legacy-1", "t", msgs, 1, 1); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	res, err := runCapture(context.Background(), captureOptions{DBPath: path, OutputDir: t.TempDir(), Source: "test"})
+	if err != nil {
+		t.Fatalf("runCapture on legacy DB: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("written = %d; want 1", len(res.Written))
+	}
+	data, err := os.ReadFile(res.Written[0])
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace Trace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		t.Fatalf("unmarshal trace: %v", err)
+	}
+	if trace.System != "legacy sys" {
+		t.Fatalf("trace.System = %q; want canonical messages fallback", trace.System)
+	}
+}
+
 func TestConversationToTraceRejectsMalformedConversations(t *testing.T) {
 	tests := []struct {
 		name    string

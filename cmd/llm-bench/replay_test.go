@@ -733,6 +733,58 @@ func TestReplayScoresToolCallOnPlainChatTraceAsDivergence(t *testing.T) {
 	}
 }
 
+// TestReplayDivergenceDoesNotLeakContentToScorer guards against a candidate
+// earning a passing score on a failed-restraint divergence: when the candidate
+// emits a tool call AND prose that happens to contain the golden answer, the
+// recorded turn must not expose that prose as the final answer, or the
+// exact-match scorer / calibration artifact would grade the divergence as
+// correct. The tool call is the answer here, and it is a divergence.
+func TestReplayDivergenceDoesNotLeakContentToScorer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollama.ChatResponse{
+			Model: "test-model",
+			Message: ollama.ChatMessage{
+				Role:    "assistant",
+				Content: "The answer is 4.",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID:       "candidate-call",
+						Type:     "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{"path": "x"}},
+					},
+				},
+			},
+			Done: true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "diverged-with-prose",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns:  []Turn{{Role: "user", Content: "Just answer directly: what is 2+2?"}},
+		Golden: Golden{ToolCalls: []string{}, FinalAnswerSubstring: "4"},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v, want nil", err)
+	}
+	if got := lastAssistantContent(out.Transcript); strings.Contains(got, "4") {
+		t.Fatalf("divergence leaked scorable content %q; want no golden-matching final answer", got)
+	}
+	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
+		t.Fatalf("transcript = %#v, want the candidate's tool call retained for forensics", out.Transcript)
+	}
+}
+
 func TestReplayPreservesToolsForScriptedToolTrace(t *testing.T) {
 	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

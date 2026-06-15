@@ -302,6 +302,14 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 				// tool-call turn is already in out.Transcript, so the scorer grades
 				// it (there is no final answer to match -> low quality).
 				if len(trace.Golden.ToolCalls) == 0 {
+					// The tool call IS the (divergent) answer. Strip any prose the
+					// candidate emitted alongside it so a stray sentence that
+					// happens to contain the golden substring cannot be scored as a
+					// correct final answer; the tool call stays on the turn for
+					// forensics and the Note records the divergence.
+					if n := len(out.Transcript); n > 0 {
+						out.Transcript[n-1].Content = ""
+					}
 					out.Notes = append(out.Notes,
 						fmt.Sprintf("trace %q user turn %d: candidate called %d tool(s) on a plain-chat trace with no scripted tool route; scored as divergence",
 							trace.ID, userIndex, len(msg.ToolCalls)))
