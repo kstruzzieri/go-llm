@@ -377,3 +377,40 @@ func TestFormatReportProvenanceReportsCacheDisabledForLLMJudge(t *testing.T) {
 		t.Fatalf("expected cache-disabled signal in provenance:\n%s", report)
 	}
 }
+
+func TestAggregateRestraint(t *testing.T) {
+	mk := func(restraint float64, computed, toolExposed bool) Result {
+		return Result{Score: Score{
+			Restraint:                    restraint,
+			RestraintComputed:            computed,
+			ToolExposedRestraint:         restraint,
+			ToolExposedRestraintComputed: computed && toolExposed,
+		}}
+	}
+	rs := []Result{
+		mk(1, true, true),   // held, tools
+		mk(0, true, true),   // diverged, tools
+		mk(1, true, false),  // held, no tools
+		mk(0, false, false), // ineligible (skipped)
+		{Err: errors.New("boom")}, // error row (skipped)
+	}
+	a := aggregate(rs)
+	if a.restraintComputed != 3 {
+		t.Fatalf("restraintComputed = %d, want 3", a.restraintComputed)
+	}
+	if a.restraintDiverged != 1 {
+		t.Fatalf("restraintDiverged = %d, want 1", a.restraintDiverged)
+	}
+	if got := a.meanRestraint; got != 2.0/3.0 {
+		t.Fatalf("meanRestraint = %v, want %v", got, 2.0/3.0)
+	}
+	if a.toolExposedRestraintComputed != 2 {
+		t.Fatalf("toolExposedRestraintComputed = %d, want 2", a.toolExposedRestraintComputed)
+	}
+	if a.toolExposedRestraintDiverged != 1 {
+		t.Fatalf("toolExposedRestraintDiverged = %d, want 1", a.toolExposedRestraintDiverged)
+	}
+	if a.meanToolExposedRestraint != 0.5 {
+		t.Fatalf("meanToolExposedRestraint = %v, want 0.5", a.meanToolExposedRestraint)
+	}
+}

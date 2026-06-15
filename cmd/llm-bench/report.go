@@ -541,6 +541,15 @@ type modelAggregate struct {
 	promptEvalTokensAvailable int
 	thinkingTokensSum         int
 	thinkingTokensAvailable   int
+
+	restraintSum                 float64 // Σ Restraint over eligible (RestraintComputed) rows
+	restraintComputed            int     // # eligible rows (primary denominator)
+	restraintDiverged            int     // # eligible rows with Restraint == 0
+	meanRestraint                float64 // restraintSum / restraintComputed (0 when none)
+	toolExposedRestraintSum      float64 // Σ over ToolExposedRestraintComputed rows
+	toolExposedRestraintComputed int     // # tool-exposed eligible rows (companion denominator)
+	toolExposedRestraintDiverged int     // # tool-exposed eligible rows with ToolExposedRestraint == 0
+	meanToolExposedRestraint     float64
 }
 
 func aggregate(rs []Result) modelAggregate {
@@ -595,6 +604,20 @@ func aggregate(rs []Result) modelAggregate {
 			a.thinkingTokensSum += r.Score.ThinkingTokens
 			a.thinkingTokensAvailable++
 		}
+		if r.Score.RestraintComputed {
+			a.restraintSum += r.Score.Restraint
+			a.restraintComputed++
+			if r.Score.Restraint == 0 {
+				a.restraintDiverged++
+			}
+		}
+		if r.Score.ToolExposedRestraintComputed {
+			a.toolExposedRestraintSum += r.Score.ToolExposedRestraint
+			a.toolExposedRestraintComputed++
+			if r.Score.ToolExposedRestraint == 0 {
+				a.toolExposedRestraintDiverged++
+			}
+		}
 	}
 	if scored > 0 {
 		a.meanQuality = qSum / float64(scored)
@@ -604,6 +627,12 @@ func aggregate(rs []Result) modelAggregate {
 	}
 	if a.toolArgsComputed > 0 {
 		a.meanToolArgs = taSum / float64(a.toolArgsComputed)
+	}
+	if a.restraintComputed > 0 {
+		a.meanRestraint = a.restraintSum / float64(a.restraintComputed)
+	}
+	if a.toolExposedRestraintComputed > 0 {
+		a.meanToolExposedRestraint = a.toolExposedRestraintSum / float64(a.toolExposedRestraintComputed)
 	}
 	if len(qVals) > 0 {
 		qPs := percentiles(qVals, 0.25, 0.5, 0.75, 0.9)
