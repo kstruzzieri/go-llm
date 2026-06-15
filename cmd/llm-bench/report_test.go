@@ -428,10 +428,10 @@ func TestAggregateRestraint(t *testing.T) {
 		}}
 	}
 	rs := []Result{
-		mk(1, true, true),   // held, tools
-		mk(0, true, true),   // diverged, tools
-		mk(1, true, false),  // held, no tools
-		mk(0, false, false), // ineligible (skipped)
+		mk(1, true, true),         // held, tools
+		mk(0, true, true),         // diverged, tools
+		mk(1, true, false),        // held, no tools
+		mk(0, false, false),       // ineligible (skipped)
 		{Err: errors.New("boom")}, // error row (skipped)
 	}
 	a := aggregate(rs)
@@ -452,5 +452,73 @@ func TestAggregateRestraint(t *testing.T) {
 	}
 	if a.meanToolExposedRestraint != 0.5 {
 		t.Fatalf("meanToolExposedRestraint = %v, want 0.5", a.meanToolExposedRestraint)
+	}
+}
+
+func TestFormatPairedReportRestraintSection(t *testing.T) {
+	pa := pairedAnalysis{
+		Lineup:         []string{"a", "b"},
+		Baseline:       "a",
+		AllTraces:      []string{"t1", "t2"},
+		PerModelMean:   map[string]float64{"a": 1, "b": 0.5},
+		PerModelN:      1, // quality paired-complete denominator
+		AllMatchedMean: map[string]float64{"a": 1, "b": 0.5},
+		AllMatchedN:    map[string]int{"a": 2, "b": 2},
+		BootstrapSeed:  pairedBootstrapSeed,
+		BootstrapN:     pairedBootstrapN,
+		Restraint: restraintPairing{
+			PerModelMean:            map[string]float64{"a": 1, "b": 0.5},
+			CompleteN:               2, // restraint's label-free denominator can differ
+			ToolExposedPerModelMean: map[string]float64{"a": 1, "b": 0.5},
+			ToolExposedN:            2,
+			BaselineSummary: []baselineDelta{
+				{Model: "b", MeanDelta: -0.5, CILow: -1, CIHigh: 0, Wins: 0, Losses: 1, Ties: 1},
+			},
+		},
+	}
+	out := formatPairedReport(pa)
+	if !strings.Contains(out, "Restraint vs baseline") {
+		t.Fatalf("paired report missing restraint section:\n%s", out)
+	}
+	if !strings.Contains(out, "Paired-complete traces: 1 of 2") {
+		t.Fatalf("paired report missing quality paired-N provenance:\n%s", out)
+	}
+	if !strings.Contains(out, "Restraint paired-complete: 2") {
+		t.Fatalf("paired report missing restraint paired-N provenance:\n%s", out)
+	}
+	if strings.Contains(out, "AnswerQuality (mean) | Restraint (mean)") {
+		t.Fatalf("paired report mixes quality and restraint denominators in one table:\n%s", out)
+	}
+	if !strings.Contains(out, "| Model | restraint (mean) | n |") {
+		t.Fatalf("paired report missing dedicated per-model restraint table:\n%s", out)
+	}
+	// b's restraint delta vs baseline a.
+	if !strings.Contains(out, "-0.50") {
+		t.Fatalf("paired report missing restraint delta:\n%s", out)
+	}
+}
+
+func TestFormatPairedReportRestraintNoEligibleTraces(t *testing.T) {
+	pa := pairedAnalysis{
+		Lineup:         []string{"a", "b"},
+		Baseline:       "a",
+		AllTraces:      []string{"t1"},
+		PerModelMean:   map[string]float64{"a": 1, "b": 1},
+		PerModelN:      1,
+		AllMatchedMean: map[string]float64{"a": 1, "b": 1},
+		AllMatchedN:    map[string]int{"a": 1, "b": 1},
+		BootstrapSeed:  pairedBootstrapSeed,
+		BootstrapN:     pairedBootstrapN,
+		Restraint: restraintPairing{
+			PerModelMean: map[string]float64{}, // no eligible traces → means absent → NaN
+			CompleteN:    0,
+		},
+	}
+	out := formatPairedReport(pa)
+	if !strings.Contains(out, "Restraint paired-complete: 0") {
+		t.Fatalf("expected restraint paired-complete 0 line:\n%s", out)
+	}
+	if !strings.Contains(out, "Restraint vs baseline") {
+		t.Fatalf("expected restraint section present even with 0 eligible:\n%s", out)
 	}
 }

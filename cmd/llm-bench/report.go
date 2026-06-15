@@ -284,6 +284,43 @@ func formatPairedReport(pa pairedAnalysis) string {
 	}
 	fmt.Fprintln(&b)
 
+	fmt.Fprintf(&b, "## Restraint vs baseline (%s)\n\n", markdownCell(pa.Baseline))
+	fmt.Fprintln(&b, "> Tool-restraint is label-free (derived from frozen artifacts), so its paired-complete sample can exceed the quality paired-complete sample. Restraint = 1.0 held / 0.0 diverged over golden-empty (restraint-eligible) traces; higher is better.")
+	fmt.Fprintln(&b, ">")
+	fmt.Fprintln(&b, "> Win/loss/tie below is the discordant-pair table (a win = model held while the baseline diverged).")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "- Quality paired-complete: %d trace(s) (label denominator)\n", pa.PerModelN)
+	fmt.Fprintf(&b, "- Restraint paired-complete: %d trace(s) (artifact denominator)\n", pa.Restraint.CompleteN)
+	if pa.Restraint.ToolExposedN > 0 {
+		fmt.Fprintf(&b, "- Tool-exposed restraint paired-complete: %d trace(s) (companion: restraint only where tools were offered)\n", pa.Restraint.ToolExposedN)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "| Model | restraint (mean) | n |")
+	fmt.Fprintln(&b, "|---|---|---|")
+	for _, m := range pa.Lineup {
+		fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), meanCell(pa.Restraint.PerModelMean[m]), pa.Restraint.CompleteN)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "| Model | mean restraint Δ vs baseline | 95% CI | wins | losses | ties |")
+	fmt.Fprintln(&b, "|---|---|---|---|---|---|")
+	for _, bd := range pa.Restraint.BaselineSummary {
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %d |\n",
+			markdownCell(bd.Model), signedMeanCell(bd.MeanDelta), ciCell(bd.CILow, bd.CIHigh), bd.Wins, bd.Losses, bd.Ties)
+	}
+	fmt.Fprintln(&b)
+	if pa.Restraint.ToolExposedN > 0 {
+		fmt.Fprintln(&b, "Tool-exposed restraint (companion, mean over tool-offered eligible traces):")
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "| Model | tool-exposed restraint (mean) | n |")
+		fmt.Fprintln(&b, "|---|---|---|")
+		for _, m := range pa.Lineup {
+			fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), meanCell(pa.Restraint.ToolExposedPerModelMean[m]), pa.Restraint.ToolExposedN)
+		}
+		fmt.Fprintln(&b)
+	}
+
 	fmt.Fprintln(&b, "## Resolution diagnostic")
 	fmt.Fprintln(&b)
 	if pa.PerModelN > 0 {
