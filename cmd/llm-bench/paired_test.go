@@ -677,6 +677,34 @@ func TestComputeRestraintPairingExcludesIneligible(t *testing.T) {
 	}
 }
 
+func TestComputeRestraintPairingExcludesMissingTraceContext(t *testing.T) {
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	valid := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: held,
+		}
+	}
+	missingTrace := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{},
+			ActualTranscript: held,
+		}
+	}
+	arts := []Artifact{
+		valid("t1", "a"), valid("t1", "b"),
+		missingTrace("t2", "a"), missingTrace("t2", "b"),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+	if rp.CompleteN != 1 {
+		t.Fatalf("CompleteN = %d, want 1 (missing embedded trace context excluded)", rp.CompleteN)
+	}
+}
+
 func contains(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {

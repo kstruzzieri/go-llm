@@ -475,11 +475,10 @@ func computePairedAnalysis(matched []matchedLabel, stale []Label, arts []Artifac
 // Callers must pass at most one artifact per (trace, model) cell;
 // computePairedAnalysis enforces this before calling, so duplicates are not
 // re-checked here.
-// Unlike the manual/calibration path (which hard-errors on missing trace context
-// via calibrationTraceFromArtifact), this path reads a.Trace directly, so an
-// artifact with a zero-value empty Trace (no Golden tool calls, no Tools) is
-// treated as restraint-eligible-and-held — the correct degenerate behavior, but
-// an intentional asymmetry.
+// Unlike the manual/calibration path (which hard-errors on missing trace
+// context via calibrationTraceFromArtifact), this path keeps the quality report
+// available and excludes invalid trace context from restraint pairing so
+// malformed artifacts cannot inflate restraint N.
 func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, seed int64, bootstrapN int) restraintPairing {
 	type cellRestraint struct {
 		value       float64
@@ -489,7 +488,10 @@ func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, 
 	byCell := make(map[cellKey]cellRestraint, len(arts))
 	traceDisplay := make(map[string]string)
 	for _, a := range arts {
-		value, computed := restraintSignals(a.Trace, a.ActualTranscript)
+		value, computed := 0.0, false
+		if restraintArtifactTraceContextValid(a) {
+			value, computed = restraintSignals(a.Trace, a.ActualTranscript)
+		}
 		byCell[newCellKey(a.TraceID, a.CandidateModel)] = cellRestraint{
 			value:       value,
 			computed:    computed,
@@ -574,6 +576,10 @@ func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, 
 		rp.BaselineSummary = append(rp.BaselineSummary, bd)
 	}
 	return rp
+}
+
+func restraintArtifactTraceContextValid(a Artifact) bool {
+	return strings.TrimSpace(a.Trace.ID) != "" && a.Trace.ID == a.TraceID
 }
 
 func mean(xs []float64) float64 {

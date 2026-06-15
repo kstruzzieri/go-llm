@@ -91,7 +91,7 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 		fmt.Fprintln(&b)
 	}
-	fmt.Fprintf(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | Restraint (mean, diverged/eligible) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |\n")
+	fmt.Fprintf(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | Restraint (mean, diverged/eligible; tool-exposed if available) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |\n")
 	fmt.Fprintf(&b, "|---|---|---|---|---|---|---|---|---|\n")
 	for _, m := range models {
 		rs := summaryByModel[m]
@@ -109,7 +109,8 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 		toolArgsCell := fmt.Sprintf("%s (computed=%d)",
 			metricCell(agg.meanToolArgs, agg.toolArgsComputed > 0), agg.toolArgsComputed)
-		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed)
+		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed,
+			agg.meanToolExposedRestraint, agg.toolExposedRestraintDiverged, agg.toolExposedRestraintComputed)
 		latencyCell := "n/a"
 		if scored > 0 {
 			latencyCell = fmt.Sprintf("%d / %d", agg.latencyP50, agg.latencyP90)
@@ -183,7 +184,7 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 	fmt.Fprintf(&b, "\nCoverage: %d scored, stale: %d (excluded — label hash no longer matches an artifact), scoring errors: %d.\n\n",
 		cov.Scored, cov.Stale, cov.Errored)
 	fmt.Fprintln(&b, "## Quality by model (all matched labels)")
-	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | Restraint (mean, diverged/eligible) | n |")
+	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | Restraint (mean, diverged/eligible; tool-exposed if available) | n |")
 	fmt.Fprintln(&b, "|---|---|---|---|")
 	for _, m := range models {
 		rs := byModel[m]
@@ -194,7 +195,8 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 			qCell = fmt.Sprintf("%.2f / %.2f / %.2f / %.2f / %.2f",
 				agg.meanQuality, agg.qualityP25, agg.qualityP50, agg.qualityP75, agg.qualityP90)
 		}
-		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed)
+		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed,
+			agg.meanToolExposedRestraint, agg.toolExposedRestraintDiverged, agg.toolExposedRestraintComputed)
 		fmt.Fprintf(&b, "| %s | %s | %s | %d |\n", markdownCell(m), qCell, restraintC, scored)
 	}
 	fmt.Fprintln(&b)
@@ -691,9 +693,13 @@ func aggregate(rs []Result) modelAggregate {
 // restraintCell renders mean restraint with its diverged/eligible counts, or
 // "n/a" when no traces were restraint-eligible (RestraintComputed == 0 for the
 // model), mirroring metricCell's not-computed sentinel.
-func restraintCell(mean float64, diverged, eligible int) string {
+func restraintCell(mean float64, diverged, eligible int, toolMean float64, toolDiverged, toolEligible int) string {
 	if eligible == 0 {
 		return "n/a"
+	}
+	if toolEligible > 0 {
+		return fmt.Sprintf("%.2f (%d/%d diverged; tool-exposed %.2f, %d/%d diverged)",
+			mean, diverged, eligible, toolMean, toolDiverged, toolEligible)
 	}
 	return fmt.Sprintf("%.2f (%d/%d diverged)", mean, diverged, eligible)
 }

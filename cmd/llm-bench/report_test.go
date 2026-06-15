@@ -270,7 +270,7 @@ func TestFormatReportSummaryMatchesTemplateColumns(t *testing.T) {
 		{Model: "m1", TraceID: "t1", Score: Score{AnswerQuality: 0.5, ToolSequenceMatch: 1, ToolArgsValid: 1, ToolArgsValidComputed: true, LatencyMs: 100, TotalTokens: 42}},
 	}, reportOptions{Scorer: "llm-judge", JudgeModel: "gemma4:31b"})
 
-	want := "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | Restraint (mean, diverged/eligible) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |"
+	want := "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | Restraint (mean, diverged/eligible; tool-exposed if available) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |"
 	if !strings.Contains(report, want) {
 		t.Fatalf("rendered report missing TEMPLATE column header.\nWant: %q\nGot:\n%s", want, report)
 	}
@@ -380,17 +380,20 @@ func TestFormatReportProvenanceReportsCacheDisabledForLLMJudge(t *testing.T) {
 
 func TestFormatReportRestraintColumn(t *testing.T) {
 	results := []Result{
-		{Model: "m", TraceID: "a", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1}},
-		{Model: "m", TraceID: "b", Score: Score{AnswerQuality: 0, RestraintComputed: true, Restraint: 0}},
-		{Model: "m", TraceID: "c", Score: Score{AnswerQuality: 1, RestraintComputed: false}},
+		{Model: "m", TraceID: "a", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1, ToolExposedRestraintComputed: true, ToolExposedRestraint: 1}},
+		{Model: "m", TraceID: "b", Score: Score{AnswerQuality: 0, RestraintComputed: true, Restraint: 0, ToolExposedRestraintComputed: true, ToolExposedRestraint: 0}},
+		{Model: "m", TraceID: "c", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1}},
+		{Model: "m", TraceID: "d", Score: Score{AnswerQuality: 1, RestraintComputed: false}},
 	}
 	out := formatReport([]string{"m"}, results, reportOptions{})
 	if !strings.Contains(out, "Restraint") {
 		t.Fatalf("report missing Restraint header:\n%s", out)
 	}
-	// 1 of 2 eligible diverged → mean 0.50, diverged/eligible = 1/2.
-	if !strings.Contains(out, "0.50 (1/2 diverged)") {
-		t.Fatalf("report missing restraint cell %q:\n%s", "0.50 (1/2 diverged)", out)
+	// Primary: 1 of 3 eligible diverged → mean 0.67. Tool-exposed companion:
+	// 1 of 2 tool-offered eligible traces diverged → mean 0.50.
+	want := "0.67 (1/3 diverged; tool-exposed 0.50, 1/2 diverged)"
+	if !strings.Contains(out, want) {
+		t.Fatalf("report missing restraint cell %q:\n%s", want, out)
 	}
 }
 
@@ -406,14 +409,15 @@ func TestFormatReportRestraintNAWhenNoneEligible(t *testing.T) {
 
 func TestFormatManualQualityReportRestraintColumn(t *testing.T) {
 	results := []Result{
-		{Model: "m", TraceID: "a", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1}},
-		{Model: "m", TraceID: "b", Score: Score{AnswerQuality: 0, RestraintComputed: true, Restraint: 0}},
+		{Model: "m", TraceID: "a", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1, ToolExposedRestraintComputed: true, ToolExposedRestraint: 1}},
+		{Model: "m", TraceID: "b", Score: Score{AnswerQuality: 0, RestraintComputed: true, Restraint: 0, ToolExposedRestraintComputed: true, ToolExposedRestraint: 0}},
+		{Model: "m", TraceID: "c", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1}},
 	}
-	out := formatManualQualityReport([]string{"m"}, results, manualReportCoverage{Scored: 2})
+	out := formatManualQualityReport([]string{"m"}, results, manualReportCoverage{Scored: 3})
 	if !strings.Contains(out, "Restraint") {
 		t.Fatalf("manual report missing Restraint header:\n%s", out)
 	}
-	if !strings.Contains(out, "0.50 (1/2 diverged)") {
+	if !strings.Contains(out, "0.67 (1/3 diverged; tool-exposed 0.50, 1/2 diverged)") {
 		t.Fatalf("manual report missing restraint cell:\n%s", out)
 	}
 }
