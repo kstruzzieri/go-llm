@@ -75,18 +75,13 @@ func (s *ManualScorer) Score(_ context.Context, trace Trace, actual Result) (Sco
 		return Score{}, fmt.Errorf("manual scorer: no human label for trace %q model %q", trace.ID, actual.Model)
 	}
 
-	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, actual.Transcript)
+	score, schemaErr := baseMechanicalScore(trace, actual.Transcript)
 	if schemaErr != nil {
 		return Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
 	}
-
-	return Score{
-		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		ToolArgsValid:         toolArgsScore,
-		ToolArgsValidComputed: toolArgsComputed,
-		AnswerQuality:         label.quality,
-		Notes:                 joinScoreNotes(toolArgsNotes, fmt.Sprintf("manual-label: %s", label.notes)),
-	}, nil
+	score.AnswerQuality = label.quality
+	score.Notes = joinScoreNotes(score.Notes, fmt.Sprintf("manual-label: %s", label.notes))
+	return score, nil
 }
 
 // manualReportCoverage records how completely the report covers the labels, so

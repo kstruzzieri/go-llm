@@ -1355,6 +1355,84 @@ func TestLLMJudgeScorer_MalformedCacheHitFallsBackToJudge(t *testing.T) {
 	}
 }
 
+// TestScorersSetRestraintFields verifies each scorer populates the restraint and tool-exposed restraint signals (held / diverged / ineligible).
+func TestScorersSetRestraintFields(t *testing.T) {
+	goldenEmpty := Trace{ID: "t1", Golden: Golden{FinalAnswerSubstring: "answer"}}
+	goldenEmptyWithTools := Trace{ID: "t2", Tools: []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}, Golden: Golden{FinalAnswerSubstring: "answer"}}
+	goldenToolRouteWithTools := Trace{ID: "t3", Tools: []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}, Golden: Golden{ToolCalls: []string{"x"}, FinalAnswerSubstring: "the answer"}}
+	heldTranscript := []Turn{{Role: "assistant", Content: "the answer"}}
+	divergedTranscript := []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "x"}}}, {Role: "assistant", Content: "the answer"}}
+
+	t.Run("exact-match held no tools", func(t *testing.T) {
+		s := &ExactMatchScorer{}
+		got, err := s.Score(context.Background(), goldenEmpty, Result{Transcript: heldTranscript})
+		if err != nil {
+			t.Fatalf("Score: %v", err)
+		}
+		if got.Restraint != 1.0 || !got.RestraintComputed {
+			t.Fatalf("restraint = (%v, %v), want (1, true)", got.Restraint, got.RestraintComputed)
+		}
+		if got.ToolExposedRestraintComputed {
+			t.Fatalf("ToolExposedRestraintComputed = true, want false (no tools offered)")
+		}
+	})
+
+	t.Run("exact-match diverged with tools", func(t *testing.T) {
+		s := &ExactMatchScorer{}
+		got, err := s.Score(context.Background(), goldenEmptyWithTools, Result{Transcript: divergedTranscript})
+		if err != nil {
+			t.Fatalf("Score: %v", err)
+		}
+		if got.Restraint != 0.0 || !got.RestraintComputed {
+			t.Fatalf("restraint = (%v, %v), want (0, true)", got.Restraint, got.RestraintComputed)
+		}
+		if got.ToolExposedRestraint != 0.0 || !got.ToolExposedRestraintComputed {
+			t.Fatalf("tool-exposed = (%v, %v), want (0, true)", got.ToolExposedRestraint, got.ToolExposedRestraintComputed)
+		}
+	})
+
+	t.Run("golden tool route is ineligible even when tools offered", func(t *testing.T) {
+		s := &ExactMatchScorer{}
+		got, err := s.Score(context.Background(), goldenToolRouteWithTools, Result{Transcript: divergedTranscript})
+		if err != nil {
+			t.Fatalf("Score: %v", err)
+		}
+		if got.RestraintComputed {
+			t.Fatalf("RestraintComputed = true, want false (golden expects a tool route)")
+		}
+		if got.ToolExposedRestraintComputed {
+			t.Fatalf("ToolExposedRestraintComputed = true, want false (primary restraint ineligible)")
+		}
+	})
+
+	t.Run("capture scorer sets restraint", func(t *testing.T) {
+		s := &CaptureScorer{}
+		got, err := s.Score(context.Background(), goldenEmpty, Result{Transcript: heldTranscript})
+		if err != nil {
+			t.Fatalf("Score: %v", err)
+		}
+		if got.Restraint != 1.0 || !got.RestraintComputed {
+			t.Fatalf("restraint = (%v, %v), want (1, true)", got.Restraint, got.RestraintComputed)
+		}
+	})
+
+	t.Run("manual scorer sets restraint", func(t *testing.T) {
+		s, err := newManualScorer([]Label{
+			{TraceID: "t1", CandidateModel: "qwen3:8b", ExpectedAnswerQuality: 1.0},
+		})
+		if err != nil {
+			t.Fatalf("newManualScorer: %v", err)
+		}
+		got, err := s.Score(context.Background(), goldenEmpty, Result{Model: "qwen3:8b", Transcript: heldTranscript})
+		if err != nil {
+			t.Fatalf("Score: %v", err)
+		}
+		if got.Restraint != 1.0 || !got.RestraintComputed {
+			t.Fatalf("restraint = (%v, %v), want (1, true)", got.Restraint, got.RestraintComputed)
+		}
+	})
+}
+
 // TestLLMJudgeScorer_CacheHit_FreshToolSequenceMatch is the load-bearing
 // invariant of the judge-cache architecture: on a cache hit the judge MUST
 // NOT be re-invoked, but the returned Score's ToolSequenceMatch MUST come
