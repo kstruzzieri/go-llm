@@ -163,6 +163,28 @@ func TestConversationToTraceCombinesMultipleSystemMessages(t *testing.T) {
 	}
 }
 
+func TestConversationToTraceDeduplicatesRepeatedSystemMessages(t *testing.T) {
+	conv := conversation.Conversation{
+		ID: "dup-system",
+		Messages: []conversation.Message{
+			{Role: "system", Content: "shared preamble"},
+			{Role: "system", Content: "shared preamble"},
+			{Role: "system", Content: "original system"},
+			{Role: "user", Content: "question"},
+			{Role: "assistant", Content: "answer"},
+		},
+	}
+
+	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor(), nil, false)
+	if err != nil {
+		t.Fatalf("conversationToTrace() error = %v", err)
+	}
+	want := "shared preamble\n\noriginal system"
+	if trace.System != want {
+		t.Fatalf("trace.System = %q; want %q (verbatim duplicate system messages must collapse)", trace.System, want)
+	}
+}
+
 func TestConversationToTraceRejectsMalformedConversations(t *testing.T) {
 	tests := []struct {
 		name    string

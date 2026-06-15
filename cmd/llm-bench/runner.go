@@ -191,25 +191,6 @@ type replayOptions struct {
 	NumCtx         int
 }
 
-func replayShouldExposeTools(trace Trace) bool {
-	if len(trace.Golden.ToolCalls) > 0 {
-		return true
-	}
-	for _, turn := range trace.Turns {
-		if turn.Role == "assistant" && len(turn.ToolCalls) > 0 {
-			return true
-		}
-	}
-	return false
-}
-
-func toolsForReplay(trace Trace, tools []ollama.Tool) []ollama.Tool {
-	if replayShouldExposeTools(trace) {
-		return tools
-	}
-	return nil
-}
-
 // replay is the legacy entry point retained for tests and callers that
 // don't need the Runner-level knobs (PerTurnTimeout, NumCtx).
 func replay(ctx context.Context, client *ollama.Client, model string, trace Trace) ([]Turn, error) {
@@ -232,7 +213,10 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 //   - Candidate emits tool calls when the scripted turn was plain text:
 //     errToolCallMismatch.
 //   - Candidate emits tool calls when there is no scripted assistant turn
-//     after the user turn: errMissingScriptedAssistant.
+//     after the user turn: for a captured plain-chat trace (Golden.ToolCalls
+//     empty) this is recorded as a scored divergence (Notes annotation, replay
+//     ends, low quality); for a trace that expected a tool route it is the
+//     errMissingScriptedAssistant malformed-fixture error.
 //   - Candidate emits plain text when the scripted route used tools:
 //     scripted tool group is skipped and a Notes annotation records the
 //     bypass; the candidate's reply replaces the scripted final answer.
@@ -249,11 +233,14 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 	messages := []ollama.ChatMessage{
 		{Role: "system", Content: trace.System},
 	}
-	decodedTools, err := decodeTraceTools(trace.Tools)
+	// Tools are always exposed exactly as captured: a faithful replay must
+	// present the candidate with the same tool temptation the original workflow
+	// did. Whether the candidate (mis)uses them is the signal we measure, not
+	// something to suppress.
+	tools, err := decodeTraceTools(trace.Tools)
 	if err != nil {
 		return replayOutput{}, fmt.Errorf("trace %q: %w", trace.ID, err)
 	}
-	tools := toolsForReplay(trace, decodedTools)
 
 	out := replayOutput{}
 	for i := 0; i < len(trace.Turns); {
@@ -306,6 +293,22 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 			}
 
 			if expectedIndex == -1 {
+				// A captured plain-chat trace (no scripted tool route) has no
+				// frozen tool result to feed back, so replay cannot continue
+				// deterministically once the candidate reaches for a tool. That
+				// choice is a real divergence (failed restraint), not a harness
+				// error: record it as a scored divergence so exactly one artifact
+				// per (trace, model) pair is still written. The candidate's
+				// tool-call turn is already in out.Transcript, so the scorer grades
+				// it (there is no final answer to match -> low quality).
+				if len(trace.Golden.ToolCalls) == 0 {
+					out.Notes = append(out.Notes,
+						fmt.Sprintf("trace %q user turn %d: candidate called %d tool(s) on a plain-chat trace with no scripted tool route; scored as divergence",
+							trace.ID, userIndex, len(msg.ToolCalls)))
+					return out, nil
+				}
+				// A trace that genuinely expected a tool route but lacks the
+				// scripted assistant turn is a malformed fixture: surface it.
 				return out, fmt.Errorf("trace %q user turn %d: candidate emitted %d tool call(s) with no scripted assistant turn to match: %w",
 					trace.ID, userIndex, len(msg.ToolCalls), errMissingScriptedAssistant)
 			}

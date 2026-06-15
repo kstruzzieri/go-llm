@@ -602,9 +602,22 @@ func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
 	if errors.Is(err, errMissingToolResult) {
 		t.Fatalf("err = %v, must not be errMissingToolResult", err)
 	}
+	// The mismatch must be reachable for the right reason: the candidate was
+	// actually offered the tool. A suppressed-tools replay could never trigger
+	// this path with a real model.
+	requests := log.snapshot()
+	if len(requests) != 1 || len(requests[0].Tools) != 1 {
+		t.Fatalf("candidate must be given the declared tool; sent %#v", requests)
+	}
 }
 
-func TestReplayOmitsToolsForPlainCapturedChatTrace(t *testing.T) {
+// TestReplayExposesToolsForPlainCapturedChatTrace verifies replay forwards the
+// captured tool schemas even when the original conversation answered in plain
+// text. The candidate must face the same tool temptation the real workflow
+// presented; stripping the tools would silently measure an easier, tool-free
+// task. Here the candidate exercises restraint and answers directly, which is a
+// clean pass.
+func TestReplayExposesToolsForPlainCapturedChatTrace(t *testing.T) {
 	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.ChatRequest
@@ -644,12 +657,79 @@ func TestReplayOmitsToolsForPlainCapturedChatTrace(t *testing.T) {
 	if len(out.Transcript) != 1 || out.Transcript[0].Content != "plain answer" {
 		t.Fatalf("transcript = %#v, want one plain assistant answer", out.Transcript)
 	}
+	if len(out.Notes) != 0 {
+		t.Fatalf("notes = %#v, want none for a clean plain-text replay", out.Notes)
+	}
 	requests := log.snapshot()
 	if len(requests) != 1 {
 		t.Fatalf("requests = %d, want 1", len(requests))
 	}
-	if len(requests[0].Tools) != 0 {
-		t.Fatalf("plain captured-chat replay sent %d tools; want 0", len(requests[0].Tools))
+	if len(requests[0].Tools) != 1 {
+		t.Fatalf("plain captured-chat replay sent %d tools; want 1 (tools must stay exposed)", len(requests[0].Tools))
+	}
+}
+
+// TestReplayScoresToolCallOnPlainChatTraceAsDivergence verifies that when a
+// candidate calls a tool on a captured plain-chat trace (no scripted tool
+// route, no frozen tool result), replay records a scored divergence instead of
+// hard-erroring. This keeps one scored artifact per (trace, model) pair while
+// preserving the failed-restraint signal: the candidate's tool-call turn lands
+// in the transcript (so the scorer grades it low) and a Note explains why.
+func TestReplayScoresToolCallOnPlainChatTraceAsDivergence(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+		resp := ollama.ChatResponse{
+			Model: "test-model",
+			Message: ollama.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID:       "candidate-call",
+						Type:     "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{"path": "x"}},
+					},
+				},
+			},
+			Done: true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "captured-plain-chat-diverged",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{{Role: "user", Content: "Just answer directly: what is 2+2?"}},
+		Golden: Golden{
+			ToolCalls:            []string{},
+			FinalAnswerSubstring: "4",
+		},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v, want nil (divergence is scored, not errored)", err)
+	}
+	if len(out.Notes) == 0 {
+		t.Fatalf("expected a divergence note when candidate called a tool on a plain-chat trace")
+	}
+	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
+		t.Fatalf("transcript = %#v, want the candidate's tool-call turn recorded", out.Transcript)
+	}
+	requests := log.snapshot()
+	if len(requests) != 1 || len(requests[0].Tools) != 1 {
+		t.Fatalf("replay must still expose the captured tool; sent %#v", requests)
 	}
 }
 
@@ -705,9 +785,12 @@ func TestReplayPreservesToolsForScriptedToolTrace(t *testing.T) {
 }
 
 // TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant guards
-// the second sentinel-taxonomy fix: when the trace has no scripted
-// assistant turn after the user turn, a candidate tool call yields
-// errMissingScriptedAssistant, not errMissingToolResult.
+// the malformed-fixture case: a trace that *expected* a tool route
+// (Golden.ToolCalls is set) but has no scripted assistant turn after the
+// user turn to supply frozen results. A candidate tool call there yields
+// errMissingScriptedAssistant, not errMissingToolResult. (For a plain-chat
+// trace with no expected tool route, the same shape is instead scored as a
+// divergence — see TestReplayScoresToolCallOnPlainChatTraceAsDivergence.)
 func TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := ollama.ChatResponse{
@@ -740,6 +823,10 @@ func TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant(t *testing.T)
 		Turns: []Turn{
 			{Role: "user", Content: "Read it"},
 		},
+		// Golden expects a tool route, but no scripted assistant turn supplies
+		// the frozen result: a malformed fixture, which must error rather than
+		// be silently scored.
+		Golden: Golden{ToolCalls: []string{"read_file"}},
 	}
 
 	_, err := replay(context.Background(), client, "test-model", trace)
@@ -944,8 +1031,7 @@ func TestReplayForwardsTraceTools(t *testing.T) {
 		Tools: []json.RawMessage{
 			json.RawMessage(`{"name":"read_file","description":"Read a file from disk","inputSchema":{"type":"object","properties":{"path":{"type":"string"}},"required":["path"]}}`),
 		},
-		Turns:  []Turn{{Role: "user", Content: "Read provider/router.go"}},
-		Golden: Golden{ToolCalls: []string{"read_file"}},
+		Turns: []Turn{{Role: "user", Content: "Read provider/router.go"}},
 	}
 
 	transcript, err := replay(context.Background(), client, "test-model", trace)

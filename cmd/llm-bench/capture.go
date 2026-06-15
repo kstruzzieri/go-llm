@@ -337,7 +337,13 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 }
 
 func conversationTurns(messages []conversation.Message, fallbackSystem string, redactor redactor) (string, []Turn, string, error) {
+	// Preserve every distinct system message in model-visible order so a
+	// RAG-injected context prefix and the original system prompt both survive
+	// into the replayed prompt. Verbatim duplicates (e.g. a system message
+	// re-injected on re-capture) are collapsed; content is never truncated,
+	// because a faithful replay must send the same prompt the model saw.
 	var systemParts []string
+	seenSystem := make(map[string]bool)
 	var turns []Turn
 	sawUser := false
 	finalAssistantIndex, finalAnswer := capturedFinalAnswer(messages, redactor)
@@ -349,7 +355,8 @@ func conversationTurns(messages []conversation.Message, fallbackSystem string, r
 		}
 
 		if role == "system" {
-			if content := strings.TrimSpace(redactor.Redact(msg.Content)); content != "" {
+			if content := strings.TrimSpace(redactor.Redact(msg.Content)); content != "" && !seenSystem[content] {
+				seenSystem[content] = true
 				systemParts = append(systemParts, content)
 			}
 			continue

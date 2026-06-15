@@ -209,6 +209,12 @@ func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
 // one is configured. Best-effort: any failure is logged and never surfaces to
 // the caller. requestMessages should be the exact model-visible messages used
 // for the successful response; callers pass args.Messages only as a fallback.
+//
+// The effective prompt is recorded verbatim, including any RAG-injected system
+// context, so replay measures the same prompt the model actually saw rather
+// than the pre-retrieval caller messages. This is intentional: the transcript
+// DB is local and unredacted by design (see WithTranscriptStore) and must not
+// be committed or shared; redaction happens at capture export, not here.
 func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, requestMessages []ollama.ChatMessage, resp *provider.ChatResponse) {
 	store := s.transcriptStoreSnapshot()
 	if store == nil {
