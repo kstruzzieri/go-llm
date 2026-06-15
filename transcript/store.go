@@ -353,20 +353,21 @@ func (s *Store) upsertCanonical(ctx context.Context, dec stitchDecision, key, so
 		if err != nil {
 			return fmt.Errorf("transcript: marshal canonical messages: %w", err)
 		}
-		// A single rendered request can only stand in for a single-call
-		// conversation; once the history grows, clear it so capture falls back
-		// to the (RAG-free) canonical messages rather than a stale latest render.
+		// rendered is either the latest full model-visible history for this call
+		// (when RAG or similar prompt rendering changed the request) or empty,
+		// which intentionally clears any previous rendered snapshot rather than
+		// preserving stale context from an older turn.
 		if _, err := s.db.ExecContext(ctx,
 			`UPDATE conversations SET
 			    messages = ?, updated_at = ?, latest_call_id = ?,
 			    message_count = ?, stitch_status = ?,
 			    conversation_key = ?,
-			    rendered_messages = '',
+			    rendered_messages = ?,
 			    identity_source = CASE WHEN identity_source = '' THEN ? ELSE identity_source END,
 			    title = CASE WHEN title = '' THEN ? ELSE title END
 			  WHERE id = ?`,
 			string(msgsJSON), now, callID, len(incoming), statusExtended,
-			key, source, conversationTitle(incoming), dec.targetID,
+			key, rendered, source, conversationTitle(incoming), dec.targetID,
 		); err != nil {
 			return fmt.Errorf("transcript: extend canonical: %w", err)
 		}

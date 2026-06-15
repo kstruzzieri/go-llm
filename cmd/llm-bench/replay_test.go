@@ -549,11 +549,11 @@ func TestReplayErrorsWhenCandidateToolCallDoesNotMatchFrozenResult(t *testing.T)
 	}
 }
 
-// TestReplayErrorsWhenCandidateCallsToolForPlainTextScript guards the
-// sentinel correction: a candidate that emits tool calls against a
-// scripted plain-text assistant turn is a *mismatch*, not a missing
-// tool result.
-func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
+// TestReplayScoresToolCallForScriptedPlainTextReplyAsDivergence guards the
+// scoreable-divergence path for fixtures that include a scripted plain-text
+// assistant turn. The candidate still faced tools, so reaching for one is a
+// failed-restraint answer to score, not a dropped replay error.
+func TestReplayScoresToolCallForScriptedPlainTextReplyAsDivergence(t *testing.T) {
 	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.ChatRequest
@@ -593,18 +593,25 @@ func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
 			{Role: "user", Content: "What is 2+2?"},
 			{Role: "assistant", Content: "4"},
 		},
+		Golden: Golden{
+			ToolCalls:            []string{},
+			FinalAnswerSubstring: "4",
+		},
 	}
 
-	_, err := replay(context.Background(), client, "test-model", trace)
-	if !errors.Is(err, errToolCallMismatch) {
-		t.Fatalf("err = %v, want errToolCallMismatch", err)
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v, want nil (divergence is scored, not errored)", err)
 	}
-	if errors.Is(err, errMissingToolResult) {
-		t.Fatalf("err = %v, must not be errMissingToolResult", err)
+	if len(out.Notes) == 0 {
+		t.Fatalf("expected a divergence note when candidate called a tool for scripted plain-text reply")
 	}
-	// The mismatch must be reachable for the right reason: the candidate was
-	// actually offered the tool. A suppressed-tools replay could never trigger
-	// this path with a real model.
+	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
+		t.Fatalf("transcript = %#v, want candidate tool-call turn recorded", out.Transcript)
+	}
+	if out.Transcript[0].Content != "" {
+		t.Fatalf("divergent tool-call content = %q, want stripped content", out.Transcript[0].Content)
+	}
 	requests := log.snapshot()
 	if len(requests) != 1 || len(requests[0].Tools) != 1 {
 		t.Fatalf("candidate must be given the declared tool; sent %#v", requests)

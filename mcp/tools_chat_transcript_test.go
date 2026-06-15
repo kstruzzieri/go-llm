@@ -223,8 +223,8 @@ func TestPersistTranscript_MultiTurnRAGStitchesIntoOneConversation(t *testing.T)
 		t.Fatalf("conversations = %d; want 1 (RAG chunks must not fork the session)", count)
 	}
 
-	var messagesJSON, status string
-	if err := db.QueryRow(`SELECT messages, stitch_status FROM conversations`).Scan(&messagesJSON, &status); err != nil {
+	var messagesJSON, renderedJSON, status string
+	if err := db.QueryRow(`SELECT messages, rendered_messages, stitch_status FROM conversations`).Scan(&messagesJSON, &renderedJSON, &status); err != nil {
 		t.Fatalf("read conversation: %v", err)
 	}
 	if status != "extended" {
@@ -241,6 +241,20 @@ func TestPersistTranscript_MultiTurnRAGStitchesIntoOneConversation(t *testing.T)
 		if strings.Contains(m.Content, "Relevant context from the codebase") {
 			t.Fatalf("canonical history leaked RAG context: %+v", stored)
 		}
+	}
+
+	var rendered []conversation.Message
+	if err := json.Unmarshal([]byte(renderedJSON), &rendered); err != nil {
+		t.Fatalf("unmarshal rendered messages: %v", err)
+	}
+	if len(rendered) != 6 {
+		t.Fatalf("rendered messages len = %d; want 6 (RAG,q1,a1,q2,a2) (%+v)", len(rendered), rendered)
+	}
+	if rendered[0].Content != "Relevant context from the codebase:\n\nchunk B" {
+		t.Fatalf("rendered[0] = %+v, want latest RAG context from extended turn", rendered[0])
+	}
+	if rendered[5].Role != "assistant" || rendered[5].Content != "a2" {
+		t.Fatalf("rendered final = %+v, want second assistant answer", rendered[5])
 	}
 }
 

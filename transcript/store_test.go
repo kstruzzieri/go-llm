@@ -183,6 +183,76 @@ func TestRecord_ExtendsAcrossTurns(t *testing.T) {
 	}
 }
 
+func TestRecord_ExtendsPreservesLatestRenderedMessages(t *testing.T) {
+	s, _ := Open(context.Background(), ":memory:")
+	defer func() { _ = s.Close() }()
+
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID: "rag-conv",
+		Request: []conversation.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+		},
+		RenderedRequest: []conversation.Message{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nchunk A"},
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+		},
+		Response: conversation.Message{Role: "assistant", Content: "a1"},
+	}); err != nil {
+		t.Fatalf("record first turn: %v", err)
+	}
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID: "rag-conv",
+		Request: []conversation.Message{
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+			{Role: "assistant", Content: "a1"},
+			{Role: "user", Content: "q2"},
+		},
+		RenderedRequest: []conversation.Message{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nchunk B"},
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+			{Role: "assistant", Content: "a1"},
+			{Role: "user", Content: "q2"},
+		},
+		Response: conversation.Message{Role: "assistant", Content: "a2"},
+	}); err != nil {
+		t.Fatalf("record second turn: %v", err)
+	}
+
+	var messagesJSON, renderedJSON, status string
+	if err := s.db.QueryRow(`SELECT messages, rendered_messages, stitch_status FROM conversations WHERE id = ?`, "rag-conv").
+		Scan(&messagesJSON, &renderedJSON, &status); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != statusExtended {
+		t.Fatalf("stitch_status = %q; want %q", status, statusExtended)
+	}
+	var canonical []conversation.Message
+	if err := json.Unmarshal([]byte(messagesJSON), &canonical); err != nil {
+		t.Fatalf("unmarshal canonical: %v", err)
+	}
+	if len(canonical) != 5 || canonical[0].Content != "sys" || canonical[4].Content != "a2" {
+		t.Fatalf("canonical messages = %+v, want RAG-free full conversation", canonical)
+	}
+
+	var rendered []conversation.Message
+	if err := json.Unmarshal([]byte(renderedJSON), &rendered); err != nil {
+		t.Fatalf("unmarshal rendered: %v", err)
+	}
+	if len(rendered) != 6 {
+		t.Fatalf("rendered messages len = %d; want 6 (%+v)", len(rendered), rendered)
+	}
+	if rendered[0].Content != "Relevant context from the codebase:\n\nchunk B" {
+		t.Fatalf("rendered[0] = %+v, want latest RAG context from extended turn", rendered[0])
+	}
+	if rendered[5].Role != "assistant" || rendered[5].Content != "a2" {
+		t.Fatalf("rendered final = %+v, want latest assistant answer", rendered[5])
+	}
+}
+
 func TestRecord_DivergentSessionsForkUnderSameKey(t *testing.T) {
 	s, _ := Open(context.Background(), ":memory:")
 	defer func() { _ = s.Close() }()

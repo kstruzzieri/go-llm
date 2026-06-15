@@ -293,27 +293,8 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 			}
 
 			if expectedIndex == -1 {
-				// A captured plain-chat trace (no scripted tool route) has no
-				// frozen tool result to feed back, so replay cannot continue
-				// deterministically once the candidate reaches for a tool. That
-				// choice is a real divergence (failed restraint), not a harness
-				// error: record it as a scored divergence so exactly one artifact
-				// per (trace, model) pair is still written. The candidate's
-				// tool-call turn is already in out.Transcript, so the scorer grades
-				// it (there is no final answer to match -> low quality).
 				if len(trace.Golden.ToolCalls) == 0 {
-					// The tool call IS the (divergent) answer. Strip any prose the
-					// candidate emitted alongside it so a stray sentence that
-					// happens to contain the golden substring cannot be scored as a
-					// correct final answer; the tool call stays on the turn for
-					// forensics and the Note records the divergence.
-					if n := len(out.Transcript); n > 0 {
-						out.Transcript[n-1].Content = ""
-					}
-					out.Notes = append(out.Notes,
-						fmt.Sprintf("trace %q user turn %d: candidate called %d tool(s) on a plain-chat trace with no scripted tool route; scored as divergence",
-							trace.ID, userIndex, len(msg.ToolCalls)))
-					return out, nil
+					return scorePlainChatToolDivergence(out, trace.ID, userIndex, len(msg.ToolCalls), "no scripted tool route"), nil
 				}
 				// A trace that genuinely expected a tool route but lacks the
 				// scripted assistant turn is a malformed fixture: surface it.
@@ -321,6 +302,9 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 					trace.ID, userIndex, len(msg.ToolCalls), errMissingScriptedAssistant)
 			}
 			if len(expected.ToolCalls) == 0 {
+				if len(trace.Golden.ToolCalls) == 0 {
+					return scorePlainChatToolDivergence(out, trace.ID, userIndex, len(msg.ToolCalls), "scripted plain-text reply"), nil
+				}
 				return out, fmt.Errorf("trace %q assistant turn %d: candidate emitted %d tool call(s) for plain-text scripted reply: %w",
 					trace.ID, expectedIndex, len(msg.ToolCalls), errToolCallMismatch)
 			}
@@ -340,6 +324,26 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 	}
 
 	return out, nil
+}
+
+func scorePlainChatToolDivergence(out replayOutput, traceID string, userIndex, toolCallCount int, reason string) replayOutput {
+	// A captured plain-chat trace (no expected tool route) has no frozen tool
+	// result to feed back, so replay cannot continue deterministically once the
+	// candidate reaches for a tool. That choice is a real divergence (failed
+	// restraint), not a harness error: record it as a scored divergence so
+	// exactly one artifact per (trace, model) pair is still written.
+	//
+	// The tool call IS the divergent answer. Strip any prose the candidate
+	// emitted alongside it so a stray sentence that happens to contain the
+	// golden substring cannot be scored as a correct final answer; the tool call
+	// stays on the turn for forensics and the Note records the divergence.
+	if n := len(out.Transcript); n > 0 {
+		out.Transcript[n-1].Content = ""
+	}
+	out.Notes = append(out.Notes,
+		fmt.Sprintf("trace %q user turn %d: candidate called %d tool(s) on a plain-chat trace (%s); scored as divergence",
+			traceID, userIndex, toolCallCount, reason))
+	return out
 }
 
 func hasUserTurn(turns []Turn) bool {
