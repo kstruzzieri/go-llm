@@ -253,6 +253,78 @@ func TestRecord_ExtendsPreservesLatestRenderedMessages(t *testing.T) {
 	}
 }
 
+func TestRecord_IdempotentRefreshesLatestRenderedMessages(t *testing.T) {
+	s, _ := Open(context.Background(), ":memory:")
+	defer func() { _ = s.Close() }()
+
+	req := []conversation.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "q1"},
+	}
+	resp := conversation.Message{Role: "assistant", Content: "a1"}
+	renderedA := []conversation.Message{
+		{Role: "system", Content: "Relevant context from the codebase:\n\nchunk A"},
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "q1"},
+	}
+	renderedB := []conversation.Message{
+		{Role: "system", Content: "Relevant context from the codebase:\n\nchunk B"},
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "q1"},
+	}
+
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID:  "rag-retry",
+		Request:         req,
+		RenderedRequest: renderedA,
+		Response:        resp,
+	}); err != nil {
+		t.Fatalf("record first render: %v", err)
+	}
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID:  "rag-retry",
+		Request:         req,
+		RenderedRequest: renderedB,
+		Response:        resp,
+	}); err != nil {
+		t.Fatalf("record idempotent render refresh: %v", err)
+	}
+
+	var renderedJSON, status string
+	if err := s.db.QueryRow(`SELECT rendered_messages, stitch_status FROM conversations WHERE id = ?`, "rag-retry").
+		Scan(&renderedJSON, &status); err != nil {
+		t.Fatalf("read refreshed render: %v", err)
+	}
+	if status != statusIdempotent {
+		t.Fatalf("stitch_status = %q; want %q", status, statusIdempotent)
+	}
+	var rendered []conversation.Message
+	if err := json.Unmarshal([]byte(renderedJSON), &rendered); err != nil {
+		t.Fatalf("unmarshal refreshed render: %v", err)
+	}
+	if len(rendered) != 4 || rendered[0].Content != "Relevant context from the codebase:\n\nchunk B" || rendered[3].Content != "a1" {
+		t.Fatalf("rendered messages = %+v, want latest chunk B plus response", rendered)
+	}
+
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID: "rag-retry",
+		Request:        req,
+		Response:       resp,
+	}); err != nil {
+		t.Fatalf("record idempotent render clear: %v", err)
+	}
+	if err := s.db.QueryRow(`SELECT rendered_messages, stitch_status FROM conversations WHERE id = ?`, "rag-retry").
+		Scan(&renderedJSON, &status); err != nil {
+		t.Fatalf("read cleared render: %v", err)
+	}
+	if status != statusIdempotent {
+		t.Fatalf("stitch_status after clear = %q; want %q", status, statusIdempotent)
+	}
+	if renderedJSON != "" {
+		t.Fatalf("rendered_messages after no-render retry = %q; want cleared", renderedJSON)
+	}
+}
+
 func TestRecord_DivergentSessionsForkUnderSameKey(t *testing.T) {
 	s, _ := Open(context.Background(), ":memory:")
 	defer func() { _ = s.Close() }()
