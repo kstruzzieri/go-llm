@@ -404,6 +404,20 @@ func TestFormatReportRestraintNAWhenNoneEligible(t *testing.T) {
 	}
 }
 
+func TestFormatManualQualityReportRestraintColumn(t *testing.T) {
+	results := []Result{
+		{Model: "m", TraceID: "a", Score: Score{AnswerQuality: 1, RestraintComputed: true, Restraint: 1}},
+		{Model: "m", TraceID: "b", Score: Score{AnswerQuality: 0, RestraintComputed: true, Restraint: 0}},
+	}
+	out := formatManualQualityReport([]string{"m"}, results, manualReportCoverage{Scored: 2})
+	if !strings.Contains(out, "Restraint") {
+		t.Fatalf("manual report missing Restraint header:\n%s", out)
+	}
+	if !strings.Contains(out, "0.50 (1/2 diverged)") {
+		t.Fatalf("manual report missing restraint cell:\n%s", out)
+	}
+}
+
 func TestAggregateRestraint(t *testing.T) {
 	mk := func(restraint float64, computed, toolExposed bool) Result {
 		return Result{Score: Score{

@@ -183,8 +183,8 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 	fmt.Fprintf(&b, "\nCoverage: %d scored, stale: %d (excluded — label hash no longer matches an artifact), scoring errors: %d.\n\n",
 		cov.Scored, cov.Stale, cov.Errored)
 	fmt.Fprintln(&b, "## Quality by model (all matched labels)")
-	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | n |")
-	fmt.Fprintln(&b, "|---|---|---|")
+	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | Restraint (mean, diverged/eligible) | n |")
+	fmt.Fprintln(&b, "|---|---|---|---|")
 	for _, m := range models {
 		rs := byModel[m]
 		agg := aggregate(rs)
@@ -194,7 +194,8 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 			qCell = fmt.Sprintf("%.2f / %.2f / %.2f / %.2f / %.2f",
 				agg.meanQuality, agg.qualityP25, agg.qualityP50, agg.qualityP75, agg.qualityP90)
 		}
-		fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), qCell, scored)
+		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed)
+		fmt.Fprintf(&b, "| %s | %s | %s | %d |\n", markdownCell(m), qCell, restraintC, scored)
 	}
 	fmt.Fprintln(&b)
 	return redactPaths(b.String())
