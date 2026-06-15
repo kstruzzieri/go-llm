@@ -475,6 +475,11 @@ func computePairedAnalysis(matched []matchedLabel, stale []Label, arts []Artifac
 // Callers must pass at most one artifact per (trace, model) cell;
 // computePairedAnalysis enforces this before calling, so duplicates are not
 // re-checked here.
+// Unlike the manual/calibration path (which hard-errors on missing trace context
+// via calibrationTraceFromArtifact), this path reads a.Trace directly, so an
+// artifact with a zero-value empty Trace (no Golden tool calls, no Tools) is
+// treated as restraint-eligible-and-held — the correct degenerate behavior, but
+// an intentional asymmetry.
 func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, seed int64, bootstrapN int) restraintPairing {
 	type cellRestraint struct {
 		value       float64

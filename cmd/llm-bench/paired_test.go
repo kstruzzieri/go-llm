@@ -505,11 +505,22 @@ func TestRunPairedReport_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runPairedReport: %v", err)
 	}
+	// Fixture derivation:
+	//   Quality paired-complete (M=1): only t1 has every lineup model labeled
+	//   (a2B has no label → t2 is quality-incomplete).
+	//   Restraint paired-complete (N=2): pairedTestArtifact creates traces with
+	//   empty Golden.ToolCalls, so restraintSignals returns computed=true for every
+	//   cell. Both t1 and t2 have artifacts for both models → N=2.
+	//   N > M: the fixture demonstrates the exceeds-case (label-free restraint
+	//   denominator exceeds the label-dependent quality denominator).
 	for _, want := range []string{
 		"Quality by model (paired-complete)",
 		"Completeness worklist",
 		"| t2 | ollama/b | missing-label |",
 		"Bootstrap: seed=1, n=10000",
+		"Restraint vs baseline",
+		"Restraint paired-complete: 2 trace(s) (artifact denominator)",
+		"Quality paired-complete: 1 trace(s) (label denominator)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("runPairedReport output missing %q:\n%s", want, out)

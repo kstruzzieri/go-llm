@@ -81,12 +81,7 @@ func baseMechanicalScore(trace Trace, transcript []Turn) (Score, error) {
 	if schemaErr != nil {
 		return Score{}, schemaErr
 	}
-	restraint, restraintComputed := restraintSignals(trace, transcript)
-	toolExposedRestraint, toolExposedComputed := 0.0, false
-	if restraintComputed && len(trace.Tools) > 0 {
-		toolExposedRestraint = restraint
-		toolExposedComputed = true
-	}
+	restraint, restraintComputed, toolExposedRestraint, toolExposedComputed := restraintScoreFields(trace, transcript)
 	return Score{
 		ToolSequenceMatch:            toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(transcript)),
 		ToolArgsValid:                toolArgsScore,
@@ -293,12 +288,7 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 type CaptureScorer struct{}
 
 func (s *CaptureScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
-	restraint, restraintComputed := restraintSignals(trace, actual.Transcript)
-	toolExposedRestraint, toolExposedComputed := 0.0, false
-	if restraintComputed && len(trace.Tools) > 0 {
-		toolExposedRestraint = restraint
-		toolExposedComputed = true
-	}
+	restraint, restraintComputed, toolExposedRestraint, toolExposedComputed := restraintScoreFields(trace, actual.Transcript)
 	return Score{
 		ToolSequenceMatch:            toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
 		Restraint:                    restraint,

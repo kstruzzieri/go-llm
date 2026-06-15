@@ -498,6 +498,20 @@ func TestFormatPairedReportRestraintSection(t *testing.T) {
 	}
 }
 
+func TestAggregateRestraintSkipsErrorRows(t *testing.T) {
+	rs := []Result{
+		{Score: Score{Restraint: 1, RestraintComputed: true}},
+		{Err: errors.New("boom"), Score: Score{Restraint: 0, RestraintComputed: true}}, // must be ignored
+	}
+	a := aggregate(rs)
+	if a.restraintComputed != 1 {
+		t.Fatalf("restraintComputed = %d, want 1 (error row ignored)", a.restraintComputed)
+	}
+	if a.restraintDiverged != 0 {
+		t.Fatalf("restraintDiverged = %d, want 0 (error row's diverged restraint must not count)", a.restraintDiverged)
+	}
+}
+
 func TestFormatPairedReportRestraintNoEligibleTraces(t *testing.T) {
 	pa := pairedAnalysis{
 		Lineup:         []string{"a", "b"},

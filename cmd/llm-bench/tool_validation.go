@@ -249,6 +249,18 @@ func restraintSignals(trace Trace, transcript []Turn) (restraint float64, comput
 	return 1, true
 }
 
+// restraintScoreFields computes the four restraint Score fields from a trace +
+// transcript: primary restraint (held/diverged) and the tool-exposed companion
+// (set only when restraint is eligible AND tools were offered). Centralizing the
+// gating keeps the scorer seam and the capture seam from drifting.
+func restraintScoreFields(trace Trace, transcript []Turn) (restraint float64, restraintComputed bool, toolExposed float64, toolExposedComputed bool) {
+	restraint, restraintComputed = restraintSignals(trace, transcript)
+	if restraintComputed && len(trace.Tools) > 0 {
+		toolExposed, toolExposedComputed = restraint, true
+	}
+	return
+}
+
 func decodeArguments(raw json.RawMessage) (any, error) {
 	if len(raw) == 0 {
 		return map[string]any{}, nil
