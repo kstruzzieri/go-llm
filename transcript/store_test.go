@@ -325,6 +325,92 @@ func TestRecord_IdempotentRefreshesLatestRenderedMessages(t *testing.T) {
 	}
 }
 
+func TestRecord_PrefixIdempotentPreservesLongerRenderedMessages(t *testing.T) {
+	s, _ := Open(context.Background(), ":memory:")
+	defer func() { _ = s.Close() }()
+
+	req1 := []conversation.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "q1"},
+	}
+	resp1 := conversation.Message{Role: "assistant", Content: "a1"}
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID: "rag-prefix",
+		Request:        req1,
+		RenderedRequest: []conversation.Message{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nchunk A"},
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+		},
+		Response: resp1,
+	}); err != nil {
+		t.Fatalf("record first turn: %v", err)
+	}
+
+	req2 := []conversation.Message{
+		{Role: "system", Content: "sys"},
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "user", Content: "q2"},
+	}
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID: "rag-prefix",
+		Request:        req2,
+		RenderedRequest: []conversation.Message{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nchunk B"},
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+			{Role: "assistant", Content: "a1"},
+			{Role: "user", Content: "q2"},
+		},
+		Response: conversation.Message{Role: "assistant", Content: "a2"},
+	}); err != nil {
+		t.Fatalf("record second turn: %v", err)
+	}
+
+	if err := s.Record(context.Background(), RecordInput{
+		ConversationID: "rag-prefix",
+		Request:        req1,
+		RenderedRequest: []conversation.Message{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nchunk retry"},
+			{Role: "system", Content: "sys"},
+			{Role: "user", Content: "q1"},
+		},
+		Response: resp1,
+	}); err != nil {
+		t.Fatalf("record prefix retry: %v", err)
+	}
+
+	var messagesJSON, renderedJSON, status string
+	if err := s.db.QueryRow(`SELECT messages, rendered_messages, stitch_status FROM conversations WHERE id = ?`, "rag-prefix").
+		Scan(&messagesJSON, &renderedJSON, &status); err != nil {
+		t.Fatalf("read conversation: %v", err)
+	}
+	if status != statusIdempotent {
+		t.Fatalf("stitch_status = %q; want %q", status, statusIdempotent)
+	}
+	var canonical []conversation.Message
+	if err := json.Unmarshal([]byte(messagesJSON), &canonical); err != nil {
+		t.Fatalf("unmarshal canonical: %v", err)
+	}
+	if len(canonical) != 5 || canonical[4].Content != "a2" {
+		t.Fatalf("canonical messages = %+v, want longer stored conversation preserved", canonical)
+	}
+	var rendered []conversation.Message
+	if err := json.Unmarshal([]byte(renderedJSON), &rendered); err != nil {
+		t.Fatalf("unmarshal rendered: %v", err)
+	}
+	if len(rendered) != 6 {
+		t.Fatalf("rendered messages len = %d; want longer rendered conversation preserved (%+v)", len(rendered), rendered)
+	}
+	if rendered[0].Content != "Relevant context from the codebase:\n\nchunk B" {
+		t.Fatalf("rendered[0] = %+v, want longer turn's RAG context, not prefix retry", rendered[0])
+	}
+	if rendered[5].Role != "assistant" || rendered[5].Content != "a2" {
+		t.Fatalf("rendered final = %+v, want longer rendered assistant answer", rendered[5])
+	}
+}
+
 func TestRecord_DivergentSessionsForkUnderSameKey(t *testing.T) {
 	s, _ := Open(context.Background(), ":memory:")
 	defer func() { _ = s.Close() }()
