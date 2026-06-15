@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -672,4 +673,52 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func TestComputeRestraintPairingN8FindingShape(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	diverged := []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "x"}}}}
+	mkArt := func(trace, model string, transcript []Turn) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Tools: withTools, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: transcript,
+		}
+	}
+	// 8 eligible traces. Model a diverges on 3 (t0,t1,t2); model b diverges on 4 (t0,t1,t2,t3).
+	var arts []Artifact
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("t%d", i)
+		aTx := held
+		if i < 3 {
+			aTx = diverged
+		}
+		bTx := held
+		if i < 4 {
+			bTx = diverged
+		}
+		arts = append(arts, mkArt(id, "a", aTx), mkArt(id, "b", bTx))
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	if rp.CompleteN != 8 {
+		t.Fatalf("CompleteN = %d, want 8", rp.CompleteN)
+	}
+	if rp.PerModelMean["a"] != 0.625 {
+		t.Fatalf("mean[a] = %v, want 0.625 (held 5/8)", rp.PerModelMean["a"])
+	}
+	if rp.PerModelMean["b"] != 0.5 {
+		t.Fatalf("mean[b] = %v, want 0.5 (held 4/8)", rp.PerModelMean["b"])
+	}
+	// b vs baseline a: b diverges on t3 where a held → 1 loss; t0-t2 both diverged (tie);
+	// t4-t7 both held (tie). So 0W/1L/7T, mean delta -1/8 = -0.125.
+	bd := rp.BaselineSummary[0]
+	if bd.Wins != 0 || bd.Losses != 1 || bd.Ties != 7 {
+		t.Fatalf("baselineDelta W/L/T = %d/%d/%d, want 0/1/7", bd.Wins, bd.Losses, bd.Ties)
+	}
+	if bd.MeanDelta != -0.125 {
+		t.Fatalf("MeanDelta = %v, want -0.125", bd.MeanDelta)
+	}
 }
