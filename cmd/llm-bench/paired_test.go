@@ -705,6 +705,42 @@ func TestComputeRestraintPairingExcludesMissingTraceContext(t *testing.T) {
 	}
 }
 
+// TestComputeRestraintPairingExcludesMissingGoldenRubric guards against a
+// truncated artifact whose embedded trace has a matching ID but no golden rubric
+// (FinalAnswerCriteria/FinalAnswerSubstring both empty). Its zero-value Golden
+// has no ToolCalls, so restraintSignals would otherwise treat it as a golden-
+// empty restraint-eligible "held" trace and inflate the paired restraint
+// denominator. A real restraint-eligible trace always carries a final-answer
+// rubric, so the absence of one marks malformed trace context to exclude.
+func TestComputeRestraintPairingExcludesMissingGoldenRubric(t *testing.T) {
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	valid := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: held,
+		}
+	}
+	// Matching ID but no golden rubric → not a real restraint-eligible trace.
+	noRubric := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace},
+			ActualTranscript: held,
+		}
+	}
+	arts := []Artifact{
+		valid("t1", "a"), valid("t1", "b"),
+		noRubric("t2", "a"), noRubric("t2", "b"),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+	if rp.CompleteN != 1 {
+		t.Fatalf("CompleteN = %d, want 1 (rubric-less trace context excluded)", rp.CompleteN)
+	}
+}
+
 func contains(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {

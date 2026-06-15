@@ -578,8 +578,21 @@ func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, 
 	return rp
 }
 
+// restraintArtifactTraceContextValid reports whether an artifact carries enough
+// embedded trace context to be trusted for restraint pairing. It requires a
+// matching trace ID AND a golden final-answer rubric (criteria or substring),
+// mirroring calibrationTraceFromArtifact's rubric check. The rubric guard is
+// load-bearing: a truncated artifact like Trace{ID: TraceID} with a zero-value
+// Golden has no ToolCalls, so without it restraintSignals would treat the
+// rubric-less trace as golden-empty/restraint-eligible/held and inflate the
+// paired restraint denominator. A real restraint-eligible trace always has a
+// rubric even though its Golden.ToolCalls is empty.
 func restraintArtifactTraceContextValid(a Artifact) bool {
-	return strings.TrimSpace(a.Trace.ID) != "" && a.Trace.ID == a.TraceID
+	if strings.TrimSpace(a.Trace.ID) == "" || a.Trace.ID != a.TraceID {
+		return false
+	}
+	return strings.TrimSpace(a.Trace.Golden.FinalAnswerCriteria) != "" ||
+		strings.TrimSpace(a.Trace.Golden.FinalAnswerSubstring) != ""
 }
 
 func mean(xs []float64) float64 {
