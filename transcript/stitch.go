@@ -31,8 +31,9 @@ type candidate struct {
 
 // stitchDecision is the outcome of decideStitch.
 type stitchDecision struct {
-	targetID string
-	status   string
+	targetID         string
+	status           string
+	preserveRendered bool
 }
 
 // forkID returns the content-addressed id of a forked sibling of key. Because
@@ -87,7 +88,7 @@ func decideStitch(key string, incoming []conversation.Message, candidates []cand
 		}
 	}
 	if longer != nil {
-		return stitchDecision{targetID: longer.id, status: statusIdempotent}
+		return stitchDecision{targetID: longer.id, status: statusIdempotent, preserveRendered: true}
 	}
 
 	// 5. All diverge.

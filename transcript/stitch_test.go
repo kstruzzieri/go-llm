@@ -35,6 +35,9 @@ func TestDecideStitch_Idempotent(t *testing.T) {
 	if dec.status != statusIdempotent || dec.targetID != "k" {
 		t.Errorf("got %+v, want {k idempotent}", dec)
 	}
+	if dec.preserveRendered {
+		t.Errorf("preserveRendered = true for exact idempotent retry; want false so rendered can refresh")
+	}
 }
 
 func TestDecideStitch_Extended(t *testing.T) {
@@ -50,6 +53,9 @@ func TestDecideStitch_ShorterIncomingNoShrink(t *testing.T) {
 	dec := decideStitch("k", msgs("a", "b"), []candidate{c}, time.UnixMilli(1000), defaultLeaseWindow, defaultShortThreshold)
 	if dec.status != statusIdempotent || dec.targetID != "k" {
 		t.Errorf("got %+v, want {k idempotent} (no shrink)", dec)
+	}
+	if !dec.preserveRendered {
+		t.Errorf("preserveRendered = false for shorter incoming retry; want true to avoid shrinking rendered_messages")
 	}
 }
 
