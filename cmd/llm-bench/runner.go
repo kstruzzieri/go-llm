@@ -16,6 +16,8 @@ import (
 // in RunAll actually keeps the model warm across all of a target's traces.
 const benchKeepAlive = "30m"
 
+const plainChatToolDivergenceFinal = "__LLM_BENCH_TOOL_DIVERGENCE_8F3E0B2C__"
+
 // Sentinel errors so tests assert on identity rather than message text.
 var (
 	errNoUserTurn               = errors.New("trace has no user turn")
@@ -333,12 +335,15 @@ func scorePlainChatToolDivergence(out replayOutput, traceID string, userIndex, t
 	// restraint), not a harness error: record it as a scored divergence so
 	// exactly one artifact per (trace, model) pair is still written.
 	//
-	// The tool call IS the divergent answer. Strip any prose the candidate
-	// emitted alongside it so a stray sentence that happens to contain the
-	// golden substring cannot be scored as a correct final answer; the tool call
-	// stays on the turn for forensics and the Note records the divergence.
+	// The tool call IS the divergent answer. Replace any prose the candidate
+	// emitted alongside it with a deterministic marker so a stray sentence that
+	// happens to contain the golden substring cannot be scored as a correct
+	// final answer. The marker is non-empty so llm-judge can still score the
+	// failed-restraint output instead of rejecting the replay as malformed. The
+	// tool call stays on the turn for forensics and the Note records the
+	// divergence.
 	if n := len(out.Transcript); n > 0 {
-		out.Transcript[n-1].Content = ""
+		out.Transcript[n-1].Content = plainChatToolDivergenceFinal
 	}
 	out.Notes = append(out.Notes,
 		fmt.Sprintf("trace %q user turn %d: candidate called %d tool(s) on a plain-chat trace (%s); scored as divergence",

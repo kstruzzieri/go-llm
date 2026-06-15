@@ -609,8 +609,8 @@ func TestReplayScoresToolCallForScriptedPlainTextReplyAsDivergence(t *testing.T)
 	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
 		t.Fatalf("transcript = %#v, want candidate tool-call turn recorded", out.Transcript)
 	}
-	if out.Transcript[0].Content != "" {
-		t.Fatalf("divergent tool-call content = %q, want stripped content", out.Transcript[0].Content)
+	if out.Transcript[0].Content != plainChatToolDivergenceFinal {
+		t.Fatalf("divergent tool-call content = %q, want marker %q", out.Transcript[0].Content, plainChatToolDivergenceFinal)
 	}
 	requests := log.snapshot()
 	if len(requests) != 1 || len(requests[0].Tools) != 1 {
@@ -787,8 +787,18 @@ func TestReplayDivergenceDoesNotLeakContentToScorer(t *testing.T) {
 	if got := lastAssistantContent(out.Transcript); strings.Contains(got, "4") {
 		t.Fatalf("divergence leaked scorable content %q; want no golden-matching final answer", got)
 	}
+	if got := lastAssistantContent(out.Transcript); strings.TrimSpace(got) == "" {
+		t.Fatalf("divergence final answer is empty; llm-judge would reject it")
+	}
 	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
 		t.Fatalf("transcript = %#v, want the candidate's tool call retained for forensics", out.Transcript)
+	}
+	judge, err := newLLMJudgeScorer(&fakeJudgeClient{}, "gemma4:31b", 0)
+	if err != nil {
+		t.Fatalf("newLLMJudgeScorer: %v", err)
+	}
+	if _, _, err := judge.buildJudgeCall(trace, Result{Model: "qwen3:8b", TraceID: trace.ID, Transcript: out.Transcript}); err != nil {
+		t.Fatalf("buildJudgeCall rejected scoreable divergence: %v", err)
 	}
 }
 
