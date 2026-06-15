@@ -38,7 +38,8 @@ const createConversationsTable = `CREATE TABLE IF NOT EXISTS conversations (
 	identity_source  TEXT NOT NULL DEFAULT '',
 	latest_call_id   TEXT NOT NULL DEFAULT '',
 	message_count    INTEGER NOT NULL DEFAULT 0,
-	stitch_status    TEXT NOT NULL DEFAULT ''
+	stitch_status    TEXT NOT NULL DEFAULT '',
+	rendered_messages TEXT NOT NULL DEFAULT ''
 )`
 
 const createConvKeyIndex = `CREATE INDEX IF NOT EXISTS idx_conversations_key
@@ -55,6 +56,7 @@ var auditColumns = []struct{ name, ddl string }{
 	{"latest_call_id", "TEXT NOT NULL DEFAULT ''"},
 	{"message_count", "INTEGER NOT NULL DEFAULT 0"},
 	{"stitch_status", "TEXT NOT NULL DEFAULT ''"},
+	{"rendered_messages", "TEXT NOT NULL DEFAULT ''"},
 }
 
 // migrate ensures both tables, their indexes, and the conversations audit

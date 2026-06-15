@@ -549,11 +549,11 @@ func TestReplayErrorsWhenCandidateToolCallDoesNotMatchFrozenResult(t *testing.T)
 	}
 }
 
-// TestReplayErrorsWhenCandidateCallsToolForPlainTextScript guards the
-// sentinel correction: a candidate that emits tool calls against a
-// scripted plain-text assistant turn is a *mismatch*, not a missing
-// tool result.
-func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
+// TestReplayScoresToolCallForScriptedPlainTextReplyAsDivergence guards the
+// scoreable-divergence path for fixtures that include a scripted plain-text
+// assistant turn. The candidate still faced tools, so reaching for one is a
+// failed-restraint answer to score, not a dropped replay error.
+func TestReplayScoresToolCallForScriptedPlainTextReplyAsDivergence(t *testing.T) {
 	log := &requestLog{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.ChatRequest
@@ -593,21 +593,273 @@ func TestReplayErrorsWhenCandidateCallsToolForPlainTextScript(t *testing.T) {
 			{Role: "user", Content: "What is 2+2?"},
 			{Role: "assistant", Content: "4"},
 		},
+		Golden: Golden{
+			ToolCalls:            []string{},
+			FinalAnswerSubstring: "4",
+		},
 	}
 
-	_, err := replay(context.Background(), client, "test-model", trace)
-	if !errors.Is(err, errToolCallMismatch) {
-		t.Fatalf("err = %v, want errToolCallMismatch", err)
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v, want nil (divergence is scored, not errored)", err)
 	}
-	if errors.Is(err, errMissingToolResult) {
-		t.Fatalf("err = %v, must not be errMissingToolResult", err)
+	if len(out.Notes) == 0 {
+		t.Fatalf("expected a divergence note when candidate called a tool for scripted plain-text reply")
+	}
+	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
+		t.Fatalf("transcript = %#v, want candidate tool-call turn recorded", out.Transcript)
+	}
+	if out.Transcript[0].Content != plainChatToolDivergenceFinal {
+		t.Fatalf("divergent tool-call content = %q, want marker %q", out.Transcript[0].Content, plainChatToolDivergenceFinal)
+	}
+	requests := log.snapshot()
+	if len(requests) != 1 || len(requests[0].Tools) != 1 {
+		t.Fatalf("candidate must be given the declared tool; sent %#v", requests)
+	}
+}
+
+// TestReplayExposesToolsForPlainCapturedChatTrace verifies replay forwards the
+// captured tool schemas even when the original conversation answered in plain
+// text. The candidate must face the same tool temptation the real workflow
+// presented; stripping the tools would silently measure an easier, tool-free
+// task. Here the candidate exercises restraint and answers directly, which is a
+// clean pass.
+func TestReplayExposesToolsForPlainCapturedChatTrace(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+		resp := ollama.ChatResponse{
+			Model:   "test-model",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "plain answer"},
+			Done:    true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "captured-plain-chat",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{{Role: "user", Content: "Explain the replay flow"}},
+		Golden: Golden{
+			ToolCalls:            []string{},
+			FinalAnswerSubstring: "plain answer",
+		},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v", err)
+	}
+	if len(out.Transcript) != 1 || out.Transcript[0].Content != "plain answer" {
+		t.Fatalf("transcript = %#v, want one plain assistant answer", out.Transcript)
+	}
+	if len(out.Notes) != 0 {
+		t.Fatalf("notes = %#v, want none for a clean plain-text replay", out.Notes)
+	}
+	requests := log.snapshot()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	if len(requests[0].Tools) != 1 {
+		t.Fatalf("plain captured-chat replay sent %d tools; want 1 (tools must stay exposed)", len(requests[0].Tools))
+	}
+}
+
+// TestReplayScoresToolCallOnPlainChatTraceAsDivergence verifies that when a
+// candidate calls a tool on a captured plain-chat trace (no scripted tool
+// route, no frozen tool result), replay records a scored divergence instead of
+// hard-erroring. This keeps one scored artifact per (trace, model) pair while
+// preserving the failed-restraint signal: the candidate's tool-call turn lands
+// in the transcript (so the scorer grades it low) and a Note explains why.
+func TestReplayScoresToolCallOnPlainChatTraceAsDivergence(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+		resp := ollama.ChatResponse{
+			Model: "test-model",
+			Message: ollama.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID:       "candidate-call",
+						Type:     "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{"path": "x"}},
+					},
+				},
+			},
+			Done: true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "captured-plain-chat-diverged",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{{Role: "user", Content: "Just answer directly: what is 2+2?"}},
+		Golden: Golden{
+			ToolCalls:            []string{},
+			FinalAnswerSubstring: "4",
+		},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v, want nil (divergence is scored, not errored)", err)
+	}
+	if len(out.Notes) == 0 {
+		t.Fatalf("expected a divergence note when candidate called a tool on a plain-chat trace")
+	}
+	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
+		t.Fatalf("transcript = %#v, want the candidate's tool-call turn recorded", out.Transcript)
+	}
+	requests := log.snapshot()
+	if len(requests) != 1 || len(requests[0].Tools) != 1 {
+		t.Fatalf("replay must still expose the captured tool; sent %#v", requests)
+	}
+}
+
+// TestReplayDivergenceDoesNotLeakContentToScorer guards against a candidate
+// earning a passing score on a failed-restraint divergence: when the candidate
+// emits a tool call AND prose that happens to contain the golden answer, the
+// recorded turn must not expose that prose as the final answer, or the
+// exact-match scorer / calibration artifact would grade the divergence as
+// correct. The tool call is the answer here, and it is a divergence.
+func TestReplayDivergenceDoesNotLeakContentToScorer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		resp := ollama.ChatResponse{
+			Model: "test-model",
+			Message: ollama.ChatMessage{
+				Role:    "assistant",
+				Content: "The answer is 4.",
+				ToolCalls: []ollama.ToolCall{
+					{
+						ID:       "candidate-call",
+						Type:     "function",
+						Function: ollama.ToolCallFunction{Name: "read_file", Arguments: map[string]any{"path": "x"}},
+					},
+				},
+			},
+			Done: true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "diverged-with-prose",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read a file","inputSchema":{"type":"object"}}`),
+		},
+		Turns:  []Turn{{Role: "user", Content: "Just answer directly: what is 2+2?"}},
+		Golden: Golden{ToolCalls: []string{}, FinalAnswerSubstring: "4"},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v, want nil", err)
+	}
+	if got := lastAssistantContent(out.Transcript); strings.Contains(got, "4") {
+		t.Fatalf("divergence leaked scorable content %q; want no golden-matching final answer", got)
+	}
+	if got := lastAssistantContent(out.Transcript); strings.TrimSpace(got) == "" {
+		t.Fatalf("divergence final answer is empty; llm-judge would reject it")
+	}
+	if len(out.Transcript) != 1 || len(out.Transcript[0].ToolCalls) != 1 {
+		t.Fatalf("transcript = %#v, want the candidate's tool call retained for forensics", out.Transcript)
+	}
+	judge, err := newLLMJudgeScorer(&fakeJudgeClient{}, "gemma4:31b", 0)
+	if err != nil {
+		t.Fatalf("newLLMJudgeScorer: %v", err)
+	}
+	if _, _, err := judge.buildJudgeCall(trace, Result{Model: "qwen3:8b", TraceID: trace.ID, Transcript: out.Transcript}); err != nil {
+		t.Fatalf("buildJudgeCall rejected scoreable divergence: %v", err)
+	}
+}
+
+func TestReplayPreservesToolsForScriptedToolTrace(t *testing.T) {
+	log := &requestLog{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ollama.ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		log.append(req)
+		resp := ollama.ChatResponse{
+			Model:   "test-model",
+			Message: ollama.ChatMessage{Role: "assistant", Content: "I can answer without tools"},
+			Done:    true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Fatalf("encode response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	trace := Trace{
+		ID:     "scripted-tool-trace",
+		System: "sys",
+		Tools: []json.RawMessage{
+			json.RawMessage(`{"name":"read_file","description":"Read","inputSchema":{"type":"object"}}`),
+		},
+		Turns: []Turn{
+			{Role: "user", Content: "Read provider/router.go"},
+			{Role: "assistant", ToolCalls: []ToolCall{{Name: "read_file", Arguments: json.RawMessage(`{"path":"provider/router.go"}`)}}},
+			{Role: "tool", Name: "read_file", Content: "package provider"},
+			{Role: "assistant", Content: "scripted summary"},
+		},
+		Golden: Golden{ToolCalls: []string{"read_file"}, FinalAnswerSubstring: "scripted summary"},
+	}
+
+	out, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "test-model", trace, replayOptions{})
+	if err != nil {
+		t.Fatalf("replayWith() error = %v", err)
+	}
+	if len(out.Notes) == 0 {
+		t.Fatalf("expected bypass note when candidate skipped scripted tool route")
+	}
+	requests := log.snapshot()
+	if len(requests) != 1 {
+		t.Fatalf("requests = %d, want 1", len(requests))
+	}
+	if len(requests[0].Tools) != 1 {
+		t.Fatalf("scripted tool replay sent %d tools; want 1", len(requests[0].Tools))
 	}
 }
 
 // TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant guards
-// the second sentinel-taxonomy fix: when the trace has no scripted
-// assistant turn after the user turn, a candidate tool call yields
-// errMissingScriptedAssistant, not errMissingToolResult.
+// the malformed-fixture case: a trace that *expected* a tool route
+// (Golden.ToolCalls is set) but has no scripted assistant turn after the
+// user turn to supply frozen results. A candidate tool call there yields
+// errMissingScriptedAssistant, not errMissingToolResult. (For a plain-chat
+// trace with no expected tool route, the same shape is instead scored as a
+// divergence — see TestReplayScoresToolCallOnPlainChatTraceAsDivergence.)
 func TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		resp := ollama.ChatResponse{
@@ -640,6 +892,10 @@ func TestReplayErrorsWhenCandidateCallsToolWithNoScriptedAssistant(t *testing.T)
 		Turns: []Turn{
 			{Role: "user", Content: "Read it"},
 		},
+		// Golden expects a tool route, but no scripted assistant turn supplies
+		// the frozen result: a malformed fixture, which must error rather than
+		// be silently scored.
+		Golden: Golden{ToolCalls: []string{"read_file"}},
 	}
 
 	_, err := replay(context.Background(), client, "test-model", trace)

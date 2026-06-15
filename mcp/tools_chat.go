@@ -153,8 +153,28 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	if err != nil {
 		return toolError("ollama", "%v", err), nil
 	}
-	s.persistTranscript(ctx, req, args, resp)
+	s.persistTranscript(ctx, req, args, messages, resp)
 	return toolResult(resp.Content), nil
+}
+
+// chatMessagesEqual reports whether two chat-message slices are equivalent for
+// transcript purposes (role, text, and tool linkage). Used to decide whether an
+// effective request differs from the canonical history enough to record it as a
+// distinct RenderedRequest.
+func chatMessagesEqual(a, b []ollama.ChatMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Role != b[i].Role ||
+			a[i].Content != b[i].Content ||
+			a[i].ToolName != b[i].ToolName ||
+			a[i].ToolCallID != b[i].ToolCallID ||
+			len(a[i].ToolCalls) != len(b[i].ToolCalls) {
+			return false
+		}
+	}
+	return true
 }
 
 // lastUserMessage returns the content of the last message with role "user".
@@ -207,9 +227,18 @@ func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
 
 // persistTranscript records a successful chat call to the transcript store when
 // one is configured. Best-effort: any failure is logged and never surfaces to
-// the caller. The original args.Messages (pre-RAG) are recorded; the ephemeral
-// RAG-injected system message is intentionally excluded.
-func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, resp *provider.ChatResponse) {
+// the caller. requestMessages is the exact model-visible request used for the
+// successful response (e.g. with RAG context prepended).
+//
+// The canonical Request is the pre-RAG caller history (args.Messages): it alone
+// drives conversation identity and stitching, so it must stay stable across the
+// turns of one session — recording a per-turn RAG system message there would
+// fork the session. The effective request (requestMessages), when it differs,
+// is recorded separately as RenderedRequest so replay still measures the prompt
+// the model actually saw. The transcript DB is local and unredacted by design
+// (see WithTranscriptStore) and must not be committed or shared; redaction
+// happens at capture export, not here.
+func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, requestMessages []ollama.ChatMessage, resp *provider.ChatResponse) {
 	store := s.transcriptStoreSnapshot()
 	if store == nil {
 		return
@@ -219,6 +248,16 @@ func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolReque
 	if err != nil {
 		log.Printf("mcp: transcript skip (convert request): %v", err)
 		return
+	}
+	// Only carry a distinct rendered request when retrieval (or similar) changed
+	// the effective prompt; otherwise it is identical to the canonical history.
+	var rendered []conversation.Message
+	if len(requestMessages) > 0 && !chatMessagesEqual(requestMessages, args.Messages) {
+		rendered, err = conversation.FromChatMessages(requestMessages)
+		if err != nil {
+			log.Printf("mcp: transcript skip (convert rendered request): %v", err)
+			return
+		}
 	}
 
 	var toolCalls json.RawMessage
@@ -239,8 +278,9 @@ func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolReque
 	}
 
 	in := transcript.RecordInput{
-		ConversationID: strings.TrimSpace(args.ConversationID),
-		Request:        reqMsgs,
+		ConversationID:  strings.TrimSpace(args.ConversationID),
+		Request:         reqMsgs,
+		RenderedRequest: rendered,
 		Response: conversation.Message{
 			Role:      "assistant",
 			Content:   resp.Content,

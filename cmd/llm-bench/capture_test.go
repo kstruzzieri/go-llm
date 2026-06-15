@@ -139,6 +139,95 @@ func TestConversationToTraceUsesFallbackSystem(t *testing.T) {
 	}
 }
 
+func TestConversationToTraceCombinesMultipleSystemMessages(t *testing.T) {
+	conv := conversation.Conversation{
+		ID: "multi-system",
+		Messages: []conversation.Message{
+			{Role: "system", Content: "Relevant context from the codebase:\n\nretrieved chunk"},
+			{Role: "system", Content: "original system"},
+			{Role: "user", Content: "question"},
+			{Role: "assistant", Content: "answer"},
+		},
+	}
+
+	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor(), nil, false)
+	if err != nil {
+		t.Fatalf("conversationToTrace() error = %v", err)
+	}
+	want := "Relevant context from the codebase:\n\nretrieved chunk\n\noriginal system"
+	if trace.System != want {
+		t.Fatalf("trace.System = %q; want %q", trace.System, want)
+	}
+	if len(trace.Turns) != 1 || trace.Turns[0].Role != "user" || trace.Turns[0].Content != "question" {
+		t.Fatalf("trace.Turns = %#v, want single user turn", trace.Turns)
+	}
+}
+
+func TestConversationToTraceDeduplicatesRepeatedSystemMessages(t *testing.T) {
+	conv := conversation.Conversation{
+		ID: "dup-system",
+		Messages: []conversation.Message{
+			{Role: "system", Content: "shared preamble"},
+			{Role: "system", Content: "shared preamble"},
+			{Role: "system", Content: "original system"},
+			{Role: "user", Content: "question"},
+			{Role: "assistant", Content: "answer"},
+		},
+	}
+
+	trace, err := conversationToTrace(conv, "test-source", "", defaultRedactor(), nil, false)
+	if err != nil {
+		t.Fatalf("conversationToTrace() error = %v", err)
+	}
+	want := "shared preamble\n\noriginal system"
+	if trace.System != want {
+		t.Fatalf("trace.System = %q; want %q (verbatim duplicate system messages must collapse)", trace.System, want)
+	}
+}
+
+// TestCaptureFallsBackToMessagesWhenNoRenderedColumn covers a legacy/foreign
+// conversations DB that predates the rendered_messages column: capture must
+// detect its absence and read the canonical messages without erroring.
+func TestCaptureFallsBackToMessagesWhenNoRenderedColumn(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE conversations (
+		id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', messages TEXT NOT NULL,
+		created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	msgs := `[{"role":"system","content":"legacy sys"},{"role":"user","content":"q"},{"role":"assistant","content":"a"}]`
+	if _, err := db.Exec(`INSERT INTO conversations (id, title, messages, created_at, updated_at) VALUES (?,?,?,?,?)`,
+		"legacy-1", "t", msgs, 1, 1); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	res, err := runCapture(context.Background(), captureOptions{DBPath: path, OutputDir: t.TempDir(), Source: "test"})
+	if err != nil {
+		t.Fatalf("runCapture on legacy DB: %v", err)
+	}
+	if len(res.Written) != 1 {
+		t.Fatalf("written = %d; want 1", len(res.Written))
+	}
+	data, err := os.ReadFile(res.Written[0])
+	if err != nil {
+		t.Fatalf("read trace: %v", err)
+	}
+	var trace Trace
+	if err := json.Unmarshal(data, &trace); err != nil {
+		t.Fatalf("unmarshal trace: %v", err)
+	}
+	if trace.System != "legacy sys" {
+		t.Fatalf("trace.System = %q; want canonical messages fallback", trace.System)
+	}
+}
+
 func TestConversationToTraceRejectsMalformedConversations(t *testing.T) {
 	tests := []struct {
 		name    string

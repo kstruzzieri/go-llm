@@ -16,16 +16,24 @@ const (
 )
 
 // RecordInput is one chat call to persist. Request is the original user-facing
-// history (any RAG-injected system message already excluded by the caller);
+// history (any RAG-injected system message MUST be excluded by the caller);
 // Response is the assistant turn that answered it.
+//
+// Request alone drives identity (conversationKey) and stitching (decideStitch),
+// so it must stay stable across the turns of one session — an ephemeral
+// RAG-injected system message that changes per turn would fork the session.
+// RenderedRequest optionally carries the exact model-visible request (including
+// that RAG context) for replay fidelity; it never participates in identity or
+// stitching and is persisted separately for capture.
 type RecordInput struct {
-	ConversationID string                 // explicit id from the chat tool arg; "" if absent
-	Request        []conversation.Message // original user-facing history
-	Response       conversation.Message   // assistant turn: content + tool_calls when present
-	Model          string                 // model that served the call; "" if unknown
-	Provider       string                 // provider instance that served the call; "" if unknown
-	RouteOutcome   json.RawMessage        // optional serialized RouteOutcome; nil ok
-	SessionHint    string                 // stable MCP session/client id; "" when unavailable
+	ConversationID  string                 // explicit id from the chat tool arg; "" if absent
+	Request         []conversation.Message // original user-facing history; RAG excluded
+	RenderedRequest []conversation.Message // optional effective model-visible request (RAG included); empty => same as Request
+	Response        conversation.Message   // assistant turn: content + tool_calls when present
+	Model           string                 // model that served the call; "" if unknown
+	Provider        string                 // provider instance that served the call; "" if unknown
+	RouteOutcome    json.RawMessage        // optional serialized RouteOutcome; nil ok
+	SessionHint     string                 // stable MCP session/client id; "" when unavailable
 }
 
 // conversationKey derives the base conversation key and its identity source

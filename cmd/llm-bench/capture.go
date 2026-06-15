@@ -75,7 +75,44 @@ func runCapture(ctx context.Context, opts captureOptions) (captureResult, error)
 	}
 	defer func() { _ = db.Close() }()
 
-	return captureConversations(ctx, &captureConversationReader{db: db}, opts)
+	// Prefer the effective (RAG-included) prompt when the transcript store
+	// recorded one; fall back to the canonical messages for older DBs or
+	// conversations with no distinct rendered request.
+	messagesCol := "messages"
+	if has, herr := columnExists(ctx, db, "conversations", "rendered_messages"); herr != nil {
+		return captureResult{}, fmt.Errorf("inspect capture db %q: %w", opts.DBPath, herr)
+	} else if has {
+		messagesCol = "CASE WHEN rendered_messages != '' THEN rendered_messages ELSE messages END"
+	}
+
+	return captureConversations(ctx, &captureConversationReader{db: db, messagesCol: messagesCol}, opts)
+}
+
+// columnExists reports whether table has a column named col. table is always a
+// trusted literal, so interpolating it into the PRAGMA is safe.
+func columnExists(ctx context.Context, db *sql.DB, table, col string) (bool, error) {
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info("+table+")")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			ctype     string
+			notnull   int
+			dfltValue sql.NullString
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == col {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func openReadOnlySQLite(path string) (*sql.DB, error) {
@@ -100,6 +137,9 @@ func openReadOnlySQLite(path string) (*sql.DB, error) {
 
 type captureConversationReader struct {
 	db *sql.DB
+	// messagesCol is the SQL expression that yields the message JSON to capture
+	// (a trusted literal: either "messages" or a rendered-preferring CASE).
+	messagesCol string
 }
 
 func (r *captureConversationReader) List(ctx context.Context) ([]conversation.Summary, error) {
@@ -142,8 +182,12 @@ func (r *captureConversationReader) Load(ctx context.Context, id string) (*conve
 	var messagesJSON string
 	var createdMs, updatedMs int64
 
+	messagesCol := r.messagesCol
+	if messagesCol == "" {
+		messagesCol = "messages"
+	}
 	err := r.db.QueryRowContext(ctx,
-		`SELECT id, title, messages, created_at, updated_at FROM conversations WHERE id = ?`,
+		`SELECT id, title, `+messagesCol+`, created_at, updated_at FROM conversations WHERE id = ?`,
 		id,
 	).Scan(&conv.ID, &conv.Title, &messagesJSON, &createdMs, &updatedMs)
 	if err != nil {
@@ -337,7 +381,13 @@ func conversationToTrace(conv conversation.Conversation, source, fallbackSystem 
 }
 
 func conversationTurns(messages []conversation.Message, fallbackSystem string, redactor redactor) (string, []Turn, string, error) {
-	var system string
+	// Preserve every distinct system message in model-visible order so a
+	// RAG-injected context prefix and the original system prompt both survive
+	// into the replayed prompt. Verbatim duplicates (e.g. a system message
+	// re-injected on re-capture) are collapsed; content is never truncated,
+	// because a faithful replay must send the same prompt the model saw.
+	var systemParts []string
+	seenSystem := make(map[string]bool)
 	var turns []Turn
 	sawUser := false
 	finalAssistantIndex, finalAnswer := capturedFinalAnswer(messages, redactor)
@@ -349,8 +399,9 @@ func conversationTurns(messages []conversation.Message, fallbackSystem string, r
 		}
 
 		if role == "system" {
-			if system == "" {
-				system = redactor.Redact(msg.Content)
+			if content := strings.TrimSpace(redactor.Redact(msg.Content)); content != "" && !seenSystem[content] {
+				seenSystem[content] = true
+				systemParts = append(systemParts, content)
 			}
 			continue
 		}
@@ -377,6 +428,7 @@ func conversationTurns(messages []conversation.Message, fallbackSystem string, r
 		turns = append(turns, turn)
 	}
 
+	system := strings.Join(systemParts, "\n\n")
 	if system == "" {
 		system = redactor.Redact(strings.TrimSpace(fallbackSystem))
 	}

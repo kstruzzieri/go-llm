@@ -21,6 +21,20 @@ Default local paths:
 3. Capture: export a small redacted trace corpus from the transcript DB.
 4. Measure: replay a small model panel, blind-label outputs, and compare reports.
 
+Replay acceptance for this shakedown is stricter than "the command exits":
+`-calibrate-capture` should produce one artifact per retained `(trace, model)`
+pair. Replay always exposes the captured tool schemas, so a candidate faces the
+same tool temptation the real workflow presented. If the candidate calls a tool
+on a plain captured-chat trace (no scripted tool route), replay records that as
+a scored divergence (a `Notes` annotation, graded low) rather than dropping the
+pair — the artifact is still written, and a model that reaches for a tool when
+it should answer directly is penalized, not hidden. A genuine
+`errMissingScriptedAssistant` now only signals a malformed fixture (a trace
+whose golden expects a tool route but lacks the scripted assistant turn); fix
+the fixture before reading model quality. RAG-backed prompts must capture the
+model-visible retrieved context, otherwise replay measures a different prompt
+than the original workflow.
+
 ## First Shakedown Scope
 
 Use 8-12 real prompts over one normal working session. Include at least:

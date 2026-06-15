@@ -251,16 +251,36 @@ func (s *Store) insertRaw(ctx context.Context, r rawRow) error {
 // swallowed by Record (the raw row remains the durable source of truth).
 func (s *Store) project(ctx context.Context, callID, key, source string, in RecordInput, now int64) error {
 	incoming := append(append([]conversation.Message{}, in.Request...), in.Response)
+	rendered, err := renderedIncomingJSON(in)
+	if err != nil {
+		return err
+	}
 
 	candidates, err := s.loadCandidates(ctx, key)
 	if err != nil {
 		return err
 	}
 	dec := decideStitch(key, incoming, candidates, time.UnixMilli(now), s.leaseWindow, s.shortThreshold)
-	if err := s.upsertCanonical(ctx, dec, key, source, callID, incoming, now); err != nil {
+	if err := s.upsertCanonical(ctx, dec, key, source, callID, incoming, rendered, now); err != nil {
 		return err
 	}
 	return s.finalizeRawOK(ctx, callID, dec, key)
+}
+
+// renderedIncomingJSON returns the JSON of the effective model-visible
+// conversation (RenderedRequest + Response) for replay capture, or "" when no
+// distinct rendered request was supplied — capture then falls back to the
+// canonical messages. The rendered form never feeds identity or stitching.
+func renderedIncomingJSON(in RecordInput) (string, error) {
+	if len(in.RenderedRequest) == 0 {
+		return "", nil
+	}
+	rendered := append(append([]conversation.Message{}, in.RenderedRequest...), in.Response)
+	b, err := json.Marshal(rendered)
+	if err != nil {
+		return "", fmt.Errorf("transcript: marshal rendered messages: %w", err)
+	}
+	return string(b), nil
 }
 
 // loadCandidates returns every canonical row sharing the base key (base + forked
@@ -304,7 +324,7 @@ func (s *Store) loadCandidates(ctx context.Context, key string) ([]candidate, er
 // INSERT a new row; extended overwrites messages (longer history); idempotent
 // refreshes recency/provenance only (never shrinks). Legacy rows (audit columns
 // defaulted to ”) are backfilled when touched.
-func (s *Store) upsertCanonical(ctx context.Context, dec stitchDecision, key, source, callID string, incoming []conversation.Message, now int64) error {
+func (s *Store) upsertCanonical(ctx context.Context, dec stitchDecision, key, source, callID string, incoming []conversation.Message, rendered string, now int64) error {
 	switch dec.status {
 	case statusCreated, statusForked:
 		msgsJSON, err := json.Marshal(incoming)
@@ -318,10 +338,11 @@ func (s *Store) upsertCanonical(ctx context.Context, dec stitchDecision, key, so
 		if _, err := s.db.ExecContext(ctx,
 			`INSERT INTO conversations
 			   (id, title, messages, created_at, updated_at,
-			    conversation_key, identity_source, latest_call_id, message_count, stitch_status)
-			 VALUES (?,?,?,?,?,?,?,?,?,?)`,
+			    conversation_key, identity_source, latest_call_id, message_count, stitch_status,
+			    rendered_messages)
+			 VALUES (?,?,?,?,?,?,?,?,?,?,?)`,
 			dec.targetID, conversationTitle(incoming), string(msgsJSON), now, now,
-			key, identity, callID, len(incoming), dec.status,
+			key, identity, callID, len(incoming), dec.status, rendered,
 		); err != nil {
 			return fmt.Errorf("transcript: insert canonical: %w", err)
 		}
@@ -332,16 +353,21 @@ func (s *Store) upsertCanonical(ctx context.Context, dec stitchDecision, key, so
 		if err != nil {
 			return fmt.Errorf("transcript: marshal canonical messages: %w", err)
 		}
+		// rendered is either the latest full model-visible history for this call
+		// (when RAG or similar prompt rendering changed the request) or empty,
+		// which intentionally clears any previous rendered snapshot rather than
+		// preserving stale context from an older turn.
 		if _, err := s.db.ExecContext(ctx,
 			`UPDATE conversations SET
 			    messages = ?, updated_at = ?, latest_call_id = ?,
 			    message_count = ?, stitch_status = ?,
 			    conversation_key = ?,
+			    rendered_messages = ?,
 			    identity_source = CASE WHEN identity_source = '' THEN ? ELSE identity_source END,
 			    title = CASE WHEN title = '' THEN ? ELSE title END
 			  WHERE id = ?`,
 			string(msgsJSON), now, callID, len(incoming), statusExtended,
-			key, source, conversationTitle(incoming), dec.targetID,
+			key, rendered, source, conversationTitle(incoming), dec.targetID,
 		); err != nil {
 			return fmt.Errorf("transcript: extend canonical: %w", err)
 		}
