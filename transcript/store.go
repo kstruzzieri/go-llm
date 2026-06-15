@@ -374,14 +374,18 @@ func (s *Store) upsertCanonical(ctx context.Context, dec stitchDecision, key, so
 		return nil
 
 	case statusIdempotent:
-		// No shrink: refresh recency + provenance, keep the stored messages.
+		// No shrink: refresh recency + provenance, keep the stored canonical
+		// messages. rendered is still call-specific, so refresh it to the latest
+		// model-visible request (or clear it when the latest call has no distinct
+		// rendered prompt) to keep capture aligned with latest_call_id.
 		if _, err := s.db.ExecContext(ctx,
 			`UPDATE conversations SET
 			    updated_at = ?, latest_call_id = ?, stitch_status = ?,
+			    rendered_messages = ?,
 			    conversation_key = CASE WHEN conversation_key = '' THEN ? ELSE conversation_key END,
 			    identity_source = CASE WHEN identity_source = '' THEN ? ELSE identity_source END
 			  WHERE id = ?`,
-			now, callID, statusIdempotent, key, source, dec.targetID,
+			now, callID, statusIdempotent, rendered, key, source, dec.targetID,
 		); err != nil {
 			return fmt.Errorf("transcript: idempotent update: %w", err)
 		}
