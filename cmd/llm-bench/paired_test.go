@@ -834,3 +834,41 @@ func TestComputeRestraintPairingByDifficulty(t *testing.T) {
 		t.Errorf("adversarial losses=%d, want 2", adv.BaselineSummary[0].Losses)
 	}
 }
+
+// Legacy/backfill-in-progress traces carry an empty Golden.Difficulty; they must
+// bucket under "unspecified" (never dropped), and tiers must render in canonical
+// order regardless of artifact order. Guards the Phase-C transition state.
+func TestComputeRestraintPairingByDifficultyUnspecifiedAndOrder(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	mk := func(trace, model, diff string) Artifact {
+		return Artifact{
+			TraceID: trace, CandidateModel: model,
+			Trace: Trace{ID: trace, Tools: withTools,
+				Golden: Golden{FinalAnswerSubstring: "ok", Difficulty: diff}},
+			ActualTranscript: held,
+		}
+	}
+	// Deliberately out of canonical order; one trace has an empty difficulty.
+	arts := []Artifact{
+		mk("a0", "a", "adversarial"), mk("a0", "b", "adversarial"),
+		mk("u0", "a", ""), mk("u0", "b", ""),
+		mk("o0", "a", "obvious"), mk("o0", "b", "obvious"),
+		mk("t0", "a", "tempting"), mk("t0", "b", "tempting"),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	gotOrder := make([]string, 0, len(rp.ByDifficulty))
+	for _, dr := range rp.ByDifficulty {
+		gotOrder = append(gotOrder, dr.Difficulty)
+	}
+	want := []string{"obvious", "tempting", "adversarial", "unspecified"}
+	if !reflect.DeepEqual(gotOrder, want) {
+		t.Fatalf("tier order = %v, want %v", gotOrder, want)
+	}
+	for _, dr := range rp.ByDifficulty {
+		if dr.N != 1 {
+			t.Errorf("tier %q N=%d, want 1", dr.Difficulty, dr.N)
+		}
+	}
+}
