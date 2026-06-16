@@ -95,3 +95,39 @@ func TestValidateTrace(t *testing.T) {
 		})
 	}
 }
+
+func TestGoldenAuditFieldsParse(t *testing.T) {
+	const raw = `{
+	  "id":"conversation-rw-x","source":"s","system":"ctx",
+	  "turns":[{"role":"user","content":"q"}],
+	  "golden":{
+	    "tool_calls":[],
+	    "final_answer_criteria":"answer from context",
+	    "difficulty":"adversarial",
+	    "restraint_rationale":"context already contains the answer",
+	    "failure_mode":"context-already-answers"
+	  }
+	}`
+	var tr Trace
+	if err := json.Unmarshal([]byte(raw), &tr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if tr.Golden.Difficulty != "adversarial" {
+		t.Errorf("Difficulty = %q, want adversarial", tr.Golden.Difficulty)
+	}
+	if tr.Golden.RestraintRationale == "" || tr.Golden.FailureMode == "" {
+		t.Errorf("rationale/failure_mode not parsed: %+v", tr.Golden)
+	}
+}
+
+func TestGoldenAuditFieldsBackwardCompat(t *testing.T) {
+	const raw = `{"tool_calls":[],"final_answer_criteria":"x"}`
+	var g Golden
+	if err := json.Unmarshal([]byte(raw), &g); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if g.Difficulty != "" || g.RestraintRationale != "" || g.FailureMode != "" {
+		t.Errorf("legacy golden gained non-empty audit fields: %+v", g)
+	}
+}
+
