@@ -14,6 +14,11 @@ import (
 // schema for the tool it's supposed to invoke.
 var errToolNameNotDeclared = errors.New("trace tool call references undeclared tool name")
 
+// validRestraintDifficulties is the closed set for Golden.Difficulty ("" allowed).
+var validRestraintDifficulties = map[string]struct{}{
+	"obvious": {}, "tempting": {}, "adversarial": {},
+}
+
 // Trace is a replayable conversation captured from a real MCP / chat session.
 // See docs/llm/benchmark-plan.md for the format and capture strategy.
 type Trace struct {
@@ -101,6 +106,11 @@ func validateTrace(t Trace) error {
 	}
 	if err := validateToolNamesDeclared(t); err != nil {
 		return err
+	}
+	if d := t.Golden.Difficulty; d != "" {
+		if _, ok := validRestraintDifficulties[d]; !ok {
+			return fmt.Errorf("golden.difficulty %q invalid (want obvious, tempting, adversarial, or empty)", d)
+		}
 	}
 	return nil
 }

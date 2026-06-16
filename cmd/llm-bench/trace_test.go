@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -128,6 +129,31 @@ func TestGoldenAuditFieldsBackwardCompat(t *testing.T) {
 	}
 	if g.Difficulty != "" || g.RestraintRationale != "" || g.FailureMode != "" {
 		t.Errorf("legacy golden gained non-empty audit fields: %+v", g)
+	}
+}
+
+func TestValidateTraceRejectsUnknownDifficulty(t *testing.T) {
+	tr := Trace{
+		ID: "x", System: "ctx",
+		Turns:  []Turn{{Role: "user", Content: "q"}},
+		Golden: Golden{Difficulty: "medium"},
+	}
+	err := validateTrace(tr)
+	if err == nil || !strings.Contains(err.Error(), "difficulty") {
+		t.Fatalf("want difficulty error, got %v", err)
+	}
+}
+
+func TestValidateTraceAllowsKnownAndEmptyDifficulty(t *testing.T) {
+	for _, d := range []string{"", "obvious", "tempting", "adversarial"} {
+		tr := Trace{
+			ID: "x", System: "ctx",
+			Turns:  []Turn{{Role: "user", Content: "q"}},
+			Golden: Golden{Difficulty: d},
+		}
+		if err := validateTrace(tr); err != nil {
+			t.Errorf("difficulty %q rejected: %v", d, err)
+		}
 	}
 }
 
