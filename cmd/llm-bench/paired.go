@@ -199,6 +199,22 @@ type baselineDelta struct {
 	Ties      int
 }
 
+// restraintPairing is the label-free paired restraint evidence: it is derived
+// entirely from frozen artifacts (no human labels), so its completeness can
+// exceed the label-paired quality completeness. PerModelMean and BaselineSummary
+// are over the restraint-paired-complete subset (every lineup model has an
+// artifact for the trace AND the trace is restraint-eligible). The ToolExposed*
+// fields repeat the calculation over the stricter "tools were offered" subset.
+type restraintPairing struct {
+	PerModelMean    map[string]float64
+	CompleteN       int
+	BaselineSummary []baselineDelta
+	// ToolExposed* is a compact companion (means only); a paired Δ/CI for the
+	// tool-exposed subset is intentionally out of scope here.
+	ToolExposedPerModelMean map[string]float64
+	ToolExposedN            int
+}
+
 // pairedAnalysis is the computed paired-label evidence for a corpus.
 type pairedAnalysis struct {
 	Lineup          []string           // normalized, sorted candidate models
@@ -217,6 +233,7 @@ type pairedAnalysis struct {
 	Labelers        []string           // distinct labelers on the complete subset
 	BootstrapSeed   int64
 	BootstrapN      int
+	Restraint       restraintPairing // label-free paired restraint evidence
 }
 
 // cellKey identifies a (trace, candidate-model) cell using the same
@@ -443,7 +460,139 @@ func computePairedAnalysis(matched []matchedLabel, stale []Label, arts []Artifac
 		pa.ResolutionFull = math.NaN()
 		pa.ResolutionStep = math.NaN()
 	}
+	pa.Restraint = computeRestraintPairing(arts, lineup, resolvedBaseline, seed, bootstrapN)
 	return pa, nil
+}
+
+// computeRestraintPairing builds paired restraint evidence directly from
+// artifacts, reusing cellKey/modelKey/mean/bootstrapDeltaCI — no new statistics.
+// A trace is restraint-paired-complete when every lineup model has an artifact
+// for it AND restraintSignals reports computed==true for each (eligibility is a
+// property of the trace's golden, so it holds uniformly; the per-cell flag
+// defines the restraint-eligibility subset and also excludes malformed/empty
+// artifacts as a side effect). The tool-exposed subset additionally requires
+// every cell to have had tools offered.
+// Callers must pass at most one artifact per (trace, model) cell;
+// computePairedAnalysis enforces this before calling, so duplicates are not
+// re-checked here.
+// Unlike the manual/calibration path (which hard-errors on missing trace
+// context via calibrationTraceFromArtifact), this path keeps the quality report
+// available and excludes invalid trace context from restraint pairing so
+// malformed artifacts cannot inflate restraint N.
+func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, seed int64, bootstrapN int) restraintPairing {
+	type cellRestraint struct {
+		value       float64
+		computed    bool
+		toolExposed bool
+	}
+	byCell := make(map[cellKey]cellRestraint, len(arts))
+	traceDisplay := make(map[string]string)
+	for _, a := range arts {
+		value, computed := 0.0, false
+		if restraintArtifactTraceContextValid(a) {
+			value, computed = restraintSignals(a.Trace, a.ActualTranscript)
+		}
+		byCell[newCellKey(a.TraceID, a.CandidateModel)] = cellRestraint{
+			value:       value,
+			computed:    computed,
+			toolExposed: computed && len(a.Trace.Tools) > 0,
+		}
+		tk := normalizeModelSelector(a.TraceID)
+		if _, ok := traceDisplay[tk]; !ok {
+			traceDisplay[tk] = a.TraceID
+		}
+	}
+
+	traceKeys := make([]string, 0, len(traceDisplay))
+	for tk := range traceDisplay {
+		traceKeys = append(traceKeys, tk)
+	}
+	sort.Strings(traceKeys)
+
+	var completeKeys []string
+	perModel := make(map[string][]float64, len(lineup))
+	var teCompleteKeys []string
+	perModelTE := make(map[string][]float64, len(lineup))
+	for _, tk := range traceKeys {
+		complete, teComplete := true, true
+		for _, model := range lineup {
+			cr, ok := byCell[cellKey{trace: tk, model: modelKey(model)}]
+			if !ok || !cr.computed {
+				complete = false
+			}
+			if !ok || !cr.toolExposed {
+				teComplete = false
+			}
+		}
+		if complete {
+			completeKeys = append(completeKeys, tk)
+			for _, model := range lineup {
+				cr := byCell[cellKey{trace: tk, model: modelKey(model)}]
+				perModel[model] = append(perModel[model], cr.value)
+			}
+		}
+		if teComplete {
+			teCompleteKeys = append(teCompleteKeys, tk)
+			for _, model := range lineup {
+				cr := byCell[cellKey{trace: tk, model: modelKey(model)}]
+				perModelTE[model] = append(perModelTE[model], cr.value)
+			}
+		}
+	}
+
+	rp := restraintPairing{
+		PerModelMean:            make(map[string]float64, len(lineup)),
+		CompleteN:               len(completeKeys),
+		ToolExposedPerModelMean: make(map[string]float64, len(lineup)),
+		ToolExposedN:            len(teCompleteKeys),
+	}
+	for _, model := range lineup {
+		rp.PerModelMean[model] = mean(perModel[model])
+		rp.ToolExposedPerModelMean[model] = mean(perModelTE[model])
+	}
+
+	base := perModel[baseline]
+	for _, model := range lineup {
+		if model == baseline {
+			continue
+		}
+		vm := perModel[model]
+		deltas := make([]float64, len(completeKeys))
+		bd := baselineDelta{Model: model}
+		for idx := range completeKeys {
+			d := vm[idx] - base[idx]
+			deltas[idx] = d
+			switch {
+			case d > 0:
+				bd.Wins++
+			case d < 0:
+				bd.Losses++
+			default:
+				bd.Ties++
+			}
+		}
+		bd.MeanDelta = mean(deltas)
+		bd.CILow, bd.CIHigh = bootstrapDeltaCI(deltas, seed, bootstrapN)
+		rp.BaselineSummary = append(rp.BaselineSummary, bd)
+	}
+	return rp
+}
+
+// restraintArtifactTraceContextValid reports whether an artifact carries enough
+// embedded trace context to be trusted for restraint pairing. It requires a
+// matching trace ID AND a golden final-answer rubric (criteria or substring),
+// mirroring calibrationTraceFromArtifact's rubric check. The rubric guard is
+// load-bearing: a truncated artifact like Trace{ID: TraceID} with a zero-value
+// Golden has no ToolCalls, so without it restraintSignals would treat the
+// rubric-less trace as golden-empty/restraint-eligible/held and inflate the
+// paired restraint denominator. A real restraint-eligible trace always has a
+// rubric even though its Golden.ToolCalls is empty.
+func restraintArtifactTraceContextValid(a Artifact) bool {
+	if strings.TrimSpace(a.Trace.ID) == "" || a.Trace.ID != a.TraceID {
+		return false
+	}
+	return strings.TrimSpace(a.Trace.Golden.FinalAnswerCriteria) != "" ||
+		strings.TrimSpace(a.Trace.Golden.FinalAnswerSubstring) != ""
 }
 
 func mean(xs []float64) float64 {

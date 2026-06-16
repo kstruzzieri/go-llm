@@ -1,6 +1,8 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
 	"math"
 	"path/filepath"
 	"reflect"
@@ -503,11 +505,22 @@ func TestRunPairedReport_EndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("runPairedReport: %v", err)
 	}
+	// Fixture derivation:
+	//   Quality paired-complete (M=1): only t1 has every lineup model labeled
+	//   (a2B has no label → t2 is quality-incomplete).
+	//   Restraint paired-complete (N=2): pairedTestArtifact creates traces with
+	//   empty Golden.ToolCalls, so restraintSignals returns computed=true for every
+	//   cell. Both t1 and t2 have artifacts for both models → N=2.
+	//   N > M: the fixture demonstrates the exceeds-case (label-free restraint
+	//   denominator exceeds the label-dependent quality denominator).
 	for _, want := range []string{
 		"Quality by model (paired-complete)",
 		"Completeness worklist",
 		"| t2 | ollama/b | missing-label |",
 		"Bootstrap: seed=1, n=10000",
+		"Restraint vs baseline",
+		"Restraint paired-complete: 2 trace(s) (artifact denominator)",
+		"Quality paired-complete: 1 trace(s) (label denominator)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("runPairedReport output missing %q:\n%s", want, out)
@@ -606,6 +619,128 @@ func TestRunPairedReport_MissingCanaryDoesNotBlock(t *testing.T) {
 	}
 }
 
+func TestComputeRestraintPairing(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	diverged := []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "x"}}}}
+
+	// trace t1: both models held; trace t2: A held, B diverged. Both eligible + tool-exposed.
+	mkArt := func(trace, model string, transcript []Turn) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Tools: withTools, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: transcript,
+		}
+	}
+	arts := []Artifact{
+		mkArt("t1", "a", held), mkArt("t1", "b", held),
+		mkArt("t2", "a", held), mkArt("t2", "b", diverged),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	if rp.CompleteN != 2 {
+		t.Fatalf("CompleteN = %d, want 2", rp.CompleteN)
+	}
+	if rp.PerModelMean["a"] != 1.0 {
+		t.Fatalf("mean[a] = %v, want 1.0", rp.PerModelMean["a"])
+	}
+	if rp.PerModelMean["b"] != 0.5 {
+		t.Fatalf("mean[b] = %v, want 0.5", rp.PerModelMean["b"])
+	}
+	if rp.ToolExposedN != 2 {
+		t.Fatalf("ToolExposedN = %d, want 2", rp.ToolExposedN)
+	}
+	if len(rp.BaselineSummary) != 1 || rp.BaselineSummary[0].Model != "b" {
+		t.Fatalf("BaselineSummary = %+v, want one entry for b", rp.BaselineSummary)
+	}
+	// b vs baseline a: t1 tie (1-1=0), t2 loss (0-1=-1) → mean -0.5, 0W/1L/1T.
+	bd := rp.BaselineSummary[0]
+	if bd.MeanDelta != -0.5 || bd.Wins != 0 || bd.Losses != 1 || bd.Ties != 1 {
+		t.Fatalf("baselineDelta = %+v, want mean=-0.5 0W/1L/1T", bd)
+	}
+}
+
+func TestComputeRestraintPairingExcludesIneligible(t *testing.T) {
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	// t1 eligible (golden empty); t2 ineligible (golden has a tool route).
+	mkArt := func(trace, model string, golden Golden) Artifact {
+		return Artifact{TraceID: trace, CandidateModel: model, Trace: Trace{ID: trace, Golden: golden}, ActualTranscript: held}
+	}
+	arts := []Artifact{
+		mkArt("t1", "a", Golden{FinalAnswerSubstring: "ok"}), mkArt("t1", "b", Golden{FinalAnswerSubstring: "ok"}),
+		mkArt("t2", "a", Golden{ToolCalls: []string{"x"}}), mkArt("t2", "b", Golden{ToolCalls: []string{"x"}}),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+	if rp.CompleteN != 1 {
+		t.Fatalf("CompleteN = %d, want 1 (t2 ineligible)", rp.CompleteN)
+	}
+}
+
+func TestComputeRestraintPairingExcludesMissingTraceContext(t *testing.T) {
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	valid := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: held,
+		}
+	}
+	missingTrace := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{},
+			ActualTranscript: held,
+		}
+	}
+	arts := []Artifact{
+		valid("t1", "a"), valid("t1", "b"),
+		missingTrace("t2", "a"), missingTrace("t2", "b"),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+	if rp.CompleteN != 1 {
+		t.Fatalf("CompleteN = %d, want 1 (missing embedded trace context excluded)", rp.CompleteN)
+	}
+}
+
+// TestComputeRestraintPairingExcludesMissingGoldenRubric guards against a
+// truncated artifact whose embedded trace has a matching ID but no golden rubric
+// (FinalAnswerCriteria/FinalAnswerSubstring both empty). Its zero-value Golden
+// has no ToolCalls, so restraintSignals would otherwise treat it as a golden-
+// empty restraint-eligible "held" trace and inflate the paired restraint
+// denominator. A real restraint-eligible trace always carries a final-answer
+// rubric, so the absence of one marks malformed trace context to exclude.
+func TestComputeRestraintPairingExcludesMissingGoldenRubric(t *testing.T) {
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	valid := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: held,
+		}
+	}
+	// Matching ID but no golden rubric → not a real restraint-eligible trace.
+	noRubric := func(trace, model string) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace},
+			ActualTranscript: held,
+		}
+	}
+	arts := []Artifact{
+		valid("t1", "a"), valid("t1", "b"),
+		noRubric("t2", "a"), noRubric("t2", "b"),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+	if rp.CompleteN != 1 {
+		t.Fatalf("CompleteN = %d, want 1 (rubric-less trace context excluded)", rp.CompleteN)
+	}
+}
+
 func contains(xs []string, s string) bool {
 	for _, x := range xs {
 		if x == s {
@@ -613,4 +748,52 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+func TestComputeRestraintPairingN8FindingShape(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	diverged := []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "x"}}}}
+	mkArt := func(trace, model string, transcript []Turn) Artifact {
+		return Artifact{
+			TraceID:          trace,
+			CandidateModel:   model,
+			Trace:            Trace{ID: trace, Tools: withTools, Golden: Golden{FinalAnswerSubstring: "ok"}},
+			ActualTranscript: transcript,
+		}
+	}
+	// 8 eligible traces. Model a diverges on 3 (t0,t1,t2); model b diverges on 4 (t0,t1,t2,t3).
+	var arts []Artifact
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("t%d", i)
+		aTx := held
+		if i < 3 {
+			aTx = diverged
+		}
+		bTx := held
+		if i < 4 {
+			bTx = diverged
+		}
+		arts = append(arts, mkArt(id, "a", aTx), mkArt(id, "b", bTx))
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	if rp.CompleteN != 8 {
+		t.Fatalf("CompleteN = %d, want 8", rp.CompleteN)
+	}
+	if rp.PerModelMean["a"] != 0.625 {
+		t.Fatalf("mean[a] = %v, want 0.625 (held 5/8)", rp.PerModelMean["a"])
+	}
+	if rp.PerModelMean["b"] != 0.5 {
+		t.Fatalf("mean[b] = %v, want 0.5 (held 4/8)", rp.PerModelMean["b"])
+	}
+	// b vs baseline a: b diverges on t3 where a held → 1 loss; t0-t2 both diverged (tie);
+	// t4-t7 both held (tie). So 0W/1L/7T, mean delta -1/8 = -0.125.
+	bd := rp.BaselineSummary[0]
+	if bd.Wins != 0 || bd.Losses != 1 || bd.Ties != 7 {
+		t.Fatalf("baselineDelta W/L/T = %d/%d/%d, want 0/1/7", bd.Wins, bd.Losses, bd.Ties)
+	}
+	if bd.MeanDelta != -0.125 {
+		t.Fatalf("MeanDelta = %v, want -0.125", bd.MeanDelta)
+	}
 }

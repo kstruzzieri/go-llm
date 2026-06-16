@@ -54,6 +54,44 @@ type Score struct {
 	// from "not reported".
 	ThinkingTokensComputed bool
 	Notes                  string
+	// Restraint is the tool-restraint signal: 1.0 = held (the golden expected no
+	// tool call and the candidate emitted none), 0.0 = diverged (emitted ≥1).
+	// RestraintComputed is false when restraint was not testable (the golden
+	// expected a tool route); then Restraint is a placeholder 0.0 that
+	// aggregation MUST skip — mirrors the ToolArgsValid/ToolArgsValidComputed
+	// idiom. Divergence is recoverable as RestraintComputed && Restraint == 0.
+	Restraint         float64
+	RestraintComputed bool
+	// ToolExposedRestraint is the same signal restricted to traces that actually
+	// offered tools (len(trace.Tools) > 0) — the stricter "restraint under
+	// temptation" denominator. ToolExposedRestraintComputed implies
+	// RestraintComputed. It is a companion diagnostic, not a replacement.
+	ToolExposedRestraint         float64
+	ToolExposedRestraintComputed bool
+}
+
+// baseMechanicalScore computes the scorer-independent mechanical fields shared by
+// every scorer: tool-sequence match, tool-argument validity, and the restraint
+// signals (primary + tool-exposed companion). It returns the raw schema-compile
+// error unwrapped so each caller can attach its own "trace %q: compile tool
+// schemas" context, preserving existing error messages. AnswerQuality is left to
+// the caller.
+func baseMechanicalScore(trace Trace, transcript []Turn) (Score, error) {
+	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, transcript)
+	if schemaErr != nil {
+		return Score{}, schemaErr
+	}
+	restraint, restraintComputed, toolExposedRestraint, toolExposedComputed := restraintScoreFields(trace, transcript)
+	return Score{
+		ToolSequenceMatch:            toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(transcript)),
+		ToolArgsValid:                toolArgsScore,
+		ToolArgsValidComputed:        toolArgsComputed,
+		Restraint:                    restraint,
+		RestraintComputed:            restraintComputed,
+		ToolExposedRestraint:         toolExposedRestraint,
+		ToolExposedRestraintComputed: toolExposedComputed,
+		Notes:                        toolArgsNotes,
+	}, nil
 }
 
 // Scorer is the pluggable strategy for evaluating a replay result.
@@ -230,16 +268,9 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 		return Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingGolden)
 	}
 
-	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, actual.Transcript)
+	score, schemaErr := baseMechanicalScore(trace, actual.Transcript)
 	if schemaErr != nil {
 		return Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
-	}
-
-	score := Score{
-		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		ToolArgsValid:         toolArgsScore,
-		ToolArgsValidComputed: toolArgsComputed,
-		Notes:                 toolArgsNotes,
 	}
 
 	finalText := lastAssistantContent(actual.Transcript)
@@ -257,9 +288,14 @@ func (s *ExactMatchScorer) Score(_ context.Context, trace Trace, actual Result) 
 type CaptureScorer struct{}
 
 func (s *CaptureScorer) Score(_ context.Context, trace Trace, actual Result) (Score, error) {
+	restraint, restraintComputed, toolExposedRestraint, toolExposedComputed := restraintScoreFields(trace, actual.Transcript)
 	return Score{
-		ToolSequenceMatch: toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		Notes:             "capture mode: scoring skipped",
+		ToolSequenceMatch:            toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
+		Restraint:                    restraint,
+		RestraintComputed:            restraintComputed,
+		ToolExposedRestraint:         toolExposedRestraint,
+		ToolExposedRestraintComputed: toolExposedComputed,
+		Notes:                        "capture mode: scoring skipped",
 	}, nil
 }
 
@@ -367,16 +403,9 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: %w", trace.ID, errMissingJudgeCriteria)
 	}
 
-	toolArgsScore, toolArgsComputed, toolArgsNotes, schemaErr := scoreToolArguments(trace, actual.Transcript)
+	baseScore, schemaErr := baseMechanicalScore(trace, actual.Transcript)
 	if schemaErr != nil {
 		return ollama.ChatRequest{}, Score{}, fmt.Errorf("trace %q: compile tool schemas: %w", trace.ID, schemaErr)
-	}
-
-	baseScore := Score{
-		ToolSequenceMatch:     toolSequenceScore(trace.Golden.ToolCalls, extractToolNames(actual.Transcript)),
-		ToolArgsValid:         toolArgsScore,
-		ToolArgsValidComputed: toolArgsComputed,
-		Notes:                 toolArgsNotes,
 	}
 
 	if strings.TrimSpace(lastAssistantContent(actual.Transcript)) == "" {

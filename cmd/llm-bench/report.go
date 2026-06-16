@@ -91,8 +91,8 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 		fmt.Fprintln(&b)
 	}
-	fmt.Fprintf(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |\n")
-	fmt.Fprintf(&b, "|---|---|---|---|---|---|---|---|\n")
+	fmt.Fprintf(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | ToolSequenceMatch | ToolArgsValid (computed=N) | Restraint (mean, diverged/eligible; tool-exposed if available) | LatencyMs (p50 / p90, successful-only) | TotalTokens | n | Failures/total (timeout) |\n")
+	fmt.Fprintf(&b, "|---|---|---|---|---|---|---|---|---|\n")
 	for _, m := range models {
 		rs := summaryByModel[m]
 		agg := aggregate(rs)
@@ -109,6 +109,8 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 		toolArgsCell := fmt.Sprintf("%s (computed=%d)",
 			metricCell(agg.meanToolArgs, agg.toolArgsComputed > 0), agg.toolArgsComputed)
+		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed,
+			agg.meanToolExposedRestraint, agg.toolExposedRestraintDiverged, agg.toolExposedRestraintComputed)
 		latencyCell := "n/a"
 		if scored > 0 {
 			latencyCell = fmt.Sprintf("%d / %d", agg.latencyP50, agg.latencyP90)
@@ -119,8 +121,8 @@ func formatReport(models []string, results []Result, opts reportOptions) string 
 		}
 
 		failuresCell := fmt.Sprintf("%d/%d (%d timeout)", agg.errors, agg.errors+scored, agg.timeouts)
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %d | %s |\n",
-			markdownCell(m), qCell, toolSeqCell, toolArgsCell, latencyCell, tokensCell, scored, failuresCell)
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s | %d | %s |\n",
+			markdownCell(m), qCell, toolSeqCell, toolArgsCell, restraintC, latencyCell, tokensCell, scored, failuresCell)
 	}
 
 	if opts.Corpus != nil {
@@ -182,8 +184,8 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 	fmt.Fprintf(&b, "\nCoverage: %d scored, stale: %d (excluded — label hash no longer matches an artifact), scoring errors: %d.\n\n",
 		cov.Scored, cov.Stale, cov.Errored)
 	fmt.Fprintln(&b, "## Quality by model (all matched labels)")
-	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | n |")
-	fmt.Fprintln(&b, "|---|---|---|")
+	fmt.Fprintln(&b, "| Model | AnswerQuality (mean / p25 / p50 / p75 / p90) | Restraint (mean, diverged/eligible; tool-exposed if available) | n |")
+	fmt.Fprintln(&b, "|---|---|---|---|")
 	for _, m := range models {
 		rs := byModel[m]
 		agg := aggregate(rs)
@@ -193,7 +195,9 @@ func formatManualQualityReport(models []string, results []Result, cov manualRepo
 			qCell = fmt.Sprintf("%.2f / %.2f / %.2f / %.2f / %.2f",
 				agg.meanQuality, agg.qualityP25, agg.qualityP50, agg.qualityP75, agg.qualityP90)
 		}
-		fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), qCell, scored)
+		restraintC := restraintCell(agg.meanRestraint, agg.restraintDiverged, agg.restraintComputed,
+			agg.meanToolExposedRestraint, agg.toolExposedRestraintDiverged, agg.toolExposedRestraintComputed)
+		fmt.Fprintf(&b, "| %s | %s | %s | %d |\n", markdownCell(m), qCell, restraintC, scored)
 	}
 	fmt.Fprintln(&b)
 	return redactPaths(b.String())
@@ -281,6 +285,43 @@ func formatPairedReport(pa pairedAnalysis) string {
 			markdownCell(bd.Model), signedMeanCell(bd.MeanDelta), ciCell(bd.CILow, bd.CIHigh), bd.Wins, bd.Losses, bd.Ties)
 	}
 	fmt.Fprintln(&b)
+
+	fmt.Fprintf(&b, "## Restraint vs baseline (%s)\n\n", markdownCell(pa.Baseline))
+	fmt.Fprintln(&b, "> Tool-restraint is label-free (derived from frozen artifacts), so its paired-complete sample can exceed the quality paired-complete sample. Restraint = 1.0 held / 0.0 diverged over golden-empty (restraint-eligible) traces; higher is better.")
+	fmt.Fprintln(&b, ">")
+	fmt.Fprintln(&b, "> Win/loss/tie below is the discordant-pair table (a win = model held while the baseline diverged).")
+	fmt.Fprintln(&b)
+	fmt.Fprintf(&b, "- Quality paired-complete: %d trace(s) (label denominator)\n", pa.PerModelN)
+	fmt.Fprintf(&b, "- Restraint paired-complete: %d trace(s) (artifact denominator)\n", pa.Restraint.CompleteN)
+	if pa.Restraint.ToolExposedN > 0 {
+		fmt.Fprintf(&b, "- Tool-exposed restraint paired-complete: %d trace(s) (companion: restraint only where tools were offered)\n", pa.Restraint.ToolExposedN)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "| Model | restraint (mean) | n |")
+	fmt.Fprintln(&b, "|---|---|---|")
+	for _, m := range pa.Lineup {
+		fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), meanCell(pa.Restraint.PerModelMean[m]), pa.Restraint.CompleteN)
+	}
+	fmt.Fprintln(&b)
+
+	fmt.Fprintln(&b, "| Model | mean restraint Δ vs baseline | 95% CI | wins | losses | ties |")
+	fmt.Fprintln(&b, "|---|---|---|---|---|---|")
+	for _, bd := range pa.Restraint.BaselineSummary {
+		fmt.Fprintf(&b, "| %s | %s | %s | %d | %d | %d |\n",
+			markdownCell(bd.Model), signedMeanCell(bd.MeanDelta), ciCell(bd.CILow, bd.CIHigh), bd.Wins, bd.Losses, bd.Ties)
+	}
+	fmt.Fprintln(&b)
+	if pa.Restraint.ToolExposedN > 0 {
+		fmt.Fprintln(&b, "Tool-exposed restraint (companion, mean over tool-offered eligible traces):")
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "| Model | tool-exposed restraint (mean) | n |")
+		fmt.Fprintln(&b, "|---|---|---|")
+		for _, m := range pa.Lineup {
+			fmt.Fprintf(&b, "| %s | %s | %d |\n", markdownCell(m), meanCell(pa.Restraint.ToolExposedPerModelMean[m]), pa.Restraint.ToolExposedN)
+		}
+		fmt.Fprintln(&b)
+	}
 
 	fmt.Fprintln(&b, "## Resolution diagnostic")
 	fmt.Fprintln(&b)
@@ -541,6 +582,15 @@ type modelAggregate struct {
 	promptEvalTokensAvailable int
 	thinkingTokensSum         int
 	thinkingTokensAvailable   int
+
+	restraintSum                 float64 // Σ Restraint over eligible (RestraintComputed) rows
+	restraintComputed            int     // # eligible rows (primary denominator)
+	restraintDiverged            int     // # eligible rows with Restraint == 0
+	meanRestraint                float64 // restraintSum / restraintComputed (0 when none)
+	toolExposedRestraintSum      float64 // Σ over ToolExposedRestraintComputed rows
+	toolExposedRestraintComputed int     // # tool-exposed eligible rows (companion denominator)
+	toolExposedRestraintDiverged int     // # tool-exposed eligible rows with ToolExposedRestraint == 0
+	meanToolExposedRestraint     float64
 }
 
 func aggregate(rs []Result) modelAggregate {
@@ -595,6 +645,20 @@ func aggregate(rs []Result) modelAggregate {
 			a.thinkingTokensSum += r.Score.ThinkingTokens
 			a.thinkingTokensAvailable++
 		}
+		if r.Score.RestraintComputed {
+			a.restraintSum += r.Score.Restraint
+			a.restraintComputed++
+			if r.Score.Restraint == 0 {
+				a.restraintDiverged++
+			}
+		}
+		if r.Score.ToolExposedRestraintComputed {
+			a.toolExposedRestraintSum += r.Score.ToolExposedRestraint
+			a.toolExposedRestraintComputed++
+			if r.Score.ToolExposedRestraint == 0 {
+				a.toolExposedRestraintDiverged++
+			}
+		}
 	}
 	if scored > 0 {
 		a.meanQuality = qSum / float64(scored)
@@ -604,6 +668,12 @@ func aggregate(rs []Result) modelAggregate {
 	}
 	if a.toolArgsComputed > 0 {
 		a.meanToolArgs = taSum / float64(a.toolArgsComputed)
+	}
+	if a.restraintComputed > 0 {
+		a.meanRestraint = a.restraintSum / float64(a.restraintComputed)
+	}
+	if a.toolExposedRestraintComputed > 0 {
+		a.meanToolExposedRestraint = a.toolExposedRestraintSum / float64(a.toolExposedRestraintComputed)
 	}
 	if len(qVals) > 0 {
 		qPs := percentiles(qVals, 0.25, 0.5, 0.75, 0.9)
@@ -618,6 +688,20 @@ func aggregate(rs []Result) modelAggregate {
 		a.latencyP90 = lPs[1]
 	}
 	return a
+}
+
+// restraintCell renders mean restraint with its diverged/eligible counts, or
+// "n/a" when no traces were restraint-eligible (RestraintComputed == 0 for the
+// model), mirroring metricCell's not-computed sentinel.
+func restraintCell(mean float64, diverged, eligible int, toolMean float64, toolDiverged, toolEligible int) string {
+	if eligible == 0 {
+		return "n/a"
+	}
+	if toolEligible > 0 {
+		return fmt.Sprintf("%.2f (%d/%d diverged; tool-exposed %.2f, %d/%d diverged)",
+			mean, diverged, eligible, toolMean, toolDiverged, toolEligible)
+	}
+	return fmt.Sprintf("%.2f (%d/%d diverged)", mean, diverged, eligible)
 }
 
 // metricCell renders a metric value as either a 2-decimal number (when
