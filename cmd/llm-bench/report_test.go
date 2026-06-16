@@ -540,3 +540,40 @@ func TestFormatPairedReportRestraintNoEligibleTraces(t *testing.T) {
 		t.Fatalf("expected restraint section present even with 0 eligible:\n%s", out)
 	}
 }
+
+func TestFormatPairedReportRendersByDifficulty(t *testing.T) {
+	pa := pairedAnalysis{
+		Lineup:         []string{"a", "b"},
+		Baseline:       "a",
+		AllTraces:      []string{"t1", "t2"},
+		PerModelMean:   map[string]float64{"a": 1, "b": 0.5},
+		PerModelN:      1,
+		AllMatchedMean: map[string]float64{"a": 1, "b": 0.5},
+		AllMatchedN:    map[string]int{"a": 2, "b": 2},
+		BootstrapSeed:  pairedBootstrapSeed,
+		BootstrapN:     pairedBootstrapN,
+		Restraint: restraintPairing{
+			PerModelMean: map[string]float64{"a": 0.75, "b": 0.25},
+			CompleteN:    4,
+			BaselineSummary: []baselineDelta{
+				{Model: "b", MeanDelta: -0.5, CILow: -1, CIHigh: 0, Wins: 0, Losses: 2, Ties: 2},
+			},
+			ByDifficulty: []difficultyRestraint{
+				{
+					Difficulty:   "adversarial",
+					N:            4,
+					PerModelMean: map[string]float64{"a": 0.75, "b": 0.25},
+					BaselineSummary: []baselineDelta{
+						{Model: "b", MeanDelta: -0.5, CILow: -1, CIHigh: 0, Wins: 0, Losses: 2, Ties: 2},
+					},
+				},
+			},
+		},
+	}
+	out := formatPairedReport(pa)
+	for _, want := range []string{"adversarial", "-0.50"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("report missing %q\n%s", want, out)
+		}
+	}
+}

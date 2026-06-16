@@ -322,6 +322,19 @@ func formatPairedReport(pa pairedAnalysis) string {
 		}
 		fmt.Fprintln(&b)
 	}
+	if len(pa.Restraint.ByDifficulty) > 0 {
+		fmt.Fprintln(&b, "Restraint by difficulty tier (exploratory; per-tier n is small):")
+		fmt.Fprintln(&b)
+		fmt.Fprintln(&b, "| Difficulty | n | mean restraint Δ vs baseline | 95% CI | wins | losses | ties |")
+		fmt.Fprintln(&b, "|---|---|---|---|---|---|---|")
+		for _, dr := range pa.Restraint.ByDifficulty {
+			for _, bd := range dr.BaselineSummary {
+				fmt.Fprintf(&b, "| %s | %d | %s | %s | %d | %d | %d |\n",
+					dr.Difficulty, dr.N, signedMeanCell(bd.MeanDelta), ciCell(bd.CILow, bd.CIHigh), bd.Wins, bd.Losses, bd.Ties)
+			}
+		}
+		fmt.Fprintln(&b)
+	}
 
 	fmt.Fprintln(&b, "## Resolution diagnostic")
 	fmt.Fprintln(&b)
