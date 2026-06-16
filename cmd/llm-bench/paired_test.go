@@ -797,3 +797,40 @@ func TestComputeRestraintPairingN8FindingShape(t *testing.T) {
 		t.Fatalf("MeanDelta = %v, want -0.125", bd.MeanDelta)
 	}
 }
+
+func TestComputeRestraintPairingByDifficulty(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	diverged := []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "x"}}}}
+	mk := func(trace, model, diff string, tx []Turn) Artifact {
+		return Artifact{
+			TraceID: trace, CandidateModel: model,
+			Trace: Trace{ID: trace, Tools: withTools,
+				Golden: Golden{FinalAnswerSubstring: "ok", Difficulty: diff}},
+			ActualTranscript: tx,
+		}
+	}
+	// 2 obvious (both models hold) + 2 adversarial (b diverges on both, a holds).
+	arts := []Artifact{
+		mk("o0", "a", "obvious", held), mk("o0", "b", "obvious", held),
+		mk("o1", "a", "obvious", held), mk("o1", "b", "obvious", held),
+		mk("d0", "a", "adversarial", held), mk("d0", "b", "adversarial", diverged),
+		mk("d1", "a", "adversarial", held), mk("d1", "b", "adversarial", diverged),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	byDiff := map[string]difficultyRestraint{}
+	for _, dr := range rp.ByDifficulty {
+		byDiff[dr.Difficulty] = dr
+	}
+	if got := byDiff["obvious"]; got.N != 2 || got.BaselineSummary[0].MeanDelta != 0 {
+		t.Errorf("obvious: N=%d delta=%v, want N=2 delta=0", got.N, got.BaselineSummary[0].MeanDelta)
+	}
+	adv := byDiff["adversarial"]
+	if adv.N != 2 || adv.BaselineSummary[0].MeanDelta != -1.0 {
+		t.Errorf("adversarial: N=%d delta=%v, want N=2 delta=-1.0", adv.N, adv.BaselineSummary[0].MeanDelta)
+	}
+	if adv.BaselineSummary[0].Losses != 2 {
+		t.Errorf("adversarial losses=%d, want 2", adv.BaselineSummary[0].Losses)
+	}
+}

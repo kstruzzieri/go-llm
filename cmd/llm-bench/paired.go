@@ -199,6 +199,16 @@ type baselineDelta struct {
 	Ties      int
 }
 
+// difficultyRestraint is the paired restraint evidence for one difficulty tier,
+// computed over the restraint-paired-complete subset whose traces carry that
+// Golden.Difficulty. Reuses baselineDelta — no new statistics.
+type difficultyRestraint struct {
+	Difficulty      string
+	N               int
+	PerModelMean    map[string]float64
+	BaselineSummary []baselineDelta
+}
+
 // restraintPairing is the label-free paired restraint evidence: it is derived
 // entirely from frozen artifacts (no human labels), so its completeness can
 // exceed the label-paired quality completeness. PerModelMean and BaselineSummary
@@ -213,6 +223,10 @@ type restraintPairing struct {
 	// tool-exposed subset is intentionally out of scope here.
 	ToolExposedPerModelMean map[string]float64
 	ToolExposedN            int
+	// ByDifficulty stratifies the paired restraint Δ by Golden.Difficulty over
+	// the same complete subset, in canonical tier order. Exploratory at small
+	// per-tier n; the headline remains the overall PerModelMean/BaselineSummary.
+	ByDifficulty []difficultyRestraint
 }
 
 // pairedAnalysis is the computed paired-label evidence for a corpus.
@@ -487,6 +501,7 @@ func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, 
 	}
 	byCell := make(map[cellKey]cellRestraint, len(arts))
 	traceDisplay := make(map[string]string)
+	traceDifficulty := make(map[string]string)
 	for _, a := range arts {
 		value, computed := 0.0, false
 		if restraintArtifactTraceContextValid(a) {
@@ -500,6 +515,9 @@ func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, 
 		tk := normalizeModelSelector(a.TraceID)
 		if _, ok := traceDisplay[tk]; !ok {
 			traceDisplay[tk] = a.TraceID
+		}
+		if _, ok := traceDifficulty[tk]; !ok {
+			traceDifficulty[tk] = a.Trace.Golden.Difficulty
 		}
 	}
 
@@ -575,7 +593,63 @@ func computeRestraintPairing(arts []Artifact, lineup []string, baseline string, 
 		bd.CILow, bd.CIHigh = bootstrapDeltaCI(deltas, seed, bootstrapN)
 		rp.BaselineSummary = append(rp.BaselineSummary, bd)
 	}
+	rp.ByDifficulty = restraintByDifficulty(completeKeys, traceDifficulty, perModel, lineup, baseline, seed, bootstrapN)
 	return rp
+}
+
+// restraintByDifficulty buckets the complete subset by trace difficulty and
+// computes a per-tier paired Δ reusing mean/bootstrapDeltaCI. completeKeys and
+// perModel[model] are index-aligned (same order). Tiers render in canonical
+// order; an empty difficulty is bucketed under "unspecified".
+func restraintByDifficulty(completeKeys []string, traceDifficulty map[string]string, perModel map[string][]float64, lineup []string, baseline string, seed int64, bootstrapN int) []difficultyRestraint {
+	order := []string{"obvious", "tempting", "adversarial", "unspecified"}
+	idxByTier := map[string][]int{}
+	for i, tk := range completeKeys {
+		tier := traceDifficulty[tk]
+		if tier == "" {
+			tier = "unspecified"
+		}
+		idxByTier[tier] = append(idxByTier[tier], i)
+	}
+	var out []difficultyRestraint
+	for _, tier := range order {
+		idxs := idxByTier[tier]
+		if len(idxs) == 0 {
+			continue
+		}
+		dr := difficultyRestraint{Difficulty: tier, N: len(idxs), PerModelMean: map[string]float64{}}
+		for _, model := range lineup {
+			vals := make([]float64, len(idxs))
+			for j, i := range idxs {
+				vals[j] = perModel[model][i]
+			}
+			dr.PerModelMean[model] = mean(vals)
+		}
+		for _, model := range lineup {
+			if model == baseline {
+				continue
+			}
+			deltas := make([]float64, len(idxs))
+			bd := baselineDelta{Model: model}
+			for j, i := range idxs {
+				d := perModel[model][i] - perModel[baseline][i]
+				deltas[j] = d
+				switch {
+				case d > 0:
+					bd.Wins++
+				case d < 0:
+					bd.Losses++
+				default:
+					bd.Ties++
+				}
+			}
+			bd.MeanDelta = mean(deltas)
+			bd.CILow, bd.CIHigh = bootstrapDeltaCI(deltas, seed, bootstrapN)
+			dr.BaselineSummary = append(dr.BaselineSummary, bd)
+		}
+		out = append(out, dr)
+	}
+	return out
 }
 
 // restraintArtifactTraceContextValid reports whether an artifact carries enough
