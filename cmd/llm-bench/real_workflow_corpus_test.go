@@ -48,6 +48,9 @@ func TestRealWorkflowCorpusBalance(t *testing.T) {
 		if tr.Golden.RestraintRationale == "" {
 			t.Errorf("trace %q missing restraint_rationale (validity anchor)", e.TraceID)
 		}
+		if tr.Golden.FailureMode == "" {
+			t.Errorf("trace %q missing failure_mode (audit tag)", e.TraceID)
+		}
 		diffCounts[tr.Golden.Difficulty]++
 	}
 	for _, tier := range []string{"obvious", "tempting", "adversarial"} {

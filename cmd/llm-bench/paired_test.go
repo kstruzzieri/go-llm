@@ -833,6 +833,12 @@ func TestComputeRestraintPairingByDifficulty(t *testing.T) {
 	if adv.BaselineSummary[0].Losses != 2 {
 		t.Errorf("adversarial losses=%d, want 2", adv.BaselineSummary[0].Losses)
 	}
+	// Per-tier per-model hold-rates: in the adversarial tier a held both (1.0),
+	// b diverged both (0.0). This is the interpretable signal the delta hides.
+	if adv.PerModelMean["a"] != 1.0 || adv.PerModelMean["b"] != 0.0 {
+		t.Errorf("adversarial PerModelMean a=%v b=%v, want 1.0/0.0",
+			adv.PerModelMean["a"], adv.PerModelMean["b"])
+	}
 }
 
 // Legacy/backfill-in-progress traces carry an empty Golden.Difficulty; they must
