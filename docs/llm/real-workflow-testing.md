@@ -135,3 +135,27 @@ repair or drop it. Record the answer as `golden.restraint_rationale`. Restraint 
 The traces, manifest, artifacts, and reports are gitignored local evidence (see the Privacy Rule
 above). They are NOT committed; only the schema/code and this recipe are. Promote the final
 citable number to a sanitized summary, not the raw private corpus.
+
+## Alternative: import xLAM-irrelevance (skip authoring)
+
+Instead of authoring golden-empty traces by hand, convert a pre-labeled public dataset.
+`MadeAgents/xlam-irrelevance-7.5k` (HuggingFace, CC-BY-4.0) holds 7,500 "irrelevance" cases —
+tools offered, none relevant, correct action = call nothing — so its empty `answers` IS the
+golden-empty label, with no authoring or sign-off.
+
+```
+# download the dataset file (CC-BY-4.0 — attribute it in any published summary)
+curl -sL -o /tmp/xlam-irrel.json \
+  https://huggingface.co/datasets/MadeAgents/xlam-irrelevance-7.5k/resolve/main/xlam-7.5k-irrelevancek.json
+
+# convert a seeded sample into golden-empty Traces + a manifest (both gitignored)
+env -u GOROOT go run ./cmd/llm-bench -import-xlam /tmp/xlam-irrel.json
+# defaults: -import-xlam-n 300 -import-xlam-seed 42 -import-xlam-min-tools 1
+#   out: docs/llm/traces/xlam-irrelevance-local/
+#   manifest: docs/llm/calibration/xlam-irrelevance-manifest.jsonl  (partition=challenge, category=irrelevance)
+```
+
+Then replay the qwen3:8b vs qwen3.6:35b-a3b panel over the manifest with tools exposed and read
+the paired restraint report. Tradeoff vs the synthesis recipe: generic synthetic APIs, not the
+go-llm repo/MCP tools, so the claim is "tool-restraint on xLAM-irrelevance," not "on go-llm
+workflows" — fine for a domain-general restraint signal, and n is no longer the constraint.
