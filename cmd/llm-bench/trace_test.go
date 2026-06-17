@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -95,3 +96,64 @@ func TestValidateTrace(t *testing.T) {
 		})
 	}
 }
+
+func TestGoldenAuditFieldsParse(t *testing.T) {
+	const raw = `{
+	  "id":"conversation-rw-x","source":"s","system":"ctx",
+	  "turns":[{"role":"user","content":"q"}],
+	  "golden":{
+	    "tool_calls":[],
+	    "final_answer_criteria":"answer from context",
+	    "difficulty":"adversarial",
+	    "restraint_rationale":"context already contains the answer",
+	    "failure_mode":"context-already-answers"
+	  }
+	}`
+	var tr Trace
+	if err := json.Unmarshal([]byte(raw), &tr); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if tr.Golden.Difficulty != "adversarial" {
+		t.Errorf("Difficulty = %q, want adversarial", tr.Golden.Difficulty)
+	}
+	if tr.Golden.RestraintRationale == "" || tr.Golden.FailureMode == "" {
+		t.Errorf("rationale/failure_mode not parsed: %+v", tr.Golden)
+	}
+}
+
+func TestGoldenAuditFieldsBackwardCompat(t *testing.T) {
+	const raw = `{"tool_calls":[],"final_answer_criteria":"x"}`
+	var g Golden
+	if err := json.Unmarshal([]byte(raw), &g); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if g.Difficulty != "" || g.RestraintRationale != "" || g.FailureMode != "" {
+		t.Errorf("legacy golden gained non-empty audit fields: %+v", g)
+	}
+}
+
+func TestValidateTraceRejectsUnknownDifficulty(t *testing.T) {
+	tr := Trace{
+		ID: "x", System: "ctx",
+		Turns:  []Turn{{Role: "user", Content: "q"}},
+		Golden: Golden{Difficulty: "medium"},
+	}
+	err := validateTrace(tr)
+	if err == nil || !strings.Contains(err.Error(), "difficulty") {
+		t.Fatalf("want difficulty error, got %v", err)
+	}
+}
+
+func TestValidateTraceAllowsKnownAndEmptyDifficulty(t *testing.T) {
+	for _, d := range []string{"", "obvious", "tempting", "adversarial"} {
+		tr := Trace{
+			ID: "x", System: "ctx",
+			Turns:  []Turn{{Role: "user", Content: "q"}},
+			Golden: Golden{Difficulty: d},
+		}
+		if err := validateTrace(tr); err != nil {
+			t.Errorf("difficulty %q rejected: %v", d, err)
+		}
+	}
+}
+

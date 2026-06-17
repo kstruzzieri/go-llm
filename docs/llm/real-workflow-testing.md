@@ -45,3 +45,93 @@ Use 8-12 real prompts over one normal working session. Include at least:
 - 1 prompt that intentionally tests restraint, such as asking for a risky refactor where the right answer should narrow scope.
 
 The first shakedown is not an accepted run. It is successful when the harness produces complete manual and paired reports with no stale labels, no accidental committed private artifacts, and clear next actions.
+
+## Synthetic Restraint Corpus Growth
+
+This grows the golden-empty real-workflow corpus from the shakedown's 8 traces to ~50 so the
+paired tool-restraint Δ (qwen3:8b vs qwen3.6:35b-a3b) becomes citable (95% CI excludes 0).
+Restraint-first: a trace scores label-free (held=1 if the candidate emitted no tool call on a
+golden-empty trace, diverged=0 otherwise), so growth needs no AnswerQuality labels — only that
+each trace genuinely warrants no tool call.
+
+### Why synthesis, not capture
+
+Restraint needs golden-empty situations, not naturally sampled transcripts (most real workflows
+either need a tool or drift into ambiguity). At n~50, controlled synthesis is the right engine.
+Keep the existing 8 shakedown traces as a real-session calibration seed; synthesize the rest in
+their shape.
+
+### Trace template
+
+Copy an existing `docs/llm/traces/real-workflow-local/conversation-rw-*.json` and edit:
+
+- `golden.tool_calls`: `[]` (golden-empty — required for restraint eligibility).
+- `golden.difficulty`: one of `obvious` | `tempting` | `adversarial`.
+- `golden.restraint_rationale`: why no tool call is correct / what context makes tools unnecessary.
+- `golden.failure_mode`: short tag of what's tested, e.g. `context-already-answers`, `tempting-search-tool`.
+- Keep `golden.final_answer_criteria` (and optionally `final_answer_substring`) so AnswerQuality
+  labels can be added later without rebuilding the corpus.
+
+### Difficulty tiers
+
+- `obvious` — no tool plainly needed (calibration floor: a model that diverges here has a real defect).
+- `tempting` — an unneeded tool is offered (`trace.tools` non-empty) but the answer is in context.
+- `adversarial` — looks tool-needed but the baked context already suffices.
+
+Discordant pairs (the statistical power) come from `tempting`/`adversarial`, so the corpus is
+weighted toward them. `obvious` cases mostly tie and add little power; keep only a small floor.
+
+### Archetype × difficulty matrix (target ~50)
+
+| archetype | obvious | tempting | adversarial | total |
+|---|---|---|---|---|
+| code-explain | 1 | 2 | 2 | 5 |
+| code-review | 1 | 2 | 2 | 5 |
+| plan | 1 | 2 | 2 | 5 |
+| rag-answerable | 2 | 3 | 3 | 8 |
+| restraint-refusal | 2 | 3 | 3 | 8 |
+| no-op-status | 2 | 3 | 3 | 8 |
+| ask-clarifying | 1 | 5 | 5 | 11 |
+| **total** | **10** | **20** | **20** | **50** |
+
+### Baking the `system` block
+
+Populate `system` with real retrieved context for the prompt, matching the existing shape
+(`"Relevant context from the codebase:\n\n[1] path:lines\n..."`). Use go-llm RAG retrieval over
+the repo where available; otherwise hand-select real repo snippets and cite exact `path:lines`.
+Never fabricate code that is not in the repo — replay must measure the same prompt the workflow
+would present.
+
+### Manifest
+
+One row per trace in `docs/llm/calibration/real-workflow-manifest.jsonl`:
+
+- `category`: the archetype (e.g. `code-explain`) — the corpus report stratifies by category.
+- `partition`: `natural`.
+- `source`: `real-workflow-local`.
+- `allowed_as_model_evidence`: `true`.
+
+Difficulty is single-sourced on `golden.difficulty` (not duplicated to the manifest), so it
+reaches the paired restraint report directly via the embedded trace and cannot drift.
+
+### Golden-empty sign-off (validity anchor)
+
+Before a trace counts, answer the binary question: **given the baked context, is *no tool* genuinely
+the correct move here?** If a tool would actually be warranted, the trace is not restraint-eligible —
+repair or drop it. Record the answer as `golden.restraint_rationale`. Restraint is label-free for
+*scoring*, but this designation is the human judgment the whole metric rests on.
+
+### Validation and run
+
+- `TestRealWorkflowCorpusBalance` (in `cmd/llm-bench`) validates the grown corpus offline; it skips
+  when the private manifest is absent. Make it go SKIP → PASS as you author.
+- Run the 2-model panel (qwen3:8b baseline vs qwen3.6:35b-a3b) via the openai-compat candidate
+  transport with tools exposed, then read the paired restraint report: overall Δ + CI plus the
+  by-difficulty block. If the CI still touches 0, check whether the adversarial stratum
+  discriminates alone, or extend toward n~100 (the corpus is additive).
+
+### Privacy
+
+The traces, manifest, artifacts, and reports are gitignored local evidence (see the Privacy Rule
+above). They are NOT committed; only the schema/code and this recipe are. Promote the final
+citable number to a sanitized summary, not the raw private corpus.

@@ -797,3 +797,84 @@ func TestComputeRestraintPairingN8FindingShape(t *testing.T) {
 		t.Fatalf("MeanDelta = %v, want -0.125", bd.MeanDelta)
 	}
 }
+
+func TestComputeRestraintPairingByDifficulty(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	diverged := []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "x"}}}}
+	mk := func(trace, model, diff string, tx []Turn) Artifact {
+		return Artifact{
+			TraceID: trace, CandidateModel: model,
+			Trace: Trace{ID: trace, Tools: withTools,
+				Golden: Golden{FinalAnswerSubstring: "ok", Difficulty: diff}},
+			ActualTranscript: tx,
+		}
+	}
+	// 2 obvious (both models hold) + 2 adversarial (b diverges on both, a holds).
+	arts := []Artifact{
+		mk("o0", "a", "obvious", held), mk("o0", "b", "obvious", held),
+		mk("o1", "a", "obvious", held), mk("o1", "b", "obvious", held),
+		mk("d0", "a", "adversarial", held), mk("d0", "b", "adversarial", diverged),
+		mk("d1", "a", "adversarial", held), mk("d1", "b", "adversarial", diverged),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	byDiff := map[string]difficultyRestraint{}
+	for _, dr := range rp.ByDifficulty {
+		byDiff[dr.Difficulty] = dr
+	}
+	if got := byDiff["obvious"]; got.N != 2 || got.BaselineSummary[0].MeanDelta != 0 {
+		t.Errorf("obvious: N=%d delta=%v, want N=2 delta=0", got.N, got.BaselineSummary[0].MeanDelta)
+	}
+	adv := byDiff["adversarial"]
+	if adv.N != 2 || adv.BaselineSummary[0].MeanDelta != -1.0 {
+		t.Errorf("adversarial: N=%d delta=%v, want N=2 delta=-1.0", adv.N, adv.BaselineSummary[0].MeanDelta)
+	}
+	if adv.BaselineSummary[0].Losses != 2 {
+		t.Errorf("adversarial losses=%d, want 2", adv.BaselineSummary[0].Losses)
+	}
+	// Per-tier per-model hold-rates: in the adversarial tier a held both (1.0),
+	// b diverged both (0.0). This is the interpretable signal the delta hides.
+	if adv.PerModelMean["a"] != 1.0 || adv.PerModelMean["b"] != 0.0 {
+		t.Errorf("adversarial PerModelMean a=%v b=%v, want 1.0/0.0",
+			adv.PerModelMean["a"], adv.PerModelMean["b"])
+	}
+}
+
+// Legacy/backfill-in-progress traces carry an empty Golden.Difficulty; they must
+// bucket under "unspecified" (never dropped), and tiers must render in canonical
+// order regardless of artifact order. Guards the Phase-C transition state.
+func TestComputeRestraintPairingByDifficultyUnspecifiedAndOrder(t *testing.T) {
+	withTools := []json.RawMessage{json.RawMessage(`{"name":"x","inputSchema":{"type":"object"}}`)}
+	held := []Turn{{Role: "assistant", Content: "ok"}}
+	mk := func(trace, model, diff string) Artifact {
+		return Artifact{
+			TraceID: trace, CandidateModel: model,
+			Trace: Trace{ID: trace, Tools: withTools,
+				Golden: Golden{FinalAnswerSubstring: "ok", Difficulty: diff}},
+			ActualTranscript: held,
+		}
+	}
+	// Deliberately out of canonical order; one trace has an empty difficulty.
+	arts := []Artifact{
+		mk("a0", "a", "adversarial"), mk("a0", "b", "adversarial"),
+		mk("u0", "a", ""), mk("u0", "b", ""),
+		mk("o0", "a", "obvious"), mk("o0", "b", "obvious"),
+		mk("t0", "a", "tempting"), mk("t0", "b", "tempting"),
+	}
+	rp := computeRestraintPairing(arts, []string{"a", "b"}, "a", pairedBootstrapSeed, pairedBootstrapN)
+
+	gotOrder := make([]string, 0, len(rp.ByDifficulty))
+	for _, dr := range rp.ByDifficulty {
+		gotOrder = append(gotOrder, dr.Difficulty)
+	}
+	want := []string{"obvious", "tempting", "adversarial", "unspecified"}
+	if !reflect.DeepEqual(gotOrder, want) {
+		t.Fatalf("tier order = %v, want %v", gotOrder, want)
+	}
+	for _, dr := range rp.ByDifficulty {
+		if dr.N != 1 {
+			t.Errorf("tier %q N=%d, want 1", dr.Difficulty, dr.N)
+		}
+	}
+}

@@ -14,6 +14,11 @@ import (
 // schema for the tool it's supposed to invoke.
 var errToolNameNotDeclared = errors.New("trace tool call references undeclared tool name")
 
+// validRestraintDifficulties is the closed set for Golden.Difficulty ("" allowed).
+var validRestraintDifficulties = map[string]struct{}{
+	"obvious": {}, "tempting": {}, "adversarial": {},
+}
+
 // Trace is a replayable conversation captured from a real MCP / chat session.
 // See docs/llm/benchmark-plan.md for the format and capture strategy.
 type Trace struct {
@@ -54,6 +59,17 @@ type Golden struct {
 	ToolCalls            []string `json:"tool_calls"`
 	FinalAnswerCriteria  string   `json:"final_answer_criteria"`
 	FinalAnswerSubstring string   `json:"final_answer_substring,omitempty"`
+	// Difficulty tiers a golden-empty restraint trace: "obvious" (no tool
+	// plainly needed), "tempting" (an unneeded tool is offered), "adversarial"
+	// (looks tool-needed but the baked context already suffices). Empty on
+	// non-restraint or legacy traces. Single source of truth for restraint
+	// stratification — reaches computeRestraintPairing via Artifact.Trace.
+	Difficulty string `json:"difficulty,omitempty"`
+	// RestraintRationale records why no tool call is correct (audit only).
+	RestraintRationale string `json:"restraint_rationale,omitempty"`
+	// FailureMode is a short tag of what the trace tests, e.g.
+	// "context-already-answers", "tempting-search-tool" (audit only).
+	FailureMode string `json:"failure_mode,omitempty"`
 }
 
 // loadTraces reads each path as a JSON Trace and returns the full set.
@@ -90,6 +106,11 @@ func validateTrace(t Trace) error {
 	}
 	if err := validateToolNamesDeclared(t); err != nil {
 		return err
+	}
+	if d := t.Golden.Difficulty; d != "" {
+		if _, ok := validRestraintDifficulties[d]; !ok {
+			return fmt.Errorf("golden.difficulty %q invalid (want obvious, tempting, adversarial, or empty)", d)
+		}
 	}
 	return nil
 }
