@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -78,6 +79,30 @@ func TestXlamConvertedTraceScoresRestraint(t *testing.T) {
 	div, computed := restraintSignals(tr, []Turn{{Role: "assistant", ToolCalls: []ToolCall{{Name: "get_weather"}}}})
 	if !computed || div != 0 {
 		t.Errorf("tool-call transcript: held=%v computed=%v, want 0/true", div, computed)
+	}
+}
+
+// The real replay path decodes tools via decodeTraceTools (not the looser
+// declaredToolNames), which routes bare-name tools through the MCP branch and
+// reads `inputSchema`. xLAM tools carry `parameters`, so the converter must emit
+// a shape decodeTraceTools accepts — otherwise every replay fails on tool decode.
+func TestXlamConvertedToolsDecodeForReplay(t *testing.T) {
+	tr, err := xlamRecordToTrace(xlamRecord{Query: "q", Tools: sampleXlamTools, Answers: "[]"}, 0)
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	tools, err := decodeTraceTools(tr.Tools)
+	if err != nil {
+		t.Fatalf("decodeTraceTools rejected converted tools: %v", err)
+	}
+	if len(tools) != 2 {
+		t.Fatalf("decoded %d tools, want 2", len(tools))
+	}
+	if strings.TrimSpace(tools[0].Function.Name) == "" {
+		t.Errorf("decoded tool missing function name: %+v", tools[0])
+	}
+	if len(tools[0].Function.Parameters) == 0 {
+		t.Errorf("decoded tool missing parameters schema: %+v", tools[0])
 	}
 }
 
