@@ -268,6 +268,21 @@ func TestImportXlamIrrelevanceRejectsNullFieldsEvenAtMinToolsZero(t *testing.T) 
 	}
 }
 
+func TestImportXlamIrrelevanceRejectsNegativeMinTools(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "x.json")
+	if err := os.WriteFile(src, []byte("[]"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := importXlamIrrelevance(xlamImportOptions{
+		SrcPath: src, OutDir: filepath.Join(dir, "o"), ManifestPath: filepath.Join(dir, "m.jsonl"),
+		N: 1, Seed: 1, MinTools: -1,
+	})
+	if err == nil {
+		t.Fatal("want error for negative min-tools, got nil")
+	}
+}
+
 func TestImportXlamIrrelevanceErrorsWhenNoneEligible(t *testing.T) {
 	// All records filtered (0 tools), so nothing is written.
 	recs := []xlamRecord{{Query: "a", Tools: "[]", Answers: "[]"}}

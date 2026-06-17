@@ -95,6 +95,11 @@ type xlamImportResult struct {
 // them, converts each to a golden-empty Trace, and writes the trace files plus a
 // corpus manifest. Sampling is deterministic for a given (Seed, input).
 func importXlamIrrelevance(opts xlamImportOptions) (xlamImportResult, error) {
+	if opts.MinTools < 0 {
+		// A negative minimum would make `len(tools) < MinTools` always false,
+		// silently admitting 0-tool rows. Reject it rather than guess intent.
+		return xlamImportResult{}, fmt.Errorf("xlam import: min-tools must be >= 0, got %d", opts.MinTools)
+	}
 	data, err := os.ReadFile(opts.SrcPath)
 	if err != nil {
 		return xlamImportResult{}, fmt.Errorf("xlam import: read source: %w", err)
