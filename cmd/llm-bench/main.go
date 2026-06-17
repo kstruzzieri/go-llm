@@ -40,6 +40,13 @@ func main() {
 	captureSample := flag.String("capture-sample", "", "Stratified capture spec, e.g. n=50,stratify=token-length:turn-count (mutually exclusive with -capture-limit)")
 	captureSampleSeed := flag.Int64("capture-sample-seed", 0, "Deterministic seed for -capture-sample (0 = time.Now().UnixNano())")
 
+	importXlam := flag.String("import-xlam", "", "Convert a MadeAgents/xlam-irrelevance JSON file into golden-empty restraint traces and exit (uses -import-xlam-out, -import-xlam-manifest, -import-xlam-n, -import-xlam-seed, -import-xlam-min-tools)")
+	importXlamOut := flag.String("import-xlam-out", filepath.Join("docs", "llm", "traces", "xlam-irrelevance-local"), "Output directory for -import-xlam trace files")
+	importXlamManifest := flag.String("import-xlam-manifest", filepath.Join("docs", "llm", "calibration", "xlam-irrelevance-manifest.jsonl"), "Output manifest path for -import-xlam")
+	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
+	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
+	importXlamMinTools := flag.Int("import-xlam-min-tools", 1, "Drop -import-xlam records offering fewer than this many tools")
+
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
@@ -121,8 +128,11 @@ func main() {
 	if *discriminationReport {
 		modes++
 	}
+	if *importXlam != "" {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -163,6 +173,22 @@ func main() {
 			log.Fatalf("llm-bench: capture wrote no traces")
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: capture wrote %d trace(s) to %s\n", len(result.Written), *captureOut)
+		return
+	}
+
+	if *importXlam != "" {
+		res, err := importXlamIrrelevance(xlamImportOptions{
+			SrcPath:      *importXlam,
+			OutDir:       *importXlamOut,
+			ManifestPath: *importXlamManifest,
+			N:            *importXlamN,
+			Seed:         *importXlamSeed,
+			MinTools:     *importXlamMinTools,
+		})
+		if err != nil {
+			log.Fatalf("llm-bench: import-xlam: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: import-xlam wrote %d of %d eligible trace(s) (filtered %d ineligible) to %s, manifest %s\n", res.Written, res.Eligible, res.Filtered, *importXlamOut, *importXlamManifest)
 		return
 	}
 
