@@ -106,6 +106,47 @@ func TestXlamConvertedToolsDecodeForReplay(t *testing.T) {
 	}
 }
 
+func TestXlamToolToProviderTool(t *testing.T) {
+	// Happy path: wraps xLAM parameters as a JSON-schema object under function.
+	out, err := xlamToolToProviderTool(json.RawMessage(`{"name":"f","description":"d","parameters":{"x":{"type":"string"}}}`))
+	if err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+	var env struct {
+		Type     string `json:"type"`
+		Function struct {
+			Name       string         `json:"name"`
+			Parameters map[string]any `json:"parameters"`
+		} `json:"function"`
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v", err)
+	}
+	if env.Type != "function" || env.Function.Name != "f" {
+		t.Errorf("envelope = %+v, want type=function name=f", env)
+	}
+	if env.Function.Parameters["type"] != "object" {
+		t.Errorf("parameters.type = %v, want object", env.Function.Parameters["type"])
+	}
+	if _, ok := env.Function.Parameters["properties"]; !ok {
+		t.Errorf("parameters missing properties: %+v", env.Function.Parameters)
+	}
+
+	// No-parameters tool still yields a valid object schema (empty properties).
+	out, err = xlamToolToProviderTool(json.RawMessage(`{"name":"g","description":"d"}`))
+	if err != nil {
+		t.Fatalf("no-params convert: %v", err)
+	}
+	if tools, err := decodeTraceTools([]json.RawMessage{out}); err != nil || len(tools) != 1 {
+		t.Errorf("no-params tool failed to decode: %v (n=%d)", err, len(tools))
+	}
+
+	// Missing name is an error.
+	if _, err := xlamToolToProviderTool(json.RawMessage(`{"description":"d","parameters":{}}`)); err == nil {
+		t.Error("want error for tool missing name")
+	}
+}
+
 func TestXlamRecordToTraceRejectsNonEmptyAnswers(t *testing.T) {
 	rec := xlamRecord{Query: "q", Tools: sampleXlamTools, Answers: `[{"name":"get_weather","arguments":{"city":"x"}}]`}
 	if _, err := xlamRecordToTrace(rec, 0); err == nil {
