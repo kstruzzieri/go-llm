@@ -40,16 +40,16 @@ func xlamRecordToTrace(rec xlamRecord, idx int) (Trace, error) {
 	if query == "" {
 		return Trace{}, fmt.Errorf("xlam record %d: empty query", idx)
 	}
-	var answers []json.RawMessage
-	if err := json.Unmarshal([]byte(rec.Answers), &answers); err != nil {
-		return Trace{}, fmt.Errorf("xlam record %d: parse answers: %w", idx, err)
+	answers, err := parseXlamJSONArray("answers", rec.Answers)
+	if err != nil {
+		return Trace{}, fmt.Errorf("xlam record %d: %w", idx, err)
 	}
 	if len(answers) != 0 {
 		return Trace{}, fmt.Errorf("xlam record %d: %d answer(s) present — not an irrelevance case", idx, len(answers))
 	}
-	var tools []json.RawMessage
-	if err := json.Unmarshal([]byte(rec.Tools), &tools); err != nil {
-		return Trace{}, fmt.Errorf("xlam record %d: parse tools: %w", idx, err)
+	tools, err := parseXlamJSONArray("tools", rec.Tools)
+	if err != nil {
+		return Trace{}, fmt.Errorf("xlam record %d: %w", idx, err)
 	}
 	tr := Trace{
 		ID:     fmt.Sprintf("xlam-irrel-%04d", idx),
@@ -184,13 +184,31 @@ func xlamRecordEligible(r xlamRecord, minTools int) bool {
 	if strings.TrimSpace(r.Query) == "" {
 		return false
 	}
-	var tools []json.RawMessage
-	if err := json.Unmarshal([]byte(r.Tools), &tools); err != nil || len(tools) < minTools {
+	tools, err := parseXlamJSONArray("tools", r.Tools)
+	if err != nil || len(tools) < minTools {
 		return false
 	}
-	var answers []json.RawMessage
-	if err := json.Unmarshal([]byte(r.Answers), &answers); err != nil || len(answers) != 0 {
+	answers, err := parseXlamJSONArray("answers", r.Answers)
+	if err != nil || len(answers) != 0 {
 		return false
 	}
 	return true
+}
+
+// parseXlamJSONArray decodes one of xLAM's double-encoded JSON-array fields,
+// rejecting the empty string and the JSON literal "null" up front. Both
+// unmarshal into a nil slice with no error, so without this guard a "null"
+// answers field would be read as an empty array (false golden-empty) and a
+// "null" tools field would slip through as zero-tools. A real empty array
+// ("[]") is still accepted — the min-tools / golden-empty checks own that.
+func parseXlamJSONArray(field, s string) ([]json.RawMessage, error) {
+	t := strings.TrimSpace(s)
+	if t == "" || t == "null" {
+		return nil, fmt.Errorf("%s is empty or null", field)
+	}
+	var arr []json.RawMessage
+	if err := json.Unmarshal([]byte(t), &arr); err != nil {
+		return nil, fmt.Errorf("parse %s: %w", field, err)
+	}
+	return arr, nil
 }

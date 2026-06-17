@@ -93,6 +93,9 @@ func TestXlamRecordToTraceRejectsBadInput(t *testing.T) {
 		"empty query":  {Query: "  ", Tools: sampleXlamTools, Answers: "[]"},
 		"bad tools":    {Query: "q", Tools: "not json", Answers: "[]"},
 		"bad answers":  {Query: "q", Tools: sampleXlamTools, Answers: "not json"},
+		"null answers": {Query: "q", Tools: sampleXlamTools, Answers: "null"},
+		"null tools":   {Query: "q", Tools: "null", Answers: "[]"},
+		"empty answers string": {Query: "q", Tools: sampleXlamTools, Answers: "  "},
 	} {
 		if _, err := xlamRecordToTrace(rec, 0); err == nil {
 			t.Errorf("%s: want error, got nil", name)
@@ -236,6 +239,32 @@ func TestImportXlamIrrelevanceClearsStaleTraces(t *testing.T) {
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
 		t.Errorf("stale trace %s not removed (err=%v)", stale, err)
+	}
+}
+
+func TestImportXlamIrrelevanceRejectsNullFieldsEvenAtMinToolsZero(t *testing.T) {
+	// With min-tools=0 a "null" tools/answers row must still be filtered, not
+	// imported as a zero-tool / false golden-empty trace.
+	recs := []xlamRecord{
+		{Query: "ok", Tools: sampleXlamTools, Answers: "[]"},
+		{Query: "nulltools", Tools: "null", Answers: "[]"},
+		{Query: "nullanswers", Tools: sampleXlamTools, Answers: "null"},
+	}
+	dir := t.TempDir()
+	src := filepath.Join(dir, "x.json")
+	blob, _ := json.Marshal(recs)
+	if err := os.WriteFile(src, blob, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res, err := importXlamIrrelevance(xlamImportOptions{
+		SrcPath: src, OutDir: filepath.Join(dir, "o"), ManifestPath: filepath.Join(dir, "m.jsonl"),
+		N: 0, Seed: 1, MinTools: 0,
+	})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if res.Written != 1 || res.Eligible != 1 || res.Filtered != 2 {
+		t.Errorf("result = %+v, want Written=1 Eligible=1 Filtered=2 (null rows filtered)", res)
 	}
 }
 
