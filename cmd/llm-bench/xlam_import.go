@@ -47,9 +47,17 @@ func xlamRecordToTrace(rec xlamRecord, idx int) (Trace, error) {
 	if len(answers) != 0 {
 		return Trace{}, fmt.Errorf("xlam record %d: %d answer(s) present — not an irrelevance case", idx, len(answers))
 	}
-	tools, err := parseXlamJSONArray("tools", rec.Tools)
+	rawTools, err := parseXlamJSONArray("tools", rec.Tools)
 	if err != nil {
 		return Trace{}, fmt.Errorf("xlam record %d: %w", idx, err)
+	}
+	tools := make([]json.RawMessage, 0, len(rawTools))
+	for j, rt := range rawTools {
+		pt, err := xlamToolToProviderTool(rt)
+		if err != nil {
+			return Trace{}, fmt.Errorf("xlam record %d tool %d: %w", idx, j, err)
+		}
+		tools = append(tools, pt)
 	}
 	tr := Trace{
 		ID:     fmt.Sprintf("xlam-irrel-%04d", idx),
@@ -198,6 +206,47 @@ func xlamRecordEligible(r xlamRecord, minTools int) bool {
 		return false
 	}
 	return true
+}
+
+// xlamToolToProviderTool rewrites one xLAM tool definition ({name, description,
+// parameters}) into the provider/function envelope the replay path expects
+// ({type:function, function:{name, description, parameters}}), wrapping the xLAM
+// parameter map as a JSON-schema object. xLAM's bare-name shape would otherwise
+// route through decodeTraceTool's MCP branch, which reads `inputSchema` and
+// rejects the tool with "schema must be a JSON object".
+func xlamToolToProviderTool(raw json.RawMessage) (json.RawMessage, error) {
+	var t struct {
+		Name        string          `json:"name"`
+		Description string          `json:"description"`
+		Parameters  json.RawMessage `json:"parameters"`
+	}
+	if err := json.Unmarshal(raw, &t); err != nil {
+		return nil, fmt.Errorf("decode tool: %w", err)
+	}
+	if strings.TrimSpace(t.Name) == "" {
+		return nil, fmt.Errorf("tool missing name")
+	}
+	// Unmarshal into a map so the emitted `properties` is always a well-formed
+	// JSON-Schema object: a non-object parameters value errors out (drops the
+	// trace via the eligibility filter), and the JSON literal "null" decodes to a
+	// nil map, which we normalize to {} rather than emit `properties:null`.
+	props := map[string]any{}
+	if len(t.Parameters) > 0 {
+		if err := json.Unmarshal(t.Parameters, &props); err != nil {
+			return nil, fmt.Errorf("tool %q parameters: %w", t.Name, err)
+		}
+		if props == nil {
+			props = map[string]any{}
+		}
+	}
+	return json.Marshal(map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name":        t.Name,
+			"description": t.Description,
+			"parameters":  map[string]any{"type": "object", "properties": props},
+		},
+	})
 }
 
 // parseXlamJSONArray decodes one of xLAM's double-encoded JSON-array fields,
