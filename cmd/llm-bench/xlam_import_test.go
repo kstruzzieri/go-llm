@@ -145,6 +145,26 @@ func TestXlamToolToProviderTool(t *testing.T) {
 	if _, err := xlamToolToProviderTool(json.RawMessage(`{"description":"d","parameters":{}}`)); err == nil {
 		t.Error("want error for tool missing name")
 	}
+
+	// "parameters": null must normalize to an empty object schema, not properties:null.
+	out, err = xlamToolToProviderTool(json.RawMessage(`{"name":"h","description":"d","parameters":null}`))
+	if err != nil {
+		t.Fatalf("null-params convert: %v", err)
+	}
+	if err := json.Unmarshal(out, &env); err != nil {
+		t.Fatalf("null-params unmarshal: %v", err)
+	}
+	if props, ok := env.Function.Parameters["properties"].(map[string]any); !ok || props == nil {
+		t.Errorf("null parameters did not normalize to empty object: %+v", env.Function.Parameters["properties"])
+	}
+	if tools, err := decodeTraceTools([]json.RawMessage{out}); err != nil || len(tools) != 1 {
+		t.Errorf("null-params tool failed to decode: %v", err)
+	}
+
+	// Non-object parameters (an array) is malformed source → error (trace dropped upstream).
+	if _, err := xlamToolToProviderTool(json.RawMessage(`{"name":"i","parameters":[1,2]}`)); err == nil {
+		t.Error("want error for non-object parameters")
+	}
 }
 
 func TestXlamRecordToTraceRejectsNonEmptyAnswers(t *testing.T) {

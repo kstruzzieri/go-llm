@@ -226,10 +226,17 @@ func xlamToolToProviderTool(raw json.RawMessage) (json.RawMessage, error) {
 	if strings.TrimSpace(t.Name) == "" {
 		return nil, fmt.Errorf("tool missing name")
 	}
-	var props any = map[string]any{}
+	// Unmarshal into a map so the emitted `properties` is always a well-formed
+	// JSON-Schema object: a non-object parameters value errors out (drops the
+	// trace via the eligibility filter), and the JSON literal "null" decodes to a
+	// nil map, which we normalize to {} rather than emit `properties:null`.
+	props := map[string]any{}
 	if len(t.Parameters) > 0 {
 		if err := json.Unmarshal(t.Parameters, &props); err != nil {
 			return nil, fmt.Errorf("tool %q parameters: %w", t.Name, err)
+		}
+		if props == nil {
+			props = map[string]any{}
 		}
 	}
 	return json.Marshal(map[string]any{
