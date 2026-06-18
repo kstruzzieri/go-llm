@@ -24,17 +24,25 @@ go get github.com/kstruzzieri/go-llm
 
 These models match the current reference lineup checked into `models.json`.
 
-**llama.cpp (recommended).** Start one `llama-server` per model, each on its own
-port (point each at the matching GGUF; flags shown are a sane local default):
+**llama.cpp (recommended).** llama.cpp serves **one model per `llama-server`
+process, each on its own port**. The shipped `models.json` maps the reference
+lineup to ports 8090–8094 (one `openai-compat` provider each). Start only the
+servers for the models you intend to use — the Router fault-tolerates and falls
+back over any that aren't running, so you do not need all five up at once (and
+on a 128GB box you can't co-resident the whole fleet anyway):
 
 ```bash
-llama-server -m /path/to/gemma4-31b.gguf       --port 8090 -c 8192 -ngl 99 --jinja --alias gemma4:31b &
-llama-server -m /path/to/qwen3.6-35b-a3b.gguf  --port 8091 -c 8192 -ngl 99 --jinja --alias qwen3.6:35b-a3b &
-# ...one server per model you intend to route to
+llama-server -m /path/to/gemma4-31b.gguf          --port 8090 -c 8192 -ngl 99 --jinja --alias gemma4:31b &           # general / agent / judge
+llama-server -m /path/to/qwen3.6-35b-a3b.gguf     --port 8091 -c 8192 -ngl 99 --jinja --alias qwen3.6:35b-a3b &      # fast
+llama-server -m /path/to/qwen3-coder-next.gguf    --port 8092 -c 8192 -ngl 99 --jinja --alias qwen3-coder-next:latest &  # coding
+llama-server -m /path/to/qwen3-8b.gguf            --port 8093 -c 8192 -ngl 99 --jinja --alias qwen3:8b &              # lightweight / FIM
+llama-server -m /path/to/qwen3-embedding-8b.gguf  --port 8094 -c 8192 -ngl 99 --embeddings --alias qwen3-embedding:8b &  # embeddings (note --embeddings)
 ```
 
-Then declare each backend as an `openai-compat` provider in `models.json` (see
-[Model Configuration](#model-configuration)).
+The shipped `models.json` already declares these as `openai-compat` providers
+(`llamacpp-gemma`, `llamacpp-fast`, `llamacpp-coder`, `llamacpp-light`,
+`llamacpp-embed`) — edit the ports/paths to match your setup. See
+[Model Configuration](#model-configuration).
 
 **Ollama (alternative).** If you run Ollama instead, pull the lineup:
 
