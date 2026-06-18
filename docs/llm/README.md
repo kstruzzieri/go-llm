@@ -44,18 +44,43 @@ not "what `go-llm` requires."
 - **`qwen3.6:35b-a3b`** — fast MoE (73.4% SWE-bench, 3B active)
 - **`qwen3:8b`** — lightweight / FIM
 
-The fleet co-resides in ~77GB with comfortable headroom. The architecture
-stays on Ollama (as of 0.19, Ollama is backed by MLX on Apple Silicon, so
-the historical MLX-vs-Ollama speed gap is closed). A second backend
-(llama.cpp, LM Studio, mlx-lm) is deferred until the benchmark harness
-shows a measurable quality delta on real workloads — see
-[setups.md](setups.md) for Setup 2/3 (GLM-5.1, MiniMax M2.7) as
-alternative paths.
+The fleet co-resides in ~77GB with comfortable headroom. **llama.cpp is now
+the primary local backend** (run one `llama-server` per model on its own
+port, exposing the OpenAI-compatible API; go-llm reaches it via the
+`openai-compat` provider format — see the root
+[README "Local model backends"](../../README.md#local-model-backends)).
+Ollama remains a supported alternative. The benchmark harness
+(`cmd/llm-bench`) drives both via the `openai-compat/` and `ollama/` model
+selectors; recent calibration runs use llama.cpp. See [setups.md](setups.md)
+for Setup 2/3 (GLM-5.1, MiniMax M2.7) as alternative paths.
 
 ## Manual smoke test
 
 To smoke-test `cmd/llm-bench` without waiting for real captured traces,
-use the checked-in synthetic trace:
+use the checked-in synthetic trace.
+
+**llama.cpp (recommended).** Start a `llama-server` for the model, then point
+the candidate selector at it (`-candidate-base-url` is the server root, **no**
+`/v1`):
+
+```bash
+llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8091 \
+  -c 8192 -ngl 99 --jinja --alias my-model &
+
+go run ./cmd/llm-bench \
+  -traces 'cmd/llm-bench/testdata/smoke/*.json' \
+  -models 'openai-compat/my-model' \
+  -candidate-base-url http://127.0.0.1:8091 \
+  -scorer exact-match \
+  -report /tmp/llm-bench-smoke.md
+```
+
+To A/B two models, run a second `llama-server` on another port and pass both
+via comma-separated `-models` (each model resolves to the server matching its
+`-candidate-base-url`; for two distinct servers, run one capture per base URL
+and merge — see [CALIBRATION.md](CALIBRATION.md)).
+
+**Ollama (alternative).** If you run Ollama instead:
 
 ```bash
 go run ./cmd/llm-bench \
@@ -65,7 +90,7 @@ go run ./cmd/llm-bench \
   -report /tmp/llm-bench-smoke.md
 ```
 
-Substitute whichever models are pulled on your machine. Success criteria:
+Substitute whichever models you have locally. Success criteria:
 the command exits `0`, writes `/tmp/llm-bench-smoke.md`, and the report
 shows `Errors = 0` with `Mean Quality = 1.00` for each model on the
 `smoke-minimal-001` trace. This only verifies harness plumbing and basic

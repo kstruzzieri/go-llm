@@ -1,12 +1,14 @@
 # go-llm
 
-A batteries-included Go module for building local-first AI features on top of [Ollama](https://ollama.com). Provides a complete pipeline from model management and configuration through RAG-powered retrieval to domain-specific analysis — all running locally with no cloud dependencies or API keys.
+A batteries-included Go module for building local-first AI features against local model backends. Run models through **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the recommended, primary backend for best local performance, via its OpenAI-compatible server — or through [Ollama](https://ollama.com). Provides a complete pipeline from model management and configuration through RAG-powered retrieval to domain-specific analysis — all running locally with no cloud dependencies or API keys.
 
 Designed for embedding into Go applications that need LLM capabilities: chat, tool calling, code completion, retrieval-augmented generation, and more. Also runs as a standalone [MCP server](#mcp-server) for use as a local AI service without embedding. Pure Go with minimal dependencies (no CGo).
 
+> **Backends:** go-llm targets local models through two provider API formats, selected per provider in `models.json` and routed by `provider.Router`: `openai-compat` (llama.cpp, vLLM, LM Studio, any OpenAI `/v1` server — **recommended**) and `ollama` (the native Ollama REST API). See [Local model backends](#local-model-backends).
+
 ### What's included
 
-- **Ollama client** — chat, completions, embeddings, model management, and tool calling with streaming support
+- **Model backends** — `openai-compat` provider (llama.cpp / vLLM / LM Studio) and a native Ollama REST client; chat, completions, embeddings, model management, and tool calling with streaming support
 - **RAG pipeline** — code-aware chunking, SQLite vector store, concurrent indexing with `.gitignore` support, and context-building retrieval
 - **FIM completion** — Fill-in-the-Middle for IDE inline suggestions with context window management
 - **Model config** — `models.json`-driven configuration with provider settings, role-based defaults, and fallback chain resolution
@@ -29,21 +31,83 @@ Designed for embedding into Go applications that need LLM capabilities: chat, to
 | `feedback/` | Implicit user behavioral signal collection for retrieval quality improvement. |
 | `fingerprint/` | Model profiling — latency benchmarks and capability detection. |
 | `prefetch/` | Predictive cache-warming engine for RAG retrieval. |
-| `compat/` | OpenAI-compatible endpoint shim — chat, completions, model aliases, and a concurrency limiter for clients that speak OpenAI's API but want to target local Ollama models. |
+| `compat/` | OpenAI-compatible endpoint shim — chat, completions, model aliases, and a concurrency limiter so clients that speak OpenAI's API can target local models served through go-llm (distinct from the `openai-compat` *provider*, which consumes an upstream OpenAI `/v1` server such as llama.cpp). |
 | `cmd/go-llm-mcp/` | Standalone MCP server binary with stdio and HTTP/2 support. |
-| `cmd/fim-smoke/` | Smoke-test harness for Fill-in-the-Middle completion against a running Ollama. |
-| `cmd/llm-bench/` | Latency benchmark for the configured model lineup. |
+| `cmd/fim-smoke/` | Smoke-test harness for Fill-in-the-Middle completion against a running backend. |
+| `cmd/llm-bench/` | Model evaluation harness — replays trace corpora against candidate models (llama.cpp via `openai-compat`, or Ollama) and reports AnswerQuality, tool-use, tool-restraint, latency, and tokens with paired deltas and bootstrap CIs. |
 
 ## Requirements
 
 - Go 1.25+
-- [Ollama](https://ollama.com) running locally (default: `http://localhost:11434`)
+- A local model backend (choose one or run both side by side):
+  - **llama.cpp** (recommended) — `llama-server` exposing its OpenAI-compatible API
+  - **Ollama** — running locally (default: `http://localhost:11434`)
 
 ## Installation
 
 ```bash
 go get github.com/kstruzzieri/go-llm
 ```
+
+## Local model backends
+
+go-llm selects a backend per provider in `models.json` via the `api_format` field: `openai-compat` (llama.cpp, vLLM, LM Studio, any OpenAI `/v1` server) or `ollama` (native Ollama REST, the default when omitted). **llama.cpp is the recommended primary backend** for best local performance. The shipped `models.json` points the reference lineup at a single `openai-compat` provider; an `ollama` provider is kept as the supported alternative.
+
+### llama.cpp via llama-swap (recommended)
+
+A single `llama-server` process pins one model in memory, so running the whole lineup that way means one process (and one slice of VRAM) per model. [llama-swap](https://github.com/mostlygeek/llama-swap) is a tiny OpenAI-compatible proxy that fronts all of them on **one** port and starts/stops the right `llama-server` on demand from the requested model name — the same load-on-demand ergonomics as Ollama, with llama.cpp's performance and per-model flag control.
+
+`llama-swap` config (`llama-swap.yaml`) — one entry per model:
+
+```yaml
+models:
+  "gemma4:31b":
+    cmd: llama-server -m /models/gemma4-31b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
+  "qwen3.6:35b-a3b":
+    cmd: llama-server -m /models/qwen3.6-35b-a3b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
+  "qwen3-coder-next:latest":
+    cmd: llama-server -m /models/qwen3-coder-next.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
+  "qwen3:8b":
+    cmd: llama-server -m /models/qwen3-8b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
+  "qwen3-embedding:8b":
+    cmd: llama-server -m /models/qwen3-embedding-8b.gguf --port ${PORT} -c 8192 -ngl 99 --embeddings
+```
+
+Run `llama-swap --config llama-swap.yaml --listen 127.0.0.1:8080`, then point a single `openai-compat` provider at it (`base_url` is the server root — **no** `/v1` suffix; go-llm appends it). This is the shipped `models.json` shape:
+
+```json
+{
+  "providers": {
+    "llamacpp": { "base_url": "http://127.0.0.1:8080", "timeout": "5m", "api_format": "openai-compat" },
+    "ollama":   { "base_url": "http://localhost:11434", "timeout": "5m" }
+  },
+  "models": {
+    "general":   { "name": "gemma4:31b", "provider": "llamacpp", "type": "dense" },
+    "embedding": { "name": "qwen3-embedding:8b", "provider": "llamacpp", "type": "embedding" }
+  }
+}
+```
+
+The model `name` must match the `llama-swap` model key. Set the provider's `api_key` field only if the proxy requires a Bearer token. Models on a backend that lacks `/v1/completions` can carve their capability set down (e.g. `"capabilities": ["chat", "stream"]`).
+
+### llama.cpp without a proxy (pinned servers)
+
+You can skip the proxy and run `llama-server` per model on its own port — useful when you want specific models hot at all times or per-model flags a proxy would complicate:
+
+```bash
+llama-server -m /path/to/model.gguf --host 127.0.0.1 --port 8091 \
+  -c 8192 -ngl 99 --jinja --alias my-model
+```
+
+Then declare one `openai-compat` provider per port and point each model at its provider. The Router's circuit breakers and fallback chains route around any server that isn't running.
+
+### Ollama (supported alternative)
+
+```json
+{ "providers": { "ollama": { "base_url": "http://localhost:11434", "timeout": "5m" } } }
+```
+
+`api_format` defaults to `ollama` when omitted, so pre-existing configs load unchanged. The low-level `ollama.NewClient()` API (used in the examples below) talks to Ollama directly; to target a llama.cpp backend, configure an `openai-compat` provider as above and route through `provider.Router`.
 
 ## Quick Start
 

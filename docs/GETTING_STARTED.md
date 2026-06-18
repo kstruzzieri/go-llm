@@ -1,12 +1,18 @@
 # Getting Started with go-llm
 
-A guide to setting up and using go-llm with your local Ollama models.
+A guide to setting up and using go-llm with your local models. **llama.cpp is
+the recommended primary backend** (best local performance, via its
+OpenAI-compatible server); Ollama is fully supported as an alternative. See
+[Local model backends](../README.md#local-model-backends) for the full backend
+reference.
 
 ## Prerequisites
 
 1. **Go 1.25+** installed
-2. **Ollama** running locally — [install](https://ollama.com/download)
-3. Required models pulled (see [Model Configuration](#model-configuration))
+2. A local model backend:
+   - **llama.cpp** (recommended) — `llama-server` per model, exposing the OpenAI-compatible API
+   - **Ollama** (alternative) — running locally ([install](https://ollama.com/download))
+3. Models available to your backend (see [Model Configuration](#model-configuration))
 
 ## Install
 
@@ -14,28 +20,48 @@ A guide to setting up and using go-llm with your local Ollama models.
 go get github.com/kstruzzieri/go-llm
 ```
 
-## Pull Required Models
+## Serve the models
 
-These pulls match the current reference lineup checked into `models.json`:
+These models match the current reference lineup checked into `models.json`.
 
-```bash
-# General / agent / judge / analysis (reasoning, multimodal chat, tool use)
-ollama pull gemma4:31b
+**llama.cpp via llama-swap (recommended).** A `llama-server` process pins one
+model in memory, so [llama-swap](https://github.com/mostlygeek/llama-swap) — a
+tiny OpenAI-compatible proxy — fronts the whole lineup on one port and starts
+the right `llama-server` on demand from the requested model name (load-on-demand,
+like Ollama, with llama.cpp performance). Write one entry per model in
+`llama-swap.yaml`:
 
-# Fast fallback / lower-latency chat
-ollama pull qwen3.6:35b-a3b
-
-# Coding (code generation, review, FIM completion)
-ollama pull qwen3-coder-next:latest
-
-# Lightweight (simple/fast tasks)
-ollama pull qwen3:8b
-
-# Embeddings (RAG vector search)
-ollama pull qwen3-embedding:8b
+```yaml
+models:
+  "gemma4:31b":              { cmd: llama-server -m /models/gemma4-31b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3.6:35b-a3b":         { cmd: llama-server -m /models/qwen3.6-35b-a3b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3-coder-next:latest": { cmd: llama-server -m /models/qwen3-coder-next.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3:8b":                { cmd: llama-server -m /models/qwen3-8b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3-embedding:8b":      { cmd: llama-server -m /models/qwen3-embedding-8b.gguf --port ${PORT} -c 8192 -ngl 99 --embeddings }
 ```
 
-If you customize `models.json`, pull the models you configured instead.
+Run it: `llama-swap --config llama-swap.yaml --listen 127.0.0.1:8080`. The
+shipped `models.json` already points a single `llamacpp` `openai-compat` provider
+at `http://127.0.0.1:8080`, with every model `name` matching a `llama-swap` key.
+See [Model Configuration](#model-configuration).
+
+**llama.cpp without a proxy (pinned servers).** Skip llama-swap and run one
+`llama-server` per model on its own port when you want specific models hot at all
+times; then declare one `openai-compat` provider per port. The Router's circuit
+breakers and fallback chains route around any server that isn't up, so you need
+not run the whole fleet at once (and on a 128GB box you can't co-resident it).
+
+**Ollama (alternative).** If you run Ollama instead, pull the lineup:
+
+```bash
+ollama pull gemma4:31b            # general / agent / judge / analysis
+ollama pull qwen3.6:35b-a3b       # fast fallback / lower-latency chat
+ollama pull qwen3-coder-next:latest  # coding / review / FIM
+ollama pull qwen3:8b              # lightweight
+ollama pull qwen3-embedding:8b    # embeddings (RAG)
+```
+
+If you customize `models.json`, serve the models you configured instead.
 See [llm/recommendation.md](llm/recommendation.md) for the current
 reference lineup and BYO-model guidance.
 
@@ -57,6 +83,26 @@ embedModel := cfg.MustModelFor("embedding")      // "qwen3-embedding:8b"
 providerCfg := cfg.Provider("ollama")
 client := ollama.NewClient(ollama.WithBaseURL(providerCfg.BaseURL))
 ```
+
+To target a **llama.cpp** backend, declare it as an `openai-compat` provider and
+route through `provider.Router` (which dispatches to the right backend client per
+the model's `provider`), rather than constructing `ollama.NewClient` directly:
+
+```json
+{
+  "providers": {
+    "llamacpp": { "base_url": "http://127.0.0.1:8080", "timeout": "5m", "api_format": "openai-compat" },
+    "ollama":   { "base_url": "http://localhost:11434", "timeout": "5m" }
+  },
+  "models": {
+    "general": { "name": "gemma4:31b", "provider": "llamacpp", "type": "dense" }
+  }
+}
+```
+
+The `provider` key on each model selects its backend (here the `llamacpp`
+provider points at the llama-swap proxy on `:8080`); `api_format` defaults to
+`ollama` when omitted. See [Local model backends](../README.md#local-model-backends).
 
 Models are organized by **role** (general, coding, embedding, etc.) with a **defaults** map linking use-cases to roles. Each model can specify **fallbacks** — if the preferred model isn't available in Ollama, the config resolver will try alternatives automatically:
 

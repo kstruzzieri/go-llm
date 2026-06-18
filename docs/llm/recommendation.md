@@ -1,5 +1,14 @@
 # Current Lineup + Customization
 
+> **Update (2026-06): llama.cpp is now the primary local backend.** The
+> "all-Ollama, second-backend-deferred" stance below was the April 2026
+> decision and is kept as a historical record. The current direction runs the
+> lineup through `llama-server` (OpenAI-compatible API) via the `openai-compat`
+> provider format, with Ollama as a supported alternative. The reference
+> *models* are unchanged; only the serving backend changed. See
+> [Local model backends](../../README.md#local-model-backends) for how to
+> configure providers.
+
 ## Reference lineup (shipped in `models.json`)
 
 Quality-ranked on chat/code Q&A by the accepted **plain-chat/manual
@@ -87,25 +96,26 @@ endpoint and cached in the fingerprint store (SQLite).
 
 ### Adding a new provider
 
-`providers` is also config-driven:
+`providers` is config-driven. `api_format` selects the backend client and
+accepts exactly two values: `openai-compat` (llama.cpp / vLLM / LM Studio /
+any OpenAI `/v1` server) and `ollama` (the default when omitted). `base_url`
+is the **server root — without `/v1`** for `openai-compat`; go-llm appends the
+per-endpoint paths internally.
 
 ```json
 {
   "providers": {
-    "ollama": { "base_url": "http://localhost:11434", "timeout": "5m" },
-    "lm-studio": {
-      "base_url": "http://localhost:1234/v1",
-      "api_format": "openai",
-      "timeout": "5m"
-    }
+    "llamacpp":  { "base_url": "http://127.0.0.1:8090", "timeout": "5m", "api_format": "openai-compat" },
+    "lm-studio": { "base_url": "http://localhost:1234",  "timeout": "5m", "api_format": "openai-compat" },
+    "ollama":    { "base_url": "http://localhost:11434", "timeout": "5m" }
   }
 }
 ```
 
-Then any model's `provider` field can reference the new key. This is how
-Setup 2 / Setup 3 from [setups.md](setups.md) land once they're
-justified — the abstraction seam already exists; the implementation (a
-second `provider.Provider`) is the only remaining work.
+Then any model's `provider` field references the key. The `openai-compat`
+client (`provider/openaicompat`) is implemented and is how llama.cpp and the
+Setup 2 / Setup 3 paths from [setups.md](setups.md) run today; set the
+provider's `api_key` field only if the server requires a Bearer token.
 
 ### Capability detection
 
