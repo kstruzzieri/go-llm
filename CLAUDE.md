@@ -2,7 +2,9 @@
 
 ## Project Overview
 
-`go-llm` is a shared Go module providing Ollama LLM integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage.
+`go-llm` is a shared Go module providing local LLM integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage.
+
+**Local backends:** models are reached per-provider via `models.json` `api_format`. **llama.cpp (via its OpenAI-compatible `llama-server`, `api_format: openai-compat`) is the primary/recommended backend** — best local performance. Ollama (native REST, `api_format: ollama`, the default when omitted) is fully supported. The `ollama/` package is the native Ollama client; `provider/openaicompat` + `provider.Router` reach any OpenAI `/v1` server (llama.cpp, vLLM, LM Studio). Local benchmarking and the `cmd/llm-bench` harness run against llama.cpp.
 
 **Consumers:** Firn IDE (custom Wails IDE), Flux ML (Wails ML dev environment), Quantum Trader (Go+Python trading platform)
 
@@ -13,6 +15,7 @@ go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
 ├── config/          # Model configuration loader (models.json, resolve, fallback)
 ├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, sticky routing, scoring, fallback chains
+│   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
 ├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
 ├── rag/ast/         # Scoped structural symbol graph: Extractor + SymbolStore interfaces (skeleton)
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
@@ -26,7 +29,7 @@ go-llm/
 ├── cmd/
 │   ├── go-llm-mcp/  # Standalone MCP server binary (stdio + HTTP/2)
 │   ├── fim-smoke/   # FIM smoke-test harness
-│   └── llm-bench/   # Model latency benchmark
+│   └── llm-bench/   # Model evaluation harness (AnswerQuality, tool-use, tool-restraint, latency, tokens; paired Δ + bootstrap CIs; llama.cpp via openai-compat)
 ├── docs/            # Reference documentation (BYO models, design notes)
 └── testdata/        # Test fixtures
 ```
@@ -59,6 +62,8 @@ Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc
 6. **Tests use mock HTTP servers** — no Ollama dependency for unit tests; integration tests behind build tag
 
 ## Ollama API Reference
+
+This is the native `ollama/` client's wire API (the `ollama` provider format). The **llama.cpp / `openai-compat`** path instead speaks the OpenAI `/v1` API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`) — handled by `provider/openaicompat`; pass the server root as base URL (go-llm appends `/v1`).
 
 Base URL: `http://localhost:11434`
 

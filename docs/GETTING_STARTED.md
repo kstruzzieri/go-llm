@@ -1,12 +1,18 @@
 # Getting Started with go-llm
 
-A guide to setting up and using go-llm with your local Ollama models.
+A guide to setting up and using go-llm with your local models. **llama.cpp is
+the recommended primary backend** (best local performance, via its
+OpenAI-compatible server); Ollama is fully supported as an alternative. See
+[Local model backends](../README.md#local-model-backends) for the full backend
+reference.
 
 ## Prerequisites
 
 1. **Go 1.25+** installed
-2. **Ollama** running locally — [install](https://ollama.com/download)
-3. Required models pulled (see [Model Configuration](#model-configuration))
+2. A local model backend:
+   - **llama.cpp** (recommended) — `llama-server` per model, exposing the OpenAI-compatible API
+   - **Ollama** (alternative) — running locally ([install](https://ollama.com/download))
+3. Models available to your backend (see [Model Configuration](#model-configuration))
 
 ## Install
 
@@ -14,28 +20,33 @@ A guide to setting up and using go-llm with your local Ollama models.
 go get github.com/kstruzzieri/go-llm
 ```
 
-## Pull Required Models
+## Serve the models
 
-These pulls match the current reference lineup checked into `models.json`:
+These models match the current reference lineup checked into `models.json`.
+
+**llama.cpp (recommended).** Start one `llama-server` per model, each on its own
+port (point each at the matching GGUF; flags shown are a sane local default):
 
 ```bash
-# General / agent / judge / analysis (reasoning, multimodal chat, tool use)
-ollama pull gemma4:31b
-
-# Fast fallback / lower-latency chat
-ollama pull qwen3.6:35b-a3b
-
-# Coding (code generation, review, FIM completion)
-ollama pull qwen3-coder-next:latest
-
-# Lightweight (simple/fast tasks)
-ollama pull qwen3:8b
-
-# Embeddings (RAG vector search)
-ollama pull qwen3-embedding:8b
+llama-server -m /path/to/gemma4-31b.gguf       --port 8090 -c 8192 -ngl 99 --jinja --alias gemma4:31b &
+llama-server -m /path/to/qwen3.6-35b-a3b.gguf  --port 8091 -c 8192 -ngl 99 --jinja --alias qwen3.6:35b-a3b &
+# ...one server per model you intend to route to
 ```
 
-If you customize `models.json`, pull the models you configured instead.
+Then declare each backend as an `openai-compat` provider in `models.json` (see
+[Model Configuration](#model-configuration)).
+
+**Ollama (alternative).** If you run Ollama instead, pull the lineup:
+
+```bash
+ollama pull gemma4:31b            # general / agent / judge / analysis
+ollama pull qwen3.6:35b-a3b       # fast fallback / lower-latency chat
+ollama pull qwen3-coder-next:latest  # coding / review / FIM
+ollama pull qwen3:8b              # lightweight
+ollama pull qwen3-embedding:8b    # embeddings (RAG)
+```
+
+If you customize `models.json`, serve the models you configured instead.
 See [llm/recommendation.md](llm/recommendation.md) for the current
 reference lineup and BYO-model guidance.
 
@@ -57,6 +68,25 @@ embedModel := cfg.MustModelFor("embedding")      // "qwen3-embedding:8b"
 providerCfg := cfg.Provider("ollama")
 client := ollama.NewClient(ollama.WithBaseURL(providerCfg.BaseURL))
 ```
+
+To target a **llama.cpp** backend, declare it as an `openai-compat` provider and
+route through `provider.Router` (which dispatches to the right backend client per
+the model's `provider`), rather than constructing `ollama.NewClient` directly:
+
+```json
+{
+  "providers": {
+    "llamacpp": { "base_url": "http://127.0.0.1:8090", "timeout": "5m", "api_format": "openai-compat" },
+    "ollama":   { "base_url": "http://localhost:11434", "timeout": "5m" }
+  },
+  "models": {
+    "gemma4:31b": { "name": "gemma4:31b", "provider": "llamacpp", "type": "dense" }
+  }
+}
+```
+
+The `provider` key on each model selects its backend; `api_format` defaults to
+`ollama` when omitted. See [Local model backends](../README.md#local-model-backends).
 
 Models are organized by **role** (general, coding, embedding, etc.) with a **defaults** map linking use-cases to roles. Each model can specify **fallbacks** — if the preferred model isn't available in Ollama, the config resolver will try alternatives automatically:
 
