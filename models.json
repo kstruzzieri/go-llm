@@ -1,27 +1,7 @@
 {
   "providers": {
-    "llamacpp-gemma": {
-      "base_url": "http://127.0.0.1:8090",
-      "timeout": "5m",
-      "api_format": "openai-compat"
-    },
-    "llamacpp-fast": {
-      "base_url": "http://127.0.0.1:8091",
-      "timeout": "5m",
-      "api_format": "openai-compat"
-    },
-    "llamacpp-coder": {
-      "base_url": "http://127.0.0.1:8092",
-      "timeout": "5m",
-      "api_format": "openai-compat"
-    },
-    "llamacpp-light": {
-      "base_url": "http://127.0.0.1:8093",
-      "timeout": "5m",
-      "api_format": "openai-compat"
-    },
-    "llamacpp-embed": {
-      "base_url": "http://127.0.0.1:8094",
+    "llamacpp": {
+      "base_url": "http://127.0.0.1:8080",
       "timeout": "5m",
       "api_format": "openai-compat"
     },
@@ -33,8 +13,8 @@
   "models": {
     "general": {
       "name": "gemma4:31b",
-      "provider": "llamacpp-gemma",
-      "description": "Gemma 4 31B dense — reasoning, analysis, multimodal; configurable thinking mode. llama-server :8090 (--alias gemma4:31b)",
+      "provider": "llamacpp",
+      "description": "Gemma 4 31B dense — reasoning, analysis, multimodal; configurable thinking mode. Served on demand via llama-swap.",
       "type": "dense",
       "parameters": "31B",
       "context_window": 256000,
@@ -42,8 +22,8 @@
     },
     "agent": {
       "name": "gemma4:31b",
-      "provider": "llamacpp-gemma",
-      "description": "Agent / tool-use — 86.4% τ2-bench, native function calling, 80.0% LiveCodeBench. llama-server :8090",
+      "provider": "llamacpp",
+      "description": "Agent / tool-use — 86.4% τ2-bench, native function calling, 80.0% LiveCodeBench.",
       "type": "dense",
       "parameters": "31B",
       "context_window": 256000,
@@ -51,8 +31,8 @@
     },
     "judge": {
       "name": "gemma4:31b",
-      "provider": "llamacpp-gemma",
-      "description": "Local LLM-as-judge for trace replay scoring; must not score itself in llm-bench. llama-server :8090",
+      "provider": "llamacpp",
+      "description": "Local LLM-as-judge for trace replay scoring; must not score itself in llm-bench.",
       "type": "dense",
       "parameters": "31B",
       "context_window": 256000,
@@ -60,8 +40,8 @@
     },
     "fast": {
       "name": "qwen3.6:35b-a3b",
-      "provider": "llamacpp-fast",
-      "description": "Qwen 3.6 MoE — 73.4% SWE-bench, 3B active for fast inference, tool use. llama-server :8091 (--alias qwen3.6:35b-a3b)",
+      "provider": "llamacpp",
+      "description": "Qwen 3.6 MoE — 73.4% SWE-bench, 3B active for fast inference, tool use.",
       "type": "moe",
       "parameters": "35B total / 3B active",
       "context_window": 256000,
@@ -69,8 +49,8 @@
     },
     "coding": {
       "name": "qwen3-coder-next:latest",
-      "provider": "llamacpp-coder",
-      "description": "Qwen3-Coder-Next MoE — 70.6% SWE-bench, dedicated agentic coding. llama-server :8092 (--alias qwen3-coder-next:latest)",
+      "provider": "llamacpp",
+      "description": "Qwen3-Coder-Next MoE — 70.6% SWE-bench, dedicated agentic coding.",
       "type": "moe",
       "parameters": "80B total / 3.9B active",
       "context_window": 262144,
@@ -78,16 +58,16 @@
     },
     "lightweight": {
       "name": "qwen3:8b",
-      "provider": "llamacpp-light",
-      "description": "Small and fast — FIM / inline completion, simple tasks. llama-server :8093 (--alias qwen3:8b)",
+      "provider": "llamacpp",
+      "description": "Small and fast — FIM / inline completion, simple tasks.",
       "type": "dense",
       "parameters": "8B",
       "context_window": 40960
     },
     "embedding": {
       "name": "qwen3-embedding:8b",
-      "provider": "llamacpp-embed",
-      "description": "Qwen3 embedding — #1 MTEB multilingual, strong code retrieval. llama-server :8094 started with --embeddings",
+      "provider": "llamacpp",
+      "description": "Qwen3 embedding — #1 MTEB multilingual, strong code retrieval. llama-swap entry must start llama-server with --embeddings.",
       "type": "embedding",
       "parameters": "8B",
       "dimensions": 4096

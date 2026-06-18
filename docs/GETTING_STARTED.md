@@ -24,25 +24,32 @@ go get github.com/kstruzzieri/go-llm
 
 These models match the current reference lineup checked into `models.json`.
 
-**llama.cpp (recommended).** llama.cpp serves **one model per `llama-server`
-process, each on its own port**. The shipped `models.json` maps the reference
-lineup to ports 8090–8094 (one `openai-compat` provider each). Start only the
-servers for the models you intend to use — the Router fault-tolerates and falls
-back over any that aren't running, so you do not need all five up at once (and
-on a 128GB box you can't co-resident the whole fleet anyway):
+**llama.cpp via llama-swap (recommended).** A `llama-server` process pins one
+model in memory, so [llama-swap](https://github.com/mostlygeek/llama-swap) — a
+tiny OpenAI-compatible proxy — fronts the whole lineup on one port and starts
+the right `llama-server` on demand from the requested model name (load-on-demand,
+like Ollama, with llama.cpp performance). Write one entry per model in
+`llama-swap.yaml`:
 
-```bash
-llama-server -m /path/to/gemma4-31b.gguf          --port 8090 -c 8192 -ngl 99 --jinja --alias gemma4:31b &           # general / agent / judge
-llama-server -m /path/to/qwen3.6-35b-a3b.gguf     --port 8091 -c 8192 -ngl 99 --jinja --alias qwen3.6:35b-a3b &      # fast
-llama-server -m /path/to/qwen3-coder-next.gguf    --port 8092 -c 8192 -ngl 99 --jinja --alias qwen3-coder-next:latest &  # coding
-llama-server -m /path/to/qwen3-8b.gguf            --port 8093 -c 8192 -ngl 99 --jinja --alias qwen3:8b &              # lightweight / FIM
-llama-server -m /path/to/qwen3-embedding-8b.gguf  --port 8094 -c 8192 -ngl 99 --embeddings --alias qwen3-embedding:8b &  # embeddings (note --embeddings)
+```yaml
+models:
+  "gemma4:31b":              { cmd: llama-server -m /models/gemma4-31b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3.6:35b-a3b":         { cmd: llama-server -m /models/qwen3.6-35b-a3b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3-coder-next:latest": { cmd: llama-server -m /models/qwen3-coder-next.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3:8b":                { cmd: llama-server -m /models/qwen3-8b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3-embedding:8b":      { cmd: llama-server -m /models/qwen3-embedding-8b.gguf --port ${PORT} -c 8192 -ngl 99 --embeddings }
 ```
 
-The shipped `models.json` already declares these as `openai-compat` providers
-(`llamacpp-gemma`, `llamacpp-fast`, `llamacpp-coder`, `llamacpp-light`,
-`llamacpp-embed`) — edit the ports/paths to match your setup. See
-[Model Configuration](#model-configuration).
+Run it: `llama-swap --config llama-swap.yaml --listen 127.0.0.1:8080`. The
+shipped `models.json` already points a single `llamacpp` `openai-compat` provider
+at `http://127.0.0.1:8080`, with every model `name` matching a `llama-swap` key.
+See [Model Configuration](#model-configuration).
+
+**llama.cpp without a proxy (pinned servers).** Skip llama-swap and run one
+`llama-server` per model on its own port when you want specific models hot at all
+times; then declare one `openai-compat` provider per port. The Router's circuit
+breakers and fallback chains route around any server that isn't up, so you need
+not run the whole fleet at once (and on a 128GB box you can't co-resident it).
 
 **Ollama (alternative).** If you run Ollama instead, pull the lineup:
 
@@ -84,16 +91,17 @@ the model's `provider`), rather than constructing `ollama.NewClient` directly:
 ```json
 {
   "providers": {
-    "llamacpp": { "base_url": "http://127.0.0.1:8090", "timeout": "5m", "api_format": "openai-compat" },
+    "llamacpp": { "base_url": "http://127.0.0.1:8080", "timeout": "5m", "api_format": "openai-compat" },
     "ollama":   { "base_url": "http://localhost:11434", "timeout": "5m" }
   },
   "models": {
-    "gemma4:31b": { "name": "gemma4:31b", "provider": "llamacpp", "type": "dense" }
+    "general": { "name": "gemma4:31b", "provider": "llamacpp", "type": "dense" }
   }
 }
 ```
 
-The `provider` key on each model selects its backend; `api_format` defaults to
+The `provider` key on each model selects its backend (here the `llamacpp`
+provider points at the llama-swap proxy on `:8080`); `api_format` defaults to
 `ollama` when omitted. See [Local model backends](../README.md#local-model-backends).
 
 Models are organized by **role** (general, coding, embedding, etc.) with a **defaults** map linking use-cases to roles. Each model can specify **fallbacks** — if the preferred model isn't available in Ollama, the config resolver will try alternatives automatically:
