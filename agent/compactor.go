@@ -94,9 +94,14 @@ func classifyGroup(msgs []Message, start, end int) compactionGroupKind {
 	if len(msgs[start].ToolCalls) == 0 {
 		return groupPlainElastic
 	}
-	// A chain is complete once the model has received tool observations and
-	// produced a following assistant message with no new tool calls.
-	if end+1 < len(msgs) && msgs[end+1].Role == "assistant" && len(msgs[end+1].ToolCalls) == 0 {
+	// A tool chain is completed (safe to evict) once every tool_call in the
+	// assistant message has a matching tool result within the chain: the model
+	// has the observations, and the whole atomic group drops together without
+	// orphaning a tool_call_id. A chain missing results is an unresolved tail
+	// (e.g. mid-dispatch) and must never be dropped. chainAt bundles the
+	// assistant with its contiguous tool results, so the result count is end-start.
+	resultCount := end - start
+	if resultCount >= len(msgs[start].ToolCalls) {
 		return groupCompletedTool
 	}
 	return groupUnresolvedTool

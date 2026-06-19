@@ -63,17 +63,21 @@ func TestAssembleCompactsElastic(t *testing.T) {
 }
 
 func TestAssembleReturnsErrWhenCompactedStateStillOverBudget(t *testing.T) {
+	// An unresolved tail (2 tool_calls, only 1 result present) can never be
+	// dropped. Even after evicting all droppable groups the state won't fit in a
+	// budget that only covers the pinned goal.
 	m := ContextManager{Compactor: RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator}
 	st := State{Messages: []Message{
 		pinned("user", "goal"),
-		elastic("user", "do"),
 		{
 			ChatMessage: provider.ChatMessage{
 				Role: "assistant",
-				ToolCalls: []provider.ToolCall{{
-					ID: "c1", Type: "function",
-					Function: provider.ToolCallFunction{Name: "search", Arguments: json.RawMessage(`{}`)},
-				}},
+				ToolCalls: []provider.ToolCall{
+					{ID: "c1", Type: "function",
+						Function: provider.ToolCallFunction{Name: "search", Arguments: json.RawMessage(`{}`)}},
+					{ID: "c2", Type: "function",
+						Function: provider.ToolCallFunction{Name: "search", Arguments: json.RawMessage(`{}`)}},
+				},
 			},
 			Segment: Elastic,
 		},
@@ -88,6 +92,8 @@ func TestAssembleReturnsErrWhenCompactedStateStillOverBudget(t *testing.T) {
 		},
 	}}
 
+	// Budget only covers the pinned goal; the unresolved tail (2 calls, 1 result)
+	// cannot be dropped, so Assemble must return ErrContextExhausted.
 	_, _, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: len("goal") + 1})
 	if !errors.Is(err, ErrContextExhausted) {
 		t.Fatalf("want ErrContextExhausted when compaction cannot fit, got %v", err)
