@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -92,9 +93,14 @@ func approve(ctx context.Context, approver Approver, call provider.ToolCall, pre
 	return approver.Approve(ctx, call, preview)
 }
 
-func capOutput(r ToolResult, cap int) ToolResult {
-	if cap > 0 && len(r.Content) > cap {
-		r.Content = r.Content[:cap]
+func capOutput(r ToolResult, limit int) ToolResult {
+	if limit > 0 && len(r.Content) > limit {
+		end := limit
+		// back up to a UTF-8 rune boundary so we never emit a split rune
+		for end > 0 && !utf8.RuneStart(r.Content[end]) {
+			end--
+		}
+		r.Content = r.Content[:end]
 		r.Truncated = true
 	}
 	return r

@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -92,7 +93,6 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			return res, nil
 		}
 
-		// Tool dispatch is implemented in Task 8.
 		state.Messages = append(state.Messages, assistantMessage(resp))
 		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov); err != nil {
 			return res, err
@@ -126,11 +126,13 @@ func addUsage(a, b provider.Usage) provider.Usage {
 }
 
 func toolSchemaString(specs []provider.Tool) string {
-	s := ""
+	var b strings.Builder
 	for _, sp := range specs {
-		s += sp.Function.Name + sp.Function.Description + string(sp.Function.Parameters)
+		b.WriteString(sp.Function.Name)
+		b.WriteString(sp.Function.Description)
+		b.Write(sp.Function.Parameters)
 	}
-	return s
+	return b.String()
 }
 
 // restraintGovernor bounds runaway loops with a weak local model. Per-Run state.
