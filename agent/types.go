@@ -50,7 +50,8 @@ func (s StopReason) String() string {
 // authoritative per-turn input ceiling (the concrete model is unknown until the
 // router selects one). Zero falls back to a conservative default.
 type Budget struct {
-	InputCeiling  int
+	InputCeiling int
+	// OutputReserve caps generation: forwarded to the model request as Options.NumPredict when > 0.
 	OutputReserve int
 	TotalTokens   int // 0 = unbounded whole-run cap
 }

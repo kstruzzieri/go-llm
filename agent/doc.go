@@ -13,4 +13,16 @@
 //
 // Retrieval is a Tool (see agent/tools.Retrieve), never a hardcoded stage.
 // Provider selection, scoring, and budgeting stay in the provider layer.
+//
+// Resource use and contracts:
+//
+//   - Result.Steps, Result.Events, and the internal transcript grow with the
+//     number of steps taken (bounded by Request.MaxSteps). Each StepRecord
+//     retains the full provider.ChatResponse for that turn; consumers that set
+//     a large MaxSteps should budget memory accordingly.
+//   - Token counts are approximate: the ContextManager re-estimates the
+//     transcript each turn with a len/4 heuristic, not the provider's exact
+//     tokenization.
+//   - Effect.Scope is advisory; the runtime does not enforce path/cwd limits.
+//     A tool must enforce its own scope.
 package agent

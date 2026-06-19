@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -27,7 +28,7 @@ func initState(req Request) State {
 	}
 }
 
-func buildChatRequest(st State, specs []provider.Tool) provider.ChatRequest {
+func buildChatRequest(st State, specs []provider.Tool, outputReserve int) provider.ChatRequest {
 	msgs := make([]provider.ChatMessage, 0, len(st.Messages)+1)
 	if st.System != "" {
 		msgs = append(msgs, provider.ChatMessage{Role: "system", Content: st.System})
@@ -35,12 +36,19 @@ func buildChatRequest(st State, specs []provider.Tool) provider.ChatRequest {
 	for _, m := range st.Messages {
 		msgs = append(msgs, m.ChatMessage)
 	}
-	return provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true}
+	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true}
+	if outputReserve > 0 {
+		req.Options.NumPredict = outputReserve
+	}
+	return req
 }
 
 // Run executes the loop until the model produces a final answer or a cap is hit.
 func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Result, error) {
 	obs = normalizeObserver(obs)
+	if req.Goal == "" {
+		return Result{}, fmt.Errorf("agent: empty goal")
+	}
 	maxSteps := req.MaxSteps
 	if maxSteps <= 0 {
 		maxSteps = defaultMaxSteps
@@ -66,11 +74,15 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
 		}
 
-		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs), func(c provider.ChatResponse) error {
+		tokenLogged := false
+		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve), func(c provider.ChatResponse) error {
 			if c.Content == "" {
 				return nil
 			}
-			res.Events = append(res.Events, EventRecord{Step: step, Kind: "token"})
+			if !tokenLogged {
+				res.Events = append(res.Events, EventRecord{Step: step, Kind: "token"})
+				tokenLogged = true
+			}
 			return obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content})
 		})
 		if err != nil {

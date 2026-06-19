@@ -46,14 +46,18 @@ type ToolResult struct {
 
 // Effect is the static, conservative upper bound for a tool.
 type Effect struct {
-	Class     EffectClass
+	Class EffectClass
+	// Scope is ADVISORY ONLY: the runtime does NOT enforce path/cwd limits in
+	// this version. A tool must enforce its own scope. It is metadata for
+	// consumers and future mutating-tool gating.
 	Scope     Scope
 	Timeout   time.Duration
 	OutputCap int
 	Approval  ApprovalPolicy
 }
 
-// Scope bounds the paths / cwd a tool may touch (advisory in #61).
+// Scope bounds the paths / cwd a tool may touch. Advisory only — see Effect.Scope;
+// the runtime does not enforce it.
 type Scope struct {
 	Paths []string
 	CWD   string
@@ -120,7 +124,10 @@ type toolRegistry struct {
 
 func newToolRegistry(tools []Tool) (*toolRegistry, error) {
 	r := &toolRegistry{byName: make(map[string]Tool, len(tools))}
-	for _, t := range tools {
+	for i, t := range tools {
+		if t == nil {
+			return nil, fmt.Errorf("agent: nil tool at index %d", i)
+		}
 		name := t.Spec().Name
 		if name == "" {
 			return nil, fmt.Errorf("agent: tool with empty name")
