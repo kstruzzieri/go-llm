@@ -453,6 +453,66 @@ func TestPullerForModel_ExplicitProviderResolvesUnknownModel(t *testing.T) {
 	}
 }
 
+func TestPullModel_ExplicitProviderWithQualifiedNameNormalizesModelName(t *testing.T) {
+	rec := &recordingPullProvider{
+		fakeRouteProvider: fakeRouteProvider{name: "ollama-a"},
+	}
+	reg := provider.NewRegistry()
+	if err := reg.Register(rec); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	s := &Server{providerRegistry: reg}
+	result, err := s.handlePullModel(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{
+			Arguments: json.RawMessage(`{"provider":"ollama-a","name":"ollama-a/qwen3:8b"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handlePullModel() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("handlePullModel() isError = true, content = %v", extractText(result))
+	}
+	if len(rec.pulled) != 1 || rec.pulled[0] != "qwen3:8b" {
+		t.Fatalf("pulled models = %v, want [qwen3:8b]", rec.pulled)
+	}
+}
+
+func TestPullModel_ExplicitProviderRejectsMismatchedQualifiedName(t *testing.T) {
+	recA := &recordingPullProvider{
+		fakeRouteProvider: fakeRouteProvider{name: "ollama-a"},
+	}
+	recB := &recordingPullProvider{
+		fakeRouteProvider: fakeRouteProvider{name: "ollama-b"},
+	}
+	reg := provider.NewRegistry()
+	for _, p := range []*recordingPullProvider{recA, recB} {
+		if err := reg.Register(p); err != nil {
+			t.Fatalf("Register(%s): %v", p.Name(), err)
+		}
+	}
+
+	s := &Server{providerRegistry: reg}
+	result, err := s.handlePullModel(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{
+			Arguments: json.RawMessage(`{"provider":"ollama-b","name":"ollama-a/qwen3:8b"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handlePullModel() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("handlePullModel() isError = false, want provider mismatch")
+	}
+	if text := extractText(result); !strings.Contains(text, `provider "ollama-b" does not match model selector provider "ollama-a"`) {
+		t.Fatalf("handlePullModel() content = %q, want provider mismatch", text)
+	}
+	if len(recA.pulled) != 0 || len(recB.pulled) != 0 {
+		t.Fatalf("pulled models: ollama-a=%v ollama-b=%v, want none", recA.pulled, recB.pulled)
+	}
+}
+
 func TestPullModel_ConfigOwnedOpenAICompatDoesNotFallbackToOllama(t *testing.T) {
 	pullHit := false
 	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -508,6 +568,16 @@ func TestPullModel_ConfigOwnedOpenAICompatDoesNotFallbackToOllama(t *testing.T) 
 	if pullHit {
 		t.Fatal("pull_model fell back to Ollama for a config-owned openai-compatible model")
 	}
+}
+
+type recordingPullProvider struct {
+	fakeRouteProvider
+	pulled []string
+}
+
+func (p *recordingPullProvider) PullModel(ctx context.Context, name string, fn func(status string, completed, total int64)) error {
+	p.pulled = append(p.pulled, name)
+	return nil
 }
 
 // With a registry present, an unresolvable model must not silently hit the

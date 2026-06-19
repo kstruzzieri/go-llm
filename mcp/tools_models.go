@@ -365,18 +365,21 @@ func (s *Server) handlePullModel(ctx context.Context, req *gomcp.CallToolRequest
 func (s *Server) modelPuller(ctx context.Context, name, providerName string) (provider.ModelPuller, string, error) {
 	if pReg := s.providerRegistrySnapshot(); pReg != nil {
 		modelName := name
-		if providerName == "" {
-			if key, ok := s.parseKnownModelSelector(name); ok {
+		if key, ok := s.parseKnownModelSelector(name); ok {
+			modelName = key.Model
+			if providerName == "" {
 				providerName = key.Provider
-				modelName = key.Model
-			} else {
-				inferredProvider, err := s.inferProviderForExplicitModel(ctx, name)
-				if err != nil {
-					return nil, modelName, err
-				}
-				if inferredProvider != "" {
-					providerName = inferredProvider
-				}
+			} else if providerName != key.Provider {
+				return nil, modelName, fmt.Errorf("provider %q does not match model selector provider %q", providerName, key.Provider)
+			}
+		}
+		if providerName == "" {
+			inferredProvider, err := s.inferProviderForExplicitModel(ctx, modelName)
+			if err != nil {
+				return nil, modelName, err
+			}
+			if inferredProvider != "" {
+				providerName = inferredProvider
 			}
 		}
 		puller, err := pullerForModel(pReg, modelName, providerName)
