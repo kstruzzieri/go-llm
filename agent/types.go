@@ -29,6 +29,7 @@ const (
 	StepCapReached
 	BudgetReached
 	ToolErrorCapReached
+	RepeatLimitReached
 )
 
 func (s StopReason) String() string {
@@ -41,6 +42,8 @@ func (s StopReason) String() string {
 		return "budget_reached"
 	case ToolErrorCapReached:
 		return "tool_error_cap_reached"
+	case RepeatLimitReached:
+		return "repeat_limit_reached"
 	default:
 		return "unknown"
 	}

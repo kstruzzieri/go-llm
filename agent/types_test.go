@@ -11,6 +11,7 @@ func TestStopReasonString(t *testing.T) {
 		StepCapReached:      "step_cap_reached",
 		BudgetReached:       "budget_reached",
 		ToolErrorCapReached: "tool_error_cap_reached",
+		RepeatLimitReached:  "repeat_limit_reached",
 	}
 	for sr, want := range cases {
 		if got := sr.String(); got != want {

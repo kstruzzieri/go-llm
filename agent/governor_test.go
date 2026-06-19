@@ -168,3 +168,55 @@ func (toolCallAbortObserver) OnToolCall(context.Context, ToolCallEvent) error {
 	return errors.New("stop")
 }
 func (toolCallAbortObserver) OnToken(context.Context, TokenEvent) error { return nil }
+
+// pollingTool returns a DIFFERENT result on each call for identical args,
+// simulating a status/poll that makes progress.
+type pollingTool struct{ n int }
+
+func (*pollingTool) Spec() ToolSpec { return ToolSpec{Name: "poll", Parameters: json.RawMessage(`{}`)} }
+func (*pollingTool) Effect() Effect { return Effect{Class: Read} }
+func (p *pollingTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	p.n++
+	return ToolResult{Content: fmt.Sprintf("status-%d", p.n)}, nil
+}
+
+func TestGovernorAllowsProgressingRepeatedCalls(t *testing.T) {
+	// Same tool + identical args called 5x, but each result differs (progress).
+	// Must NOT trip the governor; the run completes when the model answers.
+	resps := make([]ModelResult, 6)
+	for i := range 5 {
+		resps[i] = ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "poll", Arguments: json.RawMessage(`{}`)},
+		}}}}
+	}
+	resps[5] = ModelResult{Response: provider.ChatResponse{Content: "done", Done: true}}
+	o := newTestOrchestrator(&scriptedCaller{responses: resps})
+	res, err := o.Run(context.Background(), Request{Goal: "q", MaxSteps: 10, Tools: []Tool{&pollingTool{}}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != Completed {
+		t.Fatalf("progressing repeats must not trip the governor, got %v", res.StopReason)
+	}
+}
+
+func TestGovernorStopsStuckIdenticalCalls(t *testing.T) {
+	// echoTool returns an identical result for identical args -> no progress ->
+	// the no-progress repeat guard trips with RepeatLimitReached (not ToolErrorCap).
+	resps := make([]ModelResult, 10)
+	for i := range resps {
+		resps[i] = ModelResult{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "echo", Arguments: json.RawMessage(`{}`)},
+		}}}}
+	}
+	o := newTestOrchestrator(&scriptedCaller{responses: resps})
+	res, err := o.Run(context.Background(), Request{Goal: "q", MaxSteps: 10, Tools: []Tool{echoTool{name: "echo"}}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.StopReason != RepeatLimitReached {
+		t.Fatalf("stuck identical calls must trip RepeatLimitReached, got %v", res.StopReason)
+	}
+}

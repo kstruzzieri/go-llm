@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -116,7 +117,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		if err := o.runToolCalls(ctx, &res, &state, reg, resp.ToolCalls, req.Approver, obs, step, gov); err != nil {
 			return res, err
 		}
-		if res.StopReason == ToolErrorCapReached || res.StopReason == BudgetReached {
+		if res.StopReason != Completed {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
@@ -127,7 +128,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		}
 	}
 	res.StopReason = StepCapReached
-	res.Events = append(res.Events, EventRecord{Step: maxSteps, Kind: "stop"})
+	res.Events = append(res.Events, EventRecord{Step: maxSteps - 1, Kind: "stop"})
 	return res, nil
 }
 
@@ -159,10 +160,26 @@ func toolSchemaString(specs []provider.Tool) string {
 }
 
 // restraintGovernor bounds runaway loops with a weak local model. Per-Run state.
+// It stops a run on too many consecutive tool errors, or on a tool call that
+// repeats with no progress (identical name+args AND identical result).
 type restraintGovernor struct {
 	consecutiveErrors int
-	lastSig           string
+	lastSig           uint64
+	hasSig            bool
 	repeatCount       int
+}
+
+// toolCallSignature hashes the call identity together with its result so that a
+// repeated call whose result CHANGES (e.g. polling that makes progress) is not
+// mistaken for a stuck loop. Only identical call + identical result repeats.
+func toolCallSignature(call provider.ToolCall, out ToolResult) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(call.Function.Name))
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write(call.Function.Arguments)
+	_, _ = h.Write([]byte{0})
+	_, _ = h.Write([]byte(out.Content))
+	return h.Sum64()
 }
 
 func (g *restraintGovernor) observe(call provider.ToolCall, out ToolResult) {
@@ -171,14 +188,22 @@ func (g *restraintGovernor) observe(call provider.ToolCall, out ToolResult) {
 	} else {
 		g.consecutiveErrors = 0
 	}
-	sig := call.Function.Name + "\x00" + string(call.Function.Arguments)
-	if sig == g.lastSig {
+	sig := toolCallSignature(call, out)
+	if g.hasSig && sig == g.lastSig {
 		g.repeatCount++
 	} else {
-		g.lastSig, g.repeatCount = sig, 1
+		g.lastSig, g.hasSig, g.repeatCount = sig, true, 1
 	}
 }
 
-func (g *restraintGovernor) tripped() bool {
-	return g.consecutiveErrors >= defaultToolErrorCap || g.repeatCount >= defaultToolErrorCap
+// stopReason reports the cap the governor hit, if any. Consecutive tool errors
+// take precedence over no-progress repeats. The bool is false when not tripped.
+func (g *restraintGovernor) stopReason() (StopReason, bool) {
+	if g.consecutiveErrors >= defaultToolErrorCap {
+		return ToolErrorCapReached, true
+	}
+	if g.repeatCount >= defaultToolErrorCap {
+		return RepeatLimitReached, true
+	}
+	return Completed, false
 }

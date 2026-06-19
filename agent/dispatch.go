@@ -23,8 +23,8 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 		state.Messages = append(state.Messages, toolObservation(call, out))
 		gov.observe(call, out)
 	}
-	if gov.tripped() {
-		res.StopReason = ToolErrorCapReached
+	if sr, tripped := gov.stopReason(); tripped {
+		res.StopReason = sr
 	}
 	return nil
 }
