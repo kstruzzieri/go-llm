@@ -300,11 +300,11 @@ func pullerForModel(reg *provider.Registry, name, providerName string) (provider
 
 	var pullers []provider.ModelPuller
 	var names []string
-	for _, name := range reg.Names() {
-		p, _ := reg.Get(name)
+	for _, provName := range reg.Names() {
+		p, _ := reg.Get(provName)
 		if mp, ok := p.(provider.ModelPuller); ok {
 			pullers = append(pullers, mp)
-			names = append(names, name)
+			names = append(names, provName)
 		}
 	}
 	switch len(pullers) {
