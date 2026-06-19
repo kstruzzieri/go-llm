@@ -62,6 +62,9 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		if err != nil {
 			return res, err
 		}
+		if pressure.Compactions > 0 {
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
+		}
 
 		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs), func(c provider.ChatResponse) error {
 			if c.Content == "" {

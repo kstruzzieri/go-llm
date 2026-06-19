@@ -69,8 +69,11 @@ const (
 	Network
 )
 
+// Has reports whether every bit in x is set on c.
 func (c EffectClass) Has(x EffectClass) bool { return c&x != 0 }
-func (c EffectClass) IsMutating() bool       { return c.Has(Write) || c.Has(Exec) }
+
+// IsMutating reports whether the class includes Write or Exec.
+func (c EffectClass) IsMutating() bool { return c.Has(Write) || c.Has(Exec) }
 
 // ApprovalPolicy decides whether a call needs consumer approval.
 type ApprovalPolicy uint8

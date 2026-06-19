@@ -9,6 +9,11 @@ import (
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
+const (
+	defaultRetrieveK         = 5
+	defaultRetrieveMaxTokens = 2048
+)
+
 // retriever is the minimal slice of *rag.Retriever the tool needs; abstracting
 // it keeps the tool unit-testable with a fake.
 type retriever interface {
@@ -61,11 +66,11 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 		k = t.K
 	}
 	if k <= 0 {
-		k = 5
+		k = defaultRetrieveK
 	}
 	maxTokens := t.MaxTokens
 	if maxTokens <= 0 {
-		maxTokens = 2048
+		maxTokens = defaultRetrieveMaxTokens
 	}
 
 	results, err := t.R.Retrieve(ctx, args.Query, k)
