@@ -2,7 +2,6 @@ package agent
 
 import (
 	"context"
-	"errors"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -143,10 +142,3 @@ func (g *restraintGovernor) observe(_ provider.ToolCall, out ToolResult) {
 }
 
 func (g *restraintGovernor) tripped() bool { return g.consecutiveErrors >= defaultToolErrorCap }
-
-var errToolDispatchNotLinked = errors.New("agent: tool dispatch not linked")
-
-// fail-closed placeholder — replaced in Task 8
-func (o *Orchestrator) runToolCalls(context.Context, *Result, *State, *toolRegistry, []provider.ToolCall, Approver, Observer, int, *restraintGovernor) error {
-	return errToolDispatchNotLinked
-}
