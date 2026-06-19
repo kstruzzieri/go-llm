@@ -232,8 +232,8 @@ func (p *Profiler) selectProbes(det *KindDetection, base *Profile) (chat, embed 
 		for _, c := range det.Capabilities {
 			hasCap[c] = true
 		}
-		chat = hasCap["completion"] || hasCap["tools"]
-		embed = hasCap["embedding"]
+		chat = hasCap["completion"] || hasCap["tools"] || hasCap["chat"] || hasCap["generate"] || hasCap["tool_call"]
+		embed = hasCap["embedding"] || hasCap["embed"]
 		return chat, embed
 	}
 

@@ -155,6 +155,29 @@ func (m *mrMockFingerprintStore) SaveFailure(_ context.Context, _, _, _, _ strin
 	return nil
 }
 
+type mrRecordingFingerprintProber struct {
+	detectCalls int
+	chatCalls   int
+}
+
+func (m *mrRecordingFingerprintProber) DetectKind(context.Context, string) (*fingerprint.KindDetection, error) {
+	m.detectCalls++
+	return &fingerprint.KindDetection{
+		Kind:         fingerprint.ModelKindChat,
+		Source:       "capabilities",
+		Capabilities: []string{"chat"},
+	}, nil
+}
+
+func (m *mrRecordingFingerprintProber) ProbeChat(context.Context, string, any) (*fingerprint.ChatMetrics, error) {
+	m.chatCalls++
+	return &fingerprint.ChatMetrics{TokensPerSecond: 42}, nil
+}
+
+func (m *mrRecordingFingerprintProber) ProbeEmbedding(context.Context, string) (*fingerprint.EmbeddingMetrics, error) {
+	return nil, errors.New("embedding should not be probed")
+}
+
 // ---------------------------------------------------------------------------
 // TestModelRegistry_Lookup_CatalogMatch
 // ---------------------------------------------------------------------------
@@ -234,6 +257,76 @@ func TestModelRegistry_Lookup_CatalogMatch(t *testing.T) {
 	// Verify catalog-provided resource data was populated.
 	if profile.Resources.RAMRequired == 0 {
 		t.Error("expected RAMRequired > 0 from catalog")
+	}
+}
+
+func TestModelRegistry_Lookup_RunsFingerprintProberFactory(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "openai-local",
+		caps: CapChat,
+		models: []ModelInfo{
+			{
+				Name: "llama-local",
+			},
+		},
+	}
+	reg := &mrMockProviderRegistry{
+		providers: map[string]Provider{"openai-local": prov},
+	}
+	fpStore := newMrMockFingerprintStore()
+	prober := &mrRecordingFingerprintProber{}
+	var factoryKey ModelKey
+	var factoryRuntime *ModelInfo
+	var factoryProvider Provider
+	mr, err := NewModelRegistry(reg, fpStore, WithFingerprintProberFactory(
+		func(_ context.Context, key ModelKey, runtime *ModelInfo, p Provider) (*FingerprintProberSpec, error) {
+			factoryKey = key
+			factoryRuntime = runtime
+			factoryProvider = p
+			return &FingerprintProberSpec{
+				Prober:      prober,
+				ModelDigest: "config-caps:chat",
+			}, nil
+		},
+	))
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+
+	key := ModelKey{Provider: "openai-local", Model: "llama-local"}
+	profile, err := mr.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup() error: %v", err)
+	}
+	if factoryKey != key {
+		t.Fatalf("factory key = %v, want %v", factoryKey, key)
+	}
+	if factoryRuntime == nil || factoryRuntime.Name != "llama-local" {
+		t.Fatalf("factory runtime = %+v, want llama-local", factoryRuntime)
+	}
+	if factoryProvider != prov {
+		t.Fatalf("factory provider = %T, want original provider", factoryProvider)
+	}
+	if prober.detectCalls != 1 {
+		t.Fatalf("DetectKind calls = %d, want 1", prober.detectCalls)
+	}
+	if prober.chatCalls != 1 {
+		t.Fatalf("ProbeChat calls = %d, want 1", prober.chatCalls)
+	}
+	if profile.Caps&CapChat == 0 {
+		t.Fatalf("profile Caps = %v, want CapChat from fingerprint profile", profile.Caps)
+	}
+	saved, err := fpStore.Get(ctx, "openai-local", "llama-local")
+	if err != nil {
+		t.Fatalf("fingerprint profile was not saved: %v", err)
+	}
+	if saved.ModelDigest != "config-caps:chat" {
+		t.Fatalf("saved ModelDigest = %q, want factory digest", saved.ModelDigest)
+	}
+	if saved.GenerationTokensPerSecond != 42 {
+		t.Fatalf("saved GenerationTokensPerSecond = %v, want 42", saved.GenerationTokensPerSecond)
 	}
 }
 

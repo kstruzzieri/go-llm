@@ -437,6 +437,37 @@ func TestProfiler_EnsureProfile_DualCapability(t *testing.T) {
 	}
 }
 
+func TestProfiler_EnsureProfile_CanonicalDualCapability(t *testing.T) {
+	store := newMockStore()
+	prober := &mockProber{
+		detectKindFn: func(_ context.Context, _ string) (*KindDetection, error) {
+			return &KindDetection{
+				Kind:         ModelKindEmbedding,
+				Source:       "capabilities",
+				Capabilities: []string{"chat", "generate", "stream", "embed"},
+			}, nil
+		},
+	}
+	profiler := NewProfiler(store, prober)
+
+	profile, err := profiler.EnsureProfile(context.Background(), testBackend, "canonical-dual", testDigest)
+	if err != nil {
+		t.Fatalf("EnsureProfile() error: %v", err)
+	}
+	if prober.probeChatCalls.Load() != 1 {
+		t.Errorf("ProbeChat called %d times, want 1 for canonical chat capability", prober.probeChatCalls.Load())
+	}
+	if prober.probeEmbedCalls.Load() != 1 {
+		t.Errorf("ProbeEmbedding called %d times, want 1 for canonical embed capability", prober.probeEmbedCalls.Load())
+	}
+	if profile.GenerationTokensPerSecond <= 0 {
+		t.Errorf("GenerationTokensPerSecond = %f, want chat metrics", profile.GenerationTokensPerSecond)
+	}
+	if profile.EmbeddingDim != 768 {
+		t.Errorf("EmbeddingDim = %d, want embedding metrics", profile.EmbeddingDim)
+	}
+}
+
 func TestProfiler_EnsureProfile_HeuristicSingleCapability(t *testing.T) {
 	store := newMockStore()
 	prober := &mockProber{

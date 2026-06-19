@@ -10,9 +10,9 @@ func InferKindFromCapabilities(capabilities []string) ModelKind {
 	hasCompletion := false
 	for _, c := range capabilities {
 		switch c {
-		case "embedding":
+		case "embedding", "embed":
 			hasEmbedding = true
-		case "completion":
+		case "completion", "chat", "generate":
 			hasCompletion = true
 		}
 	}

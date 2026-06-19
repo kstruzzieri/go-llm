@@ -11,12 +11,15 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/completion"
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/fingerprint/probers"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
@@ -51,6 +54,7 @@ type Server struct {
 	ragDisabled       bool
 	transcriptDBPath  string
 	transcriptStore   *transcript.Store
+	fingerprintStore  fingerprint.Store
 	tlsCert           string
 	tlsKey            string
 
@@ -122,6 +126,14 @@ func WithRAGDisabled() Option {
 func WithTranscriptStore(path string) Option {
 	return func(s *Server) {
 		s.transcriptDBPath = path
+	}
+}
+
+// WithFingerprintStore enables model fingerprint persistence and profiling
+// through the provider-aware ModelRegistry.
+func WithFingerprintStore(store fingerprint.Store) Option {
+	return func(s *Server) {
+		s.fingerprintStore = store
 	}
 }
 
@@ -415,7 +427,11 @@ func (s *Server) ensureModelRegistry() error {
 			return fmt.Errorf("mcp: model registry unavailable: %w", err)
 		}
 	}
-	mr, err := provider.NewModelRegistry(pReg, nil)
+	mrOpts := []provider.ModelRegistryOption{}
+	if s.fingerprintStore != nil {
+		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(s.fingerprintProberFactory()))
+	}
+	mr, err := provider.NewModelRegistry(pReg, s.fingerprintStore, mrOpts...)
 	if err != nil {
 		return fmt.Errorf("mcp: model registry unavailable: %w", err)
 	}
@@ -435,6 +451,79 @@ func (s *Server) ensureModelRegistry() error {
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+func (s *Server) fingerprintProberFactory() provider.FingerprintProberFactory {
+	return func(ctx context.Context, key provider.ModelKey, runtime *provider.ModelInfo, p provider.Provider) (*provider.FingerprintProberSpec, error) {
+		apiFormat := "ollama"
+		if s.cfg != nil {
+			cfg, ok := s.cfg.Providers[key.Provider]
+			if !ok {
+				return nil, nil
+			}
+			apiFormat = cfg.APIFormat
+			if apiFormat == "" {
+				apiFormat = "ollama"
+			}
+		}
+
+		caps := s.configuredCapabilitiesForKey(key)
+		in := probers.ProberFactoryInput{
+			APIFormat:    apiFormat,
+			OllamaClient: s.client,
+			Capabilities: caps,
+		}
+		if apiFormat == "openai-compat" {
+			oc, ok := p.(*openaicompat.Provider)
+			if !ok {
+				return nil, fmt.Errorf("mcp: fingerprint prober for %s/%s: provider has type %T, want *openaicompat.Provider", key.Provider, key.Model, p)
+			}
+			in.OpenAICompatProvider = oc
+		}
+
+		prober, err := probers.NewProberForAPIFormat(in)
+		if err != nil {
+			return nil, err
+		}
+		return &provider.FingerprintProberSpec{
+			Prober:      prober,
+			ModelDigest: fingerprintDigestForModel(key, runtime, caps),
+		}, nil
+	}
+}
+
+func (s *Server) configuredCapabilitiesForKey(key provider.ModelKey) []string {
+	if s.cfg == nil {
+		return nil
+	}
+	roles := make([]string, 0, len(s.cfg.Models))
+	for role := range s.cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		m := s.cfg.Models[role]
+		if m.Provider != key.Provider || m.Name != key.Model {
+			continue
+		}
+		if len(m.Capabilities) > 0 {
+			out := make([]string, len(m.Capabilities))
+			copy(out, m.Capabilities)
+			return out
+		}
+		return m.ResolvedCapabilities()
+	}
+	return nil
+}
+
+func fingerprintDigestForModel(key provider.ModelKey, runtime *provider.ModelInfo, caps []string) string {
+	if runtime != nil && runtime.Digest != "" {
+		return runtime.Digest
+	}
+	if len(caps) > 0 {
+		return "config-caps:" + strings.Join(caps, ",")
+	}
+	return key.String()
 }
 
 func (s *Server) configuredProviders() ([]provider.Provider, provider.Provider, error) {
