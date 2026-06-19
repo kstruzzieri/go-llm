@@ -65,3 +65,24 @@ func TestNewProberForAPIFormat_RejectsUnsupportedFormat(t *testing.T) {
 		t.Fatalf("error = %q, want unsupported api_format", err)
 	}
 }
+
+func TestNewProberForAPIFormat_OllamaRequiresClient(t *testing.T) {
+	// Empty api_format defaults to the ollama branch, which requires a client.
+	_, err := NewProberForAPIFormat(ProberFactoryInput{APIFormat: ""})
+	if err == nil {
+		t.Fatal("NewProberForAPIFormat() error = nil, want missing-OllamaClient error")
+	}
+	if !strings.Contains(err.Error(), "requires OllamaClient") {
+		t.Fatalf("error = %q, want requires OllamaClient", err)
+	}
+}
+
+func TestNewProberForAPIFormat_OpenAICompatRequiresProvider(t *testing.T) {
+	_, err := NewProberForAPIFormat(ProberFactoryInput{APIFormat: "openai-compat"})
+	if err == nil {
+		t.Fatal("NewProberForAPIFormat() error = nil, want missing-OpenAICompatProvider error")
+	}
+	if !strings.Contains(err.Error(), "requires OpenAICompatProvider") {
+		t.Fatalf("error = %q, want requires OpenAICompatProvider", err)
+	}
+}
