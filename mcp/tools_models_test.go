@@ -10,6 +10,7 @@ import (
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
@@ -401,6 +402,34 @@ func TestPullerForModel_UnknownModelWithMultiplePullersRequiresProvider(t *testi
 	}
 }
 
+func TestPullerForModel_SharedPullableModelRequiresProvider(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	for _, name := range []string{"ollama-a", "ollama-b"} {
+		p := provider.NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)),
+			provider.WithProviderName(name))
+		if err := reg.Register(p); err != nil {
+			t.Fatalf("Register(%s): %v", name, err)
+		}
+		if err := reg.AddModelToIndex("qwen3:8b", name); err != nil {
+			t.Fatalf("AddModelToIndex(%s): %v", name, err)
+		}
+	}
+
+	puller, err := pullerForModel(reg, "qwen3:8b", "")
+	if err == nil {
+		t.Fatalf("pullerForModel() error = nil, want shared-model ambiguity; puller = %#v", puller)
+	}
+	if !strings.Contains(err.Error(), "advertised by multiple providers") {
+		t.Fatalf("pullerForModel() error = %q, want advertised by multiple providers", err)
+	}
+}
+
 func TestPullerForModel_ExplicitProviderResolvesUnknownModel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -421,6 +450,63 @@ func TestPullerForModel_ExplicitProviderResolvesUnknownModel(t *testing.T) {
 	}
 	if puller == nil {
 		t.Fatalf("pullerForModel returned nil for explicit pull-capable provider")
+	}
+}
+
+func TestPullModel_ConfigOwnedOpenAICompatDoesNotFallbackToOllama(t *testing.T) {
+	pullHit := false
+	ollamaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/pull":
+			pullHit = true
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"success"}`))
+		default:
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		}
+	}))
+	defer ollamaSrv.Close()
+
+	reg := provider.NewRegistry()
+	if err := reg.Register(provider.NewOllamaProvider(
+		ollama.NewClient(ollama.WithBaseURL(ollamaSrv.URL)),
+		provider.WithProviderName("ollama"),
+	)); err != nil {
+		t.Fatalf("Register(ollama): %v", err)
+	}
+	if err := reg.Register(openaicompat.NewProvider(
+		openaicompat.NewClient("http://127.0.0.1:1"),
+		openaicompat.WithProviderName("vllm-local"),
+	)); err != nil {
+		t.Fatalf("Register(vllm-local): %v", err)
+	}
+
+	s := &Server{
+		providerRegistry: reg,
+		cfg: &config.Config{
+			Models: map[string]config.ModelConfig{
+				"completion": {Name: "local-fim", Provider: "vllm-local"},
+			},
+		},
+	}
+
+	result, err := s.handlePullModel(context.Background(), &gomcp.CallToolRequest{
+		Params: &gomcp.CallToolParamsRaw{
+			Arguments: json.RawMessage(`{"name":"local-fim"}`),
+		},
+	})
+	if err != nil {
+		t.Fatalf("handlePullModel() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatalf("handlePullModel() isError = false, want unsupported for file-managed model")
+	}
+	if text := extractText(result); !strings.Contains(text, "pull is not supported") {
+		t.Fatalf("handlePullModel() content = %q, want pull unsupported", text)
+	}
+	if pullHit {
+		t.Fatal("pull_model fell back to Ollama for a config-owned openai-compatible model")
 	}
 }
 

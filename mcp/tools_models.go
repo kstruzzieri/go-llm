@@ -290,10 +290,16 @@ func pullerForModel(reg *provider.Registry, name, providerName string) (provider
 
 	candidates, err := reg.ProvidersForModel(name)
 	if err == nil && len(candidates) > 0 {
-		for _, p := range candidates {
-			if mp, ok := p.(provider.ModelPuller); ok {
-				return mp, nil
+		if len(candidates) > 1 {
+			names := make([]string, 0, len(candidates))
+			for _, p := range candidates {
+				names = append(names, p.Name())
 			}
+			sort.Strings(names)
+			return nil, fmt.Errorf("model %q is advertised by multiple providers (%s); pass provider", name, strings.Join(names, ", "))
+		}
+		if mp, ok := candidates[0].(provider.ModelPuller); ok {
+			return mp, nil
 		}
 		return nil, nil
 	}
@@ -329,7 +335,7 @@ func (s *Server) handlePullModel(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("validation", "name must not be empty"), nil
 	}
 
-	puller, modelName, err := s.modelPuller(args.Name, args.Provider)
+	puller, modelName, err := s.modelPuller(ctx, args.Name, args.Provider)
 	if err != nil {
 		return toolError("validation", "%v", err), nil
 	}
@@ -356,13 +362,21 @@ func (s *Server) handlePullModel(ctx context.Context, req *gomcp.CallToolRequest
 
 // modelPuller resolves the puller and normalized model name, preserving the
 // legacy (no-registry) Ollama path.
-func (s *Server) modelPuller(name, providerName string) (provider.ModelPuller, string, error) {
+func (s *Server) modelPuller(ctx context.Context, name, providerName string) (provider.ModelPuller, string, error) {
 	if pReg := s.providerRegistrySnapshot(); pReg != nil {
 		modelName := name
 		if providerName == "" {
 			if key, ok := s.parseKnownModelSelector(name); ok {
 				providerName = key.Provider
 				modelName = key.Model
+			} else {
+				inferredProvider, err := s.inferProviderForExplicitModel(ctx, name)
+				if err != nil {
+					return nil, modelName, err
+				}
+				if inferredProvider != "" {
+					providerName = inferredProvider
+				}
 			}
 		}
 		puller, err := pullerForModel(pReg, modelName, providerName)
