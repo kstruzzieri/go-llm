@@ -218,6 +218,9 @@ func (s *Server) lookupProviderModelInfo(ctx context.Context, key provider.Model
 
 	models, err := pReg.RefreshModelsAndList(ctx, key.Provider)
 	if err != nil {
+		if info, ok := s.refreshProviderModelInfo(ctx, key); ok {
+			return info, nil
+		}
 		return listedModelInfo{}, err
 	}
 	for i := range models {
@@ -225,17 +228,8 @@ func (s *Server) lookupProviderModelInfo(ctx context.Context, key provider.Model
 			continue
 		}
 
-		s.mu.RLock()
-		modelRegistry := s.modelRegistry
-		s.mu.RUnlock()
-		if modelRegistry != nil {
-			profile, err := modelRegistry.Refresh(ctx, key)
-			if err == nil {
-				return listedModelInfo{
-					ModelInfo: modelInfoFromProfile(profile),
-					Provider:  key.Provider,
-				}, nil
-			}
+		if info, ok := s.refreshProviderModelInfo(ctx, key); ok {
+			return info, nil
 		}
 
 		return listedModelInfo{
@@ -243,7 +237,27 @@ func (s *Server) lookupProviderModelInfo(ctx context.Context, key provider.Model
 			Provider:  key.Provider,
 		}, nil
 	}
+	if info, ok := s.refreshProviderModelInfo(ctx, key); ok {
+		return info, nil
+	}
 	return listedModelInfo{}, fmt.Errorf("model %q not found on provider %q", key.Model, key.Provider)
+}
+
+func (s *Server) refreshProviderModelInfo(ctx context.Context, key provider.ModelKey) (listedModelInfo, bool) {
+	s.mu.RLock()
+	modelRegistry := s.modelRegistry
+	s.mu.RUnlock()
+	if modelRegistry == nil {
+		return listedModelInfo{}, false
+	}
+	profile, err := modelRegistry.Refresh(ctx, key)
+	if err != nil {
+		return listedModelInfo{}, false
+	}
+	return listedModelInfo{
+		ModelInfo: modelInfoFromProfile(profile),
+		Provider:  key.Provider,
+	}, true
 }
 
 func modelInfoFromProfile(profile *provider.ModelProfile) provider.ModelInfo {
