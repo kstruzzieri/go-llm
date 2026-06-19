@@ -38,6 +38,12 @@ func turnBudget(b Budget) TokenBudget {
 	if ceiling <= 0 {
 		ceiling = defaultInputCeiling
 	}
+	if b.OutputReserve > 0 {
+		ceiling -= b.OutputReserve
+	}
+	if ceiling < 0 {
+		ceiling = 0
+	}
 	return TokenBudget{Input: ceiling}
 }
 
@@ -81,5 +87,9 @@ func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens
 	if report.DroppedCount > 0 {
 		compactions = 1
 	}
-	return out, Pressure{UsedPct: used, Evicted: report.DroppedCount, Compactions: compactions}, nil
+	pressure := Pressure{UsedPct: used, Evicted: report.DroppedCount, Compactions: compactions}
+	if after > budget.Input {
+		return out, pressure, ErrContextExhausted
+	}
+	return out, pressure, nil
 }

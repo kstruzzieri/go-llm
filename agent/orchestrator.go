@@ -88,7 +88,11 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 
 		if len(resp.ToolCalls) == 0 {
 			res.Answer = resp.Content
-			res.StopReason = Completed
+			if budgetExceeded(res.Usage, req.Budget) {
+				res.StopReason = BudgetReached
+			} else {
+				res.StopReason = Completed
+			}
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
@@ -101,7 +105,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
-		if req.Budget.TotalTokens > 0 && res.Usage.TotalTokens >= req.Budget.TotalTokens {
+		if budgetExceeded(res.Usage, req.Budget) {
 			res.StopReason = BudgetReached
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
@@ -123,6 +127,10 @@ func addUsage(a, b provider.Usage) provider.Usage {
 	a.CompletionTokens += b.CompletionTokens
 	a.TotalTokens += b.TotalTokens
 	return a
+}
+
+func budgetExceeded(u provider.Usage, b Budget) bool {
+	return b.TotalTokens > 0 && u.TotalTokens >= b.TotalTokens
 }
 
 func toolSchemaString(specs []provider.Tool) string {

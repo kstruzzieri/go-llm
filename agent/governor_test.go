@@ -92,6 +92,27 @@ func TestBudgetCapStop(t *testing.T) {
 	}
 }
 
+func TestBudgetCapStopOnFinalAnswer(t *testing.T) {
+	mc := &scriptedCaller{responses: []ModelResult{
+		{Response: provider.ChatResponse{
+			Content: "final",
+			Done:    true,
+			Usage:   provider.Usage{TotalTokens: 75},
+		}},
+	}}
+	o := newTestOrchestrator(mc)
+	res, err := o.Run(context.Background(), Request{Goal: "q", Budget: Budget{TotalTokens: 60}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if res.Answer != "final" {
+		t.Fatalf("answer = %q, want final", res.Answer)
+	}
+	if res.StopReason != BudgetReached {
+		t.Fatalf("stop = %v, want BudgetReached", res.StopReason)
+	}
+}
+
 func TestObserverStepErrorAborts(t *testing.T) {
 	mc := &scriptedCaller{responses: []ModelResult{
 		{Response: provider.ChatResponse{Content: "x", Done: true}},

@@ -2,14 +2,24 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func TestTurnBudgetUsesDefaultWhenZero(t *testing.T) {
 	b := turnBudget(Budget{})
 	if b.Input <= 0 {
 		t.Fatal("zero InputCeiling must fall back to a positive default")
+	}
+}
+
+func TestTurnBudgetSubtractsOutputReserve(t *testing.T) {
+	b := turnBudget(Budget{InputCeiling: 100, OutputReserve: 25})
+	if b.Input != 75 {
+		t.Fatalf("Input = %d, want 75", b.Input)
 	}
 }
 
@@ -49,6 +59,38 @@ func TestAssembleCompactsElastic(t *testing.T) {
 	}
 	if len(out.Messages) != 2 {
 		t.Fatalf("want goal + newest elastic, got %+v", out.Messages)
+	}
+}
+
+func TestAssembleReturnsErrWhenCompactedStateStillOverBudget(t *testing.T) {
+	m := ContextManager{Compactor: RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator}
+	st := State{Messages: []Message{
+		pinned("user", "goal"),
+		elastic("user", "do"),
+		{
+			ChatMessage: provider.ChatMessage{
+				Role: "assistant",
+				ToolCalls: []provider.ToolCall{{
+					ID: "c1", Type: "function",
+					Function: provider.ToolCallFunction{Name: "search", Arguments: json.RawMessage(`{}`)},
+				}},
+			},
+			Segment: Elastic,
+		},
+		{
+			ChatMessage: provider.ChatMessage{
+				Role:       "tool",
+				Content:    "tool-result-too-large",
+				ToolName:   "search",
+				ToolCallID: "c1",
+			},
+			Segment: Elastic,
+		},
+	}}
+
+	_, _, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: len("goal") + 1})
+	if !errors.Is(err, ErrContextExhausted) {
+		t.Fatalf("want ErrContextExhausted when compaction cannot fit, got %v", err)
 	}
 }
 
