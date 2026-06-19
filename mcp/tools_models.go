@@ -178,6 +178,13 @@ func (s *Server) showModel(ctx context.Context, name, providerName string) (any,
 		return s.lookupProviderModelInfo(ctx, key)
 	}
 
+	// Unresolved. Only fall back to the direct Ollama client in legacy mode
+	// (no provider registry). With a registry present, hitting one hardcoded
+	// Ollama client would report the wrong backend, so return not-found.
+	if s.providerRegistrySnapshot() != nil {
+		return nil, fmt.Errorf("model %q not found in any registered provider", name)
+	}
+
 	info, err := s.client.ShowModel(ctx, name)
 	if err != nil {
 		return nil, err

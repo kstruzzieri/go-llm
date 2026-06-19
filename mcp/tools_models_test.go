@@ -423,3 +423,60 @@ func TestPullerForModel_ExplicitProviderResolvesUnknownModel(t *testing.T) {
 		t.Fatalf("pullerForModel returned nil for explicit pull-capable provider")
 	}
 }
+
+// With a registry present, an unresolvable model must not silently hit the
+// direct legacy Ollama client; it should return a clear not-found error
+// instead.
+//
+// The model must genuinely fail provider resolution to exercise the guard. A
+// single-provider registry auto-resolves any unknown model to that sole
+// provider (see inferProviderForExplicitModel), so this test registers two
+// providers whose inventories are empty: resolution then returns no provider
+// and showModel reaches the fallback branch. A recording legacy client proves
+// the guard prevents the direct /api/show fallback.
+func TestShowModel_NoOllamaFallbackWhenRegistryPresent(t *testing.T) {
+	emptyInventory := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer emptyInventory.Close()
+
+	legacyShowHit := false
+	legacySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/show" {
+			legacyShowHit = true
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"details":{}}`))
+	}))
+	defer legacySrv.Close()
+
+	reg := provider.NewRegistry()
+	for _, name := range []string{"ollama-a", "ollama-b"} {
+		p := provider.NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(emptyInventory.URL)),
+			provider.WithProviderName(name))
+		if err := reg.Register(p); err != nil {
+			t.Fatalf("Register(%s): %v", name, err)
+		}
+	}
+	mr, err := provider.NewModelRegistry(reg, nil)
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error = %v", err)
+	}
+	s := &Server{
+		providerRegistry: reg,
+		modelRegistry:    mr,
+		client:           ollama.NewClient(ollama.WithBaseURL(legacySrv.URL)),
+	}
+
+	_, err = s.showModel(context.Background(), "definitely-not-a-real-model", "")
+	if err == nil {
+		t.Fatalf("showModel() error = nil, want not-found error")
+	}
+	if !strings.Contains(err.Error(), "not found in any registered provider") {
+		t.Fatalf("showModel() error = %q, want registered-provider not-found", err)
+	}
+	if legacyShowHit {
+		t.Errorf("showModel hit the direct Ollama /api/show despite a registry being present")
+	}
+}
