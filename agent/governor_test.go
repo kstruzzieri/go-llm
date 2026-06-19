@@ -169,6 +169,48 @@ func (toolCallAbortObserver) OnToolCall(context.Context, ToolCallEvent) error {
 }
 func (toolCallAbortObserver) OnToken(context.Context, TokenEvent) error { return nil }
 
+type countingTool struct{ n int }
+
+func (*countingTool) Spec() ToolSpec {
+	return ToolSpec{Name: "count", Parameters: json.RawMessage(`{}`)}
+}
+func (*countingTool) Effect() Effect { return Effect{Class: Read} }
+func (c *countingTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	c.n++
+	return ToolResult{Content: "same-result"}, nil
+}
+
+func TestGovernorStopsDispatchingWithinToolCallBatch(t *testing.T) {
+	calls := make([]provider.ToolCall, defaultToolErrorCap+2)
+	for i := range calls {
+		calls[i] = provider.ToolCall{
+			ID:   fmt.Sprintf("%d", i),
+			Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "count",
+				Arguments: json.RawMessage(`{}`),
+			},
+		}
+	}
+	tool := &countingTool{}
+	o := newTestOrchestrator(&scriptedCaller{responses: []ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: calls}},
+	}})
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{tool}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if tool.n != defaultToolErrorCap {
+		t.Fatalf("invocations = %d, want %d", tool.n, defaultToolErrorCap)
+	}
+	if len(res.ToolCalls) != defaultToolErrorCap {
+		t.Fatalf("tool call records = %d, want %d", len(res.ToolCalls), defaultToolErrorCap)
+	}
+	if res.StopReason != RepeatLimitReached {
+		t.Fatalf("stop = %v, want RepeatLimitReached", res.StopReason)
+	}
+}
+
 // pollingTool returns a DIFFERENT result on each call for identical args,
 // simulating a status/poll that makes progress.
 type pollingTool struct{ n int }

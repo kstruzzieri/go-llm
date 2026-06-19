@@ -22,9 +22,10 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
 		state.Messages = append(state.Messages, toolObservation(call, out))
 		gov.observe(call, out)
-	}
-	if sr, tripped := gov.stopReason(); tripped {
-		res.StopReason = sr
+		if sr, tripped := gov.stopReason(); tripped {
+			res.StopReason = sr
+			return nil
+		}
 	}
 	return nil
 }

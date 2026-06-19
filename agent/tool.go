@@ -83,7 +83,11 @@ func (c EffectClass) IsMutating() bool { return c.Has(Write) || c.Has(Exec) }
 type ApprovalPolicy uint8
 
 const (
-	ApprovalNever ApprovalPolicy = iota
+	// ApprovalDefault is the safe zero value: mutating tools require approval,
+	// read-only tools do not.
+	ApprovalDefault ApprovalPolicy = iota
+	// ApprovalNever explicitly bypasses approval.
+	ApprovalNever
 	ApprovalOnWrite
 	ApprovalAlways
 )
@@ -97,10 +101,12 @@ func needsApproval(p ApprovalPolicy, c EffectClass) bool {
 	switch p {
 	case ApprovalAlways:
 		return true
+	case ApprovalNever:
+		return false
 	case ApprovalOnWrite:
 		return c.IsMutating()
 	default:
-		return false
+		return c.IsMutating()
 	}
 }
 

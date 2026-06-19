@@ -68,3 +68,21 @@ func TestRouterModelCallerAddsToolCapWhenToolsPresent(t *testing.T) {
 		t.Fatal("CapToolCall must be required when tools are present")
 	}
 }
+
+func TestRouterModelCallerUsesNumPredictAsExpectedOutput(t *testing.T) {
+	var gotReq provider.RoutingRequest
+	mc := &routerModelCaller{
+		route: func(_ context.Context, rr provider.RoutingRequest) (planExecutor, error) {
+			gotReq = rr
+			return fakePlan{}, nil
+		},
+	}
+	_, err := mc.Chat(context.Background(),
+		provider.ChatRequest{Options: provider.ModelOptions{NumPredict: 256}}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if gotReq.ExpectedOutput != 256 {
+		t.Fatalf("ExpectedOutput = %d, want 256", gotReq.ExpectedOutput)
+	}
+}

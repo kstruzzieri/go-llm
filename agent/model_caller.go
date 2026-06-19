@@ -42,11 +42,12 @@ func (m *routerModelCaller) Chat(ctx context.Context, req provider.ChatRequest,
 	onToken func(provider.ChatResponse) error) (ModelResult, error) {
 
 	rr := provider.RoutingRequest{
-		UseCase:      "agent",
-		Messages:     req.Messages,
-		Tools:        req.Tools,
-		Options:      req.Options,
-		RequiredCaps: provider.CapChat | provider.CapStream,
+		UseCase:        "agent",
+		Messages:       req.Messages,
+		Tools:          req.Tools,
+		Options:        req.Options,
+		ExpectedOutput: req.Options.NumPredict,
+		RequiredCaps:   provider.CapChat | provider.CapStream,
 	}
 	if len(req.Tools) > 0 {
 		rr.RequiredCaps |= provider.CapToolCall

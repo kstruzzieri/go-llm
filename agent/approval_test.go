@@ -21,6 +21,16 @@ func (writeTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
 	return ToolResult{Content: "wrote"}, nil
 }
 
+type defaultWriteTool struct{}
+
+func (defaultWriteTool) Spec() ToolSpec {
+	return ToolSpec{Name: "writer", Parameters: json.RawMessage(`{}`)}
+}
+func (defaultWriteTool) Effect() Effect { return Effect{Class: Write} }
+func (defaultWriteTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
+	return ToolResult{Content: "wrote"}, nil
+}
+
 func writeCallSeq() []ModelResult {
 	return []ModelResult{
 		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
@@ -40,6 +50,18 @@ func TestNilApproverDeniesWriteTool(t *testing.T) {
 	}
 	if !res.ToolCalls[0].Denied {
 		t.Fatalf("nil approver must deny a Write tool, got %+v", res.ToolCalls[0])
+	}
+}
+
+func TestNilApproverDeniesDefaultWriteTool(t *testing.T) {
+	mc := &scriptedCaller{responses: writeCallSeq()}
+	o := newTestOrchestrator(mc)
+	res, err := o.Run(context.Background(), Request{Goal: "q", Tools: []Tool{defaultWriteTool{}}}, nil)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !res.ToolCalls[0].Denied {
+		t.Fatalf("nil approver must deny a zero-policy Write tool, got %+v", res.ToolCalls[0])
 	}
 }
 
