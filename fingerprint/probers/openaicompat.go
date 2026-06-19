@@ -58,6 +58,10 @@ var _ fingerprint.ModelProber = (*OpenAICompatProber)(nil)
 // DetectKind classifies the model using configured capabilities when present,
 // otherwise by live probe: chat first, then embedding.
 func (p *OpenAICompatProber) DetectKind(ctx context.Context, model string) (*fingerprint.KindDetection, error) {
+	if err := p.ensureModelExists(ctx, model); err != nil {
+		return nil, err
+	}
+
 	if len(p.capabilities) > 0 {
 		caps := append([]string(nil), p.capabilities...)
 		return &fingerprint.KindDetection{
@@ -70,6 +74,7 @@ func (p *OpenAICompatProber) DetectKind(ctx context.Context, model string) (*fin
 	if _, err := p.prov.Chat(ctx, provider.ChatRequest{
 		Model:    model,
 		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+		Options:  provider.ModelOptions{NumPredict: 1},
 	}); err == nil {
 		return &fingerprint.KindDetection{Kind: fingerprint.ModelKindChat, Source: "probe"}, nil
 	}
@@ -85,6 +90,22 @@ func (p *OpenAICompatProber) DetectKind(ctx context.Context, model string) (*fin
 	return &fingerprint.KindDetection{Kind: fingerprint.ModelKindUnknown, Source: "probe"}, nil
 }
 
+func (p *OpenAICompatProber) ensureModelExists(ctx context.Context, model string) error {
+	if p == nil || p.prov == nil {
+		return fmt.Errorf("fingerprint: openaicompat detect kind %q: provider is required", model)
+	}
+	models, err := p.prov.Models(ctx)
+	if err != nil {
+		return fmt.Errorf("fingerprint: openaicompat detect kind %q: list models: %w", model, err)
+	}
+	for _, m := range models {
+		if m.Name == model {
+			return nil
+		}
+	}
+	return fmt.Errorf("fingerprint: openaicompat detect kind %q: model not listed by /v1/models", model)
+}
+
 // ProbeChat sends a minimal chat request and derives throughput from the
 // reported completion-token count over measured wall-clock. opts is ignored
 // (kept for ModelProber parity); openai-compat exposes no server-side timing
@@ -94,6 +115,7 @@ func (p *OpenAICompatProber) ProbeChat(ctx context.Context, model string, opts a
 	resp, err := p.prov.Chat(ctx, provider.ChatRequest{
 		Model:    model,
 		Messages: []provider.ChatMessage{{Role: "user", Content: "Say hello."}},
+		Options:  provider.ModelOptions{NumPredict: 16},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: openaicompat probe chat %q: %w", model, err)

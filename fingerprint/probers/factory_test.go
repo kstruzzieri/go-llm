@@ -13,14 +13,20 @@ import (
 )
 
 func TestNewProberForAPIFormat_SelectsOpenAICompatWithCapabilities(t *testing.T) {
-	srv := httptest.NewServer(http.NotFoundHandler())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			_, _ = w.Write([]byte(`{"data":[{"id":"local-fim"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
 	defer srv.Close()
 
 	prov := openaicompat.NewProvider(openaicompat.NewClient(srv.URL))
 	prober, err := NewProberForAPIFormat(ProberFactoryInput{
 		APIFormat:            "openai-compat",
 		OpenAICompatProvider: prov,
-		Capabilities:         []string{"completion", "embedding"},
+		Capabilities:         []string{"chat", "embed"},
 	})
 	if err != nil {
 		t.Fatalf("NewProberForAPIFormat() error = %v", err)
@@ -38,8 +44,8 @@ func TestNewProberForAPIFormat_SelectsOpenAICompatWithCapabilities(t *testing.T)
 	if det.Source != "capabilities" {
 		t.Fatalf("Source = %q, want capabilities", det.Source)
 	}
-	if !containsCapability(det.Capabilities, "completion") || !containsCapability(det.Capabilities, "embedding") {
-		t.Fatalf("Capabilities = %v, want completion and embedding", det.Capabilities)
+	if !containsCapability(det.Capabilities, "chat") || !containsCapability(det.Capabilities, "embed") {
+		t.Fatalf("Capabilities = %v, want chat and embed", det.Capabilities)
 	}
 }
 

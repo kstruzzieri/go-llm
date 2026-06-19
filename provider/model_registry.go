@@ -40,10 +40,34 @@ type ModelRegistry struct {
 	profiles        map[ModelKey]*ModelProfile
 	catalog         *staticCatalog
 	fpStore         fingerprint.Store
+	fpProberFactory FingerprintProberFactory
 	providers       ProviderResolver
 	capOverride     CapabilityOverride
 	overrideVersion uint64
 	rejectionHook   OverrideRejectionHook
+}
+
+// FingerprintProberSpec contains the model prober and digest identity the
+// registry should use when refreshing a fingerprint profile.
+type FingerprintProberSpec struct {
+	Prober      fingerprint.ModelProber
+	ModelDigest string
+}
+
+// FingerprintProberFactory builds the provider-specific ModelProber for a
+// model. Returning nil means fingerprinting is unavailable for this provider.
+type FingerprintProberFactory func(ctx context.Context, key ModelKey, runtime *ModelInfo, p Provider) (*FingerprintProberSpec, error)
+
+// ModelRegistryOption configures ModelRegistry construction.
+type ModelRegistryOption func(*ModelRegistry)
+
+// WithFingerprintProberFactory installs provider-aware fingerprint prober
+// selection. The factory is used only when NewModelRegistry also receives a
+// non-nil fingerprint.Store.
+func WithFingerprintProberFactory(fn FingerprintProberFactory) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.fpProberFactory = fn
+	}
 }
 
 // CapabilityOverride returns the user-declared canonical capability tokens
@@ -149,18 +173,22 @@ type directModelInfoProvider interface {
 // resolver and fingerprint store. The static catalog is loaded from the
 // embedded catalog.json at construction time. The fingerprint store may
 // be nil if fingerprint enrichment is not available.
-func NewModelRegistry(providers ProviderResolver, fpStore fingerprint.Store) (*ModelRegistry, error) {
+func NewModelRegistry(providers ProviderResolver, fpStore fingerprint.Store, opts ...ModelRegistryOption) (*ModelRegistry, error) {
 	catData, err := loadCatalog()
 	if err != nil {
 		return nil, fmt.Errorf("provider: new model registry: %w", err)
 	}
 
-	return &ModelRegistry{
+	r := &ModelRegistry{
 		profiles:  make(map[ModelKey]*ModelProfile),
 		catalog:   newStaticCatalog(catData),
 		fpStore:   fpStore,
 		providers: providers,
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(r)
+	}
+	return r, nil
 }
 
 // Lookup returns the merged ModelProfile for a provider-qualified model key.
@@ -389,11 +417,7 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	}
 
 	// Layer 3: Fingerprint enrichment.
-	var fpProfile *fingerprint.Profile
-	if r.fpStore != nil {
-		fpProfile, _ = r.fpStore.Get(ctx, key.Provider, key.Model)
-		// Ignore errors -- fingerprint is optional enrichment.
-	}
+	fpProfile := r.fingerprintProfile(ctx, key, runtimeInfo)
 
 	// Merge layers using the (override, rejectionHook) snapshot taken at
 	// function entry.
@@ -407,6 +431,35 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	r.mu.Unlock()
 
 	return profile, nil
+}
+
+func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) *fingerprint.Profile {
+	if r.fpStore == nil {
+		return nil
+	}
+
+	if r.fpProberFactory != nil {
+		if p, err := r.providers.Resolve(key); err == nil {
+			spec, err := r.fpProberFactory(ctx, key, runtimeInfo, p)
+			if err == nil && spec != nil && spec.Prober != nil {
+				modelDigest := spec.ModelDigest
+				if modelDigest == "" && runtimeInfo != nil {
+					modelDigest = runtimeInfo.Digest
+				}
+				if modelDigest == "" {
+					modelDigest = key.String()
+				}
+				profile, err := fingerprint.NewProfiler(r.fpStore, spec.Prober).EnsureProfile(ctx, key.Provider, key.Model, modelDigest)
+				if err == nil {
+					return profile
+				}
+			}
+		}
+	}
+
+	fpProfile, _ := r.fpStore.Get(ctx, key.Provider, key.Model)
+	// Ignore errors -- fingerprint is optional enrichment.
+	return fpProfile
 }
 
 // queryRuntime asks the provider for model information by resolving the
