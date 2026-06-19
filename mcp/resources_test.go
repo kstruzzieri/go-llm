@@ -129,3 +129,40 @@ func TestConfigResource(t *testing.T) {
 		t.Error("missing 'resolved' field")
 	}
 }
+
+func TestModelsResourceRoutesThroughRegistry(t *testing.T) {
+	mock := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/", "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b","size":4700000000}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	env := newTestEnv(t, mock)
+	defer env.cleanup()
+
+	res, err := env.session.ReadResource(context.Background(), &gomcp.ReadResourceParams{
+		URI: "go-llm://models",
+	})
+	if err != nil {
+		t.Fatalf("ReadResource() error = %v", err)
+	}
+	if len(res.Contents) == 0 {
+		t.Fatalf("ReadResource() returned no contents")
+	}
+	// listedModelInfo carries a "provider" field; the old direct-ollama path
+	// (raw ollama.ModelInfo) did not. Asserting it proves we now route through
+	// s.listModels / the registry.
+	var listed []listedModelInfo
+	if err := json.Unmarshal([]byte(res.Contents[0].Text), &listed); err != nil {
+		t.Fatalf("unmarshal listed models: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("model count = %d, want 1", len(listed))
+	}
+	if listed[0].Provider == "" {
+		t.Errorf("provider field empty; resource did not route through the registry")
+	}
+}
