@@ -43,7 +43,7 @@ func (s *Server) registerResources() {
 	s.mcpServer.AddResourceTemplate(&gomcp.ResourceTemplate{
 		URITemplate: "go-llm://models/{name}",
 		Name:        "model-detail",
-		Description: "Details for a specific Ollama model",
+		Description: "Details for a specific provider model",
 		MIMEType:    "application/json",
 	}, s.handleModelDetailResource)
 
@@ -162,7 +162,7 @@ func (s *Server) handleModelDetailResource(ctx context.Context, req *gomcp.ReadR
 		return nil, gomcp.ResourceNotFoundError(req.Params.URI)
 	}
 
-	info, err := s.client.ShowModel(ctx, name)
+	info, err := s.showModel(ctx, name, "")
 	if err != nil {
 		return nil, err
 	}

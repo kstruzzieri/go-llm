@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -164,5 +165,43 @@ func TestModelsResourceRoutesThroughRegistry(t *testing.T) {
 	}
 	if listed[0].Provider == "" {
 		t.Errorf("provider field empty; resource did not route through the registry")
+	}
+}
+
+func TestModelDetailResourceUsesProviderRegistry(t *testing.T) {
+	openAIMock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"local-fim","object":"model"}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer openAIMock.Close()
+
+	cfgPath := writeOpenAICompatOnlyConfig(t, t.TempDir(), openAIMock.URL)
+	s, err := NewServer(context.Background(), WithConfig(cfgPath), WithRAGDisabled())
+	if err != nil {
+		t.Fatalf("NewServer() error = %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	result, err := s.handleModelDetailResource(context.Background(), &gomcp.ReadResourceRequest{
+		Params: &gomcp.ReadResourceParams{URI: "go-llm://models/local-fim"},
+	})
+	if err != nil {
+		t.Fatalf("handleModelDetailResource() error = %v", err)
+	}
+
+	var info struct {
+		Provider string `json:"provider"`
+		Name     string `json:"name"`
+	}
+	if err := json.Unmarshal([]byte(result.Contents[0].Text), &info); err != nil {
+		t.Fatalf("unmarshal model detail: %v", err)
+	}
+	if info.Provider != "vllm-local" || info.Name != "local-fim" {
+		t.Fatalf("model detail = %+v, want vllm-local/local-fim", info)
 	}
 }
