@@ -57,15 +57,14 @@ type Budget struct {
 	TotalTokens   int // 0 = unbounded whole-run cap
 }
 
-// Request is the unit of work handed to Run. The Tools and Approver fields are
-// added in a later task, once the Tool and Approver types exist in this package
-// (types.go and tool.go are mutually dependent within one package; adding the
-// fields later keeps each task independently compilable).
+// Request is the unit of work handed to Run.
 type Request struct {
 	Goal     string
 	System   string
+	Tools    []Tool
 	MaxSteps int // 0 => defaultMaxSteps
 	Budget   Budget
+	Approver Approver // nil => fail-safe (auto Read, deny Write/Exec)
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
