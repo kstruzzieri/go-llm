@@ -118,9 +118,11 @@ func (p *OpenAICompatProber) ProbeEmbedding(ctx context.Context, model string) (
 	if err != nil {
 		return nil, fmt.Errorf("fingerprint: openaicompat probe embedding %q: %w", model, err)
 	}
-	dim := 0
-	if len(resp.Embeddings) > 0 {
-		dim = len(resp.Embeddings[0])
+	// An empty embedding response is a probe failure, not a zero-dimension
+	// model: surface it instead of reporting Dim 0, which the profiler would
+	// silently treat as "not tested".
+	if len(resp.Embeddings) == 0 || len(resp.Embeddings[0]) == 0 {
+		return nil, fmt.Errorf("fingerprint: openaicompat probe embedding %q: backend returned no embedding vector", model)
 	}
-	return &fingerprint.EmbeddingMetrics{Latency: time.Since(start), Dim: dim}, nil
+	return &fingerprint.EmbeddingMetrics{Latency: time.Since(start), Dim: len(resp.Embeddings[0])}, nil
 }

@@ -161,3 +161,18 @@ func TestOpenAICompatProber_ProbeEmbedding(t *testing.T) {
 		t.Errorf("Dim = %d, want 4", m.Dim)
 	}
 }
+
+func TestOpenAICompatProber_ProbeEmbedding_EmptyResponseErrors(t *testing.T) {
+	prober, srv := newOpenAICompatTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/embeddings" {
+			_ = json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{}})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	if _, err := prober.ProbeEmbedding(context.Background(), "embed-model"); err == nil {
+		t.Fatal("ProbeEmbedding() error = nil, want error for empty embedding response")
+	}
+}
