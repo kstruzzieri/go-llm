@@ -114,3 +114,50 @@ func TestOpenAICompatProber_DetectKind_Unknown(t *testing.T) {
 func containsCapability(caps []string, want string) bool {
 	return slices.Contains(caps, want)
 }
+
+func TestOpenAICompatProber_ProbeChat(t *testing.T) {
+	prober, srv := newOpenAICompatTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/chat/completions" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"choices": []map[string]any{
+					{"message": map[string]any{"role": "assistant", "content": "hello"}},
+				},
+				"usage": map[string]any{"completion_tokens": 8},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	m, err := prober.ProbeChat(context.Background(), "llama-3", nil)
+	if err != nil {
+		t.Fatalf("ProbeChat() error = %v", err)
+	}
+	if m.TokensPerSecond <= 0 {
+		t.Errorf("TokensPerSecond = %v, want > 0 (8 completion tokens over measured elapsed)", m.TokensPerSecond)
+	}
+}
+
+func TestOpenAICompatProber_ProbeEmbedding(t *testing.T) {
+	prober, srv := newOpenAICompatTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/embeddings" {
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"data": []map[string]any{
+					{"embedding": []float64{0.1, 0.2, 0.3, 0.4}},
+				},
+			})
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	m, err := prober.ProbeEmbedding(context.Background(), "embed-model")
+	if err != nil {
+		t.Fatalf("ProbeEmbedding() error = %v", err)
+	}
+	if m.Dim != 4 {
+		t.Errorf("Dim = %d, want 4", m.Dim)
+	}
+}

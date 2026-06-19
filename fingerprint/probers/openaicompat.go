@@ -13,6 +13,7 @@ package probers
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -84,11 +85,42 @@ func (p *OpenAICompatProber) DetectKind(ctx context.Context, model string) (*fin
 	return &fingerprint.KindDetection{Kind: fingerprint.ModelKindUnknown, Source: "probe"}, nil
 }
 
-// ProbeChat and ProbeEmbedding are implemented in Task 8.
+// ProbeChat sends a minimal chat request and derives throughput from the
+// reported completion-token count over measured wall-clock. opts is ignored
+// (kept for ModelProber parity); openai-compat exposes no server-side timing
+// breakdown, so PromptLatency/ColdStartLatency are left zero.
 func (p *OpenAICompatProber) ProbeChat(ctx context.Context, model string, opts any) (*fingerprint.ChatMetrics, error) {
-	return nil, fmt.Errorf("fingerprint: openaicompat ProbeChat not implemented")
+	start := time.Now()
+	resp, err := p.prov.Chat(ctx, provider.ChatRequest{
+		Model:    model,
+		Messages: []provider.ChatMessage{{Role: "user", Content: "Say hello."}},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: openaicompat probe chat %q: %w", model, err)
+	}
+	elapsed := time.Since(start)
+
+	metrics := &fingerprint.ChatMetrics{}
+	if resp.Usage.CompletionTokens > 0 && elapsed > 0 {
+		metrics.TokensPerSecond = float64(resp.Usage.CompletionTokens) / elapsed.Seconds()
+	}
+	return metrics, nil
 }
 
+// ProbeEmbedding sends a minimal embedding request and captures dimension and
+// latency.
 func (p *OpenAICompatProber) ProbeEmbedding(ctx context.Context, model string) (*fingerprint.EmbeddingMetrics, error) {
-	return nil, fmt.Errorf("fingerprint: openaicompat ProbeEmbedding not implemented")
+	start := time.Now()
+	resp, err := p.prov.Embed(ctx, provider.EmbedRequest{
+		Model: model,
+		Input: []string{"The quick brown fox jumps over the lazy dog."},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("fingerprint: openaicompat probe embedding %q: %w", model, err)
+	}
+	dim := 0
+	if len(resp.Embeddings) > 0 {
+		dim = len(resp.Embeddings[0])
+	}
+	return &fingerprint.EmbeddingMetrics{Latency: time.Since(start), Dim: dim}, nil
 }
