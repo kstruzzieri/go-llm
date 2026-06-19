@@ -1730,3 +1730,26 @@ func TestToOllamaGenerateRequest_NoOptions(t *testing.T) {
 		t.Errorf("expected nil Options for zero-value ModelOptions, got %+v", oReq.Options)
 	}
 }
+
+func TestOllamaProvider_PullModel(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		// Non-streaming pull (fn == nil) expects a single JSON object.
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success"}`))
+	}))
+	defer srv.Close()
+
+	p := NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))
+
+	// Compile-time: OllamaProvider must satisfy ModelPuller.
+	var _ ModelPuller = p
+
+	if err := p.PullModel(context.Background(), "qwen3:8b", nil); err != nil {
+		t.Fatalf("PullModel() error = %v", err)
+	}
+	if gotPath != "/api/pull" {
+		t.Errorf("request path = %q, want /api/pull", gotPath)
+	}
+}

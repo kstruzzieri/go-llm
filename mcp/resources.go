@@ -22,7 +22,7 @@ func (s *Server) registerResources() {
 	s.mcpServer.AddResource(&gomcp.Resource{
 		URI:         "go-llm://models",
 		Name:        "models",
-		Description: "List of available Ollama models with metadata",
+		Description: "List of available provider models with metadata",
 		MIMEType:    "application/json",
 	}, s.handleModelsResource)
 
@@ -43,7 +43,7 @@ func (s *Server) registerResources() {
 	s.mcpServer.AddResourceTemplate(&gomcp.ResourceTemplate{
 		URITemplate: "go-llm://models/{name}",
 		Name:        "model-detail",
-		Description: "Details for a specific Ollama model",
+		Description: "Details for a specific provider model",
 		MIMEType:    "application/json",
 	}, s.handleModelDetailResource)
 
@@ -117,7 +117,7 @@ func (s *Server) handleHealthResource(ctx context.Context, req *gomcp.ReadResour
 }
 
 func (s *Server) handleModelsResource(ctx context.Context, req *gomcp.ReadResourceRequest) (*gomcp.ReadResourceResult, error) {
-	models, err := s.client.ListModels(ctx)
+	models, err := s.listModels(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -162,7 +162,7 @@ func (s *Server) handleModelDetailResource(ctx context.Context, req *gomcp.ReadR
 		return nil, gomcp.ResourceNotFoundError(req.Params.URI)
 	}
 
-	info, err := s.client.ShowModel(ctx, name)
+	info, err := s.showModel(ctx, name, "")
 	if err != nil {
 		return nil, err
 	}
