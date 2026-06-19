@@ -12,6 +12,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
 func TestListModelsToolBasic(t *testing.T) {
@@ -318,5 +319,107 @@ func TestPullModelToolOllamaError(t *testing.T) {
 	}
 	if text := extractText(result); !strings.Contains(text, "ollama:") {
 		t.Errorf("error = %q, want to contain %q", text, "ollama:")
+	}
+}
+
+// pullerForModel selects the provider that owns the model when that provider is
+// a ModelPuller.
+func TestPullerForModel_OllamaIsPuller(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	if err := reg.Register(provider.NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := reg.AddModelToIndex("qwen3:8b", "ollama"); err != nil {
+		t.Fatalf("AddModelToIndex: %v", err)
+	}
+
+	puller, err := pullerForModel(reg, "qwen3:8b", "")
+	if err != nil {
+		t.Fatalf("pullerForModel() error = %v", err)
+	}
+	if puller == nil {
+		t.Fatalf("pullerForModel returned nil for an Ollama-backed model; want a puller")
+	}
+}
+
+// pullerForModel returns nil when only a file-managed (openai-compat) provider
+// owns the model — pull is unsupported there.
+func TestPullerForModel_OpenAICompatNotPuller(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"id":"llama-3"}]}`))
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	oc := openaicompat.NewProvider(openaicompat.NewClient(srv.URL),
+		openaicompat.WithProviderName("llamacpp"))
+	if err := reg.Register(oc); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if err := reg.AddModelToIndex("llama-3", "llamacpp"); err != nil {
+		t.Fatalf("AddModelToIndex: %v", err)
+	}
+
+	puller, err := pullerForModel(reg, "llama-3", "")
+	if err != nil {
+		t.Fatalf("pullerForModel() error = %v", err)
+	}
+	if puller != nil {
+		t.Errorf("pullerForModel returned non-nil for a file-managed backend; want nil")
+	}
+}
+
+func TestPullerForModel_UnknownModelWithMultiplePullersRequiresProvider(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	for _, name := range []string{"ollama-a", "ollama-b"} {
+		p := provider.NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)),
+			provider.WithProviderName(name))
+		if err := reg.Register(p); err != nil {
+			t.Fatalf("Register(%s): %v", name, err)
+		}
+	}
+
+	puller, err := pullerForModel(reg, "not-yet-installed", "")
+	if err == nil {
+		t.Fatalf("pullerForModel() error = nil, want ambiguous-provider error; puller = %#v", puller)
+	}
+	if !strings.Contains(err.Error(), "multiple pull-capable providers") {
+		t.Fatalf("pullerForModel() error = %q, want multiple pull-capable providers", err)
+	}
+}
+
+func TestPullerForModel_ExplicitProviderResolvesUnknownModel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"models":[]}`))
+	}))
+	defer srv.Close()
+
+	reg := provider.NewRegistry()
+	p := provider.NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)),
+		provider.WithProviderName("shared-ollama"))
+	if err := reg.Register(p); err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+
+	puller, err := pullerForModel(reg, "not-yet-installed", "shared-ollama")
+	if err != nil {
+		t.Fatalf("pullerForModel() error = %v", err)
+	}
+	if puller == nil {
+		t.Fatalf("pullerForModel returned nil for explicit pull-capable provider")
 	}
 }
