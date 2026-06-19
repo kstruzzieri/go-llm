@@ -51,7 +51,9 @@ func (s StopReason) String() string {
 // router selects one). Zero falls back to a conservative default.
 type Budget struct {
 	InputCeiling int
-	// OutputReserve caps generation: forwarded to the model request as Options.NumPredict when > 0.
+	// OutputReserve reserves room for the model's answer. It is forwarded to the
+	// model request as Options.NumPredict when > 0 (capping generation) and is
+	// also subtracted from the per-turn input ceiling during assembly.
 	OutputReserve int
 	TotalTokens   int // 0 = unbounded whole-run cap
 }
