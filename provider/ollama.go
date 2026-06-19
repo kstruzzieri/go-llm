@@ -722,3 +722,13 @@ func toProviderToolCalls(calls []ollama.ToolCall) []ToolCall {
 	}
 	return result
 }
+
+// PullModel downloads a model via the underlying Ollama client, satisfying the
+// optional ModelPuller capability. fn receives progress updates; pass nil to
+// ignore progress.
+func (p *OllamaProvider) PullModel(ctx context.Context, name string, fn func(status string, completed, total int64)) error {
+	return p.client.PullModel(ctx, name, fn)
+}
+
+// Compile-time check: OllamaProvider implements ModelPuller.
+var _ ModelPuller = (*OllamaProvider)(nil)
