@@ -101,6 +101,11 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
+		if req.Budget.TotalTokens > 0 && res.Usage.TotalTokens >= req.Budget.TotalTokens {
+			res.StopReason = BudgetReached
+			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
+			return res, nil
+		}
 	}
 	res.StopReason = StepCapReached
 	res.Events = append(res.Events, EventRecord{Step: maxSteps, Kind: "stop"})
@@ -131,14 +136,24 @@ func toolSchemaString(specs []provider.Tool) string {
 // restraintGovernor bounds runaway loops with a weak local model. Per-Run state.
 type restraintGovernor struct {
 	consecutiveErrors int
+	lastSig           string
+	repeatCount       int
 }
 
-func (g *restraintGovernor) observe(_ provider.ToolCall, out ToolResult) {
+func (g *restraintGovernor) observe(call provider.ToolCall, out ToolResult) {
 	if out.IsError {
 		g.consecutiveErrors++
 	} else {
 		g.consecutiveErrors = 0
 	}
+	sig := call.Function.Name + "\x00" + string(call.Function.Arguments)
+	if sig == g.lastSig {
+		g.repeatCount++
+	} else {
+		g.lastSig, g.repeatCount = sig, 1
+	}
 }
 
-func (g *restraintGovernor) tripped() bool { return g.consecutiveErrors >= defaultToolErrorCap }
+func (g *restraintGovernor) tripped() bool {
+	return g.consecutiveErrors >= defaultToolErrorCap || g.repeatCount >= defaultToolErrorCap
+}
