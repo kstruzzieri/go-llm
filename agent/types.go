@@ -1,5 +1,3 @@
-// Package agent implements a dynamic plan->act->observe runtime loop that
-// drives local models through provider.Router. See doc.go for an overview.
 package agent
 
 import (
