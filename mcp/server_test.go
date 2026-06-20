@@ -101,17 +101,24 @@ func TestConfiguredProvidersDoesNotOverrideOpenAICompatProviderNamedOllama(t *te
 		},
 	}
 
-	registered, ollamaProv, err := s.configuredProviders()
-	if err != nil {
-		t.Fatalf("configuredProviders() error = %v", err)
+	// Black-box parity guard over providerbootstrap wiring: an openai-compat
+	// provider named "ollama" must reach its own base URL, must NOT inherit the
+	// WithOllamaURL override, and must leave s.ollamaProv nil (so the warmth
+	// source is not wired for it).
+	if err := s.ensureModelRegistry(context.Background()); err != nil {
+		t.Fatalf("ensureModelRegistry() error = %v", err)
 	}
-	if ollamaProv != nil {
+	if s.ollamaProv != nil {
 		t.Fatal("ollamaProv = non-nil, want nil for openai-compatible provider named ollama")
 	}
-	if len(registered) != 1 {
-		t.Fatalf("registered providers = %d, want 1", len(registered))
+	if s.warmthSource != nil {
+		t.Fatal("warmthSource = non-nil, want nil for openai-compatible provider named ollama")
 	}
-	models, err := registered[0].Models(context.Background())
+	prov, ok := s.providerRegistry.Get("ollama")
+	if !ok {
+		t.Fatal("provider \"ollama\" not registered")
+	}
+	models, err := prov.Models(context.Background())
 	if err != nil {
 		t.Fatalf("Models() error = %v", err)
 	}
@@ -126,7 +133,7 @@ func TestConfiguredProvidersDoesNotOverrideOpenAICompatProviderNamedOllama(t *te
 	}
 }
 
-func TestConfiguredProvidersRejectsInvalidProviderKeys(t *testing.T) {
+func TestEnsureModelRegistryRejectsInvalidProviderKeys(t *testing.T) {
 	tests := []struct {
 		name    string
 		key     string
@@ -154,9 +161,9 @@ func TestConfiguredProvidersRejectsInvalidProviderKeys(t *testing.T) {
 				},
 			}
 
-			_, _, err := s.configuredProviders()
+			err := s.ensureModelRegistry(context.Background())
 			if err == nil {
-				t.Fatal("configuredProviders() error = nil, want invalid provider key error")
+				t.Fatal("ensureModelRegistry() error = nil, want invalid provider key error")
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)

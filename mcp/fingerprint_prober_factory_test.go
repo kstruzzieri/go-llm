@@ -100,7 +100,7 @@ func TestEnsureModelRegistry_ProfilesOpenAICompatWithConfiguredCapabilities(t *t
 		},
 	}
 
-	if err := s.ensureModelRegistry(); err != nil {
+	if err := s.ensureModelRegistry(ctx); err != nil {
 		t.Fatalf("ensureModelRegistry() error = %v", err)
 	}
 	profile, err := s.modelRegistry.Lookup(ctx, provider.ModelKey{Provider: "local-openai", Model: "llama-local"})
