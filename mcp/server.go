@@ -231,16 +231,23 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	if err := s.ensureModelRegistry(ctx); err != nil {
 		return nil, err
 	}
+	cleanupStartupFailure := func() {
+		if err := s.Close(); err != nil {
+			log.Printf("mcp: cleanup after startup failure: %v", err)
+		}
+	}
 
 	// Step 4: Open RAG store if not disabled (before model resolution
 	// so that rebuildDerivedClients can wire up indexer/retriever).
 	if !s.ragDisabled && s.ragPath != "" {
 		parentDir := filepath.Dir(s.ragPath)
 		if err := os.MkdirAll(parentDir, 0o755); err != nil {
+			cleanupStartupFailure()
 			return nil, fmt.Errorf("mcp: create RAG directory %q: %w", parentDir, err)
 		}
 		store, err := rag.NewSQLiteStore(s.ragPath)
 		if err != nil {
+			cleanupStartupFailure()
 			return nil, fmt.Errorf("mcp: open RAG store: %w", err)
 		}
 		s.store = store
@@ -249,21 +256,15 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	// Step 4b: open the optional transcript store (off unless WithTranscriptStore
 	// is set). Failure is fatal: the caller explicitly asked to persist here.
 	if s.transcriptDBPath != "" {
-		cleanupTranscriptStartupFailure := func() {
-			if s.store != nil {
-				_ = s.store.Close()
-				s.store = nil
-			}
-		}
 		if dir := filepath.Dir(s.transcriptDBPath); dir != "" && dir != "." {
 			if err := os.MkdirAll(dir, 0o700); err != nil {
-				cleanupTranscriptStartupFailure()
+				cleanupStartupFailure()
 				return nil, fmt.Errorf("mcp: create transcript directory %q: %w", dir, err)
 			}
 		}
 		ts, err := transcript.Open(ctx, s.transcriptDBPath)
 		if err != nil {
-			cleanupTranscriptStartupFailure()
+			cleanupStartupFailure()
 			return nil, fmt.Errorf("mcp: open transcript store: %w", err)
 		}
 		s.transcriptStore = ts
@@ -426,6 +427,9 @@ func (s *Server) ensureModelRegistry(ctx context.Context) error {
 		RouterOptions:     routerOpts,
 	})
 	if err != nil {
+		if warmthSource != nil {
+			_ = warmthSource.Close()
+		}
 		return fmt.Errorf("mcp: model registry unavailable: %w", err)
 	}
 

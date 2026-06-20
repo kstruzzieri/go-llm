@@ -41,7 +41,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	// effCfg is the synthetic config when opts.Config is nil; reuse it for the
 	// prober factory, capability overrides, and Bundle.Config so all four see the
 	// same providers New actually built.
-	provs, ollamaClient, effCfg, err := buildProviders(opts.Config, opts.OllamaURLOverride)
+	provs, ollamaClients, effCfg, err := buildProviders(opts.Config, opts.OllamaURLOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -65,7 +65,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 
 	mrOpts := []provider.ModelRegistryOption{}
 	if opts.FingerprintStore != nil {
-		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(proberFactory(effCfg, ollamaClient)))
+		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(proberFactory(effCfg, ollamaClients)))
 	}
 	mr, err := provider.NewModelRegistry(pReg, opts.FingerprintStore, mrOpts...)
 	if err != nil {

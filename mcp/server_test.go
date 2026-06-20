@@ -13,6 +13,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -589,6 +590,67 @@ func TestNewServerWithoutAutoDiscoveredConfigContinues(t *testing.T) {
 	}
 	if s.ollamaProv == nil {
 		t.Fatal("ollamaProv = nil, want provider initialized in degraded mode")
+	}
+}
+
+func TestNewServerClosesBootstrapResourcesOnTranscriptStartupFailure(t *testing.T) {
+	psStarted := make(chan struct{})
+	psDone := make(chan struct{})
+	releasePS := make(chan struct{})
+	var psOnce sync.Once
+	var psDoneOnce sync.Once
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			select {
+			case <-psStarted:
+			case <-time.After(2 * time.Second):
+				http.Error(w, "warmth poll did not start", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/ps":
+			psOnce.Do(func() { close(psStarted) })
+			select {
+			case <-r.Context().Done():
+				psDoneOnce.Do(func() { close(psDone) })
+			case <-releasePS:
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer func() {
+		close(releasePS)
+		mock.Close()
+	}()
+
+	cfgPath := writeTestConfig(t, t.TempDir(), mock.URL)
+	blockingParent := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blockingParent, []byte("file"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", blockingParent, err)
+	}
+
+	_, err := NewServer(context.Background(),
+		WithConfig(cfgPath),
+		WithRAGDisabled(),
+		WithTranscriptStore(filepath.Join(blockingParent, "transcripts.db")),
+	)
+	if err == nil {
+		t.Fatal("NewServer() error = nil, want transcript startup failure")
+	}
+	if !strings.Contains(err.Error(), "create transcript directory") {
+		t.Fatalf("NewServer() error = %q, want transcript directory failure", err)
+	}
+
+	select {
+	case <-psDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("warmth poll was not cancelled after startup failure")
 	}
 }
 

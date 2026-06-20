@@ -12,12 +12,12 @@ import (
 )
 
 // buildProviders constructs every configured provider (sorted by config key).
-// It returns the registered providers, the ollama client (for the fingerprint
-// prober; nil when no ollama provider is configured), and the EFFECTIVE config
-// (the synthetic one when cfg==nil, else cfg) so callers reuse a single coherent
+// It returns the registered providers, the ollama clients keyed by provider name
+// (for provider-specific fingerprint probers), and the EFFECTIVE config (the
+// synthetic one when cfg==nil, else cfg) so callers reuse a single coherent
 // config. nil cfg synthesizes one default ollama provider at override (or
 // defaultOllamaURL). A non-nil cfg with zero Providers is an error (mcp parity).
-func buildProviders(cfg *config.Config, override string) ([]provider.Provider, *ollama.Client, *config.Config, error) {
+func buildProviders(cfg *config.Config, override string) ([]provider.Provider, map[string]*ollama.Client, *config.Config, error) {
 	effective := cfg
 	if cfg == nil {
 		url := override
@@ -38,7 +38,7 @@ func buildProviders(cfg *config.Config, override string) ([]provider.Provider, *
 	sort.Strings(keys)
 
 	registered := make([]provider.Provider, 0, len(keys))
-	var ollamaClient *ollama.Client
+	ollamaClients := make(map[string]*ollama.Client)
 	for _, key := range keys {
 		if err := config.ValidateProviderName(key); err != nil {
 			return nil, nil, nil, fmt.Errorf("providerbootstrap: provider config: %w", err)
@@ -57,12 +57,10 @@ func buildProviders(cfg *config.Config, override string) ([]provider.Provider, *
 		}
 		registered = append(registered, prov)
 		if pc.APIFormat == "ollama" && client != nil {
-			if key == "ollama" || ollamaClient == nil {
-				ollamaClient = client
-			}
+			ollamaClients[key] = client
 		}
 	}
-	return registered, ollamaClient, effective, nil
+	return registered, ollamaClients, effective, nil
 }
 
 // buildProvider constructs one provider from its config. For ollama it also

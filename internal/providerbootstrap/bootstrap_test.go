@@ -3,11 +3,16 @@ package providerbootstrap
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	"github.com/kstruzzieri/go-llm/provider"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,6 +67,92 @@ func TestNew_ProberFactoryInstalledWithFingerprintStore(t *testing.T) {
 	defer func() { _ = b.Close() }()
 	if b.Models == nil {
 		t.Fatalf("expected model registry")
+	}
+}
+
+func TestNew_FingerprintStoreUsesProviderSpecificOllamaClient(t *testing.T) {
+	ctx := context.Background()
+	var providerASawProviderBModel atomic.Bool
+	providerA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"a-model"}]}`))
+		case "/api/show":
+			var body struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad show request", http.StatusBadRequest)
+				return
+			}
+			if body.Name == "b-model" {
+				providerASawProviderBModel.Store(true)
+				http.Error(w, "wrong provider", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["completion"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer providerA.Close()
+
+	var providerBShowCalls atomic.Int32
+	providerB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[{"name":"b-model"}]}`))
+		case "/api/show":
+			var body struct {
+				Name string `json:"name"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				http.Error(w, "bad show request", http.StatusBadRequest)
+				return
+			}
+			if body.Name != "b-model" {
+				http.Error(w, "unexpected model", http.StatusNotFound)
+				return
+			}
+			providerBShowCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["completion"]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer providerB.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"a": {APIFormat: "ollama", BaseURL: providerA.URL},
+			"b": {APIFormat: "ollama", BaseURL: providerB.URL},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat": {Provider: "b", Name: "b-model", Type: "dense"},
+		},
+	}
+	bundle, err := New(ctx, Options{Config: cfg, FingerprintStore: newTestFingerprintStore(t)})
+	if err != nil {
+		t.Fatalf("New(multi-ollama cfg) error: %v", err)
+	}
+	defer func() { _ = bundle.Close() }()
+
+	profile, err := bundle.Models.Lookup(ctx, provider.ModelKey{Provider: "b", Model: "b-model"})
+	if err != nil {
+		t.Fatalf("Lookup(b/b-model) error = %v", err)
+	}
+	if !profile.Caps.Has(provider.CapChat) {
+		t.Fatalf("profile caps = %v, want chat capability from provider B", profile.Caps)
+	}
+	if providerASawProviderBModel.Load() {
+		t.Fatal("provider B fingerprint probe used provider A's Ollama client")
+	}
+	if got := providerBShowCalls.Load(); got < 3 {
+		t.Fatalf("provider B /api/show calls = %d, want startup, runtime lookup, and fingerprint probe", got)
 	}
 }
 

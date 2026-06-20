@@ -12,9 +12,10 @@ import (
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
-// proberFactory builds the provider-aware fingerprint prober factory. The
-// ollamaClient is reused for ollama-format probers (mirrors mcp's s.client).
-func proberFactory(cfg *config.Config, ollamaClient *ollama.Client) provider.FingerprintProberFactory {
+// proberFactory builds the provider-aware fingerprint prober factory. Ollama
+// clients are keyed by provider name so multi-Ollama configs probe the same
+// backend that owns the requested model key.
+func proberFactory(cfg *config.Config, ollamaClients map[string]*ollama.Client) provider.FingerprintProberFactory {
 	return func(ctx context.Context, key provider.ModelKey, runtime *provider.ModelInfo, p provider.Provider) (*provider.FingerprintProberSpec, error) {
 		apiFormat := "ollama"
 		if cfg != nil {
@@ -31,7 +32,7 @@ func proberFactory(cfg *config.Config, ollamaClient *ollama.Client) provider.Fin
 		caps := capabilitiesForKey(cfg, key)
 		in := probers.ProberFactoryInput{
 			APIFormat:    apiFormat,
-			OllamaClient: ollamaClient,
+			OllamaClient: ollamaClients[key.Provider],
 			Capabilities: caps,
 		}
 		if apiFormat == "openai-compat" {

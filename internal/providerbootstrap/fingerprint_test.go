@@ -13,7 +13,7 @@ func TestProberFactory_OllamaKeyBuildsProber(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 		"ollama": {APIFormat: "ollama", BaseURL: "http://localhost:11434"},
 	}}
-	factory := proberFactory(cfg, ollama.NewClient())
+	factory := proberFactory(cfg, map[string]*ollama.Client{"ollama": ollama.NewClient()})
 	op := provider.NewOllamaProvider(ollama.NewClient(), provider.WithProviderName("ollama"))
 	spec, err := factory(context.Background(), provider.ModelKey{Provider: "ollama", Model: "qwen"}, nil, op)
 	if err != nil {
@@ -26,7 +26,7 @@ func TestProberFactory_OllamaKeyBuildsProber(t *testing.T) {
 
 func TestProberFactory_UnknownProviderReturnsNil(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{}}
-	factory := proberFactory(cfg, ollama.NewClient())
+	factory := proberFactory(cfg, map[string]*ollama.Client{"ollama": ollama.NewClient()})
 	spec, err := factory(context.Background(), provider.ModelKey{Provider: "missing", Model: "m"}, nil, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -40,7 +40,7 @@ func TestProberFactory_OpenAICompatWrongTypeErrors(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 		"lc": {APIFormat: "openai-compat", BaseURL: "http://localhost:8080"},
 	}}
-	factory := proberFactory(cfg, ollama.NewClient())
+	factory := proberFactory(cfg, map[string]*ollama.Client{"ollama": ollama.NewClient()})
 	op := provider.NewOllamaProvider(ollama.NewClient(), provider.WithProviderName("lc"))
 	if _, err := factory(context.Background(), provider.ModelKey{Provider: "lc", Model: "m"}, nil, op); err == nil {
 		t.Fatalf("expected type-mismatch error when openai-compat provider is not *openaicompat.Provider")

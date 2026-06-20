@@ -6,19 +6,19 @@ import (
 	"github.com/kstruzzieri/go-llm/config"
 )
 
-// buildProviders returns (providers, ollamaClient, effectiveConfig, error).
+// buildProviders returns (providers, ollamaClients, effectiveConfig, error).
 // nil cfg synthesizes one default ollama provider AND a synthetic effective config;
 // a non-nil cfg with zero Providers is an error (mcp parity).
 
 func TestBuildProviders_NilConfigSynthesizesDefaultOllamaAndEffectiveConfig(t *testing.T) {
-	provs, ollamaClient, eff, err := buildProviders(nil, "")
+	provs, ollamaClients, eff, err := buildProviders(nil, "")
 	if err != nil {
 		t.Fatalf("buildProviders(nil) error: %v", err)
 	}
 	if len(provs) != 1 || provs[0].Name() != "ollama" {
 		t.Fatalf("providers = %v, want [ollama]", provs)
 	}
-	if ollamaClient == nil {
+	if ollamaClients["ollama"] == nil {
 		t.Fatalf("expected ollama client to be captured")
 	}
 	if eff == nil {
