@@ -31,13 +31,14 @@ var ignoreDirs = map[string]bool{
 }
 
 var (
-	errEmptyRoot  = errors.New("empty workspace root")
-	errNUL        = errors.New("path contains NUL byte")
-	errAbsPath    = errors.New("absolute paths are not allowed")
-	errEscape     = errors.New("path escapes the workspace root")
-	errSymlink    = errors.New("symlinks are not followed")
-	errNotRegular = errors.New("not a regular file")
-	errNotDir     = errors.New("not a directory")
+	errEmptyRoot   = errors.New("empty workspace root")
+	errNUL         = errors.New("path contains NUL byte")
+	errAbsPath     = errors.New("absolute paths are not allowed")
+	errEscape      = errors.New("path escapes the workspace root")
+	errSymlink     = errors.New("symlinks are not followed")
+	errNotRegular  = errors.New("not a regular file")
+	errNotDir      = errors.New("not a directory")
+	errFileChanged = errors.New("file identity changed between stat and open")
 )
 
 // Workspace is the single audited chokepoint for read-only filesystem access.
@@ -114,4 +115,73 @@ func (w *Workspace) walk(ctx context.Context, fn func(rel string, d fs.DirEntry)
 		}
 		return fn(filepath.ToSlash(rel), d)
 	})
+}
+
+// resolveFile contains a path to a concrete file: cleanRel for containment, then
+// Lstat to reject symlinks (never follow) and require a regular file. The
+// returned FileInfo is the pre-open Lstat result; openRegularFile re-stats the
+// open handle and compares with os.SameFile to close the symlink-swap TOCTOU window.
+func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
+	abs, err := w.cleanRel(p)
+	if err != nil {
+		return "", nil, err
+	}
+	fi, err := os.Lstat(abs)
+	if err != nil {
+		return "", nil, err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return "", nil, errSymlink
+	}
+	if !fi.Mode().IsRegular() {
+		return "", nil, errNotRegular
+	}
+	return abs, fi, nil
+}
+
+// resolveDir contains a path to a concrete directory: cleanRel, then Lstat to
+// reject a symlinked directory target (never follow) and require a real dir.
+func (w *Workspace) resolveDir(p string) (string, error) {
+	abs, err := w.cleanRel(p)
+	if err != nil {
+		return "", err
+	}
+	fi, err := os.Lstat(abs)
+	if err != nil {
+		return "", err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return "", errSymlink
+	}
+	if !fi.IsDir() {
+		return "", errNotDir
+	}
+	return abs, nil
+}
+
+// openRegularFile is the single helper for content reads. It first resolves the
+// path through resolveFile (containment + Lstat + symlink/kind checks), then opens
+// the file and verifies the open handle still refers to the same file Lstat saw.
+// Returns errFileChanged if the open handle no longer matches the file Lstat saw
+// (e.g. a regular-file swap between Lstat and Open). Callers own the returned file
+// and must close it.
+func (w *Workspace) openRegularFile(p string) (*os.File, error) {
+	abs, lfi, err := w.resolveFile(p)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, err
+	}
+	sfi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !os.SameFile(lfi, sfi) {
+		_ = f.Close()
+		return nil, errFileChanged
+	}
+	return f, nil
 }

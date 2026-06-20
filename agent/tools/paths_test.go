@@ -148,3 +148,114 @@ func TestWorkspaceWalk(t *testing.T) {
 		}
 	}
 }
+
+func TestResolveFileRejectsSymlinkAndKind(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	reg := filepath.Join(root, "reg.txt")
+	if err := os.WriteFile(reg, []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "evil")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(reg, filepath.Join(root, "ptr")); err != nil {
+		t.Fatal(err)
+	}
+
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := ws.resolveFile("reg.txt"); err != nil {
+		t.Fatalf("resolveFile on regular file errored: %v", err)
+	}
+	if _, _, err := ws.resolveFile("sub"); !errors.Is(err, errNotRegular) {
+		t.Fatalf("resolveFile on a directory: got %v, want errNotRegular", err)
+	}
+	// "evil" is an in-root symlink whose target is OUTSIDE root; rejected as a
+	// symlink by Lstat, not by containment (cleanRel passes the in-root link path).
+	if _, _, err := ws.resolveFile("evil"); !errors.Is(err, errSymlink) {
+		t.Fatalf("resolveFile on out-of-root-pointing symlink: got %v, want errSymlink", err)
+	}
+	// "ptr" is an in-root symlink to an in-root file; still never followed.
+	if _, _, err := ws.resolveFile("ptr"); !errors.Is(err, errSymlink) {
+		t.Fatalf("resolveFile on in-root symlink: got %v, want errSymlink", err)
+	}
+	if _, _, err := ws.resolveFile("missing.txt"); err == nil {
+		t.Fatal("resolveFile on missing file should error")
+	}
+}
+
+func TestOpenRegularFileRejectsSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "reg.txt"), []byte("data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	secret := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(secret, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(secret, filepath.Join(root, "evil")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f, err := ws.openRegularFile("reg.txt")
+	if err != nil {
+		t.Fatalf("openRegularFile on regular file errored: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if f, err := ws.openRegularFile("evil"); !errors.Is(err, errSymlink) {
+		if err == nil {
+			_ = f.Close()
+		}
+		t.Fatalf("openRegularFile on symlink: got %v, want errSymlink", err)
+	}
+}
+
+func TestResolveDirRejectsSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(root, "linkdir")
+	if err := os.Symlink(outside, linkDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	regFile := filepath.Join(root, "f.txt")
+	if err := os.WriteFile(regFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.resolveDir("."); err != nil {
+		t.Fatalf("resolveDir(root) errored: %v", err)
+	}
+	if _, err := ws.resolveDir("real"); err != nil {
+		t.Fatalf("resolveDir(real subdir) errored: %v", err)
+	}
+	if _, err := ws.resolveDir("linkdir"); !errors.Is(err, errSymlink) {
+		t.Fatalf("resolveDir on symlinked dir: got %v, want errSymlink", err)
+	}
+	if _, err := ws.resolveDir("f.txt"); !errors.Is(err, errNotDir) {
+		t.Fatalf("resolveDir on a regular file: got %v, want errNotDir", err)
+	}
+}
