@@ -101,6 +101,43 @@ func (w *Workspace) cleanRel(p string) (string, error) {
 	return joined, nil
 }
 
+// rejectSymlinkAncestors verifies every parent component below the workspace
+// root is a real directory. A final-component Lstat is not enough because
+// os.Open("linkdir/file") would otherwise follow the intermediate symlink.
+func (w *Workspace) rejectSymlinkAncestors(abs string) error {
+	abs = filepath.Clean(abs)
+	if !w.underRoot(abs) {
+		return errEscape
+	}
+	rel, err := filepath.Rel(w.root, abs)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(rel)
+	if dir == "." || dir == "" {
+		return nil
+	}
+
+	cur := w.root
+	for _, part := range strings.Split(dir, string(os.PathSeparator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		fi, err := os.Lstat(cur)
+		if err != nil {
+			return err
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return errSymlink
+		}
+		if !fi.IsDir() {
+			return errNotDir
+		}
+	}
+	return nil
+}
+
 // walk drives filepath.WalkDir from the canonical root, skipping ignore-set
 // directories and never descending symlinks (WalkDir does not follow them).
 // fn receives slash-normalized relative paths. ctx cancellation aborts the walk.
@@ -126,13 +163,17 @@ func (w *Workspace) walk(ctx context.Context, fn func(rel string, d fs.DirEntry)
 	})
 }
 
-// resolveFile contains a path to a concrete file: cleanRel for containment, then
-// Lstat to reject symlinks (never follow) and require a regular file. The
-// returned FileInfo is the pre-open Lstat result; openRegularFile re-stats the
-// open handle and compares with os.SameFile to close the symlink-swap TOCTOU window.
+// resolveFile contains a path to a concrete file: cleanRel for containment,
+// Lstat checks for every parent component, then final Lstat to reject symlinks
+// (never follow) and require a regular file. The returned FileInfo is the
+// pre-open Lstat result; openRegularFile re-stats the open handle and compares
+// with os.SameFile to close the final-component symlink-swap TOCTOU window.
 func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := w.rejectSymlinkAncestors(abs); err != nil {
 		return "", nil, err
 	}
 	fi, err := os.Lstat(abs)
@@ -148,13 +189,17 @@ func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 	return abs, fi, nil
 }
 
-// resolveDir contains a path to a concrete directory: cleanRel, then Lstat to
-// reject a symlinked directory target (never follow) and require a real dir. The
-// returned FileInfo is the pre-open Lstat result; openDir re-stats the open handle
-// and compares with os.SameFile to close the symlink-swap TOCTOU window.
+// resolveDir contains a path to a concrete directory: cleanRel, Lstat checks for
+// every parent component, then final Lstat to reject a symlinked directory
+// target (never follow) and require a real dir. The returned FileInfo is the
+// pre-open Lstat result; openDir re-stats the open handle and compares with
+// os.SameFile to close the final-component symlink-swap TOCTOU window.
 func (w *Workspace) resolveDir(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := w.rejectSymlinkAncestors(abs); err != nil {
 		return "", nil, err
 	}
 	fi, err := os.Lstat(abs)

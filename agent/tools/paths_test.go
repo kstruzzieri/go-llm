@@ -229,6 +229,31 @@ func TestOpenRegularFileRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestResolveFileRejectsIntermediateSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linkdir")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := ws.resolveFile("linkdir/secret.txt"); !errors.Is(err, errSymlink) {
+		t.Fatalf("resolveFile through intermediate symlink: got %v, want errSymlink", err)
+	}
+	if f, err := ws.openRegularFile("linkdir/secret.txt"); !errors.Is(err, errSymlink) {
+		if err == nil {
+			_ = f.Close()
+		}
+		t.Fatalf("openRegularFile through intermediate symlink: got %v, want errSymlink", err)
+	}
+}
+
 func TestResolveDirRejectsSymlinkTarget(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
@@ -259,6 +284,31 @@ func TestResolveDirRejectsSymlinkTarget(t *testing.T) {
 	}
 	if _, _, err := ws.resolveDir("f.txt"); !errors.Is(err, errNotDir) {
 		t.Fatalf("resolveDir on a regular file: got %v, want errNotDir", err)
+	}
+}
+
+func TestResolveDirRejectsIntermediateSymlink(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(outside, "nested"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linkdir")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := ws.resolveDir("linkdir/nested"); !errors.Is(err, errSymlink) {
+		t.Fatalf("resolveDir through intermediate symlink: got %v, want errSymlink", err)
+	}
+	if f, err := ws.openDir("linkdir/nested"); !errors.Is(err, errSymlink) {
+		if err == nil {
+			_ = f.Close()
+		}
+		t.Fatalf("openDir through intermediate symlink: got %v, want errSymlink", err)
 	}
 }
 
