@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -130,6 +131,70 @@ func TestConfiguredProvidersDoesNotOverrideOpenAICompatProviderNamedOllama(t *te
 	}
 	if overrideHit.Load() {
 		t.Fatal("WithOllamaURL override was incorrectly applied to openai-compatible provider named ollama")
+	}
+}
+
+func TestEnsureModelRegistryConcurrentInitInstallsExactlyOneStack(t *testing.T) {
+	// Drive the double-checked-locking init race directly: many goroutines call
+	// ensureModelRegistry at once. Losers must discard their freshly built bundle
+	// (close it) and keep the winner's; the installed stack must be coherent and
+	// fields must never be spliced across bundles. Run under -race to catch any
+	// unsynchronized access. A mock openai-compat endpoint gives New real work.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"m","object":"model"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mock.Close()
+
+	s := &Server{
+		ollamaURL: "http://127.0.0.1:0",
+		cfg: &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"lc": {BaseURL: mock.URL, APIFormat: "openai-compat"},
+			},
+		},
+	}
+	defer func() {
+		if s.router != nil {
+			_ = s.router.Close()
+		}
+	}()
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			errs[idx] = s.ensureModelRegistry(context.Background())
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: ensureModelRegistry() error = %v", i, err)
+		}
+	}
+	if s.router == nil || s.modelRegistry == nil || s.providerRegistry == nil {
+		t.Fatalf("expected a coherent installed stack, got router=%v models=%v providers=%v",
+			s.router, s.modelRegistry, s.providerRegistry)
+	}
+	// A subsequent call must take the fast path and not replace the stack.
+	installed := s.providerRegistry
+	if err := s.ensureModelRegistry(context.Background()); err != nil {
+		t.Fatalf("post-init ensureModelRegistry() error = %v", err)
+	}
+	if s.providerRegistry != installed {
+		t.Fatal("provider registry was replaced after init; fast path did not hold")
 	}
 }
 
