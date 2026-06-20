@@ -41,7 +41,7 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	// effCfg is the synthetic config when opts.Config is nil; reuse it for the
 	// prober factory, capability overrides, and Bundle.Config so all four see the
 	// same providers New actually built.
-	provs, _, ollamaClient, effCfg, err := buildProviders(opts.Config, opts.OllamaURLOverride)
+	provs, ollamaClient, effCfg, err := buildProviders(opts.Config, opts.OllamaURLOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -51,12 +51,12 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	var warnings []error
 	for _, p := range provs {
 		if err := pReg.Register(p); err != nil {
-			warnings = append(warnings, fmt.Errorf("register %q: %w", p.Name(), err))
+			warnings = append(warnings, fmt.Errorf("providerbootstrap: register %q: %w", p.Name(), err))
 			continue
 		}
 		registered++
 		if err := pReg.RefreshModels(ctx, p.Name()); err != nil {
-			warnings = append(warnings, fmt.Errorf("refresh %q: %w", p.Name(), err))
+			warnings = append(warnings, fmt.Errorf("providerbootstrap: refresh %q: %w", p.Name(), err))
 		}
 	}
 	if registered == 0 {

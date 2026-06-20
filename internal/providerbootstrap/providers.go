@@ -12,13 +12,12 @@ import (
 )
 
 // buildProviders constructs every configured provider (sorted by config key).
-// It returns the registered providers, the ollama provider + its client (for the
-// fingerprint prober; nil when no ollama provider is configured), and the
-// EFFECTIVE config (the synthetic one when cfg==nil, else cfg) so callers reuse a
-// single coherent config. nil cfg synthesizes one default ollama provider at
-// override (or defaultOllamaURL). A non-nil cfg with zero Providers is an error
-// (mcp parity).
-func buildProviders(cfg *config.Config, override string) ([]provider.Provider, provider.Provider, *ollama.Client, *config.Config, error) {
+// It returns the registered providers, the ollama client (for the fingerprint
+// prober; nil when no ollama provider is configured), and the EFFECTIVE config
+// (the synthetic one when cfg==nil, else cfg) so callers reuse a single coherent
+// config. nil cfg synthesizes one default ollama provider at override (or
+// defaultOllamaURL). A non-nil cfg with zero Providers is an error (mcp parity).
+func buildProviders(cfg *config.Config, override string) ([]provider.Provider, *ollama.Client, *config.Config, error) {
 	effective := cfg
 	if cfg == nil {
 		url := override
@@ -29,7 +28,7 @@ func buildProviders(cfg *config.Config, override string) ([]provider.Provider, p
 			"ollama": {BaseURL: url, APIFormat: "ollama"},
 		}}
 	} else if len(cfg.Providers) == 0 {
-		return nil, nil, nil, nil, fmt.Errorf("providerbootstrap: no providers configured")
+		return nil, nil, nil, fmt.Errorf("providerbootstrap: no providers configured")
 	}
 
 	keys := make([]string, 0, len(effective.Providers))
@@ -39,11 +38,10 @@ func buildProviders(cfg *config.Config, override string) ([]provider.Provider, p
 	sort.Strings(keys)
 
 	registered := make([]provider.Provider, 0, len(keys))
-	var ollamaProv provider.Provider
 	var ollamaClient *ollama.Client
 	for _, key := range keys {
 		if err := config.ValidateProviderName(key); err != nil {
-			return nil, nil, nil, nil, fmt.Errorf("providerbootstrap: provider config: %w", err)
+			return nil, nil, nil, fmt.Errorf("providerbootstrap: provider config: %w", err)
 		}
 		pc := effective.Providers[key]
 		if pc.APIFormat == "" {
@@ -55,16 +53,16 @@ func buildProviders(cfg *config.Config, override string) ([]provider.Provider, p
 		}
 		prov, client, err := buildProvider(key, pc)
 		if err != nil {
-			return nil, nil, nil, nil, err
+			return nil, nil, nil, err
 		}
 		registered = append(registered, prov)
 		if pc.APIFormat == "ollama" && client != nil {
-			if key == "ollama" || ollamaProv == nil {
-				ollamaProv, ollamaClient = prov, client
+			if key == "ollama" || ollamaClient == nil {
+				ollamaClient = client
 			}
 		}
 	}
-	return registered, ollamaProv, ollamaClient, effective, nil
+	return registered, ollamaClient, effective, nil
 }
 
 // buildProvider constructs one provider from its config. For ollama it also
