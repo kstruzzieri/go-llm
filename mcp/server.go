@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -451,6 +452,13 @@ func (s *Server) ensureModelRegistry(ctx context.Context) error {
 	if warmthSource != nil {
 		s.warmthSource = warmthSource
 		s.ollamaProv = providerForName(bundle.Providers, "ollama")
+	}
+	// Surface best-effort bootstrap failures (a provider that failed to register
+	// or refresh its model index) rather than silently dropping Bundle.Warnings.
+	// Non-fatal: the registry/router were still built. Logged only for the bundle
+	// we install (the lost-race bundle's warnings belong to a discarded stack).
+	for _, w := range bundle.Warnings {
+		log.Printf("mcp: model registry init: %v", w)
 	}
 	return nil
 }
