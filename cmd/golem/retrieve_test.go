@@ -16,30 +16,39 @@ func embedCfg() *config.Config {
 	}
 }
 
-func TestResolveRetriever_OmittedWhenNilRouter(t *testing.T) {
-	tool, ok := resolveRetriever(context.Background(), embedCfg(), nil, filepath.Join(t.TempDir(), "x.db"))
-	if ok || tool != nil {
-		t.Errorf("expected omission for nil router, got ok=%v tool=%v", ok, tool)
+func TestResolveRetriever_NilWhenNotRequested(t *testing.T) {
+	// dbPath == "" => retrieve was not requested: omit quietly, NO error.
+	tool, err := resolveRetriever(context.Background(), embedCfg(), &provider.Router{}, "")
+	if tool != nil || err != nil {
+		t.Errorf("not-requested should be (nil, nil), got tool=%v err=%v", tool, err)
 	}
 }
 
-func TestResolveRetriever_OmittedWhenNoEmbeddingDefault(t *testing.T) {
-	// Non-nil router + non-empty dbPath so execution reaches (and stops at) the
-	// embedding-default guard rather than an earlier short-circuit.
+func TestResolveRetriever_ErrorsWhenNoProvider(t *testing.T) {
+	// -rag-db given but no router => requested-but-failed: surface an error.
+	tool, err := resolveRetriever(context.Background(), embedCfg(), nil, filepath.Join(t.TempDir(), "x.db"))
+	if tool != nil || err == nil {
+		t.Errorf("nil router with -rag-db should error, got tool=%v err=%v", tool, err)
+	}
+}
+
+func TestResolveRetriever_ErrorsWhenNoEmbeddingDefault(t *testing.T) {
+	// Non-nil router + non-empty dbPath so execution reaches the embedding-default
+	// guard; with no defaults.embedding it is requested-but-failed.
 	cfg := &config.Config{Defaults: map[string]string{}}
-	tool, ok := resolveRetriever(context.Background(), cfg, &provider.Router{}, "/some/path.db")
-	if ok || tool != nil {
-		t.Errorf("expected omission with no defaults.embedding, got ok=%v tool=%v", ok, tool)
+	tool, err := resolveRetriever(context.Background(), cfg, &provider.Router{}, "/some/path.db")
+	if tool != nil || err == nil {
+		t.Errorf("no defaults.embedding with -rag-db should error, got tool=%v err=%v", tool, err)
 	}
 }
 
-func TestResolveRetriever_OmittedWhenDBMissing(t *testing.T) {
-	// Non-nil router + resolvable embedding default so execution reaches the
-	// os.Stat existence check; the missing path is the condition under test.
-	// The zero-value router is never dereferenced because os.Stat fails first.
-	tool, ok := resolveRetriever(context.Background(), embedCfg(), &provider.Router{}, filepath.Join(t.TempDir(), "missing.db"))
-	if ok || tool != nil {
-		t.Errorf("expected omission for missing DB file, got ok=%v tool=%v", ok, tool)
+func TestResolveRetriever_ErrorsWhenDBMissing(t *testing.T) {
+	// Resolvable embedding default so execution reaches the os.Stat existence
+	// check; the missing path is the condition under test. The zero-value router
+	// is never dereferenced because os.Stat fails first.
+	tool, err := resolveRetriever(context.Background(), embedCfg(), &provider.Router{}, filepath.Join(t.TempDir(), "missing.db"))
+	if tool != nil || err == nil {
+		t.Errorf("missing -rag-db file should error, got tool=%v err=%v", tool, err)
 	}
 }
 

@@ -28,6 +28,22 @@ func TestStartupNotices(t *testing.T) {
 	}
 }
 
+func TestStartupNotices_RequestedRetrieveSuppressesGenericLine(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace:         "/r",
+		retrieveOmitted:   true,
+		retrieveRequested: true,
+		preflightWarns:    []string{`retrieve disabled: rag-db "/x.db": no such file or directory`},
+	})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "retrieve disabled:") {
+		t.Errorf("expected the specific retrieve-disabled reason, got:\n%s", joined)
+	}
+	if strings.Contains(joined, "no RAG index configured") {
+		t.Errorf("generic no-index line must be suppressed when -rag-db was requested, got:\n%s", joined)
+	}
+}
+
 func TestParseFlags_Defaults(t *testing.T) {
 	f, err := parseFlags([]string{})
 	if err != nil {

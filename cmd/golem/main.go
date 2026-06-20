@@ -43,11 +43,12 @@ func parseFlags(args []string) (flags, error) {
 }
 
 type startupInfo struct {
-	workspace       string
-	useRecommend    bool
-	bootstrapWarns  []error
-	preflightWarns  []string
-	retrieveOmitted bool
+	workspace         string
+	useRecommend      bool
+	bootstrapWarns    []error
+	preflightWarns    []string
+	retrieveOmitted   bool
+	retrieveRequested bool // -rag-db was given; suppress the generic no-index notice
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -63,7 +64,10 @@ func startupNotices(info startupInfo) []string {
 	for _, w := range info.preflightWarns {
 		out = append(out, "warning: "+w)
 	}
-	if info.retrieveOmitted {
+	// The generic no-index notice is only meaningful when retrieve was NOT
+	// requested. When -rag-db was given but failed, a specific "retrieve
+	// disabled: ..." warning above already explains why.
+	if info.retrieveOmitted && !info.retrieveRequested {
 		out = append(out, "retrieve unavailable: no RAG index configured; using file/search tools")
 	}
 	return out
@@ -118,7 +122,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	var retrieve agent.Tool
-	if t, ok := resolveRetriever(ctx, bundle.Config, bundle.Router, f.ragDB); ok {
+	if t, rerr := resolveRetriever(ctx, bundle.Config, bundle.Router, f.ragDB); rerr != nil {
+		// -rag-db was given but retrieve could not be enabled: surface why
+		// instead of swallowing it behind the generic "no RAG index" notice.
+		warns = append(warns, "retrieve disabled: "+rerr.Error())
+	} else {
 		retrieve = t
 	}
 	tools, err := buildTools(root, retrieve)
@@ -128,11 +136,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	retrieveOmitted := retrieve == nil
 
 	for _, line := range startupNotices(startupInfo{
-		workspace:       root,
-		useRecommend:    plan.useRecommend,
-		bootstrapWarns:  bundle.Warnings,
-		preflightWarns:  warns,
-		retrieveOmitted: retrieveOmitted,
+		workspace:         root,
+		useRecommend:      plan.useRecommend,
+		bootstrapWarns:    bundle.Warnings,
+		preflightWarns:    warns,
+		retrieveOmitted:   retrieveOmitted,
+		retrieveRequested: f.ragDB != "",
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}

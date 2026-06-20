@@ -29,25 +29,36 @@ func buildTools(root string, retrieve agent.Tool) ([]agent.Tool, error) {
 	return fileTools, nil
 }
 
-// resolveRetriever builds a retrieve tool when a RAG DB exists at dbPath AND
-// defaults.embedding resolves to a model. Otherwise it returns (nil, false) so
-// the tool is omitted (weak local models waste turns on an unavailable tool).
+// resolveRetriever builds a retrieve tool from an explicitly configured RAG DB.
+// retrieve is opt-in, so it reports three distinct outcomes:
+//   - (nil, nil): not requested (dbPath == ""); the caller omits retrieve quietly.
+//   - (nil, err): requested via -rag-db but could NOT be enabled; the reason is
+//     returned so the caller can surface it rather than mislead the user with a
+//     generic "no RAG index configured" line.
+//   - (tool, nil): enabled.
 // On success the opened store lives for the process: the retriever queries it
 // for the whole session and the OS reclaims the handle at exit.
-func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string) (agent.Tool, bool) {
-	if cfg == nil || dbPath == "" || router == nil {
-		return nil, false
+func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string) (agent.Tool, error) {
+	if dbPath == "" {
+		return nil, nil // retrieve is opt-in and was not requested
+	}
+	if cfg == nil || router == nil {
+		return nil, fmt.Errorf("no provider configured for embeddings")
 	}
 	embModel := embeddingSelector(cfg)
 	if embModel == "" {
-		return nil, false
+		return nil, fmt.Errorf("no embedding model configured (set defaults.embedding in models.json)")
 	}
-	if info, err := os.Stat(dbPath); err != nil || info.IsDir() {
-		return nil, false
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("rag-db %q: %w", dbPath, err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("rag-db %q is a directory, not a SQLite file", dbPath)
 	}
 	store, err := rag.NewSQLiteStore(dbPath)
 	if err != nil {
-		return nil, false
+		return nil, fmt.Errorf("open rag-db %q: %w", dbPath, err)
 	}
 	embedder := rag.EmbedderFunc(func(ctx context.Context, model string, inputs []string) (rag.EmbedResult, error) {
 		resp, err := router.Embed(ctx, provider.EmbedRequest{Model: model, Input: inputs})
@@ -77,9 +88,9 @@ func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.
 	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(embModel))
 	if err != nil {
 		_ = store.Close()
-		return nil, false
+		return nil, fmt.Errorf("build retriever for rag-db %q: %w", dbPath, err)
 	}
-	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, true
+	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, nil
 }
 
 // embeddingSelector returns the head of the embedding fallback chain, or "".
