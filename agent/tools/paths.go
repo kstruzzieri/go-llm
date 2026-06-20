@@ -20,6 +20,13 @@ const (
 	searchMaxBytes   = 64 * 1024  // search: max bytes of joined output
 	listMaxEntries   = 1000       // glob/list: max emitted entries
 	markerHeadroom   = 256        // bytes reserved for an in-band truncation marker
+
+	// listOutputCap is the byte backstop for the entry-listing tools (glob, list).
+	// Their primary limit is the count cap (listMaxEntries); this byte ceiling is
+	// set generously above a typical 1000-entry render so the in-band truncation
+	// marker is not itself cut by the runtime. Paths are unbounded in theory, so a
+	// pathological tree of very long paths may still be runtime-capped.
+	listOutputCap = 512 * 1024
 )
 
 // ignoreDirs are directory names skipped during tree walks (search, glob).

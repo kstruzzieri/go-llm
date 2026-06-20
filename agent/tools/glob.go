@@ -53,10 +53,10 @@ func (*Glob) Spec() agent.ToolSpec {
 }
 
 // Effect declares read-only, never-approval. The entry self-cap is count-based
-// (listMaxEntries), so OutputCap is a byte ceiling set well above a worst-case
-// 1000-entry render to avoid silent runtime re-truncation of long path lists.
+// (listMaxEntries); OutputCap is a generous byte backstop (listOutputCap) above a
+// typical 1000-entry render so the truncation marker is not runtime-cut.
 func (*Glob) Effect() agent.Effect {
-	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: readFileMaxBytes + markerHeadroom}
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: listOutputCap}
 }
 
 // Invoke walks and matches relative paths against the pattern.
@@ -142,10 +142,9 @@ func (*List) Spec() agent.ToolSpec {
 	}
 }
 
-// Effect declares read-only, never-approval. OutputCap is set above the count-based
-// entry self-cap, same rationale as Glob.Effect.
+// Effect declares read-only, never-approval; same OutputCap rationale as Glob.Effect.
 func (*List) Effect() agent.Effect {
-	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: readFileMaxBytes + markerHeadroom}
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: listOutputCap}
 }
 
 // Invoke reads a single directory level. Expected failures return IsError.

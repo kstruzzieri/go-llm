@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -103,6 +104,9 @@ func TestGlobEffect(t *testing.T) {
 	if e.Class != agent.Read || e.Approval != agent.ApprovalNever {
 		t.Fatalf("Effect = %+v, want Read/ApprovalNever", e)
 	}
+	if e.OutputCap < listOutputCap {
+		t.Fatalf("OutputCap %d must be >= listOutputCap %d", e.OutputCap, listOutputCap)
+	}
 }
 
 func TestListHappyAndMarkers(t *testing.T) {
@@ -172,5 +176,75 @@ func TestListEffect(t *testing.T) {
 	e := l.Effect()
 	if e.Class != agent.Read || e.Approval != agent.ApprovalNever {
 		t.Fatalf("Effect = %+v, want Read/ApprovalNever", e)
+	}
+	if e.OutputCap < listOutputCap {
+		t.Fatalf("OutputCap %d must be >= listOutputCap %d", e.OutputCap, listOutputCap)
+	}
+}
+
+func TestGlobMarksDirectory(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"sub/x.go": "y"})
+	g := NewGlob(mustWorkspace(t, root))
+	res := invoke(t, g, map[string]any{"pattern": "sub"})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "sub/") {
+		t.Fatalf("glob should mark a matched directory with a trailing slash: %q", res.Content)
+	}
+}
+
+func TestGlobEntryCapTruncates(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{}
+	for i := 0; i < listMaxEntries+5; i++ {
+		files[fmt.Sprintf("f%04d.txt", i)] = "x"
+	}
+	writeTree(t, root, files)
+	g := NewGlob(mustWorkspace(t, root))
+	res := invoke(t, g, map[string]any{"pattern": "*.txt"})
+	if res.IsError {
+		t.Fatalf("entry cap should be partial success, got IsError: %s", res.Content)
+	}
+	if !res.Truncated || !strings.Contains(res.Content, "truncated") {
+		t.Fatal("glob entry cap should set Truncated and an in-band marker")
+	}
+}
+
+func TestListEntryCapTruncates(t *testing.T) {
+	root := t.TempDir()
+	files := map[string]string{}
+	for i := 0; i < listMaxEntries+5; i++ {
+		files[fmt.Sprintf("f%04d.txt", i)] = "x"
+	}
+	writeTree(t, root, files)
+	l := NewList(mustWorkspace(t, root))
+	res := invoke(t, l, map[string]any{"path": "."})
+	if res.IsError {
+		t.Fatalf("entry cap should be partial success, got IsError: %s", res.Content)
+	}
+	if !res.Truncated || !strings.Contains(res.Content, "truncated") {
+		t.Fatal("list entry cap should set Truncated and an in-band marker")
+	}
+}
+
+func TestListNestedSubdirPrefixes(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"sub/deep.go": "y", "sub/inner/x.go": "z"})
+	l := NewList(mustWorkspace(t, root))
+	res := invoke(t, l, map[string]any{"path": "sub"})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "sub/deep.go") {
+		t.Fatalf("subdir listing should prefix entries with sub/: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "sub/inner/") {
+		t.Fatalf("subdir listing should show nested dir as sub/inner/: %q", res.Content)
+	}
+	// single-level: must not recurse into sub/inner
+	if strings.Contains(res.Content, "x.go") {
+		t.Fatalf("list must be single-level, not recursive: %q", res.Content)
 	}
 }
