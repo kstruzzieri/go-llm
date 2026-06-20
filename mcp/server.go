@@ -64,9 +64,10 @@ type Server struct {
 	completer        *completion.Provider
 	modelRegistry    *provider.ModelRegistry
 	providerRegistry *provider.Registry
-	ollamaProv       provider.Provider
-	router           routeEngine
-	warmthSource     provider.WarmthSource
+	ollamaProv       provider.Provider // default "ollama"-format provider when warmth is wired; set for parity assertions, no production reader
+
+	router       routeEngine
+	warmthSource provider.WarmthSource
 
 	ollamaAvailable bool
 	closed          bool
