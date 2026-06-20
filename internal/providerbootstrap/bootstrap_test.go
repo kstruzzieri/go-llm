@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"testing"
+	"time"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	_ "modernc.org/sqlite"
 )
@@ -60,6 +62,37 @@ func TestNew_ProberFactoryInstalledWithFingerprintStore(t *testing.T) {
 	defer b.Close()
 	if b.Models == nil {
 		t.Fatalf("expected model registry")
+	}
+}
+
+func TestNew_OpenAICompatConfigInstallsOverridesAndBuilds(t *testing.T) {
+	// Exercises the openai-compat buildProvider branch (APIKey + Timeout) and the
+	// installCapabilityOverrides install path end-to-end through New. The provider
+	// URL is unreachable, so RefreshModels fails into a warning, but registration
+	// succeeds (registered > 0) and the bundle is built coherently.
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {
+				APIFormat: "openai-compat",
+				BaseURL:   "http://127.0.0.1:1",
+				APIKey:    "test-key",
+				Timeout:   config.Duration{Duration: 2 * time.Second},
+			},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat": {Provider: "lc", Name: "qwen", Capabilities: []string{"chat", "tool_call"}},
+		},
+	}
+	b, err := New(context.Background(), Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("New(openai-compat cfg) error: %v", err)
+	}
+	defer b.Close()
+	if b.Router == nil || b.Models == nil || b.Providers == nil {
+		t.Fatalf("New returned incomplete bundle: %+v", b)
+	}
+	if b.Config != cfg {
+		t.Fatalf("Bundle.Config should be the passed config")
 	}
 }
 
