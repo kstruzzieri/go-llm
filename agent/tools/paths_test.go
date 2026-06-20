@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 func TestWorkspaceCleanRelContainment(t *testing.T) {
@@ -257,5 +259,35 @@ func TestResolveDirRejectsSymlinkTarget(t *testing.T) {
 	}
 	if _, err := ws.resolveDir("f.txt"); !errors.Is(err, errNotDir) {
 		t.Fatalf("resolveDir on a regular file: got %v, want errNotDir", err)
+	}
+}
+
+func TestNewFileTools(t *testing.T) {
+	tools, err := NewFileTools(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewFileTools: %v", err)
+	}
+	want := map[string]bool{"read_file": false, "search": false, "glob": false, "list": false}
+	for _, tl := range tools {
+		name := tl.Spec().Name
+		if _, ok := want[name]; !ok {
+			t.Fatalf("unexpected tool %q", name)
+		}
+		want[name] = true
+		// every B1 tool must be exactly Read / ApprovalNever
+		if e := tl.Effect(); e.Class != agent.Read || e.Approval != agent.ApprovalNever {
+			t.Fatalf("tool %q Effect = %+v, want Read/ApprovalNever", name, e)
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Fatalf("NewFileTools missing %q", name)
+		}
+	}
+}
+
+func TestNewFileToolsBadRoot(t *testing.T) {
+	if _, err := NewFileTools(filepath.Join(t.TempDir(), "nope")); err == nil {
+		t.Fatal("NewFileTools on a non-existent root should error")
 	}
 }

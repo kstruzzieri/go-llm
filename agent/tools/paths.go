@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 // Shared caps and markers for the read-only file tools. Each tool also sets an
@@ -164,6 +166,22 @@ func (w *Workspace) resolveDir(p string) (string, error) {
 		return "", errNotDir
 	}
 	return abs, nil
+}
+
+// NewFileTools builds the full read-only tool set bound to a single workspace
+// root: read_file, search, glob, list. The consumer (e.g. cmd/golem) registers
+// the returned slice with the agent loop. All four are Read / ApprovalNever.
+func NewFileTools(root string) ([]agent.Tool, error) {
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	return []agent.Tool{
+		NewReadFile(ws),
+		NewSearch(ws),
+		NewGlob(ws),
+		NewList(ws),
+	}, nil
 }
 
 // openRegularFile is the single helper for content reads. It first resolves the
