@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -110,6 +112,86 @@ func renderEntries(entries []string, truncated bool) agent.ToolResult {
 		content += fmt.Sprintf("\n[truncated after %d entries]", listMaxEntries)
 	}
 	return agent.ToolResult{Content: content, Truncated: truncated}
+}
+
+// List lists the immediate children of one directory under the workspace root.
+// A symlinked-directory target is rejected; symlink entries inside a real
+// directory are emitted marked and never followed.
+type List struct {
+	ws *Workspace
+}
+
+// NewList builds the list tool bound to ws.
+func NewList(ws *Workspace) *List { return &List{ws: ws} }
+
+type listArgs struct {
+	Path string `json:"path"`
+}
+
+// Spec is the model-facing schema.
+func (*List) Spec() agent.ToolSpec {
+	return agent.ToolSpec{
+		Name:        "list",
+		Description: "List the immediate entries of a directory under the workspace root (non-recursive). Defaults to the root when path is omitted. Directories end with '/'; symlinks are marked and never followed; a symlinked directory target is refused.",
+		Parameters: json.RawMessage(`{
+  "type":"object",
+  "properties":{
+    "path":{"type":"string","description":"directory relative to the root; omit or '.' for the root"}
+  }
+}`),
+	}
+}
+
+// Effect declares read-only, never-approval. OutputCap is set above the count-based
+// entry self-cap, same rationale as Glob.Effect.
+func (*List) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: readFileMaxBytes + markerHeadroom}
+}
+
+// Invoke reads a single directory level. Expected failures return IsError.
+func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	var args listArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return errResult("invalid arguments: " + err.Error()), nil
+	}
+	p := args.Path
+	if p == "" {
+		p = "."
+	}
+	abs, err := t.ws.resolveDir(p)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	dirents, err := os.ReadDir(abs)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+
+	relBase, err := filepath.Rel(t.ws.root, abs)
+	if err != nil {
+		return errResult(err.Error()), nil
+	}
+	base := filepath.ToSlash(relBase)
+	if base == "." {
+		base = ""
+	}
+	var entries []string
+	truncated := false
+	for _, d := range dirents {
+		if d.IsDir() && ignoreDirs[d.Name()] {
+			continue
+		}
+		if len(entries) >= listMaxEntries {
+			truncated = true
+			break
+		}
+		rel := d.Name()
+		if base != "" {
+			rel = base + "/" + d.Name()
+		}
+		entries = append(entries, markEntry(rel, d))
+	}
+	return renderEntries(entries, truncated), nil
 }
 
 // matchSegments matches pattern segments against name segments. Each "**"

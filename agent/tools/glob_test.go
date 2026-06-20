@@ -104,3 +104,73 @@ func TestGlobEffect(t *testing.T) {
 		t.Fatalf("Effect = %+v, want Read/ApprovalNever", e)
 	}
 }
+
+func TestListHappyAndMarkers(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		"f.txt":       "x",
+		"sub/deep.go": "y",
+	})
+	l := NewList(mustWorkspace(t, root))
+
+	res := invoke(t, l, map[string]any{"path": "."})
+	if res.IsError {
+		t.Fatalf("unexpected error: %s", res.Content)
+	}
+	if !strings.Contains(res.Content, "f.txt") || !strings.Contains(res.Content, "sub/") {
+		t.Fatalf("list of root wrong (sub should be marked dir): %q", res.Content)
+	}
+	if strings.Contains(res.Content, "deep.go") {
+		t.Fatalf("list must be single-level, not recursive: %q", res.Content)
+	}
+}
+
+func TestListDefaultsToRoot(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"only.txt": "x"})
+	l := NewList(mustWorkspace(t, root))
+	res := invoke(t, l, map[string]any{}) // no path
+	if res.IsError || !strings.Contains(res.Content, "only.txt") {
+		t.Fatalf("empty path should list root: %+v", res)
+	}
+}
+
+func TestListSymlinkedDirTargetRejected(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "linkdir")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	l := NewList(mustWorkspace(t, root))
+	res := invoke(t, l, map[string]any{"path": "linkdir"})
+	if !res.IsError {
+		t.Fatalf("listing a symlinked dir target must be rejected, got %q", res.Content)
+	}
+	if strings.Contains(res.Content, "secret") {
+		t.Fatal("list leaked out-of-root contents via symlinked dir")
+	}
+}
+
+func TestListMarksSymlinkEntry(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{"real.txt": "x"})
+	if err := os.Symlink(filepath.Join(root, "real.txt"), filepath.Join(root, "ptr.txt")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	l := NewList(mustWorkspace(t, root))
+	res := invoke(t, l, map[string]any{"path": "."})
+	if !strings.Contains(res.Content, "ptr.txt (symlink)") {
+		t.Fatalf("symlink entry inside a real dir should be marked, got %q", res.Content)
+	}
+}
+
+func TestListEffect(t *testing.T) {
+	l := NewList(mustWorkspace(t, t.TempDir()))
+	e := l.Effect()
+	if e.Class != agent.Read || e.Approval != agent.ApprovalNever {
+		t.Fatalf("Effect = %+v, want Read/ApprovalNever", e)
+	}
+}
