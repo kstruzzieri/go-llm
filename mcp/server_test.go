@@ -10,8 +10,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -101,17 +103,24 @@ func TestConfiguredProvidersDoesNotOverrideOpenAICompatProviderNamedOllama(t *te
 		},
 	}
 
-	registered, ollamaProv, err := s.configuredProviders()
-	if err != nil {
-		t.Fatalf("configuredProviders() error = %v", err)
+	// Black-box parity guard over providerbootstrap wiring: an openai-compat
+	// provider named "ollama" must reach its own base URL, must NOT inherit the
+	// WithOllamaURL override, and must leave s.ollamaProv nil (so the warmth
+	// source is not wired for it).
+	if err := s.ensureModelRegistry(context.Background()); err != nil {
+		t.Fatalf("ensureModelRegistry() error = %v", err)
 	}
-	if ollamaProv != nil {
+	if s.ollamaProv != nil {
 		t.Fatal("ollamaProv = non-nil, want nil for openai-compatible provider named ollama")
 	}
-	if len(registered) != 1 {
-		t.Fatalf("registered providers = %d, want 1", len(registered))
+	if s.warmthSource != nil {
+		t.Fatal("warmthSource = non-nil, want nil for openai-compatible provider named ollama")
 	}
-	models, err := registered[0].Models(context.Background())
+	prov, ok := s.providerRegistry.Get("ollama")
+	if !ok {
+		t.Fatal("provider \"ollama\" not registered")
+	}
+	models, err := prov.Models(context.Background())
 	if err != nil {
 		t.Fatalf("Models() error = %v", err)
 	}
@@ -126,7 +135,71 @@ func TestConfiguredProvidersDoesNotOverrideOpenAICompatProviderNamedOllama(t *te
 	}
 }
 
-func TestConfiguredProvidersRejectsInvalidProviderKeys(t *testing.T) {
+func TestEnsureModelRegistryConcurrentInitInstallsExactlyOneStack(t *testing.T) {
+	// Drive the double-checked-locking init race directly: many goroutines call
+	// ensureModelRegistry at once. Losers must discard their freshly built bundle
+	// (close it) and keep the winner's; the installed stack must be coherent and
+	// fields must never be spliced across bundles. Run under -race to catch any
+	// unsynchronized access. A mock openai-compat endpoint gives New real work.
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"object":"list","data":[{"id":"m","object":"model"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer mock.Close()
+
+	s := &Server{
+		ollamaURL: "http://127.0.0.1:0",
+		cfg: &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"lc": {BaseURL: mock.URL, APIFormat: "openai-compat"},
+			},
+		},
+	}
+	defer func() {
+		if s.router != nil {
+			_ = s.router.Close()
+		}
+	}()
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	errs := make([]error, goroutines)
+	start := make(chan struct{})
+	for i := range goroutines {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			<-start
+			errs[idx] = s.ensureModelRegistry(context.Background())
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("goroutine %d: ensureModelRegistry() error = %v", i, err)
+		}
+	}
+	if s.router == nil || s.modelRegistry == nil || s.providerRegistry == nil {
+		t.Fatalf("expected a coherent installed stack, got router=%v models=%v providers=%v",
+			s.router, s.modelRegistry, s.providerRegistry)
+	}
+	// A subsequent call must take the fast path and not replace the stack.
+	installed := s.providerRegistry
+	if err := s.ensureModelRegistry(context.Background()); err != nil {
+		t.Fatalf("post-init ensureModelRegistry() error = %v", err)
+	}
+	if s.providerRegistry != installed {
+		t.Fatal("provider registry was replaced after init; fast path did not hold")
+	}
+}
+
+func TestEnsureModelRegistryRejectsInvalidProviderKeys(t *testing.T) {
 	tests := []struct {
 		name    string
 		key     string
@@ -154,9 +227,9 @@ func TestConfiguredProvidersRejectsInvalidProviderKeys(t *testing.T) {
 				},
 			}
 
-			_, _, err := s.configuredProviders()
+			err := s.ensureModelRegistry(context.Background())
 			if err == nil {
-				t.Fatal("configuredProviders() error = nil, want invalid provider key error")
+				t.Fatal("ensureModelRegistry() error = nil, want invalid provider key error")
 			}
 			if !strings.Contains(err.Error(), tt.wantErr) {
 				t.Fatalf("error = %q, want substring %q", err.Error(), tt.wantErr)
@@ -517,6 +590,67 @@ func TestNewServerWithoutAutoDiscoveredConfigContinues(t *testing.T) {
 	}
 	if s.ollamaProv == nil {
 		t.Fatal("ollamaProv = nil, want provider initialized in degraded mode")
+	}
+}
+
+func TestNewServerClosesBootstrapResourcesOnTranscriptStartupFailure(t *testing.T) {
+	psStarted := make(chan struct{})
+	psDone := make(chan struct{})
+	releasePS := make(chan struct{})
+	var psOnce sync.Once
+	var psDoneOnce sync.Once
+
+	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/":
+			w.WriteHeader(http.StatusOK)
+		case "/api/tags":
+			select {
+			case <-psStarted:
+			case <-time.After(2 * time.Second):
+				http.Error(w, "warmth poll did not start", http.StatusInternalServerError)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"models":[]}`))
+		case "/api/ps":
+			psOnce.Do(func() { close(psStarted) })
+			select {
+			case <-r.Context().Done():
+				psDoneOnce.Do(func() { close(psDone) })
+			case <-releasePS:
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer func() {
+		close(releasePS)
+		mock.Close()
+	}()
+
+	cfgPath := writeTestConfig(t, t.TempDir(), mock.URL)
+	blockingParent := filepath.Join(t.TempDir(), "not-a-dir")
+	if err := os.WriteFile(blockingParent, []byte("file"), 0o600); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", blockingParent, err)
+	}
+
+	_, err := NewServer(context.Background(),
+		WithConfig(cfgPath),
+		WithRAGDisabled(),
+		WithTranscriptStore(filepath.Join(blockingParent, "transcripts.db")),
+	)
+	if err == nil {
+		t.Fatal("NewServer() error = nil, want transcript startup failure")
+	}
+	if !strings.Contains(err.Error(), "create transcript directory") {
+		t.Fatalf("NewServer() error = %q, want transcript directory failure", err)
+	}
+
+	select {
+	case <-psDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("warmth poll was not cancelled after startup failure")
 	}
 }
 
