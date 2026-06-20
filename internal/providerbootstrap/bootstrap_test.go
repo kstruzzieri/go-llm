@@ -42,7 +42,7 @@ func TestNew_NilConfigBuildsRouter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(nil cfg) error: %v", err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	if b.Router == nil || b.Models == nil || b.Providers == nil {
 		t.Fatalf("New returned incomplete bundle: %+v", b)
 	}
@@ -59,7 +59,7 @@ func TestNew_ProberFactoryInstalledWithFingerprintStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New with fp store error: %v", err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	if b.Models == nil {
 		t.Fatalf("expected model registry")
 	}
@@ -87,7 +87,7 @@ func TestNew_OpenAICompatConfigInstallsOverridesAndBuilds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New(openai-compat cfg) error: %v", err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	if b.Router == nil || b.Models == nil || b.Providers == nil {
 		t.Fatalf("New returned incomplete bundle: %+v", b)
 	}
@@ -103,7 +103,7 @@ func TestNew_BestEffortRefreshRecordsWarnings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New should tolerate refresh failure, got: %v", err)
 	}
-	defer b.Close()
+	defer func() { _ = b.Close() }()
 	if len(b.Warnings) == 0 {
 		t.Fatalf("expected a best-effort refresh warning")
 	}
