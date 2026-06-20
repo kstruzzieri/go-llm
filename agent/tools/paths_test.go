@@ -248,16 +248,16 @@ func TestResolveDirRejectsSymlinkTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ws.resolveDir("."); err != nil {
+	if _, _, err := ws.resolveDir("."); err != nil {
 		t.Fatalf("resolveDir(root) errored: %v", err)
 	}
-	if _, err := ws.resolveDir("real"); err != nil {
+	if _, _, err := ws.resolveDir("real"); err != nil {
 		t.Fatalf("resolveDir(real subdir) errored: %v", err)
 	}
-	if _, err := ws.resolveDir("linkdir"); !errors.Is(err, errSymlink) {
+	if _, _, err := ws.resolveDir("linkdir"); !errors.Is(err, errSymlink) {
 		t.Fatalf("resolveDir on symlinked dir: got %v, want errSymlink", err)
 	}
-	if _, err := ws.resolveDir("f.txt"); !errors.Is(err, errNotDir) {
+	if _, _, err := ws.resolveDir("f.txt"); !errors.Is(err, errNotDir) {
 		t.Fatalf("resolveDir on a regular file: got %v, want errNotDir", err)
 	}
 }

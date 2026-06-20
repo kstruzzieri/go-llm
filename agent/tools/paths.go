@@ -149,23 +149,53 @@ func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 }
 
 // resolveDir contains a path to a concrete directory: cleanRel, then Lstat to
-// reject a symlinked directory target (never follow) and require a real dir.
-func (w *Workspace) resolveDir(p string) (string, error) {
+// reject a symlinked directory target (never follow) and require a real dir. The
+// returned FileInfo is the pre-open Lstat result; openDir re-stats the open handle
+// and compares with os.SameFile to close the symlink-swap TOCTOU window.
+func (w *Workspace) resolveDir(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	fi, err := os.Lstat(abs)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if fi.Mode()&os.ModeSymlink != 0 {
-		return "", errSymlink
+		return "", nil, errSymlink
 	}
 	if !fi.IsDir() {
-		return "", errNotDir
+		return "", nil, errNotDir
 	}
-	return abs, nil
+	return abs, fi, nil
+}
+
+// openDir is the single helper for directory listing. It resolves the path
+// through resolveDir (containment + Lstat + symlink/kind checks), opens the
+// directory, and verifies the open handle still refers to the same directory
+// Lstat saw — closing the final-component symlink-swap TOCTOU window that a bare
+// resolveDir+os.ReadDir would leave (os.ReadDir follows a final-component symlink).
+// It returns errFileChanged if the identity no longer matches. Callers own the
+// returned file and must close it; read entries via f.ReadDir.
+func (w *Workspace) openDir(p string) (*os.File, error) {
+	abs, lfi, err := w.resolveDir(p)
+	if err != nil {
+		return nil, err
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		return nil, err
+	}
+	sfi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if !os.SameFile(lfi, sfi) {
+		_ = f.Close()
+		return nil, errFileChanged
+	}
+	return f, nil
 }
 
 // NewFileTools builds the full read-only tool set bound to a single workspace

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"os"
 	"path"
 	"path/filepath"
 	"sort"
@@ -157,16 +156,18 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 	if p == "" {
 		p = "."
 	}
-	abs, err := t.ws.resolveDir(p)
+	f, err := t.ws.openDir(p)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	dirents, err := os.ReadDir(abs)
+	defer func() { _ = f.Close() }()
+
+	dirents, err := f.ReadDir(-1)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
 
-	relBase, err := filepath.Rel(t.ws.root, abs)
+	relBase, err := filepath.Rel(t.ws.root, f.Name())
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
