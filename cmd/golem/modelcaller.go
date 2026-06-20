@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -74,4 +76,71 @@ func (m *chainModelCaller) Chat(ctx context.Context, req provider.ChatRequest, o
 	final := getFinal()
 	final.RouteOutcome = outcome
 	return agent.ModelResult{Response: final, RouteOutcome: outcome}, execErr
+}
+
+// capChecker is the narrow subset of *provider.ModelRegistry the preflight needs.
+type capChecker interface {
+	Lookup(ctx context.Context, key provider.ModelKey) (*provider.ModelProfile, error)
+	LookupAny(ctx context.Context, model string) ([]*provider.ModelProfile, error)
+	Recommend(ctx context.Context, opts provider.RecommendOpts) ([]*provider.ModelProfile, error)
+}
+
+const toolRouteCaps = provider.CapChat | provider.CapStream | provider.CapToolCall
+
+func profileToolCapable(p *provider.ModelProfile) bool {
+	// Capability.Has tests c&flag == flag across all bits, so reusing the
+	// toolRouteCaps mask keeps the required-capability set defined in one place.
+	return p != nil && p.Caps.Has(toolRouteCaps)
+}
+
+func parseSelector(sel string) (provider.ModelKey, bool) {
+	pname, model, ok := strings.Cut(sel, "/")
+	if !ok {
+		return provider.ModelKey{}, false
+	}
+	return provider.ModelKey{Provider: pname, Model: model}, true
+}
+
+// preflightToolCapable verifies the agent chain can route a tool-capable model.
+// It returns warnings for each configured entry that cannot (the Router may
+// still reach them on fallback), and an error only when NO entry — or, for an
+// empty chain, the recommend set — can satisfy chat|stream|tool_call. Pure
+// registry lookup; never makes a live model call.
+func preflightToolCapable(ctx context.Context, reg capChecker, chain []string) (warnings []string, err error) {
+	if len(chain) == 0 {
+		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps})
+		if rerr != nil {
+			return nil, fmt.Errorf("golem: tool-capability preflight (recommend): %w", rerr)
+		}
+		if len(profs) == 0 {
+			return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
+		}
+		return nil, nil
+	}
+
+	capable := 0
+	for _, sel := range chain {
+		ok := false
+		if key, parsed := parseSelector(sel); parsed {
+			if p, lerr := reg.Lookup(ctx, key); lerr == nil && profileToolCapable(p) {
+				ok = true
+			}
+		} else if profs, lerr := reg.LookupAny(ctx, sel); lerr == nil {
+			for _, p := range profs {
+				if profileToolCapable(p) {
+					ok = true
+					break
+				}
+			}
+		}
+		if ok {
+			capable++
+		} else {
+			warnings = append(warnings, fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call)", sel))
+		}
+	}
+	if capable == 0 {
+		return warnings, fmt.Errorf("golem: no entry in the agent chain is tool-capable (chat|stream|tool_call): %v", chain)
+	}
+	return warnings, nil
 }
