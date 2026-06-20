@@ -18,6 +18,7 @@ type flags struct {
 	configPath    string
 	root          string
 	ollamaURL     string
+	ragDB         string
 	maxSteps      int
 	inputCeiling  int
 	outputReserve int
@@ -30,6 +31,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
+	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
 	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
 	fs.IntVar(&f.outputReserve, "output-reserve", 0, "token output reserve")
@@ -115,12 +117,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 
-	// retrieve resolution is Task 9; until then it is always omitted.
-	tools, err := buildTools(root, nil)
+	var retrieve agent.Tool
+	if t, ok := resolveRetriever(ctx, bundle.Config, bundle.Router, f.ragDB); ok {
+		retrieve = t
+	}
+	tools, err := buildTools(root, retrieve)
 	if err != nil {
 		return err
 	}
-	retrieveOmitted := true
+	retrieveOmitted := retrieve == nil
 
 	for _, line := range startupNotices(startupInfo{
 		workspace:       root,
