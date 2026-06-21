@@ -57,6 +57,24 @@ func TestRenderer_FinalFooter_Stopped(t *testing.T) {
 	}
 }
 
+func TestRenderer_OnStepStartsNewLineAfterUnterminatedToken(t *testing.T) {
+	var buf bytes.Buffer
+	clock := time.Unix(0, 0)
+	r := newRenderer(&buf, false, 16, func() time.Time { return clock })
+
+	if err := r.OnToken(context.Background(), agent.TokenEvent{Content: "answer"}); err != nil {
+		t.Fatalf("OnToken: %v", err)
+	}
+	if err := r.OnStep(context.Background(), agent.StepEvent{Index: 0, Pressure: agent.Pressure{}}); err != nil {
+		t.Fatalf("OnStep: %v", err)
+	}
+
+	want := "answer\n? · 0.0s · ctx 0% · step 1/16\n"
+	if buf.String() != want {
+		t.Errorf("step footer after unterminated token = %q, want %q", buf.String(), want)
+	}
+}
+
 func TestRenderer_FinalFooter_Completed_NoStoppedSuffix(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)

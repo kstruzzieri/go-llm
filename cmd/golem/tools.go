@@ -36,6 +36,7 @@ func buildTools(root string, retrieve agent.Tool) ([]agent.Tool, error) {
 //     returned so the caller can surface it rather than mislead the user with a
 //     generic "no RAG index configured" line.
 //   - (tool, nil): enabled.
+//
 // On success the opened store lives for the process: the retriever queries it
 // for the whole session and the OS reclaims the handle at exit.
 func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string) (agent.Tool, error) {
@@ -45,9 +46,9 @@ func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.
 	if cfg == nil || router == nil {
 		return nil, fmt.Errorf("no provider configured for embeddings")
 	}
-	embModel := embeddingSelector(cfg)
-	if embModel == "" {
-		return nil, fmt.Errorf("no embedding model configured (set defaults.embedding in models.json)")
+	embChain, err := embeddingChain(cfg)
+	if err != nil {
+		return nil, err
 	}
 	info, err := os.Stat(dbPath)
 	if err != nil {
@@ -60,32 +61,10 @@ func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.
 	if err != nil {
 		return nil, fmt.Errorf("open rag-db %q: %w", dbPath, err)
 	}
-	embedder := rag.EmbedderFunc(func(ctx context.Context, model string, inputs []string) (rag.EmbedResult, error) {
-		resp, err := router.Embed(ctx, provider.EmbedRequest{Model: model, Input: inputs})
-		if err != nil {
-			return rag.EmbedResult{}, err
-		}
-		// Derive VectorSpaceID the same way the indexer did (actual routed
-		// model, else provider/model) so query vectors validate against the
-		// corpus's stored vector space. Mirrors mcp's ragEmbedder; omitting it
-		// makes every query fail with ErrVectorSpaceMismatch on a corpus that
-		// recorded a vector-space ID.
-		result := rag.EmbedResult{
-			Embeddings: resp.Embeddings,
-			Model:      resp.Model,
-			Provider:   resp.Provider,
-		}
-		if resp.RouteOutcome != nil {
-			if am := resp.RouteOutcome.ActualModel; am.Provider != "" && am.Model != "" {
-				result.VectorSpaceID = am.String()
-			}
-		}
-		if result.VectorSpaceID == "" && result.Provider != "" && result.Model != "" {
-			result.VectorSpaceID = result.Provider + "/" + result.Model
-		}
-		return result, nil
-	})
-	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(embModel))
+	embedder := newChainEmbedder(func(ctx context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
+		return router.Route(ctx, rr)
+	}, embChain)
+	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(embChain[0]))
 	if err != nil {
 		_ = store.Close()
 		return nil, fmt.Errorf("build retriever for rag-db %q: %w", dbPath, err)
@@ -93,16 +72,91 @@ func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.
 	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, nil
 }
 
-// embeddingSelector returns the head of the embedding fallback chain, or "".
-func embeddingSelector(cfg *config.Config) string {
+type embedExecutor interface {
+	ExecuteEmbed(ctx context.Context) (*provider.EmbedResponse, error)
+}
+
+type embedRouteFunc func(context.Context, provider.RoutingRequest) (embedExecutor, error)
+
+func newChainEmbedder(route embedRouteFunc, chain []string) rag.Embedder {
+	chain = append([]string(nil), chain...)
+	return rag.EmbedderFunc(func(ctx context.Context, model string, inputs []string) (rag.EmbedResult, error) {
+		if model == "" {
+			return rag.EmbedResult{}, fmt.Errorf("rag: embedder requires explicit model to prevent vector-space drift across embedding-model boundaries")
+		}
+		if len(inputs) == 0 {
+			return rag.EmbedResult{Model: model}, nil
+		}
+		if route == nil {
+			return rag.EmbedResult{}, fmt.Errorf("golem: embedding router unavailable")
+		}
+		rr := provider.RoutingRequest{
+			UseCase:        "embedding",
+			Input:          inputs,
+			RequiredCaps:   provider.CapEmbed,
+			ExpectedOutput: provider.DefaultExpectedOutput("embedding"),
+		}
+		if len(chain) > 0 {
+			rr.PreferredChain = append([]string(nil), chain...)
+			rr.StrictChain = true
+		} else {
+			rr.Model = model
+		}
+		plan, err := route(ctx, rr)
+		if err != nil {
+			return rag.EmbedResult{}, err
+		}
+		if plan == nil {
+			return rag.EmbedResult{}, fmt.Errorf("golem: embedding route returned nil plan")
+		}
+		resp, err := plan.ExecuteEmbed(ctx)
+		if err != nil {
+			return rag.EmbedResult{}, err
+		}
+		if resp == nil {
+			return rag.EmbedResult{}, fmt.Errorf("golem: embedding route returned nil response")
+		}
+		return embedResultFromResponse(resp), nil
+	})
+}
+
+func embedResultFromResponse(resp *provider.EmbedResponse) rag.EmbedResult {
+	// Derive VectorSpaceID the same way the indexer did (actual routed model,
+	// else provider/model) so query vectors validate against the corpus's stored
+	// vector space. Mirrors mcp's ragEmbedder; omitting it makes every query
+	// fail with ErrVectorSpaceMismatch on a corpus that recorded a vector-space ID.
+	result := rag.EmbedResult{
+		Embeddings: resp.Embeddings,
+		Model:      resp.Model,
+		Provider:   resp.Provider,
+	}
+	if resp.RouteOutcome != nil {
+		if am := resp.RouteOutcome.ActualModel; am.Provider != "" && am.Model != "" {
+			result.VectorSpaceID = am.String()
+		}
+	}
+	if result.VectorSpaceID == "" && result.Provider != "" && result.Model != "" {
+		result.VectorSpaceID = result.Provider + "/" + result.Model
+	}
+	return result
+}
+
+// embeddingChain returns the configured embedding fallback chain.
+func embeddingChain(cfg *config.Config) ([]string, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("no provider configured for embeddings")
+	}
 	if _, ok := cfg.Defaults["embedding"]; !ok {
-		return ""
+		return nil, fmt.Errorf("no embedding model configured (set defaults.embedding in models.json)")
 	}
 	chain, err := cfg.RoleFallbackChain("embedding")
 	if err != nil || len(chain) == 0 {
-		return ""
+		if err != nil {
+			return nil, fmt.Errorf("resolve embedding chain: %w", err)
+		}
+		return nil, fmt.Errorf("embedding fallback chain is empty")
 	}
-	return chain[0]
+	return chain, nil
 }
 
 // effectClassName renders an agent.EffectClass bitset for /tools. The agent

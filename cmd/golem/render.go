@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -20,6 +21,7 @@ type renderer struct {
 	now      func() time.Time
 	lastMark time.Time
 	runStart time.Time
+	lastNL   bool
 }
 
 func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time) *renderer {
@@ -27,11 +29,14 @@ func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time) 
 		now = time.Now
 	}
 	start := now()
-	return &renderer{out: out, color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start}
+	return &renderer{out: out, color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, lastNL: true}
 }
 
 func (r *renderer) OnToken(_ context.Context, e agent.TokenEvent) error {
 	_, err := io.WriteString(r.out, e.Content)
+	if err == nil && e.Content != "" {
+		r.lastNL = strings.HasSuffix(e.Content, "\n")
+	}
 	return err
 }
 
@@ -40,9 +45,15 @@ func (r *renderer) OnToolCall(_ context.Context, e agent.ToolCallEvent) error {
 	// so the line reads "> name" rather than "> name ".
 	if args := string(e.Call.Function.Arguments); args != "" {
 		_, err := fmt.Fprintf(r.out, "\n> %s %s\n", e.Call.Function.Name, args)
+		if err == nil {
+			r.lastNL = true
+		}
 		return err
 	}
 	_, err := fmt.Fprintf(r.out, "\n> %s\n", e.Call.Function.Name)
+	if err == nil {
+		r.lastNL = true
+	}
 	return err
 }
 
@@ -72,9 +83,17 @@ func (r *renderer) finalFooter(res agent.Result) {
 }
 
 func (r *renderer) writeDim(line string) error {
+	if !r.lastNL {
+		if _, err := io.WriteString(r.out, "\n"); err != nil {
+			return err
+		}
+	}
 	if r.color {
 		line = "\x1b[2m" + line + "\x1b[0m"
 	}
 	_, err := io.WriteString(r.out, line+"\n")
+	if err == nil {
+		r.lastNL = true
+	}
 	return err
 }

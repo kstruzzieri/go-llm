@@ -8,7 +8,6 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"syscall"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
@@ -162,7 +161,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	interrupts := make(chan struct{}, 1)
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	signal.Notify(sigCh, interruptSignals()...)
 	defer signal.Stop(sigCh)
 	go func() {
 		for range sigCh {
@@ -174,4 +173,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}()
 
 	return runREPL(ctx, stdin, stdout, interrupts, sess)
+}
+
+func interruptSignals() []os.Signal {
+	return []os.Signal{os.Interrupt}
 }

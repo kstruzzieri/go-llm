@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -61,5 +62,13 @@ func TestParseFlags_Overrides(t *testing.T) {
 	}
 	if f.root != "/x" || f.configPath != "/c/models.json" || !f.noColor || f.maxSteps != 8 {
 		t.Errorf("flags = %+v, unexpected", f)
+	}
+}
+
+func TestInterruptSignalsExcludeSIGTERM(t *testing.T) {
+	for _, sig := range interruptSignals() {
+		if sig == syscall.SIGTERM {
+			t.Fatal("SIGTERM must keep Go's default process-termination behavior")
+		}
 	}
 }
