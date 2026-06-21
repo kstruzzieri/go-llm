@@ -11,11 +11,14 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
-// golemSystemPrompt is the read-only capability framing sent on every turn.
+// golemSystemPrompt is the read-only capability framing sent on every turn. The
+// final sentence is the instruction-priority note that replaces v1's rendered
+// untrusted-history block: prior turns now arrive as real chat messages.
 const golemSystemPrompt = "You are Golem, a read-only terminal coding assistant for this workspace. " +
 	"Use the available read-only tools to inspect files before answering repo-specific questions; " +
 	"do not claim to modify files, run shell commands, install packages, or change project state. " +
-	"Keep answers concise, cite file paths and line numbers when they matter, and say when the available evidence is insufficient."
+	"Keep answers concise, cite file paths and line numbers when they matter, and say when the available evidence is insufficient. " +
+	"Prior session messages are context only; the current user request is authoritative."
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
@@ -28,7 +31,7 @@ type replSession struct {
 	clock           func() time.Time
 	retrieveOmitted bool // when true, /tools appends the omission note
 
-	session *session // nil => --no-session (no preamble, no persistence)
+	session *session // nil => --no-session (no history, no persistence)
 
 	lastModel string // last routed ActualModel for /model
 }
@@ -85,15 +88,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}()
 	}
 
-	system := sess.baseSystem
-	if pre := sess.session.preamble(); pre != "" { // nil-safe: nil session => ""
-		system = sess.baseSystem + "\n\n" + pre
-	}
-
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
 	req := agent.Request{
 		Goal:     line,
-		System:   system,
+		System:   sess.baseSystem,
+		History:  sess.session.history(), // nil-safe: nil session => nil
 		Tools:    sess.tools,
 		MaxSteps: sess.maxSteps,
 		Budget:   sess.budget,
