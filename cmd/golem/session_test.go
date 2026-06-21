@@ -1,8 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/conversation"
 )
 
 func TestResolveSessionID(t *testing.T) {
@@ -88,5 +95,191 @@ func TestSessionDBPath(t *testing.T) {
 
 	if _, err := sessionDBPath(func(string) string { return "" }); err == nil {
 		t.Fatal("want error when HOME and XDG_DATA_HOME are both unset")
+	}
+}
+
+func openTempSession(t *testing.T, id string, budget int) (*session, sessionInfo) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "golem", "sessions.db")
+	s, info, err := openSession(context.Background(), dbPath, id, budget)
+	if err != nil {
+		t.Fatalf("openSession: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	return s, info
+}
+
+func TestSession_NewThenResume(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "golem", "sessions.db")
+
+	s, info, err := openSession(ctx, dbPath, "workspace:abc", defaultSessionBudget)
+	if err != nil {
+		t.Fatalf("openSession: %v", err)
+	}
+	if info.resumed {
+		t.Fatalf("first open must be new, got %+v", info)
+	}
+	if err := s.record(ctx, "what is x?", "x is a thing"); err != nil {
+		t.Fatalf("record: %v", err)
+	}
+	_ = s.Close()
+
+	s2, info2, err := openSession(ctx, dbPath, "workspace:abc", defaultSessionBudget)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = s2.Close() }()
+	if !info2.resumed || info2.msgCount != 2 {
+		t.Fatalf("resume info = %+v, want resumed with 2 messages", info2)
+	}
+	if len(s2.msgs) != 2 || s2.msgs[0].Content != "what is x?" || s2.msgs[1].Content != "x is a thing" {
+		t.Fatalf("loaded msgs = %+v", s2.msgs)
+	}
+}
+
+func TestSession_FilePerms(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "golem", "sessions.db")
+	s, _, err := openSession(context.Background(), dbPath, "workspace:p", defaultSessionBudget)
+	if err != nil {
+		t.Fatalf("openSession: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	fi, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat db: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Errorf("db perm = %o, want 600", fi.Mode().Perm())
+	}
+	di, err := os.Stat(filepath.Dir(dbPath))
+	if err != nil {
+		t.Fatalf("stat dir: %v", err)
+	}
+	if di.Mode().Perm() != 0o700 {
+		t.Errorf("dir perm = %o, want 700", di.Mode().Perm())
+	}
+}
+
+func TestSession_Preamble(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:pre", defaultSessionBudget)
+	if err := s.record(ctx, "q1", "a1"); err != nil {
+		t.Fatal(err)
+	}
+	pre := s.preamble()
+	for _, want := range []string{
+		"UNTRUSTED history",
+		"<session_history>",
+		"user: q1",
+		"assistant: a1",
+		"</session_history>",
+	} {
+		if !strings.Contains(pre, want) {
+			t.Errorf("preamble missing %q in:\n%s", want, pre)
+		}
+	}
+}
+
+func TestSession_PreambleBudgetZeroIsEmpty(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:zero", 0)
+	if err := s.record(ctx, "q1", "a1"); err != nil {
+		t.Fatal(err)
+	}
+	if pre := s.preamble(); pre != "" {
+		t.Errorf("budget 0 must yield empty preamble, got %q", pre)
+	}
+}
+
+func TestSession_PreambleTrimsOldest(t *testing.T) {
+	ctx := context.Background()
+	// Budget large enough for one short exchange but not many.
+	s, _ := openTempSession(t, "workspace:trim", 40)
+	for i := 0; i < 12; i++ {
+		if err := s.record(ctx, "older question number "+strings.Repeat("x", 20), "answer "+strings.Repeat("y", 20)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.record(ctx, "NEWEST", "FRESH"); err != nil {
+		t.Fatal(err)
+	}
+	pre := s.preamble()
+	if !strings.Contains(pre, "NEWEST") {
+		t.Errorf("preamble must keep the newest turn:\n%s", pre)
+	}
+	if strings.Count(pre, "user:") >= 12 {
+		t.Errorf("preamble must drop old turns under a tight budget, got %d user lines", strings.Count(pre, "user:"))
+	}
+}
+
+func TestSession_Clear(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "golem", "sessions.db")
+	s, _, err := openSession(ctx, dbPath, "workspace:clr", defaultSessionBudget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.record(ctx, "q", "a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.clear(ctx); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if len(s.msgs) != 0 {
+		t.Errorf("clear must empty the in-memory buffer, got %d", len(s.msgs))
+	}
+	if _, err := s.store.Load(ctx, "workspace:clr"); !errors.Is(err, conversation.ErrNotFound) {
+		t.Errorf("clear must delete the persisted row, Load err = %v", err)
+	}
+}
+
+func TestSession_RecordDoesNotMutateBufferOnSaveFailure(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:fail-save", defaultSessionBudget)
+	if err := s.record(ctx, "q1", "a1"); err != nil {
+		t.Fatal(err)
+	}
+	before := append([]conversation.Message(nil), s.msgs...)
+	if err := s.db.Close(); err != nil {
+		t.Fatalf("close db to force save failure: %v", err)
+	}
+	if err := s.record(ctx, "q2", "a2"); err == nil {
+		t.Fatal("want save failure after DB close")
+	}
+	if len(s.msgs) != len(before) {
+		t.Fatalf("failed save mutated buffer len: got %d want %d (%+v)", len(s.msgs), len(before), s.msgs)
+	}
+	for i := range before {
+		if !reflect.DeepEqual(s.msgs[i], before[i]) {
+			t.Fatalf("failed save mutated buffer at %d: got %+v want %+v", i, s.msgs[i], before[i])
+		}
+	}
+}
+
+func TestSession_Renew(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:rn", defaultSessionBudget)
+	if err := s.record(ctx, "q", "a"); err != nil {
+		t.Fatal(err)
+	}
+	old := s.id
+	s.renew()
+	if s.id == old || !strings.HasPrefix(s.id, "golem:") {
+		t.Errorf("renew id = %q (old %q), want a new golem: id", s.id, old)
+	}
+	if len(s.msgs) != 0 {
+		t.Errorf("renew must clear the buffer, got %d", len(s.msgs))
+	}
+}
+
+func TestSession_NilSafe(t *testing.T) {
+	var s *session
+	if pre := s.preamble(); pre != "" {
+		t.Errorf("nil preamble = %q, want empty", pre)
+	}
+	if err := s.Close(); err != nil {
+		t.Errorf("nil Close = %v, want nil", err)
 	}
 }
