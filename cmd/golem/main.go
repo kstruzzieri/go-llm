@@ -120,6 +120,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err != nil {
 		return fmt.Errorf("resolve root: %w", err)
 	}
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		return fmt.Errorf("resolve root: %w", err)
+	}
 
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
@@ -163,7 +166,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	var sessn *session
 	var sessionLine string
 	if !f.noSession {
-		switch dbPath, derr := sessionDBPath(os.Getenv); {
+		switch dbPath, derr := sessionDBPathForWorkspace(os.Getenv, root); {
 		case derr != nil:
 			warns = append(warns, "session disabled: "+derr.Error())
 		default:

@@ -23,8 +23,13 @@ func TestResolveSessionID(t *testing.T) {
 		{name: "workspace default", opts: sessionIDOpts{root: "/abs/x"}, want: "workspace:", prefix: true},
 		{name: "explicit valid", opts: sessionIDOpts{explicit: "my.chat-1"}, want: "user:my.chat-1"},
 		{name: "explicit trims", opts: sessionIDOpts{explicit: "  ok  "}, want: "user:ok"},
+		{name: "explicit printed golem id", opts: sessionIDOpts{explicit: "golem:123e4567-e89b-12d3-a456-426614174000"}, want: "golem:123e4567-e89b-12d3-a456-426614174000"},
+		{name: "explicit printed workspace id", opts: sessionIDOpts{explicit: "workspace:abcdef1234567890"}, want: "workspace:abcdef1234567890"},
+		{name: "explicit printed user id", opts: sessionIDOpts{explicit: "user:my.chat-1"}, want: "user:my.chat-1"},
 		{name: "explicit blank", opts: sessionIDOpts{explicit: "   "}, wantErr: true},
 		{name: "explicit illegal char", opts: sessionIDOpts{explicit: "bad id!"}, wantErr: true},
+		{name: "explicit unknown namespace", opts: sessionIDOpts{explicit: "other:abc"}, wantErr: true},
+		{name: "explicit namespaced illegal char", opts: sessionIDOpts{explicit: "golem:bad id"}, wantErr: true},
 		{name: "fresh", opts: sessionIDOpts{fresh: true}, want: "golem:", prefix: true},
 	}
 	for _, tc := range tests {
@@ -93,8 +98,67 @@ func TestSessionDBPath(t *testing.T) {
 		t.Fatalf("home path = %q err=%v", got, err)
 	}
 
+	relativeXDG := func(k string) string {
+		switch k {
+		case "XDG_DATA_HOME":
+			return "."
+		case "HOME":
+			return "/home/u"
+		default:
+			return ""
+		}
+	}
+	got, err = sessionDBPath(relativeXDG)
+	if err != nil || got != "/home/u/.local/share/golem/sessions.db" {
+		t.Fatalf("relative XDG fallback path = %q err=%v", got, err)
+	}
+
+	relativeHome := func(k string) string {
+		if k == "HOME" {
+			return "home/u"
+		}
+		return ""
+	}
+	if _, err := sessionDBPath(relativeHome); err == nil {
+		t.Fatal("want error when HOME is relative")
+	}
+
+	if _, err := sessionDBPath(func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return "."
+		}
+		return ""
+	}); err == nil {
+		t.Fatal("want error when XDG_DATA_HOME is relative and HOME is unset")
+	}
+
 	if _, err := sessionDBPath(func(string) string { return "" }); err == nil {
 		t.Fatal("want error when HOME and XDG_DATA_HOME are both unset")
+	}
+}
+
+func TestSessionDBPathForWorkspaceRejectsRepoLocalPath(t *testing.T) {
+	root := t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return root
+		}
+		return ""
+	}
+	if _, err := sessionDBPathForWorkspace(getenv, root); err == nil {
+		t.Fatal("want session DB inside workspace to be rejected")
+	}
+}
+
+func TestValidateSessionDBOutsideWorkspaceAllowsSiblingPrefix(t *testing.T) {
+	parent := t.TempDir()
+	root := filepath.Join(parent, "repo")
+	if err := os.Mkdir(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(parent, "repo-cache", "golem", "sessions.db")
+	if err := validateSessionDBOutsideWorkspace(dbPath, root); err != nil {
+		t.Fatalf("sibling path with shared prefix must be allowed: %v", err)
 	}
 }
 

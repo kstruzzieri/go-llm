@@ -23,6 +23,10 @@ const defaultSessionBudget = 2000
 // future session commands stay boring.
 var validSessionName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
+// validNamespacedSessionID accepts session ids that golem itself prints.
+// Bare names are still mapped to user:<name> for CLI ergonomics.
+var validNamespacedSessionID = regexp.MustCompile(`^(golem|user|workspace):[A-Za-z0-9._-]+$`)
+
 // sessionIDOpts selects which session id to use. Precedence (highest first):
 // fresh, explicit, then the per-workspace default.
 type sessionIDOpts struct {
@@ -32,8 +36,8 @@ type sessionIDOpts struct {
 }
 
 // resolveSessionID derives the keyed session id. fresh => a new unique
-// "golem:<uuid>"; explicit => validated "user:<id>"; default => a stable
-// "workspace:<sha256(root) prefix>".
+// "golem:<uuid>"; explicit => either a printed namespaced id or validated
+// "user:<id>"; default => a stable "workspace:<sha256(root) prefix>".
 func resolveSessionID(o sessionIDOpts) (string, error) {
 	if o.fresh {
 		return "golem:" + conversation.NewID(), nil
@@ -42,6 +46,12 @@ func resolveSessionID(o sessionIDOpts) (string, error) {
 		e := strings.TrimSpace(o.explicit)
 		if e == "" {
 			return "", fmt.Errorf("golem: -session must not be blank")
+		}
+		if strings.Contains(e, ":") {
+			if !validNamespacedSessionID.MatchString(e) {
+				return "", fmt.Errorf("golem: invalid -session %q: use a printed golem:, workspace:, or user: id, or a bare name with characters A-Z a-z 0-9 . _ -", e)
+			}
+			return e, nil
 		}
 		if !validSessionName.MatchString(e) {
 			return "", fmt.Errorf("golem: invalid -session %q: allowed characters are A-Z a-z 0-9 . _ -", e)
@@ -56,14 +66,56 @@ func resolveSessionID(o sessionIDOpts) (string, error) {
 // dir ($XDG_DATA_HOME/golem/sessions.db, else ~/.local/share/golem/sessions.db).
 func sessionDBPath(getenv func(string) string) (string, error) {
 	dir := getenv("XDG_DATA_HOME")
+	relativeXDG := dir != "" && !filepath.IsAbs(dir)
+	if relativeXDG {
+		dir = ""
+	}
 	if dir == "" {
 		home := getenv("HOME")
 		if home == "" {
+			if relativeXDG {
+				return "", fmt.Errorf("golem: cannot locate session data dir (XDG_DATA_HOME is relative and HOME unset)")
+			}
 			return "", fmt.Errorf("golem: cannot locate session data dir (HOME and XDG_DATA_HOME unset)")
+		}
+		if !filepath.IsAbs(home) {
+			return "", fmt.Errorf("golem: cannot locate session data dir (HOME is relative)")
 		}
 		dir = filepath.Join(home, ".local", "share")
 	}
 	return filepath.Join(dir, "golem", "sessions.db"), nil
+}
+
+func sessionDBPathForWorkspace(getenv func(string) string, root string) (string, error) {
+	dbPath, err := sessionDBPath(getenv)
+	if err != nil {
+		return "", err
+	}
+	if err := validateSessionDBOutsideWorkspace(dbPath, root); err != nil {
+		return "", err
+	}
+	return dbPath, nil
+}
+
+func validateSessionDBOutsideWorkspace(dbPath, root string) error {
+	absDB, err := filepath.Abs(dbPath)
+	if err != nil {
+		return fmt.Errorf("golem: resolve session db path: %w", err)
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return fmt.Errorf("golem: resolve workspace path: %w", err)
+	}
+	absDB = filepath.Clean(absDB)
+	absRoot = filepath.Clean(absRoot)
+	rel, err := filepath.Rel(absRoot, absDB)
+	if err != nil {
+		return fmt.Errorf("golem: compare session db path to workspace: %w", err)
+	}
+	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
+		return fmt.Errorf("golem: session db %q must be outside workspace %q", absDB, absRoot)
+	}
+	return nil
 }
 
 const (

@@ -11,9 +11,8 @@ import (
 )
 
 // renderer is an append-only agent.Observer for a terminal. It streams tokens,
-// prints a one-line tool-call notice, a dim per-step footer, and (via
-// finalFooter) a dim summary after Run. It deliberately omits a tool-RESULT
-// line: that requires the agent.ToolResultObserver seam, added in B3.
+// prints one-line tool-call and tool-result notices, a dim per-step footer, and
+// (via finalFooter) a dim summary after Run.
 type renderer struct {
 	out      io.Writer
 	color    bool
