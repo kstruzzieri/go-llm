@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -131,6 +132,63 @@ func TestRunEvictsHistoryUnderTightBudgetKeepsGoal(t *testing.T) {
 	}
 	if historyCount == 0 || historyCount >= len(hist) {
 		t.Errorf("expected partial history eviction, %d of %d survived", historyCount, len(hist))
+	}
+}
+
+func TestRunRejectsInvalidHistory(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  provider.ChatMessage
+	}{
+		{"system role", provider.ChatMessage{Role: "system", Content: "x"}},
+		{"tool role", provider.ChatMessage{Role: "tool", Content: "x", ToolCallID: "a", ToolName: "t"}},
+		{"unknown role", provider.ChatMessage{Role: "developer", Content: "x"}},
+		{"empty role", provider.ChatMessage{Role: "", Content: "x"}},
+		{"empty content", provider.ChatMessage{Role: "user", Content: ""}},
+		{"assistant with tool calls", provider.ChatMessage{
+			Role: "assistant", Content: "x",
+			ToolCalls: []provider.ToolCall{{ID: "a", Type: "function"}},
+		}},
+		{"stray tool name", provider.ChatMessage{Role: "assistant", Content: "x", ToolName: "t"}},
+		{"stray tool call id", provider.ChatMessage{Role: "assistant", Content: "x", ToolCallID: "a"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			mc := &historyCapturingCaller{answer: "should not be reached"}
+			o := newTestOrchestrator(mc)
+			_, err := o.Run(context.Background(), Request{
+				Goal:    "g",
+				History: []provider.ChatMessage{tc.msg},
+			}, nil)
+			if err == nil {
+				t.Fatalf("want error for %s, got nil", tc.name)
+			}
+			if !strings.Contains(err.Error(), "agent: invalid history") {
+				t.Errorf("error = %q, want it to contain %q", err.Error(), "agent: invalid history")
+			}
+			if mc.last.Messages != nil {
+				t.Errorf("model must not be called when history is invalid (got request %+v)", mc.last)
+			}
+		})
+	}
+}
+
+// A valid plain user/assistant history must NOT be rejected.
+func TestRunAcceptsValidHistory(t *testing.T) {
+	mc := &historyCapturingCaller{answer: "ok"}
+	o := newTestOrchestrator(mc)
+	res, err := o.Run(context.Background(), Request{
+		Goal: "g",
+		History: []provider.ChatMessage{
+			{Role: "user", Content: "q"},
+			{Role: "assistant", Content: "a"},
+		},
+	}, nil)
+	if err != nil {
+		t.Fatalf("valid history rejected: %v", err)
+	}
+	if res.Answer != "ok" {
+		t.Fatalf("answer = %q, want ok", res.Answer)
 	}
 }
 

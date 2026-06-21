@@ -53,6 +53,9 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	if req.Goal == "" {
 		return Result{}, fmt.Errorf("agent: empty goal")
 	}
+	if err := validateHistory(req.History); err != nil {
+		return Result{}, err
+	}
 	maxSteps := req.MaxSteps
 	if maxSteps <= 0 {
 		maxSteps = defaultMaxSteps
