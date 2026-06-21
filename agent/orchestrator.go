@@ -21,12 +21,15 @@ func New(model ModelCaller, ctxMgr ContextManager) *Orchestrator {
 }
 
 func initState(req Request) State {
-	return State{
-		System: req.System,
-		Messages: []Message{
-			{ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal}, Segment: Pinned},
-		},
+	msgs := make([]Message, 0, len(req.History)+1)
+	for _, h := range req.History {
+		msgs = append(msgs, Message{ChatMessage: h, Segment: Elastic})
 	}
+	msgs = append(msgs, Message{
+		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
+		Segment:     Pinned,
+	})
+	return State{System: req.System, Messages: msgs}
 }
 
 func buildChatRequest(st State, specs []provider.Tool, outputReserve int) provider.ChatRequest {
