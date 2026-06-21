@@ -100,7 +100,7 @@ func (r *renderer) writeDim(line string) error {
 
 // OnToolResult prints a quiet, display-only "< summary" line that pairs with the
 // "> call" line from OnToolCall. Pre-invocation synthetic failures (unknown
-// tool, malformed args, denied) may appear result-only with no preceding call.
+// tool, malformed args, plan failure, denied) may appear result-only with no preceding call.
 // The summary is never persisted and never fed back to the model.
 func (r *renderer) OnToolResult(_ context.Context, e agent.ToolResultEvent) error {
 	if !r.lastNL {

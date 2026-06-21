@@ -84,6 +84,9 @@ func TestREPL_EndToEndReadOnly(t *testing.T) {
 	if !strings.Contains(got, "the file says hi there") {
 		t.Errorf("missing final answer in:\n%s", got)
 	}
+	if !strings.Contains(got, "< 1 line") {
+		t.Errorf("missing tool-result summary line in:\n%s", got)
+	}
 	if !strings.Contains(got, "done · 2 steps") {
 		t.Errorf("missing/incorrect final footer in:\n%s", got)
 	}

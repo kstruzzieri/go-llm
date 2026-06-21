@@ -150,6 +150,16 @@ func openSession(ctx context.Context, dbPath, id string, budget int) (*session, 
 	return s, info, nil
 }
 
+// sessionHistoryCloseTag matches the closing fence delimiter case-insensitively
+// so untrusted stored content cannot break out of the <session_history> block.
+var sessionHistoryCloseTag = regexp.MustCompile(`(?i)</session_history>`)
+
+// fenceSafe inserts a zero-width space after '<' in any closing-tag occurrence so
+// copied delimiter text in stored content no longer reads as the structural fence.
+func fenceSafe(s string) string {
+	return sessionHistoryCloseTag.ReplaceAllString(s, "<\u200b/session_history>")
+}
+
 // preamble renders the trimmed prior-session context as a delimited, aggressively
 // labeled block. Returns "" when disabled (nil/budget<=0) or empty.
 func (s *session) preamble() string {
@@ -166,7 +176,7 @@ func (s *session) preamble() string {
 	for _, m := range tr.Messages {
 		b.WriteString(m.Role)
 		b.WriteString(": ")
-		b.WriteString(m.Content)
+		b.WriteString(fenceSafe(m.Content))
 		b.WriteByte('\n')
 	}
 	b.WriteString("</session_history>")
