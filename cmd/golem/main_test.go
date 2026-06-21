@@ -72,3 +72,43 @@ func TestInterruptSignalsExcludeSIGTERM(t *testing.T) {
 		}
 	}
 }
+
+func TestParseFlags_SessionDefaults(t *testing.T) {
+	f, err := parseFlags([]string{})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.noSession || f.fresh || f.sessionID != "" || f.sessionBudget != defaultSessionBudget {
+		t.Errorf("session flag defaults wrong: %+v", f)
+	}
+}
+
+func TestParseFlags_SessionOverrides(t *testing.T) {
+	f, err := parseFlags([]string{"-no-session", "-fresh", "-session", "mychat", "-session-budget", "500"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.noSession || !f.fresh || f.sessionID != "mychat" || f.sessionBudget != 500 {
+		t.Errorf("session overrides wrong: %+v", f)
+	}
+}
+
+func TestValidateFlags(t *testing.T) {
+	if err := validateFlags(flags{sessionBudget: -1}); err == nil {
+		t.Error("negative session-budget must error")
+	}
+	if err := validateFlags(flags{sessionBudget: 0}); err != nil {
+		t.Errorf("zero session-budget must be allowed, got %v", err)
+	}
+}
+
+func TestStartupNotices_SessionLine(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace:   "/r",
+		sessionLine: "session: workspace:abcd (new)",
+	})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "session: workspace:abcd (new)") {
+		t.Errorf("session line missing in:\n%s", joined)
+	}
+}

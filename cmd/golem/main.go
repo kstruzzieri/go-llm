@@ -22,6 +22,10 @@ type flags struct {
 	inputCeiling  int
 	outputReserve int
 	noColor       bool
+	noSession     bool
+	fresh         bool
+	sessionID     string
+	sessionBudget int
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -35,10 +39,22 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
 	fs.IntVar(&f.outputReserve, "output-reserve", 0, "token output reserve")
 	fs.BoolVar(&f.noColor, "no-color", false, "disable dim ANSI footers")
+	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
+	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
+	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
+	fs.IntVar(&f.sessionBudget, "session-budget", defaultSessionBudget, "token budget for the prior-session preamble (0 disables injection)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
 	return f, nil
+}
+
+// validateFlags rejects flag values flag.Parse cannot police.
+func validateFlags(f flags) error {
+	if f.sessionBudget < 0 {
+		return fmt.Errorf("golem: -session-budget must be >= 0, got %d", f.sessionBudget)
+	}
+	return nil
 }
 
 type startupInfo struct {
@@ -48,12 +64,16 @@ type startupInfo struct {
 	preflightWarns    []string
 	retrieveOmitted   bool
 	retrieveRequested bool // -rag-db was given; suppress the generic no-index notice
+	sessionLine       string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
 func startupNotices(info startupInfo) []string {
 	var out []string
 	out = append(out, "workspace: "+info.workspace)
+	if info.sessionLine != "" {
+		out = append(out, info.sessionLine)
+	}
 	if info.useRecommend {
 		out = append(out, "no defaults.agent configured; using model recommendation (run will route to the recommended model)")
 	}
@@ -87,6 +107,9 @@ func main() {
 func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	f, err := parseFlags(args)
 	if err != nil {
+		return err
+	}
+	if err := validateFlags(f); err != nil {
 		return err
 	}
 
@@ -134,6 +157,25 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	retrieveOmitted := retrieve == nil
 
+	var sessn *session
+	var sessionLine string
+	if !f.noSession {
+		switch dbPath, derr := sessionDBPath(os.Getenv); {
+		case derr != nil:
+			warns = append(warns, "session disabled: "+derr.Error())
+		default:
+			if id, ierr := resolveSessionID(sessionIDOpts{fresh: f.fresh, explicit: f.sessionID, root: root}); ierr != nil {
+				warns = append(warns, "session disabled: "+ierr.Error())
+			} else if s, info, oerr := openSession(ctx, dbPath, id, f.sessionBudget); oerr != nil {
+				warns = append(warns, "session disabled: "+oerr.Error())
+			} else {
+				sessn = s
+				sessionLine = info.line()
+			}
+		}
+	}
+	defer func() { _ = sessn.Close() }() // nil-safe
+
 	for _, line := range startupNotices(startupInfo{
 		workspace:         root,
 		useRecommend:      plan.useRecommend,
@@ -141,6 +183,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		preflightWarns:    warns,
 		retrieveOmitted:   retrieveOmitted,
 		retrieveRequested: f.ragDB != "",
+		sessionLine:       sessionLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
@@ -154,6 +197,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		budget:          agent.Budget{InputCeiling: f.inputCeiling, OutputReserve: f.outputReserve},
 		color:           !f.noColor,
 		retrieveOmitted: retrieveOmitted,
+		session:         sessn,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
