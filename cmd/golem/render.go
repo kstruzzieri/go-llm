@@ -187,7 +187,7 @@ func entriesSummary(content string) string {
 	return plural(n, "entry", "entries")
 }
 
-// countLines counts the lines in content, ignoring a single trailing newline.
+// countLines counts the lines in content, ignoring trailing newlines.
 func countLines(content string) int {
 	if content == "" {
 		return 0

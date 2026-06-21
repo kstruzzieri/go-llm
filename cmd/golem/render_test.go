@@ -158,6 +158,7 @@ func TestResultSummary_ByTool(t *testing.T) {
 		{"list none", "list", agent.ToolResult{Content: "no entries"}, "< no entries\n"},
 		{"retrieve sources", "retrieve", agent.ToolResult{Content: "ctx", Attrib: &agent.RetrievalAttribution{
 			Sources: make([]agent.RetrievedSource, 4)}}, "< 4 sources\n"},
+		{"retrieve no attrib", "retrieve", agent.ToolResult{Content: "a\nb"}, "< 2 lines\n"},
 		{"error", "read_file", agent.ToolResult{IsError: true, Content: "binary file (NUL byte detected); refusing to read"},
 			"< error: binary file (NUL byte detected); refusing to read\n"},
 		{"preview override", "search", agent.ToolResult{Preview: "custom"}, "< custom\n"},
