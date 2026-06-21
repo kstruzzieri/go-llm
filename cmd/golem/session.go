@@ -201,7 +201,7 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 
 // record appends the user line + final answer and persists the conversation.
 // It only mutates the in-memory buffer after Save succeeds, so a failed save
-// cannot leak an unsaved turn into future preambles or a later successful save.
+// cannot leak an unsaved turn into future history() output or a later successful save.
 func (s *session) record(ctx context.Context, userLine, answer string) error {
 	next := append(append([]conversation.Message{}, s.msgs...),
 		conversation.Message{Role: "user", Content: userLine},

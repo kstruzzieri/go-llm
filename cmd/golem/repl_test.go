@@ -197,9 +197,9 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 		t.Fatalf("runREPL: %v", err)
 	}
 
-	// The system prompt is exactly the base prompt — no rendered preamble.
+	// The system prompt is exactly the base prompt — history is sent as real messages, not appended.
 	if caller.system != golemSystemPrompt {
-		t.Errorf("system must equal baseSystem with no preamble, got:\n%s", caller.system)
+		t.Errorf("system must equal baseSystem (history is sent as real messages, not appended), got:\n%s", caller.system)
 	}
 	// Prior turn reaches the model as real user/assistant messages, ahead of the
 	// current goal: system, user(prior), assistant(prior), user(goal).
