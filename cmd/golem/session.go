@@ -77,6 +77,7 @@ const (
 // concurrent writers — two golem processes on the same id are last-save-wins.
 type session struct {
 	db     *sql.DB
+	dbPath string // retained so record/clear can re-secure sidecars after each write
 	store  conversation.Store
 	id     string
 	budget int
@@ -131,7 +132,7 @@ func openSession(ctx context.Context, dbPath, id string, budget int) (*session, 
 		return nil, sessionInfo{}, err
 	}
 
-	s := &session{db: db, store: store, id: id, budget: budget, est: conversation.CharRatioEstimator(4.0)}
+	s := &session{db: db, dbPath: dbPath, store: store, id: id, budget: budget, est: conversation.CharRatioEstimator(4.0)}
 	info := sessionInfo{id: id}
 	conv, lerr := store.Load(ctx, id)
 	switch {
@@ -188,6 +189,9 @@ func (s *session) record(ctx context.Context, userLine, answer string) error {
 		return err
 	}
 	s.msgs = next
+	// SQLite may have (re)created the -wal/-shm sidecars honoring the umask on
+	// this write; re-secure them (the WAL can hold un-checkpointed message text).
+	_ = chmodSessionDBFiles(s.dbPath)
 	return nil
 }
 
@@ -215,6 +219,7 @@ func (s *session) clear(ctx context.Context) error {
 		return err
 	}
 	s.msgs = nil
+	_ = chmodSessionDBFiles(s.dbPath)
 	return nil
 }
 

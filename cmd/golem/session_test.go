@@ -123,6 +123,12 @@ func TestSession_NewThenResume(t *testing.T) {
 	if err := s.record(ctx, "what is x?", "x is a thing"); err != nil {
 		t.Fatalf("record: %v", err)
 	}
+	// If the WAL sidecar exists after a write, it must be 0600 (re-chmod path).
+	if wfi, werr := os.Stat(dbPath + "-wal"); werr == nil {
+		if wfi.Mode().Perm() != 0o600 {
+			t.Errorf("-wal perm = %o, want 600", wfi.Mode().Perm())
+		}
+	}
 	_ = s.Close()
 
 	s2, info2, err := openSession(ctx, dbPath, "workspace:abc", defaultSessionBudget)
