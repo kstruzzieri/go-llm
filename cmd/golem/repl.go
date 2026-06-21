@@ -28,6 +28,8 @@ type replSession struct {
 	clock           func() time.Time
 	retrieveOmitted bool // when true, /tools appends the omission note
 
+	session *session // nil => --no-session (no preamble, no persistence)
+
 	lastModel string // last routed ActualModel for /model
 }
 
@@ -48,7 +50,7 @@ func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if exit := dispatchSlash(out, sess, line); exit {
+			if exit := dispatchSlash(ctx, out, sess, line); exit {
 				return nil
 			}
 			continue
@@ -83,10 +85,15 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}()
 	}
 
+	system := sess.baseSystem
+	if pre := sess.session.preamble(); pre != "" { // nil-safe: nil session => ""
+		system = sess.baseSystem + "\n\n" + pre
+	}
+
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
 	req := agent.Request{
 		Goal:     line,
-		System:   sess.baseSystem,
+		System:   system,
 		Tools:    sess.tools,
 		MaxSteps: sess.maxSteps,
 		Budget:   sess.budget,
@@ -104,6 +111,13 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if m := lastRoutedModel(res); m != "" {
 		sess.lastModel = m
 	}
+	// Persist only a successful, answered run (amendment 6). Use the parent ctx,
+	// not runCtx, so the save is not tied to this turn's cancellation scope.
+	if sess.session != nil && res.Answer != "" {
+		if serr := sess.session.record(ctx, line, res.Answer); serr != nil {
+			_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", serr)
+		}
+	}
 	rend.finalFooter(res)
 }
 
@@ -119,7 +133,7 @@ func lastRoutedModel(res agent.Result) string {
 }
 
 // dispatchSlash handles a slash command; returns true to exit the REPL.
-func dispatchSlash(out io.Writer, sess *replSession, line string) bool {
+func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) bool {
 	cmd := strings.Fields(line)[0]
 	switch cmd {
 	case "/exit", "/quit":
@@ -127,7 +141,23 @@ func dispatchSlash(out io.Writer, sess *replSession, line string) bool {
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
 	case "/clear":
-		_, _ = fmt.Fprintln(out, "no session history in this build")
+		switch {
+		case sess.session == nil:
+			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
+		default:
+			if err := sess.session.clear(ctx); err != nil {
+				_, _ = fmt.Fprintf(out, "clear failed: %v\n", err)
+			} else {
+				_, _ = fmt.Fprintln(out, "session cleared")
+			}
+		}
+	case "/new":
+		if sess.session == nil {
+			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
+		} else {
+			sess.session.renew()
+			_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+		}
 	case "/model":
 		if sess.lastModel == "" {
 			_, _ = fmt.Fprintln(out, "not yet routed")
@@ -151,7 +181,8 @@ const golemHelp = `commands:
   /help          show this help
   /tools         list registered tools and their effect class
   /model         show the last routed model
-  /clear         (no session history in this build)
+  /clear         delete the active session's history
+  /new           start a new session (keeps history of the old one)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
 `
