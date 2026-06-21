@@ -18,8 +18,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const defaultSessionBudget = 2000
-
 // validSessionName restricts explicit -session ids so display, DB keys, and any
 // future session commands stay boring.
 var validSessionName = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)

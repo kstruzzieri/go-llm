@@ -25,7 +25,6 @@ type flags struct {
 	noSession     bool
 	fresh         bool
 	sessionID     string
-	sessionBudget int
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -42,7 +41,6 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
-	fs.IntVar(&f.sessionBudget, "session-budget", defaultSessionBudget, "token budget for the prior-session preamble (0 disables injection)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -51,9 +49,6 @@ func parseFlags(args []string) (flags, error) {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
-	if f.sessionBudget < 0 {
-		return fmt.Errorf("golem: -session-budget must be >= 0, got %d", f.sessionBudget)
-	}
 	if f.fresh && f.sessionID != "" {
 		return fmt.Errorf("golem: -fresh and -session are mutually exclusive")
 	}
