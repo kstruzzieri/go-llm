@@ -54,6 +54,9 @@ func validateFlags(f flags) error {
 	if f.sessionBudget < 0 {
 		return fmt.Errorf("golem: -session-budget must be >= 0, got %d", f.sessionBudget)
 	}
+	if f.fresh && f.sessionID != "" {
+		return fmt.Errorf("golem: -fresh and -session are mutually exclusive")
+	}
 	return nil
 }
 

@@ -100,6 +100,15 @@ func TestValidateFlags(t *testing.T) {
 	if err := validateFlags(flags{sessionBudget: 0}); err != nil {
 		t.Errorf("zero session-budget must be allowed, got %v", err)
 	}
+	if err := validateFlags(flags{fresh: true, sessionID: "x"}); err == nil {
+		t.Error("-fresh with -session must error (mutually exclusive)")
+	}
+	if err := validateFlags(flags{fresh: true}); err != nil {
+		t.Errorf("-fresh alone must be allowed, got %v", err)
+	}
+	if err := validateFlags(flags{sessionID: "x"}); err != nil {
+		t.Errorf("-session alone must be allowed, got %v", err)
+	}
 }
 
 func TestStartupNotices_SessionLine(t *testing.T) {
