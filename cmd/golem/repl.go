@@ -141,15 +141,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 	case "/help":
 		_, _ = fmt.Fprint(out, golemHelp)
 	case "/clear":
-		switch {
-		case sess.session == nil:
+		if sess.session == nil {
 			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
-		default:
-			if err := sess.session.clear(ctx); err != nil {
-				_, _ = fmt.Fprintf(out, "clear failed: %v\n", err)
-			} else {
-				_, _ = fmt.Fprintln(out, "session cleared")
-			}
+		} else if err := sess.session.clear(ctx); err != nil {
+			_, _ = fmt.Fprintf(out, "clear failed: %v\n", err)
+		} else {
+			_, _ = fmt.Fprintln(out, "session cleared")
 		}
 	case "/new":
 		if sess.session == nil {
