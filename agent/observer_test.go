@@ -5,6 +5,13 @@ import (
 	"testing"
 )
 
+func TestNopObserverIsNotToolResultObserver(t *testing.T) {
+	var o Observer = nopObserver{}
+	if _, ok := o.(ToolResultObserver); ok {
+		t.Fatal("nopObserver must not implement ToolResultObserver (regression guard)")
+	}
+}
+
 func TestNormalizeObserverNilIsNoop(t *testing.T) {
 	obs := normalizeObserver(nil)
 	if obs == nil {

@@ -16,10 +16,18 @@ func (o *Orchestrator) runToolCalls(ctx context.Context, res *Result, state *Sta
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
 		out, rec, err := o.dispatch(ctx, reg, call, approver, obs, step)
 		if err != nil {
-			return err
+			return err // hard abort (ctx cancel / approver error): no ToolResult, no OnToolResult
 		}
 		res.ToolCalls = append(res.ToolCalls, rec)
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
+		// out is the exact ToolResult appended to State below (Invoke results are
+		// already capOutput-ed inside dispatch; synthetic failures are short and
+		// uncapped) — so the observer sees what the model sees.
+		if tro, ok := obs.(ToolResultObserver); ok {
+			if err := tro.OnToolResult(ctx, ToolResultEvent{Step: step, Call: call, Result: out}); err != nil {
+				return err
+			}
+		}
 		state.Messages = append(state.Messages, toolObservation(call, out))
 		gov.observe(call, out)
 		if sr, tripped := gov.stopReason(); tripped {
