@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,5 +126,67 @@ func TestRenderer_Color_WrapsFooter(t *testing.T) {
 	got := buf.String()
 	if got[:4] != "\x1b[2m" || got[len(got)-5:] != "\x1b[0m\n" {
 		t.Errorf("color footer not dim-wrapped: %q", got)
+	}
+}
+
+func renderResult(t *testing.T, name string, res agent.ToolResult) string {
+	t.Helper()
+	var buf bytes.Buffer
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	ev := agent.ToolResultEvent{
+		Call:   provider.ToolCall{Function: provider.ToolCallFunction{Name: name}},
+		Result: res,
+	}
+	if err := r.OnToolResult(context.Background(), ev); err != nil {
+		t.Fatalf("OnToolResult: %v", err)
+	}
+	return buf.String()
+}
+
+func TestResultSummary_ByTool(t *testing.T) {
+	tests := []struct {
+		name string
+		tool string
+		res  agent.ToolResult
+		want string
+	}{
+		{"read_file lines", "read_file", agent.ToolResult{Content: strings.Repeat("x\n", 86)}, "< 86 lines\n"},
+		{"read_file truncated", "read_file", agent.ToolResult{Content: "a\nb", Truncated: true}, "< 2 lines (truncated)\n"},
+		{"search matches", "search", agent.ToolResult{Content: "a.go:1: foo\na.go:5: foo\nb.go:2: foo"}, "< 3 matches in 2 files\n"},
+		{"search none", "search", agent.ToolResult{Content: "no matches"}, "< no matches\n"},
+		{"glob entries", "glob", agent.ToolResult{Content: "x\ny/\nz"}, "< 3 entries\n"},
+		{"list none", "list", agent.ToolResult{Content: "no entries"}, "< no entries\n"},
+		{"retrieve sources", "retrieve", agent.ToolResult{Content: "ctx", Attrib: &agent.RetrievalAttribution{
+			Sources: make([]agent.RetrievedSource, 4)}}, "< 4 sources\n"},
+		{"error", "read_file", agent.ToolResult{IsError: true, Content: "binary file (NUL byte detected); refusing to read"},
+			"< error: binary file (NUL byte detected); refusing to read\n"},
+		{"preview override", "search", agent.ToolResult{Preview: "custom"}, "< custom\n"},
+		{"unknown tool defaults to lines", "whatever", agent.ToolResult{Content: "one\ntwo"}, "< 2 lines\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := renderResult(t, tc.tool, tc.res); got != tc.want {
+				t.Errorf("summary = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOnToolResult_NewlineAfterUnterminatedToken(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	ctx := context.Background()
+	if err := r.OnToken(ctx, agent.TokenEvent{Content: "partial"}); err != nil {
+		t.Fatalf("OnToken: %v", err)
+	}
+	if err := r.OnToolResult(ctx, agent.ToolResultEvent{
+		Call:   provider.ToolCall{Function: provider.ToolCallFunction{Name: "read_file"}},
+		Result: agent.ToolResult{Content: "a"},
+	}); err != nil {
+		t.Fatalf("OnToolResult: %v", err)
+	}
+	want := "partial\n< 1 line\n"
+	if buf.String() != want {
+		t.Errorf("got %q, want %q", buf.String(), want)
 	}
 }
