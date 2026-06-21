@@ -166,7 +166,7 @@ func newSessionedTestSession(t *testing.T, caller agent.ModelCaller, root, id st
 		t.Fatalf("buildTools: %v", err)
 	}
 	dbPath := filepath.Join(t.TempDir(), "golem", "sessions.db")
-	s, _, err := openSession(context.Background(), dbPath, id, defaultSessionBudget)
+	s, _, err := openSession(context.Background(), dbPath, id)
 	if err != nil {
 		t.Fatalf("openSession: %v", err)
 	}

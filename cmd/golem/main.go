@@ -172,7 +172,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		default:
 			if id, ierr := resolveSessionID(sessionIDOpts{fresh: f.fresh, explicit: f.sessionID, root: root}); ierr != nil {
 				warns = append(warns, "session disabled: "+ierr.Error())
-			} else if s, info, oerr := openSession(ctx, dbPath, id, f.sessionBudget); oerr != nil {
+			} else if s, info, oerr := openSession(ctx, dbPath, id); oerr != nil {
 				warns = append(warns, "session disabled: "+oerr.Error())
 			} else {
 				sessn = s
