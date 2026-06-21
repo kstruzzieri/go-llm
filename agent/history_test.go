@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -130,5 +131,44 @@ func TestRunEvictsHistoryUnderTightBudgetKeepsGoal(t *testing.T) {
 	}
 	if historyCount == 0 || historyCount >= len(hist) {
 		t.Errorf("expected partial history eviction, %d of %d survived", historyCount, len(hist))
+	}
+}
+
+// TestInitStateDeepClonesHistory locks the runtime ownership boundary: even a
+// History entry carrying ToolCalls (rejected by Run's allowlist, so reachable
+// only by calling initState directly) must be deep-copied, so mutating the
+// caller's slice, the ToolCalls backing array, or the Arguments byte buffer
+// after seeding cannot reach into State.
+func TestInitStateDeepClonesHistory(t *testing.T) {
+	args := json.RawMessage(`{"k":"v"}`)
+	hist := []provider.ChatMessage{{
+		Role:    "assistant",
+		Content: "prior",
+		ToolCalls: []provider.ToolCall{{
+			ID:       "x",
+			Type:     "function",
+			Function: provider.ToolCallFunction{Name: "t", Arguments: args},
+		}},
+	}}
+	st := initState(Request{Goal: "g", History: hist})
+	got := st.Messages[0]
+
+	// Mutate every caller-owned alias after seeding.
+	hist[0].Content = "MUT"
+	hist[0].ToolCalls[0].ID = "MUT"
+	hist[0].ToolCalls[0].Function.Name = "MUT"
+	args[0] = 'X' // mutates the Arguments backing array
+
+	if got.Content != "prior" {
+		t.Errorf("Content aliased: %q", got.Content)
+	}
+	if got.ToolCalls[0].ID != "x" {
+		t.Errorf("ToolCall.ID aliased: %q", got.ToolCalls[0].ID)
+	}
+	if got.ToolCalls[0].Function.Name != "t" {
+		t.Errorf("ToolCall.Function.Name aliased: %q", got.ToolCalls[0].Function.Name)
+	}
+	if string(got.ToolCalls[0].Function.Arguments) != `{"k":"v"}` {
+		t.Errorf("Arguments aliased: %s", got.ToolCalls[0].Function.Arguments)
 	}
 }

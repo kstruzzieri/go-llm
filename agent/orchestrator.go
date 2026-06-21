@@ -23,7 +23,7 @@ func New(model ModelCaller, ctxMgr ContextManager) *Orchestrator {
 func initState(req Request) State {
 	msgs := make([]Message, 0, len(req.History)+1)
 	for _, h := range req.History {
-		msgs = append(msgs, Message{ChatMessage: h, Segment: Elastic})
+		msgs = append(msgs, Message{ChatMessage: cloneChatMessage(h), Segment: Elastic})
 	}
 	msgs = append(msgs, Message{
 		ChatMessage: provider.ChatMessage{Role: "user", Content: req.Goal},
