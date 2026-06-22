@@ -223,15 +223,26 @@ func (s *session) record(ctx context.Context, userLine, answer string) error {
 
 // history maps the persisted conversation to real-role chat messages for the
 // agent runtime's Request.History seam. No trimming: ContextManager.Assemble is
-// the single authority that bounds model-visible context. record only ever
-// writes user/assistant plain-text turns, so the output satisfies the runtime
-// allowlist. Nil-safe: a nil session (e.g. --no-session) yields nil.
+// the single authority that bounds model-visible context. Rows outside the
+// runtime allowlist (non user/assistant role or empty content) are skipped
+// defensively, so a foreign or corrupt stored turn cannot brick the session.
+// Nil-safe: a nil session (e.g. --no-session) yields nil.
 func (s *session) history() []provider.ChatMessage {
 	if s == nil || len(s.msgs) == 0 {
 		return nil
 	}
 	out := make([]provider.ChatMessage, 0, len(s.msgs))
 	for _, m := range s.msgs {
+		// Skip any row the agent runtime's allowlist would reject (non
+		// user/assistant role, or empty content) so a single foreign or corrupt
+		// stored turn cannot brick the session by failing validateHistory on
+		// every future run. record() only writes valid turns; this is defensive.
+		if m.Role != "user" && m.Role != "assistant" {
+			continue
+		}
+		if m.Content == "" {
+			continue
+		}
 		out = append(out, provider.ChatMessage{Role: m.Role, Content: m.Content})
 	}
 	return out

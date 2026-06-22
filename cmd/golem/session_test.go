@@ -348,3 +348,36 @@ func TestSession_HistoryNilSafe(t *testing.T) {
 		t.Errorf("nil session history = %+v, want nil", got)
 	}
 }
+
+// TestSession_HistorySkipsRowsTheRuntimeWouldReject proves history() defensively
+// drops any persisted row outside the runtime's user/assistant + non-empty
+// allowlist, so a single foreign/corrupt stored turn cannot brick the session by
+// failing validateHistory on every future run. golem's own record() never writes
+// such rows; this guards shared-store / future-feature / corruption cases.
+func TestSession_HistorySkipsRowsTheRuntimeWouldReject(t *testing.T) {
+	s, _ := openTempSession(t, "workspace:filter")
+	// Inject a buffer that mixes valid turns with rows the runtime allowlist rejects.
+	s.msgs = []conversation.Message{
+		{Role: "user", Content: "q1"},
+		{Role: "system", Content: "FOREIGN-SYSTEM-ROW"}, // wrong role
+		{Role: "assistant", Content: "a1"},
+		{Role: "tool", Content: "FOREIGN-TOOL-ROW", ToolName: "x", ToolCallID: "c1"}, // wrong role
+		{Role: "user", Content: ""},                                                  // empty content
+		{Role: "assistant", Content: "a2"},
+	}
+	got := s.history()
+	want := []provider.ChatMessage{
+		{Role: "user", Content: "q1"},
+		{Role: "assistant", Content: "a1"},
+		{Role: "assistant", Content: "a2"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("history len = %d, want %d: %+v", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i].Role != want[i].Role || got[i].Content != want[i].Content {
+			t.Errorf("history[%d] = {%q,%q}, want {%q,%q}",
+				i, got[i].Role, got[i].Content, want[i].Role, want[i].Content)
+		}
+	}
+}
