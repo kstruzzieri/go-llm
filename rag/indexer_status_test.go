@@ -43,7 +43,7 @@ func TestIndexDirectoryWithStatus_Counts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	idx, err := NewIndexerWithEmbedder(stubEmbedder("p/m"), store, WithEmbeddingModel("p/m"))
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestIndexDirectoryWithStatus_PartialErrors(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	// Embedder errors only for the file whose content contains "func B".
 	emb := EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
 		for _, in := range inputs {

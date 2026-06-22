@@ -183,7 +183,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		autoSidecarPath: autoSidecar,
 		workspaceID:     autoWorkspaceID,
 	})
-	var retrieve agent.Tool = rr.tool
+	retrieve := rr.tool
 	warns = append(warns, rr.warns...)
 	retrieveLine := rr.line
 	tools, err := buildTools(root, retrieve)

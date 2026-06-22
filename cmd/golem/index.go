@@ -53,29 +53,29 @@ func executeIndex(ctx context.Context, job indexJob) indexResult {
 	// A walk failure / cancellation aborts the command: error but no completed
 	// queue. Distinguish it from a completed run with per-file errors.
 	if ctx.Err() != nil {
-		fmt.Fprintf(job.out, "golem index: cancelled: %v\n", ctx.Err())
+		_, _ = fmt.Fprintf(job.out, "golem index: cancelled: %v\n", ctx.Err())
 		return indexResult{exitErr: errIndexFailed}
 	}
 	if indexErr != nil && len(status.Errors) == 0 {
-		fmt.Fprintf(job.out, "golem index: %v\n", indexErr)
+		_, _ = fmt.Fprintf(job.out, "golem index: %v\n", indexErr)
 		return indexResult{exitErr: errIndexFailed}
 	}
 
 	stats, statErr := job.store.Stats(ctx)
 	if statErr != nil {
-		fmt.Fprintf(job.out, "golem index: read stats: %v\n", statErr)
+		_, _ = fmt.Fprintf(job.out, "golem index: read stats: %v\n", statErr)
 		return indexResult{exitErr: errIndexFailed}
 	}
 
 	// "Usable store" gate (spec §5.7): >=1 source AND a clean single-vsid probe.
 	probe, probeErr := job.store.ProbeVectorSpaces(ctx)
 	if probeErr != nil {
-		fmt.Fprintf(job.out, "golem index: probe vector space: %v\n", probeErr)
+		_, _ = fmt.Fprintf(job.out, "golem index: probe vector space: %v\n", probeErr)
 		return indexResult{exitErr: errIndexFailed}
 	}
 	clean := len(probe.KnownIDs) == 1 && !probe.HasUnknown
 	if stats.TotalSources < 1 || !clean {
-		fmt.Fprintf(job.out, "golem index: corpus not usable (sources=%d, vector spaces=%v, legacy=%v); not writing index marker\n",
+		_, _ = fmt.Fprintf(job.out, "golem index: corpus not usable (sources=%d, vector spaces=%v, legacy=%v); not writing index marker\n",
 			stats.TotalSources, probe.KnownIDs, probe.HasUnknown)
 		return indexResult{exitErr: errIndexFailed}
 	}
@@ -95,11 +95,11 @@ func executeIndex(ctx context.Context, job indexJob) indexResult {
 		ErrorCount:              errCount,
 	}
 	if err := writeSidecar(job.sidecarPath, sc); err != nil {
-		fmt.Fprintf(job.out, "golem index: %v\n", err)
+		_, _ = fmt.Fprintf(job.out, "golem index: %v\n", err)
 		return indexResult{exitErr: errIndexFailed}
 	}
 
-	fmt.Fprintf(job.out, "indexed %d sources, %d chunks (%d errors) -> %s\n",
+	_, _ = fmt.Fprintf(job.out, "indexed %d sources, %d chunks (%d errors) -> %s\n",
 		stats.TotalSources, stats.TotalChunks, errCount, job.dbPath)
 	if errCount > 0 {
 		printCappedErrors(job.out, status.Errors, 10)
@@ -115,10 +115,10 @@ func printCappedErrors(w io.Writer, errs []string, limit int) {
 		shown = errs[:limit]
 	}
 	for _, e := range shown {
-		fmt.Fprintf(w, "  - %s\n", e)
+		_, _ = fmt.Fprintf(w, "  - %s\n", e)
 	}
 	if len(errs) > limit {
-		fmt.Fprintf(w, "  (+%d more)\n", len(errs)-limit)
+		_, _ = fmt.Fprintf(w, "  (+%d more)\n", len(errs)-limit)
 	}
 }
 
@@ -268,7 +268,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	// prepareIndexStore creates the parent dir itself; no MkdirAll needed here.
 	store, err := prepareIndexStore(ctx, dbPath, sidecarPath(dbPath), workspaceID, embChain, full)
 	if err != nil {
-		fmt.Fprintf(out, "golem index: %v\n", err)
+		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
 		return errIndexFailed
 	}
 	defer func() { _ = store.Close() }()

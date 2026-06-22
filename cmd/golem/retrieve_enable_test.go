@@ -26,7 +26,7 @@ func seedIndex(t *testing.T, dbPath, workspaceID, vsid string) {
 		sidecarPath: sidecarPath(dbPath), workspaceID: workspaceID,
 		requestedModel: vsid, out: &out,
 	})
-	store.Close()
+	_ = store.Close()
 }
 
 func TestEnableRetrieve_NoRagSuppressesNotice(t *testing.T) {

@@ -57,7 +57,7 @@ func TestExecuteIndex_HappyPath(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "indexes", "k.db")
 	store, idx := buildTestIndexer(t, dbPath, "ollama/nomic")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var out bytes.Buffer
 	res := executeIndex(context.Background(), indexJob{
@@ -105,7 +105,7 @@ func TestExecuteIndex_PartialExitsNonZeroButWritesSidecar(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	emb := rag.EmbedderFunc(func(_ context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
 		for _, in := range inputs {
 			if strings.Contains(in, "func B") {
@@ -146,7 +146,7 @@ func TestExecuteIndex_EmptyCorpusNoSidecar(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "indexes", "k.db")
 	store, idx := buildTestIndexer(t, dbPath, "ollama/nomic")
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var out bytes.Buffer
 	res := executeIndex(context.Background(), indexJob{
@@ -197,7 +197,7 @@ func TestPrepareIndexStore_FullRemovesArtifactsThenOpensFresh(t *testing.T) {
 		sidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
 		requestedModel: "ollama/OLD", out: &out0,
 	})
-	store.Close()
+	_ = store.Close()
 	if _, err := os.Stat(sidecarPath(dbPath)); err != nil {
 		t.Fatalf("seed sidecar missing: %v", err)
 	}
@@ -212,7 +212,7 @@ func TestPrepareIndexStore_FullRemovesArtifactsThenOpensFresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepareIndexStore(full): %v", err)
 	}
-	defer fresh.Close()
+	defer func() { _ = fresh.Close() }()
 
 	if _, err := os.Stat(sidecarPath(dbPath)); !os.IsNotExist(err) {
 		t.Fatalf("full rebuild should remove stale sidecar, stat err=%v", err)
@@ -237,11 +237,11 @@ func TestPrepareIndexStore_IncrementalRefusesPreexistingDBWithoutSidecar(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	store.Close()
+	_ = store.Close()
 
 	got, err := prepareIndexStore(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"}, false)
 	if got != nil {
-		got.Close()
+		_ = got.Close()
 	}
 	if err == nil {
 		t.Fatal("incremental over a DB without a valid sidecar must refuse")
@@ -259,7 +259,7 @@ func TestPrepareIndexStore_IncrementalAllowsTrueFirstRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("true first run should be allowed: %v", err)
 	}
-	store.Close()
+	_ = store.Close()
 }
 
 func TestRun_DispatchUnknownCommand(t *testing.T) {
@@ -283,13 +283,13 @@ func TestPreflightExistingIndex_RefusesVsidMismatch(t *testing.T) {
 		sidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
 		requestedModel: "ollama/OLD", out: &out,
 	})
-	store.Close()
+	_ = store.Close()
 
 	existing, err := rag.NewSQLiteStore(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer existing.Close()
+	defer func() { _ = existing.Close() }()
 	err = preflightExistingIndex(context.Background(), existing, sidecarPath(dbPath), "workspace:k", []string{"ollama/NEW"})
 	if err == nil {
 		t.Fatal("incremental with chain != stored vector space must refuse")
