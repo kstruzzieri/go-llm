@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -40,15 +39,21 @@ type replSession struct {
 // other line as an agent goal. A value on interrupts cancels the in-flight Run
 // without ending the loop. EOF (Ctrl-D) returns nil.
 func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lr := newLineReader(in)
 	for {
 		_, _ = fmt.Fprint(out, "golem> ")
-		if !sc.Scan() {
-			_, _ = fmt.Fprintln(out)
-			return sc.Err()
+		line, ok, err := lr.ReadLine(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil // ctx canceled at the prompt: exit quietly
+			}
+			return err // scanner failure (e.g. line too long): surface it, as before
 		}
-		line := strings.TrimSpace(sc.Text())
+		if !ok {
+			_, _ = fmt.Fprintln(out)
+			return nil // EOF (Ctrl-D)
+		}
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -58,11 +63,11 @@ func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan
 			}
 			continue
 		}
-		runOnce(ctx, out, interrupts, sess, line)
+		runOnce(ctx, out, interrupts, sess, line, lr)
 	}
 }
 
-func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string) {
+func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, lr *lineReader) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
