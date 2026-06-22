@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/rag"
@@ -115,4 +117,96 @@ func printCappedErrors(w io.Writer, errs []string, limit int) {
 	if len(errs) > limit {
 		fmt.Fprintf(w, "  (+%d more)\n", len(errs)-limit)
 	}
+}
+
+// osRemove and errNotExist are indirected so removal is testable without real files.
+var (
+	osRemove    = os.Remove
+	errNotExist = os.ErrNotExist
+)
+
+func fileExists(p string) bool {
+	_, err := os.Stat(p)
+	return err == nil
+}
+
+// removeIndexArtifacts deletes the DB, its WAL/SHM sidecars, and the marker so a
+// -full run cannot inherit an old vector space. Not-exist is fine (first run).
+func removeIndexArtifacts(dbPath, sidecar string) error {
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm", sidecar} {
+		if err := removeIfExists(p); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func removeIfExists(p string) error {
+	if err := osRemove(p); err != nil && !errors.Is(err, errNotExist) {
+		return fmt.Errorf("remove %q: %w", p, err)
+	}
+	return nil
+}
+
+// prepareIndexStore handles the pre-open lifecycle for the index store:
+//   - full=true: remove all artifacts (DB, WAL, SHM, sidecar) then open a fresh store.
+//   - full=false: open the store; if it pre-existed, run preflightExistingIndex to
+//     enforce spec §5.2 (valid sidecar + matching vector-space id required).
+//
+// Preflight and removal always happen BEFORE SQLite is opened so no DB file is
+// ever deleted underneath a live handle. The parent directory is created on
+// first call so callers need not manage it separately.
+func prepareIndexStore(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string, full bool) (*rag.SQLiteStore, error) {
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		return nil, fmt.Errorf("create index dir: %w", err)
+	}
+	if full {
+		if err := removeIndexArtifacts(dbPath, sidecarPath); err != nil {
+			return nil, err
+		}
+		return rag.NewSQLiteStore(dbPath)
+	}
+	preexisting := fileExists(dbPath)
+	store, err := rag.NewSQLiteStore(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if preexisting {
+		if err := preflightExistingIndex(ctx, store, sidecarPath, workspaceID, expected); err != nil {
+			_ = store.Close()
+			return nil, err
+		}
+	}
+	return store, nil
+}
+
+// preflightExistingIndex enforces spec §5.2 for a DEFAULT (incremental) run
+// when dbPath existed before opening SQLite. A matching sidecar is required even
+// if the DB has zero chunks; otherwise a copied/foreign empty DB could be
+// blessed by an incremental run.
+func preflightExistingIndex(ctx context.Context, store *rag.SQLiteStore, sidecarPath, workspaceID string, expected []string) error {
+	sc, serr := readSidecar(sidecarPath)
+	if serr != nil {
+		return fmt.Errorf("existing index has no valid sidecar; run \"golem index -full\" to rebuild")
+	}
+	if verr := validateSidecar(sc, workspaceID); verr != nil {
+		return fmt.Errorf("existing index sidecar invalid (%v); run \"golem index -full\" to rebuild", verr)
+	}
+	probe, perr := store.ProbeVectorSpaces(ctx)
+	if perr != nil {
+		return fmt.Errorf("preflight probe: %w", perr)
+	}
+	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
+	if !dec.register {
+		return fmt.Errorf("existing index was built with vector space %s, current embedding chain is %v; run \"golem index -full\" to rebuild",
+			describeStored(probe), expected)
+	}
+	return nil
+}
+
+func describeStored(p rag.VectorSpaceProbe) string {
+	if len(p.KnownIDs) == 1 {
+		return p.KnownIDs[0]
+	}
+	return fmt.Sprintf("%v", p.KnownIDs)
 }

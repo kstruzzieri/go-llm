@@ -161,3 +161,132 @@ func TestExecuteIndex_EmptyCorpusNoSidecar(t *testing.T) {
 		t.Errorf("empty corpus must not write a sidecar (stat err=%v)", err)
 	}
 }
+
+func TestRemoveIndexArtifacts_RemovesDBWalShmAndSidecar(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "k.db")
+	sidecar := filepath.Join(dir, "k.json")
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm", sidecar} {
+		if err := os.WriteFile(p, []byte("stale"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := removeIndexArtifacts(dbPath, sidecar); err != nil {
+		t.Fatalf("removeIndexArtifacts: %v", err)
+	}
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm", sidecar} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s should be removed, stat err=%v", p, err)
+		}
+	}
+}
+
+func TestPrepareIndexStore_FullRemovesArtifactsThenOpensFresh(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "indexes", "k.db")
+
+	// Stale DB + sidecar from a previous, different-model run.
+	store, idx := buildTestIndexer(t, dbPath, "ollama/OLD")
+	var out0 bytes.Buffer
+	executeIndex(context.Background(), indexJob{
+		indexer: idx, store: store, root: root, dbPath: dbPath,
+		sidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
+		requestedModel: "ollama/OLD", out: &out0,
+	})
+	store.Close()
+	if _, err := os.Stat(sidecarPath(dbPath)); err != nil {
+		t.Fatalf("seed sidecar missing: %v", err)
+	}
+	if err := os.WriteFile(dbPath+"-wal", []byte("stale-wal"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dbPath+"-shm", []byte("stale-shm"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh, err := prepareIndexStore(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/NEW"}, true)
+	if err != nil {
+		t.Fatalf("prepareIndexStore(full): %v", err)
+	}
+	defer fresh.Close()
+
+	if _, err := os.Stat(sidecarPath(dbPath)); !os.IsNotExist(err) {
+		t.Fatalf("full rebuild should remove stale sidecar, stat err=%v", err)
+	}
+	probe, err := fresh.ProbeVectorSpaces(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(probe.KnownIDs) != 0 || probe.HasUnknown {
+		t.Fatalf("fresh store inherited old vector spaces: %+v", probe)
+	}
+}
+
+func TestPrepareIndexStore_IncrementalRefusesPreexistingDBWithoutSidecar(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "indexes", "k.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := rag.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.Close()
+
+	got, err := prepareIndexStore(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"}, false)
+	if got != nil {
+		got.Close()
+	}
+	if err == nil {
+		t.Fatal("incremental over a DB without a valid sidecar must refuse")
+	}
+	if !strings.Contains(err.Error(), "-full") {
+		t.Errorf("refusal should suggest -full: %v", err)
+	}
+}
+
+func TestPrepareIndexStore_IncrementalAllowsTrueFirstRun(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "indexes", "k.db")
+
+	store, err := prepareIndexStore(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"}, false)
+	if err != nil {
+		t.Fatalf("true first run should be allowed: %v", err)
+	}
+	store.Close()
+}
+
+func TestPreflightExistingIndex_RefusesVsidMismatch(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "indexes", "k.db")
+
+	store, idx := buildTestIndexer(t, dbPath, "ollama/OLD")
+	var out bytes.Buffer
+	executeIndex(context.Background(), indexJob{
+		indexer: idx, store: store, root: root, dbPath: dbPath,
+		sidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
+		requestedModel: "ollama/OLD", out: &out,
+	})
+	store.Close()
+
+	existing, err := rag.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer existing.Close()
+	err = preflightExistingIndex(context.Background(), existing, sidecarPath(dbPath), "workspace:k", []string{"ollama/NEW"})
+	if err == nil {
+		t.Fatal("incremental with chain != stored vector space must refuse")
+	}
+	if !strings.Contains(err.Error(), "ollama/OLD") {
+		t.Errorf("refusal should name the stored vector space: %v", err)
+	}
+}
