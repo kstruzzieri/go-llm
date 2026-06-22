@@ -328,9 +328,17 @@ func (w *Workspace) resolveWriteTarget(p string) (abs string, priorExists bool, 
 // the final component changes after the last check. This is NOT a crash-durability
 // contract (undo is in-memory).
 func (w *Workspace) WriteFileAtomic(p string, content []byte) error {
-	abs, _, err := w.resolveWriteTarget(p)
+	abs, priorExists, err := w.resolveWriteTarget(p)
 	if err != nil {
 		return err
+	}
+	mode := os.FileMode(0o600)
+	if priorExists {
+		fi, err := os.Lstat(abs)
+		if err != nil {
+			return err
+		}
+		mode = fi.Mode().Perm()
 	}
 	dir := filepath.Dir(abs)
 	tmp, err := os.CreateTemp(dir, ".golem-*.tmp")
@@ -340,6 +348,10 @@ func (w *Workspace) WriteFileAtomic(p string, content []byte) error {
 	tmpName := tmp.Name()
 	cleanup := func() { _ = tmp.Close(); _ = os.Remove(tmpName) }
 	if _, err := tmp.Write(content); err != nil {
+		cleanup()
+		return err
+	}
+	if err := tmp.Chmod(mode); err != nil {
 		cleanup()
 		return err
 	}

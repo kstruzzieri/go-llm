@@ -50,30 +50,39 @@ func (*WriteFile) Effect() agent.Effect {
 }
 
 // Plan computes the preview and stashes the pending plan. It never mutates. On any
-// validation failure it returns a ToolPlan with no Preview so the call is still
-// gated (Effect is Write) but the matching Invoke will fail closed (no pending plan).
+// validation failure it returns an error so dispatch reports the failure without
+// asking the user to approve an empty diff.
 func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
 	eff := t.Effect()
 	var args writeFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return agent.ToolPlan{Effect: eff}, nil
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)
 	}
-	if args.Path == "" || len(args.Content) > mutateMaxBytes {
-		return agent.ToolPlan{Effect: eff}, nil
+	if args.Path == "" {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("path is required")
+	}
+	if len(args.Content) > mutateMaxBytes {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("content exceeds size limit")
 	}
 	if bytes.IndexByte([]byte(args.Content), 0) >= 0 {
-		return agent.ToolPlan{Effect: eff}, nil // refuse binary content (no approvable preview)
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("content contains NUL byte; refusing to write binary content")
 	}
 	_, priorExists, err := t.ws.resolveWriteTarget(args.Path)
 	if err != nil {
-		return agent.ToolPlan{Effect: eff}, nil
+		return agent.ToolPlan{Effect: eff}, err
 	}
 	var prior []byte
 	beforeHash := absentHash
 	if priorExists {
 		prior, err = t.ws.readAll(args.Path)
-		if err != nil || len(prior) > mutateMaxBytes {
-			return agent.ToolPlan{Effect: eff}, nil
+		if err != nil {
+			return agent.ToolPlan{Effect: eff}, err
+		}
+		if len(prior) > mutateMaxBytes {
+			return agent.ToolPlan{Effect: eff}, fmt.Errorf("file exceeds size limit")
+		}
+		if bytes.IndexByte(prior, 0) >= 0 {
+			return agent.ToolPlan{Effect: eff}, fmt.Errorf("binary file (NUL byte detected); refusing to overwrite")
 		}
 		beforeHash = ContentHash(prior)
 	}

@@ -406,6 +406,26 @@ func TestWriteFileAtomicCreateAndOverwrite(t *testing.T) {
 	}
 }
 
+func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "script.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := mustWorkspace(t, root)
+
+	if err := ws.WriteFileAtomic("script.sh", []byte("#!/bin/sh\nexit 1\n")); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o755 {
+		t.Fatalf("mode after overwrite = %v, want 0755", got)
+	}
+}
+
 func TestWriteFileAtomicRejectsSymlinkLeaf(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()

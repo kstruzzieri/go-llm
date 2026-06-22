@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"io"
+	"os"
 	"sync"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -44,10 +45,24 @@ func (j *mutationJournal) undo(out io.Writer) {
 	cur, err := j.ws.ReadFileForUndo(rec.Path)
 	curExists := err == nil
 	curHash := ""
+	if err != nil && !os.IsNotExist(err) {
+		_, _ = fmt.Fprintf(out, "cannot undo %s: file changed since golem wrote it\n", rec.Path)
+		return // leave the record on the stack
+	}
 	if curExists {
 		curHash = agenttools.ContentHash(cur)
 	}
-	if curExists && curHash != rec.AfterHash {
+	if !curExists {
+		if !rec.Existed {
+			// The created file is already gone — desired state reached. Pop and report.
+			j.recs = j.recs[:len(j.recs)-1]
+			_, _ = fmt.Fprintf(out, "undid %s (already absent)\n", rec.Path)
+			return
+		}
+		_, _ = fmt.Fprintf(out, "cannot undo %s: file changed since golem wrote it\n", rec.Path)
+		return // leave the record on the stack
+	}
+	if curHash != rec.AfterHash {
 		_, _ = fmt.Fprintf(out, "cannot undo %s: file changed since golem wrote it\n", rec.Path)
 		return // leave the record on the stack
 	}
@@ -58,12 +73,6 @@ func (j *mutationJournal) undo(out io.Writer) {
 			return
 		}
 	} else {
-		if !curExists {
-			// The created file is already gone — desired state reached. Pop and report.
-			j.recs = j.recs[:len(j.recs)-1]
-			_, _ = fmt.Fprintf(out, "undid %s (already absent)\n", rec.Path)
-			return
-		}
 		if rerr := j.ws.RemoveFile(rec.Path); rerr != nil {
 			_, _ = fmt.Fprintf(out, "undo failed for %s: %v\n", rec.Path, rerr)
 			return

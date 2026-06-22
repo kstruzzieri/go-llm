@@ -118,3 +118,35 @@ func TestUndoCreatedFileAlreadyAbsent(t *testing.T) {
 		t.Fatalf("record should have been popped: %q", out2.String())
 	}
 }
+
+func TestUndoCreatedFileRefusesNonRegularReplacement(t *testing.T) {
+	root := t.TempDir()
+	jr, ws := newJournal(t, root)
+	_ = ws.WriteFileAtomic("new.txt", []byte("DATA"))
+	jr.Record(agenttools.MutationRecord{Path: "new.txt", Existed: false, AfterHash: hashFor("DATA")})
+	if err := os.Remove(filepath.Join(root, "new.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "new.txt"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	jr.undo(&out)
+	if !strings.Contains(out.String(), "changed since") {
+		t.Fatalf("undo should refuse non-regular replacement: %q", out.String())
+	}
+	if fi, err := os.Stat(filepath.Join(root, "new.txt")); err != nil || !fi.IsDir() {
+		t.Fatalf("replacement directory should remain: fi=%v err=%v", fi, err)
+	}
+
+	if err := os.Remove(filepath.Join(root, "new.txt")); err != nil {
+		t.Fatal(err)
+	}
+	_ = ws.WriteFileAtomic("new.txt", []byte("DATA"))
+	var out2 strings.Builder
+	jr.undo(&out2)
+	if _, err := os.Stat(filepath.Join(root, "new.txt")); !os.IsNotExist(err) {
+		t.Fatalf("record should remain after refusal and later undo should delete file: %v", err)
+	}
+}

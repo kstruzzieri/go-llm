@@ -101,11 +101,11 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 	eff := t.Effect()
 	var args editFileArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
-		return agent.ToolPlan{Effect: eff}, nil
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)
 	}
 	before, after, err := t.computeEdit(args)
 	if err != nil {
-		return agent.ToolPlan{Effect: eff}, nil // gated but un-approvable; Invoke reports why
+		return agent.ToolPlan{Effect: eff}, err
 	}
 	t.store(ContentHash(raw), pendingPlan{
 		path:         args.Path,

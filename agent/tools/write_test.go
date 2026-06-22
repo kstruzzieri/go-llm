@@ -126,12 +126,8 @@ func TestWriteFileSizeCap(t *testing.T) {
 	wf := NewWriteFile(mustWorkspace(t, root), nil)
 	big := strings.Repeat("x", mutateMaxBytes+1)
 	raw, _ := json.Marshal(map[string]any{"path": "big.txt", "content": big})
-	plan, err := wf.Plan(context.Background(), raw)
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	if plan.Preview != "" {
-		t.Fatalf("oversize Plan should not produce an approvable preview: %q", plan.Preview)
+	if _, err := wf.Plan(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "size limit") {
+		t.Fatalf("oversize Plan error = %v, want size limit", err)
 	}
 	res, _ := wf.Invoke(context.Background(), raw)
 	if !res.IsError || !strings.Contains(res.Content, "preview missing") {
@@ -150,12 +146,8 @@ func TestWriteFileEffect(t *testing.T) {
 func TestWriteFileParentDirMissing(t *testing.T) {
 	wf := NewWriteFile(mustWorkspace(t, t.TempDir()), nil)
 	raw, _ := json.Marshal(map[string]any{"path": "nosuchdir/file.txt", "content": "x"})
-	plan, err := wf.Plan(context.Background(), raw)
-	if err != nil {
-		t.Fatalf("Plan: %v", err)
-	}
-	if plan.Preview != "" {
-		t.Fatalf("missing parent must not produce an approvable preview: %q", plan.Preview)
+	if _, err := wf.Plan(context.Background(), raw); err == nil {
+		t.Fatal("missing parent must fail during Plan")
 	}
 	res, _ := wf.Invoke(context.Background(), raw)
 	if !res.IsError {
@@ -186,9 +178,8 @@ func TestWriteFileRejectsNulContent(t *testing.T) {
 	root := t.TempDir()
 	wf := NewWriteFile(mustWorkspace(t, root), nil)
 	raw, _ := json.Marshal(map[string]any{"path": "bin.txt", "content": "a\x00b"})
-	plan, _ := wf.Plan(context.Background(), raw)
-	if plan.Preview != "" {
-		t.Fatalf("NUL content must not produce a preview: %q", plan.Preview)
+	if _, err := wf.Plan(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("NUL content Plan error = %v, want NUL", err)
 	}
 	res, _ := wf.Invoke(context.Background(), raw)
 	if !res.IsError {
@@ -196,5 +187,17 @@ func TestWriteFileRejectsNulContent(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(root, "bin.txt")); !os.IsNotExist(err) {
 		t.Fatal("rejected NUL write must not create the file")
+	}
+}
+
+func TestWriteFileRejectsBinaryPrior(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "bin.txt"), []byte("a\x00b"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wf := NewWriteFile(mustWorkspace(t, root), nil)
+	raw, _ := json.Marshal(map[string]any{"path": "bin.txt", "content": "text"})
+	if _, err := wf.Plan(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "binary") {
+		t.Fatalf("binary prior Plan error = %v, want binary", err)
 	}
 }

@@ -44,9 +44,8 @@ func TestEditFileZeroMatch(t *testing.T) {
 	writeSeed(t, root, "a.txt", "alpha\n")
 	ef := NewEditFile(mustWorkspace(t, root), nil)
 	raw, _ := json.Marshal(map[string]any{"path": "a.txt", "old_string": "zzz", "new_string": "q"})
-	plan, _ := ef.Plan(context.Background(), raw)
-	if plan.Preview != "" {
-		t.Fatalf("zero-match must not produce an approvable preview: %q", plan.Preview)
+	if _, err := ef.Plan(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("zero-match Plan error = %v, want not found", err)
 	}
 	res, _ := ef.Invoke(context.Background(), raw)
 	if !res.IsError {
@@ -59,9 +58,8 @@ func TestEditFileAmbiguousMatch(t *testing.T) {
 	writeSeed(t, root, "a.txt", "x\nx\n")
 	ef := NewEditFile(mustWorkspace(t, root), nil)
 	raw, _ := json.Marshal(map[string]any{"path": "a.txt", "old_string": "x", "new_string": "y"})
-	plan, _ := ef.Plan(context.Background(), raw)
-	if plan.Preview != "" {
-		t.Fatalf("ambiguous match must not produce a preview: %q", plan.Preview)
+	if _, err := ef.Plan(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "ambiguous") {
+		t.Fatalf("ambiguous Plan error = %v, want ambiguous", err)
 	}
 	res, _ := ef.Invoke(context.Background(), raw)
 	if !res.IsError || !strings.Contains(res.Content, "ambiguous") {
@@ -177,9 +175,8 @@ func TestEditFileRejectsNulNewString(t *testing.T) {
 	writeSeed(t, root, "a.txt", "hello\n")
 	ef := NewEditFile(mustWorkspace(t, root), nil)
 	raw, _ := json.Marshal(map[string]any{"path": "a.txt", "old_string": "hello", "new_string": "a\x00b"})
-	plan, _ := ef.Plan(context.Background(), raw)
-	if plan.Preview != "" {
-		t.Fatalf("NUL new_string must not produce a preview: %q", plan.Preview)
+	if _, err := ef.Plan(context.Background(), raw); err == nil || !strings.Contains(err.Error(), "NUL") {
+		t.Fatalf("NUL new_string Plan error = %v, want NUL", err)
 	}
 	res, _ := ef.Invoke(context.Background(), raw)
 	if !res.IsError {
