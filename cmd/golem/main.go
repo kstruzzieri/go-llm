@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
@@ -26,6 +27,7 @@ type flags struct {
 	fresh         bool
 	sessionID     string
 	allowWrite    bool
+	noRag         bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -42,6 +44,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
+	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -54,6 +57,9 @@ func validateFlags(f flags) error {
 	if f.fresh && f.sessionID != "" {
 		return fmt.Errorf("golem: -fresh and -session are mutually exclusive")
 	}
+	if f.noRag && f.ragDB != "" {
+		return fmt.Errorf("golem: -no-rag and -rag-db are mutually exclusive")
+	}
 	return nil
 }
 
@@ -62,8 +68,9 @@ type startupInfo struct {
 	useRecommend      bool
 	bootstrapWarns    []error
 	preflightWarns    []string
+	retrieveLine      string
 	retrieveOmitted   bool
-	retrieveRequested bool // -rag-db was given; suppress the generic no-index notice
+	retrieveRequested bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
 	sessionLine       string
 }
 
@@ -73,6 +80,9 @@ func startupNotices(info startupInfo) []string {
 	out = append(out, "workspace: "+info.workspace)
 	if info.sessionLine != "" {
 		out = append(out, info.sessionLine)
+	}
+	if info.retrieveLine != "" {
+		out = append(out, info.retrieveLine)
 	}
 	if info.useRecommend {
 		out = append(out, "no defaults.agent configured; using model recommendation (run will route to the recommended model)")
@@ -99,12 +109,25 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
+		// runIndex already rendered its own output; just exit non-zero.
+		if errors.Is(err, errIndexFailed) {
+			os.Exit(1)
+		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "index":
+			return runIndex(context.Background(), args[1:], stdout, stderr)
+		default:
+			return fmt.Errorf("unknown command %q (did you mean \"index\"?)", args[0])
+		}
+	}
+
 	f, err := parseFlags(args)
 	if err != nil {
 		return err
@@ -146,14 +169,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 
-	var retrieve agent.Tool
-	if t, rerr := resolveRetriever(ctx, bundle.Config, bundle.Router, f.ragDB); rerr != nil {
-		// -rag-db was given but retrieve could not be enabled: surface why
-		// instead of swallowing it behind the generic "no RAG index" notice.
-		warns = append(warns, "retrieve disabled: "+rerr.Error())
-	} else {
-		retrieve = t
+	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
+	autoSidecar := ""
+	if autoErr == nil {
+		autoSidecar = sidecarPath(autoDBPath)
+	} else if !f.noRag && f.ragDB == "" {
+		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
+	rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
+		noRag:           f.noRag,
+		ragDB:           f.ragDB,
+		autoDBPath:      autoDBPath,
+		autoSidecarPath: autoSidecar,
+		workspaceID:     autoWorkspaceID,
+	})
+	retrieve := rr.tool
+	warns = append(warns, rr.warns...)
+	retrieveLine := rr.line
 	tools, err := buildTools(root, retrieve)
 	if err != nil {
 		return err
@@ -199,8 +231,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		useRecommend:      plan.useRecommend,
 		bootstrapWarns:    bundle.Warnings,
 		preflightWarns:    warns,
+		retrieveLine:      retrieveLine,
 		retrieveOmitted:   retrieveOmitted,
-		retrieveRequested: f.ragDB != "",
+		retrieveRequested: f.ragDB != "" || f.noRag || rr.suppressNotice,
 		sessionLine:       sessionLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)

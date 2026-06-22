@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -68,6 +69,31 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	return &SQLiteStore{db: db}, nil
 }
 
+// OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
+// read-only snapshot without changing journal mode or running migrations. Use
+// it for retrieval/probe paths that must not create WAL/SHM files or mutate
+// copied/foreign index DBs.
+func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("rag: open sqlite read-only: empty path")
+	}
+	u := url.URL{Scheme: "file", Path: dbPath}
+	q := u.Query()
+	q.Set("mode", "ro")
+	q.Set("immutable", "1")
+	u.RawQuery = q.Encode()
+
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, fmt.Errorf("rag: open sqlite read-only: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("rag: open sqlite read-only %q: %w", dbPath, err)
+	}
+	return &SQLiteStore{db: db}, nil
+}
+
 // DB returns the underlying *sql.DB for packages that need shared access
 // to the workspace database (e.g., conversation/ and feedback/ creating
 // their own tables).
@@ -85,7 +111,7 @@ func (s *SQLiteStore) DB() *sql.DB {
 // DISTINCT scan would generally walk the index to prove no second distinct
 // value exists. Returned IDs are also deterministic across SQLite versions,
 // which matters for tests that assert returned IDs.
-func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, error) {
+func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (VectorSpaceProbe, error) {
 	var minID string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT vector_space_id
@@ -94,7 +120,7 @@ func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, 
 		 ORDER BY vector_space_id ASC
 		 LIMIT 1`).Scan(&minID)
 	if err != nil && err != sql.ErrNoRows {
-		return vectorSpaceProbe{}, fmt.Errorf("rag: probe min vector space: %w", err)
+		return VectorSpaceProbe{}, fmt.Errorf("rag: probe min vector space: %w", err)
 	}
 	hasKnown := err != sql.ErrNoRows
 
@@ -106,7 +132,7 @@ func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, 
 			 WHERE vector_space_id <> ''
 			 ORDER BY vector_space_id DESC
 			 LIMIT 1`).Scan(&maxID); err != nil {
-			return vectorSpaceProbe{}, fmt.Errorf("rag: probe max vector space: %w", err)
+			return VectorSpaceProbe{}, fmt.Errorf("rag: probe max vector space: %w", err)
 		}
 	}
 
@@ -118,10 +144,10 @@ func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, 
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM chunks WHERE vector_space_id = '')
 		`).Scan(&hasUnknown); err != nil {
-		return vectorSpaceProbe{}, fmt.Errorf("rag: probe unknown vector spaces: %w", err)
+		return VectorSpaceProbe{}, fmt.Errorf("rag: probe unknown vector spaces: %w", err)
 	}
 
-	probe := vectorSpaceProbe{HasUnknown: hasUnknown}
+	probe := VectorSpaceProbe{HasUnknown: hasUnknown}
 	if hasKnown {
 		if minID == maxID {
 			probe.KnownIDs = []string{minID}

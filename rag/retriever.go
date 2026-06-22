@@ -15,12 +15,10 @@ type Retriever struct {
 	store    VectorStore
 }
 
-// vectorSpaceProbe summarizes the vector-space-id distribution across a
-// corpus. KnownIDs is a deduped sample (capped at 2) of distinct non-empty
-// vsids; HasUnknown reports whether any chunks still carry the empty-string
-// legacy vsid. The two fields are orthogonal — both can be true for a
-// partially migrated corpus.
-type vectorSpaceProbe struct {
+// VectorSpaceProbe summarizes the vector-space-id distribution across a
+// vector store's chunks: the distinct known (non-empty) vector-space IDs and
+// whether any legacy empty-vsid rows remain.
+type VectorSpaceProbe struct {
 	KnownIDs   []string
 	HasUnknown bool
 }
@@ -29,7 +27,7 @@ type vectorSpaceProbe struct {
 // to expose its vsid distribution. Stores that don't implement it skip the
 // drift check.
 type vectorSpaceProber interface {
-	ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, error)
+	ProbeVectorSpaces(ctx context.Context) (VectorSpaceProbe, error)
 }
 
 // RetrieverOption configures a Retriever.
@@ -122,7 +120,7 @@ func (r *Retriever) validateVectorSpace(ctx context.Context, res EmbedResult) er
 	return validateQueryVectorSpace(resolveVectorSpaceID(res), probe)
 }
 
-func validateQueryVectorSpace(queryVectorSpaceID string, probe vectorSpaceProbe) error {
+func validateQueryVectorSpace(queryVectorSpaceID string, probe VectorSpaceProbe) error {
 	if len(probe.KnownIDs) > 1 {
 		return fmt.Errorf("%w: corpus has multiple known vector spaces %v", ErrCorpusMixedVectorSpaces, probe.KnownIDs)
 	}

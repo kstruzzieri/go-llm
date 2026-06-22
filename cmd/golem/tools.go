@@ -52,49 +52,6 @@ func buildTools(root string, retrieve agent.Tool) ([]agent.Tool, error) {
 	return fileTools, nil
 }
 
-// resolveRetriever builds a retrieve tool from an explicitly configured RAG DB.
-// retrieve is opt-in, so it reports three distinct outcomes:
-//   - (nil, nil): not requested (dbPath == ""); the caller omits retrieve quietly.
-//   - (nil, err): requested via -rag-db but could NOT be enabled; the reason is
-//     returned so the caller can surface it rather than mislead the user with a
-//     generic "no RAG index configured" line.
-//   - (tool, nil): enabled.
-//
-// On success the opened store lives for the process: the retriever queries it
-// for the whole session and the OS reclaims the handle at exit.
-func resolveRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string) (agent.Tool, error) {
-	if dbPath == "" {
-		return nil, nil // retrieve is opt-in and was not requested
-	}
-	if cfg == nil || router == nil {
-		return nil, fmt.Errorf("no provider configured for embeddings")
-	}
-	embChain, err := embeddingChain(cfg)
-	if err != nil {
-		return nil, err
-	}
-	info, err := os.Stat(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("rag-db %q: %w", dbPath, err)
-	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("rag-db %q is a directory, not a SQLite file", dbPath)
-	}
-	store, err := rag.NewSQLiteStore(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("open rag-db %q: %w", dbPath, err)
-	}
-	embedder := newChainEmbedder(func(ctx context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
-		return router.Route(ctx, rr)
-	}, embChain)
-	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(embChain[0]))
-	if err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("build retriever for rag-db %q: %w", dbPath, err)
-	}
-	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, nil
-}
-
 type embedExecutor interface {
 	ExecuteEmbed(ctx context.Context) (*provider.EmbedResponse, error)
 }
@@ -180,6 +137,60 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 		return nil, fmt.Errorf("embedding fallback chain is empty")
 	}
 	return chain, nil
+}
+
+// buildGatedRetriever stats dbPath, opens it, probes its stored vector space,
+// reads store stats for startup display, and applies the §6.1 gate against
+// expected. It returns:
+//   - (tool, decision, stats, nil) when the corpus is registerable (decision.kind may
+//     be vsLegacy, surfaced as a soft warning by the caller);
+//   - (nil, decision, stats, nil) when the gate disables retrieve (vsMismatch/vsInconsistent);
+//   - (nil, _, zero stats, err) when the DB cannot be opened/probed or the embedder is unavailable.
+//
+// The opened store lives for the process on success (closed by the OS at exit).
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string) (agent.Tool, vsDecision, rag.StoreStats, error) {
+	if cfg == nil || router == nil {
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("no provider configured for embeddings")
+	}
+	embChain, err := embeddingChain(cfg)
+	if err != nil {
+		return nil, vsDecision{}, rag.StoreStats{}, err
+	}
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q: %w", dbPath, err)
+	}
+	if info.IsDir() {
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q is a directory, not a SQLite file", dbPath)
+	}
+	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
+	if err != nil {
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("open index db %q: %w", dbPath, err)
+	}
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		_ = store.Close()
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("probe index db %q: %w", dbPath, err)
+	}
+	stats, err := store.Stats(ctx)
+	if err != nil {
+		_ = store.Close()
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("read index stats %q: %w", dbPath, err)
+	}
+	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
+	if !dec.register {
+		_ = store.Close()
+		return nil, dec, stats, nil
+	}
+	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
+		return router.Route(rc, rr)
+	}, embChain)
+	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(embChain[0]))
+	if err != nil {
+		_ = store.Close()
+		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("build retriever for %q: %w", dbPath, err)
+	}
+	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, dec, stats, nil
 }
 
 // effectClassName renders an agent.EffectClass bitset for /tools. The agent

@@ -61,9 +61,10 @@ func resolveSessionID(o sessionIDOpts) (string, error) {
 	return "workspace:" + hex.EncodeToString(sum[:])[:16], nil
 }
 
-// sessionDBPath locates the session DB OUTSIDE the repo, under the per-user data
-// dir ($XDG_DATA_HOME/golem/sessions.db, else ~/.local/share/golem/sessions.db).
-func sessionDBPath(getenv func(string) string) (string, error) {
+// dataDirBase resolves the per-user data dir base ($XDG_DATA_HOME if absolute,
+// else $HOME/.local/share). A relative XDG_DATA_HOME is ignored; a relative or
+// missing HOME with no usable XDG is an error.
+func dataDirBase(getenv func(string) string) (string, error) {
 	dir := getenv("XDG_DATA_HOME")
 	relativeXDG := dir != "" && !filepath.IsAbs(dir)
 	if relativeXDG {
@@ -82,7 +83,17 @@ func sessionDBPath(getenv func(string) string) (string, error) {
 		}
 		dir = filepath.Join(home, ".local", "share")
 	}
-	return filepath.Join(dir, "golem", "sessions.db"), nil
+	return dir, nil
+}
+
+// sessionDBPath locates the session DB OUTSIDE the repo, under the per-user data
+// dir ($XDG_DATA_HOME/golem/sessions.db, else ~/.local/share/golem/sessions.db).
+func sessionDBPath(getenv func(string) string) (string, error) {
+	base, err := dataDirBase(getenv)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(base, "golem", "sessions.db"), nil
 }
 
 func sessionDBPathForWorkspace(getenv func(string) string, root string) (string, error) {
@@ -97,22 +108,29 @@ func sessionDBPathForWorkspace(getenv func(string) string, root string) (string,
 }
 
 func validateSessionDBOutsideWorkspace(dbPath, root string) error {
-	absDB, err := filepath.Abs(dbPath)
+	return validatePathOutsideWorkspace(dbPath, root)
+}
+
+// validatePathOutsideWorkspace rejects a path that is the workspace root itself
+// or nested inside it. Used for both the session DB and the index DB so neither
+// can land inside the indexed/edited tree.
+func validatePathOutsideWorkspace(p, root string) error {
+	absP, err := filepath.Abs(p)
 	if err != nil {
-		return fmt.Errorf("golem: resolve session db path: %w", err)
+		return fmt.Errorf("golem: resolve data path: %w", err)
 	}
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		return fmt.Errorf("golem: resolve workspace path: %w", err)
 	}
-	absDB = filepath.Clean(absDB)
+	absP = filepath.Clean(absP)
 	absRoot = filepath.Clean(absRoot)
-	rel, err := filepath.Rel(absRoot, absDB)
+	rel, err := filepath.Rel(absRoot, absP)
 	if err != nil {
-		return fmt.Errorf("golem: compare session db path to workspace: %w", err)
+		return fmt.Errorf("golem: compare data path to workspace: %w", err)
 	}
 	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
-		return fmt.Errorf("golem: session db %q must be outside workspace %q", absDB, absRoot)
+		return fmt.Errorf("golem: data path %q must be outside workspace %q", absP, absRoot)
 	}
 	return nil
 }

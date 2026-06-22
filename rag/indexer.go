@@ -355,16 +355,35 @@ type IndexStatus struct {
 	InProgress   bool
 }
 
-// IndexDirectory indexes all supported files in a directory tree.
-// Files are processed concurrently (default: 4 workers).
-// It respects .gitignore patterns and can be cancelled via context.
-// The cleaned absolute path of dir is used as the workspace root for
-// StableKey computation during this indexing run.
+// IndexDirectory indexes all supported files in a directory tree, returning
+// only an aggregate error. It delegates to IndexDirectoryWithStatus; existing
+// consumers keep the error-only contract.
 func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...IndexDirOption) error {
+	_, err := idx.IndexDirectoryWithStatus(ctx, dir, opts...)
+	return err
+}
+
+// IndexDirectoryWithStatus indexes all supported files in a directory tree and
+// reports an IndexStatus snapshot. Files are processed concurrently. It respects
+// WithExclude, .gitignore (root + nested), and the configured extension set, and
+// can be cancelled via context. The cleaned absolute path of dir is used as the
+// workspace root for StableKey computation during this run.
+//
+// Status semantics (spec §7.1):
+//   - TotalFiles:   eligible queued files after extension/exclude/.gitignore filtering.
+//   - IndexedFiles: files whose indexing attempt completed without error
+//     (including incremental unchanged no-ops).
+//   - SkippedFiles: eligible files not attempted because ctx was already
+//     cancelled before they could be queued/started.
+//   - Errors:       per-file indexing errors plus non-fatal walk/.gitignore read errors.
+//   - InProgress:   always false in the returned final snapshot.
+func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, opts ...IndexDirOption) (IndexStatus, error) {
+	var status IndexStatus
+
 	// Set workspace root for StableKey computation.
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
-		return fmt.Errorf("rag: resolve directory %q: %w", dir, err)
+		return status, fmt.Errorf("rag: resolve directory %q: %w", dir, err)
 	}
 	idx.workspaceRoot = filepath.Clean(absDir)
 
@@ -450,13 +469,17 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 	})
 
 	if walkErr != nil {
-		return fmt.Errorf("rag: walk directory %q: %w", dir, walkErr)
+		return status, fmt.Errorf("rag: walk directory %q: %w", dir, walkErr)
 	}
+
+	status.TotalFiles = len(files)
 
 	// Phase 2: Index files concurrently.
 	var (
 		mu          sync.Mutex
 		indexErrors = append([]string{}, walkErrors...)
+		indexed     int
+		skipped     int
 	)
 
 	var g errgroup.Group
@@ -464,7 +487,8 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 
 	for _, path := range files {
 		if ctx.Err() != nil {
-			break
+			skipped++
+			continue
 		}
 		g.Go(func() error {
 			var indexErr error
@@ -473,22 +497,28 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 			} else {
 				indexErr = idx.IndexFile(ctx, path)
 			}
+			mu.Lock()
 			if indexErr != nil {
-				mu.Lock()
 				indexErrors = append(indexErrors, fmt.Sprintf("index %q: %v", path, indexErr))
-				mu.Unlock()
+			} else {
+				indexed++
 			}
+			mu.Unlock()
 			return nil
 		})
 	}
 	_ = g.Wait()
 
+	status.IndexedFiles = indexed
+	status.SkippedFiles = skipped
+	status.Errors = indexErrors
+
+	if ctx.Err() != nil {
+		return status, fmt.Errorf("rag: index directory %q: %w", dir, ctx.Err())
+	}
 	if len(indexErrors) > 0 {
-		return fmt.Errorf("rag: index directory %q completed with %d errors: %s",
+		return status, fmt.Errorf("rag: index directory %q completed with %d errors: %s",
 			dir, len(indexErrors), strings.Join(indexErrors, "; "))
 	}
-	if ctx.Err() != nil {
-		return fmt.Errorf("rag: index directory %q: %w", dir, ctx.Err())
-	}
-	return nil
+	return status, nil
 }

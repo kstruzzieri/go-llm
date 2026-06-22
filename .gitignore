@@ -23,6 +23,7 @@ docs/llm/traces/first-accepted-run/*
 !docs/llm/traces/round3-challenge/**
 .DS_Store
 /.worktrees/
+/golem
 
 # llm-bench harness — local artifacts
 /llm-bench
