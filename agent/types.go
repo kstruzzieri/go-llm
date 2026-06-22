@@ -65,6 +65,7 @@ type Budget struct {
 type Request struct {
 	Goal     string
 	System   string
+	History  []provider.ChatMessage // prior non-system turns; runtime marks every entry Elastic
 	Tools    []Tool
 	MaxSteps int // 0 => defaultMaxSteps
 	Budget   Budget

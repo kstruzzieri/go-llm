@@ -134,18 +134,22 @@ func TestREPL_CtrlCCancelsRunKeepsREPL(t *testing.T) {
 	}
 }
 
-// captureCaller records the System content of the first request it serves, then
-// returns a final answer.
+// captureCaller records the full message list of the first request it serves,
+// then returns a final answer.
 type captureCaller struct {
-	system string
-	answer string
+	messages []provider.ChatMessage
+	system   string
+	answer   string
 }
 
 func (c *captureCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
-	for _, m := range req.Messages {
-		if m.Role == "system" {
-			c.system = m.Content
-			break
+	if c.messages == nil {
+		c.messages = append([]provider.ChatMessage(nil), req.Messages...)
+		for _, m := range req.Messages {
+			if m.Role == "system" {
+				c.system = m.Content
+				break
+			}
 		}
 	}
 	resp := provider.ChatResponse{Content: c.answer}
@@ -162,7 +166,7 @@ func newSessionedTestSession(t *testing.T, caller agent.ModelCaller, root, id st
 		t.Fatalf("buildTools: %v", err)
 	}
 	dbPath := filepath.Join(t.TempDir(), "golem", "sessions.db")
-	s, _, err := openSession(context.Background(), dbPath, id, defaultSessionBudget)
+	s, _, err := openSession(context.Background(), dbPath, id)
 	if err != nil {
 		t.Fatalf("openSession: %v", err)
 	}
@@ -177,12 +181,12 @@ func newSessionedTestSession(t *testing.T, caller agent.ModelCaller, root, id st
 	}
 }
 
-func TestREPL_PreambleReachesModelAndPersists(t *testing.T) {
+func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 	root := t.TempDir()
 	caller := &captureCaller{answer: "second answer"}
 	sess := newSessionedTestSession(t, caller, root, "workspace:repl")
 
-	// Seed a prior turn so a preamble is built on the next prompt.
+	// Seed a prior turn so it is fed as History on the next prompt.
 	if err := sess.session.record(context.Background(), "earlier question", "earlier answer"); err != nil {
 		t.Fatal(err)
 	}
@@ -192,13 +196,25 @@ func TestREPL_PreambleReachesModelAndPersists(t *testing.T) {
 	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
-	if !strings.Contains(caller.system, "UNTRUSTED history") || !strings.Contains(caller.system, "earlier answer") {
-		t.Errorf("system prompt missing labeled preamble:\n%s", caller.system)
+
+	// The system prompt is exactly the base prompt — history is sent as real messages, not appended.
+	if caller.system != golemSystemPrompt {
+		t.Errorf("system must equal baseSystem (history is sent as real messages, not appended), got:\n%s", caller.system)
 	}
-	if !strings.HasPrefix(caller.system, golemSystemPrompt) {
-		t.Errorf("base system prompt must lead the preamble:\n%s", caller.system)
+	// Prior turn reaches the model as real user/assistant messages, ahead of the
+	// current goal: system, user(prior), assistant(prior), user(goal).
+	wantRoles := []string{"system", "user", "assistant", "user"}
+	wantContent := []string{golemSystemPrompt, "earlier question", "earlier answer", "new question"}
+	if len(caller.messages) != len(wantRoles) {
+		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
 	}
-	// The successful turn must be persisted: 2 seeded + 2 new = 4 messages.
+	for i := range wantRoles {
+		if caller.messages[i].Role != wantRoles[i] || caller.messages[i].Content != wantContent[i] {
+			t.Errorf("message %d = {%q,%q}, want {%q,%q}",
+				i, caller.messages[i].Role, caller.messages[i].Content, wantRoles[i], wantContent[i])
+		}
+	}
+	// The successful turn must still be persisted: 2 seeded + 2 new = 4.
 	if len(sess.session.msgs) != 4 || sess.session.msgs[3].Content != "second answer" {
 		t.Errorf("turn not persisted: %+v", sess.session.msgs)
 	}
