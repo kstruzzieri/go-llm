@@ -49,6 +49,24 @@ func writeWorkspaceFile(t *testing.T, root, rel, content string) {
 	}
 }
 
+func removeSQLiteSidecars(t *testing.T, dbPath string) {
+	t.Helper()
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+}
+
+func assertNoSQLiteSidecars(t *testing.T, dbPath string) {
+	t.Helper()
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("%s should not exist, stat err=%v", p, err)
+		}
+	}
+}
+
 func TestExecuteIndex_HappyPath(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
@@ -238,6 +256,7 @@ func TestPrepareIndexStore_IncrementalRefusesPreexistingDBWithoutSidecar(t *test
 		t.Fatal(err)
 	}
 	_ = store.Close()
+	removeSQLiteSidecars(t, dbPath)
 
 	got, err := prepareIndexStore(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"}, false)
 	if got != nil {
@@ -249,6 +268,37 @@ func TestPrepareIndexStore_IncrementalRefusesPreexistingDBWithoutSidecar(t *test
 	if !strings.Contains(err.Error(), "-full") {
 		t.Errorf("refusal should suggest -full: %v", err)
 	}
+	assertNoSQLiteSidecars(t, dbPath)
+}
+
+func TestPrepareIndexStore_RefusesInvalidSidecarBeforeOpeningDB(t *testing.T) {
+	dataDir := t.TempDir()
+	dbPath := filepath.Join(dataDir, "indexes", "k.db")
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := rag.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = store.Close()
+	if err := writeSidecar(sidecarPath(dbPath), sampleSidecar("workspace:other")); err != nil {
+		t.Fatal(err)
+	}
+	removeSQLiteSidecars(t, dbPath)
+
+	got, err := prepareIndexStore(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"}, false)
+	if got != nil {
+		_ = got.Close()
+	}
+	if err == nil {
+		t.Fatal("incremental with a wrong-workspace sidecar must refuse")
+	}
+	if !strings.Contains(err.Error(), "sidecar invalid") {
+		t.Errorf("refusal should name the invalid sidecar: %v", err)
+	}
+	assertNoSQLiteSidecars(t, dbPath)
 }
 
 func TestPrepareIndexStore_IncrementalAllowsTrueFirstRun(t *testing.T) {
@@ -285,16 +335,14 @@ func TestPreflightExistingIndex_RefusesVsidMismatch(t *testing.T) {
 	})
 	_ = store.Close()
 
-	existing, err := rag.NewSQLiteStore(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = existing.Close() }()
-	err = preflightExistingIndex(context.Background(), existing, sidecarPath(dbPath), "workspace:k", []string{"ollama/NEW"})
+	removeSQLiteSidecars(t, dbPath)
+
+	err := preflightExistingIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/NEW"})
 	if err == nil {
 		t.Fatal("incremental with chain != stored vector space must refuse")
 	}
 	if !strings.Contains(err.Error(), "ollama/OLD") {
 		t.Errorf("refusal should name the stored vector space: %v", err)
 	}
+	assertNoSQLiteSidecars(t, dbPath)
 }

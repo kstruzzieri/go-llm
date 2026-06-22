@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -101,6 +103,58 @@ func TestSQLiteStoreStats(t *testing.T) {
 	}
 	if stats.EmbeddingDim != 4 {
 		t.Errorf("EmbeddingDim = %d, want 4", stats.EmbeddingDim)
+	}
+}
+
+func TestOpenSQLiteStoreReadOnlyReadsWithoutWalShm(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "idx.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	chunks := []Chunk{
+		{ID: "c1", Content: "one", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	if err := store.Store(ctx, chunks, [][]float64{{1, 0, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+
+	ro, err := OpenSQLiteStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStoreReadOnly: %v", err)
+	}
+	stats, err := ro.Stats(ctx)
+	if err != nil {
+		t.Fatalf("read-only Stats: %v", err)
+	}
+	if stats.TotalChunks != 1 {
+		t.Fatalf("TotalChunks = %d, want 1", stats.TotalChunks)
+	}
+	if _, err := ro.Search(ctx, []float64{1, 0, 0}, 1); err != nil {
+		t.Fatalf("read-only Search: %v", err)
+	}
+	if err := ro.Store(ctx, chunks, [][]float64{{1, 0, 0}}); err == nil {
+		t.Fatal("read-only store should reject writes")
+	}
+	if err := ro.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Fatalf("read-only open should not create %s, stat err=%v", p, err)
+		}
 	}
 }
 

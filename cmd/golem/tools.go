@@ -163,7 +163,7 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	if info.IsDir() {
 		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q is a directory, not a SQLite file", dbPath)
 	}
-	store, err := rag.NewSQLiteStore(dbPath)
+	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 	if err != nil {
 		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("open index db %q: %w", dbPath, err)
 	}

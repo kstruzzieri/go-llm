@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"math"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -65,6 +66,31 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, err
 	}
 
+	return &SQLiteStore{db: db}, nil
+}
+
+// OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
+// read-only snapshot without changing journal mode or running migrations. Use
+// it for retrieval/probe paths that must not create WAL/SHM files or mutate
+// copied/foreign index DBs.
+func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
+	if dbPath == "" {
+		return nil, fmt.Errorf("rag: open sqlite read-only: empty path")
+	}
+	u := url.URL{Scheme: "file", Path: dbPath}
+	q := u.Query()
+	q.Set("mode", "ro")
+	q.Set("immutable", "1")
+	u.RawQuery = q.Encode()
+
+	db, err := sql.Open("sqlite", u.String())
+	if err != nil {
+		return nil, fmt.Errorf("rag: open sqlite read-only: %w", err)
+	}
+	if err := db.Ping(); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("rag: open sqlite read-only %q: %w", dbPath, err)
+	}
 	return &SQLiteStore{db: db}, nil
 }
 

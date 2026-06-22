@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
-	"github.com/kstruzzieri/go-llm/rag"
 )
 
 // seedIndex builds a per-workspace DB (vsid) + a valid sidecar at the auto paths.
@@ -43,6 +42,7 @@ func TestEnableRetrieve_AutoRegistersOnMatch(t *testing.T) {
 	dataDir := t.TempDir()
 	dbPath := filepath.Join(dataDir, "indexes", "k.db")
 	seedIndex(t, dbPath, "workspace:k", "ollama/nomic")
+	removeSQLiteSidecars(t, dbPath)
 
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
 		autoDBPath: dbPath, autoSidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
@@ -53,6 +53,7 @@ func TestEnableRetrieve_AutoRegistersOnMatch(t *testing.T) {
 	if !strings.Contains(got.line, "auto index") {
 		t.Errorf("startup line = %q, want auto-index disclosure", got.line)
 	}
+	assertNoSQLiteSidecars(t, dbPath)
 }
 
 func TestEnableRetrieve_AutoDisablesOnMismatch(t *testing.T) {
@@ -111,5 +112,3 @@ func TestEnableRetrieve_ExplicitMismatchHintHasNoFull(t *testing.T) {
 		t.Errorf("explicit -rag-db mismatch must NOT suggest golem index -full: %q", got.warns[0])
 	}
 }
-
-var _ rag.StoreStats // confirm rag.StoreStats is referenced (type existence check)

@@ -153,8 +153,9 @@ func removeIfExists(p string) error {
 
 // prepareIndexStore handles the pre-open lifecycle for the index store:
 //   - full=true: remove all artifacts (DB, WAL, SHM, sidecar) then open a fresh store.
-//   - full=false: open the store; if it pre-existed, run preflightExistingIndex to
-//     enforce spec §5.2 (valid sidecar + matching vector-space id required).
+//   - full=false: if the DB pre-existed, run preflightExistingIndex to enforce
+//     spec §5.2 (valid sidecar + matching vector-space id required), then open
+//     the write-capable store only after preflight passes.
 //
 // Preflight and removal always happen BEFORE SQLite is opened so no DB file is
 // ever deleted underneath a live handle. The parent directory is created on
@@ -170,24 +171,20 @@ func prepareIndexStore(ctx context.Context, dbPath, sidecarPath, workspaceID str
 		return rag.NewSQLiteStore(dbPath)
 	}
 	preexisting := fileExists(dbPath)
-	store, err := rag.NewSQLiteStore(dbPath)
-	if err != nil {
-		return nil, err
-	}
 	if preexisting {
-		if err := preflightExistingIndex(ctx, store, sidecarPath, workspaceID, expected); err != nil {
-			_ = store.Close()
+		if err := preflightExistingIndex(ctx, dbPath, sidecarPath, workspaceID, expected); err != nil {
 			return nil, err
 		}
 	}
-	return store, nil
+	return rag.NewSQLiteStore(dbPath)
 }
 
 // preflightExistingIndex enforces spec §5.2 for a DEFAULT (incremental) run
-// when dbPath existed before opening SQLite. A matching sidecar is required even
-// if the DB has zero chunks; otherwise a copied/foreign empty DB could be
-// blessed by an incremental run.
-func preflightExistingIndex(ctx context.Context, store *rag.SQLiteStore, sidecarPath, workspaceID string, expected []string) error {
+// when dbPath existed before opening SQLite for writes. A matching sidecar is
+// required before any DB open; otherwise a copied/foreign empty DB could be
+// blessed or modified by an incremental run. The vector-space probe uses a
+// read-only store so a mismatch refusal does not create WAL/SHM or migrate.
+func preflightExistingIndex(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string) error {
 	sc, serr := readSidecar(sidecarPath)
 	if serr != nil {
 		return fmt.Errorf("existing index has no valid sidecar; run \"golem index -full\" to rebuild")
@@ -195,6 +192,11 @@ func preflightExistingIndex(ctx context.Context, store *rag.SQLiteStore, sidecar
 	if verr := validateSidecar(sc, workspaceID); verr != nil {
 		return fmt.Errorf("existing index sidecar invalid (%v); run \"golem index -full\" to rebuild", verr)
 	}
+	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
+	if err != nil {
+		return fmt.Errorf("preflight open read-only: %w", err)
+	}
+	defer func() { _ = store.Close() }()
 	probe, perr := store.ProbeVectorSpaces(ctx)
 	if perr != nil {
 		return fmt.Errorf("preflight probe: %w", perr)
