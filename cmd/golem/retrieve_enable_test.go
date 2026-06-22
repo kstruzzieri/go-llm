@@ -69,6 +69,9 @@ func TestEnableRetrieve_AutoDisablesOnMismatch(t *testing.T) {
 	if len(got.warns) == 0 || !strings.Contains(got.warns[0], "golem index -full") {
 		t.Errorf("auto mismatch warning should suggest -full: %v", got.warns)
 	}
+	if !got.suppressNotice {
+		t.Error("a disabled-but-present auto index must suppress the contradictory generic no-index notice")
+	}
 }
 
 func TestEnableRetrieve_AutoRequiresSidecar(t *testing.T) {

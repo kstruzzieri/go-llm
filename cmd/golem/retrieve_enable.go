@@ -23,7 +23,9 @@ type retrieveOpts struct {
 
 // retrieveResult is the startup outcome. line is the positive disclosure to show
 // when retrieve is registered; warns are problems to surface; suppressNotice
-// silences the generic "no index" line (only for -no-rag and explicit -rag-db).
+// silences the generic "no index" line whenever a more specific outcome already
+// explains the situation (-no-rag, explicit -rag-db, or an existing-but-disabled
+// auto index). It stays false only when there genuinely is no usable index.
 type retrieveResult struct {
 	tool           agent.Tool
 	line           string
@@ -64,10 +66,15 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 	tool, dec, stats, err := buildGatedRetriever(ctx, cfg, router, opts.autoDBPath, expected)
 	if err != nil {
-		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}}
+		// An index exists but could not be opened/probed: a specific warning
+		// already explains why, so suppress the contradictory generic "no index"
+		// notice (mirrors the explicit -rag-db branches above).
+		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
 	if tool == nil {
-		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}}
+		// Index exists but the vector-space gate disabled it: the mismatch warning
+		// stands alone; suppress the generic "no index" notice.
+		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}, suppressNotice: true}
 	}
 	return retrieveResult{tool: tool, line: autoLine(sc, stats), warns: legacyWarnIfAny(dec)}
 }

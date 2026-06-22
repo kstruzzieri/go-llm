@@ -265,9 +265,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	if mkErr := os.MkdirAll(filepath.Dir(dbPath), 0o700); mkErr != nil {
-		return fmt.Errorf("create index dir: %w", mkErr)
-	}
+	// prepareIndexStore creates the parent dir itself; no MkdirAll needed here.
 	store, err := prepareIndexStore(ctx, dbPath, sidecarPath(dbPath), workspaceID, embChain, full)
 	if err != nil {
 		fmt.Fprintf(out, "golem index: %v\n", err)
