@@ -69,6 +69,10 @@ func (t *EditFile) computeEdit(args editFileArgs) (before, after []byte, err err
 	if len(before) > mutateMaxBytes {
 		return nil, nil, fmt.Errorf("file exceeds size limit")
 	}
+	// Sniff only the first binarySniffBytes of the EXISTING file, mirroring
+	// read_file's policy (a NUL early in the file marks it binary). The bytes we will
+	// actually write (`after`) are NUL-scanned in full below, so an existing NUL past
+	// the sniff window cannot slip through into a written result.
 	sniff := before
 	if len(sniff) > binarySniffBytes {
 		sniff = sniff[:binarySniffBytes]
@@ -120,9 +124,10 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return errResult("invalid arguments: " + err.Error()), nil
 	}
-	// Recompute from the args to produce an accurate failure reason, then require a
-	// matching pending plan (fails closed if Plan never ran / args changed).
-	before, after, err := t.computeEdit(args)
+	// Recompute from the args to produce an accurate failure reason (e.g. "old_string
+	// not found" if the file changed) and to re-read current bytes; only `before` is
+	// kept, to re-verify the file is unchanged. The approved bytes come from the plan.
+	before, _, err := t.computeEdit(args)
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
@@ -130,11 +135,13 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 	if !ok {
 		return errResult("mutation preview missing; retry"), nil
 	}
-	// The file must be byte-identical to what Plan previewed.
+	// The file must be byte-identical to what Plan previewed; then write exactly the
+	// bytes the user approved (pp.afterContent), symmetric with write_file. The
+	// before-hash match guarantees pp.afterContent equals a fresh recomputation.
 	if ContentHash(before) != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
 	}
-	if err := t.ws.WriteFileAtomic(pp.path, after); err != nil {
+	if err := t.ws.WriteFileAtomic(pp.path, pp.afterContent); err != nil {
 		return errResult(err.Error()), nil
 	}
 	record(t.j, MutationRecord{
