@@ -40,19 +40,21 @@ var ignoreDirs = map[string]bool{
 }
 
 var (
-	errEmptyRoot   = errors.New("empty workspace root")
-	errNUL         = errors.New("path contains NUL byte")
-	errAbsPath     = errors.New("absolute paths are not allowed")
-	errEscape      = errors.New("path escapes the workspace root")
-	errSymlink     = errors.New("symlinks are not followed")
-	errNotRegular  = errors.New("not a regular file")
-	errNotDir      = errors.New("not a directory")
-	errFileChanged = errors.New("file identity changed between stat and open")
+	errEmptyRoot     = errors.New("empty workspace root")
+	errNUL           = errors.New("path contains NUL byte")
+	errAbsPath       = errors.New("absolute paths are not allowed")
+	errEscape        = errors.New("path escapes the workspace root")
+	errSymlink       = errors.New("symlinks are not followed")
+	errNotRegular    = errors.New("not a regular file")
+	errNotDir        = errors.New("not a directory")
+	errFileChanged   = errors.New("file identity changed between stat and open")
+	errParentMissing = errors.New("parent directory does not exist")
 )
 
-// Workspace is the single audited chokepoint for read-only filesystem access.
-// The canonical root is resolved once at construction; no path component is ever
-// resolved through a symlink afterwards (v1 symlink policy: never follow).
+// Workspace is the single audited chokepoint for all filesystem access within the
+// agent workspace. The canonical root is resolved once at construction; no path
+// component is ever resolved through a symlink afterwards (symlink policy: never
+// follow).
 type Workspace struct {
 	root string // canonical absolute root, post-EvalSymlinks, no trailing separator
 }
@@ -284,4 +286,99 @@ func (w *Workspace) openRegularFile(p string) (*os.File, error) {
 		return nil, errFileChanged
 	}
 	return f, nil
+}
+
+// resolveWriteTarget contains a path to a write destination: cleanRel containment,
+// symlink-free ancestry, and an existing parent directory. If the leaf exists it
+// must be a regular file (never overwrite a symlink or directory). priorExists
+// reports whether the leaf already exists. No filesystem mutation occurs here.
+func (w *Workspace) resolveWriteTarget(p string) (abs string, priorExists bool, err error) {
+	abs, err = w.cleanRel(p)
+	if err != nil {
+		return "", false, err
+	}
+	if err := w.rejectSymlinkAncestors(abs); err != nil {
+		return "", false, err
+	}
+	if fi, perr := os.Lstat(filepath.Dir(abs)); perr != nil || !fi.IsDir() {
+		return "", false, errParentMissing
+	}
+	fi, lerr := os.Lstat(abs)
+	if lerr != nil {
+		if os.IsNotExist(lerr) {
+			return abs, false, nil // new file
+		}
+		return "", false, lerr
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return "", false, errSymlink
+	}
+	if !fi.Mode().IsRegular() {
+		return "", false, errNotRegular
+	}
+	return abs, true, nil
+}
+
+// WriteFileAtomic writes content to a workspace-relative path by creating a temp
+// file in the SAME directory, syncing best-effort, and renaming over the target.
+// It re-validates the target through resolveWriteTarget immediately before the
+// rename so a symlink swapped in after planning is rejected. On POSIX, rename
+// replaces a final symlink rather than following it, so containment holds even if
+// the final component changes after the last check. This is NOT a crash-durability
+// contract (undo is in-memory).
+func (w *Workspace) WriteFileAtomic(p string, content []byte) error {
+	abs, _, err := w.resolveWriteTarget(p)
+	if err != nil {
+		return err
+	}
+	dir := filepath.Dir(abs)
+	tmp, err := os.CreateTemp(dir, ".golem-*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	cleanup := func() { _ = tmp.Close(); _ = os.Remove(tmpName) }
+	if _, err := tmp.Write(content); err != nil {
+		cleanup()
+		return err
+	}
+	_ = tmp.Sync() // best-effort durability; not a crash guarantee
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	// Re-validate just before rename; reject a symlink/dir swapped in meanwhile.
+	if _, _, err := w.resolveWriteTarget(p); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, abs); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
+}
+
+// RemoveFile deletes a single regular file inside the workspace. It refuses
+// directories and symlinks and enforces containment. Used by /undo to revert a
+// file that did not exist before a mutation.
+func (w *Workspace) RemoveFile(p string) error {
+	abs, err := w.cleanRel(p)
+	if err != nil {
+		return err
+	}
+	if err := w.rejectSymlinkAncestors(abs); err != nil {
+		return err
+	}
+	fi, err := os.Lstat(abs)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errSymlink
+	}
+	if !fi.Mode().IsRegular() {
+		return errNotRegular
+	}
+	return os.Remove(abs)
 }
