@@ -68,8 +68,9 @@ type startupInfo struct {
 	useRecommend      bool
 	bootstrapWarns    []error
 	preflightWarns    []string
+	retrieveLine      string
 	retrieveOmitted   bool
-	retrieveRequested bool // -rag-db was given; suppress the generic no-index notice
+	retrieveRequested bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
 	sessionLine       string
 }
 
@@ -79,6 +80,9 @@ func startupNotices(info startupInfo) []string {
 	out = append(out, "workspace: "+info.workspace)
 	if info.sessionLine != "" {
 		out = append(out, info.sessionLine)
+	}
+	if info.retrieveLine != "" {
+		out = append(out, info.retrieveLine)
 	}
 	if info.useRecommend {
 		out = append(out, "no defaults.agent configured; using model recommendation (run will route to the recommended model)")
@@ -165,14 +169,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 
-	var retrieve agent.Tool
-	if t, rerr := resolveRetriever(ctx, bundle.Config, bundle.Router, f.ragDB); rerr != nil {
-		// -rag-db was given but retrieve could not be enabled: surface why
-		// instead of swallowing it behind the generic "no RAG index" notice.
-		warns = append(warns, "retrieve disabled: "+rerr.Error())
-	} else {
-		retrieve = t
+	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
+	autoSidecar := ""
+	if autoErr == nil {
+		autoSidecar = sidecarPath(autoDBPath)
+	} else if !f.noRag && f.ragDB == "" {
+		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
+	rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
+		noRag:           f.noRag,
+		ragDB:           f.ragDB,
+		autoDBPath:      autoDBPath,
+		autoSidecarPath: autoSidecar,
+		workspaceID:     autoWorkspaceID,
+	})
+	var retrieve agent.Tool = rr.tool
+	warns = append(warns, rr.warns...)
+	retrieveLine := rr.line
 	tools, err := buildTools(root, retrieve)
 	if err != nil {
 		return err
@@ -218,8 +231,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		useRecommend:      plan.useRecommend,
 		bootstrapWarns:    bundle.Warnings,
 		preflightWarns:    warns,
+		retrieveLine:      retrieveLine,
 		retrieveOmitted:   retrieveOmitted,
-		retrieveRequested: f.ragDB != "",
+		retrieveRequested: f.ragDB != "" || f.noRag || rr.suppressNotice,
 		sessionLine:       sessionLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
