@@ -161,3 +161,46 @@ func TestRecencyCompactorPreservesOriginalOrder(t *testing.T) {
 		}
 	}
 }
+
+// TestRecencyCompactorEvictsUserAssistantPairsAtomically proves a prior
+// user->assistant exchange is evicted as a unit: dropping the oldest question
+// must not leave its answer orphaned (model would see an assistant turn with no
+// preceding user turn). Budget 28 of a 36-token transcript: individual eviction
+// would drop only the oldest user (28<=28) and orphan its assistant; pairwise
+// eviction drops the whole oldest exchange.
+func TestRecencyCompactorEvictsUserAssistantPairsAtomically(t *testing.T) {
+	st := State{Messages: []Message{
+		elastic("user", "qqqqqOLD"),      // 8, oldest question
+		elastic("assistant", "aaaaaOLD"), // 8, its answer
+		elastic("user", "qqqqqNEW"),      // 8
+		elastic("assistant", "aaaaaNEW"), // 8, newest answer
+		pinned("user", "GOAL"),           // 4, always kept
+	}}
+	rc := RecencyCompactor{Estimate: runeEstimator}
+	out, _, err := rc.Compact(context.Background(), st, TokenBudget{Input: 28})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	for _, m := range out.Messages {
+		if m.Content == "aaaaaOLD" {
+			t.Fatalf("orphaned assistant survived without its question: %+v", out.Messages)
+		}
+		if m.Content == "qqqqqOLD" {
+			t.Fatalf("oldest question should have been evicted with its answer: %+v", out.Messages)
+		}
+	}
+	// The newest exchange and the pinned goal survive, in order.
+	gotContent := make([]string, len(out.Messages))
+	for i, m := range out.Messages {
+		gotContent[i] = m.Content
+	}
+	want := []string{"qqqqqNEW", "aaaaaNEW", "GOAL"}
+	if len(gotContent) != len(want) {
+		t.Fatalf("survivors = %v, want %v", gotContent, want)
+	}
+	for i := range want {
+		if gotContent[i] != want[i] {
+			t.Fatalf("survivors = %v, want %v", gotContent, want)
+		}
+	}
+}

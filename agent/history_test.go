@@ -102,11 +102,11 @@ func TestRunEvictsHistoryUnderTightBudgetKeepsGoal(t *testing.T) {
 		{Role: "user", Content: "hist222222"},      // 10
 		{Role: "assistant", Content: "hist333333"}, // 10, newest
 	}
-	// System "" + no tools => pinned cost = len("GOAL") = 4 < ceiling 20.
+	// System "" + no tools => pinned cost = len("GOAL") = 4 < ceiling 30. Pairwise eviction drops the oldest exchange (h0,h1); the newest (h2,h3) survives.
 	_, err := o.Run(context.Background(), Request{
 		Goal:    "GOAL",
 		History: hist,
-		Budget:  Budget{InputCeiling: 20},
+		Budget:  Budget{InputCeiling: 30},
 	}, nil)
 	if err != nil {
 		t.Fatalf("Run: %v", err)

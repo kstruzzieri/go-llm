@@ -71,6 +71,20 @@ type compactionGroup struct {
 	drop   bool
 }
 
+// pairableExchange reports whether msgs[i] is a plain Elastic user turn
+// immediately followed by a plain Elastic assistant turn (neither pinned, no
+// tool calls). Such an exchange is grouped and evicted atomically so a dropped
+// question never orphans its answer.
+func pairableExchange(msgs []Message, i int) bool {
+	if i+1 >= len(msgs) {
+		return false
+	}
+	u, a := msgs[i], msgs[i+1]
+	return u.Segment == Elastic && a.Segment == Elastic &&
+		u.Role == "user" && a.Role == "assistant" &&
+		len(u.ToolCalls) == 0 && len(a.ToolCalls) == 0
+}
+
 // chainAt returns the inclusive end index of the message group starting at i:
 // an assistant message with ToolCalls plus the contiguous tool results that
 // follow it. For a plain message it returns i.
@@ -111,6 +125,9 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 	out := make([]compactionGroup, 0, len(st.Messages))
 	for i := 0; i < len(st.Messages); {
 		end := chainAt(st.Messages, i)
+		if end == i && pairableExchange(st.Messages, i) {
+			end = i + 1 // evict the user->assistant exchange atomically
+		}
 		tokens := 0
 		for _, m := range st.Messages[i : end+1] {
 			tokens += rc.messageCost(m)
