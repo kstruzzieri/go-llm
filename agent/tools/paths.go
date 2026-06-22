@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -381,4 +382,16 @@ func (w *Workspace) RemoveFile(p string) error {
 		return errNotRegular
 	}
 	return os.Remove(abs)
+}
+
+// readAll reads a workspace-relative regular file in full, TOCTOU-hardened via
+// openRegularFile. It is the write-side counterpart used by Plan/Invoke to snapshot
+// current content; callers size-check the result against mutateMaxBytes.
+func (w *Workspace) readAll(p string) ([]byte, error) {
+	f, err := w.openRegularFile(p)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	return io.ReadAll(f)
 }

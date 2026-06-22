@@ -26,10 +26,10 @@ func TestUnifiedDiffNewFile(t *testing.T) {
 	}
 }
 
-func TestUnifiedDiffDelete(t *testing.T) {
+func TestUnifiedDiffEmpty(t *testing.T) {
 	d := unifiedDiff("a.txt", []byte("one\ntwo\n"), nil, true)
-	if !strings.Contains(d, "delete file: a.txt") || !strings.Contains(d, "-one") {
-		t.Fatalf("delete diff wrong:\n%s", d)
+	if !strings.Contains(d, "empty file: a.txt") || !strings.Contains(d, "-one") {
+		t.Fatalf("empty diff wrong:\n%s", d)
 	}
 }
 

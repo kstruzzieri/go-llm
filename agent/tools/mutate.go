@@ -39,7 +39,7 @@ func splitLines(s string) []string {
 // unifiedDiff renders a human-readable line diff for the approval preview ONLY.
 // It is never parsed or fed back to the model. beforeExists distinguishes a
 // brand-new file (all additions) from an overwrite. A non-empty before with an
-// empty after renders as a deletion.
+// empty after renders as emptied (truncated to zero bytes).
 func unifiedDiff(path string, before, after []byte, beforeExists bool) string {
 	var b strings.Builder
 	if !beforeExists {
@@ -50,7 +50,7 @@ func unifiedDiff(path string, before, after []byte, beforeExists bool) string {
 		return b.String()
 	}
 	if len(after) == 0 {
-		fmt.Fprintf(&b, "delete file: %s\n", path)
+		fmt.Fprintf(&b, "empty file: %s\n", path)
 		for _, ln := range splitLines(string(before)) {
 			fmt.Fprintf(&b, "-%s\n", ln)
 		}
