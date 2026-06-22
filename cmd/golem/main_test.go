@@ -129,3 +129,20 @@ func TestStartupNotices_SessionLine(t *testing.T) {
 		t.Errorf("session line missing in:\n%s", joined)
 	}
 }
+
+func TestValidateFlags_NoRagWithRagDBExclusive(t *testing.T) {
+	err := validateFlags(flags{noRag: true, ragDB: "/x.db"})
+	if err == nil {
+		t.Fatal("want error when -no-rag and -rag-db are both set")
+	}
+}
+
+func TestParseFlags_NoRag(t *testing.T) {
+	f, err := parseFlags([]string{"-no-rag"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.noRag {
+		t.Error("noRag = false, want true")
+	}
+}

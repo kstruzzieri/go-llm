@@ -262,6 +262,14 @@ func TestPrepareIndexStore_IncrementalAllowsTrueFirstRun(t *testing.T) {
 	store.Close()
 }
 
+func TestRun_DispatchUnknownCommand(t *testing.T) {
+	// A non-flag, non-"index" positional arg => unknown command error.
+	err := run([]string{"frobnicate"}, os.Stdin, os.Stdout, os.Stderr)
+	if err == nil || !strings.Contains(err.Error(), "unknown command") {
+		t.Fatalf("want unknown-command error, got %v", err)
+	}
+}
+
 func TestPreflightExistingIndex_RefusesVsidMismatch(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")

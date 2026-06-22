@@ -3,12 +3,15 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -209,4 +212,86 @@ func describeStored(p rag.VectorSpaceProbe) string {
 		return p.KnownIDs[0]
 	}
 	return fmt.Sprintf("%v", p.KnownIDs)
+}
+
+// runIndex is the `golem index` entry point: parse flags, bootstrap providers,
+// build the chain embedder + per-workspace store + indexer, and run executeIndex.
+// Output (summary, warnings, errors) is written to out/errOut; on a non-zero
+// outcome it returns errIndexFailed so main() exits 1 without double-printing.
+func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
+	var (
+		configPath string
+		rootFlag   string
+		ollamaURL  string
+		full       bool
+	)
+	fs := flag.NewFlagSet("golem index", flag.ContinueOnError)
+	fs.SetOutput(errOut)
+	fs.StringVar(&configPath, "config", "", "path to models.json (default: auto-discover)")
+	fs.StringVar(&rootFlag, "root", ".", "workspace root to index")
+	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
+	fs.BoolVar(&full, "full", false, "clean rebuild (drop the existing index first)")
+	fs.Bool("no-color", false, "disable dim ANSI footers in summary")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	root, err := filepath.Abs(rootFlag)
+	if err != nil {
+		return fmt.Errorf("resolve root: %w", err)
+	}
+	if root, err = filepath.EvalSymlinks(root); err != nil {
+		return fmt.Errorf("resolve root: %w", err)
+	}
+
+	cfg, err := loadConfig(configPath)
+	if err != nil {
+		return err
+	}
+	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
+		Config:            cfg,
+		OllamaURLOverride: ollamaURL,
+	})
+	if err != nil {
+		return fmt.Errorf("bootstrap providers: %w", err)
+	}
+	defer func() { _ = bundle.Close() }()
+
+	embChain, err := embeddingChain(bundle.Config)
+	if err != nil {
+		return err
+	}
+	dbPath, workspaceID, err := indexDBPathForWorkspace(os.Getenv, root)
+	if err != nil {
+		return err
+	}
+	if mkErr := os.MkdirAll(filepath.Dir(dbPath), 0o700); mkErr != nil {
+		return fmt.Errorf("create index dir: %w", mkErr)
+	}
+	store, err := prepareIndexStore(ctx, dbPath, sidecarPath(dbPath), workspaceID, embChain, full)
+	if err != nil {
+		fmt.Fprintf(out, "golem index: %v\n", err)
+		return errIndexFailed
+	}
+	defer func() { _ = store.Close() }()
+
+	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
+		return bundle.Router.Route(rc, rr)
+	}, embChain)
+	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithEmbeddingModel(embChain[0]))
+	if err != nil {
+		return fmt.Errorf("build indexer: %w", err)
+	}
+
+	res := executeIndex(ctx, indexJob{
+		indexer:        indexer,
+		store:          store,
+		root:           root,
+		dbPath:         dbPath,
+		sidecarPath:    sidecarPath(dbPath),
+		workspaceID:    workspaceID,
+		requestedModel: embChain[0],
+		out:            out,
+	})
+	return res.exitErr
 }

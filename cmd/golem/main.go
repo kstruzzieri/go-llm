@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
@@ -26,6 +27,7 @@ type flags struct {
 	fresh         bool
 	sessionID     string
 	allowWrite    bool
+	noRag         bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -42,6 +44,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
+	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -53,6 +56,9 @@ func parseFlags(args []string) (flags, error) {
 func validateFlags(f flags) error {
 	if f.fresh && f.sessionID != "" {
 		return fmt.Errorf("golem: -fresh and -session are mutually exclusive")
+	}
+	if f.noRag && f.ragDB != "" {
+		return fmt.Errorf("golem: -no-rag and -rag-db are mutually exclusive")
 	}
 	return nil
 }
@@ -99,12 +105,25 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
+		// runIndex already rendered its own output; just exit non-zero.
+		if errors.Is(err, errIndexFailed) {
+			os.Exit(1)
+		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
 		os.Exit(1)
 	}
 }
 
 func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		switch args[0] {
+		case "index":
+			return runIndex(context.Background(), args[1:], stdout, stderr)
+		default:
+			return fmt.Errorf("unknown command %q (did you mean \"index\"?)", args[0])
+		}
+	}
+
 	f, err := parseFlags(args)
 	if err != nil {
 		return err
