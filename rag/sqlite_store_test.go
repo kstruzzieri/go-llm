@@ -1153,7 +1153,7 @@ func TestProbeVectorSpaces_empty(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeVectorSpaces: %v", err)
 	}
-	want := vectorSpaceProbe{KnownIDs: nil, HasUnknown: false}
+	want := VectorSpaceProbe{KnownIDs: nil, HasUnknown: false}
 	if !reflect.DeepEqual(probe, want) {
 		t.Errorf("probe = %+v, want %+v", probe, want)
 	}
@@ -1171,7 +1171,7 @@ func TestProbeVectorSpaces_singleKnown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeVectorSpaces: %v", err)
 	}
-	want := vectorSpaceProbe{KnownIDs: []string{"X"}, HasUnknown: false}
+	want := VectorSpaceProbe{KnownIDs: []string{"X"}, HasUnknown: false}
 	if !reflect.DeepEqual(probe, want) {
 		t.Errorf("probe = %+v, want %+v", probe, want)
 	}
@@ -1190,7 +1190,7 @@ func TestProbeVectorSpaces_singleKnown_plusUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeVectorSpaces: %v", err)
 	}
-	want := vectorSpaceProbe{KnownIDs: []string{"X"}, HasUnknown: true}
+	want := VectorSpaceProbe{KnownIDs: []string{"X"}, HasUnknown: true}
 	if !reflect.DeepEqual(probe, want) {
 		t.Errorf("probe = %+v, want %+v", probe, want)
 	}
@@ -1208,7 +1208,7 @@ func TestProbeVectorSpaces_twoKnown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeVectorSpaces: %v", err)
 	}
-	want := vectorSpaceProbe{KnownIDs: []string{"A", "Y"}, HasUnknown: false}
+	want := VectorSpaceProbe{KnownIDs: []string{"A", "Y"}, HasUnknown: false}
 	if !reflect.DeepEqual(probe, want) {
 		t.Errorf("probe = %+v, want %+v", probe, want)
 	}
@@ -1226,7 +1226,7 @@ func TestProbeVectorSpaces_twoKnown_plusUnknown(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeVectorSpaces: %v", err)
 	}
-	want := vectorSpaceProbe{KnownIDs: []string{"A", "Y"}, HasUnknown: true}
+	want := VectorSpaceProbe{KnownIDs: []string{"A", "Y"}, HasUnknown: true}
 	if !reflect.DeepEqual(probe, want) {
 		t.Errorf("probe = %+v, want %+v", probe, want)
 	}
@@ -1244,7 +1244,7 @@ func TestProbeVectorSpaces_fullyLegacy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeVectorSpaces: %v", err)
 	}
-	want := vectorSpaceProbe{KnownIDs: nil, HasUnknown: true}
+	want := VectorSpaceProbe{KnownIDs: nil, HasUnknown: true}
 	if !reflect.DeepEqual(probe, want) {
 		t.Errorf("probe = %+v, want %+v", probe, want)
 	}
@@ -1266,7 +1266,7 @@ func TestProbeVectorSpaces_threeKnown_returnsBookends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ProbeVectorSpaces: %v", err)
 	}
-	want := vectorSpaceProbe{KnownIDs: []string{"A", "Z"}, HasUnknown: false}
+	want := VectorSpaceProbe{KnownIDs: []string{"A", "Z"}, HasUnknown: false}
 	if !reflect.DeepEqual(probe, want) {
 		t.Errorf("probe = %+v, want %+v", probe, want)
 	}

@@ -295,7 +295,7 @@ func TestRetrieve_searchWrapperPreserved(t *testing.T) {
 	errBoom := errors.New("boom")
 	store := &retrieverProbingStore{
 		retrieverPlainStore: retrieverPlainStore{searchErr: errBoom},
-		probe:               vectorSpaceProbe{KnownIDs: []string{"X"}},
+		probe:               VectorSpaceProbe{KnownIDs: []string{"X"}},
 	}
 	emb := &recordingEmbedder{result: EmbedResult{
 		Embeddings:    [][]float64{{1}},
@@ -388,13 +388,13 @@ func (s *retrieverPlainStore) Close() error {
 
 type retrieverProbingStore struct {
 	retrieverPlainStore
-	probe    vectorSpaceProbe
+	probe    VectorSpaceProbe
 	probeErr error
 }
 
-func (s *retrieverProbingStore) ProbeVectorSpaces(context.Context) (vectorSpaceProbe, error) {
+func (s *retrieverProbingStore) ProbeVectorSpaces(context.Context) (VectorSpaceProbe, error) {
 	if s.probeErr != nil {
-		return vectorSpaceProbe{}, s.probeErr
+		return VectorSpaceProbe{}, s.probeErr
 	}
 	return s.probe, nil
 }

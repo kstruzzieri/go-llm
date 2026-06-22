@@ -85,7 +85,7 @@ func (s *SQLiteStore) DB() *sql.DB {
 // DISTINCT scan would generally walk the index to prove no second distinct
 // value exists. Returned IDs are also deterministic across SQLite versions,
 // which matters for tests that assert returned IDs.
-func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, error) {
+func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (VectorSpaceProbe, error) {
 	var minID string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT vector_space_id
@@ -94,7 +94,7 @@ func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, 
 		 ORDER BY vector_space_id ASC
 		 LIMIT 1`).Scan(&minID)
 	if err != nil && err != sql.ErrNoRows {
-		return vectorSpaceProbe{}, fmt.Errorf("rag: probe min vector space: %w", err)
+		return VectorSpaceProbe{}, fmt.Errorf("rag: probe min vector space: %w", err)
 	}
 	hasKnown := err != sql.ErrNoRows
 
@@ -106,7 +106,7 @@ func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, 
 			 WHERE vector_space_id <> ''
 			 ORDER BY vector_space_id DESC
 			 LIMIT 1`).Scan(&maxID); err != nil {
-			return vectorSpaceProbe{}, fmt.Errorf("rag: probe max vector space: %w", err)
+			return VectorSpaceProbe{}, fmt.Errorf("rag: probe max vector space: %w", err)
 		}
 	}
 
@@ -118,10 +118,10 @@ func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (vectorSpaceProbe, 
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT EXISTS(SELECT 1 FROM chunks WHERE vector_space_id = '')
 		`).Scan(&hasUnknown); err != nil {
-		return vectorSpaceProbe{}, fmt.Errorf("rag: probe unknown vector spaces: %w", err)
+		return VectorSpaceProbe{}, fmt.Errorf("rag: probe unknown vector spaces: %w", err)
 	}
 
-	probe := vectorSpaceProbe{HasUnknown: hasUnknown}
+	probe := VectorSpaceProbe{HasUnknown: hasUnknown}
 	if hasKnown {
 		if minID == maxID {
 			probe.KnownIDs = []string{minID}
