@@ -79,6 +79,10 @@ func executeIndex(ctx context.Context, job indexJob) indexResult {
 			stats.TotalSources, probe.KnownIDs, probe.HasUnknown)
 		return indexResult{exitErr: errIndexFailed}
 	}
+	if err := chmodIndexDBFiles(job.dbPath); err != nil {
+		_, _ = fmt.Fprintf(job.out, "golem index: %v\n", err)
+		return indexResult{exitErr: errIndexFailed}
+	}
 
 	errCount := len(status.Errors)
 	sidecarStatus := "complete"
@@ -147,6 +151,18 @@ func removeIndexArtifacts(dbPath, sidecar string) error {
 func removeIfExists(p string) error {
 	if err := osRemove(p); err != nil && !errors.Is(err, errNotExist) {
 		return fmt.Errorf("remove %q: %w", p, err)
+	}
+	return nil
+}
+
+func chmodIndexDBFiles(dbPath string) error {
+	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm"} {
+		if err := os.Chmod(p, 0o600); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("golem: chmod index db artifact %q: %w", p, err)
+		}
 	}
 	return nil
 }

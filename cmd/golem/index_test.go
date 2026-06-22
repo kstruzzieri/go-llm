@@ -67,6 +67,29 @@ func assertNoSQLiteSidecars(t *testing.T, dbPath string) {
 	}
 }
 
+func assertIndexDBModes(t *testing.T, dbPath string) {
+	t.Helper()
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("db mode = %v, want 0600", info.Mode().Perm())
+	}
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		info, err := os.Stat(p)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("%s mode = %v, want 0600", p, info.Mode().Perm())
+		}
+	}
+}
+
 func TestExecuteIndex_HappyPath(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
@@ -104,6 +127,7 @@ func TestExecuteIndex_HappyPath(t *testing.T) {
 	if sc.WorkspaceID != "workspace:k" {
 		t.Errorf("sidecar workspaceID = %q", sc.WorkspaceID)
 	}
+	assertIndexDBModes(t, dbPath)
 	if !strings.Contains(out.String(), "sources") {
 		t.Errorf("summary missing source count: %q", out.String())
 	}
