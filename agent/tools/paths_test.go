@@ -341,3 +341,154 @@ func TestNewFileToolsBadRoot(t *testing.T) {
 		t.Fatal("NewFileTools on a non-existent root should error")
 	}
 }
+
+func TestResolveWriteTargetContainment(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "exist.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linkdir")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "exist.txt"), filepath.Join(root, "linkleaf")); err != nil {
+		t.Fatal(err)
+	}
+	ws := mustWorkspace(t, root)
+
+	if _, exists, err := ws.resolveWriteTarget("exist.txt"); err != nil || !exists {
+		t.Fatalf("existing regular file: err=%v exists=%v", err, exists)
+	}
+	if _, exists, err := ws.resolveWriteTarget("new.txt"); err != nil || exists {
+		t.Fatalf("new file in existing dir: err=%v exists=%v", err, exists)
+	}
+	if _, _, err := ws.resolveWriteTarget("../escape.txt"); !errors.Is(err, errEscape) {
+		t.Fatalf("escape: got %v want errEscape", err)
+	}
+	if _, _, err := ws.resolveWriteTarget("dir"); !errors.Is(err, errNotRegular) {
+		t.Fatalf("dir leaf: got %v want errNotRegular", err)
+	}
+	if _, _, err := ws.resolveWriteTarget("linkleaf"); !errors.Is(err, errSymlink) {
+		t.Fatalf("symlink leaf: got %v want errSymlink", err)
+	}
+	if _, _, err := ws.resolveWriteTarget("linkdir/x.txt"); !errors.Is(err, errSymlink) {
+		t.Fatalf("symlink ancestor: got %v want errSymlink", err)
+	}
+	if _, _, err := ws.resolveWriteTarget("missingdir/x.txt"); err == nil {
+		t.Fatal("missing parent dir must error")
+	}
+}
+
+func TestWriteFileAtomicCreateAndOverwrite(t *testing.T) {
+	root := t.TempDir()
+	ws := mustWorkspace(t, root)
+
+	if err := ws.WriteFileAtomic("a.txt", []byte("first")); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "a.txt"))
+	if err != nil || string(got) != "first" {
+		t.Fatalf("after create got %q err %v", got, err)
+	}
+	if err := ws.WriteFileAtomic("a.txt", []byte("second")); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	got, _ = os.ReadFile(filepath.Join(root, "a.txt"))
+	if string(got) != "second" {
+		t.Fatalf("after overwrite got %q", got)
+	}
+	ents, _ := os.ReadDir(root)
+	if len(ents) != 1 {
+		t.Fatalf("expected 1 entry, got %d: %v", len(ents), ents)
+	}
+}
+
+func TestWriteFileAtomicPreservesExistingMode(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "script.sh")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := mustWorkspace(t, root)
+
+	if err := ws.WriteFileAtomic("script.sh", []byte("#!/bin/sh\nexit 1\n")); err != nil {
+		t.Fatalf("overwrite: %v", err)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fi.Mode().Perm(); got != 0o755 {
+		t.Fatalf("mode after overwrite = %v, want 0755", got)
+	}
+}
+
+func TestWriteFileAtomicRejectsSymlinkLeaf(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	target := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(target, []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(root, "evil")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ws := mustWorkspace(t, root)
+	if err := ws.WriteFileAtomic("evil", []byte("x")); !errors.Is(err, errSymlink) {
+		t.Fatalf("write through symlink leaf: got %v want errSymlink", err)
+	}
+	got, _ := os.ReadFile(target)
+	if string(got) != "SECRET" {
+		t.Fatalf("symlink write escaped root: target now %q", got)
+	}
+}
+
+func TestRemoveFile(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "keep.txt"), []byte("y"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(root, "dir"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	ws := mustWorkspace(t, root)
+	if err := ws.RemoveFile("a.txt"); err != nil {
+		t.Fatalf("remove regular: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); !os.IsNotExist(err) {
+		t.Fatal("file not removed")
+	}
+	if err := ws.RemoveFile("dir"); !errors.Is(err, errNotRegular) {
+		t.Fatalf("remove dir: got %v want errNotRegular", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "keep.txt"), filepath.Join(root, "lnk")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := ws.RemoveFile("lnk"); !errors.Is(err, errSymlink) {
+		t.Fatalf("remove symlink leaf: got %v want errSymlink", err)
+	}
+	if err := ws.RemoveFile("../x"); !errors.Is(err, errEscape) {
+		t.Fatalf("remove escape: got %v want errEscape", err)
+	}
+}
+
+func TestWriteFileAtomicRejectsSymlinkAncestor(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linkdir")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	ws := mustWorkspace(t, root)
+	if err := ws.WriteFileAtomic("linkdir/new.txt", []byte("x")); !errors.Is(err, errSymlink) {
+		t.Fatalf("write through symlink ancestor: got %v want errSymlink", err)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
+		t.Fatal("write escaped root through symlinked ancestor")
+	}
+}

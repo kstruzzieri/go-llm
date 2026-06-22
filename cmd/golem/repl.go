@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -33,22 +32,30 @@ type replSession struct {
 
 	session *session // nil => --no-session (no history, no persistence)
 
-	lastModel string // last routed ActualModel for /model
+	lastModel  string           // last routed ActualModel for /model
+	journal    *mutationJournal // nil unless -allow-write enabled writes
+	allowWrite bool
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
 // other line as an agent goal. A value on interrupts cancels the in-flight Run
 // without ending the loop. EOF (Ctrl-D) returns nil.
 func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
-	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	lr := newLineReader(in)
 	for {
 		_, _ = fmt.Fprint(out, "golem> ")
-		if !sc.Scan() {
-			_, _ = fmt.Fprintln(out)
-			return sc.Err()
+		line, ok, err := lr.ReadLine(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil // ctx canceled at the prompt: exit quietly
+			}
+			return err // scanner failure (e.g. line too long): surface it, as before
 		}
-		line := strings.TrimSpace(sc.Text())
+		if !ok {
+			_, _ = fmt.Fprintln(out)
+			return nil // EOF (Ctrl-D)
+		}
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -58,11 +65,11 @@ func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan
 			}
 			continue
 		}
-		runOnce(ctx, out, interrupts, sess, line)
+		runOnce(ctx, out, interrupts, sess, line, lr)
 	}
 }
 
-func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string) {
+func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, lr *lineReader) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -88,6 +95,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}()
 	}
 
+	var approver agent.Approver
+	if sess.allowWrite {
+		approver = newReplApprover(lr, out, sess.color)
+	}
+
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
 	req := agent.Request{
 		Goal:     line,
@@ -96,7 +108,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Tools:    sess.tools,
 		MaxSteps: sess.maxSteps,
 		Budget:   sess.budget,
-		Approver: nil, // read-only => runtime auto-approves Read, denies Write/Exec
+		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 	}
 	res, err := sess.orch.Run(runCtx, req, rend)
 	if err != nil {
@@ -160,6 +172,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else {
 			_, _ = fmt.Fprintln(out, sess.lastModel)
 		}
+	case "/undo":
+		if sess.journal == nil {
+			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+		} else {
+			sess.journal.undo(out)
+		}
 	case "/tools":
 		for _, t := range sess.tools {
 			_, _ = fmt.Fprintf(out, "%s (%s)\n", t.Spec().Name, effectClassName(t.Effect().Class))
@@ -179,6 +197,7 @@ const golemHelp = `commands:
   /model         show the last routed model
   /clear         delete the active session's history
   /new           start a new session (keeps history of the old one)
+  /undo          revert the last applied write (when -allow-write)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
 `

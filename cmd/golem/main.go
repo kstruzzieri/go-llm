@@ -25,6 +25,7 @@ type flags struct {
 	noSession     bool
 	fresh         bool
 	sessionID     string
+	allowWrite    bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -40,6 +41,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noColor, "no-color", false, "disable dim ANSI footers")
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
+	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -158,6 +160,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	retrieveOmitted := retrieve == nil
 
+	var journal *mutationJournal
+	if f.allowWrite {
+		wt, j, werr := buildWriteTools(root)
+		if werr != nil {
+			return werr
+		}
+		tools = append(tools, wt...)
+		journal = j
+	}
+
+	baseSystem := golemSystemPrompt
+	if f.allowWrite {
+		baseSystem = golemWriteSystemPrompt
+	}
+
 	var sessn *session
 	var sessionLine string
 	if !f.noSession {
@@ -193,12 +210,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	sess := &replSession{
 		orch:            agent.New(caller, agent.ContextManager{}),
 		tools:           tools,
-		baseSystem:      golemSystemPrompt,
+		baseSystem:      baseSystem,
 		maxSteps:        f.maxSteps,
 		budget:          agent.Budget{InputCeiling: f.inputCeiling, OutputReserve: f.outputReserve},
 		color:           !f.noColor,
 		retrieveOmitted: retrieveOmitted,
 		session:         sessn,
+		journal:         journal,
+		allowWrite:      f.allowWrite,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate

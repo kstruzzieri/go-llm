@@ -7,6 +7,20 @@ import (
 	"testing"
 )
 
+func TestParseFlagsAllowWrite(t *testing.T) {
+	f, err := parseFlags([]string{"-allow-write"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.allowWrite {
+		t.Fatal("-allow-write should set allowWrite")
+	}
+	f2, _ := parseFlags(nil)
+	if f2.allowWrite {
+		t.Fatal("allowWrite must default to false")
+	}
+}
+
 func TestStartupNotices(t *testing.T) {
 	got := startupNotices(startupInfo{
 		workspace:       "/abs/root",
