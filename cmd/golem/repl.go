@@ -32,7 +32,8 @@ type replSession struct {
 
 	session *session // nil => --no-session (no history, no persistence)
 
-	lastModel string // last routed ActualModel for /model
+	lastModel string           // last routed ActualModel for /model
+	journal   *mutationJournal // nil unless -allow-write enabled writes
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -165,6 +166,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else {
 			_, _ = fmt.Fprintln(out, sess.lastModel)
 		}
+	case "/undo":
+		if sess.journal == nil {
+			_, _ = fmt.Fprintln(out, "writes disabled (run with -allow-write)")
+		} else {
+			sess.journal.undo(out)
+		}
 	case "/tools":
 		for _, t := range sess.tools {
 			_, _ = fmt.Fprintf(out, "%s (%s)\n", t.Spec().Name, effectClassName(t.Effect().Class))
@@ -184,6 +191,7 @@ const golemHelp = `commands:
   /model         show the last routed model
   /clear         delete the active session's history
   /new           start a new session (keeps history of the old one)
+  /undo          revert the last applied write (when -allow-write)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
 `

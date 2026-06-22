@@ -75,24 +75,24 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 		if err != nil || len(prior) > mutateMaxBytes {
 			return agent.ToolPlan{Effect: eff}, nil
 		}
-		beforeHash = contentHash(prior)
+		beforeHash = ContentHash(prior)
 	}
 	content := []byte(args.Content)
 	preview := unifiedDiff(args.Path, prior, content, priorExists)
-	t.store(contentHash(raw), pendingPlan{
+	t.store(ContentHash(raw), pendingPlan{
 		path:         args.Path,
 		priorContent: prior,
 		priorExists:  priorExists,
 		beforeHash:   beforeHash,
 		afterContent: content,
-		afterHash:    contentHash(content),
+		afterHash:    ContentHash(content),
 		summary:      fmt.Sprintf("write %s", args.Path),
 	})
 	return agent.ToolPlan{Effect: eff, Preview: preview}, nil
 }
 
 func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolResult, error) {
-	pp, ok := t.consume(contentHash(raw))
+	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("mutation preview missing; retry"), nil
 	}
@@ -111,7 +111,7 @@ func (t *WriteFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRe
 		if rerr != nil {
 			return errResult(rerr.Error()), nil
 		}
-		curHash = contentHash(cur)
+		curHash = ContentHash(cur)
 	}
 	if nowExists != pp.priorExists || curHash != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil

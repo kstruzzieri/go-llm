@@ -96,14 +96,14 @@ func TestREPL_SlashCommands(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{}
 	var out strings.Builder
-	in := strings.NewReader("/help\n/tools\n/model\n/clear\n/new\n/bogus\n/exit\n")
+	in := strings.NewReader("/help\n/tools\n/model\n/clear\n/new\n/undo\n/bogus\n/exit\n")
 	sess := newTestSession(t, caller, root)
 
 	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
 		t.Fatalf("runREPL: %v", err)
 	}
 	got := out.String()
-	for _, want := range []string{"read_file", "(read)", "not yet routed", "session disabled (--no-session)", "unknown command"} {
+	for _, want := range []string{"read_file", "(read)", "not yet routed", "session disabled (--no-session)", "unknown command", "writes disabled"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("slash output missing %q in:\n%s", want, got)
 		}

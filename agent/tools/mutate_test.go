@@ -8,14 +8,14 @@ import (
 )
 
 func TestContentHashDistinctFromAbsent(t *testing.T) {
-	if contentHash([]byte("")) == absentHash {
+	if ContentHash([]byte("")) == absentHash {
 		t.Fatal("hash of empty content must differ from the absent sentinel")
 	}
-	if contentHash([]byte("a")) == contentHash([]byte("b")) {
+	if ContentHash([]byte("a")) == ContentHash([]byte("b")) {
 		t.Fatal("different content must hash differently")
 	}
-	h1 := contentHash([]byte("a"))
-	h2 := contentHash([]byte("a"))
+	h1 := ContentHash([]byte("a"))
+	h2 := ContentHash([]byte("a"))
 	if h1 != h2 {
 		t.Fatal("hash must be stable")
 	}

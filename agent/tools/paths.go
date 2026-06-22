@@ -395,3 +395,12 @@ func (w *Workspace) readAll(p string) ([]byte, error) {
 	defer func() { _ = f.Close() }()
 	return io.ReadAll(f)
 }
+
+// ReadFileForUndo returns the full bytes of a workspace-relative regular file for
+// undo verification. It applies the same containment + never-follow-symlink checks
+// as every other access but does NOT apply the binary/size guards (undo compares
+// against a recorded hash, not model-facing content). Returns an error if the file
+// is absent.
+func (w *Workspace) ReadFileForUndo(p string) ([]byte, error) {
+	return w.readAll(p)
+}

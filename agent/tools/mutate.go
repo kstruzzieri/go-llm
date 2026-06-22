@@ -16,14 +16,14 @@ const (
 	// final content must each stay at or below this for write_file / edit_file.
 	mutateMaxBytes = 256 * 1024
 	// absentHash is the sentinel returned for a file that does not exist, distinct
-	// from contentHash of any real (including empty) content.
+	// from ContentHash of any real (including empty) content.
 	absentHash = "absent"
 	// diffContext is the number of unchanged lines shown around a change.
 	diffContext = 3
 )
 
-// contentHash is the SHA-256 hex of b. Stable, and distinct from absentHash.
-func contentHash(b []byte) string {
+// ContentHash is the SHA-256 hex of b. Stable, distinct from absentHash, and reused by cmd/golem's undo journal to detect post-write changes.
+func ContentHash(b []byte) string {
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -96,7 +96,7 @@ func unifiedDiff(path string, before, after []byte, beforeExists bool) string {
 
 // MutationRecord is what an applied write reports to a Journal so the consumer can
 // undo it. PriorContent is the file's bytes before the write (nil if it did not
-// exist); Existed says which. AfterHash is contentHash of the written bytes, used
+// exist); Existed says which. AfterHash is ContentHash of the written bytes, used
 // by /undo to confirm the file is unchanged since golem wrote it.
 type MutationRecord struct {
 	Path         string

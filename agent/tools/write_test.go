@@ -54,7 +54,7 @@ func TestWriteFileCreate(t *testing.T) {
 	if string(got) != "hello\n" {
 		t.Fatalf("file content = %q", got)
 	}
-	if len(jr.recs) != 1 || jr.recs[0].Existed || jr.recs[0].AfterHash != contentHash([]byte("hello\n")) {
+	if len(jr.recs) != 1 || jr.recs[0].Existed || jr.recs[0].AfterHash != ContentHash([]byte("hello\n")) {
 		t.Fatalf("journal record wrong: %+v", jr.recs)
 	}
 }

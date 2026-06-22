@@ -103,13 +103,13 @@ func (t *EditFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan,
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, nil // gated but un-approvable; Invoke reports why
 	}
-	t.store(contentHash(raw), pendingPlan{
+	t.store(ContentHash(raw), pendingPlan{
 		path:         args.Path,
 		priorContent: before,
 		priorExists:  true,
-		beforeHash:   contentHash(before),
+		beforeHash:   ContentHash(before),
 		afterContent: after,
-		afterHash:    contentHash(after),
+		afterHash:    ContentHash(after),
 		summary:      fmt.Sprintf("edit %s", args.Path),
 	})
 	return agent.ToolPlan{Effect: eff, Preview: unifiedDiff(args.Path, before, after, true)}, nil
@@ -126,12 +126,12 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 	if err != nil {
 		return errResult(err.Error()), nil
 	}
-	pp, ok := t.consume(contentHash(raw))
+	pp, ok := t.consume(ContentHash(raw))
 	if !ok {
 		return errResult("mutation preview missing; retry"), nil
 	}
 	// The file must be byte-identical to what Plan previewed.
-	if contentHash(before) != pp.beforeHash {
+	if ContentHash(before) != pp.beforeHash {
 		return errResult("file changed since preview; retry"), nil
 	}
 	if err := t.ws.WriteFileAtomic(pp.path, after); err != nil {
