@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 const (
@@ -158,5 +160,16 @@ func (b *mutatingBase) consume(argsHash string) (pendingPlan, bool) {
 func record(j Journal, rec MutationRecord) {
 	if j != nil {
 		j.Record(rec)
+	}
+}
+
+// NewMutatingTools builds the workspace-mutating tool set (write_file, edit_file)
+// bound to ws, reporting applied changes to journal (may be nil). The consumer
+// (cmd/golem) appends these to the read-only set only when writes are enabled, and
+// must supply an Approver so the runtime gates each call.
+func NewMutatingTools(ws *Workspace, journal Journal) []agent.Tool {
+	return []agent.Tool{
+		NewWriteFile(ws, journal),
+		NewEditFile(ws, journal),
 	}
 }

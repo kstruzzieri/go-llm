@@ -3,6 +3,8 @@ package tools
 import (
 	"strings"
 	"testing"
+
+	"github.com/kstruzzieri/go-llm/agent"
 )
 
 func TestContentHashDistinctFromAbsent(t *testing.T) {
@@ -69,6 +71,30 @@ func TestUnifiedDiffIdenticalNoChangeLines(t *testing.T) {
 			if !strings.HasPrefix(ln, "+++") && !strings.HasPrefix(ln, "---") {
 				t.Fatalf("identical inputs produced a change line: %q\nfull:\n%s", ln, d)
 			}
+		}
+	}
+}
+
+func TestNewMutatingTools(t *testing.T) {
+	ws := mustWorkspace(t, t.TempDir())
+	tools := NewMutatingTools(ws, nil)
+	want := map[string]bool{"write_file": false, "edit_file": false}
+	for _, tl := range tools {
+		name := tl.Spec().Name
+		if _, ok := want[name]; !ok {
+			t.Fatalf("unexpected tool %q", name)
+		}
+		want[name] = true
+		if e := tl.Effect(); e.Class != agent.Write || e.Approval != agent.ApprovalOnWrite {
+			t.Fatalf("%q Effect = %+v, want Write/ApprovalOnWrite", name, e)
+		}
+		if _, ok := tl.(agent.PlanningTool); !ok {
+			t.Fatalf("%q must implement PlanningTool", name)
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Fatalf("missing %q", name)
 		}
 	}
 }
