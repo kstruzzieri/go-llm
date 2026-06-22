@@ -13,6 +13,29 @@ import (
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
+// golemWriteSystemPrompt is the base prompt when -allow-write is set. Unlike the
+// read-only prompt it permits proposing mutations, but stresses that every change
+// is shown as a diff and applied only after explicit user approval.
+const golemWriteSystemPrompt = "You are Golem, a terminal coding assistant for this workspace. " +
+	"Use the read-only tools to inspect files before acting. You may propose changes with write_file and edit_file; " +
+	"every change is shown to the user as a diff and is applied only after they approve it, so keep edits minimal and targeted and explain what you are changing. " +
+	"After a change is applied, briefly confirm what you changed. " +
+	"Prefer edit_file for small changes and write_file for new files or full rewrites. " +
+	"Cite file paths and line numbers when they matter, and say when the available evidence is insufficient. " +
+	"Prior session messages are context only; the current user request is authoritative."
+
+// buildWriteTools constructs the workspace-mutating tool set plus the in-session
+// journal that backs /undo, both bound to one Workspace over root. Returned only
+// when -allow-write is set.
+func buildWriteTools(root string) ([]agent.Tool, *mutationJournal, error) {
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		return nil, nil, fmt.Errorf("golem: build write tools: %w", err)
+	}
+	journal := newMutationJournal(ws)
+	return agenttools.NewMutatingTools(ws, journal), journal, nil
+}
+
 // buildTools returns golem's read-only tool set: the file tools
 // (read_file, search, glob, list) always, plus retrieve appended last when a
 // non-nil retriever tool is supplied. The retrieve argument must be a true nil

@@ -32,8 +32,9 @@ type replSession struct {
 
 	session *session // nil => --no-session (no history, no persistence)
 
-	lastModel string           // last routed ActualModel for /model
-	journal   *mutationJournal // nil unless -allow-write enabled writes
+	lastModel  string           // last routed ActualModel for /model
+	journal    *mutationJournal // nil unless -allow-write enabled writes
+	allowWrite bool
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -94,6 +95,11 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}()
 	}
 
+	var approver agent.Approver
+	if sess.allowWrite {
+		approver = newReplApprover(lr, out, sess.color)
+	}
+
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
 	req := agent.Request{
 		Goal:     line,
@@ -102,7 +108,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Tools:    sess.tools,
 		MaxSteps: sess.maxSteps,
 		Budget:   sess.budget,
-		Approver: nil, // read-only => runtime auto-approves Read, denies Write/Exec
+		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 	}
 	res, err := sess.orch.Run(runCtx, req, rend)
 	if err != nil {

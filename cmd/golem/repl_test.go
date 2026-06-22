@@ -240,6 +240,109 @@ func TestREPL_DoesNotPersistCanceledRun(t *testing.T) {
 	}
 }
 
+func TestREPL_ReadOnlyDeniesWriteAttempt(t *testing.T) {
+	root := t.TempDir()
+	// Model attempts a write in a read-only session, then answers.
+	writeCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "w1", Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "write_file",
+				Arguments: json.RawMessage(`{"path":"out.txt","content":"x\n"}`),
+			},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "could not write"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: writeCall}, {Response: finalAns}}}
+	sess := newTestSession(t, caller, root) // read-only: no write tools, nil approver
+	var out strings.Builder
+	in := strings.NewReader("please write out.txt\n")
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if strings.Contains(out.String(), "Apply this change?") {
+		t.Fatalf("read-only session must not show an approval prompt:\n%s", out.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "out.txt")); !os.IsNotExist(err) {
+		t.Fatal("read-only session must not create a file")
+	}
+}
+
+func TestREPL_AllowWriteApprovedWriteApplies(t *testing.T) {
+	root := t.TempDir()
+	writeCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "w1", Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "write_file",
+				Arguments: json.RawMessage(`{"path":"out.txt","content":"hello\n"}`),
+			},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "wrote it"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: writeCall}, {Response: finalAns}}}
+	sess := newWriteEnabledTestSession(t, caller, root)
+
+	var out strings.Builder
+	in := strings.NewReader("write out.txt\ny\n") // goal, then approve the write
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "out.txt"))
+	if err != nil || string(got) != "hello\n" {
+		t.Fatalf("approved write not applied: got %q err %v\nout:\n%s", got, err, out.String())
+	}
+	if !strings.Contains(out.String(), "Apply this change?") {
+		t.Fatalf("approval prompt missing:\n%s", out.String())
+	}
+}
+
+func TestREPL_AllowWriteDeniedWriteSkips(t *testing.T) {
+	root := t.TempDir()
+	writeCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "w1", Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "write_file",
+				Arguments: json.RawMessage(`{"path":"out.txt","content":"hello\n"}`),
+			},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "ok, skipped"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: writeCall}, {Response: finalAns}}}
+	sess := newWriteEnabledTestSession(t, caller, root)
+
+	var out strings.Builder
+	in := strings.NewReader("write out.txt\nn\n") // goal, then deny the write
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "out.txt")); !os.IsNotExist(err) {
+		t.Fatal("denied write must not create the file")
+	}
+}
+
+func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSession {
+	t.Helper()
+	readTools, err := buildTools(root, nil)
+	if err != nil {
+		t.Fatalf("buildTools: %v", err)
+	}
+	writeTools, journal, err := buildWriteTools(root)
+	if err != nil {
+		t.Fatalf("buildWriteTools: %v", err)
+	}
+	return &replSession{
+		orch:       agent.New(caller, agent.ContextManager{}),
+		tools:      append(readTools, writeTools...),
+		baseSystem: golemWriteSystemPrompt,
+		maxSteps:   16,
+		clock:      func() time.Time { return time.Unix(0, 0) },
+		journal:    journal,
+		allowWrite: true,
+	}
+}
+
 func TestREPL_ClearAndNew(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{}
