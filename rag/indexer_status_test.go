@@ -36,7 +36,7 @@ func TestIndexDirectoryWithStatus_Counts(t *testing.T) {
 	dir := t.TempDir()
 	writeFile(t, filepath.Join(dir, "a.go"), "package a\n\nfunc A() {}\n")
 	writeFile(t, filepath.Join(dir, "b.md"), "# B\n\nsome text\n")
-	writeFile(t, filepath.Join(dir, "skip.bin"), "binary-ish")             // excluded by extension
+	writeFile(t, filepath.Join(dir, "skip.bin"), "binary-ish")              // excluded by extension
 	writeFile(t, filepath.Join(dir, "node_modules", "c.go"), "package c\n") // excluded dir
 
 	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "s.db"))
