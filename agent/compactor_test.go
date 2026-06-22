@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -16,6 +17,9 @@ func pinned(role, content string) Message {
 }
 func elastic(role, content string) Message {
 	return Message{ChatMessage: provider.ChatMessage{Role: role, Content: content}, Segment: Elastic}
+}
+func history(role, content string) Message {
+	return elastic(role, content)
 }
 
 func TestRecencyCompactorKeepsPinnedDropsOldestElastic(t *testing.T) {
@@ -113,7 +117,55 @@ func TestRecencyCompactorCountsPromptVisibleToolFields(t *testing.T) {
 	}
 }
 
-func TestRecencyCompactorDropsCompletedToolChainsBeforePlainHistory(t *testing.T) {
+func TestRecencyCompactorDropsPriorHistoryBeforeCurrentToolChains(t *testing.T) {
+	asst := Message{ChatMessage: provider.ChatMessage{
+		Role: "assistant",
+		ToolCalls: []provider.ToolCall{{
+			ID: "c1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "search", Arguments: json.RawMessage(`{}`)},
+		}},
+	}, Segment: Elastic}
+	toolResult := Message{ChatMessage: provider.ChatMessage{
+		Role: "tool", ToolName: "search", ToolCallID: "c1", Content: "TOOLRESULT",
+	}, Segment: Elastic}
+	st := State{Messages: []Message{
+		history("user", "OLD-QUESTION"),
+		history("assistant", "OLD-ANSWER"),
+		pinned("user", "GOAL"),
+		asst, toolResult,
+		elastic("assistant", "FINAL"),
+	}}
+
+	rc := RecencyCompactor{Estimate: runeEstimator}
+	budget := 0
+	for _, m := range st.Messages[2:] {
+		budget += rc.messageCost(m)
+	}
+	out, rep, err := rc.Compact(context.Background(), st, TokenBudget{Input: budget})
+	if err != nil {
+		t.Fatalf("Compact: %v", err)
+	}
+	if rep.DroppedCount != 1 {
+		t.Fatalf("DroppedCount = %d, want 1", rep.DroppedCount)
+	}
+	var sawToolCall, sawToolResult bool
+	for _, m := range out.Messages {
+		if strings.HasPrefix(m.Content, "OLD-") {
+			t.Fatalf("prior history should drop before current-run tool chain, got %+v", out.Messages)
+		}
+		if len(m.ToolCalls) > 0 {
+			sawToolCall = true
+		}
+		if m.Role == "tool" && m.ToolCallID == "c1" {
+			sawToolResult = true
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Fatalf("current-run completed tool chain should survive while prior history can be dropped, got %+v", out.Messages)
+	}
+}
+
+func TestRecencyCompactorDropsCompletedToolChainsBeforeCurrentPlainElastic(t *testing.T) {
 	asst := Message{ChatMessage: provider.ChatMessage{
 		Role: "assistant",
 		ToolCalls: []provider.ToolCall{{
@@ -137,7 +189,7 @@ func TestRecencyCompactorDropsCompletedToolChainsBeforePlainHistory(t *testing.T
 		t.Fatalf("Compact: %v", err)
 	}
 	if len(out.Messages) != 3 || out.Messages[1].Content != "PLAIN" || out.Messages[2].Content != "FINAL" {
-		t.Fatalf("completed tool chain should drop before plain history, got %+v", out.Messages)
+		t.Fatalf("completed tool chain should drop before current-run plain Elastic, got %+v", out.Messages)
 	}
 }
 

@@ -21,8 +21,9 @@ type Compactor interface {
 	Compact(ctx context.Context, state State, budget TokenBudget) (State, CompactionReport, error)
 }
 
-// RecencyCompactor drops oldest completed tool-call chains first, preserves
-// pinned messages and unresolved tool tails, and never calls a model.
+// RecencyCompactor drops oldest prior-history groups first, then completed
+// tool-call chains, preserves pinned messages and unresolved tool tails, and
+// never calls a model.
 type RecencyCompactor struct {
 	Estimate func(string) int // conversation.TokenEstimator; len/4 default when nil
 }
@@ -59,6 +60,7 @@ type compactionGroupKind int
 
 const (
 	groupPinned compactionGroupKind = iota
+	groupHistory
 	groupCompletedTool
 	groupUnresolvedTool
 	groupPlainElastic
@@ -99,11 +101,27 @@ func chainAt(msgs []Message, i int) int {
 	return end
 }
 
-func classifyGroup(msgs []Message, start, end int) compactionGroupKind {
+func firstPinnedIndex(msgs []Message) int {
+	for i, m := range msgs {
+		if m.Segment == Pinned {
+			return i
+		}
+	}
+	return -1
+}
+
+func priorHistoryGroup(start, end, firstPinned int) bool {
+	return firstPinned >= 0 && end < firstPinned
+}
+
+func classifyGroup(msgs []Message, start, end, firstPinned int) compactionGroupKind {
 	for _, m := range msgs[start : end+1] {
 		if m.Segment == Pinned {
 			return groupPinned
 		}
+	}
+	if priorHistoryGroup(start, end, firstPinned) && len(msgs[start].ToolCalls) == 0 {
+		return groupHistory
 	}
 	if len(msgs[start].ToolCalls) == 0 {
 		return groupPlainElastic
@@ -123,6 +141,7 @@ func classifyGroup(msgs []Message, start, end int) compactionGroupKind {
 
 func (rc RecencyCompactor) groups(st State) []compactionGroup {
 	out := make([]compactionGroup, 0, len(st.Messages))
+	firstPinned := firstPinnedIndex(st.Messages)
 	for i := 0; i < len(st.Messages); {
 		end := chainAt(st.Messages, i)
 		if end == i && pairableExchange(st.Messages, i) {
@@ -135,7 +154,7 @@ func (rc RecencyCompactor) groups(st State) []compactionGroup {
 		out = append(out, compactionGroup{
 			msgs:   st.Messages[i : end+1],
 			tokens: tokens,
-			kind:   classifyGroup(st.Messages, i, end),
+			kind:   classifyGroup(st.Messages, i, end, firstPinned),
 		})
 		i = end + 1
 	}
@@ -164,8 +183,11 @@ func (rc RecencyCompactor) Compact(_ context.Context, st State, b TokenBudget) (
 		}
 	}
 
-	// Completed tool-call chains are verbose and reconstructable from later
-	// assistant observations, so they are evicted before plain chat history.
+	// Prior session history is context only, so it yields before current-run
+	// tool observations. Completed tool-call chains are verbose and
+	// reconstructable from later assistant observations, so they yield before
+	// current-run plain Elastic messages.
+	dropKind(groupHistory)
 	dropKind(groupCompletedTool)
 	dropKind(groupPlainElastic)
 
