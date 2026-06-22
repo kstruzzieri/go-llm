@@ -126,3 +126,63 @@ func TestEditFileEffect(t *testing.T) {
 		t.Fatalf("Effect = %+v, want Write/ApprovalOnWrite", e)
 	}
 }
+
+func TestEditFileNoPendingPlanFails(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "a.txt", "hello\n")
+	ef := NewEditFile(mustWorkspace(t, root), nil)
+	res := invoke(t, ef, map[string]any{"path": "a.txt", "old_string": "hello", "new_string": "world"})
+	if !res.IsError || !strings.Contains(res.Content, "preview missing") {
+		t.Fatalf("invoke without plan must fail: %+v", res)
+	}
+}
+
+func TestEditFileMultilineMatch(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "a.txt", "head\nB1\nB2\ntail\n")
+	ef := NewEditFile(mustWorkspace(t, root), nil)
+	_, res := planThenInvoke(t, ef, map[string]any{
+		"path": "a.txt", "old_string": "B1\nB2\n", "new_string": "MID\n",
+	})
+	if res.IsError {
+		t.Fatalf("multiline edit errored: %s", res.Content)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+	if string(got) != "head\nMID\ntail\n" {
+		t.Fatalf("multiline content = %q", got)
+	}
+}
+
+func TestEditFileWholeFileEmptied(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "a.txt", "only\n")
+	ef := NewEditFile(mustWorkspace(t, root), nil)
+	plan, res := planThenInvoke(t, ef, map[string]any{
+		"path": "a.txt", "old_string": "only\n", "new_string": "",
+	})
+	if res.IsError {
+		t.Fatalf("emptying edit errored: %s", res.Content)
+	}
+	if !strings.Contains(plan.Preview, "empty file: a.txt") {
+		t.Fatalf("emptying preview should use empty-file framing: %q", plan.Preview)
+	}
+	got, _ := os.ReadFile(filepath.Join(root, "a.txt"))
+	if len(got) != 0 {
+		t.Fatalf("file should be emptied, got %q", got)
+	}
+}
+
+func TestEditFileRejectsNulNewString(t *testing.T) {
+	root := t.TempDir()
+	writeSeed(t, root, "a.txt", "hello\n")
+	ef := NewEditFile(mustWorkspace(t, root), nil)
+	raw, _ := json.Marshal(map[string]any{"path": "a.txt", "old_string": "hello", "new_string": "a\x00b"})
+	plan, _ := ef.Plan(context.Background(), raw)
+	if plan.Preview != "" {
+		t.Fatalf("NUL new_string must not produce a preview: %q", plan.Preview)
+	}
+	res, _ := ef.Invoke(context.Background(), raw)
+	if !res.IsError {
+		t.Fatal("NUL new_string must fail")
+	}
+}

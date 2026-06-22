@@ -181,3 +181,20 @@ func TestWriteFileDeletedBetweenPlanAndInvoke(t *testing.T) {
 		t.Fatalf("deletion between plan and invoke must fail: %+v", res)
 	}
 }
+
+func TestWriteFileRejectsNulContent(t *testing.T) {
+	root := t.TempDir()
+	wf := NewWriteFile(mustWorkspace(t, root), nil)
+	raw, _ := json.Marshal(map[string]any{"path": "bin.txt", "content": "a\x00b"})
+	plan, _ := wf.Plan(context.Background(), raw)
+	if plan.Preview != "" {
+		t.Fatalf("NUL content must not produce a preview: %q", plan.Preview)
+	}
+	res, _ := wf.Invoke(context.Background(), raw)
+	if !res.IsError {
+		t.Fatal("NUL content write must fail")
+	}
+	if _, err := os.Stat(filepath.Join(root, "bin.txt")); !os.IsNotExist(err) {
+		t.Fatal("rejected NUL write must not create the file")
+	}
+}

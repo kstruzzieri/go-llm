@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -59,6 +60,9 @@ func (t *WriteFile) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan
 	}
 	if args.Path == "" || len(args.Content) > mutateMaxBytes {
 		return agent.ToolPlan{Effect: eff}, nil
+	}
+	if bytes.IndexByte([]byte(args.Content), 0) >= 0 {
+		return agent.ToolPlan{Effect: eff}, nil // refuse binary content (no approvable preview)
 	}
 	_, priorExists, err := t.ws.resolveWriteTarget(args.Path)
 	if err != nil {

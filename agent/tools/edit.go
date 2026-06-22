@@ -87,6 +87,9 @@ func (t *EditFile) computeEdit(args editFileArgs) (before, after []byte, err err
 	if len(after) > mutateMaxBytes {
 		return nil, nil, fmt.Errorf("result exceeds size limit")
 	}
+	if bytes.IndexByte(after, 0) >= 0 {
+		return nil, nil, fmt.Errorf("new_string would introduce a NUL byte; refusing to write binary content")
+	}
 	return before, after, nil
 }
 
@@ -136,7 +139,7 @@ func (t *EditFile) Invoke(_ context.Context, raw json.RawMessage) (agent.ToolRes
 	}
 	record(t.j, MutationRecord{
 		Path: pp.path, PriorContent: pp.priorContent, Existed: true,
-		AfterHash: contentHash(after), Summary: pp.summary, At: time.Now(),
+		AfterHash: pp.afterHash, Summary: pp.summary, At: time.Now(),
 	})
 	return agent.ToolResult{Content: pp.summary, Preview: pp.summary}, nil
 }
