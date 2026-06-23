@@ -72,6 +72,43 @@ func TestLoadOrdersGlobalBeforeWorkspace(t *testing.T) {
 	}
 }
 
+func TestLoadUsesFirstMatchingConfiguredFilename(t *testing.T) {
+	ws := t.TempDir()
+	// Only the second candidate exists; loader should fall through to it.
+	if err := os.WriteFile(filepath.Join(ws, "CLAUDE.md"), []byte("claude rules"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loader{WorkspaceRoot: ws, Filenames: []string{"AGENTS.md", "CLAUDE.md"}}
+	docs, err := l.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(docs) != 1 || docs[0].Content != "claude rules" {
+		t.Fatalf("want CLAUDE.md content, got %+v", docs)
+	}
+	if filepath.Base(docs[0].Path) != "CLAUDE.md" {
+		t.Fatalf("Path=%q, want CLAUDE.md", docs[0].Path)
+	}
+}
+
+func TestLoadFirstFilenameWinsWhenBothExist(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "AGENTS.md"), []byte("agents"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "CLAUDE.md"), []byte("claude"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loader{WorkspaceRoot: ws, Filenames: []string{"AGENTS.md", "CLAUDE.md"}}
+	docs, err := l.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(docs) != 1 || docs[0].Content != "agents" {
+		t.Fatalf("want first-filename (AGENTS.md) to win, got %+v", docs)
+	}
+}
+
 func TestLoadIgnoresEscapingConfiguredFilename(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "workspace")
