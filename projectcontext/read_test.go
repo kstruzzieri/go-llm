@@ -36,3 +36,22 @@ func TestReadCappedMissingFileNotFound(t *testing.T) {
 		t.Fatal("readCapped: want found=false for missing file")
 	}
 }
+
+func TestReadCappedSkipsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.md")
+	if err := os.WriteFile(target, []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "AGENTS.md")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	_, _, found, err := readCapped(link, defaultMaxBytes)
+	if err != nil {
+		t.Fatalf("readCapped: %v", err)
+	}
+	if found {
+		t.Fatal("readCapped: must not follow a symlink (want found=false)")
+	}
+}

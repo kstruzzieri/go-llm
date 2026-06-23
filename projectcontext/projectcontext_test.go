@@ -143,3 +143,28 @@ func TestLoadIgnoresAbsoluteConfiguredFilename(t *testing.T) {
 		t.Fatalf("absolute filename must be ignored, got docs=%+v", docs)
 	}
 }
+
+func TestLoadTruncatesOversizeFile(t *testing.T) {
+	ws := t.TempDir()
+	big := make([]byte, 100)
+	for i := range big {
+		big[i] = 'a'
+	}
+	if err := os.WriteFile(filepath.Join(ws, "AGENTS.md"), big, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loader{WorkspaceRoot: ws, MaxBytes: 10}
+	docs, err := l.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(docs) != 1 {
+		t.Fatalf("want 1 doc, got %d", len(docs))
+	}
+	if !docs[0].Truncated {
+		t.Fatal("want Truncated=true")
+	}
+	if len(docs[0].Content) != 10 {
+		t.Fatalf("Content len=%d, want 10", len(docs[0].Content))
+	}
+}
