@@ -66,6 +66,7 @@ type execPending struct {
 	argv        []string
 	dir         string
 	dirLabel    string
+	dirIdentity os.FileInfo
 	env         []string
 	envNames    []string
 	timeout     time.Duration
@@ -196,7 +197,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
-	dir, dirLabel, err := t.resolveDirArg(args.Dir)
+	dir, dirLabel, dirIdentity, err := t.resolveDirArg(args.Dir)
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
 	}
@@ -208,8 +209,8 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	fp := commandFingerprint(args.Argv, dir, envNames, timeout)
 	p := execPending{
 		path: path, identity: fi, argv: args.Argv, dir: dir, dirLabel: dirLabel,
-		env: env, envNames: envNames, timeout: timeout, requestedTO: requested,
-		clamped: clamped, fingerprint: fp,
+		dirIdentity: dirIdentity, env: env, envNames: envNames, timeout: timeout,
+		requestedTO: requested, clamped: clamped, fingerprint: fp,
 	}
 	t.store(ContentHash(raw), p)
 	eff.Timeout = timeout
@@ -220,15 +221,22 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 // returning the absolute cwd and a human label. Empty -> workspace root (label "").
 // The label is the workspace-relative path passed in, or "" for root; callers that need
 // a display string should substitute "(workspace root)" when the label is empty.
-func (t *RunCommand) resolveDirArg(dir string) (abs, label string, err error) {
+func (t *RunCommand) resolveDirArg(dir string) (abs, label string, identity os.FileInfo, err error) {
 	if strings.TrimSpace(dir) == "" || filepath.Clean(dir) == "." {
-		return t.ws.root, "", nil
+		fi, err := os.Lstat(t.ws.root)
+		if err != nil {
+			return "", "", nil, err
+		}
+		if !fi.IsDir() {
+			return "", "", nil, errNotDir
+		}
+		return t.ws.root, "", fi, nil
 	}
-	abs, _, err = t.ws.resolveDir(dir)
+	abs, identity, err = t.ws.resolveDir(dir)
 	if err != nil {
-		return "", "", fmt.Errorf("dir %q: %w", dir, err)
+		return "", "", nil, fmt.Errorf("dir %q: %w", dir, err)
 	}
-	return abs, dir, nil
+	return abs, dir, identity, nil
 }
 
 // Invoke consumes the pending plan (fail-closed on hash mismatch), re-resolves and
@@ -240,8 +248,8 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 		return errResult("exec preview missing; retry"), nil
 	}
 	// Re-resolve cwd: an escape/symlink introduced after Plan fails closed.
-	dir, _, err := t.resolveDirArg(pp.dirLabel)
-	if err != nil || dir != pp.dir {
+	dir, _, dirIdentity, err := t.resolveDirArg(pp.dirLabel)
+	if err != nil || dir != pp.dir || pp.dirIdentity == nil || !os.SameFile(dirIdentity, pp.dirIdentity) {
 		return errResult("working directory changed since approval; retry"), nil
 	}
 	// Re-resolve executable against the APPROVED env (stored PATH), compare path +
@@ -273,10 +281,11 @@ func resolveExecTimeout(sec *int) (eff time.Duration, requested int, clamped boo
 		return 0, 0, false, fmt.Errorf("timeout_seconds must be positive")
 	}
 	requested = *sec
-	d := time.Duration(*sec) * time.Second
-	if d > execMaxTimeout {
+	maxSeconds := int(execMaxTimeout / time.Second)
+	if *sec > maxSeconds {
 		return execMaxTimeout, requested, true, nil
 	}
+	d := time.Duration(*sec) * time.Second
 	return d, requested, false, nil
 }
 
@@ -360,12 +369,17 @@ func resolveExecutable(ws *Workspace, dir, argv0, pathValue string) (string, os.
 // customLookPath searches pathValue (os.PathListSeparator-delimited) for name,
 // mirroring exec.LookPath semantics over an explicit PATH: the first directory holding
 // an executable regular file wins. Empty PATH entries are skipped (no implicit cwd).
+// Returned paths are absolute so cmd.Dir cannot change what the approved path means.
 func customLookPath(pathValue, name string) (string, os.FileInfo, error) {
 	for _, dir := range strings.Split(pathValue, string(os.PathListSeparator)) {
 		if dir == "" {
 			continue
 		}
 		candidate := filepath.Join(dir, name)
+		candidate, err := filepath.Abs(candidate)
+		if err != nil {
+			continue
+		}
 		fi, err := os.Stat(candidate) // follow symlinks
 		if err != nil {
 			continue

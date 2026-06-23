@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,24 @@ func TestResolveExecutable(t *testing.T) {
 		}
 		if got != filepath.Join(pathDir, "mycmd") || fi == nil {
 			t.Errorf("resolved %q", got)
+		}
+	})
+	t.Run("bare via relative PATH returns absolute path", func(t *testing.T) {
+		processRoot := t.TempDir()
+		relBin := filepath.Join(processRoot, "relbin")
+		if err := os.Mkdir(relBin, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		writeExecutable(t, filepath.Join(relBin, "relcmd"), "#!/bin/sh\n")
+		t.Chdir(processRoot)
+
+		got, fi, err := resolveExecutable(ws, dir, "relcmd", "relbin")
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := filepath.Join(relBin, "relcmd")
+		if got != want || !filepath.IsAbs(got) || fi == nil {
+			t.Errorf("resolved %q, want absolute %q", got, want)
 		}
 	})
 	t.Run("bare not found", func(t *testing.T) {
@@ -264,6 +283,17 @@ func TestResolveExecTimeout(t *testing.T) {
 		{"negative", p(-5), 0, 0, false, true},
 		{"max", p(600), 600 * time.Second, 600, false, false},
 		{"clamp", p(900), 600 * time.Second, 900, true, false},
+	}
+	if strconv.IntSize == 64 {
+		huge := int(int64(10_000_000_000))
+		cases = append(cases, struct {
+			name      string
+			in        *int
+			wantEff   time.Duration
+			wantReq   int
+			wantClamp bool
+			wantErr   bool
+		}{"clamp before duration overflow", p(huge), execMaxTimeout, huge, true, false})
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -549,6 +579,55 @@ func TestInvokeDirChangedFailsClosed(t *testing.T) {
 	}
 	if fr.called {
 		t.Error("runner must not be called when dir check fails")
+	}
+}
+
+func TestInvokeDirIdentityChangedFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix inode/SameFile semantics")
+	}
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subDir := filepath.Join(ws.root, "sub")
+	if err := os.Mkdir(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("HOME", "/home/x")
+
+	fr := &fakeRunner{}
+	rc := NewRunCommand(ws, fr)
+	raw := json.RawMessage(`{"argv":["mycmd"],"dir":"sub"}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+
+	oldSub := filepath.Join(ws.root, "sub.old")
+	newSub := filepath.Join(ws.root, "sub.new")
+	if err := os.Rename(subDir, oldSub); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(newSub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(newSub, subDir); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("dir identity changed: want IsError=true")
+	}
+	if fr.called {
+		t.Error("runner must not be called when dir identity check fails")
 	}
 }
 
