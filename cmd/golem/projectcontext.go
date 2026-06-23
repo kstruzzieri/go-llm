@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/projectcontext"
 )
@@ -62,15 +63,23 @@ func neutralizeFence(s string) string {
 	return fenceSentinel.ReplaceAllString(s, "$1 $2")
 }
 
+// projectContextMaxBytes bounds the AGGREGATE rendered document body golem injects
+// into the system prompt on every turn (across all discovered docs combined). It is
+// a Golem-side prompt-injection budget, distinct from — and tighter than — the
+// library's per-file default: project context ships as System on every turn, so an
+// oversized AGENTS.md must not crowd out history, retrieval, and tool observations.
+const projectContextMaxBytes = 16 * 1024
+
 // projectContextBlock renders discovered documents as a single fenced advisory
 // block for appending to the system prompt. Returns "" when there are no docs.
-func projectContextBlock(docs []projectcontext.Document) string {
+// maxBytes (when > 0) caps the AGGREGATE document body (labels + neutralized
+// content across all docs); the open/close fence framing is always emitted in full
+// so the boundary stays intact even when the body is truncated to fit.
+func projectContextBlock(docs []projectcontext.Document, maxBytes int) string {
 	if len(docs) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString(projectContextOpen)
-	b.WriteString("\n")
+	var body strings.Builder
 	for _, d := range docs {
 		label := d.Source
 		if d.Truncated {
@@ -79,9 +88,27 @@ func projectContextBlock(docs []projectcontext.Document) string {
 		// Neutralize the path too: it is normally a trusted canonical path, but a
 		// directory name could in principle carry a fence sentinel, and the label
 		// must never become a forgeable boundary.
-		_, _ = fmt.Fprintf(&b, "[%s: %s]\n", label, neutralizeFence(d.Path))
-		b.WriteString(neutralizeFence(d.Content))
-		b.WriteString("\n")
+		_, _ = fmt.Fprintf(&body, "[%s: %s]\n", label, neutralizeFence(d.Path))
+		body.WriteString(neutralizeFence(d.Content))
+		body.WriteString("\n")
+	}
+	bodyStr := body.String()
+	truncated := false
+	if maxBytes > 0 && len(bodyStr) > maxBytes {
+		end := maxBytes
+		for end > 0 && !utf8.RuneStart(bodyStr[end]) {
+			end-- // back up to a UTF-8 rune boundary so we never emit a split rune
+		}
+		bodyStr = bodyStr[:end]
+		truncated = true
+	}
+
+	var b strings.Builder
+	b.WriteString(projectContextOpen)
+	b.WriteString("\n")
+	b.WriteString(bodyStr)
+	if truncated {
+		b.WriteString("\n[project context truncated to golem's injected-context budget]\n")
 	}
 	b.WriteString(projectContextClose)
 	return b.String()
@@ -101,10 +128,14 @@ func loadProjectContext(ctx context.Context, root string, getenv func(string) st
 	loader := &projectcontext.Loader{
 		WorkspaceRoot: root,
 		GlobalDir:     globalDir,
+		// Bound each file read to the same ceiling as the aggregate block so a
+		// single huge AGENTS.md is not read in full only to be discarded; the
+		// aggregate cap below is the real per-turn injection limit.
+		MaxBytes: projectContextMaxBytes,
 	}
 	docs, err := loader.Load(ctx)
 	if err != nil {
 		return "", 0, err
 	}
-	return projectContextBlock(docs), len(docs), nil
+	return projectContextBlock(docs, projectContextMaxBytes), len(docs), nil
 }
