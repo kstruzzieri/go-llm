@@ -60,6 +60,24 @@ func TestReplApproverContextCancelAborts(t *testing.T) {
 	}
 }
 
+func TestApproverExecPromptNeutral(t *testing.T) {
+	in := strings.NewReader("y\n")
+	var out strings.Builder
+	a := newReplApprover(newLineReader(in), &out, false)
+	call := provider.ToolCall{Function: provider.ToolCallFunction{Name: "run_command"}}
+	ok, err := a.Approve(context.Background(), call, "run command:\n  argv: go test\n")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "Run this command?") {
+		t.Errorf("exec prompt should say 'Run this command?':\n%s", s)
+	}
+	if strings.Contains(s, "Apply this change?") {
+		t.Error("exec call must not use the diff prompt")
+	}
+}
+
 func TestReplApproverColorRendersAnsi(t *testing.T) {
 	var out strings.Builder
 	lr := newLineReader(strings.NewReader("n\n"))

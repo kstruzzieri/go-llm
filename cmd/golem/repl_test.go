@@ -48,7 +48,7 @@ func newTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSe
 	return &replSession{
 		orch:       agent.New(caller, agent.ContextManager{}),
 		tools:      tools,
-		baseSystem: golemSystemPrompt,
+		baseSystem: buildSystemPrompt(false, false),
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 	}
@@ -174,7 +174,7 @@ func newSessionedTestSession(t *testing.T, caller agent.ModelCaller, root, id st
 	return &replSession{
 		orch:       agent.New(caller, agent.ContextManager{}),
 		tools:      tools,
-		baseSystem: golemSystemPrompt,
+		baseSystem: buildSystemPrompt(false, false),
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		session:    s,
@@ -198,13 +198,13 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 	}
 
 	// The system prompt is exactly the base prompt — history is sent as real messages, not appended.
-	if caller.system != golemSystemPrompt {
+	if caller.system != buildSystemPrompt(false, false) {
 		t.Errorf("system must equal baseSystem (history is sent as real messages, not appended), got:\n%s", caller.system)
 	}
 	// Prior turn reaches the model as real user/assistant messages, ahead of the
 	// current goal: system, user(prior), assistant(prior), user(goal).
 	wantRoles := []string{"system", "user", "assistant", "user"}
-	wantContent := []string{golemSystemPrompt, "earlier question", "earlier answer", "new question"}
+	wantContent := []string{buildSystemPrompt(false, false), "earlier question", "earlier answer", "new question"}
 	if len(caller.messages) != len(wantRoles) {
 		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
 	}
@@ -335,11 +335,60 @@ func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root str
 	return &replSession{
 		orch:       agent.New(caller, agent.ContextManager{}),
 		tools:      append(readTools, writeTools...),
-		baseSystem: golemWriteSystemPrompt,
+		baseSystem: buildSystemPrompt(true, false),
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		journal:    journal,
 		allowWrite: true,
+	}
+}
+
+func newExecOnlyTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSession {
+	t.Helper()
+	readTools, err := buildTools(root, nil)
+	if err != nil {
+		t.Fatalf("buildTools: %v", err)
+	}
+	execTools, err := buildExecTools(root)
+	if err != nil {
+		t.Fatalf("buildExecTools: %v", err)
+	}
+	return &replSession{
+		orch:       agent.New(caller, agent.ContextManager{}),
+		tools:      append(readTools, execTools...),
+		baseSystem: buildSystemPrompt(false, true),
+		maxSteps:   16,
+		clock:      func() time.Time { return time.Unix(0, 0) },
+		allowExec:  true,
+	}
+}
+
+// TestRunOnceExecOnlyWiresApprover verifies that -allow-exec alone (no -allow-write)
+// wires the approval gate. The model emits a run_command call; the user denies it with
+// "n"; the test asserts the "Run this command?" prompt was shown and no file was
+// written (i.e. the approver was actually invoked).
+func TestRunOnceExecOnlyWiresApprover(t *testing.T) {
+	root := t.TempDir()
+	execCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "e1", Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "run_command",
+				Arguments: json.RawMessage(`{"argv":["echo","hello"]}`),
+			},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "ok, skipped"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: execCall}, {Response: finalAns}}}
+	sess := newExecOnlyTestSession(t, caller, root)
+
+	var out strings.Builder
+	in := strings.NewReader("run something\nn\n") // goal, then deny the exec
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if !strings.Contains(out.String(), "Run this command?") {
+		t.Errorf("exec-only session must show 'Run this command?' approval prompt:\n%s", out.String())
 	}
 }
 

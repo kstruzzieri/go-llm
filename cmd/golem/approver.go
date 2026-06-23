@@ -27,12 +27,21 @@ func newReplApprover(lr *lineReader, out io.Writer, color bool) *replApprover {
 	return &replApprover{lr: lr, out: out, color: color}
 }
 
-// Approve prints the diff and reads one line. "y"/"yes" (case-insensitive) approves.
+// Approve shows the preview and reads one line. "y"/"yes" (case-insensitive) approves.
 // "n", empty, and EOF deny with a nil error. A canceled context (Ctrl-C) denies and
 // returns the context error so the run aborts.
-func (a *replApprover) Approve(ctx context.Context, _ provider.ToolCall, preview string) (bool, error) {
-	a.renderDiff(preview)
-	_, _ = fmt.Fprint(a.out, "Apply this change? [y/N] ")
+// The prompt and rendering are action-neutral: run_command calls get a plain preview
+// and "Run this command?" prompt; all other calls get the diff rendering and "Apply
+// this change?" prompt.
+func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
+	isExec := call.Function.Name == "run_command"
+	if isExec {
+		a.renderPlain(preview)
+		_, _ = fmt.Fprint(a.out, "Run this command? [y/N] ")
+	} else {
+		a.renderDiff(preview)
+		_, _ = fmt.Fprint(a.out, "Apply this change? [y/N] ")
+	}
 	line, ok, err := a.lr.ReadLine(ctx)
 	if err != nil {
 		return false, err // ctx canceled: abort the run
@@ -47,6 +56,11 @@ func (a *replApprover) Approve(ctx context.Context, _ provider.ToolCall, preview
 	default:
 		return false, nil
 	}
+}
+
+// renderPlain prints a non-diff preview verbatim (no +/- coloring).
+func (a *replApprover) renderPlain(preview string) {
+	_, _ = fmt.Fprintln(a.out, strings.TrimRight(preview, "\n"))
 }
 
 func (a *replApprover) renderDiff(preview string) {

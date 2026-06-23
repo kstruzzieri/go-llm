@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -63,6 +64,52 @@ func TestBuildTools_WithRetrieve(t *testing.T) {
 func TestBuildTools_BadRoot(t *testing.T) {
 	if _, err := buildTools(filepath.Join(t.TempDir(), "does-not-exist"), nil); err == nil {
 		t.Fatal("buildTools on missing root err = nil, want error")
+	}
+}
+
+func TestBuildTools_NoExecTool(t *testing.T) {
+	tools, err := buildTools(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("buildTools: %v", err)
+	}
+	for _, tool := range tools {
+		if tool.Spec().Name == "run_command" {
+			t.Error("run_command must not be present in the read-only tool set (requires -allow-exec)")
+		}
+	}
+}
+
+func TestBuildSystemPrompt(t *testing.T) {
+	ro := buildSystemPrompt(false, false)
+	if !strings.Contains(ro, "Do not") || strings.Contains(ro, "run_command to") {
+		t.Errorf("read-only prompt wrong:\n%s", ro)
+	}
+	wo := buildSystemPrompt(true, false)
+	if !strings.Contains(wo, "write_file") {
+		t.Error("write-only prompt missing write capability")
+	}
+	if !strings.Contains(wo, "Do not") {
+		t.Error("write-only must still forbid running commands (!allowExec)")
+	}
+	eo := buildSystemPrompt(false, true)
+	if !strings.Contains(eo, "run_command") {
+		t.Error("exec prompt missing exec capability")
+	}
+	if strings.Contains(eo, "Do not claim to run") {
+		t.Error("exec-enabled prompt must NOT forbid commands")
+	}
+	if !strings.Contains(eo, "authoritative") {
+		t.Error("priority note dropped")
+	}
+}
+
+func TestBuildExecTools(t *testing.T) {
+	tools, err := buildExecTools(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 || tools[0].Spec().Name != "run_command" {
+		t.Fatalf("got %d tools", len(tools))
 	}
 }
 
