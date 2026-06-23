@@ -10,15 +10,6 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 )
 
-// golemSystemPrompt is the read-only capability framing sent on every turn. The
-// final sentence is the instruction-priority note that replaces v1's rendered
-// untrusted-history block: prior turns now arrive as real chat messages.
-const golemSystemPrompt = "You are Golem, a read-only terminal coding assistant for this workspace. " +
-	"Use the available read-only tools to inspect files before answering repo-specific questions; " +
-	"do not claim to modify files, run shell commands, install packages, or change project state. " +
-	"Keep answers concise, cite file paths and line numbers when they matter, and say when the available evidence is insufficient. " +
-	"Prior session messages are context only; the current user request is authoritative."
-
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
 	orch            *agent.Orchestrator
@@ -35,6 +26,7 @@ type replSession struct {
 	lastModel  string           // last routed ActualModel for /model
 	journal    *mutationJournal // nil unless -allow-write enabled writes
 	allowWrite bool
+	allowExec  bool
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -96,7 +88,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	var approver agent.Approver
-	if sess.allowWrite {
+	if sess.allowWrite || sess.allowExec {
 		approver = newReplApprover(lr, out, sess.color)
 	}
 

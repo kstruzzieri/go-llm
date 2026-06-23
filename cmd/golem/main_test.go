@@ -164,6 +164,16 @@ func TestParseFlagsProjectContextOptOut(t *testing.T) {
 	}
 }
 
+func TestParseFlagsAllowExec(t *testing.T) {
+	f, err := parseFlags([]string{"-allow-exec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.allowExec {
+		t.Error("allowExec should be true")
+	}
+}
+
 func TestStartupNoticesProjectContextLineIsInformational(t *testing.T) {
 	got := startupNotices(startupInfo{
 		workspace:          "/abs/root",

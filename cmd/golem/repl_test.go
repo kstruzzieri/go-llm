@@ -48,7 +48,7 @@ func newTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSe
 	return &replSession{
 		orch:       agent.New(caller, agent.ContextManager{}),
 		tools:      tools,
-		baseSystem: golemSystemPrompt,
+		baseSystem: buildSystemPrompt(false, false),
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 	}
@@ -174,7 +174,7 @@ func newSessionedTestSession(t *testing.T, caller agent.ModelCaller, root, id st
 	return &replSession{
 		orch:       agent.New(caller, agent.ContextManager{}),
 		tools:      tools,
-		baseSystem: golemSystemPrompt,
+		baseSystem: buildSystemPrompt(false, false),
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		session:    s,
@@ -198,13 +198,13 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 	}
 
 	// The system prompt is exactly the base prompt — history is sent as real messages, not appended.
-	if caller.system != golemSystemPrompt {
+	if caller.system != buildSystemPrompt(false, false) {
 		t.Errorf("system must equal baseSystem (history is sent as real messages, not appended), got:\n%s", caller.system)
 	}
 	// Prior turn reaches the model as real user/assistant messages, ahead of the
 	// current goal: system, user(prior), assistant(prior), user(goal).
 	wantRoles := []string{"system", "user", "assistant", "user"}
-	wantContent := []string{golemSystemPrompt, "earlier question", "earlier answer", "new question"}
+	wantContent := []string{buildSystemPrompt(false, false), "earlier question", "earlier answer", "new question"}
 	if len(caller.messages) != len(wantRoles) {
 		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
 	}
@@ -335,7 +335,7 @@ func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root str
 	return &replSession{
 		orch:       agent.New(caller, agent.ContextManager{}),
 		tools:      append(readTools, writeTools...),
-		baseSystem: golemWriteSystemPrompt,
+		baseSystem: buildSystemPrompt(true, false),
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		journal:    journal,

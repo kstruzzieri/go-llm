@@ -27,6 +27,7 @@ type flags struct {
 	fresh            bool
 	sessionID        string
 	allowWrite       bool
+	allowExec        bool
 	noRag            bool
 	noProjectContext bool
 }
@@ -45,6 +46,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noSession, "no-session", false, "disable persistent session memory")
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
+	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
@@ -208,10 +210,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		journal = j
 	}
 
-	baseSystem := golemSystemPrompt
-	if f.allowWrite {
-		baseSystem = golemWriteSystemPrompt
+	if f.allowExec {
+		et, eerr := buildExecTools(root)
+		if eerr != nil {
+			return eerr
+		}
+		tools = append(tools, et...)
 	}
+
+	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
 	projectContextLine := ""
 	if !f.noProjectContext {
 		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
@@ -267,6 +274,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		session:         sessn,
 		journal:         journal,
 		allowWrite:      f.allowWrite,
+		allowExec:       f.allowExec,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
