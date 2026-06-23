@@ -50,6 +50,28 @@ func TestLoadWorkspaceDocument(t *testing.T) {
 	}
 }
 
+func TestLoadOrdersGlobalBeforeWorkspace(t *testing.T) {
+	global := t.TempDir()
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(global, "AGENTS.md"), []byte("global"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, "AGENTS.md"), []byte("workspace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loader{WorkspaceRoot: ws, GlobalDir: global}
+	docs, err := l.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(docs) != 2 {
+		t.Fatalf("want 2 docs, got %d", len(docs))
+	}
+	if docs[0].Source != "global" || docs[1].Source != "workspace" {
+		t.Fatalf("order=[%s,%s], want [global,workspace]", docs[0].Source, docs[1].Source)
+	}
+}
+
 func TestLoadIgnoresEscapingConfiguredFilename(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "workspace")
