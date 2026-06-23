@@ -129,6 +129,30 @@ func TestResolveExecutable(t *testing.T) {
 	_ = exec.ErrNotFound
 }
 
+func TestCommandFingerprint(t *testing.T) {
+	base := commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH"}, 60*time.Second)
+	if len(base) != fingerprintLen {
+		t.Fatalf("len = %d, want %d", len(base), fingerprintLen)
+	}
+	if base != commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH"}, 60*time.Second) {
+		t.Error("must be stable for identical inputs")
+	}
+	diff := []struct {
+		name string
+		f    string
+	}{
+		{"argv", commandFingerprint([]string{"go", "vet"}, "/w", []string{"PATH"}, 60*time.Second)},
+		{"cwd", commandFingerprint([]string{"go", "test"}, "/x", []string{"PATH"}, 60*time.Second)},
+		{"env", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH", "HOME"}, 60*time.Second)},
+		{"timeout", commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH"}, 30*time.Second)},
+	}
+	for _, d := range diff {
+		if d.f == base {
+			t.Errorf("%s change did not alter fingerprint", d.name)
+		}
+	}
+}
+
 func TestBuildExecEnv(t *testing.T) {
 	parent := map[string]string{
 		"PATH":           "/usr/bin:/bin",
