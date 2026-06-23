@@ -4,10 +4,18 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/projectcontext"
 )
+
+// fenceSentinel matches a triple-angle-bracket fence lead (<<< or >>>) immediately
+// followed by the PROJECT_CONTEXT sentinel, case-insensitively. neutralizeFence
+// inserts a space at the match so untrusted content cannot reproduce EITHER the
+// real open or close marker — including a forged, partial, or case-varied open
+// marker that does not match the full open constant verbatim.
+var fenceSentinel = regexp.MustCompile(`(?i)(<<<|>>>)(PROJECT_CONTEXT)`)
 
 // projectContextOpen / projectContextClose fence the advisory project-context
 // block inside the system prompt. The content between them is untrusted (it comes
@@ -45,14 +53,13 @@ func configDirBase(getenv func(string) string) (string, error) {
 	return dir, nil
 }
 
-// neutralizeFence defangs any occurrence of the fence markers inside untrusted
-// content so a project file cannot close the advisory block early or forge a new
-// one. A zero-width-free, reversible-by-eye replacement is sufficient: the model
-// never needs to reconstruct the original bytes.
+// neutralizeFence defangs any fence sentinel inside untrusted content so a project
+// file cannot close the advisory block early or forge a new boundary. It matches on
+// the lead sentinel (<<<PROJECT_CONTEXT / >>>PROJECT_CONTEXT, case-insensitive) and
+// inserts a space, breaking the literal marker the model keys on. A space-inserted
+// replacement is sufficient: the model never needs to reconstruct the original bytes.
 func neutralizeFence(s string) string {
-	s = strings.ReplaceAll(s, projectContextClose, ">>> PROJECT_CONTEXT")
-	s = strings.ReplaceAll(s, projectContextOpen, "<<< PROJECT_CONTEXT")
-	return s
+	return fenceSentinel.ReplaceAllString(s, "$1 $2")
 }
 
 // projectContextBlock renders discovered documents as a single fenced advisory
