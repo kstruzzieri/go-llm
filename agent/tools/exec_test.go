@@ -129,6 +129,22 @@ func TestResolveExecutable(t *testing.T) {
 	_ = exec.ErrNotFound
 }
 
+func TestFormatExecResult(t *testing.T) {
+	out := formatExecResult(execResult{ExitCode: 1, Stdout: []byte("hello\n"), Stderr: []byte("oops\n")})
+	for _, want := range []string{"exit code: 1", "--- stdout ---", "hello", "--- stderr ---", "oops"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestFormatExecResultTruncationMarkers(t *testing.T) {
+	out := formatExecResult(execResult{ExitCode: 0, Stdout: []byte("a"), StdoutTruncated: true, Stderr: []byte("b"), StderrTruncated: true})
+	if c := strings.Count(out, "[truncated]"); c != 2 {
+		t.Errorf("want 2 truncation markers, got %d:\n%s", c, out)
+	}
+}
+
 func TestRenderExecPreview(t *testing.T) {
 	p := execPending{
 		path:        "/usr/local/go/bin/go",
