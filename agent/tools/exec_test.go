@@ -477,3 +477,93 @@ func TestInvokeTimeoutIsError(t *testing.T) {
 		t.Error("timeout must surface as IsError")
 	}
 }
+
+func TestInvokeDirChangedFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix symlink semantics")
+	}
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Create root/sub as a real directory so Plan accepts it.
+	subDir := filepath.Join(ws.root, "sub")
+	if err := os.Mkdir(subDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Set up a PATH dir with mycmd so Plan can resolve the executable.
+	pathDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("HOME", "/home/x")
+
+	fr := &fakeRunner{result: execResult{Started: true}}
+	rc := NewRunCommand(ws, fr)
+
+	raw := json.RawMessage(`{"argv":["mycmd"],"dir":"sub"}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+
+	// Between Plan and Invoke: replace root/sub with a symlink pointing outside the workspace.
+	outside := t.TempDir()
+	if err := os.RemoveAll(subDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, subDir); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("dir changed to symlink: want IsError=true")
+	}
+	if fr.called {
+		t.Error("runner must not be called when dir check fails")
+	}
+}
+
+func TestInvokeExecutableChangedFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix inode/SameFile semantics")
+	}
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n# inode A\n")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("HOME", "/home/x")
+
+	fr := &fakeRunner{result: execResult{Started: true}}
+	rc := NewRunCommand(ws, fr)
+
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+
+	// Between Plan and Invoke: replace mycmd with a new file at a different inode.
+	// os.Remove + writeExecutable allocates a new inode, so os.SameFile returns false.
+	if err := os.Remove(filepath.Join(pathDir, "mycmd")); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n# inode B\n")
+
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("executable swapped: want IsError=true")
+	}
+	if fr.called {
+		t.Error("runner must not be called when executable identity check fails")
+	}
+}
