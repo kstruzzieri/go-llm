@@ -146,3 +146,34 @@ func TestParseFlags_NoRag(t *testing.T) {
 		t.Error("noRag = false, want true")
 	}
 }
+
+func TestParseFlagsProjectContextOptOut(t *testing.T) {
+	f, err := parseFlags([]string{"-no-project-context"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.noProjectContext {
+		t.Fatal("-no-project-context should set noProjectContext")
+	}
+	f2, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags defaults: %v", err)
+	}
+	if f2.noProjectContext {
+		t.Fatal("noProjectContext must default to false")
+	}
+}
+
+func TestStartupNoticesProjectContextLineIsInformational(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace:          "/abs/root",
+		projectContextLine: "project context: loaded 2 file(s)",
+	})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "project context: loaded 2 file(s)") {
+		t.Fatalf("startup notices missing project context line:\n%s", joined)
+	}
+	if strings.Contains(joined, "warning: project context") {
+		t.Fatalf("project context loaded line must not be rendered as a warning:\n%s", joined)
+	}
+}
