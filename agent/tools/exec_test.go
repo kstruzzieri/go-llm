@@ -39,6 +39,43 @@ func TestRunCommandEffect(t *testing.T) {
 	}
 }
 
+func TestBuildExecEnv(t *testing.T) {
+	parent := map[string]string{
+		"PATH":           "/usr/bin:/bin",
+		"HOME":           "/home/x",
+		"LANG":           "en_US.UTF-8",
+		"USER":           "x",
+		"SECRET_TOKEN":   "shhh",
+		"OPENAI_API_KEY": "sk-xyz",
+		// TMPDIR intentionally absent -> skipped, not errored
+	}
+	lookup := func(k string) (string, bool) { v, ok := parent[k]; return v, ok }
+
+	env, names := buildExecEnv(lookup)
+
+	joined := strings.Join(env, "\n")
+	if strings.Contains(joined, "SECRET_TOKEN") || strings.Contains(joined, "OPENAI_API_KEY") {
+		t.Fatalf("secret leaked into child env: %q", env)
+	}
+	for _, want := range []string{"PATH=/usr/bin:/bin", "HOME=/home/x", "LANG=en_US.UTF-8", "USER=x"} {
+		found := false
+		for _, e := range env {
+			if e == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("env missing %q (got %v)", want, env)
+		}
+	}
+	if got := strings.Join(names, ","); got != "HOME,LANG,PATH,USER" {
+		t.Errorf("names = %q, want sorted present names HOME,LANG,PATH,USER", got)
+	}
+	if pathFromEnv(env) != "/usr/bin:/bin" {
+		t.Errorf("pathFromEnv = %q", pathFromEnv(env))
+	}
+}
+
 func TestResolveExecTimeout(t *testing.T) {
 	p := func(n int) *int { return &n }
 	cases := []struct {
