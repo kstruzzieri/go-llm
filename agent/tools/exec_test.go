@@ -1,6 +1,8 @@
 package tools
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -295,3 +297,66 @@ func TestCappedBuffer(t *testing.T) {
 		t.Errorf("post-cap write: n=%d buf=%q", n, b.buf)
 	}
 }
+
+// Task 8: Plan tests
+
+func planWS(t *testing.T) (*RunCommand, string) {
+	t.Helper()
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewRunCommand(ws, nil), root
+}
+
+func TestPlanValid(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix exec semantics")
+	}
+	rc, root := planWS(t)
+	pathDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("HOME", "/home/x")
+
+	raw := json.RawMessage(`{"argv":["mycmd","arg"]}`)
+	plan, err := rc.Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Effect.Timeout != execDefaultTimeout {
+		t.Errorf("timeout = %v, want %v", plan.Effect.Timeout, execDefaultTimeout)
+	}
+	if plan.Effect.OutputCap != execRuntimeCap {
+		t.Errorf("OutputCap = %d", plan.Effect.OutputCap)
+	}
+	if !strings.Contains(plan.Preview, "mycmd arg") {
+		t.Errorf("preview missing argv:\n%s", plan.Preview)
+	}
+	// pending plan is stashed under the raw-args hash
+	if _, ok := rc.consume(ContentHash(raw)); !ok {
+		t.Error("expected stashed pending plan")
+	}
+	_ = root
+}
+
+func TestPlanRejects(t *testing.T) {
+	rc, _ := planWS(t)
+	cases := map[string]string{
+		"empty argv":   `{"argv":[]}`,
+		"blank argv0":  `{"argv":["   "]}`,
+		"bad json":     `{"argv":`,
+		"zero timeout": `{"argv":["echo"],"timeout_seconds":0}`,
+		"dir escape":   `{"argv":["echo"],"dir":"../../etc"}`,
+		"absolute dir": `{"argv":["echo"],"dir":"/etc"}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := rc.Plan(context.Background(), json.RawMessage(raw)); err == nil {
+				t.Errorf("Plan(%s) = nil err, want error", raw)
+			}
+		})
+	}
+}
+

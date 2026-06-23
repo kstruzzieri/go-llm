@@ -173,9 +173,58 @@ func (t *RunCommand) baseEffect() agent.Effect {
 
 func (t *RunCommand) Effect() agent.Effect { return t.baseEffect() }
 
-// Plan is implemented in Task 8.
-func (t *RunCommand) Plan(_ context.Context, _ json.RawMessage) (agent.ToolPlan, error) {
-	return agent.ToolPlan{Effect: t.baseEffect()}, fmt.Errorf("run_command: Plan not yet implemented")
+// Plan validates args, resolves cwd + executable + env + timeout, renders the preview,
+// and stashes a pending plan keyed by the raw-args hash. It never spawns. Any failure
+// returns an error so dispatch reports it without prompting for approval.
+func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+	eff := t.baseEffect()
+	var args runCommandArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if len(args.Argv) == 0 {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("argv is required and must be non-empty")
+	}
+	if strings.TrimSpace(args.Argv[0]) == "" {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("argv[0] must not be blank")
+	}
+	timeout, requested, clamped, err := resolveExecTimeout(args.TimeoutSeconds)
+	if err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
+	dir, dirLabel, err := t.resolveDirArg(args.Dir)
+	if err != nil {
+		return agent.ToolPlan{Effect: eff}, err
+	}
+	env, envNames := buildExecEnv(os.LookupEnv)
+	path, fi, err := resolveExecutable(t.ws, dir, args.Argv[0], pathFromEnv(env))
+	if err != nil {
+		return agent.ToolPlan{Effect: eff}, fmt.Errorf("resolve %q: %w", args.Argv[0], err)
+	}
+	fp := commandFingerprint(args.Argv, dir, envNames, timeout)
+	p := execPending{
+		path: path, identity: fi, argv: args.Argv, dir: dir, dirLabel: dirLabel,
+		env: env, envNames: envNames, timeout: timeout, requestedTO: requested,
+		clamped: clamped, fingerprint: fp,
+	}
+	t.store(ContentHash(raw), p)
+	eff.Timeout = timeout
+	return agent.ToolPlan{Effect: eff, Preview: renderExecPreview(p, args.Argv[0])}, nil
+}
+
+// resolveDirArg resolves the optional dir argument through the Workspace chokepoint,
+// returning the absolute cwd and a human label. Empty -> workspace root (label "").
+// The label is the workspace-relative path passed in, or "" for root; callers that need
+// a display string should substitute "(workspace root)" when the label is empty.
+func (t *RunCommand) resolveDirArg(dir string) (abs, label string, err error) {
+	if strings.TrimSpace(dir) == "" {
+		return t.ws.root, "", nil
+	}
+	abs, _, err = t.ws.resolveDir(dir)
+	if err != nil {
+		return "", "", fmt.Errorf("dir %q: %w", dir, err)
+	}
+	return abs, dir, nil
 }
 
 // Invoke is implemented in Task 9.
@@ -326,10 +375,14 @@ func fmtTimeout(d time.Duration) string {
 // model). It lists names + source class for env, never values.
 func renderExecPreview(p execPending, originalArgv0 string) string {
 	var b strings.Builder
+	dirDisplay := p.dirLabel
+	if dirDisplay == "" {
+		dirDisplay = "(workspace root)"
+	}
 	b.WriteString("run command:\n")
 	fmt.Fprintf(&b, "  argv:    %s\n", strings.Join(p.argv, " "))
 	fmt.Fprintf(&b, "  exe:     %s -> %s\n", originalArgv0, p.path)
-	fmt.Fprintf(&b, "  cwd:     %s\n", p.dirLabel)
+	fmt.Fprintf(&b, "  cwd:     %s\n", dirDisplay)
 	if p.clamped {
 		fmt.Fprintf(&b, "  timeout: %s (requested %ds, clamped)\n", fmtTimeout(p.timeout), p.requestedTO)
 	} else {
