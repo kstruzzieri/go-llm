@@ -67,6 +67,18 @@ func TestBuildTools_BadRoot(t *testing.T) {
 	}
 }
 
+func TestBuildTools_NoExecTool(t *testing.T) {
+	tools, err := buildTools(t.TempDir(), nil)
+	if err != nil {
+		t.Fatalf("buildTools: %v", err)
+	}
+	for _, tool := range tools {
+		if tool.Spec().Name == "run_command" {
+			t.Error("run_command must not be present in the read-only tool set (requires -allow-exec)")
+		}
+	}
+}
+
 func TestBuildSystemPrompt(t *testing.T) {
 	ro := buildSystemPrompt(false, false)
 	if !strings.Contains(ro, "Do not") || strings.Contains(ro, "run_command to") {

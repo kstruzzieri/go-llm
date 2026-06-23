@@ -188,6 +188,11 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 	if strings.TrimSpace(args.Argv[0]) == "" {
 		return agent.ToolPlan{Effect: eff}, fmt.Errorf("argv[0] must not be blank")
 	}
+	for _, a := range args.Argv {
+		if strings.IndexByte(a, 0) >= 0 {
+			return agent.ToolPlan{Effect: eff}, fmt.Errorf("argv must not contain NUL bytes")
+		}
+	}
 	timeout, requested, clamped, err := resolveExecTimeout(args.TimeoutSeconds)
 	if err != nil {
 		return agent.ToolPlan{Effect: eff}, err
@@ -217,7 +222,7 @@ func (t *RunCommand) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPla
 // The label is the workspace-relative path passed in, or "" for root; callers that need
 // a display string should substitute "(workspace root)" when the label is empty.
 func (t *RunCommand) resolveDirArg(dir string) (abs, label string, err error) {
-	if strings.TrimSpace(dir) == "" {
+	if strings.TrimSpace(dir) == "" || filepath.Clean(dir) == "." {
 		return t.ws.root, "", nil
 	}
 	abs, _, err = t.ws.resolveDir(dir)
@@ -277,6 +282,8 @@ func resolveExecTimeout(sec *int) (eff time.Duration, requested int, clamped boo
 // the parent) as "K=V" entries plus the sorted list of names actually exposed. The
 // parent's full env (including secrets) is otherwise dropped. lookup is injected for
 // testability (production passes os.LookupEnv).
+// NOTE: HOME is passed through by design, so approved commands may read files under
+// the user's home directory. This is an approval gate, not a filesystem sandbox.
 func buildExecEnv(lookup func(string) (string, bool)) (env []string, names []string) {
 	for _, k := range defaultExecEnvAllowlist {
 		if v, ok := lookup(k); ok {

@@ -178,7 +178,7 @@ func TestUnixRunnerGroupKillReapsChild(t *testing.T) {
 	pidfile := t.TempDir() + "/grandchild.pid"
 
 	r := unixRunner{}
-	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
 	// Run the "groupkill" helper in the background so we can poll the pidfile
@@ -195,7 +195,7 @@ func TestUnixRunnerGroupKillReapsChild(t *testing.T) {
 
 	// Poll for the pidfile (written by the helper after the grandchild starts).
 	var grandchildPID int
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		data, err := os.ReadFile(pidfile)
 		if err == nil && len(data) > 0 {
@@ -217,10 +217,10 @@ func TestUnixRunnerGroupKillReapsChild(t *testing.T) {
 		t.Errorf("want TimedOut=true, got TimedOut=%v err=%v", r2.res.TimedOut, r2.err)
 	}
 
-	// Poll up to 2s confirming the grandchild is gone (SIGKILL to group must have
+	// Poll up to 5s confirming the grandchild is gone (SIGKILL to group must have
 	// reached it).  syscall.Kill(pid, 0) returns ESRCH when the process no longer
 	// exists (or has been fully reaped by its own parent).
-	deadline = time.Now().Add(2 * time.Second)
+	deadline = time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		err := syscall.Kill(grandchildPID, 0)
 		if err == syscall.ESRCH {

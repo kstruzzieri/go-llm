@@ -351,6 +351,7 @@ func TestPlanRejects(t *testing.T) {
 		"zero timeout": `{"argv":["echo"],"timeout_seconds":0}`,
 		"dir escape":   `{"argv":["echo"],"dir":"../../etc"}`,
 		"absolute dir": `{"argv":["echo"],"dir":"/etc"}`,
+		"nul in argv":  "{\"argv\":[\"echo\x00evil\"]}",
 	}
 	for name, raw := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -358,6 +359,30 @@ func TestPlanRejects(t *testing.T) {
 				t.Errorf("Plan(%s) = nil err, want error", raw)
 			}
 		})
+	}
+}
+
+func TestPlanDirDotIsRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix exec semantics")
+	}
+	rc, _ := planWS(t)
+	pathDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("HOME", "/home/x")
+
+	raw := json.RawMessage(`{"argv":["mycmd"],"dir":"."}`)
+	plan, err := rc.Plan(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plan.Preview, "(workspace root)") {
+		t.Errorf("dir=. should resolve to (workspace root) in preview:\n%s", plan.Preview)
+	}
+	// Must NOT show a bare "cwd: ." in the preview.
+	if strings.Contains(plan.Preview, "cwd:     .") {
+		t.Errorf("dir=. must not show as bare dot in cwd line:\n%s", plan.Preview)
 	}
 }
 
