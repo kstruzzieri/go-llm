@@ -438,6 +438,3 @@ func formatExecResult(r execResult) string {
 	}
 	return b.String()
 }
-
-// TEMP (removed in Task 10 when exec_unix.go/exec_other.go provide it):
-func newPlatformRunner() commandRunner { return nil }
