@@ -1,6 +1,11 @@
 package projectcontext
 
-import "context"
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"strings"
+)
 
 // defaultMaxBytes caps a single project-context file so a huge file cannot blow
 // the consumer's context window.
@@ -40,5 +45,103 @@ type Loader struct {
 // last). Missing files are skipped (not an error). Returns nil, nil when nothing
 // is found or nothing is configured.
 func (l *Loader) Load(ctx context.Context) ([]Document, error) {
-	return nil, nil
+	maxBytes := l.MaxBytes
+	if maxBytes <= 0 {
+		maxBytes = defaultMaxBytes
+	}
+	names := candidateNames(l.Filenames)
+	if len(names) == 0 {
+		return nil, nil
+	}
+
+	var docs []Document
+	// Order is significant: global (least specific) first, workspace last.
+	locations := []struct {
+		source string
+		dir    string
+	}{
+		{"global", l.GlobalDir},
+		{"workspace", l.WorkspaceRoot},
+	}
+	for _, loc := range locations {
+		if loc.dir == "" {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		doc, found, err := loadOne(loc.source, loc.dir, names, maxBytes)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			docs = append(docs, doc)
+		}
+	}
+	return docs, nil
+}
+
+func candidateNames(in []string) []string {
+	if len(in) == 0 {
+		in = []string{defaultFilename}
+	}
+	out := make([]string, 0, len(in))
+	for _, name := range in {
+		if name == "" || name == "." || name == ".." || filepath.IsAbs(name) ||
+			strings.IndexByte(name, 0) >= 0 || strings.ContainsAny(name, `/\`) {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+func canonicalDir(dir string) (string, bool, error) {
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return "", false, err
+	}
+	canon, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	fi, err := os.Lstat(canon)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if !fi.IsDir() {
+		return "", false, nil
+	}
+	return canon, true, nil
+}
+
+// loadOne reads the first existing candidate filename in dir, returning that
+// Document. found=false means no candidate existed (or all were unsafe/absent).
+func loadOne(source, dir string, names []string, maxBytes int) (Document, bool, error) {
+	root, ok, err := canonicalDir(dir)
+	if err != nil || !ok {
+		return Document{}, false, err
+	}
+	for _, name := range names {
+		path := filepath.Join(root, name)
+		content, truncated, found, err := readCapped(path, maxBytes)
+		if err != nil {
+			return Document{}, false, err
+		}
+		if found {
+			return Document{
+				Source:    source,
+				Path:      path,
+				Content:   content,
+				Truncated: truncated,
+			}, true, nil
+		}
+	}
+	return Document{}, false, nil
 }
