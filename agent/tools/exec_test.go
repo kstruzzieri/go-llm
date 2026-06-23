@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -360,3 +361,119 @@ func TestPlanRejects(t *testing.T) {
 	}
 }
 
+// Task 9: Invoke tests
+
+type fakeRunner struct {
+	result   execResult
+	err      error
+	blockCtx bool // when true, block until ctx is done then report TimedOut
+	gotSpec  execSpec
+	called   bool
+}
+
+func (f *fakeRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
+	f.called, f.gotSpec = true, spec
+	if f.blockCtx {
+		<-ctx.Done()
+		return execResult{Started: true, TimedOut: true}, fmt.Errorf("timed out")
+	}
+	return f.result, f.err
+}
+
+func invokeRC(t *testing.T, fr *fakeRunner) (*RunCommand, string) {
+	t.Helper()
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pathDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n")
+	t.Setenv("PATH", pathDir)
+	t.Setenv("HOME", "/home/x")
+	return NewRunCommand(ws, fr), root
+}
+
+func TestInvokeNonZeroExitNotError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	fr := &fakeRunner{result: execResult{ExitCode: 1, Stdout: []byte("FAIL\n"), Started: true}}
+	rc, _ := invokeRC(t, fr)
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.IsError {
+		t.Error("non-zero exit must NOT be a tool error")
+	}
+	if !strings.Contains(res.Content, "exit code: 1") || !strings.Contains(res.Content, "FAIL") {
+		t.Errorf("content = %q", res.Content)
+	}
+	if !fr.called || fr.gotSpec.Dir == "" {
+		t.Error("runner not invoked with a resolved spec")
+	}
+}
+
+func TestInvokePlanMismatchFailsClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	fr := &fakeRunner{result: execResult{Started: true}}
+	rc, _ := invokeRC(t, fr)
+	if _, err := rc.Plan(context.Background(), json.RawMessage(`{"argv":["mycmd"]}`)); err != nil {
+		t.Fatal(err)
+	}
+	// different args -> hash mismatch -> fail closed, runner never called
+	res, err := rc.Invoke(context.Background(), json.RawMessage(`{"argv":["mycmd","x"]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || fr.called {
+		t.Errorf("want fail-closed without spawning; IsError=%v called=%v", res.IsError, fr.called)
+	}
+}
+
+func TestInvokeInfraError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	fr := &fakeRunner{err: fmt.Errorf("spawn boom")}
+	rc, _ := invokeRC(t, fr)
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("runner infra error must surface as IsError")
+	}
+}
+
+func TestInvokeTimeoutIsError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	fr := &fakeRunner{blockCtx: true}
+	rc, _ := invokeRC(t, fr)
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	res, err := rc.Invoke(ctx, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("timeout must surface as IsError")
+	}
+}

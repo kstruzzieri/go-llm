@@ -227,9 +227,33 @@ func (t *RunCommand) resolveDirArg(dir string) (abs, label string, err error) {
 	return abs, dir, nil
 }
 
-// Invoke is implemented in Task 9.
-func (t *RunCommand) Invoke(_ context.Context, _ json.RawMessage) (agent.ToolResult, error) {
-	return errResult("run_command: Invoke not yet implemented"), nil
+// Invoke consumes the pending plan (fail-closed on hash mismatch), re-resolves and
+// re-checks the cwd and executable against what was approved, then spawns through the
+// runner. Non-zero exit is a normal observation; only infra failures are tool errors.
+func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	pp, ok := t.consume(ContentHash(raw))
+	if !ok {
+		return errResult("exec preview missing; retry"), nil
+	}
+	// Re-resolve cwd: an escape/symlink introduced after Plan fails closed.
+	dir, _, err := t.resolveDirArg(pp.dirLabel)
+	if err != nil || dir != pp.dir {
+		return errResult("working directory changed since approval; retry"), nil
+	}
+	// Re-resolve executable against the APPROVED env (stored PATH), compare path +
+	// identity (os.SameFile) so a symlink swap or same-path binary replacement fails closed.
+	path, fi, rerr := resolveExecutable(t.ws, pp.dir, pp.argv[0], pathFromEnv(pp.env))
+	if rerr != nil || path != pp.path || !os.SameFile(fi, pp.identity) {
+		return errResult("executable changed since approval; retry"), nil
+	}
+	res, runErr := t.runner.Run(ctx, execSpec{Path: pp.path, Argv: pp.argv, Dir: pp.dir, Env: pp.env})
+	if runErr != nil {
+		if res.TimedOut {
+			return errResult(fmt.Sprintf("command timed out after %s", pp.timeout)), nil
+		}
+		return errResult("command failed to run: " + runErr.Error()), nil
+	}
+	return agent.ToolResult{Content: formatExecResult(res)}, nil
 }
 
 // resolveExecTimeout maps timeout_seconds to an effective duration. nil -> default;
