@@ -63,6 +63,20 @@ func neutralizeFence(s string) string {
 	return fenceSentinel.ReplaceAllString(s, "$1 $2")
 }
 
+func truncateProjectContextPrefix(s string, maxBytes int) string {
+	if maxBytes <= 0 {
+		return ""
+	}
+	if len(s) <= maxBytes {
+		return s
+	}
+	end := maxBytes
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end-- // back up to a UTF-8 rune boundary so we never emit a split rune
+	}
+	return s[:end]
+}
+
 // projectContextMaxBytes bounds the AGGREGATE rendered document body golem injects
 // into the system prompt on every turn (across all discovered docs combined). It is
 // a Golem-side prompt-injection budget, distinct from — and tighter than — the
@@ -79,8 +93,10 @@ func projectContextBlock(docs []projectcontext.Document, maxBytes int) string {
 	if len(docs) == 0 {
 		return ""
 	}
-	var body strings.Builder
+	chunks := make([]string, 0, len(docs))
+	bodyLen := 0
 	for _, d := range docs {
+		var chunk strings.Builder
 		label := d.Source
 		if d.Truncated {
 			label += "; truncated"
@@ -88,25 +104,39 @@ func projectContextBlock(docs []projectcontext.Document, maxBytes int) string {
 		// Neutralize the path too: it is normally a trusted canonical path, but a
 		// directory name could in principle carry a fence sentinel, and the label
 		// must never become a forgeable boundary.
-		_, _ = fmt.Fprintf(&body, "[%s: %s]\n", label, neutralizeFence(d.Path))
-		body.WriteString(neutralizeFence(d.Content))
-		body.WriteString("\n")
+		_, _ = fmt.Fprintf(&chunk, "[%s: %s]\n", label, neutralizeFence(d.Path))
+		chunk.WriteString(neutralizeFence(d.Content))
+		chunk.WriteString("\n")
+		chunkStr := chunk.String()
+		chunks = append(chunks, chunkStr)
+		bodyLen += len(chunkStr)
 	}
-	bodyStr := body.String()
 	truncated := false
-	if maxBytes > 0 && len(bodyStr) > maxBytes {
-		end := maxBytes
-		for end > 0 && !utf8.RuneStart(bodyStr[end]) {
-			end-- // back up to a UTF-8 rune boundary so we never emit a split rune
-		}
-		bodyStr = bodyStr[:end]
+
+	if maxBytes > 0 && bodyLen > maxBytes {
 		truncated = true
+		rendered := make([]string, len(chunks))
+		remaining := maxBytes
+		// Documents are ordered low→high precedence. Allocate the capped prompt
+		// budget from the end so workspace-specific context survives an oversized
+		// lower-precedence global document.
+		for i := len(chunks) - 1; i >= 0 && remaining > 0; i-- {
+			chunk := chunks[i]
+			if len(chunk) > remaining {
+				chunk = truncateProjectContextPrefix(chunk, remaining)
+			}
+			rendered[i] = chunk
+			remaining -= len(chunk)
+		}
+		chunks = rendered
 	}
 
 	var b strings.Builder
 	b.WriteString(projectContextOpen)
 	b.WriteString("\n")
-	b.WriteString(bodyStr)
+	for _, chunk := range chunks {
+		b.WriteString(chunk)
+	}
 	if truncated {
 		b.WriteString("\n[project context truncated to golem's injected-context budget]\n")
 	}

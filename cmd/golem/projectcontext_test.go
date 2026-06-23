@@ -102,6 +102,25 @@ func TestProjectContextBlockEnforcesAggregateCap(t *testing.T) {
 	}
 }
 
+func TestProjectContextBlockPreservesWorkspaceUnderAggregateCap(t *testing.T) {
+	workspace := projectcontext.Document{Source: "workspace", Path: "/ws/AGENTS.md", Content: "workspace-specific rules"}
+	workspaceChunk := "[workspace: /ws/AGENTS.md]\nworkspace-specific rules\n"
+	docs := []projectcontext.Document{
+		{Source: "global", Path: "/global/AGENTS.md", Content: strings.Repeat("global rules\n", 80)},
+		workspace,
+	}
+	got := projectContextBlock(docs, len(workspaceChunk)+12)
+	if !strings.Contains(got, "workspace-specific rules") {
+		t.Fatalf("workspace context must survive aggregate truncation: %q", got)
+	}
+	if strings.Contains(got, strings.Repeat("global rules\n", 2)) {
+		t.Fatalf("lower-precedence global context should be truncated before workspace context: %q", got)
+	}
+	if !strings.Contains(got, "truncated to golem's injected-context budget") {
+		t.Fatalf("missing truncation note: %q", got)
+	}
+}
+
 // Content comfortably under the cap is emitted whole, with no truncation note.
 func TestProjectContextBlockNoTruncationUnderCap(t *testing.T) {
 	docs := []projectcontext.Document{

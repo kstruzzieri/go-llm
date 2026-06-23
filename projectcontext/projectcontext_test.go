@@ -72,6 +72,28 @@ func TestLoadOrdersGlobalBeforeWorkspace(t *testing.T) {
 	}
 }
 
+func TestLoadContinuesPastGlobalErrors(t *testing.T) {
+	ws := t.TempDir()
+	if err := os.WriteFile(filepath.Join(ws, "AGENTS.md"), []byte("workspace"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loader{GlobalDir: "bad\x00global", WorkspaceRoot: ws}
+	docs, err := l.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: global errors must not block workspace context: %v", err)
+	}
+	if len(docs) != 1 || docs[0].Source != "workspace" || docs[0].Content != "workspace" {
+		t.Fatalf("want workspace doc after skipped global error, got %+v", docs)
+	}
+}
+
+func TestLoadReturnsWorkspaceErrors(t *testing.T) {
+	l := &Loader{WorkspaceRoot: "bad\x00workspace"}
+	if _, err := l.Load(context.Background()); err == nil {
+		t.Fatal("Load: want workspace errors to remain fatal")
+	}
+}
+
 func TestLoadUsesFirstMatchingConfiguredFilename(t *testing.T) {
 	ws := t.TempDir()
 	// Only the second candidate exists; loader should fall through to it.

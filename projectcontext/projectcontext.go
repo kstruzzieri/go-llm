@@ -42,8 +42,9 @@ type Loader struct {
 }
 
 // Load returns documents in low→high precedence order (global first, workspace
-// last). Missing files are skipped (not an error). Returns nil, nil when nothing
-// is found or nothing is configured.
+// last). Missing files are skipped (not an error). GlobalDir read errors are
+// also skipped because user-level context is optional; WorkspaceRoot errors
+// remain fatal. Returns nil, nil when nothing is found or nothing is configured.
 func (l *Loader) Load(ctx context.Context) ([]Document, error) {
 	maxBytes := l.MaxBytes
 	if maxBytes <= 0 {
@@ -72,6 +73,9 @@ func (l *Loader) Load(ctx context.Context) ([]Document, error) {
 		}
 		doc, found, err := loadOne(loc.source, loc.dir, names, maxBytes)
 		if err != nil {
+			if loc.source == "global" {
+				continue
+			}
 			return nil, err
 		}
 		if found {
