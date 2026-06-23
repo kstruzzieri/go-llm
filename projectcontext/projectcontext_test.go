@@ -168,3 +168,21 @@ func TestLoadTruncatesOversizeFile(t *testing.T) {
 		t.Fatalf("Content len=%d, want 10", len(docs[0].Content))
 	}
 }
+
+// A WorkspaceRoot that points at a regular file (not a directory) yields no
+// document and no error: canonicalDir rejects the non-directory root.
+func TestLoadNonDirectoryRootYieldsNoDoc(t *testing.T) {
+	parent := t.TempDir()
+	rootFile := filepath.Join(parent, "not-a-dir")
+	if err := os.WriteFile(rootFile, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	l := &Loader{WorkspaceRoot: rootFile}
+	docs, err := l.Load(context.Background())
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if docs != nil {
+		t.Fatalf("non-directory root must yield nil docs, got %+v", docs)
+	}
+}

@@ -32,10 +32,10 @@ type Loader struct {
 	// GlobalDir is the directory whose file is the least specific
 	// (lowest-precedence) document. Empty disables the global document.
 	GlobalDir string
-		// Filenames is the ordered candidate filename list; the first that exists in
-		// a location wins for that location. Empty defaults to {"AGENTS.md"}.
-		// Entries must be simple base names: empty, absolute, NUL-containing, "."/"..",
-		// and path-separator-containing entries are ignored.
+	// Filenames is the ordered candidate filename list; the first that exists in
+	// a location wins for that location. Empty defaults to {"AGENTS.md"}.
+	// Entries must be simple base names: empty, absolute, NUL-containing, "."/"..",
+	// and path-separator-containing entries are ignored.
 	Filenames []string
 	// MaxBytes caps a single file. <= 0 defaults to 64 KiB.
 	MaxBytes int
