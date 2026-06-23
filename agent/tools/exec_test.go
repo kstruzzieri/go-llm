@@ -1,6 +1,10 @@
 package tools
 
 import (
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -37,6 +41,92 @@ func TestRunCommandEffect(t *testing.T) {
 	if e.OutputCap != execRuntimeCap {
 		t.Errorf("OutputCap = %d, want %d", e.OutputCap, execRuntimeCap)
 	}
+}
+
+func writeExecutable(t *testing.T, path, body string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestResolveExecutable(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("unix exec-bit semantics")
+	}
+	root := t.TempDir()
+	ws, err := NewWorkspace(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use ws.root (canonical, post-EvalSymlinks) so path arithmetic is consistent.
+	dir := ws.root
+	// bin/ holds a workspace-relative script
+	if err := os.Mkdir(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeExecutable(t, filepath.Join(dir, "bin", "tool.sh"), "#!/bin/sh\necho hi\n")
+
+	// a PATH dir outside the workspace with a bare command
+	pathDir := t.TempDir()
+	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n")
+	pathVal := pathDir + string(os.PathListSeparator) + "/usr/bin:/bin"
+
+	t.Run("bare via PATH", func(t *testing.T) {
+		got, fi, err := resolveExecutable(ws, dir, "mycmd", pathVal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != filepath.Join(pathDir, "mycmd") || fi == nil {
+			t.Errorf("resolved %q", got)
+		}
+	})
+	t.Run("bare not found", func(t *testing.T) {
+		if _, _, err := resolveExecutable(ws, dir, "no_such_cmd_xyz", pathVal); err == nil {
+			t.Error("want error")
+		}
+	})
+	t.Run("absolute", func(t *testing.T) {
+		abs := filepath.Join(pathDir, "mycmd")
+		got, _, err := resolveExecutable(ws, dir, abs, pathVal)
+		if err != nil || got != abs {
+			t.Errorf("got %q err %v", got, err)
+		}
+	})
+	t.Run("separator under workspace", func(t *testing.T) {
+		got, _, err := resolveExecutable(ws, dir, "bin/tool.sh", pathVal)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != filepath.Join(dir, "bin", "tool.sh") {
+			t.Errorf("resolved %q", got)
+		}
+	})
+	t.Run("separator escaping workspace rejected", func(t *testing.T) {
+		if _, _, err := resolveExecutable(ws, dir, "../escape.sh", pathVal); err == nil {
+			t.Error("want escape error")
+		}
+	})
+	t.Run("separator symlink rejected", func(t *testing.T) {
+		target := filepath.Join(pathDir, "mycmd")
+		link := filepath.Join(dir, "bin", "linked.sh")
+		if err := os.Symlink(target, link); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveExecutable(ws, dir, "bin/linked.sh", pathVal); err == nil {
+			t.Error("want symlink rejection for in-workspace separator path")
+		}
+	})
+	t.Run("non-executable rejected", func(t *testing.T) {
+		p := filepath.Join(dir, "bin", "data.txt")
+		if err := os.WriteFile(p, []byte("x"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := resolveExecutable(ws, dir, "bin/data.txt", pathVal); err == nil {
+			t.Error("want non-executable rejection")
+		}
+	})
+	_ = exec.ErrNotFound
 }
 
 func TestBuildExecEnv(t *testing.T) {
