@@ -317,6 +317,11 @@ func commandFingerprint(argv []string, cwd string, envNames []string, timeout ti
 	return hex.EncodeToString(h.Sum(nil))[:fingerprintLen]
 }
 
+// fmtTimeout formats a duration as seconds (e.g. "60s") for the approval preview.
+func fmtTimeout(d time.Duration) string {
+	return fmt.Sprintf("%ds", int(d.Seconds()))
+}
+
 // renderExecPreview builds the human approval preview (never parsed, never fed to the
 // model). It lists names + source class for env, never values.
 func renderExecPreview(p execPending, originalArgv0 string) string {
@@ -326,9 +331,9 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 	fmt.Fprintf(&b, "  exe:     %s -> %s\n", originalArgv0, p.path)
 	fmt.Fprintf(&b, "  cwd:     %s\n", p.dirLabel)
 	if p.clamped {
-		fmt.Fprintf(&b, "  timeout: %s (requested %ds, clamped)\n", p.timeout, p.requestedTO)
+		fmt.Fprintf(&b, "  timeout: %s (requested %ds, clamped)\n", fmtTimeout(p.timeout), p.requestedTO)
 	} else {
-		fmt.Fprintf(&b, "  timeout: %s\n", p.timeout)
+		fmt.Fprintf(&b, "  timeout: %s\n", fmtTimeout(p.timeout))
 	}
 	parts := make([]string, len(p.envNames))
 	for i, n := range p.envNames {

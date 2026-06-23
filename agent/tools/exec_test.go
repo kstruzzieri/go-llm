@@ -129,6 +129,45 @@ func TestResolveExecutable(t *testing.T) {
 	_ = exec.ErrNotFound
 }
 
+func TestRenderExecPreview(t *testing.T) {
+	p := execPending{
+		path:        "/usr/local/go/bin/go",
+		argv:        []string{"go", "test", "./..."},
+		dirLabel:    "(workspace root)",
+		envNames:    []string{"HOME", "PATH"},
+		timeout:     60 * time.Second,
+		fingerprint: "abc123def456",
+	}
+	out := renderExecPreview(p, "go")
+	for _, want := range []string{
+		"go test ./...",
+		"go -> /usr/local/go/bin/go",
+		"(workspace root)",
+		"60s",
+		"HOME(parent)", "PATH(parent)",
+		"abc123def456",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("preview missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "clamped") {
+		t.Error("unclamped preview should not mention clamping")
+	}
+}
+
+func TestRenderExecPreviewClamped(t *testing.T) {
+	p := execPending{
+		path: "/bin/sleep", argv: []string{"sleep", "999"},
+		dirLabel: "sub", envNames: []string{"PATH"},
+		timeout: 600 * time.Second, requestedTO: 900, clamped: true, fingerprint: "f1",
+	}
+	out := renderExecPreview(p, "sleep")
+	if !strings.Contains(out, "600s (requested 900s, clamped)") {
+		t.Errorf("missing clamp note:\n%s", out)
+	}
+}
+
 func TestCommandFingerprint(t *testing.T) {
 	base := commandFingerprint([]string{"go", "test"}, "/w", []string{"PATH"}, 60*time.Second)
 	if len(base) != fingerprintLen {
