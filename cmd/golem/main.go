@@ -15,19 +15,20 @@ import (
 )
 
 type flags struct {
-	configPath    string
-	root          string
-	ollamaURL     string
-	ragDB         string
-	maxSteps      int
-	inputCeiling  int
-	outputReserve int
-	noColor       bool
-	noSession     bool
-	fresh         bool
-	sessionID     string
-	allowWrite    bool
-	noRag         bool
+	configPath       string
+	root             string
+	ollamaURL        string
+	ragDB            string
+	maxSteps         int
+	inputCeiling     int
+	outputReserve    int
+	noColor          bool
+	noSession        bool
+	fresh            bool
+	sessionID        string
+	allowWrite       bool
+	noRag            bool
+	noProjectContext bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -45,6 +46,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
+	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -64,14 +66,15 @@ func validateFlags(f flags) error {
 }
 
 type startupInfo struct {
-	workspace         string
-	useRecommend      bool
-	bootstrapWarns    []error
-	preflightWarns    []string
-	retrieveLine      string
-	retrieveOmitted   bool
-	retrieveRequested bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
-	sessionLine       string
+	workspace          string
+	useRecommend       bool
+	bootstrapWarns     []error
+	preflightWarns     []string
+	retrieveLine       string
+	retrieveOmitted    bool
+	retrieveRequested  bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
+	sessionLine        string
+	projectContextLine string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -80,6 +83,9 @@ func startupNotices(info startupInfo) []string {
 	out = append(out, "workspace: "+info.workspace)
 	if info.sessionLine != "" {
 		out = append(out, info.sessionLine)
+	}
+	if info.projectContextLine != "" {
+		out = append(out, info.projectContextLine)
 	}
 	if info.retrieveLine != "" {
 		out = append(out, info.retrieveLine)
@@ -206,6 +212,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if f.allowWrite {
 		baseSystem = golemWriteSystemPrompt
 	}
+	projectContextLine := ""
+	if !f.noProjectContext {
+		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
+			warns = append(warns, "project context disabled: "+perr.Error())
+		} else if block != "" {
+			baseSystem = baseSystem + "\n\n" + block
+			projectContextLine = fmt.Sprintf("project context: loaded %d file(s)", n)
+		}
+	}
 
 	var sessn *session
 	var sessionLine string
@@ -227,14 +242,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	defer func() { _ = sessn.Close() }() // nil-safe
 
 	for _, line := range startupNotices(startupInfo{
-		workspace:         root,
-		useRecommend:      plan.useRecommend,
-		bootstrapWarns:    bundle.Warnings,
-		preflightWarns:    warns,
-		retrieveLine:      retrieveLine,
-		retrieveOmitted:   retrieveOmitted,
-		retrieveRequested: f.ragDB != "" || f.noRag || rr.suppressNotice,
-		sessionLine:       sessionLine,
+		workspace:          root,
+		useRecommend:       plan.useRecommend,
+		bootstrapWarns:     bundle.Warnings,
+		preflightWarns:     warns,
+		retrieveLine:       retrieveLine,
+		retrieveOmitted:    retrieveOmitted,
+		retrieveRequested:  f.ragDB != "" || f.noRag || rr.suppressNotice,
+		sessionLine:        sessionLine,
+		projectContextLine: projectContextLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -74,4 +75,26 @@ func projectContextBlock(docs []projectcontext.Document) string {
 	}
 	b.WriteString(projectContextClose)
 	return b.String()
+}
+
+// loadProjectContext discovers project-context documents for the workspace at
+// root plus the per-user global config dir, and renders them as a fenced advisory
+// block. It returns the block ("" when none), the document count, and any error.
+// A config-dir resolution failure is non-fatal for discovery: it just skips the
+// global document (the global dir is left empty), because project context is
+// best-effort advisory input, not a hard dependency.
+func loadProjectContext(ctx context.Context, root string, getenv func(string) string) (string, int, error) {
+	var globalDir string
+	if base, err := configDirBase(getenv); err == nil {
+		globalDir = filepath.Join(base, "golem")
+	}
+	loader := &projectcontext.Loader{
+		WorkspaceRoot: root,
+		GlobalDir:     globalDir,
+	}
+	docs, err := loader.Load(ctx)
+	if err != nil {
+		return "", 0, err
+	}
+	return projectContextBlock(docs), len(docs), nil
 }

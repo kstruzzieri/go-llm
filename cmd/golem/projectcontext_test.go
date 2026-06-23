@@ -1,6 +1,9 @@
 package main
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -69,5 +72,48 @@ func TestConfigDirBaseHomeFallback(t *testing.T) {
 	}
 	if base != "/home/keith/.config" {
 		t.Fatalf("base=%q, want /home/keith/.config", base)
+	}
+}
+
+func TestLoadProjectContextAppendsWorkspaceDoc(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "AGENTS.md"), []byte("prefer go test ./..."), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// HOME points at an empty dir so no global doc exists.
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	block, n, err := loadProjectContext(context.Background(), root, getenv)
+	if err != nil {
+		t.Fatalf("loadProjectContext: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("want 1 doc, got %d", n)
+	}
+	if !strings.Contains(block, "prefer go test ./...") {
+		t.Fatalf("block missing workspace content: %q", block)
+	}
+}
+
+func TestLoadProjectContextEmptyWhenNoFiles(t *testing.T) {
+	root := t.TempDir()
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	block, n, err := loadProjectContext(context.Background(), root, getenv)
+	if err != nil {
+		t.Fatalf("loadProjectContext: %v", err)
+	}
+	if n != 0 || block != "" {
+		t.Fatalf("want empty block/0 docs, got n=%d block=%q", n, block)
 	}
 }
