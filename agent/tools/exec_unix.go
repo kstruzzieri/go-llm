@@ -46,7 +46,6 @@ func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
 	waitErr := cmd.Wait()
 
 	res := execResult{
-		Started:         true,
 		Stdout:          stdout.buf,
 		Stderr:          stderr.buf,
 		StdoutTruncated: stdout.truncated,
@@ -54,7 +53,9 @@ func (unixRunner) Run(ctx context.Context, spec execSpec) (execResult, error) {
 		ExitCode:        cmd.ProcessState.ExitCode(),
 	}
 	if ctx.Err() != nil {
-		res.TimedOut = true
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			res.TimedOut = true
+		}
 		return res, ctx.Err()
 	}
 	if waitErr != nil {

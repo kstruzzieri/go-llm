@@ -48,7 +48,6 @@ type execResult struct {
 	Stderr          []byte
 	StdoutTruncated bool
 	StderrTruncated bool
-	Started         bool
 	TimedOut        bool
 }
 
@@ -256,6 +255,9 @@ func (t *RunCommand) Invoke(ctx context.Context, raw json.RawMessage) (agent.Too
 		if res.TimedOut {
 			return errResult(fmt.Sprintf("command timed out after %s", pp.timeout)), nil
 		}
+		if errors.Is(runErr, context.Canceled) {
+			return errResult("command canceled"), nil
+		}
 		return errResult("command failed to run: " + runErr.Error()), nil
 	}
 	return agent.ToolResult{Content: formatExecResult(res)}, nil
@@ -402,6 +404,31 @@ func fmtTimeout(d time.Duration) string {
 	return fmt.Sprintf("%ds", int(d.Seconds()))
 }
 
+// quoteArgForPreview returns a quoted form of arg when it is empty or contains any
+// whitespace character (space, tab, newline), so an approval reviewer can see exact
+// argument boundaries. Simple arguments are returned bare.
+func quoteArgForPreview(arg string) string {
+	for _, r := range arg {
+		if r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			return fmt.Sprintf("%q", arg)
+		}
+	}
+	if arg == "" {
+		return `""`
+	}
+	return arg
+}
+
+// renderArgvForPreview renders an argv slice so that each argument containing
+// whitespace or that is empty is shown quoted, and simple arguments are bare.
+func renderArgvForPreview(argv []string) string {
+	parts := make([]string, len(argv))
+	for i, a := range argv {
+		parts[i] = quoteArgForPreview(a)
+	}
+	return strings.Join(parts, " ")
+}
+
 // renderExecPreview builds the human approval preview (never parsed, never fed to the
 // model). It lists names + source class for env, never values.
 func renderExecPreview(p execPending, originalArgv0 string) string {
@@ -411,7 +438,7 @@ func renderExecPreview(p execPending, originalArgv0 string) string {
 		dirDisplay = "(workspace root)"
 	}
 	b.WriteString("run command:\n")
-	fmt.Fprintf(&b, "  argv:    %s\n", strings.Join(p.argv, " "))
+	fmt.Fprintf(&b, "  argv:    %s\n", renderArgvForPreview(p.argv))
 	fmt.Fprintf(&b, "  exe:     %s -> %s\n", originalArgv0, p.path)
 	fmt.Fprintf(&b, "  cwd:     %s\n", dirDisplay)
 	if p.clamped {

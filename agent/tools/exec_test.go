@@ -400,7 +400,7 @@ func (f *fakeRunner) Run(ctx context.Context, spec execSpec) (execResult, error)
 	f.called, f.gotSpec = true, spec
 	if f.blockCtx {
 		<-ctx.Done()
-		return execResult{Started: true, TimedOut: true}, fmt.Errorf("timed out")
+		return execResult{TimedOut: true}, context.DeadlineExceeded
 	}
 	return f.result, f.err
 }
@@ -423,7 +423,7 @@ func TestInvokeNonZeroExitNotError(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip()
 	}
-	fr := &fakeRunner{result: execResult{ExitCode: 1, Stdout: []byte("FAIL\n"), Started: true}}
+	fr := &fakeRunner{result: execResult{ExitCode: 1, Stdout: []byte("FAIL\n")}}
 	rc, _ := invokeRC(t, fr)
 	raw := json.RawMessage(`{"argv":["mycmd"]}`)
 	if _, err := rc.Plan(context.Background(), raw); err != nil {
@@ -448,7 +448,7 @@ func TestInvokePlanMismatchFailsClosed(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip()
 	}
-	fr := &fakeRunner{result: execResult{Started: true}}
+	fr := &fakeRunner{}
 	rc, _ := invokeRC(t, fr)
 	if _, err := rc.Plan(context.Background(), json.RawMessage(`{"argv":["mycmd"]}`)); err != nil {
 		t.Fatal(err)
@@ -523,7 +523,7 @@ func TestInvokeDirChangedFailsClosed(t *testing.T) {
 	t.Setenv("PATH", pathDir)
 	t.Setenv("HOME", "/home/x")
 
-	fr := &fakeRunner{result: execResult{Started: true}}
+	fr := &fakeRunner{}
 	rc := NewRunCommand(ws, fr)
 
 	raw := json.RawMessage(`{"argv":["mycmd"],"dir":"sub"}`)
@@ -566,7 +566,7 @@ func TestInvokeExecutableChangedFailsClosed(t *testing.T) {
 	t.Setenv("PATH", pathDir)
 	t.Setenv("HOME", "/home/x")
 
-	fr := &fakeRunner{result: execResult{Started: true}}
+	fr := &fakeRunner{}
 	rc := NewRunCommand(ws, fr)
 
 	raw := json.RawMessage(`{"argv":["mycmd"]}`)
@@ -590,5 +590,82 @@ func TestInvokeExecutableChangedFailsClosed(t *testing.T) {
 	}
 	if fr.called {
 		t.Error("runner must not be called when executable identity check fails")
+	}
+}
+
+// Fix 1: runner returning DeadlineExceeded + TimedOut=true must produce "timed out" message.
+func TestInvokeRunnerTimeoutMessage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	fr := &fakeRunner{result: execResult{TimedOut: true}, err: context.DeadlineExceeded}
+	rc, _ := invokeRC(t, fr)
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("timeout runner error must surface as IsError")
+	}
+	if !strings.Contains(res.Content, "timed out") {
+		t.Errorf("want 'timed out' in content, got: %q", res.Content)
+	}
+}
+
+// Fix 1: runner returning context.Canceled (no TimedOut) must produce "canceled" message.
+func TestInvokeRunnerCanceledMessage(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip()
+	}
+	fr := &fakeRunner{err: context.Canceled}
+	rc, _ := invokeRC(t, fr)
+	raw := json.RawMessage(`{"argv":["mycmd"]}`)
+	if _, err := rc.Plan(context.Background(), raw); err != nil {
+		t.Fatal(err)
+	}
+	res, err := rc.Invoke(context.Background(), raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError {
+		t.Error("canceled runner error must surface as IsError")
+	}
+	if !strings.Contains(res.Content, "canceled") {
+		t.Errorf("want 'canceled' in content, got: %q", res.Content)
+	}
+}
+
+// Fix 3: renderExecPreview must quote args that contain spaces.
+func TestRenderExecPreviewQuotesSpacedArgs(t *testing.T) {
+	p := execPending{
+		path:        "/usr/bin/git",
+		argv:        []string{"git", "commit", "-m", "hello world"},
+		dirLabel:    "",
+		envNames:    []string{"PATH"},
+		timeout:     60 * time.Second,
+		fingerprint: "abc123",
+	}
+	out := renderExecPreview(p, "git")
+	// The spaced arg must appear quoted.
+	if !strings.Contains(out, `"hello world"`) {
+		t.Errorf("spaced arg not quoted in preview:\n%s", out)
+	}
+	// Simple args must appear bare (no quotes).
+	if strings.Contains(out, `"git"`) || strings.Contains(out, `"commit"`) || strings.Contains(out, `"-m"`) {
+		t.Errorf("simple args should not be quoted in preview:\n%s", out)
+	}
+}
+
+// Fix 3: renderArgvForPreview must leave simple argv like "go test ./..." unquoted.
+func TestRenderArgvForPreviewNoExtraQuotes(t *testing.T) {
+	argv := []string{"go", "test", "./..."}
+	got := renderArgvForPreview(argv)
+	want := "go test ./..."
+	if got != want {
+		t.Errorf("renderArgvForPreview = %q, want %q", got, want)
 	}
 }
