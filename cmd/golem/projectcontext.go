@@ -76,7 +76,10 @@ func projectContextBlock(docs []projectcontext.Document) string {
 		if d.Truncated {
 			label += "; truncated"
 		}
-		_, _ = fmt.Fprintf(&b, "[%s: %s]\n", label, d.Path)
+		// Neutralize the path too: it is normally a trusted canonical path, but a
+		// directory name could in principle carry a fence sentinel, and the label
+		// must never become a forgeable boundary.
+		_, _ = fmt.Fprintf(&b, "[%s: %s]\n", label, neutralizeFence(d.Path))
 		b.WriteString(neutralizeFence(d.Content))
 		b.WriteString("\n")
 	}

@@ -131,6 +131,37 @@ func TestLoadProjectContextAppendsWorkspaceDoc(t *testing.T) {
 	}
 }
 
+// loadProjectContext must discover the global file under <config>/golem and label
+// it "global" — this exercises the golem-specific config-base + "golem" namespace
+// join that the library layer does not own.
+func TestLoadProjectContextDiscoversGlobalDoc(t *testing.T) {
+	cfg := t.TempDir()
+	golemDir := filepath.Join(cfg, "golem")
+	if err := os.MkdirAll(golemDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(golemDir, "AGENTS.md"), []byte("global house rules"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir() // empty workspace: no workspace doc
+	getenv := func(k string) string {
+		if k == "XDG_CONFIG_HOME" {
+			return cfg
+		}
+		return ""
+	}
+	block, n, err := loadProjectContext(context.Background(), root, getenv)
+	if err != nil {
+		t.Fatalf("loadProjectContext: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("want 1 global doc, got %d", n)
+	}
+	if !strings.Contains(block, "global house rules") || !strings.Contains(block, "[global:") {
+		t.Fatalf("block missing global doc/label: %q", block)
+	}
+}
+
 func TestLoadProjectContextEmptyWhenNoFiles(t *testing.T) {
 	root := t.TempDir()
 	home := t.TempDir()
