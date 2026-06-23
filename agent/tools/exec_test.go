@@ -574,12 +574,17 @@ func TestInvokeExecutableChangedFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Between Plan and Invoke: replace mycmd with a new file at a different inode.
-	// os.Remove + writeExecutable allocates a new inode, so os.SameFile returns false.
-	if err := os.Remove(filepath.Join(pathDir, "mycmd")); err != nil {
+	// Between Plan and Invoke: replace mycmd with a different file at a NEW inode.
+	// Writing a sibling and renaming it over the path guarantees a distinct inode on
+	// any filesystem: the sibling is allocated a fresh inode while the original still
+	// exists, then rename relinks the path to it. A plain remove+recreate can reuse the
+	// original inode on ext4/overlayfs, which would make os.SameFile pass and silently
+	// defeat the identity check this test exists to verify.
+	swapped := filepath.Join(pathDir, "mycmd.new")
+	writeExecutable(t, swapped, "#!/bin/sh\n# inode B\n")
+	if err := os.Rename(swapped, filepath.Join(pathDir, "mycmd")); err != nil {
 		t.Fatal(err)
 	}
-	writeExecutable(t, filepath.Join(pathDir, "mycmd"), "#!/bin/sh\n# inode B\n")
 
 	res, err := rc.Invoke(context.Background(), raw)
 	if err != nil {
