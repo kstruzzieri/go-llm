@@ -68,17 +68,6 @@ func TestBuildTools_BadRoot(t *testing.T) {
 }
 
 func TestBuildSystemPrompt(t *testing.T) {
-	cases := []struct {
-		name           string
-		write, exec    bool
-		mustContain    []string
-		mustNotContain []string
-	}{
-		{"readonly", false, false,
-			[]string{"do not", "run_command" /*not*/},
-			nil},
-	}
-	_ = cases
 	ro := buildSystemPrompt(false, false)
 	if !strings.Contains(ro, "Do not") || strings.Contains(ro, "run_command to") {
 		t.Errorf("read-only prompt wrong:\n%s", ro)

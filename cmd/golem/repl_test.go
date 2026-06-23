@@ -343,6 +343,55 @@ func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root str
 	}
 }
 
+func newExecOnlyTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSession {
+	t.Helper()
+	readTools, err := buildTools(root, nil)
+	if err != nil {
+		t.Fatalf("buildTools: %v", err)
+	}
+	execTools, err := buildExecTools(root)
+	if err != nil {
+		t.Fatalf("buildExecTools: %v", err)
+	}
+	return &replSession{
+		orch:       agent.New(caller, agent.ContextManager{}),
+		tools:      append(readTools, execTools...),
+		baseSystem: buildSystemPrompt(false, true),
+		maxSteps:   16,
+		clock:      func() time.Time { return time.Unix(0, 0) },
+		allowExec:  true,
+	}
+}
+
+// TestRunOnceExecOnlyWiresApprover verifies that -allow-exec alone (no -allow-write)
+// wires the approval gate. The model emits a run_command call; the user denies it with
+// "n"; the test asserts the "Run this command?" prompt was shown and no file was
+// written (i.e. the approver was actually invoked).
+func TestRunOnceExecOnlyWiresApprover(t *testing.T) {
+	root := t.TempDir()
+	execCall := provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "e1", Type: "function",
+			Function: provider.ToolCallFunction{
+				Name:      "run_command",
+				Arguments: json.RawMessage(`{"argv":["echo","hello"]}`),
+			},
+		}},
+	}
+	finalAns := provider.ChatResponse{Content: "ok, skipped"}
+	caller := &scriptCaller{responses: []agent.ModelResult{{Response: execCall}, {Response: finalAns}}}
+	sess := newExecOnlyTestSession(t, caller, root)
+
+	var out strings.Builder
+	in := strings.NewReader("run something\nn\n") // goal, then deny the exec
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if !strings.Contains(out.String(), "Run this command?") {
+		t.Errorf("exec-only session must show 'Run this command?' approval prompt:\n%s", out.String())
+	}
+}
+
 func TestREPL_ClearAndNew(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{}
