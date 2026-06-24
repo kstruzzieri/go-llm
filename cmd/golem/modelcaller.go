@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -113,6 +114,28 @@ func statusLabel(code int) string {
 		return fmt.Sprintf("%d %s", code, text)
 	}
 	return fmt.Sprintf("HTTP %d", code)
+}
+
+// redactBaseURL strips any userinfo (user:pass@) from a base_url before it is
+// printed in a diagnostic, so credentials never leak into logs. A string that
+// fails to parse and looks userinfo-shaped (contains "@") is replaced wholesale
+// rather than printed raw.
+func redactBaseURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		if strings.Contains(raw, "@") {
+			return "<invalid base_url>"
+		}
+		return raw
+	}
+	if strings.Contains(raw, "@") && u.User == nil && u.Host == "" {
+		return "<invalid base_url>"
+	}
+	u.User = nil
+	return u.String()
 }
 
 func profileToolCapable(p *provider.ModelProfile) bool {
