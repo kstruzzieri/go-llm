@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -136,6 +137,45 @@ func redactBaseURL(raw string) string {
 	}
 	u.User = nil
 	return u.String()
+}
+
+// newPreflightEndpointResolver builds an endpointResolver from a config. It
+// mirrors providerbootstrap's ollama base-URL override (providers.go), which is
+// applied to the live client but not written back into the returned Config, so
+// the resolver re-applies it to avoid printing a stale ollama base_url under
+// `golem -ollama-url ...`. The overlay is idempotent for the nil-config
+// synthetic path.
+func newPreflightEndpointResolver(cfg *config.Config, ollamaURLOverride string) endpointResolver {
+	return func(name string) (preflightEndpoint, bool) {
+		if cfg == nil {
+			return preflightEndpoint{}, false
+		}
+		pc, ok := cfg.Providers[name]
+		if !ok {
+			return preflightEndpoint{}, false
+		}
+		apiFormat := pc.APIFormat
+		if apiFormat == "" {
+			apiFormat = "ollama"
+		}
+		if name == "ollama" && apiFormat == "ollama" && ollamaURLOverride != "" {
+			pc.BaseURL = ollamaURLOverride
+		}
+		path := "/api/tags"
+		if apiFormat == "openai-compat" {
+			path = "/v1/models"
+		}
+		return preflightEndpoint{BaseURL: pc.BaseURL, ModelsPath: path}, true
+	}
+}
+
+// resolvePreflightEndpoint guards a nil resolver before invoking it, so callers
+// (and tests) can pass nil to mean "no endpoint metadata available."
+func resolvePreflightEndpoint(resolve endpointResolver, providerName string) (preflightEndpoint, bool) {
+	if resolve == nil {
+		return preflightEndpoint{}, false
+	}
+	return resolve(providerName)
 }
 
 func profileToolCapable(p *provider.ModelProfile) bool {
