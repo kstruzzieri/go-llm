@@ -1,6 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1200" role="img" aria-labelledby="title desc">
-  <title id="title">Golem agent logo lockup</title>
-  <desc id="desc">A full-body low-poly Golem agent mascot with lowercase golem wordmark.</desc>
+  <title id="title">Golem agent logo lockup on light</title>
+  <desc id="desc">A full-body low-poly Golem agent mascot with a graphite wordmark for light backgrounds.</desc>
   <defs>
     <style>
       .outline { stroke: #202326; stroke-width: 8; stroke-linejoin: round; }
