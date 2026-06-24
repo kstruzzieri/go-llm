@@ -2,10 +2,17 @@ package main
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -87,6 +94,139 @@ type capChecker interface {
 
 const toolRouteCaps = provider.CapChat | provider.CapStream | provider.CapToolCall
 
+// preflightEndpoint is the discovery endpoint a provider exposes. It is used
+// only to build a human-facing connectivity diagnostic, never to make a call.
+type preflightEndpoint struct {
+	BaseURL    string // provider base_url from config ("" if unknown)
+	ModelsPath string // "/v1/models" (openai-compat) or "/api/tags" (ollama)
+}
+
+// endpointResolver maps a provider name to its discovery endpoint. It returns
+// ok=false when the provider is absent or the config is nil, in which case the
+// diagnostic falls back to a base_url-free message.
+type endpointResolver func(providerName string) (preflightEndpoint, bool)
+
+// httpStatuser is satisfied by *openaicompat.statusError and *ollama.APIError,
+// both preserved through ModelRegistry.Lookup's %w wrapping. The interface
+// exposes only the numeric code; the status text is reconstructed locally.
+type httpStatuser interface{ HTTPStatusCode() int }
+
+// statusLabel renders an HTTP status code as "<code> <text>" (e.g.
+// "404 Not Found"), falling back to "HTTP <code>" for codes without a known
+// textual status.
+func statusLabel(code int) string {
+	if text := http.StatusText(code); text != "" {
+		return fmt.Sprintf("%d %s", code, text)
+	}
+	return fmt.Sprintf("HTTP %d", code)
+}
+
+// redactBaseURL strips any userinfo (user:pass@) from a base_url before it is
+// printed in a diagnostic, so credentials never leak into logs. A string that
+// fails to parse and looks userinfo-shaped (contains "@") is replaced wholesale
+// rather than printed raw.
+func redactBaseURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		if strings.Contains(raw, "@") {
+			return "<invalid base_url>"
+		}
+		return raw
+	}
+	if strings.Contains(raw, "@") && u.User == nil && u.Host == "" {
+		return "<invalid base_url>"
+	}
+	u.User = nil
+	return u.String()
+}
+
+// newPreflightEndpointResolver builds an endpointResolver from a config. It
+// mirrors providerbootstrap's ollama base-URL override (providers.go), which is
+// applied to the live client but not written back into the returned Config, so
+// the resolver re-applies it to avoid printing a stale ollama base_url under
+// `golem -ollama-url ...`. The overlay is idempotent for the nil-config
+// synthetic path.
+func newPreflightEndpointResolver(cfg *config.Config, ollamaURLOverride string) endpointResolver {
+	return func(name string) (preflightEndpoint, bool) {
+		if cfg == nil {
+			return preflightEndpoint{}, false
+		}
+		pc, ok := cfg.Providers[name]
+		if !ok {
+			return preflightEndpoint{}, false
+		}
+		apiFormat := pc.APIFormat
+		if apiFormat == "" {
+			apiFormat = "ollama"
+		}
+		if name == "ollama" && apiFormat == "ollama" && ollamaURLOverride != "" {
+			pc.BaseURL = ollamaURLOverride
+		}
+		path := "/api/tags"
+		if apiFormat == "openai-compat" {
+			path = "/v1/models"
+		}
+		return preflightEndpoint{BaseURL: pc.BaseURL, ModelsPath: path}, true
+	}
+}
+
+// resolvePreflightEndpoint guards a nil resolver before invoking it, so callers
+// (and tests) can pass nil to mean "no endpoint metadata available."
+func resolvePreflightEndpoint(resolve endpointResolver, providerName string) (preflightEndpoint, bool) {
+	if resolve == nil {
+		return preflightEndpoint{}, false
+	}
+	return resolve(providerName)
+}
+
+func providerDiscoveryFailure(err error) bool {
+	var hs httpStatuser
+	if errors.As(err, &hs) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
+}
+
+// preflightConnectivityWarn builds the bare warning string for a chain entry
+// whose registry lookup errored — a connectivity/config failure rather than a
+// capability gap. When the provider's endpoint is known it names the provider +
+// base_url + discovery path (and the HTTP status, when the underlying error
+// carries one). With no endpoint, or when the lookup error is not a discovery
+// failure, it surfaces the underlying error verbatim under a neutral
+// "provider lookup failed" framing.
+// The returned string is bare: the startup renderer prepends "warning: ".
+func preflightConnectivityWarn(sel, providerName string, ep preflightEndpoint, epOK bool, lookupErr error) string {
+	if !epOK || ep.BaseURL == "" || !providerDiscoveryFailure(lookupErr) {
+		return fmt.Sprintf("agent fallback %q: provider lookup failed: %v", sel, lookupErr)
+	}
+	addr := redactBaseURL(ep.BaseURL)
+	var hs httpStatuser
+	if errors.As(lookupErr, &hs) {
+		return fmt.Sprintf("agent fallback %q: cannot reach provider %q at %s (GET %s -> %s); check server/base_url",
+			sel, providerName, addr, ep.ModelsPath, statusLabel(hs.HTTPStatusCode()))
+	}
+	return fmt.Sprintf("agent fallback %q: cannot reach provider %q at %s (GET %s): %v",
+		sel, providerName, addr, ep.ModelsPath, lookupErr)
+}
+
 func profileToolCapable(p *provider.ModelProfile) bool {
 	// Capability.Has tests c&flag == flag across all bits, so reusing the
 	// toolRouteCaps mask keeps the required-capability set defined in one place.
@@ -102,11 +242,17 @@ func parseSelector(sel string) (provider.ModelKey, bool) {
 }
 
 // preflightToolCapable verifies the agent chain can route a tool-capable model.
-// It returns warnings for each configured entry that cannot (the Router may
-// still reach them on fallback), and an error only when NO entry — or, for an
-// empty chain, the recommend set — can satisfy chat|stream|tool_call. Pure
-// registry lookup; never makes a live model call.
-func preflightToolCapable(ctx context.Context, reg capChecker, chain []string) (warnings []string, err error) {
+// For each configured entry it classifies the outcome as capable,
+// not-tool-capable (resolved but lacks tool_call), or lookup-errored
+// (provider unreachable / config failure). It returns a bare warning per
+// non-capable entry, and an error only when NO entry — or, for an empty chain,
+// the recommend set — can satisfy chat|stream|tool_call. On that failure the
+// error INLINES every per-entry diagnostic, because the caller returns on the
+// error and would otherwise drop the warnings. Pure registry lookup; never
+// makes a live model call. resolveEndpoint supplies provider base_url +
+// discovery path for connectivity diagnostics; a nil resolver yields
+// base_url-free messages.
+func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, resolveEndpoint endpointResolver) (warnings []string, err error) {
 	if len(chain) == 0 {
 		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps})
 		if rerr != nil {
@@ -120,27 +266,49 @@ func preflightToolCapable(ctx context.Context, reg capChecker, chain []string) (
 
 	capable := 0
 	for _, sel := range chain {
-		ok := false
-		if key, parsed := parseSelector(sel); parsed {
-			if p, lerr := reg.Lookup(ctx, key); lerr == nil && profileToolCapable(p) {
-				ok = true
-			}
-		} else if profs, lerr := reg.LookupAny(ctx, sel); lerr == nil {
-			for _, p := range profs {
-				if profileToolCapable(p) {
-					ok = true
-					break
-				}
-			}
-		}
+		ok, warn := evalChainEntry(ctx, reg, sel, resolveEndpoint)
 		if ok {
 			capable++
-		} else {
-			warnings = append(warnings, fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call)", sel))
+			continue
 		}
+		warnings = append(warnings, warn)
 	}
 	if capable == 0 {
-		return warnings, fmt.Errorf("golem: no entry in the agent chain is tool-capable (chat|stream|tool_call): %v", chain)
+		return warnings, fmt.Errorf("golem: tool-capability preflight failed:\n%s", strings.Join(warnings, "\n"))
 	}
 	return warnings, nil
+}
+
+// evalChainEntry classifies one agent-chain selector. It returns capable=true
+// when the selector resolves to a tool-capable model; otherwise it returns a
+// bare warning string: a connectivity diagnostic when the registry lookup
+// errored, or the capability message when the model resolved without tool_call.
+func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndpoint endpointResolver) (capable bool, warning string) {
+	notCapable := fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call)", sel)
+
+	if key, parsed := parseSelector(sel); parsed {
+		p, lerr := reg.Lookup(ctx, key)
+		if lerr != nil {
+			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
+			return false, preflightConnectivityWarn(sel, key.Provider, ep, epOK, lerr)
+		}
+		if profileToolCapable(p) {
+			return true, ""
+		}
+		return false, notCapable
+	}
+
+	// Bare model name: resolve across providers. A bare selector names no single
+	// provider, so there is no endpoint to resolve — reuse the connectivity
+	// builder's no-endpoint branch (epOK=false) so the message has one source.
+	profs, lerr := reg.LookupAny(ctx, sel)
+	if lerr != nil {
+		return false, preflightConnectivityWarn(sel, "", preflightEndpoint{}, false, lerr)
+	}
+	for _, p := range profs {
+		if profileToolCapable(p) {
+			return true, ""
+		}
+	}
+	return false, notCapable
 }
