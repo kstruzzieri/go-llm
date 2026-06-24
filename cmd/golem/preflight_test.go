@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"testing"
 
@@ -188,7 +188,7 @@ func TestPreflight_LookupErrorResolverMiss(t *testing.T) {
 func TestPreflight_LookupErrorNonStatus(t *testing.T) {
 	key := provider.ModelKey{Provider: "llamacpp", Model: "gemma4:31b"}
 	reg := fakeReg{errByKey: map[provider.ModelKey]error{
-		key: errors.New("dial tcp 127.0.0.1:8080: connection refused"),
+		key: &net.DNSError{Err: "no such host", Name: "llamacpp.local"},
 	}}
 	resolve := fixedEndpoints(map[string]preflightEndpoint{
 		"llamacpp": {BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"},
@@ -201,11 +201,37 @@ func TestPreflight_LookupErrorNonStatus(t *testing.T) {
 		t.Fatalf("warnings = %v, want 1", warns)
 	}
 	w := warns[0]
-	if !strings.Contains(w, `cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models): dial tcp`) {
+	if !strings.Contains(w, `cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models): lookup llamacpp.local`) {
 		t.Errorf("warning = %q, want non-status connectivity message with endpoint + underlying error", w)
 	}
 	if strings.Contains(w, "->") {
 		t.Errorf("warning = %q, must not include status arrow for non-status errors", w)
+	}
+}
+
+// TestPreflight_QualifiedModelNotFoundIsLookupFailure: a configured provider
+// with a missing model must not be diagnosed as an unreachable provider.
+func TestPreflight_QualifiedModelNotFoundIsLookupFailure(t *testing.T) {
+	key := provider.ModelKey{Provider: "ollama", Model: "missing"}
+	reg := fakeReg{errByKey: map[provider.ModelKey]error{
+		key: fmt.Errorf(`provider: lookup %v: model %q not found on %q`, key, key.Model, key.Provider),
+	}}
+	resolve := fixedEndpoints(map[string]preflightEndpoint{
+		"ollama": {BaseURL: "http://localhost:11434", ModelsPath: "/api/tags"},
+	})
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"ollama/missing"}, resolve)
+	if err == nil {
+		t.Fatal("err = nil, want failure")
+	}
+	if len(warns) != 1 {
+		t.Fatalf("warnings = %v, want 1", warns)
+	}
+	w := warns[0]
+	if !strings.Contains(w, "provider lookup failed:") || !strings.Contains(w, `model "missing" not found on "ollama"`) {
+		t.Errorf("warning = %q, want neutral lookup failure with model-not-found cause", w)
+	}
+	if strings.Contains(w, "cannot reach provider") || strings.Contains(w, "GET /api/tags") {
+		t.Errorf("warning = %q, must not diagnose missing model as provider reachability", w)
 	}
 }
 

@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"testing"
 )
 
@@ -15,9 +17,12 @@ func (e statusErr) HTTPStatusCode() int { return e.code }
 
 func TestPreflightConnectivityWarn(t *testing.T) {
 	wrapped := fmt.Errorf("provider: lookup llamacpp/gemma4:31b: %w", statusErr{404})
-	plain := errors.New("dial tcp 127.0.0.1:8080: connection refused")
+	netFailure := &net.DNSError{Err: "no such host", Name: "llamacpp.local"}
+	emptyResponse := fmt.Errorf("openaicompat: decode response: %w", io.EOF)
+	notFound := errors.New(`model "missing" not found on "ollama"`)
 
 	ep := preflightEndpoint{BaseURL: "http://127.0.0.1:8080", ModelsPath: "/v1/models"}
+	ollamaEP := preflightEndpoint{BaseURL: "http://localhost:11434", ModelsPath: "/api/tags"}
 	epCreds := preflightEndpoint{BaseURL: "http://u:p@127.0.0.1:8080", ModelsPath: "/v1/models"}
 	epMalformedCreds := preflightEndpoint{BaseURL: "user:pass@127.0.0.1:8080", ModelsPath: "/v1/models"}
 
@@ -37,8 +42,13 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 		},
 		{
 			name: "no status + endpoint", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
-			ep: ep, epOK: true, err: plain,
-			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models): dial tcp 127.0.0.1:8080: connection refused`,
+			ep: ep, epOK: true, err: netFailure,
+			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models): lookup llamacpp.local: no such host`,
+		},
+		{
+			name: "empty discovery response", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
+			ep: ep, epOK: true, err: emptyResponse,
+			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at http://127.0.0.1:8080 (GET /v1/models): openaicompat: decode response: EOF`,
 		},
 		{
 			name: "no endpoint (resolver miss)", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
@@ -47,8 +57,13 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 		},
 		{
 			name: "endpoint ok but empty base_url", sel: "x/y", provider: "x",
-			ep: preflightEndpoint{BaseURL: "", ModelsPath: "/v1/models"}, epOK: true, err: plain,
-			want: `agent fallback "x/y": provider lookup failed: dial tcp 127.0.0.1:8080: connection refused`,
+			ep: preflightEndpoint{BaseURL: "", ModelsPath: "/v1/models"}, epOK: true, err: netFailure,
+			want: `agent fallback "x/y": provider lookup failed: lookup llamacpp.local: no such host`,
+		},
+		{
+			name: "model not found is not reachability", sel: "ollama/missing", provider: "ollama",
+			ep: ollamaEP, epOK: true, err: notFound,
+			want: `agent fallback "ollama/missing": provider lookup failed: model "missing" not found on "ollama"`,
 		},
 		{
 			name: "credentials redacted", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
@@ -57,8 +72,8 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 		},
 		{
 			name: "malformed credentials not leaked", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
-			ep: epMalformedCreds, epOK: true, err: plain,
-			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at <invalid base_url> (GET /v1/models): dial tcp 127.0.0.1:8080: connection refused`,
+			ep: epMalformedCreds, epOK: true, err: netFailure,
+			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at <invalid base_url> (GET /v1/models): lookup llamacpp.local: no such host`,
 		},
 	}
 	for _, tt := range tests {

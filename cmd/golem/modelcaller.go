@@ -2,8 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -179,16 +182,39 @@ func resolvePreflightEndpoint(resolve endpointResolver, providerName string) (pr
 	return resolve(providerName)
 }
 
+func providerDiscoveryFailure(err error) bool {
+	var hs httpStatuser
+	if errors.As(err, &hs) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, io.EOF) {
+		return true
+	}
+	var syntaxErr *json.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return true
+	}
+	var typeErr *json.UnmarshalTypeError
+	return errors.As(err, &typeErr)
+}
+
 // preflightConnectivityWarn builds the bare warning string for a chain entry
 // whose registry lookup errored — a connectivity/config failure rather than a
 // capability gap. When the provider's endpoint is known it names the provider +
 // base_url + discovery path (and the HTTP status, when the underlying error
-// carries one). With no endpoint it surfaces the underlying error verbatim
-// under a neutral "provider lookup failed" framing, since that error may be
-// unreachability OR a not-configured/not-found model and we cannot tell which.
+// carries one). With no endpoint, or when the lookup error is not a discovery
+// failure, it surfaces the underlying error verbatim under a neutral
+// "provider lookup failed" framing.
 // The returned string is bare: the startup renderer prepends "warning: ".
 func preflightConnectivityWarn(sel, providerName string, ep preflightEndpoint, epOK bool, lookupErr error) string {
-	if !epOK || ep.BaseURL == "" {
+	if !epOK || ep.BaseURL == "" || !providerDiscoveryFailure(lookupErr) {
 		return fmt.Sprintf("agent fallback %q: provider lookup failed: %v", sel, lookupErr)
 	}
 	addr := redactBaseURL(ep.BaseURL)
