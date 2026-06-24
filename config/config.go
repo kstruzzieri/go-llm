@@ -307,6 +307,10 @@ func Default() (*Config, error) {
 }
 
 // Load reads a models.json file from path, parses it, applies defaults, and validates.
+// As part of loading, ${ENV} references in each provider's api_key are expanded
+// from the environment (see expandProviderAPIKeys); this happens only on the
+// file-backed Load path, so programmatically constructed Config values keep
+// api_key literal.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -323,10 +327,70 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Expand ${ENV} references in provider api_key fields (file-backed loads only).
+	if err := cfg.expandProviderAPIKeys(); err != nil {
+		return nil, err
+	}
+
 	// Apply defaults after validation passes.
 	cfg.applyDefaults()
 
 	return &cfg, nil
+}
+
+// expandAPIKeyRefs replaces every ${NAME} reference in value with the value of
+// environment variable NAME. A value containing no "${" is returned verbatim, so
+// existing literal keys keep working. A referenced variable that is unset or
+// empty, or a malformed reference, returns an error naming providerName. Errors
+// never contain an expanded secret value. Only the provider api_key field uses
+// this helper.
+func expandAPIKeyRefs(providerName, value string) (string, error) {
+	if !strings.Contains(value, "${") {
+		return value, nil
+	}
+	var b strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
+			rel := strings.IndexByte(value[i+2:], '}')
+			if rel < 0 {
+				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
+			}
+			name := value[i+2 : i+2+rel]
+			if !validEnvName(name) {
+				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
+			}
+			v, ok := os.LookupEnv(name)
+			if !ok || v == "" {
+				return "", fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name)
+			}
+			b.WriteString(v)
+			i += 2 + rel + 1
+			continue
+		}
+		b.WriteByte(value[i])
+		i++
+	}
+	return b.String(), nil
+}
+
+// validEnvName reports whether s is a POSIX-style environment identifier
+// matching [A-Za-z_][A-Za-z0-9_]*.
+func validEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		letter := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		digit := c >= '0' && c <= '9'
+		if i == 0 && !letter {
+			return false
+		}
+		if i > 0 && !letter && !digit {
+			return false
+		}
+	}
+	return true
 }
 
 // MustLoad is like Load but panics on error.
@@ -336,6 +400,27 @@ func MustLoad(path string) *Config {
 		panic(err)
 	}
 	return cfg
+}
+
+// expandProviderAPIKeys rewrites each provider's api_key, expanding ${ENV}
+// references. Providers are visited in sorted order so the first error is
+// deterministic when several reference bad variables.
+func (cfg *Config) expandProviderAPIKeys() error {
+	keys := make([]string, 0, len(cfg.Providers))
+	for k := range cfg.Providers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		p := cfg.Providers[k]
+		expanded, err := expandAPIKeyRefs(k, p.APIKey)
+		if err != nil {
+			return err
+		}
+		p.APIKey = expanded
+		cfg.Providers[k] = p
+	}
+	return nil
 }
 
 // applyDefaults materializes implicit provider assignments and timeout defaults.
