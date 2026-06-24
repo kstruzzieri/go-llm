@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -86,6 +87,33 @@ type capChecker interface {
 }
 
 const toolRouteCaps = provider.CapChat | provider.CapStream | provider.CapToolCall
+
+// preflightEndpoint is the discovery endpoint a provider exposes. It is used
+// only to build a human-facing connectivity diagnostic, never to make a call.
+type preflightEndpoint struct {
+	BaseURL    string // provider base_url from config ("" if unknown)
+	ModelsPath string // "/v1/models" (openai-compat) or "/api/tags" (ollama)
+}
+
+// endpointResolver maps a provider name to its discovery endpoint. It returns
+// ok=false when the provider is absent or the config is nil, in which case the
+// diagnostic falls back to a base_url-free message.
+type endpointResolver func(providerName string) (preflightEndpoint, bool)
+
+// httpStatuser is satisfied by *openaicompat.statusError and *ollama.APIError,
+// both preserved through ModelRegistry.Lookup's %w wrapping. The interface
+// exposes only the numeric code; the status text is reconstructed locally.
+type httpStatuser interface{ HTTPStatusCode() int }
+
+// statusLabel renders an HTTP status code as "<code> <text>" (e.g.
+// "404 Not Found"), falling back to "HTTP <code>" for codes without a known
+// textual status.
+func statusLabel(code int) string {
+	if text := http.StatusText(code); text != "" {
+		return fmt.Sprintf("%d %s", code, text)
+	}
+	return fmt.Sprintf("HTTP %d", code)
+}
 
 func profileToolCapable(p *provider.ModelProfile) bool {
 	// Capability.Has tests c&flag == flag across all bits, so reusing the
