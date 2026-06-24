@@ -307,6 +307,10 @@ func Default() (*Config, error) {
 }
 
 // Load reads a models.json file from path, parses it, applies defaults, and validates.
+// As part of loading, ${ENV} references in each provider's api_key are expanded
+// from the environment (see expandProviderAPIKeys); this happens only on the
+// file-backed Load path, so programmatically constructed Config values keep
+// api_key literal.
 func Load(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
