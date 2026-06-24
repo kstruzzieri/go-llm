@@ -323,6 +323,11 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
+	// Expand ${ENV} references in provider api_key fields (file-backed loads only).
+	if err := cfg.expandProviderAPIKeys(); err != nil {
+		return nil, err
+	}
+
 	// Apply defaults after validation passes.
 	cfg.applyDefaults()
 
@@ -391,6 +396,27 @@ func MustLoad(path string) *Config {
 		panic(err)
 	}
 	return cfg
+}
+
+// expandProviderAPIKeys rewrites each provider's api_key, expanding ${ENV}
+// references. Providers are visited in sorted order so the first error is
+// deterministic when several reference bad variables.
+func (cfg *Config) expandProviderAPIKeys() error {
+	keys := make([]string, 0, len(cfg.Providers))
+	for k := range cfg.Providers {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		p := cfg.Providers[k]
+		expanded, err := expandAPIKeyRefs(k, p.APIKey)
+		if err != nil {
+			return err
+		}
+		p.APIKey = expanded
+		cfg.Providers[k] = p
+	}
+	return nil
 }
 
 // applyDefaults materializes implicit provider assignments and timeout defaults.

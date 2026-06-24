@@ -927,3 +927,58 @@ func TestExpandAPIKeyRefs(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_APIKeyEnvExpansion(t *testing.T) {
+	t.Setenv("GOLEM_TEST_KEY", "sk-secret-123")
+	cfg := `{
+  "providers": {
+    "hosted": {"base_url": "https://api.openai.com", "api_format": "openai-compat", "api_key": "${GOLEM_TEST_KEY}"}
+  },
+  "models": {"agent": {"name": "gpt-4o", "provider": "hosted", "type": "dense"}},
+  "defaults": {"agent": "agent"}
+}`
+	path := writeTempJSON(t, cfg)
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := loaded.Providers["hosted"].APIKey; got != "sk-secret-123" {
+		t.Errorf("api_key = %q, want expanded %q", got, "sk-secret-123")
+	}
+}
+
+func TestLoad_APIKeyEnvExpansion_UnsetErrors(t *testing.T) {
+	cfg := `{
+  "providers": {
+    "hosted": {"base_url": "https://api.openai.com", "api_format": "openai-compat", "api_key": "${GOLEM_TEST_MISSING}"}
+  },
+  "models": {"agent": {"name": "gpt-4o", "provider": "hosted", "type": "dense"}},
+  "defaults": {"agent": "agent"}
+}`
+	path := writeTempJSON(t, cfg)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for unset env var, got nil")
+	}
+	if !contains(err.Error(), `provider "hosted"`) || !contains(err.Error(), "GOLEM_TEST_MISSING") {
+		t.Errorf("error = %q, want provider name and var name", err.Error())
+	}
+}
+
+func TestLoad_LiteralAPIKeyUnchanged(t *testing.T) {
+	cfg := `{
+  "providers": {
+    "hosted": {"base_url": "https://api.openai.com", "api_format": "openai-compat", "api_key": "sk-plain"}
+  },
+  "models": {"agent": {"name": "gpt-4o", "provider": "hosted", "type": "dense"}},
+  "defaults": {"agent": "agent"}
+}`
+	path := writeTempJSON(t, cfg)
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := loaded.Providers["hosted"].APIKey; got != "sk-plain" {
+		t.Errorf("api_key = %q, want unchanged literal", got)
+	}
+}
