@@ -214,11 +214,17 @@ func parseSelector(sel string) (provider.ModelKey, bool) {
 }
 
 // preflightToolCapable verifies the agent chain can route a tool-capable model.
-// It returns warnings for each configured entry that cannot (the Router may
-// still reach them on fallback), and an error only when NO entry — or, for an
-// empty chain, the recommend set — can satisfy chat|stream|tool_call. Pure
-// registry lookup; never makes a live model call.
-func preflightToolCapable(ctx context.Context, reg capChecker, chain []string) (warnings []string, err error) {
+// For each configured entry it classifies the outcome as capable,
+// not-tool-capable (resolved but lacks tool_call), or lookup-errored
+// (provider unreachable / config failure). It returns a bare warning per
+// non-capable entry, and an error only when NO entry — or, for an empty chain,
+// the recommend set — can satisfy chat|stream|tool_call. On that failure the
+// error INLINES every per-entry diagnostic, because the caller returns on the
+// error and would otherwise drop the warnings. Pure registry lookup; never
+// makes a live model call. resolveEndpoint supplies provider base_url +
+// discovery path for connectivity diagnostics; a nil resolver yields
+// base_url-free messages.
+func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, resolveEndpoint endpointResolver) (warnings []string, err error) {
 	if len(chain) == 0 {
 		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps})
 		if rerr != nil {
@@ -232,27 +238,47 @@ func preflightToolCapable(ctx context.Context, reg capChecker, chain []string) (
 
 	capable := 0
 	for _, sel := range chain {
-		ok := false
-		if key, parsed := parseSelector(sel); parsed {
-			if p, lerr := reg.Lookup(ctx, key); lerr == nil && profileToolCapable(p) {
-				ok = true
-			}
-		} else if profs, lerr := reg.LookupAny(ctx, sel); lerr == nil {
-			for _, p := range profs {
-				if profileToolCapable(p) {
-					ok = true
-					break
-				}
-			}
-		}
+		ok, warn := evalChainEntry(ctx, reg, sel, resolveEndpoint)
 		if ok {
 			capable++
-		} else {
-			warnings = append(warnings, fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call)", sel))
+			continue
 		}
+		warnings = append(warnings, warn)
 	}
 	if capable == 0 {
-		return warnings, fmt.Errorf("golem: no entry in the agent chain is tool-capable (chat|stream|tool_call): %v", chain)
+		return warnings, fmt.Errorf("golem: tool-capability preflight failed:\n%s", strings.Join(warnings, "\n"))
 	}
 	return warnings, nil
+}
+
+// evalChainEntry classifies one agent-chain selector. It returns capable=true
+// when the selector resolves to a tool-capable model; otherwise it returns a
+// bare warning string: a connectivity diagnostic when the registry lookup
+// errored, or the capability message when the model resolved without tool_call.
+func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndpoint endpointResolver) (capable bool, warning string) {
+	notCapable := fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call)", sel)
+
+	if key, parsed := parseSelector(sel); parsed {
+		p, lerr := reg.Lookup(ctx, key)
+		if lerr != nil {
+			ep, epOK := resolvePreflightEndpoint(resolveEndpoint, key.Provider)
+			return false, preflightConnectivityWarn(sel, key.Provider, ep, epOK, lerr)
+		}
+		if profileToolCapable(p) {
+			return true, ""
+		}
+		return false, notCapable
+	}
+
+	// Bare model name: resolve across providers.
+	profs, lerr := reg.LookupAny(ctx, sel)
+	if lerr != nil {
+		return false, fmt.Sprintf("agent fallback %q: cannot reach provider: %v", sel, lerr)
+	}
+	for _, p := range profs {
+		if profileToolCapable(p) {
+			return true, ""
+		}
+	}
+	return false, notCapable
 }
