@@ -1,14 +1,20 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/golem-lockup-on-dark.svg">
+  <img alt="Golem agent logo" src="assets/brand/golem-lockup-on-light.svg" width="260">
+</picture>
+
 # go-llm
 
-A batteries-included Go module for building local-first AI features against local model backends. Run models through **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the recommended, primary backend for best local performance, via its OpenAI-compatible server — or through [Ollama](https://ollama.com). Provides a complete pipeline from model management and configuration through RAG-powered retrieval to domain-specific analysis — local-first by default — no cloud account required — with optional bring-your-own-key access to hosted OpenAI-compatible APIs (see [Use a hosted API](#use-a-hosted-api-bring-your-own-key)).
+A local-first LLM toolkit and terminal coding agent for Go. Run models through **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the recommended, primary backend for best local performance, via its OpenAI-compatible server — or through [Ollama](https://ollama.com). go-llm provides the plumbing for model management, routing, RAG-powered retrieval, MCP integration, and domain-specific analysis — local-first by default, no cloud account required — with optional bring-your-own-key access to hosted OpenAI-compatible APIs (see [Use a hosted API](#use-a-hosted-api-bring-your-own-key)).
 
-Designed for embedding into Go applications that need LLM capabilities: chat, tool calling, code completion, retrieval-augmented generation, and more. Also runs as a standalone [MCP server](#mcp-server) for use as a local AI service without embedding. Pure Go with minimal dependencies (no CGo).
+Use it directly in a terminal through **Golem**, the bundled local coding agent; expose it as a standalone [MCP server](#mcp-server); or embed the Go packages in your own application. Pure Go with minimal dependencies (no CGo).
 
 > **Backends:** go-llm targets local models through two provider API formats, selected per provider in `models.json` and routed by `provider.Router`: `openai-compat` (llama.cpp, vLLM, LM Studio, any OpenAI `/v1` server — **recommended**) and `ollama` (the native Ollama REST API). See [Local model backends](#local-model-backends).
 
 ### What's included
 
 - **Model backends** — `openai-compat` provider (llama.cpp / vLLM / LM Studio) and a native Ollama REST client; chat, completions, embeddings, model management, and tool calling with streaming support
+- **Golem terminal agent** — local workspace assistant with provider routing, project-context loading, persistent sessions, optional RAG retrieval, and approval-gated write/exec tools
 - **RAG pipeline** — code-aware chunking, SQLite vector store, concurrent indexing with `.gitignore` support, and context-building retrieval
 - **FIM completion** — Fill-in-the-Middle for IDE inline suggestions with context window management
 - **Model config** — `models.json`-driven configuration with provider settings, role-based defaults, and fallback chain resolution
@@ -32,6 +38,7 @@ Designed for embedding into Go applications that need LLM capabilities: chat, to
 | `fingerprint/` | Model profiling — latency benchmarks and capability detection. |
 | `prefetch/` | Predictive cache-warming engine for RAG retrieval. |
 | `compat/` | OpenAI-compatible endpoint shim — chat, completions, model aliases, and a concurrency limiter so clients that speak OpenAI's API can target local models served through go-llm (distinct from the `openai-compat` *provider*, which consumes an upstream OpenAI `/v1` server such as llama.cpp). |
+| `cmd/golem/` | Terminal coding agent built on `agent/`, `provider.Router`, file/search tools, optional RAG retrieval, persistent sessions, and approval-gated write/exec. |
 | `cmd/go-llm-mcp/` | Standalone MCP server binary with stdio and HTTP/2 support. |
 | `cmd/fim-smoke/` | Smoke-test harness for Fill-in-the-Middle completion against a running backend. |
 | `cmd/llm-bench/` | Model evaluation harness — replays trace corpora against candidate models (llama.cpp via `openai-compat`, or Ollama) and reports AnswerQuality, tool-use, tool-restraint, latency, and tokens with paired deltas and bootstrap CIs. |
@@ -44,6 +51,22 @@ Designed for embedding into Go applications that need LLM capabilities: chat, to
   - **Ollama** — running locally (default: `http://localhost:11434`)
 
 ## Installation
+
+Install the terminal tools:
+
+```bash
+go install github.com/kstruzzieri/go-llm/cmd/golem@latest
+go install github.com/kstruzzieri/go-llm/cmd/go-llm-mcp@latest
+```
+
+Or build from a local checkout:
+
+```bash
+go build -o bin/golem ./cmd/golem
+go build -o bin/go-llm-mcp ./cmd/go-llm-mcp
+```
+
+Use `go get` when embedding go-llm as a library:
 
 ```bash
 go get github.com/kstruzzieri/go-llm
@@ -179,7 +202,55 @@ If a hosted backend lacks an endpoint (`/v1/completions`, embeddings, FIM, or
 tool calls), set that model's `capabilities` to the endpoints that actually work
 so the Router won't send unsupported requests.
 
-## Quick Start
+## Terminal Quick Start
+
+Start your configured model backend first. The checked-in `models.json` defaults to a llama.cpp-compatible server at `http://127.0.0.1:8080`; see [Local model backends](#local-model-backends) for the llama-swap and Ollama setup options.
+
+Run Golem against a workspace:
+
+```bash
+golem -root /path/to/project
+```
+
+Golem starts in a read-only mode by default. It can inspect files, search the workspace, route through the configured `agent` model chain, load project instructions from `AGENTS.md`, and keep a persistent per-workspace session.
+
+Build a workspace RAG index, then start Golem with automatic retrieval enabled:
+
+```bash
+golem index -root /path/to/project
+golem -root /path/to/project
+```
+
+Use a specific config or backend endpoint:
+
+```bash
+golem -root /path/to/project -config /path/to/models.json
+golem -root /path/to/project -ollama-url http://gpu-server:11434
+```
+
+Opt in to project mutation explicitly:
+
+```bash
+# Show diffs and apply write/edit tool calls only after approval.
+golem -root /path/to/project -allow-write
+
+# Run shell commands only after approval.
+golem -root /path/to/project -allow-write -allow-exec
+```
+
+Inside the REPL, use `/help`, `/tools`, `/model`, `/new`, `/clear`, `/undo`, and `/exit`. Any other line is sent to the agent as the current goal.
+
+### MCP server
+
+Expose go-llm to Claude Desktop, IDE extensions, or any MCP client:
+
+```bash
+go-llm-mcp --transport stdio
+go-llm-mcp --transport http --addr 127.0.0.1:8080
+go-llm-mcp --ollama-url http://gpu-server:11434
+```
+
+## Use as a Go library
 
 ### Chat with a local model
 
