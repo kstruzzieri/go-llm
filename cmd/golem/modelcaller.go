@@ -270,10 +270,12 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndp
 		return false, notCapable
 	}
 
-	// Bare model name: resolve across providers.
+	// Bare model name: resolve across providers. A bare selector names no single
+	// provider, so there is no endpoint to resolve — reuse the connectivity
+	// builder's no-endpoint branch (epOK=false) so the message has one source.
 	profs, lerr := reg.LookupAny(ctx, sel)
 	if lerr != nil {
-		return false, fmt.Sprintf("agent fallback %q: cannot reach provider: %v", sel, lerr)
+		return false, preflightConnectivityWarn(sel, "", preflightEndpoint{}, false, lerr)
 	}
 	for _, p := range profs {
 		if profileToolCapable(p) {
