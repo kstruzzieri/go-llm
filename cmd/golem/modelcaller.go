@@ -183,11 +183,13 @@ func resolvePreflightEndpoint(resolve endpointResolver, providerName string) (pr
 // whose registry lookup errored — a connectivity/config failure rather than a
 // capability gap. When the provider's endpoint is known it names the provider +
 // base_url + discovery path (and the HTTP status, when the underlying error
-// carries one); otherwise it surfaces the underlying error verbatim. The
-// returned string is bare: the startup renderer prepends "warning: ".
+// carries one). With no endpoint it surfaces the underlying error verbatim
+// under a neutral "provider lookup failed" framing, since that error may be
+// unreachability OR a not-configured/not-found model and we cannot tell which.
+// The returned string is bare: the startup renderer prepends "warning: ".
 func preflightConnectivityWarn(sel, providerName string, ep preflightEndpoint, epOK bool, lookupErr error) string {
 	if !epOK || ep.BaseURL == "" {
-		return fmt.Sprintf("agent fallback %q: cannot reach provider: %v", sel, lookupErr)
+		return fmt.Sprintf("agent fallback %q: provider lookup failed: %v", sel, lookupErr)
 	}
 	addr := redactBaseURL(ep.BaseURL)
 	var hs httpStatuser

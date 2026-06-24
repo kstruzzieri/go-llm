@@ -176,7 +176,7 @@ func TestPreflight_LookupErrorResolverMiss(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
-	if len(warns) != 1 || !strings.Contains(warns[0], "cannot reach provider:") ||
+	if len(warns) != 1 || !strings.Contains(warns[0], "provider lookup failed:") ||
 		strings.Contains(warns[0], "http://") {
 		t.Errorf("warning = %v, want verbatim fallback without base_url", warns)
 	}
@@ -258,7 +258,8 @@ func TestPreflight_MixedErroredAndNonCapable(t *testing.T) {
 }
 
 // TestPreflight_BareLookupAnyError: a bare selector whose LookupAny errors
-// surfaces the verbatim error under the connectivity framing.
+// surfaces the verbatim error under the neutral "provider lookup failed" framing
+// (a bare selector names no single provider/endpoint).
 func TestPreflight_BareLookupAnyError(t *testing.T) {
 	reg := fakeReg{errByModel: map[string]error{
 		"gemma4:31b": fmt.Errorf("provider: lookup any %q: all providers failed: %w", "gemma4:31b", connStatusErr{404}),
@@ -267,7 +268,7 @@ func TestPreflight_BareLookupAnyError(t *testing.T) {
 	if err == nil {
 		t.Fatal("err = nil, want failure")
 	}
-	if len(warns) != 1 || !strings.Contains(warns[0], "cannot reach provider:") ||
+	if len(warns) != 1 || !strings.Contains(warns[0], "provider lookup failed:") ||
 		!strings.Contains(warns[0], "all providers failed") {
 		t.Errorf("warning = %v, want verbatim LookupAny error", warns)
 	}

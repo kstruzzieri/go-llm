@@ -43,12 +43,12 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 		{
 			name: "no endpoint (resolver miss)", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
 			ep: preflightEndpoint{}, epOK: false, err: wrapped,
-			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider: provider: lookup llamacpp/gemma4:31b: list models: 404`,
+			want: `agent fallback "llamacpp/gemma4:31b": provider lookup failed: provider: lookup llamacpp/gemma4:31b: list models: 404`,
 		},
 		{
 			name: "endpoint ok but empty base_url", sel: "x/y", provider: "x",
 			ep: preflightEndpoint{BaseURL: "", ModelsPath: "/v1/models"}, epOK: true, err: plain,
-			want: `agent fallback "x/y": cannot reach provider: dial tcp 127.0.0.1:8080: connection refused`,
+			want: `agent fallback "x/y": provider lookup failed: dial tcp 127.0.0.1:8080: connection refused`,
 		},
 		{
 			name: "credentials redacted", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
