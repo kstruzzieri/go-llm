@@ -1,6 +1,6 @@
 # go-llm
 
-A batteries-included Go module for building local-first AI features against local model backends. Run models through **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the recommended, primary backend for best local performance, via its OpenAI-compatible server — or through [Ollama](https://ollama.com). Provides a complete pipeline from model management and configuration through RAG-powered retrieval to domain-specific analysis — all running locally with no cloud dependencies or API keys.
+A batteries-included Go module for building local-first AI features against local model backends. Run models through **[llama.cpp](https://github.com/ggml-org/llama.cpp)** — the recommended, primary backend for best local performance, via its OpenAI-compatible server — or through [Ollama](https://ollama.com). Provides a complete pipeline from model management and configuration through RAG-powered retrieval to domain-specific analysis — local-first by default — no cloud account required — with optional bring-your-own-key access to hosted OpenAI-compatible APIs (see [Use a hosted API](#use-a-hosted-api-bring-your-own-key)).
 
 Designed for embedding into Go applications that need LLM capabilities: chat, tool calling, code completion, retrieval-augmented generation, and more. Also runs as a standalone [MCP server](#mcp-server) for use as a local AI service without embedding. Pure Go with minimal dependencies (no CGo).
 
@@ -108,6 +108,76 @@ Then declare one `openai-compat` provider per port and point each model at its p
 ```
 
 `api_format` defaults to `ollama` when omitted, so pre-existing configs load unchanged. The low-level `ollama.NewClient()` API (used in the examples below) talks to Ollama directly; to target a llama.cpp backend, configure an `openai-compat` provider as above and route through `provider.Router`.
+
+## Use a hosted API (bring your own key)
+
+No local GPU? Point go-llm at any hosted **OpenAI-compatible** endpoint with the
+`openai-compat` provider and your own API key. `base_url` is the server **root** —
+do **not** include `/v1`; go-llm appends it.
+
+Keep the secret out of the file: set `api_key` to a `${ENV_VAR}` reference and
+export the variable. go-llm expands it when the config loads and fails fast if the
+variable is unset or empty, so a missing key surfaces as a clear config error
+rather than a remote 401. Literal keys still work, but `${ENV_VAR}` is recommended.
+
+```bash
+export OPENAI_API_KEY=sk-...
+golem -config models.json
+```
+
+```json
+{
+  "providers": {
+    "openai": {
+      "base_url": "https://api.openai.com",
+      "api_format": "openai-compat",
+      "api_key": "${OPENAI_API_KEY}"
+    }
+  },
+  "models": {
+    "agent":     { "name": "gpt-4o",                 "provider": "openai", "type": "dense", "capabilities": ["chat", "stream", "tool_call"] },
+    "embedding": { "name": "text-embedding-3-small", "provider": "openai", "type": "embedding" }
+  },
+  "defaults": { "chat": "agent", "agent": "agent", "embedding": "embedding" }
+}
+```
+
+Golem's agent loop routes the **`agent`** role, so set `defaults.agent` to a
+chat/stream/**tool-call**-capable model. `golem index` and RAG need an
+**embedding**-capable model — set `defaults.embedding` to one (hosted providers
+without embeddings can omit it and skip indexing).
+
+### More compatibility examples
+
+Only `base_url` and the model `name` change; go-llm appends `/v1` to each.
+
+| Provider | `base_url` | Notes |
+|----------|-----------|-------|
+| OpenAI | `https://api.openai.com` | |
+| OpenRouter | `https://openrouter.ai/api` | One key → many models (incl. Claude, Llama). The OpenAI SDK base is `…/api/v1`; go-llm adds the `/v1`. |
+| Anthropic (OpenAI-compat layer) | `https://api.anthropic.com` | Anthropic's **OpenAI SDK compatibility** endpoint (`…/v1/`), handy for testing/comparison — **not** native Claude support. The native `/v1/messages` API is not supported. |
+
+### Mixing providers and fallbacks
+
+Providers and keys coexist — declare several and let a model fall back across them:
+
+```json
+{
+  "providers": {
+    "openai":     { "base_url": "https://api.openai.com",    "api_format": "openai-compat", "api_key": "${OPENAI_API_KEY}" },
+    "openrouter": { "base_url": "https://openrouter.ai/api", "api_format": "openai-compat", "api_key": "${OPENROUTER_API_KEY}" }
+  },
+  "models": {
+    "agent":        { "name": "gpt-4o",                       "provider": "openai",     "type": "dense", "capabilities": ["chat", "stream", "tool_call"], "fallbacks": ["agent-backup"] },
+    "agent-backup": { "name": "anthropic/claude-3.5-sonnet",  "provider": "openrouter", "type": "dense", "capabilities": ["chat", "stream", "tool_call"] }
+  },
+  "defaults": { "agent": "agent" }
+}
+```
+
+If a hosted backend lacks an endpoint (`/v1/completions`, embeddings, FIM, or
+tool calls), set that model's `capabilities` to the endpoints that actually work
+so the Router won't send unsupported requests.
 
 ## Quick Start
 
