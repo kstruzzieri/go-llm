@@ -353,11 +353,11 @@ func expandAPIKeyRefs(providerName, value string) (string, error) {
 		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
 			rel := strings.IndexByte(value[i+2:], '}')
 			if rel < 0 {
-				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference %q", providerName, value[i:])
+				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
 			}
 			name := value[i+2 : i+2+rel]
 			if !validEnvName(name) {
-				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference %q", providerName, "${"+name+"}")
+				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference", providerName)
 			}
 			v, ok := os.LookupEnv(name)
 			if !ok || v == "" {

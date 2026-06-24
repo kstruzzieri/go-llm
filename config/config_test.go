@@ -877,6 +877,7 @@ func TestExpandAPIKeyRefs(t *testing.T) {
 		env      map[string]string
 		want     string
 		wantErr  string // substring; "" means no error
+		notErr   []string
 	}{
 		{name: "literal unchanged", provider: "p", value: "sk-literal", want: "sk-literal"},
 		{name: "empty unchanged", provider: "p", value: "", want: ""},
@@ -892,6 +893,20 @@ func TestExpandAPIKeyRefs(t *testing.T) {
 		{name: "leading digit invalid", provider: "p", value: "${1A}", wantErr: "malformed environment reference"},
 		{name: "adjacent refs no separator", provider: "p", value: "${A}${B}", env: map[string]string{"A": "x", "B": "y"}, want: "xy"},
 		{name: "non-ascii name invalid", provider: "p", value: "${KÉY}", wantErr: "malformed environment reference"},
+		{
+			name:     "unterminated does not echo raw api key",
+			provider: "openai",
+			value:    "sk-secret-${BROKEN",
+			wantErr:  `provider "openai" api_key: malformed environment reference`,
+			notErr:   []string{"sk-secret", "${BROKEN"},
+		},
+		{
+			name:     "invalid name does not echo raw api key",
+			provider: "openai",
+			value:    "sk-secret-${BAD NAME}",
+			wantErr:  `provider "openai" api_key: malformed environment reference`,
+			notErr:   []string{"sk-secret", "${BAD NAME}", "BAD NAME"},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -916,6 +931,11 @@ func TestExpandAPIKeyRefs(t *testing.T) {
 				if err == nil || !contains(err.Error(), tc.wantErr) {
 					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
 				}
+				for _, forbidden := range tc.notErr {
+					if contains(err.Error(), forbidden) {
+						t.Fatalf("err = %q, must not contain %q", err.Error(), forbidden)
+					}
+				}
 				return
 			}
 			if err != nil {
@@ -925,6 +945,29 @@ func TestExpandAPIKeyRefs(t *testing.T) {
 				t.Errorf("got %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestLoad_MalformedAPIKeyEnvExpansionDoesNotLeakSecret(t *testing.T) {
+	cfg := `{
+  "providers": {
+    "hosted": {"base_url": "https://api.openai.com", "api_format": "openai-compat", "api_key": "sk-secret-${BROKEN"}
+  },
+  "models": {"agent": {"name": "gpt-4o", "provider": "hosted", "type": "dense"}},
+  "defaults": {"agent": "agent"}
+}`
+	path := writeTempJSON(t, cfg)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for malformed env reference, got nil")
+	}
+	if !contains(err.Error(), `provider "hosted"`) || !contains(err.Error(), "malformed environment reference") {
+		t.Errorf("error = %q, want provider name and malformed reference message", err.Error())
+	}
+	for _, forbidden := range []string{"sk-secret", "${BROKEN"} {
+		if contains(err.Error(), forbidden) {
+			t.Errorf("error = %q, must not contain %q", err.Error(), forbidden)
+		}
 	}
 }
 
