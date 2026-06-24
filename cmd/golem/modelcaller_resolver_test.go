@@ -14,13 +14,13 @@ func TestNewPreflightEndpointResolver(t *testing.T) {
 	}}
 
 	tests := []struct {
-		name      string
-		cfg       *config.Config
-		override  string
-		provider  string
-		wantOK    bool
-		wantURL   string
-		wantPath  string
+		name     string
+		cfg      *config.Config
+		override string
+		provider string
+		wantOK   bool
+		wantURL  string
+		wantPath string
 	}{
 		{"openai-compat path", cfg, "", "llamacpp", true, "http://127.0.0.1:8080", "/v1/models"},
 		{"ollama path", cfg, "", "ollama", true, "http://localhost:11434", "/api/tags"},
