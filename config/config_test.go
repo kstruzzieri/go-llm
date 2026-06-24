@@ -868,3 +868,62 @@ func TestLoad_RootModelsJSON(t *testing.T) {
 		t.Errorf("expected 7 models, got %d", len(cfg.Models))
 	}
 }
+
+func TestExpandAPIKeyRefs(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		value    string
+		env      map[string]string
+		want     string
+		wantErr  string // substring; "" means no error
+	}{
+		{name: "literal unchanged", provider: "p", value: "sk-literal", want: "sk-literal"},
+		{name: "empty unchanged", provider: "p", value: "", want: ""},
+		{name: "dollar without brace literal", provider: "p", value: "a$b", want: "a$b"},
+		{name: "whole value expands", provider: "p", value: "${K}", env: map[string]string{"K": "sk-1"}, want: "sk-1"},
+		{name: "embedded expands", provider: "p", value: "Bearer-${K}", env: map[string]string{"K": "tok"}, want: "Bearer-tok"},
+		{name: "multiple refs", provider: "p", value: "${A}-${B}", env: map[string]string{"A": "x", "B": "y"}, want: "x-y"},
+		{name: "unset var errors", provider: "openai", value: "${GO_LLM_TEST_MISSING_API_KEY}", wantErr: `provider "openai" api_key references unset or empty environment variable "GO_LLM_TEST_MISSING_API_KEY"`},
+		{name: "empty var errors", provider: "openai", value: "${E}", env: map[string]string{"E": ""}, wantErr: `references unset or empty environment variable "E"`},
+		{name: "malformed empty name", provider: "p", value: "${}", wantErr: "malformed environment reference"},
+		{name: "unterminated", provider: "p", value: "${K", wantErr: "malformed environment reference"},
+		{name: "illegal char", provider: "p", value: "${A B}", wantErr: "malformed environment reference"},
+		{name: "leading digit invalid", provider: "p", value: "${1A}", wantErr: "malformed environment reference"},
+		{name: "adjacent refs no separator", provider: "p", value: "${A}${B}", env: map[string]string{"A": "x", "B": "y"}, want: "xy"},
+		{name: "non-ascii name invalid", provider: "p", value: "${KÉY}", wantErr: "malformed environment reference"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			for k, v := range tc.env {
+				t.Setenv(k, v)
+			}
+			if tc.name == "unset var errors" {
+				old, hadOld := os.LookupEnv("GO_LLM_TEST_MISSING_API_KEY")
+				if err := os.Unsetenv("GO_LLM_TEST_MISSING_API_KEY"); err != nil {
+					t.Fatalf("unset test env: %v", err)
+				}
+				t.Cleanup(func() {
+					if hadOld {
+						_ = os.Setenv("GO_LLM_TEST_MISSING_API_KEY", old)
+					} else {
+						_ = os.Unsetenv("GO_LLM_TEST_MISSING_API_KEY")
+					}
+				})
+			}
+			got, err := expandAPIKeyRefs(tc.provider, tc.value)
+			if tc.wantErr != "" {
+				if err == nil || !contains(err.Error(), tc.wantErr) {
+					t.Fatalf("err = %v, want substring %q", err, tc.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tc.want {
+				t.Errorf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

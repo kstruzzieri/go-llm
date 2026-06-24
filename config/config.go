@@ -329,6 +329,61 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// expandAPIKeyRefs replaces every ${NAME} reference in value with the value of
+// environment variable NAME. A value containing no "${" is returned verbatim, so
+// existing literal keys keep working. A referenced variable that is unset or
+// empty, or a malformed reference, returns an error naming providerName. Errors
+// never contain an expanded secret value. Only the provider api_key field uses
+// this helper.
+func expandAPIKeyRefs(providerName, value string) (string, error) {
+	if !strings.Contains(value, "${") {
+		return value, nil
+	}
+	var b strings.Builder
+	for i := 0; i < len(value); {
+		if value[i] == '$' && i+1 < len(value) && value[i+1] == '{' {
+			rel := strings.IndexByte(value[i+2:], '}')
+			if rel < 0 {
+				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference %q", providerName, value[i:])
+			}
+			name := value[i+2 : i+2+rel]
+			if !validEnvName(name) {
+				return "", fmt.Errorf("config: provider %q api_key: malformed environment reference %q", providerName, "${"+name+"}")
+			}
+			v, ok := os.LookupEnv(name)
+			if !ok || v == "" {
+				return "", fmt.Errorf("config: provider %q api_key references unset or empty environment variable %q", providerName, name)
+			}
+			b.WriteString(v)
+			i += 2 + rel + 1
+			continue
+		}
+		b.WriteByte(value[i])
+		i++
+	}
+	return b.String(), nil
+}
+
+// validEnvName reports whether s is a POSIX-style environment identifier
+// matching [A-Za-z_][A-Za-z0-9_]*.
+func validEnvName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		letter := c == '_' || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')
+		digit := c >= '0' && c <= '9'
+		if i == 0 && !letter {
+			return false
+		}
+		if i > 0 && !letter && !digit {
+			return false
+		}
+	}
+	return true
+}
+
 // MustLoad is like Load but panics on error.
 func MustLoad(path string) *Config {
 	cfg, err := Load(path)
