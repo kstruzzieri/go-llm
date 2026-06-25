@@ -214,6 +214,19 @@ func TestResolve_UnknownUseCase(t *testing.T) {
 	}
 }
 
+func TestResolve_SideTaskFallbackUseCase(t *testing.T) {
+	cfg := loadTestConfig(t)
+	checker := &mockChecker{models: []string{"qwen3.5:27b"}}
+
+	got, err := cfg.Resolve(context.Background(), checker, "summarize")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if got.Role != "general" || got.Name != "qwen3.5:27b" {
+		t.Fatalf("Resolve(\"summarize\") = %+v, want analysis/general fallback", got)
+	}
+}
+
 func TestResolve_CheckerError(t *testing.T) {
 	cfg := loadTestConfig(t)
 	checker := &mockChecker{err: fmt.Errorf("connection refused")}
@@ -464,6 +477,24 @@ func TestConfig_RoleFallbackChain_UnknownUseCase(t *testing.T) {
 	_, err := cfg.RoleFallbackChain("unknown")
 	if err == nil {
 		t.Fatal("expected unknown-use-case error, got nil")
+	}
+}
+
+func TestConfig_RoleFallbackChain_SideTaskFallbackUseCase(t *testing.T) {
+	cfg := loadTestConfig(t)
+
+	chain, err := cfg.RoleFallbackChain("summarize")
+	if err != nil {
+		t.Fatalf("RoleFallbackChain(\"summarize\"): %v", err)
+	}
+	want := []string{"ollama/qwen3.5:27b", "ollama/qwen3:8b"}
+	if len(chain) != len(want) {
+		t.Fatalf("chain = %v, want %v", chain, want)
+	}
+	for i := range want {
+		if chain[i] != want[i] {
+			t.Fatalf("chain = %v, want %v", chain, want)
+		}
 	}
 }
 

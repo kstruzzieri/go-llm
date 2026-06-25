@@ -66,12 +66,14 @@ type ResolvedModel struct {
 
 // Resolve checks availability and walks the fallback chain for a single use-case.
 // It calls checker.AvailableModels once, builds a lookup set, then tries the
-// primary model followed by each fallback until one is found in the set.
+// primary model followed by each fallback until one is found in the set. Optional
+// auxiliary use-cases first fall back to existing configured defaults when their
+// own Defaults slot is absent.
 func (c *Config) Resolve(ctx context.Context, checker ModelChecker, useCase string) (ResolvedModel, error) {
 	if checker == nil {
 		return ResolvedModel{}, fmt.Errorf("config: model checker is required")
 	}
-	role, ok := c.Defaults[useCase]
+	role, ok := c.roleForUseCase(useCase)
 	if !ok {
 		return ResolvedModel{}, fmt.Errorf("config: unknown use-case %q", useCase)
 	}
@@ -201,7 +203,8 @@ func toSet(items []string) map[string]bool {
 
 // RoleFallbackChain returns the ordered chain of model selectors for a use-case
 // role: the primary model first, then each fallback in declared order, then
-// transitively each fallback's fallbacks. Selectors are always provider-
+// transitively each fallback's fallbacks. Optional auxiliary use-cases first
+// fall back to existing configured defaults when absent. Selectors are always provider-
 // qualified ("provider/model") because Load defaults Model.Provider to
 // "ollama" when unset.
 //
@@ -210,7 +213,7 @@ func toSet(items []string) map[string]bool {
 // surface as an error. Availability is NOT filtered — that is the Router's
 // job via breakers, warmth, and gates.
 func (c *Config) RoleFallbackChain(useCase string) ([]string, error) {
-	role, ok := c.Defaults[useCase]
+	role, ok := c.roleForUseCase(useCase)
 	if !ok {
 		return nil, fmt.Errorf("config: unknown use-case %q", useCase)
 	}

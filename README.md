@@ -452,7 +452,7 @@ provider.CompleteStream(ctx, req, func(token string) error {
 
 ## Model Configuration
 
-Load model settings from `models.json` with provider configs, role-based defaults, and fallback chains that resolve against available Ollama models.
+Load model settings from `models.json` with provider configs, role-based defaults, and fallback chains that resolve against available provider models.
 
 `go-llm` does not hard-code a model roster — `models.json` is the sole source of truth. Substitute any model your configured provider can load by editing `models.json`; capabilities (chat / embedding / tool-call) are detected at runtime by `fingerprint/`. See [`docs/llm/`](docs/llm/) for the reference lineup shipped by default and the full BYO guide.
 
@@ -468,6 +468,42 @@ model := cfg.ModelFor("chat") // e.g., "gemma4:31b"
 resolved, _ := cfg.Resolve(ctx, client, "chat")
 fmt.Printf("Using %s (fallback: %v)\n", resolved.Name, resolved.IsFallback)
 ```
+
+### Auxiliary model defaults
+
+`models.json` can optionally define side-task defaults for runtime helpers:
+`summarize`, `route`, `rerank`, `verify`, `extract`, `approval`, and `vision`.
+If one is omitted, go-llm falls back to existing defaults:
+
+| Side task | Fallback defaults |
+| --- | --- |
+| `summarize` | `analysis`, then `chat` |
+| `route` | `analysis`, then `chat` |
+| `rerank` | `analysis`, then `chat` |
+| `verify` | `analysis`, then `chat` |
+| `extract` | `analysis`, then `chat` |
+| `approval` | `agent`, then `chat` |
+| `vision` | `chat` |
+
+Explicit side-task defaults always win:
+
+```json
+{
+  "defaults": {
+    "chat": "general",
+    "analysis": "general",
+    "agent": "agent",
+    "summarize": "lightweight"
+  }
+}
+```
+
+`ModelFor`, `Resolve`, `ResolveCandidates`, and `RoleFallbackChain` all apply
+this fallback behavior. `ResolveAll` only enumerates defaults explicitly present
+in `models.json`.
+
+The `vision` slot is model selection only; image message payload support is
+tracked separately.
 
 ## MCP Server
 
