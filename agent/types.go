@@ -140,6 +140,7 @@ type ToolCallRecord struct {
 // Result is the canonical final state of a run.
 type Result struct {
 	Answer     string
+	Messages   []provider.ChatMessage
 	Steps      []StepRecord
 	Events     []EventRecord
 	Usage      provider.Usage

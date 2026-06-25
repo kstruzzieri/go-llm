@@ -69,6 +69,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	budget := turnBudget(req.Budget)
 
 	state := initState(req)
+	historyLen := len(req.History)
 	gov := &restraintGovernor{} // per-Run loop state; never shared across Run calls
 	var res Result
 
@@ -109,7 +110,9 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		}
 
 		if len(resp.ToolCalls) == 0 {
+			state.Messages = append(state.Messages, assistantMessage(resp))
 			res.Answer = resp.Content
+			res.Messages = resultMessages(state, historyLen)
 			if budgetExceeded(res.Usage, req.Budget) {
 				res.StopReason = BudgetReached
 			} else {
@@ -124,16 +127,19 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			return res, err
 		}
 		if res.StopReason != Completed {
+			res.Messages = resultMessages(state, historyLen)
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
 		if budgetExceeded(res.Usage, req.Budget) {
 			res.StopReason = BudgetReached
+			res.Messages = resultMessages(state, historyLen)
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "stop"})
 			return res, nil
 		}
 	}
 	res.StopReason = StepCapReached
+	res.Messages = resultMessages(state, historyLen)
 	res.Events = append(res.Events, EventRecord{Step: maxSteps - 1, Kind: "stop"})
 	return res, nil
 }
@@ -149,6 +155,17 @@ func addUsage(a, b provider.Usage) provider.Usage {
 	a.CompletionTokens += b.CompletionTokens
 	a.TotalTokens += b.TotalTokens
 	return a
+}
+
+func resultMessages(st State, historyLen int) []provider.ChatMessage {
+	if historyLen >= len(st.Messages) {
+		return nil
+	}
+	out := make([]provider.ChatMessage, 0, len(st.Messages)-historyLen)
+	for _, m := range st.Messages[historyLen:] {
+		out = append(out, cloneChatMessage(m.ChatMessage))
+	}
+	return out
 }
 
 func budgetExceeded(u provider.Usage, b Budget) bool {

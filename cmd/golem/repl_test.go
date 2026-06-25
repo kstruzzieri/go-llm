@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -220,6 +221,57 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 	}
 }
 
+func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hi"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	toolCall := provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: "c1", Type: "function",
+		Function: provider.ToolCallFunction{
+			Name:      "read_file",
+			Arguments: json.RawMessage(`{"path":"hello.txt"}`),
+		},
+	}}}
+	caller := &scriptCaller{responses: []agent.ModelResult{
+		{Response: toolCall},
+		{Response: provider.ChatResponse{Content: "it says hi"}},
+	}}
+	sess := newSessionedTestSession(t, caller, root, "workspace:toolhist")
+
+	var out strings.Builder
+	if err := runREPL(context.Background(), strings.NewReader("read it\n"), &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if len(sess.session.msgs) != 4 {
+		t.Fatalf("persisted messages = %+v, want user/tool-call/tool/final transcript", sess.session.msgs)
+	}
+	if sess.session.msgs[1].Role != "assistant" || len(sess.session.msgs[1].ToolCalls) == 0 {
+		t.Fatalf("assistant tool call not persisted: %+v", sess.session.msgs[1])
+	}
+	if sess.session.msgs[2].Role != "tool" || sess.session.msgs[2].ToolName != "read_file" ||
+		sess.session.msgs[2].ToolCallID != "c1" || sess.session.msgs[2].Content != "hi" {
+		t.Fatalf("tool result not persisted: %+v", sess.session.msgs[2])
+	}
+
+	resume := &captureCaller{answer: "second"}
+	sess.orch = agent.New(resume, agent.ContextManager{})
+	if err := runREPL(context.Background(), strings.NewReader("again\n"), &out, nil, sess); err != nil {
+		t.Fatalf("second runREPL: %v", err)
+	}
+	roles := make([]string, len(resume.messages))
+	for i, m := range resume.messages {
+		roles[i] = m.Role
+		if len(m.ToolCalls) != 0 || m.ToolName != "" || m.ToolCallID != "" {
+			t.Fatalf("history message %d leaked tool metadata: %+v", i, m)
+		}
+	}
+	wantRoles := []string{"system", "user", "assistant", "user"}
+	if strings.Join(roles, ",") != strings.Join(wantRoles, ",") {
+		t.Fatalf("resume roles = %v, want %v", roles, wantRoles)
+	}
+}
+
 func TestREPL_DoesNotPersistCanceledRun(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{block: make(chan struct{})} // never unblocked
@@ -415,5 +467,102 @@ func TestREPL_ClearAndNew(t *testing.T) {
 	}
 	if sess.session.id == oldID || !strings.HasPrefix(sess.session.id, "golem:") {
 		t.Errorf("/new did not switch session id: %q", sess.session.id)
+	}
+}
+
+func TestREPL_SessionsListsStoredSessions(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{}
+	sess := newSessionedTestSession(t, caller, root, "workspace:list")
+	if err := sess.session.record(context.Background(), "current question", "current answer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+		ID:       "user:other",
+		Title:    "other title",
+		Messages: []conversation.Message{{Role: "user", Content: "other"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	in := strings.NewReader("/sessions\n/exit\n")
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	got := out.String()
+	for _, want := range []string{"sessions:", "workspace:list", "2 messages", "current question", "user:other", "1 message", "other title"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("/sessions output missing %q in:\n%s", want, got)
+		}
+	}
+}
+
+func TestREPL_ResumeSwitchesActiveSession(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "new answer"}
+	sess := newSessionedTestSession(t, caller, root, "workspace:current")
+	if err := sess.session.record(context.Background(), "current question", "current answer"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+		ID:    "user:other",
+		Title: "other question",
+		Messages: []conversation.Message{
+			{Role: "user", Content: "other question"},
+			{Role: "assistant", Content: "other answer"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	in := strings.NewReader("/resume user:other\nfollow up\n")
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	if sess.session.id != "user:other" {
+		t.Fatalf("active session = %q, want user:other", sess.session.id)
+	}
+	if !strings.Contains(out.String(), "session: user:other resumed, 2 messages") {
+		t.Fatalf("resume output missing in:\n%s", out.String())
+	}
+	wantRoles := []string{"system", "user", "assistant", "user"}
+	wantContent := []string{buildSystemPrompt(false, false), "other question", "other answer", "follow up"}
+	if len(caller.messages) != len(wantRoles) {
+		t.Fatalf("messages = %+v, want %d entries", caller.messages, len(wantRoles))
+	}
+	for i := range wantRoles {
+		if caller.messages[i].Role != wantRoles[i] || caller.messages[i].Content != wantContent[i] {
+			t.Errorf("message %d = {%q,%q}, want {%q,%q}",
+				i, caller.messages[i].Role, caller.messages[i].Content, wantRoles[i], wantContent[i])
+		}
+	}
+}
+
+func TestREPL_SearchSessions(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{}
+	sess := newSessionedTestSession(t, caller, root, "workspace:search")
+	if err := sess.session.record(context.Background(), "approval prompts", "writes require approval"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.session.store.Save(context.Background(), conversation.Conversation{
+		ID:       "user:other",
+		Title:    "other",
+		Messages: []conversation.Message{{Role: "user", Content: "quantum notes"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var out strings.Builder
+	in := strings.NewReader("/search-sessions approval\n/exit\n")
+	if err := runREPL(context.Background(), in, &out, nil, sess); err != nil {
+		t.Fatalf("runREPL: %v", err)
+	}
+	got := out.String()
+	if !strings.Contains(got, "session search:") || !strings.Contains(got, "workspace:search") ||
+		!strings.Contains(got, "approval prompts") || strings.Contains(got, "user:other") {
+		t.Fatalf("search output wrong:\n%s", got)
 	}
 }

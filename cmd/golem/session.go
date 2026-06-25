@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
 	_ "modernc.org/sqlite"
@@ -221,10 +223,22 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 // It only mutates the in-memory buffer after Save succeeds, so a failed save
 // cannot leak an unsaved turn into future history() output or a later successful save.
 func (s *session) record(ctx context.Context, userLine, answer string) error {
-	next := append(append([]conversation.Message{}, s.msgs...),
+	return s.recordMessages(ctx, []conversation.Message{
 		conversation.Message{Role: "user", Content: userLine},
 		conversation.Message{Role: "assistant", Content: answer},
-	)
+	})
+}
+
+func (s *session) recordResult(ctx context.Context, userLine string, res agent.Result) error {
+	msgs, err := resultConversationMessages(userLine, res)
+	if err != nil {
+		return err
+	}
+	return s.recordMessages(ctx, msgs)
+}
+
+func (s *session) recordMessages(ctx context.Context, msgs []conversation.Message) error {
+	next := append(append([]conversation.Message{}, s.msgs...), msgs...)
 	if err := s.store.Save(ctx, conversation.Conversation{
 		ID:       s.id,
 		Title:    sessionTitle(next),
@@ -237,6 +251,33 @@ func (s *session) record(ctx context.Context, userLine, answer string) error {
 	// this write; re-secure them (the WAL can hold un-checkpointed message text).
 	_ = chmodSessionDBFiles(s.dbPath)
 	return nil
+}
+
+func resultConversationMessages(userLine string, res agent.Result) ([]conversation.Message, error) {
+	if len(res.Messages) == 0 {
+		return []conversation.Message{
+			{Role: "user", Content: userLine},
+			{Role: "assistant", Content: res.Answer},
+		}, nil
+	}
+	out := make([]conversation.Message, len(res.Messages))
+	for i, m := range res.Messages {
+		cm := conversation.Message{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+		}
+		if len(m.ToolCalls) > 0 {
+			raw, err := json.Marshal(m.ToolCalls)
+			if err != nil {
+				return nil, fmt.Errorf("golem: marshal tool calls at message %d: %w", i, err)
+			}
+			cm.ToolCalls = raw
+		}
+		out[i] = cm
+	}
+	return out, nil
 }
 
 // history maps the persisted conversation to real-role chat messages for the
@@ -298,6 +339,21 @@ func (s *session) clear(ctx context.Context) error {
 func (s *session) renew() {
 	s.id = "golem:" + conversation.NewID()
 	s.msgs = nil
+}
+
+func (s *session) switchTo(ctx context.Context, id string) (sessionInfo, error) {
+	conv, err := s.store.Load(ctx, id)
+	if err != nil {
+		return sessionInfo{}, err
+	}
+	s.id = id
+	s.msgs = conv.Messages
+	return sessionInfo{
+		id:        id,
+		resumed:   len(conv.Messages) > 0,
+		msgCount:  len(conv.Messages),
+		updatedAt: conv.UpdatedAt,
+	}, nil
 }
 
 // Close releases the DB. Nil-safe and idempotent enough for defer.
