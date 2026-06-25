@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/conversation"
 )
 
 // replSession holds the per-process state the REPL needs.
@@ -117,7 +118,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	// Persist only a successful, answered run (amendment 6). Use the parent ctx,
 	// not runCtx, so the save is not tied to this turn's cancellation scope.
 	if sess.session != nil && res.Answer != "" {
-		if serr := sess.session.record(ctx, line, res.Answer); serr != nil {
+		if serr := sess.session.recordResult(ctx, line, res); serr != nil {
 			_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", serr)
 		}
 	}
@@ -137,7 +138,8 @@ func lastRoutedModel(res agent.Result) string {
 
 // dispatchSlash handles a slash command; returns true to exit the REPL.
 func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line string) bool {
-	cmd := strings.Fields(line)[0]
+	fields := strings.Fields(line)
+	cmd := fields[0]
 	switch cmd {
 	case "/exit", "/quit":
 		return true
@@ -157,6 +159,32 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else {
 			sess.session.renew()
 			_, _ = fmt.Fprintf(out, "session: %s (new)\n", sess.session.id)
+		}
+	case "/sessions":
+		if sess.session == nil {
+			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
+		} else if err := printSessions(ctx, out, sess.session); err != nil {
+			_, _ = fmt.Fprintf(out, "sessions failed: %v\n", err)
+		}
+	case "/search-sessions":
+		if sess.session == nil {
+			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
+		} else if q := strings.TrimSpace(strings.TrimPrefix(line, cmd)); q == "" {
+			_, _ = fmt.Fprintln(out, "usage: /search-sessions <query>")
+		} else if err := printSessionSearch(ctx, out, sess.session, q); err != nil {
+			_, _ = fmt.Fprintf(out, "session search failed: %v\n", err)
+		}
+	case "/resume":
+		if sess.session == nil {
+			_, _ = fmt.Fprintln(out, "session disabled (--no-session)")
+		} else if len(fields) != 2 {
+			_, _ = fmt.Fprintln(out, "usage: /resume <session-id>")
+		} else if id, err := resolveSessionID(sessionIDOpts{explicit: fields[1]}); err != nil {
+			_, _ = fmt.Fprintln(out, err)
+		} else if info, err := sess.session.switchTo(ctx, id); err != nil {
+			_, _ = fmt.Fprintf(out, "resume failed: %v\n", err)
+		} else {
+			_, _ = fmt.Fprintln(out, info.line())
 		}
 	case "/model":
 		if sess.lastModel == "" {
@@ -189,7 +217,65 @@ const golemHelp = `commands:
   /model         show the last routed model
   /clear         delete the active session's history
   /new           start a new session (keeps history of the old one)
+  /sessions      list saved sessions
+  /search-sessions <query>
+                 search saved sessions
+  /resume <id>   switch to a saved session
   /undo          revert the last applied write (when -allow-write)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
 `
+
+func printSessions(ctx context.Context, out io.Writer, s *session) error {
+	summaries, err := s.store.List(ctx)
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintln(out, "sessions:")
+	if len(summaries) == 0 {
+		_, _ = fmt.Fprintln(out, "  (none)")
+		return nil
+	}
+	for _, sum := range summaries {
+		title := strings.TrimSpace(sum.Title)
+		if title == "" {
+			title = "(untitled)"
+		}
+		_, _ = fmt.Fprintf(out, "  %s  %s  updated %s  %s\n",
+			sum.ID,
+			plural(sum.MessageCount, "message", "messages"),
+			sum.UpdatedAt.Format("2006-01-02 15:04"),
+			title,
+		)
+	}
+	return nil
+}
+
+func printSessionSearch(ctx context.Context, out io.Writer, s *session, query string) error {
+	results, err := s.store.Search(ctx, query, conversation.SearchOptions{Limit: 10})
+	if err != nil {
+		return err
+	}
+	_, _ = fmt.Fprintln(out, "session search:")
+	if len(results) == 0 {
+		_, _ = fmt.Fprintln(out, "  (no matches)")
+		return nil
+	}
+	for _, res := range results {
+		title := strings.TrimSpace(res.Title)
+		if title == "" {
+			title = "(untitled)"
+		}
+		snippet := strings.TrimSpace(strings.ReplaceAll(res.Snippet, "\n", " "))
+		if snippet == "" {
+			snippet = title
+		}
+		_, _ = fmt.Fprintf(out, "  %s  updated %s  %s\n    %s\n",
+			res.ID,
+			res.UpdatedAt.Format("2006-01-02 15:04"),
+			title,
+			snippet,
+		)
+	}
+	return nil
+}

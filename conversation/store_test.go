@@ -2,7 +2,9 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -212,6 +214,146 @@ func TestDelete_Idempotent(t *testing.T) {
 	_, err := store.Load(ctx, id)
 	if !errors.Is(err, ErrNotFound) {
 		t.Errorf("Load after Delete: error = %v, want ErrNotFound", err)
+	}
+}
+
+func TestSearch_FindsMessageTextWithoutLoadingBlobs(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	conv := Conversation{
+		ID:    "workspace:alpha",
+		Title: "Golem session",
+		Messages: []Message{
+			{Role: "user", Content: "How do approval prompts work?"},
+			{Role: "assistant", Content: "The approval prompt gates writes and exec."},
+		},
+	}
+	if err := store.Save(ctx, conv); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	if err := store.Save(ctx, Conversation{
+		ID:       "workspace:beta",
+		Title:    "Unrelated",
+		Messages: []Message{{Role: "user", Content: "quantum trading notes"}},
+	}); err != nil {
+		t.Fatalf("Save() unrelated error: %v", err)
+	}
+
+	got, err := store.Search(ctx, "approval prompt", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search() error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Search() len = %d, want 1: %+v", len(got), got)
+	}
+	if got[0].ID != conv.ID || got[0].Title != conv.Title || got[0].MessageCount != 2 {
+		t.Fatalf("Search() result = %+v, want alpha metadata", got[0])
+	}
+	if got[0].Snippet == "" {
+		t.Fatal("Search() result missing snippet")
+	}
+	if got[0].CreatedAt.IsZero() || got[0].UpdatedAt.IsZero() {
+		t.Fatalf("Search() timestamps missing: %+v", got[0])
+	}
+}
+
+func TestSearch_FindsToolCallPayloads(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.Save(ctx, Conversation{
+		ID:    "workspace:toolcall",
+		Title: "Tool call session",
+		Messages: []Message{
+			{Role: "user", Content: "read it"},
+			{Role: "assistant", ToolCalls: json.RawMessage(`[{"id":"c1","type":"function","function":{"name":"read_file","arguments":{"path":"secret.go"}}}]`)},
+			{Role: "tool", Content: "package secret", ToolName: "read_file", ToolCallID: "c1"},
+			{Role: "assistant", Content: "found it"},
+		},
+	}); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	got, err := store.Search(ctx, "secret.go", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search() error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "workspace:toolcall" {
+		t.Fatalf("Search() = %+v, want tool-call session", got)
+	}
+}
+
+func TestSearch_UpdateAndDeleteStayInSync(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	id := "workspace:sync"
+	if err := store.Save(ctx, Conversation{
+		ID:       id,
+		Title:    "Sync",
+		Messages: []Message{{Role: "user", Content: "alpha needle"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, Conversation{
+		ID:       id,
+		Title:    "Sync",
+		Messages: []Message{{Role: "user", Content: "bravo needle"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oldResults, err := store.Search(ctx, "alpha", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search(old) error: %v", err)
+	}
+	if len(oldResults) != 0 {
+		t.Fatalf("old term still indexed after update: %+v", oldResults)
+	}
+	newResults, err := store.Search(ctx, "bravo", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search(new) error: %v", err)
+	}
+	if len(newResults) != 1 || newResults[0].ID != id {
+		t.Fatalf("new term results = %+v, want %q", newResults, id)
+	}
+
+	if err := store.Delete(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	deleted, err := store.Search(ctx, "bravo", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search(after delete) error: %v", err)
+	}
+	if len(deleted) != 0 {
+		t.Fatalf("deleted conversation still indexed: %+v", deleted)
+	}
+}
+
+func TestSearch_IDPrefixScopeAndLimit(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, conv := range []Conversation{
+		{ID: "workspace:a", Title: "A", Messages: []Message{{Role: "user", Content: "shared term"}}},
+		{ID: "user:b", Title: "B", Messages: []Message{{Role: "user", Content: "shared term"}}},
+		{ID: "user:c", Title: "C", Messages: []Message{{Role: "user", Content: "shared term"}}},
+	} {
+		if err := store.Save(ctx, conv); err != nil {
+			t.Fatalf("Save(%s): %v", conv.ID, err)
+		}
+	}
+
+	got, err := store.Search(ctx, "shared", SearchOptions{IDPrefix: "user:", Limit: 1})
+	if err != nil {
+		t.Fatalf("Search() error: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("Search() len = %d, want 1: %+v", len(got), got)
+	}
+	if !strings.HasPrefix(got[0].ID, "user:") {
+		t.Fatalf("Search() = %+v, want user: scoped result", got)
 	}
 }
 

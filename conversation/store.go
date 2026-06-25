@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // Store defines conversation persistence operations.
@@ -13,6 +15,7 @@ type Store interface {
 	Save(ctx context.Context, conv Conversation) error
 	Load(ctx context.Context, id string) (*Conversation, error)
 	List(ctx context.Context) ([]Summary, error)
+	Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error)
 	Delete(ctx context.Context, id string) error
 }
 
@@ -48,7 +51,14 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 
 	now := time.Now().UnixMilli()
 
-	_, err = s.db.ExecContext(ctx,
+	searchBody := searchText(msgs)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("conversation: save %q: begin: %w", conv.ID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO conversations (id, title, messages, created_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
@@ -59,6 +69,12 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 	)
 	if err != nil {
 		return fmt.Errorf("conversation: save %q: %w", conv.ID, err)
+	}
+	if err := s.saveSearchIndex(ctx, tx, conv.ID, conv.Title, searchBody, len(msgs), now, now); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("conversation: save %q: commit: %w", conv.ID, err)
 	}
 	return nil
 }
@@ -123,11 +139,149 @@ func (s *SQLiteStore) List(ctx context.Context) ([]Summary, error) {
 	return summaries, nil
 }
 
+func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
+	match := sanitizeFTS5Query(query)
+	if match == "" {
+		return []SearchResult{}, nil
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 10
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT s.id, s.title,
+		        snippet(conversation_fts, 2, '', '', '...', 12) AS snippet,
+		        s.message_count, s.created_at, s.updated_at,
+		        bm25(conversation_fts) AS score
+		   FROM conversation_fts
+		   JOIN conversation_search s ON s.id = conversation_fts.id
+		  WHERE conversation_fts MATCH ?
+		    AND (? = '' OR s.id LIKE ? || '%')
+		  ORDER BY score ASC, s.updated_at DESC, s.id ASC
+		  LIMIT ?`,
+		match, opts.IDPrefix, opts.IDPrefix, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("conversation: search: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	results := []SearchResult{}
+	for rows.Next() {
+		var r SearchResult
+		var createdMs, updatedMs int64
+		if err := rows.Scan(&r.ID, &r.Title, &r.Snippet, &r.MessageCount, &createdMs, &updatedMs, &r.Score); err != nil {
+			return nil, fmt.Errorf("conversation: search: scan: %w", err)
+		}
+		r.CreatedAt = time.UnixMilli(createdMs)
+		r.UpdatedAt = time.UnixMilli(updatedMs)
+		results = append(results, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("conversation: search: iterate: %w", err)
+	}
+	return results, nil
+}
+
 // Delete removes a conversation by ID. Returns nil if not found (idempotent).
 func (s *SQLiteStore) Delete(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM conversations WHERE id = ?`, id)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return fmt.Errorf("conversation: delete %q: begin: %w", id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conversations WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("conversation: delete %q: %w", id, err)
 	}
+	if err := s.deleteSearchIndex(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("conversation: delete %q: commit: %w", id, err)
+	}
 	return nil
+}
+
+func (s *SQLiteStore) saveSearchIndex(ctx context.Context, tx *sql.Tx, id, title, body string, msgCount int, createdMs, updatedMs int64) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_fts WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("conversation: save %q: delete search fts: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO conversation_search (id, title, body, message_count, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(id) DO UPDATE SET
+			title         = excluded.title,
+			body          = excluded.body,
+			message_count = excluded.message_count,
+			updated_at    = excluded.updated_at`,
+		id, title, body, msgCount, createdMs, updatedMs,
+	); err != nil {
+		return fmt.Errorf("conversation: save %q: upsert search metadata: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO conversation_fts (id, title, body) VALUES (?, ?, ?)`,
+		id, title, body,
+	); err != nil {
+		return fmt.Errorf("conversation: save %q: insert search fts: %w", id, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) deleteSearchIndex(ctx context.Context, tx *sql.Tx, id string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_fts WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("conversation: delete %q: delete search fts: %w", id, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM conversation_search WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("conversation: delete %q: delete search metadata: %w", id, err)
+	}
+	return nil
+}
+
+func searchText(msgs []Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.Role != "" {
+			b.WriteString(m.Role)
+			b.WriteString(": ")
+		}
+		b.WriteString(m.Content)
+		if m.ToolName != "" {
+			b.WriteByte(' ')
+			b.WriteString(m.ToolName)
+		}
+		if m.ToolCallID != "" {
+			b.WriteByte(' ')
+			b.WriteString(m.ToolCallID)
+		}
+		if len(m.ToolCalls) > 0 {
+			b.WriteByte(' ')
+			b.Write(m.ToolCalls)
+		}
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+func sanitizeFTS5Query(query string) string {
+	var tokens []string
+	var current strings.Builder
+	for _, r := range query {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' {
+			current.WriteRune(r)
+		} else if current.Len() > 0 {
+			tokens = append(tokens, current.String())
+			current.Reset()
+		}
+	}
+	if current.Len() > 0 {
+		tokens = append(tokens, current.String())
+	}
+	if len(tokens) == 0 {
+		return ""
+	}
+	quoted := make([]string, len(tokens))
+	for i, t := range tokens {
+		quoted[i] = `"` + strings.ReplaceAll(t, `"`, `""`) + `"`
+	}
+	return strings.Join(quoted, " ")
 }

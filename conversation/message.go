@@ -72,6 +72,23 @@ type Summary struct {
 	UpdatedAt    time.Time
 }
 
+// SearchOptions scopes and bounds conversation search.
+type SearchOptions struct {
+	Limit    int
+	IDPrefix string
+}
+
+// SearchResult is one matching prior conversation.
+type SearchResult struct {
+	ID           string
+	Title        string
+	Snippet      string
+	MessageCount int
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+	Score        float64
+}
+
 // TrimResult holds the trimmed message slice and metadata about the trim.
 type TrimResult struct {
 	Messages        []Message

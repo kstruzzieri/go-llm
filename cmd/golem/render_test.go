@@ -86,7 +86,7 @@ func TestRenderer_FinalFooter_Completed_NoStoppedSuffix(t *testing.T) {
 		Usage:      provider.Usage{TotalTokens: 42},
 		StopReason: agent.Completed,
 	})
-	want := "done · 1 steps · 2.0s · 42 tok\n"
+	want := "done · 1 step · 2.0s · 42 tok\n"
 	if buf.String() != want {
 		t.Errorf("completed footer = %q, want %q (no stopped suffix)", buf.String(), want)
 	}

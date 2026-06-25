@@ -35,8 +35,8 @@ func TestRunMigrations_FreshDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version query failed: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("schema version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("schema version = %d, want 2", version)
 	}
 }
 
@@ -54,8 +54,8 @@ func TestRunMigrations_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version query failed: %v", err)
 	}
-	if version != 1 {
-		t.Fatalf("schema version = %d, want 1", version)
+	if version != 2 {
+		t.Fatalf("schema version = %d, want 2", version)
 	}
 }
 
@@ -71,5 +71,23 @@ func TestRunMigrations_IndexExists(t *testing.T) {
 	).Scan(&count)
 	if err != nil || count != 1 {
 		t.Fatalf("expected idx_conversations_updated_id index, count=%d err=%v", count, err)
+	}
+}
+
+func TestRunMigrations_SearchTablesExist(t *testing.T) {
+	db := openTestDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
+	}
+
+	for _, name := range []string{"conversation_search", "conversation_fts"} {
+		var count int
+		err := db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE name = ?`,
+			name,
+		).Scan(&count)
+		if err != nil || count != 1 {
+			t.Fatalf("expected %s table, count=%d err=%v", name, count, err)
+		}
 	}
 }

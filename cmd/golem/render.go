@@ -71,8 +71,8 @@ func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
 
 func (r *renderer) finalFooter(res agent.Result) {
 	total := r.now().Sub(r.runStart).Seconds()
-	line := fmt.Sprintf("done · %d steps · %.1fs · %d tok",
-		len(res.Steps), total, res.Usage.TotalTokens)
+	line := fmt.Sprintf("done · %s · %.1fs · %d tok",
+		plural(len(res.Steps), "step", "steps"), total, res.Usage.TotalTokens)
 	if res.StopReason != agent.Completed {
 		// Double space (not " · ") deliberately sets the stop reason apart from
 		// the metric fields above it — it is a status suffix, not another metric.

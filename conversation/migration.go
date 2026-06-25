@@ -18,6 +18,11 @@ var migrations = []migration{
 		description: "baseline conversations table",
 		fn:          migrateV1,
 	},
+	{
+		version:     2,
+		description: "conversation search shadow table and FTS5 index",
+		fn:          migrateV2,
+	},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -35,6 +40,36 @@ func migrateV1(tx *sql.Tx) error {
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("conversation: migrate v1: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV2(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS conversation_search (
+			id            TEXT PRIMARY KEY,
+			title         TEXT NOT NULL DEFAULT '',
+			body          TEXT NOT NULL,
+			message_count INTEGER NOT NULL,
+			created_at    INTEGER NOT NULL,
+			updated_at    INTEGER NOT NULL
+		)`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS conversation_fts USING fts5(
+			id UNINDEXED,
+			title,
+			body
+		)`,
+		`INSERT OR REPLACE INTO conversation_search (id, title, body, message_count, created_at, updated_at)
+		 SELECT id, title, messages, json_array_length(messages), created_at, updated_at
+		   FROM conversations`,
+		`DELETE FROM conversation_fts`,
+		`INSERT INTO conversation_fts (id, title, body)
+		 SELECT id, title, body FROM conversation_search`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("conversation: migrate v2: %w", err)
 		}
 	}
 	return nil
