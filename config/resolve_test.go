@@ -227,6 +227,33 @@ func TestResolve_SideTaskFallbackUseCase(t *testing.T) {
 	}
 }
 
+func TestResolve_ApprovalFallbackUsesAgentDefault(t *testing.T) {
+	cfg := loadTestConfig(t)
+	checker := &mockChecker{models: []string{"qwen3.5:35b-a3b", "qwen3.5:27b"}}
+
+	got, err := cfg.Resolve(context.Background(), checker, "approval")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if got.Role != "fast" || got.Name != "qwen3.5:35b-a3b" {
+		t.Fatalf("Resolve(\"approval\") = %+v, want agent/fast fallback", got)
+	}
+}
+
+func TestResolve_ExplicitSideTaskDefaultWins(t *testing.T) {
+	cfg := loadTestConfig(t)
+	cfg.Defaults["summarize"] = "lightweight"
+	checker := &mockChecker{models: []string{"qwen3.5:27b", "qwen3:8b"}}
+
+	got, err := cfg.Resolve(context.Background(), checker, "summarize")
+	if err != nil {
+		t.Fatalf("Resolve() error: %v", err)
+	}
+	if got.Role != "lightweight" || got.Name != "qwen3:8b" {
+		t.Fatalf("Resolve(\"summarize\") = %+v, want explicit lightweight role", got)
+	}
+}
+
 func TestResolve_CheckerError(t *testing.T) {
 	cfg := loadTestConfig(t)
 	checker := &mockChecker{err: fmt.Errorf("connection refused")}
@@ -334,6 +361,27 @@ func TestResolveAll_NoneAvailable(t *testing.T) {
 	_, err := cfg.ResolveAll(context.Background(), checker)
 	if err == nil {
 		t.Fatal("expected error when no models are available")
+	}
+}
+
+func TestResolveAll_OnlyExplicitDefaults(t *testing.T) {
+	cfg := loadTestConfig(t)
+	checker := &mockChecker{models: []string{
+		"qwen3.5:27b",
+		"qwen3.5:35b-a3b",
+		"qwen3-coder-next:latest",
+		"qwen3:8b",
+		"qwen3-embedding:8b",
+	}}
+
+	results, err := cfg.ResolveAll(context.Background(), checker)
+	if err != nil {
+		t.Fatalf("ResolveAll() error: %v", err)
+	}
+	for _, useCase := range []string{"summarize", "route", "rerank", "verify", "extract", "approval", "vision"} {
+		if _, ok := results[useCase]; ok {
+			t.Fatalf("ResolveAll() included virtual side-task %q in %+v", useCase, results)
+		}
 	}
 }
 
@@ -488,6 +536,24 @@ func TestConfig_RoleFallbackChain_SideTaskFallbackUseCase(t *testing.T) {
 		t.Fatalf("RoleFallbackChain(\"summarize\"): %v", err)
 	}
 	want := []string{"ollama/qwen3.5:27b", "ollama/qwen3:8b"}
+	if len(chain) != len(want) {
+		t.Fatalf("chain = %v, want %v", chain, want)
+	}
+	for i := range want {
+		if chain[i] != want[i] {
+			t.Fatalf("chain = %v, want %v", chain, want)
+		}
+	}
+}
+
+func TestConfig_RoleFallbackChain_ApprovalFallbackUseCase(t *testing.T) {
+	cfg := loadTestConfig(t)
+
+	chain, err := cfg.RoleFallbackChain("approval")
+	if err != nil {
+		t.Fatalf("RoleFallbackChain(\"approval\"): %v", err)
+	}
+	want := []string{"ollama/qwen3.5:35b-a3b", "ollama/qwen3:8b"}
 	if len(chain) != len(want) {
 		t.Fatalf("chain = %v, want %v", chain, want)
 	}

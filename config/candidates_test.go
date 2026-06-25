@@ -176,6 +176,25 @@ func TestResolveCandidates_SideTaskFallbackUseCase(t *testing.T) {
 	}
 }
 
+func TestResolveCandidates_ApprovalFallbackUsesAgentDefault(t *testing.T) {
+	cfg := loadTestConfig(t)
+	checker := &mockChecker{models: []string{"qwen3.5:35b-a3b", "qwen3.5:27b", "qwen3:8b"}}
+
+	got, err := cfg.ResolveCandidates(context.Background(), checker, "approval")
+	if err != nil {
+		t.Fatalf("ResolveCandidates() error: %v", err)
+	}
+	wantRoles := []string{"fast", "lightweight"}
+	if len(got) != len(wantRoles) {
+		t.Fatalf("len(candidates) = %d, want %d: %+v", len(got), len(wantRoles), got)
+	}
+	for i, want := range wantRoles {
+		if got[i].Role != want {
+			t.Fatalf("candidate roles = %+v, want %v", got, wantRoles)
+		}
+	}
+}
+
 func TestResolveCandidates_UnknownDefaultRole(t *testing.T) {
 	cfg := &Config{
 		Models: map[string]ModelConfig{

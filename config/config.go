@@ -83,7 +83,8 @@ type Config struct {
 	Defaults  map[string]string         `json:"defaults"`
 }
 
-// sideTaskDefaultFallbacks keeps auxiliary orchestration roles optional.
+// sideTaskDefaultFallbacks keeps auxiliary model-selection roles optional.
+// "route" here is the side-task model role, not provider.Router itself.
 // Explicit defaults win; these entries only pick an existing use-case when a
 // side-task slot is absent from older models.json files.
 var sideTaskDefaultFallbacks = map[string][]string{
@@ -220,8 +221,8 @@ func (c *Config) RoleConfig(role string) *ModelConfig {
 // ModelFor resolves a use-case to a model name through the defaults chain.
 // It looks up useCase in Defaults to find the role, then looks up that role in
 // Models to return the model Name. Optional auxiliary use-cases such as
-// summarize, rerank, verify, extract, approval, and vision fall back to existing
-// defaults when absent. Returns "" if the use-case or its target role is not found.
+// summarize, route, rerank, verify, extract, approval, and vision fall back to
+// existing defaults when absent. Returns "" if the use-case or its target role is not found.
 func (c *Config) ModelFor(useCase string) string {
 	role, ok := c.roleForUseCase(useCase)
 	if !ok {
