@@ -18,6 +18,8 @@ type CandidateModel struct {
 
 // ResolveCandidates returns all available models for a use-case, ordered by
 // config preference (primary first, then fallback chain traversal order).
+// Optional auxiliary use-cases first fall back to existing configured defaults
+// when their own Defaults slot is absent.
 // Unlike Resolve (which returns the first available model), this enumerates
 // every reachable model that is currently available, giving orchestration
 // layers the full candidate set for enrichment and scoring.
@@ -29,7 +31,7 @@ func (c *Config) ResolveCandidates(ctx context.Context, checker ModelChecker, us
 	if checker == nil {
 		return nil, fmt.Errorf("config: model checker is required")
 	}
-	role, ok := c.Defaults[useCase]
+	role, ok := c.roleForUseCase(useCase)
 	if !ok {
 		return nil, fmt.Errorf("config: unknown use-case %q", useCase)
 	}

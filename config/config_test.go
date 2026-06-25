@@ -624,6 +624,13 @@ func TestModelFor(t *testing.T) {
 		{"embedding", "qwen3-embedding:8b"},
 		{"agent", "qwen3.5:35b-a3b"},
 		{"analysis", "qwen3.5:27b"},
+		{"summarize", "qwen3.5:27b"},
+		{"route", "qwen3.5:27b"},
+		{"rerank", "qwen3.5:27b"},
+		{"verify", "qwen3.5:27b"},
+		{"extract", "qwen3.5:27b"},
+		{"approval", "qwen3.5:35b-a3b"},
+		{"vision", "qwen3.5:27b"},
 		{"unknown", ""},
 	}
 
@@ -634,6 +641,18 @@ func TestModelFor(t *testing.T) {
 				t.Errorf("ModelFor(%q) = %q, want %q", tt.useCase, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestModelFor_ExplicitSideTaskDefaultWins(t *testing.T) {
+	cfg, err := Load("testdata/valid.json")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	cfg.Defaults["summarize"] = "lightweight"
+
+	if got := cfg.ModelFor("summarize"); got != "qwen3:8b" {
+		t.Fatalf("ModelFor(\"summarize\") = %q, want explicit lightweight model", got)
 	}
 }
 
