@@ -253,6 +253,10 @@ func searchText(msgs []Message) string {
 			b.WriteByte(' ')
 			b.WriteString(m.ToolCallID)
 		}
+		if len(m.ToolCalls) > 0 {
+			b.WriteByte(' ')
+			b.Write(m.ToolCalls)
+		}
 		b.WriteByte('\n')
 	}
 	return b.String()

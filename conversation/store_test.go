@@ -2,6 +2,7 @@ package conversation
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -254,6 +255,32 @@ func TestSearch_FindsMessageTextWithoutLoadingBlobs(t *testing.T) {
 	}
 	if got[0].CreatedAt.IsZero() || got[0].UpdatedAt.IsZero() {
 		t.Fatalf("Search() timestamps missing: %+v", got[0])
+	}
+}
+
+func TestSearch_FindsToolCallPayloads(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	if err := store.Save(ctx, Conversation{
+		ID:    "workspace:toolcall",
+		Title: "Tool call session",
+		Messages: []Message{
+			{Role: "user", Content: "read it"},
+			{Role: "assistant", ToolCalls: json.RawMessage(`[{"id":"c1","type":"function","function":{"name":"read_file","arguments":{"path":"secret.go"}}}]`)},
+			{Role: "tool", Content: "package secret", ToolName: "read_file", ToolCallID: "c1"},
+			{Role: "assistant", Content: "found it"},
+		},
+	}); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	got, err := store.Search(ctx, "secret.go", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search() error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != "workspace:toolcall" {
+		t.Fatalf("Search() = %+v, want tool-call session", got)
 	}
 }
 
