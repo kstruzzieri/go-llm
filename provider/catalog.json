@@ -49,6 +49,7 @@
       "context_window": 131072,
       "variants": {
         "7b":  { "ram_required": 5.0, "ram_recommended": 8.0, "vram_recommended": 5.0, "quality": "good", "speed": "fast" },
+        "9b":  { "ram_required": 6.0, "ram_recommended": 9.0, "vram_recommended": 6.0, "quality": "good", "speed": "fast" },
         "14b": { "ram_required": 9.0, "ram_recommended": 12.0, "vram_recommended": 9.0, "quality": "great", "speed": "medium" },
         "27b": { "ram_required": 17.0, "ram_recommended": 22.0, "vram_recommended": 17.0, "quality": "great", "speed": "medium" },
         "35b": { "ram_required": 22.0, "ram_recommended": 28.0, "vram_recommended": 22.0, "quality": "great", "speed": "medium" }
