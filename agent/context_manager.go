@@ -7,8 +7,10 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// defaultInputCeiling is a conservative fallback when Budget.InputCeiling is 0.
-const defaultInputCeiling = 8192
+// DefaultInputCeiling is a conservative fallback when Budget.InputCeiling is 0.
+// Exported so consumers (e.g. Golem's compression policy) derive their own
+// token thresholds from the same source rather than duplicating the literal.
+const DefaultInputCeiling = 8192
 
 // ContextManager assembles and bounds the prompt each turn. It is a pure
 // function over State, tool-schema token count, and budget.
@@ -48,7 +50,7 @@ func (m ContextManager) messageCost(msg Message) int {
 func turnBudget(b Budget) TokenBudget {
 	ceiling := b.InputCeiling
 	if ceiling <= 0 {
-		ceiling = defaultInputCeiling
+		ceiling = DefaultInputCeiling
 	}
 	if b.OutputReserve > 0 {
 		ceiling -= b.OutputReserve

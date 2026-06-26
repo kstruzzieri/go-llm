@@ -268,7 +268,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	maxHistoryTokens := f.inputCeiling
 	if maxHistoryTokens <= 0 {
-		maxHistoryTokens = 8192 // mirror agent defaultInputCeiling
+		maxHistoryTokens = agent.DefaultInputCeiling
 	}
 	maxHistoryTokens /= 2
 
