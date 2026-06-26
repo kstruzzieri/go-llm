@@ -1,7 +1,9 @@
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/golem-lockup-on-dark.svg">
   <img alt="Golem agent logo" src="assets/brand/golem-lockup-on-light.svg" width="260">
 </picture>
+</p>
 
 # go-llm
 
@@ -90,8 +92,8 @@ models:
     cmd: llama-server -m /models/qwen3.6-35b-a3b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
   "qwen3-coder-next:latest":
     cmd: llama-server -m /models/qwen3-coder-next.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
-  "qwen3:8b":
-    cmd: llama-server -m /models/qwen3-8b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
+  "qwen3.5:9b-mtp":
+    cmd: llama-server -m /models/qwen3.5-9b-mtp.gguf --port ${PORT} -c 8192 -ngl 99 --jinja
   "qwen3-embedding:8b":
     cmd: llama-server -m /models/qwen3-embedding-8b.gguf --port ${PORT} -c 8192 -ngl 99 --embeddings
 ```

@@ -42,7 +42,7 @@ not "what `go-llm` requires."
 - **`gemma4:31b`** (dense) — agent / judge / reasoning (86.4% τ2-bench,
   80.0% LiveCodeBench, native function calling)
 - **`qwen3.6:35b-a3b`** — fast MoE (73.4% SWE-bench, 3B active)
-- **`qwen3:8b`** — lightweight / FIM
+- **`qwen3.5:9b-mtp`** — lightweight / FIM
 
 The fleet co-resides in ~77GB with comfortable headroom. **llama.cpp is now
 the primary local backend** (run one `llama-server` per model on its own

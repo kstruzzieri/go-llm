@@ -425,6 +425,48 @@ func TestModelRegistry_Lookup_Qwen3CoderNextLatestCatalogMatch(t *testing.T) {
 	}
 }
 
+func TestModelRegistry_Lookup_Qwen35NineBMTPUsesCatalog(t *testing.T) {
+	ctx := context.Background()
+
+	prov := &mrMockProvider{
+		name: "llamacpp",
+		caps: CapChat | CapGenerate | CapStream,
+		models: []ModelInfo{
+			{Name: "qwen3.5:9b-mtp"},
+		},
+	}
+
+	reg := &mrMockProviderRegistry{
+		providers: map[string]Provider{"llamacpp": prov},
+	}
+
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry() error: %v", err)
+	}
+
+	profile, err := mr.Lookup(ctx, ModelKey{Provider: "llamacpp", Model: "qwen3.5:9b-mtp"})
+	if err != nil {
+		t.Fatalf("Lookup() error: %v", err)
+	}
+
+	if profile.Resources.RAMRequired != 6.0 {
+		t.Errorf("RAMRequired = %f, want 6.0", profile.Resources.RAMRequired)
+	}
+	if profile.Resources.RAMRecommended != 9.0 {
+		t.Errorf("RAMRecommended = %f, want 9.0", profile.Resources.RAMRecommended)
+	}
+	if profile.Quality != TierGood {
+		t.Errorf("Quality = %v, want %v", profile.Quality, TierGood)
+	}
+	if profile.Speed != TierGreat {
+		t.Errorf("Speed = %v, want %v", profile.Speed, TierGreat)
+	}
+	if profile.FIM == nil {
+		t.Fatal("expected FIM config from catalog, got nil")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // TestModelRegistry_Lookup_UnknownModel
 // ---------------------------------------------------------------------------
