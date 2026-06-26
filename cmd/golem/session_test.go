@@ -432,6 +432,25 @@ func TestSession_CurrentConversationSnapshotsState(t *testing.T) {
 	}
 }
 
+func TestSession_ClearAndRenewZeroDurableSummary(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:clearsummary")
+
+	s.summary = &conversation.DurableSummary{Content: "X", MessageCount: 1}
+	if err := s.clear(ctx); err != nil {
+		t.Fatalf("clear: %v", err)
+	}
+	if s.summary != nil || s.historySummary() != "" {
+		t.Fatalf("clear did not zero the durable summary: %+v", s.summary)
+	}
+
+	s.summary = &conversation.DurableSummary{Content: "Y", MessageCount: 1}
+	s.renew()
+	if s.summary != nil {
+		t.Fatalf("renew did not zero the durable summary: %+v", s.summary)
+	}
+}
+
 // TestSession_HistorySkipsRowsTheRuntimeWouldReject proves history() defensively
 // drops any persisted row outside the runtime's user/assistant + non-empty
 // allowlist, so a single foreign/corrupt stored turn cannot brick the session by
