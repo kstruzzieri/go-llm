@@ -1,10 +1,5 @@
 package conversation
 
-import (
-	"context"
-	"strings"
-)
-
 // messageCost computes the estimated token cost of a message using all
 // prompt-visible fields.
 func messageCost(m Message, estimator TokenEstimator) int {
@@ -337,68 +332,4 @@ func trimByExchangesKeep(msgs []Message, maxExchanges int) []bool {
 		}
 	}
 	return keep
-}
-
-// Summarizer compresses a safe old-message span into durable summary text.
-type Summarizer func(context.Context, []Message) (string, error)
-
-// CompressByExchanges summarizes old safe history and keeps recent raw
-// messages according to TrimByExchanges' safety rules.
-func CompressByExchanges(ctx context.Context, conv Conversation, maxRecentExchanges int, summarize Summarizer) (Conversation, error) {
-	if summarize == nil {
-		summarize = FallbackSummarizer
-	}
-	keep := trimByExchangesKeep(conv.Messages, maxRecentExchanges)
-	old := make([]Message, 0, len(conv.Messages))
-	recent := make([]Message, 0, len(conv.Messages))
-	for i, m := range conv.Messages {
-		if keep[i] {
-			recent = append(recent, m)
-			continue
-		}
-		if m.Role != "system" {
-			old = append(old, m)
-		}
-	}
-	if len(old) == 0 {
-		return conv, nil
-	}
-
-	text, err := summarize(ctx, old)
-	if err != nil {
-		return Conversation{}, err
-	}
-
-	out := conv
-	out.Messages = recent
-	content := strings.TrimSpace(text)
-	count := len(old)
-	if conv.DurableSummary != nil {
-		count += conv.DurableSummary.MessageCount
-		switch {
-		case conv.DurableSummary.Content != "" && content != "":
-			content = conv.DurableSummary.Content + "\n\n" + content
-		case content == "":
-			content = conv.DurableSummary.Content
-		}
-	}
-	out.DurableSummary = &DurableSummary{Content: content, MessageCount: count}
-	return out, nil
-}
-
-// FallbackSummarizer is deterministic and model-free for tests and offline use.
-func FallbackSummarizer(_ context.Context, msgs []Message) (string, error) {
-	var b strings.Builder
-	for _, m := range msgs {
-		if m.Role == "" && m.Content == "" {
-			continue
-		}
-		if m.Role != "" {
-			b.WriteString(m.Role)
-			b.WriteString(": ")
-		}
-		b.WriteString(m.Content)
-		b.WriteByte('\n')
-	}
-	return strings.TrimSpace(b.String()), nil
 }
