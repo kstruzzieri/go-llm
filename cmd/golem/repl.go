@@ -24,6 +24,8 @@ type replSession struct {
 
 	session *session // nil => --no-session (no history, no persistence)
 
+	compress compressPolicy // post-turn history compression policy
+
 	lastModel  string           // last routed ActualModel for /model
 	journal    *mutationJournal // nil unless -allow-write enabled writes
 	allowWrite bool
