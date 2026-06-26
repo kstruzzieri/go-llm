@@ -147,11 +147,12 @@ const (
 // re-saved after each successful turn. Single-writer: B3 does not merge
 // concurrent writers — two golem processes on the same id are last-save-wins.
 type session struct {
-	db     *sql.DB
-	dbPath string // retained so record/clear can re-secure sidecars after each write
-	store  conversation.Store
-	id     string
-	msgs   []conversation.Message
+	db      *sql.DB
+	dbPath  string // retained so record/clear can re-secure sidecars after each write
+	store   conversation.Store
+	id      string
+	msgs    []conversation.Message
+	summary *conversation.DurableSummary
 }
 
 // sessionInfo is the startup disclosure for one resolved session.
@@ -207,6 +208,7 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 	switch {
 	case lerr == nil:
 		s.msgs = conv.Messages
+		s.summary = cloneDurableSummary(conv.DurableSummary)
 		info.resumed = len(conv.Messages) > 0
 		info.msgCount = len(conv.Messages)
 		info.updatedAt = conv.UpdatedAt
@@ -240,9 +242,10 @@ func (s *session) recordResult(ctx context.Context, userLine string, res agent.R
 func (s *session) recordMessages(ctx context.Context, msgs []conversation.Message) error {
 	next := append(append([]conversation.Message{}, s.msgs...), msgs...)
 	if err := s.store.Save(ctx, conversation.Conversation{
-		ID:       s.id,
-		Title:    sessionTitle(next),
-		Messages: next,
+		ID:             s.id,
+		Title:          sessionTitle(next),
+		Messages:       next,
+		DurableSummary: cloneDurableSummary(s.summary),
 	}); err != nil {
 		return err
 	}
@@ -307,6 +310,13 @@ func (s *session) history() []provider.ChatMessage {
 	return out
 }
 
+func (s *session) historySummary() string {
+	if s == nil || s.summary == nil {
+		return ""
+	}
+	return s.summary.Content
+}
+
 // sessionTitle is the first user line, truncated, for nicer future listings.
 func sessionTitle(msgs []conversation.Message) string {
 	for _, m := range msgs {
@@ -331,6 +341,7 @@ func (s *session) clear(ctx context.Context) error {
 		return err
 	}
 	s.msgs = nil
+	s.summary = nil
 	_ = chmodSessionDBFiles(s.dbPath)
 	return nil
 }
@@ -339,6 +350,7 @@ func (s *session) clear(ctx context.Context) error {
 func (s *session) renew() {
 	s.id = "golem:" + conversation.NewID()
 	s.msgs = nil
+	s.summary = nil
 }
 
 func (s *session) switchTo(ctx context.Context, id string) (sessionInfo, error) {
@@ -348,12 +360,21 @@ func (s *session) switchTo(ctx context.Context, id string) (sessionInfo, error) 
 	}
 	s.id = id
 	s.msgs = conv.Messages
+	s.summary = cloneDurableSummary(conv.DurableSummary)
 	return sessionInfo{
 		id:        id,
 		resumed:   len(conv.Messages) > 0,
 		msgCount:  len(conv.Messages),
 		updatedAt: conv.UpdatedAt,
 	}, nil
+}
+
+func cloneDurableSummary(in *conversation.DurableSummary) *conversation.DurableSummary {
+	if in == nil {
+		return nil
+	}
+	out := *in
+	return &out
 }
 
 // Close releases the DB. Nil-safe and idempotent enough for defer.

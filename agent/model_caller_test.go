@@ -2,8 +2,10 @@ package agent
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -84,5 +86,32 @@ func TestRouterModelCallerUsesNumPredictAsExpectedOutput(t *testing.T) {
 	}
 	if gotReq.ExpectedOutput != 256 {
 		t.Fatalf("ExpectedOutput = %d, want 256", gotReq.ExpectedOutput)
+	}
+}
+
+func TestRouterSummarizerRoutesSummarizeUseCase(t *testing.T) {
+	var gotReq provider.RoutingRequest
+	s := &routerSummarizer{
+		route: func(_ context.Context, rr provider.RoutingRequest) (planExecutor, error) {
+			gotReq = rr
+			return fakePlan{}, nil
+		},
+	}
+
+	got, err := s.Summarize(context.Background(), []conversation.Message{{Role: "user", Content: "old turn"}})
+	if err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if got != "Hello" {
+		t.Fatalf("summary = %q, want collected model output", got)
+	}
+	if gotReq.UseCase != "summarize" {
+		t.Fatalf("UseCase = %q, want summarize", gotReq.UseCase)
+	}
+	if gotReq.RequiredCaps != provider.CapChat|provider.CapStream {
+		t.Fatalf("RequiredCaps = %s, want chat|stream", gotReq.RequiredCaps)
+	}
+	if len(gotReq.Messages) != 2 || !strings.Contains(gotReq.Messages[1].Content, "user: old turn") {
+		t.Fatalf("Messages = %+v, want old messages in summarize prompt", gotReq.Messages)
 	}
 }

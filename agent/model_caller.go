@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"fmt"
+	"strings"
 
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -72,4 +75,69 @@ func (m *routerModelCaller) Chat(ctx context.Context, req provider.ChatRequest,
 	final := getFinal()
 	final.RouteOutcome = outcome
 	return ModelResult{Response: final, RouteOutcome: outcome}, execErr
+}
+
+type routerSummarizer struct {
+	route func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error)
+}
+
+// NewRouterSummarizer routes durable-history compression through the optional
+// "summarize" model role.
+func NewRouterSummarizer(r *provider.Router) conversation.Summarizer {
+	return (&routerSummarizer{
+		route: func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error) {
+			return r.Route(ctx, rr)
+		},
+	}).Summarize
+}
+
+func (s *routerSummarizer) Summarize(ctx context.Context, msgs []conversation.Message) (string, error) {
+	if s.route == nil {
+		return "", fmt.Errorf("agent: summarize route is nil")
+	}
+	const outputReserve = 512
+	rr := provider.RoutingRequest{
+		UseCase: "summarize",
+		Messages: []provider.ChatMessage{
+			{Role: "system", Content: "Summarize older conversation messages for future context. Preserve goals, decisions, tool results, and open tasks. Be concise."},
+			{Role: "user", Content: summarizeTranscript(msgs)},
+		},
+		Options:        provider.ModelOptions{NumPredict: outputReserve},
+		ExpectedOutput: outputReserve,
+		RequiredCaps:   provider.CapChat | provider.CapStream,
+	}
+	plan, err := s.route(ctx, rr)
+	if err != nil {
+		return "", err
+	}
+	wrapped, getFinal := provider.Collect(nil)
+	if err := plan.ExecuteChatStream(ctx, wrapped); err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(getFinal().Content), nil
+}
+
+func summarizeTranscript(msgs []conversation.Message) string {
+	var b strings.Builder
+	for _, m := range msgs {
+		if m.Role != "" {
+			b.WriteString(m.Role)
+			b.WriteString(": ")
+		}
+		b.WriteString(m.Content)
+		if len(m.ToolCalls) > 0 {
+			b.WriteString(" tool_calls=")
+			b.Write(m.ToolCalls)
+		}
+		if m.ToolName != "" {
+			b.WriteString(" tool_name=")
+			b.WriteString(m.ToolName)
+		}
+		if m.ToolCallID != "" {
+			b.WriteString(" tool_call_id=")
+			b.WriteString(m.ToolCallID)
+		}
+		b.WriteByte('\n')
+	}
+	return strings.TrimSpace(b.String())
 }

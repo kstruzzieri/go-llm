@@ -95,13 +95,14 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
 	req := agent.Request{
-		Goal:     line,
-		System:   sess.baseSystem,
-		History:  sess.session.history(), // nil-safe: nil session => nil
-		Tools:    sess.tools,
-		MaxSteps: sess.maxSteps,
-		Budget:   sess.budget,
-		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
+		Goal:           line,
+		System:         sess.baseSystem,
+		HistorySummary: sess.session.historySummary(), // nil-safe: nil session => empty
+		History:        sess.session.history(),        // nil-safe: nil session => nil
+		Tools:          sess.tools,
+		MaxSteps:       sess.maxSteps,
+		Budget:         sess.budget,
+		Approver:       approver, // nil when read-only => runtime fail-safe denies Write/Exec
 	}
 	res, err := sess.orch.Run(runCtx, req, rend)
 	if err != nil {

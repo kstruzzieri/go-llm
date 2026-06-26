@@ -67,6 +67,45 @@ func TestSave_And_Load_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestSave_And_Load_RoundTripWithDurableSummary(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	conv := Conversation{
+		ID:    NewID(),
+		Title: "compressed conversation",
+		Messages: []Message{
+			{Role: "user", Content: "recent question"},
+			{Role: "assistant", Content: "recent answer"},
+		},
+		DurableSummary: &DurableSummary{
+			Content:      "Earlier conversation covered repository setup and Golem goals.",
+			MessageCount: 6,
+		},
+	}
+
+	if err := store.Save(ctx, conv); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	loaded, err := store.Load(ctx, conv.ID)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if loaded.DurableSummary == nil {
+		t.Fatal("DurableSummary is nil")
+	}
+	if loaded.DurableSummary.Content != conv.DurableSummary.Content {
+		t.Fatalf("DurableSummary.Content = %q, want %q", loaded.DurableSummary.Content, conv.DurableSummary.Content)
+	}
+	if loaded.DurableSummary.MessageCount != conv.DurableSummary.MessageCount {
+		t.Fatalf("DurableSummary.MessageCount = %d, want %d", loaded.DurableSummary.MessageCount, conv.DurableSummary.MessageCount)
+	}
+	if len(loaded.Messages) != len(conv.Messages) {
+		t.Fatalf("Messages len = %d, want %d", len(loaded.Messages), len(conv.Messages))
+	}
+}
+
 func TestSave_EmptyID_ReturnsError(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

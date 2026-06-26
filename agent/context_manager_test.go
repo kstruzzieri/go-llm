@@ -62,6 +62,33 @@ func TestAssembleCompactsElastic(t *testing.T) {
 	}
 }
 
+func TestAssembleIncludesDurableSummaryBeforeRawMessages(t *testing.T) {
+	m := ContextManager{Compactor: RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator}
+	st := State{
+		System:         "sys",
+		DurableSummary: "old setup and decisions",
+		Messages: []Message{
+			elastic("user", "recent question"),
+			pinned("user", "goal"),
+		},
+	}
+
+	out, _, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: 100})
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	req := buildChatRequest(out, nil, 0)
+	if len(req.Messages) < 4 {
+		t.Fatalf("messages = %+v, want system, durable summary, recent, goal", req.Messages)
+	}
+	if req.Messages[1].Role != "system" || req.Messages[1].Content != durableSummaryPrompt("old setup and decisions") {
+		t.Fatalf("summary message = %+v", req.Messages[1])
+	}
+	if req.Messages[2].Content != "recent question" {
+		t.Fatalf("summary was not before raw messages: %+v", req.Messages)
+	}
+}
+
 func TestAssembleReturnsErrWhenCompactedStateStillOverBudget(t *testing.T) {
 	// An unresolved tail (2 tool_calls, only 1 result present) can never be
 	// dropped. Even after evicting all droppable groups the state won't fit in a

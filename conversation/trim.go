@@ -1,5 +1,10 @@
 package conversation
 
+import (
+	"context"
+	"strings"
+)
+
 // messageCost computes the estimated token cost of a message using all
 // prompt-visible fields.
 func messageCost(m Message, estimator TokenEstimator) int {
@@ -227,23 +232,44 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 		return TrimResult{Messages: []Message{}}
 	}
 
-	var systemMsgs []Message
-	var nonSystem []Message
-	for _, m := range msgs {
-		if m.Role == "system" {
-			systemMsgs = append(systemMsgs, m)
-		} else {
-			nonSystem = append(nonSystem, m)
+	// Build result preserving original message order.
+	keep := trimByExchangesKeep(msgs, maxExchanges)
+	var result []Message
+	trimmedCount := 0
+	for i, m := range msgs {
+		if keep[i] {
+			result = append(result, m)
+			continue
 		}
+		trimmedCount++
 	}
 
+	return TrimResult{
+		Messages:        result,
+		TrimmedCount:    trimmedCount,
+		EstimatedTokens: 0,
+	}
+}
+
+type exchange struct {
+	start int
+	end   int
+}
+
+func trimByExchangesKeep(msgs []Message, maxExchanges int) []bool {
+	keep := make([]bool, len(msgs))
+	var nonSystem []Message
+	var orig []int
+	for i, m := range msgs {
+		if m.Role == "system" {
+			keep[i] = true
+			continue
+		}
+		nonSystem = append(nonSystem, m)
+		orig = append(orig, i)
+	}
 	if len(nonSystem) == 0 {
-		return TrimResult{Messages: systemMsgs, TrimmedCount: 0}
-	}
-
-	type exchange struct {
-		start int
-		end   int
+		return keep
 	}
 
 	unresolvedStart := -1
@@ -267,24 +293,23 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 	}
 
 	var exchanges []exchange
-	i := 0
-	for i < resolvedEnd {
-		if nonSystem[i].Role == "user" {
-			ex := exchange{start: i}
-			j := i + 1
-			for j < resolvedEnd {
-				if nonSystem[j].Role == "assistant" && len(nonSystem[j].ToolCalls) == 0 {
-					ex.end = j
-					exchanges = append(exchanges, ex)
-					j++
-					break
-				}
-				j++
-			}
-			i = j
-		} else {
+	for i := 0; i < resolvedEnd; {
+		if nonSystem[i].Role != "user" {
 			i++
+			continue
 		}
+		ex := exchange{start: i}
+		j := i + 1
+		for j < resolvedEnd {
+			if nonSystem[j].Role == "assistant" && len(nonSystem[j].ToolCalls) == 0 {
+				ex.end = j
+				exchanges = append(exchanges, ex)
+				j++
+				break
+			}
+			j++
+		}
+		i = j
 	}
 
 	keepFrom := 0
@@ -292,12 +317,10 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 		keepFrom = len(exchanges) - maxExchanges
 	}
 
-	keep := make([]bool, len(nonSystem))
-
 	for idx := keepFrom; idx < len(exchanges); idx++ {
 		ex := exchanges[idx]
 		for k := ex.start; k <= ex.end; k++ {
-			keep[k] = true
+			keep[orig[k]] = true
 		}
 	}
 
@@ -310,30 +333,72 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 			}
 		}
 		for k := tailStart; k < len(nonSystem); k++ {
-			keep[k] = true
+			keep[orig[k]] = true
 		}
 	}
+	return keep
+}
 
-	// Build result preserving original message order.
-	var result []Message
-	trimmedCount := 0
-	nsIdx := 0
+// Summarizer compresses a safe old-message span into durable summary text.
+type Summarizer func(context.Context, []Message) (string, error)
+
+// CompressByExchanges summarizes old safe history and keeps recent raw
+// messages according to TrimByExchanges' safety rules.
+func CompressByExchanges(ctx context.Context, conv Conversation, maxRecentExchanges int, summarize Summarizer) (Conversation, error) {
+	if summarize == nil {
+		summarize = FallbackSummarizer
+	}
+	keep := trimByExchangesKeep(conv.Messages, maxRecentExchanges)
+	old := make([]Message, 0, len(conv.Messages))
+	recent := make([]Message, 0, len(conv.Messages))
+	for i, m := range conv.Messages {
+		if keep[i] {
+			recent = append(recent, m)
+			continue
+		}
+		if m.Role != "system" {
+			old = append(old, m)
+		}
+	}
+	if len(old) == 0 {
+		return conv, nil
+	}
+
+	text, err := summarize(ctx, old)
+	if err != nil {
+		return Conversation{}, err
+	}
+
+	out := conv
+	out.Messages = recent
+	content := strings.TrimSpace(text)
+	count := len(old)
+	if conv.DurableSummary != nil {
+		count += conv.DurableSummary.MessageCount
+		switch {
+		case conv.DurableSummary.Content != "" && content != "":
+			content = conv.DurableSummary.Content + "\n\n" + content
+		case content == "":
+			content = conv.DurableSummary.Content
+		}
+	}
+	out.DurableSummary = &DurableSummary{Content: content, MessageCount: count}
+	return out, nil
+}
+
+// FallbackSummarizer is deterministic and model-free for tests and offline use.
+func FallbackSummarizer(_ context.Context, msgs []Message) (string, error) {
+	var b strings.Builder
 	for _, m := range msgs {
-		if m.Role == "system" {
-			result = append(result, m)
-		} else {
-			if keep[nsIdx] {
-				result = append(result, m)
-			} else {
-				trimmedCount++
-			}
-			nsIdx++
+		if m.Role == "" && m.Content == "" {
+			continue
 		}
+		if m.Role != "" {
+			b.WriteString(m.Role)
+			b.WriteString(": ")
+		}
+		b.WriteString(m.Content)
+		b.WriteByte('\n')
 	}
-
-	return TrimResult{
-		Messages:        result,
-		TrimmedCount:    trimmedCount,
-		EstimatedTokens: 0,
-	}
+	return strings.TrimSpace(b.String()), nil
 }

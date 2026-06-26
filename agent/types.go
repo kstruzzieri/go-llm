@@ -63,13 +63,14 @@ type Budget struct {
 
 // Request is the unit of work handed to Run.
 type Request struct {
-	Goal     string
-	System   string
-	History  []provider.ChatMessage // prior non-system turns; runtime marks every entry Elastic
-	Tools    []Tool
-	MaxSteps int // 0 => defaultMaxSteps
-	Budget   Budget
-	Approver Approver // nil => fail-safe (auto Read, deny Write/Exec)
+	Goal           string
+	System         string
+	HistorySummary string
+	History        []provider.ChatMessage // prior non-system turns; runtime marks every entry Elastic
+	Tools          []Tool
+	MaxSteps       int // 0 => defaultMaxSteps
+	Budget         Budget
+	Approver       Approver // nil => fail-safe (auto Read, deny Write/Exec)
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).
@@ -89,8 +90,9 @@ type Message struct {
 
 // State is the canonical transcript the Orchestrator owns.
 type State struct {
-	System   string
-	Messages []Message
+	System         string
+	DurableSummary string
+	Messages       []Message
 }
 
 // RetrievalAttribution credits the sources a retrieval-style tool returned.

@@ -35,8 +35,8 @@ func TestRunMigrations_FreshDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version query failed: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("schema version = %d, want 3", version)
 	}
 }
 
@@ -54,8 +54,8 @@ func TestRunMigrations_Idempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("version query failed: %v", err)
 	}
-	if version != 2 {
-		t.Fatalf("schema version = %d, want 2", version)
+	if version != 3 {
+		t.Fatalf("schema version = %d, want 3", version)
 	}
 }
 
@@ -88,6 +88,21 @@ func TestRunMigrations_SearchTablesExist(t *testing.T) {
 		).Scan(&count)
 		if err != nil || count != 1 {
 			t.Fatalf("expected %s table, count=%d err=%v", name, count, err)
+		}
+	}
+}
+
+func TestRunMigrations_DurableSummaryColumnsExist(t *testing.T) {
+	db := openTestDB(t)
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
+	}
+
+	for _, name := range []string{"summary_content", "summary_message_count"} {
+		var count int
+		err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = ?`, name).Scan(&count)
+		if err != nil || count != 1 {
+			t.Fatalf("expected conversations.%s column, count=%d err=%v", name, count, err)
 		}
 	}
 }

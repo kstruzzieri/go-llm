@@ -1,6 +1,7 @@
 package conversation
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 	"unicode/utf8"
@@ -323,6 +324,53 @@ func TestTrimByExchanges_ZeroExchanges(t *testing.T) {
 	}
 	if result.Messages[0].Role != "system" {
 		t.Error("expected system message only")
+	}
+}
+
+func TestCompressByExchanges_SummarizesOnlySafeOldMessages(t *testing.T) {
+	conv := Conversation{
+		ID: "c1",
+		Messages: []Message{
+			makeMsg("system", "sys"),
+			makeMsg("user", "q1"),
+			makeMsg("assistant", "a1"),
+			makeMsg("user", "search"),
+			makeToolCallMsg("", `[{"id":"c1","type":"function","function":{"name":"s","arguments":{}}}]`),
+			makeToolResult("data", "s", "c1"),
+			makeMsg("assistant", "found it"),
+			makeMsg("user", "q3"),
+			makeMsg("assistant", "a3"),
+			makeMsg("user", "pending"),
+			makeToolCallMsg("", `[{"id":"c2","type":"function","function":{"name":"act","arguments":{}}}]`),
+			makeToolResult("pending result", "act", "c2"),
+		},
+	}
+
+	var summarized []Message
+	out, err := CompressByExchanges(context.Background(), conv, 1, func(_ context.Context, msgs []Message) (string, error) {
+		summarized = append([]Message(nil), msgs...)
+		return "old q1/search summary", nil
+	})
+	if err != nil {
+		t.Fatalf("CompressByExchanges() error: %v", err)
+	}
+
+	if out.DurableSummary == nil || out.DurableSummary.Content != "old q1/search summary" {
+		t.Fatalf("DurableSummary = %+v, want summary text", out.DurableSummary)
+	}
+	if out.DurableSummary.MessageCount != len(summarized) {
+		t.Fatalf("DurableSummary.MessageCount = %d, want %d", out.DurableSummary.MessageCount, len(summarized))
+	}
+	for _, m := range summarized {
+		if m.Role == "system" || m.Content == "q3" || m.Content == "pending" || m.ToolCallID == "c2" {
+			t.Fatalf("summarized unsafe/recent message: %+v in %+v", m, summarized)
+		}
+	}
+	if len(out.Messages) != 6 {
+		t.Fatalf("Messages len = %d, want system + recent exchange + unresolved tail", len(out.Messages))
+	}
+	if out.Messages[0].Role != "system" || out.Messages[1].Content != "q3" || out.Messages[3].Content != "pending" || out.Messages[4].ToolCalls == nil {
+		t.Fatalf("Messages = %+v, want system, recent exchange, unresolved tail", out.Messages)
 	}
 }
 

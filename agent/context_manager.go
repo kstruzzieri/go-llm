@@ -1,6 +1,11 @@
 package agent
 
-import "context"
+import (
+	"context"
+	"strings"
+
+	"github.com/kstruzzieri/go-llm/provider"
+)
 
 // defaultInputCeiling is a conservative fallback when Budget.InputCeiling is 0.
 const defaultInputCeiling = 8192
@@ -10,6 +15,10 @@ const defaultInputCeiling = 8192
 type ContextManager struct {
 	Compactor Compactor
 	Estimate  func(string) int // token estimator; len/4 when nil
+}
+
+func durableSummaryPrompt(summary string) string {
+	return "Previous conversation summary:\n" + summary
 }
 
 func (m ContextManager) estimate(s string) int {
@@ -65,10 +74,27 @@ func (m ContextManager) totalTokens(st State, toolSchemaTokens int) int {
 	return n
 }
 
+func materializeDurableSummary(st State) State {
+	summary := strings.TrimSpace(st.DurableSummary)
+	if summary == "" {
+		return st
+	}
+	out := st
+	out.DurableSummary = ""
+	out.Messages = make([]Message, 0, len(st.Messages)+1)
+	out.Messages = append(out.Messages, Message{
+		ChatMessage: provider.ChatMessage{Role: "system", Content: durableSummaryPrompt(summary)},
+		Segment:     Pinned,
+	})
+	out.Messages = append(out.Messages, st.Messages...)
+	return out
+}
+
 // Assemble bounds the transcript to fit the budget. toolSchemaTokens is the
 // pinned cost of the active tool schemas (not stored in State).
 func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens int, budget TokenBudget) (State, Pressure, error) {
 	m = normalizeContextManager(m)
+	st = materializeDurableSummary(st)
 	if m.pinnedTokens(st, toolSchemaTokens) > budget.Input {
 		return st, Pressure{}, ErrContextExhausted
 	}

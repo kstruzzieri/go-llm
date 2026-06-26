@@ -327,6 +327,39 @@ func TestSession_History(t *testing.T) {
 	}
 }
 
+func TestSession_HistorySummaryLoadedAndPreserved(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:summary")
+	if err := s.store.Save(ctx, conversation.Conversation{
+		ID:       s.id,
+		Title:    "summary",
+		Messages: []conversation.Message{{Role: "user", Content: "recent"}},
+		DurableSummary: &conversation.DurableSummary{
+			Content:      "old compressed turns",
+			MessageCount: 4,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.switchTo(ctx, s.id); err != nil {
+		t.Fatal(err)
+	}
+	if got := s.historySummary(); got != "old compressed turns" {
+		t.Fatalf("historySummary() = %q, want durable summary", got)
+	}
+	if err := s.record(ctx, "q", "a"); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := s.store.Load(ctx, s.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.DurableSummary == nil || loaded.DurableSummary.Content != "old compressed turns" {
+		t.Fatalf("DurableSummary after record = %+v, want preserved", loaded.DurableSummary)
+	}
+}
+
 // Stored content that used to threaten the v1 fence is now inert: history()
 // passes it through verbatim as a real message's Content, with no escaping.
 func TestSession_HistoryInertClosingTag(t *testing.T) {
