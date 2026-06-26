@@ -124,6 +124,9 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		if serr := sess.session.recordResult(ctx, line, res); serr != nil {
 			_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", serr)
 		}
+		if cerr := sess.maybeCompress(ctx); cerr != nil {
+			_, _ = fmt.Fprintf(out, "warning: compression skipped: %v\n", cerr)
+		}
 	}
 	rend.finalFooter(res)
 }

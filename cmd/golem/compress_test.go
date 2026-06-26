@@ -117,3 +117,27 @@ func TestMaybeCompress_SummarizerErrorLeavesSessionIntact(t *testing.T) {
 		t.Fatalf("session mutated on failure: msgs=%d summary=%v", len(s.msgs), s.summary)
 	}
 }
+
+func TestRunOnce_TriggersCompressionAfterRecord(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:runonce")
+	fillSession(t, s, 8, "this is a reasonably long line of conversation text")
+
+	called := false
+	sum := func(context.Context, string, []conversation.Message) (string, error) {
+		called = true
+		return "ROLLED", nil
+	}
+	sess := newCompressRepl(s, sum, 20, true)
+
+	// recordResult-equivalent then the post-record compression hook.
+	if err := s.record(ctx, "newq", "newa"); err != nil {
+		t.Fatal(err)
+	}
+	if err := sess.maybeCompress(ctx); err != nil {
+		t.Fatalf("maybeCompress: %v", err)
+	}
+	if !called || s.historySummary() != "ROLLED" {
+		t.Fatalf("post-record compression did not run: called=%v summary=%q", called, s.historySummary())
+	}
+}
