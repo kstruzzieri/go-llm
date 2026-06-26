@@ -256,6 +256,35 @@ func (s *session) recordMessages(ctx context.Context, msgs []conversation.Messag
 	return nil
 }
 
+// currentConversation snapshots the session's in-memory state for compression.
+// Messages are copied so the caller cannot mutate the session buffer.
+func (s *session) currentConversation() conversation.Conversation {
+	return conversation.Conversation{
+		ID:             s.id,
+		Messages:       append([]conversation.Message(nil), s.msgs...),
+		DurableSummary: cloneDurableSummary(s.summary),
+	}
+}
+
+// applyCompacted replaces history with a compressed conversation (recent raw
+// messages + durable summary) and persists it. Persistence only — it does not
+// construct the router or summarizer. Mirrors recordMessages' save-then-mutate
+// ordering so a failed save cannot leak partial state.
+func (s *session) applyCompacted(ctx context.Context, conv conversation.Conversation) error {
+	if err := s.store.Save(ctx, conversation.Conversation{
+		ID:             s.id,
+		Title:          sessionTitle(conv.Messages),
+		Messages:       conv.Messages,
+		DurableSummary: cloneDurableSummary(conv.DurableSummary),
+	}); err != nil {
+		return err
+	}
+	s.msgs = conv.Messages
+	s.summary = cloneDurableSummary(conv.DurableSummary)
+	_ = chmodSessionDBFiles(s.dbPath)
+	return nil
+}
+
 func resultConversationMessages(userLine string, res agent.Result) ([]conversation.Message, error) {
 	if len(res.Messages) == 0 {
 		return []conversation.Message{
