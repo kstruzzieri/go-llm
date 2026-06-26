@@ -1,7 +1,9 @@
+<p align="center">
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="assets/brand/golem-lockup-on-dark.svg">
   <img alt="Golem agent logo" src="assets/brand/golem-lockup-on-light.svg" width="260">
 </picture>
+</p>
 
 # go-llm
 
