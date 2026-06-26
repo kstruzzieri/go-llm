@@ -81,6 +81,21 @@ type routerSummarizer struct {
 	route func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error)
 }
 
+// DefaultSummaryOutputReserve bounds the rolling durable summary. It is the
+// summarizer's NumPredict AND the token headroom Golem reserves for the summary
+// when deciding how much raw history to keep — one constant, no drift.
+const DefaultSummaryOutputReserve = 512
+
+const summarySystemPrompt = `You maintain a single rolling summary of an ongoing coding session. Rewrite the summary so it stays concise and within budget, folding in the new messages.
+Do not invent facts.
+If uncertain, preserve the original wording briefly.
+Output ONLY these sections:
+Goals:
+Decisions:
+Files/commands/tools:
+Open tasks:
+Recent outcome:`
+
 // NewRouterSummarizer routes durable-history compression through the optional
 // "summarize" model role.
 func NewRouterSummarizer(r *provider.Router) conversation.Summarizer {
@@ -91,19 +106,18 @@ func NewRouterSummarizer(r *provider.Router) conversation.Summarizer {
 	}).Summarize
 }
 
-func (s *routerSummarizer) Summarize(ctx context.Context, msgs []conversation.Message) (string, error) {
+func (s *routerSummarizer) Summarize(ctx context.Context, prior string, msgs []conversation.Message) (string, error) {
 	if s.route == nil {
 		return "", fmt.Errorf("agent: summarize route is nil")
 	}
-	const outputReserve = 512
 	rr := provider.RoutingRequest{
 		UseCase: "summarize",
 		Messages: []provider.ChatMessage{
-			{Role: "system", Content: "Summarize older conversation messages for future context. Preserve goals, decisions, tool results, and open tasks. Be concise."},
-			{Role: "user", Content: summarizeTranscript(msgs)},
+			{Role: "system", Content: summarySystemPrompt},
+			{Role: "user", Content: summaryUserContent(prior, msgs)},
 		},
-		Options:        provider.ModelOptions{NumPredict: outputReserve},
-		ExpectedOutput: outputReserve,
+		Options:        provider.ModelOptions{NumPredict: DefaultSummaryOutputReserve},
+		ExpectedOutput: DefaultSummaryOutputReserve,
 		RequiredCaps:   provider.CapChat | provider.CapStream,
 	}
 	plan, err := s.route(ctx, rr)
@@ -115,6 +129,16 @@ func (s *routerSummarizer) Summarize(ctx context.Context, msgs []conversation.Me
 		return "", err
 	}
 	return strings.TrimSpace(getFinal().Content), nil
+}
+
+// summaryUserContent labels the prior summary and the new transcript so the
+// model rewrites one rolling blob rather than appending.
+func summaryUserContent(prior string, msgs []conversation.Message) string {
+	transcript := summarizeTranscript(msgs)
+	if strings.TrimSpace(prior) == "" {
+		return transcript
+	}
+	return "Current summary:\n" + prior + "\n\nNew messages:\n" + transcript
 }
 
 func summarizeTranscript(msgs []conversation.Message) string {

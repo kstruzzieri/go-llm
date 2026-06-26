@@ -81,7 +81,7 @@ func TestAssembleIncludesDurableSummaryBeforeRawMessages(t *testing.T) {
 	if len(req.Messages) < 4 {
 		t.Fatalf("messages = %+v, want system, durable summary, recent, goal", req.Messages)
 	}
-	if req.Messages[1].Role != "system" || req.Messages[1].Content != durableSummaryPrompt("old setup and decisions") {
+	if req.Messages[1].Role != "system" || req.Messages[1].Content != DurableSummaryPrompt("old setup and decisions") {
 		t.Fatalf("summary message = %+v", req.Messages[1])
 	}
 	if req.Messages[2].Content != "recent question" {

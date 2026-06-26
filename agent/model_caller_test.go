@@ -98,7 +98,8 @@ func TestRouterSummarizerRoutesSummarizeUseCase(t *testing.T) {
 		},
 	}
 
-	got, err := s.Summarize(context.Background(), []conversation.Message{{Role: "user", Content: "old turn"}})
+	got, err := s.Summarize(context.Background(), "PRIOR-SUMMARY",
+		[]conversation.Message{{Role: "user", Content: "old turn"}})
 	if err != nil {
 		t.Fatalf("Summarize: %v", err)
 	}
@@ -111,7 +112,18 @@ func TestRouterSummarizerRoutesSummarizeUseCase(t *testing.T) {
 	if gotReq.RequiredCaps != provider.CapChat|provider.CapStream {
 		t.Fatalf("RequiredCaps = %s, want chat|stream", gotReq.RequiredCaps)
 	}
-	if len(gotReq.Messages) != 2 || !strings.Contains(gotReq.Messages[1].Content, "user: old turn") {
-		t.Fatalf("Messages = %+v, want old messages in summarize prompt", gotReq.Messages)
+	if gotReq.Options.NumPredict != DefaultSummaryOutputReserve {
+		t.Fatalf("NumPredict = %d, want %d", gotReq.Options.NumPredict, DefaultSummaryOutputReserve)
+	}
+	if len(gotReq.Messages) != 2 {
+		t.Fatalf("want system+user, got %d messages", len(gotReq.Messages))
+	}
+	if !strings.Contains(gotReq.Messages[0].Content, "Do not invent facts.") ||
+		!strings.Contains(gotReq.Messages[0].Content, "Open tasks:") {
+		t.Fatalf("system prompt missing constraints/sections: %q", gotReq.Messages[0].Content)
+	}
+	if !strings.Contains(gotReq.Messages[1].Content, "PRIOR-SUMMARY") ||
+		!strings.Contains(gotReq.Messages[1].Content, "user: old turn") {
+		t.Fatalf("user content missing prior/transcript: %q", gotReq.Messages[1].Content)
 	}
 }

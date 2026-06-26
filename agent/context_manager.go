@@ -17,7 +17,10 @@ type ContextManager struct {
 	Estimate  func(string) int // token estimator; len/4 when nil
 }
 
-func durableSummaryPrompt(summary string) string {
+// DurableSummaryPrompt renders the durable summary as the pinned system message
+// injected ahead of raw history. Exported so Golem's trigger accounting counts
+// the exact text agent injects (no drift between estimate and reality).
+func DurableSummaryPrompt(summary string) string {
 	return "Previous conversation summary:\n" + summary
 }
 
@@ -83,7 +86,7 @@ func materializeDurableSummary(st State) State {
 	out.DurableSummary = ""
 	out.Messages = make([]Message, 0, len(st.Messages)+1)
 	out.Messages = append(out.Messages, Message{
-		ChatMessage: provider.ChatMessage{Role: "system", Content: durableSummaryPrompt(summary)},
+		ChatMessage: provider.ChatMessage{Role: "system", Content: DurableSummaryPrompt(summary)},
 		Segment:     Pinned,
 	})
 	out.Messages = append(out.Messages, st.Messages...)
