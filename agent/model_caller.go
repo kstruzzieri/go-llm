@@ -78,6 +78,7 @@ func (m *routerModelCaller) Chat(ctx context.Context, req provider.ChatRequest,
 }
 
 type routerSummarizer struct {
+	chain []string
 	route func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error)
 }
 
@@ -98,8 +99,9 @@ Recent outcome:`
 
 // NewRouterSummarizer routes durable-history compression through the optional
 // "summarize" model role.
-func NewRouterSummarizer(r *provider.Router) conversation.Summarizer {
+func NewRouterSummarizer(r *provider.Router, chain []string) conversation.Summarizer {
 	return (&routerSummarizer{
+		chain: append([]string(nil), chain...),
 		route: func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error) {
 			return r.Route(ctx, rr)
 		},
@@ -119,6 +121,10 @@ func (s *routerSummarizer) Summarize(ctx context.Context, prior string, msgs []c
 		Options:        provider.ModelOptions{NumPredict: DefaultSummaryOutputReserve},
 		ExpectedOutput: DefaultSummaryOutputReserve,
 		RequiredCaps:   provider.CapChat | provider.CapStream,
+	}
+	if len(s.chain) > 0 {
+		rr.PreferredChain = append([]string(nil), s.chain...)
+		rr.StrictChain = true
 	}
 	plan, err := s.route(ctx, rr)
 	if err != nil {

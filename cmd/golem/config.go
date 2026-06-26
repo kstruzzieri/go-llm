@@ -52,3 +52,21 @@ func resolveAgentChain(cfg *config.Config) (chainPlan, error) {
 	}
 	return chainPlan{chain: chain}, nil
 }
+
+func resolveSummarizeChain(cfg *config.Config) ([]string, error) {
+	if cfg == nil {
+		return nil, nil
+	}
+	if _, ok := cfg.Defaults["summarize"]; !ok {
+		if _, ok := cfg.Defaults["analysis"]; !ok {
+			if _, ok := cfg.Defaults["chat"]; !ok {
+				return nil, nil
+			}
+		}
+	}
+	chain, err := cfg.RoleFallbackChain("summarize")
+	if err != nil {
+		return nil, fmt.Errorf("golem: resolve summarize chain: %w", err)
+	}
+	return chain, nil
+}

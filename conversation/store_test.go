@@ -297,6 +297,32 @@ func TestSearch_FindsMessageTextWithoutLoadingBlobs(t *testing.T) {
 	}
 }
 
+func TestSearch_FindsDurableSummaryText(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	conv := Conversation{
+		ID:       "workspace:compressed",
+		Title:    "Compressed session",
+		Messages: []Message{{Role: "user", Content: "recent turn only"}},
+		DurableSummary: &DurableSummary{
+			Content:      "Earlier turns discussed frobnicator calibration.",
+			MessageCount: 8,
+		},
+	}
+	if err := store.Save(ctx, conv); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	got, err := store.Search(ctx, "frobnicator", SearchOptions{Limit: 10})
+	if err != nil {
+		t.Fatalf("Search() error: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != conv.ID {
+		t.Fatalf("Search() = %+v, want compressed session", got)
+	}
+}
+
 func TestSearch_FindsToolCallPayloads(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

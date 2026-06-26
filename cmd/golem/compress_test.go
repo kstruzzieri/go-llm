@@ -78,6 +78,50 @@ func TestMaybeCompress_NoOpUnderThreshold(t *testing.T) {
 	}
 }
 
+func TestMaybeCompress_AppliesRewrittenSummaryWhenRawHistoryUnchanged(t *testing.T) {
+	ctx := context.Background()
+	s, _ := openTempSession(t, "workspace:summary-only")
+	if err := s.record(ctx, "short", "turn"); err != nil {
+		t.Fatal(err)
+	}
+	oversized := strings.Repeat("oversized summary ", 300)
+	s.summary = &conversation.DurableSummary{Content: oversized, MessageCount: 12}
+	beforeMessages := len(s.msgs)
+
+	called := false
+	sum := func(_ context.Context, prior string, msgs []conversation.Message) (string, error) {
+		called = true
+		if prior != oversized {
+			t.Fatalf("prior = %q, want oversized summary", prior)
+		}
+		if len(msgs) != 0 {
+			t.Fatalf("msgs len = %d, want no raw-message eviction", len(msgs))
+		}
+		return "SMALL", nil
+	}
+	sess := newCompressRepl(s, sum, 600, true) // summary pushes over threshold; raw still fits
+
+	if err := sess.maybeCompress(ctx); err != nil {
+		t.Fatalf("maybeCompress: %v", err)
+	}
+	if !called {
+		t.Fatal("summarizer was not called")
+	}
+	if s.historySummary() != "SMALL" {
+		t.Fatalf("summary not applied: %q", s.historySummary())
+	}
+	if len(s.msgs) != beforeMessages {
+		t.Fatalf("messages changed: got %d, want %d", len(s.msgs), beforeMessages)
+	}
+	loaded, err := s.store.Load(ctx, s.id)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if loaded.DurableSummary == nil || loaded.DurableSummary.Content != "SMALL" || loaded.DurableSummary.MessageCount != 12 {
+		t.Fatalf("persisted summary = %+v, want rewritten content with same count", loaded.DurableSummary)
+	}
+}
+
 func TestMaybeCompress_DisabledIsNoOp(t *testing.T) {
 	ctx := context.Background()
 	s, _ := openTempSession(t, "workspace:off")

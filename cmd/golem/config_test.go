@@ -71,6 +71,24 @@ func TestResolveAgentChain_EmptyAgentKeyFatal(t *testing.T) {
 	}
 }
 
+func TestResolveSummarizeChain_UsesConfiguredFallbackChain(t *testing.T) {
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"light":  {Name: "small", Provider: "ollama", Fallbacks: []string{"hosted"}},
+			"hosted": {Name: "large", Provider: "openai"},
+		},
+		Defaults: map[string]string{"summarize": "light"},
+	}
+	chain, err := resolveSummarizeChain(cfg)
+	if err != nil {
+		t.Fatalf("resolveSummarizeChain: %v", err)
+	}
+	want := []string{"ollama/small", "openai/large"}
+	if len(chain) != len(want) || chain[0] != want[0] || chain[1] != want[1] {
+		t.Fatalf("chain = %v, want %v", chain, want)
+	}
+}
+
 func TestLoadConfig_ExplicitBadPathFatal(t *testing.T) {
 	if _, err := loadConfig("/nonexistent/path/models.json"); err == nil {
 		t.Fatal("err = nil for nonexistent explicit config path, want fatal")

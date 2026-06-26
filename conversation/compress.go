@@ -67,8 +67,9 @@ func EstimateMessagesTokens(msgs []Message, estimator TokenEstimator) int {
 // estimated cost of non-system raw messages exceeds maxTokens. It retains the
 // most recent exchanges that fit maxTokens, never fewer than minRecentExchanges,
 // and never splits a tool-call/result chain (it reuses trimByExchangesKeep).
-// Returns conv unchanged (no model call) when raw history already fits or there
-// is nothing older than the floor to evict.
+// Returns conv unchanged (no model call) when raw history already fits and
+// there is no durable summary to rewrite, or when the floor keeps all messages
+// and there is no durable summary to rewrite.
 //
 // Safety invariant: raw messages are evicted ONLY after the summary that absorbs
 // them is produced successfully. Any summarizer error (including blank output)
@@ -86,7 +87,13 @@ func CompressMessages(
 	if summarize == nil {
 		return Conversation{}, errNilSummarizer
 	}
-	if EstimateMessagesTokens(conv.Messages, estimator) <= maxTokens {
+	prior, priorCount := "", 0
+	if conv.DurableSummary != nil {
+		prior = conv.DurableSummary.Content
+		priorCount = conv.DurableSummary.MessageCount
+	}
+	hasPrior := strings.TrimSpace(prior) != ""
+	if EstimateMessagesTokens(conv.Messages, estimator) <= maxTokens && !hasPrior {
 		return conv, nil
 	}
 	if minRecentExchanges < 0 {
@@ -118,13 +125,9 @@ func CompressMessages(
 		}
 	}
 	if len(old) == 0 {
-		return conv, nil
-	}
-
-	prior, priorCount := "", 0
-	if conv.DurableSummary != nil {
-		prior = conv.DurableSummary.Content
-		priorCount = conv.DurableSummary.MessageCount
+		if !hasPrior {
+			return conv, nil
+		}
 	}
 	newSummary, err := summarize(ctx, prior, old)
 	if err != nil {

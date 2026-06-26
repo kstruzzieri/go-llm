@@ -53,6 +53,9 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 	now := time.Now().UnixMilli()
 
 	searchBody := searchText(msgs)
+	if summaryContent != "" {
+		searchBody += "\n" + summaryContent
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("conversation: save %q: begin: %w", conv.ID, err)

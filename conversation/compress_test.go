@@ -62,6 +62,39 @@ func TestCompressMessages_NoOpWhenUnderBudget(t *testing.T) {
 	}
 }
 
+func TestCompressMessages_RewritesPriorSummaryWhenRawHistoryFits(t *testing.T) {
+	conv := Conversation{
+		ID:             "c",
+		Messages:       userAsst("short", "turn"),
+		DurableSummary: &DurableSummary{Content: "OVERSIZED", MessageCount: 12},
+	}
+	called := false
+	sum := func(_ context.Context, prior string, msgs []Message) (string, error) {
+		called = true
+		if prior != "OVERSIZED" {
+			t.Fatalf("prior = %q, want OVERSIZED", prior)
+		}
+		if len(msgs) != 0 {
+			t.Fatalf("msgs len = %d, want no newly evicted messages", len(msgs))
+		}
+		return "SMALL", nil
+	}
+
+	out, err := CompressMessages(context.Background(), conv, 1000, 1, lenEstimator, sum)
+	if err != nil {
+		t.Fatalf("CompressMessages: %v", err)
+	}
+	if !called {
+		t.Fatal("summarizer was not called")
+	}
+	if out.DurableSummary == nil || out.DurableSummary.Content != "SMALL" || out.DurableSummary.MessageCount != 12 {
+		t.Fatalf("summary = %+v, want rewritten content with same count", out.DurableSummary)
+	}
+	if len(out.Messages) != len(conv.Messages) {
+		t.Fatalf("messages len = %d, want %d", len(out.Messages), len(conv.Messages))
+	}
+}
+
 func TestCompressMessages_EvictsOldestBeyondFloor(t *testing.T) {
 	var msgs []Message
 	for i := 0; i < 6; i++ { // 6 exchanges

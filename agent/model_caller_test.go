@@ -127,3 +127,25 @@ func TestRouterSummarizerRoutesSummarizeUseCase(t *testing.T) {
 		t.Fatalf("user content missing prior/transcript: %q", gotReq.Messages[1].Content)
 	}
 }
+
+func TestRouterSummarizerUsesStrictPreferredChain(t *testing.T) {
+	var gotReq provider.RoutingRequest
+	s := &routerSummarizer{
+		chain: []string{"ollama/light", "hosted/big"},
+		route: func(_ context.Context, rr provider.RoutingRequest) (planExecutor, error) {
+			gotReq = rr
+			return fakePlan{}, nil
+		},
+	}
+
+	if _, err := s.Summarize(context.Background(), "",
+		[]conversation.Message{{Role: "user", Content: "old turn"}}); err != nil {
+		t.Fatalf("Summarize: %v", err)
+	}
+	if !gotReq.StrictChain {
+		t.Fatal("StrictChain = false, want true")
+	}
+	if len(gotReq.PreferredChain) != 2 || gotReq.PreferredChain[0] != "ollama/light" || gotReq.PreferredChain[1] != "hosted/big" {
+		t.Fatalf("PreferredChain = %v, want summarize chain", gotReq.PreferredChain)
+	}
+}

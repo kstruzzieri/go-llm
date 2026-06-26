@@ -271,6 +271,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		maxHistoryTokens = agent.DefaultInputCeiling
 	}
 	maxHistoryTokens /= 2
+	summarizeChain, err := resolveSummarizeChain(bundle.Config)
+	if err != nil {
+		return err
+	}
 
 	caller := newRouterChainCaller(bundle.Router, plan.chain)
 	sess := &replSession{
@@ -283,7 +287,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieveOmitted: retrieveOmitted,
 		session:         sessn,
 		compress: compressPolicy{
-			summarize:          agent.NewRouterSummarizer(bundle.Router),
+			summarize:          agent.NewRouterSummarizer(bundle.Router, summarizeChain),
 			estimate:           conversation.CharRatioEstimator(4.0),
 			maxHistoryTokens:   maxHistoryTokens,
 			minRecentExchanges: 4,

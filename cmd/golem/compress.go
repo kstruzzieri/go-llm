@@ -47,8 +47,15 @@ func (sess *replSession) maybeCompress(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if len(out.Messages) == len(conv.Messages) {
-		return nil // nothing was evicted (floor covered everything)
+	if len(out.Messages) == len(conv.Messages) && sameDurableSummary(out.DurableSummary, conv.DurableSummary) {
+		return nil // nothing changed (floor covered everything)
 	}
 	return sess.session.applyCompacted(ctx, out)
+}
+
+func sameDurableSummary(a, b *conversation.DurableSummary) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return a.Content == b.Content && a.MessageCount == b.MessageCount
 }
