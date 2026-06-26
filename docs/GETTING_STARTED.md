@@ -36,7 +36,7 @@ models:
   "gemma4:31b":              { cmd: llama-server -m /models/gemma4-31b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
   "qwen3.6:35b-a3b":         { cmd: llama-server -m /models/qwen3.6-35b-a3b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
   "qwen3-coder-next:latest": { cmd: llama-server -m /models/qwen3-coder-next.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
-  "qwen3:8b":                { cmd: llama-server -m /models/qwen3-8b.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
+  "qwen3.5:9b-mtp":          { cmd: llama-server -m /models/qwen3.5-9b-mtp.gguf --port ${PORT} -c 8192 -ngl 99 --jinja }
   "qwen3-embedding:8b":      { cmd: llama-server -m /models/qwen3-embedding-8b.gguf --port ${PORT} -c 8192 -ngl 99 --embeddings }
 ```
 
@@ -57,7 +57,7 @@ not run the whole fleet at once (and on a 128GB box you can't co-resident it).
 ollama pull gemma4:31b            # general / agent / judge / analysis
 ollama pull qwen3.6:35b-a3b       # fast fallback / lower-latency chat
 ollama pull qwen3-coder-next:latest  # coding / review / FIM
-ollama pull qwen3:8b              # lightweight
+ollama pull qwen3:8b              # lightweight fallback for Ollama-only installs
 ollama pull qwen3-embedding:8b    # embeddings (RAG)
 ```
 
@@ -125,7 +125,7 @@ Consumer applications (Firn IDE, Flux ML) can also use `config.Default()` to dis
 | `judge` | `gemma4:31b` (~20GB) | Local LLM-as-judge scoring for captured trace replays |
 | `fast` | `qwen3.6:35b-a3b` (~28GB) | Lower-latency chat and strong fallback path |
 | `coding` | `qwen3-coder-next:latest` (~46GB) | Code generation, review, FIM completions |
-| `lightweight` | `qwen3:8b` (~6GB) | Quick answers, classification, low-stakes tasks |
+| `lightweight` | `qwen3.5:9b-mtp` (~6GB) | Quick answers, classification, low-stakes tasks |
 | `embedding` | `qwen3-embedding:8b` (~5GB) | Vector embeddings for RAG search |
 
 The `analysis` use-case currently maps to the `general` role, so it also
@@ -337,8 +337,8 @@ go-llm/
 
 | Setup | RAM | Recommended Models |
 |-------|-----|-------------------|
-| Minimal (8GB) | 8GB | `qwen3:8b` only |
-| Standard (16-32GB) | 16-32GB | `qwen3:8b` + `qwen3-embedding:8b` |
+| Minimal (8GB) | 8GB | `qwen3.5:9b-mtp` only |
+| Standard (16-32GB) | 16-32GB | `qwen3.5:9b-mtp` + `qwen3-embedding:8b` |
 | Large (32-64GB) | 32-64GB | One primary model at a time (`gemma4:31b` or `qwen3.6:35b-a3b`), adding smaller models only if memory allows |
 | Power (128GB+) | 128GB+ | Full reference lineup from `models.json` |
 

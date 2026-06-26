@@ -22,7 +22,7 @@ to `go-llm`. This is what `models.json` ships with.
 | `agent` | `gemma4:31b` (dense) | ~20GB | 86.4% τ2-bench, 80.0% LiveCodeBench, native function calling |
 | `general` / `analysis` | `gemma4:31b` (thinking mode on) | shared | Gemma 4 doubles as reasoner |
 | `fast` | `qwen3.6:35b-a3b` | ~28GB (Q6) | Superseded the legacy qwen3.5:35b-a3b |
-| `lightweight` | `qwen3:8b` | ~6GB | FIM completion |
+| `lightweight` | `qwen3.5:9b-mtp` | ~6GB | MTP FIM completion |
 | `embedding` | `qwen3-embedding:8b` | ~5GB | |
 
 **Resident memory:** ~77GB with the optional `qwen3.6:35b-a3b`, or ~57GB
