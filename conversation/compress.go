@@ -62,3 +62,105 @@ func EstimateMessagesTokens(msgs []Message, estimator TokenEstimator) int {
 	}
 	return n
 }
+
+// CompressMessages folds the oldest history into the durable summary when the
+// estimated cost of non-system raw messages exceeds maxTokens. It retains the
+// most recent exchanges that fit maxTokens, never fewer than minRecentExchanges,
+// and never splits a tool-call/result chain (it reuses trimByExchangesKeep).
+// Returns conv unchanged (no model call) when raw history already fits or there
+// is nothing older than the floor to evict.
+//
+// Safety invariant: raw messages are evicted ONLY after the summary that absorbs
+// them is produced successfully. Any summarizer error (including blank output)
+// aborts the whole operation and the caller keeps its prior state.
+func CompressMessages(
+	ctx context.Context,
+	conv Conversation,
+	maxTokens, minRecentExchanges int,
+	estimator TokenEstimator,
+	summarize Summarizer,
+) (Conversation, error) {
+	if estimator == nil {
+		panic("conversation: CompressMessages requires non-nil TokenEstimator")
+	}
+	if summarize == nil {
+		return Conversation{}, errNilSummarizer
+	}
+	if EstimateMessagesTokens(conv.Messages, estimator) <= maxTokens {
+		return conv, nil
+	}
+	if minRecentExchanges < 0 {
+		minRecentExchanges = 0
+	}
+
+	// Grow the retained window up from the hard floor while it still fits the
+	// budget and there are older exchanges left to add.
+	// ponytail: O(n^2) over exchanges; fine for chat-history sizes.
+	keep := trimByExchangesKeep(conv.Messages, minRecentExchanges)
+	for next := minRecentExchanges + 1; ; next++ {
+		grown := trimByExchangesKeep(conv.Messages, next)
+		if sameKeepMask(grown, keep) {
+			break // nothing older left to add: floor already keeps everything
+		}
+		if keptRawCost(conv.Messages, grown, estimator) > maxTokens {
+			break // adding the next-oldest exchange overflows the budget
+		}
+		keep = grown
+	}
+
+	recent := make([]Message, 0, len(conv.Messages))
+	old := make([]Message, 0, len(conv.Messages))
+	for i, m := range conv.Messages {
+		if !keep[i] && m.Role != "system" {
+			old = append(old, m)
+		} else {
+			recent = append(recent, m)
+		}
+	}
+	if len(old) == 0 {
+		return conv, nil
+	}
+
+	prior, priorCount := "", 0
+	if conv.DurableSummary != nil {
+		prior = conv.DurableSummary.Content
+		priorCount = conv.DurableSummary.MessageCount
+	}
+	newSummary, err := summarize(ctx, prior, old)
+	if err != nil {
+		return Conversation{}, err
+	}
+	if strings.TrimSpace(newSummary) == "" {
+		return Conversation{}, ErrEmptySummary
+	}
+
+	out := conv
+	out.Messages = recent
+	out.DurableSummary = &DurableSummary{
+		Content:      strings.TrimSpace(newSummary),
+		MessageCount: priorCount + len(old),
+	}
+	return out, nil
+}
+
+func sameKeepMask(a, b []bool) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func keptRawCost(msgs []Message, keep []bool, estimator TokenEstimator) int {
+	n := 0
+	for i, m := range msgs {
+		if keep[i] && m.Role != "system" {
+			n += messageCost(m, estimator)
+		}
+	}
+	return n
+}
