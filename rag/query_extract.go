@@ -110,6 +110,9 @@ func isCodeShaped(tok string) bool {
 	if hasDigit && letterDigitAdj {
 		return true
 	}
+	if isDottedSingleLetterAbbreviation(tok) {
+		return false
+	}
 	for _, sep := range []rune{'_', '/', '.', ':'} {
 		if hasInternalRune(tok, sep) {
 			return true
@@ -155,6 +158,28 @@ func hasInternalRune(tok string, sep rune) bool {
 		}
 	}
 	return false
+}
+
+// isDottedSingleLetterAbbreviation rejects prose abbreviations like "e.g." or
+// "(i.e.)," before dots are treated as code/path separators.
+func isDottedSingleLetterAbbreviation(tok string) bool {
+	core := strings.TrimFunc(tok, func(r rune) bool {
+		return !isWordRune(r) && r != '.'
+	})
+	if !strings.HasSuffix(core, ".") {
+		return false
+	}
+	parts := strings.Split(strings.TrimSuffix(core, "."), ".")
+	if len(parts) < 2 {
+		return false
+	}
+	for _, part := range parts {
+		runes := []rune(part)
+		if len(runes) != 1 || !unicode.IsLetter(runes[0]) {
+			return false
+		}
+	}
+	return true
 }
 
 func isWordRune(r rune) bool    { return unicode.IsLetter(r) || unicode.IsDigit(r) }

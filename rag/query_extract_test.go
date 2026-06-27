@@ -29,6 +29,7 @@ func TestExtractCodeQuery(t *testing.T) {
 		// Alphanumeric identifiers.
 		{"alphanumeric", "hash with sha256 please", "sha256"},
 		{"model tag", "load qwen2.5:72b now", "qwen2.5:72b"},
+		{"dotted code", "check x.y", "x.y"},
 
 		// Full code snippet: identifiers survive, prose-like keywords are kept
 		// only when code-shaped.
@@ -41,9 +42,11 @@ func TestExtractCodeQuery(t *testing.T) {
 		{"numbers only", "i tried 3 times and 404", ""},
 		{"sentence-leading caps", "Retrieval embeds the query", ""},
 		{"all caps acronyms", "the API and HTTP layer", ""},
+		{"dotted prose abbreviations", "e.g. i.e. (U.S.),", ""},
 
 		// Mixed prose + code keeps only the code term.
 		{"mixed", "please look at SearchMulti in rag/retriever.go", "SearchMulti rag/retriever.go"},
+		{"abbreviation with code term", "e.g. SearchMulti", "SearchMulti"},
 	}
 
 	for _, tt := range tests {
