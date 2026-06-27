@@ -58,3 +58,30 @@ func TestExtractJSONObjects(t *testing.T) {
 		})
 	}
 }
+
+func TestParseModelAnswer(t *testing.T) {
+	t.Run("single valid", func(t *testing.T) {
+		ma, ok := parseModelAnswer(`{"answer":"yes","evidence":[{"id":"E1","quote":"q"}]}`)
+		if !ok || ma.Answer != "yes" || len(ma.Evidence) != 1 || ma.Evidence[0].ID != "E1" {
+			t.Fatalf("got %+v ok=%v", ma, ok)
+		}
+	})
+	t.Run("echo then real picks last", func(t *testing.T) {
+		in := `Here is the format {"answer":"","evidence":[]} and my answer: {"answer":"real","evidence":[]}`
+		ma, ok := parseModelAnswer(in)
+		if !ok || ma.Answer != "real" {
+			t.Fatalf("got %+v ok=%v, want answer=real", ma, ok)
+		}
+	})
+	t.Run("object without answer or evidence skipped", func(t *testing.T) {
+		ma, ok := parseModelAnswer(`{"foo":1} {"answer":"x"}`)
+		if !ok || ma.Answer != "x" {
+			t.Fatalf("got %+v ok=%v", ma, ok)
+		}
+	})
+	t.Run("no valid object", func(t *testing.T) {
+		if _, ok := parseModelAnswer(`no json {nope}`); ok {
+			t.Fatal("expected ok=false")
+		}
+	})
+}

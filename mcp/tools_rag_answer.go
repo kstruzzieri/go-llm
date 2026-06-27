@@ -66,3 +66,41 @@ func extractJSONObjects(s string) []json.RawMessage {
 	}
 	return out
 }
+
+// modelAnswer is the ONLY shape the model is asked to produce. status,
+// answer_found, sources, and verified are server-owned and never requested.
+type modelAnswer struct {
+	Answer   string          `json:"answer"`
+	Evidence []modelEvidence `json:"evidence"`
+}
+
+type modelEvidence struct {
+	ID    string `json:"id"`    // short prompt-assigned label E1..En, not the SHA chunk ID
+	Quote string `json:"quote"` // span the model claims to have copied verbatim
+}
+
+// parseModelAnswer returns the LAST extracted JSON object that decodes into a
+// modelAnswer carrying at least an "answer" or "evidence" key. Local models
+// sometimes emit example/scaffolding JSON before the real answer, so the final
+// valid object is the answer attempt.
+func parseModelAnswer(text string) (modelAnswer, bool) {
+	var best modelAnswer
+	found := false
+	for _, raw := range extractJSONObjects(text) {
+		var keys map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &keys); err != nil {
+			continue
+		}
+		_, hasAnswer := keys["answer"]
+		_, hasEvidence := keys["evidence"]
+		if !hasAnswer && !hasEvidence {
+			continue
+		}
+		var ma modelAnswer
+		if err := json.Unmarshal(raw, &ma); err != nil {
+			continue
+		}
+		best, found = ma, true
+	}
+	return best, found
+}
