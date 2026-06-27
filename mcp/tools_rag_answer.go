@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -310,4 +312,96 @@ func (s *Server) callForAnswer(ctx context.Context, router routeEngine, model, q
 	}
 	ma, ok := parseModelAnswer(text2)
 	return ma, ok, nil
+}
+
+func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if r := s.requireRAG(); r != nil {
+		return r, nil
+	}
+	var args struct {
+		Question           string `json:"question"`
+		Model              string `json:"model,omitempty"`
+		TopK               int    `json:"top_k,omitempty"`
+		IncludeDiagnostics bool   `json:"include_diagnostics,omitempty"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if args.Question == "" {
+		return toolError("validation", "question must not be empty"), nil
+	}
+	topK := args.TopK
+	if topK <= 0 {
+		topK = 5
+	}
+
+	s.mu.RLock()
+	retriever := s.retriever
+	s.mu.RUnlock()
+	if retriever == nil {
+		return toolError("rag", "retriever unavailable; embedding model may not be resolved"), nil
+	}
+
+	results, err := retriever.Retrieve(ctx, args.Question, topK)
+	if err != nil {
+		return toolError("rag", "retrieve: %v", err), nil
+	}
+
+	var (
+		ma     modelAnswer
+		blocks []evidenceBlock
+		result ragAnswerResult
+	)
+
+	if len(results) == 0 {
+		// No retrieved context: skip the model entirely.
+		result = ragAnswerResult{Status: statusNotInRetrievedContext, Sources: []answerSource{}, Quotes: []answerQuote{}, VerificationErrors: []string{}}
+	} else {
+		var evidenceText string
+		evidenceText, blocks = buildEvidenceBlocks(results, ragContextMaxTokens)
+
+		router := s.routerSnapshot()
+		if router == nil {
+			return toolError("config", "router unavailable"), nil
+		}
+		var parsed bool
+		ma, parsed, err = s.callForAnswer(ctx, router, args.Model, args.Question, evidenceText)
+		if err != nil {
+			return toolError("router", "%v", err), nil
+		}
+		if !parsed {
+			result = ragAnswerResult{Status: statusMalformedOutput, Sources: []answerSource{}, Quotes: []answerQuote{}, VerificationErrors: []string{}}
+		} else {
+			result = deriveAnswer(ma, blocks)
+		}
+	}
+
+	if args.IncludeDiagnostics {
+		result.Diagnostics = buildDiagnostics(ma, blocks, result)
+	}
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return toolError("rag", "marshal result: %v", err), nil
+	}
+	return toolResult(string(data)), nil
+}
+
+// buildDiagnostics assembles the opt-in diagnostics block. Corpus fields are
+// added by the #230 wiring (Task 11).
+func buildDiagnostics(ma modelAnswer, blocks []evidenceBlock, res ragAnswerResult) *answerDiagnostics {
+	d := &answerDiagnostics{}
+	for _, b := range blocks {
+		d.RetrievedChunkIDs = append(d.RetrievedChunkIDs, b.ID)
+	}
+	for _, ev := range ma.Evidence {
+		d.EvidenceIDs = append(d.EvidenceIDs, ev.ID)
+	}
+	for _, q := range res.Quotes {
+		d.VerifiedQuoteIDs = append(d.VerifiedQuoteIDs, q.ID)
+	}
+	if res.Answer == "" && strings.TrimSpace(ma.Answer) != "" {
+		d.CandidateAnswer = ma.Answer
+	}
+	return d
 }

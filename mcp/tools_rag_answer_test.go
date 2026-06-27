@@ -2,8 +2,11 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -270,4 +273,128 @@ func TestCallForAnswer_RepairRetry(t *testing.T) {
 			t.Errorf("calls = %d, want 2", eng.calls)
 		}
 	})
+}
+
+func TestHandleRAGAnswer(t *testing.T) {
+	good := `{"answer":"computeFoo returns 1","evidence":[{"id":"E1","quote":"return 1"}]}`
+
+	t.Run("answer_found", func(t *testing.T) {
+		s := answerEnv(t, &queuedRouteEngine{responses: []string{good}})
+		res := callAnswer(t, s, `{"question":"what does computeFoo return?"}`)
+		if res.Status != statusAnswerFound || !res.AnswerFound || res.Answer == "" {
+			t.Fatalf("res = %+v", res)
+		}
+	})
+
+	t.Run("unverified answer suppresses public answer", func(t *testing.T) {
+		bad := `{"answer":"Foo returns 7","evidence":[{"id":"E1","quote":"return 7"}]}`
+		s := answerEnv(t, &queuedRouteEngine{responses: []string{bad}})
+		res := callAnswer(t, s, `{"question":"q","include_diagnostics":true}`)
+		if res.Status != statusUnverifiedAnswer || res.Answer != "" {
+			t.Fatalf("res = %+v", res)
+		}
+		if res.Diagnostics == nil || res.Diagnostics.CandidateAnswer == "" {
+			t.Errorf("candidate answer should be in diagnostics: %+v", res.Diagnostics)
+		}
+	})
+
+	t.Run("model declines -> not_in_retrieved_context", func(t *testing.T) {
+		s := answerEnv(t, &queuedRouteEngine{responses: []string{`{"answer":"","evidence":[]}`}})
+		res := callAnswer(t, s, `{"question":"unrelated?"}`)
+		if res.Status != statusNotInRetrievedContext {
+			t.Fatalf("status = %s", res.Status)
+		}
+	})
+
+	t.Run("malformed twice -> malformed_output", func(t *testing.T) {
+		s := answerEnv(t, &queuedRouteEngine{responses: []string{"no", "still no"}})
+		res := callAnswer(t, s, `{"question":"q"}`)
+		if res.Status != statusMalformedOutput {
+			t.Fatalf("status = %s", res.Status)
+		}
+	})
+
+	t.Run("zero retrieved chunks skips model", func(t *testing.T) {
+		eng := &queuedRouteEngine{responses: []string{good}}
+		s := answerEnvWithStore(t, eng, &answerStore{})
+		res := callAnswer(t, s, `{"question":"q"}`)
+		if res.Status != statusNotInRetrievedContext {
+			t.Fatalf("status = %s, want not_in_retrieved_context", res.Status)
+		}
+		if eng.calls != 0 {
+			t.Fatalf("model calls = %d, want 0", eng.calls)
+		}
+	})
+
+	t.Run("missing question -> validation error", func(t *testing.T) {
+		s := answerEnv(t, &queuedRouteEngine{responses: []string{good}})
+		out, err := s.handleRAGAnswer(context.Background(), rawArgs(t, `{}`))
+		if err != nil || out == nil || !out.IsError {
+			t.Fatalf("expected validation error result, got out=%v err=%v", out, err)
+		}
+	})
+}
+
+// callAnswer invokes the handler and unmarshals the JSON tool result.
+func callAnswer(t *testing.T, s *Server, args string) ragAnswerResult {
+	t.Helper()
+	out, err := s.handleRAGAnswer(context.Background(), rawArgs(t, args))
+	if err != nil {
+		t.Fatalf("handler err: %v", err)
+	}
+	if out.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(out))
+	}
+	var res ragAnswerResult
+	if uerr := json.Unmarshal([]byte(extractText(out)), &res); uerr != nil {
+		t.Fatalf("unmarshal result: %v (%s)", uerr, extractText(out))
+	}
+	return res
+}
+
+// rawArgs wraps a JSON arguments string in a CallToolRequest.
+func rawArgs(t *testing.T, args string) *gomcp.CallToolRequest {
+	t.Helper()
+	return &gomcp.CallToolRequest{Params: &gomcp.CallToolParamsRaw{Arguments: json.RawMessage(args)}}
+}
+
+type answerStore struct {
+	results []rag.SearchResult
+}
+
+func (s *answerStore) Store(context.Context, []rag.Chunk, [][]float64) error { return nil }
+
+func (s *answerStore) Search(_ context.Context, _ []float64, k int) ([]rag.SearchResult, error) {
+	if k > 0 && len(s.results) > k {
+		return s.results[:k], nil
+	}
+	return s.results, nil
+}
+
+func (s *answerStore) DeleteBySource(context.Context, string) error  { return nil }
+func (s *answerStore) Stats(context.Context) (rag.StoreStats, error) { return rag.StoreStats{}, nil }
+func (s *answerStore) Close() error                                  { return nil }
+
+func answerEnv(t *testing.T, eng routeEngine) *Server {
+	t.Helper()
+	chunk := rag.Chunk{
+		ID: "c1", Source: "a.go", StartLine: 10, EndLine: 12,
+		Content: "func computeFoo() int { return 1 }",
+	}
+	store := &answerStore{results: []rag.SearchResult{{Chunk: chunk, Score: 1}}}
+	return answerEnvWithStore(t, eng, store)
+}
+
+func answerEnvWithStore(t *testing.T, eng routeEngine, store rag.VectorStore) *Server {
+	t.Helper()
+	ret, err := rag.NewRetrieverWithEmbedder(rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		return rag.EmbedResult{Embeddings: [][]float64{{1}}}, nil
+	}), store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+	s := newAnswerTestServer(t, eng)
+	s.store = store
+	s.retriever = ret
+	return s
 }

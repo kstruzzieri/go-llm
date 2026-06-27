@@ -50,6 +50,21 @@ func (s *Server) registerRAGTools() {
 	}, s.handleRAGSearch)
 
 	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "rag_answer",
+		Description: "Audited RAG answer: retrieves context, asks the model for an answer with supporting quotes, verifies each quote against retrieved context, and returns machine-readable JSON with a server-derived status.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"question":            map[string]any{"type": "string", "description": "The question to answer from indexed context"},
+				"model":               map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
+				"top_k":               map[string]any{"type": "integer", "description": "Number of chunks to retrieve (default: 5)"},
+				"include_diagnostics": map[string]any{"type": "boolean", "description": "Include retrieval/verification diagnostics in the response"},
+			},
+			"required": []string{"question"},
+		},
+	}, s.handleRAGAnswer)
+
+	s.mcpServer.AddTool(&gomcp.Tool{
 		Name:        "rag_stats",
 		Description: "Get vector store statistics (chunk count, source count, dimensions, storage size).",
 		InputSchema: map[string]any{
