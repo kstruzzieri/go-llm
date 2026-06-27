@@ -44,8 +44,8 @@
         "duplicate_rate_at_10": 0,
         "context_precision_at_5": 0.51,
         "context_precision_at_10": 0.27,
-        "average_context_tokens_at_5": 666.85,
-        "average_context_tokens_at_10": 1343.55,
+        "average_context_tokens_at_5": 736.7,
+        "average_context_tokens_at_10": 1477.65,
         "cold_latency_ms": {
           "count": 20,
           "p50": 0,
@@ -67,9 +67,9 @@
           "result_ids": [
             "auth_handler_login",
             "middleware_require_auth",
+            "api_router_new",
             "auth_service_login",
             "users_repository_find",
-            "api_router_new",
             "errors_app_error",
             "config_loader_load",
             "orders_service_place",
@@ -83,7 +83,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -91,7 +91,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1375
+              "context_tokens": 1508
             }
           ],
           "cold_latency_ms": 0,
@@ -126,7 +126,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 678
+              "context_tokens": 743
             },
             {
               "k": 10,
@@ -134,7 +134,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1387
+              "context_tokens": 1524
             }
           ],
           "cold_latency_ms": 0,
@@ -152,9 +152,9 @@
           ],
           "result_ids": [
             "middleware_require_auth",
+            "api_router_new",
             "auth_handler_login",
             "auth_service_login",
-            "api_router_new",
             "users_repository_find",
             "errors_app_error",
             "config_loader_load",
@@ -169,7 +169,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -177,7 +177,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1372
+              "context_tokens": 1507
             }
           ],
           "cold_latency_ms": 0,
@@ -196,8 +196,8 @@
           "result_ids": [
             "payments_client_charge",
             "shipping_service_create",
-            "config_loader_load",
             "orders_service_place",
+            "config_loader_load",
             "inventory_service_reserve",
             "errors_app_error",
             "orders_repository_save",
@@ -212,7 +212,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 667
+              "context_tokens": 739
             },
             {
               "k": 10,
@@ -220,7 +220,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -257,7 +257,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -265,7 +265,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1375
+              "context_tokens": 1508
             }
           ],
           "cold_latency_ms": 0,
@@ -304,7 +304,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 1,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -312,7 +312,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.5,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -349,7 +349,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 672
+              "context_tokens": 733
             },
             {
               "k": 10,
@@ -357,7 +357,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1357
+              "context_tokens": 1493
             }
           ],
           "cold_latency_ms": 0,
@@ -394,7 +394,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 595
+              "context_tokens": 654
             },
             {
               "k": 10,
@@ -402,7 +402,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1305
+              "context_tokens": 1434
             }
           ],
           "cold_latency_ms": 0,
@@ -420,8 +420,8 @@
             "users_repository_find"
           ],
           "result_ids": [
-            "users_repository_find",
             "auth_service_login",
+            "users_repository_find",
             "auth_handler_login",
             "middleware_require_auth",
             "orders_repository_save",
@@ -438,7 +438,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 678
+              "context_tokens": 743
             },
             {
               "k": 10,
@@ -446,7 +446,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1387
+              "context_tokens": 1524
             }
           ],
           "cold_latency_ms": 0,
@@ -466,8 +466,8 @@
           "result_ids": [
             "payments_client_charge",
             "shipping_service_create",
-            "inventory_service_reserve",
             "orders_service_place",
+            "inventory_service_reserve",
             "orders_repository_save",
             "config_loader_load",
             "errors_app_error",
@@ -482,7 +482,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -490,7 +490,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -511,8 +511,8 @@
             "middleware_require_auth",
             "auth_handler_login",
             "auth_service_login",
-            "users_repository_find",
             "api_router_new",
+            "users_repository_find",
             "errors_app_error",
             "config_loader_load",
             "shipping_service_create",
@@ -526,7 +526,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -534,7 +534,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1372
+              "context_tokens": 1507
             }
           ],
           "cold_latency_ms": 0,
@@ -570,7 +570,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -578,7 +578,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -616,7 +616,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 672
+              "context_tokens": 733
             },
             {
               "k": 10,
@@ -624,7 +624,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 1357
+              "context_tokens": 1493
             }
           ],
           "cold_latency_ms": 0,
@@ -663,7 +663,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 1,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -671,7 +671,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.5,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -708,7 +708,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -716,7 +716,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1339
+              "context_tokens": 1471
             }
           ],
           "cold_latency_ms": 0,
@@ -754,7 +754,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 718
+              "context_tokens": 796
             },
             {
               "k": 10,
@@ -762,7 +762,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 1383
+              "context_tokens": 1523
             }
           ],
           "cold_latency_ms": 0,
@@ -799,7 +799,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 726
+              "context_tokens": 798
             },
             {
               "k": 10,
@@ -807,7 +807,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1408
+              "context_tokens": 1550
             }
           ],
           "cold_latency_ms": 0,
@@ -846,7 +846,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 1,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -854,7 +854,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.5,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -890,7 +890,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 608
+              "context_tokens": 672
             },
             {
               "k": 10,
@@ -898,7 +898,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1333
+              "context_tokens": 1466
             }
           ],
           "cold_latency_ms": 0,
@@ -920,8 +920,8 @@
             "shipping_service_create",
             "config_loader_load",
             "errors_app_error",
-            "inventory_service_reserve",
             "orders_service_place",
+            "inventory_service_reserve",
             "orders_repository_save",
             "api_router_new",
             "auth_service_login",
@@ -934,7 +934,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 608
+              "context_tokens": 758
             },
             {
               "k": 10,
@@ -942,7 +942,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -964,8 +964,8 @@
         "duplicate_rate_at_10": 0,
         "context_precision_at_5": 0.51,
         "context_precision_at_10": 0.27,
-        "average_context_tokens_at_5": 665.25,
-        "average_context_tokens_at_10": 1343.55,
+        "average_context_tokens_at_5": 734.9,
+        "average_context_tokens_at_10": 1477.65,
         "cold_latency_ms": {
           "count": 20,
           "p50": 0,
@@ -1003,7 +1003,7 @@
               "mrr": 0.5,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -1011,7 +1011,7 @@
               "mrr": 0.5,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1375
+              "context_tokens": 1508
             }
           ],
           "cold_latency_ms": 0,
@@ -1046,7 +1046,7 @@
               "mrr": 0.3333333333333333,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 678
+              "context_tokens": 743
             },
             {
               "k": 10,
@@ -1054,7 +1054,7 @@
               "mrr": 0.3333333333333333,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1387
+              "context_tokens": 1524
             }
           ],
           "cold_latency_ms": 0,
@@ -1089,7 +1089,7 @@
               "mrr": 0.5,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -1097,7 +1097,7 @@
               "mrr": 0.5,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1372
+              "context_tokens": 1507
             }
           ],
           "cold_latency_ms": 0,
@@ -1132,7 +1132,7 @@
               "mrr": 0.3333333333333333,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 635
+              "context_tokens": 703
             },
             {
               "k": 10,
@@ -1140,7 +1140,7 @@
               "mrr": 0.3333333333333333,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.1,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -1177,7 +1177,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -1185,7 +1185,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1375
+              "context_tokens": 1508
             }
           ],
           "cold_latency_ms": 0,
@@ -1224,7 +1224,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 1,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -1232,7 +1232,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.5,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -1269,7 +1269,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 672
+              "context_tokens": 733
             },
             {
               "k": 10,
@@ -1277,7 +1277,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1357
+              "context_tokens": 1493
             }
           ],
           "cold_latency_ms": 0,
@@ -1314,7 +1314,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 595
+              "context_tokens": 654
             },
             {
               "k": 10,
@@ -1322,7 +1322,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1305
+              "context_tokens": 1434
             }
           ],
           "cold_latency_ms": 0,
@@ -1358,7 +1358,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 678
+              "context_tokens": 743
             },
             {
               "k": 10,
@@ -1366,7 +1366,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1387
+              "context_tokens": 1524
             }
           ],
           "cold_latency_ms": 0,
@@ -1402,7 +1402,7 @@
               "mrr": 0.3333333333333333,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -1410,7 +1410,7 @@
               "mrr": 0.3333333333333333,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -1446,7 +1446,7 @@
               "mrr": 0.5,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -1454,7 +1454,7 @@
               "mrr": 0.5,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1372
+              "context_tokens": 1507
             }
           ],
           "cold_latency_ms": 0,
@@ -1490,7 +1490,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -1498,7 +1498,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -1536,7 +1536,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 672
+              "context_tokens": 733
             },
             {
               "k": 10,
@@ -1544,7 +1544,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 1357
+              "context_tokens": 1493
             }
           ],
           "cold_latency_ms": 0,
@@ -1583,7 +1583,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 1,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -1591,7 +1591,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.5,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -1628,7 +1628,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 697
+              "context_tokens": 761
             },
             {
               "k": 10,
@@ -1636,7 +1636,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1339
+              "context_tokens": 1471
             }
           ],
           "cold_latency_ms": 0,
@@ -1674,7 +1674,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 718
+              "context_tokens": 796
             },
             {
               "k": 10,
@@ -1682,7 +1682,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 1383
+              "context_tokens": 1523
             }
           ],
           "cold_latency_ms": 0,
@@ -1719,7 +1719,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.6,
-              "context_tokens": 726
+              "context_tokens": 798
             },
             {
               "k": 10,
@@ -1727,7 +1727,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.3,
-              "context_tokens": 1408
+              "context_tokens": 1550
             }
           ],
           "cold_latency_ms": 0,
@@ -1766,7 +1766,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 1,
-              "context_tokens": 646
+              "context_tokens": 712
             },
             {
               "k": 10,
@@ -1774,7 +1774,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.5,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,
@@ -1810,7 +1810,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 608
+              "context_tokens": 672
             },
             {
               "k": 10,
@@ -1818,7 +1818,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1333
+              "context_tokens": 1466
             }
           ],
           "cold_latency_ms": 0,
@@ -1840,8 +1840,8 @@
             "shipping_service_create",
             "config_loader_load",
             "errors_app_error",
-            "inventory_service_reserve",
             "orders_service_place",
+            "inventory_service_reserve",
             "orders_repository_save",
             "api_router_new",
             "auth_service_login",
@@ -1854,7 +1854,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 608
+              "context_tokens": 758
             },
             {
               "k": 10,
@@ -1862,7 +1862,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.2,
-              "context_tokens": 1303
+              "context_tokens": 1435
             }
           ],
           "cold_latency_ms": 0,

@@ -186,6 +186,11 @@ func validateQueryVectorSpace(queryVectorSpaceID string, probe VectorSpaceProbe)
 // BuildContext constructs a context string from retrieved chunks,
 // formatted for LLM consumption with source attribution.
 // maxTokens provides a rough character limit (4 chars per token).
+//
+// Each chunk's contents are rendered with stable line numbers anchored at the
+// chunk's StartLine, so the model can cite exact lines and the user can
+// inspect the supporting evidence. The header retains source, line range, and
+// similarity attribution, and the existing max-token truncation is preserved.
 func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 	if len(results) == 0 {
 		return ""
@@ -196,9 +201,9 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 	b.WriteString("Relevant code context:\n\n")
 
 	for _, res := range results {
-		entry := fmt.Sprintf("--- %s (lines %d-%d, similarity: %.2f) ---\n%s\n\n",
+		entry := fmt.Sprintf("--- %s (lines %d-%d, similarity: %.2f) ---\n%s\n",
 			res.Chunk.Source, res.Chunk.StartLine, res.Chunk.EndLine,
-			res.Score, res.Chunk.Content)
+			res.Score, numberLines(res.Chunk.Content, res.Chunk.StartLine))
 
 		if maxChars > 0 && b.Len()+len(entry) > maxChars {
 			break
@@ -206,5 +211,22 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 		b.WriteString(entry)
 	}
 
+	return b.String()
+}
+
+// numberLines prefixes each line of content with a 1-based source line number
+// starting at startLine, producing line-anchored output (e.g. "42| code").
+// A single trailing newline is dropped so it does not yield a phantom empty
+// numbered line. The returned string ends with a newline when non-empty.
+func numberLines(content string, startLine int) string {
+	lines := strings.Split(content, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1] // ignore the empty tail from a trailing newline
+	}
+
+	var b strings.Builder
+	for i, line := range lines {
+		fmt.Fprintf(&b, "%d| %s\n", startLine+i, line)
+	}
 	return b.String()
 }
