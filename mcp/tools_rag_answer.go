@@ -1,10 +1,13 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 
+	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -230,4 +233,81 @@ func buildEvidenceBlocks(results []rag.SearchResult, maxTokens int) (string, []e
 		blocks = append(blocks, evidenceBlock{ID: id, Chunk: r.Chunk})
 	}
 	return strings.TrimRight(b.String(), "\n"), blocks
+}
+
+// buildAnswerPrompt produces the audited-answer chat messages. It describes the
+// required JSON as a FIELD LIST, not a valid JSON example object, so a model
+// that echoes the instructions cannot itself satisfy the parser.
+func buildAnswerPrompt(question, evidence string) []ollama.ChatMessage {
+	system := "You are an audited code question-answering assistant. " +
+		"Answer ONLY from the numbered evidence blocks below. " +
+		"Reply with a single JSON object and nothing else, containing exactly these fields:\n" +
+		"- answer: a string. Use the empty string if the evidence does not answer the question.\n" +
+		"- evidence: a list of items, each with id (the E-label of the block you used) and " +
+		"quote (text copied verbatim from that block).\n" +
+		"Do not invent ids or quotes. Copy each quote exactly from the block you cite."
+	user := fmt.Sprintf("Question: %s\n\nEvidence:\n%s", question, evidence)
+	return []ollama.ChatMessage{
+		{Role: "system", Content: system},
+		{Role: "user", Content: user},
+	}
+}
+
+// routeChat executes one chat round via the router at temperature 0 and returns
+// the response text. Mirrors the routing in handleChat (tools_chat.go).
+func (s *Server) routeChat(ctx context.Context, router routeEngine, model string, msgs []ollama.ChatMessage) (string, error) {
+	zero := 0.0
+	resolved, err := s.routeModelSelector(ctx, model, "chat")
+	if err != nil {
+		return "", err
+	}
+	rr := provider.RoutingRequest{
+		Model:          resolved,
+		UseCase:        "chat",
+		RequiredCaps:   provider.CapChat,
+		Messages:       toProviderChatMessages(msgs),
+		Options:        provider.ModelOptions{Temperature: &zero},
+		ExpectedOutput: provider.DefaultExpectedOutput("chat"),
+		Priority:       provider.PriorityNormal,
+	}
+	if rr.Model == "" {
+		chain, cerr := s.chainFor("chat")
+		if cerr != nil {
+			return "", cerr
+		}
+		rr.PreferredChain = chain
+	}
+	plan, err := router.Route(ctx, rr)
+	if err != nil {
+		return "", err
+	}
+	resp, err := plan.ExecuteChat(ctx)
+	if err != nil {
+		return "", err
+	}
+	return resp.Content, nil
+}
+
+// callForAnswer runs the audited-answer model call with one repair retry when
+// the first reply does not parse. Returns the parsed answer and whether parsing
+// ultimately succeeded.
+func (s *Server) callForAnswer(ctx context.Context, router routeEngine, model, question, evidence string) (modelAnswer, bool, error) {
+	msgs := buildAnswerPrompt(question, evidence)
+	text, err := s.routeChat(ctx, router, model, msgs)
+	if err != nil {
+		return modelAnswer{}, false, err
+	}
+	if ma, ok := parseModelAnswer(text); ok {
+		return ma, true, nil
+	}
+	repair := append(msgs,
+		ollama.ChatMessage{Role: "assistant", Content: text},
+		ollama.ChatMessage{Role: "user", Content: "Your previous reply was not valid JSON. Return ONLY a single valid JSON object with fields answer and evidence, and nothing else."},
+	)
+	text2, err := s.routeChat(ctx, router, model, repair)
+	if err != nil {
+		return modelAnswer{}, false, err
+	}
+	ma, ok := parseModelAnswer(text2)
+	return ma, ok, nil
 }

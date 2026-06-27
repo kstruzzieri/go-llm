@@ -1,9 +1,12 @@
 package mcp
 
 import (
+	"context"
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -168,6 +171,103 @@ func TestBuildEvidenceBlocks(t *testing.T) {
 		}
 		if strings.Contains(text, "E2") {
 			t.Errorf("E2 should have been dropped:\n%s", text)
+		}
+	})
+}
+
+// queuedRouteEngine returns successive chat contents on each Route call, so a
+// test can drive the repair retry (call 1 malformed, call 2 valid). Each
+// rag_answer model turn performs exactly one Route+ExecuteChat. Modeled on
+// recordingRouteEngine / fakeRouteProvider in mcp/router_seam_test.go.
+type queuedRouteEngine struct {
+	responses []string
+	calls     int
+}
+
+func (e *queuedRouteEngine) Route(ctx context.Context, req provider.RoutingRequest) (*provider.RoutePlan, error) {
+	content := ""
+	if e.calls < len(e.responses) {
+		content = e.responses[e.calls]
+	}
+	e.calls++
+	model := req.Model
+	if model == "" && len(req.PreferredChain) > 0 {
+		model = req.PreferredChain[0]
+	}
+	prov := &fakeRouteProvider{name: "fake", chatContent: content}
+	return &provider.RoutePlan{
+		Provider: prov,
+		Model:    model,
+		Profile: &provider.ModelProfile{
+			Key:           provider.ModelKey{Provider: "fake", Model: model},
+			Caps:          provider.CapChat | provider.CapGenerate | provider.CapEmbed | provider.CapStream,
+			ContextWindow: 8192,
+		},
+		Request: req,
+		Budget:  provider.BudgetResult{Decision: provider.BudgetOK},
+	}, nil
+}
+
+func (e *queuedRouteEngine) Close() error { return nil }
+func (e *queuedRouteEngine) BreakerInfo(string) (provider.BreakerInfo, bool) {
+	return provider.BreakerInfo{}, false
+}
+func (e *queuedRouteEngine) WarmthSnapshot() []provider.WarmModel              { return nil }
+func (e *queuedRouteEngine) StickyRoutes() map[string]provider.StickyRouteInfo { return nil }
+
+func newAnswerTestServer(t *testing.T, router routeEngine) *Server {
+	t.Helper()
+	if router == nil {
+		router = &queuedRouteEngine{}
+	}
+	return &Server{
+		cfg: &config.Config{
+			Defaults: map[string]string{"chat": "primary"},
+			Models: map[string]config.ModelConfig{
+				"primary": {Name: "qwen3:8b", Provider: "ollama"},
+			},
+		},
+		router: router,
+	}
+}
+
+func TestCallForAnswer_RepairRetry(t *testing.T) {
+	s := newAnswerTestServer(t, nil)
+	good := `{"answer":"ok","evidence":[]}`
+
+	t.Run("first valid, no retry", func(t *testing.T) {
+		eng := &queuedRouteEngine{responses: []string{good}}
+		ma, ok, err := s.callForAnswer(context.Background(), eng, "", "q", "E1...")
+		if err != nil || !ok || ma.Answer != "ok" {
+			t.Fatalf("ma=%+v ok=%v err=%v", ma, ok, err)
+		}
+		if eng.calls != 1 {
+			t.Errorf("calls = %d, want 1", eng.calls)
+		}
+	})
+
+	t.Run("malformed then valid", func(t *testing.T) {
+		eng := &queuedRouteEngine{responses: []string{"not json", good}}
+		ma, ok, err := s.callForAnswer(context.Background(), eng, "", "q", "E1...")
+		if err != nil || !ok || ma.Answer != "ok" {
+			t.Fatalf("ma=%+v ok=%v err=%v", ma, ok, err)
+		}
+		if eng.calls != 2 {
+			t.Errorf("calls = %d, want 2 (one repair)", eng.calls)
+		}
+	})
+
+	t.Run("malformed twice -> not ok", func(t *testing.T) {
+		eng := &queuedRouteEngine{responses: []string{"nope", "still nope"}}
+		_, ok, err := s.callForAnswer(context.Background(), eng, "", "q", "E1...")
+		if err != nil {
+			t.Fatalf("err = %v", err)
+		}
+		if ok {
+			t.Fatal("expected ok=false after failed repair")
+		}
+		if eng.calls != 2 {
+			t.Errorf("calls = %d, want 2", eng.calls)
 		}
 	})
 }
