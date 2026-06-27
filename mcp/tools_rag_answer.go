@@ -337,6 +337,7 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 
 	s.mu.RLock()
 	retriever := s.retriever
+	store := s.store
 	s.mu.RUnlock()
 	if retriever == nil {
 		return toolError("rag", "retriever unavailable; embedding model may not be resolved"), nil
@@ -376,8 +377,26 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 		}
 	}
 
+	var (
+		cp        rag.CorpusPresence
+		corpusRan bool
+	)
+	if result.Status == statusNotInRetrievedContext && store != nil {
+		retrievedIDs := make([]string, 0, len(results))
+		for _, r := range results {
+			retrievedIDs = append(retrievedIDs, r.Chunk.ID)
+		}
+		result, cp, corpusRan = s.refineWithCorpus(ctx, store, args.Question, retrievedIDs, result)
+	}
+
 	if args.IncludeDiagnostics {
 		result.Diagnostics = buildDiagnostics(ma, blocks, result)
+		if corpusRan {
+			total, outside := cp.TotalMatches, cp.OutsideMatches
+			result.Diagnostics.KeywordTerms = cp.Terms
+			result.Diagnostics.CorpusMatchCount = &total
+			result.Diagnostics.CorpusOutsideMatchCount = &outside
+		}
 	}
 
 	data, err := json.Marshal(result)
@@ -385,6 +404,39 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("rag", "marshal result: %v", err), nil
 	}
 	return toolResult(string(data)), nil
+}
+
+// corpusKeywordSearcher is the subset of the vector store the corpus-absence
+// check needs. Defined at the consumer (Go idiom); SQLiteStore implements it.
+type corpusKeywordSearcher interface {
+	KeywordPresence(ctx context.Context, query string, retrievedIDs []string) (rag.CorpusPresence, error)
+}
+
+// refineWithCorpus deepens the model-declined branch using a deterministic
+// keyword check. It returns the refined result and the corpus presence (and
+// whether the check ran) for diagnostics. On any error or unsupported store it
+// fails open: the status stays not_in_retrieved_context.
+func (s *Server) refineWithCorpus(ctx context.Context, store rag.VectorStore, question string, retrievedIDs []string, res ragAnswerResult) (ragAnswerResult, rag.CorpusPresence, bool) {
+	searcher, ok := store.(corpusKeywordSearcher)
+	if !ok {
+		return res, rag.CorpusPresence{}, false
+	}
+	cp, err := searcher.KeywordPresence(ctx, question, retrievedIDs)
+	if err != nil {
+		return res, rag.CorpusPresence{}, false // fail open
+	}
+	switch {
+	case len(cp.Terms) == 0:
+		res.Status = statusNoUsefulTerms
+	case cp.OutsideMatches > 0:
+		res.Status = statusRetrievalMiss
+	case cp.TotalMatches == 0:
+		res.Status = statusCorpusAbsent
+	default:
+		// Matches exist only inside the retrieved set, yet the model declined:
+		// not a retrieval miss. Leave status as not_in_retrieved_context.
+	}
+	return res, cp, true
 }
 
 // buildDiagnostics assembles the opt-in diagnostics block. Corpus fields are

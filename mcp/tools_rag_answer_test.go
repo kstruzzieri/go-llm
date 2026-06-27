@@ -375,6 +375,128 @@ func (s *answerStore) DeleteBySource(context.Context, string) error  { return ni
 func (s *answerStore) Stats(context.Context) (rag.StoreStats, error) { return rag.StoreStats{}, nil }
 func (s *answerStore) Close() error                                  { return nil }
 
+type corpusOnlyStore struct {
+	*answerStore
+	presence     rag.CorpusPresence
+	err          error
+	gotQuestion  string
+	gotRetrieved []string
+}
+
+func (s *corpusOnlyStore) KeywordPresence(_ context.Context, question string, retrievedIDs []string) (rag.CorpusPresence, error) {
+	s.gotQuestion = question
+	s.gotRetrieved = append([]string(nil), retrievedIDs...)
+	return s.presence, s.err
+}
+
+func TestRefineWithCorpus(t *testing.T) {
+	base := ragAnswerResult{Status: statusNotInRetrievedContext}
+	tests := []struct {
+		name       string
+		store      rag.VectorStore
+		wantStatus string
+		wantRan    bool
+	}{
+		{
+			name:       "unsupported store leaves status",
+			store:      &answerStore{},
+			wantStatus: statusNotInRetrievedContext,
+			wantRan:    false,
+		},
+		{
+			name: "keyword error leaves status",
+			store: &corpusOnlyStore{
+				answerStore: &answerStore{},
+				err:         context.Canceled,
+			},
+			wantStatus: statusNotInRetrievedContext,
+			wantRan:    false,
+		},
+		{
+			name: "no useful terms",
+			store: &corpusOnlyStore{
+				answerStore: &answerStore{},
+				presence:    rag.CorpusPresence{},
+			},
+			wantStatus: statusNoUsefulTerms,
+			wantRan:    true,
+		},
+		{
+			name: "outside matches -> retrieval_miss",
+			store: &corpusOnlyStore{
+				answerStore: &answerStore{},
+				presence: rag.CorpusPresence{
+					Terms: []string{"RareSymbolZ"}, TotalMatches: 2, OutsideMatches: 1,
+				},
+			},
+			wantStatus: statusRetrievalMiss,
+			wantRan:    true,
+		},
+		{
+			name: "absent -> corpus_absent",
+			store: &corpusOnlyStore{
+				answerStore: &answerStore{},
+				presence: rag.CorpusPresence{
+					Terms: []string{"MissingSymbol"}, TotalMatches: 0, OutsideMatches: 0,
+				},
+			},
+			wantStatus: statusCorpusAbsent,
+			wantRan:    true,
+		},
+		{
+			name: "inside-only stays not_in_retrieved_context",
+			store: &corpusOnlyStore{
+				answerStore: &answerStore{},
+				presence: rag.CorpusPresence{
+					Terms: []string{"computeFoo"}, TotalMatches: 1, OutsideMatches: 0,
+				},
+			},
+			wantStatus: statusNotInRetrievedContext,
+			wantRan:    true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &Server{}
+			got, _, ran := s.refineWithCorpus(context.Background(), tt.store, "where is RareSymbolZ", []string{"c1"}, base)
+			if got.Status != tt.wantStatus || ran != tt.wantRan {
+				t.Fatalf("status=%s ran=%v, want status=%s ran=%v", got.Status, ran, tt.wantStatus, tt.wantRan)
+			}
+		})
+	}
+}
+
+func TestHandleRAGAnswer_CorpusDiagnostics(t *testing.T) {
+	decline := `{"answer":"","evidence":[]}`
+	chunk := rag.Chunk{
+		ID: "c1", Source: "a.go", StartLine: 10, EndLine: 12,
+		Content: "func computeFoo() int { return 1 }",
+	}
+	store := &corpusOnlyStore{
+		answerStore: &answerStore{results: []rag.SearchResult{{Chunk: chunk, Score: 1}}},
+		presence: rag.CorpusPresence{
+			Terms: []string{"computeFoo"}, TotalMatches: 1, OutsideMatches: 0,
+		},
+	}
+	s := answerEnvWithStore(t, &queuedRouteEngine{responses: []string{decline}}, store)
+	res := callAnswer(t, s, `{"question":"where is computeFoo","include_diagnostics":true}`)
+	if res.Status != statusNotInRetrievedContext {
+		t.Fatalf("status = %s, want not_in_retrieved_context", res.Status)
+	}
+	if res.Diagnostics == nil || res.Diagnostics.CorpusMatchCount == nil || *res.Diagnostics.CorpusMatchCount != 1 {
+		t.Fatalf("diagnostics = %+v, want corpus match count 1", res.Diagnostics)
+	}
+	if res.Diagnostics.CorpusOutsideMatchCount == nil || *res.Diagnostics.CorpusOutsideMatchCount != 0 {
+		t.Fatalf("diagnostics = %+v, want outside match count 0", res.Diagnostics)
+	}
+	if store.gotQuestion != "where is computeFoo" {
+		t.Fatalf("question = %q", store.gotQuestion)
+	}
+	if len(store.gotRetrieved) != 1 || store.gotRetrieved[0] != "c1" {
+		t.Fatalf("retrieved IDs = %v, want [c1]", store.gotRetrieved)
+	}
+}
+
 func answerEnv(t *testing.T, eng routeEngine) *Server {
 	t.Helper()
 	chunk := rag.Chunk{
