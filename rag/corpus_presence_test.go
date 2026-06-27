@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"context"
 	"strings"
 	"testing"
 )
@@ -48,4 +49,90 @@ func contains(xs []string, v string) bool {
 		}
 	}
 	return false
+}
+
+func TestKeywordPresence(t *testing.T) {
+	ctx := context.Background()
+	store, err := NewSQLiteStore(t.TempDir() + "/p.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+
+	chunks := []Chunk{
+		{ID: "c1", Source: "a.go", StartLine: 1, EndLine: 1, Content: "func BuildContext() {}"},
+		{ID: "c2", Source: "b.go", StartLine: 1, EndLine: 1, Content: "func numberLines() {}"},
+		{ID: "c3", Source: "c.go", StartLine: 1, EndLine: 1, Content: "package main // unrelated prose"},
+		{ID: "c4", Source: "d.go", StartLine: 1, EndLine: 1, Content: `const greeting = "hello world"`},
+	}
+	embs := [][]float64{{1, 0, 0}, {0, 1, 0}, {0, 0, 1}, {1, 1, 0}}
+	if err := store.Store(ctx, chunks, embs); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("present across corpus", func(t *testing.T) {
+		cp, err := store.KeywordPresence(ctx, "where is BuildContext", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cp.TotalMatches != 1 || cp.OutsideMatches != 1 {
+			t.Fatalf("cp = %+v, want total=1 outside=1", cp)
+		}
+		if !contains(cp.Terms, "BuildContext") {
+			t.Errorf("terms = %v", cp.Terms)
+		}
+	})
+
+	t.Run("outside excludes retrieved id", func(t *testing.T) {
+		cp, err := store.KeywordPresence(ctx, "BuildContext", []string{"c1"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cp.TotalMatches != 1 || cp.OutsideMatches != 0 {
+			t.Fatalf("cp = %+v, want total=1 outside=0", cp)
+		}
+	})
+
+	t.Run("absent term", func(t *testing.T) {
+		cp, err := store.KeywordPresence(ctx, "NonexistentSymbolXYZ", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cp.TotalMatches != 0 {
+			t.Fatalf("cp = %+v, want total=0", cp)
+		}
+	})
+
+	t.Run("no useful terms", func(t *testing.T) {
+		cp, err := store.KeywordPresence(ctx, "what is the meaning of it all", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(cp.Terms) != 0 || cp.TotalMatches != 0 {
+			t.Fatalf("cp = %+v, want no terms", cp)
+		}
+	})
+
+	t.Run("quoted literal phrase", func(t *testing.T) {
+		cp, err := store.KeywordPresence(ctx, `find "hello world"`, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cp.TotalMatches != 1 || cp.OutsideMatches != 1 {
+			t.Fatalf("cp = %+v, want total=1 outside=1", cp)
+		}
+		if !contains(cp.Terms, "hello world") {
+			t.Errorf("terms = %v, want hello world", cp.Terms)
+		}
+	})
+
+	t.Run("disjunction: terms split across chunks both count", func(t *testing.T) {
+		cp, err := store.KeywordPresence(ctx, "BuildContext and numberLines", nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cp.TotalMatches != 2 {
+			t.Fatalf("cp = %+v, want total=2 (OR semantics)", cp)
+		}
+	})
 }
