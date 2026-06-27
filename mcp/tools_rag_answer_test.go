@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/rag"
@@ -138,6 +139,35 @@ func TestDeriveAnswer(t *testing.T) {
 		got := deriveAnswer(modelAnswer{Answer: "  "}, blocks)
 		if got.Status != statusNotInRetrievedContext || got.AnswerFound {
 			t.Fatalf("status=%s found=%v", got.Status, got.AnswerFound)
+		}
+	})
+}
+
+func TestBuildEvidenceBlocks(t *testing.T) {
+	results := []rag.SearchResult{
+		{Chunk: rag.Chunk{Source: "a.go", StartLine: 1, EndLine: 1, Content: "alpha"}},
+		{Chunk: rag.Chunk{Source: "b.go", StartLine: 2, EndLine: 2, Content: "beta"}},
+	}
+	t.Run("labels and format", func(t *testing.T) {
+		text, blocks := buildEvidenceBlocks(results, 4096)
+		if len(blocks) != 2 || blocks[0].ID != "E1" || blocks[1].ID != "E2" {
+			t.Fatalf("blocks = %+v", blocks)
+		}
+		if !strings.Contains(text, "[E1] a.go (lines 1-1)") || !strings.Contains(text, "alpha") {
+			t.Errorf("text missing E1 block:\n%s", text)
+		}
+		if !strings.Contains(text, "[E2] b.go (lines 2-2)") {
+			t.Errorf("text missing E2 block:\n%s", text)
+		}
+	})
+	t.Run("budget drops tail but keeps first", func(t *testing.T) {
+		// maxTokens=1 -> maxChars=4, far smaller than one block; first still included.
+		text, blocks := buildEvidenceBlocks(results, 1)
+		if len(blocks) != 1 || blocks[0].ID != "E1" {
+			t.Fatalf("blocks = %+v", blocks)
+		}
+		if strings.Contains(text, "E2") {
+			t.Errorf("E2 should have been dropped:\n%s", text)
 		}
 	})
 }

@@ -210,3 +210,24 @@ func deriveAnswer(ma modelAnswer, blocks []evidenceBlock) ragAnswerResult {
 	}
 	return res
 }
+
+// buildEvidenceBlocks assigns stable E1..En labels to the retrieved chunks and
+// formats them for the prompt, honoring a character budget (maxTokens*4, the
+// same chars-per-token ratio BuildContext uses). Lower-ranked blocks are dropped
+// when the budget would be exceeded; a dropped block is omitted from the
+// returned slice so the model cannot cite it. The first block is always kept.
+func buildEvidenceBlocks(results []rag.SearchResult, maxTokens int) (string, []evidenceBlock) {
+	maxChars := maxTokens * 4
+	var b strings.Builder
+	var blocks []evidenceBlock
+	for i, r := range results {
+		id := fmt.Sprintf("E%d", i+1)
+		block := fmt.Sprintf("[%s] %s (lines %d-%d)\n%s\n\n", id, r.Chunk.Source, r.Chunk.StartLine, r.Chunk.EndLine, r.Chunk.Content)
+		if b.Len() > 0 && b.Len()+len(block) > maxChars {
+			break
+		}
+		b.WriteString(block)
+		blocks = append(blocks, evidenceBlock{ID: id, Chunk: r.Chunk})
+	}
+	return strings.TrimRight(b.String(), "\n"), blocks
+}
