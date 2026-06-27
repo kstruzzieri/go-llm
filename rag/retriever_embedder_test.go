@@ -150,6 +150,43 @@ func TestRetrieve_VSIDMatch_proceeds(t *testing.T) {
 	}
 }
 
+// TestRetrieve_embedsOriginalQueryNotExtracted guards the issue #226 contract
+// that semantic embedding uses the original query verbatim while only the
+// keyword path derives a narrower code-term query. The query intentionally
+// extracts to something different so a future refactor that routes the
+// extracted query into the embedder would fail here.
+func TestRetrieve_embedsOriginalQueryNotExtracted(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{{ID: "c1", Content: "stored", Source: "s.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "s.go", chunks, [][]float64{{1, 0}}, "hash", "X"); err != nil {
+		t.Fatalf("seed store: %v", err)
+	}
+
+	emb := &recordingEmbedder{result: EmbedResult{
+		Embeddings:    [][]float64{{1, 0}},
+		VectorSpaceID: "X",
+	}}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	const query = "fix SearchMulti in rag/retriever.go"
+	if extractCodeQuery(query) == query {
+		t.Fatal("precondition: extraction should differ from the original query")
+	}
+
+	if _, err := r.Retrieve(ctx, query, 1); err != nil {
+		t.Fatalf("Retrieve: %v", err)
+	}
+
+	if len(emb.inputs) != 1 || emb.inputs[0] != query {
+		t.Errorf("embedder inputs = %v, want [%q] (original query, not extracted)", emb.inputs, query)
+	}
+}
+
 func TestRetrieve_emptyQueryVSID_errs(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

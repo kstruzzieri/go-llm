@@ -121,6 +121,85 @@ func TestRetrieverBuildContextTruncation(t *testing.T) {
 	}
 }
 
+func TestRetrieverBuildContextLineNumbersSingleLine(t *testing.T) {
+	client := ollama.NewClient()
+	store, _ := NewSQLiteStore(":memory:")
+	defer func() { _ = store.Close() }()
+	retriever := NewRetriever(client, store)
+
+	results := []SearchResult{
+		{Chunk: Chunk{Source: "a.go", StartLine: 42, EndLine: 42, Content: "x := compute()"}, Score: 0.9},
+	}
+
+	ctx := retriever.BuildContext(results, 1000)
+	if !strings.Contains(ctx, "42| x := compute()") {
+		t.Errorf("context missing line-anchored content; got:\n%s", ctx)
+	}
+	// Attribution (source, line range, score) is still present.
+	if !strings.Contains(ctx, "a.go") || !strings.Contains(ctx, "lines 42-42") || !strings.Contains(ctx, "0.90") {
+		t.Errorf("context missing attribution; got:\n%s", ctx)
+	}
+}
+
+func TestRetrieverBuildContextLineNumbersMultiLine(t *testing.T) {
+	client := ollama.NewClient()
+	store, _ := NewSQLiteStore(":memory:")
+	defer func() { _ = store.Close() }()
+	retriever := NewRetriever(client, store)
+
+	results := []SearchResult{
+		{Chunk: Chunk{Source: "m.go", StartLine: 10, EndLine: 12, Content: "func f() {\n\treturn 1\n}"}, Score: 0.8},
+	}
+
+	ctx := retriever.BuildContext(results, 1000)
+	for _, want := range []string{"10| func f() {", "11| \treturn 1", "12| }"} {
+		if !strings.Contains(ctx, want) {
+			t.Errorf("context missing %q; got:\n%s", want, ctx)
+		}
+	}
+}
+
+func TestRetrieverBuildContextLineNumbersTrailingNewline(t *testing.T) {
+	client := ollama.NewClient()
+	store, _ := NewSQLiteStore(":memory:")
+	defer func() { _ = store.Close() }()
+	retriever := NewRetriever(client, store)
+
+	// Content ending in a newline must not produce a phantom numbered line.
+	results := []SearchResult{
+		{Chunk: Chunk{Source: "t.go", StartLine: 5, EndLine: 6, Content: "a\nb\n"}, Score: 0.7},
+	}
+
+	ctx := retriever.BuildContext(results, 1000)
+	if !strings.Contains(ctx, "5| a") || !strings.Contains(ctx, "6| b") {
+		t.Errorf("context missing numbered lines; got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "7| ") {
+		t.Errorf("context numbered a phantom trailing line; got:\n%s", ctx)
+	}
+}
+
+func TestRetrieverBuildContextLineNumbersTruncation(t *testing.T) {
+	client := ollama.NewClient()
+	store, _ := NewSQLiteStore(":memory:")
+	defer func() { _ = store.Close() }()
+	retriever := NewRetriever(client, store)
+
+	results := []SearchResult{
+		{Chunk: Chunk{Source: "first.go", StartLine: 1, EndLine: 1, Content: "small"}, Score: 0.9},
+		{Chunk: Chunk{Source: "second.go", StartLine: 1, EndLine: 1, Content: strings.Repeat("y", 500)}, Score: 0.8},
+	}
+
+	// Budget fits the first numbered chunk but not the large second one.
+	ctx := retriever.BuildContext(results, 40) // ~160 chars
+	if !strings.Contains(ctx, "1| small") {
+		t.Errorf("first chunk should be line-numbered and present; got:\n%s", ctx)
+	}
+	if strings.Contains(ctx, "second.go") {
+		t.Error("second result should be truncated due to token limit")
+	}
+}
+
 func TestRetrieverWithCustomModel(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ollama.EmbedRequest
