@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 )
 
@@ -30,6 +31,7 @@ type flags struct {
 	allowExec        bool
 	noRag            bool
 	noProjectContext bool
+	noCompress       bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -49,6 +51,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
+	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -263,6 +266,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
 
+	maxHistoryTokens := f.inputCeiling
+	if maxHistoryTokens <= 0 {
+		maxHistoryTokens = agent.DefaultInputCeiling
+	}
+	maxHistoryTokens /= 2
+	summarizeChain, err := resolveSummarizeChain(bundle.Config)
+	if err != nil {
+		return err
+	}
+
 	caller := newRouterChainCaller(bundle.Router, plan.chain)
 	sess := &replSession{
 		orch:            agent.New(caller, agent.ContextManager{}),
@@ -273,9 +286,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		color:           !f.noColor,
 		retrieveOmitted: retrieveOmitted,
 		session:         sessn,
-		journal:         journal,
-		allowWrite:      f.allowWrite,
-		allowExec:       f.allowExec,
+		compress: compressPolicy{
+			summarize:          agent.NewRouterSummarizer(bundle.Router, summarizeChain),
+			estimate:           conversation.CharRatioEstimator(4.0),
+			maxHistoryTokens:   maxHistoryTokens,
+			minRecentExchanges: 4,
+			enabled:            !f.noCompress,
+		},
+		journal:    journal,
+		allowWrite: f.allowWrite,
+		allowExec:  f.allowExec,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate

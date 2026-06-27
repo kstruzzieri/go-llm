@@ -56,11 +56,19 @@ type Message struct {
 
 // Conversation is the unit of persistence.
 type Conversation struct {
-	ID        string
-	Title     string
-	Messages  []Message
-	CreatedAt time.Time
-	UpdatedAt time.Time
+	ID             string
+	Title          string
+	Messages       []Message
+	DurableSummary *DurableSummary
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// DurableSummary is compressed transcript history kept beside recent raw
+// messages.
+type DurableSummary struct {
+	Content      string
+	MessageCount int
 }
 
 // Summary is the lightweight listing type returned by List (no messages loaded).

@@ -24,6 +24,8 @@ type replSession struct {
 
 	session *session // nil => --no-session (no history, no persistence)
 
+	compress compressPolicy // post-turn history compression policy
+
 	lastModel  string           // last routed ActualModel for /model
 	journal    *mutationJournal // nil unless -allow-write enabled writes
 	allowWrite bool
@@ -95,13 +97,14 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
 	req := agent.Request{
-		Goal:     line,
-		System:   sess.baseSystem,
-		History:  sess.session.history(), // nil-safe: nil session => nil
-		Tools:    sess.tools,
-		MaxSteps: sess.maxSteps,
-		Budget:   sess.budget,
-		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
+		Goal:           line,
+		System:         sess.baseSystem,
+		HistorySummary: sess.session.historySummary(), // nil-safe: nil session => empty
+		History:        sess.session.history(),        // nil-safe: nil session => nil
+		Tools:          sess.tools,
+		MaxSteps:       sess.maxSteps,
+		Budget:         sess.budget,
+		Approver:       approver, // nil when read-only => runtime fail-safe denies Write/Exec
 	}
 	res, err := sess.orch.Run(runCtx, req, rend)
 	if err != nil {
@@ -115,11 +118,18 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if m := lastRoutedModel(res); m != "" {
 		sess.lastModel = m
 	}
-	// Persist only a successful, answered run (amendment 6). Use the parent ctx,
-	// not runCtx, so the save is not tied to this turn's cancellation scope.
+	// Persist only a successful, answered run (amendment 6). recordResult uses the
+	// parent ctx so saving the computed answer is not tied to this turn's
+	// cancellation scope. maybeCompress, by contrast, makes a new summarizer model
+	// call — it uses runCtx so a Ctrl-C during post-turn compression interrupts it
+	// (CompressMessages then returns a cancellation error and the session is left
+	// untouched, which the warning below surfaces).
 	if sess.session != nil && res.Answer != "" {
 		if serr := sess.session.recordResult(ctx, line, res); serr != nil {
 			_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", serr)
+		}
+		if cerr := sess.maybeCompress(runCtx); cerr != nil {
+			_, _ = fmt.Fprintf(out, "warning: compression skipped: %v\n", cerr)
 		}
 	}
 	rend.finalFooter(res)

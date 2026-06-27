@@ -23,6 +23,11 @@ var migrations = []migration{
 		description: "conversation search shadow table and FTS5 index",
 		fn:          migrateV2,
 	},
+	{
+		version:     3,
+		description: "durable conversation summaries",
+		fn:          migrateV3,
+	},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -70,6 +75,19 @@ func migrateV2(tx *sql.Tx) error {
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("conversation: migrate v2: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV3(tx *sql.Tx) error {
+	stmts := []string{
+		`ALTER TABLE conversations ADD COLUMN summary_content TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE conversations ADD COLUMN summary_message_count INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("conversation: migrate v3: %w", err)
 		}
 	}
 	return nil

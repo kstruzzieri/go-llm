@@ -227,23 +227,44 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 		return TrimResult{Messages: []Message{}}
 	}
 
-	var systemMsgs []Message
-	var nonSystem []Message
-	for _, m := range msgs {
-		if m.Role == "system" {
-			systemMsgs = append(systemMsgs, m)
-		} else {
-			nonSystem = append(nonSystem, m)
+	// Build result preserving original message order.
+	keep := trimByExchangesKeep(msgs, maxExchanges)
+	var result []Message
+	trimmedCount := 0
+	for i, m := range msgs {
+		if keep[i] {
+			result = append(result, m)
+			continue
 		}
+		trimmedCount++
 	}
 
+	return TrimResult{
+		Messages:        result,
+		TrimmedCount:    trimmedCount,
+		EstimatedTokens: 0,
+	}
+}
+
+type exchange struct {
+	start int
+	end   int
+}
+
+func trimByExchangesKeep(msgs []Message, maxExchanges int) []bool {
+	keep := make([]bool, len(msgs))
+	var nonSystem []Message
+	var orig []int
+	for i, m := range msgs {
+		if m.Role == "system" {
+			keep[i] = true
+			continue
+		}
+		nonSystem = append(nonSystem, m)
+		orig = append(orig, i)
+	}
 	if len(nonSystem) == 0 {
-		return TrimResult{Messages: systemMsgs, TrimmedCount: 0}
-	}
-
-	type exchange struct {
-		start int
-		end   int
+		return keep
 	}
 
 	unresolvedStart := -1
@@ -267,24 +288,23 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 	}
 
 	var exchanges []exchange
-	i := 0
-	for i < resolvedEnd {
-		if nonSystem[i].Role == "user" {
-			ex := exchange{start: i}
-			j := i + 1
-			for j < resolvedEnd {
-				if nonSystem[j].Role == "assistant" && len(nonSystem[j].ToolCalls) == 0 {
-					ex.end = j
-					exchanges = append(exchanges, ex)
-					j++
-					break
-				}
-				j++
-			}
-			i = j
-		} else {
+	for i := 0; i < resolvedEnd; {
+		if nonSystem[i].Role != "user" {
 			i++
+			continue
 		}
+		ex := exchange{start: i}
+		j := i + 1
+		for j < resolvedEnd {
+			if nonSystem[j].Role == "assistant" && len(nonSystem[j].ToolCalls) == 0 {
+				ex.end = j
+				exchanges = append(exchanges, ex)
+				j++
+				break
+			}
+			j++
+		}
+		i = j
 	}
 
 	keepFrom := 0
@@ -292,12 +312,10 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 		keepFrom = len(exchanges) - maxExchanges
 	}
 
-	keep := make([]bool, len(nonSystem))
-
 	for idx := keepFrom; idx < len(exchanges); idx++ {
 		ex := exchanges[idx]
 		for k := ex.start; k <= ex.end; k++ {
-			keep[k] = true
+			keep[orig[k]] = true
 		}
 	}
 
@@ -310,30 +328,8 @@ func TrimByExchanges(msgs []Message, maxExchanges int) TrimResult {
 			}
 		}
 		for k := tailStart; k < len(nonSystem); k++ {
-			keep[k] = true
+			keep[orig[k]] = true
 		}
 	}
-
-	// Build result preserving original message order.
-	var result []Message
-	trimmedCount := 0
-	nsIdx := 0
-	for _, m := range msgs {
-		if m.Role == "system" {
-			result = append(result, m)
-		} else {
-			if keep[nsIdx] {
-				result = append(result, m)
-			} else {
-				trimmedCount++
-			}
-			nsIdx++
-		}
-	}
-
-	return TrimResult{
-		Messages:        result,
-		TrimmedCount:    trimmedCount,
-		EstimatedTokens: 0,
-	}
+	return keep
 }

@@ -48,10 +48,14 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 	if err != nil {
 		return fmt.Errorf("conversation: save: marshal messages: %w", err)
 	}
+	summaryContent, summaryMessageCount := durableSummaryValues(conv.DurableSummary)
 
 	now := time.Now().UnixMilli()
 
 	searchBody := searchText(msgs)
+	if summaryContent != "" {
+		searchBody += "\n" + summaryContent
+	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("conversation: save %q: begin: %w", conv.ID, err)
@@ -59,13 +63,15 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 	defer func() { _ = tx.Rollback() }()
 
 	_, err = tx.ExecContext(ctx,
-		`INSERT INTO conversations (id, title, messages, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO conversations (id, title, messages, summary_content, summary_message_count, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(id) DO UPDATE SET
-			title      = excluded.title,
-			messages   = excluded.messages,
-			updated_at = excluded.updated_at`,
-		conv.ID, conv.Title, string(messagesJSON), now, now,
+			title                 = excluded.title,
+			messages              = excluded.messages,
+			summary_content       = excluded.summary_content,
+			summary_message_count = excluded.summary_message_count,
+			updated_at            = excluded.updated_at`,
+		conv.ID, conv.Title, string(messagesJSON), summaryContent, summaryMessageCount, now, now,
 	)
 	if err != nil {
 		return fmt.Errorf("conversation: save %q: %w", conv.ID, err)
@@ -83,12 +89,14 @@ func (s *SQLiteStore) Save(ctx context.Context, conv Conversation) error {
 func (s *SQLiteStore) Load(ctx context.Context, id string) (*Conversation, error) {
 	var conv Conversation
 	var messagesJSON string
+	var summaryContent string
+	var summaryMessageCount int
 	var createdMs, updatedMs int64
 
 	err := s.db.QueryRowContext(ctx,
-		`SELECT id, title, messages, created_at, updated_at FROM conversations WHERE id = ?`,
+		`SELECT id, title, messages, summary_content, summary_message_count, created_at, updated_at FROM conversations WHERE id = ?`,
 		id,
-	).Scan(&conv.ID, &conv.Title, &messagesJSON, &createdMs, &updatedMs)
+	).Scan(&conv.ID, &conv.Title, &messagesJSON, &summaryContent, &summaryMessageCount, &createdMs, &updatedMs)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("conversation: load %q: %w", id, ErrNotFound)
@@ -102,6 +110,12 @@ func (s *SQLiteStore) Load(ctx context.Context, id string) (*Conversation, error
 
 	conv.CreatedAt = time.UnixMilli(createdMs)
 	conv.UpdatedAt = time.UnixMilli(updatedMs)
+	if summaryContent != "" || summaryMessageCount > 0 {
+		conv.DurableSummary = &DurableSummary{
+			Content:      summaryContent,
+			MessageCount: summaryMessageCount,
+		}
+	}
 
 	return &conv, nil
 }
@@ -235,6 +249,13 @@ func (s *SQLiteStore) deleteSearchIndex(ctx context.Context, tx *sql.Tx, id stri
 		return fmt.Errorf("conversation: delete %q: delete search metadata: %w", id, err)
 	}
 	return nil
+}
+
+func durableSummaryValues(s *DurableSummary) (string, int) {
+	if s == nil {
+		return "", 0
+	}
+	return s.Content, s.MessageCount
 }
 
 func searchText(msgs []Message) string {

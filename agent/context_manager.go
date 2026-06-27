@@ -1,15 +1,29 @@
 package agent
 
-import "context"
+import (
+	"context"
+	"strings"
 
-// defaultInputCeiling is a conservative fallback when Budget.InputCeiling is 0.
-const defaultInputCeiling = 8192
+	"github.com/kstruzzieri/go-llm/provider"
+)
+
+// DefaultInputCeiling is a conservative fallback when Budget.InputCeiling is 0.
+// Exported so consumers (e.g. Golem's compression policy) derive their own
+// token thresholds from the same source rather than duplicating the literal.
+const DefaultInputCeiling = 8192
 
 // ContextManager assembles and bounds the prompt each turn. It is a pure
 // function over State, tool-schema token count, and budget.
 type ContextManager struct {
 	Compactor Compactor
 	Estimate  func(string) int // token estimator; len/4 when nil
+}
+
+// DurableSummaryPrompt renders the durable summary as the pinned system message
+// injected ahead of raw history. Exported so Golem's trigger accounting counts
+// the exact text agent injects (no drift between estimate and reality).
+func DurableSummaryPrompt(summary string) string {
+	return "Previous conversation summary:\n" + summary
 }
 
 func (m ContextManager) estimate(s string) int {
@@ -36,7 +50,7 @@ func (m ContextManager) messageCost(msg Message) int {
 func turnBudget(b Budget) TokenBudget {
 	ceiling := b.InputCeiling
 	if ceiling <= 0 {
-		ceiling = defaultInputCeiling
+		ceiling = DefaultInputCeiling
 	}
 	if b.OutputReserve > 0 {
 		ceiling -= b.OutputReserve
@@ -65,10 +79,27 @@ func (m ContextManager) totalTokens(st State, toolSchemaTokens int) int {
 	return n
 }
 
+func materializeDurableSummary(st State) State {
+	summary := strings.TrimSpace(st.DurableSummary)
+	if summary == "" {
+		return st
+	}
+	out := st
+	out.DurableSummary = ""
+	out.Messages = make([]Message, 0, len(st.Messages)+1)
+	out.Messages = append(out.Messages, Message{
+		ChatMessage: provider.ChatMessage{Role: "system", Content: DurableSummaryPrompt(summary)},
+		Segment:     Pinned,
+	})
+	out.Messages = append(out.Messages, st.Messages...)
+	return out
+}
+
 // Assemble bounds the transcript to fit the budget. toolSchemaTokens is the
 // pinned cost of the active tool schemas (not stored in State).
 func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens int, budget TokenBudget) (State, Pressure, error) {
 	m = normalizeContextManager(m)
+	st = materializeDurableSummary(st)
 	if m.pinnedTokens(st, toolSchemaTokens) > budget.Input {
 		return st, Pressure{}, ErrContextExhausted
 	}
