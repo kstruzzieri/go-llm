@@ -296,6 +296,9 @@ func TestHandleRAGAnswer(t *testing.T) {
 		if res.Diagnostics == nil || res.Diagnostics.CandidateAnswer == "" {
 			t.Errorf("candidate answer should be in diagnostics: %+v", res.Diagnostics)
 		}
+		if len(res.Diagnostics.RetrievedChunkIDs) != 1 || res.Diagnostics.RetrievedChunkIDs[0] != "c1" {
+			t.Errorf("retrieved_chunk_ids = %v, want [c1]", res.Diagnostics.RetrievedChunkIDs)
+		}
 	})
 
 	t.Run("model declines -> not_in_retrieved_context", func(t *testing.T) {

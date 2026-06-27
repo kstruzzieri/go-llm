@@ -450,7 +450,7 @@ func (s *Server) refineWithCorpus(ctx context.Context, store rag.VectorStore, qu
 func buildDiagnostics(ma modelAnswer, blocks []evidenceBlock, res ragAnswerResult) *answerDiagnostics {
 	d := &answerDiagnostics{}
 	for _, b := range blocks {
-		d.RetrievedChunkIDs = append(d.RetrievedChunkIDs, b.ID)
+		d.RetrievedChunkIDs = append(d.RetrievedChunkIDs, b.Chunk.ID)
 	}
 	for _, ev := range ma.Evidence {
 		d.EvidenceIDs = append(d.EvidenceIDs, ev.ID)
