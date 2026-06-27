@@ -27,17 +27,27 @@ func (s *KeywordScorer) Name() string { return "keyword" }
 // ScoreBatch computes BM25-based keyword relevance for each chunk.
 // Scores are normalized to the [0, 1] range using max-normalization.
 //
-// The raw query is sanitized into FTS5-safe tokens before issuing MATCH,
-// so code-style queries like "pkg/main.go", "foo-bar", and "qwen2.5:72b"
-// are properly tokenized rather than causing FTS5 parse errors.
+// Before matching, the query is reduced to its code-shaped tokens via
+// extractCodeQuery so identifiers and paths drive the keyword search instead
+// of being buried in natural-language prose; the original query is used when
+// extraction finds no code terms. The result is then sanitized into FTS5-safe
+// tokens, so code-style queries like "pkg/main.go", "foo-bar", and
+// "qwen2.5:72b" are properly tokenized rather than causing FTS5 parse errors.
 func (s *KeywordScorer) ScoreBatch(ctx context.Context, chunks []Chunk, query string,
 	queryEmbedding []float64, qCtx QueryContext) ([]float64, error) {
 	if len(chunks) == 0 || query == "" {
 		return make([]float64, len(chunks)), nil
 	}
 
-	// Sanitize the query into FTS5-safe quoted tokens.
-	sanitized := sanitizeFTS5Query(query)
+	// Prefer code-shaped tokens for keyword matching; fall back to the full
+	// query when extraction yields nothing (e.g. pure natural language).
+	keywordQuery := query
+	if extracted := extractCodeQuery(query); extracted != "" {
+		keywordQuery = extracted
+	}
+
+	// Sanitize the keyword query into FTS5-safe quoted tokens.
+	sanitized := sanitizeFTS5Query(keywordQuery)
 	if sanitized == "" {
 		// Query contained no searchable tokens (e.g., all punctuation).
 		return make([]float64, len(chunks)), nil

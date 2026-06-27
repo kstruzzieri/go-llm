@@ -346,7 +346,7 @@ func TestSanitizeFTS5Query(t *testing.T) {
 		{"  spaces  ", `"spaces"`},
 		{"a/b/c.d", `"a" "b" "c" "d"`},
 		{"hello_world", `"hello_world"`}, // underscore preserved for phrase semantics
-		{"café", `"café"`},                 // unicode letters preserved
+		{"café", `"café"`},               // unicode letters preserved
 	}
 
 	for _, tt := range tests {
@@ -389,6 +389,83 @@ func TestKeywordScorerUnderscorePhraseSemantics(t *testing.T) {
 	// c2 has "snake" and "case" but NOT adjacent — phrase query should not match.
 	if scores[1] != 0 {
 		t.Errorf("scores[1] = %f, want 0 (snake and case are not adjacent)", scores[1])
+	}
+}
+
+// TestKeywordScorerExtractsCodeTermFromNoisyQuery drives the real FTS5-backed
+// scorer to prove that code-term extraction (issue #226) changes the outcome,
+// not just a fixture. The query mixes an identifier (only in c1) with prose
+// words (only in c2). FTS5 combines terms with an implicit AND, so the raw
+// noisy query would require every prose word to be present and therefore fail
+// to surface c1 at all. Extraction reduces the query to "SearchMulti", letting
+// the keyword signal rank c1 above c2.
+func TestKeywordScorerExtractsCodeTermFromNoisyQuery(t *testing.T) {
+	store := newScorerTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "func SearchMulti runs hybrid retrieval over chunks", Source: "search_multi.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c2", Content: "please find the helper in this file", Source: "other.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{{1.0, 0.0}, {0.0, 1.0}}
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	// Sanity-check the discriminator: the raw query AND-fails to match c1
+	// because its prose tokens ("please", "find") are absent from c1.
+	if got := sanitizeFTS5Query("please find the SearchMulti function"); got == sanitizeFTS5Query(extractCodeQuery("please find the SearchMulti function")) {
+		t.Fatalf("raw and extracted queries sanitize identically (%q); test would not discriminate", got)
+	}
+
+	scorer := NewKeywordScorer(store.DB())
+	scores, err := scorer.ScoreBatch(ctx, chunks, "please find the SearchMulti function", nil, QueryContext{})
+	if err != nil {
+		t.Fatalf("ScoreBatch: %v", err)
+	}
+
+	if scores[0] <= 0 {
+		t.Errorf("c1 (contains SearchMulti) scored %f, want > 0; extraction should have surfaced it", scores[0])
+	}
+	if scores[0] <= scores[1] {
+		t.Errorf("c1 score %f should rank above c2 score %f after extraction", scores[0], scores[1])
+	}
+}
+
+// TestKeywordScorerFallsBackToOriginalQuery verifies that when the query holds
+// no code-shaped tokens, the scorer searches the original natural-language
+// query rather than an empty extraction.
+func TestKeywordScorerFallsBackToOriginalQuery(t *testing.T) {
+	store := newScorerTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "the retrieval pipeline ranks candidate chunks", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c2", Content: "unrelated database connection pooling", Source: "b.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{{1.0, 0.0}, {0.0, 1.0}}
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	// Pure prose (no code tokens) whose words appear verbatim in c1. FTS5
+	// uses implicit AND with no stemming, so the terms must match exactly.
+	const query = "retrieval pipeline candidate chunks"
+	if extractCodeQuery(query) != "" {
+		t.Fatal("precondition: query should extract no code tokens")
+	}
+
+	scorer := NewKeywordScorer(store.DB())
+	scores, err := scorer.ScoreBatch(ctx, chunks, query, nil, QueryContext{})
+	if err != nil {
+		t.Fatalf("ScoreBatch: %v", err)
+	}
+
+	if scores[0] <= 0 {
+		t.Errorf("c1 (matches prose terms via fallback) scored %f, want > 0", scores[0])
+	}
+	if scores[1] != 0 {
+		t.Errorf("c2 (no shared terms) scored %f, want 0", scores[1])
 	}
 }
 
