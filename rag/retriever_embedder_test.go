@@ -139,8 +139,11 @@ func TestRetrieve_VSIDMatch_proceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Retrieve error: %v", err)
 	}
-	if spyStore.searchCalls != 1 {
-		t.Fatalf("Search calls = %d, want 1", spyStore.searchCalls)
+	if spyStore.searchMultiCalls != 1 {
+		t.Fatalf("SearchMulti calls = %d, want 1 (hybrid is default)", spyStore.searchMultiCalls)
+	}
+	if spyStore.searchCalls != 0 {
+		t.Fatalf("Search calls = %d, want 0 when the store supports hybrid", spyStore.searchCalls)
 	}
 	if len(results) != 1 || results[0].Chunk.ID != "c1" {
 		t.Fatalf("results = %+v, want c1", results)
@@ -257,8 +260,11 @@ func TestRetrieve_fullyLegacy_proceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Retrieve error: %v", err)
 	}
-	if spyStore.searchCalls != 1 {
-		t.Fatalf("Search calls = %d, want 1", spyStore.searchCalls)
+	if spyStore.searchMultiCalls != 1 {
+		t.Fatalf("SearchMulti calls = %d, want 1 (hybrid is default)", spyStore.searchMultiCalls)
+	}
+	if spyStore.searchCalls != 0 {
+		t.Fatalf("Search calls = %d, want 0 when the store supports hybrid", spyStore.searchCalls)
 	}
 	if len(results) != 2 {
 		t.Fatalf("results = %d, want 2", len(results))
@@ -283,8 +289,11 @@ func TestRetrieve_emptyCorpus_proceeds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Retrieve error: %v", err)
 	}
-	if spyStore.searchCalls != 1 {
-		t.Fatalf("Search calls = %d, want 1", spyStore.searchCalls)
+	if spyStore.searchMultiCalls != 1 {
+		t.Fatalf("SearchMulti calls = %d, want 1 (hybrid is default)", spyStore.searchMultiCalls)
+	}
+	if spyStore.searchCalls != 0 {
+		t.Fatalf("Search calls = %d, want 0 when the store supports hybrid", spyStore.searchCalls)
 	}
 	if len(results) != 0 {
 		t.Fatalf("results = %d, want 0", len(results))
@@ -348,12 +357,19 @@ func TestRetrieve_storeWithoutProber_skipsCheck(t *testing.T) {
 
 type countingSQLiteRetrieverStore struct {
 	*SQLiteStore
-	searchCalls int
+	searchCalls      int
+	searchMultiCalls int
 }
 
 func (s *countingSQLiteRetrieverStore) Search(ctx context.Context, queryEmbedding []float64, k int) ([]SearchResult, error) {
 	s.searchCalls++
 	return s.SQLiteStore.Search(ctx, queryEmbedding, k)
+}
+
+func (s *countingSQLiteRetrieverStore) SearchMulti(ctx context.Context, queryEmbedding []float64, query string,
+	k int, qCtx QueryContext) ([]ScoredResult, error) {
+	s.searchMultiCalls++
+	return s.SQLiteStore.SearchMulti(ctx, queryEmbedding, query, k, qCtx)
 }
 
 type retrieverPlainStore struct {
