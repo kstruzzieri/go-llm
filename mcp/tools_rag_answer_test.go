@@ -29,3 +29,32 @@ func TestQuoteInChunk(t *testing.T) {
 		})
 	}
 }
+
+func TestExtractJSONObjects(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"plain", `{"a":1}`, []string{`{"a":1}`}},
+		{"prose around", "sure:\n{\"a\":1}\nthanks", []string{`{"a":1}`}},
+		{"two objects", `{"a":1} then {"b":2}`, []string{`{"a":1}`, `{"b":2}`}},
+		{"nested", `{"a":{"b":2}}`, []string{`{"a":{"b":2}}`}},
+		{"brace in string", `{"a":"}{"}`, []string{`{"a":"}{"}`}},
+		{"escaped quote in string", `{"a":"x\"}"}`, []string{`{"a":"x\"}"}`}},
+		{"none", `no json here`, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := extractJSONObjects(tc.in)
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d objects %v, want %d %v", len(got), got, len(tc.want), tc.want)
+			}
+			for i := range got {
+				if string(got[i]) != tc.want[i] {
+					t.Errorf("obj[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+		})
+	}
+}
