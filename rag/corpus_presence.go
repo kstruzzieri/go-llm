@@ -24,6 +24,12 @@ func corpusKeywordTerms(query string) ([]string, string) {
 		if tok == "" || seen[tok] {
 			return
 		}
+		// A term with no letter or digit (e.g. a punctuation-only quoted literal
+		// like "===") tokenizes to an empty FTS5 phrase: it would mislabel absence
+		// or trip an FTS5 parse edge. Such a term carries no searchable content.
+		if strings.IndexFunc(tok, func(r rune) bool { return unicode.IsLetter(r) || unicode.IsDigit(r) }) < 0 {
+			return
+		}
 		seen[tok] = true
 		terms = append(terms, tok)
 	}

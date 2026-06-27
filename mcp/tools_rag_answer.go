@@ -23,6 +23,12 @@ func normalizeWS(s string) string {
 // conservative whitespace normalization. Case-sensitive (code is). Matches
 // against rag.Chunk.Content, never BuildContext output: BuildContext prefixes
 // each line with "<n>| " (PR #227 line anchors), which would corrupt matching.
+//
+// Verification is literal substring presence, with no minimum-meaningfulness
+// floor: a trivially short cited quote (e.g. "1") can satisfy it. A length
+// threshold is intentionally omitted because it would false-negative legitimate
+// short identifiers, and the model is the server's own prompt-controlled local
+// model rather than an adversary.
 func quoteInChunk(chunk rag.Chunk, quote string) bool {
 	q := normalizeWS(quote)
 	if q == "" {

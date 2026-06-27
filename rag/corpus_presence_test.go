@@ -39,6 +39,13 @@ func TestCorpusKeywordTerms(t *testing.T) {
 			t.Errorf("terms = %v, want exactly [getUserID]", terms)
 		}
 	})
+	t.Run("punctuation-only quoted literal dropped", func(t *testing.T) {
+		// A quoted literal with no letter/digit has no searchable FTS5 content.
+		terms, expr := corpusKeywordTerms(`find "==="`)
+		if len(terms) != 0 || expr != "" {
+			t.Errorf("terms = %v expr = %q, want empty", terms, expr)
+		}
+	})
 }
 
 // contains is shared by the corpus_presence tests in this file.
