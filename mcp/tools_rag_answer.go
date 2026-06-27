@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/rag"
@@ -103,4 +104,109 @@ func parseModelAnswer(text string) (modelAnswer, bool) {
 		best, found = ma, true
 	}
 	return best, found
+}
+
+const (
+	statusAnswerFound           = "answer_found"
+	statusUnverifiedAnswer      = "unverified_answer"
+	statusNotInRetrievedContext = "not_in_retrieved_context"
+	statusMalformedOutput       = "malformed_output"
+	statusRetrievalMiss         = "retrieval_miss"  // #230
+	statusCorpusAbsent          = "corpus_absent"   // #230
+	statusNoUsefulTerms         = "no_useful_terms" // #230
+)
+
+// evidenceBlock pairs a prompt-assigned label (E1..En) with the retrieved chunk
+// it represents, so verification can match a cited quote against the exact chunk.
+type evidenceBlock struct {
+	ID    string
+	Chunk rag.Chunk
+}
+
+type answerSource struct {
+	Source    string `json:"source"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+}
+
+type answerQuote struct {
+	ID        string `json:"id"`
+	Source    string `json:"source"`
+	StartLine int    `json:"start_line"`
+	EndLine   int    `json:"end_line"`
+	Text      string `json:"text"`
+}
+
+type answerDiagnostics struct {
+	RetrievedChunkIDs       []string `json:"retrieved_chunk_ids,omitempty"`
+	EvidenceIDs             []string `json:"evidence_ids,omitempty"`
+	VerifiedQuoteIDs        []string `json:"verified_quote_ids,omitempty"`
+	CandidateAnswer         string   `json:"candidate_answer,omitempty"`
+	KeywordTerms            []string `json:"keyword_terms,omitempty"`              // #230
+	CorpusMatchCount        *int     `json:"corpus_match_count,omitempty"`         // #230
+	CorpusOutsideMatchCount *int     `json:"corpus_outside_match_count,omitempty"` // #230
+}
+
+type ragAnswerResult struct {
+	Status             string             `json:"status"`
+	AnswerFound        bool               `json:"answer_found"`
+	Answer             string             `json:"answer"`
+	Sources            []answerSource     `json:"sources"`
+	Quotes             []answerQuote      `json:"quotes"`
+	Verified           bool               `json:"verified"`
+	VerificationErrors []string           `json:"verification_errors"`
+	Diagnostics        *answerDiagnostics `json:"diagnostics,omitempty"`
+}
+
+// deriveAnswer verifies the model's cited evidence against the built blocks and
+// produces the audited result for the #229 status set. A returned status of
+// statusNotInRetrievedContext marks the model-declined branch that #230 refines.
+func deriveAnswer(ma modelAnswer, blocks []evidenceBlock) ragAnswerResult {
+	byID := make(map[string]rag.Chunk, len(blocks))
+	for _, bl := range blocks {
+		byID[bl.ID] = bl.Chunk
+	}
+
+	res := ragAnswerResult{
+		Sources:            []answerSource{},
+		Quotes:             []answerQuote{},
+		VerificationErrors: []string{},
+	}
+
+	if strings.TrimSpace(ma.Answer) == "" {
+		// Model declined; no-answer branch (#230 may refine).
+		res.Status = statusNotInRetrievedContext
+		return res
+	}
+
+	seenSource := make(map[string]bool)
+	for _, ev := range ma.Evidence {
+		chunk, ok := byID[ev.ID]
+		if !ok {
+			res.VerificationErrors = append(res.VerificationErrors, fmt.Sprintf("unknown id %q", ev.ID))
+			continue
+		}
+		if !quoteInChunk(chunk, ev.Quote) {
+			res.VerificationErrors = append(res.VerificationErrors, fmt.Sprintf("quote not found in %s", ev.ID))
+			continue
+		}
+		res.Quotes = append(res.Quotes, answerQuote{
+			ID: ev.ID, Source: chunk.Source, StartLine: chunk.StartLine, EndLine: chunk.EndLine, Text: ev.Quote,
+		})
+		key := fmt.Sprintf("%s:%d-%d", chunk.Source, chunk.StartLine, chunk.EndLine)
+		if !seenSource[key] {
+			seenSource[key] = true
+			res.Sources = append(res.Sources, answerSource{Source: chunk.Source, StartLine: chunk.StartLine, EndLine: chunk.EndLine})
+		}
+	}
+
+	if len(res.Quotes) > 0 {
+		res.Status = statusAnswerFound
+		res.AnswerFound = true
+		res.Verified = true
+		res.Answer = strings.TrimSpace(ma.Answer) // public answer only when verified
+	} else {
+		res.Status = statusUnverifiedAnswer // answer given but unsupported (terminal)
+	}
+	return res
 }

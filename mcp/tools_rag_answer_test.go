@@ -85,3 +85,59 @@ func TestParseModelAnswer(t *testing.T) {
 		}
 	})
 }
+
+func TestDeriveAnswer(t *testing.T) {
+	blocks := []evidenceBlock{
+		{ID: "E1", Chunk: rag.Chunk{Content: "func Foo() int { return 1 }", Source: "a.go", StartLine: 10, EndLine: 12}},
+		{ID: "E2", Chunk: rag.Chunk{Content: "var Bar = 2", Source: "b.go", StartLine: 3, EndLine: 3}},
+	}
+
+	t.Run("verified -> answer_found", func(t *testing.T) {
+		ma := modelAnswer{Answer: "Foo returns 1", Evidence: []modelEvidence{{ID: "E1", Quote: "return 1"}}}
+		got := deriveAnswer(ma, blocks)
+		if got.Status != statusAnswerFound || !got.AnswerFound || !got.Verified {
+			t.Fatalf("status=%s found=%v verified=%v", got.Status, got.AnswerFound, got.Verified)
+		}
+		if got.Answer != "Foo returns 1" {
+			t.Errorf("answer = %q, want populated", got.Answer)
+		}
+		if len(got.Sources) != 1 || got.Sources[0].Source != "a.go" || got.Sources[0].StartLine != 10 {
+			t.Errorf("sources = %+v", got.Sources)
+		}
+		if len(got.Quotes) != 1 || got.Quotes[0].ID != "E1" {
+			t.Errorf("quotes = %+v", got.Quotes)
+		}
+	})
+
+	t.Run("invented quote -> unverified, answer suppressed", func(t *testing.T) {
+		ma := modelAnswer{Answer: "Foo returns 99", Evidence: []modelEvidence{{ID: "E1", Quote: "return 99"}}}
+		got := deriveAnswer(ma, blocks)
+		if got.Status != statusUnverifiedAnswer || got.AnswerFound || got.Verified {
+			t.Fatalf("status=%s found=%v", got.Status, got.AnswerFound)
+		}
+		if got.Answer != "" {
+			t.Errorf("answer = %q, want empty (suppressed)", got.Answer)
+		}
+		if len(got.VerificationErrors) != 1 {
+			t.Errorf("verification_errors = %v", got.VerificationErrors)
+		}
+	})
+
+	t.Run("unknown id -> unverified with error", func(t *testing.T) {
+		ma := modelAnswer{Answer: "x", Evidence: []modelEvidence{{ID: "E9", Quote: "return 1"}}}
+		got := deriveAnswer(ma, blocks)
+		if got.Status != statusUnverifiedAnswer {
+			t.Fatalf("status=%s", got.Status)
+		}
+		if len(got.VerificationErrors) != 1 {
+			t.Errorf("verification_errors = %v", got.VerificationErrors)
+		}
+	})
+
+	t.Run("empty answer -> not_in_retrieved_context", func(t *testing.T) {
+		got := deriveAnswer(modelAnswer{Answer: "  "}, blocks)
+		if got.Status != statusNotInRetrievedContext || got.AnswerFound {
+			t.Fatalf("status=%s found=%v", got.Status, got.AnswerFound)
+		}
+	})
+}
