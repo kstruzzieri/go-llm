@@ -10,9 +10,10 @@ import (
 
 // Retriever queries the vector store and builds augmented prompts.
 type Retriever struct {
-	embedder Embedder
-	model    string
-	store    VectorStore
+	embedder   Embedder
+	model      string
+	store      VectorStore
+	vectorOnly bool
 }
 
 // VectorSpaceProbe summarizes the vector-space-id distribution across a
@@ -42,6 +43,18 @@ type RetrieverOption func(*Retriever)
 func WithRetrieverModel(model string) RetrieverOption {
 	return func(r *Retriever) {
 		r.model = model
+	}
+}
+
+// WithVectorOnly forces vector-only (cosine) retrieval even when the store
+// implements MultiSignalSearcher, disabling the default hybrid path. Use it
+// to bypass hybrid retrieval — for example against an index whose FTS5
+// keyword table is unavailable (a legacy snapshot opened read-only cannot be
+// migrated to add it), or to compare ranking strategies. Hybrid retrieval
+// otherwise depends on the chunks_fts table populated at index time.
+func WithVectorOnly() RetrieverOption {
+	return func(r *Retriever) {
+		r.vectorOnly = true
 	}
 }
 
@@ -98,6 +111,33 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 
 	if err := r.validateVectorSpace(ctx, res); err != nil {
 		return nil, err
+	}
+
+	// Prefer multi-signal (hybrid) retrieval when the store supports it and the
+	// caller has not opted out: semantic, keyword, and temporal signals
+	// participate in ranking. Retrieve's signature carries no editor context,
+	// so structural/behavioral signals stay inert (empty QueryContext); the
+	// temporal scorer still works, dating chunks against the newest indexed row.
+	if ms, ok := r.store.(MultiSignalSearcher); ok && !r.vectorOnly {
+		scored, err := ms.SearchMulti(ctx, embedding, query, k, QueryContext{})
+		if err != nil {
+			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
+		}
+		if len(scored) == 0 {
+			return nil, nil
+		}
+		// Normalize Score to semantic similarity so the SearchResult contract
+		// (Score == 1 - Distance, in [0,1]) holds identically on both retrieval
+		// paths. Hybrid ranking is preserved in result order, not in Score:
+		// downstream BuildContext renders Score as "similarity", and callers
+		// surface it as a 0..1 value, so it must not carry raw RRF magnitudes.
+		results := make([]SearchResult, len(scored))
+		for i, s := range scored {
+			sr := s.SearchResult
+			sr.Score = 1 - sr.Distance
+			results[i] = sr
+		}
+		return results, nil
 	}
 
 	results, err := r.store.Search(ctx, embedding, k)
