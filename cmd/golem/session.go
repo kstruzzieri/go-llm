@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/provider"
 	_ "modernc.org/sqlite"
@@ -299,6 +300,9 @@ func resultConversationMessages(userLine string, res agent.Result) ([]conversati
 			Content:    m.Content,
 			ToolName:   m.ToolName,
 			ToolCallID: m.ToolCallID,
+		}
+		if m.Role == "tool" && m.ToolName == agenttools.MemorySearchToolName {
+			cm.Content = memorySearchRedactedMarker
 		}
 		if len(m.ToolCalls) > 0 {
 			raw, err := json.Marshal(m.ToolCalls)
