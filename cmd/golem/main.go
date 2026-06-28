@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -11,8 +12,10 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/memory"
 )
 
 type flags struct {
@@ -32,6 +35,7 @@ type flags struct {
 	noRag            bool
 	noProjectContext bool
 	noCompress       bool
+	noMemory         bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -52,6 +56,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
+	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
@@ -80,6 +85,7 @@ type startupInfo struct {
 	retrieveRequested  bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
 	sessionLine        string
 	projectContextLine string
+	memoryLine         string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -88,6 +94,9 @@ func startupNotices(info startupInfo) []string {
 	out = append(out, "workspace: "+info.workspace)
 	if info.sessionLine != "" {
 		out = append(out, info.sessionLine)
+	}
+	if info.memoryLine != "" {
+		out = append(out, info.memoryLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
@@ -204,6 +213,25 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	retrieveOmitted := retrieve == nil
 
+	var memStore *memory.SQLiteStore
+	var memDB *sql.DB
+	memoryEnabled := false
+	if !f.noMemory {
+		if dbPath, derr := memoryDBPathForWorkspace(os.Getenv, root); derr != nil {
+			warns = append(warns, "memory disabled: "+derr.Error())
+		} else if store, db, oerr := openMemoryStore(ctx, dbPath); oerr != nil {
+			warns = append(warns, "memory disabled: "+oerr.Error())
+		} else {
+			memStore, memDB, memoryEnabled = store, db, true
+			tools = append(tools, agenttools.MemorySearch{S: store, WorkspaceID: workspaceID(root), Limit: 8})
+		}
+	}
+	defer func() {
+		if memDB != nil {
+			_ = memDB.Close()
+		}
+	}()
+
 	var journal *mutationJournal
 	if f.allowWrite {
 		wt, j, werr := buildWriteTools(root)
@@ -223,6 +251,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
+	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
 	if !f.noProjectContext {
 		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
@@ -252,6 +281,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	defer func() { _ = sessn.Close() }() // nil-safe
 
+	memoryLine := ""
+	if memoryEnabled {
+		memoryLine = "memory: enabled"
+	}
 	for _, line := range startupNotices(startupInfo{
 		workspace:          root,
 		useRecommend:       plan.useRecommend,
@@ -262,6 +295,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieveRequested:  f.ragDB != "" || f.noRag || rr.suppressNotice,
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
+		memoryLine:         memoryLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
@@ -293,9 +327,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			minRecentExchanges: 4,
 			enabled:            !f.noCompress,
 		},
-		journal:    journal,
-		allowWrite: f.allowWrite,
-		allowExec:  f.allowExec,
+		journal:     journal,
+		allowWrite:  f.allowWrite,
+		allowExec:   f.allowExec,
+		memory:      memStore,
+		workspaceID: workspaceID(root),
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
