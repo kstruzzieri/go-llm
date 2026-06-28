@@ -217,6 +217,37 @@ func (s *SQLiteStore) SoftDelete(ctx context.Context, id string) error {
 	return nil
 }
 
+// SetScope re-scopes a live memory. Promote: ScopeGlobal (workspace_id cleared).
+// Localize: ScopeWorkspace (workspace_id required). updated_at is bumped. FTS is
+// untouched because scope/workspace are not indexed.
+func (s *SQLiteStore) SetScope(ctx context.Context, id string, scope Scope, workspaceID string) error {
+	switch scope {
+	case ScopeGlobal:
+		workspaceID = ""
+	case ScopeWorkspace:
+		if strings.TrimSpace(workspaceID) == "" {
+			return fmt.Errorf("memory: localize requires workspace_id")
+		}
+	default:
+		return ErrBadScope
+	}
+	now := time.Now().UnixMilli()
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE memories SET scope = ?, workspace_id = ?, updated_at = ? WHERE id = ? AND deleted_at = 0`,
+		string(scope), workspaceID, now, id)
+	if err != nil {
+		return fmt.Errorf("memory: set scope: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memory: set scope: rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
 // List returns live memories visible to opts.WorkspaceID (global + that
 // workspace), newest first. Returns a non-nil empty slice when none match.
 func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Memory, error) {

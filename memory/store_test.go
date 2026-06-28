@@ -178,3 +178,35 @@ func TestSoftDelete(t *testing.T) {
 		t.Errorf("double delete: want ErrNotFound, got %v", err)
 	}
 }
+
+func TestSetScopePromoteLocalize(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	m, _ := store.Add(ctx, AddParams{Text: "promote me", Scope: ScopeWorkspace, WorkspaceID: "workspace:aaa"})
+
+	if err := store.SetScope(ctx, m.ID, ScopeGlobal, ""); err != nil {
+		t.Fatalf("promote: %v", err)
+	}
+	got, err := store.ResolveVisible(ctx, m.ID, "workspace:zzz") // visible from any ws now
+	if err != nil || got.Scope != ScopeGlobal || got.WorkspaceID != "" {
+		t.Errorf("after promote: %+v / %v", got, err)
+	}
+
+	if err := store.SetScope(ctx, m.ID, ScopeWorkspace, "workspace:bbb"); err != nil {
+		t.Fatalf("localize: %v", err)
+	}
+	got, err = store.ResolveVisible(ctx, m.ID, "workspace:bbb")
+	if err != nil || got.Scope != ScopeWorkspace || got.WorkspaceID != "workspace:bbb" {
+		t.Errorf("after localize: %+v / %v", got, err)
+	}
+
+	if err := store.SetScope(ctx, m.ID, ScopeWorkspace, ""); err == nil {
+		t.Error("localize without workspace_id should error")
+	}
+	if err := store.SetScope(ctx, "nope", ScopeGlobal, ""); !errors.Is(err, ErrNotFound) {
+		t.Errorf("missing id: want ErrNotFound, got %v", err)
+	}
+	if err := store.SetScope(ctx, m.ID, Scope("bogus"), ""); !errors.Is(err, ErrBadScope) {
+		t.Errorf("bad scope: want ErrBadScope, got %v", err)
+	}
+}
