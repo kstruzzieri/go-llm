@@ -174,7 +174,7 @@ func (i sessionInfo) line() string {
 // and loads the keyed conversation. A missing row is a new session (not an
 // error); any other load error is surfaced so the caller can disable + report.
 func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo, error) {
-	if err := prepareSessionDBFile(dbPath); err != nil {
+	if err := prepareDBFile(dbPath); err != nil {
 		return nil, sessionInfo{}, err
 	}
 	db, err := sql.Open("sqlite", dbPath)
@@ -195,7 +195,7 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 		_ = db.Close()
 		return nil, sessionInfo{}, fmt.Errorf("golem: init session store: %w", err)
 	}
-	if err := chmodSessionDBFiles(dbPath); err != nil {
+	if err := chmodDBFiles(dbPath); err != nil {
 		_ = db.Close()
 		return nil, sessionInfo{}, err
 	}
@@ -250,7 +250,7 @@ func (s *session) recordMessages(ctx context.Context, msgs []conversation.Messag
 	s.msgs = next
 	// SQLite may have (re)created the -wal/-shm sidecars honoring the umask on
 	// this write; re-secure them (the WAL can hold un-checkpointed message text).
-	_ = chmodSessionDBFiles(s.dbPath)
+	_ = chmodDBFiles(s.dbPath)
 	return nil
 }
 
@@ -279,7 +279,7 @@ func (s *session) applyCompacted(ctx context.Context, conv conversation.Conversa
 	}
 	s.msgs = conv.Messages
 	s.summary = cloneDurableSummary(conv.DurableSummary)
-	_ = chmodSessionDBFiles(s.dbPath)
+	_ = chmodDBFiles(s.dbPath)
 	return nil
 }
 
@@ -372,7 +372,7 @@ func (s *session) clear(ctx context.Context) error {
 	}
 	s.msgs = nil
 	s.summary = nil
-	_ = chmodSessionDBFiles(s.dbPath)
+	_ = chmodDBFiles(s.dbPath)
 	return nil
 }
 
@@ -415,7 +415,7 @@ func (s *session) Close() error {
 	return s.db.Close()
 }
 
-func prepareSessionDBFile(path string) error {
+func prepareDBFile(path string) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, sessionDirMode); err != nil {
 			return fmt.Errorf("golem: create session dir %q: %w", dir, err)
@@ -435,7 +435,7 @@ func prepareSessionDBFile(path string) error {
 	return nil
 }
 
-func chmodSessionDBFiles(path string) error {
+func chmodDBFiles(path string) error {
 	for _, p := range []string{path, path + "-wal", path + "-shm"} {
 		info, err := os.Stat(p)
 		if err != nil {

@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"path/filepath"
+
+	"github.com/kstruzzieri/go-llm/memory"
+	_ "modernc.org/sqlite"
 )
 
 // workspaceID derives the stable per-workspace identity (sha256 prefix of the
@@ -41,3 +47,32 @@ func memoryDBPathForWorkspace(getenv func(string) string, root string) (string, 
 // folded into the pinned durable summary. The live turn already consumed the real
 // result; this only affects what is stored.
 const memorySearchRedactedMarker = "memory_search result omitted from session history"
+
+// openMemoryStore prepares the hardened DB file, opens it WAL-mode single-conn,
+// runs migrations, and re-secures the file. Mirrors openSession.
+func openMemoryStore(ctx context.Context, dbPath string) (*memory.SQLiteStore, *sql.DB, error) {
+	if err := prepareDBFile(dbPath); err != nil {
+		return nil, nil, err
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("golem: open memory db %q: %w", dbPath, err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			_ = db.Close()
+			return nil, nil, fmt.Errorf("golem: memory db %s: %w", pragma, err)
+		}
+	}
+	store, err := memory.NewStore(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("golem: init memory store: %w", err)
+	}
+	if err := chmodDBFiles(dbPath); err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return store, db, nil
+}

@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -74,5 +77,27 @@ func TestMemoryDBPathOutsideWorkspace(t *testing.T) {
 	inside := filepath.Join(home, ".local", "share", "golem")
 	if _, err := memoryDBPathForWorkspace(getenv, inside); err == nil {
 		t.Error("expected rejection when workspace contains the db path")
+	}
+}
+
+func TestOpenMemoryStoreHardening(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "memories.db")
+	store, db, err := openMemoryStore(context.Background(), dbPath)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	if store == nil {
+		t.Fatal("nil store")
+	}
+	info, err := os.Stat(dbPath)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("mode = %v, want 0600", info.Mode().Perm())
+	}
+	if _, err := store.Add(context.Background(), memory.AddParams{Text: "x", Scope: memory.ScopeGlobal}); err != nil {
+		t.Errorf("add after open: %v", err)
 	}
 }
