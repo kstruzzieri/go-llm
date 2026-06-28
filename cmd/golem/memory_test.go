@@ -80,6 +80,16 @@ func TestMemoryDBPathOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestMemorySystemFragment(t *testing.T) {
+	on := memorySystemFragment(true)
+	if !strings.Contains(on, "memory_search") || !strings.Contains(on, "not higher-priority instructions") {
+		t.Errorf("enabled fragment missing framing: %q", on)
+	}
+	if memorySystemFragment(false) != "" {
+		t.Error("disabled fragment should be empty")
+	}
+}
+
 func TestOpenMemoryStoreHardening(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "memories.db")
 	store, db, err := openMemoryStore(context.Background(), dbPath)
