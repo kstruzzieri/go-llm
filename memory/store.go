@@ -97,6 +97,45 @@ func (s *SQLiteStore) Add(ctx context.Context, in AddParams) (Memory, error) {
 	return m, nil
 }
 
+// Search returns live, visible memories whose text matches query (FTS5/bm25,
+// porter-stemmed), best match first. Empty/punctuation-only query => empty slice.
+func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOptions) ([]Memory, error) {
+	match := sanitizeFTS5Query(query)
+	if match == "" {
+		return []Memory{}, nil
+	}
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 8
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT m.id, m.text, m.scope, m.workspace_id, m.source_session_id, m.created_at, m.updated_at
+		   FROM memories_fts
+		   JOIN memories m ON m.id = memories_fts.id
+		  WHERE memories_fts MATCH ?
+		    AND m.deleted_at = 0
+		    AND (m.scope = 'global' OR m.workspace_id = ?)
+		  ORDER BY bm25(memories_fts) ASC, m.updated_at DESC, m.id ASC
+		  LIMIT ?`,
+		match, opts.WorkspaceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("memory: search: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []Memory{}
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("memory: search: iterate: %w", err)
+	}
+	return out, nil
+}
+
 // List returns live memories visible to opts.WorkspaceID (global + that
 // workspace), newest first. Returns a non-nil empty slice when none match.
 func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Memory, error) {

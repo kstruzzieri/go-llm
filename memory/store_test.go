@@ -75,3 +75,44 @@ func TestAddValidation(t *testing.T) {
 		t.Errorf("bad scope: want ErrBadScope, got %v", err)
 	}
 }
+
+func TestSearch(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	a, err := store.Add(ctx, AddParams{Text: "I prefer testing with table-driven style", Scope: ScopeWorkspace, WorkspaceID: "workspace:aaa"})
+	if err != nil {
+		t.Fatalf("add a: %v", err)
+	}
+	if _, err := store.Add(ctx, AddParams{Text: "deploy via makefile", Scope: ScopeWorkspace, WorkspaceID: "workspace:bbb"}); err != nil {
+		t.Fatalf("add b: %v", err)
+	}
+	if _, err := store.Add(ctx, AddParams{Text: "keep diffs small", Scope: ScopeGlobal}); err != nil {
+		t.Fatalf("add g: %v", err)
+	}
+
+	// porter stemming: 'test' matches 'testing'
+	got, err := store.Search(ctx, "test", SearchOptions{WorkspaceID: "workspace:aaa"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != a.ID {
+		t.Fatalf("porter stem: want only %s, got %+v", a.ID, got)
+	}
+	// other-workspace memory excluded even if it matches
+	if got, _ := store.Search(ctx, "makefile", SearchOptions{WorkspaceID: "workspace:aaa"}); len(got) != 0 {
+		t.Errorf("leaked other-workspace match: %+v", got)
+	}
+	// global visible from any workspace
+	if got, _ := store.Search(ctx, "diffs", SearchOptions{WorkspaceID: "workspace:aaa"}); len(got) != 1 {
+		t.Errorf("global not visible: %+v", got)
+	}
+	// id is UNINDEXED: searching the id string returns nothing
+	if got, _ := store.Search(ctx, a.ID, SearchOptions{WorkspaceID: "workspace:aaa"}); len(got) != 0 {
+		t.Errorf("id should not be searchable, got %+v", got)
+	}
+	// punctuation/empty query -> empty, no error
+	got, err = store.Search(ctx, "  ?? ", SearchOptions{WorkspaceID: "workspace:aaa"})
+	if err != nil || len(got) != 0 {
+		t.Errorf("punct query: want empty/no-err, got %+v / %v", got, err)
+	}
+}
