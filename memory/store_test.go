@@ -6,6 +6,7 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -114,5 +115,45 @@ func TestSearch(t *testing.T) {
 	got, err = store.Search(ctx, "  ?? ", SearchOptions{WorkspaceID: "workspace:aaa"})
 	if err != nil || len(got) != 0 {
 		t.Errorf("punct query: want empty/no-err, got %+v / %v", got, err)
+	}
+}
+
+func TestResolveVisible(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	a, _ := store.Add(ctx, AddParams{Text: "alpha", Scope: ScopeWorkspace, WorkspaceID: "workspace:aaa"})
+	other, _ := store.Add(ctx, AddParams{Text: "beta", Scope: ScopeWorkspace, WorkspaceID: "workspace:bbb"})
+	g, _ := store.Add(ctx, AddParams{Text: "gamma", Scope: ScopeGlobal})
+
+	if got, err := store.ResolveVisible(ctx, a.ID, "workspace:aaa"); err != nil || got.ID != a.ID {
+		t.Fatalf("resolve own: %v / %+v", err, got)
+	}
+	if _, err := store.ResolveVisible(ctx, g.ID, "workspace:aaa"); err != nil {
+		t.Errorf("resolve global from any ws: %v", err)
+	}
+	if _, err := store.ResolveVisible(ctx, other.ID, "workspace:aaa"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("foreign workspace memory: want ErrNotFound, got %v", err)
+	}
+	if _, err := store.ResolveVisible(ctx, "zzzzzzzz", "workspace:aaa"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown prefix: want ErrNotFound, got %v", err)
+	}
+}
+
+func TestResolveVisiblePrefix(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	for _, id := range []string{"abc1", "abc2"} {
+		if _, err := store.db.ExecContext(ctx,
+			`INSERT INTO memories (id, text, scope, workspace_id, source_session_id, created_at, updated_at, deleted_at)
+			 VALUES (?, 'x', 'workspace', 'workspace:aaa', '', ?, ?, 0)`, id, now, now); err != nil {
+			t.Fatalf("seed %s: %v", id, err)
+		}
+	}
+	if _, err := store.ResolveVisible(ctx, "abc", "workspace:aaa"); !errors.Is(err, ErrAmbiguous) {
+		t.Errorf("prefix abc: want ErrAmbiguous, got %v", err)
+	}
+	if got, err := store.ResolveVisible(ctx, "abc1", "workspace:aaa"); err != nil || got.ID != "abc1" {
+		t.Errorf("exact abc1 should win: got %+v / %v", got, err)
 	}
 }

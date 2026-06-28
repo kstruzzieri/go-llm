@@ -136,6 +136,55 @@ func (s *SQLiteStore) Search(ctx context.Context, query string, opts SearchOptio
 	return out, nil
 }
 
+// ResolveVisible resolves a live memory visible to workspaceID (global + that
+// workspace) by unique id prefix. An exact full-id match wins even if it is also
+// a prefix of another id. Zero matches => ErrNotFound; 2+ => ErrAmbiguous. This
+// scoping is the isolation boundary: another workspace's workspace-scoped memory
+// is unreachable here.
+func (s *SQLiteStore) ResolveVisible(ctx context.Context, idPrefix, workspaceID string) (Memory, error) {
+	idPrefix = strings.TrimSpace(idPrefix)
+	if idPrefix == "" {
+		return Memory{}, ErrNotFound
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, text, scope, workspace_id, source_session_id, created_at, updated_at
+		   FROM memories
+		  WHERE deleted_at = 0
+		    AND (scope = 'global' OR workspace_id = ?)
+		    AND id LIKE ? || '%'
+		  ORDER BY id ASC
+		  LIMIT 2`,
+		workspaceID, idPrefix)
+	if err != nil {
+		return Memory{}, fmt.Errorf("memory: resolve: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var found []Memory
+	for rows.Next() {
+		m, err := scanMemory(rows)
+		if err != nil {
+			return Memory{}, err
+		}
+		found = append(found, m)
+	}
+	if err := rows.Err(); err != nil {
+		return Memory{}, fmt.Errorf("memory: resolve: iterate: %w", err)
+	}
+	switch len(found) {
+	case 0:
+		return Memory{}, ErrNotFound
+	case 1:
+		return found[0], nil
+	default:
+		for _, m := range found {
+			if m.ID == idPrefix {
+				return m, nil // exact id beats a prefix collision
+			}
+		}
+		return Memory{}, ErrAmbiguous
+	}
+}
+
 // List returns live memories visible to opts.WorkspaceID (global + that
 // workspace), newest first. Returns a non-nil empty slice when none match.
 func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Memory, error) {
