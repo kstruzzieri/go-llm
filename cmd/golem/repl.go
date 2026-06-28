@@ -27,8 +27,9 @@ type replSession struct {
 
 	compress compressPolicy // post-turn history compression policy
 
-	memory      *memory.SQLiteStore // nil => memory disabled (-no-memory or open failed)
-	workspaceID string              // stable id used to scope memory create/list/search
+	memory       *memory.SQLiteStore // nil => memory disabled (-no-memory or open failed)
+	memoryDBPath string              // used to re-secure SQLite sidecars after writes
+	workspaceID  string              // stable id used to scope memory create/list/search
 
 	lastModel  string           // last routed ActualModel for /model
 	journal    *mutationJournal // nil unless -allow-write enabled writes

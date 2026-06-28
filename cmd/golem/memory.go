@@ -91,6 +91,13 @@ func openMemoryStore(ctx context.Context, dbPath string) (*memory.SQLiteStore, *
 	return store, db, nil
 }
 
+func secureMemoryDBFiles(sess *replSession) {
+	if sess.memoryDBPath == "" {
+		return
+	}
+	_ = chmodDBFiles(sess.memoryDBPath)
+}
+
 // cutFlag removes a leading "<flag>" token from s, returning the remainder and
 // whether the flag was present. Only matches the flag as the first token.
 func cutFlag(s, flag string) (string, bool) {
@@ -133,6 +140,7 @@ func handleRemember(ctx context.Context, out io.Writer, sess *replSession, line 
 		_, _ = fmt.Fprintf(out, "remember failed: %v\n", err)
 		return
 	}
+	secureMemoryDBFiles(sess)
 	_, _ = fmt.Fprintf(out, "remembered %s (%s)\n", m.ID, m.Scope)
 }
 
@@ -154,6 +162,7 @@ func handleForget(ctx context.Context, out io.Writer, sess *replSession, fields 
 		_, _ = fmt.Fprintf(out, "forget failed: %v\n", err)
 		return
 	}
+	secureMemoryDBFiles(sess)
 	_, _ = fmt.Fprintf(out, "forgot %s\n", m.ID)
 }
 
@@ -184,6 +193,7 @@ func setMemoryScope(ctx context.Context, out io.Writer, sess *replSession, idPre
 		_, _ = fmt.Fprintf(out, "failed: %v\n", err)
 		return
 	}
+	secureMemoryDBFiles(sess)
 	_, _ = fmt.Fprintf(out, "%s is now %s\n", m.ID, scope)
 }
 

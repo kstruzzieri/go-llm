@@ -215,6 +215,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	var memStore *memory.SQLiteStore
 	var memDB *sql.DB
+	var memDBPath string
 	memoryEnabled := false
 	if !f.noMemory {
 		if dbPath, derr := memoryDBPathForWorkspace(os.Getenv, root); derr != nil {
@@ -222,7 +223,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		} else if store, db, oerr := openMemoryStore(ctx, dbPath); oerr != nil {
 			warns = append(warns, "memory disabled: "+oerr.Error())
 		} else {
-			memStore, memDB, memoryEnabled = store, db, true
+			memStore, memDB, memDBPath, memoryEnabled = store, db, dbPath, true
 			tools = append(tools, agenttools.MemorySearch{S: store, WorkspaceID: workspaceID(root), Limit: 8})
 		}
 	}
@@ -327,11 +328,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			minRecentExchanges: 4,
 			enabled:            !f.noCompress,
 		},
-		journal:     journal,
-		allowWrite:  f.allowWrite,
-		allowExec:   f.allowExec,
-		memory:      memStore,
-		workspaceID: workspaceID(root),
+		journal:      journal,
+		allowWrite:   f.allowWrite,
+		allowExec:    f.allowExec,
+		memory:       memStore,
+		memoryDBPath: memDBPath,
+		workspaceID:  workspaceID(root),
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate

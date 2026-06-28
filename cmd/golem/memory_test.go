@@ -114,19 +114,20 @@ func TestOpenMemoryStoreHardening(t *testing.T) {
 	}
 }
 
-func newTestReplWithMemory(t *testing.T) *replSession {
+func newTestReplWithMemory(t *testing.T) (*replSession, string) {
 	t.Helper()
-	store, db, err := openMemoryStore(context.Background(), filepath.Join(t.TempDir(), "memories.db"))
+	dbPath := filepath.Join(t.TempDir(), "memories.db")
+	store, db, err := openMemoryStore(context.Background(), dbPath)
 	if err != nil {
 		t.Fatalf("open mem: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return &replSession{memory: store, workspaceID: "workspace:aaa"}
+	return &replSession{memory: store, memoryDBPath: dbPath, workspaceID: "workspace:aaa"}, dbPath
 }
 
 func TestRememberForgetMemories(t *testing.T) {
 	ctx := context.Background()
-	sess := newTestReplWithMemory(t)
+	sess, _ := newTestReplWithMemory(t)
 	var buf bytes.Buffer
 
 	handleRemember(ctx, &buf, sess, "/remember use table tests")
@@ -159,6 +160,66 @@ func TestRememberForgetMemories(t *testing.T) {
 	if _, err := sess.memory.ResolveVisible(ctx, wsID, "workspace:aaa"); !errors.Is(err, memory.ErrNotFound) {
 		t.Errorf("not forgotten: %v", err)
 	}
+}
+
+func TestMemoryCommandsReSecureSidecarsAfterMutations(t *testing.T) {
+	ctx := context.Background()
+	sess, dbPath := newTestReplWithMemory(t)
+	var buf bytes.Buffer
+
+	loosen := func() []string {
+		t.Helper()
+		var paths []string
+		for _, suffix := range []string{"-wal", "-shm"} {
+			p := dbPath + suffix
+			if _, err := os.Stat(p); err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
+				t.Fatalf("stat %s: %v", p, err)
+			}
+			if err := os.Chmod(p, 0o644); err != nil {
+				t.Fatalf("chmod %s: %v", p, err)
+			}
+			paths = append(paths, p)
+		}
+		if len(paths) == 0 {
+			t.Skip("sqlite did not create WAL sidecars on this platform")
+		}
+		return paths
+	}
+	requireSecure := func(paths []string) {
+		t.Helper()
+		for _, p := range paths {
+			info, err := os.Stat(p)
+			if err != nil {
+				t.Fatalf("stat %s: %v", p, err)
+			}
+			if got := info.Mode().Perm(); got != 0o600 {
+				t.Fatalf("%s mode = %v, want 0600", filepath.Base(p), got)
+			}
+		}
+	}
+
+	paths := loosen()
+	handleRemember(ctx, &buf, sess, "/remember re-secure after write")
+	requireSecure(paths)
+
+	m, err := sess.memory.Add(ctx, memory.AddParams{Text: "scope change", Scope: memory.ScopeWorkspace, WorkspaceID: sess.workspaceID})
+	if err != nil {
+		t.Fatalf("seed promote memory: %v", err)
+	}
+	paths = loosen()
+	handleMemories(ctx, &buf, sess, []string{"/memories", "--promote", m.ID})
+	requireSecure(paths)
+
+	m, err = sess.memory.Add(ctx, memory.AddParams{Text: "delete me", Scope: memory.ScopeWorkspace, WorkspaceID: sess.workspaceID})
+	if err != nil {
+		t.Fatalf("seed forget memory: %v", err)
+	}
+	paths = loosen()
+	handleForget(ctx, &buf, sess, []string{"/forget", m.ID})
+	requireSecure(paths)
 }
 
 func TestMemoryCommandsDisabled(t *testing.T) {
