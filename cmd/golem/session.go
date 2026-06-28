@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -60,8 +58,7 @@ func resolveSessionID(o sessionIDOpts) (string, error) {
 		}
 		return "user:" + e, nil
 	}
-	sum := sha256.Sum256([]byte(o.root))
-	return "workspace:" + hex.EncodeToString(sum[:])[:16], nil
+	return workspaceID(o.root), nil
 }
 
 // dataDirBase resolves the per-user data dir base ($XDG_DATA_HOME if absolute,
