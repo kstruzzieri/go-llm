@@ -22,6 +22,7 @@ go-llm/
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
 ├── conversation/    # Persistent conversation storage with SQLite
+├── memory/          # Explicit user-controlled local memories (SQLite, scope-filtered FTS5/bm25 search); separate from conversation + RAG; backs Golem /remember + memory_search
 ├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)
 ├── feedback/        # Implicit user behavioral signal collection
 ├── fingerprint/     # Model profiling (latency benchmarks, capability detection)

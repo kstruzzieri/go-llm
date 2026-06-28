@@ -187,3 +187,17 @@ func TestStartupNoticesProjectContextLineIsInformational(t *testing.T) {
 		t.Fatalf("project context loaded line must not be rendered as a warning:\n%s", joined)
 	}
 }
+
+func TestParseFlagsNoMemory(t *testing.T) {
+	f, err := parseFlags([]string{"-no-memory"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !f.noMemory {
+		t.Error("-no-memory not parsed")
+	}
+	def, _ := parseFlags(nil)
+	if def.noMemory {
+		t.Error("noMemory should default false")
+	}
+}
