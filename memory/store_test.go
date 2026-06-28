@@ -210,3 +210,24 @@ func TestSetScopePromoteLocalize(t *testing.T) {
 		t.Errorf("bad scope: want ErrBadScope, got %v", err)
 	}
 }
+
+func TestResolveVisibleEscapesLikeWildcards(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	m, err := store.Add(ctx, AddParams{Text: "only one", Scope: ScopeWorkspace, WorkspaceID: "workspace:aaa"})
+	if err != nil {
+		t.Fatalf("add: %v", err)
+	}
+	// LIKE metacharacters must be treated literally, not as wildcards. With a
+	// single memory present, an un-escaped "_" or "%" would have matched (and a
+	// /forget would delete an unnamed row). They must resolve to ErrNotFound.
+	for _, bad := range []string{"_", "%", "_" + m.ID[1:]} {
+		if _, err := store.ResolveVisible(ctx, bad, "workspace:aaa"); !errors.Is(err, ErrNotFound) {
+			t.Errorf("ResolveVisible(%q): want ErrNotFound, got %v", bad, err)
+		}
+	}
+	// a legitimate hex prefix still resolves
+	if got, err := store.ResolveVisible(ctx, m.ID[:6], "workspace:aaa"); err != nil || got.ID != m.ID {
+		t.Errorf("legit prefix: got %+v / %v", got, err)
+	}
+}

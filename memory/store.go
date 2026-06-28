@@ -34,6 +34,14 @@ func newID() string {
 	return hex.EncodeToString(b[:])
 }
 
+// escapeLikePrefix neutralizes the SQLite LIKE wildcards (% _) and the escape
+// char (\) in a user-supplied id prefix, so a typo'd metacharacter in a
+// /forget|/promote|/localize argument cannot match an id the user did not name.
+// Pair with `LIKE ? ESCAPE '\'` and append the literal "%" wildcard yourself.
+func escapeLikePrefix(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(s)
+}
+
 type rowScanner interface{ Scan(dest ...any) error }
 
 func scanMemory(r rowScanner) (Memory, error) {
@@ -151,10 +159,10 @@ func (s *SQLiteStore) ResolveVisible(ctx context.Context, idPrefix, workspaceID 
 		   FROM memories
 		  WHERE deleted_at = 0
 		    AND (scope = 'global' OR workspace_id = ?)
-		    AND id LIKE ? || '%'
+		    AND id LIKE ? ESCAPE '\'
 		  ORDER BY id ASC
 		  LIMIT 2`,
-		workspaceID, idPrefix)
+		workspaceID, escapeLikePrefix(idPrefix)+"%")
 	if err != nil {
 		return Memory{}, fmt.Errorf("memory: resolve: %w", err)
 	}
