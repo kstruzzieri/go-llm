@@ -185,6 +185,38 @@ func (s *SQLiteStore) ResolveVisible(ctx context.Context, idPrefix, workspaceID 
 	}
 }
 
+// SoftDelete marks a memory deleted (deleted_at set) and removes its FTS row so
+// search can never surface it. Deleting an absent or already-deleted id returns
+// ErrNotFound (callers resolve via ResolveVisible first; this is defensive).
+func (s *SQLiteStore) SoftDelete(ctx context.Context, id string) error {
+	now := time.Now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("memory: soft delete: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE memories SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at = 0`,
+		now, now, id)
+	if err != nil {
+		return fmt.Errorf("memory: soft delete: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memory: soft delete: rows: %w", err)
+	}
+	if n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memories_fts WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("memory: soft delete: fts: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memory: soft delete: commit: %w", err)
+	}
+	return nil
+}
+
 // List returns live memories visible to opts.WorkspaceID (global + that
 // workspace), newest first. Returns a non-nil empty slice when none match.
 func (s *SQLiteStore) List(ctx context.Context, opts ListOptions) ([]Memory, error) {

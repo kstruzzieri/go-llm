@@ -157,3 +157,24 @@ func TestResolveVisiblePrefix(t *testing.T) {
 		t.Errorf("exact abc1 should win: got %+v / %v", got, err)
 	}
 }
+
+func TestSoftDelete(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	m, _ := store.Add(ctx, AddParams{Text: "ephemeral note", Scope: ScopeWorkspace, WorkspaceID: "workspace:aaa"})
+	if err := store.SoftDelete(ctx, m.ID); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+	if got, _ := store.List(ctx, ListOptions{WorkspaceID: "workspace:aaa"}); len(got) != 0 {
+		t.Errorf("still listed: %+v", got)
+	}
+	if got, _ := store.Search(ctx, "ephemeral", SearchOptions{WorkspaceID: "workspace:aaa"}); len(got) != 0 {
+		t.Errorf("still searchable: %+v", got)
+	}
+	if _, err := store.ResolveVisible(ctx, m.ID, "workspace:aaa"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("resolvable after delete: %v", err)
+	}
+	if err := store.SoftDelete(ctx, m.ID); !errors.Is(err, ErrNotFound) {
+		t.Errorf("double delete: want ErrNotFound, got %v", err)
+	}
+}
