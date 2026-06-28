@@ -9,6 +9,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/memory"
 )
 
 // replSession holds the per-process state the REPL needs.
@@ -25,6 +26,9 @@ type replSession struct {
 	session *session // nil => --no-session (no history, no persistence)
 
 	compress compressPolicy // post-turn history compression policy
+
+	memory      *memory.SQLiteStore // nil => memory disabled (-no-memory or open failed)
+	workspaceID string              // stable id used to scope memory create/list/search
 
 	lastModel  string           // last routed ActualModel for /model
 	journal    *mutationJournal // nil unless -allow-write enabled writes
@@ -208,6 +212,12 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		} else {
 			sess.journal.undo(out)
 		}
+	case "/remember":
+		handleRemember(ctx, out, sess, line)
+	case "/forget":
+		handleForget(ctx, out, sess, fields)
+	case "/memories":
+		handleMemories(ctx, out, sess, fields)
 	case "/tools":
 		for _, t := range sess.tools {
 			_, _ = fmt.Fprintf(out, "%s (%s)\n", t.Spec().Name, effectClassName(t.Effect().Class))
@@ -232,6 +242,11 @@ const golemHelp = `commands:
                  search saved sessions
   /resume <id>   switch to a saved session
   /undo          revert the last applied write (when -allow-write)
+  /remember [--global] <text>
+                 save a memory (workspace scope unless --global)
+  /forget <id>   delete a saved memory
+  /memories [--promote <id> | --localize <id>]
+                 list saved memories, or change a memory's scope
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
 `

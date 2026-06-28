@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -109,5 +111,63 @@ func TestOpenMemoryStoreHardening(t *testing.T) {
 	}
 	if _, err := store.Add(context.Background(), memory.AddParams{Text: "x", Scope: memory.ScopeGlobal}); err != nil {
 		t.Errorf("add after open: %v", err)
+	}
+}
+
+func newTestReplWithMemory(t *testing.T) *replSession {
+	t.Helper()
+	store, db, err := openMemoryStore(context.Background(), filepath.Join(t.TempDir(), "memories.db"))
+	if err != nil {
+		t.Fatalf("open mem: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return &replSession{memory: store, workspaceID: "workspace:aaa"}
+}
+
+func TestRememberForgetMemories(t *testing.T) {
+	ctx := context.Background()
+	sess := newTestReplWithMemory(t)
+	var buf bytes.Buffer
+
+	handleRemember(ctx, &buf, sess, "/remember use table tests")
+	handleRemember(ctx, &buf, sess, "/remember --global prefer small diffs")
+	got, _ := sess.memory.List(ctx, memory.ListOptions{WorkspaceID: "workspace:aaa"})
+	if len(got) != 2 {
+		t.Fatalf("want 2 memories, got %d", len(got))
+	}
+
+	buf.Reset()
+	handleMemories(ctx, &buf, sess, []string{"/memories"})
+	if !strings.Contains(buf.String(), "use table tests") {
+		t.Errorf("list missing entry: %q", buf.String())
+	}
+
+	var wsID string
+	for _, m := range got {
+		if m.Scope == memory.ScopeWorkspace {
+			wsID = m.ID
+		}
+	}
+	buf.Reset()
+	handleMemories(ctx, &buf, sess, []string{"/memories", "--promote", wsID})
+	if pm, _ := sess.memory.ResolveVisible(ctx, wsID, "workspace:other"); pm.Scope != memory.ScopeGlobal {
+		t.Errorf("promote failed: %+v", pm)
+	}
+
+	buf.Reset()
+	handleForget(ctx, &buf, sess, []string{"/forget", wsID})
+	if _, err := sess.memory.ResolveVisible(ctx, wsID, "workspace:aaa"); !errors.Is(err, memory.ErrNotFound) {
+		t.Errorf("not forgotten: %v", err)
+	}
+}
+
+func TestMemoryCommandsDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	sess := &replSession{} // memory nil
+	handleRemember(context.Background(), &buf, sess, "/remember x")
+	handleForget(context.Background(), &buf, sess, []string{"/forget", "id"})
+	handleMemories(context.Background(), &buf, sess, []string{"/memories"})
+	if c := strings.Count(buf.String(), "memory disabled"); c != 3 {
+		t.Errorf("want 3 'memory disabled', got %d: %q", c, buf.String())
 	}
 }
