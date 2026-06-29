@@ -11,21 +11,15 @@ func BuildTrace(meta TraceMeta, res agent.Result, status string, partial bool, r
 	if runErr != nil {
 		errStr = runErr.Error()
 	}
+	// TraceMeta and TraceRequest are identical in shape (TraceRequest only adds
+	// JSON tags), so a direct conversion keeps the two in lockstep — a field
+	// drift becomes a compile error here rather than a silent omission.
 	return TraceRecord{
 		SchemaVersion: SchemaVersion,
 		Status:        status,
 		Partial:       partial,
-		Request: TraceRequest{
-			Goal:           meta.Goal,
-			System:         meta.System,
-			HistorySummary: meta.HistorySummary,
-			History:        meta.History,
-			ToolSchemaHash: meta.ToolSchemaHash,
-			ModelHint:      meta.ModelHint,
-			MaxSteps:       meta.MaxSteps,
-			Budget:         meta.Budget,
-		},
-		Result: res,
-		Error:  errStr,
+		Request:       TraceRequest(meta),
+		Result:        res,
+		Error:         errStr,
 	}
 }
