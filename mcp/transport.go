@@ -29,10 +29,7 @@ func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 		return fmt.Errorf("mcp: non-loopback address %q requires TLS (use WithTLS)", addr)
 	}
 
-	handler := gomcp.NewStreamableHTTPHandler(
-		func(r *http.Request) *gomcp.Server { return s.mcpServer },
-		nil,
-	)
+	handler := streamableHTTPHandler(s)
 
 	httpServer := &http.Server{
 		Addr:    addr,
@@ -63,6 +60,15 @@ func (s *Server) ListenHTTP(ctx context.Context, addr string) error {
 		return nil
 	}
 	return err
+}
+
+func streamableHTTPHandler(s *Server) *gomcp.StreamableHTTPHandler {
+	return gomcp.NewStreamableHTTPHandler(
+		func(r *http.Request) *gomcp.Server { return s.mcpServer },
+		&gomcp.StreamableHTTPOptions{
+			CrossOriginProtection: http.NewCrossOriginProtection(),
+		},
+	)
 }
 
 // isLoopback reports whether the host part of addr is a loopback address.
