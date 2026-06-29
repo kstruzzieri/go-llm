@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"fmt"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -77,4 +78,104 @@ func parseHeading(line string) (level int, title string, ok bool) {
 		title = strings.Repeat("#", level)
 	}
 	return level, title, true
+}
+
+// splitByHeadings splits Markdown into section-aware chunks on ATX heading
+// boundaries. It returns (nil, nil) when no heading is found, so the caller can
+// fall back to whole-file sliding-window chunking (unchanged behavior). Content
+// before the first heading is preserved as preamble chunks (anchor_hash, no
+// section_path). Every section is run through the sliding-window chunker so an
+// oversized section is bounded by the same max/overlap behavior as the rest of
+// the corpus; a section that fits yields a single sub-chunk.
+func splitByHeadings(source, content string, maxSize, overlap int) ([]Chunk, error) {
+	lines := strings.Split(content, "\n")
+
+	type section struct {
+		startLine int      // 1-based file line of the heading
+		path      string   // e.g. "Parent > Child"
+		body      []string // lines including the heading line
+	}
+	type frame struct {
+		level int
+		title string
+	}
+
+	var (
+		preamble []string
+		sections []section
+		stack    []frame
+		inFence  bool
+		curIdx   = -1 // index into sections of the open section; -1 = preamble
+	)
+
+	appendLine := func(s string) {
+		// Index-based, NOT a pointer into sections: appending a new section may
+		// reallocate the backing array and dangle a held pointer.
+		if curIdx < 0 {
+			preamble = append(preamble, s)
+		} else {
+			sections[curIdx].body = append(sections[curIdx].body, s)
+		}
+	}
+
+	for i, line := range lines {
+		if fenceRe.MatchString(line) {
+			inFence = !inFence
+			appendLine(line)
+			continue
+		}
+		if !inFence {
+			if level, title, ok := parseHeading(line); ok {
+				for len(stack) > 0 && stack[len(stack)-1].level >= level {
+					stack = stack[:len(stack)-1]
+				}
+				stack = append(stack, frame{level: level, title: title})
+				titles := make([]string, len(stack))
+				for k := range stack {
+					titles[k] = stack[k].title
+				}
+				sections = append(sections, section{
+					startLine: i + 1,
+					path:      strings.Join(titles, " > "),
+					body:      []string{line},
+				})
+				curIdx = len(sections) - 1
+				continue
+			}
+		}
+		appendLine(line)
+	}
+
+	if len(sections) == 0 {
+		return nil, nil
+	}
+
+	sw, err := NewSlidingWindowChunker(maxSize, overlap)
+	if err != nil {
+		return nil, fmt.Errorf("rag: markdown chunker for %q: %w", source, err)
+	}
+
+	var chunks []Chunk
+	if text := strings.Join(preamble, "\n"); strings.TrimSpace(text) != "" {
+		pre, err := sw.Chunk(source, text)
+		if err != nil {
+			return nil, err
+		}
+		chunks = append(chunks, pre...) // keep anchor_hash, no section_path
+	}
+	for _, sec := range sections {
+		sub, err := sw.Chunk(source, strings.Join(sec.body, "\n"))
+		if err != nil {
+			return nil, err
+		}
+		rebaseChunkLines(sub, sec.startLine-1)
+		for j := range sub {
+			sub[j].Language = "markdown"
+			sub[j].Metadata["section_path"] = sec.path
+			delete(sub[j].Metadata, "anchor_hash")
+		}
+		chunks = append(chunks, sub...)
+	}
+	populateMarkdownChunkMetadata(chunks)
+	return chunks, nil
 }
