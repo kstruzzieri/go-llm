@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sync"
@@ -97,7 +99,9 @@ func (o *observ) writeTrace(runID, startedAt, endedAt string, meta agenttrace.Tr
 		if err == nil {
 			return nil
 		}
-		if !os.IsExist(err) {
+		// WriteTrace wraps the O_EXCL failure with %w; errors.Is walks that chain
+		// (os.IsExist does not), so a real collision falls through to a suffix.
+		if !errors.Is(err, fs.ErrExist) {
 			return err
 		}
 	}

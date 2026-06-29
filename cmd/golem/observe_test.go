@@ -47,6 +47,40 @@ func TestNewObserv_ResolvesPathsOutsideWorkspace(t *testing.T) {
 	}
 }
 
+func TestObserv_WriteTraceCollisionRetry(t *testing.T) {
+	base := t.TempDir()
+	root := t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return base
+		}
+		return ""
+	}
+	o, err := newObserv(getenv, root, true, false, func() time.Time { return time.Unix(1719600000, 0) })
+	if err != nil {
+		t.Fatalf("newObserv: %v", err)
+	}
+	runID := "fixed-run"
+	startedAt := "2026-06-28T00-00-00Z"
+	// Pre-create the primary trace path so the first WriteTrace collides; the
+	// retry must fall through to a "-1.json" suffix and leave the seed untouched.
+	primary := filepath.Join(o.traceDir, startedAt+"-"+runID+".json")
+	if werr := os.WriteFile(primary, []byte("preexisting"), 0o600); werr != nil {
+		t.Fatalf("seed: %v", werr)
+	}
+	res := agent.Result{Steps: []agent.StepRecord{{Index: 0}}, StopReason: agent.Completed}
+	if werr := o.writeTrace(runID, startedAt, startedAt, agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil); werr != nil {
+		t.Fatalf("writeTrace: %v", werr)
+	}
+	suffixed := filepath.Join(o.traceDir, startedAt+"-"+runID+"-1.json")
+	if _, serr := os.Stat(suffixed); serr != nil {
+		t.Fatalf("expected suffixed trace %q: %v", suffixed, serr)
+	}
+	if b, _ := os.ReadFile(primary); string(b) != "preexisting" {
+		t.Fatalf("primary trace was clobbered: %q", b)
+	}
+}
+
 func TestObserv_NextRunIDUnique(t *testing.T) {
 	o := &observ{clock: func() time.Time { return time.Unix(1719600000, 123_000_000) }}
 	a, b := o.nextRunID(), o.nextRunID()
