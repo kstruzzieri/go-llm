@@ -195,6 +195,27 @@ func TestSplitByHeadingsFenceGuard(t *testing.T) {
 	}
 }
 
+func TestSplitByHeadingsFenceRequiresMatchingDelimiter(t *testing.T) {
+	content := "# Real\n````markdown\n```go\n# not a heading\n```\n````\nafter\n"
+	chunks, err := splitByHeadings("doc.md", content, 1500, 200)
+	if err != nil {
+		t.Fatalf("splitByHeadings() error: %v", err)
+	}
+	count := 0
+	for _, c := range chunks {
+		if c.Metadata["section_path"] != "" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("got %d section chunks, want 1 (shorter nested fence must not close outer fence)", count)
+	}
+	realChunk := findChunk(t, chunks, "Real")
+	if !strings.Contains(realChunk.Content, "# not a heading") {
+		t.Errorf("nested fenced '#' should stay inside the Real section: %q", realChunk.Content)
+	}
+}
+
 func TestSplitByHeadingsOversized(t *testing.T) {
 	body := strings.Repeat("padding line of text\n", 20)
 	content := "preamble\n# Big\n" + body

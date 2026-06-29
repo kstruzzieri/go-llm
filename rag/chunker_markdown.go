@@ -20,8 +20,8 @@ var headingRe = regexp.MustCompile(`^ {0,3}(#{1,6})([ \t].*)?$`)
 var closingHashRe = regexp.MustCompile(`[ \t]+#+[ \t]*$`)
 
 // fenceRe matches a fenced-code delimiter line: after up to 3 leading spaces, a
-// run of 3 or more backticks OR 3 or more tildes.
-var fenceRe = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})")
+// run of 3 or more backticks OR 3 or more tildes, plus any trailing text.
+var fenceRe = regexp.MustCompile("^ {0,3}(`{3,}|~{3,})(.*)$")
 
 // isMarkdown reports whether path has a Markdown extension.
 func isMarkdown(path string) bool {
@@ -80,6 +80,14 @@ func parseHeading(line string) (level int, title string, ok bool) {
 	return level, title, true
 }
 
+func parseFence(line string) (marker byte, length int, rest string, ok bool) {
+	m := fenceRe.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, "", false
+	}
+	return m[1][0], len(m[1]), m[2], true
+}
+
 // splitByHeadings splits Markdown into section-aware chunks on ATX heading
 // boundaries. It returns (nil, nil) when no heading is found, so the caller can
 // fall back to whole-file sliding-window chunking (unchanged behavior). Content
@@ -105,6 +113,8 @@ func splitByHeadings(source, content string, maxSize, overlap int) ([]Chunk, err
 		sections []section
 		stack    []frame
 		inFence  bool
+		fenceCh  byte
+		fenceLen int
 		curIdx   = -1 // index into sections of the open section; -1 = preamble
 	)
 
@@ -119,8 +129,16 @@ func splitByHeadings(source, content string, maxSize, overlap int) ([]Chunk, err
 	}
 
 	for i, line := range lines {
-		if fenceRe.MatchString(line) {
-			inFence = !inFence
+		if marker, length, rest, ok := parseFence(line); ok {
+			if !inFence {
+				inFence = true
+				fenceCh = marker
+				fenceLen = length
+			} else if marker == fenceCh && length >= fenceLen && strings.TrimSpace(rest) == "" {
+				inFence = false
+				fenceCh = 0
+				fenceLen = 0
+			}
 			appendLine(line)
 			continue
 		}
