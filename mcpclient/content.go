@@ -27,12 +27,16 @@ func flattenContent(res *gomcp.CallToolResult) string {
 		fmt.Fprintf(&b, "[non-text content: %T]", c)
 	}
 	if res.StructuredContent != nil {
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
 		if raw, err := json.Marshal(res.StructuredContent); err == nil {
-			if b.Len() > 0 {
-				b.WriteByte('\n')
-			}
 			b.WriteString("[structured] ")
 			b.Write(raw)
+		} else {
+			// Honor the no-silent-loss invariant: a marshal failure still leaves a
+			// marker rather than dropping the structured payload without a trace.
+			b.WriteString("[structured: unmarshalable]")
 		}
 	}
 	return b.String()

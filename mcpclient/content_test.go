@@ -37,4 +37,11 @@ func TestFlattenContent(t *testing.T) {
 			t.Fatalf("got %q", got)
 		}
 	})
+	t.Run("unmarshalable structured content still leaves a marker", func(t *testing.T) {
+		// A channel cannot be JSON-marshaled; the invariant says never drop silently.
+		res := &gomcp.CallToolResult{StructuredContent: make(chan int)}
+		if got := flattenContent(res); !strings.Contains(got, "[structured: unmarshalable]") {
+			t.Fatalf("got %q, want unmarshalable marker", got)
+		}
+	})
 }

@@ -91,6 +91,7 @@ type startupInfo struct {
 	sessionLine        string
 	projectContextLine string
 	memoryLine         string
+	mcpLine            string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -102,6 +103,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.memoryLine != "" {
 		out = append(out, info.memoryLine)
+	}
+	if info.mcpLine != "" {
+		out = append(out, info.mcpLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
@@ -258,6 +262,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	var mcpManager *mcpclient.Manager
 	mcpAttached := false
+	mcpLine := ""
 	if servers, perr := parseMCPServers(f.mcpStdio, f.mcpHTTP); perr != nil {
 		return perr // fatal: bad flag config / explicit duplicate alias
 	} else if len(servers) > 0 {
@@ -272,6 +277,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		tools = append(tools, mcpTools...)
 		mcpManager = mgr
 		mcpAttached = len(mcpTools) > 0
+		// Positive confirmation so a silently-failed server attach is visible:
+		// attached-tool count against the configured-server count (failures and
+		// skipped tools appear as the "mcp: ..." warnings above).
+		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(servers))
 	}
 	defer func() {
 		if mcpManager != nil {
@@ -325,6 +334,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
+		mcpLine:            mcpLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}

@@ -58,8 +58,9 @@ type Manager struct {
 	tools    []agent.Tool
 }
 
-// Tools returns the namespaced adapter tools in deterministic (server, list)
-// order. The slice is a copy; callers may append freely.
+// Tools returns the namespaced adapter tools in server-then-list order (the
+// order each server returned its tools). The slice is a copy; callers may
+// append freely.
 func (m *Manager) Tools() []agent.Tool {
 	out := make([]agent.Tool, len(m.tools))
 	copy(out, m.tools)

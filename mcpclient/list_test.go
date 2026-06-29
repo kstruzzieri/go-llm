@@ -53,3 +53,23 @@ func TestListAllToolsErrorWarns(t *testing.T) {
 		t.Fatalf("got %d tools, %d warns", len(got), len(warns))
 	}
 }
+
+// advancingLister never returns an empty cursor and always advances it, so only
+// the maxListPages cap can stop the walk (exercises the runaway-page guard).
+type advancingLister struct{ n int }
+
+func (a *advancingLister) ListTools(_ context.Context, _ *gomcp.ListToolsParams) (*gomcp.ListToolsResult, error) {
+	a.n++
+	return &gomcp.ListToolsResult{Tools: []*gomcp.Tool{tool("t" + itoa(a.n))}, NextCursor: "c" + itoa(a.n)}, nil
+}
+
+func TestListAllToolsPageCap(t *testing.T) {
+	l := &advancingLister{}
+	got, warns := listAllTools(context.Background(), l, "fs")
+	if len(got) != maxListPages {
+		t.Fatalf("got %d tools, want page cap %d", len(got), maxListPages)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("page-cap truncation must warn; got %d warns", len(warns))
+	}
+}
