@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -21,6 +22,7 @@ type StepEvent struct {
 	Response     provider.ChatResponse
 	RouteOutcome *provider.RouteOutcome
 	Pressure     Pressure
+	Latency      time.Duration
 }
 
 // ToolCallEvent reports a tool about to be invoked (post-approval).
@@ -42,9 +44,13 @@ type TokenEvent struct {
 // capping and BEFORE the runtime appends it to State. Result is byte-identical
 // to the observation the model receives.
 type ToolResultEvent struct {
-	Step   int
-	Call   provider.ToolCall
-	Result ToolResult
+	Step    int
+	Call    provider.ToolCall
+	Effect  Effect // normalized effect when known; zero value for unknown-tool / bad-JSON
+	Result  ToolResult
+	Denied  bool
+	Invoked bool
+	Latency time.Duration
 }
 
 // ToolResultObserver is an OPTIONAL extension of Observer. When an Observer also

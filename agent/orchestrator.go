@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -13,11 +14,31 @@ import (
 type Orchestrator struct {
 	model  ModelCaller
 	ctxMgr ContextManager
+	now    func() time.Time // wall clock for latency; time.Now unless overridden
+}
+
+// Option configures an Orchestrator at construction. New stays source-compatible
+// for callers that pass none (per feedback_additive_constructors).
+type Option func(*Orchestrator)
+
+// WithClock overrides the wall clock used for step/tool latency measurement. A
+// nil now is ignored so the default time.Now is preserved. Tests inject a fake
+// clock for deterministic latencies.
+func WithClock(now func() time.Time) Option {
+	return func(o *Orchestrator) {
+		if now != nil {
+			o.now = now
+		}
+	}
 }
 
 // New constructs an Orchestrator from a ModelCaller and ContextManager.
-func New(model ModelCaller, ctxMgr ContextManager) *Orchestrator {
-	return &Orchestrator{model: model, ctxMgr: normalizeContextManager(ctxMgr)}
+func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator {
+	o := &Orchestrator{model: model, ctxMgr: normalizeContextManager(ctxMgr), now: time.Now}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return o
 }
 
 func initState(req Request) State {
@@ -83,6 +104,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		}
 
 		tokenLogged := false
+		modelStart := o.now()
 		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve), func(c provider.ChatResponse) error {
 			if c.Content == "" {
 				return nil
@@ -93,18 +115,19 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			}
 			return obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content})
 		})
+		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
 			return res, err
 		}
 		resp := modelResult.Response
 
 		res.Steps = append(res.Steps, StepRecord{
-			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure,
+			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		})
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
 		res.Usage = addUsage(res.Usage, resp.Usage)
 		if err := obs.OnStep(ctx, StepEvent{
-			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure,
+			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		}); err != nil {
 			return res, err
 		}

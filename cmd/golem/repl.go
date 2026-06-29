@@ -9,6 +9,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
 )
 
@@ -35,7 +36,8 @@ type replSession struct {
 	journal     *mutationJournal // nil unless -allow-write enabled writes
 	allowWrite  bool
 	allowExec   bool
-	mcpAttached bool // true when external MCP tools are attached (force approver)
+	mcpAttached bool    // true when external MCP tools are attached (force approver)
+	obs         *observ // nil unless -trace/-telemetry enabled
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -102,6 +104,26 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
+
+	var (
+		runID     string
+		startedAt time.Time
+		sink      *agenttrace.TelemetrySink
+	)
+	observer := agent.Observer(rend)
+	if sess.obs != nil {
+		runID = sess.obs.nextRunID()
+		startedAt = sess.obs.clock()
+		var serr error
+		if sink, serr = sess.obs.startSink(runID, startedAt); serr != nil {
+			_, _ = fmt.Fprintf(out, "warning: telemetry disabled: %v\n", serr)
+		}
+		observer = composeObserver(rend, sink)
+		if sink != nil {
+			defer func() { _ = sink.Close() }()
+		}
+	}
+
 	req := agent.Request{
 		Goal:           line,
 		System:         sess.baseSystem,
@@ -112,24 +134,49 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Budget:         sess.budget,
 		Approver:       approver, // nil when read-only => runtime fail-safe denies Write/Exec
 	}
-	res, err := sess.orch.Run(runCtx, req, rend)
-	if err != nil {
+	res, runErr := sess.orch.Run(runCtx, req, observer)
+
+	// Post-run observability on EVERY exit path. Uses the parent ctx (not runCtx)
+	// so a canceled turn still flushes its partial trace.
+	if sess.obs != nil {
+		status, partial := runStatus(runErr, runCtx.Err() != nil)
+		if sink != nil {
+			if ferr := sink.Finish(res, status); ferr != nil {
+				_, _ = fmt.Fprintf(out, "warning: telemetry write incomplete: %v\n", ferr)
+			}
+		}
+		if sess.obs.trace {
+			meta := agenttrace.TraceMeta{
+				Goal:           req.Goal,
+				System:         req.System,
+				HistorySummary: req.HistorySummary,
+				History:        req.History,
+				MaxSteps:       req.MaxSteps,
+				Budget:         req.Budget,
+				ToolSchemaHash: toolSchemaHash(sess.tools),
+				ModelHint:      lastRoutedModel(res),
+			}
+			startedStr := startedAt.UTC().Format(time.RFC3339Nano)
+			endedStr := sess.obs.clock().UTC().Format(time.RFC3339Nano)
+			if terr := sess.obs.writeTrace(runID, startedStr, endedStr, meta, res, status, partial, runErr); terr != nil {
+				_, _ = fmt.Fprintf(out, "warning: trace not written: %v\n", terr)
+			}
+		}
+	}
+
+	if runErr != nil {
 		if runCtx.Err() != nil {
 			_, _ = fmt.Fprintln(out, "\ncanceled")
 			return
 		}
-		_, _ = fmt.Fprintf(out, "\nerror: %v\n", err)
+		_, _ = fmt.Fprintf(out, "\nerror: %v\n", runErr)
 		return
 	}
 	if m := lastRoutedModel(res); m != "" {
 		sess.lastModel = m
 	}
-	// Persist only a successful, answered run (amendment 6). recordResult uses the
-	// parent ctx so saving the computed answer is not tied to this turn's
-	// cancellation scope. maybeCompress, by contrast, makes a new summarizer model
-	// call — it uses runCtx so a Ctrl-C during post-turn compression interrupts it
-	// (CompressMessages then returns a cancellation error and the session is left
-	// untouched, which the warning below surfaces).
+	// Persist only a successful, answered run. recordResult uses the parent ctx so
+	// saving the computed answer is not tied to this turn's cancellation scope.
 	if sess.session != nil && res.Answer != "" {
 		if serr := sess.session.recordResult(ctx, line, res); serr != nil {
 			_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", serr)

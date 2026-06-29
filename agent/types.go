@@ -123,6 +123,7 @@ type StepRecord struct {
 	Response     provider.ChatResponse
 	RouteOutcome *provider.RouteOutcome
 	Pressure     Pressure
+	Latency      time.Duration // wall time of the ModelCaller.Chat call for this step
 }
 
 // EventRecord is a lightweight ordered log entry for replay/eval.
@@ -137,6 +138,8 @@ type ToolCallRecord struct {
 	Name    string
 	IsError bool
 	Denied  bool
+	Invoked bool          // false for synthetic pre-invoke outcomes (no Invoke ran)
+	Latency time.Duration // wall time of Invoke only; zero when !Invoked
 }
 
 // Result is the canonical final state of a run.
