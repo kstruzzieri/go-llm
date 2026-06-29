@@ -189,9 +189,9 @@ func TestSplitByHeadingsFenceGuard(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("got %d section chunks, want 1 (fence '#' must not split)", count)
 	}
-	real := findChunk(t, chunks, "Real")
-	if !strings.Contains(real.Content, "# not a heading") {
-		t.Errorf("fenced '#' should stay inside the Real section: %q", real.Content)
+	realChunk := findChunk(t, chunks, "Real")
+	if !strings.Contains(realChunk.Content, "# not a heading") {
+		t.Errorf("fenced '#' should stay inside the Real section: %q", realChunk.Content)
 	}
 }
 

@@ -134,6 +134,10 @@ func splitByHeadings(source, content string, maxSize, overlap int) ([]Chunk, err
 				for k := range stack {
 					titles[k] = stack[k].title
 				}
+				// section_path uses an unescaped " > " join for readability. A
+				// heading whose title literally contains " > " can alias a nested
+				// path, but ordinals still keep keys unique within a document and
+				// the assignment is deterministic across re-indexes.
 				sections = append(sections, section{
 					startLine: i + 1,
 					path:      strings.Join(titles, " > "),
