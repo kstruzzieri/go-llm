@@ -3,6 +3,7 @@ package rag
 import (
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -28,6 +29,35 @@ func isMarkdown(path string) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+// rebaseChunkLines shifts each chunk's line numbers by lineOffset and recomputes
+// its ID. The ID recompute is mandatory: chunkID embeds StartLine, so a chunk
+// produced against a within-section span (1-based) would otherwise carry an ID
+// reflecting the wrong file line.
+func rebaseChunkLines(chunks []Chunk, lineOffset int) {
+	for i := range chunks {
+		chunks[i].StartLine += lineOffset
+		chunks[i].EndLine += lineOffset
+		chunks[i].ID = chunkID(chunks[i].Source, chunks[i].Content, chunks[i].StartLine)
+	}
+}
+
+// populateMarkdownChunkMetadata assigns chunk_ordinal per identical full
+// section_path in document order (mirrors populateCodeChunkMetadata). Chunks
+// with no section_path (preamble/fallback) are left untouched — they keep the
+// anchor_hash + ordinal the sliding-window chunker already gave them.
+func populateMarkdownChunkMetadata(chunks []Chunk) {
+	ordinals := make(map[string]int)
+	for i := range chunks {
+		path := chunks[i].Metadata["section_path"]
+		if path == "" {
+			continue
+		}
+		ord := ordinals[path]
+		ordinals[path] = ord + 1
+		chunks[i].Metadata["chunk_ordinal"] = strconv.Itoa(ord)
 	}
 }
 
