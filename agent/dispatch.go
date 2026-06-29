@@ -27,11 +27,11 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 
 	for _, call := range calls {
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_call"})
-		out, rec, err := o.dispatch(ctx, reg, call, approver, obs, step)
+		out, effect, rec, err := o.dispatch(ctx, reg, call, approver, obs, step)
 		if err != nil {
 			return err // hard abort (ctx cancel / approver error): no ToolResult, no OnToolResult
 		}
-		stop, err := recordResult(ctx, res, state, obs, gov, step, call, rec, out)
+		stop, err := recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out)
 		if err != nil {
 			return err
 		}
@@ -50,13 +50,16 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 // observer sees what the model sees. It returns stop=true (and sets
 // res.StopReason) when the governor trips, or an error to hard-abort the run.
 func recordResult(ctx context.Context, res *Result, state *State, obs Observer,
-	gov *restraintGovernor, step int, call provider.ToolCall, rec ToolCallRecord,
+	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
 	out ToolResult) (stop bool, err error) {
 
 	res.ToolCalls = append(res.ToolCalls, rec)
 	res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
 	if tro, ok := obs.(ToolResultObserver); ok {
-		if err := tro.OnToolResult(ctx, ToolResultEvent{Step: step, Call: call, Result: out}); err != nil {
+		if err := tro.OnToolResult(ctx, ToolResultEvent{
+			Step: step, Call: call, Effect: effect, Result: out,
+			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
+		}); err != nil {
 			return false, err
 		}
 	}
@@ -117,6 +120,7 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 		effect, preview = plan.Effect, plan.Preview
 	}
 	effect = normalizeEffect(effect)
+	p.effect = effect // capture now so a denial (which returns before invoke) still carries the effect
 
 	if needsApproval(effect.Approval, effect.Class) {
 		ok, err := approve(ctx, approver, call, preview)
@@ -134,7 +138,7 @@ func (o *Orchestrator) prepareCall(ctx context.Context, reg *toolRegistry, call 
 		return p, err
 	}
 
-	p.tool, p.effect = tool, effect
+	p.tool = tool
 	return p, nil
 }
 
@@ -156,21 +160,24 @@ func (o *Orchestrator) invokeCall(ctx context.Context, tool Tool, effect Effect,
 // A cancelled PARENT context after invoke is a hard abort (distinct from a tool's
 // own per-call timeout, which stays a model-visible IsError observation).
 func (o *Orchestrator) dispatch(ctx context.Context, reg *toolRegistry, call provider.ToolCall,
-	approver Approver, obs Observer, step int) (ToolResult, ToolCallRecord, error) {
+	approver Approver, obs Observer, step int) (ToolResult, Effect, ToolCallRecord, error) {
 
 	p, err := o.prepareCall(ctx, reg, call, approver, obs, step)
 	if err != nil {
-		return ToolResult{}, p.rec, err
+		return ToolResult{}, p.effect, p.rec, err
 	}
 	if p.result != nil {
-		return *p.result, p.rec, nil
+		return *p.result, p.effect, p.rec, nil
 	}
+	start := o.now()
 	out := o.invokeCall(ctx, p.tool, p.effect, call.Function.Arguments)
+	p.rec.Invoked = true
+	p.rec.Latency = o.now().Sub(start)
 	if ctx.Err() != nil {
-		return ToolResult{}, p.rec, ctx.Err() // parent cancelled -> hard abort
+		return ToolResult{}, p.effect, p.rec, ctx.Err() // parent cancelled -> hard abort
 	}
 	p.rec.IsError = out.IsError
-	return out, p.rec, nil
+	return out, p.effect, p.rec, nil
 }
 
 // approve applies the fail-safe: a nil approver denies any call that reaches it

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -74,13 +75,16 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 		prepared[i] = p
 	}
 
-	// Phase 2: invoke concurrently, bounded.
+	// Phase 2: invoke concurrently, bounded; time each invoke in isolation.
 	results := make([]ToolResult, len(prepared))
+	latencies := make([]time.Duration, len(prepared))
 	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(parallelToolCallLimit)
 	for i := range prepared {
 		g.Go(func() error {
+			start := o.now()
 			results[i] = o.invokeCall(gctx, prepared[i].tool, prepared[i].effect, prepared[i].call.Function.Arguments)
+			latencies[i] = o.now().Sub(start)
 			return nil // never fail the group; tool errors are model-visible results
 		})
 	}
@@ -94,7 +98,9 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 	for i := range prepared {
 		rec := prepared[i].rec
 		rec.IsError = results[i].IsError
-		stop, err := recordResult(ctx, res, state, obs, gov, step, prepared[i].call, rec, results[i])
+		rec.Invoked = true
+		rec.Latency = latencies[i]
+		stop, err := recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i])
 		if err != nil {
 			return err
 		}
