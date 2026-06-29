@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -39,6 +40,8 @@ type flags struct {
 	noProjectContext bool
 	noCompress       bool
 	noMemory         bool
+	trace            bool
+	telemetry        bool
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -63,6 +66,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
+	// -trace persists a full per-run trace (may contain workspace/user content; for replay/eval).
+	// -telemetry appends content-light run metrics only (timings, route, usage; no prompt or output).
+	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user content)")
+	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -350,6 +357,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	caller := newRouterChainCaller(bundle.Router, plan.chain)
+
+	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
+	if err != nil {
+		return fmt.Errorf("golem: observability setup: %w", err)
+	}
+
 	sess := &replSession{
 		orch:            agent.New(caller, agent.ContextManager{}),
 		tools:           tools,
@@ -373,6 +386,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		memory:       memStore,
 		memoryDBPath: memDBPath,
 		workspaceID:  workspaceID(root),
+		obs:          obsv,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate

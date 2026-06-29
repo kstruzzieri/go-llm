@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 )
 
 func TestNewObserv_DisabledReturnsNil(t *testing.T) {
@@ -70,5 +71,48 @@ func TestComposeObserver(t *testing.T) {
 	rend := newRenderer(io.Discard, false, 4, nil)
 	if got := composeObserver(rend, nil); got != agent.Observer(rend) {
 		t.Fatalf("nil sink should return renderer unchanged")
+	}
+}
+
+func TestObserv_TraceAndTelemetryShareRunID(t *testing.T) {
+	base := t.TempDir()
+	root := t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return base
+		}
+		return ""
+	}
+	o, err := newObserv(getenv, root, true, true, func() time.Time { return time.Unix(1719600000, 0) })
+	if err != nil {
+		t.Fatalf("newObserv: %v", err)
+	}
+	runID := o.nextRunID()
+	started := o.clock()
+
+	sink, err := o.startSink(runID, started)
+	if err != nil {
+		t.Fatalf("startSink: %v", err)
+	}
+	res := agent.Result{Steps: []agent.StepRecord{{Index: 0}}, StopReason: agent.Completed}
+	_ = sink.Finish(res, "completed")
+	_ = sink.Close()
+
+	if err := o.writeTrace(runID,
+		started.UTC().Format(time.RFC3339Nano), started.UTC().Format(time.RFC3339Nano),
+		agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil); err != nil {
+		t.Fatalf("writeTrace: %v", err)
+	}
+
+	tel, _ := os.ReadFile(o.telemetryPath)
+	if !strings.Contains(string(tel), runID) {
+		t.Fatalf("telemetry missing run id %q:\n%s", runID, tel)
+	}
+	entries, _ := os.ReadDir(o.traceDir)
+	if len(entries) != 1 {
+		t.Fatalf("trace files = %d, want 1", len(entries))
+	}
+	if !strings.Contains(entries[0].Name(), runID) {
+		t.Fatalf("trace file %q missing run id %q", entries[0].Name(), runID)
 	}
 }
