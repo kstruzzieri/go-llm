@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -185,8 +186,14 @@ func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.
 		}
 		desc := rt.Description
 		if len(desc) > maxDescBytes {
-			desc = desc[:maxDescBytes] + "...[truncated]"
-			warns = append(warns, fmt.Errorf("server %q: tool %q description truncated to %d bytes", alias, rt.Name, maxDescBytes))
+			// Back up to a UTF-8 rune boundary so truncation never splits a rune
+			// (mirrors the runtime's capOutput).
+			cut := maxDescBytes
+			for cut > 0 && !utf8.RuneStart(desc[cut]) {
+				cut--
+			}
+			desc = desc[:cut] + "...[truncated]"
+			warns = append(warns, fmt.Errorf("server %q: tool %q description truncated to %d bytes", alias, rt.Name, cut))
 		}
 		out = append(out, &toolAdapter{
 			caller:       caller,

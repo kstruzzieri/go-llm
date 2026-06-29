@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -69,6 +70,19 @@ func TestAdaptToolsDescriptionTruncated(t *testing.T) {
 	}
 	if len(warns) != 1 {
 		t.Fatalf("truncation must warn; got %d warns", len(warns))
+	}
+}
+
+func TestAdaptToolsDescriptionTruncationKeepsValidUTF8(t *testing.T) {
+	// Multi-byte runes so a naive byte cut at maxDescBytes would split a rune.
+	tools, _ := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
+		{Name: "u", Description: strings.Repeat("世", maxDescBytes), InputSchema: map[string]any{"type": "object"}},
+	})
+	if len(tools) != 1 {
+		t.Fatalf("got %d tools, want 1", len(tools))
+	}
+	if !utf8.ValidString(tools[0].Spec().Description) {
+		t.Fatal("truncated description is not valid UTF-8 (cut split a rune)")
 	}
 }
 
