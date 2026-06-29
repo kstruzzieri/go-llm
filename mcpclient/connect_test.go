@@ -2,6 +2,7 @@ package mcpclient
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -34,6 +35,40 @@ func TestAdaptToolsPerServerCap(t *testing.T) {
 	}
 	if len(warns) != 1 {
 		t.Fatalf("cap truncation must warn; got %d warns", len(warns))
+	}
+}
+
+func TestAdaptToolsSchemaSizeCapSkips(t *testing.T) {
+	// A schema that marshals beyond maxSchemaBytes must be skipped+warned, not
+	// registered (it would bloat the prompt every turn).
+	big := map[string]any{"type": "object", "x": strings.Repeat("a", maxSchemaBytes+1)}
+	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
+		{Name: "ok", InputSchema: map[string]any{"type": "object"}},
+		{Name: "huge", InputSchema: big},
+	})
+	if len(tools) != 1 {
+		t.Fatalf("got %d tools, want 1 (huge skipped)", len(tools))
+	}
+	if tools[0].Spec().Name != "mcp__fs__ok" {
+		t.Fatalf("kept the wrong tool: %s", tools[0].Spec().Name)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("oversized schema must warn; got %d warns", len(warns))
+	}
+}
+
+func TestAdaptToolsDescriptionTruncated(t *testing.T) {
+	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
+		{Name: "d", Description: strings.Repeat("x", maxDescBytes+50), InputSchema: map[string]any{"type": "object"}},
+	})
+	if len(tools) != 1 {
+		t.Fatalf("got %d tools, want 1 (description truncated, not skipped)", len(tools))
+	}
+	if got := len(tools[0].Spec().Description); got > maxDescBytes+len("...[truncated]") {
+		t.Fatalf("description not truncated: %d bytes", got)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("truncation must warn; got %d warns", len(warns))
 	}
 }
 

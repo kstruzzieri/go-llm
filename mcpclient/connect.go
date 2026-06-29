@@ -14,6 +14,16 @@ import (
 const (
 	maxToolsPerServer = 128
 	maxListPages      = 100
+	// maxSchemaBytes bounds a remote tool's input schema. The schema comes from
+	// an untrusted server and is sent to the model in the tool list on EVERY turn
+	// (unlike tool results, which the runtime output-caps post-hoc), so an
+	// oversized schema is a persistent prompt-bloat / cost vector. A tool whose
+	// normalized schema exceeds this is skipped (a clipped JSON schema would be
+	// invalid), so the cap is generous: any real tool schema is far smaller.
+	maxSchemaBytes = 32 * 1024
+	// maxDescBytes bounds a remote tool's description (also untrusted, also sent
+	// every turn). Free text, so it is truncated rather than skipped.
+	maxDescBytes = 8 * 1024
 	// connectTimeout bounds the handshake + tools/list for one server so a stdio
 	// command that spawns but never speaks MCP (or a hung HTTP endpoint) cannot
 	// block startup forever. It scopes only setup: the SDK keeps the session's
@@ -169,11 +179,20 @@ func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.
 			warns = append(warns, fmt.Errorf("server %q: skipping tool %q (%v)", alias, rt.Name, err))
 			continue
 		}
+		if len(schema) > maxSchemaBytes {
+			warns = append(warns, fmt.Errorf("server %q: skipping tool %q (schema %d bytes exceeds %d cap)", alias, rt.Name, len(schema), maxSchemaBytes))
+			continue
+		}
+		desc := rt.Description
+		if len(desc) > maxDescBytes {
+			desc = desc[:maxDescBytes] + "...[truncated]"
+			warns = append(warns, fmt.Errorf("server %q: tool %q description truncated to %d bytes", alias, rt.Name, maxDescBytes))
+		}
 		out = append(out, &toolAdapter{
 			caller:       caller,
 			remoteName:   rt.Name,
 			prefixedName: name,
-			description:  rt.Description,
+			description:  desc,
 			schema:       schema,
 			timeout:      defaultToolTimeout,
 			outputCap:    defaultToolOutputCap,
