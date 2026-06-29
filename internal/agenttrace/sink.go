@@ -113,6 +113,10 @@ func (s *TelemetrySink) OnToken(context.Context, agent.TokenEvent) error { retur
 // Finish emits the root run span. Call after Run returns; status is computed by
 // the caller. Returns the first retained write error, if any (advisory only).
 func (s *TelemetrySink) Finish(res agent.Result, status string) error {
+	stopReason := ""
+	if status == "completed" {
+		stopReason = res.StopReason.String()
+	}
 	s.record(runSpan{
 		SchemaVersion: SchemaVersion,
 		RunID:         s.runID,
@@ -122,7 +126,7 @@ func (s *TelemetrySink) Finish(res agent.Result, status string) error {
 		DurationMS:    ms(s.now().Sub(s.started)),
 		Steps:         len(res.Steps),
 		Status:        status,
-		StopReason:    res.StopReason.String(),
+		StopReason:    stopReason,
 	})
 	return s.lastErr
 }

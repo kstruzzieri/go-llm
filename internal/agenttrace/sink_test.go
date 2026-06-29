@@ -95,6 +95,30 @@ func TestTelemetrySink_SpansAndContentLight(t *testing.T) {
 	}
 }
 
+func TestTelemetrySink_OmitsStopReasonForNonCompletedStatus(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telemetry.jsonl")
+	sink, err := NewTelemetrySink(path, "run-error", time.Unix(0, 0), time.Now)
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+
+	if err := sink.Finish(agent.Result{}, "error"); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	spans := readSpans(t, path)
+	if len(spans) != 1 || spans[0]["kind"] != "run" {
+		t.Fatalf("spans = %+v, want one run span", spans)
+	}
+	if _, ok := spans[0]["stop_reason"]; ok {
+		t.Fatalf("error span has stop_reason = %v", spans[0]["stop_reason"])
+	}
+}
+
 // TestTelemetrySink_SwallowsWriteErrors proves the sink never aborts a run.
 func TestTelemetrySink_SwallowsWriteErrors(t *testing.T) {
 	dir := t.TempDir()

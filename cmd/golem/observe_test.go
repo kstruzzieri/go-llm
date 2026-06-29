@@ -112,6 +112,48 @@ func TestObserv_WriteTraceCollisionRetry(t *testing.T) {
 	}
 }
 
+func TestObserv_WriteTraceSanitizesStartedAtFilename(t *testing.T) {
+	base := t.TempDir()
+	root := t.TempDir()
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return base
+		}
+		return ""
+	}
+	o, err := newObserv(getenv, root, true, false, time.Now)
+	if err != nil {
+		t.Fatalf("newObserv: %v", err)
+	}
+	startedAt := "2026-06-29T10:20:30.123456789Z"
+	res := agent.Result{StopReason: agent.Completed}
+	if err := o.writeTrace("run1", startedAt, startedAt, agenttrace.TraceMeta{Goal: "g"}, res, "completed", false, nil); err != nil {
+		t.Fatalf("writeTrace: %v", err)
+	}
+
+	entries, err := os.ReadDir(o.traceDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("trace files = %d, want 1", len(entries))
+	}
+	if strings.Contains(entries[0].Name(), ":") {
+		t.Fatalf("trace filename contains colon: %q", entries[0].Name())
+	}
+	raw, err := os.ReadFile(filepath.Join(o.traceDir, entries[0].Name()))
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	var rec agenttrace.TraceRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
+	}
+	if rec.StartedAt != startedAt {
+		t.Fatalf("started_at = %q, want %q", rec.StartedAt, startedAt)
+	}
+}
+
 func TestObserv_NextRunIDUnique(t *testing.T) {
 	o := &observ{clock: func() time.Time { return time.Unix(1719600000, 123_000_000) }}
 	a, b := o.nextRunID(), o.nextRunID()

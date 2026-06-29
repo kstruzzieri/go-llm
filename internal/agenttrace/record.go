@@ -75,7 +75,7 @@ type runSpan struct {
 	DurationMS    float64 `json:"duration_ms"`
 	Steps         int     `json:"steps"`
 	Status        string  `json:"status"`
-	StopReason    string  `json:"stop_reason"`
+	StopReason    string  `json:"stop_reason,omitempty"`
 }
 
 type modelStepSpan struct {

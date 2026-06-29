@@ -8,6 +8,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -90,7 +91,8 @@ func (o *observ) writeTrace(runID, startedAt, endedAt string, meta agenttrace.Tr
 	rec.RunID = runID
 	rec.StartedAt = startedAt
 	rec.EndedAt = endedAt
-	base := filepath.Join(o.traceDir, startedAt+"-"+runID)
+	nameStartedAt := strings.NewReplacer(":", "-", "/", "-", "\\", "-").Replace(startedAt)
+	base := filepath.Join(o.traceDir, nameStartedAt+"-"+runID)
 	for i := 0; i < 5; i++ {
 		path := base + ".json"
 		if i > 0 {
