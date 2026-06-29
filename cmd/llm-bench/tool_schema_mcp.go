@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
-	"unicode"
 
+	"github.com/kstruzzieri/go-llm/internal/mcpstdio"
 	mcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -52,72 +52,7 @@ func newMCPToolSchemaSourceStdio(command string) (*mcpToolSchemaSource, error) {
 }
 
 func parseStdioCommand(command string) ([]string, error) {
-	var parts []string
-	var b strings.Builder
-	var quote rune
-	inToken := false
-
-	flush := func() {
-		parts = append(parts, b.String())
-		b.Reset()
-		inToken = false
-	}
-
-	runes := []rune(strings.TrimSpace(command))
-	for i := 0; i < len(runes); i++ {
-		r := runes[i]
-		if quote != '\'' && r == '\\' {
-			if i+1 < len(runes) && isStdioEscapedRune(quote, runes[i+1]) {
-				b.WriteRune(runes[i+1])
-				i++
-			} else {
-				b.WriteRune(r)
-			}
-			inToken = true
-			continue
-		}
-		if quote != 0 {
-			if r == quote {
-				quote = 0
-				continue
-			}
-			b.WriteRune(r)
-			inToken = true
-			continue
-		}
-
-		switch {
-		case r == '\'' || r == '"':
-			quote = r
-			inToken = true
-		case unicode.IsSpace(r):
-			if inToken {
-				flush()
-			}
-		default:
-			b.WriteRune(r)
-			inToken = true
-		}
-	}
-	if quote != 0 {
-		return nil, fmt.Errorf("unterminated %q quote", quote)
-	}
-	if inToken {
-		flush()
-	}
-	return parts, nil
-}
-
-func isStdioEscapedRune(quote rune, next rune) bool {
-	// Only consume escapes for parser delimiters; other backslashes are
-	// preserved as Windows path separators.
-	if quote == '"' {
-		return next == '"'
-	}
-	if quote == 0 {
-		return unicode.IsSpace(next) || next == '\'' || next == '"'
-	}
-	return false
+	return mcpstdio.ParseCommand(command)
 }
 
 func newMCPToolSchemaSourceHTTP(endpoint string) (*mcpToolSchemaSource, error) {

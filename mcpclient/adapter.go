@@ -3,6 +3,8 @@ package mcpclient
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,6 +35,7 @@ type toolAdapter struct {
 }
 
 var _ agent.Tool = (*toolAdapter)(nil)
+var _ agent.PlanningTool = (*toolAdapter)(nil)
 
 func (a *toolAdapter) Spec() agent.ToolSpec {
 	return agent.ToolSpec{Name: a.prefixedName, Description: a.description, Parameters: a.schema}
@@ -58,6 +61,20 @@ func (a *toolAdapter) Effect() agent.Effect {
 		Timeout:   to,
 		OutputCap: oc,
 	}
+}
+
+func (a *toolAdapter) Plan(_ context.Context, raw json.RawMessage) (agent.ToolPlan, error) {
+	args := strings.TrimSpace(string(raw))
+	if args == "" {
+		args = "{}"
+	}
+	return agent.ToolPlan{
+		Effect: a.Effect(),
+		Preview: fmt.Sprintf(
+			"mcp tool call:\n  tool: %s\n  remote: %s\n  args: %s\n",
+			a.prefixedName, a.remoteName, args,
+		),
+	}, nil
 }
 
 // Invoke calls the remote tool. Every failure mode (bad args, transport/session

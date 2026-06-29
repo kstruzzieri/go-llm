@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -41,6 +42,26 @@ func TestAdapterSpecAndEffect(t *testing.T) {
 	}
 	if e.Timeout <= 0 || e.OutputCap <= 0 {
 		t.Fatal("effect must declare a positive timeout and output cap")
+	}
+}
+
+func TestAdapterPlanShowsMCPCall(t *testing.T) {
+	a := newAdapter(&fakeCaller{})
+	pt, ok := any(a).(agent.PlanningTool)
+	if !ok {
+		t.Fatal("mcp adapter must provide an approval preview")
+	}
+	plan, err := pt.Plan(context.Background(), json.RawMessage(`{"path":"x y"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Effect.Approval != agent.ApprovalAlways {
+		t.Fatalf("approval = %v, want ApprovalAlways", plan.Effect.Approval)
+	}
+	for _, want := range []string{`tool: mcp__fs__read`, `remote: read`, `args: {"path":"x y"}`} {
+		if !strings.Contains(plan.Preview, want) {
+			t.Fatalf("preview missing %q:\n%s", want, plan.Preview)
+		}
 	}
 }
 

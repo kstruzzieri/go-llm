@@ -5,8 +5,10 @@ import (
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 
+	"github.com/kstruzzieri/go-llm/internal/mcpstdio"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 )
 
@@ -61,12 +63,20 @@ func parseMCPServers(stdioFlags, httpFlags []string) ([]mcpclient.Server, error)
 		if a == "" {
 			a = "mcp"
 		}
-		cand := a
-		for n := 2; used[cand]; n++ {
-			cand = fmt.Sprintf("%s%d", a, n)
+		for n := 1; ; n++ {
+			cand := a
+			if n > 1 {
+				suffix := strconv.Itoa(n)
+				if maxBase := 64 - len(suffix); len(cand) > maxBase {
+					cand = cand[:maxBase]
+				}
+				cand += suffix
+			}
+			if !used[cand] {
+				used[cand] = true
+				return cand
+			}
 		}
-		used[cand] = true
-		return cand
 	}
 	claimExplicit := func(flagName, raw, alias string) error {
 		if used[alias] {
@@ -78,7 +88,10 @@ func parseMCPServers(stdioFlags, httpFlags []string) ([]mcpclient.Server, error)
 
 	for _, f := range stdioFlags {
 		alias, spec := splitAlias(strings.TrimSpace(f))
-		fields := strings.Fields(spec)
+		fields, err := mcpstdio.ParseCommand(spec)
+		if err != nil {
+			return nil, fmt.Errorf("-mcp-stdio %q: %w", f, err)
+		}
 		if len(fields) == 0 {
 			return nil, fmt.Errorf("-mcp-stdio %q: empty command", f)
 		}

@@ -1,6 +1,9 @@
 package main
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestSplitAlias(t *testing.T) {
 	tests := []struct{ in, alias, spec string }{
@@ -36,6 +39,46 @@ func TestParseMCPServersDerivesAndDedupes(t *testing.T) {
 		}
 		seen[s.Alias] = true
 	}
+}
+
+func TestParseMCPServersStdioQuotedArgs(t *testing.T) {
+	servers, err := parseMCPServers([]string{`fs="/tmp/my server" --config "Project A.json" 'single quoted arg' bare`}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := serverCommand(servers[0])
+	want := []string{"/tmp/my server", "--config", "Project A.json", "single quoted arg", "bare"}
+	if len(got) != len(want) {
+		t.Fatalf("command = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("command = %#v, want %#v", got, want)
+		}
+	}
+}
+
+func TestParseMCPServersDerivedAliasSuffixStaysValid(t *testing.T) {
+	long := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	servers, err := parseMCPServers([]string{long, long}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(servers[1].Alias) > 64 {
+		t.Fatalf("alias %q length = %d, want <= 64", servers[1].Alias, len(servers[1].Alias))
+	}
+	if servers[0].Alias == servers[1].Alias {
+		t.Fatalf("aliases must be unique: %q", servers[0].Alias)
+	}
+}
+
+func serverCommand(server any) []string {
+	v := reflect.ValueOf(server).FieldByName("command")
+	out := make([]string, v.Len())
+	for i := range out {
+		out[i] = v.Index(i).String()
+	}
+	return out
 }
 
 func TestParseMCPServersExplicitAliasCollision(t *testing.T) {
