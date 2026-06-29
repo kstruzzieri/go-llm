@@ -265,3 +265,69 @@ func TestSplitByHeadingsConfigError(t *testing.T) {
 		t.Fatal("expected error for invalid maxSize/overlap, got nil")
 	}
 }
+
+func TestCodeChunkerMarkdownEndToEnd(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "doc.md")
+	content := "# A\nintro\n## B\nbody text\n"
+
+	chunks, err := NewCodeChunker().Chunk(source, content)
+	if err != nil {
+		t.Fatalf("Chunk() error: %v", err)
+	}
+	var b Chunk
+	for _, c := range chunks {
+		if c.Metadata["section_path"] == "A > B" {
+			b = c
+		}
+	}
+	if b.Language != "markdown" {
+		t.Fatalf("A > B chunk not found or wrong language: %+v", b)
+	}
+	key, err := ComputeStableKey(b, root)
+	if err != nil {
+		t.Fatalf("ComputeStableKey() error: %v", err)
+	}
+	if key != "doc.md::A > B#0" {
+		t.Errorf("stable key = %q, want %q", key, "doc.md::A > B#0")
+	}
+}
+
+func TestCodeChunkerMarkdownHeadingless(t *testing.T) {
+	content := "plain prose with no headings at all, just text.\n"
+	chunks, err := NewCodeChunker().Chunk("notes.md", content)
+	if err != nil {
+		t.Fatalf("Chunk() error: %v", err)
+	}
+	if len(chunks) == 0 {
+		t.Fatal("expected fallback chunks")
+	}
+	for _, c := range chunks {
+		if c.Metadata["section_path"] != "" {
+			t.Errorf("headingless md should have no section_path: %v", c.Metadata)
+		}
+		if c.Metadata["anchor_hash"] == "" {
+			t.Errorf("headingless md should fall back to anchor_hash: %v", c.Metadata)
+		}
+	}
+}
+
+func TestCodeChunkerWithLanguageOverridesMarkdown(t *testing.T) {
+	content := "def hello():\n    return 1\n"
+	chunks, err := NewCodeChunker(WithLanguage("python")).Chunk("weird.md", content)
+	if err != nil {
+		t.Fatalf("Chunk() error: %v", err)
+	}
+	for _, c := range chunks {
+		if c.Language != "python" {
+			t.Errorf("chunk language = %q, want python (override must win)", c.Language)
+		}
+	}
+}
+
+func TestCodeChunkerMarkdownConfigErrorPropagates(t *testing.T) {
+	_, err := NewCodeChunker(WithMaxChunkSize(0)).Chunk("doc.md", "# H\nbody\n")
+	if err == nil {
+		t.Fatal("expected error to propagate from markdown path, got nil")
+	}
+}
