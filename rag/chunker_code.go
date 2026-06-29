@@ -15,8 +15,15 @@ type codeChunker struct {
 	language string
 }
 
+// codeChunkerBehaviorVersion identifies the chunk-output behavior of
+// codeChunker. Bump it whenever the chunks produced for some input change, so
+// cached embeddings with the old signature are treated as incompatible and
+// re-embedded. 1 = pre-markdown; 2 = markdown heading-aware sectioning.
+const codeChunkerBehaviorVersion = 2
+
 func (c *codeChunker) sourceSignature() string {
-	return fmt.Sprintf("%T:max=%d:overlap=%d:language=%s", c, c.maxSize, c.overlap, c.language)
+	return fmt.Sprintf("%T:v=%d:max=%d:overlap=%d:language=%s",
+		c, codeChunkerBehaviorVersion, c.maxSize, c.overlap, c.language)
 }
 
 // NewCodeChunker returns a chunker that respects code boundaries.

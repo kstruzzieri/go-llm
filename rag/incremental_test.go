@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -214,6 +215,34 @@ func TestSourceSignatureV1V2Incompatible(t *testing.T) {
 	}
 	if v1.String() == v2.String() {
 		t.Fatal("v1 and v2 source signatures should serialize differently")
+	}
+}
+
+func TestCodeChunkerBehaviorVersionInvalidatesCache(t *testing.T) {
+	// The markdown change alters .md chunk output, so the chunker signature must
+	// differ from the pre-markdown one, forcing a re-embed.
+	if codeChunkerBehaviorVersion < 2 {
+		t.Fatalf("codeChunkerBehaviorVersion = %d, want >= 2", codeChunkerBehaviorVersion)
+	}
+
+	cur := chunkerSignature(NewCodeChunker())
+	if !strings.Contains(cur, "v=2") {
+		t.Errorf("code chunker signature %q should encode behavior version v=2", cur)
+	}
+
+	// A stored signature carrying the pre-markdown chunker string must be
+	// treated as incompatible -> requires full re-embed.
+	current := sourceSignature{
+		Version:          sourceSignatureVersion,
+		ContentHash:      contentHash("# Heading\nbody"),
+		EmbeddingModel:   "qwen3-embedding:8b",
+		Chunker:          cur,
+		StableKeyVersion: stableKeyVersion,
+	}
+	stored := current
+	stored.Chunker = "*rag.codeChunker:v=1:max=1500:overlap=200:language=" // pre-markdown form
+	if stored.compatibleWith(current) {
+		t.Error("pre-markdown chunker signature should be incompatible with the markdown-aware one")
 	}
 }
 
