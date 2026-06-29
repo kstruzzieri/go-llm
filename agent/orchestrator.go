@@ -104,6 +104,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		}
 
 		tokenLogged := false
+		modelStart := o.now()
 		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve), func(c provider.ChatResponse) error {
 			if c.Content == "" {
 				return nil
@@ -114,18 +115,19 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 			}
 			return obs.OnToken(ctx, TokenEvent{Step: step, Content: c.Content})
 		})
+		modelLatency := o.now().Sub(modelStart)
 		if err != nil {
 			return res, err
 		}
 		resp := modelResult.Response
 
 		res.Steps = append(res.Steps, StepRecord{
-			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure,
+			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		})
 		res.Events = append(res.Events, EventRecord{Step: step, Kind: "step"})
 		res.Usage = addUsage(res.Usage, resp.Usage)
 		if err := obs.OnStep(ctx, StepEvent{
-			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure,
+			Index: step, Response: resp, RouteOutcome: modelResult.RouteOutcome, Pressure: pressure, Latency: modelLatency,
 		}); err != nil {
 			return res, err
 		}

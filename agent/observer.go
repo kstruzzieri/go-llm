@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -21,6 +22,7 @@ type StepEvent struct {
 	Response     provider.ChatResponse
 	RouteOutcome *provider.RouteOutcome
 	Pressure     Pressure
+	Latency      time.Duration
 }
 
 // ToolCallEvent reports a tool about to be invoked (post-approval).

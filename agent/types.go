@@ -123,6 +123,7 @@ type StepRecord struct {
 	Response     provider.ChatResponse
 	RouteOutcome *provider.RouteOutcome
 	Pressure     Pressure
+	Latency      time.Duration // wall time of the ModelCaller.Chat call for this step
 }
 
 // EventRecord is a lightweight ordered log entry for replay/eval.
