@@ -15,6 +15,7 @@ import (
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/memory"
 )
 
@@ -32,6 +33,8 @@ type flags struct {
 	sessionID        string
 	allowWrite       bool
 	allowExec        bool
+	mcpStdio         stringSliceFlag
+	mcpHTTP          stringSliceFlag
 	noRag            bool
 	noProjectContext bool
 	noCompress       bool
@@ -53,6 +56,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
+	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
+	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
@@ -86,6 +91,7 @@ type startupInfo struct {
 	sessionLine        string
 	projectContextLine string
 	memoryLine         string
+	mcpLine            string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -97,6 +103,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.memoryLine != "" {
 		out = append(out, info.memoryLine)
+	}
+	if info.mcpLine != "" {
+		out = append(out, info.mcpLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
@@ -251,6 +260,34 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		tools = append(tools, et...)
 	}
 
+	var mcpManager *mcpclient.Manager
+	mcpAttached := false
+	mcpLine := ""
+	if servers, perr := parseMCPServers(f.mcpStdio, f.mcpHTTP); perr != nil {
+		return perr // fatal: bad flag config / explicit duplicate alias
+	} else if len(servers) > 0 {
+		mgr, mcpWarns, cerr := mcpclient.Connect(ctx, mcpClientImpl(), servers)
+		if cerr != nil {
+			return cerr // fatal: invalid / duplicate alias
+		}
+		for _, w := range mcpWarns {
+			warns = append(warns, "mcp: "+w.Error())
+		}
+		mcpTools := mgr.Tools()
+		tools = append(tools, mcpTools...)
+		mcpManager = mgr
+		mcpAttached = len(mcpTools) > 0
+		// Positive confirmation so a silently-failed server attach is visible:
+		// attached-tool count against the configured-server count (failures and
+		// skipped tools appear as the "mcp: ..." warnings above).
+		mcpLine = fmt.Sprintf("mcp: attached %d tool(s) from %d configured server(s)", len(mcpTools), len(servers))
+	}
+	defer func() {
+		if mcpManager != nil {
+			_ = mcpManager.Close()
+		}
+	}()
+
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
@@ -297,6 +334,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
+		mcpLine:            mcpLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
@@ -331,6 +369,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		journal:      journal,
 		allowWrite:   f.allowWrite,
 		allowExec:    f.allowExec,
+		mcpAttached:  mcpAttached,
 		memory:       memStore,
 		memoryDBPath: memDBPath,
 		workspaceID:  workspaceID(root),

@@ -78,6 +78,24 @@ func TestApproverExecPromptNeutral(t *testing.T) {
 	}
 }
 
+func TestApproverMCPPromptShowsRunTool(t *testing.T) {
+	in := strings.NewReader("y\n")
+	var out strings.Builder
+	a := newReplApprover(newLineReader(in), &out, false)
+	call := provider.ToolCall{Function: provider.ToolCallFunction{Name: "mcp__fs__read"}}
+	ok, err := a.Approve(context.Background(), call, "mcp tool call:\n  args: {}\n")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "Run this MCP tool?") {
+		t.Errorf("mcp prompt should say 'Run this MCP tool?':\n%s", s)
+	}
+	if strings.Contains(s, "Apply this change?") {
+		t.Error("mcp call must not use the diff prompt")
+	}
+}
+
 func TestReplApproverColorRendersAnsi(t *testing.T) {
 	var out strings.Builder
 	lr := newLineReader(strings.NewReader("n\n"))

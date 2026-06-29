@@ -21,6 +21,7 @@ go-llm/
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
+├── mcpclient/       # MCP client: adapts external MCP servers' tools into agent.Tool (stdio/streamable-HTTP); consumed by cmd/golem
 ├── conversation/    # Persistent conversation storage with SQLite
 ├── memory/          # Explicit user-controlled local memories (SQLite, scope-filtered FTS5/bm25 search); separate from conversation + RAG; backs Golem /remember + memory_search
 ├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)
@@ -48,7 +49,7 @@ Keep minimal. Allowed external dependencies:
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
 - `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
 - `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
-- `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (only imported by `mcp/`)
+- `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (imported by `mcp/` server side, `mcpclient/` client side, and `cmd/llm-bench/`)
 - `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
 - `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)
 

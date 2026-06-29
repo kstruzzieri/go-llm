@@ -130,6 +130,30 @@ func TestStartupNotices_SessionLine(t *testing.T) {
 	}
 }
 
+func TestStartupNotices_MCPLine(t *testing.T) {
+	got := startupNotices(startupInfo{
+		workspace: "/r",
+		mcpLine:   "mcp: attached 3 tool(s) from 2 configured server(s)",
+	})
+	joined := strings.Join(got, "\n")
+	if !strings.Contains(joined, "mcp: attached 3 tool(s) from 2 configured server(s)") {
+		t.Errorf("mcp line missing in:\n%s", joined)
+	}
+}
+
+func TestParseFlags_MCPServersRepeatable(t *testing.T) {
+	f, err := parseFlags([]string{"-mcp-stdio", "npx a", "-mcp-stdio", "npx b", "-mcp-http", "https://h/mcp"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.mcpStdio) != 2 {
+		t.Errorf("mcpStdio = %v, want 2 entries", f.mcpStdio)
+	}
+	if len(f.mcpHTTP) != 1 {
+		t.Errorf("mcpHTTP = %v, want 1 entry", f.mcpHTTP)
+	}
+}
+
 func TestValidateFlags_NoRagWithRagDBExclusive(t *testing.T) {
 	err := validateFlags(flags{noRag: true, ragDB: "/x.db"})
 	if err == nil {

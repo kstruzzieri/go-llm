@@ -31,10 +31,11 @@ type replSession struct {
 	memoryDBPath string              // used to re-secure SQLite sidecars after writes
 	workspaceID  string              // stable id used to scope memory create/list/search
 
-	lastModel  string           // last routed ActualModel for /model
-	journal    *mutationJournal // nil unless -allow-write enabled writes
-	allowWrite bool
-	allowExec  bool
+	lastModel   string           // last routed ActualModel for /model
+	journal     *mutationJournal // nil unless -allow-write enabled writes
+	allowWrite  bool
+	allowExec   bool
+	mcpAttached bool // true when external MCP tools are attached (force approver)
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -96,7 +97,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	var approver agent.Approver
-	if sess.allowWrite || sess.allowExec {
+	if needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
 		approver = newReplApprover(lr, out, sess.color)
 	}
 
