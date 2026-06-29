@@ -153,6 +153,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 				History:        req.History,
 				MaxSteps:       req.MaxSteps,
 				Budget:         req.Budget,
+				ToolSchemaHash: toolSchemaHash(sess.tools),
 				ModelHint:      lastRoutedModel(res),
 			}
 			startedStr := startedAt.UTC().Format(time.RFC3339Nano)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -158,6 +159,27 @@ func (m *multiObserver) OnToolResult(ctx context.Context, e agent.ToolResultEven
 		}
 	}
 	return nil
+}
+
+// toolSchemaHash returns a stable fnv64a digest of the active tool specs (name,
+// description, JSON schema) so a trace records which tool surface the run saw
+// without embedding the full schemas (#238: "tool specs or tool schema hash").
+// Empty when there are no tools. Hashed in slice order, which Golem fixes.
+func toolSchemaHash(tools []agent.Tool) string {
+	if len(tools) == 0 {
+		return ""
+	}
+	h := fnv.New64a()
+	for _, t := range tools {
+		s := t.Spec()
+		_, _ = h.Write([]byte(s.Name))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write([]byte(s.Description))
+		_, _ = h.Write([]byte{0})
+		_, _ = h.Write(s.Parameters)
+		_, _ = h.Write([]byte{0})
+	}
+	return fmt.Sprintf("fnv64:%x", h.Sum64())
 }
 
 // runStatus derives the trace completeness status from the Run return. agent's

@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"os"
 	"path/filepath"
@@ -12,6 +13,36 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 )
+
+// schemaStubTool is an agent.Tool whose full spec (name/desc/params) varies, for
+// toolSchemaHash tests. (tools_test.go's stubTool exposes only a name.)
+type schemaStubTool struct{ name, desc, params string }
+
+func (s schemaStubTool) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: s.name, Description: s.desc, Parameters: json.RawMessage(s.params)}
+}
+func (schemaStubTool) Effect() agent.Effect { return agent.Effect{Class: agent.Read} }
+func (schemaStubTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{}, nil
+}
+
+func TestToolSchemaHash(t *testing.T) {
+	if toolSchemaHash(nil) != "" {
+		t.Fatal("nil tools -> want empty hash")
+	}
+	a := []agent.Tool{schemaStubTool{"read", "r", `{"type":"object"}`}}
+	b := []agent.Tool{schemaStubTool{"read", "r", `{"type":"object"}`}}
+	c := []agent.Tool{schemaStubTool{"read", "r", `{"type":"string"}`}}
+	if toolSchemaHash(a) != toolSchemaHash(b) {
+		t.Fatal("identical specs must hash equal")
+	}
+	if toolSchemaHash(a) == toolSchemaHash(c) {
+		t.Fatal("differing schema must change the hash")
+	}
+	if toolSchemaHash(a) == "" {
+		t.Fatal("non-empty tools -> non-empty hash")
+	}
+}
 
 func TestNewObserv_DisabledReturnsNil(t *testing.T) {
 	o, err := newObserv(os.Getenv, t.TempDir(), false, false, time.Now)
