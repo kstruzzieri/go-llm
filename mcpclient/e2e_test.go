@@ -27,28 +27,23 @@ func TestEndToEndInMemory(t *testing.T) {
 	serverTr, clientTr := gomcp.NewInMemoryTransports()
 	go func() { _ = srv.Run(ctx, serverTr) }()
 
-	// Real adapter client over the in-memory transport.
-	client := gomcp.NewClient(&gomcp.Implementation{Name: "golem", Version: "test"},
-		&gomcp.ClientOptions{Capabilities: &gomcp.ClientCapabilities{}})
-	session, err := client.Connect(ctx, clientTr, nil)
-	if err != nil {
-		t.Fatalf("connect: %v", err)
+	// Drive the real mcpclient connect path: handshake + time-bounded setup +
+	// paginated list + adapt, over the in-memory transport.
+	session, tools, warns := connectVia(ctx, Implementation{Name: "golem", Version: "test"}, "fs", clientTr)
+	if session == nil {
+		t.Fatalf("connectVia returned nil session; warns=%v", warns)
 	}
 	defer func() { _ = session.Close() }()
-
-	remote, warns := listAllTools(ctx, session, "fs")
-	if len(remote) != 1 || len(warns) != 0 {
-		t.Fatalf("listed %d tools, %d warns", len(remote), len(warns))
-	}
-	tools, warns := adaptTools(session, "fs", remote)
 	if len(tools) != 1 || len(warns) != 0 {
-		t.Fatalf("adapted %d tools, %d warns", len(tools), len(warns))
+		t.Fatalf("adapted %d tools, %d warns: %v", len(tools), len(warns), warns)
 	}
 
 	tl := tools[0]
 	if tl.Spec().Name != "mcp__fs__echo" {
 		t.Fatalf("name %q", tl.Spec().Name)
 	}
+	// Invoke AFTER connectVia returned: its bounded setup context is now cancelled,
+	// so a successful call proves the session outlives the connect timeout.
 	out, err := tl.Invoke(ctx, json.RawMessage(`{"text":"hi"}`))
 	if err != nil {
 		t.Fatalf("invoke: %v", err)

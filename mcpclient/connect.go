@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -13,6 +14,12 @@ import (
 const (
 	maxToolsPerServer = 128
 	maxListPages      = 100
+	// connectTimeout bounds the handshake + tools/list for one server so a stdio
+	// command that spawns but never speaks MCP (or a hung HTTP endpoint) cannot
+	// block startup forever. It scopes only setup: the SDK keeps the session's
+	// background loop on its own context, so cancelling here does not close the
+	// live session, which is later driven by per-call dispatch contexts.
+	connectTimeout = 30 * time.Second
 )
 
 // lister is the minimal slice of *gomcp.ClientSession for paginated tools/list.
@@ -114,6 +121,16 @@ func connectOne(ctx context.Context, impl Implementation, s Server) (*gomcp.Clie
 	if err != nil {
 		return nil, nil, []error{fmt.Errorf("server %q: %w", s.Alias, err)}
 	}
+	return connectVia(ctx, impl, s.Alias, tr)
+}
+
+// connectVia performs the dial + handshake + tools/list + adapt for one server
+// over an already-built transport. Split from connectOne so tests can drive it
+// with an in-memory transport. Setup is time-bounded (see connectTimeout); the
+// returned session outlives the bounded context.
+func connectVia(ctx context.Context, impl Implementation, alias string, tr gomcp.Transport) (*gomcp.ClientSession, []agent.Tool, []error) {
+	ctx, cancel := context.WithTimeout(ctx, connectTimeout)
+	defer cancel()
 	client := gomcp.NewClient(
 		&gomcp.Implementation{Name: impl.Name, Version: impl.Version},
 		// Empty Capabilities disables the roots capability (SDK #607 behavior) and
@@ -122,10 +139,10 @@ func connectOne(ctx context.Context, impl Implementation, s Server) (*gomcp.Clie
 	)
 	session, err := client.Connect(ctx, tr, nil)
 	if err != nil {
-		return nil, nil, []error{fmt.Errorf("server %q: connect: %w", s.Alias, err)}
+		return nil, nil, []error{fmt.Errorf("server %q: connect: %w", alias, err)}
 	}
-	remote, listWarns := listAllTools(ctx, session, s.Alias)
-	tools, adaptWarns := adaptTools(session, s.Alias, remote)
+	remote, listWarns := listAllTools(ctx, session, alias)
+	tools, adaptWarns := adaptTools(session, alias, remote)
 	return session, tools, append(listWarns, adaptWarns...)
 }
 
