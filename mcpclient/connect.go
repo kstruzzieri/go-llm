@@ -164,8 +164,13 @@ func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.
 	var (
 		out   []agent.Tool
 		warns []error
+		seen  = make(map[string]bool)
 	)
 	for _, rt := range remote {
+		if rt == nil {
+			warns = append(warns, fmt.Errorf("server %q: skipping nil tool", alias))
+			continue
+		}
 		if len(out) >= maxToolsPerServer {
 			warns = append(warns, fmt.Errorf("server %q: more than %d tools, truncating", alias, maxToolsPerServer))
 			break
@@ -173,6 +178,10 @@ func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.
 		name, ok := composeName(alias, rt.Name)
 		if !ok {
 			warns = append(warns, fmt.Errorf("server %q: skipping tool %q (invalid or over-long composed name)", alias, rt.Name))
+			continue
+		}
+		if seen[name] {
+			warns = append(warns, fmt.Errorf("server %q: skipping duplicate tool %q", alias, rt.Name))
 			continue
 		}
 		schema, err := normalizeSchema(rt.InputSchema)
@@ -204,6 +213,7 @@ func adaptTools(caller toolCaller, alias string, remote []*gomcp.Tool) ([]agent.
 			timeout:      defaultToolTimeout,
 			outputCap:    defaultToolOutputCap,
 		})
+		seen[name] = true
 	}
 	return out, warns
 }

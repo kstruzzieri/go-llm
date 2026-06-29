@@ -25,6 +25,38 @@ func TestAdaptToolsSkipsAndCaps(t *testing.T) {
 	}
 }
 
+func TestAdaptToolsSkipsNilTool(t *testing.T) {
+	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
+		nil,
+		{Name: "good", InputSchema: map[string]any{"type": "object"}},
+	})
+	if len(tools) != 1 {
+		t.Fatalf("got %d tools, want 1", len(tools))
+	}
+	if tools[0].Spec().Name != "mcp__fs__good" {
+		t.Fatalf("kept the wrong tool: %s", tools[0].Spec().Name)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("nil tool must warn; got %d warns", len(warns))
+	}
+}
+
+func TestAdaptToolsSkipsDuplicateNames(t *testing.T) {
+	tools, warns := adaptTools(&fakeCaller{}, "fs", []*gomcp.Tool{
+		{Name: "read", InputSchema: map[string]any{"type": "object"}},
+		{Name: "read", InputSchema: map[string]any{"type": "object"}},
+	})
+	if len(tools) != 1 {
+		t.Fatalf("got %d tools, want duplicate skipped", len(tools))
+	}
+	if tools[0].Spec().Name != "mcp__fs__read" {
+		t.Fatalf("kept the wrong tool: %s", tools[0].Spec().Name)
+	}
+	if len(warns) != 1 {
+		t.Fatalf("duplicate tool must warn; got %d warns", len(warns))
+	}
+}
+
 func TestAdaptToolsPerServerCap(t *testing.T) {
 	var remote []*gomcp.Tool
 	for i := 0; i < maxToolsPerServer+5; i++ {
