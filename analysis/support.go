@@ -221,11 +221,29 @@ func parseClaimsLenient(reply string) []string {
 	return out
 }
 
+// verdictSeverity ranks a verdict by how unsupportive it is, so that duplicate
+// verdicts for the same claim fail closed: a duplicate can never raise a
+// claim's support level. Contradiction is the most severe.
+func verdictSeverity(v verdict) int {
+	if v.Contradicted {
+		return 3
+	}
+	switch parseStatus(v.Status) {
+	case StatusUnsupported:
+		return 2
+	case StatusPartial:
+		return 1
+	default: // StatusSupported
+		return 0
+	}
+}
+
 // buildEvidenceBlocks formats evidence as labeled blocks (E1..) for the verify
 // prompt and returns the matching EvidenceRefs. Evidence is assumed ranked
 // best-first; once the running size would exceed maxChars, the lower-ranked
 // tail is dropped. The first block is always kept even if it alone exceeds the
 // budget. maxChars <= 0 uses defaultMaxEvidenceChars.
+// Evidence content is untrusted, caller-supplied text and is included in the verify prompt verbatim; this judge trusts its own local model, not the evidence.
 func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []EvidenceRef) {
 	if maxChars <= 0 {
 		maxChars = defaultMaxEvidenceChars
@@ -324,7 +342,11 @@ func (j *SupportJudge) verifyClaims(ctx context.Context, claims []ClaimSupport, 
 	}
 	byID := make(map[string]verdict, len(vr.Verdicts))
 	for _, v := range vr.Verdicts {
-		byID[v.ClaimID] = v // last verdict for an id wins
+		// Duplicate claim_id fails closed: keep the least-supportive verdict so a
+		// repeated id can never upgrade a claim's support level.
+		if cur, ok := byID[v.ClaimID]; !ok || verdictSeverity(v) > verdictSeverity(cur) {
+			byID[v.ClaimID] = v
+		}
 	}
 
 	var missing, queries []string

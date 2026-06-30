@@ -431,6 +431,24 @@ func TestJudge_MalformedVerifyPropagates(t *testing.T) {
 	}
 }
 
+func TestVerifyClaims_DuplicateClaimIDFailsClosed(t *testing.T) {
+	// Both orderings must fail closed: a duplicate verdict can never upgrade.
+	for _, reply := range []string{
+		`{"verdicts":[{"claim_id":"C1","status":"unsupported","evidence_ids":[]},{"claim_id":"C1","status":"supported","evidence_ids":["E1"]}]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"]},{"claim_id":"C1","status":"unsupported","evidence_ids":[]}]}`,
+	} {
+		rc := &recordingChat{replies: []string{reply}}
+		j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+		claims, _, _, err := j.verifyClaims(context.Background(), []ClaimSupport{{ID: "C1", Claim: "alpha", Status: StatusUnsupported}}, "E1: a.go\n...", []EvidenceRef{{ID: "E1", ChunkID: "h1", Source: "a.go"}})
+		if err != nil {
+			t.Fatalf("reply %q: unexpected error: %v", reply, err)
+		}
+		if claims[0].Status != StatusUnsupported {
+			t.Fatalf("reply %q: duplicate claim_id must fail closed to unsupported, got %q", reply, claims[0].Status)
+		}
+	}
+}
+
 func TestAggregateStatus(t *testing.T) {
 	c := func(s SupportStatus, contra bool) ClaimSupport {
 		return ClaimSupport{Status: s, Contradicted: contra}
