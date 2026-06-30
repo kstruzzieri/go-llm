@@ -58,7 +58,7 @@ func turnBudget(b Budget) TokenBudget {
 	if ceiling < 0 {
 		ceiling = 0
 	}
-	return TokenBudget{Input: ceiling}
+	return TokenBudget{Input: ceiling, Thresholds: b.Pressure.normalize()}
 }
 
 func (m ContextManager) pinnedTokens(st State, toolSchemaTokens int) int {
@@ -96,31 +96,79 @@ func materializeDurableSummary(st State) State {
 }
 
 // Assemble bounds the transcript to fit the budget. toolSchemaTokens is the
-// pinned cost of the active tool schemas (not stored in State).
+// pinned cost of the active tool schemas (not stored in State). The returned
+// Pressure is fully populated on every path — including the exhaustion error
+// paths — so the orchestrator can emit it before the model call.
 func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens int, budget TokenBudget) (State, Pressure, error) {
 	m = normalizeContextManager(m)
+	thresholds := budget.Thresholds.normalize()
 	st = materializeDurableSummary(st)
-	if m.pinnedTokens(st, toolSchemaTokens) > budget.Input {
-		return st, Pressure{}, ErrContextExhausted
+
+	pinned := m.pinnedTokens(st, toolSchemaTokens)
+	if pinned > budget.Input {
+		// Pinned segment (system + goal + tool schemas) alone exceeds the ceiling:
+		// a hard runtime exhaustion. Report pinned tokens as the input cost.
+		p := Pressure{
+			UsedPct:     usedFraction(pinned, budget.Input),
+			InputTokens: pinned,
+			InputBudget: budget.Input,
+			Level:       LevelCritical,
+			Cause:       m.pinnedOverflowCause(st, toolSchemaTokens),
+			Mitigation:  MitigationHalt,
+		}
+		return st, p, ErrContextExhausted
 	}
-	// Compactor fits the State messages into the budget left after tool schemas.
+
 	stateBudget := TokenBudget{Input: budget.Input - toolSchemaTokens}
 	out, report, err := m.Compactor.Compact(ctx, st, stateBudget)
 	if err != nil {
 		return st, Pressure{}, err
 	}
 	after := m.totalTokens(out, toolSchemaTokens)
-	used := 0.0
-	if budget.Input > 0 {
-		used = float64(after) / float64(budget.Input)
-	}
+	used := usedFraction(after, budget.Input)
+	evicted := report.DroppedCount > 0
 	compactions := 0
-	if report.DroppedCount > 0 {
+	if evicted {
 		compactions = 1
 	}
-	pressure := Pressure{UsedPct: used, Evicted: report.DroppedCount, Compactions: compactions}
-	if after > budget.Input {
+	exhausted := after > budget.Input
+	level, mitigation := thresholds.Classify(used, exhausted, evicted)
+	pressure := Pressure{
+		UsedPct:     used,
+		Evicted:     report.DroppedCount,
+		Compactions: compactions,
+		InputTokens: after,
+		InputBudget: budget.Input,
+		Level:       level,
+		Cause:       m.dominantCause(out, toolSchemaTokens),
+		Mitigation:  mitigation,
+	}
+	if exhausted {
 		return out, pressure, ErrContextExhausted
 	}
 	return out, pressure, nil
+}
+
+// usedFraction is after/budget, guarding a zero/negative budget.
+func usedFraction(tokens, budget int) float64 {
+	if budget <= 0 {
+		return 0
+	}
+	return float64(tokens) / float64(budget)
+}
+
+// pinnedOverflowCause attributes a pinned-overflow exhaustion to either the tool
+// schemas or the pinned messages (system + goal). It deliberately ignores elastic
+// history, which is irrelevant to a pinned-segment overflow.
+func (m ContextManager) pinnedOverflowCause(st State, toolSchemaTokens int) PressureCause {
+	pinnedMsgs := m.estimate(st.System)
+	for _, msg := range st.Messages {
+		if msg.Segment == Pinned {
+			pinnedMsgs += m.messageCost(msg)
+		}
+	}
+	if toolSchemaTokens > pinnedMsgs {
+		return CauseToolSchema
+	}
+	return CausePinned
 }
