@@ -1,6 +1,9 @@
 package rag
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // BehavioralScorer scores chunks by accumulated behavioral feedback weight,
 // keyed by stable chunk key. It is fail-open: any weighter error yields neutral
@@ -54,6 +57,9 @@ func (s *BehavioralScorer) ScoreBatch(ctx context.Context, chunks []Chunk, query
 
 	weights, err := s.w.WeightsBatch(ctx, keys)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return scores, err
+		}
 		return scores, nil // fail open: neutral (scores still all-zero), no error
 	}
 	for i, c := range chunks {

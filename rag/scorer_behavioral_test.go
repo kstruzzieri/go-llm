@@ -61,6 +61,16 @@ func TestBehavioralScorerFailsOpen(t *testing.T) {
 	}
 }
 
+func TestBehavioralScorerPreservesCancellation(t *testing.T) {
+	fw := &fakeWeighter{err: context.Canceled}
+	s := NewBehavioralScorer(fw)
+	chunks := []Chunk{{ID: "c1", StableKey: "sk1"}}
+	_, err := s.ScoreBatch(context.Background(), chunks, "q", nil, QueryContext{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ScoreBatch error = %v, want context.Canceled", err)
+	}
+}
+
 func TestBehavioralScorerDeduplicatesKeys(t *testing.T) {
 	fw := &fakeWeighter{weights: map[string]float64{"sk1": 0.5}}
 	s := NewBehavioralScorer(fw)

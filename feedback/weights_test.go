@@ -2,9 +2,39 @@ package feedback
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
+
+var errTestBatchTooLarge = errors.New("test batch too large")
+
+type batchingStore struct {
+	SignalStore
+	signalCount int
+	maxBatch    int
+	calls       [][]string
+	aggs        map[string]Aggregate
+}
+
+func (s *batchingStore) SignalCount(ctx context.Context) (int, error) {
+	return s.signalCount, nil
+}
+
+func (s *batchingStore) GetAggregatesBatch(ctx context.Context, chunkKeys []string) (map[string]Aggregate, error) {
+	if len(chunkKeys) > s.maxBatch {
+		return nil, errTestBatchTooLarge
+	}
+	s.calls = append(s.calls, append([]string(nil), chunkKeys...))
+	out := make(map[string]Aggregate, len(chunkKeys))
+	for _, k := range chunkKeys {
+		if agg, ok := s.aggs[k]; ok {
+			out[k] = agg
+		}
+	}
+	return out, nil
+}
 
 // warmedStore returns a store where chunk-1 has 2 positive signals (clears a
 // WarmupSignals=2 gate) and retrieval_count=1, with aggregates recomputed.
@@ -68,6 +98,34 @@ func TestWeightReaderMinRetrievalsGate(t *testing.T) {
 	}
 	if w["chunk-1"] != 0 {
 		t.Errorf("below-MinRetrievals weight = %v, want 0", w["chunk-1"])
+	}
+}
+
+func TestWeightReaderBatchesAggregateLookups(t *testing.T) {
+	const keyCount = 1001
+	keys := make([]string, keyCount)
+	aggs := make(map[string]Aggregate, keyCount)
+	for i := range keys {
+		keys[i] = fmt.Sprintf("chunk-%04d", i)
+		aggs[keys[i]] = Aggregate{WeightedScore: float64(i), RetrievalCount: 1}
+	}
+	store := &batchingStore{signalCount: 1, maxBatch: 900, aggs: aggs}
+	reader := NewWeightReader(store, CollectorConfig{WarmupSignals: 1, MinRetrievals: 1})
+
+	got, err := reader.WeightsBatch(context.Background(), keys)
+	if err != nil {
+		t.Fatalf("WeightsBatch: %v", err)
+	}
+	if len(store.calls) != 2 {
+		t.Fatalf("GetAggregatesBatch calls = %d, want 2", len(store.calls))
+	}
+	for i, call := range store.calls {
+		if len(call) > store.maxBatch {
+			t.Fatalf("call %d len = %d, want <= %d", i, len(call), store.maxBatch)
+		}
+	}
+	if got["chunk-1000"] != 1000 {
+		t.Fatalf("chunk-1000 weight = %v, want 1000", got["chunk-1000"])
 	}
 }
 

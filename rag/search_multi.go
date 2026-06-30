@@ -88,8 +88,11 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	var behavioralRanks []int
 	foldBehavioral := false
 	if s.behavioral != nil {
-		behavioralScores, _ = NewBehavioralScorer(s.behavioral).
-			ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx) // fail-open: never errors
+		behavioralScores, err = NewBehavioralScorer(s.behavioral).
+			ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
+		if err != nil {
+			return nil, fmt.Errorf("rag: behavioral scoring: %w", err)
+		}
 		if anyNonZero(behavioralScores) {
 			behavioralRanks = computeRanks(behavioralScores)
 			foldBehavioral = true

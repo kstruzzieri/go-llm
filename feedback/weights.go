@@ -2,6 +2,8 @@ package feedback
 
 import "context"
 
+const weightLookupBatchSize = 900
+
 // weightsBatch applies cold-start (warmup) and MinRetrievals gating over a
 // store's aggregates. It is the single source of truth shared by Collector and
 // WeightReader so the two cannot diverge. Keys below MinRetrievals, unknown
@@ -20,13 +22,19 @@ func weightsBatch(ctx context.Context, store SignalStore, cfg CollectorConfig, c
 		return result, nil
 	}
 
-	aggs, err := store.GetAggregatesBatch(ctx, chunkKeys)
-	if err != nil {
-		return nil, err
-	}
-	for k, agg := range aggs {
-		if agg.RetrievalCount >= cfg.MinRetrievals {
-			result[k] = agg.WeightedScore
+	for start := 0; start < len(chunkKeys); start += weightLookupBatchSize {
+		end := start + weightLookupBatchSize
+		if end > len(chunkKeys) {
+			end = len(chunkKeys)
+		}
+		aggs, err := store.GetAggregatesBatch(ctx, chunkKeys[start:end])
+		if err != nil {
+			return nil, err
+		}
+		for k, agg := range aggs {
+			if agg.RetrievalCount >= cfg.MinRetrievals {
+				result[k] = agg.WeightedScore
+			}
 		}
 	}
 	return result, nil

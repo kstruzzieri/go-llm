@@ -350,6 +350,15 @@ func TestSearchMultiFailOpenPreservesBaseline(t *testing.T) {
 	}
 }
 
+func TestSearchMultiPropagatesBehavioralCancellation(t *testing.T) {
+	store := behavioralFixture(t)
+	store.SetBehavioralWeighter(&fakeWeighter{err: context.Canceled})
+	_, err := store.SearchMulti(context.Background(), behEmb, behQuery, 3, QueryContext{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("SearchMulti error = %v, want context.Canceled", err)
+	}
+}
+
 // Dominance: a behavior-only favorite (B, irrelevant) with a huge weight cannot
 // outrank T, which is rank-1 in both semantic and keyword. Temporal/structural
 // are uniform (empty qCtx, co-indexed), isolating behavioral per the spec.
