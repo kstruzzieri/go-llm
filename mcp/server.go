@@ -5,6 +5,7 @@ package mcp
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"log"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/completion"
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/feedback"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -53,6 +55,8 @@ type Server struct {
 	ragDisabled       bool
 	transcriptDBPath  string
 	transcriptStore   *transcript.Store
+	feedbackDBPath    string
+	feedbackDB        *sql.DB
 	fingerprintStore  fingerprint.Store
 	tlsCert           string
 	tlsKey            string
@@ -129,6 +133,17 @@ func WithTranscriptStore(path string) Option {
 	}
 }
 
+// WithRetrievalFeedback enables optional behavioral feedback ranking by opening the
+// given SQLite DB at startup and injecting a consume-only weighter into the RAG
+// store. Schema migrations may run, but the server never records retrievals or
+// outcomes. Open failure is non-fatal (logged; ranking stays neutral). MCP
+// requires an explicit path because it has no canonical workspace root.
+func WithRetrievalFeedback(path string) Option {
+	return func(s *Server) {
+		s.feedbackDBPath = path
+	}
+}
+
 // WithFingerprintStore enables model fingerprint persistence and profiling
 // through the provider-aware ModelRegistry.
 func WithFingerprintStore(store fingerprint.Store) Option {
@@ -170,6 +185,81 @@ func defaultRAGPath() string {
 		return "rag.db"
 	}
 	return filepath.Join(home, ".local", "share", "go-llm", "rag.db")
+}
+
+// prepareRetrievalFeedbackDB creates the feedback DB's parent dir (0700) and the
+// DB file (0600) before sql.Open. Feedback data is behavioral telemetry; it must
+// stay private (mirrors the session/feedback DB handling elsewhere).
+func prepareRetrievalFeedbackDB(path string) error {
+	if dir := filepath.Dir(path); dir != "" && dir != "." {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create retrieval feedback dir %q: %w", dir, err)
+		}
+	}
+	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o600)
+	if err != nil {
+		return fmt.Errorf("create retrieval feedback db %q: %w", path, err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		_ = f.Close()
+		return fmt.Errorf("chmod retrieval feedback db %q: %w", path, err)
+	}
+	return f.Close()
+}
+
+// chmodRetrievalFeedbackDBFiles re-applies 0600 to the feedback DB and its WAL/SHM
+// sidecars, which journal_mode=WAL creates with default (group/world-readable on
+// some umasks) permissions. Telemetry must never leak through a sidecar.
+func chmodRetrievalFeedbackDBFiles(path string) error {
+	for _, p := range []string{path, path + "-wal", path + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return fmt.Errorf("stat retrieval feedback db %q: %w", p, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("retrieval feedback db %q is a directory", p)
+		}
+		if err := os.Chmod(p, 0o600); err != nil {
+			return fmt.Errorf("chmod retrieval feedback db %q: %w", p, err)
+		}
+	}
+	return nil
+}
+
+// openRetrievalFeedbackWeighter best-effort opens the feedback DB and returns a
+// consume-only weighter plus the owning *sql.DB. It is hardened the same way as
+// the Golem path: single connection, WAL + busy_timeout, private 0600 files
+// (including WAL/SHM sidecars). Migrations may run, but it never records
+// retrievals or outcomes. On any failure it closes the db and returns an error;
+// the caller logs and continues with neutral ranking (non-fatal).
+func openRetrievalFeedbackWeighter(ctx context.Context, path string) (*sql.DB, rag.BehavioralWeighter, error) {
+	if err := prepareRetrievalFeedbackDB(path); err != nil {
+		return nil, nil, err
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open retrieval feedback db %q: %w", path, err)
+	}
+	db.SetMaxOpenConns(1)
+	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
+			_ = db.Close()
+			return nil, nil, fmt.Errorf("retrieval feedback %s: %w", pragma, err)
+		}
+	}
+	store, err := feedback.NewSignalStore(ctx, db)
+	if err != nil {
+		_ = db.Close()
+		return nil, nil, fmt.Errorf("init retrieval feedback db %q: %w", path, err)
+	}
+	if err := chmodRetrievalFeedbackDBFiles(path); err != nil {
+		_ = db.Close()
+		return nil, nil, err
+	}
+	return db, feedback.NewWeightReader(store, feedback.DefaultConfig()), nil
 }
 
 // NewServer creates and initializes an MCP server with the given options.
@@ -251,6 +341,14 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 			return nil, fmt.Errorf("mcp: open RAG store: %w", err)
 		}
 		s.store = store
+		if s.feedbackDBPath != "" {
+			if fdb, weighter, err := openRetrievalFeedbackWeighter(ctx, s.feedbackDBPath); err != nil {
+				log.Printf("mcp: behavioral feedback disabled: %v", err)
+			} else {
+				s.feedbackDB = fdb
+				store.SetBehavioralWeighter(weighter)
+			}
+		}
 	}
 
 	// Step 4b: open the optional transcript store (off unless WithTranscriptStore
@@ -691,6 +789,8 @@ func (s *Server) Close() error {
 	store := s.store
 	router := s.router
 	tstore := s.transcriptStore
+	fdb := s.feedbackDB
+	s.feedbackDB = nil
 	s.store = nil
 	s.indexer = nil
 	s.retriever = nil
@@ -711,5 +811,9 @@ func (s *Server) Close() error {
 	if tstore != nil {
 		transcriptErr = tstore.Close()
 	}
-	return errors.Join(routerErr, storeErr, transcriptErr)
+	var feedbackErr error
+	if fdb != nil {
+		feedbackErr = fdb.Close()
+	}
+	return errors.Join(routerErr, storeErr, transcriptErr, feedbackErr)
 }
