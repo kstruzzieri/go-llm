@@ -329,6 +329,108 @@ func TestVerifyClaims_DedupQueries(t *testing.T) {
 	}
 }
 
+func twoEvidence() []rag.SearchResult {
+	return []rag.SearchResult{ev("h1", "a.go", "alpha facts", 1, 2), ev("h2", "b.go", "beta facts", 3, 4)}
+}
+
+func TestJudge_EmptyAnswer(t *testing.T) {
+	rc := &recordingChat{}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	if _, err := j.Judge(context.Background(), "", twoEvidence()); err == nil {
+		t.Fatal("expected validation error for empty answer")
+	}
+	if len(rc.calls) != 0 {
+		t.Error("no model call expected for empty answer")
+	}
+}
+
+func TestJudge_EmptyEvidenceShortCircuits(t *testing.T) {
+	rc := &recordingChat{}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	report, err := j.Judge(context.Background(), "some answer", nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.Status != StatusUnsupported {
+		t.Errorf("status = %q, want unsupported", report.Status)
+	}
+	if len(report.MissingEvidence) == 0 {
+		t.Error("expected a missing-evidence note")
+	}
+	if len(rc.calls) != 0 {
+		t.Fatalf("no model calls expected on empty evidence, got %d", len(rc.calls))
+	}
+}
+
+func TestJudge_Supported(t *testing.T) {
+	rc := &recordingChat{replies: []string{
+		`{"claims":["alpha","beta"]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"]},{"claim_id":"C2","status":"supported","evidence_ids":["E2"]}]}`,
+	}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	report, err := j.Judge(context.Background(), "answer", twoEvidence())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if report.Status != StatusSupported {
+		t.Errorf("status = %q, want supported", report.Status)
+	}
+	if len(report.Evidence) != 2 {
+		t.Errorf("expected 2 evidence refs, got %d", len(report.Evidence))
+	}
+	// Proves both #60 roles are consumed, in order.
+	if len(rc.calls) != 2 || rc.calls[0].useCase != config.UseCaseExtract || rc.calls[1].useCase != config.UseCaseVerify {
+		t.Fatalf("call order/use-cases wrong: %+v", rc.calls)
+	}
+}
+
+func TestJudge_Unsupported(t *testing.T) {
+	rc := &recordingChat{replies: []string{
+		`{"claims":["alpha"]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"unsupported","evidence_ids":[],"missing_query":"find alpha"}]}`,
+	}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	report, _ := j.Judge(context.Background(), "answer", twoEvidence())
+	if report.Status != StatusUnsupported {
+		t.Errorf("status = %q, want unsupported", report.Status)
+	}
+	if len(report.MissingEvidenceQueries) != 1 {
+		t.Errorf("expected one missing-evidence query, got %v", report.MissingEvidenceQueries)
+	}
+}
+
+func TestJudge_Partial(t *testing.T) {
+	rc := &recordingChat{replies: []string{
+		`{"claims":["alpha","beta"]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"]},{"claim_id":"C2","status":"unsupported","evidence_ids":[]}]}`,
+	}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	report, _ := j.Judge(context.Background(), "answer", twoEvidence())
+	if report.Status != StatusPartial {
+		t.Errorf("status = %q, want partial", report.Status)
+	}
+}
+
+func TestJudge_ContradictedForcesUnsupported(t *testing.T) {
+	rc := &recordingChat{replies: []string{
+		`{"claims":["alpha","beta"]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"]},{"claim_id":"C2","status":"supported","evidence_ids":["E2"],"contradicted":true}]}`,
+	}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	report, _ := j.Judge(context.Background(), "answer", twoEvidence())
+	if report.Status != StatusUnsupported {
+		t.Errorf("contradicted claim must force unsupported, got %q", report.Status)
+	}
+}
+
+func TestJudge_MalformedVerifyPropagates(t *testing.T) {
+	rc := &recordingChat{replies: []string{`{"claims":["alpha"]}`, `not json`}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	if _, err := j.Judge(context.Background(), "answer", twoEvidence()); !errors.Is(err, ErrSupportVerifyMalformed) {
+		t.Fatalf("err = %v, want ErrSupportVerifyMalformed", err)
+	}
+}
+
 func TestAggregateStatus(t *testing.T) {
 	c := func(s SupportStatus, contra bool) ClaimSupport {
 		return ClaimSupport{Status: s, Contradicted: contra}

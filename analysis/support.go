@@ -413,8 +413,9 @@ func aggregateStatus(claims []ClaimSupport) SupportStatus {
 	}
 }
 
-// Judge runs the two-stage pipeline and returns a structured SupportReport.
-// Stages are added in later tasks; this stub validates input only.
+// Judge runs the two-stage extract -> verify pipeline and returns a structured
+// SupportReport. It makes no model call when answer is empty (returns an error)
+// or when evidence is empty (returns a deterministic unsupported report).
 func (j *SupportJudge) Judge(ctx context.Context, answer string, evidence []rag.SearchResult, opts ...SupportOption) (*SupportReport, error) {
 	if answer == "" {
 		return nil, fmt.Errorf("analysis: judge support: answer is required")
@@ -423,7 +424,27 @@ func (j *SupportJudge) Judge(ctx context.Context, answer string, evidence []rag.
 	for _, opt := range opts {
 		opt(cfg)
 	}
-	_ = ctx
-	_ = evidence
-	return &SupportReport{Status: StatusUnsupported}, nil
+	if len(evidence) == 0 {
+		return &SupportReport{
+			Status:          StatusUnsupported,
+			MissingEvidence: []string{"no evidence provided"},
+		}, nil
+	}
+
+	claims, err := j.extractClaims(ctx, answer)
+	if err != nil {
+		return nil, err
+	}
+	blocks, refs := buildEvidenceBlocks(evidence, cfg.maxEvidenceChars)
+	claims, missing, queries, err := j.verifyClaims(ctx, claims, blocks, refs)
+	if err != nil {
+		return nil, err
+	}
+	return &SupportReport{
+		Status:                 aggregateStatus(claims),
+		Claims:                 claims,
+		Evidence:               refs,
+		MissingEvidence:        missing,
+		MissingEvidenceQueries: queries,
+	}, nil
 }
