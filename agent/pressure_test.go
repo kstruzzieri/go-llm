@@ -1,6 +1,10 @@
 package agent
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/kstruzzieri/go-llm/provider"
+)
 
 func TestPressureThresholdsClassify(t *testing.T) {
 	def := PressureThresholds{}.normalize() // Watch .60 Warn .75 Critical .90
@@ -44,6 +48,43 @@ func TestPressureThresholdsNormalize(t *testing.T) {
 	}
 	if got := (PressureThresholds{Watch: -0.1, Warn: 0.5, Critical: 0.6}).normalize(); got != def {
 		t.Fatalf("out-of-range => %+v, want default", got)
+	}
+}
+
+func TestDominantCause(t *testing.T) {
+	m := ContextManager{Estimate: runeEstimator}
+	mkPinned := func(role, content string) Message {
+		return Message{ChatMessage: provider.ChatMessage{Role: role, Content: content}, Segment: Pinned}
+	}
+	mkElastic := func(role, content string) Message {
+		return Message{ChatMessage: provider.ChatMessage{Role: role, Content: content}, Segment: Elastic}
+	}
+	mkRetrieval := func(content string) Message {
+		return Message{
+			ChatMessage: provider.ChatMessage{Role: "tool", Content: content},
+			Segment:     Elastic,
+			Attrib:      &RetrievalAttribution{Sources: []RetrievedSource{{StableKey: "k"}}},
+		}
+	}
+	cases := []struct {
+		name             string
+		st               State
+		toolSchemaTokens int
+		want             PressureCause
+	}{
+		{"empty", State{}, 0, CauseUnknown},
+		{"tool_schema_dominates", State{Messages: []Message{mkElastic("user", "hi")}}, 1000, CauseToolSchema},
+		{"pinned_dominates", State{System: "", Messages: []Message{mkPinned("system", "PPPPPPPPPP")}}, 1, CausePinned},
+		{"history_dominates", State{Messages: []Message{mkElastic("assistant", "HHHHHHHHHH")}}, 1, CauseHistory},
+		{"tool_output_dominates", State{Messages: []Message{mkElastic("tool", "TTTTTTTTTT")}}, 1, CauseToolOutput},
+		{"retrieval_beats_tool_output", State{Messages: []Message{mkRetrieval("RRRRRRRRRR")}}, 1, CauseRetrieval},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := m.dominantCause(c.st, c.toolSchemaTokens); got != c.want {
+				t.Fatalf("dominantCause = %v, want %v", got, c.want)
+			}
+		})
 	}
 }
 

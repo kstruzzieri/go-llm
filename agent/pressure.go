@@ -80,6 +80,47 @@ func (m PressureMitigation) String() string {
 	}
 }
 
+// dominantCause attributes a turn's input tokens to the single largest bucket.
+// It reuses ContextManager.estimate / messageCost so the attribution can never
+// drift from the token accounting Assemble performs. Per-message precedence:
+// pinned > retrieval (Attrib set) > tool_output (role "tool") > history. Ties
+// resolve to the earliest bucket in {pinned, tool_schema, history, tool_output,
+// retrieval}; an all-zero state yields CauseUnknown.
+func (m ContextManager) dominantCause(st State, toolSchemaTokens int) PressureCause {
+	var pinned, toolOutput, retrieval, history int
+	pinned += m.estimate(st.System)
+	for _, msg := range st.Messages {
+		cost := m.messageCost(msg)
+		switch {
+		case msg.Segment == Pinned:
+			pinned += cost
+		case msg.Attrib != nil:
+			retrieval += cost
+		case msg.Role == "tool":
+			toolOutput += cost
+		default:
+			history += cost
+		}
+	}
+	buckets := []struct {
+		cause  PressureCause
+		tokens int
+	}{
+		{CausePinned, pinned},
+		{CauseToolSchema, toolSchemaTokens},
+		{CauseHistory, history},
+		{CauseToolOutput, toolOutput},
+		{CauseRetrieval, retrieval},
+	}
+	best, bestTokens := CauseUnknown, 0
+	for _, b := range buckets {
+		if b.tokens > bestTokens {
+			best, bestTokens = b.cause, b.tokens
+		}
+	}
+	return best
+}
+
 // PressureThresholds are the fractional bands (of the per-turn input budget) that
 // classify usage. The zero value normalizes to conservative defaults so existing
 // Budget{} callers are unaffected.
