@@ -91,3 +91,12 @@ func TestRoleForUseCase_ExplicitWins(t *testing.T) {
 		t.Fatalf("RoleForUseCase(summarize) = (%q,%v), want explicit (light,true)", role, ok)
 	}
 }
+
+func TestRoleForUseCase_WalksToSecondFallback(t *testing.T) {
+	// summarize -> {analysis, chat}; with analysis absent it must walk past the
+	// first fallback entry to the second one ("chat").
+	cfg := &Config{Defaults: map[string]string{"chat": "general"}}
+	if role, ok := cfg.RoleForUseCase(UseCaseSummarize); role != "general" || !ok {
+		t.Fatalf("RoleForUseCase(summarize) = (%q,%v), want chat fallback (general,true)", role, ok)
+	}
+}

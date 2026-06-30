@@ -118,6 +118,21 @@ func TestResolveSummarizeChain_NoDefaultsReturnsNil(t *testing.T) {
 	}
 }
 
+func TestResolveSummarizeChain_FallbackOnlyUsesChat(t *testing.T) {
+	cfg := &config.Config{
+		Models:   map[string]config.ModelConfig{"light": {Name: "small", Provider: "ollama"}},
+		Defaults: map[string]string{"chat": "light"}, // no summarize / analysis
+	}
+	chain, err := resolveSummarizeChain(cfg)
+	if err != nil {
+		t.Fatalf("resolveSummarizeChain: %v", err)
+	}
+	want := []string{"ollama/small"}
+	if len(chain) != len(want) || chain[0] != want[0] {
+		t.Fatalf("chain = %v, want %v (summarize -> chat fallback)", chain, want)
+	}
+}
+
 func TestLoadConfig_ExplicitBadPathFatal(t *testing.T) {
 	if _, err := loadConfig("/nonexistent/path/models.json"); err == nil {
 		t.Fatal("err = nil for nonexistent explicit config path, want fatal")
