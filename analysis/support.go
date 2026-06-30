@@ -29,17 +29,17 @@ const (
 // claim verdicts, so a SupportReport is self-describing once it leaves the call
 // site.
 type EvidenceRef struct {
-	ID        string `json:"id"`         // E1.. label referenced by ClaimSupport.EvidenceIDs
-	ChunkID   string `json:"chunk_id"`   // rag.Chunk.ID
-	Source    string `json:"source"`     // file path
+	ID        string `json:"id"`       // E1.. label referenced by ClaimSupport.EvidenceIDs
+	ChunkID   string `json:"chunk_id"` // rag.Chunk.ID
+	Source    string `json:"source"`   // file path
 	StartLine int    `json:"start_line"`
 	EndLine   int    `json:"end_line"`
 }
 
 // ClaimSupport is the verdict for one atomic claim extracted from the answer.
 type ClaimSupport struct {
-	ID           string        `json:"id"`           // C1.. label assigned by the helper
-	Claim        string        `json:"claim"`        // claim text owned by the helper
+	ID           string        `json:"id"`    // C1.. label assigned by the helper
+	Claim        string        `json:"claim"` // claim text owned by the helper
 	Status       SupportStatus `json:"status"`
 	EvidenceIDs  []string      `json:"evidence_ids"` // E1.. labels into SupportReport.Evidence
 	Contradicted bool          `json:"contradicted"` // evidence actively refutes the claim
