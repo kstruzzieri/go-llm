@@ -1,0 +1,64 @@
+package agent
+
+import "testing"
+
+func TestPressureThresholdsClassify(t *testing.T) {
+	def := PressureThresholds{}.normalize() // Watch .60 Warn .75 Critical .90
+	cases := []struct {
+		name      string
+		used      float64
+		exhausted bool
+		evicted   bool
+		wantLevel PressureLevel
+		wantMit   PressureMitigation
+	}{
+		{"ok", 0.10, false, false, LevelOK, MitigationNone},
+		{"watch", 0.65, false, false, LevelWatch, MitigationNone},
+		{"warn", 0.80, false, false, LevelWarn, MitigationWarn},
+		{"critical", 0.95, false, false, LevelCritical, MitigationWarn},
+		{"evict_wins_over_warn", 0.80, false, true, LevelWarn, MitigationEvict},
+		{"exhausted_overrides_all", 0.50, true, true, LevelCritical, MitigationHalt},
+		{"watch_with_evict", 0.65, false, true, LevelWatch, MitigationEvict},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			gotLevel, gotMit := def.Classify(c.used, c.exhausted, c.evicted)
+			if gotLevel != c.wantLevel || gotMit != c.wantMit {
+				t.Fatalf("Classify(%.2f,%v,%v)=%v/%v want %v/%v",
+					c.used, c.exhausted, c.evicted, gotLevel, gotMit, c.wantLevel, c.wantMit)
+			}
+		})
+	}
+}
+
+func TestPressureThresholdsNormalize(t *testing.T) {
+	def := PressureThresholds{Watch: 0.60, Warn: 0.75, Critical: 0.90}
+	if got := (PressureThresholds{}).normalize(); got != def {
+		t.Fatalf("zero => %+v, want %+v", got, def)
+	}
+	if got := (PressureThresholds{Warn: 0.80}).normalize(); got != (PressureThresholds{Watch: 0.60, Warn: 0.80, Critical: 0.90}) {
+		t.Fatalf("partial fill => %+v", got)
+	}
+	if got := (PressureThresholds{Warn: 0.99}).normalize(); got != def {
+		t.Fatalf("non-monotonic => %+v, want default", got)
+	}
+	if got := (PressureThresholds{Watch: -0.1, Warn: 0.5, Critical: 0.6}).normalize(); got != def {
+		t.Fatalf("out-of-range => %+v, want default", got)
+	}
+}
+
+func TestPressureLabelStrings(t *testing.T) {
+	if LevelOK.String() != "ok" || LevelWatch.String() != "watch" ||
+		LevelWarn.String() != "warn" || LevelCritical.String() != "critical" {
+		t.Fatal("level labels wrong")
+	}
+	if MitigationNone.String() != "none" || MitigationWarn.String() != "warn" ||
+		MitigationEvict.String() != "evict" || MitigationHalt.String() != "halt" {
+		t.Fatal("mitigation labels wrong")
+	}
+	if CauseUnknown.String() != "unknown" || CausePinned.String() != "pinned" ||
+		CauseToolSchema.String() != "tool_schema" || CauseHistory.String() != "history" ||
+		CauseToolOutput.String() != "tool_output" || CauseRetrieval.String() != "retrieval" {
+		t.Fatal("cause labels wrong")
+	}
+}
