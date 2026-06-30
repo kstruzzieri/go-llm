@@ -221,6 +221,35 @@ func parseClaimsLenient(reply string) []string {
 	return out
 }
 
+// buildEvidenceBlocks formats evidence as labeled blocks (E1..) for the verify
+// prompt and returns the matching EvidenceRefs. Evidence is assumed ranked
+// best-first; once the running size would exceed maxChars, the lower-ranked
+// tail is dropped. The first block is always kept even if it alone exceeds the
+// budget. maxChars <= 0 uses defaultMaxEvidenceChars.
+func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []EvidenceRef) {
+	if maxChars <= 0 {
+		maxChars = defaultMaxEvidenceChars
+	}
+	var b strings.Builder
+	refs := make([]EvidenceRef, 0, len(evidence))
+	for i, r := range evidence {
+		id := fmt.Sprintf("E%d", i+1)
+		block := fmt.Sprintf("%s: %s (lines %d-%d)\n%s\n\n", id, r.Chunk.Source, r.Chunk.StartLine, r.Chunk.EndLine, r.Chunk.Content)
+		if i > 0 && b.Len()+len(block) > maxChars {
+			break
+		}
+		b.WriteString(block)
+		refs = append(refs, EvidenceRef{
+			ID:        id,
+			ChunkID:   r.Chunk.ID,
+			Source:    r.Chunk.Source,
+			StartLine: r.Chunk.StartLine,
+			EndLine:   r.Chunk.EndLine,
+		})
+	}
+	return b.String(), refs
+}
+
 // Judge runs the two-stage pipeline and returns a structured SupportReport.
 // Stages are added in later tasks; this stub validates input only.
 func (j *SupportJudge) Judge(ctx context.Context, answer string, evidence []rag.SearchResult, opts ...SupportOption) (*SupportReport, error) {

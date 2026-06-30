@@ -10,6 +10,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 // recordingChat is a fake ChatFunc that returns queued replies in call order
@@ -166,5 +167,52 @@ func TestExtractClaims_ChatError(t *testing.T) {
 	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
 	if _, err := j.extractClaims(context.Background(), "x"); err == nil {
 		t.Fatal("expected error propagated from chat")
+	}
+}
+
+func ev(id, source, content string, start, end int) rag.SearchResult {
+	return rag.SearchResult{Chunk: rag.Chunk{ID: id, Source: source, Content: content, StartLine: start, EndLine: end}}
+}
+
+func TestBuildEvidenceBlocks_LabelsAndRefs(t *testing.T) {
+	evidence := []rag.SearchResult{
+		ev("h1", "a.go", "alpha", 1, 2),
+		ev("h2", "b.go", "beta", 3, 4),
+	}
+	text, refs := buildEvidenceBlocks(evidence, 0)
+	if len(refs) != 2 {
+		t.Fatalf("got %d refs, want 2", len(refs))
+	}
+	if refs[0].ID != "E1" || refs[0].ChunkID != "h1" || refs[0].Source != "a.go" || refs[0].StartLine != 1 || refs[0].EndLine != 2 {
+		t.Errorf("ref[0] = %+v", refs[0])
+	}
+	if refs[1].ID != "E2" {
+		t.Errorf("ref[1].ID = %q, want E2", refs[1].ID)
+	}
+	if !strings.Contains(text, "E1: a.go (lines 1-2)") || !strings.Contains(text, "alpha") {
+		t.Errorf("text missing E1 block: %q", text)
+	}
+}
+
+func TestBuildEvidenceBlocks_BudgetDropsTail(t *testing.T) {
+	evidence := []rag.SearchResult{
+		ev("h1", "a.go", strings.Repeat("x", 40), 1, 1),
+		ev("h2", "b.go", strings.Repeat("y", 40), 2, 2),
+		ev("h3", "c.go", strings.Repeat("z", 40), 3, 3),
+	}
+	_, refs := buildEvidenceBlocks(evidence, 60) // only the first block fits under 60
+	if len(refs) != 1 || refs[0].ID != "E1" {
+		t.Fatalf("budget should keep only E1, got %d refs", len(refs))
+	}
+}
+
+func TestBuildEvidenceBlocks_KeepsFirstEvenIfOversized(t *testing.T) {
+	evidence := []rag.SearchResult{ev("h1", "a.go", strings.Repeat("x", 500), 1, 1)}
+	text, refs := buildEvidenceBlocks(evidence, 10) // first block alone exceeds budget
+	if len(refs) != 1 || refs[0].ID != "E1" {
+		t.Fatalf("first block must always be kept, got %d refs", len(refs))
+	}
+	if !strings.Contains(text, "E1:") {
+		t.Errorf("expected E1 block present: %q", text)
 	}
 }
