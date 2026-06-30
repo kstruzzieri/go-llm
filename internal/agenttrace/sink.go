@@ -14,11 +14,12 @@ var (
 	_ agent.PressureObserver   = (*TelemetrySink)(nil)
 )
 
-// TelemetrySink is a content-light agent.Observer (+ ToolResultObserver). It
-// emits a model_step span per OnStep and a tool_call span per OnToolResult, then
-// a root run span on Finish (callbacks do not know final status/duration). It is
-// best-effort: write/encode errors are retained on the sink and every callback
-// returns nil so telemetry never aborts a run or changes observer semantics.
+// TelemetrySink is a content-light agent.Observer (+ ToolResultObserver +
+// PressureObserver). It emits a model_step span per OnStep, a tool_call span per
+// OnToolResult, a runtime_stage span per OnPressure, then a root run span on
+// Finish (callbacks do not know final status/duration). It is best-effort:
+// write/encode errors are retained on the sink and every callback returns nil so
+// telemetry never aborts a run or changes observer semantics.
 //
 // It serializes only content-light fields: identity, counts, sizes, durations,
 // and the denied/error/truncated/invoked bools. It never reads or writes prompt,

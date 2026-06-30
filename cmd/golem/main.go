@@ -6,7 +6,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"math"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -371,14 +370,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	budget := agent.Budget{InputCeiling: f.inputCeiling, OutputReserve: f.outputReserve}
 	if f.pressureWarn > 0 {
-		w := float64(f.pressureWarn) / 100
-		// Keep the triplet monotonic for any chosen warn so normalize() does not
-		// fall back to defaults: Watch <= Warn <= Critical.
-		budget.Pressure = agent.PressureThresholds{
-			Watch:    math.Min(0.60, w),
-			Warn:     w,
-			Critical: math.Max(0.90, w),
-		}
+		// The agent package owns the band layout (single source of truth for the
+		// monotonic clamp + defaults); golem only supplies the warn fraction.
+		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
 	sess := &replSession{
 		orch:            agent.New(caller, agent.ContextManager{}),

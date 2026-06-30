@@ -51,6 +51,21 @@ func TestPressureThresholdsNormalize(t *testing.T) {
 	}
 }
 
+func TestPressureThresholdsForWarn(t *testing.T) {
+	// mid-range warn keeps the default watch/critical bands.
+	if got := PressureThresholdsForWarn(0.80); got != (PressureThresholds{Watch: 0.60, Warn: 0.80, Critical: 0.90}) {
+		t.Fatalf("warn 0.80 => %+v", got)
+	}
+	// high warn widens critical so normalize keeps the warn instead of discarding it.
+	if got := PressureThresholdsForWarn(0.95); got != (PressureThresholds{Watch: 0.60, Warn: 0.95, Critical: 0.95}) {
+		t.Fatalf("warn 0.95 => %+v", got)
+	}
+	// low warn lowers watch so normalize keeps the warn.
+	if got := PressureThresholdsForWarn(0.50); got != (PressureThresholds{Watch: 0.50, Warn: 0.50, Critical: 0.90}) {
+		t.Fatalf("warn 0.50 => %+v", got)
+	}
+}
+
 func TestDominantCause(t *testing.T) {
 	m := ContextManager{Estimate: runeEstimator}
 	mkPinned := func(role, content string) Message {

@@ -1,5 +1,7 @@
 package agent
 
+import "math"
+
 // PressureLevel is the severity of per-turn context-budget usage. It is a label
 // only: LevelCritical does not stop a run (the hard stop is ErrContextExhausted).
 type PressureLevel int
@@ -130,11 +132,17 @@ type PressureThresholds struct {
 	Critical float64
 }
 
+// defaultPressureThresholds is the single source of truth for the conservative
+// warn/watch/critical bands applied when a PressureThresholds is unset or invalid.
+func defaultPressureThresholds() PressureThresholds {
+	return PressureThresholds{Watch: 0.60, Warn: 0.75, Critical: 0.90}
+}
+
 // normalize fills zero fields with their default and, if the result is not a
 // valid monotonic triplet (0 < Watch <= Warn <= Critical <= 1), falls back to the
 // default triplet entirely. This keeps Classify deterministic for any input.
 func (t PressureThresholds) normalize() PressureThresholds {
-	def := PressureThresholds{Watch: 0.60, Warn: 0.75, Critical: 0.90}
+	def := defaultPressureThresholds()
 	if t == (PressureThresholds{}) {
 		return def
 	}
@@ -177,4 +185,17 @@ func (t PressureThresholds) Classify(usedPct float64, exhausted, evicted bool) (
 	default:
 		return level, MitigationNone
 	}
+}
+
+// PressureThresholdsForWarn builds a monotonic triplet around warn (a fraction of
+// the input budget) so a consumer can tune just the warn band without normalize
+// discarding it. It keeps the default watch/critical bands, widening them only
+// when warn falls outside, then normalizes (an out-of-range warn yields defaults).
+func PressureThresholdsForWarn(warn float64) PressureThresholds {
+	def := defaultPressureThresholds()
+	return PressureThresholds{
+		Watch:    math.Min(def.Watch, warn),
+		Warn:     warn,
+		Critical: math.Max(def.Critical, warn),
+	}.normalize()
 }
