@@ -136,3 +136,84 @@ func TestTelemetrySink_SwallowsWriteErrors(t *testing.T) {
 		t.Fatalf("OnToolResult returned %v, want nil", err)
 	}
 }
+
+func TestTelemetrySinkOnPressureSpan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telemetry.jsonl")
+	started := time.Unix(0, 0)
+	sink, err := NewTelemetrySink(path, "run1", started, func() time.Time { return started })
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	p1 := agent.Pressure{UsedPct: 0.50, InputTokens: 50, InputBudget: 100, Level: agent.LevelOK, Cause: agent.CauseHistory, Mitigation: agent.MitigationNone}
+	p2 := agent.Pressure{UsedPct: 0.80, InputTokens: 80, InputBudget: 100, Level: agent.LevelWarn, Cause: agent.CauseHistory, Mitigation: agent.MitigationWarn}
+	if err := sink.OnPressure(context.Background(), agent.PressureEvent{Step: 0, Pressure: p1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.OnPressure(context.Background(), agent.PressureEvent{Step: 1, Pressure: p2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Finish(agent.Result{}, "completed"); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	_ = sink.Close()
+
+	spans := readSpans(t, path)
+	var stage0, stage1, run map[string]any
+	for _, s := range spans {
+		switch s["kind"] {
+		case "runtime_stage":
+			if s["span_id"] == "run1-stage-assemble-0" {
+				stage0 = s
+			}
+			if s["span_id"] == "run1-stage-assemble-1" {
+				stage1 = s
+			}
+		case "run":
+			run = s
+		}
+	}
+	if stage0 == nil || stage1 == nil || run == nil {
+		t.Fatalf("missing spans: stage0=%v stage1=%v run=%v", stage0 != nil, stage1 != nil, run != nil)
+	}
+	if stage0["stage"] != "assemble" || stage0["parent_id"] != "run1-run" {
+		t.Fatalf("stage0 fields wrong: %+v", stage0)
+	}
+	if stage0["used_pct_delta"].(float64) != 0 {
+		t.Fatalf("first delta should be 0, got %v", stage0["used_pct_delta"])
+	}
+	if d := stage1["used_pct_delta"].(float64); d < 0.29 || d > 0.31 {
+		t.Fatalf("second delta should be ~0.30, got %v", d)
+	}
+	if stage1["level"] != "warn" || stage1["mitigation"] != "warn" || stage1["cause"] != "history" {
+		t.Fatalf("stage1 labels wrong: %+v", stage1)
+	}
+	if mp := run["max_used_pct"].(float64); mp < 0.79 || mp > 0.81 {
+		t.Fatalf("run max_used_pct should be ~0.80, got %v", mp)
+	}
+	if run["max_pressure_level"] != "warn" {
+		t.Fatalf("run max_pressure_level should be warn, got %v", run["max_pressure_level"])
+	}
+	if int(stage0["schema_version"].(float64)) != SchemaVersion || SchemaVersion != 2 {
+		t.Fatalf("schema version: span=%v const=%d want 2", stage0["schema_version"], SchemaVersion)
+	}
+}
+
+func TestTelemetrySinkExhaustedOutcome(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, _ := NewTelemetrySink(path, "runX", started, func() time.Time { return started })
+	p := agent.Pressure{UsedPct: 1.2, InputTokens: 120, InputBudget: 100, Level: agent.LevelCritical, Cause: agent.CausePinned, Mitigation: agent.MitigationHalt}
+	_ = sink.OnPressure(context.Background(), agent.PressureEvent{Step: 0, Pressure: p})
+	_ = sink.Close()
+	for _, s := range readSpans(t, path) {
+		if s["kind"] == "runtime_stage" {
+			if s["outcome"] != "exhausted" {
+				t.Fatalf("halt mitigation should yield outcome=exhausted, got %v", s["outcome"])
+			}
+			return
+		}
+	}
+	t.Fatal("no runtime_stage span written")
+}

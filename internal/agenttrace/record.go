@@ -9,7 +9,8 @@ import (
 )
 
 // SchemaVersion is bumped on any breaking change to the trace/telemetry records.
-const SchemaVersion = 1
+// v2 adds the runtime_stage span and pressure enrichment (#63).
+const SchemaVersion = 2
 
 // TraceMeta is the replay-relevant request context the caller supplies (the
 // agent.Request is not embedded in agent.Result, and history is excluded from
@@ -64,18 +65,25 @@ type pressureLite struct {
 	UsedPct     float64 `json:"used_pct"`
 	Evicted     int     `json:"evicted"`
 	Compactions int     `json:"compactions"`
+	Level       string  `json:"level"`
+	Cause       string  `json:"cause"`
+	Mitigation  string  `json:"mitigation"`
+	InputTokens int     `json:"input_tokens"`
+	InputBudget int     `json:"input_budget"`
 }
 
 type runSpan struct {
-	SchemaVersion int     `json:"schema_version"`
-	RunID         string  `json:"run_id"`
-	SpanID        string  `json:"span_id"`
-	Kind          string  `json:"kind"` // "run"
-	StartedAt     string  `json:"started_at"`
-	DurationMS    float64 `json:"duration_ms"`
-	Steps         int     `json:"steps"`
-	Status        string  `json:"status"`
-	StopReason    string  `json:"stop_reason,omitempty"`
+	SchemaVersion    int     `json:"schema_version"`
+	RunID            string  `json:"run_id"`
+	SpanID           string  `json:"span_id"`
+	Kind             string  `json:"kind"` // "run"
+	StartedAt        string  `json:"started_at"`
+	DurationMS       float64 `json:"duration_ms"`
+	Steps            int     `json:"steps"`
+	Status           string  `json:"status"`
+	StopReason       string  `json:"stop_reason,omitempty"`
+	MaxUsedPct       float64 `json:"max_used_pct"`
+	MaxPressureLevel string  `json:"max_pressure_level"`
 }
 
 type modelStepSpan struct {
@@ -109,6 +117,29 @@ type toolCallSpan struct {
 	Truncated     bool    `json:"truncated"`
 	ContentBytes  int     `json:"content_bytes"`
 	DurationMS    float64 `json:"duration_ms"`
+}
+
+// runtimeStageSpan is one content-light runtime-stage record (#63). Today the
+// only emitted stage is "assemble" (the condense/compact boundary); future
+// stages reuse this shape with a different Stage value.
+type runtimeStageSpan struct {
+	SchemaVersion int     `json:"schema_version"`
+	RunID         string  `json:"run_id"`
+	SpanID        string  `json:"span_id"`
+	ParentID      string  `json:"parent_id"`
+	Kind          string  `json:"kind"`
+	Stage         string  `json:"stage"`
+	Step          int     `json:"step"`
+	Level         string  `json:"level"`
+	Cause         string  `json:"cause"`
+	Mitigation    string  `json:"mitigation"`
+	Outcome       string  `json:"outcome"`
+	UsedPct       float64 `json:"used_pct"`
+	UsedPctDelta  float64 `json:"used_pct_delta"`
+	InputTokens   int     `json:"input_tokens"`
+	InputBudget   int     `json:"input_budget"`
+	Evicted       int     `json:"evicted"`
+	Compactions   int     `json:"compactions"`
 }
 
 // effectString renders an EffectClass bitset as a stable, content-light label.
