@@ -43,6 +43,8 @@ type flags struct {
 	trace            bool
 	telemetry        bool
 	pressureWarn     int
+	feedback         bool
+	feedbackDB       string
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -72,6 +74,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user content)")
 	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
 	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
+	fs.BoolVar(&f.feedback, "feedback", false, "enable optional behavioral feedback ranking (consume-only; reads a per-workspace feedback DB)")
+	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -88,6 +92,9 @@ func validateFlags(f flags) error {
 	}
 	if f.pressureWarn < 0 || f.pressureWarn > 100 {
 		return fmt.Errorf("golem: -pressure-warn must be between 0 and 100")
+	}
+	if f.feedbackDB != "" && !f.feedback {
+		return fmt.Errorf("golem: -feedback-db requires -feedback")
 	}
 	return nil
 }
@@ -218,13 +225,31 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	} else if !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
+	feedbackDB := ""
+	if f.feedback && !f.noRag {
+		if f.feedbackDB != "" {
+			if err := validatePathOutsideWorkspace(f.feedbackDB, root); err != nil {
+				warns = append(warns, "behavioral feedback disabled: "+err.Error())
+			} else {
+				feedbackDB = f.feedbackDB
+			}
+		} else if p, ferr := feedbackDBPathForWorkspace(os.Getenv, root); ferr != nil {
+			warns = append(warns, "behavioral feedback disabled: "+ferr.Error())
+		} else {
+			feedbackDB = p
+		}
+	}
 	rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 		noRag:           f.noRag,
 		ragDB:           f.ragDB,
 		autoDBPath:      autoDBPath,
 		autoSidecarPath: autoSidecar,
 		workspaceID:     autoWorkspaceID,
+		feedbackDB:      feedbackDB,
 	})
+	if rr.feedback != nil && rr.feedback.db != nil {
+		defer func() { _ = rr.feedback.db.Close() }()
+	}
 	retrieve := rr.tool
 	warns = append(warns, rr.warns...)
 	retrieveLine := rr.line

@@ -188,31 +188,7 @@ func (c *Collector) Weights(ctx context.Context, chunkKey string) (float64, erro
 // query. Keys that are below MinRetrievals or that have no aggregate return
 // 0.0.
 func (c *Collector) WeightsBatch(ctx context.Context, chunkKeys []string) (map[string]float64, error) {
-	result := make(map[string]float64, len(chunkKeys))
-	for _, k := range chunkKeys {
-		result[k] = 0
-	}
-
-	totalSignals, err := c.store.SignalCount(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if totalSignals < c.config.WarmupSignals {
-		return result, nil
-	}
-
-	aggs, err := c.store.GetAggregatesBatch(ctx, chunkKeys)
-	if err != nil {
-		return nil, err
-	}
-
-	for k, agg := range aggs {
-		if agg.RetrievalCount >= c.config.MinRetrievals {
-			result[k] = agg.WeightedScore
-		}
-	}
-
-	return result, nil
+	return weightsBatch(ctx, c.store, c.config, chunkKeys)
 }
 
 // sweepLoop runs in a goroutine, expiring attribution windows and applying

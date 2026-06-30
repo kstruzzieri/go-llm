@@ -171,46 +171,53 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 
 // buildGatedRetriever stats dbPath, opens it, probes its stored vector space,
 // reads store stats for startup display, and applies the §6.1 gate against
-// expected. It returns:
-//   - (tool, decision, stats, nil) when the corpus is registerable (decision.kind may
-//     be vsLegacy, surfaced as a soft warning by the caller);
-//   - (nil, decision, stats, nil) when the gate disables retrieve (vsMismatch/vsInconsistent);
-//   - (nil, _, zero stats, err) when the DB cannot be opened/probed or the embedder is unavailable.
+// expected. It returns (tool, feedback, feedbackWarn, decision, stats, err):
+//   - tool/decision/stats set, err nil when the corpus is registerable
+//     (decision.kind may be vsLegacy, surfaced as a soft warning by the caller);
+//   - nil tool, err nil when the gate disables retrieve (vsMismatch/vsInconsistent);
+//   - nil tool, zero stats, err set when the DB cannot be opened/probed or the
+//     embedder is unavailable.
+//
+// When feedbackDB != "" it best-effort opens a consume-only behavioral weighter
+// and injects it into the store. feedback is non-nil only on success (the caller
+// owns it and must close feedback.db); it stays nil when feedback is disabled or
+// fails to open. feedbackWarn is non-empty when feedback failed to open, in which
+// case retrieval still registers and ranks neutrally.
 //
 // The opened store lives for the process on success (closed by the OS at exit).
-func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string) (agent.Tool, vsDecision, rag.StoreStats, error) {
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, feedbackDB string) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
 	if cfg == nil || router == nil {
-		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("no provider configured for embeddings")
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("no provider configured for embeddings")
 	}
 	embChain, err := embeddingChain(cfg)
 	if err != nil {
-		return nil, vsDecision{}, rag.StoreStats{}, err
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, err
 	}
 	info, err := os.Stat(dbPath)
 	if err != nil {
-		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q: %w", dbPath, err)
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q: %w", dbPath, err)
 	}
 	if info.IsDir() {
-		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q is a directory, not a SQLite file", dbPath)
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q is a directory, not a SQLite file", dbPath)
 	}
 	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 	if err != nil {
-		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("open index db %q: %w", dbPath, err)
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("open index db %q: %w", dbPath, err)
 	}
 	probe, err := store.ProbeVectorSpaces(ctx)
 	if err != nil {
 		_ = store.Close()
-		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("probe index db %q: %w", dbPath, err)
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("probe index db %q: %w", dbPath, err)
 	}
 	stats, err := store.Stats(ctx)
 	if err != nil {
 		_ = store.Close()
-		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("read index stats %q: %w", dbPath, err)
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("read index stats %q: %w", dbPath, err)
 	}
 	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
 	if !dec.register {
 		_ = store.Close()
-		return nil, dec, stats, nil
+		return nil, nil, "", dec, stats, nil
 	}
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return router.Route(rc, rr)
@@ -218,9 +225,19 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(embChain[0]))
 	if err != nil {
 		_ = store.Close()
-		return nil, vsDecision{}, rag.StoreStats{}, fmt.Errorf("build retriever for %q: %w", dbPath, err)
+		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("build retriever for %q: %w", dbPath, err)
 	}
-	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, dec, stats, nil
+	var feedbackHandle *behavioralWeighterHandle
+	feedbackWarn := ""
+	if feedbackDB != "" {
+		if h, warn := openBehavioralWeighter(ctx, feedbackDB); h != nil {
+			store.SetBehavioralWeighter(h.weighter)
+			feedbackHandle = h
+		} else if warn != "" {
+			feedbackWarn = warn
+		}
+	}
+	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, feedbackHandle, feedbackWarn, dec, stats, nil
 }
 
 // effectClassName renders an agent.EffectClass bitset for /tools. The agent
