@@ -57,14 +57,10 @@ func resolveSummarizeChain(cfg *config.Config) ([]string, error) {
 	if cfg == nil {
 		return nil, nil
 	}
-	if _, ok := cfg.Defaults["summarize"]; !ok {
-		if _, ok := cfg.Defaults["analysis"]; !ok {
-			if _, ok := cfg.Defaults["chat"]; !ok {
-				return nil, nil
-			}
-		}
+	if _, ok := cfg.RoleForUseCase(config.UseCaseSummarize); !ok {
+		return nil, nil
 	}
-	chain, err := cfg.RoleFallbackChain("summarize")
+	chain, err := cfg.RoleFallbackChain(config.UseCaseSummarize)
 	if err != nil {
 		return nil, fmt.Errorf("golem: resolve summarize chain: %w", err)
 	}
