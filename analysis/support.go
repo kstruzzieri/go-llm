@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -153,6 +156,69 @@ func lastJSONObjectWith(reply, key string) []byte {
 		}
 	}
 	return nil
+}
+
+const extractSystem = "You decompose an answer into atomic, independently-checkable factual claims. " +
+	"Use only the answer text; do not add facts."
+
+const extractInstruction = "Return ONLY JSON of the form {\"claims\": [\"claim 1\", \"claim 2\"]}. " +
+	"Each claim must be one self-contained factual statement. No commentary, no markdown."
+
+// extractReply is the expected JSON shape from the extract stage.
+type extractReply struct {
+	Claims []string `json:"claims"`
+}
+
+// extractClaims runs the extract stage and returns helper-labeled claims
+// (C1..). Malformed or empty model output falls back to treating the whole
+// answer as a single claim. Claims default to StatusUnsupported until verified.
+func (j *SupportJudge) extractClaims(ctx context.Context, answer string) ([]ClaimSupport, error) {
+	zero := 0.0
+	resp, err := j.chat(ctx, config.UseCaseExtract, provider.ChatRequest{
+		Model:   j.model,
+		Options: provider.ModelOptions{Temperature: &zero},
+		Messages: []provider.ChatMessage{
+			{Role: "system", Content: extractSystem},
+			{Role: "user", Content: "Answer:\n" + answer + "\n\n" + extractInstruction},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("analysis: judge support: extract: %w", err)
+	}
+
+	texts := parseClaimsLenient(resp.Content)
+	if len(texts) == 0 {
+		texts = []string{answer}
+	}
+	claims := make([]ClaimSupport, len(texts))
+	for i, c := range texts {
+		claims[i] = ClaimSupport{
+			ID:     fmt.Sprintf("C%d", i+1),
+			Claim:  c,
+			Status: StatusUnsupported,
+		}
+	}
+	return claims, nil
+}
+
+// parseClaimsLenient extracts non-empty claim strings from a model reply, or
+// nil when nothing usable is present.
+func parseClaimsLenient(reply string) []string {
+	obj := lastJSONObjectWith(reply, "claims")
+	if obj == nil {
+		return nil
+	}
+	var er extractReply
+	if err := json.Unmarshal(obj, &er); err != nil {
+		return nil
+	}
+	var out []string
+	for _, c := range er.Claims {
+		if strings.TrimSpace(c) != "" {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 // Judge runs the two-stage pipeline and returns a structured SupportReport.

@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -119,5 +120,51 @@ func TestLastJSONObjectWith(t *testing.T) {
 				t.Fatalf("got %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestExtractClaims_WellFormed(t *testing.T) {
+	rc := &recordingChat{replies: []string{`{"claims":["the sky is blue","water is wet"]}`}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	claims, err := j.extractClaims(context.Background(), "answer text")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(claims) != 2 {
+		t.Fatalf("got %d claims, want 2", len(claims))
+	}
+	if claims[0].ID != "C1" || claims[1].ID != "C2" {
+		t.Errorf("labels = %q,%q want C1,C2", claims[0].ID, claims[1].ID)
+	}
+	if claims[0].Claim != "the sky is blue" {
+		t.Errorf("claim[0] = %q", claims[0].Claim)
+	}
+	if claims[0].Status != StatusUnsupported {
+		t.Errorf("default status = %q, want unsupported (fail closed)", claims[0].Status)
+	}
+	if len(rc.calls) != 1 || rc.calls[0].useCase != config.UseCaseExtract {
+		t.Fatalf("expected one call with useCase %q, got %+v", config.UseCaseExtract, rc.calls)
+	}
+}
+
+func TestExtractClaims_FallbackWholeAnswer(t *testing.T) {
+	for _, reply := range []string{`not json at all`, `{"claims":[]}`, `{"claims":["   "]}`} {
+		rc := &recordingChat{replies: []string{reply}}
+		j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+		claims, err := j.extractClaims(context.Background(), "the whole answer")
+		if err != nil {
+			t.Fatalf("reply %q: unexpected error: %v", reply, err)
+		}
+		if len(claims) != 1 || claims[0].Claim != "the whole answer" || claims[0].ID != "C1" {
+			t.Fatalf("reply %q: want single whole-answer claim, got %+v", reply, claims)
+		}
+	}
+}
+
+func TestExtractClaims_ChatError(t *testing.T) {
+	rc := &recordingChat{err: errors.New("boom")}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	if _, err := j.extractClaims(context.Background(), "x"); err == nil {
+		t.Fatal("expected error propagated from chat")
 	}
 }
