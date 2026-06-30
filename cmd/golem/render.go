@@ -14,13 +14,15 @@ import (
 // prints one-line tool-call and tool-result notices, a dim per-step footer, and
 // (via finalFooter) a dim summary after Run.
 type renderer struct {
-	out      io.Writer
-	color    bool
-	maxSteps int
-	now      func() time.Time
-	lastMark time.Time
-	runStart time.Time
-	lastNL   bool
+	out          io.Writer
+	color        bool
+	maxSteps     int
+	now          func() time.Time
+	lastMark     time.Time
+	runStart     time.Time
+	lastNL       bool
+	warnPressure bool // print a one-line context-pressure warning
+	warned       bool // ensures at most one pressure line per run
 }
 
 func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time) *renderer {
@@ -112,6 +114,18 @@ func (r *renderer) OnToolResult(_ context.Context, e agent.ToolResultEvent) erro
 		r.lastNL = true
 	}
 	return err
+}
+
+// OnPressure prints a single dim context-pressure warning per run when warnings
+// are enabled and the level reaches warn. Telemetry records every event; the
+// terminal is deduped to avoid spam.
+func (r *renderer) OnPressure(_ context.Context, e agent.PressureEvent) error {
+	if !r.warnPressure || r.warned || e.Pressure.Level < agent.LevelWarn {
+		return nil
+	}
+	r.warned = true
+	return r.writeDim(fmt.Sprintf("context pressure: %s · ctx %.0f%% · cause %s",
+		e.Pressure.Level, e.Pressure.UsedPct*100, e.Pressure.Cause))
 }
 
 // resultSummary derives a terse one-line summary from the result. A tool-set

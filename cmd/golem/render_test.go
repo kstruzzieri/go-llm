@@ -191,3 +191,43 @@ func TestOnToolResult_NewlineAfterUnterminatedToken(t *testing.T) {
 		t.Errorf("got %q, want %q", buf.String(), want)
 	}
 }
+
+func TestRendererOnPressureGatedOncePerRun(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	r.warnPressure = true
+	warn := agent.PressureEvent{Pressure: agent.Pressure{Level: agent.LevelWarn, UsedPct: 0.80, Cause: agent.CauseHistory}}
+	below := agent.PressureEvent{Pressure: agent.Pressure{Level: agent.LevelWatch, UsedPct: 0.65}}
+	if err := r.OnPressure(context.Background(), below); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("watch level must not print: %q", buf.String())
+	}
+	if err := r.OnPressure(context.Background(), warn); err != nil {
+		t.Fatal(err)
+	}
+	first := buf.String()
+	if !strings.Contains(first, "pressure") {
+		t.Fatalf("warn level should print a pressure line, got %q", first)
+	}
+	if err := r.OnPressure(context.Background(), warn); err != nil {
+		t.Fatal(err)
+	}
+	if buf.String() != first {
+		t.Fatalf("second warn must not print again (one per run), got %q", buf.String())
+	}
+}
+
+func TestRendererOnPressureDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	r := newRenderer(&buf, false, 16, func() time.Time { return time.Unix(0, 0) })
+	r.warnPressure = false
+	warn := agent.PressureEvent{Pressure: agent.Pressure{Level: agent.LevelCritical, UsedPct: 0.95}}
+	if err := r.OnPressure(context.Background(), warn); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("disabled renderer must not print: %q", buf.String())
+	}
+}

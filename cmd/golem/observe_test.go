@@ -181,6 +181,35 @@ func TestComposeObserver(t *testing.T) {
 	}
 }
 
+type pressureChild struct{ got []agent.PressureEvent }
+
+func (p *pressureChild) OnStep(context.Context, agent.StepEvent) error         { return nil }
+func (p *pressureChild) OnToolCall(context.Context, agent.ToolCallEvent) error { return nil }
+func (p *pressureChild) OnToken(context.Context, agent.TokenEvent) error       { return nil }
+func (p *pressureChild) OnPressure(_ context.Context, e agent.PressureEvent) error {
+	p.got = append(p.got, e)
+	return nil
+}
+
+type nonPressureObs struct{}
+
+func (nonPressureObs) OnStep(context.Context, agent.StepEvent) error         { return nil }
+func (nonPressureObs) OnToolCall(context.Context, agent.ToolCallEvent) error { return nil }
+func (nonPressureObs) OnToken(context.Context, agent.TokenEvent) error       { return nil }
+
+func TestMultiObserverOnPressureFanout(t *testing.T) {
+	child := &pressureChild{}
+	plain := nonPressureObs{} // does NOT implement PressureObserver
+	m := &multiObserver{children: []agent.Observer{plain, child}}
+	e := agent.PressureEvent{Step: 3, Pressure: agent.Pressure{Level: agent.LevelWarn}}
+	if err := m.OnPressure(context.Background(), e); err != nil {
+		t.Fatal(err)
+	}
+	if len(child.got) != 1 || child.got[0].Step != 3 {
+		t.Fatalf("PressureObserver child not reached: %+v", child.got)
+	}
+}
+
 func TestObserv_TraceAndTelemetryShareRunID(t *testing.T) {
 	base := t.TempDir()
 	root := t.TempDir()

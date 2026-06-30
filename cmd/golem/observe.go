@@ -163,6 +163,17 @@ func (m *multiObserver) OnToolResult(ctx context.Context, e agent.ToolResultEven
 	return nil
 }
 
+func (m *multiObserver) OnPressure(ctx context.Context, e agent.PressureEvent) error {
+	for _, c := range m.children {
+		if po, ok := c.(agent.PressureObserver); ok {
+			if err := po.OnPressure(ctx, e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // toolSchemaHash returns a stable fnv64a digest of the active tool specs (name,
 // description, JSON schema) so a trace records which tool surface the run saw
 // without embedding the full schemas (#238: "tool specs or tool schema hash").

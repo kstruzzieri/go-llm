@@ -32,12 +32,13 @@ type replSession struct {
 	memoryDBPath string              // used to re-secure SQLite sidecars after writes
 	workspaceID  string              // stable id used to scope memory create/list/search
 
-	lastModel   string           // last routed ActualModel for /model
-	journal     *mutationJournal // nil unless -allow-write enabled writes
-	allowWrite  bool
-	allowExec   bool
-	mcpAttached bool    // true when external MCP tools are attached (force approver)
-	obs         *observ // nil unless -trace/-telemetry enabled
+	lastModel    string           // last routed ActualModel for /model
+	journal      *mutationJournal // nil unless -allow-write enabled writes
+	allowWrite   bool
+	allowExec    bool
+	mcpAttached  bool    // true when external MCP tools are attached (force approver)
+	obs          *observ // nil unless -trace/-telemetry enabled
+	pressureWarn bool    // enable the one-per-run context-pressure warning line
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -104,6 +105,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
+	rend.warnPressure = sess.pressureWarn
 
 	var (
 		runID     string
