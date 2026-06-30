@@ -14,6 +14,14 @@ type SignalScorer interface {
 		queryEmbedding []float64, qCtx QueryContext) ([]float64, error)
 }
 
+// BehavioralWeighter supplies optional per-chunk behavioral weights keyed by
+// stable chunk key. It is the only behavioral surface the ranking path holds,
+// so ranking physically cannot open attribution windows or record signals.
+// *feedback.WeightReader satisfies it structurally; rag does not import feedback.
+type BehavioralWeighter interface {
+	WeightsBatch(ctx context.Context, keys []string) (map[string]float64, error)
+}
+
 // QueryContext carries metadata about the retrieval request.
 // It provides contextual signals (current file, workspace root, open files)
 // that individual scorers can use to improve relevance.
