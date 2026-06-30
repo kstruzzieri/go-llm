@@ -138,3 +138,62 @@ func TestContextManagerZeroValueUsesDefaultCompactor(t *testing.T) {
 		t.Fatalf("unexpected assembled state: %+v", out.Messages)
 	}
 }
+
+func TestAssembleEnrichedPressureNormalPath(t *testing.T) {
+	m := ContextManager{Compactor: RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator}
+	st := State{System: "sys", Messages: []Message{
+		{ChatMessage: provider.ChatMessage{Role: "user", Content: "hello"}, Segment: Pinned},
+	}}
+	budget := TokenBudget{Input: 1000, Thresholds: PressureThresholds{}.normalize()}
+	_, p, err := m.Assemble(context.Background(), st, 0, budget)
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	if p.InputBudget != 1000 || p.InputTokens <= 0 {
+		t.Fatalf("tokens/budget not stamped: %+v", p)
+	}
+	if p.Level != LevelOK || p.Mitigation != MitigationNone {
+		t.Fatalf("low usage should be ok/none, got %v/%v", p.Level, p.Mitigation)
+	}
+	if p.Cause == CauseUnknown {
+		t.Fatalf("cause should be attributed, got %v", p.Cause)
+	}
+}
+
+func TestAssemblePinnedOverflowPressure(t *testing.T) {
+	m := ContextManager{Compactor: RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator}
+	st := State{System: "0123456789", Messages: []Message{
+		{ChatMessage: provider.ChatMessage{Role: "user", Content: "q"}, Segment: Pinned},
+	}}
+	budget := TokenBudget{Input: 3, Thresholds: PressureThresholds{}.normalize()}
+	_, p, err := m.Assemble(context.Background(), st, 0, budget)
+	if !errors.Is(err, ErrContextExhausted) {
+		t.Fatalf("want ErrContextExhausted, got %v", err)
+	}
+	if p.Level != LevelCritical || p.Mitigation != MitigationHalt {
+		t.Fatalf("overflow should be critical/halt, got %v/%v", p.Level, p.Mitigation)
+	}
+	wantPinned := m.pinnedTokens(st, 0)
+	if p.InputTokens != wantPinned {
+		t.Fatalf("InputTokens=%d, want pinnedTokens=%d", p.InputTokens, wantPinned)
+	}
+	if p.Cause != CausePinned && p.Cause != CauseToolSchema {
+		t.Fatalf("overflow cause should be pinned/tool_schema, got %v", p.Cause)
+	}
+}
+
+func TestUsedFractionSaturatesNonPositiveBudget(t *testing.T) {
+	if got := usedFraction(10, 0); got != 1 {
+		t.Fatalf("usedFraction(positive, zero) = %v, want 1", got)
+	}
+	if got := usedFraction(0, 0); got != 0 {
+		t.Fatalf("usedFraction(zero, zero) = %v, want 0", got)
+	}
+}
+
+func TestTurnBudgetCopiesNormalizedThresholds(t *testing.T) {
+	tb := turnBudget(Budget{InputCeiling: 100, Pressure: PressureThresholds{Warn: 0.80}})
+	if tb.Thresholds != (PressureThresholds{Watch: 0.60, Warn: 0.80, Critical: 0.90}) {
+		t.Fatalf("thresholds not normalized into TokenBudget: %+v", tb.Thresholds)
+	}
+}

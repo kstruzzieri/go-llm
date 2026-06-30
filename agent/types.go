@@ -59,6 +59,9 @@ type Budget struct {
 	// also subtracted from the per-turn input ceiling during assembly.
 	OutputReserve int
 	TotalTokens   int // 0 = unbounded whole-run cap
+	// Pressure tunes the warn/watch/critical bands classified during assembly.
+	// The zero value normalizes to conservative defaults. #63.
+	Pressure PressureThresholds
 }
 
 // Request is the unit of work handed to Run.
@@ -109,11 +112,17 @@ type RetrievedSource struct {
 	Score     float64
 }
 
-// Pressure is the per-turn context-budget telemetry (#63 seam).
+// Pressure is the per-turn context-budget telemetry (#63 seam). UsedPct,
+// Evicted, Compactions are the original v1 fields; the rest enrich them.
 type Pressure struct {
 	UsedPct     float64
 	Evicted     int
 	Compactions int
+	InputTokens int
+	InputBudget int
+	Level       PressureLevel
+	Cause       PressureCause
+	Mitigation  PressureMitigation
 }
 
 // StepRecord is the durable per-turn truth. RouteOutcome is captured

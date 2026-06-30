@@ -63,6 +63,22 @@ type ToolResultObserver interface {
 	OnToolResult(ctx context.Context, e ToolResultEvent) error
 }
 
+// PressureObserver is an OPTIONAL extension of Observer. When an Observer also
+// implements it, the Orchestrator calls OnPressure once per step immediately
+// after assembling the turn's context and BEFORE the model call — including the
+// path where assembly fails with ErrContextExhausted (so the most important
+// pressure event is never invisible). A returned error aborts Run before the
+// model call, like the other observer callbacks.
+type PressureObserver interface {
+	OnPressure(ctx context.Context, e PressureEvent) error
+}
+
+// PressureEvent reports the per-turn context pressure computed during assembly.
+type PressureEvent struct {
+	Step     int
+	Pressure Pressure
+}
+
 type nopObserver struct{}
 
 func (nopObserver) OnStep(context.Context, StepEvent) error         { return nil }

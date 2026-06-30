@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"strings"
@@ -96,6 +97,15 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 
 	for step := 0; step < maxSteps; step++ {
 		assembled, pressure, err := o.ctxMgr.Assemble(ctx, state, toolSchemaTokens, budget)
+		// Emit pressure before the model call on the success path and on the
+		// exhaustion path; skip only opaque compactor failures (pressure is zero).
+		if err == nil || errors.Is(err, ErrContextExhausted) {
+			if po, ok := obs.(PressureObserver); ok {
+				if perr := po.OnPressure(ctx, PressureEvent{Step: step, Pressure: pressure}); perr != nil {
+					return res, perr
+				}
+			}
+		}
 		if err != nil {
 			return res, err
 		}

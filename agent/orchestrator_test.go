@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -98,5 +100,79 @@ func TestRunReturnsCurrentTurnTranscriptWithToolObservation(t *testing.T) {
 	}
 	if res.Messages[3].Role != "assistant" || res.Messages[3].Content != "done" {
 		t.Fatalf("message 3 = %+v, want final answer", res.Messages[3])
+	}
+}
+
+// pressureRec is a local observer capturing callback order and pressure events
+// without importing agenttest (avoids any test import cycle).
+type pressureRec struct {
+	kinds      []string
+	pressures  []PressureEvent
+	onPressErr error
+}
+
+func (r *pressureRec) OnStep(_ context.Context, _ StepEvent) error {
+	r.kinds = append(r.kinds, "step")
+	return nil
+}
+func (r *pressureRec) OnToolCall(_ context.Context, _ ToolCallEvent) error {
+	r.kinds = append(r.kinds, "tool_call")
+	return nil
+}
+func (r *pressureRec) OnToken(_ context.Context, _ TokenEvent) error {
+	r.kinds = append(r.kinds, "token")
+	return nil
+}
+func (r *pressureRec) OnPressure(_ context.Context, e PressureEvent) error {
+	r.kinds = append(r.kinds, "pressure")
+	r.pressures = append(r.pressures, e)
+	return r.onPressErr
+}
+
+func TestOnPressureFiresBeforeFirstStep(t *testing.T) {
+	mc := &scriptedCaller{responses: []ModelResult{
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	o := newTestOrchestrator(mc)
+	rec := &pressureRec{}
+	if _, err := o.Run(context.Background(), Request{Goal: "q"}, rec); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(rec.kinds) == 0 || rec.kinds[0] != "pressure" {
+		t.Fatalf("first callback should be pressure, got %v", rec.kinds)
+	}
+	if len(rec.pressures) == 0 {
+		t.Fatal("expected a pressure event")
+	}
+}
+
+func TestOnPressureFiresOnExhaustionWithoutModelCall(t *testing.T) {
+	mc := &scriptedCaller{responses: nil}
+	o := newTestOrchestrator(mc)
+	rec := &pressureRec{}
+	req := Request{Goal: "0123456789012345678901234567890123456789", Budget: Budget{InputCeiling: 2}}
+	_, err := o.Run(context.Background(), req, rec)
+	if !errors.Is(err, ErrContextExhausted) {
+		t.Fatalf("want ErrContextExhausted, got %v", err)
+	}
+	if mc.calls != 0 {
+		t.Fatalf("model should not be called on exhaustion, calls=%d", mc.calls)
+	}
+	if len(rec.pressures) != 1 || rec.pressures[0].Pressure.Mitigation != MitigationHalt {
+		t.Fatalf("expected one halt pressure event, got %+v", rec.pressures)
+	}
+}
+
+func TestOnPressureErrorAbortsBeforeModelCall(t *testing.T) {
+	mc := &scriptedCaller{responses: nil}
+	o := newTestOrchestrator(mc)
+	sentinel := fmt.Errorf("observer abort")
+	rec := &pressureRec{onPressErr: sentinel}
+	_, err := o.Run(context.Background(), Request{Goal: "q"}, rec)
+	if !errors.Is(err, sentinel) {
+		t.Fatalf("want sentinel, got %v", err)
+	}
+	if mc.calls != 0 {
+		t.Fatalf("model should not be called when OnPressure errors, calls=%d", mc.calls)
 	}
 }

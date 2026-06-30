@@ -225,3 +225,29 @@ func TestParseFlagsNoMemory(t *testing.T) {
 		t.Error("noMemory should default false")
 	}
 }
+
+func TestParsePressureWarnFlag(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.pressureWarn != 75 {
+		t.Fatalf("default pressureWarn = %d, want 75", f.pressureWarn)
+	}
+	f, err = parseFlags([]string{"-pressure-warn", "0"})
+	if err != nil || f.pressureWarn != 0 {
+		t.Fatalf("explicit 0: f=%d err=%v", f.pressureWarn, err)
+	}
+}
+
+func TestValidatePressureWarnRange(t *testing.T) {
+	if err := validateFlags(flags{pressureWarn: 75}); err != nil {
+		t.Fatalf("75 should be valid: %v", err)
+	}
+	if err := validateFlags(flags{pressureWarn: -1}); err == nil {
+		t.Fatal("negative pressureWarn should be rejected")
+	}
+	if err := validateFlags(flags{pressureWarn: 101}); err == nil {
+		t.Fatal(">100 pressureWarn should be rejected")
+	}
+}

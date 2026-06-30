@@ -42,6 +42,7 @@ type flags struct {
 	noMemory         bool
 	trace            bool
 	telemetry        bool
+	pressureWarn     int
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -70,6 +71,7 @@ func parseFlags(args []string) (flags, error) {
 	// -telemetry appends content-light run metrics only (timings, route, usage; no prompt or output).
 	fs.BoolVar(&f.trace, "trace", false, "persist a content-full run trace per turn (outside the workspace; may contain workspace/user content)")
 	fs.BoolVar(&f.telemetry, "telemetry", false, "append content-light run telemetry (timings, route, usage; no prompt/output)")
+	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -83,6 +85,9 @@ func validateFlags(f flags) error {
 	}
 	if f.noRag && f.ragDB != "" {
 		return fmt.Errorf("golem: -no-rag and -rag-db are mutually exclusive")
+	}
+	if f.pressureWarn < 0 || f.pressureWarn > 100 {
+		return fmt.Errorf("golem: -pressure-warn must be between 0 and 100")
 	}
 	return nil
 }
@@ -363,12 +368,18 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return fmt.Errorf("golem: observability setup: %w", err)
 	}
 
+	budget := agent.Budget{InputCeiling: f.inputCeiling, OutputReserve: f.outputReserve}
+	if f.pressureWarn > 0 {
+		// The agent package owns the band layout (single source of truth for the
+		// monotonic clamp + defaults); golem only supplies the warn fraction.
+		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
+	}
 	sess := &replSession{
 		orch:            agent.New(caller, agent.ContextManager{}),
 		tools:           tools,
 		baseSystem:      baseSystem,
 		maxSteps:        f.maxSteps,
-		budget:          agent.Budget{InputCeiling: f.inputCeiling, OutputReserve: f.outputReserve},
+		budget:          budget,
 		color:           !f.noColor,
 		retrieveOmitted: retrieveOmitted,
 		session:         sessn,
@@ -387,6 +398,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		memoryDBPath: memDBPath,
 		workspaceID:  workspaceID(root),
 		obs:          obsv,
+		pressureWarn: f.pressureWarn > 0,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate

@@ -3,9 +3,12 @@ package agent
 import "context"
 
 // TokenBudget is the input-token budget available to the State messages
-// (system + transcript), already net of tool-schema tokens.
+// (system + transcript), already net of tool-schema tokens. Thresholds carries
+// the per-turn pressure bands (zero value => defaults) so Assemble stays a pure
+// function of its inputs. #63.
 type TokenBudget struct {
-	Input int
+	Input      int
+	Thresholds PressureThresholds
 }
 
 // CompactionReport describes what a Compact call did.
