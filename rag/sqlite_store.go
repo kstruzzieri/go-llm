@@ -25,7 +25,8 @@ var (
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
 type SQLiteStore struct {
-	db *sql.DB
+	db         *sql.DB
+	behavioral BehavioralWeighter // optional; nil => behavioral signal inert
 }
 
 type replaceSourceOptions struct {
@@ -92,6 +93,14 @@ func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("rag: open sqlite read-only %q: %w", dbPath, err)
 	}
 	return &SQLiteStore{db: db}, nil
+}
+
+// SetBehavioralWeighter installs an optional behavioral weighter consumed by
+// SearchMulti as a third RRF list. Startup-only: call once during wiring, before
+// any concurrent retrieval. It takes no lock and is not safe to call against
+// in-flight SearchMulti calls.
+func (s *SQLiteStore) SetBehavioralWeighter(w BehavioralWeighter) {
+	s.behavioral = w
 }
 
 // DB returns the underlying *sql.DB for packages that need shared access
