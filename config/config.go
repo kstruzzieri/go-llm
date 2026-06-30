@@ -83,20 +83,6 @@ type Config struct {
 	Defaults  map[string]string         `json:"defaults"`
 }
 
-// sideTaskDefaultFallbacks keeps auxiliary model-selection roles optional.
-// "route" here is the side-task model role, not provider.Router itself.
-// Explicit defaults win; these entries only pick an existing use-case when a
-// side-task slot is absent from older models.json files.
-var sideTaskDefaultFallbacks = map[string][]string{
-	"summarize": {"analysis", "chat"},
-	"route":     {"analysis", "chat"},
-	"rerank":    {"analysis", "chat"},
-	"verify":    {"analysis", "chat"},
-	"extract":   {"analysis", "chat"},
-	"approval":  {"agent", "chat"},
-	"vision":    {"chat"},
-}
-
 // ErrConfigNotFound indicates that Default could not find a models.json file
 // in any of its discovery locations.
 var ErrConfigNotFound = errors.New("config: no configuration file found")
@@ -224,7 +210,7 @@ func (c *Config) RoleConfig(role string) *ModelConfig {
 // summarize, route, rerank, verify, extract, approval, and vision fall back to
 // existing defaults when absent. Returns "" if the use-case or its target role is not found.
 func (c *Config) ModelFor(useCase string) string {
-	role, ok := c.roleForUseCase(useCase)
+	role, ok := c.RoleForUseCase(useCase)
 	if !ok {
 		return ""
 	}
@@ -242,18 +228,6 @@ func (c *Config) MustModelFor(useCase string) string {
 		panic(fmt.Sprintf("config: no model for use-case %q", useCase))
 	}
 	return name
-}
-
-func (c *Config) roleForUseCase(useCase string) (string, bool) {
-	if role, ok := c.Defaults[useCase]; ok {
-		return role, true
-	}
-	for _, fallback := range sideTaskDefaultFallbacks[useCase] {
-		if role, ok := c.Defaults[fallback]; ok {
-			return role, true
-		}
-	}
-	return "", false
 }
 
 // ProviderFor returns the provider config for a given role's model.

@@ -73,7 +73,7 @@ func (c *Config) Resolve(ctx context.Context, checker ModelChecker, useCase stri
 	if checker == nil {
 		return ResolvedModel{}, fmt.Errorf("config: model checker is required")
 	}
-	role, ok := c.roleForUseCase(useCase)
+	role, ok := c.RoleForUseCase(useCase)
 	if !ok {
 		return ResolvedModel{}, fmt.Errorf("config: unknown use-case %q", useCase)
 	}
@@ -213,7 +213,7 @@ func toSet(items []string) map[string]bool {
 // surface as an error. Availability is NOT filtered — that is the Router's
 // job via breakers, warmth, and gates.
 func (c *Config) RoleFallbackChain(useCase string) ([]string, error) {
-	role, ok := c.roleForUseCase(useCase)
+	role, ok := c.RoleForUseCase(useCase)
 	if !ok {
 		return nil, fmt.Errorf("config: unknown use-case %q", useCase)
 	}
