@@ -216,3 +216,115 @@ func TestBuildEvidenceBlocks_KeepsFirstEvenIfOversized(t *testing.T) {
 		t.Errorf("expected E1 block present: %q", text)
 	}
 }
+
+func claimsFixture() []ClaimSupport {
+	return []ClaimSupport{
+		{ID: "C1", Claim: "alpha", Status: StatusUnsupported},
+		{ID: "C2", Claim: "beta", Status: StatusUnsupported},
+	}
+}
+
+func refsFixture() []EvidenceRef {
+	return []EvidenceRef{{ID: "E1", ChunkID: "h1", Source: "a.go"}}
+}
+
+func TestVerifyClaims_MapsByClaimID(t *testing.T) {
+	reply := `{"verdicts":[
+		{"claim_id":"C2","status":"supported","evidence_ids":["E1"],"contradicted":false,"reason":"ok","missing_query":""},
+		{"claim_id":"C1","status":"unsupported","evidence_ids":[],"contradicted":false,"reason":"not found","missing_query":"find alpha"}
+	]}`
+	rc := &recordingChat{replies: []string{reply}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	claims, missing, queries, err := j.verifyClaims(context.Background(), claimsFixture(), "E1: a.go\n...", refsFixture())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// C1 stays text "alpha" even though verdict order differs; mapping is by id.
+	if claims[0].ID != "C1" || claims[0].Claim != "alpha" || claims[0].Status != StatusUnsupported {
+		t.Errorf("C1 = %+v", claims[0])
+	}
+	if claims[1].ID != "C2" || claims[1].Status != StatusSupported || len(claims[1].EvidenceIDs) != 1 {
+		t.Errorf("C2 = %+v", claims[1])
+	}
+	if rc.calls[0].useCase != config.UseCaseVerify {
+		t.Errorf("useCase = %q, want %q", rc.calls[0].useCase, config.UseCaseVerify)
+	}
+	if len(missing) == 0 {
+		t.Error("expected missing evidence reasons for unsupported C1")
+	}
+	if len(queries) != 1 || queries[0] != "find alpha" {
+		t.Errorf("queries = %v, want [find alpha]", queries)
+	}
+}
+
+func TestVerifyClaims_MissingVerdictFailsClosed(t *testing.T) {
+	reply := `{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"]}]}`
+	rc := &recordingChat{replies: []string{reply}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	claims, _, _, err := j.verifyClaims(context.Background(), claimsFixture(), "blocks", refsFixture())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if claims[1].Status != StatusUnsupported || claims[1].Reason == "" {
+		t.Errorf("C2 with no verdict should be unsupported with a reason: %+v", claims[1])
+	}
+}
+
+func TestVerifyClaims_UnknownStatusFailsClosed(t *testing.T) {
+	reply := `{"verdicts":[{"claim_id":"C1","status":"maybe","evidence_ids":["E1"]},{"claim_id":"C2","status":"supported","evidence_ids":["E1"]}]}`
+	rc := &recordingChat{replies: []string{reply}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	claims, _, _, _ := j.verifyClaims(context.Background(), claimsFixture(), "blocks", refsFixture())
+	if claims[0].Status != StatusUnsupported {
+		t.Errorf("unknown status should fail closed to unsupported, got %q", claims[0].Status)
+	}
+}
+
+func TestVerifyClaims_DowngradeSupportedWithoutEvidence(t *testing.T) {
+	// supported/partial with no valid evidence id -> downgrade to unsupported.
+	reply := `{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E9"]},{"claim_id":"C2","status":"partial","evidence_ids":[]}]}`
+	rc := &recordingChat{replies: []string{reply}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	claims, _, _, _ := j.verifyClaims(context.Background(), claimsFixture(), "blocks", refsFixture())
+	if claims[0].Status != StatusUnsupported || len(claims[0].EvidenceIDs) != 0 {
+		t.Errorf("C1 supported with only invalid E9 should downgrade: %+v", claims[0])
+	}
+	if claims[1].Status != StatusUnsupported {
+		t.Errorf("C2 partial with no evidence should downgrade: %+v", claims[1])
+	}
+}
+
+func TestVerifyClaims_ContradictedFailsClosed(t *testing.T) {
+	reply := `{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"],"contradicted":true},{"claim_id":"C2","status":"supported","evidence_ids":["E1"]}]}`
+	rc := &recordingChat{replies: []string{reply}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	claims, missing, _, _ := j.verifyClaims(context.Background(), claimsFixture(), "blocks", refsFixture())
+	if claims[0].Status != StatusUnsupported || !claims[0].Contradicted {
+		t.Errorf("contradicted claim should fail closed to unsupported: %+v", claims[0])
+	}
+	if len(missing) == 0 {
+		t.Error("contradicted claim should produce missing-evidence detail")
+	}
+}
+
+func TestVerifyClaims_Malformed(t *testing.T) {
+	rc := &recordingChat{replies: []string{`sorry, I could not produce JSON`}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	_, _, _, err := j.verifyClaims(context.Background(), claimsFixture(), "blocks", refsFixture())
+	if !errors.Is(err, ErrSupportVerifyMalformed) {
+		t.Fatalf("err = %v, want ErrSupportVerifyMalformed", err)
+	}
+}
+
+func TestVerifyClaims_DedupQueries(t *testing.T) {
+	reply := `{"verdicts":[
+		{"claim_id":"C1","status":"unsupported","evidence_ids":[],"missing_query":"q"},
+		{"claim_id":"C2","status":"unsupported","evidence_ids":[],"missing_query":"q"}
+	]}`
+	rc := &recordingChat{replies: []string{reply}}
+	j, _ := NewSupportJudgeWithChat(rc.fn(), "m")
+	_, _, queries, _ := j.verifyClaims(context.Background(), claimsFixture(), "blocks", refsFixture())
+	if len(queries) != 1 {
+		t.Errorf("duplicate queries should dedup to 1, got %v", queries)
+	}
+}

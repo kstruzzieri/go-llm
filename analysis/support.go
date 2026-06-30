@@ -250,6 +250,140 @@ func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []E
 	return b.String(), refs
 }
 
+const verifySystem = "You judge whether each claim is supported by the evidence. " +
+	"Use ONLY the evidence blocks; do not use outside knowledge."
+
+const verifyInstruction = "For each claim return JSON of the form " +
+	"{\"verdicts\":[{\"claim_id\":\"C1\",\"status\":\"supported|partial|unsupported\"," +
+	"\"evidence_ids\":[\"E1\"],\"contradicted\":false,\"reason\":\"...\",\"missing_query\":\"...\"}]}. " +
+	"status is supported, partial, or unsupported. evidence_ids cite the E labels that back the claim. " +
+	"contradicted is true only when an evidence block refutes the claim. " +
+	"missing_query is a short retrieval query that might find support, set only when unsupported. " +
+	"Return ONLY the JSON, no commentary, no markdown."
+
+// verdict is one entry of the verify stage's JSON reply.
+type verdict struct {
+	ClaimID      string   `json:"claim_id"`
+	Status       string   `json:"status"`
+	EvidenceIDs  []string `json:"evidence_ids"`
+	Contradicted bool     `json:"contradicted"`
+	Reason       string   `json:"reason"`
+	MissingQuery string   `json:"missing_query"`
+}
+
+type verifyReply struct {
+	Verdicts []verdict `json:"verdicts"`
+}
+
+// parseStatus normalizes a model status string, failing closed to
+// StatusUnsupported on anything unrecognized.
+func parseStatus(s string) SupportStatus {
+	switch SupportStatus(strings.ToLower(strings.TrimSpace(s))) {
+	case StatusSupported:
+		return StatusSupported
+	case StatusPartial:
+		return StatusPartial
+	default:
+		return StatusUnsupported
+	}
+}
+
+// verifyClaims runs the verify stage, maps verdicts back to the extracted
+// claims by id, normalizes/fails-closed, and returns the updated claims plus
+// the de-duplicated missing-evidence reasons and retrieval queries.
+func (j *SupportJudge) verifyClaims(ctx context.Context, claims []ClaimSupport, blocks string, refs []EvidenceRef) ([]ClaimSupport, []string, []string, error) {
+	var cb strings.Builder
+	for _, c := range claims {
+		fmt.Fprintf(&cb, "%s: %s\n", c.ID, c.Claim)
+	}
+	zero := 0.0
+	resp, err := j.chat(ctx, config.UseCaseVerify, provider.ChatRequest{
+		Model:   j.model,
+		Options: provider.ModelOptions{Temperature: &zero},
+		Messages: []provider.ChatMessage{
+			{Role: "system", Content: verifySystem},
+			{Role: "user", Content: "Evidence:\n" + blocks + "\nClaims:\n" + cb.String() + "\n" + verifyInstruction},
+		},
+	})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("analysis: judge support: verify: %w", err)
+	}
+
+	obj := lastJSONObjectWith(resp.Content, "verdicts")
+	if obj == nil {
+		return nil, nil, nil, ErrSupportVerifyMalformed
+	}
+	var vr verifyReply
+	if err := json.Unmarshal(obj, &vr); err != nil {
+		return nil, nil, nil, fmt.Errorf("%w: %v", ErrSupportVerifyMalformed, err)
+	}
+
+	validEvidence := make(map[string]bool, len(refs))
+	for _, r := range refs {
+		validEvidence[r.ID] = true
+	}
+	byID := make(map[string]verdict, len(vr.Verdicts))
+	for _, v := range vr.Verdicts {
+		byID[v.ClaimID] = v // last verdict for an id wins
+	}
+
+	var missing, queries []string
+	seenQuery := make(map[string]bool)
+	for i := range claims {
+		c := &claims[i]
+		v, ok := byID[c.ID]
+		if !ok {
+			c.Status = StatusUnsupported
+			c.Reason = "no verifier verdict returned"
+			missing = append(missing, c.ID+": "+c.Reason)
+			continue
+		}
+		c.Contradicted = v.Contradicted
+		c.Reason = v.Reason
+		c.Status = parseStatus(v.Status)
+		c.EvidenceIDs = filterEvidenceIDs(v.EvidenceIDs, validEvidence)
+		if c.Contradicted {
+			c.Status = StatusUnsupported
+			if c.Reason == "" {
+				c.Reason = "evidence contradicts claim"
+			}
+		}
+		// A support claim with no addressable evidence is not inspectable.
+		if (c.Status == StatusSupported || c.Status == StatusPartial) && len(c.EvidenceIDs) == 0 {
+			c.Status = StatusUnsupported
+			if c.Reason == "" {
+				c.Reason = "claimed support but cited no valid evidence"
+			}
+		}
+		if c.Status == StatusUnsupported {
+			reason := c.Reason
+			if reason == "" {
+				reason = "unsupported"
+			}
+			missing = append(missing, c.ID+": "+reason)
+			if q := strings.TrimSpace(v.MissingQuery); q != "" && !seenQuery[q] {
+				seenQuery[q] = true
+				queries = append(queries, q)
+			}
+		}
+	}
+	return claims, missing, queries, nil
+}
+
+// filterEvidenceIDs keeps only ids present in valid, preserving order and
+// dropping duplicates.
+func filterEvidenceIDs(ids []string, valid map[string]bool) []string {
+	var out []string
+	seen := make(map[string]bool)
+	for _, id := range ids {
+		if valid[id] && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // Judge runs the two-stage pipeline and returns a structured SupportReport.
 // Stages are added in later tasks; this stub validates input only.
 func (j *SupportJudge) Judge(ctx context.Context, answer string, evidence []rag.SearchResult, opts ...SupportOption) (*SupportReport, error) {
