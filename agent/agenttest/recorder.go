@@ -11,12 +11,15 @@ import (
 // RecorderObserver records the ordered sequence of observer callbacks so loop
 // tests can assert the exact event transcript.
 type RecorderObserver struct {
-	mu     sync.Mutex
-	Kinds  []string // "step" | "tool_call" | "token"
-	Steps  []agent.StepEvent
-	Calls  []agent.ToolCallEvent
-	Tokens []agent.TokenEvent
+	mu        sync.Mutex
+	Kinds     []string // "pressure" | "step" | "tool_call" | "token"
+	Steps     []agent.StepEvent
+	Calls     []agent.ToolCallEvent
+	Tokens    []agent.TokenEvent
+	Pressures []agent.PressureEvent
 }
+
+var _ agent.PressureObserver = (*RecorderObserver)(nil)
 
 func (r *RecorderObserver) OnStep(_ context.Context, e agent.StepEvent) error {
 	r.mu.Lock()
@@ -39,5 +42,15 @@ func (r *RecorderObserver) OnToken(_ context.Context, e agent.TokenEvent) error 
 	defer r.mu.Unlock()
 	r.Kinds = append(r.Kinds, "token")
 	r.Tokens = append(r.Tokens, e)
+	return nil
+}
+
+// OnPressure records per-turn pressure events (#63). RecorderObserver thus
+// satisfies agent.PressureObserver.
+func (r *RecorderObserver) OnPressure(_ context.Context, e agent.PressureEvent) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.Kinds = append(r.Kinds, "pressure")
+	r.Pressures = append(r.Pressures, e)
 	return nil
 }

@@ -58,8 +58,9 @@ func TestEndToEndRetrieveThenAnswer(t *testing.T) {
 	if res.Answer != "final" || res.StopReason != agent.Completed {
 		t.Fatalf("got answer=%q stop=%v", res.Answer, res.StopReason)
 	}
-	// observer saw: step (tool turn), tool_call, token, step (final turn).
-	if len(rec.Kinds) < 4 || rec.Kinds[0] != "step" || rec.Kinds[1] != "tool_call" || rec.Kinds[2] != "token" {
+	// observer saw: pressure (step 0 assembly), step (tool turn), tool_call,
+	// pressure (step 1 assembly), token, step (final turn).
+	if len(rec.Kinds) < 6 || rec.Kinds[0] != "pressure" || rec.Kinds[1] != "step" || rec.Kinds[2] != "tool_call" || rec.Kinds[3] != "pressure" || rec.Kinds[4] != "token" {
 		t.Fatalf("unexpected event order: %v", rec.Kinds)
 	}
 	if len(res.ToolCalls) != 1 || res.ToolCalls[0].Name != "retrieve" {
