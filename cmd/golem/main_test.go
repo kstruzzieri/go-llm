@@ -161,6 +161,15 @@ func TestValidateFlags_NoRagWithRagDBExclusive(t *testing.T) {
 	}
 }
 
+func TestValidateFlags_FeedbackDBRequiresFeedback(t *testing.T) {
+	if err := validateFlags(flags{feedbackDB: "/x.db"}); err == nil {
+		t.Fatal("want error when -feedback-db is set without -feedback")
+	}
+	if err := validateFlags(flags{feedback: true, feedbackDB: "/x.db"}); err != nil {
+		t.Fatalf("want no error when -feedback and -feedback-db both set: %v", err)
+	}
+}
+
 func TestParseFlags_NoRag(t *testing.T) {
 	f, err := parseFlags([]string{"-no-rag"})
 	if err != nil {

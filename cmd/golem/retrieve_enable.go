@@ -19,6 +19,7 @@ type retrieveOpts struct {
 	autoDBPath      string // per-workspace index DB path
 	autoSidecarPath string // per-workspace sidecar path
 	workspaceID     string // workspace:<sha16> for sidecar validation
+	feedbackDB      string // resolved feedback DB path; "" => behavioral ranking off
 }
 
 // retrieveResult is the startup outcome. line is the positive disclosure to show
@@ -28,6 +29,7 @@ type retrieveOpts struct {
 // auto index). It stays false only when there genuinely is no usable index.
 type retrieveResult struct {
 	tool           agent.Tool
+	feedback       *behavioralWeighterHandle
 	line           string
 	warns          []string
 	suppressNotice bool
@@ -42,15 +44,19 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 
 	if opts.ragDB != "" {
-		tool, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected)
+		tool, feedback, feedbackWarn, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.feedbackDB)
 		if err != nil {
 			return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 		}
 		if tool == nil {
 			return retrieveResult{warns: []string{explicitMismatchWarning(opts.ragDB, dec, expected)}, suppressNotice: true}
 		}
-		return retrieveResult{tool: tool, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
-			warns: legacyWarnIfAny(dec)}
+		warns := legacyWarnIfAny(dec)
+		if feedbackWarn != "" {
+			warns = append(warns, feedbackWarn)
+		}
+		return retrieveResult{tool: tool, feedback: feedback, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
+			warns: warns}
 	}
 
 	// Auto-discovery: require both the DB and a valid sidecar.
@@ -64,7 +70,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	if verr := validateSidecar(sc, opts.workspaceID); verr != nil {
 		return retrieveResult{}
 	}
-	tool, dec, stats, err := buildGatedRetriever(ctx, cfg, router, opts.autoDBPath, expected)
+	tool, feedback, feedbackWarn, dec, stats, err := buildGatedRetriever(ctx, cfg, router, opts.autoDBPath, expected, opts.feedbackDB)
 	if err != nil {
 		// An index exists but could not be opened/probed: a specific warning
 		// already explains why, so suppress the contradictory generic "no index"
@@ -76,7 +82,11 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		// stands alone; suppress the generic "no index" notice.
 		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}, suppressNotice: true}
 	}
-	return retrieveResult{tool: tool, line: autoLine(sc, stats), warns: legacyWarnIfAny(dec)}
+	warns := legacyWarnIfAny(dec)
+	if feedbackWarn != "" {
+		warns = append(warns, feedbackWarn)
+	}
+	return retrieveResult{tool: tool, feedback: feedback, line: autoLine(sc, stats), warns: warns}
 }
 
 // expectedVectorSpaces returns the provider-qualified vsid set the current
