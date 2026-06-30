@@ -168,6 +168,7 @@ func (t PressureThresholds) Classify(usedPct float64, exhausted, evicted bool) (
 	if exhausted {
 		return LevelCritical, MitigationHalt
 	}
+	t = t.normalize()
 	level := LevelOK
 	switch {
 	case usedPct >= t.Critical:

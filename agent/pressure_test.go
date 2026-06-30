@@ -35,6 +35,13 @@ func TestPressureThresholdsClassify(t *testing.T) {
 	}
 }
 
+func TestPressureThresholdsClassifyNormalizesZeroValue(t *testing.T) {
+	level, mitigation := (PressureThresholds{}).Classify(0.10, false, false)
+	if level != LevelOK || mitigation != MitigationNone {
+		t.Fatalf("zero-value Classify = %v/%v, want ok/none", level, mitigation)
+	}
+}
+
 func TestPressureThresholdsNormalize(t *testing.T) {
 	def := PressureThresholds{Watch: 0.60, Warn: 0.75, Critical: 0.90}
 	if got := (PressureThresholds{}).normalize(); got != def {

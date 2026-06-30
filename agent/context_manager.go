@@ -152,6 +152,9 @@ func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens
 // usedFraction is after/budget, guarding a zero/negative budget.
 func usedFraction(tokens, budget int) float64 {
 	if budget <= 0 {
+		if tokens > 0 {
+			return 1
+		}
 		return 0
 	}
 	return float64(tokens) / float64(budget)

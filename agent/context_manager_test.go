@@ -182,6 +182,15 @@ func TestAssemblePinnedOverflowPressure(t *testing.T) {
 	}
 }
 
+func TestUsedFractionSaturatesNonPositiveBudget(t *testing.T) {
+	if got := usedFraction(10, 0); got != 1 {
+		t.Fatalf("usedFraction(positive, zero) = %v, want 1", got)
+	}
+	if got := usedFraction(0, 0); got != 0 {
+		t.Fatalf("usedFraction(zero, zero) = %v, want 0", got)
+	}
+}
+
 func TestTurnBudgetCopiesNormalizedThresholds(t *testing.T) {
 	tb := turnBudget(Budget{InputCeiling: 100, Pressure: PressureThresholds{Warn: 0.80}})
 	if tb.Thresholds != (PressureThresholds{Watch: 0.60, Warn: 0.80, Critical: 0.90}) {
