@@ -2,6 +2,7 @@ package analysis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -94,6 +95,64 @@ func NewSupportJudgeWithChat(chat ChatFunc, model string) (*SupportJudge, error)
 		return nil, fmt.Errorf("analysis: new support judge: chat is required")
 	}
 	return &SupportJudge{chat: chat, model: model}, nil
+}
+
+// topLevelJSONObjects returns each balanced, top-level {...} substring in s,
+// honoring string literals and escapes so braces inside JSON strings do not
+// break nesting. Order is preserved.
+func topLevelJSONObjects(s string) []string {
+	var out []string
+	depth, start := 0, -1
+	inStr, esc := false, false
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if inStr {
+			switch {
+			case esc:
+				esc = false
+			case c == '\\':
+				esc = true
+			case c == '"':
+				inStr = false
+			}
+			continue
+		}
+		switch c {
+		case '"':
+			inStr = true
+		case '{':
+			if depth == 0 {
+				start = i
+			}
+			depth++
+		case '}':
+			if depth > 0 {
+				depth--
+				if depth == 0 && start >= 0 {
+					out = append(out, s[start:i+1])
+					start = -1
+				}
+			}
+		}
+	}
+	return out
+}
+
+// lastJSONObjectWith returns the raw bytes of the last top-level JSON object in
+// reply that parses and contains key, or nil. Choosing the last match skips
+// example/prefatory JSON the model may emit before its real answer.
+func lastJSONObjectWith(reply, key string) []byte {
+	objs := topLevelJSONObjects(reply)
+	for i := len(objs) - 1; i >= 0; i-- {
+		var probe map[string]json.RawMessage
+		if err := json.Unmarshal([]byte(objs[i]), &probe); err != nil {
+			continue
+		}
+		if _, ok := probe[key]; ok {
+			return []byte(objs[i])
+		}
+	}
+	return nil
 }
 
 // Judge runs the two-stage pipeline and returns a structured SupportReport.

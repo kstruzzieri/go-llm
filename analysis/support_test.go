@@ -89,3 +89,35 @@ func TestErrSupportVerifyMalformed_Sentinel(t *testing.T) {
 		t.Fatal("sentinel must match through wrapping via errors.Is")
 	}
 }
+
+func TestLastJSONObjectWith(t *testing.T) {
+	tests := []struct {
+		name  string
+		reply string
+		key   string
+		want  string // "" means nil
+	}{
+		{"plain", `{"claims":["a"]}`, "claims", `{"claims":["a"]}`},
+		{"fenced", "```json\n{\"claims\":[\"a\"]}\n```", "claims", `{"claims":["a"]}`},
+		{"prefatory then real", `here is an example {"foo":1} and the answer {"claims":["a","b"]}`, "claims", `{"claims":["a","b"]}`},
+		{"trailing prose", `{"claims":["a"]} hope that helps`, "claims", `{"claims":["a"]}`},
+		{"brace in string", `{"claims":["uses {x} syntax"]}`, "claims", `{"claims":["uses {x} syntax"]}`},
+		{"missing key", `{"foo":1}`, "claims", ""},
+		{"no json", `sorry, no json here`, "claims", ""},
+		{"last wins", `{"claims":["old"]} {"claims":["new"]}`, "claims", `{"claims":["new"]}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := lastJSONObjectWith(tt.reply, tt.key)
+			if tt.want == "" {
+				if got != nil {
+					t.Fatalf("got %q, want nil", got)
+				}
+				return
+			}
+			if string(got) != tt.want {
+				t.Fatalf("got %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
