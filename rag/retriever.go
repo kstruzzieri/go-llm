@@ -115,9 +115,11 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 
 	// Prefer multi-signal (hybrid) retrieval when the store supports it and the
 	// caller has not opted out: semantic, keyword, and temporal signals
-	// participate in ranking. Retrieve's signature carries no editor context,
-	// so structural/behavioral signals stay inert (empty QueryContext); the
-	// temporal scorer still works, dating chunks against the newest indexed row.
+	// participate in ranking. Retrieve's signature carries no editor context, so
+	// the structural scorer stays inert (empty QueryContext); the temporal scorer
+	// still works, dating chunks against the newest indexed row. Behavioral does
+	// NOT depend on QueryContext: when a weighter is installed (SetBehavioralWeighter)
+	// it is active here too, keyed by each chunk's StableKey.
 	if ms, ok := r.store.(MultiSignalSearcher); ok && !r.vectorOnly {
 		scored, err := ms.SearchMulti(ctx, embedding, query, k, QueryContext{})
 		if err != nil {
