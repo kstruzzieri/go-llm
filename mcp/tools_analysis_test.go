@@ -328,6 +328,8 @@ func TestUseCaseToConfigRole(t *testing.T) {
 		"embedding":   "embedding",
 		"chat":        "chat",
 		"unknown":     "chat",
+		"verify":      "verify",
+		"extract":     "extract",
 	}
 	for in, want := range cases {
 		if got := useCaseToConfigRole(in); got != want {

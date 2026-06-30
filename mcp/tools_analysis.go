@@ -10,6 +10,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/analysis"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -21,6 +22,10 @@ func useCaseToConfigRole(useCase string) string {
 		return "analysis"
 	case "embedding":
 		return "embedding"
+	case config.UseCaseVerify, config.UseCaseExtract:
+		// Pass through; chainFor -> RoleFallbackChain -> RoleForUseCase resolves
+		// the side-task fallback (analysis -> chat) configured in #60.
+		return useCase
 	default:
 		return "chat"
 	}
