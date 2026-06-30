@@ -2,11 +2,14 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
 	"testing"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/analysis"
 )
 
 // analysisOllamaMock returns a handler that responds to /api/chat with a
@@ -335,5 +338,77 @@ func TestUseCaseToConfigRole(t *testing.T) {
 		if got := useCaseToConfigRole(in); got != want {
 			t.Errorf("useCaseToConfigRole(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestVerifySupportToolEmptyAnswer(t *testing.T) {
+	s := newAnswerTestServer(t, nil)
+	result, err := s.handleVerifySupport(context.Background(), rawArgs(t, `{"answer":"","question":"q"}`))
+	if err != nil {
+		t.Fatalf("handleVerifySupport() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected isError = true for empty answer")
+	}
+	if text := extractText(result); !strings.Contains(text, "answer must not be empty") {
+		t.Errorf("error = %q, want to contain %q", text, "answer must not be empty")
+	}
+}
+
+func TestVerifySupportToolEmptyQuestion(t *testing.T) {
+	s := newAnswerTestServer(t, nil)
+	result, err := s.handleVerifySupport(context.Background(), rawArgs(t, `{"answer":"a","question":""}`))
+	if err != nil {
+		t.Fatalf("handleVerifySupport() error = %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("expected isError = true for empty question")
+	}
+	if text := extractText(result); !strings.Contains(text, "question must not be empty") {
+		t.Errorf("error = %q, want to contain %q", text, "question must not be empty")
+	}
+}
+
+func TestVerifySupportToolRegistered(t *testing.T) {
+	env := newTestEnv(t, analysisOllamaMock()) // RAG disabled by default
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name:      "verify_support",
+		Arguments: map[string]any{"answer": "a", "question": "q"},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if !result.IsError || !strings.Contains(extractText(result), "RAG is disabled") {
+		t.Fatalf("registered tool should return existing RAG-disabled error, got isError=%v text=%q", result.IsError, extractText(result))
+	}
+}
+
+func TestVerifySupportToolHappyPath(t *testing.T) {
+	s := answerEnv(t, &queuedRouteEngine{responses: []string{
+		`{"claims":["computeFoo returns one"]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"],"reason":"ok"}]}`,
+	}})
+
+	result, err := s.handleVerifySupport(context.Background(), rawArgs(t, `{"answer":"computeFoo returns one","question":"where is computeFoo","top_k":1}`))
+	if err != nil {
+		t.Fatalf("handleVerifySupport() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(result))
+	}
+	var report analysis.SupportReport
+	if err := json.Unmarshal([]byte(extractText(result)), &report); err != nil {
+		t.Fatalf("unmarshal report: %v (%s)", err, extractText(result))
+	}
+	if report.Status != analysis.StatusSupported {
+		t.Fatalf("status = %q, want supported; report=%+v", report.Status, report)
+	}
+	if len(report.Claims) != 1 || len(report.Evidence) != 1 || len(report.Claims[0].EvidenceIDs) != 1 || report.Claims[0].EvidenceIDs[0] != "E1" {
+		t.Fatalf("unexpected report shape: %+v", report)
+	}
+	if !strings.Contains(extractText(result), `"missing_evidence_queries"`) {
+		t.Fatalf("JSON should use lower_snake_case field names: %s", extractText(result))
 	}
 }
