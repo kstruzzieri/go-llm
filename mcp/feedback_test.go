@@ -37,6 +37,19 @@ func TestWithRetrievalFeedbackOpensAndCloses(t *testing.T) {
 		_ = s.Close()
 		t.Fatal("feedbackDB = nil, want opened feedback DB")
 	}
+	// WAL/SHM sidecars (if present while the DB is open) must be 0600: telemetry
+	// must never leak through a sidecar. They may legitimately not exist yet.
+	for _, sidecar := range []string{feedbackPath + "-wal", feedbackPath + "-shm"} {
+		if info, err := os.Stat(sidecar); err == nil {
+			if info.Mode().Perm() != 0o600 {
+				_ = s.Close()
+				t.Fatalf("sidecar %s mode = %o, want 0600", sidecar, info.Mode().Perm())
+			}
+		} else if !os.IsNotExist(err) {
+			_ = s.Close()
+			t.Fatalf("stat sidecar %s: %v", sidecar, err)
+		}
+	}
 	if err := s.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}

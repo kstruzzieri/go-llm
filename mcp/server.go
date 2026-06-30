@@ -138,6 +138,8 @@ func WithTranscriptStore(path string) Option {
 // store. Schema migrations may run, but the server never records retrievals or
 // outcomes. Open failure is non-fatal (logged; ranking stays neutral). MCP
 // requires an explicit path because it has no canonical workspace root.
+// It has no effect when RAG is disabled (WithRAGDisabled or empty RAG path),
+// since the weighter is injected into the RAG store.
 func WithRetrievalFeedback(path string) Option {
 	return func(s *Server) {
 		s.feedbackDBPath = path
