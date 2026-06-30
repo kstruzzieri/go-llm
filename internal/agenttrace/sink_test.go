@@ -217,3 +217,35 @@ func TestTelemetrySinkExhaustedOutcome(t *testing.T) {
 	}
 	t.Fatal("no runtime_stage span written")
 }
+
+// TestTelemetrySinkStepSpanEnrichedPressure guards the model_step pressureLite
+// enrichment (level/cause/mitigation/input_budget) added in schema v2, which the
+// other tests exercise only via the runtime_stage span.
+func TestTelemetrySinkStepSpanEnrichedPressure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, _ := NewTelemetrySink(path, "runE", started, func() time.Time { return started })
+	_ = sink.OnStep(context.Background(), agent.StepEvent{
+		Index:    0,
+		Pressure: agent.Pressure{UsedPct: 0.8, InputTokens: 80, InputBudget: 100, Level: agent.LevelWarn, Cause: agent.CauseHistory, Mitigation: agent.MitigationWarn},
+	})
+	_ = sink.Close()
+	for _, s := range readSpans(t, path) {
+		if s["kind"] != "model_step" {
+			continue
+		}
+		pr, ok := s["pressure"].(map[string]any)
+		if !ok {
+			t.Fatalf("model_step missing pressure object: %+v", s)
+		}
+		if pr["level"] != "warn" || pr["cause"] != "history" || pr["mitigation"] != "warn" {
+			t.Fatalf("model_step pressure not enriched: %+v", pr)
+		}
+		if int(pr["input_budget"].(float64)) != 100 || int(pr["input_tokens"].(float64)) != 80 {
+			t.Fatalf("model_step pressure tokens missing: %+v", pr)
+		}
+		return
+	}
+	t.Fatal("no model_step span written")
+}
