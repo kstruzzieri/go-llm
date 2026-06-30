@@ -81,10 +81,28 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	semanticRanks := computeRanks(semanticScores)
 	keywordRanks := computeRanks(keywordScores)
 
+	// Optional behavioral signal as a third RRF list. It is folded only when a
+	// weighter is configured AND at least one chunk has a non-zero weight, so
+	// cold-start (all-zero) leaves the raw fused score byte-for-byte unchanged.
+	var behavioralScores []float64
+	var behavioralRanks []int
+	foldBehavioral := false
+	if s.behavioral != nil {
+		behavioralScores, _ = NewBehavioralScorer(s.behavioral).
+			ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx) // fail-open: never errors
+		if anyNonZero(behavioralScores) {
+			behavioralRanks = computeRanks(behavioralScores)
+			foldBehavioral = true
+		}
+	}
+
 	// Build final scored results.
 	results := make([]ScoredResult, len(chunks))
 	for i, chunk := range chunks {
 		rrfScore := rrfContribution(semanticRanks[i]) + rrfContribution(keywordRanks[i])
+		if foldBehavioral {
+			rrfScore += rrfContribution(behavioralRanks[i])
+		}
 
 		// Add weighted bonuses from non-ranked signals.
 		var temporalBonus, structuralBonus float64
@@ -97,18 +115,25 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 
 		finalScore := rrfScore + temporalBonus + structuralBonus
 
+		signals := map[string]float64{
+			"semantic":   semanticScores[i],
+			"keyword":    keywordScores[i],
+			"temporal":   safeIndex(temporalScores, i),
+			"structural": structuralScores[i],
+		}
+		// Expose behavioral only when a weighter is configured (0 during
+		// cold-start, raw weighted score otherwise). Absent when nil.
+		if s.behavioral != nil {
+			signals["behavioral"] = safeIndex(behavioralScores, i)
+		}
+
 		results[i] = ScoredResult{
 			SearchResult: SearchResult{
 				Chunk:    chunk,
 				Score:    finalScore,
 				Distance: 1 - semanticScores[i], // cosine distance from semantic signal
 			},
-			Signals: map[string]float64{
-				"semantic":   semanticScores[i],
-				"keyword":    keywordScores[i],
-				"temporal":   safeIndex(temporalScores, i),
-				"structural": structuralScores[i],
-			},
+			Signals: signals,
 		}
 	}
 
@@ -199,6 +224,17 @@ func computeRanks(scores []float64) []int {
 // rrfContribution computes the RRF score contribution for a given rank.
 func rrfContribution(rank int) float64 {
 	return 1.0 / float64(rrfK+rank)
+}
+
+// anyNonZero reports whether xs contains any non-zero value. Used to skip the
+// behavioral RRF list during cold-start so raw fused scores stay identical.
+func anyNonZero(xs []float64) bool {
+	for _, x := range xs {
+		if x != 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // safeIndex returns scores[i] if in bounds, or 0.

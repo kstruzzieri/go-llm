@@ -2,10 +2,13 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 )
+
+var errTestWeighter = errors.New("test weighter failure")
 
 func TestSearchMultiBasic(t *testing.T) {
 	store := newTestStore(t)
@@ -252,5 +255,144 @@ func TestComputeRanks(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// behavioralFixture stores three chunks with StableKeys and returns the store.
+// T is the relevant chunk (top semantic+keyword), M is middling, B is
+// irrelevant. qCtx is empty so temporal is uniform (all indexed together) and
+// structural is zero for all — isolating behavioral per the spec.
+func behavioralFixture(t *testing.T) *SQLiteStore {
+	t.Helper()
+	store := newTestStore(t)
+	ctx := context.Background()
+	chunks := []Chunk{
+		{ID: "T", StableKey: "skT", Content: "golang concurrency channels", Source: "a.go", StartLine: 1, EndLine: 5, Metadata: map[string]string{}},
+		{ID: "M", StableKey: "skM", Content: "golang slices", Source: "b.go", StartLine: 1, EndLine: 5, Metadata: map[string]string{}},
+		{ID: "B", StableKey: "skB", Content: "python pandas dataframe", Source: "c.go", StartLine: 1, EndLine: 5, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{
+		{1.0, 0.0, 0.0}, // T closest to query
+		{0.6, 0.0, 0.8}, // M partial
+		{0.0, 1.0, 0.0}, // B orthogonal
+	}
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+	return store
+}
+
+func ids(rs []ScoredResult) []string {
+	out := make([]string, len(rs))
+	for i, r := range rs {
+		out[i] = r.Chunk.ID
+	}
+	return out
+}
+
+// query "golang concurrency", embedding aligned with T.
+var (
+	behQuery = "golang concurrency"
+	behEmb   = []float64{0.95, 0.0, 0.1}
+)
+
+func TestSearchMultiNilWeighterNoBehavioralSignal(t *testing.T) {
+	store := behavioralFixture(t)
+	res, err := store.SearchMulti(context.Background(), behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("SearchMulti: %v", err)
+	}
+	for _, r := range res {
+		if _, ok := r.Signals["behavioral"]; ok {
+			t.Errorf("nil weighter must not add a 'behavioral' signal key, got %v", r.Signals)
+		}
+	}
+}
+
+func TestSearchMultiColdStartInert(t *testing.T) {
+	store := behavioralFixture(t)
+	ctx := context.Background()
+	base, err := store.SearchMulti(ctx, behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	// All-zero weighter == cold-start: contribution skipped, raw scores unchanged.
+	store.SetBehavioralWeighter(&fakeWeighter{weights: map[string]float64{}})
+	got, err := store.SearchMulti(ctx, behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("with weighter: %v", err)
+	}
+	for i := range base {
+		if got[i].Chunk.ID != base[i].Chunk.ID || got[i].Score != base[i].Score {
+			t.Errorf("cold-start not inert at %d: base=(%s,%v) got=(%s,%v)",
+				i, base[i].Chunk.ID, base[i].Score, got[i].Chunk.ID, got[i].Score)
+		}
+	}
+}
+
+func TestSearchMultiFailOpenPreservesBaseline(t *testing.T) {
+	store := behavioralFixture(t)
+	ctx := context.Background()
+	base, err := store.SearchMulti(ctx, behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	store.SetBehavioralWeighter(&fakeWeighter{err: errTestWeighter})
+	got, err := store.SearchMulti(ctx, behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("SearchMulti must not surface weighter error: %v", err)
+	}
+	for i := range base {
+		if got[i].Chunk.ID != base[i].Chunk.ID || got[i].Score != base[i].Score {
+			t.Errorf("fail-open not inert at %d: base=(%s,%v) got=(%s,%v)",
+				i, base[i].Chunk.ID, base[i].Score, got[i].Chunk.ID, got[i].Score)
+		}
+	}
+}
+
+// Dominance: a behavior-only favorite (B, irrelevant) with a huge weight cannot
+// outrank T, which is rank-1 in both semantic and keyword. Temporal/structural
+// are uniform (empty qCtx, co-indexed), isolating behavioral per the spec.
+func TestSearchMultiBehavioralCannotDominate(t *testing.T) {
+	store := behavioralFixture(t)
+	store.SetBehavioralWeighter(&fakeWeighter{weights: map[string]float64{"skB": 100.0}})
+	res, err := store.SearchMulti(context.Background(), behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("SearchMulti: %v", err)
+	}
+	if res[0].Chunk.ID != "T" {
+		t.Errorf("behavior-only favorite dominated: top=%s, want T; order=%v", res[0].Chunk.ID, ids(res))
+	}
+}
+
+// Warmed feedback reorders genuinely near-tied candidates: with M and B close on
+// relevance, a strong positive weight on B lifts it above M.
+func TestSearchMultiWarmedReordersNearTies(t *testing.T) {
+	store := behavioralFixture(t)
+	ctx := context.Background()
+	base, err := store.SearchMulti(ctx, behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("baseline: %v", err)
+	}
+	basePos := map[string]int{}
+	for i, id := range ids(base) {
+		basePos[id] = i
+	}
+	// Favor B heavily; it should climb at least one position vs baseline.
+	store.SetBehavioralWeighter(&fakeWeighter{weights: map[string]float64{"skB": 50.0}})
+	got, err := store.SearchMulti(ctx, behEmb, behQuery, 3, QueryContext{})
+	if err != nil {
+		t.Fatalf("warmed: %v", err)
+	}
+	gotPos := map[string]int{}
+	for i, id := range ids(got) {
+		gotPos[id] = i
+	}
+	if gotPos["B"] >= basePos["B"] {
+		t.Errorf("expected B to climb with positive feedback: base pos=%d got pos=%d (order %v)",
+			basePos["B"], gotPos["B"], ids(got))
+	}
+	if got[0].Chunk.ID != "T" {
+		t.Errorf("T must remain top (relevance winner), got %v", ids(got))
 	}
 }
