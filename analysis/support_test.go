@@ -328,3 +328,28 @@ func TestVerifyClaims_DedupQueries(t *testing.T) {
 		t.Errorf("duplicate queries should dedup to 1, got %v", queries)
 	}
 }
+
+func TestAggregateStatus(t *testing.T) {
+	c := func(s SupportStatus, contra bool) ClaimSupport {
+		return ClaimSupport{Status: s, Contradicted: contra}
+	}
+	tests := []struct {
+		name   string
+		claims []ClaimSupport
+		want   SupportStatus
+	}{
+		{"empty", nil, StatusUnsupported},
+		{"all supported", []ClaimSupport{c(StatusSupported, false), c(StatusSupported, false)}, StatusSupported},
+		{"all unsupported", []ClaimSupport{c(StatusUnsupported, false), c(StatusUnsupported, false)}, StatusUnsupported},
+		{"mixed", []ClaimSupport{c(StatusSupported, false), c(StatusUnsupported, false)}, StatusPartial},
+		{"partial present", []ClaimSupport{c(StatusPartial, false), c(StatusSupported, false)}, StatusPartial},
+		{"contradicted overrides", []ClaimSupport{c(StatusSupported, false), c(StatusSupported, true)}, StatusUnsupported},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := aggregateStatus(tt.claims); got != tt.want {
+				t.Errorf("aggregateStatus = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}

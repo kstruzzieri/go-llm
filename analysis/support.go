@@ -384,6 +384,35 @@ func filterEvidenceIDs(ids []string, valid map[string]bool) []string {
 	return out
 }
 
+// aggregateStatus derives the report-level status. Any contradicted claim
+// forces unsupported; otherwise all-supported -> supported, all-unsupported ->
+// unsupported, and any mix -> partial. Empty claims is unsupported.
+func aggregateStatus(claims []ClaimSupport) SupportStatus {
+	if len(claims) == 0 {
+		return StatusUnsupported
+	}
+	allSupported, allUnsupported := true, true
+	for _, c := range claims {
+		if c.Contradicted {
+			return StatusUnsupported
+		}
+		if c.Status != StatusSupported {
+			allSupported = false
+		}
+		if c.Status != StatusUnsupported {
+			allUnsupported = false
+		}
+	}
+	switch {
+	case allSupported:
+		return StatusSupported
+	case allUnsupported:
+		return StatusUnsupported
+	default:
+		return StatusPartial
+	}
+}
+
 // Judge runs the two-stage pipeline and returns a structured SupportReport.
 // Stages are added in later tasks; this stub validates input only.
 func (j *SupportJudge) Judge(ctx context.Context, answer string, evidence []rag.SearchResult, opts ...SupportOption) (*SupportReport, error) {
