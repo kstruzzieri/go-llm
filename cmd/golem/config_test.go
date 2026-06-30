@@ -89,6 +89,50 @@ func TestResolveSummarizeChain_UsesConfiguredFallbackChain(t *testing.T) {
 	}
 }
 
+func TestResolveSummarizeChain_FallbackOnlyUsesAnalysis(t *testing.T) {
+	cfg := &config.Config{
+		Models:   map[string]config.ModelConfig{"light": {Name: "small", Provider: "ollama"}},
+		Defaults: map[string]string{"analysis": "light"}, // no "summarize"
+	}
+	chain, err := resolveSummarizeChain(cfg)
+	if err != nil {
+		t.Fatalf("resolveSummarizeChain: %v", err)
+	}
+	want := []string{"ollama/small"}
+	if len(chain) != len(want) || chain[0] != want[0] {
+		t.Fatalf("chain = %v, want %v (summarize -> analysis fallback)", chain, want)
+	}
+}
+
+func TestResolveSummarizeChain_NoDefaultsReturnsNil(t *testing.T) {
+	cfg := &config.Config{
+		Models:   map[string]config.ModelConfig{"light": {Name: "small", Provider: "ollama"}},
+		Defaults: map[string]string{}, // no summarize / analysis / chat
+	}
+	chain, err := resolveSummarizeChain(cfg)
+	if err != nil {
+		t.Fatalf("resolveSummarizeChain: %v", err)
+	}
+	if chain != nil {
+		t.Fatalf("chain = %v, want nil (no resolvable summarize)", chain)
+	}
+}
+
+func TestResolveSummarizeChain_FallbackOnlyUsesChat(t *testing.T) {
+	cfg := &config.Config{
+		Models:   map[string]config.ModelConfig{"light": {Name: "small", Provider: "ollama"}},
+		Defaults: map[string]string{"chat": "light"}, // no summarize / analysis
+	}
+	chain, err := resolveSummarizeChain(cfg)
+	if err != nil {
+		t.Fatalf("resolveSummarizeChain: %v", err)
+	}
+	want := []string{"ollama/small"}
+	if len(chain) != len(want) || chain[0] != want[0] {
+		t.Fatalf("chain = %v, want %v (summarize -> chat fallback)", chain, want)
+	}
+}
+
 func TestLoadConfig_ExplicitBadPathFatal(t *testing.T) {
 	if _, err := loadConfig("/nonexistent/path/models.json"); err == nil {
 		t.Fatal("err = nil for nonexistent explicit config path, want fatal")

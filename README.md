@@ -507,6 +507,12 @@ in `models.json`.
 The `vision` slot is model selection only; image message payload support is
 tracked separately.
 
+The auxiliary use-case keys are exported as untyped string constants
+(`config.UseCaseSummarize`, `config.UseCaseRerank`, and the rest), enumerated by
+`config.SideTaskUseCases()`, and resolved to a model role by
+`cfg.RoleForUseCase(useCase)` — the same fallback semantics, exposed for callers
+that pick a side-task model without walking the full chain.
+
 ## MCP Server
 
 Expose all go-llm capabilities over the [Model Context Protocol](https://modelcontextprotocol.io/) for use with Claude Desktop, IDE extensions, or any MCP client.

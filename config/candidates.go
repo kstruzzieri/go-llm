@@ -31,7 +31,7 @@ func (c *Config) ResolveCandidates(ctx context.Context, checker ModelChecker, us
 	if checker == nil {
 		return nil, fmt.Errorf("config: model checker is required")
 	}
-	role, ok := c.roleForUseCase(useCase)
+	role, ok := c.RoleForUseCase(useCase)
 	if !ok {
 		return nil, fmt.Errorf("config: unknown use-case %q", useCase)
 	}
