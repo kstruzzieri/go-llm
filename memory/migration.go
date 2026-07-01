@@ -16,6 +16,7 @@ type migration struct {
 
 var migrations = []migration{
 	{version: 1, description: "baseline memories table + FTS5", fn: migrateV1},
+	{version: 2, description: "agent memory records + FTS5", fn: migrateV2},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -38,6 +39,39 @@ func migrateV1(tx *sql.Tx) error {
 	for _, s := range stmts {
 		if _, err := tx.Exec(s); err != nil {
 			return fmt.Errorf("memory: migrate v1: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV2(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE IF NOT EXISTS memory_records (
+			id           TEXT PRIMARY KEY,
+			kind         TEXT NOT NULL,
+			content      TEXT NOT NULL,
+			namespace    TEXT NOT NULL DEFAULT '',
+			workspace_id TEXT NOT NULL DEFAULT '',
+			session_id   TEXT NOT NULL DEFAULT '',
+			source_kind  TEXT NOT NULL DEFAULT '',
+			source_id    TEXT NOT NULL DEFAULT '',
+			source_start INTEGER NOT NULL DEFAULT 0,
+			source_end   INTEGER NOT NULL DEFAULT 0,
+			source_hash  TEXT NOT NULL DEFAULT '',
+			metadata     TEXT NOT NULL DEFAULT '{}',
+			created_at   INTEGER NOT NULL,
+			updated_at   INTEGER NOT NULL,
+			expires_at   INTEGER NOT NULL DEFAULT 0,
+			deleted_at   INTEGER NOT NULL DEFAULT 0
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_memory_records_live
+			ON memory_records(kind, namespace, workspace_id, session_id) WHERE deleted_at = 0`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS memory_records_fts
+			USING fts5(id UNINDEXED, content, tokenize='porter')`,
+	}
+	for _, s := range stmts {
+		if _, err := tx.Exec(s); err != nil {
+			return fmt.Errorf("memory: migrate v2: %w", err)
 		}
 	}
 	return nil
