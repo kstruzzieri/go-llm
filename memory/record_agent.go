@@ -1,3 +1,10 @@
+// This file adds the agent-memory record surface (MemoryRecord /
+// MemoryRecordStore): typed working/semantic/episodic records with provenance,
+// expiration, scoped FTS search, and opt-in promotion. It is a sibling of the
+// user-authored Memory surface in this package and shares the same SQLite
+// migration chain, but owns separate tables (memory_records/_fts). It imports
+// neither conversation/ nor rag/: agent memory, conversation persistence, and
+// document RAG stay separate storage concepts.
 package memory
 
 import (

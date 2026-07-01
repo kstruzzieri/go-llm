@@ -430,3 +430,36 @@ func TestPromoteBadTargetAndMiss(t *testing.T) {
 		t.Fatalf("promote of session record without session scope: got %v want ErrRecordNotFound", err)
 	}
 }
+
+func TestMemoryRecordsMigrationKeepsMemoriesWorking(t *testing.T) {
+	ctx := context.Background()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	// Open BOTH stores on the same DB (shared migration chain, v1 + v2).
+	notes, err := NewStore(ctx, db)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	if _, err := NewMemoryRecordStore(ctx, db); err != nil {
+		t.Fatalf("NewMemoryRecordStore: %v", err)
+	}
+
+	// #237 Memory still round-trips: Add, Search, List, ResolveVisible.
+	m, err := notes.Add(ctx, AddParams{Text: "user preference note", Scope: ScopeWorkspace, WorkspaceID: "w1"})
+	if err != nil {
+		t.Fatalf("Add: %v", err)
+	}
+	if hits, err := notes.Search(ctx, "preference", SearchOptions{WorkspaceID: "w1"}); err != nil || len(hits) != 1 {
+		t.Fatalf("Search: err=%v n=%d", err, len(hits))
+	}
+	if ms, err := notes.List(ctx, ListOptions{WorkspaceID: "w1"}); err != nil || len(ms) != 1 {
+		t.Fatalf("List: err=%v n=%d", err, len(ms))
+	}
+	if got, err := notes.ResolveVisible(ctx, m.ID, "w1"); err != nil || got.ID != m.ID {
+		t.Fatalf("ResolveVisible: err=%v id=%s", err, got.ID)
+	}
+}
