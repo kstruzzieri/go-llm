@@ -254,6 +254,39 @@ func (s *MemoryRecordStore) Search(ctx context.Context, query string, opts Recor
 	return out, nil
 }
 
+// SoftDelete marks the record deleted (deleted_at set) within acc's scope and
+// removes its FTS row. An absent, already-deleted, or out-of-scope id returns
+// ErrRecordNotFound (matches SQLiteStore.SoftDelete; not idempotent-silent).
+func (s *MemoryRecordStore) SoftDelete(ctx context.Context, id string, acc RecordAccess) error {
+	now := time.Now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("memory: soft delete: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE memory_records SET deleted_at = ?, updated_at = ?
+		  WHERE id = ? AND deleted_at = 0 AND `+visibilityClause,
+		now, now, id, acc.WorkspaceID, acc.SessionID)
+	if err != nil {
+		return fmt.Errorf("memory: soft delete: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("memory: soft delete: rows: %w", err)
+	}
+	if n == 0 {
+		return ErrRecordNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_records_fts WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("memory: soft delete: fts: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("memory: soft delete: commit: %w", err)
+	}
+	return nil
+}
+
 // Update applies the non-nil fields of in to the record visible under acc, bumps
 // updated_at, and re-syncs the FTS row when Content changed. Kind/workspace/session
 // are not mutable here. A miss or out-of-scope record returns ErrRecordNotFound.

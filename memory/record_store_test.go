@@ -333,3 +333,50 @@ func TestUpdateMissScopeAndBadMetadata(t *testing.T) {
 		t.Fatalf("whitespace content: got %v want ErrEmptyContent", err)
 	}
 }
+
+func TestRecordSoftDelete(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	m, _ := s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "gone soon", WorkspaceID: "w1"})
+	if err := s.SoftDelete(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}); err != nil {
+		t.Fatalf("SoftDelete: %v", err)
+	}
+	if _, err := s.Get(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("Get after delete: got %v", err)
+	}
+	if hits := mustSearch(t, s, "gone", RecordSearchOptions{WorkspaceID: "w1"}); len(hits) != 0 {
+		t.Fatalf("Search after delete: got %v", hits)
+	}
+	// prove the FTS row itself is gone, not merely hidden by the deleted_at join
+	// filter (otherwise orphaned FTS rows would accumulate unbounded).
+	var ftsRows int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_records_fts WHERE id = ?`, m.ID).Scan(&ftsRows); err != nil {
+		t.Fatalf("count fts rows: %v", err)
+	}
+	if ftsRows != 0 {
+		t.Fatalf("orphaned FTS row after delete: count=%d", ftsRows)
+	}
+	if err := s.SoftDelete(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("double delete: got %v want ErrRecordNotFound", err)
+	}
+}
+
+func TestRecordSoftDeleteScope(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	m, _ := s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "x", WorkspaceID: "w1"})
+	if err := s.SoftDelete(ctx, m.ID, RecordAccess{WorkspaceID: "w2"}); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("cross-workspace delete: got %v want ErrRecordNotFound", err)
+	}
+	if _, err := s.Get(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}); err != nil {
+		t.Fatalf("record wrongly deleted: %v", err)
+	}
+	// session isolation: a session-scoped record is not deletable without the session.
+	sm, _ := s.Create(ctx, CreateRecordParams{Kind: KindWorking, Content: "y", WorkspaceID: "w1", SessionID: "s1"})
+	if err := s.SoftDelete(ctx, sm.ID, RecordAccess{WorkspaceID: "w1"}); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("cross-session delete: got %v want ErrRecordNotFound", err)
+	}
+	if _, err := s.Get(ctx, sm.ID, RecordAccess{WorkspaceID: "w1", SessionID: "s1"}); err != nil {
+		t.Fatalf("session record wrongly deleted: %v", err)
+	}
+}
