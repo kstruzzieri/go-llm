@@ -10,6 +10,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/analysis"
+	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -21,6 +22,10 @@ func useCaseToConfigRole(useCase string) string {
 		return "analysis"
 	case "embedding":
 		return "embedding"
+	case config.UseCaseVerify, config.UseCaseExtract:
+		// Pass through; chainFor -> RoleFallbackChain -> RoleForUseCase resolves
+		// the side-task fallback (analysis -> chat) configured in #60.
+		return useCase
 	default:
 		return "chat"
 	}
@@ -145,6 +150,21 @@ func (s *Server) registerAnalysisTools() {
 			"required": []string{"strategies"},
 		},
 	}, s.handleCompareStrategies)
+
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "verify_support",
+		Description: "Judge whether an answer is supported by retrieved evidence. Retrieves context for the question, extracts the answer's claims, verifies each against the evidence, and returns a machine-readable support report.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"answer":   map[string]any{"type": "string", "description": "The answer to verify against retrieved evidence"},
+				"question": map[string]any{"type": "string", "description": "The question used to retrieve supporting evidence"},
+				"top_k":    map[string]any{"type": "integer", "description": "Number of chunks to retrieve (default: 5)"},
+				"model":    map[string]any{"type": "string", "description": "Model name (defers to the configured verify/extract roles if omitted)"},
+			},
+			"required": []string{"answer", "question"},
+		},
+	}, s.handleVerifySupport)
 }
 
 func (s *Server) handleCodeReview(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -315,6 +335,58 @@ func (s *Server) handleCompareStrategies(ctx context.Context, req *gomcp.CallToo
 	}
 
 	return toolResult(result), nil
+}
+
+func (s *Server) handleVerifySupport(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if r := s.requireRAG(); r != nil {
+		return r, nil
+	}
+
+	var args struct {
+		Answer   string `json:"answer"`
+		Question string `json:"question"`
+		TopK     int    `json:"top_k,omitempty"`
+		Model    string `json:"model,omitempty"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if args.Answer == "" {
+		return toolError("validation", "answer must not be empty"), nil
+	}
+	if args.Question == "" {
+		return toolError("validation", "question must not be empty"), nil
+	}
+
+	s.mu.RLock()
+	retriever := s.retriever
+	s.mu.RUnlock()
+	if retriever == nil {
+		return toolError("rag", "retriever unavailable; embedding model may not be resolved"), nil
+	}
+
+	topK := args.TopK
+	if topK <= 0 {
+		topK = 5
+	}
+	evidence, err := retriever.Retrieve(ctx, args.Question, topK)
+	if err != nil {
+		return toolError("rag", "retrieve: %v", err), nil
+	}
+
+	judge, err := analysis.NewSupportJudgeWithChat(s.analysisChatFunc(), args.Model)
+	if err != nil {
+		return toolError("config", "%v", err), nil
+	}
+	report, err := judge.Judge(ctx, args.Answer, evidence)
+	if err != nil {
+		return toolError("analysis", "%v", err), nil
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		return toolError("analysis", "marshal report: %v", err), nil
+	}
+	return toolResult(string(data)), nil
 }
 
 func decodeTrainingMetrics(raw json.RawMessage) (analysis.TrainingMetrics, error) {
