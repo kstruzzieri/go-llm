@@ -389,10 +389,13 @@ func (s *MemoryRecordStore) Update(ctx context.Context, id string, acc RecordAcc
 	now := time.Now().UnixMilli()
 	cur.UpdatedAt = time.UnixMilli(now)
 
+	// Re-assert deleted_at + visibility on the write (defense-in-depth; matches
+	// SoftDelete/Promote so every mutation self-guards rather than trusting the
+	// prior in-tx SELECT).
 	if _, err := tx.ExecContext(ctx,
 		`UPDATE memory_records SET content = ?, namespace = ?, metadata = ?, expires_at = ?, updated_at = ?
-		  WHERE id = ?`,
-		cur.Content, cur.Namespace, string(cur.Metadata), toMs(cur.ExpiresAt), now, id); err != nil {
+		  WHERE id = ? AND deleted_at = 0 AND `+visibilityClause,
+		cur.Content, cur.Namespace, string(cur.Metadata), toMs(cur.ExpiresAt), now, id, acc.WorkspaceID, acc.SessionID); err != nil {
 		return MemoryRecord{}, fmt.Errorf("memory: update: %w", err)
 	}
 	if newContent != nil {
