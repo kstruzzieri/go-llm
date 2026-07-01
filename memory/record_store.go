@@ -253,3 +253,79 @@ func (s *MemoryRecordStore) Search(ctx context.Context, query string, opts Recor
 	}
 	return out, nil
 }
+
+// Update applies the non-nil fields of in to the record visible under acc, bumps
+// updated_at, and re-syncs the FTS row when Content changed. Kind/workspace/session
+// are not mutable here. A miss or out-of-scope record returns ErrRecordNotFound.
+func (s *MemoryRecordStore) Update(ctx context.Context, id string, acc RecordAccess, in UpdateRecordParams) (MemoryRecord, error) {
+	// Validate inputs before opening the tx (matches Create's validate-first pattern).
+	var newContent *string
+	if in.Content != nil {
+		c := strings.TrimSpace(*in.Content)
+		if c == "" {
+			return MemoryRecord{}, ErrEmptyContent
+		}
+		newContent = &c
+	}
+	var metadata *string
+	if in.Metadata != nil {
+		norm, err := normalizeMetadata(in.Metadata)
+		if err != nil {
+			return MemoryRecord{}, err
+		}
+		metadata = &norm
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MemoryRecord{}, fmt.Errorf("memory: update: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Resolve within scope; also gives us existence.
+	row := tx.QueryRowContext(ctx,
+		`SELECT `+recordColumns+` FROM memory_records
+		  WHERE id = ? AND deleted_at = 0 AND `+visibilityClause,
+		id, acc.WorkspaceID, acc.SessionID)
+	cur, err := scanRecord(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MemoryRecord{}, ErrRecordNotFound
+		}
+		return MemoryRecord{}, err
+	}
+
+	if newContent != nil {
+		cur.Content = *newContent
+	}
+	if in.Namespace != nil {
+		cur.Namespace = *in.Namespace
+	}
+	if metadata != nil {
+		cur.Metadata = json.RawMessage(*metadata)
+	}
+	if in.ExpiresAt != nil {
+		cur.ExpiresAt = *in.ExpiresAt
+	}
+	now := time.Now().UnixMilli()
+	cur.UpdatedAt = time.UnixMilli(now)
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE memory_records SET content = ?, namespace = ?, metadata = ?, expires_at = ?, updated_at = ?
+		  WHERE id = ?`,
+		cur.Content, cur.Namespace, string(cur.Metadata), toMs(cur.ExpiresAt), now, id); err != nil {
+		return MemoryRecord{}, fmt.Errorf("memory: update: %w", err)
+	}
+	if newContent != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_records_fts WHERE id = ?`, id); err != nil {
+			return MemoryRecord{}, fmt.Errorf("memory: update: fts delete: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO memory_records_fts (id, content) VALUES (?, ?)`, id, cur.Content); err != nil {
+			return MemoryRecord{}, fmt.Errorf("memory: update: fts insert: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryRecord{}, fmt.Errorf("memory: update: commit: %w", err)
+	}
+	return cur, nil
+}

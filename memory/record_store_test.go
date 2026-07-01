@@ -249,3 +249,87 @@ func TestSearchNoMatchNonNil(t *testing.T) {
 		t.Fatalf("want non-nil empty slice, got %v", got)
 	}
 }
+
+func strptr(s string) *string { return &s }
+
+func TestUpdateFields(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	m, _ := s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "old", WorkspaceID: "w1", Namespace: "a"})
+	exp := time.Now().Add(time.Hour)
+	got, err := s.Update(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}, UpdateRecordParams{
+		Content:   strptr("new content"),
+		Namespace: strptr("b"),
+		Metadata:  json.RawMessage(`{"k":1}`),
+		ExpiresAt: &exp,
+	})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Content != "new content" || got.Namespace != "b" || string(got.Metadata) != `{"k":1}` || got.ExpiresAt.IsZero() {
+		t.Fatalf("Update result: %+v", got)
+	}
+	hits := mustSearch(t, s, "content", RecordSearchOptions{WorkspaceID: "w1"})
+	if len(hits) != 1 {
+		t.Fatalf("FTS resync: got %d want 1", len(hits))
+	}
+	if old := mustSearch(t, s, "old", RecordSearchOptions{WorkspaceID: "w1"}); len(old) != 0 {
+		t.Fatalf("stale FTS term still matches: %v", old)
+	}
+	// re-fetch from the DB to confirm the write landed (not just the in-memory struct).
+	reread, err := s.Get(ctx, m.ID, RecordAccess{WorkspaceID: "w1"})
+	if err != nil {
+		t.Fatalf("Get after Update: %v", err)
+	}
+	if reread.Content != "new content" || reread.Namespace != "b" || string(reread.Metadata) != `{"k":1}` || reread.ExpiresAt.IsZero() {
+		t.Fatalf("persisted row mismatch: %+v", reread)
+	}
+}
+
+func TestUpdatePartialLeavesOthers(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	m, _ := s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "keep", WorkspaceID: "w1", Namespace: "a", Metadata: json.RawMessage(`{"k":1}`)})
+	got, err := s.Update(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}, UpdateRecordParams{Namespace: strptr("b")})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if got.Namespace != "b" {
+		t.Fatalf("namespace not updated: %q", got.Namespace)
+	}
+	if got.Content != "keep" || string(got.Metadata) != `{"k":1}` || !got.ExpiresAt.IsZero() {
+		t.Fatalf("untouched fields changed: %+v", got)
+	}
+}
+
+func TestUpdateClearExpiry(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	m, _ := s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "x", WorkspaceID: "w1", ExpiresAt: time.Now().Add(time.Hour)})
+	zero := time.Time{}
+	got, err := s.Update(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}, UpdateRecordParams{ExpiresAt: &zero})
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	if !got.ExpiresAt.IsZero() {
+		t.Fatalf("expected cleared expiry, got %v", got.ExpiresAt)
+	}
+}
+
+func TestUpdateMissScopeAndBadMetadata(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	if _, err := s.Update(ctx, "nope", RecordAccess{}, UpdateRecordParams{Namespace: strptr("x")}); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("Update miss: got %v", err)
+	}
+	m, _ := s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "x", WorkspaceID: "w1"})
+	if _, err := s.Update(ctx, m.ID, RecordAccess{WorkspaceID: "w2"}, UpdateRecordParams{Namespace: strptr("x")}); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("cross-workspace Update: got %v", err)
+	}
+	if _, err := s.Update(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}, UpdateRecordParams{Metadata: json.RawMessage("{bad")}); !errors.Is(err, ErrBadMetadata) {
+		t.Fatalf("bad metadata: got %v", err)
+	}
+	if _, err := s.Update(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}, UpdateRecordParams{Content: strptr("   ")}); !errors.Is(err, ErrEmptyContent) {
+		t.Fatalf("whitespace content: got %v want ErrEmptyContent", err)
+	}
+}
