@@ -436,6 +436,7 @@ func TestVerifyClaims_DuplicateClaimIDFailsClosed(t *testing.T) {
 	for _, reply := range []string{
 		`{"verdicts":[{"claim_id":"C1","status":"unsupported","evidence_ids":[]},{"claim_id":"C1","status":"supported","evidence_ids":["E1"]}]}`,
 		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"]},{"claim_id":"C1","status":"unsupported","evidence_ids":[]}]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"]},{"claim_id":"C1","status":"supported","evidence_ids":["E1"]}]}`,
 	} {
 		rc := &recordingChat{replies: []string{reply}}
 		j, _ := NewSupportJudgeWithChat(rc.fn(), "m")

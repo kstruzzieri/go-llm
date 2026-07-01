@@ -341,10 +341,16 @@ func (j *SupportJudge) verifyClaims(ctx context.Context, claims []ClaimSupport, 
 		validEvidence[r.ID] = true
 	}
 	byID := make(map[string]verdict, len(vr.Verdicts))
+	duplicateID := make(map[string]bool)
 	for _, v := range vr.Verdicts {
 		// Duplicate claim_id fails closed: keep the least-supportive verdict so a
 		// repeated id can never upgrade a claim's support level.
-		if cur, ok := byID[v.ClaimID]; !ok || verdictSeverity(v) > verdictSeverity(cur) {
+		if cur, ok := byID[v.ClaimID]; ok {
+			duplicateID[v.ClaimID] = true
+			if verdictSeverity(v) > verdictSeverity(cur) {
+				byID[v.ClaimID] = v
+			}
+		} else {
 			byID[v.ClaimID] = v
 		}
 	}
@@ -357,6 +363,12 @@ func (j *SupportJudge) verifyClaims(ctx context.Context, claims []ClaimSupport, 
 		if !ok {
 			c.Status = StatusUnsupported
 			c.Reason = "no verifier verdict returned"
+			missing = append(missing, c.ID+": "+c.Reason)
+			continue
+		}
+		if duplicateID[c.ID] {
+			c.Status = StatusUnsupported
+			c.Reason = "duplicate verifier verdicts returned"
 			missing = append(missing, c.ID+": "+c.Reason)
 			continue
 		}
