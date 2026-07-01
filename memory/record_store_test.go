@@ -25,6 +25,15 @@ func newRecordStore(t *testing.T) *MemoryRecordStore {
 	return s
 }
 
+func mustSearch(t *testing.T, s *MemoryRecordStore, query string, opts RecordSearchOptions) []MemoryRecord {
+	t.Helper()
+	got, err := s.Search(context.Background(), query, opts)
+	if err != nil {
+		t.Fatalf("Search(%q): %v", query, err)
+	}
+	return got
+}
+
 func TestCreateValidKinds(t *testing.T) {
 	s := newRecordStore(t)
 	ctx := context.Background()
@@ -147,5 +156,96 @@ func TestGetReturnsExpired(t *testing.T) {
 	}
 	if got.ExpiresAt.IsZero() {
 		t.Fatalf("expected non-zero ExpiresAt round-trip")
+	}
+}
+
+func TestSearchFTSAndEmptyQuery(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "alpha beta gamma", WorkspaceID: "w1"})
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "delta epsilon", WorkspaceID: "w1"})
+
+	hits, err := s.Search(ctx, "beta", RecordSearchOptions{WorkspaceID: "w1"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(hits) != 1 || hits[0].Content != "alpha beta gamma" {
+		t.Fatalf("FTS search: got %d %v", len(hits), hits)
+	}
+	all, err := s.Search(ctx, "", RecordSearchOptions{WorkspaceID: "w1"})
+	if err != nil {
+		t.Fatalf("Search empty: %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("empty-query listing: got %d want 2", len(all))
+	}
+}
+
+func TestSearchFilters(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindWorking, Content: "task note", WorkspaceID: "w1", SessionID: "s1", Namespace: "ns1"})
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "fact note", WorkspaceID: "w1", Namespace: "ns2"})
+
+	byKind := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w1", SessionID: "s1", Kind: KindWorking})
+	if len(byKind) != 1 || byKind[0].Kind != KindWorking {
+		t.Fatalf("kind filter: got %v", byKind)
+	}
+	byNS := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w1", Namespace: "ns2"})
+	if len(byNS) != 1 || byNS[0].Namespace != "ns2" {
+		t.Fatalf("namespace filter: got %v", byNS)
+	}
+}
+
+func TestSearchVisibilityIsolation(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindEpisodic, Content: "global note"})
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "w1 note", WorkspaceID: "w1"})
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindWorking, Content: "s1 note", WorkspaceID: "w1", SessionID: "s1"})
+
+	fromS1 := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w1", SessionID: "s1"})
+	if len(fromS1) != 3 {
+		t.Fatalf("session view: got %d want 3", len(fromS1))
+	}
+	fromW1 := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w1"})
+	if len(fromW1) != 2 {
+		t.Fatalf("workspace view: got %d want 2", len(fromW1))
+	}
+	fromW2 := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w2"})
+	if len(fromW2) != 1 {
+		t.Fatalf("other workspace view: got %d want 1", len(fromW2))
+	}
+}
+
+func TestSearchExpiryAndLimit(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "live", WorkspaceID: "w1"})
+	_, _ = s.Create(ctx, CreateRecordParams{Kind: KindSemantic, Content: "dead", WorkspaceID: "w1", ExpiresAt: now.Add(-time.Hour)})
+
+	live := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w1", Now: now})
+	if len(live) != 1 || live[0].Content != "live" {
+		t.Fatalf("expiry exclusion: got %v", live)
+	}
+	withExpired := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w1", Now: now, IncludeExpired: true})
+	if len(withExpired) != 2 {
+		t.Fatalf("IncludeExpired: got %d want 2", len(withExpired))
+	}
+	limited := mustSearch(t, s, "", RecordSearchOptions{WorkspaceID: "w1", Now: now, IncludeExpired: true, Limit: 1})
+	if len(limited) != 1 {
+		t.Fatalf("limit: got %d want 1", len(limited))
+	}
+}
+
+func TestSearchNoMatchNonNil(t *testing.T) {
+	s := newRecordStore(t)
+	got, err := s.Search(context.Background(), "zzz", RecordSearchOptions{WorkspaceID: "w1"})
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if got == nil || len(got) != 0 {
+		t.Fatalf("want non-nil empty slice, got %v", got)
 	}
 }

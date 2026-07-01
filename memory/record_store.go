@@ -36,6 +36,16 @@ const recordColumns = `id, kind, content, namespace, workspace_id, session_id,
 	source_kind, source_id, source_start, source_end, source_hash, metadata,
 	created_at, updated_at, expires_at, deleted_at`
 
+// recordColumnsAlias mirrors recordColumns with an `mr.` table alias for joined
+// queries (Search). Keep the two column lists in lockstep with scanRecord.
+const recordColumnsAlias = `mr.id, mr.kind, mr.content, mr.namespace, mr.workspace_id, mr.session_id,
+	mr.source_kind, mr.source_id, mr.source_start, mr.source_end, mr.source_hash, mr.metadata,
+	mr.created_at, mr.updated_at, mr.expires_at, mr.deleted_at`
+
+// visibilityClauseAlias is visibilityClause with the `mr.` alias, for joined
+// queries. Bind args in order: workspaceID, sessionID.
+const visibilityClauseAlias = `(mr.workspace_id = '' OR mr.workspace_id = ?) AND (mr.session_id = '' OR mr.session_id = ?)`
+
 func toMs(t time.Time) int64 {
 	if t.IsZero() {
 		return 0
@@ -175,4 +185,71 @@ func (s *MemoryRecordStore) Get(ctx context.Context, id string, acc RecordAccess
 		return MemoryRecord{}, err
 	}
 	return m, nil
+}
+
+// Search returns live records visible under opts (workspace + session), best match
+// first. An empty/punctuation-only query lists by recency (updated_at DESC); a
+// non-empty query ranks by FTS5 bm25. Expired records are excluded unless
+// opts.IncludeExpired. Returns a non-nil empty slice on no match.
+func (s *MemoryRecordStore) Search(ctx context.Context, query string, opts RecordSearchOptions) ([]MemoryRecord, error) {
+	limit := opts.Limit
+	if limit <= 0 {
+		limit = 8
+	}
+	now := opts.Now
+	if now.IsZero() {
+		now = time.Now()
+	}
+
+	var (
+		where []string
+		args  []any
+	)
+	where = append(where, `mr.deleted_at = 0`)
+	where = append(where, visibilityClauseAlias)
+	args = append(args, opts.WorkspaceID, opts.SessionID)
+	if opts.Kind != "" {
+		where = append(where, `mr.kind = ?`)
+		args = append(args, string(opts.Kind))
+	}
+	if opts.Namespace != "" {
+		where = append(where, `mr.namespace = ?`)
+		args = append(args, opts.Namespace)
+	}
+	if !opts.IncludeExpired {
+		where = append(where, `NOT (mr.expires_at != 0 AND mr.expires_at <= ?)`)
+		args = append(args, now.UnixMilli())
+	}
+
+	var q string
+	match := sanitizeFTS5Query(query)
+	if match == "" {
+		q = `SELECT ` + recordColumnsAlias + ` FROM memory_records mr WHERE ` + strings.Join(where, " AND ") +
+			` ORDER BY mr.updated_at DESC, mr.id ASC LIMIT ?`
+		args = append(args, limit)
+	} else {
+		q = `SELECT ` + recordColumnsAlias + ` FROM memory_records_fts f JOIN memory_records mr ON mr.id = f.id
+			WHERE f.content MATCH ? AND ` + strings.Join(where, " AND ") +
+			` ORDER BY bm25(memory_records_fts) ASC, mr.updated_at DESC, mr.id ASC LIMIT ?`
+		args = append([]any{match}, args...)
+		args = append(args, limit)
+	}
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("memory: search records: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := []MemoryRecord{}
+	for rows.Next() {
+		m, err := scanRecord(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("memory: search records: iterate: %w", err)
+	}
+	return out, nil
 }
