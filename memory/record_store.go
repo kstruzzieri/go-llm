@@ -287,6 +287,52 @@ func (s *MemoryRecordStore) SoftDelete(ctx context.Context, id string, acc Recor
 	return nil
 }
 
+// Promote converts a record to a durable kind (semantic or episodic) within acc's
+// scope: it sheds the session binding (session_id cleared), clears expiry, keeps
+// the workspace, and preserves content/provenance. to must be KindSemantic or
+// KindEpisodic. A miss or out-of-scope record returns ErrRecordNotFound. The
+// from-kind is deliberately unrestricted (the intended flow is working ->
+// durable, but re-promoting an already-durable record is a harmless no-op).
+func (s *MemoryRecordStore) Promote(ctx context.Context, id string, acc RecordAccess, to MemoryKind) (MemoryRecord, error) {
+	if to != KindSemantic && to != KindEpisodic {
+		return MemoryRecord{}, ErrBadPromotion
+	}
+	now := time.Now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return MemoryRecord{}, fmt.Errorf("memory: promote: begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx,
+		`UPDATE memory_records SET kind = ?, session_id = '', expires_at = 0, updated_at = ?
+		  WHERE id = ? AND deleted_at = 0 AND `+visibilityClause,
+		string(to), now, id, acc.WorkspaceID, acc.SessionID)
+	if err != nil {
+		return MemoryRecord{}, fmt.Errorf("memory: promote: %w", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return MemoryRecord{}, fmt.Errorf("memory: promote: rows: %w", err)
+	}
+	if n == 0 {
+		return MemoryRecord{}, ErrRecordNotFound
+	}
+	// Re-read the mutated row within the tx. FTS is untouched: content is
+	// preserved, only kind/session/expiry changed.
+	row := tx.QueryRowContext(ctx, `SELECT `+recordColumns+` FROM memory_records WHERE id = ?`, id)
+	m, err := scanRecord(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return MemoryRecord{}, ErrRecordNotFound
+		}
+		return MemoryRecord{}, fmt.Errorf("memory: promote: reselect: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return MemoryRecord{}, fmt.Errorf("memory: promote: commit: %w", err)
+	}
+	return m, nil
+}
+
 // Update applies the non-nil fields of in to the record visible under acc, bumps
 // updated_at, and re-syncs the FTS row when Content changed. Kind/workspace/session
 // are not mutable here. A miss or out-of-scope record returns ErrRecordNotFound.

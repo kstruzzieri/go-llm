@@ -380,3 +380,53 @@ func TestRecordSoftDeleteScope(t *testing.T) {
 		t.Fatalf("session record wrongly deleted: %v", err)
 	}
 }
+
+func TestPromote(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	for _, to := range []MemoryKind{KindSemantic, KindEpisodic} {
+		m, _ := s.Create(ctx, CreateRecordParams{
+			Kind: KindWorking, Content: "candidate", WorkspaceID: "w1", SessionID: "s1",
+			Provenance: Provenance{SourceKind: "conversation", SourceID: "c1", Start: 1, End: 4},
+			ExpiresAt:  time.Now().Add(time.Hour),
+		})
+		got, err := s.Promote(ctx, m.ID, RecordAccess{WorkspaceID: "w1", SessionID: "s1"}, to)
+		if err != nil {
+			t.Fatalf("Promote(%s): %v", to, err)
+		}
+		if got.Kind != to {
+			t.Fatalf("kind: got %s want %s", got.Kind, to)
+		}
+		if got.SessionID != "" {
+			t.Fatalf("session not cleared: %q", got.SessionID)
+		}
+		if !got.ExpiresAt.IsZero() {
+			t.Fatalf("expiry not cleared: %v", got.ExpiresAt)
+		}
+		if got.WorkspaceID != "w1" {
+			t.Fatalf("workspace changed: %q", got.WorkspaceID)
+		}
+		if got.Provenance.SourceID != "c1" {
+			t.Fatalf("provenance lost: %+v", got.Provenance)
+		}
+		// now visible to a non-session caller in w1 (session binding shed)
+		if _, err := s.Get(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}); err != nil {
+			t.Fatalf("promoted record not workspace-visible: %v", err)
+		}
+	}
+}
+
+func TestPromoteBadTargetAndMiss(t *testing.T) {
+	s := newRecordStore(t)
+	ctx := context.Background()
+	m, _ := s.Create(ctx, CreateRecordParams{Kind: KindWorking, Content: "x", WorkspaceID: "w1", SessionID: "s1"})
+	if _, err := s.Promote(ctx, m.ID, RecordAccess{WorkspaceID: "w1", SessionID: "s1"}, KindWorking); !errors.Is(err, ErrBadPromotion) {
+		t.Fatalf("promote to working: got %v want ErrBadPromotion", err)
+	}
+	if _, err := s.Promote(ctx, "nope", RecordAccess{}, KindSemantic); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("promote miss: got %v", err)
+	}
+	if _, err := s.Promote(ctx, m.ID, RecordAccess{WorkspaceID: "w1"}, KindSemantic); !errors.Is(err, ErrRecordNotFound) {
+		t.Fatalf("promote of session record without session scope: got %v want ErrRecordNotFound", err)
+	}
+}
