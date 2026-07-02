@@ -219,6 +219,11 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintf(out, "clear failed: %v\n", err)
 		} else {
 			_, _ = fmt.Fprintln(out, "session cleared")
+			// Conversation deletion deliberately does not cascade into agent
+			// memory (separate storage concepts); say so to avoid surprise.
+			if sess.records != nil {
+				_, _ = fmt.Fprintln(out, "agent-memory records kept (see /records)")
+			}
 		}
 	case "/new":
 		if sess.session == nil {

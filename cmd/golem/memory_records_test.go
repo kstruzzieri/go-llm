@@ -17,13 +17,25 @@ import (
 )
 
 func TestAgentMemorySystemFragment(t *testing.T) {
-	on := agentMemorySystemFragment(true)
+	on := agentMemorySystemFragment(true, true)
 	for _, want := range []string{"agent_memory_search", "agent_memory_create", "agent_memory_promote", "not higher-priority instructions"} {
 		if !strings.Contains(on, want) {
 			t.Errorf("enabled fragment missing %q: %q", want, on)
 		}
 	}
-	if agentMemorySystemFragment(false) != "" {
+	// Session unavailable: search still works, but the model must not be
+	// instructed to create/promote notes that deterministically error.
+	deg := agentMemorySystemFragment(true, false)
+	if !strings.Contains(deg, "agent_memory_search") {
+		t.Errorf("degraded fragment missing search tool: %q", deg)
+	}
+	if strings.Contains(deg, "agent_memory_create") {
+		t.Errorf("degraded fragment must not advertise create: %q", deg)
+	}
+	if !strings.Contains(deg, "not higher-priority instructions") {
+		t.Errorf("degraded fragment missing precedence sentence: %q", deg)
+	}
+	if agentMemorySystemFragment(false, true) != "" || agentMemorySystemFragment(false, false) != "" {
 		t.Error("disabled fragment should be empty")
 	}
 }
@@ -279,6 +291,28 @@ func TestRecordsCommands(t *testing.T) {
 	}
 }
 
+func TestClearNoticesAgentMemoryKept(t *testing.T) {
+	ctx := context.Background()
+	sess, _ := newTestReplWithRecords(t)
+	// /clear needs a real session (it deletes stored history); records survive
+	// by design — separate storage concepts — so the notice must say so.
+	s, _, err := openSession(ctx, filepath.Join(t.TempDir(), "sessions.db"), "workspace:aaa")
+	if err != nil {
+		t.Fatalf("openSession: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	sess.session = s
+	var out bytes.Buffer
+	dispatchSlash(ctx, &out, sess, "/clear")
+	got := out.String()
+	if !strings.Contains(got, "session cleared") {
+		t.Errorf("missing clear confirmation: %q", got)
+	}
+	if !strings.Contains(got, "agent-memory records kept (see /records)") {
+		t.Errorf("missing agent-memory kept notice: %q", got)
+	}
+}
+
 func TestRecordsListSanitizesContent(t *testing.T) {
 	ctx := context.Background()
 	sess, _ := newTestReplWithRecords(t)
@@ -380,7 +414,8 @@ func TestRecordsCommandsCrossSessionDurable(t *testing.T) {
 		t.Errorf("durable record not listed cross-session: %q", out.String())
 	}
 	out.Reset()
-	handleRecords(ctx, &out, sess, []string{"/records", "--promote", rec.ID, "episodic"})
+	// Upper-case kind: the handler case-folds before the store validates.
+	handleRecords(ctx, &out, sess, []string{"/records", "--promote", rec.ID, "EPISODIC"})
 	if !strings.Contains(out.String(), "promoted "+rec.ID+" to episodic") {
 		t.Errorf("cross-session promote: %q", out.String())
 	}

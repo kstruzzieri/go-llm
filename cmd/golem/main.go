@@ -328,7 +328,6 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
 	baseSystem += memorySystemFragment(memoryEnabled)
-	baseSystem += agentMemorySystemFragment(agentMemoryEnabled)
 	projectContextLine := ""
 	if !f.noProjectContext {
 		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
@@ -357,6 +356,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		}
 	}
 	defer func() { _ = sessn.Close() }() // nil-safe
+
+	// Appended after the session block (not beside memorySystemFragment) so the
+	// framing can reflect whether the session actually opened: without one,
+	// create/promote deterministically error, so the model must not be told to
+	// use them. baseSystem is consumed only at replSession construction below;
+	// this fragment now trails the project-context block in the composed prompt.
+	baseSystem += agentMemorySystemFragment(agentMemoryEnabled, sessn != nil)
 
 	if agentMemoryEnabled {
 		// SessionID is read at call time: if the session failed to open at

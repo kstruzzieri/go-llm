@@ -244,7 +244,7 @@ func (t AgentMemoryPromote) Invoke(ctx context.Context, raw json.RawMessage) (ag
 		return agent.ToolResult{IsError: true, Content: "id is required"}, nil
 	}
 	acc := memory.RecordAccess{WorkspaceID: t.WorkspaceID, SessionID: resolveSessionID(t.SessionID)}
-	rec, err := t.S.Promote(ctx, id, acc, memory.MemoryKind(strings.TrimSpace(args.Kind)))
+	rec, err := t.S.Promote(ctx, id, acc, memory.MemoryKind(strings.ToLower(strings.TrimSpace(args.Kind))))
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "agent memory promote failed: " + err.Error()}, nil
 	}

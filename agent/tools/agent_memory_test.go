@@ -249,6 +249,18 @@ func TestAgentMemoryPromote(t *testing.T) {
 	}
 }
 
+func TestAgentMemoryPromoteCaseFoldsKind(t *testing.T) {
+	fake := &fakeRecordStore{promoteOut: memory.MemoryRecord{ID: "rec1", Kind: memory.KindSemantic}}
+	tool := AgentMemoryPromote{S: fake, SessionID: sidFunc("s")}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"rec1","kind":"Semantic"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("invoke: err=%v result=%+v", err, res)
+	}
+	if fake.promotedKind != memory.KindSemantic {
+		t.Errorf("kind must be case-folded before the store: %q", fake.promotedKind)
+	}
+}
+
 func TestAgentMemoryPromoteErrors(t *testing.T) {
 	fake := &fakeRecordStore{promoteErr: memory.ErrBadPromotion}
 	tool := AgentMemoryPromote{S: fake, SessionID: sidFunc("s")}
