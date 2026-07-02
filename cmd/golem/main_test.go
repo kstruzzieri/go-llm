@@ -260,3 +260,28 @@ func TestValidatePressureWarnRange(t *testing.T) {
 		t.Fatal(">100 pressureWarn should be rejected")
 	}
 }
+
+func TestAgentMemoryFlag(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if f.agentMemory {
+		t.Error("agent memory must default to disabled (opt-in)")
+	}
+	f, err = parseFlags([]string{"-agent-memory"})
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if !f.agentMemory {
+		t.Error("-agent-memory not parsed")
+	}
+}
+
+func TestStartupNoticesAgentMemoryLine(t *testing.T) {
+	lines := startupNotices(startupInfo{workspace: "/w", agentMemoryLine: "agent memory: enabled"})
+	joined := strings.Join(lines, "\n")
+	if !strings.Contains(joined, "agent memory: enabled") {
+		t.Errorf("notices missing agent memory line: %v", lines)
+	}
+}

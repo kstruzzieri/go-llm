@@ -32,6 +32,8 @@ type replSession struct {
 	memoryDBPath string              // used to re-secure SQLite sidecars after writes
 	workspaceID  string              // stable id used to scope memory create/list/search
 
+	records *memory.MemoryRecordStore // nil => agent memory disabled (-agent-memory absent or open failed)
+
 	lastModel    string           // last routed ActualModel for /model
 	journal      *mutationJournal // nil unless -allow-write enabled writes
 	allowWrite   bool
@@ -217,6 +219,11 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 			_, _ = fmt.Fprintf(out, "clear failed: %v\n", err)
 		} else {
 			_, _ = fmt.Fprintln(out, "session cleared")
+			// Conversation deletion deliberately does not cascade into agent
+			// memory (separate storage concepts); say so to avoid surprise.
+			if sess.records != nil {
+				_, _ = fmt.Fprintln(out, "agent-memory records kept (see /records)")
+			}
 		}
 	case "/new":
 		if sess.session == nil {
@@ -269,6 +276,8 @@ func dispatchSlash(ctx context.Context, out io.Writer, sess *replSession, line s
 		handleForget(ctx, out, sess, fields)
 	case "/memories":
 		handleMemories(ctx, out, sess, fields)
+	case "/records":
+		handleRecords(ctx, out, sess, fields)
 	case "/tools":
 		for _, t := range sess.tools {
 			_, _ = fmt.Fprintf(out, "%s (%s)\n", t.Spec().Name, effectClassName(t.Effect().Class))
@@ -298,6 +307,8 @@ const golemHelp = `commands:
   /forget <id>   delete a saved memory
   /memories [--promote <id> | --localize <id>]
                  list saved memories, or change a memory's scope
+  /records [--forget <id> | --promote <id> <semantic|episodic>]
+                 list agent-memory records, forget one, or promote one (with -agent-memory)
   /exit, /quit   leave golem
 any other line is sent to the agent as a goal.
 `

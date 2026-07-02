@@ -300,9 +300,11 @@ func resultConversationMessages(userLine string, res agent.Result) ([]conversati
 		}
 		if m.Role == "tool" && m.ToolName == agenttools.MemorySearchToolName {
 			cm.Content = memorySearchRedactedMarker
+		} else if m.Role == "tool" && isAgentMemoryTool(m.ToolName) {
+			cm.Content = agentMemoryResultRedactedMarker
 		}
 		if len(m.ToolCalls) > 0 {
-			raw, err := json.Marshal(m.ToolCalls)
+			raw, err := json.Marshal(redactAgentMemoryToolCalls(m.ToolCalls))
 			if err != nil {
 				return nil, fmt.Errorf("golem: marshal tool calls at message %d: %w", i, err)
 			}
