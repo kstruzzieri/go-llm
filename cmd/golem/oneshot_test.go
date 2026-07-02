@@ -60,8 +60,8 @@ func TestRun_OneShotEmptyPromptErrors(t *testing.T) {
 
 func TestApplyOneShotMode(t *testing.T) {
 	got, warns := applyOneShotMode(flags{promptSet: true, prompt: "x", allowWrite: true, allowExec: true})
-	if !got.noSession || !got.noCompress {
-		t.Errorf("one-shot must force -no-session and -no-compress, got %+v", got)
+	if !got.noSession || !got.noCompress || !got.noMemory {
+		t.Errorf("one-shot must force -no-session, -no-compress, and -no-memory, got %+v", got)
 	}
 	if got.allowWrite || got.allowExec {
 		t.Errorf("one-shot must drop -allow-write/-allow-exec (no interactive approver), got %+v", got)
@@ -71,8 +71,8 @@ func TestApplyOneShotMode(t *testing.T) {
 	}
 
 	plain, warns := applyOneShotMode(flags{promptSet: true, prompt: "x"})
-	if !plain.noSession || !plain.noCompress || len(warns) != 0 {
-		t.Errorf("plain one-shot: noSession/noCompress forced without warnings, got %+v %v", plain, warns)
+	if !plain.noSession || !plain.noCompress || !plain.noMemory || len(warns) != 0 {
+		t.Errorf("plain one-shot: noSession/noCompress/noMemory forced without warnings, got %+v %v", plain, warns)
 	}
 
 	repl := flags{allowWrite: true}

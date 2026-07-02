@@ -54,7 +54,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
-	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
+	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
 	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
 	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
@@ -114,9 +114,10 @@ func validateFlags(f flags) error {
 }
 
 // applyOneShotMode forces the scripting-safe defaults -p implies: no session
-// persistence, no post-turn compression, and no approval-gated tools (there is
-// no interactive approver to answer the prompt, so -allow-write/-allow-exec
-// are dropped with a warning instead of dangling unanswerable approvals).
+// persistence, no post-turn compression, no memory DB, and no approval-gated
+// tools (there is no interactive approver to answer the prompt, so
+// -allow-write/-allow-exec are dropped with a warning instead of dangling
+// unanswerable approvals).
 func applyOneShotMode(f flags) (flags, []string) {
 	if !f.promptSet {
 		return f, nil
@@ -124,6 +125,7 @@ func applyOneShotMode(f flags) (flags, []string) {
 	var warns []string
 	f.noSession = true
 	f.noCompress = true
+	f.noMemory = true
 	if f.allowWrite || f.allowExec {
 		warns = append(warns, "one-shot: -allow-write/-allow-exec ignored (approval prompts need the REPL); write/exec tools unavailable")
 		f.allowWrite = false

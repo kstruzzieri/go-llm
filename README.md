@@ -244,7 +244,7 @@ Inside the REPL, use `/help`, `/tools`, `/model`, `/new`, `/clear`, `/undo`, and
 
 ### Scripting / one-shot mode
 
-`-p` runs a single agent turn without the REPL and prints only the final answer to stdout, so the output is safe to capture in scripts. All progress, warnings, and errors go to stderr, and failures exit non-zero. One-shot implies `-no-session` and `-no-compress` (nothing is persisted, and no agent-memory records are written), and approval-gated tools stay unavailable — `-allow-write`/`-allow-exec` are ignored because there is no interactive approver to answer the prompt.
+`-p` runs a single agent turn without the REPL and prints only the final answer to stdout, so the output is safe to capture in scripts. All progress, warnings, and errors go to stderr, and failures exit non-zero. One-shot implies `-no-session`, `-no-compress`, and `-no-memory` (nothing is persisted, and no memory DB is opened), and approval-gated tools stay unavailable — `-allow-write`/`-allow-exec` are ignored because there is no interactive approver to answer the prompt.
 
 Generate a commit message from a staged diff:
 
