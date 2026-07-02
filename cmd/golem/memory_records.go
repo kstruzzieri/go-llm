@@ -228,12 +228,16 @@ func handleRecords(ctx context.Context, out io.Writer, sess *replSession, fields
 	}
 }
 
+// recordsListLimit bounds /records output; recency-ordered, so the newest
+// records win.
+const recordsListLimit = 20
+
 func listRecords(ctx context.Context, out io.Writer, sess *replSession) {
 	acc := recordAccess(sess)
 	rs, err := sess.records.Search(ctx, "", memory.RecordSearchOptions{
 		WorkspaceID: acc.WorkspaceID,
 		SessionID:   acc.SessionID,
-		Limit:       20,
+		Limit:       recordsListLimit,
 	})
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "records failed: %v\n", err)
