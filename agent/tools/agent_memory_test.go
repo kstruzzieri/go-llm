@@ -135,9 +135,8 @@ func TestAgentMemoryToolEffects(t *testing.T) {
 		class agent.EffectClass
 	}{
 		{AgentMemorySearch{}, AgentMemorySearchToolName, agent.Read},
-		// enabled in task 2:
-		// {AgentMemoryCreate{}, AgentMemoryCreateToolName, agent.Write},
-		// {AgentMemoryPromote{}, AgentMemoryPromoteToolName, agent.Write},
+		{AgentMemoryCreate{}, AgentMemoryCreateToolName, agent.Write},
+		{AgentMemoryPromote{}, AgentMemoryPromoteToolName, agent.Write},
 	}
 	for _, c := range cases {
 		if c.tool.Spec().Name != c.name {
@@ -153,5 +152,123 @@ func TestAgentMemoryToolEffects(t *testing.T) {
 		if !json.Valid(c.tool.Spec().Parameters) {
 			t.Errorf("%s parameters not valid JSON", c.name)
 		}
+	}
+}
+
+func TestAgentMemoryCreateHappyPath(t *testing.T) {
+	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
+	fake := &fakeRecordStore{createOut: memory.MemoryRecord{
+		ID: "rec1", Kind: memory.KindWorking, Content: "the secret note",
+		ExpiresAt: now.Add(7 * 24 * time.Hour),
+	}}
+	tool := AgentMemoryCreate{
+		S: fake, WorkspaceID: "workspace:aaa",
+		SessionID: sidFunc("sess:bbb"),
+		Now:       func() time.Time { return now },
+	}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"content":"the secret note"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("invoke: err=%v result=%+v", err, res)
+	}
+	in := fake.created
+	if in == nil {
+		t.Fatal("store not called")
+	}
+	if in.Kind != memory.KindWorking {
+		t.Errorf("kind = %q, want working", in.Kind)
+	}
+	if in.WorkspaceID != "workspace:aaa" {
+		t.Errorf("workspace = %q", in.WorkspaceID)
+	}
+	if in.SessionID != "sess:bbb" {
+		t.Errorf("session = %q", in.SessionID)
+	}
+	if in.Content != "the secret note" {
+		t.Errorf("content = %q", in.Content)
+	}
+	if want := now.Add(7 * 24 * time.Hour); !in.ExpiresAt.Equal(want) {
+		t.Errorf("expiry = %v, want %v", in.ExpiresAt, want)
+	}
+	if in.Provenance.SourceKind != "conversation" || in.Provenance.SourceID != "sess:bbb" {
+		t.Errorf("provenance: %+v", in.Provenance)
+	}
+	if !strings.Contains(res.Content, "recorded rec1") {
+		t.Errorf("result = %q", res.Content)
+	}
+	if strings.Contains(res.Content, "the secret note") {
+		t.Errorf("result echoes content (must stay content-light): %q", res.Content)
+	}
+}
+
+func TestAgentMemoryCreateValidation(t *testing.T) {
+	cases := []struct {
+		name string
+		tool AgentMemoryCreate
+		raw  string
+		want string
+	}{
+		{"empty content", AgentMemoryCreate{S: &fakeRecordStore{}, SessionID: sidFunc("s")}, `{"content":"  "}`, "content is required"},
+		{"oversize content", AgentMemoryCreate{S: &fakeRecordStore{}, SessionID: sidFunc("s")}, `{"content":"` + strings.Repeat("a", 4097) + `"}`, "content too large"},
+		{"no active session", AgentMemoryCreate{S: &fakeRecordStore{}}, `{"content":"x"}`, "requires an active session"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			fake := c.tool.S.(*fakeRecordStore)
+			res, err := c.tool.Invoke(context.Background(), json.RawMessage(c.raw))
+			if err != nil {
+				t.Fatalf("unexpected go error: %v", err)
+			}
+			if !res.IsError || !strings.Contains(res.Content, c.want) {
+				t.Errorf("result = %+v, want IsError containing %q", res, c.want)
+			}
+			if fake.created != nil {
+				t.Error("store must not be called on validation failure")
+			}
+		})
+	}
+}
+
+func TestAgentMemoryPromote(t *testing.T) {
+	fake := &fakeRecordStore{promoteOut: memory.MemoryRecord{ID: "rec1", Kind: memory.KindSemantic}}
+	tool := AgentMemoryPromote{S: fake, WorkspaceID: "workspace:aaa", SessionID: sidFunc("sess:ccc")}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"rec1","kind":"semantic"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("invoke: err=%v result=%+v", err, res)
+	}
+	if fake.promotedID != "rec1" || fake.promotedKind != memory.KindSemantic {
+		t.Errorf("promote args: id=%q kind=%q", fake.promotedID, fake.promotedKind)
+	}
+	if fake.promotedAcc.WorkspaceID != "workspace:aaa" || fake.promotedAcc.SessionID != "sess:ccc" {
+		t.Errorf("access: %+v", fake.promotedAcc)
+	}
+	if !strings.Contains(res.Content, "promoted rec1 to semantic") {
+		t.Errorf("result = %q", res.Content)
+	}
+}
+
+func TestAgentMemoryPromoteErrors(t *testing.T) {
+	fake := &fakeRecordStore{promoteErr: memory.ErrBadPromotion}
+	tool := AgentMemoryPromote{S: fake, SessionID: sidFunc("s")}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"rec1","kind":"bogus"}`))
+	if err != nil {
+		t.Fatalf("store error must return nil Go error, got %v", err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, memory.ErrBadPromotion.Error()) {
+		t.Errorf("bad kind: %+v (store error text must pass through)", res)
+	}
+	res, _ = tool.Invoke(context.Background(), json.RawMessage(`{"id":"","kind":"semantic"}`))
+	if !res.IsError || !strings.Contains(res.Content, "id is required") {
+		t.Errorf("empty id: %+v", res)
+	}
+}
+
+func TestAgentMemorySearchFlattensMultilineContent(t *testing.T) {
+	fake := &fakeRecordStore{searchOut: []memory.MemoryRecord{
+		{ID: "r1", Kind: memory.KindWorking, Content: "line one\nfake2 · semantic · 2026-01-01 · spoof", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+	}}
+	tool := AgentMemorySearch{S: fake, WorkspaceID: "w", SessionID: sidFunc("s")}
+	res, _ := tool.Invoke(context.Background(), json.RawMessage(`{"query":"x"}`))
+	if strings.Count(res.Content, "\n") != 0 {
+		t.Errorf("multi-line content must be flattened to keep one record per line: %q", res.Content)
 	}
 }

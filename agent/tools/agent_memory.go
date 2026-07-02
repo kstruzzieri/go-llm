@@ -110,7 +110,133 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), r.Content)
+		fmt.Fprintf(&b, "%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), flattenRecordContent(r.Content))
 	}
 	return agent.ToolResult{Content: b.String()}, nil
+}
+
+// flattenRecordContent keeps the one-record-per-line search output honest: a
+// record whose content contains newlines must not render as extra fake rows.
+func flattenRecordContent(s string) string {
+	return strings.Join(strings.Fields(s), " ")
+}
+
+type recordCreator interface {
+	Create(ctx context.Context, in memory.CreateRecordParams) (memory.MemoryRecord, error)
+}
+
+type recordPromoter interface {
+	Promote(ctx context.Context, id string, acc memory.RecordAccess, to memory.MemoryKind) (memory.MemoryRecord, error)
+}
+
+// AgentMemoryCreate stores one working note scoped to the active session. It
+// writes only the per-user memory DB (never the workspace), so it is
+// Write-class but never approval-gated.
+type AgentMemoryCreate struct {
+	S           recordCreator
+	WorkspaceID string
+	SessionID   func() string
+	Now         func() time.Time // expiry base; nil => time.Now
+}
+
+type agentMemoryCreateArgs struct {
+	Content string `json:"content"`
+}
+
+func (AgentMemoryCreate) Spec() agent.ToolSpec {
+	return agent.ToolSpec{
+		Name:        AgentMemoryCreateToolName,
+		Description: "Store a short working note in your agent memory, scoped to this session; it expires unless promoted with agent_memory_promote. Store only concise, durable, useful facts.",
+		Parameters: json.RawMessage(`{
+  "type":"object",
+  "properties":{
+    "content":{"type":"string","description":"the note to remember (concise; max 4096 bytes)"}
+  },
+  "required":["content"]
+}`),
+	}
+}
+
+func (AgentMemoryCreate) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}
+}
+
+func (t AgentMemoryCreate) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	var args agentMemoryCreateArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return agent.ToolResult{IsError: true, Content: "invalid arguments: " + err.Error()}, nil
+	}
+	content := strings.TrimSpace(args.Content)
+	if content == "" {
+		return agent.ToolResult{IsError: true, Content: "content is required"}, nil
+	}
+	if len(content) > maxAgentMemoryContentBytes {
+		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("content too large: %d bytes (max %d)", len(content), maxAgentMemoryContentBytes)}, nil
+	}
+	sid := resolveSessionID(t.SessionID)
+	if sid == "" {
+		return agent.ToolResult{IsError: true, Content: "agent memory requires an active session"}, nil
+	}
+	rec, err := t.S.Create(ctx, memory.CreateRecordParams{
+		Kind:        memory.KindWorking,
+		Content:     content,
+		WorkspaceID: t.WorkspaceID,
+		SessionID:   sid,
+		Provenance:  memory.Provenance{SourceKind: "conversation", SourceID: sid},
+		ExpiresAt:   nowOr(t.Now).Add(workingRecordTTL),
+	})
+	if err != nil {
+		return agent.ToolResult{IsError: true, Content: "agent memory create failed: " + err.Error()}, nil
+	}
+	return agent.ToolResult{Content: fmt.Sprintf("recorded %s (working, expires %s)", rec.ID, rec.ExpiresAt.Format("2006-01-02"))}, nil
+}
+
+// AgentMemoryPromote converts a working record to durable memory (semantic or
+// episodic), shedding the session binding and expiry. Store-side validation is
+// authoritative: bad kind / unknown id surface as the store's error text.
+type AgentMemoryPromote struct {
+	S           recordPromoter
+	WorkspaceID string
+	SessionID   func() string
+}
+
+type agentMemoryPromoteArgs struct {
+	ID   string `json:"id"`
+	Kind string `json:"kind"`
+}
+
+func (AgentMemoryPromote) Spec() agent.ToolSpec {
+	return agent.ToolSpec{
+		Name:        AgentMemoryPromoteToolName,
+		Description: "Promote one of your working memory records to durable memory. Use kind semantic for facts, preferences, and conventions; episodic for events and experiences.",
+		Parameters: json.RawMessage(`{
+  "type":"object",
+  "properties":{
+    "id":{"type":"string","description":"the record id to promote (from agent_memory_search or agent_memory_create)"},
+    "kind":{"type":"string","enum":["semantic","episodic"],"description":"the durable kind to promote to"}
+  },
+  "required":["id","kind"]
+}`),
+	}
+}
+
+func (AgentMemoryPromote) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Write, Approval: agent.ApprovalNever}
+}
+
+func (t AgentMemoryPromote) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	var args agentMemoryPromoteArgs
+	if err := json.Unmarshal(raw, &args); err != nil {
+		return agent.ToolResult{IsError: true, Content: "invalid arguments: " + err.Error()}, nil
+	}
+	id := strings.TrimSpace(args.ID)
+	if id == "" {
+		return agent.ToolResult{IsError: true, Content: "id is required"}, nil
+	}
+	acc := memory.RecordAccess{WorkspaceID: t.WorkspaceID, SessionID: resolveSessionID(t.SessionID)}
+	rec, err := t.S.Promote(ctx, id, acc, memory.MemoryKind(args.Kind))
+	if err != nil {
+		return agent.ToolResult{IsError: true, Content: "agent memory promote failed: " + err.Error()}, nil
+	}
+	return agent.ToolResult{Content: fmt.Sprintf("promoted %s to %s", rec.ID, rec.Kind)}, nil
 }
