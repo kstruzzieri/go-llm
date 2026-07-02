@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"database/sql"
 	"errors"
 	"flag"
 	"fmt"
@@ -17,7 +16,6 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
-	"github.com/kstruzzieri/go-llm/memory"
 )
 
 type flags struct {
@@ -40,6 +38,7 @@ type flags struct {
 	noProjectContext bool
 	noCompress       bool
 	noMemory         bool
+	agentMemory      bool
 	trace            bool
 	telemetry        bool
 	pressureWarn     int
@@ -68,6 +67,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
+	fs.BoolVar(&f.agentMemory, "agent-memory", false, "enable agent-authored memory records (agent_memory_* tools, /records; requires sessions)")
 	fs.StringVar(&f.sessionID, "session", "", "explicit session id to resume or create (default: per-workspace)")
 	// -trace persists a full per-run trace (may contain workspace/user content; for replay/eval).
 	// -telemetry appends content-light run metrics only (timings, route, usage; no prompt or output).
@@ -110,6 +110,7 @@ type startupInfo struct {
 	sessionLine        string
 	projectContextLine string
 	memoryLine         string
+	agentMemoryLine    string
 	mcpLine            string
 }
 
@@ -122,6 +123,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.memoryLine != "" {
 		out = append(out, info.memoryLine)
+	}
+	if info.agentMemoryLine != "" {
+		out = append(out, info.agentMemoryLine)
 	}
 	if info.mcpLine != "" {
 		out = append(out, info.mcpLine)
@@ -259,23 +263,21 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	retrieveOmitted := retrieve == nil
 
-	var memStore *memory.SQLiteStore
-	var memDB *sql.DB
-	var memDBPath string
-	memoryEnabled := false
-	if !f.noMemory {
-		if dbPath, derr := memoryDBPathForWorkspace(os.Getenv, root); derr != nil {
-			warns = append(warns, "memory disabled: "+derr.Error())
-		} else if store, db, oerr := openMemoryStore(ctx, dbPath); oerr != nil {
-			warns = append(warns, "memory disabled: "+oerr.Error())
-		} else {
-			memStore, memDB, memDBPath, memoryEnabled = store, db, dbPath, true
-			tools = append(tools, agenttools.MemorySearch{S: store, WorkspaceID: workspaceID(root), Limit: 8})
-		}
+	wantAgentMemory := f.agentMemory
+	if wantAgentMemory && f.noSession {
+		warns = append(warns, "agent memory disabled: requires a session (drop -no-session)")
+		wantAgentMemory = false
+	}
+	mrt := openMemoryRuntime(ctx, os.Getenv, root, !f.noMemory, wantAgentMemory)
+	warns = append(warns, mrt.warns...)
+	memoryEnabled := mrt.user != nil
+	agentMemoryEnabled := mrt.records != nil
+	if memoryEnabled {
+		tools = append(tools, agenttools.MemorySearch{S: mrt.user, WorkspaceID: workspaceID(root), Limit: 8})
 	}
 	defer func() {
-		if memDB != nil {
-			_ = memDB.Close()
+		if mrt.db != nil {
+			_ = mrt.db.Close()
 		}
 	}()
 
@@ -327,6 +329,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
 	baseSystem += memorySystemFragment(memoryEnabled)
+	baseSystem += agentMemorySystemFragment(agentMemoryEnabled)
 	projectContextLine := ""
 	if !f.noProjectContext {
 		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
@@ -356,9 +359,30 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	defer func() { _ = sessn.Close() }() // nil-safe
 
+	if agentMemoryEnabled {
+		// SessionID is read at call time: if the session failed to open at
+		// runtime, sid() returns "" and create degrades to its IsError path.
+		sid := func() string {
+			if sessn == nil {
+				return ""
+			}
+			return sessn.id
+		}
+		ws := workspaceID(root)
+		tools = append(tools,
+			agenttools.AgentMemorySearch{S: mrt.records, WorkspaceID: ws, SessionID: sid},
+			sidecarSecuringTool{Tool: agenttools.AgentMemoryCreate{S: mrt.records, WorkspaceID: ws, SessionID: sid}, dbPath: mrt.dbPath},
+			sidecarSecuringTool{Tool: agenttools.AgentMemoryPromote{S: mrt.records, WorkspaceID: ws, SessionID: sid}, dbPath: mrt.dbPath},
+		)
+	}
+
 	memoryLine := ""
 	if memoryEnabled {
 		memoryLine = "memory: enabled"
+	}
+	agentMemoryLine := ""
+	if agentMemoryEnabled {
+		agentMemoryLine = "agent memory: enabled"
 	}
 	for _, line := range startupNotices(startupInfo{
 		workspace:          root,
@@ -371,6 +395,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
+		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
@@ -419,8 +444,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		allowWrite:   f.allowWrite,
 		allowExec:    f.allowExec,
 		mcpAttached:  mcpAttached,
-		memory:       memStore,
-		memoryDBPath: memDBPath,
+		memory:       mrt.user,
+		memoryDBPath: mrt.dbPath,
+		records:      mrt.records,
 		workspaceID:  workspaceID(root),
 		obs:          obsv,
 		pressureWarn: f.pressureWarn > 0,
