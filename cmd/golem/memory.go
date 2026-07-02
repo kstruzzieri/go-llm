@@ -82,25 +82,6 @@ func openMemoryDB(ctx context.Context, dbPath string) (*sql.DB, error) {
 	return db, nil
 }
 
-// openMemoryStore prepares the hardened DB file, opens it WAL-mode single-conn,
-// runs migrations, and re-secures the file. Mirrors openSession.
-func openMemoryStore(ctx context.Context, dbPath string) (*memory.SQLiteStore, *sql.DB, error) {
-	db, err := openMemoryDB(ctx, dbPath)
-	if err != nil {
-		return nil, nil, err
-	}
-	store, err := memory.NewStore(ctx, db)
-	if err != nil {
-		_ = db.Close()
-		return nil, nil, fmt.Errorf("golem: init memory store: %w", err)
-	}
-	if err := chmodDBFiles(dbPath); err != nil {
-		_ = db.Close()
-		return nil, nil, err
-	}
-	return store, db, nil
-}
-
 func secureMemoryDBFiles(sess *replSession) {
 	if sess.memoryDBPath == "" {
 		return

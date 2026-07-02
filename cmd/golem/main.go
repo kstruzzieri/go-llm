@@ -362,6 +362,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if agentMemoryEnabled {
 		// SessionID is read at call time: if the session failed to open at
 		// runtime, sid() returns "" and create degrades to its IsError path.
+		// Registered after the session block (not beside MemorySearch) so sid
+		// can observe the opened session.
 		sid := func() string {
 			if sessn == nil {
 				return ""
@@ -380,10 +382,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if memoryEnabled {
 		memoryLine = "memory: enabled"
 	}
-	agentMemoryLine := ""
-	if agentMemoryEnabled {
-		agentMemoryLine = "agent memory: enabled"
-	}
+	agentMemoryLine := agentMemoryNotice(agentMemoryEnabled, sessn != nil)
 	for _, line := range startupNotices(startupInfo{
 		workspace:          root,
 		useRecommend:       plan.useRecommend,

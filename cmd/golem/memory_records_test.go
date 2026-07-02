@@ -430,3 +430,19 @@ func TestSidecarSecuringToolReChmods(t *testing.T) {
 		}
 	}
 }
+
+func TestAgentMemoryNotice(t *testing.T) {
+	cases := []struct {
+		enabled, sessionUp bool
+		want               string
+	}{
+		{false, true, ""},
+		{true, true, "agent memory: enabled"},
+		{true, false, "agent memory: enabled (session unavailable; working notes disabled)"},
+	}
+	for _, c := range cases {
+		if got := agentMemoryNotice(c.enabled, c.sessionUp); got != c.want {
+			t.Errorf("agentMemoryNotice(%v, %v) = %q, want %q", c.enabled, c.sessionUp, got, c.want)
+		}
+	}
+}

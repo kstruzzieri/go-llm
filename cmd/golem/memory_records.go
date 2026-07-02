@@ -70,6 +70,21 @@ func redactAgentMemoryToolCalls(calls []provider.ToolCall) []provider.ToolCall {
 	return out
 }
 
+// agentMemoryNotice renders the startup line for agent memory. When the
+// session failed to open at runtime, working-note creation is guaranteed to
+// error (no session id), so the notice must say so instead of a bare
+// "enabled" that contradicts observable behavior.
+func agentMemoryNotice(enabled, sessionUp bool) string {
+	switch {
+	case !enabled:
+		return ""
+	case !sessionUp:
+		return "agent memory: enabled (session unavailable; working notes disabled)"
+	default:
+		return "agent memory: enabled"
+	}
+}
+
 // memoryRuntime is the outcome of opening the shared memories.db for the
 // requested memory features. Zero value = everything disabled.
 type memoryRuntime struct {
