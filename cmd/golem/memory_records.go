@@ -106,6 +106,26 @@ func agentMemoryRequest(agentMemory, noSession bool) (want bool, warn string) {
 	return agentMemory, ""
 }
 
+func appendAgentMemoryTools(tools []agent.Tool, records *memory.MemoryRecordStore, dbPath, workspaceID string, sessn *session) []agent.Tool {
+	if records == nil {
+		return tools
+	}
+	sid := func() string {
+		if sessn == nil {
+			return ""
+		}
+		return sessn.id
+	}
+	tools = append(tools, agenttools.AgentMemorySearch{S: records, WorkspaceID: workspaceID, SessionID: sid})
+	if sessn == nil {
+		return tools
+	}
+	return append(tools,
+		sidecarSecuringTool{Tool: agenttools.AgentMemoryCreate{S: records, WorkspaceID: workspaceID, SessionID: sid}, dbPath: dbPath},
+		sidecarSecuringTool{Tool: agenttools.AgentMemoryPromote{S: records, WorkspaceID: workspaceID, SessionID: sid}, dbPath: dbPath},
+	)
+}
+
 // memoryRuntime is the outcome of opening the shared memories.db for the
 // requested memory features. Zero value = everything disabled.
 type memoryRuntime struct {

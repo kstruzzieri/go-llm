@@ -365,22 +365,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	baseSystem += agentMemorySystemFragment(agentMemoryEnabled, sessn != nil)
 
 	if agentMemoryEnabled {
-		// SessionID is read at call time: if the session failed to open at
-		// runtime, sid() returns "" and create degrades to its IsError path.
-		// Registered after the session block (not beside MemorySearch) so sid
-		// can observe the opened session.
-		sid := func() string {
-			if sessn == nil {
-				return ""
-			}
-			return sessn.id
-		}
-		ws := workspaceID(root)
-		tools = append(tools,
-			agenttools.AgentMemorySearch{S: mrt.records, WorkspaceID: ws, SessionID: sid},
-			sidecarSecuringTool{Tool: agenttools.AgentMemoryCreate{S: mrt.records, WorkspaceID: ws, SessionID: sid}, dbPath: mrt.dbPath},
-			sidecarSecuringTool{Tool: agenttools.AgentMemoryPromote{S: mrt.records, WorkspaceID: ws, SessionID: sid}, dbPath: mrt.dbPath},
-		)
+		tools = appendAgentMemoryTools(tools, mrt.records, mrt.dbPath, workspaceID(root), sessn)
 	}
 
 	memoryLine := ""

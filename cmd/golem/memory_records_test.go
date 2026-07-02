@@ -580,3 +580,33 @@ func TestAgentMemoryNotice(t *testing.T) {
 		}
 	}
 }
+
+func TestAppendAgentMemoryToolsRequiresSessionForWrites(t *testing.T) {
+	sess, dbPath := newTestReplWithRecords(t)
+	names := func(tools []agent.Tool) map[string]bool {
+		out := make(map[string]bool, len(tools))
+		for _, tl := range tools {
+			out[tl.Spec().Name] = true
+		}
+		return out
+	}
+
+	noSession := names(appendAgentMemoryTools(nil, sess.records, dbPath, sess.workspaceID, nil))
+	if !noSession[agenttools.AgentMemorySearchToolName] {
+		t.Fatal("agent-memory search must remain available without a session")
+	}
+	if noSession[agenttools.AgentMemoryCreateToolName] || noSession[agenttools.AgentMemoryPromoteToolName] {
+		t.Fatalf("create/promote must not be registered without a session: %+v", noSession)
+	}
+
+	withSession := names(appendAgentMemoryTools(nil, sess.records, dbPath, sess.workspaceID, sess.session))
+	for _, name := range []string{
+		agenttools.AgentMemorySearchToolName,
+		agenttools.AgentMemoryCreateToolName,
+		agenttools.AgentMemoryPromoteToolName,
+	} {
+		if !withSession[name] {
+			t.Fatalf("missing %s with active session: %+v", name, withSession)
+		}
+	}
+}
