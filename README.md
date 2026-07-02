@@ -242,6 +242,17 @@ golem -root /path/to/project -allow-write -allow-exec
 
 Inside the REPL, use `/help`, `/tools`, `/model`, `/new`, `/clear`, `/undo`, and `/exit`. Any other line is sent to the agent as the current goal.
 
+### Scripting / one-shot mode
+
+`-p` runs a single agent turn without the REPL and prints only the final answer to stdout, so the output is safe to capture in scripts. All progress, warnings, and errors go to stderr, and failures exit non-zero. One-shot implies `-no-session` and `-no-compress` (nothing is persisted, and no agent-memory records are written), and approval-gated tools stay unavailable — `-allow-write`/`-allow-exec` are ignored because there is no interactive approver to answer the prompt.
+
+Generate a commit message from a staged diff:
+
+```bash
+msg=$(golem -root /path/to/project -p "Write a conventional commit message for this diff, output only the message: $(git diff --cached)")
+git commit -m "$msg"
+```
+
 ### MCP server
 
 Expose go-llm to Claude Desktop, IDE extensions, or any MCP client:
