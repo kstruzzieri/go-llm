@@ -21,6 +21,8 @@ import (
 type flags struct {
 	configPath       string
 	root             string
+	prompt           string
+	promptSet        bool // -p was passed (distinguishes an explicit empty prompt)
 	ollamaURL        string
 	ragDB            string
 	maxSteps         int
@@ -52,6 +54,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
+	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
 	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
 	fs.IntVar(&f.inputCeiling, "input-ceiling", 0, "token input ceiling (0 => default)")
@@ -79,11 +82,22 @@ func parseFlags(args []string) (flags, error) {
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "p" {
+			f.promptSet = true
+		}
+	})
 	return f, nil
 }
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if f.promptSet && strings.TrimSpace(f.prompt) == "" {
+		return fmt.Errorf("golem: -p requires a non-empty prompt")
+	}
+	if f.promptSet && (f.fresh || f.sessionID != "") {
+		return fmt.Errorf("golem: -p (one-shot) is incompatible with -session and -fresh")
+	}
 	if f.fresh && f.sessionID != "" {
 		return fmt.Errorf("golem: -fresh and -session are mutually exclusive")
 	}
@@ -97,6 +111,25 @@ func validateFlags(f flags) error {
 		return fmt.Errorf("golem: -feedback-db requires -feedback")
 	}
 	return nil
+}
+
+// applyOneShotMode forces the scripting-safe defaults -p implies: no session
+// persistence, no post-turn compression, and no approval-gated tools (there is
+// no interactive approver to answer the prompt, so -allow-write/-allow-exec
+// are dropped with a warning instead of dangling unanswerable approvals).
+func applyOneShotMode(f flags) (flags, []string) {
+	if !f.promptSet {
+		return f, nil
+	}
+	var warns []string
+	f.noSession = true
+	f.noCompress = true
+	if f.allowWrite || f.allowExec {
+		warns = append(warns, "one-shot: -allow-write/-allow-exec ignored (approval prompts need the REPL); write/exec tools unavailable")
+		f.allowWrite = false
+		f.allowExec = false
+	}
+	return f, warns
 }
 
 type startupInfo struct {
@@ -161,8 +194,8 @@ func main() {
 		if errors.Is(err, flag.ErrHelp) {
 			return
 		}
-		// runIndex already rendered its own output; just exit non-zero.
-		if errors.Is(err, errIndexFailed) {
+		// runIndex/runOneShot already rendered their own output; just exit non-zero.
+		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) {
 			os.Exit(1)
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
@@ -187,6 +220,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err := validateFlags(f); err != nil {
 		return err
 	}
+	f, oneShotWarns := applyOneShotMode(f)
 
 	root, err := filepath.Abs(f.root)
 	if err != nil {
@@ -221,6 +255,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err != nil {
 		return err
 	}
+	warns = append(warns, oneShotWarns...)
 
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	autoSidecar := ""
@@ -457,6 +492,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		}
 	}()
 
+	if f.promptSet {
+		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
+	}
 	return runREPL(ctx, stdin, stdout, interrupts, sess)
 }
 

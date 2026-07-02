@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -71,11 +72,35 @@ func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan
 			}
 			continue
 		}
-		runOnce(ctx, out, interrupts, sess, line, lr)
+		_, _ = runOnce(ctx, out, interrupts, sess, line, lr)
 	}
 }
 
-func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, lr *lineReader) {
+// errOneShotFailed signals a one-shot turn that already reported its failure
+// on stderr; main exits non-zero without printing a second message.
+var errOneShotFailed = errors.New("one-shot run failed")
+
+// runOneShot executes exactly one agent turn for -p. Only the final answer is
+// written to stdout (with a single trailing newline); every other line the
+// turn produces — tool progress, warnings, errors — goes to stderr via
+// runOnce. A nil lineReader means no interactive approver exists, so the
+// runtime fail-safe denies any approval-gated tool call.
+func runOneShot(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, prompt string) error {
+	res, runErr := runOnce(ctx, stderr, interrupts, sess, prompt, nil)
+	if runErr != nil {
+		return errOneShotFailed // runOnce already reported the failure on stderr
+	}
+	if strings.TrimSpace(res.Answer) == "" {
+		return errors.New("one-shot: model produced no final answer")
+	}
+	_, _ = fmt.Fprintln(stdout, strings.TrimRight(res.Answer, "\n"))
+	return nil
+}
+
+// runOnce runs a single agent turn, rendering all progress and errors to out.
+// It returns the run result so runOneShot can extract the final answer; the
+// REPL ignores it.
+func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, sess *replSession, line string, lr *lineReader) (agent.Result, error) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -102,7 +127,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	}
 
 	var approver agent.Approver
-	if needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
+	if lr != nil && needsApprover(sess.allowWrite, sess.allowExec, sess.mcpAttached) {
 		approver = newReplApprover(lr, out, sess.color)
 	}
 
@@ -171,10 +196,10 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if runErr != nil {
 		if runCtx.Err() != nil {
 			_, _ = fmt.Fprintln(out, "\ncanceled")
-			return
+			return res, runErr
 		}
 		_, _ = fmt.Fprintf(out, "\nerror: %v\n", runErr)
-		return
+		return res, runErr
 	}
 	if m := lastRoutedModel(res); m != "" {
 		sess.lastModel = m
@@ -190,6 +215,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}
 	}
 	rend.finalFooter(res)
+	return res, nil
 }
 
 // lastRoutedModel returns the ActualModel of the last step that carried a
