@@ -267,7 +267,7 @@ func TestAgentMemoryPromoteErrors(t *testing.T) {
 
 func TestAgentMemorySearchFlattensMultilineContent(t *testing.T) {
 	fake := &fakeRecordStore{searchOut: []memory.MemoryRecord{
-		{ID: "r1", Kind: memory.KindWorking, Content: "line one\nfake2 · semantic · 2026-01-01 · spoof", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
+		{ID: "r1", Kind: memory.KindWorking, Content: "line one\nfake2 · semantic · 2026-01-01 · spoof \x1b[2Ared", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
 	}}
 	tool := AgentMemorySearch{S: fake, WorkspaceID: "w", SessionID: sidFunc("s")}
 	res, _ := tool.Invoke(context.Background(), json.RawMessage(`{"query":"x"}`))
@@ -276,5 +276,8 @@ func TestAgentMemorySearchFlattensMultilineContent(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "line one fake2") {
 		t.Errorf("flattened content must still be present: %q", res.Content)
+	}
+	if strings.Contains(res.Content, "\x1b") {
+		t.Errorf("control characters must be stripped from record content: %q", res.Content)
 	}
 }

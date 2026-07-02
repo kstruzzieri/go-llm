@@ -279,6 +279,31 @@ func TestRecordsCommands(t *testing.T) {
 	}
 }
 
+func TestRecordsListSanitizesContent(t *testing.T) {
+	ctx := context.Background()
+	sess, _ := newTestReplWithRecords(t)
+	rec, err := sess.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindWorking, Content: "line1\nfake-row \x1b[31mred",
+		WorkspaceID: sess.workspaceID, SessionID: sess.session.id,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	var out bytes.Buffer
+	handleRecords(ctx, &out, sess, []string{"/records"})
+	got := out.String()
+	if !strings.Contains(got, "line1 fake-row") {
+		t.Errorf("flattened content missing: %q", got)
+	}
+	if strings.Contains(got, "\x1b") {
+		t.Errorf("ANSI escape reached terminal output: %q", got)
+	}
+	// One record must render as exactly one line (no forged extra rows).
+	if n := strings.Count(strings.TrimRight(got, "\n"), "\n"); n != 0 {
+		t.Errorf("record %s rendered as %d extra line(s): %q", rec.ID, n, got)
+	}
+}
+
 func TestRecordsCommandsDisabled(t *testing.T) {
 	var out bytes.Buffer
 	sess := &replSession{} // records nil

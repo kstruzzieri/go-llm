@@ -252,7 +252,10 @@ func listRecords(ctx context.Context, out io.Writer, sess *replSession) {
 		if !r.ExpiresAt.IsZero() {
 			expires = r.ExpiresAt.Format("2006-01-02")
 		}
+		// Model-authored content is untrusted for terminal display: flatten to
+		// one line and strip control chars so a record cannot forge extra rows
+		// or emit ANSI escapes in the table users act on (--forget/--promote).
 		_, _ = fmt.Fprintf(out, "%s  %s  %s  %s  %s\n",
-			r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), expires, r.Content)
+			r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), expires, agenttools.FlattenRecordContent(r.Content))
 	}
 }

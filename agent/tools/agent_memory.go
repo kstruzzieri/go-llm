@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/memory"
@@ -110,15 +111,24 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), flattenRecordContent(r.Content))
+		fmt.Fprintf(&b, "%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
 	}
 	return agent.ToolResult{Content: b.String()}, nil
 }
 
-// flattenRecordContent keeps the one-record-per-line search output honest: a
-// record whose content contains newlines must not render as extra fake rows.
-func flattenRecordContent(s string) string {
-	return strings.Join(strings.Fields(s), " ")
+// FlattenRecordContent is the shared display-sanitizer for record content: one
+// line, no control characters. It keeps one-record-per-line output honest — a
+// record whose content contains newlines must not render as extra fake rows,
+// and control characters (e.g. ANSI escapes) must not pass through either.
+// Used by both the agent_memory_search tool result and golem's /records list.
+func FlattenRecordContent(s string) string {
+	flat := strings.Join(strings.Fields(s), " ")
+	return strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, flat)
 }
 
 type recordCreator interface {
