@@ -130,8 +130,15 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 		return memoryRuntime{warns: rt.warns}
 	}
 	// Migrations may have (re)created -wal/-shm honoring the umask; re-secure.
+	// Warn only still-live features: one that already warned above (e.g. record
+	// store construction failed) must not warn a second time.
 	if cerr := chmodDBFiles(dbPath); cerr != nil {
-		warnBoth(cerr.Error())
+		if rt.user != nil {
+			rt.warns = append(rt.warns, "memory disabled: "+cerr.Error())
+		}
+		if rt.records != nil {
+			rt.warns = append(rt.warns, "agent memory disabled: "+cerr.Error())
+		}
 		_ = db.Close()
 		return memoryRuntime{warns: rt.warns}
 	}

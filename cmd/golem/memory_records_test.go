@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -158,6 +159,29 @@ func TestOpenMemoryRuntimeRecordsOnly(t *testing.T) {
 
 func TestOpenMemoryRuntimeFailOpen(t *testing.T) {
 	getenv := func(string) string { return "" } // no HOME, no XDG => path resolution fails
+	rt := openMemoryRuntime(context.Background(), getenv, "/some/workspace/root", true, true)
+	if rt.user != nil || rt.records != nil || rt.db != nil {
+		t.Fatalf("expected everything disabled: %+v", rt)
+	}
+	joined := strings.Join(rt.warns, "\n")
+	if !strings.Contains(joined, "memory disabled:") || !strings.Contains(joined, "agent memory disabled:") {
+		t.Errorf("both features must warn: %v", rt.warns)
+	}
+}
+
+func TestOpenMemoryRuntimeDBOpenFailure(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	// A directory at the db path makes prepareDBFile/open fail after path
+	// resolution succeeds, exercising the openMemoryDB-failure branch.
+	if err := os.MkdirAll(filepath.Join(home, ".local", "share", "golem", "memories.db"), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	rt := openMemoryRuntime(context.Background(), getenv, "/some/workspace/root", true, true)
 	if rt.user != nil || rt.records != nil || rt.db != nil {
 		t.Fatalf("expected everything disabled: %+v", rt)
