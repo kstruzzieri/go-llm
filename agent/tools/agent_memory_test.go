@@ -229,7 +229,7 @@ func TestAgentMemoryCreateValidation(t *testing.T) {
 }
 
 func TestAgentMemoryPromote(t *testing.T) {
-	fake := &fakeRecordStore{promoteOut: memory.MemoryRecord{ID: "rec1", Kind: memory.KindSemantic}}
+	fake := &fakeRecordStore{promoteOut: memory.MemoryRecord{ID: "rec1", Kind: memory.KindSemantic, Content: "the secret note"}}
 	tool := AgentMemoryPromote{S: fake, WorkspaceID: "workspace:aaa", SessionID: sidFunc("sess:ccc")}
 	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"id":"rec1","kind":"semantic"}`))
 	if err != nil || res.IsError {
@@ -243,6 +243,9 @@ func TestAgentMemoryPromote(t *testing.T) {
 	}
 	if !strings.Contains(res.Content, "promoted rec1 to semantic") {
 		t.Errorf("result = %q", res.Content)
+	}
+	if strings.Contains(res.Content, "the secret note") {
+		t.Errorf("result echoes content (must stay content-light): %q", res.Content)
 	}
 }
 
@@ -270,5 +273,8 @@ func TestAgentMemorySearchFlattensMultilineContent(t *testing.T) {
 	res, _ := tool.Invoke(context.Background(), json.RawMessage(`{"query":"x"}`))
 	if strings.Count(res.Content, "\n") != 0 {
 		t.Errorf("multi-line content must be flattened to keep one record per line: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "line one fake2") {
+		t.Errorf("flattened content must still be present: %q", res.Content)
 	}
 }
