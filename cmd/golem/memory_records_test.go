@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -212,4 +213,166 @@ func TestOpenMemoryRuntimeUserOnlyNoAgentWarn(t *testing.T) {
 		t.Fatalf("user-only open wrong: %+v", rt)
 	}
 	_ = rt.db.Close()
+}
+
+func newTestReplWithRecords(t *testing.T) (*replSession, string) {
+	t.Helper()
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "memories.db")
+	db, err := openMemoryDB(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	rs, err := memory.NewMemoryRecordStore(ctx, db)
+	if err != nil {
+		t.Fatalf("record store: %v", err)
+	}
+	if err := chmodDBFiles(dbPath); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	sess := &replSession{records: rs, memoryDBPath: dbPath, workspaceID: "workspace:aaa"}
+	sess.session = &session{id: "workspace:aaa"} // handlers only read .id
+	return sess, dbPath
+}
+
+func TestRecordsCommands(t *testing.T) {
+	ctx := context.Background()
+	sess, _ := newTestReplWithRecords(t)
+	rec, err := sess.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindWorking, Content: "note body",
+		WorkspaceID: sess.workspaceID, SessionID: sess.session.id,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	var out bytes.Buffer
+	handleRecords(ctx, &out, sess, []string{"/records"})
+	if !strings.Contains(out.String(), rec.ID) || !strings.Contains(out.String(), "note body") {
+		t.Errorf("list output: %q", out.String())
+	}
+
+	out.Reset()
+	handleRecords(ctx, &out, sess, []string{"/records", "--promote", rec.ID, "semantic"})
+	if !strings.Contains(out.String(), "promoted "+rec.ID+" to semantic") {
+		t.Errorf("promote output: %q", out.String())
+	}
+
+	out.Reset()
+	handleRecords(ctx, &out, sess, []string{"/records", "--forget", rec.ID})
+	if !strings.Contains(out.String(), "forgot record "+rec.ID) {
+		t.Errorf("forget output: %q", out.String())
+	}
+
+	out.Reset()
+	handleRecords(ctx, &out, sess, []string{"/records"})
+	if !strings.Contains(out.String(), "no records") {
+		t.Errorf("post-forget list: %q", out.String())
+	}
+
+	out.Reset()
+	handleRecords(ctx, &out, sess, []string{"/records", "--bogus"})
+	if !strings.Contains(out.String(), "usage:") {
+		t.Errorf("usage output: %q", out.String())
+	}
+}
+
+func TestRecordsCommandsDisabled(t *testing.T) {
+	var out bytes.Buffer
+	sess := &replSession{} // records nil
+	handleRecords(context.Background(), &out, sess, []string{"/records"})
+	if !strings.Contains(out.String(), "agent memory disabled") {
+		t.Errorf("disabled output: %q", out.String())
+	}
+}
+
+func TestRecordsSlashReSecuresSidecars(t *testing.T) {
+	ctx := context.Background()
+	sess, dbPath := newTestReplWithRecords(t)
+	rec, err := sess.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindWorking, Content: "x",
+		WorkspaceID: sess.workspaceID, SessionID: sess.session.id,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	loosen := func() {
+		for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+			if _, err := os.Stat(p); err == nil {
+				_ = os.Chmod(p, 0o644)
+			}
+		}
+	}
+	assertTight := func(when string) {
+		t.Helper()
+		for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+			info, err := os.Stat(p)
+			if err != nil {
+				continue // sidecar may not exist; nothing to leak
+			}
+			if info.Mode().Perm() != 0o600 {
+				t.Errorf("%s: %s mode = %v, want 0600", when, p, info.Mode().Perm())
+			}
+		}
+	}
+	var out bytes.Buffer
+	loosen()
+	handleRecords(ctx, &out, sess, []string{"/records", "--promote", rec.ID, "semantic"})
+	assertTight("after --promote")
+	loosen()
+	handleRecords(ctx, &out, sess, []string{"/records", "--forget", rec.ID})
+	assertTight("after --forget")
+}
+
+func TestSidecarSecuringToolReChmods(t *testing.T) {
+	ctx := context.Background()
+	sess, dbPath := newTestReplWithRecords(t)
+	inner := agenttools.AgentMemoryCreate{
+		S: sess.records, WorkspaceID: sess.workspaceID,
+		SessionID: func() string { return sess.session.id },
+	}
+	tool := sidecarSecuringTool{Tool: inner, dbPath: dbPath}
+	if tool.Spec().Name != agenttools.AgentMemoryCreateToolName {
+		t.Errorf("decorator must delegate Spec: %q", tool.Spec().Name)
+	}
+	if tool.Effect().Class != agent.Write {
+		t.Errorf("decorator must delegate Effect")
+	}
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			_ = os.Chmod(p, 0o644)
+		}
+	}
+	res, err := tool.Invoke(ctx, json.RawMessage(`{"content":"hello"}`))
+	if err != nil || res.IsError {
+		t.Fatalf("invoke: err=%v res=%+v", err, res)
+	}
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %v, want 0600 after tool write", p, info.Mode().Perm())
+		}
+	}
+	// re-chmod must also run when the inner tool errors
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		if _, err := os.Stat(p); err == nil {
+			_ = os.Chmod(p, 0o644)
+		}
+	}
+	if res, _ := tool.Invoke(ctx, json.RawMessage(`{"content":""}`)); !res.IsError {
+		t.Fatal("expected IsError for empty content")
+	}
+	for _, p := range []string{dbPath + "-wal", dbPath + "-shm"} {
+		info, err := os.Stat(p)
+		if err != nil {
+			continue
+		}
+		if info.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %v, want 0600 after erroring tool write", p, info.Mode().Perm())
+		}
+	}
 }

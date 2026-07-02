@@ -300,8 +300,7 @@ func resultConversationMessages(userLine string, res agent.Result) ([]conversati
 		}
 		if m.Role == "tool" && m.ToolName == agenttools.MemorySearchToolName {
 			cm.Content = memorySearchRedactedMarker
-		}
-		if m.Role == "tool" && isAgentMemoryTool(m.ToolName) {
+		} else if m.Role == "tool" && isAgentMemoryTool(m.ToolName) {
 			cm.Content = agentMemoryResultRedactedMarker
 		}
 		if len(m.ToolCalls) > 0 {

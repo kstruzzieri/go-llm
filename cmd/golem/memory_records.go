@@ -4,7 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"io"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -144,4 +147,81 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 	}
 	rt.db, rt.dbPath = db, dbPath
 	return rt
+}
+
+// sidecarSecuringTool re-secures the memory DB file + sidecars after every
+// Invoke of a memory-writing tool (#237 lesson: every write path re-chmods,
+// not just the open path). Spec/Effect delegate via the embedded Tool.
+type sidecarSecuringTool struct {
+	agent.Tool
+	dbPath string
+}
+
+func (t sidecarSecuringTool) Invoke(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
+	res, err := t.Tool.Invoke(ctx, args)
+	_ = chmodDBFiles(t.dbPath)
+	return res, err
+}
+
+// recordAccess is the visibility scope golem presents for record reads and
+// mutations: this workspace plus the active session ("" when sessions are off).
+func recordAccess(sess *replSession) memory.RecordAccess {
+	acc := memory.RecordAccess{WorkspaceID: sess.workspaceID}
+	if sess.session != nil {
+		acc.SessionID = sess.session.id
+	}
+	return acc
+}
+
+func handleRecords(ctx context.Context, out io.Writer, sess *replSession, fields []string) {
+	if sess.records == nil {
+		_, _ = fmt.Fprintln(out, "agent memory disabled")
+		return
+	}
+	switch {
+	case len(fields) == 3 && fields[1] == "--forget":
+		if err := sess.records.SoftDelete(ctx, fields[2], recordAccess(sess)); err != nil {
+			_, _ = fmt.Fprintf(out, "forget failed: %v\n", err)
+			return
+		}
+		secureMemoryDBFiles(sess)
+		_, _ = fmt.Fprintf(out, "forgot record %s\n", fields[2])
+	case len(fields) == 4 && fields[1] == "--promote":
+		rec, err := sess.records.Promote(ctx, fields[2], recordAccess(sess), memory.MemoryKind(fields[3]))
+		if err != nil {
+			_, _ = fmt.Fprintf(out, "promote failed: %v\n", err)
+			return
+		}
+		secureMemoryDBFiles(sess)
+		_, _ = fmt.Fprintf(out, "promoted %s to %s\n", rec.ID, rec.Kind)
+	case len(fields) == 1:
+		listRecords(ctx, out, sess)
+	default:
+		_, _ = fmt.Fprintln(out, "usage: /records [--forget <id> | --promote <id> <semantic|episodic>]")
+	}
+}
+
+func listRecords(ctx context.Context, out io.Writer, sess *replSession) {
+	acc := recordAccess(sess)
+	rs, err := sess.records.Search(ctx, "", memory.RecordSearchOptions{
+		WorkspaceID: acc.WorkspaceID,
+		SessionID:   acc.SessionID,
+		Limit:       20,
+	})
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "records failed: %v\n", err)
+		return
+	}
+	if len(rs) == 0 {
+		_, _ = fmt.Fprintln(out, "no records")
+		return
+	}
+	for _, r := range rs {
+		expires := "-"
+		if !r.ExpiresAt.IsZero() {
+			expires = r.ExpiresAt.Format("2006-01-02")
+		}
+		_, _ = fmt.Fprintf(out, "%s  %s  %s  %s  %s\n",
+			r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), expires, r.Content)
+	}
 }
