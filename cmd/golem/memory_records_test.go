@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -427,6 +428,79 @@ func TestSidecarSecuringToolReChmods(t *testing.T) {
 		}
 		if info.Mode().Perm() != 0o600 {
 			t.Errorf("%s mode = %v, want 0600 after erroring tool write", p, info.Mode().Perm())
+		}
+	}
+}
+
+func TestAgentMemoryPersistsAcrossReopen(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	const sid = "workspace:stable" // default session id is stable across restarts
+	rt := openMemoryRuntime(ctx, getenv, "/some/workspace/root", true, true)
+	if rt.records == nil {
+		t.Fatalf("first open failed: %v", rt.warns)
+	}
+	rec, err := rt.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindWorking, Content: "survives restart",
+		WorkspaceID: "workspace:aaa", SessionID: sid,
+		ExpiresAt: time.Now().Add(24 * time.Hour),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := rt.db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	rt2 := openMemoryRuntime(ctx, getenv, "/some/workspace/root", true, true)
+	if rt2.records == nil {
+		t.Fatalf("reopen failed: %v", rt2.warns)
+	}
+	t.Cleanup(func() { _ = rt2.db.Close() })
+	got, err := rt2.records.Search(ctx, "restart", memory.RecordSearchOptions{
+		WorkspaceID: "workspace:aaa", SessionID: sid, Limit: 8, Now: time.Now(),
+	})
+	if err != nil {
+		t.Fatalf("search after reopen: %v", err)
+	}
+	if len(got) != 1 || got[0].ID != rec.ID || got[0].Content != "survives restart" {
+		t.Fatalf("record did not survive reopen: %+v", got)
+	}
+	// The store persists timestamps at millisecond precision (toMs/fromMs in
+	// memory/record_store.go), so the read-back ExpiresAt is ms-truncated while
+	// Create echoed the caller's ns-precision input; truncate the expected side.
+	if !got[0].ExpiresAt.Equal(rec.ExpiresAt.Truncate(time.Millisecond)) {
+		t.Errorf("expiry did not round-trip: got %v want %v", got[0].ExpiresAt, rec.ExpiresAt.Truncate(time.Millisecond))
+	}
+}
+
+func TestAgentMemoryRequest(t *testing.T) {
+	cases := []struct {
+		agentMemory, noSession bool
+		want                   bool
+		warnContains           string
+	}{
+		{false, false, false, ""},
+		{true, false, true, ""},
+		{true, true, false, "requires a session"},
+		{false, true, false, ""},
+	}
+	for _, c := range cases {
+		got, warn := agentMemoryRequest(c.agentMemory, c.noSession)
+		if got != c.want {
+			t.Errorf("agentMemoryRequest(%v, %v) = %v, want %v", c.agentMemory, c.noSession, got, c.want)
+		}
+		if c.warnContains == "" && warn != "" {
+			t.Errorf("agentMemoryRequest(%v, %v) warn = %q, want empty", c.agentMemory, c.noSession, warn)
+		}
+		if c.warnContains != "" && !strings.Contains(warn, c.warnContains) {
+			t.Errorf("agentMemoryRequest(%v, %v) warn = %q, want contains %q", c.agentMemory, c.noSession, warn, c.warnContains)
 		}
 	}
 }

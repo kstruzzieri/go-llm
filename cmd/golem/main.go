@@ -263,10 +263,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	retrieveOmitted := retrieve == nil
 
-	wantAgentMemory := f.agentMemory
-	if wantAgentMemory && f.noSession {
-		warns = append(warns, "agent memory disabled: requires a session (drop -no-session)")
-		wantAgentMemory = false
+	wantAgentMemory, agentMemoryWarn := agentMemoryRequest(f.agentMemory, f.noSession)
+	if agentMemoryWarn != "" {
+		warns = append(warns, agentMemoryWarn)
 	}
 	mrt := openMemoryRuntime(ctx, os.Getenv, root, !f.noMemory, wantAgentMemory)
 	warns = append(warns, mrt.warns...)

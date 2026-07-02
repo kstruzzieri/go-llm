@@ -85,6 +85,16 @@ func agentMemoryNotice(enabled, sessionUp bool) string {
 	}
 }
 
+// agentMemoryRequest applies the flag-level gate: agent memory needs sessions
+// (working records are session-scoped), so -no-session forces it off with a
+// warning instead of an error (fail-open, mirroring the other memory features).
+func agentMemoryRequest(agentMemory, noSession bool) (want bool, warn string) {
+	if agentMemory && noSession {
+		return false, "agent memory disabled: requires a session (drop -no-session)"
+	}
+	return agentMemory, ""
+}
+
 // memoryRuntime is the outcome of opening the shared memories.db for the
 // requested memory features. Zero value = everything disabled.
 type memoryRuntime struct {
