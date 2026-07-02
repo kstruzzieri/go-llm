@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -62,4 +65,76 @@ func redactAgentMemoryToolCalls(calls []provider.ToolCall) []provider.ToolCall {
 		}
 	}
 	return out
+}
+
+// memoryRuntime is the outcome of opening the shared memories.db for the
+// requested memory features. Zero value = everything disabled.
+type memoryRuntime struct {
+	user    *memory.SQLiteStore       // nil => user memories disabled
+	records *memory.MemoryRecordStore // nil => agent memory disabled
+	db      *sql.DB                   // shared handle; nil when nothing opened
+	dbPath  string
+	warns   []string
+}
+
+// openMemoryRuntime opens the shared memories.db once and constructs the
+// requested stores on the same hardened handle. Fail-open: every failure is a
+// warning plus a disabled feature, never a startup error. A DB open failure
+// disables all requested features sharing the handle; once the user store is
+// constructed, an agent-memory failure disables agent memory only (optional
+// wiring must not turn a healthy user-memory feature off).
+func openMemoryRuntime(ctx context.Context, getenv func(string) string, root string, wantUser, wantRecords bool) memoryRuntime {
+	var rt memoryRuntime
+	if !wantUser && !wantRecords {
+		return rt
+	}
+	warnBoth := func(msg string) {
+		if wantUser {
+			rt.warns = append(rt.warns, "memory disabled: "+msg)
+		}
+		if wantRecords {
+			rt.warns = append(rt.warns, "agent memory disabled: "+msg)
+		}
+	}
+	dbPath, err := memoryDBPathForWorkspace(getenv, root)
+	if err != nil {
+		warnBoth(err.Error())
+		return rt
+	}
+	db, err := openMemoryDB(ctx, dbPath)
+	if err != nil {
+		warnBoth(err.Error())
+		return rt
+	}
+	if wantUser {
+		store, serr := memory.NewStore(ctx, db)
+		if serr != nil {
+			// Both stores run the same migration chain; do not retry the record
+			// store on a handle whose migrations just failed.
+			warnBoth(serr.Error())
+			_ = db.Close()
+			return memoryRuntime{warns: rt.warns}
+		}
+		rt.user = store
+	}
+	if wantRecords {
+		rs, rerr := memory.NewMemoryRecordStore(ctx, db)
+		if rerr != nil {
+			rt.warns = append(rt.warns, "agent memory disabled: "+rerr.Error())
+		} else {
+			rt.records = rs
+		}
+	}
+	if rt.user == nil && rt.records == nil {
+		_ = db.Close()
+		return memoryRuntime{warns: rt.warns}
+	}
+	// Migrations may have (re)created -wal/-shm honoring the umask; re-secure.
+	if cerr := chmodDBFiles(dbPath); cerr != nil {
+		warnBoth(cerr.Error())
+		_ = db.Close()
+		return memoryRuntime{warns: rt.warns}
+	}
+	rt.db, rt.dbPath = db, dbPath
+	return rt
 }

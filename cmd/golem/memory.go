@@ -62,22 +62,32 @@ func memorySystemFragment(enabled bool) string {
 // result; this only affects what is stored.
 const memorySearchRedactedMarker = "memory_search result omitted from session history"
 
-// openMemoryStore prepares the hardened DB file, opens it WAL-mode single-conn,
-// runs migrations, and re-secures the file. Mirrors openSession.
-func openMemoryStore(ctx context.Context, dbPath string) (*memory.SQLiteStore, *sql.DB, error) {
+// openMemoryDB prepares the hardened DB file and opens it WAL-mode single-conn.
+// Store construction and the post-migration chmod are the caller's job.
+func openMemoryDB(ctx context.Context, dbPath string) (*sql.DB, error) {
 	if err := prepareDBFile(dbPath); err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		return nil, nil, fmt.Errorf("golem: open memory db %q: %w", dbPath, err)
+		return nil, fmt.Errorf("golem: open memory db %q: %w", dbPath, err)
 	}
 	db.SetMaxOpenConns(1)
 	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
 		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			_ = db.Close()
-			return nil, nil, fmt.Errorf("golem: memory db %s: %w", pragma, err)
+			return nil, fmt.Errorf("golem: memory db %s: %w", pragma, err)
 		}
+	}
+	return db, nil
+}
+
+// openMemoryStore prepares the hardened DB file, opens it WAL-mode single-conn,
+// runs migrations, and re-secures the file. Mirrors openSession.
+func openMemoryStore(ctx context.Context, dbPath string) (*memory.SQLiteStore, *sql.DB, error) {
+	db, err := openMemoryDB(ctx, dbPath)
+	if err != nil {
+		return nil, nil, err
 	}
 	store, err := memory.NewStore(ctx, db)
 	if err != nil {

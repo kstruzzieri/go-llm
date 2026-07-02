@@ -1,12 +1,15 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -99,4 +102,90 @@ func TestResultMessagesRedactsAgentMemory(t *testing.T) {
 	if !strings.Contains(string(res.Messages[1].ToolCalls[0].Function.Arguments), created) {
 		t.Error("live agent.Result mutated by persistence mapping")
 	}
+}
+
+func TestOpenMemoryRuntimeDualStores(t *testing.T) {
+	ctx := context.Background()
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	rt := openMemoryRuntime(ctx, getenv, "/some/workspace/root", true, true)
+	if len(rt.warns) != 0 {
+		t.Fatalf("warns: %v", rt.warns)
+	}
+	if rt.user == nil || rt.records == nil || rt.db == nil {
+		t.Fatalf("stores not constructed: %+v", rt)
+	}
+	t.Cleanup(func() { _ = rt.db.Close() })
+	info, err := os.Stat(rt.dbPath)
+	if err != nil || info.Mode().Perm() != 0o600 {
+		t.Errorf("db file mode: %v err=%v", info.Mode().Perm(), err)
+	}
+	if _, err := rt.user.Add(ctx, memory.AddParams{Text: "u", Scope: memory.ScopeGlobal}); err != nil {
+		t.Errorf("user store: %v", err)
+	}
+	if _, err := rt.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindWorking, Content: "r", WorkspaceID: "w", SessionID: "s",
+	}); err != nil {
+		t.Errorf("record store: %v", err)
+	}
+}
+
+func TestOpenMemoryRuntimeRecordsOnly(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	rt := openMemoryRuntime(context.Background(), getenv, "/some/workspace/root", false, true)
+	if len(rt.warns) != 0 {
+		t.Fatalf("warns: %v", rt.warns)
+	}
+	if rt.user != nil {
+		t.Error("user store constructed though not requested")
+	}
+	if rt.records == nil || rt.db == nil {
+		t.Fatalf("records store missing: %+v", rt)
+	}
+	_ = rt.db.Close()
+}
+
+func TestOpenMemoryRuntimeFailOpen(t *testing.T) {
+	getenv := func(string) string { return "" } // no HOME, no XDG => path resolution fails
+	rt := openMemoryRuntime(context.Background(), getenv, "/some/workspace/root", true, true)
+	if rt.user != nil || rt.records != nil || rt.db != nil {
+		t.Fatalf("expected everything disabled: %+v", rt)
+	}
+	joined := strings.Join(rt.warns, "\n")
+	if !strings.Contains(joined, "memory disabled:") || !strings.Contains(joined, "agent memory disabled:") {
+		t.Errorf("both features must warn: %v", rt.warns)
+	}
+}
+
+func TestOpenMemoryRuntimeNothingRequested(t *testing.T) {
+	rt := openMemoryRuntime(context.Background(), func(string) string { return "" }, "/r", false, false)
+	if rt.db != nil || rt.user != nil || rt.records != nil || len(rt.warns) != 0 {
+		t.Fatalf("expected zero value: %+v", rt)
+	}
+}
+
+func TestOpenMemoryRuntimeUserOnlyNoAgentWarn(t *testing.T) {
+	home := t.TempDir()
+	getenv := func(k string) string {
+		if k == "HOME" {
+			return home
+		}
+		return ""
+	}
+	rt := openMemoryRuntime(context.Background(), getenv, "/some/workspace/root", true, false)
+	if len(rt.warns) != 0 || rt.user == nil || rt.records != nil {
+		t.Fatalf("user-only open wrong: %+v", rt)
+	}
+	_ = rt.db.Close()
 }
