@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -52,7 +53,7 @@ func TestAgentMemorySearchScopesAndFormats(t *testing.T) {
 		{ID: "r1", Kind: memory.KindWorking, Content: "note one", CreatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)},
 		{ID: "r2", Kind: memory.KindSemantic, Content: "fact two", CreatedAt: time.Date(2026, 6, 30, 0, 0, 0, 0, time.UTC)},
 	}}
-	tool := AgentMemorySearch{S: fake, WorkspaceID: "workspace:aaa", SessionID: sidFunc("workspace:aaa")}
+	tool := AgentMemorySearch{S: fake, WorkspaceID: "workspace:aaa", SessionID: sidFunc("sess:bbb")}
 	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"note"}`))
 	if err != nil || res.IsError {
 		t.Fatalf("invoke: err=%v result=%+v", err, res)
@@ -60,8 +61,12 @@ func TestAgentMemorySearchScopesAndFormats(t *testing.T) {
 	if fake.searchQuery != "note" {
 		t.Errorf("query = %q", fake.searchQuery)
 	}
-	if fake.searchOpts.WorkspaceID != "workspace:aaa" || fake.searchOpts.SessionID != "workspace:aaa" {
-		t.Errorf("scope not passed: %+v", fake.searchOpts)
+	// Distinct values so a workspace/session field swap cannot pass.
+	if fake.searchOpts.WorkspaceID != "workspace:aaa" {
+		t.Errorf("workspace = %q, want workspace:aaa", fake.searchOpts.WorkspaceID)
+	}
+	if fake.searchOpts.SessionID != "sess:bbb" {
+		t.Errorf("session = %q, want sess:bbb", fake.searchOpts.SessionID)
 	}
 	if fake.searchOpts.Limit != 8 {
 		t.Errorf("limit = %d, want default 8", fake.searchOpts.Limit)
@@ -98,6 +103,28 @@ func TestAgentMemorySearchNilSessionFuncSafe(t *testing.T) {
 	}
 	if fake.searchOpts.SessionID != "" {
 		t.Errorf("session = %q, want empty", fake.searchOpts.SessionID)
+	}
+}
+
+func TestAgentMemorySearchErrorPaths(t *testing.T) {
+	// Store failure: IsError result with the error text, nil Go error.
+	fake := &fakeRecordStore{searchErr: errors.New("disk on fire")}
+	tool := AgentMemorySearch{S: fake, WorkspaceID: "w", SessionID: sidFunc("s")}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"x"}`))
+	if err != nil {
+		t.Fatalf("store failure must return nil Go error, got %v", err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, "disk on fire") {
+		t.Errorf("store failure result = %+v, want IsError with error text", res)
+	}
+
+	// Malformed JSON args: IsError result, nil Go error.
+	res, err = tool.Invoke(context.Background(), json.RawMessage(`{`))
+	if err != nil {
+		t.Fatalf("malformed args must return nil Go error, got %v", err)
+	}
+	if !res.IsError {
+		t.Errorf("malformed args result = %+v, want IsError", res)
 	}
 }
 
