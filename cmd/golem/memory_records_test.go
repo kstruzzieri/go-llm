@@ -325,6 +325,60 @@ func TestRecordsSlashReSecuresSidecars(t *testing.T) {
 	assertTight("after --forget")
 }
 
+func TestSidecarWrappedToolsAreNotPlanningTools(t *testing.T) {
+	// sidecarSecuringTool's interface embedding would silently drop Plan;
+	// pin that the tools golem wraps never implement it.
+	for _, tl := range []agent.Tool{agenttools.AgentMemoryCreate{}, agenttools.AgentMemoryPromote{}} {
+		if _, ok := tl.(agent.PlanningTool); ok {
+			t.Fatalf("%s implements PlanningTool; sidecarSecuringTool would drop Plan", tl.Spec().Name)
+		}
+	}
+}
+
+func TestRecordsCommandsCrossSessionDurable(t *testing.T) {
+	ctx := context.Background()
+	sess, _ := newTestReplWithRecords(t)
+	// Durable record: workspace-scoped, no session (legal for semantic/episodic;
+	// visible from any session in the workspace).
+	rec, err := sess.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindSemantic, Content: "durable", WorkspaceID: sess.workspaceID,
+	})
+	if err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	sess.session = &session{id: "different-session"}
+	var out bytes.Buffer
+	handleRecords(ctx, &out, sess, []string{"/records"})
+	if !strings.Contains(out.String(), rec.ID) {
+		t.Errorf("durable record not listed cross-session: %q", out.String())
+	}
+	out.Reset()
+	handleRecords(ctx, &out, sess, []string{"/records", "--promote", rec.ID, "episodic"})
+	if !strings.Contains(out.String(), "promoted "+rec.ID+" to episodic") {
+		t.Errorf("cross-session promote: %q", out.String())
+	}
+	out.Reset()
+	handleRecords(ctx, &out, sess, []string{"/records", "--forget", rec.ID})
+	if !strings.Contains(out.String(), "forgot record "+rec.ID) {
+		t.Errorf("cross-session forget: %q", out.String())
+	}
+
+	// Sessions off: recordAccess yields SessionID "" and mutations still work.
+	rec2, err := sess.records.Create(ctx, memory.CreateRecordParams{
+		Kind: memory.KindSemantic, Content: "durable2", WorkspaceID: sess.workspaceID,
+	})
+	if err != nil {
+		t.Fatalf("seed2: %v", err)
+	}
+	sess.session = nil
+	out.Reset()
+	handleRecords(ctx, &out, sess, []string{"/records", "--forget", rec2.ID})
+	if !strings.Contains(out.String(), "forgot record "+rec2.ID) {
+		t.Errorf("no-session forget: %q", out.String())
+	}
+}
+
 func TestSidecarSecuringToolReChmods(t *testing.T) {
 	ctx := context.Background()
 	sess, dbPath := newTestReplWithRecords(t)

@@ -152,6 +152,8 @@ func openMemoryRuntime(ctx context.Context, getenv func(string) string, root str
 // sidecarSecuringTool re-secures the memory DB file + sidecars after every
 // Invoke of a memory-writing tool (#237 lesson: every write path re-chmods,
 // not just the open path). Spec/Effect delegate via the embedded Tool.
+// Do not wrap PlanningTools: interface embedding drops Plan and its approval
+// gating.
 type sidecarSecuringTool struct {
 	agent.Tool
 	dbPath string
