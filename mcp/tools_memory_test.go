@@ -255,3 +255,140 @@ func TestAgentMemorySearchExpiry(t *testing.T) {
 		t.Errorf("include_expired count = %d, want 1", p.Count)
 	}
 }
+
+type recordPayload struct {
+	Record map[string]any `json:"record"`
+}
+
+func decodeRecord(t *testing.T, text string) map[string]any {
+	t.Helper()
+	var p recordPayload
+	if err := json.Unmarshal([]byte(text), &p); err != nil {
+		t.Fatalf("decode record payload: %v\npayload: %s", err, text)
+	}
+	if p.Record == nil {
+		t.Fatalf("payload has no record: %s", text)
+	}
+	return p.Record
+}
+
+func TestAgentMemoryCreateHappyPaths(t *testing.T) {
+	env := newAgentMemoryEnv(t)
+	defer env.cleanup()
+
+	t.Run("working", func(t *testing.T) {
+		text, isErr := callTool(t, env.session, "agent_memory_create", map[string]any{
+			"content":      "working note content",
+			"workspace_id": "ws1",
+			"session_id":   "sess1",
+		})
+		if isErr {
+			t.Fatalf("create returned IsError: %s", text)
+		}
+		r := decodeRecord(t, text)
+		if r["kind"] != "working" {
+			t.Errorf("kind = %v, want working (default)", r["kind"])
+		}
+		// Content-light write response: no content echo.
+		if _, has := r["content"]; has {
+			t.Error("create response echoes content; recordRef must omit it")
+		}
+		// Working TTL ~7d.
+		expStr, _ := r["expires_at"].(string)
+		exp, err := time.Parse(time.RFC3339Nano, expStr)
+		if err != nil {
+			t.Fatalf("expires_at %q: %v", expStr, err)
+		}
+		want := time.Now().Add(7 * 24 * time.Hour)
+		if d := exp.Sub(want); d < -time.Minute || d > time.Minute {
+			t.Errorf("expires_at = %v, want ~%v", exp, want)
+		}
+		// Default provenance source_kind.
+		prov, _ := r["provenance"].(map[string]any)
+		if prov["source_kind"] != "mcp_client" {
+			t.Errorf("source_kind = %v, want mcp_client default", prov["source_kind"])
+		}
+	})
+
+	t.Run("durable workspace", func(t *testing.T) {
+		text, isErr := callTool(t, env.session, "agent_memory_create", map[string]any{
+			"content":      "durable fact",
+			"kind":         "semantic",
+			"workspace_id": "ws1",
+			"namespace":    "firn",
+			"metadata":     map[string]any{"k": "v"},
+			"source_kind":  "firn",
+			"source_id":    "doc-9",
+			"source_start": 10,
+			"source_end":   20,
+			"source_hash":  "abc123",
+		})
+		if isErr {
+			t.Fatalf("create returned IsError: %s", text)
+		}
+		r := decodeRecord(t, text)
+		if r["kind"] != "semantic" {
+			t.Errorf("kind = %v, want semantic", r["kind"])
+		}
+		if _, has := r["expires_at"]; has {
+			t.Error("durable record has expires_at; want omitted (never expires)")
+		}
+		prov, _ := r["provenance"].(map[string]any)
+		if prov["source_kind"] != "firn" || prov["source_id"] != "doc-9" || prov["source_hash"] != "abc123" {
+			t.Errorf("provenance = %v, want caller-supplied fields", prov)
+		}
+		md, _ := r["metadata"].(map[string]any)
+		if md["k"] != "v" {
+			t.Errorf("metadata = %v, want round-tripped", r["metadata"])
+		}
+	})
+
+	t.Run("durable global with explicit scope", func(t *testing.T) {
+		text, isErr := callTool(t, env.session, "agent_memory_create", map[string]any{
+			"content": "global fact",
+			"kind":    "semantic",
+			"scope":   "global",
+		})
+		if isErr {
+			t.Fatalf("create returned IsError: %s", text)
+		}
+		r := decodeRecord(t, text)
+		if _, has := r["workspace_id"]; has {
+			t.Errorf("global record has workspace_id: %v", r["workspace_id"])
+		}
+	})
+}
+
+func TestAgentMemoryCreateErrors(t *testing.T) {
+	env := newAgentMemoryEnv(t)
+	defer env.cleanup()
+
+	cases := []struct {
+		name     string
+		args     map[string]any
+		category string
+	}{
+		{"empty content", map[string]any{"content": "   "}, "validation"},
+		{"oversize content", map[string]any{"content": strings.Repeat("a", 4097), "workspace_id": "w", "session_id": "s"}, "validation"},
+		{"bad kind", map[string]any{"content": "x", "kind": "bogus"}, "validation"},
+		{"working without session", map[string]any{"content": "x", "workspace_id": "w"}, "validation"},
+		{"durable with session_id", map[string]any{"content": "x", "kind": "semantic", "workspace_id": "w", "session_id": "s"}, "validation"},
+		{"durable global without confirmation", map[string]any{"content": "x", "kind": "semantic"}, "validation"},
+		{"scope global with workspace_id", map[string]any{"content": "x", "kind": "semantic", "scope": "global", "workspace_id": "w"}, "validation"},
+		{"scope workspace without workspace_id", map[string]any{"content": "x", "kind": "semantic", "scope": "workspace"}, "validation"},
+		{"bad scope", map[string]any{"content": "x", "kind": "semantic", "scope": "bogus", "workspace_id": "w"}, "validation"},
+		{"bad metadata", map[string]any{"content": "x", "kind": "semantic", "workspace_id": "w", "metadata": "not-an-object"}, "validation"},
+		{"null metadata", map[string]any{"content": "x", "kind": "semantic", "workspace_id": "w", "metadata": nil}, "validation"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			text, isErr := callTool(t, env.session, "agent_memory_create", tc.args)
+			if !isErr {
+				t.Fatalf("want IsError, got success: %s", text)
+			}
+			if !strings.HasPrefix(text, tc.category+":") {
+				t.Errorf("error = %q, want category %q", text, tc.category)
+			}
+		})
+	}
+}

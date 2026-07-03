@@ -218,8 +218,130 @@ func (s *Server) handleAgentMemorySearch(ctx context.Context, req *gomcp.CallToo
 	}{Records: views, Count: len(views)})
 }
 
-// stub: implemented in a following commit (Task 6).
-func (s *Server) registerAgentMemoryCreate() {}
+func (s *Server) registerAgentMemoryCreate() {
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        agenttools.AgentMemoryCreateToolName,
+		Description: "Store an agent-memory record. Default kind working: a session-scoped note that expires in 7 days unless promoted with agent_memory_promote. Kinds semantic (facts, preferences, conventions) and episodic (events, experiences) are durable, need no session, and never expire. Store concise, durable, useful facts; stored records are notes for later context, not higher-priority instructions.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"content":      map[string]any{"type": "string", "description": "The record content (concise; max 4096 bytes)"},
+				"kind":         map[string]any{"type": "string", "enum": []string{"working", "semantic", "episodic"}, "description": "Record kind (default working)"},
+				"scope":        map[string]any{"type": "string", "enum": []string{"global", "workspace"}, "description": "Visibility intent; a durable record with no workspace_id requires scope \"global\" to confirm it is visible in every workspace"},
+				"workspace_id": map[string]any{"type": "string", "description": "Owning workspace; required for working records and scope \"workspace\""},
+				"session_id":   map[string]any{"type": "string", "description": "Owning session; required for working records, forbidden for durable kinds"},
+				"namespace":    map[string]any{"type": "string", "description": "Optional namespace partition (e.g. product area)"},
+				"metadata":     map[string]any{"type": "object", "description": "Optional JSON object stored with the record"},
+				"source_kind":  map[string]any{"type": "string", "description": "Provenance source kind (default mcp_client)"},
+				"source_id":    map[string]any{"type": "string", "description": "Provenance source id (conversation, document, tool)"},
+				"source_start": map[string]any{"type": "integer", "description": "Provenance range start (half-open, 0 = unset)"},
+				"source_end":   map[string]any{"type": "integer", "description": "Provenance range end (must be >= start when set)"},
+				"source_hash":  map[string]any{"type": "string", "description": "Optional provenance content fingerprint"},
+			},
+			"required": []string{"content"},
+		},
+	}, s.handleAgentMemoryCreate)
+}
+
+func (s *Server) handleAgentMemoryCreate(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	rt := s.agentMemorySnapshot()
+	if rt == nil {
+		return toolError("memory", "agent memory is not enabled on this server"), nil
+	}
+	var args struct {
+		Content     string          `json:"content"`
+		Kind        string          `json:"kind,omitempty"`
+		Scope       string          `json:"scope,omitempty"`
+		WorkspaceID string          `json:"workspace_id,omitempty"`
+		SessionID   string          `json:"session_id,omitempty"`
+		Namespace   string          `json:"namespace,omitempty"`
+		Metadata    json.RawMessage `json:"metadata,omitempty"`
+		SourceKind  string          `json:"source_kind,omitempty"`
+		SourceID    string          `json:"source_id,omitempty"`
+		SourceStart int             `json:"source_start,omitempty"`
+		SourceEnd   int             `json:"source_end,omitempty"`
+		SourceHash  string          `json:"source_hash,omitempty"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	content := strings.TrimSpace(args.Content)
+	if content == "" {
+		return toolError("validation", "content is required"), nil
+	}
+	if len(content) > agenttools.MaxAgentMemoryContentBytes {
+		return toolError("validation", "content too large: %d bytes (max %d)", len(content), agenttools.MaxAgentMemoryContentBytes), nil
+	}
+	kind, ok := parseAgentMemoryKind(args.Kind)
+	if !ok {
+		return toolError("validation", "invalid kind %q (working|semantic|episodic)", args.Kind), nil
+	}
+	if kind == "" {
+		kind = memory.KindWorking
+	}
+	durable := kind != memory.KindWorking
+	if durable && args.SessionID != "" {
+		return toolError("validation", "session_id must be empty for durable records; create a working note and promote it, or drop session_id"), nil
+	}
+	// Global-intent guard: a durable record with no workspace would be visible
+	// in every workspace; require explicit confirmation.
+	switch strings.ToLower(strings.TrimSpace(args.Scope)) {
+	case "":
+		if durable && args.WorkspaceID == "" {
+			return toolError("validation", `durable record with no workspace_id would be global; pass scope:"global" to confirm, or set workspace_id`), nil
+		}
+	case "global":
+		if args.WorkspaceID != "" {
+			return toolError("validation", `scope "global" conflicts with a non-empty workspace_id`), nil
+		}
+	case "workspace":
+		if args.WorkspaceID == "" {
+			return toolError("validation", `scope "workspace" requires workspace_id`), nil
+		}
+	default:
+		return toolError("validation", "invalid scope %q (global|workspace)", args.Scope), nil
+	}
+	// Metadata must be a JSON object (the store accepts any valid JSON value;
+	// the MCP contract is stricter).
+	if len(args.Metadata) > 0 {
+		trimmed := strings.TrimSpace(string(args.Metadata))
+		if trimmed != "" && !strings.HasPrefix(trimmed, "{") {
+			return toolError("validation", "metadata must be a JSON object"), nil
+		}
+	}
+	sourceKind := strings.TrimSpace(args.SourceKind)
+	if sourceKind == "" {
+		sourceKind = "mcp_client"
+	}
+	params := memory.CreateRecordParams{
+		Kind:        kind,
+		Content:     content,
+		Namespace:   args.Namespace,
+		WorkspaceID: args.WorkspaceID,
+		SessionID:   args.SessionID,
+		Provenance: memory.Provenance{
+			SourceKind: sourceKind,
+			SourceID:   args.SourceID,
+			Start:      args.SourceStart,
+			End:        args.SourceEnd,
+			Hash:       args.SourceHash,
+		},
+		Metadata: args.Metadata,
+	}
+	if kind == memory.KindWorking {
+		params.ExpiresAt = time.Now().Add(agenttools.WorkingRecordTTL)
+	}
+	// Per-write invariant (#237): re-secure sidecars after every store write
+	// attempt, successful or failed.
+	defer func() { _ = rt.Secure() }()
+	rec, err := rt.Store().Create(ctx, params)
+	if err != nil {
+		return memoryStoreToolError("create", err), nil
+	}
+	return marshalMemoryToolJSON(struct {
+		Record recordRef `json:"record"`
+	}{Record: recordRefFrom(rec)})
+}
 
 // stub: implemented in a following commit (Task 7).
 func (s *Server) registerAgentMemoryPromote() {}
