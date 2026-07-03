@@ -22,6 +22,7 @@ func main() {
 	configPath := flag.String("config", "", "Path to models.json (default: auto-discover)")
 	ragDB := flag.String("rag-db", "", "RAG database path (default: ~/.local/share/go-llm/rag.db)")
 	conversationDB := flag.String("conversation-db", "", "Transcript database path for opt-in conversation persistence (default: disabled). Stores UNREDACTED prompts and responses locally; do not commit or share the database.")
+	agentMemoryDB := flag.String("agent-memory-db", "", "Agent-memory record DB path (enables agent_memory_* tools; default: disabled)")
 	noRAG := flag.Bool("no-rag", false, "Disable RAG tools")
 	tlsCert := flag.String("tls-cert", "", "TLS certificate file (enables HTTPS)")
 	tlsKey := flag.String("tls-key", "", "TLS private key file")
@@ -39,6 +40,9 @@ func main() {
 	}
 	if *conversationDB != "" {
 		opts = append(opts, mcp.WithTranscriptStore(*conversationDB))
+	}
+	if *agentMemoryDB != "" {
+		opts = append(opts, mcp.WithAgentMemoryPath(*agentMemoryDB))
 	}
 	if *noRAG {
 		opts = append(opts, mcp.WithRAGDisabled())
