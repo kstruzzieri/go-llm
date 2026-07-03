@@ -20,18 +20,14 @@ const (
 	dbFileMode = 0o600
 )
 
-// PrepareDBFile creates the DB's parent directory (0700) and the DB file
+// PrepareDBFile creates a missing DB parent directory (0700) and the DB file
 // itself (0600), re-chmodding an existing file so a previously-loosened DB
-// is re-secured on open. The parent directory is claimed exclusively: its
-// permissions are forced to 0700 even if it pre-exists, so callers passing
-// user-configured paths must point at a directory the DB may own.
+// is re-secured on open. Existing parent directories are left alone because
+// DB paths may live under shared/user-configured directories.
 func PrepareDBFile(path string) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, dbDirMode); err != nil {
 			return fmt.Errorf("memory: create db dir %q: %w", dir, err)
-		}
-		if err := os.Chmod(dir, dbDirMode); err != nil {
-			return fmt.Errorf("memory: chmod db dir %q: %w", dir, err)
 		}
 	}
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, dbFileMode)

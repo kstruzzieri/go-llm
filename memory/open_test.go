@@ -101,10 +101,13 @@ func TestSecureDBFilesSkipsMissingSidecars(t *testing.T) {
 	}
 }
 
-func TestPrepareDBFileRechmodsExistingDir(t *testing.T) {
+func TestPrepareDBFileLeavesExistingDirMode(t *testing.T) {
 	dir := filepath.Join(t.TempDir(), "loose")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatalf("mkdir loose: %v", err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatalf("chmod loose: %v", err)
 	}
 	path := filepath.Join(dir, "memories.db")
 	if err := PrepareDBFile(path); err != nil {
@@ -114,8 +117,8 @@ func TestPrepareDBFileRechmodsExistingDir(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat dir: %v", err)
 	}
-	if perm := info.Mode().Perm(); perm != 0o700 {
-		t.Errorf("existing dir perm = %o, want re-chmodded 0700", perm)
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf("existing dir perm = %o, want unchanged 0755", perm)
 	}
 }
 
