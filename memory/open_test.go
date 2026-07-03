@@ -72,7 +72,7 @@ func TestRecordRuntimeSecureRechmodsSidecars(t *testing.T) {
 	}
 	wal := path + "-wal"
 	if _, err := os.Stat(wal); err != nil {
-		t.Skipf("no -wal sidecar present (%v); WAL mode not materialized", err)
+		t.Fatalf("no -wal sidecar after committed write (%v); WAL pragma not applied", err)
 	}
 	if err := os.Chmod(wal, 0o644); err != nil {
 		t.Fatalf("chmod loosen: %v", err)
@@ -132,7 +132,7 @@ func TestOpenRecordStoreFailurePaths(t *testing.T) {
 	}
 }
 
-func TestOpenHardenedDBRejectsCancelledContext(t *testing.T) {
+func TestOpenHardenedDBFailsWithCancelledContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	dir := t.TempDir()

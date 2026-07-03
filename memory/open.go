@@ -2,6 +2,7 @@
 // SQLite databases (#237 lesson): private dir/file modes, WAL single-conn
 // open, and sidecar re-securing after migrations and after every write.
 // cmd/golem and mcp both consume these so the invariant set exists once.
+
 package memory
 
 import (
@@ -21,7 +22,9 @@ const (
 
 // PrepareDBFile creates the DB's parent directory (0700) and the DB file
 // itself (0600), re-chmodding an existing file so a previously-loosened DB
-// is re-secured on open.
+// is re-secured on open. The parent directory is claimed exclusively: its
+// permissions are forced to 0700 even if it pre-exists, so callers passing
+// user-configured paths must point at a directory the DB may own.
 func PrepareDBFile(path string) error {
 	if dir := filepath.Dir(path); dir != "" && dir != "." {
 		if err := os.MkdirAll(dir, dbDirMode); err != nil {
@@ -118,6 +121,8 @@ func OpenRecordStore(ctx context.Context, path string) (*RecordRuntime, error) {
 	store, err := NewMemoryRecordStore(ctx, db)
 	if err != nil {
 		_ = db.Close()
+		// Best-effort: migrations may have created loose sidecars before failing.
+		_ = SecureDBFiles(path)
 		return nil, err
 	}
 	if err := SecureDBFiles(path); err != nil {
