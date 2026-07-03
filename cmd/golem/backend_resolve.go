@@ -220,7 +220,9 @@ func isLoopbackURL(raw string) bool {
 		return false
 	}
 	host := u.Hostname() // strips port and IPv6 brackets
-	if host == "localhost" {
+	if strings.EqualFold(host, "localhost") {
+		// Hostnames are case-insensitive (RFC 4343); "Localhost" must arm
+		// the scan the same as "localhost".
 		return true
 	}
 	ip := net.ParseIP(host)

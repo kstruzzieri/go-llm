@@ -467,6 +467,7 @@ func TestIsLoopbackURL(t *testing.T) {
 	}{
 		{"http://127.0.0.1:8080", true},
 		{"http://localhost:8080", true},
+		{"http://Localhost:8080", true}, // hostnames are case-insensitive
 		{"http://[::1]:8080", true},     // brackets stripped by Hostname()
 		{"http://127.0.0.2:8080", true}, // whole 127/8 block is loopback
 		{"https://api.example.com", false},

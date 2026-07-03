@@ -167,7 +167,8 @@ func TestRedactURLUserinfo(t *testing.T) {
 		raw  string
 		want string
 	}{
-		// Parses OK (Opaque form) but User is nil, Host is empty, and the
+		// Parses OK (no scheme, so the whole string lands in Path) but User
+		// is nil, Host is empty, and the
 		// string still contains "@": treated as unparseable-looking and
 		// redacted wholesale rather than printed with the raw "@" segment.
 		{"parses opaque with unresolved userinfo-looking text", "not a url with @ in it", "<invalid url>"},
