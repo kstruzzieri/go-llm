@@ -358,6 +358,22 @@ func TestResolveBackend_NoTargetNoOp(t *testing.T) {
 	}
 }
 
+func TestStartupNotices_BackendLine(t *testing.T) {
+	lines := startupNotices(startupInfo{
+		workspace:   "/w",
+		backendLine: "openai-compat backend: resolved to http://127.0.0.1:8083 (configured http://127.0.0.1:8080 did not serve \"gemma4:31b\")",
+	})
+	if len(lines) < 2 {
+		t.Fatalf("lines = %v", lines)
+	}
+	if lines[0] != "workspace: /w" {
+		t.Fatalf("lines[0] = %q", lines[0])
+	}
+	if !strings.Contains(lines[1], "openai-compat backend: resolved to") {
+		t.Fatalf("lines[1] = %q, want the backend line directly after workspace", lines[1])
+	}
+}
+
 func TestIsLoopbackURL(t *testing.T) {
 	tests := []struct {
 		raw  string

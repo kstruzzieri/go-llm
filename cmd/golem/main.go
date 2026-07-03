@@ -16,6 +16,7 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
 type flags struct {
@@ -144,6 +145,7 @@ func applyOneShotMode(f flags) (flags, []string) {
 
 type startupInfo struct {
 	workspace          string
+	backendLine        string
 	useRecommend       bool
 	bootstrapWarns     []error
 	preflightWarns     []string
@@ -161,6 +163,9 @@ type startupInfo struct {
 func startupNotices(info startupInfo) []string {
 	var out []string
 	out = append(out, "workspace: "+info.workspace)
+	if info.backendLine != "" {
+		out = append(out, info.backendLine)
+	}
 	if info.sessionLine != "" {
 		out = append(out, info.sessionLine)
 	}
@@ -240,15 +245,29 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return fmt.Errorf("resolve root: %w", err)
 	}
 
+	ctx := context.Background()
+
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
 		return err
 	}
 
-	ctx := context.Background()
+	backendRes, err := resolveBackend(ctx, cfg, backendResolveOpts{
+		flagBaseURL: f.baseURL,
+		flagSet:     f.baseURLSet,
+		noProbe:     f.noProbe,
+		lookupEnv:   os.LookupEnv,
+		prober:      openaicompat.DiscoverBaseURL,
+	})
+	if err != nil {
+		return err // explicit-override validation error: fatal, matches validateFlags semantics
+	}
+
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
-		Config:            cfg, // nil => default Ollama provider
-		OllamaURLOverride: f.ollamaURL,
+		Config:                          cfg, // nil => default Ollama provider
+		OllamaURLOverride:               f.ollamaURL,
+		OpenAICompatURLOverrideProvider: backendRes.providerKey,
+		OpenAICompatURLOverride:         backendRes.baseURL,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap providers: %w", err)
@@ -260,9 +279,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 
-	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, "", "")
+	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, backendRes.providerKey, backendRes.diagSource())
 	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint)
+	warns = append(backendRes.warns, warns...)
 	if err != nil {
+		if len(backendRes.warns) > 0 {
+			return fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
+		}
 		return err
 	}
 	warns = append(warns, oneShotWarns...)
@@ -420,6 +443,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	agentMemoryLine := agentMemoryNotice(agentMemoryEnabled, sessn != nil)
 	for _, line := range startupNotices(startupInfo{
 		workspace:          root,
+		backendLine:        backendRes.notice,
 		useRecommend:       plan.useRecommend,
 		bootstrapWarns:     bundle.Warnings,
 		preflightWarns:     warns,
