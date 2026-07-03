@@ -343,5 +343,54 @@ func (s *Server) handleAgentMemoryCreate(ctx context.Context, req *gomcp.CallToo
 	}{Record: recordRefFrom(rec)})
 }
 
-// stub: implemented in a following commit (Task 7).
-func (s *Server) registerAgentMemoryPromote() {}
+func (s *Server) registerAgentMemoryPromote() {
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        agenttools.AgentMemoryPromoteToolName,
+		Description: "Promote a working agent-memory record to durable memory: kind semantic for facts, preferences, and conventions; episodic for events and experiences. Promotion sheds the session binding and clears expiry.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id":           map[string]any{"type": "string", "description": "The record id to promote (from agent_memory_search or agent_memory_create)"},
+				"kind":         map[string]any{"type": "string", "enum": []string{"semantic", "episodic"}, "description": "The durable kind to promote to"},
+				"workspace_id": map[string]any{"type": "string", "description": "Visibility scope the record must be reachable under"},
+				"session_id":   map[string]any{"type": "string", "description": "Visibility scope for session-bound working records"},
+			},
+			"required": []string{"id", "kind"},
+		},
+	}, s.handleAgentMemoryPromote)
+}
+
+func (s *Server) handleAgentMemoryPromote(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	rt := s.agentMemorySnapshot()
+	if rt == nil {
+		return toolError("memory", "agent memory is not enabled on this server"), nil
+	}
+	var args struct {
+		ID          string `json:"id"`
+		Kind        string `json:"kind"`
+		WorkspaceID string `json:"workspace_id,omitempty"`
+		SessionID   string `json:"session_id,omitempty"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	id := strings.TrimSpace(args.ID)
+	if id == "" {
+		return toolError("validation", "id is required"), nil
+	}
+	kind := memory.MemoryKind(strings.ToLower(strings.TrimSpace(args.Kind)))
+	if kind != memory.KindSemantic && kind != memory.KindEpisodic {
+		return toolError("validation", "invalid kind %q (semantic|episodic)", args.Kind), nil
+	}
+	acc := memory.RecordAccess{WorkspaceID: args.WorkspaceID, SessionID: args.SessionID}
+	// Per-write invariant (#237): re-secure sidecars after every store write
+	// attempt, successful or failed.
+	defer func() { _ = rt.Secure() }()
+	rec, err := rt.Store().Promote(ctx, id, acc, kind)
+	if err != nil {
+		return memoryStoreToolError("promote", err), nil
+	}
+	return marshalMemoryToolJSON(struct {
+		Record recordRef `json:"record"`
+	}{Record: recordRefFrom(rec)})
+}

@@ -393,3 +393,88 @@ func TestAgentMemoryCreateErrors(t *testing.T) {
 		})
 	}
 }
+
+func TestAgentMemoryToolsRegisteredWithPath(t *testing.T) {
+	env := newAgentMemoryEnv(t)
+	defer env.cleanup()
+
+	names := listToolNames(t, env.session)
+	for _, n := range []string{"agent_memory_search", "agent_memory_create", "agent_memory_promote"} {
+		if !names[n] {
+			t.Errorf("tool %q not registered with WithAgentMemoryPath; want present", n)
+		}
+	}
+}
+
+func TestAgentMemoryPromote(t *testing.T) {
+	env := newAgentMemoryEnv(t)
+	defer env.cleanup()
+
+	create := func(t *testing.T) string {
+		t.Helper()
+		text, isErr := callTool(t, env.session, "agent_memory_create", map[string]any{
+			"content":      "promotable note",
+			"workspace_id": "ws1",
+			"session_id":   "sess1",
+		})
+		if isErr {
+			t.Fatalf("seed create: %s", text)
+		}
+		id, _ := decodeRecord(t, text)["id"].(string)
+		if id == "" {
+			t.Fatal("seed create returned no id")
+		}
+		return id
+	}
+
+	t.Run("working to semantic", func(t *testing.T) {
+		id := create(t)
+		text, isErr := callTool(t, env.session, "agent_memory_promote", map[string]any{
+			"id":           id,
+			"kind":         "semantic",
+			"workspace_id": "ws1",
+			"session_id":   "sess1",
+		})
+		if isErr {
+			t.Fatalf("promote returned IsError: %s", text)
+		}
+		r := decodeRecord(t, text)
+		if r["kind"] != "semantic" {
+			t.Errorf("kind = %v, want semantic", r["kind"])
+		}
+		if _, has := r["session_id"]; has {
+			t.Errorf("promoted record kept session_id: %v", r["session_id"])
+		}
+		if _, has := r["expires_at"]; has {
+			t.Errorf("promoted record kept expires_at: %v", r["expires_at"])
+		}
+		if _, has := r["content"]; has {
+			t.Error("promote response echoes content; recordRef must omit it")
+		}
+	})
+
+	t.Run("errors", func(t *testing.T) {
+		id := create(t)
+		cases := []struct {
+			name     string
+			args     map[string]any
+			category string
+		}{
+			{"empty id", map[string]any{"id": "  ", "kind": "semantic"}, "validation"},
+			{"bad kind", map[string]any{"id": id, "kind": "working"}, "validation"},
+			{"unknown id", map[string]any{"id": "rec_does_not_exist", "kind": "semantic"}, "not_found"},
+			{"out of scope", map[string]any{"id": id, "kind": "semantic", "workspace_id": "OTHER", "session_id": "OTHER"}, "not_found"},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				text, isErr := callTool(t, env.session, "agent_memory_promote", tc.args)
+				if !isErr {
+					t.Fatalf("want IsError, got success: %s", text)
+				}
+				if !strings.HasPrefix(text, tc.category+":") {
+					t.Errorf("error = %q, want category %q", text, tc.category)
+				}
+			})
+		}
+	})
+}
