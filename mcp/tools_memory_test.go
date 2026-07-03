@@ -372,6 +372,7 @@ func TestAgentMemoryCreateErrors(t *testing.T) {
 		{"oversize content", map[string]any{"content": strings.Repeat("a", 4097), "workspace_id": "w", "session_id": "s"}, "validation"},
 		{"bad kind", map[string]any{"content": "x", "kind": "bogus"}, "validation"},
 		{"working without session", map[string]any{"content": "x", "workspace_id": "w"}, "validation"},
+		{"working session without workspace", map[string]any{"content": "x", "session_id": "s"}, "validation"},
 		{"durable with session_id", map[string]any{"content": "x", "kind": "semantic", "workspace_id": "w", "session_id": "s"}, "validation"},
 		{"durable global without confirmation", map[string]any{"content": "x", "kind": "semantic"}, "validation"},
 		{"scope global with workspace_id", map[string]any{"content": "x", "kind": "semantic", "scope": "global", "workspace_id": "w"}, "validation"},
