@@ -24,16 +24,17 @@ type testEnv struct {
 // related Ollama endpoints (/api/tags, /api/show) so that the Router's
 // model registry can resolve test models without each test mock having
 // to stub those routes.
-func newTestEnv(t *testing.T, mockHandler http.Handler) testEnv {
+func newTestEnv(t *testing.T, mockHandler http.Handler, extraOpts ...Option) testEnv {
 	t.Helper()
 
 	mock := httptest.NewServer(routingFallbackHandler(mockHandler))
 
 	ctx := context.Background()
-	s, err := NewServer(ctx,
+	opts := append([]Option{
 		WithOllamaURL(mock.URL),
 		WithRAGDisabled(),
-	)
+	}, extraOpts...)
+	s, err := NewServer(ctx, opts...)
 	if err != nil {
 		mock.Close()
 		t.Fatalf("newTestEnv: NewServer() error = %v", err)

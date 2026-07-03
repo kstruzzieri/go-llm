@@ -22,6 +22,7 @@ import (
 	"github.com/kstruzzieri/go-llm/feedback"
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -55,6 +56,8 @@ type Server struct {
 	ragDisabled       bool
 	transcriptDBPath  string
 	transcriptStore   *transcript.Store
+	agentMemoryPath   string
+	agentMemory       *memory.RecordRuntime
 	feedbackDBPath    string
 	feedbackDB        *sql.DB
 	fingerprintStore  fingerprint.Store
@@ -130,6 +133,17 @@ func WithRAGDisabled() Option {
 func WithTranscriptStore(path string) Option {
 	return func(s *Server) {
 		s.transcriptDBPath = path
+	}
+}
+
+// WithAgentMemoryPath enables the opt-in agent_memory_* tools backed by the
+// agent-memory record store at the given SQLite path (shared memories.db
+// schema). Empty (the default) leaves the tools unregistered. Open failure
+// at startup is fatal: the caller explicitly opted in, and failing open
+// would silently hide a bad deploy.
+func WithAgentMemoryPath(path string) Option {
+	return func(s *Server) {
+		s.agentMemoryPath = path
 	}
 }
 
@@ -370,6 +384,18 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 		s.transcriptStore = ts
 	}
 
+	// Step 4c: open the optional agent-memory record store (off unless
+	// WithAgentMemoryPath is set). Failure is fatal, matching the transcript
+	// store: the caller explicitly asked for agent memory here.
+	if s.agentMemoryPath != "" {
+		rt, err := memory.OpenRecordStore(ctx, s.agentMemoryPath)
+		if err != nil {
+			cleanupStartupFailure()
+			return nil, fmt.Errorf("mcp: open agent memory store: %w", err)
+		}
+		s.agentMemory = rt
+	}
+
 	// Step 5: Resolve models and rebuild derived clients (non-fatal).
 	// Uses refreshResolved which stores partial results and calls rebuildDerivedClients.
 	if s.cfg != nil {
@@ -393,6 +419,7 @@ func NewServer(ctx context.Context, opts ...Option) (*Server, error) {
 	s.registerRAGTools()
 	s.registerModelTools()
 	s.registerAnalysisTools()
+	s.registerMemoryTools()
 	s.registerPrompts()
 	s.registerResources()
 
@@ -704,6 +731,14 @@ func (s *Server) transcriptStoreSnapshot() *transcript.Store {
 	return s.transcriptStore
 }
 
+// agentMemorySnapshot returns the agent-memory runtime under the read lock
+// (nil when WithAgentMemoryPath was not configured).
+func (s *Server) agentMemorySnapshot() *memory.RecordRuntime {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.agentMemory
+}
+
 // fimPriority returns the configured FIM routing priority, defaulting to
 // provider.PriorityHigh when WithFIMPriority was not invoked.
 //
@@ -791,6 +826,7 @@ func (s *Server) Close() error {
 	store := s.store
 	router := s.router
 	tstore := s.transcriptStore
+	amem := s.agentMemory
 	fdb := s.feedbackDB
 	s.feedbackDB = nil
 	s.store = nil
@@ -800,6 +836,7 @@ func (s *Server) Close() error {
 	s.router = nil
 	s.warmthSource = nil
 	s.transcriptStore = nil
+	s.agentMemory = nil
 	s.mu.Unlock()
 
 	var routerErr, storeErr error
@@ -817,5 +854,9 @@ func (s *Server) Close() error {
 	if fdb != nil {
 		feedbackErr = fdb.Close()
 	}
-	return errors.Join(routerErr, storeErr, transcriptErr, feedbackErr)
+	var agentMemoryErr error
+	if amem != nil {
+		agentMemoryErr = amem.Close()
+	}
+	return errors.Join(routerErr, storeErr, transcriptErr, feedbackErr, agentMemoryErr)
 }
