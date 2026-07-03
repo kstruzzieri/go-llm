@@ -62,24 +62,11 @@ func memorySystemFragment(enabled bool) string {
 // result; this only affects what is stored.
 const memorySearchRedactedMarker = "memory_search result omitted from session history"
 
-// openMemoryDB prepares the hardened DB file and opens it WAL-mode single-conn.
-// Store construction and the post-migration chmod are the caller's job.
+// openMemoryDB prepares the hardened DB file and opens it WAL-mode
+// single-conn via the shared memory primitives. Store construction and the
+// post-migration chmod are the caller's job.
 func openMemoryDB(ctx context.Context, dbPath string) (*sql.DB, error) {
-	if err := prepareDBFile(dbPath); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("golem: open memory db %q: %w", dbPath, err)
-	}
-	db.SetMaxOpenConns(1)
-	for _, pragma := range []string{"PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=5000"} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("golem: memory db %s: %w", pragma, err)
-		}
-	}
-	return db, nil
+	return memory.OpenHardenedDB(ctx, dbPath)
 }
 
 func secureMemoryDBFiles(sess *replSession) {

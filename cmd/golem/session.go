@@ -15,6 +15,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 	_ "modernc.org/sqlite"
 )
@@ -417,41 +418,15 @@ func (s *session) Close() error {
 	return s.db.Close()
 }
 
+// prepareDBFile creates the DB's parent dir (0700) and file (0600).
+// Delegates to the shared hardened-open primitives in memory/ (#237
+// invariants live once).
 func prepareDBFile(path string) error {
-	if dir := filepath.Dir(path); dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, sessionDirMode); err != nil {
-			return fmt.Errorf("golem: create session dir %q: %w", dir, err)
-		}
-	}
-	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, sessionFileMode)
-	if err != nil {
-		return fmt.Errorf("golem: create session db %q: %w", path, err)
-	}
-	if err := f.Chmod(sessionFileMode); err != nil {
-		_ = f.Close()
-		return fmt.Errorf("golem: chmod session db %q: %w", path, err)
-	}
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("golem: close session db %q: %w", path, err)
-	}
-	return nil
+	return memory.PrepareDBFile(path)
 }
 
+// chmodDBFiles re-secures the DB file and -wal/-shm sidecars (0600).
+// Delegates to memory.SecureDBFiles.
 func chmodDBFiles(path string) error {
-	for _, p := range []string{path, path + "-wal", path + "-shm"} {
-		info, err := os.Stat(p)
-		if err != nil {
-			if os.IsNotExist(err) {
-				continue
-			}
-			return fmt.Errorf("golem: stat %q: %w", p, err)
-		}
-		if info.IsDir() {
-			return fmt.Errorf("golem: %q is a directory", p)
-		}
-		if err := os.Chmod(p, sessionFileMode); err != nil {
-			return fmt.Errorf("golem: chmod %q: %w", p, err)
-		}
-	}
-	return nil
+	return memory.SecureDBFiles(path)
 }
