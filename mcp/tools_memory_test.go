@@ -478,3 +478,84 @@ func TestAgentMemoryPromote(t *testing.T) {
 		}
 	})
 }
+
+// newAgentMemoryEnvWithPath is newAgentMemoryEnv but also returns the on-disk
+// DB path, so sidecar-permission tests can loosen a sidecar and assert the
+// write handlers re-secure it.
+func newAgentMemoryEnvWithPath(t *testing.T) (testEnv, string) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "memories.db")
+	env := newTestEnv(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}), WithAgentMemoryPath(dbPath))
+	return env, dbPath
+}
+
+func TestAgentMemoryCreateResecuresSidecars(t *testing.T) {
+	env, dbPath := newAgentMemoryEnvWithPath(t)
+	defer env.cleanup()
+
+	// First create materializes the -wal sidecar.
+	if _, isErr := callTool(t, env.session, "agent_memory_create", map[string]any{
+		"content": "first", "kind": "semantic", "workspace_id": "ws1",
+	}); isErr {
+		t.Fatal("first create returned IsError")
+	}
+	wal := dbPath + "-wal"
+	if _, err := os.Stat(wal); err != nil {
+		t.Fatalf("no -wal sidecar after committed write (%v); WAL not applied", err)
+	}
+	if err := os.Chmod(wal, 0o644); err != nil {
+		t.Fatalf("chmod loosen: %v", err)
+	}
+	// A second create must re-secure the sidecar via the handler's defer.
+	if _, isErr := callTool(t, env.session, "agent_memory_create", map[string]any{
+		"content": "second", "kind": "semantic", "workspace_id": "ws1",
+	}); isErr {
+		t.Fatal("second create returned IsError")
+	}
+	info, err := os.Stat(wal)
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("wal perm after create = %o, want 0600 (handler must re-secure sidecars)", perm)
+	}
+}
+
+func TestAgentMemoryPromoteResecuresSidecars(t *testing.T) {
+	env, dbPath := newAgentMemoryEnvWithPath(t)
+	defer env.cleanup()
+
+	// Seed a working record to promote.
+	text, isErr := callTool(t, env.session, "agent_memory_create", map[string]any{
+		"content": "promotable", "workspace_id": "ws1", "session_id": "sess1",
+	})
+	if isErr {
+		t.Fatalf("seed create: %s", text)
+	}
+	id, _ := decodeRecord(t, text)["id"].(string)
+	if id == "" {
+		t.Fatal("seed create returned no id")
+	}
+	wal := dbPath + "-wal"
+	if _, err := os.Stat(wal); err != nil {
+		t.Fatalf("no -wal sidecar after committed write (%v); WAL not applied", err)
+	}
+	if err := os.Chmod(wal, 0o644); err != nil {
+		t.Fatalf("chmod loosen: %v", err)
+	}
+	// Promote must re-secure the sidecar via the handler's defer.
+	if _, isErr := callTool(t, env.session, "agent_memory_promote", map[string]any{
+		"id": id, "kind": "semantic", "workspace_id": "ws1", "session_id": "sess1",
+	}); isErr {
+		t.Fatal("promote returned IsError")
+	}
+	info, err := os.Stat(wal)
+	if err != nil {
+		t.Fatalf("stat wal: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Errorf("wal perm after promote = %o, want 0600 (handler must re-secure sidecars)", perm)
+	}
+}
