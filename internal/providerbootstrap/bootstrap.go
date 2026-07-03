@@ -20,6 +20,17 @@ type Options struct {
 	FingerprintStore  fingerprint.Store
 	OllamaURLOverride string
 	RouterOptions     []provider.RouterOption
+
+	// OpenAICompatURLOverrideProvider names the openai-compat provider whose
+	// BaseURL is replaced by OpenAICompatURLOverride (provider keys are
+	// arbitrary — "llamacpp", "local" — so a bare URL cannot address one).
+	// Both fields must be set together; the named provider must exist in
+	// Config with api_format "openai-compat". Unlike OllamaURLOverride, the
+	// override is written into the returned Bundle.Config (on a copy — the
+	// caller's Config is never mutated) so diagnostics read the same URL the
+	// live client uses.
+	OpenAICompatURLOverrideProvider string
+	OpenAICompatURLOverride         string
 }
 
 // Bundle is the assembled provider stack. Warnings collects non-fatal,
@@ -41,7 +52,8 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	// effCfg is the synthetic config when opts.Config is nil; reuse it for the
 	// prober factory, capability overrides, and Bundle.Config so all four see the
 	// same providers New actually built.
-	provs, ollamaClients, effCfg, err := buildProviders(opts.Config, opts.OllamaURLOverride)
+	provs, ollamaClients, effCfg, err := buildProviders(opts.Config, opts.OllamaURLOverride,
+		opts.OpenAICompatURLOverrideProvider, opts.OpenAICompatURLOverride)
 	if err != nil {
 		return nil, err
 	}
