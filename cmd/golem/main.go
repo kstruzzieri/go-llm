@@ -260,7 +260,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 
-	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL)
+	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, "", "")
 	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint)
 	if err != nil {
 		return err

@@ -99,6 +99,7 @@ const toolRouteCaps = provider.CapChat | provider.CapStream | provider.CapToolCa
 type preflightEndpoint struct {
 	BaseURL    string // provider base_url from config ("" if unknown)
 	ModelsPath string // "/v1/models" (openai-compat) or "/api/tags" (ollama)
+	Source     string // explicit override source ("-base-url"/"GO_LLM_BASE_URL"); "" for config-sourced URLs
 }
 
 // endpointResolver maps a provider name to its discovery endpoint. It returns
@@ -147,9 +148,11 @@ func redactBaseURL(raw string) string {
 // mirrors providerbootstrap's ollama base-URL override (providers.go), which is
 // applied to the live client but not written back into the returned Config, so
 // the resolver re-applies it to avoid printing a stale ollama base_url under
-// `golem -ollama-url ...`. The overlay is idempotent for the nil-config
-// synthetic path.
-func newPreflightEndpointResolver(cfg *config.Config, ollamaURLOverride string) endpointResolver {
+// `golem -ollama-url ...`. The openai-compat override IS written into the
+// bundle config by providerbootstrap, so no URL overlay is needed for it; the
+// resolver only stamps the explicit-source label (ocSourceProvider/ocSource)
+// so connectivity diagnostics can name a failing -base-url/GO_LLM_BASE_URL.
+func newPreflightEndpointResolver(cfg *config.Config, ollamaURLOverride, ocSourceProvider, ocSource string) endpointResolver {
 	return func(name string) (preflightEndpoint, bool) {
 		if cfg == nil {
 			return preflightEndpoint{}, false
@@ -169,7 +172,11 @@ func newPreflightEndpointResolver(cfg *config.Config, ollamaURLOverride string) 
 		if apiFormat == "openai-compat" {
 			path = "/v1/models"
 		}
-		return preflightEndpoint{BaseURL: pc.BaseURL, ModelsPath: path}, true
+		ep := preflightEndpoint{BaseURL: pc.BaseURL, ModelsPath: path}
+		if name == ocSourceProvider && ocSource != "" {
+			ep.Source = ocSource
+		}
+		return ep, true
 	}
 }
 
@@ -218,6 +225,11 @@ func preflightConnectivityWarn(sel, providerName string, ep preflightEndpoint, e
 		return fmt.Sprintf("agent fallback %q: provider lookup failed: %v", sel, lookupErr)
 	}
 	addr := redactBaseURL(ep.BaseURL)
+	if ep.Source != "" {
+		// A failing explicit override must be named as such: the fix is the
+		// flag/env value the user passed, not models.json.
+		addr += " (from " + ep.Source + ")"
+	}
 	var hs httpStatuser
 	if errors.As(lookupErr, &hs) {
 		return fmt.Sprintf("agent fallback %q: cannot reach provider %q at %s (GET %s -> %s); check server/base_url",
