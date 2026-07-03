@@ -378,6 +378,9 @@ func (s *Server) handleAgentMemoryPromote(ctx context.Context, req *gomcp.CallTo
 	if id == "" {
 		return toolError("validation", "id is required"), nil
 	}
+	// Promote's valid target set is durable-only (narrower than
+	// parseAgentMemoryKind, which also accepts "" and working), so the check is
+	// inlined here rather than shared — do not de-duplicate into that parser.
 	kind := memory.MemoryKind(strings.ToLower(strings.TrimSpace(args.Kind)))
 	if kind != memory.KindSemantic && kind != memory.KindEpisodic {
 		return toolError("validation", "invalid kind %q (semantic|episodic)", args.Kind), nil
