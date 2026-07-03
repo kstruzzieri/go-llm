@@ -23,7 +23,7 @@ go-llm/
 ├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
 ├── mcpclient/       # MCP client: adapts external MCP servers' tools into agent.Tool (stdio/streamable-HTTP); consumed by cmd/golem
 ├── conversation/    # Persistent conversation storage with SQLite
-├── memory/          # Explicit user-controlled local memories (SQLite, scope-filtered FTS5/bm25 search); separate from conversation + RAG; backs Golem /remember + memory_search
+├── memory/          # Explicit user-controlled local memories + agent-memory records (SQLite, scope-filtered FTS5/bm25 search); shared hardened-open primitives (open.go); separate from conversation + RAG; backs Golem /remember + memory_search AND MCP agent_memory_* tools
 ├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)
 ├── feedback/        # Implicit user behavioral signal collection
 ├── fingerprint/     # Model profiling (latency benchmarks, capability detection)

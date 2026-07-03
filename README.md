@@ -540,6 +540,9 @@ go build -o go-llm-mcp ./cmd/go-llm-mcp/
 
 # Custom Ollama URL
 ./go-llm-mcp --ollama-url http://gpu-server:11434
+
+# Opt-in agent-memory tools (agent_memory_search/create/promote)
+./go-llm-mcp --agent-memory-db ~/.local/share/go-llm/memories.db
 ```
 
 Claude Desktop configuration (`claude_desktop_config.json`):
@@ -555,7 +558,7 @@ Claude Desktop configuration (`claude_desktop_config.json`):
 }
 ```
 
-The server exposes 19 tools (chat, generate, code completion, embeddings, RAG, model management, analysis), 4 prompt templates, 7 concrete resources, and 1 resource template. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see Roadmap.)
+The server exposes 19 tools by default (chat, generate, code completion, embeddings, RAG, model management, analysis) plus 3 opt-in agent-memory tools (`agent_memory_search`, `agent_memory_create`, `agent_memory_promote`) registered only when `--agent-memory-db <path>` is set, 4 prompt templates, 7 concrete resources, and 1 resource template. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see Roadmap.)
 
 ## Parquet Export
 
