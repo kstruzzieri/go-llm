@@ -24,6 +24,9 @@ type flags struct {
 	prompt           string
 	promptSet        bool // -p was passed (distinguishes an explicit empty prompt)
 	ollamaURL        string
+	baseURL          string
+	baseURLSet       bool // -base-url was passed (distinguishes an explicit empty value)
+	noProbe          bool
 	ragDB            string
 	maxSteps         int
 	inputCeiling     int
@@ -54,6 +57,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
+	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the primary agent model (server root, without /v1); used exactly as given, disables discovery")
+	fs.BoolVar(&f.noProbe, "no-probe", false, "disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved")
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
 	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
@@ -83,8 +88,11 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, err
 	}
 	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "p" {
+		switch fl.Name {
+		case "p":
 			f.promptSet = true
+		case "base-url":
+			f.baseURLSet = true
 		}
 	})
 	return f, nil
