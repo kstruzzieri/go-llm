@@ -104,14 +104,16 @@ type fakeProber struct {
 	calls     int
 	gotCands  []string
 	gotModel  string
+	gotOpts   int
 	returnURL string
 	returnErr error
 }
 
-func (fp *fakeProber) probe(_ context.Context, cands []string, model string, _ ...openaicompat.ClientOption) (string, error) {
+func (fp *fakeProber) probe(_ context.Context, cands []string, model string, opts ...openaicompat.ClientOption) (string, error) {
 	fp.calls++
 	fp.gotCands = cands
 	fp.gotModel = model
+	fp.gotOpts = len(opts)
 	return fp.returnURL, fp.returnErr
 }
 
@@ -257,6 +259,35 @@ func TestResolveBackend_ScanCandidatesShape(t *testing.T) {
 	if !strings.Contains(res.notice, "resolved to http://127.0.0.1:8083") {
 		t.Fatalf("notice = %q", res.notice)
 	}
+	if fp.gotOpts != 1 {
+		t.Fatalf("gotOpts = %d, want 1 (base HTTP-client opt only, no APIKey configured)", fp.gotOpts)
+	}
+}
+
+func TestResolveBackend_ScanPassesAPIKeyOpt(t *testing.T) {
+	fp := &fakeProber{returnURL: "http://127.0.0.1:8083"}
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080", APIKey: "k123"},
+		},
+		Models:   map[string]config.ModelConfig{"agent-role": {Name: "gemma4:31b", Provider: "llamacpp", Type: "dense"}},
+		Defaults: map[string]string{"agent": "agent-role"},
+	}
+	res, err := resolveBackend(context.Background(), cfg, backendResolveOpts{
+		lookupEnv: noEnv, prober: fp.probe,
+	})
+	if err != nil {
+		t.Fatalf("resolveBackend: %v", err)
+	}
+	if fp.calls != 1 {
+		t.Fatalf("prober calls = %d, want 1", fp.calls)
+	}
+	if fp.gotOpts != 2 {
+		t.Fatalf("gotOpts = %d, want 2 (base HTTP-client opt + APIKey opt)", fp.gotOpts)
+	}
+	if res.baseURL != "http://127.0.0.1:8083" {
+		t.Fatalf("res = %+v", res)
+	}
 }
 
 func TestResolveBackend_DistinctConfiguredURLPrepended(t *testing.T) {
@@ -326,6 +357,25 @@ func TestResolveBackend_NoTargetNoOp(t *testing.T) {
 			Models:   map[string]config.ModelConfig{"r": {Name: "m", Provider: "ollama", Type: "dense"}},
 			Defaults: map[string]string{"agent": "r"},
 		}},
+		{"defaults.agent names missing role", &config.Config{
+			Providers: map[string]config.ProviderConfig{
+				"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
+			},
+			Models:   map[string]config.ModelConfig{"agent-role": {Name: "m", Provider: "llamacpp", Type: "dense"}},
+			Defaults: map[string]string{"agent": "typo"},
+		}},
+		{"chain resolution errors (RoleFallbackChain)", &config.Config{
+			// defaults.agent points at a role whose fallback cycles back to
+			// itself: RoleFallbackChain errors, which openAICompatAgentTarget
+			// treats identically to an unparseable selector (ok=false).
+			Providers: map[string]config.ProviderConfig{
+				"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
+			},
+			Models: map[string]config.ModelConfig{
+				"agent-role": {Name: "m", Provider: "llamacpp", Type: "dense", Fallbacks: []string{"agent-role"}},
+			},
+			Defaults: map[string]string{"agent": "agent-role"},
+		}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -371,6 +421,42 @@ func TestStartupNotices_BackendLine(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], "openai-compat backend: resolved to") {
 		t.Fatalf("lines[1] = %q, want the backend line directly after workspace", lines[1])
+	}
+}
+
+func TestBackendResolutionDiagSource(t *testing.T) {
+	cases := []struct {
+		name   string
+		source string
+		want   string
+	}{
+		{"flag source", "-base-url", "-base-url"},
+		{"env source", "GO_LLM_BASE_URL", "GO_LLM_BASE_URL"},
+		{"discovered source stays unlabeled", "discovered", ""},
+		{"empty source", "", ""},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			r := backendResolution{source: tt.source}
+			if got := r.diagSource(); got != tt.want {
+				t.Fatalf("diagSource() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveBackend_InvalidFlagErrors(t *testing.T) {
+	fp := &fakeProber{}
+	cfg := ocConfig("llamacpp", "gemma4:31b", "http://127.0.0.1:8080")
+	_, err := resolveBackend(context.Background(), cfg, backendResolveOpts{
+		flagBaseURL: "http://127.0.0.1:8081/v1", flagSet: true,
+		lookupEnv: noEnv, prober: fp.probe,
+	})
+	if err == nil || !strings.Contains(err.Error(), "without the /v1 suffix") {
+		t.Fatalf("err = %v, want substring %q", err, "without the /v1 suffix")
+	}
+	if fp.calls != 0 {
+		t.Fatalf("prober called %d times, want 0 (flag validation fails before discovery)", fp.calls)
 	}
 }
 

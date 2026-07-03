@@ -126,6 +126,10 @@ func statusLabel(code int) string {
 // printed in a diagnostic, so credentials never leak into logs. A string that
 // fails to parse and looks userinfo-shaped (contains "@") is replaced wholesale
 // rather than printed raw.
+//
+// This logic is mirrored in provider/openaicompat/discover.go's
+// redactURLUserinfo (that package cannot import cmd/golem). Keep the two in
+// sync when either changes.
 func redactBaseURL(raw string) string {
 	if raw == "" {
 		return ""

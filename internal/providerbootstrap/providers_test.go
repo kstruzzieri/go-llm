@@ -107,6 +107,7 @@ func TestBuildProviders_OpenAICompatOverrideValidation(t *testing.T) {
 	base := &config.Config{Providers: map[string]config.ProviderConfig{
 		"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
 		"ollama":   {APIFormat: "ollama", BaseURL: "http://localhost:11434"},
+		"plain":    {APIFormat: "", BaseURL: "http://127.0.0.1:8082"},
 	}}
 	tests := []struct {
 		name       string
@@ -116,6 +117,11 @@ func TestBuildProviders_OpenAICompatOverrideValidation(t *testing.T) {
 		{"url without provider", "", "http://127.0.0.1:8083"},
 		{"unknown provider", "nope", "http://127.0.0.1:8083"},
 		{"non-openai-compat provider", "ollama", "http://127.0.0.1:8083"},
+		// Empty api_format defaults to "ollama" internally (buildProvider's
+		// switch, and the same default this validation applies), so it is
+		// rejected as a non-openai-compat override target exactly like an
+		// explicit "ollama" api_format.
+		{"empty api_format target", "plain", "http://127.0.0.1:8083"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,6 +129,14 @@ func TestBuildProviders_OpenAICompatOverrideValidation(t *testing.T) {
 				t.Fatal("want error, got nil")
 			}
 		})
+	}
+}
+
+func TestBuildProviders_NilConfigRejectsOpenAICompatOverride(t *testing.T) {
+	// nil cfg synthesizes an ollama-only default config; overriding a
+	// non-openai-compat provider ("ollama") must still be rejected.
+	if _, _, _, err := buildProviders(nil, "", "ollama", "http://x"); err == nil {
+		t.Fatal("want error, got nil")
 	}
 }
 

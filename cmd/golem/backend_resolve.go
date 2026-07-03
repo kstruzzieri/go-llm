@@ -38,9 +38,17 @@ const (
 	backendScanPortLow  = 8080
 	backendScanPortHigh = 8090
 	// backendProbeTimeout bounds each discovery probe. Loopback-only targets,
-	// so a short timeout keeps the worst case (all 11 ports dead) around a
-	// few seconds — paid only when the configured backend is already broken.
+	// so a short timeout keeps the worst case — up to 12 probes (configured
+	// URL + 11-port band) x 800ms, ~10s worst case — paid only when the
+	// configured backend is already broken.
 	backendProbeTimeout = 800 * time.Millisecond
+
+	// sourceFlagBaseURL and sourceEnvBaseURL are the explicit-override source
+	// labels shared by explicitBaseURL, diagSource, and validateBaseURLOverride
+	// call sites, so the label used in diagnostics cannot drift from the label
+	// stored on backendResolution.
+	sourceFlagBaseURL = "-base-url"
+	sourceEnvBaseURL  = "GO_LLM_BASE_URL"
 )
 
 // backendProber matches openaicompat.DiscoverBaseURL. A seam so policy tests
@@ -54,7 +62,7 @@ type backendProber func(ctx context.Context, candidates []string, wantModel stri
 type backendResolution struct {
 	providerKey string   // openai-compat provider to override; "" => none
 	baseURL     string   // override URL; "" => none
-	source      string   // "-base-url" | "GO_LLM_BASE_URL" | "discovered" | ""
+	source      string   // sourceFlagBaseURL | sourceEnvBaseURL | "discovered" | ""
 	notice      string   // positive startup line ("" => none)
 	warns       []string // non-fatal problems to surface
 }
@@ -65,7 +73,7 @@ type backendResolution struct {
 // URL already got its own startup notice.
 func (r backendResolution) diagSource() string {
 	switch r.source {
-	case "-base-url", "GO_LLM_BASE_URL":
+	case sourceFlagBaseURL, sourceEnvBaseURL:
 		return r.source
 	}
 	return ""
@@ -127,6 +135,12 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 	copts := []openaicompat.ClientOption{
 		openaicompat.WithHTTPClient(&http.Client{Timeout: backendProbeTimeout}),
 	}
+	// The provider's API key is deliberately sent to every loopback scan
+	// candidate: if the backend moved to another local port but still
+	// enforces auth, it must still answer the probe. This is bounded by the
+	// literal-loopback gate above (isLoopbackURL) — the scan never leaves
+	// 127.0.0.1/localhost, so the key never reaches a non-loopback host.
+	// Spec-locked tradeoff; do not gate this on a "trusted candidate" check.
 	if pc.APIKey != "" {
 		copts = append(copts, openaicompat.WithAPIKey(pc.APIKey))
 	}
@@ -152,18 +166,18 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 // first, then GO_LLM_BASE_URL. Returns ("", "", nil) when neither is set.
 func explicitBaseURL(flagVal string, flagSet bool, lookupEnv func(string) (string, bool)) (val, source string, err error) {
 	if flagSet {
-		v, err := validateBaseURLOverride(flagVal, "-base-url")
+		v, err := validateBaseURLOverride(flagVal, sourceFlagBaseURL)
 		if err != nil {
 			return "", "", err
 		}
-		return v, "-base-url", nil
+		return v, sourceFlagBaseURL, nil
 	}
-	if raw, ok := lookupEnv("GO_LLM_BASE_URL"); ok {
-		v, err := validateBaseURLOverride(raw, "GO_LLM_BASE_URL")
+	if raw, ok := lookupEnv(sourceEnvBaseURL); ok {
+		v, err := validateBaseURLOverride(raw, sourceEnvBaseURL)
 		if err != nil {
 			return "", "", err
 		}
-		return v, "GO_LLM_BASE_URL", nil
+		return v, sourceEnvBaseURL, nil
 	}
 	return "", "", nil
 }
