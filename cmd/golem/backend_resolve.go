@@ -17,8 +17,11 @@ import (
 // override (-base-url flag or GO_LLM_BASE_URL env). source names the origin
 // for error messages. The value is the openai-compat server ROOT — the client
 // appends /v1 paths itself — so a path that ends in /v1 is rejected with a
-// hint; other path prefixes stay allowed for reverse-proxy setups. URLs in
-// error messages are userinfo-redacted (never leak credentials into logs).
+// hint; other path prefixes stay allowed for reverse-proxy setups. A query or
+// fragment is rejected: the client builds requests by string concatenation
+// (base + "/v1/..."), so "http://h:8080?x=1" would swallow the API path into
+// the query string and every call would silently hit "/". URLs in error
+// messages are userinfo-redacted (never leak credentials into logs).
 func validateBaseURLOverride(raw, source string) (string, error) {
 	v := strings.TrimSpace(raw)
 	if v == "" {
@@ -27,6 +30,12 @@ func validateBaseURLOverride(raw, source string) (string, error) {
 	u, err := url.ParseRequestURI(v)
 	if err != nil || u.Scheme == "" || u.Host == "" {
 		return "", fmt.Errorf("golem: %s: URL %q must include scheme and host (server root, e.g. http://127.0.0.1:8081)", source, redactBaseURL(v))
+	}
+	// ParseRequestURI keeps "#" as a literal path byte (request-URIs carry no
+	// fragment), but the client's own url.Parse of the final concatenated URL
+	// WOULD treat it as a fragment delimiter — so check the raw value too.
+	if u.RawQuery != "" || u.ForceQuery || strings.Contains(v, "#") {
+		return "", fmt.Errorf("golem: %s: URL %q must not carry a query or fragment (server root only, e.g. http://127.0.0.1:8081)", source, redactBaseURL(v))
 	}
 	if p := strings.TrimRight(u.Path, "/"); strings.HasSuffix(p, "/v1") {
 		return "", fmt.Errorf("golem: %s: pass the server root without the /v1 suffix (the client appends API paths): got %q", source, redactBaseURL(v))
@@ -164,6 +173,12 @@ func resolveBackend(ctx context.Context, cfg *config.Config, o backendResolveOpt
 
 // explicitBaseURL applies the explicit-override precedence: -base-url flag
 // first, then GO_LLM_BASE_URL. Returns ("", "", nil) when neither is set.
+//
+// Validation is deliberately fatal even when no openai-compat target exists
+// to apply the value to (where a VALID value is merely warn-and-ignored): a
+// malformed override is a misconfiguration the user should notice, not one
+// that starts failing only on the day the config gains an openai-compat
+// provider.
 func explicitBaseURL(flagVal string, flagSet bool, lookupEnv func(string) (string, bool)) (val, source string, err error) {
 	if flagSet {
 		v, err := validateBaseURLOverride(flagVal, sourceFlagBaseURL)
