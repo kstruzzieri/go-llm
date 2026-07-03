@@ -21,13 +21,15 @@ const (
 )
 
 const (
-	defaultAgentMemorySearchLimit = 8
-	// workingRecordTTL is the staleness backstop on working records; promotion
+	// DefaultAgentMemorySearchLimit is the bounded top-k used when a search
+	// limit is unset; shared by the built-in tool and the MCP surface.
+	DefaultAgentMemorySearchLimit = 8
+	// WorkingRecordTTL is the staleness backstop on working records; promotion
 	// clears it. Session scoping is the primary boundary.
-	workingRecordTTL = 7 * 24 * time.Hour
-	// maxAgentMemoryContentBytes hard-caps stored content; prompt guidance
+	WorkingRecordTTL = 7 * 24 * time.Hour
+	// MaxAgentMemoryContentBytes hard-caps stored content; prompt guidance
 	// alone is not a storage bound.
-	maxAgentMemoryContentBytes = 4096
+	MaxAgentMemoryContentBytes = 4096
 )
 
 // recordSearcher is the minimal slice of *memory.MemoryRecordStore the search
@@ -92,7 +94,7 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 	}
 	limit := t.Limit
 	if limit <= 0 {
-		limit = defaultAgentMemorySearchLimit
+		limit = DefaultAgentMemorySearchLimit
 	}
 	records, err := t.S.Search(ctx, strings.TrimSpace(args.Query), memory.RecordSearchOptions{
 		WorkspaceID: t.WorkspaceID,
@@ -180,8 +182,8 @@ func (t AgentMemoryCreate) Invoke(ctx context.Context, raw json.RawMessage) (age
 	if content == "" {
 		return agent.ToolResult{IsError: true, Content: "content is required"}, nil
 	}
-	if len(content) > maxAgentMemoryContentBytes {
-		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("content too large: %d bytes (max %d)", len(content), maxAgentMemoryContentBytes)}, nil
+	if len(content) > MaxAgentMemoryContentBytes {
+		return agent.ToolResult{IsError: true, Content: fmt.Sprintf("content too large: %d bytes (max %d)", len(content), MaxAgentMemoryContentBytes)}, nil
 	}
 	sid := resolveSessionID(t.SessionID)
 	if sid == "" {
@@ -193,7 +195,7 @@ func (t AgentMemoryCreate) Invoke(ctx context.Context, raw json.RawMessage) (age
 		WorkspaceID: t.WorkspaceID,
 		SessionID:   sid,
 		Provenance:  memory.Provenance{SourceKind: "conversation", SourceID: sid},
-		ExpiresAt:   nowOr(t.Now).Add(workingRecordTTL),
+		ExpiresAt:   nowOr(t.Now).Add(WorkingRecordTTL),
 	})
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "agent memory create failed: " + err.Error()}, nil
