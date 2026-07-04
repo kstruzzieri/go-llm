@@ -691,10 +691,11 @@ func toChatRequest(req provider.ChatRequest, stream bool) chatRequest {
 		}
 	}
 	r := chatRequest{
-		Model:    req.Model,
-		Messages: msgs,
-		Stream:   stream,
-		Tools:    toWireTools(req.Tools),
+		Model:      req.Model,
+		Messages:   msgs,
+		Stream:     stream,
+		Tools:      toWireTools(req.Tools),
+		ToolChoice: req.ToolChoice,
 	}
 	if stream {
 		r.StreamOptions = &chatStreamOptions{IncludeUsage: true}

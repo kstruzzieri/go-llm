@@ -4,6 +4,7 @@
 package fingerprint
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -166,4 +167,20 @@ func (p CapProbe) Valid(currentDigest string, now time.Time) bool {
 		return false
 	}
 	return true
+}
+
+// CapProbeOutcome is a classified probe verdict ready to persist.
+// TTL zero means the row does not expire.
+type CapProbeOutcome struct {
+	State  CapProbeState
+	TTL    time.Duration
+	Detail string // short human-readable classification, for diagnostics
+}
+
+// ToolCallProber is an optional interface a ModelProber may implement to
+// actively determine tool-call support. A non-nil error means the probe
+// was transient/diagnostic (network failure, auth, rate limit) and MUST
+// NOT be persisted; the outcome is only meaningful when err is nil.
+type ToolCallProber interface {
+	ProbeToolCall(ctx context.Context, model string) (CapProbeOutcome, error)
 }
