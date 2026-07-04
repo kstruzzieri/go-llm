@@ -2112,3 +2112,123 @@ func TestRecommend_RestrictToProvider(t *testing.T) {
 		t.Fatal("Recommend (nonexistent) returned nil error, want provider resolution error")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// SetCapabilityFloor
+// ---------------------------------------------------------------------------
+
+// newTestRegistryWithModel builds a ModelRegistry over a single mock provider
+// advertising one model with no runtime capability metadata — the
+// openai-compat shape the capability floor exists for.
+func newTestRegistryWithModel(t *testing.T, providerName, model string) *ModelRegistry {
+	t.Helper()
+	prov := &mrMockProvider{
+		name:   providerName,
+		models: []ModelInfo{{Name: model}},
+	}
+	reg := &mrMockProviderRegistry{providers: map[string]Provider{providerName: prov}}
+	mr, err := NewModelRegistry(reg, newMrMockFingerprintStore())
+	if err != nil {
+		t.Fatalf("NewModelRegistry: %v", err)
+	}
+	return mr
+}
+
+// TestSetCapabilityFloor_ORsBelowCatalogAndOverride verifies the floor
+// OR-merges with the static catalog instead of replacing it: a catalog
+// family hit carrying tool_call must survive a floor that omits it.
+func TestSetCapabilityFloor_ORsBelowCatalogAndOverride(t *testing.T) {
+	// "qwen3:8b" hits the catalog family entry whose caps include "tools".
+	reg := newTestRegistryWithModel(t, "llamacpp", "qwen3:8b")
+	reg.SetCapabilityFloor(func(key ModelKey) []string {
+		return []string{"chat", "generate", "stream"}
+	})
+	p, err := reg.Lookup(context.Background(), ModelKey{Provider: "llamacpp", Model: "qwen3:8b"})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	want := CapChat | CapGenerate | CapStream | CapToolCall
+	if !p.Caps.Has(want) {
+		t.Fatalf("caps = %v, want superset of %v", p.Caps, want)
+	}
+}
+
+// TestSetCapabilityFloor_ExplicitOverrideStillReplaces verifies the explicit
+// override keeps its wholesale-REPLACE semantics above the floor: floor and
+// catalog both contribute tool_call, but an override without it wins.
+func TestSetCapabilityFloor_ExplicitOverrideStillReplaces(t *testing.T) {
+	reg := newTestRegistryWithModel(t, "llamacpp", "qwen3:8b")
+	reg.SetCapabilityFloor(func(ModelKey) []string { return []string{"chat", "generate", "stream"} })
+	reg.SetCapabilityOverride(func(ModelKey) []string { return []string{"chat", "stream"} })
+	p, err := reg.Lookup(context.Background(), ModelKey{Provider: "llamacpp", Model: "qwen3:8b"})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	if p.Caps != (CapChat | CapStream) {
+		t.Fatalf("caps = %v, want exactly chat|stream", p.Caps)
+	}
+}
+
+// TestSetCapabilityFloor_InvalidTokensDroppedWithHook verifies non-canonical
+// floor tokens are rejected wholesale (never partially applied) and that the
+// rejection hook fires so the misconfiguration is observable.
+func TestSetCapabilityFloor_InvalidTokensDroppedWithHook(t *testing.T) {
+	reg := newTestRegistryWithModel(t, "llamacpp", "unknown-model")
+	var hookKey ModelKey
+	reg.SetOverrideRejectionHook(func(key ModelKey, tokens []string, err error) { hookKey = key })
+	reg.SetCapabilityFloor(func(ModelKey) []string { return []string{"completion"} }) // multi-bit alias => strict-reject
+	p, err := reg.Lookup(context.Background(), ModelKey{Provider: "llamacpp", Model: "unknown-model"})
+	if err != nil {
+		t.Fatalf("lookup: %v", err)
+	}
+	// "completion" would lenient-expand to chat|generate|stream; none of
+	// those bits may leak through a rejected floor.
+	if p.Caps.Has(CapChat) || p.Caps.Has(CapGenerate) || p.Caps.Has(CapStream) {
+		t.Fatalf("rejected floor partially applied: caps = %v", p.Caps)
+	}
+	if hookKey.Model != "unknown-model" {
+		t.Fatalf("rejection hook not fired for floor tokens")
+	}
+}
+
+// TestSetCapabilityFloor_InvalidatesCache verifies installing a floor
+// flushes the profile cache so already-warm keys pick up the new policy on
+// the next Lookup (same invalidation contract as the override; the TOCTOU
+// version guard is shared machinery covered by the override tests).
+func TestSetCapabilityFloor_InvalidatesCache(t *testing.T) {
+	reg := newTestRegistryWithModel(t, "llamacpp", "unknown-model")
+	if _, err := reg.Lookup(context.Background(), ModelKey{Provider: "llamacpp", Model: "unknown-model"}); err != nil {
+		t.Fatalf("warm lookup: %v", err)
+	}
+	reg.SetCapabilityFloor(func(ModelKey) []string { return []string{"chat", "stream"} })
+	p, err := reg.Lookup(context.Background(), ModelKey{Provider: "llamacpp", Model: "unknown-model"})
+	if err != nil {
+		t.Fatalf("lookup after floor: %v", err)
+	}
+	if !p.Caps.Has(CapChat | CapStream) {
+		t.Fatalf("floor not applied after cache flush: %v", p.Caps)
+	}
+}
+
+// TestSetCapabilityFloor_NilClearsFloor verifies SetCapabilityFloor(nil)
+// removes the floor: a catalog-miss model that only had floor-supplied bits
+// loses them on the next Lookup.
+func TestSetCapabilityFloor_NilClearsFloor(t *testing.T) {
+	reg := newTestRegistryWithModel(t, "llamacpp", "unknown-model")
+	reg.SetCapabilityFloor(func(ModelKey) []string { return []string{"chat", "stream"} })
+	p, err := reg.Lookup(context.Background(), ModelKey{Provider: "llamacpp", Model: "unknown-model"})
+	if err != nil {
+		t.Fatalf("lookup with floor: %v", err)
+	}
+	if !p.Caps.Has(CapChat | CapStream) {
+		t.Fatalf("floor not applied: %v", p.Caps)
+	}
+	reg.SetCapabilityFloor(nil)
+	p, err = reg.Lookup(context.Background(), ModelKey{Provider: "llamacpp", Model: "unknown-model"})
+	if err != nil {
+		t.Fatalf("lookup after clearing floor: %v", err)
+	}
+	if p.Caps.Has(CapChat) || p.Caps.Has(CapStream) {
+		t.Fatalf("floor bits survived SetCapabilityFloor(nil): %v", p.Caps)
+	}
+}

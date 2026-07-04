@@ -43,7 +43,8 @@ type ModelRegistry struct {
 	fpProberFactory FingerprintProberFactory
 	providers       ProviderResolver
 	capOverride     CapabilityOverride
-	overrideVersion uint64
+	capFloor        CapabilityFloor
+	overrideVersion uint64 // bumped by SetCapabilityOverride AND SetCapabilityFloor; guards stale cache writes in buildProfile
 	rejectionHook   OverrideRejectionHook
 }
 
@@ -100,6 +101,21 @@ func WithFingerprintProberFactory(fn FingerprintProberFactory) ModelRegistryOpti
 //   - parses to zero caps: ignored (same crippling hazard)
 type CapabilityOverride func(key ModelKey) []string
 
+// CapabilityFloor returns baseline canonical capability tokens for a model
+// key, or nil when none. Floor caps are OR-merged into the profile at the
+// LOWEST precedence (with the static catalog layer): they guarantee a
+// minimum capability set for models whose provider exposes no capability
+// metadata (openai-compat), WITHOUT erasing catalog/fingerprint/runtime
+// additions the way the REPLACE override does. Tokens must be canonical
+// (ParseCapsStrict); invalid slices are dropped with the rejection hook
+// fired and never zero or shrink the profile.
+//
+// CapInsert exception: the runtime layer sits ABOVE the floor and clears
+// CapInsert (`&^= CapInsert`) when the model's template lacks suffix
+// markers, so a floor-supplied "insert" bit may still be removed by
+// runtime template detection. Every other floor bit is OR-only.
+type CapabilityFloor func(key ModelKey) []string
+
 // OverrideRejectionHook is called when a capability override returned a
 // non-empty token slice that failed strict canonical-only parsing — i.e.
 // the override was applied at the registry but had to be DROPPED because
@@ -110,6 +126,10 @@ type CapabilityOverride func(key ModelKey) []string
 // safe), so the hook is the only signal the misconfiguration ever happened.
 // Without it the override is silently swallowed and the operator sees
 // router decisions that don't match the config they wrote.
+//
+// The hook also fires for rejected capability-floor slices: a floor whose
+// tokens fail strict parsing is dropped wholesale (caps unchanged) with
+// the same observability contract.
 //
 // Typical implementations log the rejection or emit a metric. Hooks MUST
 // be cheap and non-blocking — they run inside merge() on every cache miss
@@ -158,6 +178,21 @@ func (r *ModelRegistry) SetCapabilityOverride(fn CapabilityOverride) {
 	// override in effect. Skipping this flush is the bug class where a
 	// warm cache silently shadows config changes — see feedback memory
 	// on rebuilding downstream state when a cache source changes.
+	clear(r.profiles)
+}
+
+// SetCapabilityFloor installs (or clears) the capability floor hook.
+// Pass nil to disable. Safe for concurrent use.
+//
+// Shares SetCapabilityOverride's invalidation + version-guard semantics:
+// the profile cache is flushed and the single policy version counter is
+// bumped so an in-flight buildProfile that snapshotted the OLD floor
+// cannot repopulate the cache with a stale-policy profile.
+func (r *ModelRegistry) SetCapabilityFloor(fn CapabilityFloor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.capFloor = fn
+	r.overrideVersion++
 	clear(r.profiles)
 }
 
@@ -380,15 +415,18 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 //  2. Fingerprint: capability probing data, benchmarked resource observations
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
-	// Snapshot (override, version, rejectionHook) FIRST so the policy a
-	// single buildProfile applies is fixed at start, and the cache write
-	// at the end can detect any concurrent SetCapabilityOverride. Reading
+	// Snapshot (override, floor, version, rejectionHook) FIRST so the
+	// policy a single buildProfile applies is fixed at start, and the
+	// cache write at the end can detect any concurrent
+	// SetCapabilityOverride or SetCapabilityFloor (both bump the shared
+	// version counter). Reading
 	// later (after slow IO like queryRuntime) would shrink the visible
 	// TOCTOU window but also leave the same race against the cache write
 	// itself; reading first keeps the contract simple: one buildProfile ->
 	// one policy version.
 	r.mu.RLock()
 	override := r.capOverride
+	floor := r.capFloor
 	overrideVer := r.overrideVersion
 	rejectionHook := r.rejectionHook
 	r.mu.RUnlock()
@@ -419,9 +457,9 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	// Layer 3: Fingerprint enrichment.
 	fpProfile := r.fingerprintProfile(ctx, key, runtimeInfo)
 
-	// Merge layers using the (override, rejectionHook) snapshot taken at
-	// function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, rejectionHook)
+	// Merge layers using the (override, floor, rejectionHook) snapshot
+	// taken at function entry.
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, rejectionHook)
 
 	// Cache the result iff the override snapshot is still current.
 	r.mu.Lock()
@@ -507,6 +545,7 @@ func (r *ModelRegistry) merge(
 	fp *fingerprint.Profile,
 	parsed ParsedModel,
 	override CapabilityOverride,
+	floor CapabilityFloor,
 	rejectionHook OverrideRejectionHook,
 ) *ModelProfile {
 	profile := &ModelProfile{
@@ -531,6 +570,26 @@ func (r *ModelRegistry) merge(
 
 		if static.ContextWindow > 0 {
 			profile.ContextWindow = static.ContextWindow
+		}
+	}
+
+	// Capability floor (lowest precedence, OR-merge). Guarantees baseline
+	// caps for providers that expose no capability metadata without the
+	// REPLACE override's erasure semantics. Invalid tokens are dropped
+	// wholesale with the rejection hook fired — a floor must never zero,
+	// shrink, or partially apply to the profile. Passed in by buildProfile
+	// (not read from r) for the same TOCTOU reason as the override.
+	if floor != nil {
+		if floorTokens := floor(key); len(floorTokens) > 0 {
+			floorCaps, err := ParseCapsStrict(floorTokens)
+			switch {
+			case err != nil:
+				if rejectionHook != nil {
+					rejectionHook(key, floorTokens, err)
+				}
+			case floorCaps != 0:
+				profile.Caps |= floorCaps
+			}
 		}
 	}
 
