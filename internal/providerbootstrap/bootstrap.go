@@ -86,6 +86,9 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	if err := installCapabilityOverrides(mr, effCfg); err != nil {
 		return nil, err
 	}
+	if err := installCapabilityFloors(mr, effCfg); err != nil {
+		return nil, err
+	}
 
 	router := provider.NewRouter(mr, pReg, opts.RouterOptions...)
 
