@@ -742,3 +742,199 @@ func TestLookupAndRecommendStayPure(t *testing.T) {
 		t.Fatalf("prober calls = %d, want 0 (Lookup/Recommend never probe)", got)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// ExplainToolCall (diagnostic provenance for `golem models`)
+// ---------------------------------------------------------------------------
+
+func TestExplainToolCall_Provenance(t *testing.T) {
+	ctx := context.Background()
+
+	// Explicit override key => Source "explicit".
+	t.Run("explicit", func(t *testing.T) {
+		store := newFakeCapProbeStore()
+		prober := newFakeToolCallProber()
+		mr := newCapResolveRegistry(t, "probe-prov", []string{"mystery-model"}, store, prober)
+		key := ModelKey{Provider: "probe-prov", Model: "mystery-model"}
+		mr.SetCapabilityOverride(func(k ModelKey) []string {
+			if k == key {
+				return []string{"chat", "tool_call"}
+			}
+			return nil
+		})
+		exp, err := mr.ExplainToolCall(ctx, key)
+		if err != nil {
+			t.Fatalf("ExplainToolCall() error: %v", err)
+		}
+		if exp.Source != "explicit" {
+			t.Fatalf("Source = %q, want explicit", exp.Source)
+		}
+		if !exp.Has {
+			t.Fatalf("Has = false, want true (override declares tool_call)")
+		}
+		if got := prober.totalCalls(); got != 0 {
+			t.Fatalf("prober calls = %d, want 0 (Explain never probes)", got)
+		}
+	})
+
+	// Catalog-tools key => Source "catalog". qwen3:8b declares tool_call in the
+	// static catalog, so the merged profile carries the bit without any probe.
+	t.Run("catalog", func(t *testing.T) {
+		store := newFakeCapProbeStore()
+		prober := newFakeToolCallProber()
+		mr := newCapResolveRegistry(t, "ollama-local", []string{"qwen3:8b"}, store, prober)
+		key := ModelKey{Provider: "ollama-local", Model: "qwen3:8b"}
+		exp, err := mr.ExplainToolCall(ctx, key)
+		if err != nil {
+			t.Fatalf("ExplainToolCall() error: %v", err)
+		}
+		if exp.Source != "catalog" {
+			t.Fatalf("Source = %q, want catalog", exp.Source)
+		}
+		if !exp.Has {
+			t.Fatalf("Has = false, want true")
+		}
+	})
+
+	// Probe-yes row => Source "probe" with TestedAt set. mystery-model has no
+	// catalog tool_call, so a valid cached "yes" row is the only source.
+	t.Run("probe", func(t *testing.T) {
+		store := newFakeCapProbeStore()
+		prober := newFakeToolCallProber()
+		mr := newCapResolveRegistry(t, "probe-prov", []string{"mystery-model"}, store, prober)
+		key := ModelKey{Provider: "probe-prov", Model: "mystery-model"}
+		tested := time.Now().Add(-2 * time.Hour)
+		if err := store.SaveCapProbe(ctx, fingerprint.CapProbe{
+			BackendID:    "probe-prov",
+			ModelName:    "mystery-model",
+			Capability:   "tool_call",
+			State:        fingerprint.CapProbeYes,
+			ModelDigest:  key.String(),
+			ProbeVersion: fingerprint.CurrentToolProbeVersion,
+			TestedAt:     tested,
+		}); err != nil {
+			t.Fatalf("seed SaveCapProbe() error: %v", err)
+		}
+		exp, err := mr.ExplainToolCall(ctx, key)
+		if err != nil {
+			t.Fatalf("ExplainToolCall() error: %v", err)
+		}
+		if exp.Source != "probe" {
+			t.Fatalf("Source = %q, want probe", exp.Source)
+		}
+		if !exp.Has {
+			t.Fatalf("Has = false, want true")
+		}
+		if exp.State != fingerprint.CapProbeYes {
+			t.Fatalf("State = %q, want yes", exp.State)
+		}
+		if exp.TestedAt.IsZero() {
+			t.Fatalf("TestedAt is zero, want the probe row timestamp")
+		}
+		if got := prober.totalCalls(); got != 0 {
+			t.Fatalf("prober calls = %d, want 0 (Explain never probes)", got)
+		}
+	})
+
+	// Nothing known => Source "unknown". A probe-no row is still surfaced in
+	// State/TestedAt even though Has is false.
+	t.Run("unknown_with_no_row", func(t *testing.T) {
+		store := newFakeCapProbeStore()
+		prober := newFakeToolCallProber()
+		mr := newCapResolveRegistry(t, "probe-prov", []string{"mystery-model"}, store, prober)
+		key := ModelKey{Provider: "probe-prov", Model: "mystery-model"}
+		tested := time.Now().Add(-time.Hour)
+		if err := store.SaveCapProbe(ctx, fingerprint.CapProbe{
+			BackendID:    "probe-prov",
+			ModelName:    "mystery-model",
+			Capability:   "tool_call",
+			State:        fingerprint.CapProbeNo,
+			ModelDigest:  key.String(),
+			ProbeVersion: fingerprint.CurrentToolProbeVersion,
+			TestedAt:     tested,
+		}); err != nil {
+			t.Fatalf("seed SaveCapProbe() error: %v", err)
+		}
+		exp, err := mr.ExplainToolCall(ctx, key)
+		if err != nil {
+			t.Fatalf("ExplainToolCall() error: %v", err)
+		}
+		if exp.Source != "probe" {
+			t.Fatalf("Source = %q, want probe (a no row is still a probe source)", exp.Source)
+		}
+		if exp.Has {
+			t.Fatalf("Has = true, want false (probe said no)")
+		}
+		if exp.State != fingerprint.CapProbeNo {
+			t.Fatalf("State = %q, want no", exp.State)
+		}
+	})
+
+	// Stale probe-yes row (wrong digest) + floor-supplied tool_call => the live
+	// bit is NOT the probe's (the merge layer would reject the stale row), so
+	// Source must be "runtime", not "probe". State/TestedAt still surface the
+	// stale row for operator visibility.
+	t.Run("stale_probe_with_floor_bit_is_runtime", func(t *testing.T) {
+		store := newFakeCapProbeStore()
+		prober := newFakeToolCallProber()
+		mr := newCapResolveRegistry(t, "probe-prov", []string{"mystery-model"}, store, prober)
+		key := ModelKey{Provider: "probe-prov", Model: "mystery-model"}
+		// Floor supplies tool_call (registry/provider-layer knowledge).
+		mr.SetCapabilityFloor(func(k ModelKey) []string {
+			if k == key {
+				return []string{"tool_call"}
+			}
+			return nil
+		})
+		// A stale yes row: wrong digest, so Valid() is false at read time.
+		tested := time.Now().Add(-3 * time.Hour)
+		if err := store.SaveCapProbe(ctx, fingerprint.CapProbe{
+			BackendID:    "probe-prov",
+			ModelName:    "mystery-model",
+			Capability:   "tool_call",
+			State:        fingerprint.CapProbeYes,
+			ModelDigest:  "stale-digest-does-not-match",
+			ProbeVersion: fingerprint.CurrentToolProbeVersion,
+			TestedAt:     tested,
+		}); err != nil {
+			t.Fatalf("seed SaveCapProbe() error: %v", err)
+		}
+		exp, err := mr.ExplainToolCall(ctx, key)
+		if err != nil {
+			t.Fatalf("ExplainToolCall() error: %v", err)
+		}
+		if !exp.Has {
+			t.Fatalf("Has = false, want true (floor supplies tool_call)")
+		}
+		if exp.Source != "runtime" {
+			t.Fatalf("Source = %q, want runtime (stale probe row must NOT be the source)", exp.Source)
+		}
+		if exp.State != fingerprint.CapProbeYes || exp.TestedAt.IsZero() {
+			t.Fatalf("State/TestedAt = %q/%v, want the stale row still surfaced", exp.State, exp.TestedAt)
+		}
+	})
+
+	// Truly nothing: no override, no catalog tool_call, no probe row => unknown.
+	t.Run("unknown", func(t *testing.T) {
+		store := newFakeCapProbeStore()
+		prober := newFakeToolCallProber()
+		mr := newCapResolveRegistry(t, "probe-prov", []string{"mystery-model"}, store, prober)
+		key := ModelKey{Provider: "probe-prov", Model: "mystery-model"}
+		exp, err := mr.ExplainToolCall(ctx, key)
+		if err != nil {
+			t.Fatalf("ExplainToolCall() error: %v", err)
+		}
+		if exp.Source != "unknown" {
+			t.Fatalf("Source = %q, want unknown", exp.Source)
+		}
+		if exp.Has {
+			t.Fatalf("Has = true, want false")
+		}
+		if exp.State != "" {
+			t.Fatalf("State = %q, want empty", exp.State)
+		}
+		if !exp.TestedAt.IsZero() {
+			t.Fatalf("TestedAt = %v, want zero (no row)", exp.TestedAt)
+		}
+	})
+}

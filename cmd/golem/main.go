@@ -226,8 +226,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		switch args[0] {
 		case "index":
 			return runIndex(context.Background(), args[1:], stdout, stderr)
+		case "models":
+			return runModels(context.Background(), args[1:], stdout, stderr)
 		default:
-			return fmt.Errorf("unknown command %q (did you mean \"index\"?)", args[0])
+			return fmt.Errorf("unknown command %q (did you mean \"index\" or \"models\"?)", args[0])
 		}
 	}
 
