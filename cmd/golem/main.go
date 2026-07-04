@@ -14,6 +14,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
@@ -28,6 +29,7 @@ type flags struct {
 	baseURL          string
 	baseURLSet       bool // -base-url was passed (distinguishes an explicit empty value)
 	noProbe          bool
+	noCapProbe       bool
 	ragDB            string
 	maxSteps         int
 	inputCeiling     int
@@ -60,6 +62,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
 	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the primary agent model (server root, without /v1); used exactly as given, disables discovery")
 	fs.BoolVar(&f.noProbe, "no-probe", false, "disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved")
+	fs.BoolVar(&f.noCapProbe, "no-cap-probe", false, "disable the active tool-capability probe for undeclared models (catalog and explicit capabilities still apply)")
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
 	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
@@ -263,11 +266,23 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err // explicit-override validation error: fatal, matches validateFlags semantics
 	}
 
+	var capStore fingerprint.CapProbeStore
+	capStoreWarn := ""
+	if !f.noCapProbe {
+		var capHandle *capProbeHandle
+		capHandle, capStoreWarn = openCapProbeStore(ctx, os.Getenv, root)
+		if capHandle != nil {
+			capStore = capHandle.store
+			defer func() { _ = capHandle.db.Close() }()
+		}
+	}
+
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
 		Config:                          cfg, // nil => default Ollama provider
 		OllamaURLOverride:               f.ollamaURL,
 		OpenAICompatURLOverrideProvider: backendRes.providerKey,
 		OpenAICompatURLOverride:         backendRes.baseURL,
+		CapabilityProbeStore:            capStore, // nil when -no-cap-probe or open fully failed
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap providers: %w", err)
@@ -289,6 +304,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 	warns = append(warns, oneShotWarns...)
+	if capStoreWarn != "" {
+		warns = append(warns, capStoreWarn)
+	}
 
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	autoSidecar := ""
