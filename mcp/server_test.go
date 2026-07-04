@@ -407,7 +407,7 @@ func TestNewServerRegistersConfiguredProvidersAndOverridesCapabilities(t *testin
 		t.Fatalf("Lookup(vllm-local/local-chat) error = %v", err)
 	}
 	if !profile.Caps.Has(provider.CapChat | provider.CapGenerate | provider.CapStream) {
-		t.Fatalf("local-chat caps = %v, want openai-compatible type-derived chat+generate+stream override", profile.Caps)
+		t.Fatalf("local-chat caps = %v, want openai-compatible type-derived chat+generate+stream floor", profile.Caps)
 	}
 
 	profile, err = s.modelRegistry.Lookup(context.Background(), provider.ModelKey{Provider: "vllm-local", Model: "local-carved"})

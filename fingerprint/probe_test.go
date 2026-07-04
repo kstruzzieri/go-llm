@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
@@ -328,5 +329,114 @@ func TestProbeEmbedding_Error(t *testing.T) {
 	_, err := prober.ProbeEmbedding(context.Background(), "chat-only-model")
 	if err == nil {
 		t.Fatal("expected error from embedding failure")
+	}
+}
+
+// TestOllamaProbeToolCall_CapabilitiesWithTools verifies a curated yes when
+// /api/show lists "tools".
+func TestOllamaProbeToolCall_CapabilitiesWithTools(t *testing.T) {
+	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"capabilities": []string{"completion", "tools"},
+		})
+	}))
+	defer srv.Close()
+
+	out, err := prober.ProbeToolCall(context.Background(), "qwen2.5:72b")
+	if err != nil {
+		t.Fatalf("ProbeToolCall() error: %v", err)
+	}
+	if out.State != CapProbeYes {
+		t.Errorf("State = %q, want %q", out.State, CapProbeYes)
+	}
+	if out.TTL != 0 {
+		t.Errorf("TTL = %v, want 0", out.TTL)
+	}
+}
+
+// TestOllamaProbeToolCall_CapabilitiesWithoutTools verifies a curated no when
+// the capabilities array is present but lacks "tools".
+func TestOllamaProbeToolCall_CapabilitiesWithoutTools(t *testing.T) {
+	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"capabilities": []string{"completion"},
+		})
+	}))
+	defer srv.Close()
+
+	out, err := prober.ProbeToolCall(context.Background(), "gemma3:27b")
+	if err != nil {
+		t.Fatalf("ProbeToolCall() error: %v", err)
+	}
+	if out.State != CapProbeNo {
+		t.Errorf("State = %q, want %q", out.State, CapProbeNo)
+	}
+	if out.TTL != 0 {
+		t.Errorf("TTL = %v, want 0", out.TTL)
+	}
+}
+
+// TestOllamaProbeToolCall_EmptyCapabilitiesArray verifies an empty-but-present
+// array is still a curated no, not inconclusive.
+func TestOllamaProbeToolCall_EmptyCapabilitiesArray(t *testing.T) {
+	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"capabilities": []string{},
+		})
+	}))
+	defer srv.Close()
+
+	out, err := prober.ProbeToolCall(context.Background(), "gemma3:27b")
+	if err != nil {
+		t.Fatalf("ProbeToolCall() error: %v", err)
+	}
+	if out.State != CapProbeNo {
+		t.Errorf("State = %q, want %q", out.State, CapProbeNo)
+	}
+	if out.TTL != 0 {
+		t.Errorf("TTL = %v, want 0", out.TTL)
+	}
+}
+
+// TestOllamaProbeToolCall_MissingCapabilitiesArray verifies older Ollama
+// (no capabilities field) yields inconclusive with a bounded TTL, never a
+// hard no.
+func TestOllamaProbeToolCall_MissingCapabilitiesArray(t *testing.T) {
+	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"details": map[string]any{"family": "llama"},
+		})
+	}))
+	defer srv.Close()
+
+	out, err := prober.ProbeToolCall(context.Background(), "llama2:7b")
+	if err != nil {
+		t.Fatalf("ProbeToolCall() error: %v", err)
+	}
+	if out.State != CapProbeInconclusive {
+		t.Errorf("State = %q, want %q", out.State, CapProbeInconclusive)
+	}
+	if out.TTL != CapProbeInconclusiveTTL {
+		t.Errorf("TTL = %v, want %v", out.TTL, CapProbeInconclusiveTTL)
+	}
+}
+
+// TestOllamaProbeToolCall_ShowError verifies a transport/API failure is
+// surfaced as an error, not persisted as a verdict.
+func TestOllamaProbeToolCall_ShowError(t *testing.T) {
+	prober, srv := newTestProber(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, `{"error":"model not found"}`, http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	out, err := prober.ProbeToolCall(context.Background(), "missing:latest")
+	if err == nil {
+		t.Fatal("ProbeToolCall() error = nil, want non-nil")
+	}
+	if !strings.Contains(err.Error(), "fingerprint: ollama tool probe") {
+		t.Errorf("error = %q, want wrap prefix %q", err, "fingerprint: ollama tool probe")
+	}
+	if out != (CapProbeOutcome{}) {
+		t.Errorf("outcome = %+v, want zero value", out)
 	}
 }

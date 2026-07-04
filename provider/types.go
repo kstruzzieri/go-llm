@@ -194,7 +194,11 @@ type ChatRequest struct {
 	Messages []ChatMessage `json:"messages"`
 	Options  ModelOptions  `json:"options,omitempty"`
 	Tools    []Tool        `json:"tools,omitempty"`
-	Stream   bool          `json:"stream"`
+	// ToolChoice forces the model's tool-use behavior (e.g. "required").
+	// Currently honored by the openai-compat provider; empty omits the
+	// field from the wire request.
+	ToolChoice string `json:"tool_choice,omitempty"`
+	Stream     bool   `json:"stream"`
 }
 
 // ChatResponse is the provider-agnostic response from a chat completion.

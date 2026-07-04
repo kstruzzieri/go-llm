@@ -3,6 +3,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -11,8 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/kstruzzieri/go-llm/fingerprint"
 )
+
+// capabilityToolCall is the canonical capability token persisted in
+// capability_probes rows and resolved by ResolveToolCall.
+const capabilityToolCall = "tool_call"
 
 // ProviderResolver provides the subset of Registry methods needed by
 // ModelRegistry to query providers and resolve model keys. This interface
@@ -43,8 +50,16 @@ type ModelRegistry struct {
 	fpProberFactory FingerprintProberFactory
 	providers       ProviderResolver
 	capOverride     CapabilityOverride
-	overrideVersion uint64
+	capFloor        CapabilityFloor
+	overrideVersion uint64 // bumped by SetCapabilityOverride AND SetCapabilityFloor; guards stale cache writes in buildProfile
 	rejectionHook   OverrideRejectionHook
+
+	// Capability-probe resolution (ResolveToolCall). Both fields are set
+	// only at construction via options and never mutated afterward, so
+	// they are read without holding mu.
+	capProbeStore   fingerprint.CapProbeStore
+	capProber       FingerprintProberFactory
+	capResolveGroup singleflight.Group
 }
 
 // FingerprintProberSpec contains the model prober and digest identity the
@@ -67,6 +82,27 @@ type ModelRegistryOption func(*ModelRegistry)
 func WithFingerprintProberFactory(fn FingerprintProberFactory) ModelRegistryOption {
 	return func(r *ModelRegistry) {
 		r.fpProberFactory = fn
+	}
+}
+
+// WithCapabilityProbeStore installs the narrow cache used by ResolveToolCall
+// and the read-only cap-probe merge layer. It is intentionally separate from
+// the full fingerprint Store so Golem can persist capability verdicts without
+// enabling full latency/embedding/chat profiling.
+func WithCapabilityProbeStore(store fingerprint.CapProbeStore) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.capProbeStore = store
+	}
+}
+
+// WithCapabilityProber installs provider-aware prober selection used ONLY
+// for on-demand capability resolution (ResolveToolCall). Unlike
+// WithFingerprintProberFactory it never triggers full profiling from
+// Lookup: Lookup/Recommend stay pure, and active probes run only at the
+// named call sites (golem preflight, router candidate resolution).
+func WithCapabilityProber(fn FingerprintProberFactory) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.capProber = fn
 	}
 }
 
@@ -100,6 +136,21 @@ func WithFingerprintProberFactory(fn FingerprintProberFactory) ModelRegistryOpti
 //   - parses to zero caps: ignored (same crippling hazard)
 type CapabilityOverride func(key ModelKey) []string
 
+// CapabilityFloor returns baseline canonical capability tokens for a model
+// key, or nil when none. Floor caps are OR-merged into the profile at the
+// LOWEST precedence (with the static catalog layer): they guarantee a
+// minimum capability set for models whose provider exposes no capability
+// metadata (openai-compat), WITHOUT erasing catalog/fingerprint/runtime
+// additions the way the REPLACE override does. Tokens must be canonical
+// (ParseCapsStrict); invalid slices are dropped with the rejection hook
+// fired and never zero or shrink the profile.
+//
+// CapInsert exception: the runtime layer sits ABOVE the floor and clears
+// CapInsert (`&^= CapInsert`) when the model's template lacks suffix
+// markers, so a floor-supplied "insert" bit may still be removed by
+// runtime template detection. Every other floor bit is OR-only.
+type CapabilityFloor func(key ModelKey) []string
+
 // OverrideRejectionHook is called when a capability override returned a
 // non-empty token slice that failed strict canonical-only parsing — i.e.
 // the override was applied at the registry but had to be DROPPED because
@@ -110,6 +161,10 @@ type CapabilityOverride func(key ModelKey) []string
 // safe), so the hook is the only signal the misconfiguration ever happened.
 // Without it the override is silently swallowed and the operator sees
 // router decisions that don't match the config they wrote.
+//
+// The hook also fires for rejected capability-floor slices: a floor whose
+// tokens fail strict parsing is dropped wholesale (caps unchanged) with
+// the same observability contract.
 //
 // Typical implementations log the rejection or emit a metric. Hooks MUST
 // be cheap and non-blocking — they run inside merge() on every cache miss
@@ -158,6 +213,21 @@ func (r *ModelRegistry) SetCapabilityOverride(fn CapabilityOverride) {
 	// override in effect. Skipping this flush is the bug class where a
 	// warm cache silently shadows config changes — see feedback memory
 	// on rebuilding downstream state when a cache source changes.
+	clear(r.profiles)
+}
+
+// SetCapabilityFloor installs (or clears) the capability floor hook.
+// Pass nil to disable. Safe for concurrent use.
+//
+// Shares SetCapabilityOverride's invalidation + version-guard semantics:
+// the profile cache is flushed and the single policy version counter is
+// bumped so an in-flight buildProfile that snapshotted the OLD floor
+// cannot repopulate the cache with a stale-policy profile.
+func (r *ModelRegistry) SetCapabilityFloor(fn CapabilityFloor) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.capFloor = fn
+	r.overrideVersion++
 	clear(r.profiles)
 }
 
@@ -215,6 +285,214 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 	r.mu.Unlock()
 
 	return r.buildProfile(ctx, key)
+}
+
+// ResolveToolCall resolves the tri-state tool-call capability for a model
+// key on demand. Precedence:
+//  1. Explicit capability override -- authoritative in both directions
+//     (declared set contains tool_call => yes, otherwise no), no probe.
+//  2. Merged profile already carries CapToolCall (catalog/floor/runtime/
+//     cached probe row) => yes, no probe.
+//  3. Resolution disabled (no prober or no store) => "" (unknown) -- the
+//     empty state is never a claim.
+//  4. Active probe, singleflight-deduplicated per key: valid cached row
+//     wins, otherwise probe, persist the verdict, and invalidate the
+//     cached profile so the next Lookup re-merges.
+//
+// A non-nil error means the probe was transient (network/auth); nothing
+// is persisted and the state is "".
+func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
+	// 1. Explicit declaration is authoritative both directions. A rejected
+	// override (non-canonical tokens / zero caps) is a no-op here exactly
+	// as it is in merge(): fall through rather than fabricate a verdict.
+	r.mu.RLock()
+	override := r.capOverride
+	r.mu.RUnlock()
+	if override != nil {
+		if tokens := override(key); len(tokens) > 0 {
+			if caps, err := ParseCapsStrict(tokens); err == nil && caps != 0 {
+				if caps.Has(CapToolCall) {
+					return fingerprint.CapProbeYes, nil
+				}
+				return fingerprint.CapProbeNo, nil
+			}
+		}
+	}
+
+	// 2. Merged profile short-circuit (cache READ only; Lookup never probes).
+	profile, err := r.Lookup(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if profile.Caps.Has(CapToolCall) {
+		return fingerprint.CapProbeYes, nil
+	}
+
+	// 3. Resolution disabled: unknown is never a claim.
+	if r.capProber == nil || r.capProbeStore == nil {
+		return "", nil
+	}
+
+	// 4. Deduplicated slow path. The singleflight fn holds no registry
+	// locks; invalidateProfile takes mu only briefly after probe IO.
+	// Flight key uses an explicit NUL separator (not key.String(), whose
+	// "provider/model" join could collide across keys containing slashes).
+	// Follower semantics: the leader's ctx governs the probe; followers
+	// block until the shared flight completes and receive its result even
+	// if their own ctx was canceled meanwhile.
+	flightKey := key.Provider + "\x00" + key.Model
+	v, err, _ := r.capResolveGroup.Do(flightKey, func() (interface{}, error) {
+		return r.resolveToolCallSlow(ctx, key)
+	})
+	if err != nil {
+		return "", err
+	}
+	return v.(fingerprint.CapProbeState), nil
+}
+
+// resolveToolCallSlow is the probe path behind ResolveToolCall's
+// singleflight: cache check, active probe, persistence, and profile-cache
+// invalidation. Must not be called while holding r.mu.
+func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
+	p, err := r.providers.Resolve(key)
+	if err != nil {
+		return "", err
+	}
+	runtimeInfo, err := r.queryRuntime(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	spec, err := r.capProber(ctx, key, runtimeInfo, p)
+	if err != nil {
+		return "", err
+	}
+	if spec == nil || spec.Prober == nil {
+		return "", nil
+	}
+	prober, ok := spec.Prober.(fingerprint.ToolCallProber)
+	if !ok {
+		return "", nil
+	}
+
+	// Cap-probe rows deliberately IGNORE spec.ModelDigest: the real factory
+	// (providerbootstrap's fingerprintDigestForModel) synthesizes
+	// "config-caps:<caps>" digests when the runtime digest is empty --
+	// exactly the openai-compat case -- and the read side (capProbeCaps:
+	// runtimeInfo.Digest fallback key.String()) can never reproduce that
+	// value. Rows keyed by it would never merge into profiles, and
+	// synthetic-digest negatives would dodge the digestless TTL cap below.
+	// Using runtimeInfo.Digest with the key fallback keeps the write and
+	// read digests byte-symmetric by construction.
+	digest := capProbeDigest(key, runtimeInfo)
+	backendID := key.Provider // EnsureProfile's existing backend_id convention
+
+	now := time.Now()
+	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, now) {
+		return row.State, nil
+	}
+
+	outcome, err := prober.ProbeToolCall(ctx, key.Model)
+	if err != nil {
+		// Transient/diagnostic: never persisted, never a claim.
+		return "", err
+	}
+
+	row := fingerprint.CapProbe{
+		BackendID:    backendID,
+		ModelName:    key.Model,
+		Capability:   capabilityToolCall,
+		State:        outcome.State,
+		ModelDigest:  digest,
+		ProbeVersion: fingerprint.CurrentToolProbeVersion,
+		TestedAt:     now,
+	}
+	if outcome.TTL > 0 {
+		row.ExpiresAt = now.Add(outcome.TTL)
+	}
+	// Digestless negatives expire: a wedged "no" keyed only by name would
+	// silently block usage until a manual reprobe. A real digest keeps the
+	// prober-chosen TTL (ollama's curated "no" stays unbounded).
+	if outcome.State == fingerprint.CapProbeNo && digest == key.String() {
+		row.ExpiresAt = now.Add(fingerprint.CapProbeDigestlessNoTTL)
+	}
+	// Persistence failure is non-fatal: the verdict stands for this caller.
+	_ = r.capProbeStore.SaveCapProbe(ctx, row)
+
+	if outcome.State == fingerprint.CapProbeYes {
+		r.invalidateProfile(key)
+	}
+	return outcome.State, nil
+}
+
+// invalidateProfile drops one cached profile so the next Lookup re-merges.
+//
+// It also bumps the shared policy version counter: a buildProfile in
+// flight for this key may have read the store BEFORE the probe row was
+// saved; without the bump its cache write would pass the version guard
+// and re-cache the stale no-toolcall profile permanently (ResolveToolCall's
+// row-hit fast path never invalidates, so it would never self-heal).
+// Bumping fences those in-flight writes exactly like
+// SetCapabilityOverride/SetCapabilityFloor do.
+func (r *ModelRegistry) invalidateProfile(key ModelKey) {
+	r.mu.Lock()
+	delete(r.profiles, key)
+	r.overrideVersion++
+	r.mu.Unlock()
+}
+
+// canResolveToolCall reports whether on-demand tool-call resolution is
+// fully wired (prober factory AND probe store).
+func (r *ModelRegistry) canResolveToolCall() bool {
+	return r != nil && r.capProber != nil && r.capProbeStore != nil
+}
+
+// EnsureToolCallResolved resolves tool_call for candidate profiles that
+// lack CapToolCall, returning a slice where probe-yes candidates are
+// replaced by their refreshed profiles. Candidates are NEVER removed --
+// probe-no/inconclusive/error entries are returned unchanged so the
+// caller's RequiredCaps gate stays the single rejection point. The input
+// slice and its profiles are never modified; replacements land in a copy.
+// No-op (input returned as-is) when resolution is disabled or required
+// does not include CapToolCall.
+//
+// The returned errors are per-candidate probe diagnostics labeled with
+// the model key (transient failures: network, auth, ...). They are
+// diagnostics ONLY -- never a rejection signal; the affected candidates
+// stay in the returned slice unchanged -- so operators can distinguish
+// "probe failed (e.g. 401)" from "genuinely not tool-capable" when a
+// route comes up empty. Callers thread them into the route-failure error.
+func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
+	if !r.canResolveToolCall() || !required.Has(CapToolCall) {
+		return profiles, nil
+	}
+	var diags []error
+	out := make([]*ModelProfile, len(profiles))
+	copy(out, profiles)
+	for i, p := range out {
+		if p == nil || p.Caps.Has(CapToolCall) {
+			continue
+		}
+		state, err := r.ResolveToolCall(ctx, p.Key)
+		if err != nil {
+			diags = append(diags, fmt.Errorf("resolve tool_call %s: %w", p.Key, err))
+			continue
+		}
+		if state != fingerprint.CapProbeYes {
+			continue
+		}
+		if refreshed, lErr := r.Lookup(ctx, p.Key); lErr == nil && refreshed.Caps.Has(CapToolCall) {
+			out[i] = refreshed
+			continue
+		}
+		// The probe said yes but the refreshed profile lacks the bit --
+		// e.g. SaveCapProbe failed (swallowed as non-fatal) so the merge
+		// layer had no row to read. A lost store write must not erase the
+		// verdict for this caller: patch a copy, never the caller's input.
+		cp := *p
+		cp.Caps |= CapToolCall
+		out[i] = &cp
+	}
+	return out, diags
 }
 
 // LookupAny returns merged profiles for an unqualified model name across
@@ -380,15 +658,18 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 //  2. Fingerprint: capability probing data, benchmarked resource observations
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
-	// Snapshot (override, version, rejectionHook) FIRST so the policy a
-	// single buildProfile applies is fixed at start, and the cache write
-	// at the end can detect any concurrent SetCapabilityOverride. Reading
+	// Snapshot (override, floor, version, rejectionHook) FIRST so the
+	// policy a single buildProfile applies is fixed at start, and the
+	// cache write at the end can detect any concurrent
+	// SetCapabilityOverride or SetCapabilityFloor (both bump the shared
+	// version counter). Reading
 	// later (after slow IO like queryRuntime) would shrink the visible
 	// TOCTOU window but also leave the same race against the cache write
 	// itself; reading first keeps the contract simple: one buildProfile ->
 	// one policy version.
 	r.mu.RLock()
 	override := r.capOverride
+	floor := r.capFloor
 	overrideVer := r.overrideVersion
 	rejectionHook := r.rejectionHook
 	r.mu.RUnlock()
@@ -401,6 +682,36 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 
 	// Layer 2: Static catalog match.
 	parsed := ParseModelName(key.Model)
+	staticProfile := r.catalogProfileFor(parsed, runtimeInfo)
+
+	// Layer 3: Fingerprint enrichment.
+	fpProfile := r.fingerprintProfile(ctx, key, runtimeInfo)
+
+	// Cap-probe merge layer: READ ONLY -- never probes. A valid cached
+	// "yes" row ORs CapToolCall into the profile. Computed here (not in
+	// merge) so merge stays IO-free and applies exactly the bits this
+	// buildProfile snapshot observed.
+	capProbeCaps := r.capProbeCaps(ctx, key, runtimeInfo)
+
+	// Merge layers using the (override, floor, rejectionHook) snapshot
+	// taken at function entry.
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, rejectionHook, capProbeCaps)
+
+	// Cache the result iff the override snapshot is still current.
+	r.mu.Lock()
+	if r.overrideVersion == overrideVer {
+		r.profiles[key] = profile
+	}
+	r.mu.Unlock()
+
+	return profile, nil
+}
+
+// catalogProfileFor resolves the static-catalog profile for a parsed model
+// name, applying the same fallback ladder buildProfile uses: exact
+// family+param, family+tag, family-only, then runtime-reported family.
+// Returns nil when the catalog knows nothing about the model.
+func (r *ModelRegistry) catalogProfileFor(parsed ParsedModel, runtimeInfo *ModelInfo) *ModelProfile {
 	staticProfile := r.catalog.lookup(parsed.NormalizedFamily(), parsed.ParamSize)
 	if staticProfile == nil && parsed.ParamSize == "" && parsed.Tag != "" {
 		// Some catalog-only variants are keyed by tag (for example ":latest")
@@ -411,26 +722,133 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 		// Try family-only lookup for family-level metadata (FIM, think mode).
 		staticProfile = r.catalog.lookupFamily(parsed.NormalizedFamily())
 	}
-	if staticProfile == nil && runtimeInfo.Family != "" {
+	if staticProfile == nil && runtimeInfo != nil && runtimeInfo.Family != "" {
 		// Fall back to runtime-reported family.
 		staticProfile = r.catalog.lookupFamily(strings.ToLower(runtimeInfo.Family))
 	}
+	return staticProfile
+}
 
-	// Layer 3: Fingerprint enrichment.
-	fpProfile := r.fingerprintProfile(ctx, key, runtimeInfo)
+// ToolCallExplanation is diagnostic provenance for one model's tool_call
+// capability, consumed by `golem models`. Deliberately narrow -- not a general
+// provenance API.
+type ToolCallExplanation struct {
+	Caps     Capability
+	Has      bool
+	Source   string                    // "explicit" | "catalog" | "runtime" | "probe" | "unknown"
+	State    fingerprint.CapProbeState // cached probe state, "" if none
+	TestedAt time.Time                 // zero when no probe row
+}
 
-	// Merge layers using the (override, rejectionHook) snapshot taken at
-	// function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, rejectionHook)
-
-	// Cache the result iff the override snapshot is still current.
-	r.mu.Lock()
-	if r.overrideVersion == overrideVer {
-		r.profiles[key] = profile
+// ExplainToolCall reports where a model's tool_call bit comes from (or why it
+// is absent). READ-ONLY: it consults the explicit override, the merged profile
+// (a cache read; Lookup never probes), the static catalog, and the cap-probe
+// cache -- it never triggers an active probe. Precedence mirrors
+// ResolveToolCall / merge():
+//  1. explicit override => "explicit" (present or absent per the declared set).
+//  2. merged profile carries CapToolCall => catalog / probe / runtime,
+//     distinguished by re-running the pure catalog lookup and the cached row.
+//  3. profile lacks tool_call but a probe row (any state) exists => "probe".
+//  4. otherwise => "unknown".
+//
+// State + TestedAt are populated from the cap-probe row whenever one exists,
+// regardless of the chosen Source, so operators see the last verdict and when.
+func (r *ModelRegistry) ExplainToolCall(ctx context.Context, key ModelKey) (ToolCallExplanation, error) {
+	// 1. Explicit override is authoritative in both directions.
+	r.mu.RLock()
+	override := r.capOverride
+	r.mu.RUnlock()
+	if override != nil {
+		if tokens := override(key); len(tokens) > 0 {
+			if caps, err := ParseCapsStrict(tokens); err == nil && caps != 0 {
+				return ToolCallExplanation{
+					Caps:   caps,
+					Has:    caps.Has(CapToolCall),
+					Source: "explicit",
+				}, nil
+			}
+		}
 	}
-	r.mu.Unlock()
 
-	return profile, nil
+	profile, err := r.Lookup(ctx, key)
+	if err != nil {
+		return ToolCallExplanation{}, err
+	}
+
+	// Read the cap-probe row (any state) once so State/TestedAt are always
+	// populated when a row exists. Uses the write-side digest convention.
+	row := r.capProbeRow(ctx, key)
+
+	exp := ToolCallExplanation{Caps: profile.Caps, Has: profile.Caps.Has(CapToolCall)}
+	if row != nil {
+		exp.State = row.State
+		exp.TestedAt = row.TestedAt
+	}
+
+	if profile.Caps.Has(CapToolCall) {
+		// Distinguish catalog vs probe vs runtime for a present bit. The catalog
+		// lookup is a pure in-memory read (no probe); if the catalog profile
+		// carries tool_call, that is the source.
+		// This queryRuntime is deliberate: Lookup above ran its own internal
+		// queryRuntime but does not expose the digest, and the probe-row Valid
+		// check below needs it (via capProbeDigest). It is a metadata read, not
+		// a tool-call probe -- the READ-ONLY contract holds.
+		runtimeInfo, _ := r.queryRuntime(ctx, key)
+		parsed := ParseModelName(key.Model)
+		if static := r.catalogProfileFor(parsed, runtimeInfo); static != nil && static.Caps.Has(CapToolCall) {
+			exp.Source = "catalog"
+			return exp, nil
+		}
+		// "probe" only when the row is the one the merge layer would actually
+		// honor: a VALID "yes" (same digest + probe version, unexpired). A stale
+		// yes row cannot be the source of a live bit -- that came from floor /
+		// fingerprint / runtime -- so gate on Valid() exactly like capProbeCaps,
+		// using the identical digest fallback (runtimeInfo.Digest -> key.String()).
+		if row != nil && row.State == fingerprint.CapProbeYes && row.Valid(capProbeDigest(key, runtimeInfo), time.Now()) {
+			exp.Source = "probe"
+			return exp, nil
+		}
+		// Floor/fingerprint/runtime-supplied bit: registry/provider-layer
+		// knowledge, labeled "runtime" for operator diagnostics.
+		exp.Source = "runtime"
+		return exp, nil
+	}
+
+	// Bit absent: a probe row (no/inconclusive) is still a "probe" source so
+	// operators can see the verdict that blocked it.
+	if row != nil {
+		exp.Source = "probe"
+		return exp, nil
+	}
+	exp.Source = "unknown"
+	return exp, nil
+}
+
+// capProbeDigest returns the digest a cap-probe row is keyed by: the runtime
+// content digest, or key.String() when the runtime is digestless (the
+// openai-compat case). Write side (resolveToolCallSlow) and read sides
+// (capProbeCaps, ExplainToolCall) MUST agree byte-for-byte, so the convention
+// lives in one place.
+func capProbeDigest(key ModelKey, runtimeInfo *ModelInfo) string {
+	if runtimeInfo != nil && runtimeInfo.Digest != "" {
+		return runtimeInfo.Digest
+	}
+	return key.String()
+}
+
+// capProbeRow reads the persisted tool-call probe row for a key (any state),
+// or nil when the store is absent or has no row. Uses the same digest-agnostic
+// read the merge layer uses: the row is returned even when stale so callers can
+// surface State/TestedAt; validity is the caller's concern. Pure cache read.
+func (r *ModelRegistry) capProbeRow(ctx context.Context, key ModelKey) *fingerprint.CapProbe {
+	if r.capProbeStore == nil {
+		return nil
+	}
+	row, err := r.capProbeStore.GetCapProbe(ctx, key.Provider, key.Model, capabilityToolCall)
+	if err != nil || row == nil {
+		return nil
+	}
+	return row
 }
 
 func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) *fingerprint.Profile {
@@ -460,6 +878,32 @@ func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, ru
 	fpProfile, _ := r.fpStore.Get(ctx, key.Provider, key.Model)
 	// Ignore errors -- fingerprint is optional enrichment.
 	return fpProfile
+}
+
+// capProbeCaps reads the persisted tool-call probe verdict for a key and
+// returns the capability bits it contributes to the merge (CapToolCall for
+// a valid "yes" row, zero otherwise). Pure cache read; never probes.
+func (r *ModelRegistry) capProbeCaps(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) Capability {
+	if r.capProbeStore == nil {
+		return 0
+	}
+	digest := capProbeDigest(key, runtimeInfo)
+	row, err := r.capProbeStore.GetCapProbe(ctx, key.Provider, key.Model, capabilityToolCall)
+	if err != nil {
+		if errors.Is(err, fingerprint.ErrNotFound) {
+			return 0 // expected miss: never probed
+		}
+		// Real store error (corruption, IO): fail closed to "no bits" --
+		// enrichment is optional and must never block a profile build.
+		return 0
+	}
+	if row == nil {
+		return 0
+	}
+	if row.State == fingerprint.CapProbeYes && row.Valid(digest, time.Now()) {
+		return CapToolCall
+	}
+	return 0
 }
 
 // queryRuntime asks the provider for model information by resolving the
@@ -507,7 +951,9 @@ func (r *ModelRegistry) merge(
 	fp *fingerprint.Profile,
 	parsed ParsedModel,
 	override CapabilityOverride,
+	floor CapabilityFloor,
 	rejectionHook OverrideRejectionHook,
+	capProbeCaps Capability,
 ) *ModelProfile {
 	profile := &ModelProfile{
 		Key:       key,
@@ -534,6 +980,26 @@ func (r *ModelRegistry) merge(
 		}
 	}
 
+	// Capability floor (lowest precedence, OR-merge). Guarantees baseline
+	// caps for providers that expose no capability metadata without the
+	// REPLACE override's erasure semantics. Invalid tokens are dropped
+	// wholesale with the rejection hook fired — a floor must never zero,
+	// shrink, or partially apply to the profile. Passed in by buildProfile
+	// (not read from r) for the same TOCTOU reason as the override.
+	if floor != nil {
+		if floorTokens := floor(key); len(floorTokens) > 0 {
+			floorCaps, err := ParseCapsStrict(floorTokens)
+			switch {
+			case err != nil:
+				if rejectionHook != nil {
+					rejectionHook(key, floorTokens, err)
+				}
+			case floorCaps != 0:
+				profile.Caps |= floorCaps
+			}
+		}
+	}
+
 	// Apply fingerprint enrichment (medium precedence).
 	if fp != nil {
 		fpCaps := parseCaps(fp.Capabilities)
@@ -548,6 +1014,10 @@ func (r *ModelRegistry) merge(
 			}
 		}
 	}
+
+	// Cap-probe verdict (read-only layer, computed by buildProfile). OR-only
+	// like the floor; the REPLACE override below still wins both directions.
+	profile.Caps |= capProbeCaps
 
 	// Apply runtime data (highest precedence).
 	if runtime != nil {

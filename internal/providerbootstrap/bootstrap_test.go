@@ -27,8 +27,9 @@ func TestBundleCloseNilSafe(t *testing.T) {
 }
 
 // newTestFingerprintStore creates an in-memory SQLite-backed fingerprint store
-// for testing. It registers a t.Cleanup to close the underlying DB.
-func newTestFingerprintStore(t *testing.T) fingerprint.Store {
+// for testing. The concrete *SQLiteStore satisfies both fingerprint.Store and
+// fingerprint.CapProbeStore. It registers a t.Cleanup to close the underlying DB.
+func newTestFingerprintStore(t *testing.T) *fingerprint.SQLiteStore {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -153,6 +154,115 @@ func TestNew_FingerprintStoreUsesProviderSpecificOllamaClient(t *testing.T) {
 	}
 	if got := providerBShowCalls.Load(); got < 3 {
 		t.Fatalf("provider B /api/show calls = %d, want startup, runtime lookup, and fingerprint probe", got)
+	}
+}
+
+func TestNew_CapabilityProbeStoreInstallsCapProberNotFullFactory(t *testing.T) {
+	// Golem's capability-only mode: Options{CapabilityProbeStore: store} with
+	// FingerprintStore nil must wire the on-demand capability prober WITHOUT
+	// full fingerprint profiling. Behaviorally: Lookup performs no probe
+	// chat-completions calls; ResolveToolCall does.
+	ctx := context.Background()
+	var chatCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"mystery-model-x"}]}`))
+		case "/v1/chat/completions":
+			chatCalls.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"completion_tokens":4}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {APIFormat: "openai-compat", BaseURL: srv.URL},
+		},
+		Models: map[string]config.ModelConfig{
+			// No explicit Capabilities: derived dense caps become a floor
+			// (chat/generate/stream) without tool_call, so resolution must probe.
+			"chat": {Provider: "lc", Name: "mystery-model-x", Type: "dense"},
+		},
+	}
+	b, err := New(ctx, Options{Config: cfg, CapabilityProbeStore: newTestFingerprintStore(t)})
+	if err != nil {
+		t.Fatalf("New(capability-probe store) error: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	key := provider.ModelKey{Provider: "lc", Model: "mystery-model-x"}
+	profile, err := b.Models.Lookup(ctx, key)
+	if err != nil {
+		t.Fatalf("Lookup error: %v", err)
+	}
+	if profile.Caps.Has(provider.CapToolCall) {
+		t.Fatalf("precondition: undeclared model must not already claim tool_call, caps = %v", profile.Caps)
+	}
+	if got := chatCalls.Load(); got != 0 {
+		t.Fatalf("Lookup made %d chat-completions probe call(s), want 0 (Lookup must never probe in capability-only mode)", got)
+	}
+
+	state, err := b.Models.ResolveToolCall(ctx, key)
+	if err != nil {
+		t.Fatalf("ResolveToolCall error: %v", err)
+	}
+	if state != fingerprint.CapProbeYes {
+		t.Fatalf("ResolveToolCall state = %q, want %q", state, fingerprint.CapProbeYes)
+	}
+	if got := chatCalls.Load(); got < 1 {
+		t.Fatalf("ResolveToolCall made %d probe call(s), want >= 1", got)
+	}
+}
+
+func TestNew_FingerprintStoreSatisfiesCapProbeStoreFallback(t *testing.T) {
+	// MCP path: with a FingerprintStore (whose SQLiteStore also satisfies
+	// fingerprint.CapProbeStore) and NO explicit CapabilityProbeStore, the
+	// interface-assert fallback must still enable ResolveToolCall. This proves
+	// the fallback branch wires the resolver, not just compiles.
+	//
+	// Unlike the capability-only test, a FingerprintStore is wired here, so
+	// Lookup MAY trigger full profiling — do not assert zero probe calls.
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"mystery-model-x"}]}`))
+		case "/v1/chat/completions":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"","tool_calls":[{"id":"1","type":"function","function":{"name":"get_time","arguments":"{}"}}]}}],"usage":{"completion_tokens":4}}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {APIFormat: "openai-compat", BaseURL: srv.URL},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat": {Provider: "lc", Name: "mystery-model-x", Type: "dense"},
+		},
+	}
+	b, err := New(ctx, Options{Config: cfg, FingerprintStore: newTestFingerprintStore(t)})
+	if err != nil {
+		t.Fatalf("New(fingerprint store, no explicit cap store) error: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	key := provider.ModelKey{Provider: "lc", Model: "mystery-model-x"}
+	state, err := b.Models.ResolveToolCall(ctx, key)
+	if err != nil {
+		t.Fatalf("ResolveToolCall error: %v", err)
+	}
+	if state != fingerprint.CapProbeYes {
+		t.Fatalf("ResolveToolCall state = %q, want %q (fallback resolver must be enabled)", state, fingerprint.CapProbeYes)
 	}
 }
 

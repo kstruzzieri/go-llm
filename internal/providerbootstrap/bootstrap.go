@@ -31,6 +31,13 @@ type Options struct {
 	// live client uses.
 	OpenAICompatURLOverrideProvider string
 	OpenAICompatURLOverride         string
+
+	// CapabilityProbeStore wires capability-probe rows and on-demand
+	// ResolveToolCall without enabling full fingerprint profiling. Golem
+	// sets this and leaves FingerprintStore nil; MCP/full-profiler callers
+	// can rely on FingerprintStore's SQLiteStore also satisfying
+	// fingerprint.CapProbeStore (interface-assert fallback below).
+	CapabilityProbeStore fingerprint.CapProbeStore
 }
 
 // Bundle is the assembled provider stack. Warnings collects non-fatal,
@@ -76,14 +83,34 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	}
 
 	mrOpts := []provider.ModelRegistryOption{}
+	factory := proberFactory(effCfg, ollamaClients)
 	if opts.FingerprintStore != nil {
-		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(proberFactory(effCfg, ollamaClients)))
+		mrOpts = append(mrOpts, provider.WithFingerprintProberFactory(factory))
+	}
+	// Capability-only resolution (ResolveToolCall): explicit store wins;
+	// otherwise a FingerprintStore that also satisfies CapProbeStore (the
+	// SQLite store does) provides it for free. The prober factory is shared —
+	// WithCapabilityProber never triggers full profiling from Lookup.
+	capProbeStore := opts.CapabilityProbeStore
+	if capProbeStore == nil {
+		if s, ok := opts.FingerprintStore.(fingerprint.CapProbeStore); ok {
+			capProbeStore = s
+		}
+	}
+	if capProbeStore != nil {
+		mrOpts = append(mrOpts,
+			provider.WithCapabilityProbeStore(capProbeStore),
+			provider.WithCapabilityProber(factory),
+		)
 	}
 	mr, err := provider.NewModelRegistry(pReg, opts.FingerprintStore, mrOpts...)
 	if err != nil {
 		return nil, fmt.Errorf("providerbootstrap: model registry: %w", err)
 	}
 	if err := installCapabilityOverrides(mr, effCfg); err != nil {
+		return nil, err
+	}
+	if err := installCapabilityFloors(mr, effCfg); err != nil {
 		return nil, err
 	}
 
