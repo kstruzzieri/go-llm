@@ -295,7 +295,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, backendRes.providerKey, backendRes.diagSource())
-	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint)
+	var resolver toolCallResolver
+	if !f.noCapProbe && capStore != nil {
+		resolver = bundle.Models // concrete *provider.ModelRegistry; always non-nil after bootstrap
+	}
+	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint, resolver)
 	warns = append(backendRes.warns, warns...)
 	if err != nil {
 		if len(backendRes.warns) > 0 {
