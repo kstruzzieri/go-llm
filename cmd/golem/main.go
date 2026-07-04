@@ -43,6 +43,7 @@ type flags struct {
 	mcpStdio         stringSliceFlag
 	mcpHTTP          stringSliceFlag
 	noRag            bool
+	noAutoIndex      bool
 	noProjectContext bool
 	noCompress       bool
 	noMemory         bool
@@ -76,6 +77,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
+	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable automatic background index build/refresh on startup (an existing index is still used as-is)")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
