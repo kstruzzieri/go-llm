@@ -18,6 +18,11 @@ var migrations = []migration{
 		description: "baseline fingerprint profiles and failures tables",
 		fn:          migrateV1,
 	},
+	{
+		version:     2,
+		description: "capability_probes table for tri-state capability verdicts",
+		fn:          migrateV2,
+	},
 }
 
 func migrateV1(tx *sql.Tx) error {
@@ -59,6 +64,24 @@ func migrateV1(tx *sql.Tx) error {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("fingerprint: migrate v1: %w", err)
 		}
+	}
+	return nil
+}
+
+func migrateV2(tx *sql.Tx) error {
+	const stmt = `CREATE TABLE IF NOT EXISTS capability_probes (
+		backend_id    TEXT NOT NULL,
+		model_name    TEXT NOT NULL,
+		capability    TEXT NOT NULL,
+		state         TEXT NOT NULL,
+		model_digest  TEXT NOT NULL,
+		probe_version INTEGER NOT NULL,
+		tested_at     INTEGER NOT NULL,
+		expires_at    INTEGER,
+		PRIMARY KEY (backend_id, model_name, capability)
+	)`
+	if _, err := tx.Exec(stmt); err != nil {
+		return fmt.Errorf("fingerprint: migrate v2: %w", err)
 	}
 	return nil
 }

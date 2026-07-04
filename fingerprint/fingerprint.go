@@ -106,3 +106,64 @@ type BackoffError struct {
 func (e *BackoffError) Error() string {
 	return fmt.Sprintf("fingerprint: in backoff until %s: %s", e.RetryAfter.Format(time.RFC3339), e.LastError)
 }
+
+// CapProbeState is the tri-state outcome of a capability probe.
+// The empty string means "unknown" (never probed / cache miss) and is
+// never persisted.
+type CapProbeState string
+
+const (
+	CapProbeYes          CapProbeState = "yes"
+	CapProbeNo           CapProbeState = "no"
+	CapProbeInconclusive CapProbeState = "inconclusive"
+)
+
+// CurrentToolProbeVersion identifies the tool-call probe request shape.
+// Bump when the probe protocol changes (tool definition, prompt,
+// tool_choice escalation); cached rows from other versions are ignored.
+const CurrentToolProbeVersion = 1
+
+// CapProbeInconclusiveTTL bounds how long an inconclusive verdict is
+// trusted before the next demand re-probes.
+const CapProbeInconclusiveTTL = 24 * time.Hour
+
+// CapProbeDigestlessNoTTL bounds a negative verdict for models with no
+// content digest (openai-compat fallback keying): a wedged "no" silently
+// blocks usage, so digestless negatives expire rather than sticking until
+// a manual --reprobe.
+const CapProbeDigestlessNoTTL = 7 * 24 * time.Hour
+
+// CapProbe is one persisted capability-probe verdict, keyed by
+// (backend_id, model_name, capability). Distinct from Profile so
+// capability-only resolution can never masquerade as a complete
+// fingerprint profile.
+type CapProbe struct {
+	BackendID    string
+	ModelName    string
+	Capability   string // canonical token, e.g. "tool_call"
+	State        CapProbeState
+	ModelDigest  string // runtime digest, or key fallback when digestless
+	ProbeVersion int    // CurrentToolProbeVersion at probe time
+	TestedAt     time.Time
+	ExpiresAt    time.Time // zero = does not expire
+}
+
+// Valid reports whether the cached probe still applies for the given
+// current digest at time now: digest and probe version must match and the
+// row must not be expired.
+//
+// The version check is coupled to the tool_call probe protocol
+// (CurrentToolProbeVersion); a second capability would need its own
+// probe-version parameter here.
+func (p CapProbe) Valid(currentDigest string, now time.Time) bool {
+	if p.ModelDigest != currentDigest {
+		return false
+	}
+	if p.ProbeVersion != CurrentToolProbeVersion {
+		return false
+	}
+	if !p.ExpiresAt.IsZero() && now.After(p.ExpiresAt) {
+		return false
+	}
+	return true
+}
