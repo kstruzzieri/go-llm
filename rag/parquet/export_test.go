@@ -1,13 +1,13 @@
 package parquet
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"iter"
 	"math"
 	"os"
 	"path/filepath"
-	"bytes"
 	"strings"
 	"testing"
 
@@ -432,10 +432,10 @@ func TestQualityNaNNotCountedAsZeroVector(t *testing.T) {
 func TestQualityFloat32Float64Consistency(t *testing.T) {
 	// Same data should produce identical quality flags regardless of DType.
 	embs := [][]float64{
-		uniformEmb(3, 1.0),          // clean
-		uniformEmb(3, 0),            // zero_vector
-		{math.NaN(), 0.1, 0.2},     // nan_replaced
-		uniformEmb(3, 100.0),        // outlier_norm
+		uniformEmb(3, 1.0),     // clean
+		uniformEmb(3, 0),       // zero_vector
+		{math.NaN(), 0.1, 0.2}, // nan_replaced
+		uniformEmb(3, 100.0),   // outlier_norm
 	}
 
 	for _, dt := range []DType{Float32, Float64} {

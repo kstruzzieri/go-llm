@@ -176,11 +176,11 @@ func TestXlamRecordToTraceRejectsNonEmptyAnswers(t *testing.T) {
 
 func TestXlamRecordToTraceRejectsBadInput(t *testing.T) {
 	for name, rec := range map[string]xlamRecord{
-		"empty query":  {Query: "  ", Tools: sampleXlamTools, Answers: "[]"},
-		"bad tools":    {Query: "q", Tools: "not json", Answers: "[]"},
-		"bad answers":  {Query: "q", Tools: sampleXlamTools, Answers: "not json"},
-		"null answers": {Query: "q", Tools: sampleXlamTools, Answers: "null"},
-		"null tools":   {Query: "q", Tools: "null", Answers: "[]"},
+		"empty query":          {Query: "  ", Tools: sampleXlamTools, Answers: "[]"},
+		"bad tools":            {Query: "q", Tools: "not json", Answers: "[]"},
+		"bad answers":          {Query: "q", Tools: sampleXlamTools, Answers: "not json"},
+		"null answers":         {Query: "q", Tools: sampleXlamTools, Answers: "null"},
+		"null tools":           {Query: "q", Tools: "null", Answers: "[]"},
 		"empty answers string": {Query: "q", Tools: sampleXlamTools, Answers: "  "},
 	} {
 		if _, err := xlamRecordToTrace(rec, 0); err == nil {
@@ -193,8 +193,8 @@ func TestImportXlamIrrelevanceFilterSampleDeterministic(t *testing.T) {
 	// 5 records: 2 valid (>=1 tool, empty answers), 1 zero-tool, 1 non-empty answers, 1 valid.
 	recs := []xlamRecord{
 		{Query: "a", Tools: sampleXlamTools, Answers: "[]"},
-		{Query: "b", Tools: "[]", Answers: "[]"},                                  // 0 tools -> filtered
-		{Query: "c", Tools: sampleXlamTools, Answers: `[{"name":"x"}]`},           // has answer -> filtered
+		{Query: "b", Tools: "[]", Answers: "[]"},                        // 0 tools -> filtered
+		{Query: "c", Tools: sampleXlamTools, Answers: `[{"name":"x"}]`}, // has answer -> filtered
 		{Query: "d", Tools: sampleXlamTools, Answers: "[]"},
 		{Query: "e", Tools: sampleXlamTools, Answers: "[]"},
 	}

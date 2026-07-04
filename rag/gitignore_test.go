@@ -132,11 +132,11 @@ func TestGlobMatch(t *testing.T) {
 		{"[Tt]mp/**", "xmp/cache.dat", false},
 
 		// Trailing /** with /**/ in the prefix
-		{"a/**/b/**", "a/b/out.go", true},         // zero dirs in /**/
-		{"a/**/b/**", "a/x/y/b/out.go", true},     // multiple dirs in /**/
-		{"a/**/b/**", "a/x/y/b/d/e/f.go", true},   // deep under b/
-		{"a/**/b/**", "a/b", false},                // b itself not matched (no trailing content)
-		{"a/**/b/**", "other/b/out.go", false},     // wrong prefix
+		{"a/**/b/**", "a/b/out.go", true},       // zero dirs in /**/
+		{"a/**/b/**", "a/x/y/b/out.go", true},   // multiple dirs in /**/
+		{"a/**/b/**", "a/x/y/b/d/e/f.go", true}, // deep under b/
+		{"a/**/b/**", "a/b", false},             // b itself not matched (no trailing content)
+		{"a/**/b/**", "other/b/out.go", false},  // wrong prefix
 
 		// Middle /**/
 		{"a/**/b", "a/b", true},       // zero dirs
@@ -193,14 +193,20 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Basic ignore
 		{
 			name: "simple glob match",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"*.log"}},
 			},
 			path: "app.log", isDir: false, want: true,
 		},
 		{
 			name: "no match",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"*.log"}},
 			},
 			path: "app.go", isDir: false, want: false,
@@ -209,7 +215,10 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Unanchored matches at any depth
 		{
 			name: "unanchored deep match",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"*.log"}},
 			},
 			path: "a/b/app.log", isDir: false, want: true,
@@ -218,14 +227,20 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Anchored matches only at scope level
 		{
 			name: "anchored match",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"src/foo"}},
 			},
 			path: "src/foo", isDir: false, want: true,
 		},
 		{
 			name: "anchored no match elsewhere",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"src/foo"}},
 			},
 			path: "lib/src/foo", isDir: false, want: false,
@@ -234,14 +249,20 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Negation
 		{
 			name: "negation un-ignores",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"*.log", "!important.log"}},
 			},
 			path: "important.log", isDir: false, want: false,
 		},
 		{
 			name: "negation does not affect others",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"*.log", "!important.log"}},
 			},
 			path: "debug.log", isDir: false, want: true,
@@ -250,14 +271,20 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Directory-only
 		{
 			name: "dir-only matches dir",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"build/"}},
 			},
 			path: "build", isDir: true, want: true,
 		},
 		{
 			name: "dir-only skips file",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"build/"}},
 			},
 			path: "build", isDir: false, want: false,
@@ -266,14 +293,20 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Nested .gitignore scoping
 		{
 			name: "nested rule applies within scope",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{"src", []string{"*.tmp"}},
 			},
 			path: "src/cache.tmp", isDir: false, want: true,
 		},
 		{
 			name: "nested rule does NOT affect sibling",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{"src", []string{"*.tmp"}},
 			},
 			path: "lib/cache.tmp", isDir: false, want: false,
@@ -282,14 +315,20 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Leading **/ pattern
 		{
 			name: "leading doublestar",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"**/test"}},
 			},
 			path: "a/b/test", isDir: false, want: true,
 		},
 		{
 			name: "leading doublestar root",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"**/test"}},
 			},
 			path: "test", isDir: false, want: true,
@@ -298,7 +337,10 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Last rule wins across files
 		{
 			name: "nested negation overrides parent",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"*.gen.go"}},
 				{"src", []string{"!important.gen.go"}},
 			},
@@ -306,7 +348,10 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		},
 		{
 			name: "nested re-ignore after parent negation",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"*.log", "!*.log"}},
 				{"src", []string{"*.log"}},
 			},
@@ -316,14 +361,20 @@ func TestGitignoreMatcherIsIgnored(t *testing.T) {
 		// Leading slash anchoring
 		{
 			name: "leading slash root only",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"/build"}},
 			},
 			path: "build", isDir: false, want: true,
 		},
 		{
 			name: "leading slash no deep match",
-			rules: []struct{ baseDir string; patterns []string }{
+			rules: []struct {
+				baseDir  string
+				patterns []string
+			}{
 				{".", []string{"/build"}},
 			},
 			path: "src/build", isDir: false, want: false,

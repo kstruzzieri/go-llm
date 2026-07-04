@@ -17,7 +17,7 @@ type mockProvider struct {
 }
 
 func (m *mockProvider) Name() string             { return m.name }
-func (m *mockProvider) Capabilities() Capability  { return m.caps }
+func (m *mockProvider) Capabilities() Capability { return m.caps }
 
 func (m *mockProvider) Health(_ context.Context) error {
 	if !m.healthy {

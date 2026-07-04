@@ -33,7 +33,7 @@ type fakeRouteProvider struct {
 	genResponse  string
 }
 
-func (f *fakeRouteProvider) Name() string             { return f.name }
+func (f *fakeRouteProvider) Name() string { return f.name }
 func (f *fakeRouteProvider) Capabilities() provider.Capability {
 	return provider.CapChat | provider.CapGenerate | provider.CapEmbed | provider.CapStream
 }

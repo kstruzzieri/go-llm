@@ -12,12 +12,12 @@ import (
 
 // mockRetriever implements Retriever for testing.
 type mockRetriever struct {
-	mu          sync.Mutex
-	results     *RetrieveResult
-	err         error
-	callCount   int
-	lastQuery   string
-	lastK       int
+	mu        sync.Mutex
+	results   *RetrieveResult
+	err       error
+	callCount int
+	lastQuery string
+	lastK     int
 }
 
 func (m *mockRetriever) Retrieve(_ context.Context, query string, k int,
@@ -191,11 +191,11 @@ func TestEngine_SkipCache(t *testing.T) {
 
 func TestEngine_ResourceAdaptation(t *testing.T) {
 	tests := []struct {
-		name          string
-		memory        int64
-		wantCapacity  int
-		wantPolicy    string
-		wantCacheNil  bool
+		name         string
+		memory       int64
+		wantCapacity int
+		wantPolicy   string
+		wantCacheNil bool
 	}{
 		{
 			name:         "high resources (64GB)",
