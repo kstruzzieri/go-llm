@@ -3,6 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,12 +20,13 @@ import (
 // ExplainToolCall provenance, and a ResolveToolCall that records calls (so the
 // -probe-all / -reprobe tests can assert per-entry probing). When events is
 // non-nil, each ResolveToolCall appends "resolve:<key>" to the shared ordered
-// log so a test can assert delete-before-resolve ordering across both fakes.
+// log so a test can assert delete-refresh-resolve ordering across both fakes.
 type fakeModelsReg struct {
 	profiles map[provider.ModelKey]*provider.ModelProfile
 	explain  map[provider.ModelKey]provider.ToolCallExplanation
 	states   map[provider.ModelKey]fingerprint.CapProbeState
 	calls    []provider.ModelKey
+	refresh  []provider.ModelKey
 	events   *[]string
 }
 
@@ -30,6 +35,14 @@ func (f *fakeModelsReg) Lookup(_ context.Context, key provider.ModelKey) (*provi
 		return p, nil
 	}
 	return nil, context.Canceled // any non-nil error stands in for not-found
+}
+
+func (f *fakeModelsReg) Refresh(_ context.Context, key provider.ModelKey) (*provider.ModelProfile, error) {
+	f.refresh = append(f.refresh, key)
+	if f.events != nil {
+		*f.events = append(*f.events, "refresh:"+key.String())
+	}
+	return f.Lookup(context.Background(), key)
 }
 
 func (f *fakeModelsReg) ExplainToolCall(_ context.Context, key provider.ModelKey) (provider.ToolCallExplanation, error) {
@@ -105,6 +118,66 @@ func TestRunModels_ListsChainWithProvenance(t *testing.T) {
 	// The remediation hint appears under the MISSING entry.
 	if !strings.Contains(got, remediationHint("llamacpp/byo-model")) {
 		t.Fatalf("output missing remediation hint for B:\n%s", got)
+	}
+}
+
+func TestRunModels_ReadsCachedProbeOnPlainListing(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "unexpected request", http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"id":"mystery"}]}`))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", filepath.Join(dir, "data"))
+	root := filepath.Join(dir, "workspace")
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	h, warn := openCapProbeStore(ctx, os.Getenv, root)
+	if warn != "" {
+		t.Fatalf("openCapProbeStore warning = %q", warn)
+	}
+	if h == nil || h.store == nil {
+		t.Fatal("openCapProbeStore returned nil store")
+	}
+	key := provider.ModelKey{Provider: "llamacpp", Model: "mystery"}
+	if err := h.store.SaveCapProbe(ctx, fingerprint.CapProbe{
+		BackendID:    key.Provider,
+		ModelName:    key.Model,
+		Capability:   "tool_call",
+		State:        fingerprint.CapProbeYes,
+		ModelDigest:  key.String(),
+		ProbeVersion: fingerprint.CurrentToolProbeVersion,
+		TestedAt:     time.Now(),
+	}); err != nil {
+		t.Fatalf("seed SaveCapProbe: %v", err)
+	}
+	if err := h.db.Close(); err != nil {
+		t.Fatalf("close seed store: %v", err)
+	}
+
+	cfgPath := filepath.Join(dir, "models.json")
+	if err := os.WriteFile(cfgPath, []byte(`{
+		"providers": {"llamacpp": {"base_url": "`+srv.URL+`", "api_format": "openai-compat"}},
+		"models": {"agent": {"name": "mystery", "provider": "llamacpp", "type": "dense"}},
+		"defaults": {"agent": "agent"}
+	}`), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var out, errOut bytes.Buffer
+	if err := runModels(ctx, []string{"-config", cfgPath, "-root", root, "-no-probe"}, &out, &errOut); err != nil {
+		t.Fatalf("runModels() error: %v\nstderr:\n%s", err, errOut.String())
+	}
+	got := out.String()
+	if !strings.Contains(got, "tool_call=yes (probe)") {
+		t.Fatalf("output = %q, want cached probe provenance", got)
 	}
 }
 
@@ -190,8 +263,10 @@ func TestRunModels_ReprobeDeletesRowsFirst(t *testing.T) {
 	if len(reg.calls) != 2 {
 		t.Fatalf("ResolveToolCall calls = %d, want 2 (resolve after delete)", len(reg.calls))
 	}
-	// Every delete for a key must precede that key's resolve on the shared
-	// timeline. Locate each event's index and compare per key.
+	if len(reg.refresh) != 2 {
+		t.Fatalf("Refresh calls = %d, want 2 (invalidate stale profile after delete)", len(reg.refresh))
+	}
+	// Every delete for a key must precede refresh, which must precede resolve.
 	idx := func(want string) int {
 		for i, e := range events {
 			if e == want {
@@ -203,12 +278,13 @@ func TestRunModels_ReprobeDeletesRowsFirst(t *testing.T) {
 	for _, s := range sels {
 		k := keyOf(s)
 		di := idx("delete:" + k.String())
+		fi := idx("refresh:" + k.String())
 		ri := idx("resolve:" + k.String())
-		if di < 0 || ri < 0 {
+		if di < 0 || fi < 0 || ri < 0 {
 			t.Fatalf("missing events for %s: got %v", s, events)
 		}
-		if di >= ri {
-			t.Fatalf("%s: delete (idx %d) must precede resolve (idx %d); timeline=%v", s, di, ri, events)
+		if di >= fi || fi >= ri {
+			t.Fatalf("%s: delete (idx %d) must precede refresh (idx %d) then resolve (idx %d); timeline=%v", s, di, fi, ri, events)
 		}
 	}
 }

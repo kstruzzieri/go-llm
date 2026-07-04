@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 	"testing"
 
@@ -50,11 +51,16 @@ func (f fakeReg) LookupAny(ctx context.Context, model string) ([]*provider.Model
 	if e, ok := f.errByModel[model]; ok {
 		return nil, e
 	}
-	var out []*provider.ModelProfile
-	for k, c := range f.byKey {
+	var keys []provider.ModelKey
+	for k := range f.byKey {
 		if k.Model == model {
-			out = append(out, &provider.ModelProfile{Caps: c})
+			keys = append(keys, k)
 		}
+	}
+	sort.Slice(keys, func(i, j int) bool { return keys[i].String() < keys[j].String() })
+	var out []*provider.ModelProfile
+	for _, k := range keys {
+		out = append(out, &provider.ModelProfile{Key: k, Caps: f.byKey[k]})
 	}
 	return out, nil
 }
@@ -148,6 +154,29 @@ func TestPreflight_BareModelNotFound(t *testing.T) {
 	}
 	if len(warns) != 1 || !strings.Contains(warns[0], "ghost") {
 		t.Errorf("warnings = %v, want one naming ghost", warns)
+	}
+}
+
+func TestPreflight_BareSelectorProbesUntilProviderCapable(t *testing.T) {
+	a := provider.ModelKey{Provider: "a", Model: "shared"}
+	b := provider.ModelKey{Provider: "b", Model: "shared"}
+	reg := fakeReg{byKey: map[provider.ModelKey]provider.Capability{
+		a: provider.CapChat | provider.CapStream,
+		b: provider.CapChat | provider.CapStream,
+	}}
+	res := &fakeToolResolver{states: map[provider.ModelKey]fingerprint.CapProbeState{
+		a: fingerprint.CapProbeNo,
+		b: fingerprint.CapProbeYes,
+	}}
+	warns, err := preflightToolCapable(context.Background(), reg, []string{"shared"}, noEndpoints, res)
+	if err != nil {
+		t.Fatalf("err = %v, want nil (second provider probes capable)", err)
+	}
+	if len(warns) != 0 {
+		t.Fatalf("warnings = %v, want none", warns)
+	}
+	if len(res.calls) != 2 || res.calls[0] != a || res.calls[1] != b {
+		t.Fatalf("resolver calls = %v, want [%s %s]", res.calls, a, b)
 	}
 }
 

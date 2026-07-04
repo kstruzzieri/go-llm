@@ -398,9 +398,20 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndp
 		// No matching provider: nothing to probe, and no single provider to name.
 		return false, notToolCapableWarn(sel)
 	}
-	// A bare selector may match several providers; probing the first match is a
-	// pragmatic choice (the resolver's own singleflight keys per provider/model).
-	return classifyToolCapability(ctx, sel, profs[0].Key, resolver, allowProbe)
+	warning = notToolCapableWarn(sel)
+	for _, p := range profs {
+		if p == nil {
+			continue
+		}
+		capable, w := classifyToolCapability(ctx, sel, p.Key, resolver, allowProbe)
+		if capable {
+			return true, ""
+		}
+		if w != "" {
+			warning = w
+		}
+	}
+	return false, warning
 }
 
 // classifyToolCapability resolves a chain entry that looked up cleanly but does

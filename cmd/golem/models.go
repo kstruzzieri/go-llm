@@ -21,6 +21,7 @@ import (
 // active resolution. The concrete registry satisfies all three.
 type modelsRegistry interface {
 	Lookup(ctx context.Context, key provider.ModelKey) (*provider.ModelProfile, error)
+	Refresh(ctx context.Context, key provider.ModelKey) (*provider.ModelProfile, error)
 	ExplainToolCall(ctx context.Context, key provider.ModelKey) (provider.ToolCallExplanation, error)
 	ResolveToolCall(ctx context.Context, key provider.ModelKey) (fingerprint.CapProbeState, error)
 }
@@ -88,22 +89,22 @@ func runModels(ctx context.Context, args []string, out, errOut io.Writer) error 
 		return err
 	}
 
-	// The cap-probe store is required to probe/reprobe. Open it whenever
-	// probing might run (either switch), mirroring run()'s handle lifecycle.
+	// The cap-probe store is required for cached provenance in normal listings
+	// and for probe/reprobe writes, mirroring run()'s handle lifecycle.
 	var capStore fingerprint.CapProbeStore
-	if probeAll || reprobe {
-		capHandle, capStoreWarn := openCapProbeStore(ctx, os.Getenv, root)
-		if capHandle != nil {
-			capStore = capHandle.store
-			defer func() { _ = capHandle.db.Close() }()
-		}
-		if capStoreWarn != "" {
-			_, _ = fmt.Fprintln(errOut, "warning: "+capStoreWarn)
-		}
-		// Store fully unavailable (not even the in-memory fallback): a probe run
-		// would silently no-op. Tell the operator why nothing gets probed, then
-		// drop the switches so runModelsWith renders cached provenance only.
-		if capStore == nil {
+	capHandle, capStoreWarn := openCapProbeStore(ctx, os.Getenv, root)
+	if capHandle != nil {
+		capStore = capHandle.store
+		defer func() { _ = capHandle.db.Close() }()
+	}
+	if capStoreWarn != "" {
+		_, _ = fmt.Fprintln(errOut, "warning: "+capStoreWarn)
+	}
+	// Store fully unavailable (not even the in-memory fallback): a probe run
+	// would silently no-op. Tell the operator why nothing gets probed, then
+	// drop the switches so runModelsWith renders cached provenance only.
+	if capStore == nil {
+		if probeAll || reprobe {
 			reason := capStoreWarn
 			if reason == "" {
 				reason = "no capability-probe store"
@@ -191,6 +192,7 @@ func runModelsWith(
 		if !explicit && (opts.probeAll || opts.reprobe) {
 			if opts.reprobe && store != nil {
 				_ = store.DeleteCapProbes(ctx, key.Provider, key.Model)
+				_, _ = reg.Refresh(ctx, key)
 			}
 			if _, rerr := reg.ResolveToolCall(ctx, key); rerr == nil {
 				if re, eerr := reg.ExplainToolCall(ctx, key); eerr == nil {
