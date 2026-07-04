@@ -3,6 +3,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -11,8 +12,14 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/singleflight"
+
 	"github.com/kstruzzieri/go-llm/fingerprint"
 )
+
+// capabilityToolCall is the canonical capability token persisted in
+// capability_probes rows and resolved by ResolveToolCall.
+const capabilityToolCall = "tool_call"
 
 // ProviderResolver provides the subset of Registry methods needed by
 // ModelRegistry to query providers and resolve model keys. This interface
@@ -46,6 +53,13 @@ type ModelRegistry struct {
 	capFloor        CapabilityFloor
 	overrideVersion uint64 // bumped by SetCapabilityOverride AND SetCapabilityFloor; guards stale cache writes in buildProfile
 	rejectionHook   OverrideRejectionHook
+
+	// Capability-probe resolution (ResolveToolCall). Both fields are set
+	// only at construction via options and never mutated afterward, so
+	// they are read without holding mu.
+	capProbeStore   fingerprint.CapProbeStore
+	capProber       FingerprintProberFactory
+	capResolveGroup singleflight.Group
 }
 
 // FingerprintProberSpec contains the model prober and digest identity the
@@ -68,6 +82,27 @@ type ModelRegistryOption func(*ModelRegistry)
 func WithFingerprintProberFactory(fn FingerprintProberFactory) ModelRegistryOption {
 	return func(r *ModelRegistry) {
 		r.fpProberFactory = fn
+	}
+}
+
+// WithCapabilityProbeStore installs the narrow cache used by ResolveToolCall
+// and the read-only cap-probe merge layer. It is intentionally separate from
+// the full fingerprint Store so Golem can persist capability verdicts without
+// enabling full latency/embedding/chat profiling.
+func WithCapabilityProbeStore(store fingerprint.CapProbeStore) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.capProbeStore = store
+	}
+}
+
+// WithCapabilityProber installs provider-aware prober selection used ONLY
+// for on-demand capability resolution (ResolveToolCall). Unlike
+// WithFingerprintProberFactory it never triggers full profiling from
+// Lookup: Lookup/Recommend stay pure, and active probes run only at the
+// named call sites (golem preflight, router candidate resolution).
+func WithCapabilityProber(fn FingerprintProberFactory) ModelRegistryOption {
+	return func(r *ModelRegistry) {
+		r.capProber = fn
 	}
 }
 
@@ -250,6 +285,208 @@ func (r *ModelRegistry) Refresh(ctx context.Context, key ModelKey) (*ModelProfil
 	r.mu.Unlock()
 
 	return r.buildProfile(ctx, key)
+}
+
+// ResolveToolCall resolves the tri-state tool-call capability for a model
+// key on demand. Precedence:
+//  1. Explicit capability override -- authoritative in both directions
+//     (declared set contains tool_call => yes, otherwise no), no probe.
+//  2. Merged profile already carries CapToolCall (catalog/floor/runtime/
+//     cached probe row) => yes, no probe.
+//  3. Resolution disabled (no prober or no store) => "" (unknown) -- the
+//     empty state is never a claim.
+//  4. Active probe, singleflight-deduplicated per key: valid cached row
+//     wins, otherwise probe, persist the verdict, and invalidate the
+//     cached profile so the next Lookup re-merges.
+//
+// A non-nil error means the probe was transient (network/auth); nothing
+// is persisted and the state is "".
+func (r *ModelRegistry) ResolveToolCall(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
+	// 1. Explicit declaration is authoritative both directions. A rejected
+	// override (non-canonical tokens / zero caps) is a no-op here exactly
+	// as it is in merge(): fall through rather than fabricate a verdict.
+	r.mu.RLock()
+	override := r.capOverride
+	r.mu.RUnlock()
+	if override != nil {
+		if tokens := override(key); len(tokens) > 0 {
+			if caps, err := ParseCapsStrict(tokens); err == nil && caps != 0 {
+				if caps.Has(CapToolCall) {
+					return fingerprint.CapProbeYes, nil
+				}
+				return fingerprint.CapProbeNo, nil
+			}
+		}
+	}
+
+	// 2. Merged profile short-circuit (cache READ only; Lookup never probes).
+	profile, err := r.Lookup(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	if profile.Caps.Has(CapToolCall) {
+		return fingerprint.CapProbeYes, nil
+	}
+
+	// 3. Resolution disabled: unknown is never a claim.
+	if r.capProber == nil || r.capProbeStore == nil {
+		return "", nil
+	}
+
+	// 4. Deduplicated slow path. The singleflight fn holds no registry
+	// locks; invalidateProfile takes mu only briefly after probe IO.
+	// Flight key uses an explicit NUL separator (not key.String(), whose
+	// "provider/model" join could collide across keys containing slashes).
+	// Follower semantics: the leader's ctx governs the probe; followers
+	// block until the shared flight completes and receive its result even
+	// if their own ctx was canceled meanwhile.
+	flightKey := key.Provider + "\x00" + key.Model
+	v, err, _ := r.capResolveGroup.Do(flightKey, func() (interface{}, error) {
+		return r.resolveToolCallSlow(ctx, key)
+	})
+	if err != nil {
+		return "", err
+	}
+	return v.(fingerprint.CapProbeState), nil
+}
+
+// resolveToolCallSlow is the probe path behind ResolveToolCall's
+// singleflight: cache check, active probe, persistence, and profile-cache
+// invalidation. Must not be called while holding r.mu.
+func (r *ModelRegistry) resolveToolCallSlow(ctx context.Context, key ModelKey) (fingerprint.CapProbeState, error) {
+	p, err := r.providers.Resolve(key)
+	if err != nil {
+		return "", err
+	}
+	runtimeInfo, err := r.queryRuntime(ctx, key)
+	if err != nil {
+		return "", err
+	}
+	spec, err := r.capProber(ctx, key, runtimeInfo, p)
+	if err != nil {
+		return "", err
+	}
+	if spec == nil || spec.Prober == nil {
+		return "", nil
+	}
+	prober, ok := spec.Prober.(fingerprint.ToolCallProber)
+	if !ok {
+		return "", nil
+	}
+
+	// Cap-probe rows deliberately IGNORE spec.ModelDigest: the real factory
+	// (providerbootstrap's fingerprintDigestForModel) synthesizes
+	// "config-caps:<caps>" digests when the runtime digest is empty --
+	// exactly the openai-compat case -- and the read side (capProbeCaps:
+	// runtimeInfo.Digest fallback key.String()) can never reproduce that
+	// value. Rows keyed by it would never merge into profiles, and
+	// synthetic-digest negatives would dodge the digestless TTL cap below.
+	// Using runtimeInfo.Digest with the key fallback keeps the write and
+	// read digests byte-symmetric by construction.
+	digest := ""
+	if runtimeInfo != nil {
+		digest = runtimeInfo.Digest
+	}
+	if digest == "" {
+		digest = key.String()
+	}
+	backendID := key.Provider // EnsureProfile's existing backend_id convention
+
+	now := time.Now()
+	if row, gErr := r.capProbeStore.GetCapProbe(ctx, backendID, key.Model, capabilityToolCall); gErr == nil && row != nil && row.Valid(digest, now) {
+		return row.State, nil
+	}
+
+	outcome, err := prober.ProbeToolCall(ctx, key.Model)
+	if err != nil {
+		// Transient/diagnostic: never persisted, never a claim.
+		return "", err
+	}
+
+	row := fingerprint.CapProbe{
+		BackendID:    backendID,
+		ModelName:    key.Model,
+		Capability:   capabilityToolCall,
+		State:        outcome.State,
+		ModelDigest:  digest,
+		ProbeVersion: fingerprint.CurrentToolProbeVersion,
+		TestedAt:     now,
+	}
+	if outcome.TTL > 0 {
+		row.ExpiresAt = now.Add(outcome.TTL)
+	}
+	// Digestless negatives expire: a wedged "no" keyed only by name would
+	// silently block usage until a manual reprobe. A real digest keeps the
+	// prober-chosen TTL (ollama's curated "no" stays unbounded).
+	if outcome.State == fingerprint.CapProbeNo && digest == key.String() {
+		row.ExpiresAt = now.Add(fingerprint.CapProbeDigestlessNoTTL)
+	}
+	// Persistence failure is non-fatal: the verdict stands for this caller.
+	_ = r.capProbeStore.SaveCapProbe(ctx, row)
+
+	if outcome.State == fingerprint.CapProbeYes {
+		r.invalidateProfile(key)
+	}
+	return outcome.State, nil
+}
+
+// invalidateProfile drops one cached profile so the next Lookup re-merges.
+//
+// It also bumps the shared policy version counter: a buildProfile in
+// flight for this key may have read the store BEFORE the probe row was
+// saved; without the bump its cache write would pass the version guard
+// and re-cache the stale no-toolcall profile permanently (ResolveToolCall's
+// row-hit fast path never invalidates, so it would never self-heal).
+// Bumping fences those in-flight writes exactly like
+// SetCapabilityOverride/SetCapabilityFloor do.
+func (r *ModelRegistry) invalidateProfile(key ModelKey) {
+	r.mu.Lock()
+	delete(r.profiles, key)
+	r.overrideVersion++
+	r.mu.Unlock()
+}
+
+// canResolveToolCall reports whether on-demand tool-call resolution is
+// fully wired (prober factory AND probe store).
+func (r *ModelRegistry) canResolveToolCall() bool {
+	return r != nil && r.capProber != nil && r.capProbeStore != nil
+}
+
+// EnsureToolCallResolved resolves tool_call for candidate profiles that
+// lack CapToolCall, returning a slice where probe-yes candidates are
+// replaced by their refreshed profiles. Candidates are NEVER removed --
+// probe-no/inconclusive/error entries are returned unchanged so the
+// caller's RequiredCaps gate stays the single rejection point. The input
+// slice and its profiles are never modified; replacements land in a copy.
+// No-op (input returned as-is) when resolution is disabled or required
+// does not include CapToolCall.
+func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*ModelProfile, required Capability) []*ModelProfile {
+	if !r.canResolveToolCall() || !required.Has(CapToolCall) {
+		return profiles
+	}
+	out := make([]*ModelProfile, len(profiles))
+	copy(out, profiles)
+	for i, p := range out {
+		if p == nil || p.Caps.Has(CapToolCall) {
+			continue
+		}
+		state, err := r.ResolveToolCall(ctx, p.Key)
+		if err != nil || state != fingerprint.CapProbeYes {
+			continue
+		}
+		if refreshed, lErr := r.Lookup(ctx, p.Key); lErr == nil && refreshed.Caps.Has(CapToolCall) {
+			out[i] = refreshed
+			continue
+		}
+		// The probe said yes but the refreshed profile lacks the bit --
+		// e.g. SaveCapProbe failed (swallowed as non-fatal) so the merge
+		// layer had no row to read. A lost store write must not erase the
+		// verdict for this caller: patch a copy, never the caller's input.
+		cp := *p
+		cp.Caps |= CapToolCall
+		out[i] = &cp
+	}
+	return out
 }
 
 // LookupAny returns merged profiles for an unqualified model name across
@@ -457,9 +694,15 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	// Layer 3: Fingerprint enrichment.
 	fpProfile := r.fingerprintProfile(ctx, key, runtimeInfo)
 
+	// Cap-probe merge layer: READ ONLY -- never probes. A valid cached
+	// "yes" row ORs CapToolCall into the profile. Computed here (not in
+	// merge) so merge stays IO-free and applies exactly the bits this
+	// buildProfile snapshot observed.
+	capProbeCaps := r.capProbeCaps(ctx, key, runtimeInfo)
+
 	// Merge layers using the (override, floor, rejectionHook) snapshot
 	// taken at function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, rejectionHook)
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, rejectionHook, capProbeCaps)
 
 	// Cache the result iff the override snapshot is still current.
 	r.mu.Lock()
@@ -498,6 +741,38 @@ func (r *ModelRegistry) fingerprintProfile(ctx context.Context, key ModelKey, ru
 	fpProfile, _ := r.fpStore.Get(ctx, key.Provider, key.Model)
 	// Ignore errors -- fingerprint is optional enrichment.
 	return fpProfile
+}
+
+// capProbeCaps reads the persisted tool-call probe verdict for a key and
+// returns the capability bits it contributes to the merge (CapToolCall for
+// a valid "yes" row, zero otherwise). Pure cache read; never probes.
+func (r *ModelRegistry) capProbeCaps(ctx context.Context, key ModelKey, runtimeInfo *ModelInfo) Capability {
+	if r.capProbeStore == nil {
+		return 0
+	}
+	digest := ""
+	if runtimeInfo != nil {
+		digest = runtimeInfo.Digest
+	}
+	if digest == "" {
+		digest = key.String()
+	}
+	row, err := r.capProbeStore.GetCapProbe(ctx, key.Provider, key.Model, capabilityToolCall)
+	if err != nil {
+		if errors.Is(err, fingerprint.ErrNotFound) {
+			return 0 // expected miss: never probed
+		}
+		// Real store error (corruption, IO): fail closed to "no bits" --
+		// enrichment is optional and must never block a profile build.
+		return 0
+	}
+	if row == nil {
+		return 0
+	}
+	if row.State == fingerprint.CapProbeYes && row.Valid(digest, time.Now()) {
+		return CapToolCall
+	}
+	return 0
 }
 
 // queryRuntime asks the provider for model information by resolving the
@@ -547,6 +822,7 @@ func (r *ModelRegistry) merge(
 	override CapabilityOverride,
 	floor CapabilityFloor,
 	rejectionHook OverrideRejectionHook,
+	capProbeCaps Capability,
 ) *ModelProfile {
 	profile := &ModelProfile{
 		Key:       key,
@@ -607,6 +883,10 @@ func (r *ModelRegistry) merge(
 			}
 		}
 	}
+
+	// Cap-probe verdict (read-only layer, computed by buildProfile). OR-only
+	// like the floor; the REPLACE override below still wins both directions.
+	profile.Caps |= capProbeCaps
 
 	// Apply runtime data (highest precedence).
 	if runtime != nil {
