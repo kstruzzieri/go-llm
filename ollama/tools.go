@@ -18,7 +18,7 @@ const (
 // ParamDef describes a single property in a tool's parameter schema.
 type ParamDef struct {
 	Name        string
-	Type        string   // Use ParamType* constants
+	Type        string // Use ParamType* constants
 	Description string
 	Enum        []string // optional: constrained values
 }

@@ -145,7 +145,7 @@ func migrateV4(tx *sql.Tx) error {
 // migrateV5 adds the vector_space_id column and a partial index over
 // non-empty values. Legacy rows keep the empty default; the partial-index
 // predicate keeps them out of the index, so probe queries that filter on
-// vector_space_id <> '' stay cheap regardless of corpus size.
+// vector_space_id <> ” stay cheap regardless of corpus size.
 func migrateV5(tx *sql.Tx) error {
 	stmts := []string{
 		`ALTER TABLE chunks ADD COLUMN vector_space_id TEXT NOT NULL DEFAULT ''`,

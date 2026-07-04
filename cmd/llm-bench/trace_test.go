@@ -156,4 +156,3 @@ func TestValidateTraceAllowsKnownAndEmptyDifficulty(t *testing.T) {
 		}
 	}
 }
-

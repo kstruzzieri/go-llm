@@ -259,46 +259,46 @@ func TestHysteresisCheck(t *testing.T) {
 	const margin = 0.15
 
 	tests := []struct {
-		name           string
-		incumbentScore float64
+		name            string
+		incumbentScore  float64
 		challengerScore float64
-		margin         float64
-		wantKeep       bool // true = keep incumbent
+		margin          float64
+		wantKeep        bool // true = keep incumbent
 	}{
 		{
-			name:           "challenger far better",
-			incumbentScore: 0.70,
+			name:            "challenger far better",
+			incumbentScore:  0.70,
 			challengerScore: 0.90,
-			margin:         margin,
-			wantKeep:       false, // 0.90 >= 0.70*1.15=0.805
+			margin:          margin,
+			wantKeep:        false, // 0.90 >= 0.70*1.15=0.805
 		},
 		{
-			name:           "challenger marginally better",
-			incumbentScore: 0.70,
+			name:            "challenger marginally better",
+			incumbentScore:  0.70,
 			challengerScore: 0.78,
-			margin:         margin,
-			wantKeep:       true, // 0.78 < 0.805
+			margin:          margin,
+			wantKeep:        true, // 0.78 < 0.805
 		},
 		{
-			name:           "challenger at margin boundary",
-			incumbentScore: 0.70,
+			name:            "challenger at margin boundary",
+			incumbentScore:  0.70,
 			challengerScore: 0.805,
-			margin:         margin,
-			wantKeep:       false, // 0.805 >= 0.805
+			margin:          margin,
+			wantKeep:        false, // 0.805 >= 0.805
 		},
 		{
-			name:           "challenger equal",
-			incumbentScore: 0.70,
+			name:            "challenger equal",
+			incumbentScore:  0.70,
 			challengerScore: 0.70,
-			margin:         margin,
-			wantKeep:       true, // 0.70 < 0.805
+			margin:          margin,
+			wantKeep:        true, // 0.70 < 0.805
 		},
 		{
-			name:           "challenger worse",
-			incumbentScore: 0.70,
+			name:            "challenger worse",
+			incumbentScore:  0.70,
 			challengerScore: 0.60,
-			margin:         margin,
-			wantKeep:       true, // 0.60 < 0.805
+			margin:          margin,
+			wantKeep:        true, // 0.60 < 0.805
 		},
 	}
 

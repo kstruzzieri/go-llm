@@ -23,8 +23,8 @@ type TrainingMetrics struct {
 
 // AnomalyInfo describes a detected anomaly in training metrics.
 type AnomalyInfo struct {
-	Type        string             // e.g. "reward_hack", "kl_drift", "loss_spike"
-	Severity    string             // "warning" or "critical"
+	Type        string // e.g. "reward_hack", "kl_drift", "loss_spike"
+	Severity    string // "warning" or "critical"
 	Description string
 	Metrics     map[string]float64
 }

@@ -98,7 +98,7 @@ func TestTokenBudgetPerUseCaseOutput(t *testing.T) {
 	contextWindow := 32768
 
 	tests := []struct {
-		useCase       string
+		useCase        string
 		expectedBudget int
 	}{
 		{"fim", contextWindow - 200},
