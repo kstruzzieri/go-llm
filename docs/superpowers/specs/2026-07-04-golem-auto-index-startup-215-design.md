@@ -1,270 +1,245 @@
-# Golem auto-build + incremental RAG re-index on startup (#215)
+# Golem Auto-Index Startup (#215) Design
 
-Date: 2026-07-04
-Issue: #215
-Base: develop@c88e45b
-Lineage: #202 (`golem index` subcommand), #225-#231 (RAG quality track), #235 (parallel read-only dispatch)
+**Date:** 2026-07-04
+**Issue:** [#215](https://github.com/kstruzzieri/go-llm/issues/215)
+**Review note:** The review request says ticket #219, but GitHub #219 is the
+closed tool-capability probe. The filenames, issue body, and decisions all map
+to #215, so this spec covers #215.
+**Status:** Review-updated design; ready for implementation plan.
 
-## 1. Problem
+## Problem
 
-The RAG index is only built by the explicit `golem index` subcommand. A first
-`golem` run in an un-indexed repo silently omits the `retrieve` tool
-(`os.Stat(autoDBPath)` miss in `cmd/golem/retrieve_enable.go`), and an existing
-index is a point-in-time snapshot that goes stale after edits until the user
-remembers to re-run `golem index`. The rag engine already supports incremental
-indexing (`rag.WithIncremental`, content-hash `sourceSignature` with
-embedding-model awareness, chunk-diff, stable keys); making indexing automatic
-is Golem-side orchestration.
+`golem index` can build a per-workspace RAG store, and plain `golem` can open a
+valid existing auto index. It does not yet make a fresh or stale index "just
+work" on startup. A repo with no index starts without `retrieve`, and a repo
+with edits keeps serving the previous point-in-time snapshot until the user runs
+`golem index` manually.
 
-## 2. Goals
+The existing pieces are good enough to reuse:
 
-- On startup, auto-build the index if absent and incrementally refresh it if
-  present, in the background, without blocking the REPL.
-- `retrieve` registers as a ready-gated tool that reports "warming" until the
-  background build completes, then serves; a notice announces the transition.
-- Embedder unavailable => clear warning, file tools still work, no crash.
-- `-no-auto-index` opt-out; explicit `golem index`, `-rag-db`, `-no-rag`
-  unchanged.
+- `cmd/golem/index.go` has `executeIndex`, sidecar writing, vector-space probing,
+  chmod hardening, and partial-but-usable sidecar behavior.
+- `cmd/golem/retrieve_enable.go` has the current read-only `retrieve` open path.
+- `rag.Indexer.IndexDirectoryWithStatus` already performs incremental updates for
+  discovered files.
+- `newChainEmbedder` exercises the same routing and vector-space path used for
+  indexing and retrieval.
 
-## 3. Non-goals
+## Review Findings
 
-- No file-watching / live re-index during a session (warm once at startup).
-- No change to the `rag` incremental engine.
-- No multi-writer / cross-process index locking (see 9. Concurrency).
-- No change to `golem index` semantics (it still requires explicit `-full` for
-  torn or mismatched stores; the AUTO path is allowed to self-heal because the
-  DB lives in golem's private data dir).
+1. **#215 says deleted files must be dropped, but current `rag.IndexDirectory`
+   does not prune them.** `IndexDirectoryWithStatus` walks eligible files and
+   indexes them, but never removes sources missing from the walk. The plan adds
+   a small opt-in prune path for auto refresh. Do not claim existing incremental
+   indexing already handles deletes.
+2. **`executeIndex` returns non-zero for partial indexes even when it writes a
+   usable sidecar.** Auto startup must not treat `errIndexFailed` alone as final
+   failure. After `executeIndex`, inspect whether a valid sidecar and retriever
+   can be opened; partial-but-usable becomes ready with a warning.
+3. **The ready-gated tool must be mutex-guarded.** After #235, read-only tools
+   can run in parallel. `retrieve` is read-only and approval-free, so any shared
+   state inside a wrapper must be protected with a mutex/RWMutex and copied before
+   delegating.
+4. **Probe with the chain embedder, not provider health.** A one-input embed
+   call through `newChainEmbedder` validates routing, fallback-chain resolution,
+   model availability, and vector-space identity on the exact path that indexing
+   uses. This is the right "Health() equivalent" for #215.
+5. **Self-heal is safe only for the private auto index path.** The auto DB lives
+   at `<data>/golem/indexes/<sha16>.db`, never at a user-supplied `-rag-db`
+   path. It can remove torn or stale private artifacts. Manual `golem index` and
+   explicit `-rag-db` must continue to fail closed unless the user asks for
+   `golem index -full`.
+6. **One-shot mode should skip only the background writer.** `-p` exits after one
+   turn, so a background write risks process termination mid-index. Existing
+   valid indexes may still be opened immediately, matching today's behavior.
+7. **Auto-ready retrieval must retain the feedback DB handle.**
+   `buildGatedRetriever` may open a `behavioralWeighterHandle`; callers own that
+   DB and must keep it open while retrieval is live. The ready wrapper should own
+   and close this handle when auto mode is used.
 
-## 4. Current state (verified against develop@c88e45b)
+## Goals
 
-- `cmd/golem/main.go run()`: computes `autoDBPath`/`workspaceID` via
-  `indexDBPathForWorkspace`, then calls `enableRetrieve` once, synchronously.
-  `retrieve == nil` => `retrieveOmitted`, generic "retrieve unavailable" notice.
-- `enableRetrieve` (retrieve_enable.go): auto-discovery requires DB + valid
-  sidecar, then `buildGatedRetriever` opens the store with
-  `rag.OpenSQLiteStoreReadOnly` (`immutable=1`) — the open MUST NOT be
-  concurrent with a writer.
-- `runIndex`/`executeIndex` (index.go): `prepareIndexStore` (preflight existing
-  index: valid sidecar + vector-space match, else refuse) -> `IndexDirectoryWithStatus(ctx,
-  root, rag.WithIncremental(), rag.WithExclude(indexExcludes...))` -> usable-store
-  gate -> `chmodIndexDBFiles` -> sidecar write. First build IS the incremental
-  path on an empty store.
-- `agenttools.Retrieve`: `Spec()` and `Effect()` are static (no field
-  dependence) — a wrapper can mirror them exactly.
-- `replSession.tools` is fixed for the process; #235 dispatches read-only tools
-  in parallel, so a late-binding tool must be race-safe.
-- One-shot `-p` mode forces no-session/no-compress/no-memory and exits after a
-  single turn.
+1. Default REPL startup starts a background auto-index job when `-rag-db`,
+   `-no-rag`, `-no-auto-index`, and `-p` are absent.
+2. The REPL is usable immediately. The `retrieve` tool is registered as a
+   ready-gated wrapper and returns model-visible steering while warming or failed.
+3. When the background job succeeds, the wrapper opens the immutable read-only
+   retriever after the writer closes and then serves a static snapshot for the
+   rest of the session.
+4. The background job reuses `executeIndex` and the existing sidecar/vector-space
+   gates instead of duplicating indexing logic.
+5. Auto refresh drops deleted or now-ignored files from the private index.
+6. Embedder unavailable, invalid private DB, and vector-space mismatch degrade
+   without crashing the REPL.
+7. `-no-auto-index` restores today's immediate-open behavior exactly.
 
-## 5. Design
+## Non-Goals
 
-### 5.1 Approaches considered
+- No file watcher or live re-index during a session.
+- No parallel/multi-process writer coordination. A single Golem process owns the
+  startup job.
+- No changes to explicit `-rag-db` safety.
+- No new user config for concurrency, refresh interval, extensions, or excludes.
+- No dynamic tool registration. Tools are fixed per turn, so the wrapper is the
+  stable tool surface.
 
-1. **Background warm + ready-gated wrapper tool (chosen).** REPL usable
-   immediately; `retrieve` is registered up front as a wrapper whose inner tool
-   is swapped in when the background build finishes. Matches the decided design
-   in the issue.
-2. Blocking foreground refresh with progress output. Rejected: violates the
-   non-blocking goal; a cold build on a big repo would stall the first prompt
-   for minutes.
-3. Serve the stale index immediately (read-only) while rebuilding into a temp
-   DB, atomic-rename swap on completion. Rejected: the issue explicitly decided
-   warm-once-then-static; double disk, rename-under-immutable-handle
-   complexity, and stale results served silently in the interim.
+## CLI Behavior
 
-### 5.2 Components
+New flag:
 
-New file `cmd/golem/autoindex.go` (+ `_test.go`), new file
-`cmd/golem/retrieve_ready.go` (+ `_test.go`). Changes to `main.go`, `repl.go`
-(one line in `/tools`), flag plumbing.
+```text
+-no-auto-index
+```
 
-**a) `readyRetrieve` wrapper (retrieve_ready.go)** — implements `agent.Tool`.
+Behavior matrix:
 
-- `Spec()`/`Effect()`: return `agenttools.Retrieve{}.Spec()` / `.Effect()`
-  verbatim (static), so `toolSchemaHash` is stable across the swap.
-- Tri-state: `warming` -> `ready(inner agent.Tool)` | `failed(reason)`.
-  State guarded by a mutex (or `atomic.Pointer` + atomic state word); Invoke may
-  be called from parallel dispatch goroutines (#235).
-- `Invoke` while `warming`: returns `agent.ToolResult{IsError: false, Content:
-  "retrieve: the workspace index is still warming in the background; use the
-  file/search tools for now and retry retrieve later in this session."}`.
-  Non-error: an unavailable-yet capability is a normal observation, and an
-  error result would push some models to abandon the tool for the session.
-- `Invoke` while `failed`: same shape, content "retrieve: index unavailable:
-  <reason>; using file tools" (IsError: false).
-- `Invoke` while `ready`: delegate to inner tool.
-- `SetReady(tool agent.Tool)`, `SetFailed(reason string)`, `StateLine() string`
-  (for `/tools` and the completion notice).
+| Mode | Background writer | Retrieve registration |
+| --- | --- | --- |
+| default REPL, no `-rag-db`, no `-no-rag`, no `-no-auto-index` | yes | ready-gated wrapper |
+| `-no-auto-index` | no | current immediate auto-open behavior |
+| `-p` one-shot | no | current immediate auto-open behavior |
+| `-rag-db <path>` | no | current explicit path behavior |
+| `-no-rag` | no | no retrieve tool |
 
-**b) Auto-index decision (autoindex.go)** — two stages.
+`-no-auto-index` is intentionally separate from `-no-rag`: it disables only the
+startup writer, not retrieval from an already-valid auto index.
 
-Stage 1, synchronous at startup (pure function `autoIndexMode(f flags,
-autoErr error, embChainErr error) (on bool, skipReason string)`):
+## Startup Flow
 
-- OFF when any of: `-no-rag`, `-rag-db` set, `-no-auto-index`, one-shot
-  (`f.promptSet`), `autoErr != nil` (no resolvable index path), embedding chain
-  unresolvable (no `defaults.embedding`).
-- Each OFF cause keeps today's behavior exactly (see 5.4 matrix): the flow
-  falls through to the existing `enableRetrieve` path, whose warnings/notices
-  (including the generic "retrieve unavailable" line and the autoErr warning)
-  already cover every OFF case. `autoIndexMode` therefore returns only a bool.
+1. Resolve `root`, config, backend, provider bundle, agent chain, feedback DB,
+   memory, and other existing startup state as today.
+2. Resolve the auto index path with `indexDBPathForWorkspace(os.Getenv, root)`.
+   If that fails in default REPL mode, warn and fall back to file tools.
+3. If auto-index is disabled by flags or one-shot mode, call `enableRetrieve`
+   exactly as today.
+4. Otherwise:
+   - create a `readyRetrieve` wrapper in `warming` state;
+   - register it in the tool list;
+   - start a background auto-index job;
+   - print a startup line such as
+     `retrieve: auto-index warming in background`.
+5. The background job:
+   - runs a 30s one-input embed probe through the chain embedder;
+   - self-heals private auto artifacts when safe;
+   - runs `executeIndex` into a buffer;
+   - closes the write store;
+   - opens retrieval through `buildGatedRetriever`;
+   - keeps any returned feedback handle alive with the ready wrapper;
+   - atomically switches the wrapper to `ready` or `failed`;
+   - prints one completion notice to stderr.
 
-Stage 2, inside the background goroutine (`runAutoIndex`), in order:
+## Ready-Gated Retrieve
 
-1. **Embedder probe.** One 1-input embed through the same `newChainEmbedder`
-   the indexer will use (input: a short constant string), bounded by a
-   30-second timeout (model cold-load headroom; configurable only by code
-   constant). Failure => `SetFailed("embedder unavailable: <err>")` + warning
-   notice; goroutine ends. This is the "Health() or equivalent" probe from the
-   issue: it exercises routing + model availability on the exact path indexing
-   uses, provider-agnostic.
-2. **Store preparation with self-heal.** `prepareAutoIndexStore`:
-   - DB absent: `prepareIndexStore(..., full=false)` (fresh store; first build
-     is incremental-on-empty).
-   - DB present: try the existing `preflightExistingIndex`. On success open
-     write store (incremental refresh). On preflight failure (torn sidecar,
-     workspace mismatch, vector-space mismatch, probe failure): **self-heal**
-     — `removeIndexArtifacts` + fresh store + notice ("rebuilding index:
-     <reason>"). Safety argument: this applies ONLY to `autoDBPath`, which
-     lives under golem's private data dir (`<base>/golem/indexes/<sha16>.db`,
-     validated outside the workspace) and is keyed to this workspace; the
-     explicit `golem index` command keeps requiring `-full` so destruction in
-     the manual path stays explicit. An interrupted background build (torn
-     state) therefore heals itself on the next startup instead of demanding a
-     manual `-full`. A changed embedding model rebuilds the whole corpus, which
-     is what a vector-space flip means semantically; the vs gate is honored
-     because the store is never served or appended to across spaces.
-3. **Index run.** Reuse `executeIndex` verbatim with the job's `out` set to a
-   `bytes.Buffer` (its summary/errors are not interleaved into the REPL).
-   `ctx` is the warmer's cancellable context, so REPL exit aborts the walk.
-4. **Outcome classification.** After the run, re-read the sidecar:
-   - sidecar valid now => the store is usable (executeIndex only writes it
-     behind the usable-store gate). Proceed to open. If `executeIndex`
-     returned `errIndexFailed` with a valid sidecar, the run was PARTIAL:
-     serve + warning notice mirroring today's partial `autoLine`.
-   - sidecar invalid/absent => build failed before usability:
-     `SetFailed(<first buffer line or indexErr>)` + warning notice with the
-     buffered output capped to a few lines.
-   - ctx canceled => exit silently (process is shutting down).
-5. **Open-after-write.** Only now call `buildGatedRetriever(ctx, cfg, router,
-   autoDBPath, expected, feedbackDB)` — the immutable read-only open is
-   sequenced strictly after the writer store is closed. Success =>
-   `SetReady(tool)`, inject behavioral weighter handle ownership into the
-   warmer, emit ready notice built from the store stats/sidecar (same shape as
-   today's `autoLine`). Failure => `SetFailed` + warning.
+`readyRetrieve` implements `agent.Tool` and delegates `Spec`/`Effect` to the real
+retrieve tool shape:
 
-**c) `indexWarmer` lifecycle (autoindex.go).**
+- `warming`: `Invoke` returns a non-error `agent.ToolResult` explaining that the
+  index is warming and the model should use `read_file`, `search`, `glob`, and
+  `list` for now.
+- `failed`: `Invoke` returns a non-error result explaining the failure and
+  steering to file tools.
+- `ready`: `Invoke` delegates to the opened `agenttools.Retrieve`.
 
-- Holds: cancel func, done channel, notify `func(string)` (writes lines to
-  stderr; safe for async use), the feedback handle once opened, and the
-  `readyRetrieve` wrapper.
-- `Close()`: cancel, wait for the goroutine, close the feedback DB handle if
-  set. Called via defer in `run()` before the provider bundle closes. The
-  read-only store itself follows the existing precedent: process-lifetime,
-  closed by the OS at exit.
-- The write store is always closed inside the goroutine before the read-only
-  open (defer + explicit close before open).
+State is guarded by a mutex/RWMutex. `Invoke` copies the state and delegate
+under lock, releases the lock, then calls the delegate. The lock is never held
+while doing retrieval.
 
-### 5.3 Wiring in main.go
+When the delegate is installed, the wrapper also retains any
+`behavioralWeighterHandle` returned by `buildGatedRetriever`. Main should defer a
+wrapper `close()` method so that handle is closed during normal shutdown.
 
-- New flag: `-no-auto-index` ("disable automatic background index build/refresh
-  on startup; an existing index is still used as-is"). No validateFlags
-  coupling: it composes harmlessly with every other flag (it only narrows
-  behavior).
-- Flow replaces the current single `enableRetrieve` call site:
-  - auto mode OFF => exactly today's path (`enableRetrieve`, immediate
-    read-only open of an existing valid index).
-  - auto mode ON => do NOT open the store at startup (even when present:
-    warm-once-then-static; the immutable open must not race the refresh
-    writer). Register the `readyRetrieve` wrapper in the tool list,
-    `retrieveOmitted = false`, startup notice one of:
-    - "retrieve: building workspace index in the background (first build)"
-      (DB absent)
-    - "retrieve: refreshing workspace index in the background" (DB present)
-    The generic "retrieve unavailable: no RAG index configured" notice never
-    fires in auto mode.
-  - Start the goroutine after startup notices are printed (the warmer only
-    emits async lines).
-- `replSession` gains the warmer handle (nil when auto mode off) so `/tools`
-  can print `warmer.wrapper.StateLine()`; `retrieveOmitted` semantics for
-  non-auto paths unchanged.
-- Async notices write to stderr as they happen. They may interleave with the
-  `golem> ` prompt visually; accepted (startup warnings already share the
-  terminal), and queuing them to the next prompt would delay them arbitrarily
-  because the REPL blocks on ReadLine.
+The warming/failed responses are non-error on purpose: they are not malformed
+tool calls, and the model can recover by using file tools.
 
-### 5.4 Behavior matrix
+## Embed Probe
 
-| Condition | Behavior |
-|---|---|
-| default, no index | wrapper registered (warming), background full build, ready notice on completion |
-| default, valid index, unchanged repo | wrapper (warming), background incremental refresh (hash checks only), near-instant ready |
-| default, valid index, edits | wrapper (warming), only new/modified files re-embedded, deleted dropped |
-| default, torn state (DB without valid sidecar) | self-heal: remove artifacts, full rebuild, notice |
-| default, vector-space mismatch (embedding model changed) | self-heal: remove artifacts, full rebuild, notice |
-| embedder down | probe fails: warning notice, wrapper -> failed, file tools unaffected |
-| `-no-auto-index` | today's behavior byte-for-byte (existing valid index opens immediately; none => omitted notice) |
-| `-no-rag` | unchanged (no retrieve at all) |
-| `-rag-db <path>` | unchanged (explicit DB, no auto anything) |
-| `-p` one-shot | auto-index skipped (process too short-lived; a mid-write kill would tear the store) |
-| no `defaults.embedding` | auto-index off; today's behavior (generic "retrieve unavailable" notice) |
-| REPL exits mid-build | warmer ctx canceled, goroutine drains; torn store self-heals next startup |
-| partial run (per-file errors, usable store) | serve + partial warning (mirrors `autoLine` partial shape) |
+The startup probe is:
 
-### 5.5 Error handling
+```go
+ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+defer cancel()
+_, err := embedder.Embed(ctx, embChain[0], []string{"golem startup index probe"})
+```
 
-- Every failure path lands in exactly one of: startup warning (sync),
-  `SetFailed` + async warning notice, or silent exit on cancellation. The
-  goroutine never panics the process: it only touches injected deps and
-  recovers nothing (a panic in rag/sqlite code is a real bug we want loud —
-  no blanket recover).
-- Buffered `executeIndex` output is surfaced only on failure/partial, capped.
+The response must contain one vector. A missing vector or embed error marks
+auto-index as failed for this run. Nothing is persisted and the REPL keeps
+running.
 
-### 5.6 Concurrency
+This is better than `Provider.Health()` because it exercises:
 
-- Wrapper: mutex-guarded state; Invoke concurrent-safe (#235 parallel
-  dispatch); `go test -race` covers via a dedicated concurrent test.
-- Exactly one writer goroutine per process. Two golem processes on the same
-  workspace can race on the same DB file; SQLite locking makes this safe
-  (worst case: one refresh fails busy => failed state, that session uses file
-  tools). Documented limitation, per issue non-goal.
-- Warmer goroutine must not outlive `run()`: `Close()` waits on the done
-  channel (bounded by ctx cancellation propagating into the indexer walk and
-  the embed probe).
+- provider routing;
+- strict embedding fallback chain;
+- model load under llama-swap style backends;
+- the configured embedding model;
+- vector-space metadata returned by the exact indexing path.
 
-### 5.7 Testing (unit; no live embedder)
+## Self-Heal Policy
 
-Existing patterns: fake embedder via pre-built indexer/store (index_test.go),
-temp data dir via getenv injection.
+Self-heal applies only to `autoDBPath`:
 
-1. `autoIndexMode` matrix: every OFF cause + ON case (pure, table-driven).
-2. Wrapper: warming/failed/ready Invoke results; Spec/Effect equal
-   `agenttools.Retrieve`'s; concurrent Invoke+SetReady under `-race`.
-3. Background build when absent: fake embedder, tiny tree => sidecar written,
-   wrapper ready, ready notice emitted, chmod applied (0600).
-4. Incremental refresh when present: build once, touch one file, rerun warm =>
-   embed calls only for changed file (counting fake embedder), deleted file
-   dropped.
-5. Embedder-down: probe returns error => failed state, warning notice, no DB
-   artifacts created (probe precedes store prep — a dead embedder must not
-   leave an empty DB behind).
-6. Self-heal torn: DB present, sidecar missing => artifacts removed, rebuilt.
-7. Self-heal vs-mismatch: sidecar with different vector space => rebuilt.
-8. Cancel mid-build: Close() during a slow fake embed returns promptly, no
-   goroutine leak (race detector + done-channel assertion).
-9. One-shot / `-no-auto-index` / `-no-rag` / `-rag-db`: no warmer started.
-   Decision-level coverage via the mode matrix suffices: the OFF path is the
-   byte-identical existing `enableRetrieve` flow, already covered by
-   `retrieve_enable_test.go` (immediate open of an existing valid index).
-10. Partial: fake embedder failing for one file => usable sidecar partial,
-    serve + partial notice.
+- DB exists but sidecar missing, corrupt, wrong schema, or wrong workspace:
+  remove DB, WAL, SHM, and sidecar, then full rebuild.
+- DB exists with a valid sidecar but vector-space gate rejects it:
+  remove artifacts, then full rebuild.
+- DB absent:
+  normal first build.
+- DB valid and vector-space-compatible:
+  incremental refresh.
 
-### 5.8 Acceptance criteria mapping
+Manual paths keep existing behavior:
 
-- First run un-indexed + embedder up => background build, retrieve becomes
-  available without blocking (tests 3, wrapper tests).
-- Subsequent runs incremental; unchanged => near-instant (test 4).
-- Embedder down => warning, file tools work, no crash (test 5).
-- `-no-auto-index` disables; `golem index`/`-rag-db`/`-no-rag` unchanged
-  (tests 1, 9; `golem index` untouched by construction).
-- `go test -race ./...` clean; gofmt/vet clean.
+- `golem index` without `-full` still refuses invalid/mismatched existing DBs.
+- `-rag-db` never self-heals or deletes anything.
+
+## Deleted Source Prune
+
+Auto refresh must drop sources that no longer appear in the eligible workspace
+walk. The minimal change is an opt-in `rag.WithPruneDeleted()` directory option:
+
+1. `IndexDirectoryWithStatus` already collects the eligible file list.
+2. When prune is enabled, after the walk and file indexing, list current stored
+   sources from `*rag.SQLiteStore`.
+3. For stored sources under the workspace root that are not in the eligible file
+   set, call `DeleteBySource`.
+4. Sources outside the workspace root are ignored defensively.
+
+Manual `golem index` does not need to change unless the implementation chooses to
+share the prune option there explicitly. For #215, the startup auto refresh is
+the required prune path.
+
+## Partial Indexes
+
+`executeIndex` already writes a sidecar for partial-but-usable runs and returns
+`errIndexFailed`. The background job must interpret the result through the store,
+not through the exit sentinel alone:
+
+- sidecar valid and retriever opens: `ready`, plus a warning notice using the
+  existing partial sidecar fields;
+- no valid sidecar or retriever cannot open: `failed`.
+
+## Notices
+
+Startup and completion lines are concise:
+
+- startup: `retrieve: auto-index warming in background`
+- ready: `retrieve: auto-index ready, <n> sources, <vector-space-id>, updated <timestamp>`
+- partial ready: `warning: retrieve auto-index partial, <n> sources, <m> errors; retrieval enabled`
+- failed: `warning: retrieve auto-index failed: <reason>; using file/search tools`
+- self-heal: `warning: retrieve auto-index rebuilding private store: <reason>`
+
+The completion notice may be printed by the background goroutine to stderr. Keep
+it one line so it is tolerable if it appears near a prompt.
+
+## Testing
+
+Required focused tests:
+
+- flag parsing for `-no-auto-index`;
+- default REPL chooses ready-gated auto mode, while `-p`, `-no-auto-index`,
+  `-rag-db`, and `-no-rag` do not start the writer;
+- `readyRetrieve` warming/failed/ready states and race-safe transition;
+- embed probe uses `newChainEmbedder` route path and honors timeout;
+- auto self-heals invalid private sidecar and vector-space mismatch;
+- partial usable index becomes ready with a warning;
+- deleted/ignored sources are pruned in auto refresh;
+- `go test -race ./cmd/golem ./agent ./rag` clean, then full `go test ./...`.
