@@ -91,8 +91,40 @@ endpoint and cached in the fingerprint store (SQLite).
 | `type` | yes | `"dense"`, `"moe"`, or `"embedding"` (validates fallback compatibility) |
 | `context_window` | no | Observed/overridden at runtime by fingerprint if wrong |
 | `dimensions` | no | For embedding models |
+| `capabilities` | no | Explicit capability list; **replaces** the type-derived default. See below. |
 | `fallbacks` | no | Role names to degrade to when the primary is unavailable |
 | `description`, `parameters` | no | Human-readable only |
+
+### The `capabilities` field
+
+`capabilities` is an optional explicit override of the capabilities `go-llm`
+derives from `type`. Its semantics are deliberately strict:
+
+- **Explicit list REPLACES, in both directions.** When you set `capabilities`,
+  the listed tokens become the model's capabilities outright — the derived set
+  is discarded, not merged. This cuts both ways: omitting a token *denies* that
+  capability. A model declared `["chat", "stream"]` is treated as **not**
+  tool-capable even if the model can call tools, because the explicit list left
+  `tool_call` out. Use this to carve a model down for a backend that lacks an
+  endpoint (e.g. an OpenAI-compat server with no `/v1/completions`), and to
+  pin tool support on (or off) without waiting for a probe.
+- **Only canonical single-bit names.** The accepted vocabulary is the canonical
+  set (`chat`, `generate`, `stream`, `embed`, `tool_call`, `thinking`,
+  `insert`). Catalog
+  aliases that expand to several bits (`completion`, `tools`) are rejected here,
+  so an explicit list never surprises you with hidden expansion.
+- **Derived caps are a floor, not an override.** When you *omit* `capabilities`
+  on an undeclared OpenAI-compat model, the type-derived set is applied as a
+  **floor** (OR-merged at lowest precedence). A floor can only add routability;
+  it never erases catalog, fingerprint, or runtime capabilities. So a catalog
+  entry that adds `tool_call` survives — the floor won't strip it. (This is the
+  fix for the issue where a derived REPLACE override silently erased catalog
+  tools.)
+- **Cross-role consistency.** The same provider/model can back more than one
+  role. If two roles declare an *explicit* `capabilities` list for the same
+  provider/model key, the lists must agree; a conflict is a hard startup error
+  (`conflicting capability overrides for <provider>/<model>`). Floors (omitted
+  lists) never conflict — they union.
 
 ### Adding a new provider
 
@@ -129,10 +161,70 @@ model metadata and records:
 
 The catalog (`provider/catalog.json`) matches model **families** (e.g.
 `qwen3`, `gemma4`, `codellama`, `deepseek`) by name prefix and supplies
-FIM-policy and thinking-mode defaults. If a model's family isn't in the
-catalog, the system falls back to runtime-detected capabilities and a
+FIM-policy, thinking-mode, and capability defaults. If a model's family isn't
+in the catalog, the system falls back to runtime-detected capabilities and a
 neutral default policy — it still works; it just won't get family-specific
 tuning until you add a catalog entry.
+
+#### Tool-capable bundled families
+
+The catalog records which families support tool / function calling. This is the
+static ground truth the router trusts before any probe runs:
+
+| Family | Tool calls | Notes |
+|---|---|---|
+| `qwen2.5`, `qwen3`, `qwen3.5`, `qwen3.6`, `qwen3-coder-next` | yes | Native function calling |
+| `llama3`, `llama3.1`, `llama3.2`, `llama3.3` | yes | Native function calling |
+| `gemma3`, `gemma4` | yes | Function calling (Gemma 3+) |
+| `phi3`, `phi4` | yes | |
+| `mistral`, `mixtral` | yes | |
+| `deepseek-coder-v2` | yes | |
+| `deepseek-r1` | no | Reasoning model; no function-calling surface |
+| `gemma2` | no | No native tool support |
+| `codellama` | no | Base code-completion model |
+| `starcoder`, `starcoder2` | no | Code-completion, no tool interface |
+| `nomic-embed-text`, `mxbai-embed-large` | no | Embedding only |
+
+A family absent from the catalog gets no tool claim until a probe (below) or an
+explicit `capabilities` entry supplies one.
+
+### Tool-capability probe
+
+Catalog and explicit `capabilities` cover the bundled lineup. For a model the
+router has **no** static tool-call answer for — an undeclared model on an
+OpenAI-compat backend — `go-llm` actively probes tool support rather than
+guessing.
+
+- **When it runs.** At agent startup the router bounded-eagerly probes the
+  models it is about to route, and route-time it probes on a cache miss. Models
+  with a catalog or explicit answer are never probed.
+- **What it sends (OpenAI-compat only).** A minimal `get_time` tool with up to
+  two chat-completions requests: attempt 1 forces `tool_choice: "required"`;
+  only if the server rejects that (400/422) does attempt 2 retry with `tools`
+  but no `tool_choice`. A tool call in the response means **yes**; a plain
+  answer is **inconclusive** (short TTL); a rejected `tools` array on both
+  attempts is **no**. Auth / rate-limit / transport failures are diagnostic and
+  never cached.
+- **Ollama is passive.** The Ollama path reads tool support from `/api/show`
+  template metadata — it sends no `get_time` request. The two-attempt live
+  probe is OpenAI-compat only.
+- **Cache.** Verdicts persist to `$XDG_DATA_HOME/golem/fingerprints.db` (else
+  `~/.local/share/golem/fingerprints.db`), keyed by backend + model, so a
+  probe runs at most once per model per version.
+- **Disabling.** Pass `-no-cap-probe` to Golem to skip the active probe
+  entirely; catalog and explicit `capabilities` still apply.
+
+Inspect and refresh verdicts with the `golem models` subcommand:
+
+```bash
+golem models              # list models, capabilities, and tool-call provenance
+golem models -probe-all   # actively probe every non-explicit entry
+golem models -reprobe     # drop cached verdicts for non-explicit entries, re-probe
+```
+
+Provenance in the listing tells you *why* a model has (or lacks) tool support:
+`explicit` (config), `catalog`, `probe` (with a tested-at timestamp),
+`runtime`, or `unknown`.
 
 ### Router weight profiles
 
