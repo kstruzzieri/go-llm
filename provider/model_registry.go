@@ -460,10 +460,18 @@ func (r *ModelRegistry) canResolveToolCall() bool {
 // slice and its profiles are never modified; replacements land in a copy.
 // No-op (input returned as-is) when resolution is disabled or required
 // does not include CapToolCall.
-func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*ModelProfile, required Capability) []*ModelProfile {
+//
+// The returned errors are per-candidate probe diagnostics labeled with
+// the model key (transient failures: network, auth, ...). They are
+// diagnostics ONLY -- never a rejection signal; the affected candidates
+// stay in the returned slice unchanged -- so operators can distinguish
+// "probe failed (e.g. 401)" from "genuinely not tool-capable" when a
+// route comes up empty. Callers thread them into the route-failure error.
+func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*ModelProfile, required Capability) ([]*ModelProfile, []error) {
 	if !r.canResolveToolCall() || !required.Has(CapToolCall) {
-		return profiles
+		return profiles, nil
 	}
+	var diags []error
 	out := make([]*ModelProfile, len(profiles))
 	copy(out, profiles)
 	for i, p := range out {
@@ -471,7 +479,11 @@ func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*
 			continue
 		}
 		state, err := r.ResolveToolCall(ctx, p.Key)
-		if err != nil || state != fingerprint.CapProbeYes {
+		if err != nil {
+			diags = append(diags, fmt.Errorf("resolve tool_call %s: %w", p.Key, err))
+			continue
+		}
+		if state != fingerprint.CapProbeYes {
 			continue
 		}
 		if refreshed, lErr := r.Lookup(ctx, p.Key); lErr == nil && refreshed.Caps.Has(CapToolCall) {
@@ -486,7 +498,7 @@ func (r *ModelRegistry) EnsureToolCallResolved(ctx context.Context, profiles []*
 		cp.Caps |= CapToolCall
 		out[i] = &cp
 	}
-	return out
+	return out, diags
 }
 
 // LookupAny returns merged profiles for an unqualified model name across

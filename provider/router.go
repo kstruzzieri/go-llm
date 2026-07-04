@@ -15,6 +15,7 @@ package provider
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -335,13 +336,15 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 	// is a valid explicit choice, so we do not override it with a default.
 	// Convenience methods set appropriate priorities (e.g., FIM -> PriorityHigh).
 
-	// 2. Resolve candidates.
-	candidates, err := r.resolveCandidates(ctx, req)
+	// 2. Resolve candidates. probeDiags are non-fatal per-candidate probe
+	//    failures (e.g. 401 from the backend) — surfaced only if the route
+	//    ultimately fails, mirroring how chain routing joins lookupErrs.
+	candidates, probeDiags, err := r.resolveCandidates(ctx, req)
 	if err != nil {
 		return nil, err
 	}
 	if len(candidates) == 0 {
-		return nil, ErrNoViableCandidate
+		return nil, joinNoViableCandidate(probeDiags)
 	}
 
 	// 3. Hard gates + budget + score all candidates.
@@ -387,7 +390,7 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 			winner := truncatable[0]
 			plan, buildErr := r.buildPlan(winner, nil, req, false, snap)
 			if buildErr != nil {
-				return nil, ErrNoViableCandidate
+				return nil, joinNoViableCandidate(probeDiags)
 			}
 			plan.Degraded = true
 			return plan, ErrBudgetAdaptationRequired
@@ -398,7 +401,7 @@ func (r *Router) Route(ctx context.Context, req RoutingRequest) (*RoutePlan, err
 		if allBudgeted {
 			return nil, ErrBudgetExceeded
 		}
-		return nil, ErrNoViableCandidate
+		return nil, joinNoViableCandidate(probeDiags)
 	}
 
 	// 5. Sort scored candidates.
@@ -674,33 +677,95 @@ func parseModelSelector(selector string) (ModelKey, bool) {
 // in Router.Route before this is called; by the time we reach the qualified
 // branch here, either req.Provider is empty or it agrees with the qualified
 // prefix, so we do not need to re-read req.Provider in that branch.
-func (r *Router) resolveCandidates(ctx context.Context, req RoutingRequest) ([]*ModelProfile, error) {
+//
+// The second return value carries non-fatal per-candidate probe
+// diagnostics from EnsureToolCallResolved (candidates always stay);
+// Route() joins them into ErrNoViableCandidate when the route fails.
+func (r *Router) resolveCandidates(ctx context.Context, req RoutingRequest) ([]*ModelProfile, []error, error) {
 	if req.Model == "" {
-		return r.registry.Recommend(ctx, RecommendOpts{
-			RequiredCaps:       req.RequiredCaps,
+		return r.recommendWithToolCallResolution(ctx, RecommendOpts{
 			AvailableRAM:       r.availableRAM,
 			PreferWarm:         req.PreferWarm,
 			RestrictToProvider: req.Provider, // empty == unrestricted
-		})
+		}, req.RequiredCaps)
 	}
 
 	if key, ok := parseModelSelector(req.Model); ok {
 		profile, err := r.registry.Lookup(ctx, key)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return []*ModelProfile{profile}, nil
+		resolved, diags := r.registry.EnsureToolCallResolved(ctx, []*ModelProfile{profile}, req.RequiredCaps)
+		return resolved, diags, nil
 	}
 
 	if req.Provider != "" {
 		key := ModelKey{Provider: req.Provider, Model: req.Model}
 		profile, err := r.registry.Lookup(ctx, key)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		return []*ModelProfile{profile}, nil
+		resolved, diags := r.registry.EnsureToolCallResolved(ctx, []*ModelProfile{profile}, req.RequiredCaps)
+		return resolved, diags, nil
 	}
-	return r.registry.LookupAny(ctx, req.Model)
+	profiles, err := r.registry.LookupAny(ctx, req.Model)
+	if err != nil {
+		return nil, nil, err
+	}
+	resolved, diags := r.registry.EnsureToolCallResolved(ctx, profiles, req.RequiredCaps)
+	return resolved, diags, nil
+}
+
+// joinNoViableCandidate wraps ErrNoViableCandidate with probe diagnostics
+// so a route that failed because a probe errored (e.g. 401) is
+// distinguishable from one whose candidates are genuinely not capable.
+// Mirrors classifyChainExhaustion's lookupErrs join.
+func joinNoViableCandidate(diags []error) error {
+	if len(diags) == 0 {
+		return ErrNoViableCandidate
+	}
+	return fmt.Errorf("%w: %s", ErrNoViableCandidate, errors.Join(diags...))
+}
+
+// recommendWithToolCallResolution runs ModelRegistry.Recommend for the
+// given required caps, lazily resolving tool_call when possible. Recommend
+// filters by caps BEFORE the router sees candidates, which would silently
+// drop probe-resolvable models — so when resolution is wired and tool_call
+// is required, Recommend runs WITHOUT the tool_call bit, the router
+// resolves it via EnsureToolCallResolved (probe I/O — callers must invoke
+// this before any feedback-snapshot reads), and then re-applies the
+// tool_call filter itself. That re-filter is the router-applied capability
+// gate for the Recommend path; EnsureToolCallResolved itself never drops
+// candidates. When resolution is disabled or tool_call is not required,
+// behavior is byte-identical to a plain Recommend call. Shared by
+// resolveCandidates and recommendTailProfiles so the dance exists once.
+// Probe diagnostics (second return) are non-fatal; callers surface them
+// only when the route fails.
+//
+// Worst case on cache miss: N unknown models x up to ~30s active probe,
+// resolved sequentially inside EnsureToolCallResolved. Persisted verdicts
+// amortize this to zero on later routes, and the bounded-eager preflight
+// (Task 9) keeps this path rare. Transient-error models re-probe on every
+// route with no backoff — deliberate; add a backoff seam here if it bites.
+func (r *Router) recommendWithToolCallResolution(ctx context.Context, opts RecommendOpts, reqCaps Capability) ([]*ModelProfile, []error, error) {
+	if !r.registry.canResolveToolCall() || !reqCaps.Has(CapToolCall) {
+		opts.RequiredCaps = reqCaps
+		profiles, err := r.registry.Recommend(ctx, opts)
+		return profiles, nil, err
+	}
+	opts.RequiredCaps = reqCaps &^ CapToolCall
+	candidates, err := r.registry.Recommend(ctx, opts)
+	if err != nil {
+		return nil, nil, err
+	}
+	candidates, diags := r.registry.EnsureToolCallResolved(ctx, candidates, reqCaps)
+	filtered := make([]*ModelProfile, 0, len(candidates))
+	for _, p := range candidates {
+		if p.Caps.Has(CapToolCall) {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered, diags, nil
 }
 
 // scoreAll evaluates all candidates against the routing request, applying

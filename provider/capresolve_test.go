@@ -599,7 +599,7 @@ func TestEnsureToolCallResolved_FiltersAndRefreshes(t *testing.T) {
 	}
 
 	required := CapChat | CapStream | CapToolCall
-	out := mr.EnsureToolCallResolved(ctx, profiles, required)
+	out, _ := mr.EnsureToolCallResolved(ctx, profiles, required)
 	if len(out) != len(profiles) {
 		t.Fatalf("len(out) = %d, want %d (never removes candidates)", len(out), len(profiles))
 	}
@@ -645,7 +645,7 @@ func TestEnsureToolCallResolved_NoOpWhenDisabledOrNotRequired(t *testing.T) {
 	in := []*ModelProfile{p}
 
 	// required lacks CapToolCall: input returned as-is, no probes.
-	out := mr.EnsureToolCallResolved(ctx, in, CapChat|CapStream)
+	out, _ := mr.EnsureToolCallResolved(ctx, in, CapChat|CapStream)
 	if len(out) != 1 || out[0] != p {
 		t.Fatal("expected input passthrough when tool_call not required")
 	}
@@ -655,7 +655,7 @@ func TestEnsureToolCallResolved_NoOpWhenDisabledOrNotRequired(t *testing.T) {
 
 	// Resolution disabled (no prober): passthrough too.
 	mrDisabled := newCapResolveRegistry(t, "multi", []string{"mystery-model"}, store, nil)
-	out = mrDisabled.EnsureToolCallResolved(ctx, in, CapChat|CapStream|CapToolCall)
+	out, _ = mrDisabled.EnsureToolCallResolved(ctx, in, CapChat|CapStream|CapToolCall)
 	if len(out) != 1 || out[0] != p {
 		t.Fatal("expected input passthrough when resolution disabled")
 	}
@@ -708,7 +708,7 @@ func TestEnsureToolCallResolved_SaveFailureKeepsVerdict(t *testing.T) {
 	}
 	in := []*ModelProfile{p}
 
-	out := mr.EnsureToolCallResolved(ctx, in, CapChat|CapStream|CapToolCall)
+	out, _ := mr.EnsureToolCallResolved(ctx, in, CapChat|CapStream|CapToolCall)
 	if len(out) != 1 {
 		t.Fatalf("len(out) = %d, want 1", len(out))
 	}
