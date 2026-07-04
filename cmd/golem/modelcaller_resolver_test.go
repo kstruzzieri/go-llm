@@ -32,7 +32,7 @@ func TestNewPreflightEndpointResolver(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newPreflightEndpointResolver(tt.cfg, tt.override)
+			r := newPreflightEndpointResolver(tt.cfg, tt.override, "", "")
 			ep, ok := r(tt.provider)
 			if ok != tt.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tt.wantOK)
@@ -53,8 +53,33 @@ func TestResolvePreflightEndpoint_NilResolver(t *testing.T) {
 	}
 	r := newPreflightEndpointResolver(&config.Config{Providers: map[string]config.ProviderConfig{
 		"ollama": {BaseURL: "http://x:1", APIFormat: "ollama"},
-	}}, "")
+	}}, "", "", "")
 	if _, ok := resolvePreflightEndpoint(r, "ollama"); !ok {
 		t.Error("present provider should report ok=true")
+	}
+}
+
+func TestNewPreflightEndpointResolver_StampsOCSource(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
+		"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8083"},
+		"ollama":   {APIFormat: "ollama", BaseURL: "http://localhost:11434"},
+	}}
+	resolve := newPreflightEndpointResolver(cfg, "", "llamacpp", "-base-url")
+	ep, ok := resolve("llamacpp")
+	if !ok {
+		t.Fatal("resolve(llamacpp) not ok")
+	}
+	if ep.Source != "-base-url" {
+		t.Fatalf("Source = %q, want -base-url", ep.Source)
+	}
+	// Other providers unlabeled.
+	ep, ok = resolve("ollama")
+	if !ok || ep.Source != "" {
+		t.Fatalf("ollama ep = %+v, want empty Source", ep)
+	}
+	// No source label => empty Source on the target too.
+	resolve = newPreflightEndpointResolver(cfg, "", "", "")
+	if ep, _ := resolve("llamacpp"); ep.Source != "" {
+		t.Fatalf("Source = %q, want empty when no override source", ep.Source)
 	}
 }

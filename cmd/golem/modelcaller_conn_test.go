@@ -75,6 +75,12 @@ func TestPreflightConnectivityWarn(t *testing.T) {
 			ep: epMalformedCreds, epOK: true, err: netFailure,
 			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at <invalid base_url> (GET /v1/models): lookup llamacpp.local: no such host`,
 		},
+		{
+			name: "status hit + endpoint + explicit source", sel: "llamacpp/gemma4:31b", provider: "llamacpp",
+			ep:   preflightEndpoint{BaseURL: "http://127.0.0.1:8083", ModelsPath: "/v1/models", Source: "-base-url"},
+			epOK: true, err: wrapped,
+			want: `agent fallback "llamacpp/gemma4:31b": cannot reach provider "llamacpp" at http://127.0.0.1:8083 (from -base-url) (GET /v1/models -> 404 Not Found); check server/base_url`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

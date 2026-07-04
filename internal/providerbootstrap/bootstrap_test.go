@@ -187,6 +187,24 @@ func TestNew_OpenAICompatConfigInstallsOverridesAndBuilds(t *testing.T) {
 	}
 }
 
+func TestNew_OpenAICompatURLOverride(t *testing.T) {
+	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
+		"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},
+	}}
+	b, err := New(context.Background(), Options{
+		Config:                          cfg,
+		OpenAICompatURLOverrideProvider: "llamacpp",
+		OpenAICompatURLOverride:         "http://127.0.0.1:8083",
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+	if got := b.Config.Providers["llamacpp"].BaseURL; got != "http://127.0.0.1:8083" {
+		t.Fatalf("Bundle.Config BaseURL = %q, want override (diagnostics must match the live client)", got)
+	}
+}
+
 func TestNew_BestEffortRefreshRecordsWarnings(t *testing.T) {
 	// Point ollama at an unreachable URL so RefreshModels fails; New must still
 	// succeed and record a Warning rather than error.

@@ -17,7 +17,11 @@ import (
 // synthetic one when cfg==nil, else cfg) so callers reuse a single coherent
 // config. nil cfg synthesizes one default ollama provider at override (or
 // defaultOllamaURL). A non-nil cfg with zero Providers is an error (mcp parity).
-func buildProviders(cfg *config.Config, override string) ([]provider.Provider, map[string]*ollama.Client, *config.Config, error) {
+//
+// ocOverrideProvider/ocOverrideURL rewrite a named openai-compat provider's
+// BaseURL on a copy of the effective config (never mutating cfg) so the
+// returned config reflects the live client URL. Both must be set together.
+func buildProviders(cfg *config.Config, override, ocOverrideProvider, ocOverrideURL string) ([]provider.Provider, map[string]*ollama.Client, *config.Config, error) {
 	effective := cfg
 	if cfg == nil {
 		url := override
@@ -29,6 +33,33 @@ func buildProviders(cfg *config.Config, override string) ([]provider.Provider, m
 		}}
 	} else if len(cfg.Providers) == 0 {
 		return nil, nil, nil, fmt.Errorf("providerbootstrap: no providers configured")
+	}
+
+	if (ocOverrideProvider == "") != (ocOverrideURL == "") {
+		return nil, nil, nil, fmt.Errorf("providerbootstrap: OpenAICompatURLOverrideProvider and OpenAICompatURLOverride must be set together")
+	}
+	if ocOverrideProvider != "" {
+		pc, ok := effective.Providers[ocOverrideProvider]
+		if !ok {
+			return nil, nil, nil, fmt.Errorf("providerbootstrap: openai-compat URL override: unknown provider %q", ocOverrideProvider)
+		}
+		apiFormat := pc.APIFormat
+		if apiFormat == "" {
+			apiFormat = "ollama"
+		}
+		if apiFormat != "openai-compat" {
+			return nil, nil, nil, fmt.Errorf("providerbootstrap: openai-compat URL override: provider %q has api_format %q, want \"openai-compat\"", ocOverrideProvider, apiFormat)
+		}
+		// Copy-on-write: Bundle.Config must reflect the URL the live client
+		// uses without mutating the caller-owned config.
+		cp := *effective
+		cp.Providers = make(map[string]config.ProviderConfig, len(effective.Providers))
+		for k, v := range effective.Providers {
+			cp.Providers[k] = v
+		}
+		pc.BaseURL = ocOverrideURL
+		cp.Providers[ocOverrideProvider] = pc
+		effective = &cp
 	}
 
 	keys := make([]string, 0, len(effective.Providers))

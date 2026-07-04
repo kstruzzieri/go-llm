@@ -16,6 +16,7 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
+	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
 type flags struct {
@@ -24,6 +25,9 @@ type flags struct {
 	prompt           string
 	promptSet        bool // -p was passed (distinguishes an explicit empty prompt)
 	ollamaURL        string
+	baseURL          string
+	baseURLSet       bool // -base-url was passed (distinguishes an explicit empty value)
+	noProbe          bool
 	ragDB            string
 	maxSteps         int
 	inputCeiling     int
@@ -54,6 +58,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
+	fs.StringVar(&f.baseURL, "base-url", "", "override the openai-compat backend base URL for the primary agent model (server root, without /v1); used exactly as given, disables discovery")
+	fs.BoolVar(&f.noProbe, "no-probe", false, "disable openai-compat backend port discovery; explicit and configured URLs are still used as resolved")
 	fs.StringVar(&f.prompt, "p", "", "one-shot mode: run a single agent turn with this prompt and exit; only the final answer goes to stdout (implies -no-session -no-compress -no-memory; approval-gated tools are unavailable, so -allow-write/-allow-exec are ignored)")
 	fs.StringVar(&f.ragDB, "rag-db", "", "path to a prebuilt RAG SQLite DB to enable the retrieve tool")
 	fs.IntVar(&f.maxSteps, "max-steps", 0, "max agent steps per prompt (0 => default 16)")
@@ -83,8 +89,11 @@ func parseFlags(args []string) (flags, error) {
 		return flags{}, err
 	}
 	fs.Visit(func(fl *flag.Flag) {
-		if fl.Name == "p" {
+		switch fl.Name {
+		case "p":
 			f.promptSet = true
+		case "base-url":
+			f.baseURLSet = true
 		}
 	})
 	return f, nil
@@ -136,6 +145,7 @@ func applyOneShotMode(f flags) (flags, []string) {
 
 type startupInfo struct {
 	workspace          string
+	backendLine        string
 	useRecommend       bool
 	bootstrapWarns     []error
 	preflightWarns     []string
@@ -153,6 +163,9 @@ type startupInfo struct {
 func startupNotices(info startupInfo) []string {
 	var out []string
 	out = append(out, "workspace: "+info.workspace)
+	if info.backendLine != "" {
+		out = append(out, info.backendLine)
+	}
 	if info.sessionLine != "" {
 		out = append(out, info.sessionLine)
 	}
@@ -232,15 +245,29 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return fmt.Errorf("resolve root: %w", err)
 	}
 
+	ctx := context.Background()
+
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
 		return err
 	}
 
-	ctx := context.Background()
+	backendRes, err := resolveBackend(ctx, cfg, backendResolveOpts{
+		flagBaseURL: f.baseURL,
+		flagSet:     f.baseURLSet,
+		noProbe:     f.noProbe,
+		lookupEnv:   os.LookupEnv,
+		prober:      openaicompat.DiscoverBaseURL,
+	})
+	if err != nil {
+		return err // explicit-override validation error: fatal, matches validateFlags semantics
+	}
+
 	bundle, err := providerbootstrap.New(ctx, providerbootstrap.Options{
-		Config:            cfg, // nil => default Ollama provider
-		OllamaURLOverride: f.ollamaURL,
+		Config:                          cfg, // nil => default Ollama provider
+		OllamaURLOverride:               f.ollamaURL,
+		OpenAICompatURLOverrideProvider: backendRes.providerKey,
+		OpenAICompatURLOverride:         backendRes.baseURL,
 	})
 	if err != nil {
 		return fmt.Errorf("bootstrap providers: %w", err)
@@ -252,9 +279,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 
-	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL)
+	resolveEndpoint := newPreflightEndpointResolver(bundle.Config, f.ollamaURL, backendRes.providerKey, backendRes.diagSource())
 	warns, err := preflightToolCapable(ctx, bundle.Models, plan.chain, resolveEndpoint)
+	warns = append(backendRes.warns, warns...)
 	if err != nil {
+		if len(backendRes.warns) > 0 {
+			return fmt.Errorf("%s\n%w", strings.Join(backendRes.warns, "\n"), err)
+		}
 		return err
 	}
 	warns = append(warns, oneShotWarns...)
@@ -412,6 +443,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	agentMemoryLine := agentMemoryNotice(agentMemoryEnabled, sessn != nil)
 	for _, line := range startupNotices(startupInfo{
 		workspace:          root,
+		backendLine:        backendRes.notice,
 		useRecommend:       plan.useRecommend,
 		bootstrapWarns:     bundle.Warnings,
 		preflightWarns:     warns,
