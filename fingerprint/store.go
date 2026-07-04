@@ -23,6 +23,18 @@ type Store interface {
 	SaveFailure(ctx context.Context, backendID, modelName, modelDigest, errMsg string) error
 }
 
+// CapProbeStore defines capability-probe persistence operations.
+// It is intentionally separate from Store so capability-only resolution
+// never affects NeedsFingerprint / IncompleteCapabilities semantics and
+// test fakes for full fingerprint profiles do not need cap-probe methods.
+type CapProbeStore interface {
+	GetCapProbe(ctx context.Context, backendID, modelName, capability string) (*CapProbe, error)
+	SaveCapProbe(ctx context.Context, probe CapProbe) error
+	DeleteCapProbes(ctx context.Context, backendID, modelName string) error
+}
+
+var _ CapProbeStore = (*SQLiteStore)(nil)
+
 // SQLiteStore is a fingerprint Store backed by SQLite.
 type SQLiteStore struct {
 	db *sql.DB
@@ -319,6 +331,77 @@ func (s *SQLiteStore) SaveFailure(ctx context.Context, backendID, modelName, mod
 	)
 	if err != nil {
 		return fmt.Errorf("fingerprint: save failure %q/%q: %w", backendID, modelName, err)
+	}
+	return nil
+}
+
+// GetCapProbe retrieves a capability-probe row. Returns ErrNotFound when
+// no row exists for the key.
+func (s *SQLiteStore) GetCapProbe(ctx context.Context, backendID, modelName, capability string) (*CapProbe, error) {
+	var p CapProbe
+	var testedAtMs int64
+	var expiresAtMs sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT backend_id, model_name, capability, state, model_digest,
+			probe_version, tested_at, expires_at
+		FROM capability_probes
+		WHERE backend_id = ? AND model_name = ? AND capability = ?`,
+		backendID, modelName, capability,
+	).Scan(&p.BackendID, &p.ModelName, &p.Capability, &p.State, &p.ModelDigest,
+		&p.ProbeVersion, &testedAtMs, &expiresAtMs)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("fingerprint: get cap probe %q/%q/%q: %w", backendID, modelName, capability, err)
+	}
+	p.TestedAt = time.UnixMilli(testedAtMs)
+	if expiresAtMs.Valid {
+		p.ExpiresAt = time.UnixMilli(expiresAtMs.Int64)
+	}
+	return &p, nil
+}
+
+// SaveCapProbe persists a probe verdict using upsert semantics.
+//
+// The upsert only overwrites an existing row when the incoming probe is
+// at least as recent (by tested_at). This prevents a slow-finishing probe
+// for an old digest from overwriting a newer verdict during concurrent
+// probing, mirroring the guard on Save.
+func (s *SQLiteStore) SaveCapProbe(ctx context.Context, probe CapProbe) error {
+	var expiresAt any // nil => NULL (no expiry)
+	if !probe.ExpiresAt.IsZero() {
+		expiresAt = probe.ExpiresAt.UnixMilli()
+	}
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO capability_probes
+			(backend_id, model_name, capability, state, model_digest,
+			 probe_version, tested_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(backend_id, model_name, capability) DO UPDATE SET
+			state         = excluded.state,
+			model_digest  = excluded.model_digest,
+			probe_version = excluded.probe_version,
+			tested_at     = excluded.tested_at,
+			expires_at    = excluded.expires_at
+		WHERE excluded.tested_at >= capability_probes.tested_at`,
+		probe.BackendID, probe.ModelName, probe.Capability, string(probe.State),
+		probe.ModelDigest, probe.ProbeVersion, probe.TestedAt.UnixMilli(), expiresAt)
+	if err != nil {
+		return fmt.Errorf("fingerprint: save cap probe %q/%q/%q: %w",
+			probe.BackendID, probe.ModelName, probe.Capability, err)
+	}
+	return nil
+}
+
+// DeleteCapProbes removes all capability rows for a model (used by
+// `golem models --reprobe`).
+func (s *SQLiteStore) DeleteCapProbes(ctx context.Context, backendID, modelName string) error {
+	_, err := s.db.ExecContext(ctx,
+		`DELETE FROM capability_probes WHERE backend_id = ? AND model_name = ?`,
+		backendID, modelName)
+	if err != nil {
+		return fmt.Errorf("fingerprint: delete cap probes %q/%q: %w", backendID, modelName, err)
 	}
 	return nil
 }

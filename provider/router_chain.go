@@ -52,6 +52,20 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 			continue
 		}
 
+		// Route-time lazy tool_call resolution (probe I/O) — strictly
+		// BEFORE this step's snap.readCandidates so feedback-snapshot
+		// reads never interleave with probe I/O and scorers stay pure.
+		// EnsureToolCallResolved never drops candidates; the capability
+		// gate in scoreChainStep remains the single rejection point.
+		// Probe diagnostics join lookupErrs so an exhausted route names
+		// probe failures (401 vs genuinely-not-capable). Worst case on
+		// cache miss: N unknown models x ~30s sequential probe; persisted
+		// verdicts amortize, Task 9's bounded-eager preflight keeps this
+		// rare (see recommendWithToolCallResolution).
+		var resolveDiags []error
+		profiles, resolveDiags = r.registry.EnsureToolCallResolved(ctx, profiles, req.RequiredCaps)
+		lookupErrs = append(lookupErrs, resolveDiags...)
+
 		chainSteps = append(chainSteps, profiles)
 		r.markChainSeenForTail(chainSeenForTail, profiles, req)
 
@@ -64,9 +78,10 @@ func (r *Router) routeChain(ctx context.Context, req RoutingRequest) (*RoutePlan
 
 	var tailProfiles []*ModelProfile
 	if !req.StrictChain {
-		var terr error
-		tailProfiles, terr = r.recommendTailProfiles(ctx, req, chainSeenForTail)
+		tp, tailDiags, terr := r.recommendTailProfiles(ctx, req, chainSeenForTail)
 		if terr == nil {
+			tailProfiles = tp
+			lookupErrs = append(lookupErrs, tailDiags...)
 			snap.readCandidates(ctx, r, tailProfiles, req.UseCase)
 		}
 	}
@@ -264,14 +279,17 @@ func (r *Router) recordChainLookupFailure(selector string, err error) {
 // tail's profiles are extended into the same snapshot before any chain/tail
 // scoring happens, keeping the snapshot's fail-open latch consistent across
 // the whole route.
-func (r *Router) recommendTailProfiles(ctx context.Context, req RoutingRequest, seen map[ModelKey]bool) ([]*ModelProfile, error) {
-	all, err := r.registry.Recommend(ctx, RecommendOpts{
-		RequiredCaps: req.RequiredCaps,
+func (r *Router) recommendTailProfiles(ctx context.Context, req RoutingRequest, seen map[ModelKey]bool) ([]*ModelProfile, []error, error) {
+	// Same strip-resolve-filter dance as resolveCandidates (shared helper):
+	// probe I/O runs here, before routeChain's snap.readCandidates call on
+	// the tail profiles, preserving feedback-snapshot purity. Probe
+	// diagnostics bubble to routeChain, which joins them into lookupErrs.
+	all, diags, err := r.recommendWithToolCallResolution(ctx, RecommendOpts{
 		AvailableRAM: r.availableRAM,
 		PreferWarm:   req.PreferWarm,
-	})
+	}, req.RequiredCaps)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	// Pre-filter Recommend output against the chain's `seen` set before
 	// extending the route-level snapshot. Without this, every candidate
@@ -287,7 +305,7 @@ func (r *Router) recommendTailProfiles(ctx context.Context, req RoutingRequest, 
 		}
 		fresh = append(fresh, p)
 	}
-	return fresh, nil
+	return fresh, diags, nil
 }
 
 func (r *Router) scoreRecommendTail(

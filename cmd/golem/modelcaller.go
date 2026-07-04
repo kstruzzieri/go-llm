@@ -13,6 +13,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -93,6 +94,33 @@ type capChecker interface {
 }
 
 const toolRouteCaps = provider.CapChat | provider.CapStream | provider.CapToolCall
+
+// toolCallResolver is the narrow slice of *provider.ModelRegistry the preflight
+// needs for active capability resolution. A nil resolver disables probing
+// (-no-cap-probe or no store), in which case the preflight relies solely on the
+// merged (catalog+floor+declared) profile capabilities.
+type toolCallResolver interface {
+	ResolveToolCall(ctx context.Context, key provider.ModelKey) (fingerprint.CapProbeState, error)
+}
+
+// remediationCaps is the exact models.json fix fragment surfaced in remediation
+// hints: the capability list a tool-capable model entry must declare.
+const remediationCaps = `"capabilities": ["chat","generate","stream","tool_call"]`
+
+// remediationHint renders the models.json fix line for a chain entry that
+// resolved without tool_call, naming the selector and the exact capabilities
+// fragment the user should add.
+func remediationHint(sel string) string {
+	return fmt.Sprintf("if it supports function calling, add %s to the model entry for %q in models.json", remediationCaps, sel)
+}
+
+// notToolCapableWarn is the bare capability-gap warning for a selector that
+// resolved (or matched no provider) without tool_call, with its remediation
+// hint. Used wherever a probe cannot or need not run: nil resolver, unknown
+// verdict (probing disabled for the provider), and bare-selector no-match.
+func notToolCapableWarn(sel string) string {
+	return fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call); %s", sel, remediationHint(sel))
+}
 
 // preflightEndpoint is the discovery endpoint a provider exposes. It is used
 // only to build a human-facing connectivity diagnostic, never to make a call.
@@ -264,25 +292,27 @@ func parseSelector(sel string) (provider.ModelKey, bool) {
 // non-capable entry, and an error only when NO entry — or, for an empty chain,
 // the recommend set — can satisfy chat|stream|tool_call. On that failure the
 // error INLINES every per-entry diagnostic, because the caller returns on the
-// error and would otherwise drop the warnings. Pure registry lookup; never
-// makes a live model call. resolveEndpoint supplies provider base_url +
-// discovery path for connectivity diagnostics; a nil resolver yields
-// base_url-free messages.
-func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, resolveEndpoint endpointResolver) (warnings []string, err error) {
+// error and would otherwise drop the warnings. Pure registry lookup unless a
+// resolver is supplied; never makes a live chat call. resolveEndpoint supplies
+// provider base_url + discovery path for connectivity diagnostics; a nil
+// resolver disables active capability probing (a nil endpointResolver yields
+// base_url-free messages).
+//
+// Bounded-eager: active probing runs only until the FIRST capable entry. Startup
+// proves ONE usable model then stops loading fallbacks (llama-swap load cost);
+// unknown entries reached after that resolve lazily at route time, reported here
+// as a non-fatal "probed on first use" line.
+func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, resolveEndpoint endpointResolver, resolver toolCallResolver) (warnings []string, err error) {
 	if len(chain) == 0 {
-		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps})
-		if rerr != nil {
-			return nil, fmt.Errorf("golem: tool-capability preflight (recommend): %w", rerr)
-		}
-		if len(profs) == 0 {
-			return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
-		}
-		return nil, nil
+		return preflightRecommendToolCapable(ctx, reg, resolver)
 	}
 
 	capable := 0
 	for _, sel := range chain {
-		ok, warn := evalChainEntry(ctx, reg, sel, resolveEndpoint)
+		// Probe only until the first capable entry is proven; later unknowns
+		// are deferred to route time.
+		allowProbe := capable == 0
+		ok, warn := evalChainEntry(ctx, reg, sel, resolveEndpoint, resolver, allowProbe)
 		if ok {
 			capable++
 			continue
@@ -295,13 +325,51 @@ func preflightToolCapable(ctx context.Context, reg capChecker, chain []string, r
 	return warnings, nil
 }
 
+// preflightRecommendToolCapable handles the empty-chain case: no explicit
+// fallback chain, so the gate asks the registry to recommend a tool-capable
+// model. With no resolver it requires the declared tool_call capability up
+// front. With a resolver it relaxes the recommend query (drops CapToolCall so
+// undeclared-but-probeable models are considered) and probes candidates,
+// passing on the first that already declares tool_call or probes yes.
+func preflightRecommendToolCapable(ctx context.Context, reg capChecker, resolver toolCallResolver) ([]string, error) {
+	if resolver == nil {
+		profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps})
+		if rerr != nil {
+			return nil, fmt.Errorf("golem: tool-capability preflight (recommend): %w", rerr)
+		}
+		if len(profs) == 0 {
+			return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
+		}
+		return nil, nil
+	}
+
+	profs, rerr := reg.Recommend(ctx, provider.RecommendOpts{RequiredCaps: toolRouteCaps &^ provider.CapToolCall})
+	if rerr != nil {
+		return nil, fmt.Errorf("golem: tool-capability preflight (recommend): %w", rerr)
+	}
+	// Two passes, deliberately not fused: exhaust the cheap declared-capability
+	// check across ALL candidates before doing any probe I/O, so a later
+	// already-capable model is preferred over probing an earlier one.
+	for _, p := range profs {
+		if p.Caps.Has(provider.CapToolCall) {
+			return nil, nil
+		}
+	}
+	for _, p := range profs {
+		if state, err := resolver.ResolveToolCall(ctx, p.Key); err == nil && state == fingerprint.CapProbeYes {
+			return nil, nil
+		}
+	}
+	return nil, fmt.Errorf("golem: no tool-capable model available (require chat|stream|tool_call)")
+}
+
 // evalChainEntry classifies one agent-chain selector. It returns capable=true
 // when the selector resolves to a tool-capable model; otherwise it returns a
 // bare warning string: a connectivity diagnostic when the registry lookup
-// errored, or the capability message when the model resolved without tool_call.
-func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndpoint endpointResolver) (capable bool, warning string) {
-	notCapable := fmt.Sprintf("agent fallback %q is not tool-capable (chat|stream|tool_call)", sel)
-
+// errored, or a capability message (possibly a probe outcome) when the model
+// resolved without a declared tool_call. allowProbe gates active probing per the
+// bounded-eager policy.
+func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndpoint endpointResolver, resolver toolCallResolver, allowProbe bool) (capable bool, warning string) {
 	if key, parsed := parseSelector(sel); parsed {
 		p, lerr := reg.Lookup(ctx, key)
 		if lerr != nil {
@@ -311,7 +379,7 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndp
 		if profileToolCapable(p) {
 			return true, ""
 		}
-		return false, notCapable
+		return classifyToolCapability(ctx, sel, key, resolver, allowProbe)
 	}
 
 	// Bare model name: resolve across providers. A bare selector names no single
@@ -326,5 +394,49 @@ func evalChainEntry(ctx context.Context, reg capChecker, sel string, resolveEndp
 			return true, ""
 		}
 	}
-	return false, notCapable
+	if len(profs) == 0 {
+		// No matching provider: nothing to probe, and no single provider to name.
+		return false, notToolCapableWarn(sel)
+	}
+	warning = notToolCapableWarn(sel)
+	for _, p := range profs {
+		if p == nil {
+			continue
+		}
+		capable, w := classifyToolCapability(ctx, sel, p.Key, resolver, allowProbe)
+		if capable {
+			return true, ""
+		}
+		if w != "" {
+			warning = w
+		}
+	}
+	return false, warning
+}
+
+// classifyToolCapability resolves a chain entry that looked up cleanly but does
+// not declare tool_call. With no resolver, or when probing is not allowed for
+// this entry (bounded-eager: a capable entry already found), it reports a
+// non-fatal / capability-gap message rather than making a call. Otherwise it
+// probes and maps the tri-state verdict to a capable flag + diagnostic.
+func classifyToolCapability(ctx context.Context, sel string, key provider.ModelKey, resolver toolCallResolver, allowProbe bool) (bool, string) {
+	if resolver == nil {
+		return false, notToolCapableWarn(sel)
+	}
+	if !allowProbe {
+		return false, fmt.Sprintf("agent fallback %q: tool capability unknown; probed on first use", sel)
+	}
+	state, err := resolver.ResolveToolCall(ctx, key)
+	switch {
+	case err != nil:
+		return false, fmt.Sprintf("agent fallback %q: tool-capability probe failed: %v; %s", sel, err, remediationHint(sel))
+	case state == fingerprint.CapProbeYes:
+		return true, ""
+	case state == fingerprint.CapProbeNo:
+		return false, fmt.Sprintf("agent fallback %q: model did not produce a tool call when probed; %s", sel, remediationHint(sel))
+	case state == fingerprint.CapProbeInconclusive:
+		return false, fmt.Sprintf("agent fallback %q: tool-capability probe was inconclusive; declare capabilities to override: %s", sel, remediationHint(sel))
+	default: // "" unknown: resolution disabled for this provider (no prober/store)
+		return false, notToolCapableWarn(sel)
+	}
 }

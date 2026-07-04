@@ -623,6 +623,53 @@ func TestProvider_Chat_RequestBodyShape(t *testing.T) {
 	}
 }
 
+// TestProvider_Chat_RequestBody_ToolChoice verifies that
+// ChatRequest.ToolChoice serializes as tool_choice and that the zero value
+// omits the field entirely (some servers reject an empty tool_choice).
+func TestProvider_Chat_RequestBody_ToolChoice(t *testing.T) {
+	var rawBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var err error
+		rawBody, err = io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(chatResponse{
+			Choices: []chatChoice{{Message: chatMessage{Content: "ok"}}},
+		})
+	}))
+	defer srv.Close()
+
+	p := NewProvider(NewClient(srv.URL))
+
+	if _, err := p.Chat(context.Background(), provider.ChatRequest{
+		Model:      "m",
+		Messages:   []provider.ChatMessage{{Role: "user", Content: "hi"}},
+		ToolChoice: "required",
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	var withChoice struct {
+		ToolChoice string `json:"tool_choice"`
+	}
+	if err := json.Unmarshal(rawBody, &withChoice); err != nil {
+		t.Fatalf("decode body: %v", err)
+	}
+	if withChoice.ToolChoice != "required" {
+		t.Errorf("tool_choice = %q, want %q (body=%s)", withChoice.ToolChoice, "required", rawBody)
+	}
+
+	if _, err := p.Chat(context.Background(), provider.ChatRequest{
+		Model:    "m",
+		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+	}); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if strings.Contains(string(rawBody), "tool_choice") {
+		t.Errorf("zero-value ToolChoice must omit tool_choice field, body was: %s", rawBody)
+	}
+}
+
 // TestProvider_Chat_RequestBody_OmitsToolCallIndex verifies that the
 // outbound wire does NOT carry an `index` field on tool_calls entries.
 // OpenAI treats index as response-only — strict server-side schema

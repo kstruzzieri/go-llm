@@ -66,21 +66,7 @@ func buildCapabilityOverrides(cfg *config.Config) (map[provider.ModelKey][]strin
 		}
 		caps := m.Capabilities
 		if len(caps) == 0 {
-			pCfg, ok := cfg.Providers[m.Provider]
-			if !ok {
-				continue
-			}
-			apiFormat := pCfg.APIFormat
-			if apiFormat == "" {
-				apiFormat = "ollama"
-			}
-			if apiFormat != "openai-compat" {
-				continue
-			}
-			caps = m.ResolvedCapabilities()
-		}
-		if len(caps) == 0 {
-			continue
+			continue // derived caps are floors now (buildCapabilityFloors), not overrides
 		}
 		parsedCaps, err := provider.ParseCapsStrict(caps)
 		if err != nil {
@@ -116,6 +102,91 @@ func buildCapabilityOverrides(cfg *config.Config) (map[provider.ModelKey][]strin
 		out[key] = entry.caps
 	}
 	return out, nil
+}
+
+// buildCapabilityFloors computes baseline capability floors for undeclared
+// openai-compat models: their provider exposes no capability metadata, so
+// the type-derived set guarantees routability. Floors OR-merge in the
+// registry (lowest precedence), so unlike the old REPLACE override they
+// cannot erase catalog/fingerprint/runtime capabilities (issue #219 root
+// cause). Shared keys across roles union their derived sets — OR semantics
+// make conflicts impossible.
+func buildCapabilityFloors(cfg *config.Config) (map[provider.ModelKey][]string, error) {
+	out := make(map[provider.ModelKey][]string)
+	if cfg == nil {
+		return out, nil
+	}
+	union := make(map[provider.ModelKey]map[string]bool)
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		m := cfg.Models[role]
+		if m.Provider == "" || m.Name == "" || len(m.Capabilities) > 0 {
+			continue // explicit declarations are overrides, not floors
+		}
+		pCfg, ok := cfg.Providers[m.Provider]
+		if !ok {
+			continue
+		}
+		apiFormat := pCfg.APIFormat
+		if apiFormat == "" {
+			apiFormat = "ollama"
+		}
+		if apiFormat != "openai-compat" {
+			continue
+		}
+		derived := m.ResolvedCapabilities()
+		if len(derived) == 0 {
+			continue
+		}
+		if _, err := provider.ParseCapsStrict(derived); err != nil {
+			return nil, fmt.Errorf("providerbootstrap: model %q derived floor for %s/%s: %w", role, m.Provider, m.Name, err)
+		}
+		key := provider.ModelKey{Provider: m.Provider, Model: m.Name}
+		if union[key] == nil {
+			union[key] = make(map[string]bool)
+		}
+		for _, tok := range derived {
+			union[key][tok] = true
+		}
+	}
+	for key, set := range union {
+		toks := make([]string, 0, len(set))
+		for tok := range set {
+			toks = append(toks, tok)
+		}
+		sort.Strings(toks)
+		out[key] = toks
+	}
+	return out, nil
+}
+
+// installCapabilityFloors installs the computed floors onto the registry.
+// No-op when mr/cfg is nil or there are no floors.
+func installCapabilityFloors(mr *provider.ModelRegistry, cfg *config.Config) error {
+	if mr == nil || cfg == nil {
+		return nil
+	}
+	floors, err := buildCapabilityFloors(cfg)
+	if err != nil {
+		return err
+	}
+	if len(floors) == 0 {
+		return nil
+	}
+	mr.SetCapabilityFloor(func(key provider.ModelKey) []string {
+		caps, ok := floors[key]
+		if !ok {
+			return nil
+		}
+		out := make([]string, len(caps))
+		copy(out, caps)
+		return out
+	})
+	return nil
 }
 
 // installCapabilityOverrides installs the computed overrides onto the registry.

@@ -18,6 +18,7 @@ type chatRequest struct {
 	MaxTokens     int                `json:"max_tokens,omitempty"`
 	Stop          []string           `json:"stop,omitempty"`
 	Tools         []chatTool         `json:"tools,omitempty"`
+	ToolChoice    string             `json:"tool_choice,omitempty"`
 }
 
 type chatStreamOptions struct {
