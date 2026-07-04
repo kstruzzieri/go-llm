@@ -102,8 +102,35 @@ func (p *OllamaProber) probeKind(ctx context.Context, model string, info *ollama
 	}, nil
 }
 
-// Compile-time interface check.
-var _ ModelProber = (*OllamaProber)(nil)
+// Compile-time interface checks.
+var (
+	_ ModelProber    = (*OllamaProber)(nil)
+	_ ToolCallProber = (*OllamaProber)(nil)
+)
+
+// ProbeToolCall determines tool support passively from /api/show model
+// metadata — no generation request, no model load. A present capabilities
+// array is authoritative in both directions; a missing array (older
+// Ollama) is inconclusive, never a hard no.
+func (p *OllamaProber) ProbeToolCall(ctx context.Context, model string) (CapProbeOutcome, error) {
+	info, err := p.client.ShowModel(ctx, model)
+	if err != nil {
+		return CapProbeOutcome{}, fmt.Errorf("fingerprint: ollama tool probe %q: %w", model, err)
+	}
+	if info.Capabilities == nil {
+		return CapProbeOutcome{
+			State:  CapProbeInconclusive,
+			TTL:    CapProbeInconclusiveTTL,
+			Detail: "ollama /api/show has no capabilities array",
+		}, nil
+	}
+	for _, c := range info.Capabilities {
+		if c == "tools" {
+			return CapProbeOutcome{State: CapProbeYes, Detail: "ollama capabilities lists tools"}, nil
+		}
+	}
+	return CapProbeOutcome{State: CapProbeNo, Detail: "ollama capabilities array lacks tools"}, nil
+}
 
 // ProbeChat sends a minimal chat request and extracts performance metrics
 // from Ollama's timing fields. The opts parameter accepts *ollama.ModelOptions
