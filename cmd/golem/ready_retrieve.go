@@ -73,21 +73,19 @@ func (r *readyRetrieve) Invoke(ctx context.Context, args json.RawMessage) (agent
 // racing outcomes cannot flap the tool.
 func (r *readyRetrieve) markReady(tool agent.Tool, message string, feedback *behavioralWeighterHandle) {
 	r.mu.Lock()
-	if r.state != retrieveWarming {
-		r.mu.Unlock()
-		return
-	}
-	r.state = retrieveReady
-	r.tool = tool
-	r.message = message
-	closed := r.closed
-	if !closed {
-		r.feedback = feedback
+	if r.state == retrieveWarming {
+		r.state = retrieveReady
+		r.tool = tool
+		r.message = message
+		if !r.closed {
+			r.feedback = feedback
+			feedback = nil // ownership transferred to close()
+		}
 	}
 	r.mu.Unlock()
-	// close() already ran (shutdown raced the background job): the wrapper can
-	// never release a handle stored now, so release it here instead.
-	if closed && feedback != nil && feedback.db != nil {
+	// Not installed (lost the transition race, or close() already ran during
+	// shutdown): nothing will ever release the handle, so release it here.
+	if feedback != nil && feedback.db != nil {
 		_ = feedback.db.Close()
 	}
 }

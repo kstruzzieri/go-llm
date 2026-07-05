@@ -156,6 +156,54 @@ func TestReadyRetrieve_CloseNilSafe(t *testing.T) {
 	r.close() // no feedback handle retained; must not panic
 }
 
+// A markReady that loses the terminal-transition race to markFailed must not
+// strand its feedback handle either — same ownership rule as the close race.
+func TestReadyRetrieve_MarkReadyAfterFailedReleasesHandle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "feedback.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	r.markFailed("boom; use read_file, search, glob, and list instead")
+	r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
+	if err := db.Ping(); err == nil {
+		t.Fatal("markReady losing the transition race must release its feedback handle")
+	}
+}
+
+// Concurrent close/markReady: exactly one side must end up releasing the
+// handle, with no race reported and no strand.
+func TestReadyRetrieve_ConcurrentCloseAndMarkReady(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		dbPath := filepath.Join(t.TempDir(), "feedback.db")
+		db, err := sql.Open("sqlite", dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r := newReadyRetrieve(warmingRetrieveMessage)
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
+		}()
+		go func() {
+			defer wg.Done()
+			r.close()
+		}()
+		wg.Wait()
+		// Whichever side lost the race must have released the handle already;
+		// no sweep needed.
+		if err := db.Ping(); err == nil {
+			t.Fatal("handle stranded after concurrent close/markReady")
+		}
+	}
+}
+
 // Invoke may run from parallel read-only dispatch goroutines (#235) while the
 // background job flips state; the wrapper must be race-clean.
 func TestReadyRetrieve_ConcurrentMarkReadyAndInvoke(t *testing.T) {
