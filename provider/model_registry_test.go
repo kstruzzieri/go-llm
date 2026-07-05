@@ -1970,6 +1970,13 @@ func TestModelRegistry_CapabilityOverride_ConcurrentSwap(t *testing.T) {
 		func(_ ModelKey) []string { return []string{"chat"} },
 		func(_ ModelKey) []string { return nil },
 	}
+	thinkOverrides := []ThinkOverride{
+		nil,
+		func(_ ModelKey) (*ThinkMode, *ThinkTags) {
+			m := ThinkAlways
+			return &m, nil
+		},
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(writers + readers)
@@ -1978,6 +1985,7 @@ func TestModelRegistry_CapabilityOverride_ConcurrentSwap(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < iters; i++ {
 				mr.SetCapabilityOverride(overrides[(i+seed)%len(overrides)])
+				mr.SetThinkOverride(thinkOverrides[(i+seed)%len(thinkOverrides)])
 			}
 		}(w)
 	}

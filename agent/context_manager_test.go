@@ -77,7 +77,7 @@ func TestAssembleIncludesDurableSummaryBeforeRawMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	req := buildChatRequest(out, nil, 0)
+	req := buildChatRequest(out, nil, 0, provider.ModelOptions{})
 	if len(req.Messages) < 4 {
 		t.Fatalf("messages = %+v, want system, durable summary, recent, goal", req.Messages)
 	}

@@ -54,6 +54,7 @@ type flags struct {
 	pressureWarn     int
 	feedback         bool
 	feedbackDB       string
+	think            string
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -91,8 +92,15 @@ func parseFlags(args []string) (flags, error) {
 	fs.IntVar(&f.pressureWarn, "pressure-warn", 75, "context-pressure warn threshold percent 1-100 (0 disables the warning line)")
 	fs.BoolVar(&f.feedback, "feedback", false, "enable optional behavioral feedback ranking (consume-only; reads a per-workspace feedback DB)")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
+	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	f.think = strings.ToLower(f.think)
+	switch f.think {
+	case "", "off", "on", "low", "medium", "high":
+	default:
+		return flags{}, fmt.Errorf("golem: invalid -think %q (want off, on, low, medium, or high)", f.think)
 	}
 	fs.Visit(func(fl *flag.Flag) {
 		switch fl.Name {
@@ -172,6 +180,7 @@ type startupInfo struct {
 	retrieveLine       string
 	retrieveOmitted    bool
 	retrieveRequested  bool // -rag-db, -no-rag, or auto suppress the generic no-index notice
+	thinkLine          string
 	sessionLine        string
 	projectContextLine string
 	memoryLine         string
@@ -206,6 +215,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.useRecommend {
 		out = append(out, "no defaults.agent configured; using model recommendation (run will route to the recommended model)")
+	}
+	if info.thinkLine != "" {
+		out = append(out, info.thinkLine)
 	}
 	for _, w := range info.bootstrapWarns {
 		out = append(out, "warning: "+w.Error())
@@ -330,6 +342,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if capStoreWarn != "" {
 		warns = append(warns, capStoreWarn)
 	}
+
+	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
 
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
 	autoSidecar := ""
@@ -509,6 +523,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieveLine:       retrieveLine,
 		retrieveOmitted:    retrieveOmitted,
 		retrieveRequested:  retrieveRequested,
+		thinkLine:          thinkLine,
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
@@ -567,6 +582,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		workspaceID:  workspaceID(root),
 		obs:          obsv,
 		pressureWarn: f.pressureWarn > 0,
+		modelOptions: thinkOpts,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate

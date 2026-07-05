@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -102,6 +103,43 @@ func TestThinkMode_String(t *testing.T) {
 			got := tt.mode.String()
 			if got != tt.want {
 				t.Errorf("ThinkMode(%d).String() = %q, want %q", tt.mode, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseThinkModeStrict(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    ThinkMode
+		wantErr bool
+	}{
+		{name: "none", input: "none", want: ThinkNone},
+		{name: "always", input: "always", want: ThinkAlways},
+		{name: "toggle", input: "toggle", want: ThinkToggle},
+		{name: "auto", input: "auto", want: ThinkAuto},
+		{name: "case insensitive", input: "ALWAYS", want: ThinkAlways},
+		{name: "invalid", input: "maybe", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseThinkModeStrict(tt.input)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got nil")
+				}
+				if !strings.Contains(err.Error(), tt.input) {
+					t.Errorf("error %q does not name input %q", err.Error(), tt.input)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got != tt.want {
+				t.Errorf("ParseThinkModeStrict(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
 	}

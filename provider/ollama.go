@@ -97,16 +97,42 @@ func NewOllamaProvider(client *ollama.Client, opts ...OllamaOption) *OllamaProvi
 	return p
 }
 
-func (p *OllamaProvider) thinkToggleActive(opts ModelOptions) bool {
-	return opts.Think != nil && *opts.Think
+// thinkToggleActive reports whether a ThinkToggle parser should be active for
+// the given options: explicit Think wins; a bare effort hint implies on.
+// Mirrored in provider/openaicompat; keep the pair in sync.
+func thinkToggleActive(opts ModelOptions) bool {
+	if opts.Think != nil {
+		return *opts.Think
+	}
+	return opts.ThinkEffort != ""
 }
 
-func (p *OllamaProvider) shouldExtractThinking(opts ModelOptions) bool {
-	switch p.thinkMode {
+// effectiveThinkMode returns the parser mode for a chat request, honoring the
+// per-request ParseThinkMode override before the provider-instance default.
+// Mirrored in provider/openaicompat; keep the pair in sync.
+func (p *OllamaProvider) effectiveThinkMode(req ChatRequest) ThinkMode {
+	if req.ParseThinkMode != nil {
+		return *req.ParseThinkMode
+	}
+	return p.thinkMode
+}
+
+// effectiveThinkTags returns the parser tags for a chat request, honoring the
+// per-request ParseThinkTags override before the provider-instance default.
+// Mirrored in provider/openaicompat; keep the pair in sync.
+func (p *OllamaProvider) effectiveThinkTags(req ChatRequest) ThinkTags {
+	if req.ParseThinkTags != nil {
+		return *req.ParseThinkTags
+	}
+	return p.thinkTags
+}
+
+func (p *OllamaProvider) shouldExtractThinking(req ChatRequest) bool {
+	switch p.effectiveThinkMode(req) {
 	case ThinkNone:
 		return false
 	case ThinkToggle:
-		return p.thinkToggleActive(opts)
+		return thinkToggleActive(req.Options)
 	default:
 		return true
 	}
@@ -205,9 +231,9 @@ func (p *OllamaProvider) Chat(ctx context.Context, req ChatRequest) (*ChatRespon
 	// folded-into-content case, and still cleans Content either way.
 	content := oResp.Message.Content
 	thinking := oResp.Message.Thinking
-	if p.shouldExtractThinking(req.Options) {
+	if p.shouldExtractThinking(req) {
 		var inline string
-		content, inline = ExtractThinking(oResp.Message.Content, p.thinkTags)
+		content, inline = ExtractThinking(oResp.Message.Content, p.effectiveThinkTags(req))
 		if thinking == "" {
 			thinking = inline
 		}
@@ -261,9 +287,10 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 	var callbackErr error
 	lastDone := false
 
+	mode := p.effectiveThinkMode(req)
 	parser := NewThinkParser(ThinkParserConfig{
-		Mode: p.thinkMode,
-		Tags: p.thinkTags,
+		Mode: mode,
+		Tags: p.effectiveThinkTags(req),
 		OnThinking: func(s string) error {
 			resp := ChatResponse{
 				Model:    lastModel,
@@ -290,8 +317,8 @@ func (p *OllamaProvider) ChatStream(ctx context.Context, req ChatRequest, fn fun
 		},
 		Budget: p.thinkBudget,
 	})
-	if p.thinkMode == ThinkToggle {
-		parser.SetActive(p.thinkToggleActive(req.Options))
+	if mode == ThinkToggle {
+		parser.SetActive(thinkToggleActive(req.Options))
 	}
 
 	streamErr := p.client.ChatStream(ctx, oReq, func(oResp ollama.ChatResponse) error {
@@ -604,6 +631,13 @@ func toOllamaChatRequest(req ChatRequest) ollama.ChatRequest {
 	}
 	if opts := toOllamaOptions(req.Options); opts != nil {
 		oReq.Options = opts
+	}
+	// Wire the caller's think intent. Explicit Think wins; a bare effort
+	// hint implies thinking on. nil + no effort leaves the field absent so
+	// the request is byte-identical to pre-#220 behavior.
+	if req.Options.Think != nil || req.Options.ThinkEffort != "" {
+		on := thinkToggleActive(req.Options) // single source of think precedence
+		oReq.Think = &on
 	}
 	return oReq
 }

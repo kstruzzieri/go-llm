@@ -23,6 +23,7 @@ type renderer struct {
 	lastNL       bool
 	warnPressure bool // print a one-line context-pressure warning
 	warned       bool // ensures at most one pressure line per run
+	thinkOpen    bool // "[thinking]" header printed for the current step
 }
 
 func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time) *renderer {
@@ -34,6 +35,15 @@ func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time) 
 }
 
 func (r *renderer) OnToken(_ context.Context, e agent.TokenEvent) error {
+	if r.thinkOpen {
+		r.thinkOpen = false
+		if !r.lastNL {
+			if _, err := io.WriteString(r.out, "\n"); err != nil {
+				return err
+			}
+			r.lastNL = true
+		}
+	}
 	_, err := io.WriteString(r.out, e.Content)
 	if err == nil && e.Content != "" {
 		r.lastNL = strings.HasSuffix(e.Content, "\n")
@@ -58,7 +68,31 @@ func (r *renderer) OnToolCall(_ context.Context, e agent.ToolCallEvent) error {
 	return err
 }
 
+// OnThinking streams reasoning deltas dim, under a one-per-step "[thinking]"
+// header, keeping them visually distinct from the answer. The header is plain
+// text so non-TTY logs stay parseable.
+func (r *renderer) OnThinking(_ context.Context, e agent.ThinkingEvent) error {
+	if !r.thinkOpen {
+		if !r.lastNL {
+			if _, err := io.WriteString(r.out, "\n"); err != nil {
+				return err
+			}
+		}
+		if _, err := io.WriteString(r.out, r.dim("[thinking]")+"\n"); err != nil {
+			return err
+		}
+		r.thinkOpen = true
+		r.lastNL = true
+	}
+	_, err := io.WriteString(r.out, r.dim(e.Content))
+	if err == nil && e.Content != "" {
+		r.lastNL = strings.HasSuffix(e.Content, "\n")
+	}
+	return err
+}
+
 func (r *renderer) OnStep(_ context.Context, e agent.StepEvent) error {
+	r.thinkOpen = false
 	t := r.now()
 	lat := t.Sub(r.lastMark).Seconds()
 	r.lastMark = t
@@ -89,14 +123,19 @@ func (r *renderer) writeDim(line string) error {
 			return err
 		}
 	}
-	if r.color {
-		line = "\x1b[2m" + line + "\x1b[0m"
-	}
-	_, err := io.WriteString(r.out, line+"\n")
+	_, err := io.WriteString(r.out, r.dim(line)+"\n")
 	if err == nil {
 		r.lastNL = true
 	}
 	return err
+}
+
+// dim wraps s in the SGR faint sequence when color is on; otherwise s as-is.
+func (r *renderer) dim(s string) string {
+	if r.color {
+		return "\x1b[2m" + s + "\x1b[0m"
+	}
+	return s
 }
 
 // OnToolResult prints a quiet, display-only "< summary" line that pairs with the

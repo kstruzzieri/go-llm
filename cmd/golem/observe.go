@@ -121,8 +121,9 @@ func composeObserver(rend agent.Observer, sink *agenttrace.TelemetrySink) agent.
 }
 
 // multiObserver fans every callback out to its children in order, propagating
-// the first error. It implements ToolResultObserver and forwards OnToolResult
-// only to children that implement it.
+// the first error. It implements the optional ToolResultObserver, Thinking-
+// Observer, and PressureObserver extensions, forwarding each callback only to
+// children that implement it.
 type multiObserver struct{ children []agent.Observer }
 
 func (m *multiObserver) OnStep(ctx context.Context, e agent.StepEvent) error {
@@ -156,6 +157,17 @@ func (m *multiObserver) OnToolResult(ctx context.Context, e agent.ToolResultEven
 	for _, c := range m.children {
 		if tro, ok := c.(agent.ToolResultObserver); ok {
 			if err := tro.OnToolResult(ctx, e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func (m *multiObserver) OnThinking(ctx context.Context, e agent.ThinkingEvent) error {
+	for _, c := range m.children {
+		if to, ok := c.(agent.ThinkingObserver); ok {
+			if err := to.OnThinking(ctx, e); err != nil {
 				return err
 			}
 		}

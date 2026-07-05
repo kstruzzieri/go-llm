@@ -770,13 +770,53 @@ func sanitizeScoreForJSON(score float64) float64 {
 // ---------------------------------------------------------------------------
 
 // buildChatRequest constructs a ChatRequest from the immutable request snapshot.
+//
+// The selected profile's think mode/tags ride the outgoing request as parse
+// controls (ParseThinkMode/ParseThinkTags), and a ThinkNone profile clears
+// the wire think options — a routed fallback to a non-thinking model must
+// not receive controls negotiated for a thinking one (#220). The options
+// copy is by value, which keeps rp.Request immutable: ModelOptions' only
+// reference field is Stop []string, and we reassign scalar/pointer fields
+// on the copy without ever mutating through them.
 func (rp *RoutePlan) buildChatRequest(stream bool) ChatRequest {
+	opts := rp.Request.Options
+	var parseMode *ThinkMode
+	var parseTags *ThinkTags
+	if rp.Profile != nil {
+		mode := rp.Profile.ThinkMode
+		// A toggle-family profile with no caller think intent must parse as
+		// ThinkAuto, not ThinkToggle: the wire request is untouched, so the
+		// model may still emit inline think tags, and a toggle parser with
+		// no activating signal runs INACTIVE (passthrough) — leaking raw
+		// tags into Content. Auto-sniff is the safety net for the silent
+		// default; toggle semantics apply only when the caller expressed
+		// intent (Think set either way, or an effort hint) (#220).
+		if mode == ThinkToggle && opts.Think == nil && opts.ThinkEffort == "" {
+			mode = ThinkAuto
+		}
+		parseMode = &mode
+		if rp.Profile.ThinkTags != nil {
+			tags := *rp.Profile.ThinkTags
+			parseTags = &tags
+		}
+		// ThinkNone is the ThinkMode zero value, but here it is always a
+		// DECLARED value: every catalog family sets think_mode and
+		// inferProfile defaults unknown models to ThinkAuto, so a
+		// zero-value profile cannot reach a routed plan. The clear is
+		// intentional policy, not a zero-value accident.
+		if rp.Profile.ThinkMode == ThinkNone {
+			opts.Think = nil
+			opts.ThinkEffort = ""
+		}
+	}
 	return ChatRequest{
-		Model:    rp.Model,
-		Messages: rp.Request.Messages,
-		Options:  rp.Request.Options,
-		Tools:    rp.Request.Tools,
-		Stream:   stream,
+		Model:          rp.Model,
+		Messages:       rp.Request.Messages,
+		Options:        opts,
+		Tools:          rp.Request.Tools,
+		Stream:         stream,
+		ParseThinkMode: parseMode,
+		ParseThinkTags: parseTags,
 	}
 }
 

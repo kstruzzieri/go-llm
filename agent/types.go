@@ -74,6 +74,12 @@ type Request struct {
 	MaxSteps       int // 0 => defaultMaxSteps
 	Budget         Budget
 	Approver       Approver // nil => fail-safe (auto Read, deny Write/Exec)
+	// Options carries per-run model options (think controls, temperature,
+	// ...) applied to every model call in the run. Zero value preserves
+	// prior behavior. Budget.OutputReserve still overrides NumPredict;
+	// when OutputReserve is zero, a directly-set NumPredict also seeds the
+	// router's ExpectedOutput hint.
+	Options provider.ModelOptions
 }
 
 // Segment tags a message as always-present (Pinned) or compactable (Elastic).

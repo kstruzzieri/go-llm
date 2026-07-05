@@ -189,6 +189,113 @@ func installCapabilityFloors(mr *provider.ModelRegistry, cfg *config.Config) err
 	return nil
 }
 
+// thinkOverrideEntry holds the per-key think override plus the role that
+// declared each field, so same-key conflicts can name both roles.
+type thinkOverrideEntry struct {
+	modeRole string
+	tagsRole string
+	mode     *provider.ThinkMode
+	tags     *provider.ThinkTags
+}
+
+// buildThinkOverrides computes the think_mode/think_tags overrides declared in
+// models.json, keyed by provider.ModelKey. Config.Models is keyed by role, so
+// multiple roles may share a provider/model key: identical re-declarations are
+// fine, complementary fields combine (one role mode-only, another tags-only),
+// and conflicting declarations error naming both roles — mirroring
+// buildCapabilityOverrides. Pure (no registry side effect) so it is directly
+// unit-testable.
+func buildThinkOverrides(cfg *config.Config) (map[provider.ModelKey]thinkOverrideEntry, error) {
+	out := make(map[provider.ModelKey]thinkOverrideEntry)
+	if cfg == nil {
+		return out, nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		m := cfg.Models[role]
+		if m.Provider == "" || m.Name == "" {
+			continue
+		}
+		if m.ThinkMode == "" && m.ThinkTags == nil {
+			continue
+		}
+		key := provider.ModelKey{Provider: m.Provider, Model: m.Name}
+		entry := out[key]
+		if m.ThinkMode != "" {
+			// config.Load already validated this, but programmatic Config
+			// callers bypass Load — stay fail-loud here too.
+			mode, err := provider.ParseThinkModeStrict(m.ThinkMode)
+			if err != nil {
+				return nil, fmt.Errorf("providerbootstrap: model %q think_mode for %s/%s: %w", role, key.Provider, key.Model, err)
+			}
+			switch {
+			case entry.mode == nil:
+				entry.mode = &mode
+				entry.modeRole = role
+			case *entry.mode != mode:
+				return nil, fmt.Errorf(
+					"providerbootstrap: conflicting think_mode for %s/%s: model %q declares %q, model %q declares %q",
+					key.Provider, key.Model, entry.modeRole, entry.mode.String(), role, mode.String(),
+				)
+			}
+		}
+		if tt := m.ThinkTags; tt != nil {
+			tags := provider.ThinkTags{Open: tt.Open, Close: tt.Close}
+			switch {
+			case entry.tags == nil:
+				entry.tags = &tags
+				entry.tagsRole = role
+			case *entry.tags != tags:
+				return nil, fmt.Errorf(
+					"providerbootstrap: conflicting think_tags for %s/%s: model %q declares %q/%q, model %q declares %q/%q",
+					key.Provider, key.Model, entry.tagsRole, entry.tags.Open, entry.tags.Close, role, tags.Open, tags.Close,
+				)
+			}
+		}
+		out[key] = entry
+	}
+	return out, nil
+}
+
+// installThinkOverrides installs the computed think overrides onto the
+// registry. No-op when mr/cfg is nil or there are no overrides.
+func installThinkOverrides(mr *provider.ModelRegistry, cfg *config.Config) error {
+	if mr == nil || cfg == nil {
+		return nil
+	}
+	overrides, err := buildThinkOverrides(cfg)
+	if err != nil {
+		return err
+	}
+	if len(overrides) == 0 {
+		return nil
+	}
+	mr.SetThinkOverride(func(key provider.ModelKey) (*provider.ThinkMode, *provider.ThinkTags) {
+		entry, ok := overrides[key]
+		if !ok {
+			return nil, nil
+		}
+		// Return copies so hook callers can never alias the map's memory
+		// (the registry merge also copies — defense in depth).
+		var mode *provider.ThinkMode
+		if entry.mode != nil {
+			m := *entry.mode
+			mode = &m
+		}
+		var tags *provider.ThinkTags
+		if entry.tags != nil {
+			tg := *entry.tags
+			tags = &tg
+		}
+		return mode, tags
+	})
+	return nil
+}
+
 // installCapabilityOverrides installs the computed overrides onto the registry.
 // No-op when mr/cfg is nil or there are no overrides.
 func installCapabilityOverrides(mr *provider.ModelRegistry, cfg *config.Config) error {
