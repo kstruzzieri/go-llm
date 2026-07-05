@@ -285,3 +285,69 @@ func TestStartupNoticesAgentMemoryLine(t *testing.T) {
 		t.Errorf("notices missing agent memory line: %v", lines)
 	}
 }
+
+func TestParseFlags_NoAutoIndex(t *testing.T) {
+	f, err := parseFlags([]string{"-no-auto-index"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if !f.noAutoIndex {
+		t.Error("-no-auto-index not parsed")
+	}
+	f, err = parseFlags(nil)
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if f.noAutoIndex {
+		t.Error("noAutoIndex must default to false")
+	}
+}
+
+func TestParseFlags_NoAutoIndexNoConflicts(t *testing.T) {
+	for _, args := range [][]string{
+		{"-no-auto-index", "-rag-db", "x.db"},
+		{"-no-auto-index", "-no-rag"},
+	} {
+		f, err := parseFlags(args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", args, err)
+		}
+		if err := validateFlags(f); err != nil {
+			t.Errorf("validateFlags(%v): %v", args, err)
+		}
+	}
+}
+
+func TestShouldStartAutoIndex(t *testing.T) {
+	tests := []struct {
+		name string
+		f    flags
+		want bool
+	}{
+		{name: "default", f: flags{}, want: true},
+		{name: "one-shot -p", f: flags{prompt: "hi", promptSet: true}, want: false},
+		{name: "-no-auto-index", f: flags{noAutoIndex: true}, want: false},
+		{name: "-no-rag", f: flags{noRag: true}, want: false},
+		{name: "-rag-db", f: flags{ragDB: "x.db"}, want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldStartAutoIndex(tt.f); got != tt.want {
+				t.Errorf("shouldStartAutoIndex = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestParseFlags_PromptSkipsAutoIndex(t *testing.T) {
+	f, err := parseFlags([]string{"-p", "hello"})
+	if err != nil {
+		t.Fatalf("parseFlags: %v", err)
+	}
+	if err := validateFlags(f); err != nil {
+		t.Fatalf("validateFlags: %v", err)
+	}
+	if shouldStartAutoIndex(f) {
+		t.Error("one-shot -p must not start the background auto-index")
+	}
+}
