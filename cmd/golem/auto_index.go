@@ -192,6 +192,14 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		fail(fmt.Sprintf("index vector space %s does not match embedding chain %v", dec.stored, job.embChain))
 		return
 	}
+	// A non-nil exitErr with a COMPLETE sidecar means this run failed before
+	// writing a new marker and an older valid index survived (a completed
+	// partial run writes status "partial" and warns below). Serving the
+	// previous corpus is correct, but say so instead of a plain ready line.
+	if res.exitErr != nil && sc.Status != "partial" {
+		job.notice("warning: retrieve auto-index refresh failed: " + autoIndexFailReason(&buf, res.exitErr) +
+			"; serving previous index")
+	}
 	line := autoIndexReadyLine(sc, stats)
 	job.ready.markReady(tool, line, feedback)
 	job.notice(line)

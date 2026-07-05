@@ -189,8 +189,10 @@ func autoIndexTestEmbedder(vsid, failSubstr string) rag.Embedder {
 }
 
 // realReadOnlyOpen is an openRetriever seam that performs a genuine immutable
-// read-only open + Stats on dbPath. It fails if the write store is still open,
-// which is exactly the writer-closes-before-reader invariant under test.
+// read-only open + Stats on dbPath. With immutable=1 the open may SUCCEED
+// against a stale pre-checkpoint snapshot even while a writer is live, so the
+// ordering invariant is pinned by the source counts the callers assert on
+// (a stale snapshot reads 0 sources), not by this open failing.
 func realReadOnlyOpen(dbPath string) func(context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
 	return func(ctx context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
 		store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
@@ -329,13 +331,18 @@ func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) 
 	writeWorkspaceFile(t, root, "b.go", "package a\n\nfunc B() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
 
-	// First run: realReadOnlyOpen in the seam fails if the write store is
-	// still open, so a ready outcome proves the close-before-open ordering.
+	// First run: realReadOnlyOpen in the seam opens with immutable=1, so it
+	// sees only the checkpointed main DB file. The ready-notice source count
+	// is the ordering detector: an un-closed writer leaves the rows in the
+	// WAL and the immutable snapshot reads 0 sources, not 2.
 	var notices1 []string
 	job1 := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices1)
 	runAutoIndex(context.Background(), job1)
 	if got := retrieveStateOf(job1.ready); got != retrieveReady {
 		t.Fatalf("first run state = %d, want ready; notices = %v", got, notices1)
+	}
+	if len(notices1) == 0 || !strings.Contains(notices1[len(notices1)-1], "2 sources") {
+		t.Fatalf("first-run ready notice must count both sources (writer closed before open): %v", notices1)
 	}
 
 	// Refresh after a deletion: the pruned source must be gone.
