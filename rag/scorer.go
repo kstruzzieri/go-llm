@@ -46,6 +46,16 @@ type MultiSignalSearcher interface {
 		k int, qCtx QueryContext) ([]ScoredResult, error)
 }
 
+// ScoredRetriever exposes signal-scored retrieval. Distinct from
+// Retriever.Retrieve, which flattens scored results to SearchResult for
+// backward compatibility. qCtx activates the structural scorer and dates the
+// temporal scorer; pass a zero value when the caller has no editor context
+// (this behaves like Retrieve's internal hybrid path). Experimental: the
+// agentic-retrieval surface is not yet committed-stable (epic #97).
+type ScoredRetriever interface {
+	RetrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error)
+}
+
 // ScoredResult extends SearchResult with a hybrid ranking score and per-signal
 // score breakdowns. Score (embedded from SearchResult) is the semantic cosine
 // similarity (0-1); RankScore is the fused ranking score the results are sorted

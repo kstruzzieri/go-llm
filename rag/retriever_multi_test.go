@@ -221,6 +221,41 @@ func TestRetrieve_multiStore_vsidMismatch_skipsSearchMulti(t *testing.T) {
 	}
 }
 
+func TestRetrieveScored_usesSearchMulti(t *testing.T) {
+	store := &retrieverMultiStore{
+		multiResults: []ScoredResult{
+			{
+				SearchResult: SearchResult{Chunk: Chunk{ID: "c1"}, Score: 0.9, Distance: 0.1},
+				RankScore:    0.033,
+				Signals:      map[string]float64{"semantic": 0.9, "keyword": 0.5},
+			},
+		},
+	}
+	emb := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0, 0}}}}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	got, err := r.RetrieveScored(context.Background(), "q", 5, QueryContext{})
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+	if store.searchMultiCalls != 1 {
+		t.Fatalf("SearchMulti calls = %d, want 1", store.searchMultiCalls)
+	}
+	if len(got) != 1 || got[0].Chunk.ID != "c1" {
+		t.Fatalf("unexpected results: %+v", got)
+	}
+	// The scored surface preserves Signals (unlike Retrieve, which flattens them).
+	if got[0].Signals["keyword"] != 0.5 {
+		t.Errorf("keyword signal = %v, want 0.5 (Signals must be preserved)", got[0].Signals["keyword"])
+	}
+	if got[0].RankScore != 0.033 {
+		t.Errorf("RankScore = %v, want 0.033", got[0].RankScore)
+	}
+}
+
 // seedHybridCorpus stores a small content-bearing corpus (so FTS5 is
 // populated) with orthonormal embeddings for deterministic semantic scores.
 func seedHybridCorpus(t *testing.T, store *SQLiteStore) {

@@ -16,6 +16,9 @@ type Retriever struct {
 	vectorOnly bool
 }
 
+// Compile-time check: *Retriever satisfies ScoredRetriever.
+var _ ScoredRetriever = (*Retriever)(nil)
+
 // VectorSpaceProbe summarizes the vector-space-id distribution across a
 // vector store's chunks: the distinct known (non-empty) vector-space IDs and
 // whether any legacy empty-vsid rows remain.
@@ -148,6 +151,57 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 	}
 
 	return results, nil
+}
+
+// RetrieveScored is the signal-scored retrieval surface. Like Retrieve it embeds
+// the query and validates the vector space, but it returns ScoredResult with the
+// per-signal breakdown preserved instead of flattening to SearchResult. On stores
+// that implement MultiSignalSearcher (and when WithVectorOnly is not set) it
+// returns SearchMulti's hybrid results directly; otherwise it falls back to dense
+// vector search wrapped as single-signal ("semantic") scored results.
+func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
+	res, err := r.embedder.Embed(ctx, r.model, []string{query})
+	if err != nil {
+		return nil, fmt.Errorf("%w: embed query: %w", ErrEmbedderFailed, err)
+	}
+	if len(res.Embeddings) != 1 {
+		return nil, fmt.Errorf("%w: embed query: expected 1 embedding, got %d", ErrEmbeddingCountMismatch, len(res.Embeddings))
+	}
+	embedding := res.Embeddings[0]
+
+	if err := r.validateVectorSpace(ctx, res); err != nil {
+		return nil, err
+	}
+
+	if ms, ok := r.store.(MultiSignalSearcher); ok && !r.vectorOnly {
+		scored, err := ms.SearchMulti(ctx, embedding, query, k, qCtx)
+		if err != nil {
+			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
+		}
+		return scored, nil
+	}
+
+	return r.denseScored(ctx, embedding, k)
+}
+
+// denseScored runs dense vector search and wraps each result as a ScoredResult
+// carrying a single "semantic" signal, with RankScore == Score. It is the
+// graceful fallback for stores without MultiSignalSearcher and for the
+// WithVectorOnly path.
+func (r *Retriever) denseScored(ctx context.Context, embedding []float64, k int) ([]ScoredResult, error) {
+	results, err := r.store.Search(ctx, embedding, k)
+	if err != nil {
+		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
+	}
+	scored := make([]ScoredResult, len(results))
+	for i, sr := range results {
+		scored[i] = ScoredResult{
+			SearchResult: sr,
+			RankScore:    sr.Score,
+			Signals:      map[string]float64{"semantic": sr.Score},
+		}
+	}
+	return scored, nil
 }
 
 func (r *Retriever) validateVectorSpace(ctx context.Context, res EmbedResult) error {
