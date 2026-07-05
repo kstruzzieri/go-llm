@@ -17,6 +17,7 @@ import (
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -109,6 +110,13 @@ func parseFlags(args []string) (flags, error) {
 // handled at the wiring site.
 func shouldStartAutoIndex(f flags) bool {
 	return !f.promptSet && !f.noAutoIndex && !f.noRag && f.ragDB == ""
+}
+
+// autoIndexEnabled is the wiring gate for the background auto-index job:
+// the flag decision plus the two startup resolution errors (auto index path,
+// embedding chain) that force the immediate enableRetrieve path instead.
+func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
+	return shouldStartAutoIndex(f) && autoErr == nil && embChainErr == nil
 }
 
 // validateFlags rejects flag values flag.Parse cannot police.
@@ -344,20 +352,36 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			feedbackDB = p
 		}
 	}
-	rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
-		noRag:           f.noRag,
-		ragDB:           f.ragDB,
-		autoDBPath:      autoDBPath,
-		autoSidecarPath: autoSidecar,
-		workspaceID:     autoWorkspaceID,
-		feedbackDB:      feedbackDB,
-	})
-	if rr.feedback != nil && rr.feedback.db != nil {
-		defer func() { _ = rr.feedback.db.Close() }()
+	embChain, embChainErr := embeddingChain(bundle.Config)
+	var retrieve agent.Tool
+	retrieveLine := ""
+	retrieveRequested := f.ragDB != "" || f.noRag
+	var ready *readyRetrieve
+	if autoIndexEnabled(f, autoErr, embChainErr) {
+		// Default REPL auto mode: register the warming wrapper now; the
+		// background job (launched after the startup notices below) flips it.
+		ready = newReadyRetrieve(warmingRetrieveMessage)
+		defer ready.close()
+		retrieve = ready
+		retrieveLine = "retrieve: auto-index warming in background"
+		retrieveRequested = true // wrapper is registered; the generic no-index notice does not apply
+	} else {
+		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
+			noRag:           f.noRag,
+			ragDB:           f.ragDB,
+			autoDBPath:      autoDBPath,
+			autoSidecarPath: autoSidecar,
+			workspaceID:     autoWorkspaceID,
+			feedbackDB:      feedbackDB,
+		})
+		if rr.feedback != nil && rr.feedback.db != nil {
+			defer func() { _ = rr.feedback.db.Close() }()
+		}
+		retrieve = rr.tool
+		warns = append(warns, rr.warns...)
+		retrieveLine = rr.line
+		retrieveRequested = retrieveRequested || rr.suppressNotice
 	}
-	retrieve := rr.tool
-	warns = append(warns, rr.warns...)
-	retrieveLine := rr.line
 	tools, err := buildTools(root, retrieve)
 	if err != nil {
 		return err
@@ -482,7 +506,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		preflightWarns:     warns,
 		retrieveLine:       retrieveLine,
 		retrieveOmitted:    retrieveOmitted,
-		retrieveRequested:  f.ragDB != "" || f.noRag || rr.suppressNotice,
+		retrieveRequested:  retrieveRequested,
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
@@ -490,6 +514,27 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		mcpLine:            mcpLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
+	}
+
+	if ready != nil {
+		// Launched after the synchronous startup block so async notices never
+		// interleave it. run's ctx is never cancelled: the goroutine dies with
+		// the process at exit and a torn store self-heals on the next startup.
+		go runAutoIndex(ctx, autoIndexJob{
+			root:        root,
+			dbPath:      autoDBPath,
+			sidecarPath: autoSidecar,
+			workspaceID: autoWorkspaceID,
+			cfg:         bundle.Config,
+			router:      bundle.Router,
+			embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
+				return bundle.Router.Route(rc, rreq)
+			}, embChain),
+			embChain:   embChain,
+			feedbackDB: feedbackDB,
+			ready:      ready,
+			notice:     func(line string) { _, _ = fmt.Fprintln(stderr, line) },
+		})
 	}
 
 	maxHistoryTokens := f.inputCeiling
