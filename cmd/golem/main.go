@@ -364,7 +364,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		defer ready.close()
 		retrieve = ready
 		retrieveLine = "retrieve: auto-index warming in background"
-		retrieveRequested = true // wrapper is registered; the generic no-index notice does not apply
+		// Defensive only: the non-nil wrapper already makes retrieveOmitted
+		// false, which is what actually suppresses the generic no-index notice.
+		retrieveRequested = true
 	} else {
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			noRag:           f.noRag,
