@@ -86,7 +86,9 @@ func TestComposedObserverForwardsThinking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sink: %v", err)
 	}
-	defer sink.Close()
+	defer func() {
+		_ = sink.Close()
+	}()
 
 	obs := composeObserver(rend, sink)
 	if obs == agent.Observer(rend) {
