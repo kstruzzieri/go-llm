@@ -54,6 +54,13 @@ type autoIndexClass struct {
 // those errors also select a full rebuild.
 func classifyAutoIndex(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string) autoIndexClass {
 	if !fileExists(dbPath) {
+		// A sidecar without its database (torn artifact removal, or the .db
+		// deleted by hand) must not survive: if this build fails before
+		// writing a new marker, the stale sidecar would validate and the run
+		// would report ready with the old run's metadata. Full removes it.
+		if fileExists(sidecarPath) {
+			return autoIndexClass{full: true, reason: "sidecar exists without a database"}
+		}
 		// First build: incremental on an empty store is a full build anyway.
 		return autoIndexClass{}
 	}

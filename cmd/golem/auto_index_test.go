@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -406,5 +407,98 @@ func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
 	}
 	if len(notices) != 0 {
 		t.Fatalf("cancelled run must be silent, notices = %v", notices)
+	}
+}
+
+func TestClassifyAutoIndex_SidecarWithoutDBIsFull(t *testing.T) {
+	dir := t.TempDir()
+	dbPath := filepath.Join(dir, "k.db")
+	// Torn artifact removal / hand-deleted .db: only the sidecar remains.
+	if err := os.WriteFile(sidecarPath(dbPath), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"})
+	if !got.full {
+		t.Fatal("sidecar without a database must select full rebuild (removes the stale marker)")
+	}
+	if !strings.Contains(got.reason, "sidecar exists without a database") {
+		t.Errorf("reason = %q", got.reason)
+	}
+}
+
+// A refresh that fails BEFORE writing a new marker, while a valid complete
+// sidecar from the previous run survives, must serve the previous index but
+// say so — not report a plain ready line. The deterministic pre-marker
+// failure: the sidecar directory is unwritable, so executeIndex's final
+// writeSidecar fails after an otherwise clean incremental run.
+func TestRunAutoIndex_FailedRefreshWarnsServingPreviousIndex(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory write permissions not enforced this way on windows")
+	}
+	if os.Getuid() == 0 {
+		t.Skip("root bypasses directory permissions")
+	}
+
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	scDir := t.TempDir()
+	scPath := filepath.Join(scDir, "k.json")
+
+	// Seed a valid complete index whose sidecar lives in its own directory.
+	store, idx := buildTestIndexer(t, dbPath, "ollama/nomic")
+	var out bytes.Buffer
+	res := executeIndex(context.Background(), indexJob{
+		indexer: idx, store: store, root: root, dbPath: dbPath,
+		sidecarPath: scPath, workspaceID: "workspace:k",
+		requestedModel: "ollama/nomic", out: &out,
+	})
+	_ = store.Close()
+	if res.exitErr != nil {
+		t.Fatalf("seed index failed: %v\n%s", res.exitErr, out.String())
+	}
+	removeSQLiteSidecars(t, dbPath)
+
+	// Make the sidecar directory unwritable so the refresh cannot write a new
+	// marker; verify the OS actually enforces it (some filesystems do not).
+	if err := os.Chmod(scDir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(scDir, 0o700) })
+	if probe := os.WriteFile(filepath.Join(scDir, "probe"), nil, 0o600); probe == nil {
+		t.Skip("filesystem does not enforce directory write permissions")
+	}
+
+	var notices []string
+	job := autoIndexJob{
+		root:          root,
+		dbPath:        dbPath,
+		sidecarPath:   scPath,
+		workspaceID:   "workspace:k",
+		embedder:      autoIndexTestEmbedder("ollama/nomic", ""),
+		embChain:      []string{"ollama/nomic"},
+		ready:         newReadyRetrieve(warmingRetrieveMessage),
+		notice:        func(s string) { notices = append(notices, s) },
+		openRetriever: realReadOnlyOpen(dbPath),
+	}
+	runAutoIndex(context.Background(), job)
+
+	if got := retrieveStateOf(job.ready); got != retrieveReady {
+		t.Fatalf("state = %d, want ready over the previous index; notices = %v", got, notices)
+	}
+	var sawStaleWarn bool
+	for _, n := range notices {
+		if strings.Contains(n, "warning: retrieve auto-index refresh failed:") &&
+			strings.Contains(n, "serving previous index") {
+			sawStaleWarn = true
+		}
+	}
+	if !sawStaleWarn {
+		t.Fatalf("missing serving-previous-index warning; notices = %v", notices)
+	}
+	last := notices[len(notices)-1]
+	if !strings.Contains(last, "retrieve: auto-index ready,") {
+		t.Fatalf("final notice should still be the ready line, got %q; all = %v", last, notices)
 	}
 }
