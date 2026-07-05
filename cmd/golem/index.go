@@ -200,6 +200,8 @@ func prepareIndexStore(ctx context.Context, dbPath, sidecarPath, workspaceID str
 // required before any DB open; otherwise a copied/foreign empty DB could be
 // blessed or modified by an incremental run. The vector-space probe uses a
 // read-only store so a mismatch refusal does not create WAL/SHM or migrate.
+// Mirrored by classifyAutoIndex (auto_index.go), which maps these refusals to
+// a self-heal full rebuild; keep the checks in sync.
 func preflightExistingIndex(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string) error {
 	sc, serr := readSidecar(sidecarPath)
 	if serr != nil {

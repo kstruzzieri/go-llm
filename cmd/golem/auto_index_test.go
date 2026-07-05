@@ -51,8 +51,9 @@ func TestProbeAutoIndexEmbedder_EmbedErrorIsOrdinaryError(t *testing.T) {
 
 func TestProbeAutoIndexEmbedder_WrongVectorCount(t *testing.T) {
 	for name, vecs := range map[string][][]float64{
-		"zero": {},
-		"two":  {{1}, {2}},
+		"zero":      {},
+		"two":       {{1}, {2}},
+		"one-empty": {{}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
