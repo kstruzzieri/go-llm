@@ -199,6 +199,13 @@ type ChatRequest struct {
 	// field from the wire request.
 	ToolChoice string `json:"tool_choice,omitempty"`
 	Stream     bool   `json:"stream"`
+	// ParseThinkMode optionally overrides the provider instance's parser mode
+	// for this request. Router-filled from the selected ModelProfile; direct
+	// provider callers can leave it nil to use the provider default.
+	ParseThinkMode *ThinkMode `json:"-"`
+	// ParseThinkTags optionally overrides the provider instance's parser tags
+	// for this request. nil uses the provider default tags.
+	ParseThinkTags *ThinkTags `json:"-"`
 }
 
 // ChatResponse is the provider-agnostic response from a chat completion.
@@ -284,6 +291,12 @@ type ModelOptions struct {
 	Stop          []string `json:"stop,omitempty"`
 	RepeatPenalty *float64 `json:"repeat_penalty,omitempty"`
 	Think         *bool    `json:"think,omitempty"` // only used when ThinkMode is ThinkToggle
+	// ThinkEffort is an optional reasoning-effort hint: "low", "medium", or
+	// "high". Empty means no hint. A non-empty effort with Think == nil
+	// implies thinking on. Providers ignore it when Think is explicitly
+	// false. Values are not validated here; the CLI boundary validates and
+	// openai-compat servers reject unknown efforts themselves.
+	ThinkEffort string `json:"think_effort,omitempty"`
 }
 
 // ModelInfo holds metadata about a model available from a provider.

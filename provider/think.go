@@ -434,8 +434,9 @@ func (p *ThinkParser) Reset() {
 // When active is false, the parser behaves like ThinkNone (passthrough).
 //
 // This method is only meaningful when the parser's mode is ThinkToggle.
-// For other modes it is a no-op. The Provider calls SetActive based on
-// whether it injected /think or /no_think into the prompt for this request.
+// For other modes it is a no-op. The Provider calls SetActive based on the
+// request's think options: an explicit Think value wins, and a bare effort
+// hint implies active.
 //
 // Must be called before Process, typically after Reset for a new request.
 func (p *ThinkParser) SetActive(active bool) {
