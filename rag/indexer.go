@@ -428,10 +428,16 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 
 	// Phase 1: Walk and collect eligible file paths.
 	var files []string
+	// walkIncomplete records non-fatal access errors: an unreadable subtree
+	// silently drops out of the eligible set, so pruning against it would
+	// wrongly delete its stored sources. Missed .gitignore reads are excluded
+	// on purpose — they only grow the eligible set, which is prune-safe.
+	var walkIncomplete bool
 
 	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			walkErrors = append(walkErrors, fmt.Sprintf("cannot access %q: %v", path, err))
+			walkIncomplete = true
 			return nil
 		}
 
@@ -524,12 +530,17 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 	}
 	_ = g.Wait()
 
-	// Phase 3: Prune stored sources no longer in the eligible set. Only runs
-	// when the walk succeeded (a failed walk returns above, so the eligible
-	// set is never partial here) and the context is still live. Per-file
-	// index errors are fine: eligible-but-failed files stay in the keep set.
+	// Phase 3: Prune stored sources no longer in the eligible set. Requires a
+	// COMPLETE eligible set: a fatal walk error returns above, and non-fatal
+	// access errors set walkIncomplete, which disables pruning for this run
+	// (failure mode is "not pruned", never wrong deletion). Per-file index
+	// errors are fine: eligible-but-failed files stay in the keep set.
 	if cfg.pruneDeleted && ctx.Err() == nil {
-		indexErrors = append(indexErrors, idx.pruneDeletedSources(ctx, files)...)
+		if walkIncomplete {
+			indexErrors = append(indexErrors, "prune skipped: directory walk was incomplete")
+		} else {
+			indexErrors = append(indexErrors, idx.pruneDeletedSources(ctx, files)...)
+		}
 	}
 
 	status.IndexedFiles = indexed
