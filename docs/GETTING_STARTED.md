@@ -1,6 +1,6 @@
 # Getting Started with go-llm
 
-A guide to setting up and using go-llm with your local models. **llama.cpp is
+A guide to setting up and using go-llm with local or hosted models. **llama.cpp is
 the recommended primary backend** (best local performance, via its
 OpenAI-compatible server); Ollama is fully supported as an alternative. See
 [Local model backends](../README.md#local-model-backends) for the full backend
