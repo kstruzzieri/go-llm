@@ -6,8 +6,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -163,4 +166,238 @@ func TestClassifyAutoIndex_CompatibleStoreIsIncremental(t *testing.T) {
 	}
 	// Read-only classification must not have created WAL/SHM.
 	assertNoSQLiteSidecars(t, dbPath)
+}
+
+// autoIndexTestEmbedder emits fixed vectors under vsid, failing any batch whose
+// input contains failSubstr ("" never fails). The startup probe input contains
+// no source code, so content-targeted failures leave the probe passing.
+func autoIndexTestEmbedder(vsid, failSubstr string) rag.Embedder {
+	return rag.EmbedderFunc(func(_ context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+		if failSubstr != "" {
+			for _, in := range inputs {
+				if strings.Contains(in, failSubstr) {
+					return rag.EmbedResult{}, errTestEmbedCmd
+				}
+			}
+		}
+		vecs := make([][]float64, len(inputs))
+		for i := range vecs {
+			vecs[i] = []float64{1, 0, 0}
+		}
+		return rag.EmbedResult{Embeddings: vecs, Model: "nomic", Provider: "ollama", VectorSpaceID: vsid}, nil
+	})
+}
+
+// realReadOnlyOpen is an openRetriever seam that performs a genuine immutable
+// read-only open + Stats on dbPath. It fails if the write store is still open,
+// which is exactly the writer-closes-before-reader invariant under test.
+func realReadOnlyOpen(dbPath string) func(context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
+	return func(ctx context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
+		store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
+		if err != nil {
+			return nil, nil, "", vsDecision{}, rag.StoreStats{}, err
+		}
+		defer func() { _ = store.Close() }()
+		stats, err := store.Stats(ctx)
+		if err != nil {
+			return nil, nil, "", vsDecision{}, rag.StoreStats{}, err
+		}
+		return &agenttools.Retrieve{}, nil, "", vsDecision{}, stats, nil
+	}
+}
+
+// retrieveStateOf reads the wrapper state for assertions.
+func retrieveStateOf(r *readyRetrieve) retrieveReadyState {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.state
+}
+
+// newAutoIndexTestJob wires a runAutoIndex job over root/dbPath with the given
+// embedder, a real read-only openRetriever seam, and notice capture.
+func newAutoIndexTestJob(root, dbPath string, emb rag.Embedder, notices *[]string) autoIndexJob {
+	return autoIndexJob{
+		root:        root,
+		dbPath:      dbPath,
+		sidecarPath: sidecarPath(dbPath),
+		workspaceID: "workspace:k",
+		embedder:    emb,
+		embChain:    []string{"ollama/nomic"},
+		ready:       newReadyRetrieve(warmingRetrieveMessage),
+		notice:      func(s string) { *notices = append(*notices, s) },
+
+		openRetriever: realReadOnlyOpen(dbPath),
+	}
+}
+
+func TestRunAutoIndex_FirstRunBuildsAndMarksReady(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+	runAutoIndex(context.Background(), job)
+
+	if got := retrieveStateOf(job.ready); got != retrieveReady {
+		t.Fatalf("state = %d, want ready; notices = %v", got, notices)
+	}
+	want := "retrieve: auto-index ready, 1 sources, ollama/nomic, updated "
+	if len(notices) != 1 || !strings.HasPrefix(notices[0], want) {
+		t.Fatalf("notices = %v, want one line with prefix %q", notices, want)
+	}
+	sc, err := readSidecar(sidecarPath(dbPath))
+	if err != nil {
+		t.Fatalf("sidecar not written: %v", err)
+	}
+	if verr := validateSidecar(sc, "workspace:k"); verr != nil {
+		t.Fatalf("sidecar invalid: %v", verr)
+	}
+	assertIndexDBModes(t, dbPath)
+}
+
+func TestRunAutoIndex_PartialRunMarksReadyWithWarning(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "ok.go", "package a\n\nfunc A() {}\n")
+	writeWorkspaceFile(t, root, "bad.go", "package a\n\nfunc B() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", "func B"), &notices)
+	runAutoIndex(context.Background(), job)
+
+	if got := retrieveStateOf(job.ready); got != retrieveReady {
+		t.Fatalf("partial usable run must end ready, state = %d; notices = %v", got, notices)
+	}
+	want := "warning: retrieve auto-index partial, 1 sources, 1 errors; retrieval enabled"
+	if len(notices) != 1 || notices[0] != want {
+		t.Fatalf("notices = %v, want exactly [%q]", notices, want)
+	}
+}
+
+func TestRunAutoIndex_EmbedderDownMarksFailedWithoutTouchingStore(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+
+	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		return rag.EmbedResult{}, errTestEmbedCmd
+	})
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	runAutoIndex(context.Background(), job)
+
+	if got := retrieveStateOf(job.ready); got != retrieveFailed {
+		t.Fatalf("state = %d, want failed", got)
+	}
+	if len(notices) != 1 ||
+		!strings.HasPrefix(notices[0], "warning: retrieve auto-index failed: ") ||
+		!strings.HasSuffix(notices[0], "; using file/search tools") {
+		t.Fatalf("notices = %v, want one failed line", notices)
+	}
+	if fileExists(dbPath) {
+		t.Fatal("dead embedder must not create the index DB")
+	}
+}
+
+func TestRunAutoIndex_InvalidSidecarRebuildsAndEndsReady(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	seedAutoIndexStore(t, dbPath, "ollama/nomic", "workspace:k")
+	if err := os.Remove(sidecarPath(dbPath)); err != nil {
+		t.Fatal(err)
+	}
+
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+	runAutoIndex(context.Background(), job)
+
+	if got := retrieveStateOf(job.ready); got != retrieveReady {
+		t.Fatalf("self-heal run must end ready, state = %d; notices = %v", got, notices)
+	}
+	if len(notices) != 2 ||
+		!strings.HasPrefix(notices[0], "warning: retrieve auto-index rebuilding private store: ") ||
+		!strings.HasPrefix(notices[1], "retrieve: auto-index ready, ") {
+		t.Fatalf("notices = %v, want rebuild warning then ready line", notices)
+	}
+}
+
+func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	writeWorkspaceFile(t, root, "b.go", "package a\n\nfunc B() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+
+	// First run: realReadOnlyOpen in the seam fails if the write store is
+	// still open, so a ready outcome proves the close-before-open ordering.
+	var notices1 []string
+	job1 := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices1)
+	runAutoIndex(context.Background(), job1)
+	if got := retrieveStateOf(job1.ready); got != retrieveReady {
+		t.Fatalf("first run state = %d, want ready; notices = %v", got, notices1)
+	}
+
+	// Refresh after a deletion: the pruned source must be gone.
+	if err := os.Remove(filepath.Join(root, "b.go")); err != nil {
+		t.Fatal(err)
+	}
+	var notices2 []string
+	job2 := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices2)
+	runAutoIndex(context.Background(), job2)
+	if got := retrieveStateOf(job2.ready); got != retrieveReady {
+		t.Fatalf("refresh state = %d, want ready; notices = %v", got, notices2)
+	}
+
+	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("open after refresh: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	sources, err := store.ListSources(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawA bool
+	for _, s := range sources {
+		if strings.Contains(s, "b.go") {
+			t.Fatalf("deleted source still indexed: %q", s)
+		}
+		if strings.Contains(s, "a.go") {
+			sawA = true
+		}
+	}
+	if !sawA {
+		t.Fatalf("surviving source missing after prune: %v", sources)
+	}
+}
+
+func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+
+	// The probe (first call) succeeds; the first indexing embed cancels the
+	// run, simulating shutdown mid-index.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var calls atomic.Int32
+	emb := rag.EmbedderFunc(func(c context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+		if calls.Add(1) == 1 {
+			return rag.EmbedResult{Embeddings: [][]float64{{1, 0, 0}}, Model: "nomic", Provider: "ollama", VectorSpaceID: "ollama/nomic"}, nil
+		}
+		cancel()
+		return rag.EmbedResult{}, context.Canceled
+	})
+
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	runAutoIndex(ctx, job)
+
+	if got := retrieveStateOf(job.ready); got != retrieveWarming {
+		t.Fatalf("cancelled run must stay warming, state = %d", got)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("cancelled run must be silent, notices = %v", notices)
+	}
 }

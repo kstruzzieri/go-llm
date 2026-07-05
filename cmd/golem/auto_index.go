@@ -1,10 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -73,4 +78,142 @@ func classifyAutoIndex(ctx context.Context, dbPath, sidecarPath, workspaceID str
 			describeStored(probe), expected)}
 	}
 	return autoIndexClass{}
+}
+
+// autoIndexJob carries the background auto-index runner's dependencies. The
+// embedder is pre-built by the caller (the same chain embedder used for the
+// probe and the index run) and embChain doubles as the expected vector-space
+// set: expectedVectorSpaces(cfg) and embeddingChain(cfg) return the identical
+// chain, so no separate expected field is carried.
+type autoIndexJob struct {
+	root        string
+	dbPath      string
+	sidecarPath string
+	workspaceID string
+	cfg         *config.Config
+	router      *provider.Router
+	embedder    rag.Embedder
+	embChain    []string
+	feedbackDB  string
+	ready       *readyRetrieve
+	notice      func(string)
+
+	// openRetriever is a test seam: nil selects the real buildGatedRetriever
+	// over cfg/router; tests inject a fake because buildGatedRetriever needs
+	// a live provider router to construct the query-time chain embedder.
+	openRetriever func(context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error)
+}
+
+// runAutoIndex is the startup auto-index pipeline (spec "Startup Flow" step 5):
+// probe the embedder, classify/self-heal the private store, run the index with
+// deleted-source pruning, close the writer, then open read-only retrieval and
+// flip the ready wrapper. It is synchronous; the caller launches the goroutine.
+// A cancelled ctx returns silently: the wrapper stays warming and no notices
+// print during shutdown.
+func runAutoIndex(ctx context.Context, job autoIndexJob) {
+	fail := func(reason string) {
+		if ctx.Err() != nil {
+			return
+		}
+		job.ready.markFailed("retrieve: the workspace auto-index failed (" + reason + "); " +
+			"use read_file, search, glob, and list instead.")
+		job.notice("warning: retrieve auto-index failed: " + reason + "; using file/search tools")
+	}
+
+	// Probe FIRST: a dead embedder must not create or write the store.
+	if err := probeAutoIndexEmbedder(ctx, job.embedder, job.embChain[0]); err != nil {
+		fail(err.Error())
+		return
+	}
+
+	class := classifyAutoIndex(ctx, job.dbPath, job.sidecarPath, job.workspaceID, job.embChain)
+	if class.full && class.reason != "" {
+		job.notice("warning: retrieve auto-index rebuilding private store: " + class.reason)
+	}
+	store, err := prepareIndexStore(ctx, job.dbPath, job.sidecarPath, job.workspaceID, job.embChain, class.full)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	indexer, err := rag.NewIndexerWithEmbedder(job.embedder, store, rag.WithEmbeddingModel(job.embChain[0]))
+	if err != nil {
+		_ = store.Close()
+		fail(err.Error())
+		return
+	}
+	var buf bytes.Buffer
+	res := executeIndex(ctx, indexJob{
+		indexer:        indexer,
+		store:          store,
+		root:           job.root,
+		dbPath:         job.dbPath,
+		sidecarPath:    job.sidecarPath,
+		workspaceID:    job.workspaceID,
+		requestedModel: job.embChain[0],
+		out:            &buf,
+		pruneDeleted:   true,
+	})
+	// Close the writer BEFORE any read-only open: retrieval opens the DB with
+	// immutable=1 and must not race a live write handle.
+	_ = store.Close()
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Interpret the outcome through the store, not the exit sentinel alone
+	// (spec "Partial Indexes"): a partial run still writes a usable sidecar.
+	sc, scErr := readSidecar(job.sidecarPath)
+	if scErr != nil || validateSidecar(sc, job.workspaceID) != nil {
+		fail(autoIndexFailReason(&buf, res.exitErr))
+		return
+	}
+
+	open := job.openRetriever
+	if open == nil {
+		open = func(oc context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
+			return buildGatedRetriever(oc, job.cfg, job.router, job.dbPath, job.embChain, job.feedbackDB)
+		}
+	}
+	tool, feedback, feedbackWarn, dec, stats, err := open(ctx)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	if tool == nil {
+		// The gate refusing a store this run just wrote should be impossible;
+		// surface it rather than serving a mismatched corpus.
+		fail(fmt.Sprintf("index vector space %s does not match embedding chain %v", dec.stored, job.embChain))
+		return
+	}
+	line := autoIndexReadyLine(sc, stats)
+	job.ready.markReady(tool, line, feedback)
+	job.notice(line)
+	if feedbackWarn != "" {
+		job.notice("warning: " + feedbackWarn)
+	}
+}
+
+// autoIndexReadyLine renders the completion notice (spec "Notices"): the ready
+// line for a complete sidecar, the partial warning for a partial one.
+func autoIndexReadyLine(sc indexSidecar, stats rag.StoreStats) string {
+	if sc.Status == "partial" {
+		return fmt.Sprintf("warning: retrieve auto-index partial, %d sources, %d errors; retrieval enabled",
+			stats.TotalSources, sc.ErrorCount)
+	}
+	return fmt.Sprintf("retrieve: auto-index ready, %d sources, %s, updated %s",
+		stats.TotalSources, sc.VectorSpaceID, sc.IndexedAt)
+}
+
+// autoIndexFailReason caps the background failure reason to one line: the
+// first useful line executeIndex printed, else the exit error.
+func autoIndexFailReason(buf *bytes.Buffer, exitErr error) string {
+	for _, line := range strings.Split(buf.String(), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	if exitErr != nil {
+		return exitErr.Error()
+	}
+	return "index failed"
 }

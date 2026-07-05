@@ -31,6 +31,7 @@ type indexJob struct {
 	workspaceID    string
 	requestedModel string // embChain[0], the configured primary selector
 	out            io.Writer
+	pruneDeleted   bool // drop stored sources missing from the walk (startup auto refresh only)
 }
 
 // indexResult is executeIndex's outcome. exitErr is nil on a clean run,
@@ -47,8 +48,11 @@ var indexExcludes = []string{".git", "vendor", "node_modules", ".superpowers", "
 // sidecar only for a usable+clean store, prints a summary, and returns the exit
 // outcome. (Preflight and -full removal are layered in Task 7.)
 func executeIndex(ctx context.Context, job indexJob) indexResult {
-	status, indexErr := job.indexer.IndexDirectoryWithStatus(ctx, job.root,
-		rag.WithIncremental(), rag.WithExclude(indexExcludes...))
+	dirOpts := []rag.IndexDirOption{rag.WithIncremental(), rag.WithExclude(indexExcludes...)}
+	if job.pruneDeleted {
+		dirOpts = append(dirOpts, rag.WithPruneDeleted())
+	}
+	status, indexErr := job.indexer.IndexDirectoryWithStatus(ctx, job.root, dirOpts...)
 
 	// A walk failure / cancellation aborts the command: error but no completed
 	// queue. Distinguish it from a completed run with per-file errors.
