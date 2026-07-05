@@ -670,7 +670,7 @@ func (p *Provider) shouldExtractThinking(req provider.ChatRequest) bool {
 
 // thinkToggleActive reports whether a ThinkToggle parser should be active for
 // the given options: explicit Think wins; a bare effort hint implies on.
-// Semantics are identical to provider.thinkToggleActive.
+// Mirrors provider/ollama.go; keep the pair in sync.
 func thinkToggleActive(opts provider.ModelOptions) bool {
 	if opts.Think != nil {
 		return *opts.Think
@@ -680,6 +680,7 @@ func thinkToggleActive(opts provider.ModelOptions) bool {
 
 // effectiveThinkMode returns the parser mode for a chat request, honoring the
 // per-request ParseThinkMode override before the provider-instance default.
+// Mirrors provider/ollama.go; keep the pair in sync.
 func (p *Provider) effectiveThinkMode(req provider.ChatRequest) provider.ThinkMode {
 	if req.ParseThinkMode != nil {
 		return *req.ParseThinkMode
@@ -689,6 +690,7 @@ func (p *Provider) effectiveThinkMode(req provider.ChatRequest) provider.ThinkMo
 
 // effectiveThinkTags returns the parser tags for a chat request, honoring the
 // per-request ParseThinkTags override before the provider-instance default.
+// Mirrors provider/ollama.go; keep the pair in sync.
 func (p *Provider) effectiveThinkTags(req provider.ChatRequest) provider.ThinkTags {
 	if req.ParseThinkTags != nil {
 		return *req.ParseThinkTags
@@ -758,14 +760,13 @@ func applyOptionsChat(r *chatRequest, opts provider.ModelOptions) {
 	}
 	// Think controls (#220). Explicit Think=false wins: no effort is sent
 	// and the template is asked not to think. A bare effort implies on.
-	switch {
-	case opts.Think != nil && !*opts.Think:
-		r.ChatTemplateKwargs = map[string]any{"enable_thinking": false}
-	case opts.ThinkEffort != "":
+	if opts.Think == nil && opts.ThinkEffort == "" {
+		return // pre-#220 byte-identical request
+	}
+	active := thinkToggleActive(opts) // single source of think precedence
+	r.ChatTemplateKwargs = map[string]any{"enable_thinking": active}
+	if active && opts.ThinkEffort != "" {
 		r.ReasoningEffort = opts.ThinkEffort
-		r.ChatTemplateKwargs = map[string]any{"enable_thinking": true}
-	case opts.Think != nil: // Think == &true, no effort
-		r.ChatTemplateKwargs = map[string]any{"enable_thinking": true}
 	}
 }
 
