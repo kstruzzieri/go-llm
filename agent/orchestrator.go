@@ -54,7 +54,7 @@ func initState(req Request) State {
 	return State{System: req.System, DurableSummary: req.HistorySummary, Messages: msgs}
 }
 
-func buildChatRequest(st State, specs []provider.Tool, outputReserve int) provider.ChatRequest {
+func buildChatRequest(st State, specs []provider.Tool, outputReserve int, opts provider.ModelOptions) provider.ChatRequest {
 	msgs := make([]provider.ChatMessage, 0, len(st.Messages)+1)
 	if st.System != "" {
 		msgs = append(msgs, provider.ChatMessage{Role: "system", Content: st.System})
@@ -62,7 +62,7 @@ func buildChatRequest(st State, specs []provider.Tool, outputReserve int) provid
 	for _, m := range st.Messages {
 		msgs = append(msgs, m.ChatMessage)
 	}
-	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true}
+	req := provider.ChatRequest{Messages: msgs, Tools: specs, Stream: true, Options: opts}
 	if outputReserve > 0 {
 		req.Options.NumPredict = outputReserve
 	}
@@ -115,7 +115,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 
 		tokenLogged := false
 		modelStart := o.now()
-		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve), func(c provider.ChatResponse) error {
+		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options), func(c provider.ChatResponse) error {
 			if c.Content == "" {
 				return nil
 			}
