@@ -4,7 +4,9 @@
 // -allow-write and -allow-exec opt into approval-gated mutation and command
 // execution, and retrieve can be enabled for a prebuilt RAG index. Session,
 // memory, and agent-memory features write per-user databases outside the
-// workspace.
+// workspace. For thinking-capable models, -think off|on|low|medium|high
+// drives reasoning behavior and captured thinking renders dim above the
+// answer (a no-op with a notice when the model does not support thinking).
 //
 // The openai-compat backend URL can be overridden with -base-url (or
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
