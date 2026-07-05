@@ -3,6 +3,7 @@ package prefetch
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -82,6 +83,41 @@ func newMockEmbedServer(embedding []float64) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	}))
+}
+
+// mockProbingStore is a plain store that also exposes a vector-space probe, so
+// the delegated rag.Retriever runs its vsid guard.
+type mockProbingStore struct {
+	mockVectorStore
+	knownIDs []string
+}
+
+func (m *mockProbingStore) ProbeVectorSpaces(context.Context) (rag.VectorSpaceProbe, error) {
+	return rag.VectorSpaceProbe{KnownIDs: m.knownIDs}, nil
+}
+
+func TestScoredRetriever_vsidMismatch_errors(t *testing.T) {
+	embedding := []float64{0.1, 0.2, 0.3}
+	server := newMockEmbedServer(embedding)
+	defer server.Close()
+
+	client := ollama.NewClient(ollama.WithBaseURL(server.URL))
+	// The mock embed server returns an untagged embedding, so the delegated
+	// rag.Retriever resolves an empty query vector-space ID; against a corpus
+	// that reports a known space it trips ErrVectorSpaceMismatch on the
+	// "query produced no VectorSpaceID" branch. This exercises the prefetch ->
+	// RetrieveScored -> vsid-guard wiring; the different-but-present mismatch
+	// branch is covered directly in rag's own tests.
+	store := &mockProbingStore{knownIDs: []string{"space-A"}}
+	retriever := NewScoredRetriever(client, store, "test-model")
+
+	_, err := retriever.Retrieve(context.Background(), "q", 5, rag.QueryContext{}, RetrieveOptions{})
+	if err == nil {
+		t.Fatal("expected vsid mismatch error, got nil")
+	}
+	if !errors.Is(err, rag.ErrVectorSpaceMismatch) {
+		t.Fatalf("expected ErrVectorSpaceMismatch, got %v", err)
+	}
 }
 
 func TestScoredRetriever_PlainSearch(t *testing.T) {
