@@ -518,27 +518,6 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
 
-	if ready != nil {
-		// Launched after the synchronous startup block so async notices never
-		// interleave it. run's ctx is never cancelled: the goroutine dies with
-		// the process at exit and a torn store self-heals on the next startup.
-		go runAutoIndex(ctx, autoIndexJob{
-			root:        root,
-			dbPath:      autoDBPath,
-			sidecarPath: autoSidecar,
-			workspaceID: autoWorkspaceID,
-			cfg:         bundle.Config,
-			router:      bundle.Router,
-			embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
-				return bundle.Router.Route(rc, rreq)
-			}, embChain),
-			embChain:   embChain,
-			feedbackDB: feedbackDB,
-			ready:      ready,
-			notice:     func(line string) { _, _ = fmt.Fprintln(stderr, line) },
-		})
-	}
-
 	maxHistoryTokens := f.inputCeiling
 	if maxHistoryTokens <= 0 {
 		maxHistoryTokens = agent.DefaultInputCeiling
@@ -605,6 +584,27 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			}
 		}
 	}()
+
+	if ready != nil {
+		// Launched after startup construction succeeds so async notices never
+		// interleave the synchronous startup block, and setup errors do not race
+		// the background job against deferred provider cleanup.
+		go runAutoIndex(ctx, autoIndexJob{
+			root:        root,
+			dbPath:      autoDBPath,
+			sidecarPath: autoSidecar,
+			workspaceID: autoWorkspaceID,
+			cfg:         bundle.Config,
+			router:      bundle.Router,
+			embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
+				return bundle.Router.Route(rc, rreq)
+			}, embChain),
+			embChain:   embChain,
+			feedbackDB: feedbackDB,
+			ready:      ready,
+			notice:     func(line string) { _, _ = fmt.Fprintln(stderr, line) },
+		})
+	}
 
 	if f.promptSet {
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)

@@ -199,6 +199,10 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		fail(fmt.Sprintf("index vector space %s does not match embedding chain %v", dec.stored, job.embChain))
 		return
 	}
+	if res.exitErr != nil && stats.TotalSources < 1 {
+		fail(autoIndexFailReason(&buf, res.exitErr))
+		return
+	}
 	// A non-nil exitErr with a COMPLETE sidecar means this run failed before
 	// writing a new marker and an older valid index survived (a completed
 	// partial run writes status "partial" and warns below). Serving the

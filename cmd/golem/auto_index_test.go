@@ -502,3 +502,32 @@ func TestRunAutoIndex_FailedRefreshWarnsServingPreviousIndex(t *testing.T) {
 		t.Fatalf("final notice should still be the ready line, got %q; all = %v", last, notices)
 	}
 }
+
+func TestRunAutoIndex_DeletedLastSourceFailsInsteadOfServingStaleMarker(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+
+	var notices1 []string
+	job1 := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices1)
+	runAutoIndex(context.Background(), job1)
+	if got := retrieveStateOf(job1.ready); got != retrieveReady {
+		t.Fatalf("seed state = %d, want ready; notices = %v", got, notices1)
+	}
+
+	if err := os.Remove(filepath.Join(root, "a.go")); err != nil {
+		t.Fatal(err)
+	}
+	var notices2 []string
+	job2 := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices2)
+	runAutoIndex(context.Background(), job2)
+
+	if got := retrieveStateOf(job2.ready); got != retrieveFailed {
+		t.Fatalf("empty refresh must fail, state = %d; notices = %v", got, notices2)
+	}
+	if len(notices2) != 1 ||
+		!strings.Contains(notices2[0], "corpus not usable (sources=0") ||
+		!strings.Contains(notices2[0], "using file/search tools") {
+		t.Fatalf("notices = %v, want unusable-corpus failure", notices2)
+	}
+}
