@@ -23,7 +23,7 @@ func probeAutoIndexEmbedder(ctx context.Context, embedder rag.Embedder, model st
 		return fmt.Errorf("embed probe (%s): %w", model, err)
 	}
 	if len(res.Embeddings) != 1 || len(res.Embeddings[0]) == 0 {
-		return fmt.Errorf("embed probe (%s): got %d vectors, want exactly 1 non-empty", model, len(res.Embeddings))
+		return fmt.Errorf("embed probe (%s): want one non-empty vector, got %d", model, len(res.Embeddings))
 	}
 	return nil
 }

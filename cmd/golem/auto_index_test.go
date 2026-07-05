@@ -28,8 +28,8 @@ func TestProbeAutoIndexEmbedder_CallsWithOneInputAndModel(t *testing.T) {
 	if gotModel != "ollama/nomic" {
 		t.Errorf("model = %q, want ollama/nomic", gotModel)
 	}
-	if len(gotInputs) != 1 {
-		t.Fatalf("inputs = %v, want exactly one", gotInputs)
+	if len(gotInputs) != 1 || gotInputs[0] != "golem startup index probe" {
+		t.Fatalf(`inputs = %v, want exactly ["golem startup index probe"]`, gotInputs)
 	}
 	if !hadDeadline {
 		t.Error("probe context must carry a deadline")
