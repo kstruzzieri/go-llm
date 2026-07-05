@@ -46,9 +46,12 @@ type MultiSignalSearcher interface {
 		k int, qCtx QueryContext) ([]ScoredResult, error)
 }
 
-// ScoredResult extends SearchResult with per-signal score breakdowns.
-// Used by explain mode and prompt formatting to show why each result ranked.
+// ScoredResult extends SearchResult with a hybrid ranking score and per-signal
+// score breakdowns. Score (embedded from SearchResult) is the semantic cosine
+// similarity (0-1); RankScore is the fused ranking score the results are sorted
+// by. Used by explain mode and prompt formatting to show why each result ranked.
 type ScoredResult struct {
 	SearchResult                    // embeds existing type (Chunk + Score + Distance)
-	Signals      map[string]float64 // per-signal scores: "semantic" -> 0.85, "keyword" -> 0.3, etc.
+	RankScore    float64            // fused/hybrid ranking score; the sort key. Dense fallback sets it == Score.
+	Signals      map[string]float64 // per-signal scores: "semantic" -> 0.85, "keyword" -> 0.3, etc. A missing key means unavailable/disabled, not zero.
 }

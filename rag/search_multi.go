@@ -133,16 +133,17 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 		results[i] = ScoredResult{
 			SearchResult: SearchResult{
 				Chunk:    chunk,
-				Score:    finalScore,
-				Distance: 1 - semanticScores[i], // cosine distance from semantic signal
+				Score:    semanticScores[i], // semantic cosine similarity (0-1 contract)
+				Distance: 1 - semanticScores[i],
 			},
-			Signals: signals,
+			RankScore: finalScore, // fused RRF + bonus score; the ranking key
+			Signals:   signals,
 		}
 	}
 
-	// Sort by final score descending.
+	// Sort by fused ranking score descending.
 	sort.Slice(results, func(i, j int) bool {
-		return results[i].Score > results[j].Score
+		return results[i].RankScore > results[j].RankScore
 	})
 
 	if k > 0 && len(results) > k {
