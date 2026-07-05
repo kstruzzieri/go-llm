@@ -1,6 +1,6 @@
 # Getting Started with go-llm
 
-A guide to setting up and using go-llm with your local models. **llama.cpp is
+A guide to setting up and using go-llm with local or hosted models. **llama.cpp is
 the recommended primary backend** (best local performance, via its
 OpenAI-compatible server); Ollama is fully supported as an alternative. See
 [Local model backends](../README.md#local-model-backends) for the full backend
@@ -9,9 +9,11 @@ reference.
 ## Prerequisites
 
 1. **Go 1.25+** installed
-2. A local model backend:
+2. A model backend — one of:
    - **llama.cpp** (recommended) — `llama-server` per model, exposing the OpenAI-compatible API
    - **Ollama** (alternative) — running locally ([install](https://ollama.com/download))
+   - **A hosted OpenAI-compatible API** — no local model needed; see
+     [Running Golem against a hosted API](#running-golem-against-a-hosted-api)
 3. Models available to your backend (see [Model Configuration](#model-configuration))
 
 ## Install
@@ -147,6 +149,118 @@ To use different models, edit `models.json`:
 ```
 
 Pull the new model (`ollama pull llama3.3:70b`) and restart your application.
+
+## Running Golem against a hosted API
+
+Golem does not require a local LLM. Any hosted OpenAI-compatible endpoint works:
+declare a provider with `api_format: "openai-compat"` and an `api_key`, point the
+`agent` role at it, and run `golem` as usual. For the general (non-Golem)
+hosted-provider reference — compatibility table, mixing providers, fallbacks —
+see [Use a hosted API](../README.md#use-a-hosted-api-bring-your-own-key) in the
+README; this section is the Golem-specific path.
+
+A minimal hosted `models.json` (this exact config is load-verified against
+`config.Load`):
+
+```json
+{
+  "providers": {
+    "hosted": {
+      "base_url": "https://api.openai.com",
+      "api_format": "openai-compat",
+      "api_key": "${HOSTED_API_KEY}"
+    }
+  },
+  "models": {
+    "agent": {
+      "name": "gpt-4o",
+      "provider": "hosted",
+      "type": "dense",
+      "context_window": 128000,
+      "capabilities": ["chat", "stream", "tool_call"]
+    }
+  },
+  "defaults": {
+    "agent": "agent"
+  }
+}
+```
+
+Three things in this config are easy to get wrong:
+
+- `base_url` is the server **root** — do not include `/v1`; the client appends
+  the `/v1/...` endpoint paths itself.
+- `api_format` must be set explicitly. When omitted it defaults to `ollama`,
+  and a hosted endpoint will not speak that protocol.
+- `capabilities` must declare `tool_call` explicitly, alongside `chat` and
+  `stream`. `tool_call` is never derived from the model `type`; without it the
+  agent loop rejects the model.
+
+### Secrets
+
+Set `api_key` to a `${ENV_VAR}` reference and export the variable before
+running golem:
+
+```bash
+export HOSTED_API_KEY=sk-...
+golem -config models.json
+```
+
+Expansion happens when the config file loads and fails fast if the variable is
+unset or empty — it never falls back to the literal `${...}` string, and the
+error names the provider and variable, never the secret value. Never commit a
+literal key to a config file. Expansion applies only to file-loaded configs;
+a `config.Config` built programmatically keeps `api_key` as written.
+
+### Remote-relevant flags
+
+- `-no-probe` — skips the openai-compat port discovery scan. The scan is
+  loopback-only (localhost ports 8080-8090); a remote `base_url` is never
+  scanned regardless, so this flag just silences local discovery when you are
+  not running a local backend.
+- `-no-cap-probe` — disables the active tool-capability probe. For a model
+  with no declared or catalog-known `tool_call` capability, golem sends up to
+  two real chat-completion requests to the endpoint to test tool support —
+  against a hosted API those are billable calls. Verdicts are cached in
+  `fingerprints.db` under the golem data directory, so a positive verdict is
+  probed once per backend/model rather than per session (negative and
+  inconclusive verdicts can expire and re-probe). Declaring `capabilities` explicitly (as in
+  the example above) makes the probe unnecessary: an explicit declaration is
+  authoritative and no probe is sent.
+- `-base-url` — overrides the primary openai-compat agent provider's base URL.
+  Server root, without `/v1`, used exactly as given; also disables discovery.
+- `golem models -probe-all` / `golem models -reprobe` — subcommand flags for
+  explicit capability-probe refresh: `-probe-all` actively probes every
+  non-explicit entry, `-reprobe` deletes the cached verdicts first and probes
+  fresh. Use these when checking provenance with `golem models`; they are not
+  top-level `golem` flags.
+
+### Capabilities the agent loop needs
+
+Golem's agent loop requires `chat`, `stream`, and `tool_call` on the agent
+model (and on any fallback it may route to). Explicit `capabilities` REPLACE
+the type-derived defaults, which also makes them the carve-down mechanism: the
+example's `["chat", "stream", "tool_call"]` omits `generate`, so a hosted
+server without `/v1/completions` is fine — the Router never sends it
+unsupported requests.
+
+RAG is optional. To index and use `retrieve`, add a hosted embedding model
+(`"type": "embedding"`) and set `defaults.embedding` to it. Without one, golem
+runs with file tools only.
+
+### Verify the setup
+
+```bash
+golem models                 # confirm resolution and tool_call provenance
+golem -p "say hi"            # one-shot smoke against the hosted endpoint
+```
+
+`golem models` shows which model each role resolves to and where its
+`tool_call` verdict came from (`explicit`, `catalog`, `runtime`, or `probe`).
+If it looks right, the one-shot run is the end-to-end proof.
+
+Provider `timeout` defaults to `5m` when omitted. Set `"timeout"` on the
+provider entry if a hosted model needs longer.
 
 ## Quick Start
 
