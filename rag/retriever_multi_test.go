@@ -378,3 +378,67 @@ func BenchmarkRetrieve(b *testing.B) {
 		}
 	})
 }
+
+func seedBenchStore(tb testing.TB, n int) *SQLiteStore {
+	tb.Helper()
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		tb.Fatalf("NewSQLiteStore: %v", err)
+	}
+	chunks := make([]Chunk, n)
+	embeddings := make([][]float64, n)
+	for i := range chunks {
+		chunks[i] = Chunk{
+			ID:       "c" + strconv.Itoa(i),
+			Content:  "alpha beta gamma delta token" + strconv.Itoa(i),
+			Source:   "f" + strconv.Itoa(i) + ".go",
+			Metadata: map[string]string{},
+		}
+		embeddings[i] = []float64{float64(i % 7), float64(i % 3), 1}
+	}
+	if err := store.Store(context.Background(), chunks, embeddings); err != nil {
+		tb.Fatalf("seed: %v", err)
+	}
+	return store
+}
+
+func TestSeedBenchStore(t *testing.T) {
+	store := seedBenchStore(t, 50)
+	defer func() { _ = store.Close() }()
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.TotalChunks != 50 {
+		t.Fatalf("TotalChunks = %d, want 50", stats.TotalChunks)
+	}
+}
+
+// BenchmarkSearchVsSearchMulti compares dense Search against hybrid SearchMulti
+// across small/medium/large synthetic corpora (#95). Seeding happens outside the
+// timed region; report the SearchMulti/Search ratio (portable) alongside ns/op.
+func BenchmarkSearchVsSearchMulti(b *testing.B) {
+	query := []float64{1, 1, 1}
+	for _, n := range []int{100, 1000, 10000} {
+		store := seedBenchStore(b, n)
+		size := strconv.Itoa(n)
+
+		b.Run("n="+size+"/search", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := store.Search(context.Background(), query, 5); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run("n="+size+"/search_multi", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := store.SearchMulti(context.Background(), query, "alpha token", 5, QueryContext{}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		_ = store.Close()
+	}
+}
