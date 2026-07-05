@@ -51,7 +51,8 @@ type ModelRegistry struct {
 	providers       ProviderResolver
 	capOverride     CapabilityOverride
 	capFloor        CapabilityFloor
-	overrideVersion uint64 // bumped by SetCapabilityOverride AND SetCapabilityFloor; guards stale cache writes in buildProfile
+	thinkOverride   ThinkOverride
+	overrideVersion uint64 // bumped by SetCapabilityOverride, SetCapabilityFloor, SetThinkOverride, and invalidateProfile; guards stale cache writes in buildProfile
 	rejectionHook   OverrideRejectionHook
 
 	// Capability-probe resolution (ResolveToolCall). Both fields are set
@@ -227,6 +228,27 @@ func (r *ModelRegistry) SetCapabilityFloor(fn CapabilityFloor) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.capFloor = fn
+	r.overrideVersion++
+	clear(r.profiles)
+}
+
+// ThinkOverride returns per-model think overrides from user config. A nil
+// mode/tags pointer means "no override for that field" — the merged value
+// is kept. Non-nil REPLACES the merged value wholesale (same contract as
+// the capability override: config is the final word, per field).
+type ThinkOverride func(key ModelKey) (mode *ThinkMode, tags *ThinkTags)
+
+// SetThinkOverride installs (or clears) the think override hook.
+// Pass nil to disable. Safe for concurrent use.
+//
+// Shares SetCapabilityOverride's invalidation + version-guard semantics:
+// the profile cache is flushed and the single policy version counter is
+// bumped so an in-flight buildProfile that snapshotted the OLD hook
+// cannot repopulate the cache with a stale-policy profile.
+func (r *ModelRegistry) SetThinkOverride(fn ThinkOverride) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.thinkOverride = fn
 	r.overrideVersion++
 	clear(r.profiles)
 }
@@ -658,11 +680,11 @@ func (r *ModelRegistry) FIMConfigFor(ctx context.Context, key ModelKey) (*FIMCon
 //  2. Fingerprint: capability probing data, benchmarked resource observations
 //  3. Runtime: context_window, parameter_size, quant_level, digest (freshest)
 func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelProfile, error) {
-	// Snapshot (override, floor, version, rejectionHook) FIRST so the
-	// policy a single buildProfile applies is fixed at start, and the
-	// cache write at the end can detect any concurrent
-	// SetCapabilityOverride or SetCapabilityFloor (both bump the shared
-	// version counter). Reading
+	// Snapshot (override, floor, thinkOverride, version, rejectionHook)
+	// FIRST so the policy a single buildProfile applies is fixed at start,
+	// and the cache write at the end can detect any concurrent
+	// SetCapabilityOverride, SetCapabilityFloor, or SetThinkOverride (all
+	// bump the shared version counter). Reading
 	// later (after slow IO like queryRuntime) would shrink the visible
 	// TOCTOU window but also leave the same race against the cache write
 	// itself; reading first keeps the contract simple: one buildProfile ->
@@ -670,6 +692,7 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 	r.mu.RLock()
 	override := r.capOverride
 	floor := r.capFloor
+	thinkOverride := r.thinkOverride
 	overrideVer := r.overrideVersion
 	rejectionHook := r.rejectionHook
 	r.mu.RUnlock()
@@ -695,7 +718,7 @@ func (r *ModelRegistry) buildProfile(ctx context.Context, key ModelKey) (*ModelP
 
 	// Merge layers using the (override, floor, rejectionHook) snapshot
 	// taken at function entry.
-	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, rejectionHook, capProbeCaps)
+	profile := r.merge(key, runtimeInfo, staticProfile, fpProfile, parsed, override, floor, thinkOverride, rejectionHook, capProbeCaps)
 
 	// Cache the result iff the override snapshot is still current.
 	r.mu.Lock()
@@ -952,6 +975,7 @@ func (r *ModelRegistry) merge(
 	parsed ParsedModel,
 	override CapabilityOverride,
 	floor CapabilityFloor,
+	thinkOverride ThinkOverride,
 	rejectionHook OverrideRejectionHook,
 	capProbeCaps Capability,
 ) *ModelProfile {
@@ -1129,6 +1153,24 @@ func (r *ModelRegistry) merge(
 				}
 			case parsedCaps != 0:
 				profile.Caps = parsedCaps
+			}
+		}
+	}
+
+	// Config think override (final precedence, #220). Per-field REPLACE:
+	// a nil pointer keeps the merged value; non-nil replaces it. Unlike
+	// capabilities there is no parse step to reject — config.validate
+	// already rejected bad enum strings at load time. Passed in by
+	// buildProfile (not read from r) for the same TOCTOU reason as the
+	// capability override. Touches ThinkMode/ThinkTags only — never Caps.
+	if thinkOverride != nil {
+		if mode, tags := thinkOverride(key); mode != nil || tags != nil {
+			if mode != nil {
+				profile.ThinkMode = *mode
+			}
+			if tags != nil {
+				tagsCopy := *tags
+				profile.ThinkTags = &tagsCopy
 			}
 		}
 	}
