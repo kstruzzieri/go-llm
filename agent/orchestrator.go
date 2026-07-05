@@ -116,6 +116,13 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		tokenLogged := false
 		modelStart := o.now()
 		modelResult, err := o.model.Chat(ctx, buildChatRequest(assembled, specs, req.Budget.OutputReserve, req.Options), func(c provider.ChatResponse) error {
+			if c.Thinking != "" {
+				if to, ok := obs.(ThinkingObserver); ok {
+					if terr := to.OnThinking(ctx, ThinkingEvent{Step: step, Content: c.Thinking}); terr != nil {
+						return terr
+					}
+				}
+			}
 			if c.Content == "" {
 				return nil
 			}

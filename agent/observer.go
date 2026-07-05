@@ -79,6 +79,22 @@ type PressureEvent struct {
 	Pressure Pressure
 }
 
+// ThinkingEvent reports a streamed reasoning delta from the model, separated
+// from answer content by the provider layer.
+type ThinkingEvent struct {
+	Step    int
+	Content string
+}
+
+// ThinkingObserver is an OPTIONAL extension of Observer. When an Observer
+// also implements it, the Orchestrator calls OnThinking for every reasoning
+// delta before any OnToken for the same chunk. Observers that do not
+// implement it keep today's behavior (thinking is dropped). A returned error
+// aborts Run, like the other observer callbacks.
+type ThinkingObserver interface {
+	OnThinking(ctx context.Context, e ThinkingEvent) error
+}
+
 type nopObserver struct{}
 
 func (nopObserver) OnStep(context.Context, StepEvent) error         { return nil }
