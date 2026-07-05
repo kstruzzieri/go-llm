@@ -120,6 +120,13 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		job.notice("warning: retrieve auto-index failed: " + reason + "; using file/search tools")
 	}
 
+	// Caller-owned invariant (the job is only built after embeddingChain
+	// succeeds), but self-defend: an empty chain must fail, not panic.
+	if len(job.embChain) == 0 {
+		fail("no embedding chain configured")
+		return
+	}
+
 	// Probe FIRST: a dead embedder must not create or write the store.
 	if err := probeAutoIndexEmbedder(ctx, job.embedder, job.embChain[0]); err != nil {
 		fail(err.Error())
