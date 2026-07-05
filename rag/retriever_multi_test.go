@@ -256,6 +256,69 @@ func TestRetrieveScored_usesSearchMulti(t *testing.T) {
 	}
 }
 
+func TestRetrieveScored_plainStore_dense(t *testing.T) {
+	store := &retrieverPlainStore{
+		searchResults: []SearchResult{
+			{Chunk: Chunk{ID: "c1"}, Score: 0.9, Distance: 0.1},
+			{Chunk: Chunk{ID: "c2"}, Score: 0.7, Distance: 0.3},
+		},
+	}
+	emb := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0, 0}}}}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	got, err := r.RetrieveScored(context.Background(), "q", 5, QueryContext{})
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 results, got %d", len(got))
+	}
+	for i, sr := range got {
+		if len(sr.Signals) != 1 {
+			t.Errorf("result %d: want single-signal dense result, got %v", i, sr.Signals)
+		}
+		if sr.Signals["semantic"] != sr.Score {
+			t.Errorf("result %d: semantic signal %v != Score %v", i, sr.Signals["semantic"], sr.Score)
+		}
+		if sr.RankScore != sr.Score {
+			t.Errorf("result %d: dense RankScore %v != Score %v", i, sr.RankScore, sr.Score)
+		}
+	}
+}
+
+func TestRetrieveScored_vectorOnly_skipsSearchMulti(t *testing.T) {
+	store := &retrieverMultiStore{
+		retrieverPlainStore: retrieverPlainStore{
+			searchResults: []SearchResult{{Chunk: Chunk{ID: "dense1"}, Score: 0.8, Distance: 0.2}},
+		},
+		multiResults: []ScoredResult{
+			{SearchResult: SearchResult{Chunk: Chunk{ID: "hybrid1"}}, Signals: map[string]float64{"semantic": 1}},
+		},
+	}
+	emb := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0, 0}}}}
+	r, err := NewRetrieverWithEmbedder(emb, store, WithVectorOnly())
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	got, err := r.RetrieveScored(context.Background(), "q", 5, QueryContext{})
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+	if store.searchMultiCalls != 0 {
+		t.Fatalf("SearchMulti called %d times under WithVectorOnly, want 0", store.searchMultiCalls)
+	}
+	if len(got) != 1 || got[0].Chunk.ID != "dense1" {
+		t.Fatalf("want dense result dense1, got %+v", got)
+	}
+	if got[0].Signals["semantic"] != got[0].Score {
+		t.Errorf("semantic signal %v != Score %v", got[0].Signals["semantic"], got[0].Score)
+	}
+}
+
 // seedHybridCorpus stores a small content-bearing corpus (so FTS5 is
 // populated) with orthonormal embeddings for deterministic semantic scores.
 func seedHybridCorpus(t *testing.T, store *SQLiteStore) {
