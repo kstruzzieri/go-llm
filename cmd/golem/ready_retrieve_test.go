@@ -131,6 +131,26 @@ func TestReadyRetrieve_CloseReleasesFeedbackHandle(t *testing.T) {
 	r.close() // idempotent, nil-safe second close
 }
 
+// Shutdown can race the background job: close() may run while the wrapper is
+// still warming, and markReady lands afterwards. The handle installed then can
+// never be released by close() again, so markReady must release it itself.
+func TestReadyRetrieve_MarkReadyAfterCloseReleasesHandle(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "feedback.db")
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Ping(); err != nil {
+		t.Fatal(err)
+	}
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	r.close()
+	r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
+	if err := db.Ping(); err == nil {
+		t.Fatal("markReady after close() must release the incoming feedback handle")
+	}
+}
+
 func TestReadyRetrieve_CloseNilSafe(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	r.close() // no feedback handle retained; must not panic

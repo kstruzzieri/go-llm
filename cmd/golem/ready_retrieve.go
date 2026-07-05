@@ -39,6 +39,7 @@ type readyRetrieve struct {
 	tool     agent.Tool
 	feedback *behavioralWeighterHandle
 	message  string
+	closed   bool // close() ran; a later markReady must not strand a handle
 }
 
 // newReadyRetrieve returns a wrapper in the warming state; warmingMessage is
@@ -72,14 +73,23 @@ func (r *readyRetrieve) Invoke(ctx context.Context, args json.RawMessage) (agent
 // racing outcomes cannot flap the tool.
 func (r *readyRetrieve) markReady(tool agent.Tool, message string, feedback *behavioralWeighterHandle) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 	if r.state != retrieveWarming {
+		r.mu.Unlock()
 		return
 	}
 	r.state = retrieveReady
 	r.tool = tool
 	r.message = message
-	r.feedback = feedback
+	closed := r.closed
+	if !closed {
+		r.feedback = feedback
+	}
+	r.mu.Unlock()
+	// close() already ran (shutdown raced the background job): the wrapper can
+	// never release a handle stored now, so release it here instead.
+	if closed && feedback != nil && feedback.db != nil {
+		_ = feedback.db.Close()
+	}
 }
 
 // markFailed records the terminal failure message served to the model. First
@@ -100,6 +110,7 @@ func (r *readyRetrieve) close() {
 	r.mu.Lock()
 	f := r.feedback
 	r.feedback = nil
+	r.closed = true
 	r.mu.Unlock()
 	if f != nil && f.db != nil {
 		_ = f.db.Close()
