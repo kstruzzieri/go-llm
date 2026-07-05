@@ -204,6 +204,9 @@ If a hosted backend lacks an endpoint (`/v1/completions`, embeddings, FIM, or
 tool calls), set that model's `capabilities` to the endpoints that actually work
 so the Router won't send unsupported requests.
 
+For the Golem-specific walkthrough (flags, capability probing costs, verification
+runbook), see [Running Golem against a hosted API](docs/GETTING_STARTED.md#running-golem-against-a-hosted-api).
+
 ## Terminal Quick Start
 
 Start your configured model backend first. The checked-in `models.json` defaults to a llama.cpp-compatible server at `http://127.0.0.1:8080`; see [Local model backends](#local-model-backends) for the llama-swap and Ollama setup options.
