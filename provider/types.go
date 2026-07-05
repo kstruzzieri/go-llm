@@ -375,6 +375,24 @@ func (m ThinkMode) String() string {
 	}
 }
 
+// ParseThinkModeStrict parses a user-supplied think-mode string. Unlike the
+// catalog's lenient parser (trusted embedded data, defaults to none), user
+// config fails loud on unknown values.
+func ParseThinkModeStrict(s string) (ThinkMode, error) {
+	switch strings.ToLower(s) {
+	case "none":
+		return ThinkNone, nil
+	case "always":
+		return ThinkAlways, nil
+	case "toggle":
+		return ThinkToggle, nil
+	case "auto":
+		return ThinkAuto, nil
+	default:
+		return ThinkNone, fmt.Errorf("unknown think_mode %q (want none, always, toggle, or auto)", s)
+	}
+}
+
 // ThinkTags defines the delimiters used to wrap thinking blocks in model output.
 type ThinkTags struct {
 	Open  string

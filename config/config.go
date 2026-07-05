@@ -74,6 +74,20 @@ type ModelConfig struct {
 	Dimensions    int      `json:"dimensions,omitempty"`
 	Capabilities  []string `json:"capabilities,omitempty"`
 	Fallbacks     []string `json:"fallbacks,omitempty"`
+	// ThinkMode optionally overrides the catalog/inferred think mode for
+	// this model: "none", "always", "toggle", or "auto" (lowercased at
+	// load). Empty means no override. Invalid values fail Load — user
+	// config fails loud, unlike the lenient embedded-catalog parser.
+	ThinkMode string `json:"think_mode,omitempty"`
+	// ThinkTags optionally overrides the reasoning tag delimiters.
+	ThinkTags *ThinkTagsConfig `json:"think_tags,omitempty"`
+}
+
+// ThinkTagsConfig is the models.json shape for custom reasoning delimiters.
+// Both fields are required when the object is present and must differ.
+type ThinkTagsConfig struct {
+	Open  string `json:"open"`
+	Close string `json:"close"`
 }
 
 // Config is the top-level configuration loaded from models.json.
@@ -542,6 +556,29 @@ func (cfg *Config) validate() error {
 				return fmt.Errorf("config: model %q: implicit provider \"ollama\" not found", role)
 			}
 			return fmt.Errorf("config: model %q: provider %q not found", role, providerKey)
+		}
+
+		// Validate and normalize think_mode (strict — user config fails loud
+		// on unknown values, unlike the lenient embedded-catalog parser).
+		// Write the lowercased value back so callers see the normalized form.
+		if m.ThinkMode != "" {
+			mode, err := provider.ParseThinkModeStrict(m.ThinkMode)
+			if err != nil {
+				return fmt.Errorf("config: model %q: %w", role, err)
+			}
+			m.ThinkMode = mode.String()
+			cfg.Models[role] = m
+		}
+
+		// Validate think_tags: both delimiters required and must differ.
+		// Tags-only overrides (no think_mode) are allowed.
+		if tt := m.ThinkTags; tt != nil {
+			if tt.Open == "" || tt.Close == "" {
+				return fmt.Errorf("config: model %q: think_tags requires both open and close", role)
+			}
+			if tt.Open == tt.Close {
+				return fmt.Errorf("config: model %q: think_tags open and close must differ", role)
+			}
 		}
 
 		// Validate fallbacks.
