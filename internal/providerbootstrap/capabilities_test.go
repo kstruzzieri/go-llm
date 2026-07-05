@@ -2,6 +2,7 @@ package providerbootstrap
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -144,5 +145,127 @@ func TestInstallCapabilityFloors_NilSafe(t *testing.T) {
 func TestInstallCapabilityOverrides_NilSafe(t *testing.T) {
 	if err := installCapabilityOverrides(nil, nil); err != nil {
 		t.Fatalf("installCapabilityOverrides(nil,nil) = %v, want nil", err)
+	}
+}
+
+func TestInstallThinkOverrides_NilSafe(t *testing.T) {
+	if err := installThinkOverrides(nil, nil); err != nil {
+		t.Fatalf("installThinkOverrides(nil,nil) = %v, want nil", err)
+	}
+}
+
+func TestBuildThinkOverridesSameKeyCompatibility(t *testing.T) {
+	tags := &config.ThinkTagsConfig{Open: "<r>", Close: "</r>"}
+	otherTags := &config.ThinkTagsConfig{Open: "<t>", Close: "</t>"}
+	key := provider.ModelKey{Provider: "lc", Model: "qwen"}
+
+	tests := []struct {
+		name     string
+		models   map[string]config.ModelConfig
+		wantErr  bool
+		errNames []string // role names the error must mention
+		check    func(t *testing.T, got map[provider.ModelKey]thinkOverrideEntry)
+	}{
+		{
+			name: "identical modes on same key are compatible",
+			models: map[string]config.ModelConfig{
+				"chat":   {Provider: "lc", Name: "qwen", ThinkMode: "always"},
+				"review": {Provider: "lc", Name: "qwen", ThinkMode: "always"},
+			},
+			check: func(t *testing.T, got map[provider.ModelKey]thinkOverrideEntry) {
+				e := got[key]
+				if e.mode == nil || *e.mode != provider.ThinkAlways {
+					t.Fatalf("mode = %v, want always", e.mode)
+				}
+			},
+		},
+		{
+			name: "identical tags on same key are compatible",
+			models: map[string]config.ModelConfig{
+				// Distinct pointers, equal values: compatibility must compare
+				// tag values, not re-declaration per se.
+				"chat":   {Provider: "lc", Name: "qwen", ThinkTags: tags},
+				"review": {Provider: "lc", Name: "qwen", ThinkTags: &config.ThinkTagsConfig{Open: "<r>", Close: "</r>"}},
+			},
+			check: func(t *testing.T, got map[provider.ModelKey]thinkOverrideEntry) {
+				e := got[key]
+				if e.tags == nil || *e.tags != (provider.ThinkTags{Open: "<r>", Close: "</r>"}) {
+					t.Fatalf("tags = %v, want <r>/</r>", e.tags)
+				}
+			},
+		},
+		{
+			name: "mode-only and tags-only combine per field",
+			models: map[string]config.ModelConfig{
+				"chat":   {Provider: "lc", Name: "qwen", ThinkMode: "toggle"},
+				"review": {Provider: "lc", Name: "qwen", ThinkTags: tags},
+			},
+			check: func(t *testing.T, got map[provider.ModelKey]thinkOverrideEntry) {
+				e := got[key]
+				if e.mode == nil || *e.mode != provider.ThinkToggle {
+					t.Fatalf("mode = %v, want toggle", e.mode)
+				}
+				if e.tags == nil || *e.tags != (provider.ThinkTags{Open: "<r>", Close: "</r>"}) {
+					t.Fatalf("tags = %v, want <r>/</r>", e.tags)
+				}
+			},
+		},
+		{
+			name: "conflicting modes error naming both roles",
+			models: map[string]config.ModelConfig{
+				"chat":   {Provider: "lc", Name: "qwen", ThinkMode: "always"},
+				"review": {Provider: "lc", Name: "qwen", ThinkMode: "none"},
+			},
+			wantErr:  true,
+			errNames: []string{"chat", "review"},
+		},
+		{
+			name: "conflicting tags error naming both roles",
+			models: map[string]config.ModelConfig{
+				"chat":   {Provider: "lc", Name: "qwen", ThinkTags: tags},
+				"review": {Provider: "lc", Name: "qwen", ThinkTags: otherTags},
+			},
+			wantErr:  true,
+			errNames: []string{"chat", "review"},
+		},
+		{
+			name: "invalid mode fails loud for programmatic configs",
+			models: map[string]config.ModelConfig{
+				"chat": {Provider: "lc", Name: "qwen", ThinkMode: "bogus"},
+			},
+			wantErr:  true,
+			errNames: []string{"chat"},
+		},
+		{
+			name: "entries with neither field are skipped",
+			models: map[string]config.ModelConfig{
+				"chat": {Provider: "lc", Name: "qwen"},
+			},
+			check: func(t *testing.T, got map[provider.ModelKey]thinkOverrideEntry) {
+				if len(got) != 0 {
+					t.Fatalf("overrides = %v, want empty", got)
+				}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := buildThinkOverrides(&config.Config{Models: tt.models})
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error, got %v", got)
+				}
+				for _, name := range tt.errNames {
+					if !strings.Contains(err.Error(), "\""+name+"\"") {
+						t.Fatalf("error %q does not name role %q", err, name)
+					}
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("buildThinkOverrides: %v", err)
+			}
+			tt.check(t, got)
+		})
 	}
 }

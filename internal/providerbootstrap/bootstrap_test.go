@@ -315,6 +315,62 @@ func TestNew_OpenAICompatURLOverride(t *testing.T) {
 	}
 }
 
+func TestBootstrapInstallsThinkOverride(t *testing.T) {
+	// End-to-end: think_mode/think_tags declared in config must surface on the
+	// registry profile after New; models without declarations stay untouched.
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"data":[{"id":"custom-a"},{"id":"custom-b"}]}`))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {APIFormat: "openai-compat", BaseURL: srv.URL},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat": {Provider: "lc", Name: "custom-a", Type: "dense",
+				ThinkMode: "always",
+				ThinkTags: &config.ThinkTagsConfig{Open: "<r>", Close: "</r>"}},
+			"plain": {Provider: "lc", Name: "custom-b", Type: "dense"},
+		},
+	}
+	b, err := New(ctx, Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("New(think override cfg) error: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	overridden, err := b.Models.Lookup(ctx, provider.ModelKey{Provider: "lc", Model: "custom-a"})
+	if err != nil {
+		t.Fatalf("Lookup(custom-a): %v", err)
+	}
+	if overridden.ThinkMode != provider.ThinkAlways {
+		t.Fatalf("ThinkMode = %v, want ThinkAlways", overridden.ThinkMode)
+	}
+	if overridden.ThinkTags == nil || *overridden.ThinkTags != (provider.ThinkTags{Open: "<r>", Close: "</r>"}) {
+		t.Fatalf("ThinkTags = %v, want <r>/</r>", overridden.ThinkTags)
+	}
+
+	untouched, err := b.Models.Lookup(ctx, provider.ModelKey{Provider: "lc", Model: "custom-b"})
+	if err != nil {
+		t.Fatalf("Lookup(custom-b): %v", err)
+	}
+	// inferProfile defaults unknown models to ThinkAuto — that is the
+	// no-config baseline the override must leave alone.
+	if untouched.ThinkMode != provider.ThinkAuto {
+		t.Fatalf("untouched ThinkMode = %v, want no-config baseline ThinkAuto", untouched.ThinkMode)
+	}
+	if untouched.ThinkTags != nil {
+		t.Fatalf("untouched ThinkTags = %v, want nil", untouched.ThinkTags)
+	}
+}
+
 func TestNew_BestEffortRefreshRecordsWarnings(t *testing.T) {
 	// Point ollama at an unreachable URL so RefreshModels fails; New must still
 	// succeed and record a Warning rather than error.
