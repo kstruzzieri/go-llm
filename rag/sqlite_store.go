@@ -506,6 +506,29 @@ func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
 	return nil
 }
 
+// ListSources returns the distinct source paths currently stored, sorted
+// ascending. It supports deleted-source pruning during directory indexing.
+func (s *SQLiteStore) ListSources(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT source FROM chunks ORDER BY source`)
+	if err != nil {
+		return nil, fmt.Errorf("rag: list sources: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var sources []string
+	for rows.Next() {
+		var src string
+		if err := rows.Scan(&src); err != nil {
+			return nil, fmt.Errorf("rag: scan source: %w", err)
+		}
+		sources = append(sources, src)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rag: iterate sources: %w", err)
+	}
+	return sources, nil
+}
+
 // GetBySource returns all chunks for a given source path, ordered by start_line,
 // with their embeddings. This supports incremental indexing by allowing comparison
 // of existing chunks against newly generated ones.

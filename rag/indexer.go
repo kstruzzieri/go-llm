@@ -301,10 +301,11 @@ func resolveVectorSpaceID(res EmbedResult) string {
 type IndexDirOption func(*indexDirConfig)
 
 type indexDirConfig struct {
-	extensions  map[string]bool
-	exclude     []string
-	concurrency int
-	incremental bool
+	extensions   map[string]bool
+	exclude      []string
+	concurrency  int
+	incremental  bool
+	pruneDeleted bool
 }
 
 // WithExtensions sets which file extensions to index (default: .go, .py, .ts, .tsx, .js, .md).
@@ -346,6 +347,19 @@ func WithIncremental() IndexDirOption {
 	}
 }
 
+// WithPruneDeleted enables deleted-source pruning for IndexDirectory.
+// After the walk and file indexing complete, stored sources under the
+// workspace root that are absent from the eligible file set (deleted,
+// newly excluded, or newly gitignored) are removed via DeleteBySource.
+// Sources outside the workspace root are never touched. Requires a store
+// that supports ListSources (SQLiteStore does); otherwise pruning is
+// silently skipped.
+func WithPruneDeleted() IndexDirOption {
+	return func(cfg *indexDirConfig) {
+		cfg.pruneDeleted = true
+	}
+}
+
 // IndexStatus reports the progress of an indexing operation.
 type IndexStatus struct {
 	TotalFiles   int
@@ -375,7 +389,8 @@ func (idx *Indexer) IndexDirectory(ctx context.Context, dir string, opts ...Inde
 //     (including incremental unchanged no-ops).
 //   - SkippedFiles: eligible files not attempted because ctx was already
 //     cancelled before they could be queued/started.
-//   - Errors:       per-file indexing errors plus non-fatal walk/.gitignore read errors.
+//   - Errors:       per-file indexing errors, non-fatal walk/.gitignore read
+//     errors, and prune errors when WithPruneDeleted is enabled.
 //   - InProgress:   always false in the returned final snapshot.
 func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, opts ...IndexDirOption) (IndexStatus, error) {
 	var status IndexStatus
@@ -413,10 +428,16 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 
 	// Phase 1: Walk and collect eligible file paths.
 	var files []string
+	// walkIncomplete records non-fatal access errors: an unreadable subtree
+	// silently drops out of the eligible set, so pruning against it would
+	// wrongly delete its stored sources. Missed .gitignore reads are excluded
+	// on purpose — they only grow the eligible set, which is prune-safe.
+	var walkIncomplete bool
 
 	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			walkErrors = append(walkErrors, fmt.Sprintf("cannot access %q: %v", path, err))
+			walkIncomplete = true
 			return nil
 		}
 
@@ -509,6 +530,19 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 	}
 	_ = g.Wait()
 
+	// Phase 3: Prune stored sources no longer in the eligible set. Requires a
+	// COMPLETE eligible set: a fatal walk error returns above, and non-fatal
+	// access errors set walkIncomplete, which disables pruning for this run
+	// (failure mode is "not pruned", never wrong deletion). Per-file index
+	// errors are fine: eligible-but-failed files stay in the keep set.
+	if cfg.pruneDeleted && ctx.Err() == nil {
+		if walkIncomplete {
+			indexErrors = append(indexErrors, "prune skipped: directory walk was incomplete")
+		} else {
+			indexErrors = append(indexErrors, idx.pruneDeletedSources(ctx, files)...)
+		}
+	}
+
 	status.IndexedFiles = indexed
 	status.SkippedFiles = skipped
 	status.Errors = indexErrors
@@ -521,4 +555,51 @@ func (idx *Indexer) IndexDirectoryWithStatus(ctx context.Context, dir string, op
 			dir, len(indexErrors), strings.Join(indexErrors, "; "))
 	}
 	return status, nil
+}
+
+// sourceLister is implemented by stores that can enumerate stored source
+// paths (SQLiteStore does). Pruning is silently skipped for stores without it.
+type sourceLister interface {
+	ListSources(ctx context.Context) ([]string, error)
+}
+
+// pruneDeletedSources deletes stored sources under the workspace root that
+// are not in the eligible file set from the current walk. Sources outside
+// the workspace root (or that fail to resolve to an absolute path) are
+// ignored defensively. Failures are returned as error strings in the same
+// per-item format IndexDirectoryWithStatus collects; a ListSources failure
+// yields a single entry and skips pruning entirely.
+func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []string {
+	lister, ok := idx.store.(sourceLister)
+	if !ok {
+		return nil
+	}
+
+	keep := make(map[string]bool, len(files))
+	for _, f := range files {
+		if abs, err := filepath.Abs(f); err == nil {
+			keep[abs] = true
+		}
+	}
+
+	sources, err := lister.ListSources(ctx)
+	if err != nil {
+		return []string{fmt.Sprintf("list sources for prune: %v", err)}
+	}
+
+	rootPrefix := idx.workspaceRoot + string(filepath.Separator)
+	var errs []string
+	for _, src := range sources {
+		abs, err := filepath.Abs(src)
+		if err != nil || !strings.HasPrefix(abs, rootPrefix) {
+			continue
+		}
+		if keep[abs] {
+			continue
+		}
+		if err := idx.store.DeleteBySource(ctx, src); err != nil {
+			errs = append(errs, fmt.Sprintf("prune %q: %v", src, err))
+		}
+	}
+	return errs
 }

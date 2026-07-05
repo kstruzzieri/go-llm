@@ -31,6 +31,7 @@ type indexJob struct {
 	workspaceID    string
 	requestedModel string // embChain[0], the configured primary selector
 	out            io.Writer
+	pruneDeleted   bool // drop stored sources missing from the walk (startup auto refresh only)
 }
 
 // indexResult is executeIndex's outcome. exitErr is nil on a clean run,
@@ -47,8 +48,11 @@ var indexExcludes = []string{".git", "vendor", "node_modules", ".superpowers", "
 // sidecar only for a usable+clean store, prints a summary, and returns the exit
 // outcome. (Preflight and -full removal are layered in Task 7.)
 func executeIndex(ctx context.Context, job indexJob) indexResult {
-	status, indexErr := job.indexer.IndexDirectoryWithStatus(ctx, job.root,
-		rag.WithIncremental(), rag.WithExclude(indexExcludes...))
+	dirOpts := []rag.IndexDirOption{rag.WithIncremental(), rag.WithExclude(indexExcludes...)}
+	if job.pruneDeleted {
+		dirOpts = append(dirOpts, rag.WithPruneDeleted())
+	}
+	status, indexErr := job.indexer.IndexDirectoryWithStatus(ctx, job.root, dirOpts...)
 
 	// A walk failure / cancellation aborts the command: error but no completed
 	// queue. Distinguish it from a completed run with per-file errors.
@@ -200,6 +204,8 @@ func prepareIndexStore(ctx context.Context, dbPath, sidecarPath, workspaceID str
 // required before any DB open; otherwise a copied/foreign empty DB could be
 // blessed or modified by an incremental run. The vector-space probe uses a
 // read-only store so a mismatch refusal does not create WAL/SHM or migrate.
+// Mirrored by classifyAutoIndex (auto_index.go), which maps these refusals to
+// a self-heal full rebuild; keep the checks in sync.
 func preflightExistingIndex(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string) error {
 	sc, serr := readSidecar(sidecarPath)
 	if serr != nil {

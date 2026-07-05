@@ -17,6 +17,7 @@ import (
 	"github.com/kstruzzieri/go-llm/fingerprint"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -43,6 +44,7 @@ type flags struct {
 	mcpStdio         stringSliceFlag
 	mcpHTTP          stringSliceFlag
 	noRag            bool
+	noAutoIndex      bool
 	noProjectContext bool
 	noCompress       bool
 	noMemory         bool
@@ -76,6 +78,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
+	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
@@ -100,6 +103,20 @@ func parseFlags(args []string) (flags, error) {
 		}
 	})
 	return f, nil
+}
+
+// shouldStartAutoIndex reports whether default REPL startup should run the
+// background auto-index job. Flags only: auto-path and embed-chain errors are
+// handled at the wiring site.
+func shouldStartAutoIndex(f flags) bool {
+	return !f.promptSet && !f.noAutoIndex && !f.noRag && f.ragDB == ""
+}
+
+// autoIndexEnabled is the wiring gate for the background auto-index job:
+// the flag decision plus the two startup resolution errors (auto index path,
+// embedding chain) that force the immediate enableRetrieve path instead.
+func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
+	return shouldStartAutoIndex(f) && autoErr == nil && embChainErr == nil
 }
 
 // validateFlags rejects flag values flag.Parse cannot police.
@@ -335,20 +352,38 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			feedbackDB = p
 		}
 	}
-	rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
-		noRag:           f.noRag,
-		ragDB:           f.ragDB,
-		autoDBPath:      autoDBPath,
-		autoSidecarPath: autoSidecar,
-		workspaceID:     autoWorkspaceID,
-		feedbackDB:      feedbackDB,
-	})
-	if rr.feedback != nil && rr.feedback.db != nil {
-		defer func() { _ = rr.feedback.db.Close() }()
+	embChain, embChainErr := embeddingChain(bundle.Config)
+	var retrieve agent.Tool
+	retrieveLine := ""
+	retrieveRequested := f.ragDB != "" || f.noRag
+	var ready *readyRetrieve
+	if autoIndexEnabled(f, autoErr, embChainErr) {
+		// Default REPL auto mode: register the warming wrapper now; the
+		// background job (launched after the startup notices below) flips it.
+		ready = newReadyRetrieve(warmingRetrieveMessage)
+		defer ready.close()
+		retrieve = ready
+		retrieveLine = "retrieve: auto-index warming in background"
+		// Defensive only: the non-nil wrapper already makes retrieveOmitted
+		// false, which is what actually suppresses the generic no-index notice.
+		retrieveRequested = true
+	} else {
+		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
+			noRag:           f.noRag,
+			ragDB:           f.ragDB,
+			autoDBPath:      autoDBPath,
+			autoSidecarPath: autoSidecar,
+			workspaceID:     autoWorkspaceID,
+			feedbackDB:      feedbackDB,
+		})
+		if rr.feedback != nil && rr.feedback.db != nil {
+			defer func() { _ = rr.feedback.db.Close() }()
+		}
+		retrieve = rr.tool
+		warns = append(warns, rr.warns...)
+		retrieveLine = rr.line
+		retrieveRequested = retrieveRequested || rr.suppressNotice
 	}
-	retrieve := rr.tool
-	warns = append(warns, rr.warns...)
-	retrieveLine := rr.line
 	tools, err := buildTools(root, retrieve)
 	if err != nil {
 		return err
@@ -473,7 +508,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		preflightWarns:     warns,
 		retrieveLine:       retrieveLine,
 		retrieveOmitted:    retrieveOmitted,
-		retrieveRequested:  f.ragDB != "" || f.noRag || rr.suppressNotice,
+		retrieveRequested:  retrieveRequested,
 		sessionLine:        sessionLine,
 		projectContextLine: projectContextLine,
 		memoryLine:         memoryLine,
@@ -549,6 +584,27 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			}
 		}
 	}()
+
+	if ready != nil {
+		// Launched after startup construction succeeds so async notices never
+		// interleave the synchronous startup block, and setup errors do not race
+		// the background job against deferred provider cleanup.
+		go runAutoIndex(ctx, autoIndexJob{
+			root:        root,
+			dbPath:      autoDBPath,
+			sidecarPath: autoSidecar,
+			workspaceID: autoWorkspaceID,
+			cfg:         bundle.Config,
+			router:      bundle.Router,
+			embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
+				return bundle.Router.Route(rc, rreq)
+			}, embChain),
+			embChain:   embChain,
+			feedbackDB: feedbackDB,
+			ready:      ready,
+			notice:     func(line string) { _, _ = fmt.Fprintln(stderr, line) },
+		})
+	}
 
 	if f.promptSet {
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
