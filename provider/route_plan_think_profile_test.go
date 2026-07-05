@@ -1,6 +1,13 @@
 package provider
 
-import "testing"
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/kstruzzieri/go-llm/ollama"
+)
 
 // TestRoutePlanAppliesProfileThinkParserControls verifies buildChatRequest
 // binds the selected profile's think mode/tags onto the outgoing request as
@@ -44,6 +51,83 @@ func TestRoutePlanAppliesProfileThinkParserControls(t *testing.T) {
 	// Caller's snapshot must be unmutated.
 	if rp.Request.Options.Think == nil || !*rp.Request.Options.Think {
 		t.Error("caller's RoutePlan.Request.Options.Think mutated by buildChatRequest")
+	}
+}
+
+// TestRoutePlanToggleProfileZeroOptionsKeepsAutoParse verifies that a
+// ThinkToggle profile with no caller think intent (no -think flag, no
+// effort) stamps ThinkAuto as the parse mode: the wire request is
+// untouched, so the model may still emit inline think tags, and a
+// toggle-INACTIVE parser would leak them into Content. Explicit intent
+// (Think set either way, or an effort hint) keeps toggle semantics.
+func TestRoutePlanToggleProfileZeroOptionsKeepsAutoParse(t *testing.T) {
+	tests := []struct {
+		name string
+		opts ModelOptions
+		want ThinkMode
+	}{
+		{"zero options fall back to auto", ModelOptions{}, ThinkAuto},
+		{"explicit false keeps toggle", ModelOptions{Think: Ptr(false)}, ThinkToggle},
+		{"explicit true keeps toggle", ModelOptions{Think: Ptr(true)}, ThinkToggle},
+		{"effort keeps toggle", ModelOptions{ThinkEffort: "high"}, ThinkToggle},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rp := &RoutePlan{
+				Model: "qwen3:8b",
+				Profile: &ModelProfile{
+					Key:       ModelKey{Provider: "ollama", Model: "qwen3:8b"},
+					ThinkMode: ThinkToggle,
+				},
+				Request: RoutingRequest{Options: tt.opts},
+			}
+
+			req := rp.buildChatRequest(false)
+
+			if req.ParseThinkMode == nil {
+				t.Fatal("ParseThinkMode = nil, want a stamped mode")
+			}
+			if *req.ParseThinkMode != tt.want {
+				t.Errorf("ParseThinkMode = %v, want %v", *req.ParseThinkMode, tt.want)
+			}
+		})
+	}
+}
+
+// TestRoutedToggleProfileZeroOptionsStillExtractsThinking drives the exact
+// request buildChatRequest produces for a toggle profile with zero think
+// options through the ollama provider: the stamped parse mode must keep
+// inline <think> extraction active (develop's ThinkAuto behavior), not pass
+// raw tags into Content.
+func TestRoutedToggleProfileZeroOptionsStillExtractsThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"m","message":{"role":"assistant","content":"<think>why</think>answer"},"done":true}`))
+	}))
+	defer srv.Close()
+
+	rp := &RoutePlan{
+		Model: "m",
+		Profile: &ModelProfile{
+			Key:       ModelKey{Provider: "ollama", Model: "m"},
+			ThinkMode: ThinkToggle,
+		},
+		Request: RoutingRequest{
+			Messages: []ChatMessage{{Role: "user", Content: "hi"}},
+		},
+	}
+	req := rp.buildChatRequest(false)
+
+	p := NewOllamaProvider(ollama.NewClient(ollama.WithBaseURL(srv.URL)))
+	resp, err := p.Chat(context.Background(), req)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if resp.Thinking != "why" {
+		t.Errorf("Thinking = %q, want %q", resp.Thinking, "why")
+	}
+	if resp.Content != "answer" {
+		t.Errorf("Content = %q, want %q (raw think tags must not leak)", resp.Content, "answer")
 	}
 }
 

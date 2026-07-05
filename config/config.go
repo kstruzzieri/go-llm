@@ -84,7 +84,8 @@ type ModelConfig struct {
 }
 
 // ThinkTagsConfig is the models.json shape for custom reasoning delimiters.
-// Both fields are required when the object is present and must differ.
+// Both fields are required when the object is present, must differ, and must
+// start with '<' (the streaming parser only enters tag matching on that byte).
 type ThinkTagsConfig struct {
 	Open  string `json:"open"`
 	Close string `json:"close"`
@@ -578,6 +579,12 @@ func (cfg *Config) validate() error {
 			}
 			if tt.Open == tt.Close {
 				return fmt.Errorf("config: model %q: think_tags open and close must differ", role)
+			}
+			// The streaming think parser only enters tag matching on a '<'
+			// byte; any other leading byte validates but silently never
+			// matches, so reject it here instead.
+			if tt.Open[0] != '<' || tt.Close[0] != '<' {
+				return fmt.Errorf("config: model %q: think_tags open and close must start with '<' (streaming parser constraint)", role)
 			}
 		}
 

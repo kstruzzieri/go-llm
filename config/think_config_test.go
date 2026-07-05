@@ -50,6 +50,22 @@ func TestLoad_ThinkModeValidation(t *testing.T) {
 			name:     "tags without mode allowed",
 			fragment: `"think_tags": {"open": "<think>", "close": "</think>"}`,
 		},
+		{
+			name:        "open not starting with angle bracket rejected",
+			fragment:    `"think_tags": {"open": "[[think]]", "close": "</think>"}`,
+			wantErr:     true,
+			errContains: "start with '<'",
+		},
+		{
+			name:        "close not starting with angle bracket rejected",
+			fragment:    `"think_tags": {"open": "<think>", "close": "[[/think]]"}`,
+			wantErr:     true,
+			errContains: "start with '<'",
+		},
+		{
+			name:     "non-default tags with angle brackets accepted",
+			fragment: `"think_tags": {"open": "<reasoning>", "close": "</reasoning>"}`,
+		},
 	}
 
 	for _, tt := range tests {

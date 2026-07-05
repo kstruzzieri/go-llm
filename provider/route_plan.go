@@ -784,6 +784,16 @@ func (rp *RoutePlan) buildChatRequest(stream bool) ChatRequest {
 	var parseTags *ThinkTags
 	if rp.Profile != nil {
 		mode := rp.Profile.ThinkMode
+		// A toggle-family profile with no caller think intent must parse as
+		// ThinkAuto, not ThinkToggle: the wire request is untouched, so the
+		// model may still emit inline think tags, and a toggle parser with
+		// no activating signal runs INACTIVE (passthrough) — leaking raw
+		// tags into Content. Auto-sniff is the safety net for the silent
+		// default; toggle semantics apply only when the caller expressed
+		// intent (Think set either way, or an effort hint) (#220).
+		if mode == ThinkToggle && opts.Think == nil && opts.ThinkEffort == "" {
+			mode = ThinkAuto
+		}
 		parseMode = &mode
 		if rp.Profile.ThinkTags != nil {
 			tags := *rp.Profile.ThinkTags
