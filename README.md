@@ -216,11 +216,12 @@ golem -root /path/to/project
 
 Golem starts in a read-only mode by default. It can inspect files, search the workspace, route through the configured `agent` model chain, load project instructions from `AGENTS.md`, and keep a persistent per-workspace session.
 
-Build a workspace RAG index, then start Golem with automatic retrieval enabled:
+Golem builds and refreshes the workspace RAG index automatically in the background on startup; `retrieve` reports that it is warming until the index is ready. Manual control is still available:
 
 ```bash
-golem index -root /path/to/project
-golem -root /path/to/project
+golem index -root /path/to/project              # explicit index rebuild
+golem -root /path/to/project -no-auto-index     # disable the startup refresh
+golem -root /path/to/project -no-rag            # disable retrieval entirely
 ```
 
 Use a specific config or backend endpoint:
