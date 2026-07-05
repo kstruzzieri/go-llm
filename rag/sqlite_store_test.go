@@ -78,6 +78,39 @@ func TestSQLiteStoreDeleteBySource(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreListSources(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	empty, err := store.ListSources(ctx)
+	if err != nil {
+		t.Fatalf("ListSources() on empty store error: %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("ListSources() on empty store = %v, want empty", empty)
+	}
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "one", Source: "b.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c2", Content: "two", Source: "a.go", StartLine: 1, EndLine: 1, Metadata: map[string]string{}},
+		{ID: "c3", Content: "three", Source: "a.go", StartLine: 2, EndLine: 2, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{{1, 0}, {0, 1}, {1, 1}}
+
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+
+	sources, err := store.ListSources(ctx)
+	if err != nil {
+		t.Fatalf("ListSources() error: %v", err)
+	}
+	want := []string{"a.go", "b.go"}
+	if !reflect.DeepEqual(sources, want) {
+		t.Errorf("ListSources() = %v, want %v", sources, want)
+	}
+}
+
 func TestSQLiteStoreStats(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

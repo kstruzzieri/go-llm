@@ -1982,3 +1982,146 @@ func seedIncrementalFixtureRows(t *testing.T, store *SQLiteStore, source string,
 		}
 	}
 }
+
+// --- WithPruneDeleted tests ---
+
+// newPruneTestIndexer builds an indexer backed by an in-memory SQLiteStore
+// and a mock embed server, for exercising directory prune behavior.
+func newPruneTestIndexer(t *testing.T) (*Indexer, *SQLiteStore) {
+	t.Helper()
+	var embedCount atomic.Int32
+	srv := newBatchCountingEmbedServer(4, &embedCount)
+	t.Cleanup(srv.Close)
+
+	client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	return NewIndexer(client, store, WithEmbeddingModel("test-embed")), store
+}
+
+// sourceSet lists stored sources as a membership set.
+func sourceSet(t *testing.T, store *SQLiteStore) map[string]bool {
+	t.Helper()
+	sources, err := store.ListSources(context.Background())
+	if err != nil {
+		t.Fatalf("ListSources() error: %v", err)
+	}
+	set := make(map[string]bool, len(sources))
+	for _, s := range sources {
+		set[s] = true
+	}
+	return set
+}
+
+func TestIndexDirectory_PruneDeleted_RemovesDeletedFile(t *testing.T) {
+	idx, store := newPruneTestIndexer(t)
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	keptFile := filepath.Join(tmpDir, "main.go")
+	deletedFile := filepath.Join(tmpDir, "old.go")
+	_ = os.WriteFile(keptFile, []byte("package main\n\nfunc Hello() {}\n"), 0644)
+	_ = os.WriteFile(deletedFile, []byte("package main\n\nfunc Old() {}\n"), 0644)
+
+	if err := idx.IndexDirectory(ctx, tmpDir); err != nil {
+		t.Fatalf("first IndexDirectory() error: %v", err)
+	}
+	set := sourceSet(t, store)
+	if !set[keptFile] || !set[deletedFile] {
+		t.Fatalf("expected both files indexed, got sources %v", set)
+	}
+
+	// Seed a source outside the workspace root: prune must never touch it.
+	outside := filepath.Join(t.TempDir(), "elsewhere.go")
+	outsideChunks := []Chunk{{ID: "out1", Content: "outside", Source: outside, StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}
+	if err := store.Store(ctx, outsideChunks, [][]float64{{1, 0, 0, 0}}); err != nil {
+		t.Fatalf("Store() outside chunk error: %v", err)
+	}
+
+	if err := os.Remove(deletedFile); err != nil {
+		t.Fatalf("Remove() error: %v", err)
+	}
+
+	if err := idx.IndexDirectory(ctx, tmpDir, WithIncremental(), WithPruneDeleted()); err != nil {
+		t.Fatalf("prune IndexDirectory() error: %v", err)
+	}
+
+	set = sourceSet(t, store)
+	if set[deletedFile] {
+		t.Errorf("deleted file %q still stored after prune", deletedFile)
+	}
+	if !set[keptFile] {
+		t.Errorf("kept file %q missing after prune", keptFile)
+	}
+	if !set[outside] {
+		t.Errorf("outside-root source %q was pruned; must be preserved", outside)
+	}
+}
+
+func TestIndexDirectory_PruneDeleted_RemovesExcludedSource(t *testing.T) {
+	idx, store := newPruneTestIndexer(t)
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	keptFile := filepath.Join(tmpDir, "main.go")
+	genDir := filepath.Join(tmpDir, "gen")
+	_ = os.MkdirAll(genDir, 0755)
+	excludedFile := filepath.Join(genDir, "out.go")
+	_ = os.WriteFile(keptFile, []byte("package main\n\nfunc Hello() {}\n"), 0644)
+	_ = os.WriteFile(excludedFile, []byte("package gen\n\nfunc Out() {}\n"), 0644)
+
+	if err := idx.IndexDirectory(ctx, tmpDir); err != nil {
+		t.Fatalf("first IndexDirectory() error: %v", err)
+	}
+	if set := sourceSet(t, store); !set[excludedFile] {
+		t.Fatalf("expected %q indexed on first run, got sources %v", excludedFile, set)
+	}
+
+	// Second run excludes gen/: its stored source must be pruned.
+	if err := idx.IndexDirectory(ctx, tmpDir, WithIncremental(), WithPruneDeleted(), WithExclude("gen")); err != nil {
+		t.Fatalf("prune IndexDirectory() error: %v", err)
+	}
+
+	set := sourceSet(t, store)
+	if set[excludedFile] {
+		t.Errorf("excluded file %q still stored after prune", excludedFile)
+	}
+	if !set[keptFile] {
+		t.Errorf("kept file %q missing after prune", keptFile)
+	}
+}
+
+func TestIndexDirectory_WithIncremental_PreservesDeletedWithoutPrune(t *testing.T) {
+	idx, store := newPruneTestIndexer(t)
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	keptFile := filepath.Join(tmpDir, "main.go")
+	deletedFile := filepath.Join(tmpDir, "old.go")
+	_ = os.WriteFile(keptFile, []byte("package main\n\nfunc Hello() {}\n"), 0644)
+	_ = os.WriteFile(deletedFile, []byte("package main\n\nfunc Old() {}\n"), 0644)
+
+	if err := idx.IndexDirectory(ctx, tmpDir); err != nil {
+		t.Fatalf("first IndexDirectory() error: %v", err)
+	}
+	if err := os.Remove(deletedFile); err != nil {
+		t.Fatalf("Remove() error: %v", err)
+	}
+
+	// No WithPruneDeleted: deleted sources stay (existing manual semantics).
+	if err := idx.IndexDirectory(ctx, tmpDir, WithIncremental()); err != nil {
+		t.Fatalf("incremental IndexDirectory() error: %v", err)
+	}
+
+	set := sourceSet(t, store)
+	if !set[deletedFile] {
+		t.Errorf("deleted file %q was removed without WithPruneDeleted", deletedFile)
+	}
+	if !set[keptFile] {
+		t.Errorf("kept file %q missing", keptFile)
+	}
+}
