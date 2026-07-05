@@ -19,6 +19,14 @@ type chatRequest struct {
 	Stop          []string           `json:"stop,omitempty"`
 	Tools         []chatTool         `json:"tools,omitempty"`
 	ToolChoice    string             `json:"tool_choice,omitempty"`
+
+	// ReasoningEffort and ChatTemplateKwargs carry the caller's think
+	// controls (#220). llama.cpp forwards reasoning_effort to templates
+	// that support it and honors chat_template_kwargs.enable_thinking for
+	// Qwen3-family templates; servers ignore unknown fields/kwargs. Both
+	// are omitempty so unset options leave the request unchanged.
+	ReasoningEffort    string         `json:"reasoning_effort,omitempty"`
+	ChatTemplateKwargs map[string]any `json:"chat_template_kwargs,omitempty"`
 }
 
 type chatStreamOptions struct {
