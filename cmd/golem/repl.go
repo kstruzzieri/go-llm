@@ -12,6 +12,7 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // replSession holds the per-process state the REPL needs.
@@ -42,6 +43,8 @@ type replSession struct {
 	mcpAttached  bool    // true when external MCP tools are attached (force approver)
 	obs          *observ // nil unless -trace/-telemetry enabled
 	pressureWarn bool    // enable the one-per-run context-pressure warning line
+
+	modelOptions provider.ModelOptions // per-run model options (-think)
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -162,6 +165,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		MaxSteps:       sess.maxSteps,
 		Budget:         sess.budget,
 		Approver:       approver, // nil when read-only => runtime fail-safe denies Write/Exec
+		Options:        sess.modelOptions,
 	}
 	res, runErr := sess.orch.Run(runCtx, req, observer)
 
