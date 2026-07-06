@@ -102,12 +102,10 @@ func TestScoredRetriever_vsidMismatch_errors(t *testing.T) {
 	defer server.Close()
 
 	client := ollama.NewClient(ollama.WithBaseURL(server.URL))
-	// The mock embed server returns an untagged embedding, so the delegated
-	// rag.Retriever resolves an empty query vector-space ID; against a corpus
-	// that reports a known space it trips ErrVectorSpaceMismatch on the
-	// "query produced no VectorSpaceID" branch. This exercises the prefetch ->
-	// RetrieveScored -> vsid-guard wiring; the different-but-present mismatch
-	// branch is covered directly in rag's own tests.
+	// The rag Ollama adapter wraps this mock embedding as "ollama/test-model";
+	// the corpus reports a different known space, so the delegated retriever's
+	// vsid guard rejects the query. This exercises the prefetch -> RetrieveScored
+	// -> vsid-guard wiring.
 	store := &mockProbingStore{knownIDs: []string{"space-A"}}
 	retriever := NewScoredRetriever(client, store, "test-model")
 
