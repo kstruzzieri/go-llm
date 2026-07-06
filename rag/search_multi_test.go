@@ -3,12 +3,51 @@ package rag
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
 )
 
 var errTestWeighter = errors.New("test weighter failure")
+
+func TestSearchMulti_ScoreContractAndOrder(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	chunks := []Chunk{
+		{ID: "c1", Content: "golang concurrency", Source: "main.go", StartLine: 1, EndLine: 5, Metadata: map[string]string{}},
+		{ID: "c2", Content: "python typing", Source: "ml.py", StartLine: 1, EndLine: 5, Metadata: map[string]string{}},
+		{ID: "c3", Content: "golang errors", Source: "errors.go", StartLine: 1, EndLine: 5, Metadata: map[string]string{}},
+	}
+	embeddings := [][]float64{{1, 0, 0}, {0, 1, 0}, {0.8, 0, 0.6}}
+	if err := store.Store(ctx, chunks, embeddings); err != nil {
+		t.Fatalf("Store: %v", err)
+	}
+
+	results, err := store.SearchMulti(ctx, []float64{0.9, 0, 0.1}, "golang", 3, QueryContext{Timestamp: time.Now()})
+	if err != nil {
+		t.Fatalf("SearchMulti: %v", err)
+	}
+	if len(results) != 3 {
+		t.Fatalf("want 3 results, got %d", len(results))
+	}
+
+	for i, r := range results {
+		// Score is semantic cosine similarity, honoring the store.go contract.
+		if got := r.Signals["semantic"]; math.Abs(r.Score-got) > 1e-9 {
+			t.Errorf("result %d: Score=%v, want semantic signal %v", i, r.Score, got)
+		}
+		if math.Abs(r.Score-(1-r.Distance)) > 1e-9 {
+			t.Errorf("result %d: Score=%v Distance=%v, want Score == 1-Distance", i, r.Score, r.Distance)
+		}
+		// RankScore is the fused sort key: the slice is non-increasing in RankScore.
+		if i > 0 && results[i-1].RankScore < r.RankScore {
+			t.Errorf("not sorted by RankScore: [%d]=%v < [%d]=%v",
+				i-1, results[i-1].RankScore, i, r.RankScore)
+		}
+	}
+}
 
 func TestSearchMultiBasic(t *testing.T) {
 	store := newTestStore(t)

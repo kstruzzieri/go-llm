@@ -221,6 +221,104 @@ func TestRetrieve_multiStore_vsidMismatch_skipsSearchMulti(t *testing.T) {
 	}
 }
 
+func TestRetrieveScored_usesSearchMulti(t *testing.T) {
+	store := &retrieverMultiStore{
+		multiResults: []ScoredResult{
+			{
+				SearchResult: SearchResult{Chunk: Chunk{ID: "c1"}, Score: 0.9, Distance: 0.1},
+				RankScore:    0.033,
+				Signals:      map[string]float64{"semantic": 0.9, "keyword": 0.5},
+			},
+		},
+	}
+	emb := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0, 0}}}}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	got, err := r.RetrieveScored(context.Background(), "q", 5, QueryContext{})
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+	if store.searchMultiCalls != 1 {
+		t.Fatalf("SearchMulti calls = %d, want 1", store.searchMultiCalls)
+	}
+	if len(got) != 1 || got[0].Chunk.ID != "c1" {
+		t.Fatalf("unexpected results: %+v", got)
+	}
+	// The scored surface preserves Signals (unlike Retrieve, which flattens them).
+	if got[0].Signals["keyword"] != 0.5 {
+		t.Errorf("keyword signal = %v, want 0.5 (Signals must be preserved)", got[0].Signals["keyword"])
+	}
+	if got[0].RankScore != 0.033 {
+		t.Errorf("RankScore = %v, want 0.033", got[0].RankScore)
+	}
+}
+
+func TestRetrieveScored_plainStore_dense(t *testing.T) {
+	store := &retrieverPlainStore{
+		searchResults: []SearchResult{
+			{Chunk: Chunk{ID: "c1"}, Score: 0.9, Distance: 0.1},
+			{Chunk: Chunk{ID: "c2"}, Score: 0.7, Distance: 0.3},
+		},
+	}
+	emb := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0, 0}}}}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	got, err := r.RetrieveScored(context.Background(), "q", 5, QueryContext{})
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("want 2 results, got %d", len(got))
+	}
+	for i, sr := range got {
+		if len(sr.Signals) != 1 {
+			t.Errorf("result %d: want single-signal dense result, got %v", i, sr.Signals)
+		}
+		if sr.Signals["semantic"] != sr.Score {
+			t.Errorf("result %d: semantic signal %v != Score %v", i, sr.Signals["semantic"], sr.Score)
+		}
+		if sr.RankScore != sr.Score {
+			t.Errorf("result %d: dense RankScore %v != Score %v", i, sr.RankScore, sr.Score)
+		}
+	}
+}
+
+func TestRetrieveScored_vectorOnly_skipsSearchMulti(t *testing.T) {
+	store := &retrieverMultiStore{
+		retrieverPlainStore: retrieverPlainStore{
+			searchResults: []SearchResult{{Chunk: Chunk{ID: "dense1"}, Score: 0.8, Distance: 0.2}},
+		},
+		multiResults: []ScoredResult{
+			{SearchResult: SearchResult{Chunk: Chunk{ID: "hybrid1"}}, Signals: map[string]float64{"semantic": 1}},
+		},
+	}
+	emb := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0, 0}}}}
+	r, err := NewRetrieverWithEmbedder(emb, store, WithVectorOnly())
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	got, err := r.RetrieveScored(context.Background(), "q", 5, QueryContext{})
+	if err != nil {
+		t.Fatalf("RetrieveScored: %v", err)
+	}
+	if store.searchMultiCalls != 0 {
+		t.Fatalf("SearchMulti called %d times under WithVectorOnly, want 0", store.searchMultiCalls)
+	}
+	if len(got) != 1 || got[0].Chunk.ID != "dense1" {
+		t.Fatalf("want dense result dense1, got %+v", got)
+	}
+	if got[0].Signals["semantic"] != got[0].Score {
+		t.Errorf("semantic signal %v != Score %v", got[0].Signals["semantic"], got[0].Score)
+	}
+}
+
 // seedHybridCorpus stores a small content-bearing corpus (so FTS5 is
 // populated) with orthonormal embeddings for deterministic semantic scores.
 func seedHybridCorpus(t *testing.T, store *SQLiteStore) {
@@ -279,4 +377,68 @@ func BenchmarkRetrieve(b *testing.B) {
 			}
 		}
 	})
+}
+
+func seedBenchStore(tb testing.TB, n int) *SQLiteStore {
+	tb.Helper()
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		tb.Fatalf("NewSQLiteStore: %v", err)
+	}
+	chunks := make([]Chunk, n)
+	embeddings := make([][]float64, n)
+	for i := range chunks {
+		chunks[i] = Chunk{
+			ID:       "c" + strconv.Itoa(i),
+			Content:  "alpha beta gamma delta token" + strconv.Itoa(i),
+			Source:   "f" + strconv.Itoa(i) + ".go",
+			Metadata: map[string]string{},
+		}
+		embeddings[i] = []float64{float64(i % 7), float64(i % 3), 1}
+	}
+	if err := store.Store(context.Background(), chunks, embeddings); err != nil {
+		tb.Fatalf("seed: %v", err)
+	}
+	return store
+}
+
+func TestSeedBenchStore(t *testing.T) {
+	store := seedBenchStore(t, 50)
+	defer func() { _ = store.Close() }()
+	stats, err := store.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.TotalChunks != 50 {
+		t.Fatalf("TotalChunks = %d, want 50", stats.TotalChunks)
+	}
+}
+
+// BenchmarkSearchVsSearchMulti compares dense Search against hybrid SearchMulti
+// across small/medium/large synthetic corpora (#95). Seeding happens outside the
+// timed region; report the SearchMulti/Search ratio (portable) alongside ns/op.
+func BenchmarkSearchVsSearchMulti(b *testing.B) {
+	query := []float64{1, 1, 1}
+	for _, n := range []int{100, 1000, 10000} {
+		store := seedBenchStore(b, n)
+		size := strconv.Itoa(n)
+
+		b.Run("n="+size+"/search", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := store.Search(context.Background(), query, 5); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		b.Run("n="+size+"/search_multi", func(b *testing.B) {
+			b.ReportAllocs()
+			for i := 0; i < b.N; i++ {
+				if _, err := store.SearchMulti(context.Background(), query, "alpha token", 5, QueryContext{}); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+		_ = store.Close()
+	}
 }
