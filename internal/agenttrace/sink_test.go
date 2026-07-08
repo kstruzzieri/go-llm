@@ -36,6 +36,54 @@ func readSpans(t *testing.T, path string) []map[string]any {
 	return spans
 }
 
+func TestOnToolResult_RecordsDelegatedModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.jsonl")
+	s, err := NewTelemetrySink(path, "run1", time.Unix(0, 0), func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	ro := &provider.RouteOutcome{
+		ActualModel:   provider.ModelKey{Provider: "local", Model: "coder"},
+		PlannedModel:  provider.ModelKey{Provider: "local", Model: "coder"},
+		FallbacksUsed: 0,
+	}
+	err = s.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step:    0,
+		Call:    provider.ToolCall{Function: provider.ToolCallFunction{Name: "delegate_code"}},
+		Effect:  agent.Effect{Class: agent.Read | agent.Network},
+		Invoked: true,
+		Result:  agent.ToolResult{Content: "code", RouteOutcome: ro},
+	})
+	if err != nil {
+		t.Fatalf("OnToolResult: %v", err)
+	}
+	_ = s.Close()
+
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"delegated_model":"local/coder"`) {
+		t.Fatalf("span missing delegated_model: %s", data)
+	}
+}
+
+func TestOnToolResult_OmitsDelegatedModelWhenNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.jsonl")
+	s, _ := NewTelemetrySink(path, "run1", time.Unix(0, 0), func() time.Time { return time.Unix(0, 0) })
+	_ = s.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step:    0,
+		Call:    provider.ToolCall{Function: provider.ToolCallFunction{Name: "read_file"}},
+		Effect:  agent.Effect{Class: agent.Read},
+		Invoked: true,
+		Result:  agent.ToolResult{Content: "x"},
+	})
+	_ = s.Close()
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "delegated_model") {
+		t.Fatalf("nil RouteOutcome must omit delegated_model: %s", data)
+	}
+}
+
 func TestTelemetrySink_SpansAndContentLight(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "telemetry.jsonl")
