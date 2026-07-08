@@ -592,12 +592,32 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, interruptSignals()...)
 	defer signal.Stop(sigCh)
+
+	// Interactive REPL routes Ctrl-C through replControl: mid-turn cancels the
+	// turn; a first idle Ctrl-C hints and a second quits. It also reprints the
+	// prompt under async auto-index notices so the prompt is never buried. The
+	// one-shot (-p) path keeps the plain cancel-the-turn wiring and stderr
+	// notices.
+	replCtx := ctx
+	notice := func(line string) { _, _ = fmt.Fprintln(stderr, line) }
+	onInterrupt := func() {
+		select {
+		case interrupts <- struct{}{}:
+		default:
+		}
+	}
+	if !f.promptSet {
+		var cancelREPL context.CancelFunc
+		replCtx, cancelREPL = context.WithCancel(ctx)
+		defer cancelREPL()
+		ctrl := newReplControl(stdout, stderr, interrupts, cancelREPL)
+		sess.control = ctrl
+		notice = ctrl.notice
+		onInterrupt = ctrl.interrupt
+	}
 	go func() {
 		for range sigCh {
-			select {
-			case interrupts <- struct{}{}:
-			default:
-			}
+			onInterrupt()
 		}
 	}()
 
@@ -618,14 +638,14 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			embChain:   embChain,
 			feedbackDB: feedbackDB,
 			ready:      ready,
-			notice:     func(line string) { _, _ = fmt.Fprintln(stderr, line) },
+			notice:     notice,
 		})
 	}
 
 	if f.promptSet {
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}
-	return runREPL(ctx, stdin, stdout, interrupts, sess)
+	return runREPL(replCtx, stdin, stdout, interrupts, sess)
 }
 
 func interruptSignals() []os.Signal {

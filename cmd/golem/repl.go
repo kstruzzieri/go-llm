@@ -45,6 +45,11 @@ type replSession struct {
 	pressureWarn bool    // enable the one-per-run context-pressure warning line
 
 	modelOptions provider.ModelOptions // per-run model options (-think)
+
+	// control coordinates the prompt, async notices, and Ctrl-C. nil in tests
+	// and non-interactive callers, where runREPL falls back to a plain prompt
+	// and the caller's interrupt wiring.
+	control *replControl
 }
 
 // runREPL reads lines from in, dispatching slash commands and running every
@@ -53,17 +58,24 @@ type replSession struct {
 func runREPL(ctx context.Context, in io.Reader, out io.Writer, interrupts <-chan struct{}, sess *replSession) error {
 	lr := newLineReader(in)
 	for {
-		_, _ = fmt.Fprint(out, "golem> ")
+		if sess.control != nil {
+			sess.control.prompt()
+		} else {
+			_, _ = fmt.Fprint(out, promptText)
+		}
 		line, ok, err := lr.ReadLine(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
-				return nil // ctx canceled at the prompt: exit quietly
+				return nil // ctx canceled at the prompt: exit quietly (idle Ctrl-C quit / shutdown)
 			}
 			return err // scanner failure (e.g. line too long): surface it, as before
 		}
 		if !ok {
 			_, _ = fmt.Fprintln(out)
 			return nil // EOF (Ctrl-D)
+		}
+		if sess.control != nil {
+			sess.control.enterTurn()
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
