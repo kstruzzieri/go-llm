@@ -95,5 +95,52 @@ func TestChainModelCaller_EmptyChain_UsesRecommend(t *testing.T) {
 	}
 }
 
+func TestChainModelCaller_UseCaseAndNoToolCap(t *testing.T) {
+	var got provider.RoutingRequest
+	m := &chainModelCaller{
+		chain:   []string{"local/coder"},
+		useCase: "coding",
+		route: func(ctx context.Context, rr provider.RoutingRequest) (chatStreamer, error) {
+			got = rr
+			return fakeChatStreamer{content: "ok"}, nil
+		},
+	}
+	_, err := m.Chat(context.Background(), provider.ChatRequest{
+		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if got.UseCase != "coding" {
+		t.Fatalf("UseCase = %q, want coding", got.UseCase)
+	}
+	if got.RequiredCaps&provider.CapToolCall != 0 {
+		t.Fatal("no-tools request must not require CapToolCall")
+	}
+	if !got.StrictChain || len(got.PreferredChain) != 1 {
+		t.Fatalf("expected strict chain, got %+v", got)
+	}
+}
+
+func TestChainModelCaller_EmptyUseCaseDefaultsAgent(t *testing.T) {
+	var got provider.RoutingRequest
+	m := &chainModelCaller{
+		route: func(ctx context.Context, rr provider.RoutingRequest) (chatStreamer, error) {
+			got = rr
+			return fakeChatStreamer{content: "ok"}, nil
+		},
+	}
+	_, _ = m.Chat(context.Background(), provider.ChatRequest{Messages: []provider.ChatMessage{{Role: "user", Content: "x"}}}, nil)
+	if got.UseCase != "agent" {
+		t.Fatalf("empty useCase should default to agent, got %q", got.UseCase)
+	}
+}
+
+type fakeChatStreamer struct{ content string }
+
+func (f fakeChatStreamer) ExecuteChatStream(ctx context.Context, fn func(provider.ChatResponse) error) error {
+	return fn(provider.ChatResponse{Content: f.content})
+}
+
 // Compile-time assertion: chainModelCaller satisfies agent.ModelCaller.
 var _ agent.ModelCaller = (*chainModelCaller)(nil)
