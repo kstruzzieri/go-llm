@@ -120,7 +120,7 @@ func TestBuildDelegateTool_ResolvesCodingRole(t *testing.T) {
 			"coding": {Name: "coder", Provider: "local"},
 		},
 	}
-	tool, chain, err := buildDelegateTool(cfg, nil, "coding")
+	tool, chain, err := buildDelegateTool(cfg, nil, "coding", nil)
 	if err != nil {
 		t.Fatalf("buildDelegateTool: %v", err)
 	}
@@ -133,15 +133,31 @@ func TestBuildDelegateTool_ResolvesCodingRole(t *testing.T) {
 }
 
 func TestBuildDelegateTool_NilConfig(t *testing.T) {
-	if _, _, err := buildDelegateTool(nil, nil, "coding"); err == nil {
+	if _, _, err := buildDelegateTool(nil, nil, "coding", nil); err == nil {
 		t.Fatal("nil config should fail loudly, not no-op")
 	}
 }
 
 func TestBuildDelegateTool_UnknownRole(t *testing.T) {
 	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
-	if _, _, err := buildDelegateTool(cfg, nil, "coding"); err == nil {
+	if _, _, err := buildDelegateTool(cfg, nil, "coding", nil); err == nil {
 		t.Fatal("unknown role should error")
+	}
+}
+
+func TestBuildDelegateTool_WithStreamSink(t *testing.T) {
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"coding": {Name: "coder", Provider: "local"},
+		},
+	}
+	var sink = func(string) {} // non-nil sink
+	tool, _, err := buildDelegateTool(cfg, nil, "coding", sink)
+	if err != nil {
+		t.Fatalf("buildDelegateTool with sink: %v", err)
+	}
+	if tool == nil || tool.Spec().Name != "delegate_code" {
+		t.Fatalf("expected delegate_code tool, got %+v", tool)
 	}
 }
 

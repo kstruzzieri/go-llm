@@ -190,6 +190,7 @@ type startupInfo struct {
 	memoryLine         string
 	agentMemoryLine    string
 	mcpLine            string
+	delegateLine       string
 }
 
 // startupNotices renders the human-facing startup lines (written to stderr).
@@ -210,6 +211,9 @@ func startupNotices(info startupInfo) []string {
 	}
 	if info.mcpLine != "" {
 		out = append(out, info.mcpLine)
+	}
+	if info.delegateLine != "" {
+		out = append(out, info.delegateLine)
 	}
 	if info.projectContextLine != "" {
 		out = append(out, info.projectContextLine)
@@ -443,13 +447,16 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		tools = append(tools, et...)
 	}
 
+	delegateLine := ""
 	if f.delegate {
-		dt, dchain, derr := buildDelegateTool(bundle.Config, bundle.Router, f.delegateRole)
+		dt, dchain, derr := buildDelegateTool(bundle.Config, bundle.Router, f.delegateRole, func(s string) {
+			_, _ = fmt.Fprint(stderr, s)
+		})
 		if derr != nil {
 			return derr
 		}
 		tools = append(tools, dt)
-		_ = dchain // reserved for a future startup notice; not surfaced in v1
+		delegateLine = fmt.Sprintf("delegate: enabled -> %s", dchain[0])
 	}
 
 	var mcpManager *mcpclient.Manager
@@ -543,6 +550,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		memoryLine:         memoryLine,
 		agentMemoryLine:    agentMemoryLine,
 		mcpLine:            mcpLine,
+		delegateLine:       delegateLine,
 	}) {
 		_, _ = fmt.Fprintln(stderr, line)
 	}

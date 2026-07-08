@@ -44,11 +44,18 @@ func buildSystemPrompt(allowWrite, allowExec bool) string {
 	return b + golemPriorityNote
 }
 
+// delegateUseCase is the routing use-case for delegated code generation. It
+// names the TASK (code generation), not the model — the -delegate-role picks
+// the model via the StrictChain-pinned chain.
+const delegateUseCase = "coding"
+
 // buildDelegateTool resolves the delegate role chain and returns the
-// delegate_code tool backed by a caller pinned to that chain (UseCase "coding").
-// It fails when the role cannot be resolved — an explicit -delegate must not
-// silently no-op. The returned chain is for the caller wiring / a future notice.
-func buildDelegateTool(cfg *config.Config, router *provider.Router, role string) (agent.Tool, []string, error) {
+// delegate_code tool backed by a caller pinned to that chain (UseCase
+// delegateUseCase). It fails when the role cannot be resolved — an explicit
+// -delegate must not silently no-op. The returned chain is for the caller
+// wiring / the startup notice. The stream sink is optional: nil disables
+// streaming (default runs unchanged); non-nil surfaces generation progress.
+func buildDelegateTool(cfg *config.Config, router *provider.Router, role string, stream func(string)) (agent.Tool, []string, error) {
 	if cfg == nil {
 		return nil, nil, fmt.Errorf("golem: -delegate requires a models.json with a %q role; none found", role)
 	}
@@ -59,12 +66,14 @@ func buildDelegateTool(cfg *config.Config, router *provider.Router, role string)
 	if len(chain) == 0 {
 		return nil, nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
 	}
-	// UseCase "coding" describes the TASK (code generation), not the model. The
-	// role (-delegate-role) selects which model serves it via the StrictChain-
-	// pinned chain; the use-case only shapes the routing/expected-output profile,
-	// so it stays "coding" even when -delegate-role points elsewhere.
-	caller := newRouterChainCallerFor(router, chain, "coding")
-	return agenttools.NewDelegateCode(caller), chain, nil
+	// delegateUseCase describes the TASK, not the model; -delegate-role selects
+	// which model serves it via the StrictChain-pinned chain.
+	caller := newRouterChainCallerFor(router, chain, delegateUseCase)
+	var opts []agenttools.DelegateOption
+	if stream != nil {
+		opts = append(opts, agenttools.WithStream(stream))
+	}
+	return agenttools.NewDelegateCode(caller, opts...), chain, nil
 }
 
 // delegateSystemFragment is appended to the system prompt only when delegation
