@@ -42,6 +42,11 @@ type ToolResult struct {
 	Preview   string
 	Truncated bool
 	Attrib    *RetrievalAttribution // set by retrieval-style tools; copied to Message.Attrib
+	// RouteOutcome is set by tools that make their own model call (e.g.
+	// delegate_code) so the run can record which model authored the result.
+	// Nil for ordinary tools. Display-only fields (Preview) and the model-facing
+	// observation (Content) are unaffected by it.
+	RouteOutcome *provider.RouteOutcome
 }
 
 // Effect is the static, conservative upper bound for a tool.

@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"testing"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 type fakeTool struct {
@@ -82,5 +84,18 @@ func TestRegistryLookupAndProviderSpecs(t *testing.T) {
 func TestRegistryRejectsDuplicateNames(t *testing.T) {
 	if _, err := newToolRegistry([]Tool{fakeTool{name: "x"}, fakeTool{name: "x"}}); err == nil {
 		t.Fatal("duplicate tool names must error")
+	}
+}
+
+func TestToolResult_RouteOutcome_Additive(t *testing.T) {
+	ro := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "p", Model: "m"}}
+	r := ToolResult{Content: "x", RouteOutcome: ro}
+	if r.RouteOutcome == nil || r.RouteOutcome.ActualModel.Model != "m" {
+		t.Fatalf("RouteOutcome not carried: %+v", r.RouteOutcome)
+	}
+	// capOutput must not touch RouteOutcome.
+	capped := capOutput(r, 0)
+	if capped.RouteOutcome != ro {
+		t.Fatal("capOutput dropped RouteOutcome")
 	}
 }
