@@ -136,7 +136,7 @@ func TestRunREPLExitsWhenControlQuits(t *testing.T) {
 	sess.control = newReplControl(&out, &errOut, interrupts, cancel)
 
 	pr, pw := io.Pipe()
-	defer pw.Close() // unblock the lineReader goroutine at test end
+	defer func() { _ = pw.Close() }() // unblock the lineReader goroutine at test end
 
 	done := make(chan error, 1)
 	go func() { done <- runREPL(ctx, pr, &out, interrupts, sess) }()

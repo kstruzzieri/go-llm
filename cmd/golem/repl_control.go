@@ -46,7 +46,7 @@ func (c *replControl) prompt() {
 	defer c.mu.Unlock()
 	c.atPrompt = true
 	c.armed = false
-	fmt.Fprint(c.out, promptText)
+	_, _ = fmt.Fprint(c.out, promptText)
 }
 
 // enterTurn marks the REPL busy: a line was read and is being dispatched or
@@ -64,12 +64,12 @@ func (c *replControl) notice(line string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.atPrompt {
-		fmt.Fprintf(c.out, "\n%s\n%s", line, promptText)
+		_, _ = fmt.Fprintf(c.out, "\n%s\n%s", line, promptText)
 		return
 	}
 	// Mid-turn: write to stderr so the notice never splices into the renderer's
 	// stdout stream (the renderer writes stdout unsynchronized during a turn).
-	fmt.Fprintln(c.errOut, line)
+	_, _ = fmt.Fprintln(c.errOut, line)
 }
 
 // interrupt handles one Ctrl-C. Mid-turn: request turn cancellation. Idle at
@@ -90,5 +90,5 @@ func (c *replControl) interrupt() {
 		return
 	}
 	c.armed = true
-	fmt.Fprintf(c.out, "\n%s\n%s", ctrlCHint, promptText)
+	_, _ = fmt.Fprintf(c.out, "\n%s\n%s", ctrlCHint, promptText)
 }
