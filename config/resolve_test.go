@@ -3,6 +3,7 @@ package config
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -572,5 +573,41 @@ func TestConfig_RoleFallbackChain_UnknownRole(t *testing.T) {
 	_, err := cfg.RoleFallbackChain("chat")
 	if err == nil {
 		t.Fatal("expected unknown-role error, got nil")
+	}
+}
+
+func TestConfig_RoleChain_LinearAndDedupe(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"coding": {Name: "coder", Provider: "local", Fallbacks: []string{"fast"}},
+			"fast":   {Name: "speedy", Provider: "local"},
+		},
+	}
+	got, err := cfg.RoleChain("coding")
+	if err != nil {
+		t.Fatalf("RoleChain: %v", err)
+	}
+	want := []string{"local/coder", "local/speedy"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("RoleChain = %v, want %v", got, want)
+	}
+}
+
+func TestConfig_RoleChain_UnknownRole(t *testing.T) {
+	cfg := &Config{Models: map[string]ModelConfig{}}
+	if _, err := cfg.RoleChain("coding"); err == nil {
+		t.Fatal("RoleChain(unknown) = nil error, want error")
+	}
+}
+
+func TestConfig_RoleChain_CycleErrors(t *testing.T) {
+	cfg := &Config{
+		Models: map[string]ModelConfig{
+			"a": {Name: "a", Provider: "local", Fallbacks: []string{"b"}},
+			"b": {Name: "b", Provider: "local", Fallbacks: []string{"a"}},
+		},
+	}
+	if _, err := cfg.RoleChain("a"); err == nil {
+		t.Fatal("RoleChain(cycle) = nil error, want error")
 	}
 }
