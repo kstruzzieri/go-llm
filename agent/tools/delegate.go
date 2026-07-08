@@ -56,9 +56,16 @@ func (*DelegateCode) Spec() agent.ToolSpec {
 }
 
 // Effect is Read|Network (not plain Read): the tool makes an outbound model
-// call, and Network keeps it off the read-only parallel dispatch path.
+// call, and Network keeps it off the read-only parallel dispatch path. The
+// OutputCap matches the write tools' ceiling (mutateMaxBytes) so a large
+// generated proposal is not truncated below what write_file/edit_file accept.
 func (*DelegateCode) Effect() agent.Effect {
-	return agent.Effect{Class: agent.Read | agent.Network, Timeout: delegateTimeout}
+	return agent.Effect{
+		Class:     agent.Read | agent.Network,
+		Timeout:   delegateTimeout,
+		OutputCap: mutateMaxBytes,
+		Approval:  agent.ApprovalNever,
+	}
 }
 
 func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
@@ -75,7 +82,6 @@ func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 			{Role: "system", Content: delegateSystemPrompt},
 			{Role: "user", Content: args.Prompt},
 		},
-		Stream: true,
 	}
 	result, err := t.caller.Chat(ctx, req, nil)
 	if err != nil {

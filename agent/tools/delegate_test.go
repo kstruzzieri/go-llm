@@ -104,3 +104,30 @@ func TestDelegateCode_EffectAndShape(t *testing.T) {
 		t.Fatal("delegate_code must not be a PlanningTool")
 	}
 }
+
+func TestDelegateCode_SubRequestMessages(t *testing.T) {
+	fc := &fakeCaller{resp: provider.ChatResponse{Content: "x"}}
+	_, _ = NewDelegateCode(fc).Invoke(context.Background(), rawPrompt("generate a parser"))
+	msgs := fc.gotReq.Messages
+	if len(msgs) != 2 {
+		t.Fatalf("expected system+user messages, got %d", len(msgs))
+	}
+	if msgs[0].Role != "system" || !strings.Contains(msgs[0].Content, "proposal") {
+		t.Fatalf("first message must be the delegate system prompt, got %+v", msgs[0])
+	}
+	if msgs[1].Role != "user" || msgs[1].Content != "generate a parser" {
+		t.Fatalf("second message must be the user prompt verbatim, got %+v", msgs[1])
+	}
+}
+
+func TestDelegateCode_PreviewFallbackNoOutcome(t *testing.T) {
+	// nil RouteOutcome -> fallback label, never a bare slash.
+	fc := &fakeCaller{resp: provider.ChatResponse{Content: "code\nmore\n"}}
+	out, _ := NewDelegateCode(fc).Invoke(context.Background(), rawPrompt("x"))
+	if !strings.Contains(out.Preview, "specialist model") {
+		t.Fatalf("nil outcome should fall back to 'specialist model', got %q", out.Preview)
+	}
+	if strings.Contains(out.Preview, "delegated to /") {
+		t.Fatalf("must not render a bare slash for an empty model key: %q", out.Preview)
+	}
+}
