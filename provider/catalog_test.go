@@ -181,6 +181,31 @@ func TestCatalogLookupExact(t *testing.T) {
 	}
 }
 
+// TestCatalogQwen3EmbeddingResolves guards the qwen3-embedding family added so
+// the default local embedding model gets a non-zero context window. Without it,
+// catalog lookup misses, ContextWindow stays 0, and the router rejects every
+// embed request with ErrBudgetExceeded (Validate: "no context window
+// configured"), breaking RAG auto-index on the openai-compat backend (which
+// reports no context via /v1/models).
+func TestCatalogQwen3EmbeddingResolves(t *testing.T) {
+	cat, err := loadCatalog()
+	if err != nil {
+		t.Fatalf("loadCatalog() error: %v", err)
+	}
+	sc := newStaticCatalog(cat)
+
+	profile := sc.lookup("qwen3-embedding", "8b")
+	if profile == nil {
+		t.Fatal("lookup(qwen3-embedding, 8b) returned nil; RAG embed budget will reject")
+	}
+	if profile.ContextWindow <= 0 {
+		t.Errorf("ContextWindow = %d, want > 0 (0 triggers router budget reject)", profile.ContextWindow)
+	}
+	if !profile.Caps.Has(CapEmbed) {
+		t.Errorf("Caps = %v, want CapEmbed", profile.Caps)
+	}
+}
+
 func TestCatalogLookupFamilyOnly(t *testing.T) {
 	cat, err := loadCatalog()
 	if err != nil {

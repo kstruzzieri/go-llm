@@ -289,6 +289,19 @@
       "variants": {
         "latest": { "ram_required": 0.7, "ram_recommended": 1.2, "vram_recommended": 0.7, "quality": "great", "speed": "fast" }
       }
+    },
+    "qwen3-embedding": {
+      "fim": null,
+      "think_mode": "none",
+      "caps": ["embedding"],
+      "context_window": 32768,
+      "dimensions": 4096,
+      "variants": {
+        "0.6b": { "ram_required": 1.0, "ram_recommended": 1.5, "vram_recommended": 1.0, "quality": "good", "speed": "fast" },
+        "4b":   { "ram_required": 3.5, "ram_recommended": 5.0, "vram_recommended": 3.5, "quality": "great", "speed": "fast" },
+        "8b":   { "ram_required": 6.0, "ram_recommended": 8.5, "vram_recommended": 6.0, "quality": "best", "speed": "fast" },
+        "latest": { "ram_required": 6.0, "ram_recommended": 8.5, "vram_recommended": 6.0, "quality": "best", "speed": "fast" }
+      }
     }
   }
 }
