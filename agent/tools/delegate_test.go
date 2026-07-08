@@ -23,6 +23,11 @@ func (f *fakeCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken
 	if f.err != nil {
 		return agent.ModelResult{}, f.err
 	}
+	if onToken != nil {
+		if err := onToken(f.resp); err != nil {
+			return agent.ModelResult{}, err
+		}
+	}
 	return agent.ModelResult{Response: f.resp, RouteOutcome: f.outcome}, nil
 }
 
@@ -117,6 +122,45 @@ func TestDelegateCode_SubRequestMessages(t *testing.T) {
 	}
 	if msgs[1].Role != "user" || msgs[1].Content != "generate a parser" {
 		t.Fatalf("second message must be the user prompt verbatim, got %+v", msgs[1])
+	}
+}
+
+func TestDelegateCode_StreamsTokens(t *testing.T) {
+	fc := &fakeCaller{resp: provider.ChatResponse{Content: "streamed code"}}
+	var got string
+	tool := NewDelegateCode(fc, WithStream(func(s string) { got += s }))
+	if _, err := tool.Invoke(context.Background(), rawPrompt("x")); err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if got != "streamed code" {
+		t.Fatalf("stream sink got %q, want %q", got, "streamed code")
+	}
+}
+
+func TestStripCodeFence(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"plain go fence", "```go\nfunc x() {}\n```", "func x() {}"},
+		{"no lang fence", "```\nabc\n```", "abc"},
+		{"unfenced unchanged", "func x() {}", "func x() {}"},
+		{"leading text not fenced", "here:\n```\nabc\n```", "here:\n```\nabc\n```"},
+		{"multi-block markdown untouched", "```go\na\n```\ntext\n```go\nb\n```", "```go\na\n```\ntext\n```go\nb\n```"},
+		{"single line backticks untouched", "```justthis", "```justthis"},
+	}
+	for _, c := range cases {
+		if got := stripCodeFence(c.in); got != c.want {
+			t.Errorf("%s: stripCodeFence(%q) = %q, want %q", c.name, c.in, got, c.want)
+		}
+	}
+}
+
+func TestDelegateCode_StripsWrappingFence(t *testing.T) {
+	fc := &fakeCaller{resp: provider.ChatResponse{Content: "```go\npackage main\n```"}}
+	out, _ := NewDelegateCode(fc).Invoke(context.Background(), rawPrompt("x"))
+	if out.IsError {
+		t.Fatalf("unexpected error: %s", out.Content)
+	}
+	if out.Content != "package main" {
+		t.Fatalf("fence not stripped: %q", out.Content)
 	}
 }
 

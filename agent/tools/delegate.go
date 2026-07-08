@@ -27,13 +27,29 @@ const delegateSystemPrompt = "You are a code-generation specialist invoked for o
 // generated text as a NON-MUTATING tool result. It never touches disk: the
 // orchestrator integrates the result through the approval-gated write tools.
 type DelegateCode struct {
-	caller agent.ModelCaller
+	caller  agent.ModelCaller
+	onToken func(string)
+}
+
+// DelegateOption configures optional DelegateCode behavior.
+type DelegateOption func(*DelegateCode)
+
+// WithStream streams the specialist's output tokens to sink as they arrive, so a
+// caller can show progress during a long delegate call. A nil sink (or no option)
+// leaves streaming off — the tool still returns the full result. The sink is
+// display-only; it never affects the ToolResult.
+func WithStream(sink func(string)) DelegateOption {
+	return func(d *DelegateCode) { d.onToken = sink }
 }
 
 // NewDelegateCode builds the delegate_code tool over a caller pinned to the
-// delegate role chain.
-func NewDelegateCode(caller agent.ModelCaller) *DelegateCode {
-	return &DelegateCode{caller: caller}
+// delegate role chain. Pass WithStream to surface generation progress.
+func NewDelegateCode(caller agent.ModelCaller, opts ...DelegateOption) *DelegateCode {
+	d := &DelegateCode{caller: caller}
+	for _, o := range opts {
+		o(d)
+	}
+	return d
 }
 
 type delegateArgs struct {
@@ -83,7 +99,16 @@ func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 			{Role: "user", Content: args.Prompt},
 		},
 	}
-	result, err := t.caller.Chat(ctx, req, nil)
+	var onTok func(provider.ChatResponse) error
+	if t.onToken != nil {
+		onTok = func(chunk provider.ChatResponse) error {
+			if chunk.Content != "" {
+				t.onToken(chunk.Content)
+			}
+			return nil
+		}
+	}
+	result, err := t.caller.Chat(ctx, req, onTok)
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "delegate failed: " + err.Error()}, nil
 	}
@@ -91,6 +116,7 @@ func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	if content == "" {
 		return agent.ToolResult{IsError: true, Content: "delegate returned no content"}, nil
 	}
+	content = stripCodeFence(content)
 	return agent.ToolResult{
 		Content:      content,
 		Preview:      delegatePreview(result.RouteOutcome, content),
@@ -109,4 +135,33 @@ func delegatePreview(outcome *provider.RouteOutcome, content string) string {
 	}
 	lines := strings.Count(content, "\n") + 1
 	return fmt.Sprintf("delegated to %s · %d lines", model, lines)
+}
+
+// stripCodeFence removes a single outer Markdown code fence when the ENTIRE
+// content is one fenced block (```lang\n...\n```), the common way local models
+// wrap generated code despite instructions. It strips only when the content
+// starts with a fence line, ends with a closing fence, the inner body is
+// non-empty, and the body contains no further fence — so a genuine multi-block
+// Markdown document (which does not reduce to a single fence pair) is left
+// untouched.
+func stripCodeFence(s string) string {
+	if !strings.HasPrefix(s, "```") {
+		return s
+	}
+	nl := strings.IndexByte(s, '\n')
+	if nl < 0 {
+		return s // single line starting with ``` — not a real block
+	}
+	inner := strings.TrimRight(s[nl+1:], " \t\n")
+	if !strings.HasSuffix(inner, "```") {
+		return s
+	}
+	inner = strings.TrimRight(strings.TrimSuffix(inner, "```"), " \t\n")
+	if strings.TrimSpace(inner) == "" {
+		return s // empty block — leave original so the empty-content guard can catch it
+	}
+	if strings.Contains(inner, "```") {
+		return s // multi-block document — not a single wrapping fence
+	}
+	return inner
 }
