@@ -146,11 +146,19 @@ func TestBuildDelegateTool_UnknownRole(t *testing.T) {
 }
 
 func TestDelegateSystemFragment(t *testing.T) {
-	if delegateSystemFragment(false) != "" {
-		t.Fatal("fragment must be empty when delegation disabled")
+	if delegateSystemFragment(false, false) != "" || delegateSystemFragment(false, true) != "" {
+		t.Fatal("fragment must be empty when delegation disabled, regardless of allowWrite")
 	}
-	if !strings.Contains(delegateSystemFragment(true), "delegate_code") {
-		t.Fatal("enabled fragment should mention delegate_code")
+	withWrite := delegateSystemFragment(true, true)
+	if !strings.Contains(withWrite, "delegate_code") || !strings.Contains(withWrite, "write_file") {
+		t.Fatalf("write-enabled fragment should mention delegate_code and write_file: %q", withWrite)
+	}
+	noWrite := delegateSystemFragment(true, false)
+	if !strings.Contains(noWrite, "delegate_code") {
+		t.Fatalf("fragment should mention delegate_code: %q", noWrite)
+	}
+	if strings.Contains(noWrite, "write_file") || strings.Contains(noWrite, "edit_file") {
+		t.Fatalf("write-disabled fragment must not instruct writing to disk: %q", noWrite)
 	}
 }
 

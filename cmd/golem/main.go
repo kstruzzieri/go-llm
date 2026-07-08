@@ -481,7 +481,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}()
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
-	baseSystem += delegateSystemFragment(f.delegate)
+	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
 	if !f.noProjectContext {
