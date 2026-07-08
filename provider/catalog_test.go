@@ -187,6 +187,13 @@ func TestCatalogLookupExact(t *testing.T) {
 // embed request with ErrBudgetExceeded (Validate: "no context window
 // configured"), breaking RAG auto-index on the openai-compat backend (which
 // reports no context via /v1/models).
+//
+// The value is pinned to 8192 deliberately: for openai-compat the catalog IS
+// the router budget (runtime reports no context, models.json carries none for
+// embeddings), so it must equal the context the shipped llama-swap config
+// actually starts the server with -- `-c 8192` in README.md and
+// docs/GETTING_STARTED.md. Raising one without the other lets embed inputs pass
+// routing then fail at the backend. If the shipped -c changes, change both.
 func TestCatalogQwen3EmbeddingResolves(t *testing.T) {
 	cat, err := loadCatalog()
 	if err != nil {
@@ -198,8 +205,8 @@ func TestCatalogQwen3EmbeddingResolves(t *testing.T) {
 	if profile == nil {
 		t.Fatal("lookup(qwen3-embedding, 8b) returned nil; RAG embed budget will reject")
 	}
-	if profile.ContextWindow <= 0 {
-		t.Errorf("ContextWindow = %d, want > 0 (0 triggers router budget reject)", profile.ContextWindow)
+	if profile.ContextWindow != 8192 {
+		t.Errorf("ContextWindow = %d, want 8192 (must match the shipped llama-swap -c; see README/GETTING_STARTED)", profile.ContextWindow)
 	}
 	if !profile.Caps.Has(CapEmbed) {
 		t.Errorf("Caps = %v, want CapEmbed", profile.Caps)

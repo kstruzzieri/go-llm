@@ -294,7 +294,7 @@
       "fim": null,
       "think_mode": "none",
       "caps": ["embedding"],
-      "context_window": 32768,
+      "context_window": 8192,
       "dimensions": 4096,
       "variants": {
         "0.6b": { "ram_required": 1.0, "ram_recommended": 1.5, "vram_recommended": 1.0, "quality": "good", "speed": "fast" },
