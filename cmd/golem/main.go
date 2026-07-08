@@ -41,6 +41,8 @@ type flags struct {
 	sessionID        string
 	allowWrite       bool
 	allowExec        bool
+	delegate         bool
+	delegateRole     string
 	mcpStdio         stringSliceFlag
 	mcpHTTP          stringSliceFlag
 	noRag            bool
@@ -76,6 +78,8 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.fresh, "fresh", false, "start a new persistent session instead of resuming this workspace")
 	fs.BoolVar(&f.allowWrite, "allow-write", false, "enable approval-gated write_file/edit_file tools")
 	fs.BoolVar(&f.allowExec, "allow-exec", false, "enable the approval-gated run_command exec tool")
+	fs.BoolVar(&f.delegate, "delegate", false, "enable the delegate_code tool (route a scoped codegen sub-task to a specialist model)")
+	fs.StringVar(&f.delegateRole, "delegate-role", "coding", "model role the delegate_code tool routes to")
 	fs.Var(&f.mcpStdio, "mcp-stdio", "attach an MCP server over stdio: \"[alias=]command args...\" (repeatable; use `env KEY=val cmd` for env vars)")
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
@@ -439,6 +443,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		tools = append(tools, et...)
 	}
 
+	if f.delegate {
+		dt, dchain, derr := buildDelegateTool(bundle.Config, bundle.Router, f.delegateRole)
+		if derr != nil {
+			return derr
+		}
+		tools = append(tools, dt)
+		_ = dchain // reserved for a future startup notice; not surfaced in v1
+	}
+
 	var mcpManager *mcpclient.Manager
 	mcpAttached := false
 	mcpLine := ""
@@ -468,6 +481,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}()
 
 	baseSystem := buildSystemPrompt(f.allowWrite, f.allowExec)
+	baseSystem += delegateSystemFragment(f.delegate)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
 	if !f.noProjectContext {

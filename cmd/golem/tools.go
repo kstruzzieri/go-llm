@@ -44,6 +44,34 @@ func buildSystemPrompt(allowWrite, allowExec bool) string {
 	return b + golemPriorityNote
 }
 
+// buildDelegateTool resolves the delegate role chain and returns the
+// delegate_code tool backed by a caller pinned to that chain (UseCase "coding").
+// It fails when the role cannot be resolved — an explicit -delegate must not
+// silently no-op. The returned chain is for the caller wiring / a future notice.
+func buildDelegateTool(cfg *config.Config, router *provider.Router, role string) (agent.Tool, []string, error) {
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("golem: -delegate requires a models.json with a %q role; none found", role)
+	}
+	chain, err := cfg.RoleChain(role)
+	if err != nil {
+		return nil, nil, fmt.Errorf("golem: -delegate-role %q: %w", role, err)
+	}
+	if len(chain) == 0 {
+		return nil, nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
+	}
+	caller := newRouterChainCallerFor(router, chain, "coding")
+	return agenttools.NewDelegateCode(caller), chain, nil
+}
+
+// delegateSystemFragment is appended to the system prompt only when delegation
+// is enabled. Empty otherwise so default runs are byte-for-byte unchanged.
+func delegateSystemFragment(enabled bool) string {
+	if !enabled {
+		return ""
+	}
+	return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model. The result is a proposal: review it, then write it with write_file or edit_file. Use delegate_code for bulk generation, never for planning or decisions, and stay responsible for what you apply."
+}
+
 // buildExecTools constructs the approval-gated exec tool set bound to one Workspace
 // over root. Returned only when -allow-exec is set.
 func buildExecTools(root string) ([]agent.Tool, error) {

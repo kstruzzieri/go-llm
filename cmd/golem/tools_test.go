@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
 )
 
 // stubTool is a minimal agent.Tool to stand in for retrieve.
@@ -110,6 +111,46 @@ func TestBuildExecTools(t *testing.T) {
 	}
 	if len(tools) != 1 || tools[0].Spec().Name != "run_command" {
 		t.Fatalf("got %d tools", len(tools))
+	}
+}
+
+func TestBuildDelegateTool_ResolvesCodingRole(t *testing.T) {
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"coding": {Name: "coder", Provider: "local"},
+		},
+	}
+	tool, chain, err := buildDelegateTool(cfg, nil, "coding")
+	if err != nil {
+		t.Fatalf("buildDelegateTool: %v", err)
+	}
+	if tool == nil || tool.Spec().Name != "delegate_code" {
+		t.Fatalf("expected delegate_code tool, got %+v", tool)
+	}
+	if len(chain) != 1 || chain[0] != "local/coder" {
+		t.Fatalf("chain = %v", chain)
+	}
+}
+
+func TestBuildDelegateTool_NilConfig(t *testing.T) {
+	if _, _, err := buildDelegateTool(nil, nil, "coding"); err == nil {
+		t.Fatal("nil config should fail loudly, not no-op")
+	}
+}
+
+func TestBuildDelegateTool_UnknownRole(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
+	if _, _, err := buildDelegateTool(cfg, nil, "coding"); err == nil {
+		t.Fatal("unknown role should error")
+	}
+}
+
+func TestDelegateSystemFragment(t *testing.T) {
+	if delegateSystemFragment(false) != "" {
+		t.Fatal("fragment must be empty when delegation disabled")
+	}
+	if !strings.Contains(delegateSystemFragment(true), "delegate_code") {
+		t.Fatal("enabled fragment should mention delegate_code")
 	}
 }
 
