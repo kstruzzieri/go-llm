@@ -53,6 +53,7 @@ func recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
 	out ToolResult) (stop bool, err error) {
 
+	rec.RouteOutcome = out.RouteOutcome
 	res.ToolCalls = append(res.ToolCalls, rec)
 	res.Events = append(res.Events, EventRecord{Step: step, Kind: "tool_result"})
 	if tro, ok := obs.(ToolResultObserver); ok {

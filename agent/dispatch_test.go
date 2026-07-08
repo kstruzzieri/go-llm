@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/provider"
@@ -57,5 +58,31 @@ func TestUnknownToolBecomesObservation(t *testing.T) {
 	}
 	if res.Answer != "recovered" || !res.ToolCalls[0].IsError {
 		t.Fatalf("unknown tool must yield IsError observation, got %+v", res.ToolCalls)
+	}
+}
+
+func TestRecordResult_CopiesRouteOutcome(t *testing.T) {
+	var res Result
+	var state State
+	ro := &provider.RouteOutcome{ActualModel: provider.ModelKey{Provider: "p", Model: "coder"}}
+	call := provider.ToolCall{Function: provider.ToolCallFunction{Name: "delegate_code"}}
+	out := ToolResult{Content: "code", RouteOutcome: ro}
+
+	stop, err := recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0, call, Effect{Class: Read | Network}, ToolCallRecord{Step: 0, Name: "delegate_code"}, out)
+	if err != nil || stop {
+		t.Fatalf("recordResult: stop=%v err=%v", stop, err)
+	}
+	if len(res.ToolCalls) != 1 || res.ToolCalls[0].RouteOutcome != ro {
+		t.Fatalf("RouteOutcome not copied into ToolCallRecord: %+v", res.ToolCalls)
+	}
+}
+
+func TestToolCallRecord_NilRouteOutcome_OmittedFromJSON(t *testing.T) {
+	b, err := json.Marshal(ToolCallRecord{Step: 1, Name: "read_file"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(b), "RouteOutcome") {
+		t.Fatalf("nil RouteOutcome should be omitted, got %s", b)
 	}
 }
