@@ -98,6 +98,9 @@ func TestDelegateCode_EffectAndShape(t *testing.T) {
 	if tool.Spec().Name != "delegate_code" {
 		t.Fatalf("name = %q", tool.Spec().Name)
 	}
+	if desc := tool.Spec().Description; strings.Contains(desc, "write_file") || strings.Contains(desc, "edit_file") {
+		t.Fatalf("static delegate description must be write-mode neutral: %q", desc)
+	}
 	eff := tool.Effect()
 	if eff.Class != (agent.Read | agent.Network) {
 		t.Fatalf("effect class = %v, want Read|Network", eff.Class)
@@ -145,6 +148,7 @@ func TestStripCodeFence(t *testing.T) {
 		{"leading text not fenced", "here:\n```\nabc\n```", "here:\n```\nabc\n```"},
 		{"multi-block markdown untouched", "```go\na\n```\ntext\n```go\nb\n```", "```go\na\n```\ntext\n```go\nb\n```"},
 		{"single line backticks untouched", "```justthis", "```justthis"},
+		{"empty wrapping fence", "```go\n   \n```", ""},
 	}
 	for _, c := range cases {
 		if got := stripCodeFence(c.in); got != c.want {
@@ -161,6 +165,17 @@ func TestDelegateCode_StripsWrappingFence(t *testing.T) {
 	}
 	if out.Content != "package main" {
 		t.Fatalf("fence not stripped: %q", out.Content)
+	}
+}
+
+func TestDelegateCode_EmptyWrappingFenceIsError(t *testing.T) {
+	fc := &fakeCaller{resp: provider.ChatResponse{Content: "```go\n   \n```"}}
+	out, err := NewDelegateCode(fc).Invoke(context.Background(), rawPrompt("x"))
+	if err != nil {
+		t.Fatalf("Invoke: %v", err)
+	}
+	if !out.IsError {
+		t.Fatalf("empty fenced content should be IsError, got %+v", out)
 	}
 }
 

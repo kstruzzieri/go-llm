@@ -449,9 +449,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 
 	delegateLine := ""
 	if f.delegate {
-		dt, dchain, derr := buildDelegateTool(bundle.Config, bundle.Router, f.delegateRole, func(s string) {
-			_, _ = fmt.Fprint(stderr, s)
-		})
+		dt, dchain, derr := buildDelegateTool(bundle.Config, bundle.Router, f.delegateRole, nil)
 		if derr != nil {
 			return derr
 		}

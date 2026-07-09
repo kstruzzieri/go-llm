@@ -60,7 +60,7 @@ func (*DelegateCode) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
 		Name: "delegate_code",
 		Description: "Delegate one self-contained code-generation sub-task to a specialist coding model and return the generated code. " +
-			"Use it for bulk or boilerplate generation, not for planning or decisions. The result is a proposal: review it and write it to disk with write_file or edit_file. This tool does not modify any file.",
+			"Use it for bulk or boilerplate generation, not for planning or decisions. The result is a proposal: review it before presenting or applying it. This tool does not modify any file.",
 		Parameters: json.RawMessage(`{
   "type":"object",
   "properties":{
@@ -112,11 +112,10 @@ func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "delegate failed: " + err.Error()}, nil
 	}
-	content := strings.TrimSpace(result.Response.Content)
-	if content == "" {
+	content := stripCodeFence(strings.TrimSpace(result.Response.Content))
+	if strings.TrimSpace(content) == "" {
 		return agent.ToolResult{IsError: true, Content: "delegate returned no content"}, nil
 	}
-	content = stripCodeFence(content)
 	return agent.ToolResult{
 		Content:      content,
 		Preview:      delegatePreview(result.RouteOutcome, content),
@@ -158,7 +157,7 @@ func stripCodeFence(s string) string {
 	}
 	inner = strings.TrimRight(strings.TrimSuffix(inner, "```"), " \t\n")
 	if strings.TrimSpace(inner) == "" {
-		return s // empty block — leave original so the empty-content guard can catch it
+		return ""
 	}
 	if strings.Contains(inner, "```") {
 		return s // multi-block document — not a single wrapping fence
