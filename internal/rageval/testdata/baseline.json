@@ -44,7 +44,7 @@
         "duplicate_rate_at_10": 0,
         "context_precision_at_5": 0.51,
         "context_precision_at_10": 0.27,
-        "average_context_tokens_at_5": 736.7,
+        "average_context_tokens_at_5": 732.4,
         "average_context_tokens_at_10": 1477.65,
         "cold_latency_ms": {
           "count": 20,
@@ -67,9 +67,9 @@
           "result_ids": [
             "auth_handler_login",
             "middleware_require_auth",
-            "api_router_new",
             "auth_service_login",
             "users_repository_find",
+            "api_router_new",
             "errors_app_error",
             "config_loader_load",
             "orders_service_place",
@@ -152,9 +152,9 @@
           ],
           "result_ids": [
             "middleware_require_auth",
-            "api_router_new",
             "auth_handler_login",
             "auth_service_login",
+            "api_router_new",
             "users_repository_find",
             "errors_app_error",
             "config_loader_load",
@@ -196,8 +196,8 @@
           "result_ids": [
             "payments_client_charge",
             "shipping_service_create",
-            "orders_service_place",
             "config_loader_load",
+            "orders_service_place",
             "inventory_service_reserve",
             "errors_app_error",
             "orders_repository_save",
@@ -420,8 +420,8 @@
             "users_repository_find"
           ],
           "result_ids": [
-            "auth_service_login",
             "users_repository_find",
+            "auth_service_login",
             "auth_handler_login",
             "middleware_require_auth",
             "orders_repository_save",
@@ -466,8 +466,8 @@
           "result_ids": [
             "payments_client_charge",
             "shipping_service_create",
-            "orders_service_place",
             "inventory_service_reserve",
+            "orders_service_place",
             "orders_repository_save",
             "config_loader_load",
             "errors_app_error",
@@ -511,8 +511,8 @@
             "middleware_require_auth",
             "auth_handler_login",
             "auth_service_login",
-            "api_router_new",
             "users_repository_find",
+            "api_router_new",
             "errors_app_error",
             "config_loader_load",
             "shipping_service_create",
@@ -920,8 +920,8 @@
             "shipping_service_create",
             "config_loader_load",
             "errors_app_error",
-            "orders_service_place",
             "inventory_service_reserve",
+            "orders_service_place",
             "orders_repository_save",
             "api_router_new",
             "auth_service_login",
@@ -934,7 +934,7 @@
               "mrr": 1,
               "duplicate_rate": 0,
               "context_precision_proxy": 0.4,
-              "context_tokens": 758
+              "context_tokens": 672
             },
             {
               "k": 10,
