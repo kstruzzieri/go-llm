@@ -29,7 +29,13 @@ func (c *Client) call(ctx context.Context, name string, args []string, wantJSON 
 		if wantJSON {
 			var env statusEnvelope
 			if json.Unmarshal(out, &env) == nil {
-				ce.Errors = env.Errors
+				ce.Errors = append(ce.Errors, env.Errors...)
+				for _, fnd := range env.Findings {
+					ce.Errors = append(ce.Errors, StructuredError{Code: fnd.Severity, Message: fnd.Message})
+				}
+				for _, d := range env.Diagnostics {
+					ce.Errors = append(ce.Errors, StructuredError{Code: "diagnostic", Message: d})
+				}
 			}
 		}
 		return nil, ce
@@ -91,7 +97,7 @@ func (c *Client) LockPlan(ctx context.Context, planPath string) error {
 }
 
 func (c *Client) Init(ctx context.Context) error {
-	_, err := c.call(ctx, "init", []string{"init"}, false)
+	_, err := c.call(ctx, "init", append([]string{"init"}, c.rootArgs()...), false)
 	return err
 }
 

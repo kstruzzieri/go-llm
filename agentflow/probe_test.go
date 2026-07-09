@@ -21,7 +21,7 @@ func probeReplies(topHelp string) map[string]fakeReply {
 		"--help":    {stdout: []byte(topHelp)},
 	}
 	for _, sub := range []string{
-		"lock-plan", "init-execution", "doctor", "next-step", "claim-step",
+		"init", "lock-plan", "init-execution", "doctor", "next-step", "claim-step",
 		"record-file-change", "run", "finish-step", "finish-run", "next-action", "status",
 	} {
 		replies[sub] = fakeReply{stdout: allFlags}
@@ -49,6 +49,17 @@ func TestProbe_FailsOnMissingRequiredFlag(t *testing.T) {
 	err := NewClient(f, "/ws").Probe(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "lock-plan --from-json") {
 		t.Fatalf("expected missing flag error, got %v", err)
+	}
+}
+
+func TestProbe_FailsOnMissingInitSubcommand(t *testing.T) {
+	help := "usage: agentflow {init-execution,lock-plan,record-file-change,run,finish-step,finish-run,next-step,next-action,doctor,status}"
+	replies := probeReplies(help)
+	// Simulate standalone `init` removed: `init --help` errors (no --root in usage).
+	replies["init"] = fakeReply{stdout: []byte("usage: agentflow [-h] ...\nagentflow: error: argument command: invalid choice: 'init'\n"), exit: 2}
+	f := &fakeRunner{replies: replies}
+	if err := NewClient(f, "/ws").Probe(context.Background()); err == nil {
+		t.Fatal("expected probe to fail when standalone init is unavailable")
 	}
 }
 

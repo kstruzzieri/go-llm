@@ -31,8 +31,18 @@ func (e *CommandError) Error() string {
 	return b.String()
 }
 
-// statusEnvelope is the common --json failure envelope: {"status":"invalid","errors":[...]}.
+// statusEnvelope is the common --json failure envelope. Different subcommands
+// report failure detail under different keys: lock-plan uses errors[]; doctor
+// uses findings[]; finish-step uses diagnostics[]. Capture all so CommandError
+// can surface the reason instead of a bare exit code.
 type statusEnvelope struct {
-	Status string            `json:"status"`
-	Errors []StructuredError `json:"errors"`
+	Status      string            `json:"status"`
+	Errors      []StructuredError `json:"errors"`
+	Findings    []finding         `json:"findings"`
+	Diagnostics []string          `json:"diagnostics"`
+}
+
+type finding struct {
+	Message  string `json:"message"`
+	Severity string `json:"severity"`
 }

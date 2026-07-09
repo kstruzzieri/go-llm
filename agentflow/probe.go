@@ -22,6 +22,7 @@ type featureProbe struct {
 }
 
 var requiredFeatures = []featureProbe{
+	{"init", []string{"--root"}},
 	{"lock-plan", []string{"--from-json", "--json"}},
 	{"init-execution", []string{"--root"}},
 	{"doctor", []string{"--root", "--json"}},

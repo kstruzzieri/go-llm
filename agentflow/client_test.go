@@ -3,6 +3,7 @@ package agentflow
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,37 @@ func TestClient_LockPlan_ArgvAndInvalid(t *testing.T) {
 	}
 	// lock-plan takes NO --root (Cmd.Dir handles it); it does take --from-json + --json.
 	want := []string{"lock-plan", "--from-json", "plan.json", "--json"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+}
+
+func TestClient_Doctor_SurfacesFindings(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"doctor": {stdout: []byte(`{"contract":null,"findings":[{"message":".agent/execution.contract.json is missing","severity":"error"}],"status":"failed"}`), exit: 1},
+	})
+	err := c.Doctor(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "execution.contract.json is missing") {
+		t.Fatalf("doctor error must surface findings message, got %v", err)
+	}
+}
+
+func TestClient_FinishStep_SurfacesDiagnostics(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"finish-step": {stdout: []byte(`{"completed":false,"verified":false,"diagnostics":["gate go test failed"]}`), exit: 1},
+	})
+	err := c.FinishStep(context.Background(), "P1", "A1")
+	if err == nil || !strings.Contains(err.Error(), "gate go test failed") {
+		t.Fatalf("finish-step error must surface diagnostics, got %v", err)
+	}
+}
+
+func TestClient_Init_Argv(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{"init": {exit: 0}})
+	if err := c.Init(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"init", "--root", "/ws"}
 	if !reflect.DeepEqual(f.calls[0], want) {
 		t.Fatalf("argv = %v, want %v", f.calls[0], want)
 	}
