@@ -12,6 +12,18 @@ func newTestClient(replies map[string]fakeReply) (*Client, *fakeRunner) {
 	return NewClient(f, "/ws"), f
 }
 
+func TestClient_NextAction_Argv(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{"state":"steps_pending"}`), exit: 0}})
+	st, err := c.NextAction(context.Background())
+	if err != nil || st.State != "steps_pending" {
+		t.Fatalf("st=%+v err=%v", st, err)
+	}
+	want := []string{"next-action", "--root", "/ws", "--json"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv=%v", f.calls[0])
+	}
+}
+
 func TestClient_LockPlan_ArgvAndInvalid(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{
 		"lock-plan": {stdout: []byte(`{"status":"invalid","errors":[{"code":"x","message":"m"}]}`), exit: 1},

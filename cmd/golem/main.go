@@ -292,7 +292,7 @@ func main() {
 			return
 		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
-		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) {
+		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) {
 			os.Exit(1)
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
@@ -706,6 +706,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		})
 	}
 
+	if f.planPath != "" {
+		return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
+	}
 	if f.promptSet {
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}

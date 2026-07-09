@@ -184,6 +184,31 @@ func (c *Client) FinishRun(ctx context.Context) (string, error) {
 	return filepath.Join(c.root, ".agent", "proof-pack.json"), nil
 }
 
+// NextActionState is the advisory recovery hint agentflow's next-action reports.
+// It is printed, never executed: proof state stays adapter-driven.
+type NextActionState struct {
+	State       string   `json:"state"`
+	Reason      string   `json:"reason"`
+	Command     string   `json:"command"`
+	Args        []string `json:"args"`
+	Diagnostics []string `json:"diagnostics"`
+}
+
+// NextAction returns agentflow's advisory next-action state (recovery hint).
+func (c *Client) NextAction(ctx context.Context) (NextActionState, error) {
+	out, err := c.call(ctx, "next-action", append([]string{"next-action"}, c.rootArgs("--json")...), true)
+	if err != nil {
+		return NextActionState{}, err
+	}
+	var st NextActionState
+	return st, json.Unmarshal(out, &st)
+}
+
+// Status returns agentflow's status output verbatim (printed on recovery).
+func (c *Client) Status(ctx context.Context) ([]byte, error) {
+	return c.call(ctx, "status", append([]string{"status"}, c.rootArgs()...), false)
+}
+
 func (c *Client) RecordEvidence(ctx context.Context, e EvidenceEntry) error {
 	args := append([]string{"record-evidence"}, c.rootArgs("--id", e.ID, "--claim", e.Claim, "--source", e.Source)...)
 	if e.Confidence != "" {
