@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -126,7 +127,11 @@ func findStep(p *agentflow.Plan, id string) (agentflow.Step, bool) {
 // always headless: both approval classes must be opted in up front.
 func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, f flags, root string) error {
 	// 1. Read + parse the plan document, preflight P0 gates.
-	planBytes, err := os.ReadFile(f.planPath)
+	planPath, err := resolveTaskPlanPath(f.planPath)
+	if err != nil {
+		return fmt.Errorf("resolve plan: %w", err)
+	}
+	planBytes, err := os.ReadFile(planPath)
 	if err != nil {
 		return fmt.Errorf("read plan: %w", err)
 	}
@@ -222,7 +227,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	}
 
 	// 7. Drive.
-	d := &driver{af: client, plan: &plan, planPath: f.planPath, evidence: evidence, runStep: runStep, out: stdout}
+	d := &driver{af: client, plan: &plan, planPath: planPath, evidence: evidence, runStep: runStep, out: stdout}
 	proof, err := d.run(runCtx)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %v\n", err)
@@ -231,6 +236,13 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	}
 	_, _ = fmt.Fprintf(stdout, "proof pack: %s\n", proof)
 	return nil
+}
+
+func resolveTaskPlanPath(path string) (string, error) {
+	if filepath.IsAbs(path) {
+		return path, nil
+	}
+	return filepath.Abs(path)
 }
 
 func stepGoal(s agentflow.Step) string {

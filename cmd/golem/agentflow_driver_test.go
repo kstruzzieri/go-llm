@@ -173,6 +173,28 @@ func TestRunAgentflowTask_RequiresApprovalFlags(t *testing.T) {
 	}
 }
 
+func TestResolveTaskPlanPath(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+
+	got, err := resolveTaskPlanPath(filepath.Join("plans", "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(cwd, "plans", "plan.json"); got != want {
+		t.Fatalf("relative path = %q, want %q", got, want)
+	}
+
+	abs := filepath.Join(t.TempDir(), "plan.json")
+	got, err = resolveTaskPlanPath(abs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != abs {
+		t.Fatalf("absolute path = %q, want unchanged %q", got, abs)
+	}
+}
+
 func equalSeq(a, b []string) bool {
 	if len(a) != len(b) {
 		return false
