@@ -52,12 +52,19 @@ var (
 	errParentMissing = errors.New("parent directory does not exist")
 )
 
+// ScopeGuard optionally vetoes an access by workspace-relative slash path. write
+// is true for mutations (write/remove), false for reads/listing. A non-nil error
+// denies the access. Enforced below any approver — an approved call still fails
+// if the guard denies it.
+type ScopeGuard func(rel string, write bool) error
+
 // Workspace is the single audited chokepoint for all filesystem access within the
 // agent workspace. The canonical root is resolved once at construction; no path
 // component is ever resolved through a symlink afterwards (symlink policy: never
 // follow).
 type Workspace struct {
-	root string // canonical absolute root, post-EvalSymlinks, no trailing separator
+	root  string     // canonical absolute root, post-EvalSymlinks, no trailing separator
+	guard ScopeGuard // nil => allow everything (default)
 }
 
 // NewWorkspace canonicalizes root via filepath.EvalSymlinks so the root itself
@@ -75,6 +82,21 @@ func NewWorkspace(root string) (*Workspace, error) {
 		return nil, fmt.Errorf("tools: resolve root: %w", err)
 	}
 	return &Workspace{root: canon}, nil
+}
+
+// SetScopeGuard installs (or clears with nil) the proof-mode scope guard.
+func (w *Workspace) SetScopeGuard(g ScopeGuard) { w.guard = g }
+
+// checkScope consults the guard for a cleaned absolute path.
+func (w *Workspace) checkScope(abs string, write bool) error {
+	if w.guard == nil {
+		return nil
+	}
+	rel, err := filepath.Rel(w.root, abs)
+	if err != nil {
+		return err
+	}
+	return w.guard(filepath.ToSlash(rel), write)
 }
 
 // underRoot reports whether a cleaned absolute candidate is the root or strictly
@@ -162,7 +184,16 @@ func (w *Workspace) walk(ctx context.Context, fn func(rel string, d fs.DirEntry)
 		if rel == "." {
 			return nil // skip the root entry itself
 		}
-		return fn(filepath.ToSlash(rel), d)
+		slash := filepath.ToSlash(rel)
+		if w.guard != nil {
+			if gerr := w.guard(slash, false); gerr != nil {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+		}
+		return fn(slash, d)
 	})
 }
 
@@ -174,6 +205,9 @@ func (w *Workspace) walk(ctx context.Context, fn func(rel string, d fs.DirEntry)
 func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := w.checkScope(abs, false); err != nil {
 		return "", nil, err
 	}
 	if err := w.rejectSymlinkAncestors(abs); err != nil {
@@ -200,6 +234,9 @@ func (w *Workspace) resolveFile(p string) (string, os.FileInfo, error) {
 func (w *Workspace) resolveDir(p string) (string, os.FileInfo, error) {
 	abs, err := w.cleanRel(p)
 	if err != nil {
+		return "", nil, err
+	}
+	if err := w.checkScope(abs, false); err != nil {
 		return "", nil, err
 	}
 	if err := w.rejectSymlinkAncestors(abs); err != nil {
@@ -246,6 +283,18 @@ func (w *Workspace) openDir(p string) (*os.File, error) {
 	return f, nil
 }
 
+// NewFileToolsForWorkspace builds read-only tools over an existing workspace.
+// Use this when a caller has installed a ScopeGuard that must apply to reads,
+// search, glob, and list.
+func NewFileToolsForWorkspace(ws *Workspace) []agent.Tool {
+	return []agent.Tool{
+		NewReadFile(ws),
+		NewSearch(ws),
+		NewGlob(ws),
+		NewList(ws),
+	}
+}
+
 // NewFileTools builds the full read-only tool set bound to a single workspace
 // root: read_file, search, glob, list. The consumer (e.g. cmd/golem) registers
 // the returned slice with the agent loop. All four are Read / ApprovalNever.
@@ -254,12 +303,7 @@ func NewFileTools(root string) ([]agent.Tool, error) {
 	if err != nil {
 		return nil, err
 	}
-	return []agent.Tool{
-		NewReadFile(ws),
-		NewSearch(ws),
-		NewGlob(ws),
-		NewList(ws),
-	}, nil
+	return NewFileToolsForWorkspace(ws), nil
 }
 
 // openRegularFile is the single helper for content reads. It first resolves the
@@ -296,6 +340,9 @@ func (w *Workspace) openRegularFile(p string) (*os.File, error) {
 func (w *Workspace) resolveWriteTarget(p string) (abs string, priorExists bool, err error) {
 	abs, err = w.cleanRel(p)
 	if err != nil {
+		return "", false, err
+	}
+	if err := w.checkScope(abs, true); err != nil {
 		return "", false, err
 	}
 	if err := w.rejectSymlinkAncestors(abs); err != nil {
@@ -378,6 +425,9 @@ func (w *Workspace) WriteFileAtomic(p string, content []byte) error {
 func (w *Workspace) RemoveFile(p string) error {
 	abs, err := w.cleanRel(p)
 	if err != nil {
+		return err
+	}
+	if err := w.checkScope(abs, true); err != nil {
 		return err
 	}
 	if err := w.rejectSymlinkAncestors(abs); err != nil {
