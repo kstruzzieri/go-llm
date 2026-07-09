@@ -406,3 +406,42 @@ func TestParseFlags_PromptSkipsAutoIndex(t *testing.T) {
 		t.Error("one-shot -p must not start the background auto-index")
 	}
 }
+
+func TestParseFlags_TaskMode(t *testing.T) {
+	f, err := parseFlags([]string{"-plan", "plan.json", "-approve-plan-edits", "-approve-plan-gates"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.planPath != "plan.json" || !f.approveEdits || !f.approveGates {
+		t.Fatalf("flags = %+v", f)
+	}
+}
+
+func TestValidateFlags_PlanIncompatibleWithP(t *testing.T) {
+	f := flags{planPath: "plan.json", promptSet: true, prompt: "hi"}
+	if err := validateFlags(f); err == nil {
+		t.Fatal("expected -plan + -p to be rejected")
+	}
+}
+
+func TestValidateFlags_PlanRejectsAmbientToolFlags(t *testing.T) {
+	for _, f := range []flags{
+		{planPath: "plan.json", allowExec: true},
+		{planPath: "plan.json", allowWrite: true},
+		{planPath: "plan.json", ragDB: "/tmp/rag.db"},
+		{planPath: "plan.json", delegate: true},
+		{planPath: "plan.json", mcpStdio: stringSliceFlag{"server"}},
+		{planPath: "plan.json", mcpHTTP: stringSliceFlag{"https://example.invalid/mcp"}},
+	} {
+		if err := validateFlags(f); err == nil {
+			t.Fatalf("expected proof-mode ambient tool flag to be rejected: %+v", f)
+		}
+	}
+}
+
+func TestApplyTaskMode_DisablesPersistentAndAmbientState(t *testing.T) {
+	f, _ := applyTaskMode(flags{planPath: "plan.json", agentMemory: true})
+	if !f.noSession || !f.noCompress || !f.noMemory || !f.noAutoIndex || !f.noRag || f.agentMemory {
+		t.Fatalf("task-mode defaults not applied: %+v", f)
+	}
+}
