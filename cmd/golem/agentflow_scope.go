@@ -19,7 +19,11 @@ var errProofState = errors.New("path is under .agent/ proof state (opaque to the
 func stepScopeGuard(plan *agentflow.Plan, stepID string) tools.ScopeGuard {
 	allowed, blocked := agentflow.EffectiveScope(plan, stepID)
 	return func(rel string, write bool) error {
-		if rel == ".agent" || strings.HasPrefix(rel, ".agent/") {
+		first := rel
+		if i := strings.IndexByte(rel, '/'); i >= 0 {
+			first = rel[:i]
+		}
+		if strings.EqualFold(first, ".agent") {
 			return errProofState
 		}
 		if write {

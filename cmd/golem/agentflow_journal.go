@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -46,7 +47,13 @@ func (j *agentflowJournal) Record(rec agenttools.MutationRecord) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	if err := j.record(ctx, step, attempt, rec.Path); err != nil {
+	// Record the canonical (cleaned) rel path — the same form the Workspace
+	// scope guard validated. agentflow's record_file_change scope-checks the raw
+	// string with fnmatch (no normpath) and rejects a leading "./", so an
+	// in-scope but non-canonical model path (./src/a.go, src/../src/a.go) would
+	// otherwise be surfaced as a fatal unreceipted-edit abort.
+	cleaned := filepath.ToSlash(filepath.Clean(rec.Path))
+	if err := j.record(ctx, step, attempt, cleaned); err != nil {
 		j.mu.Lock()
 		if j.fatal == nil {
 			j.fatal = err

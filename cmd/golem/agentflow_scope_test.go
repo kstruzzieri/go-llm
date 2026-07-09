@@ -34,3 +34,30 @@ func TestStepScopeGuard(t *testing.T) {
 		t.Fatal(".agent write must be denied")
 	}
 }
+
+func TestStepScopeGuardAgentCaseInsensitive(t *testing.T) {
+	plan := &agentflow.Plan{
+		// Permissive allowed_files so only the .agent rule can deny a write.
+		AllowedFiles: []string{"**"},
+		Steps:        []agentflow.Step{{ID: "P1", Files: []string{".AGENT/proof-pack.json", ".Agent/x", ".agent", ".agent/receipts"}}},
+	}
+	g := stepScopeGuard(plan, "P1")
+
+	// Proof state must stay opaque on a case-insensitive filesystem (macOS APFS):
+	// deny for BOTH read and write regardless of the case the model supplies.
+	denied := []string{".AGENT/proof-pack.json", ".Agent/x", ".agent", ".agent/receipts"}
+	for _, rel := range denied {
+		if err := g(rel, false); err == nil {
+			t.Errorf("%q read must be denied by the .agent rule", rel)
+		}
+		if err := g(rel, true); err == nil {
+			t.Errorf("%q write must be denied by the .agent rule", rel)
+		}
+	}
+
+	// An unrelated top-level name that merely shares the .agent prefix is NOT
+	// proof state: the read must pass (preserving the original prefix semantics).
+	if err := g(".agentfoo", false); err != nil {
+		t.Errorf(".agentfoo read must not be denied by the .agent rule: %v", err)
+	}
+}

@@ -189,6 +189,12 @@ func (t *List) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResul
 		if base != "" {
 			rel = base + "/" + d.Name()
 		}
+		// Skip guard-denied entries so list is consistent with search/glob,
+		// whose walk consults the same guard (e.g. .agent proof state stays
+		// hidden). checkScope is a no-op when no guard is installed.
+		if t.ws.checkScope(filepath.Join(t.ws.root, rel), false) != nil {
+			continue
+		}
 		entries = append(entries, markEntry(rel, d))
 	}
 	return renderEntries(entries, truncated), nil

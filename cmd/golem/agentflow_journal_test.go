@@ -39,6 +39,27 @@ func TestAgentflowJournal_FailureLatchesAndCancels(t *testing.T) {
 	}
 }
 
+func TestAgentflowJournal_RecordsCanonicalPath(t *testing.T) {
+	// A non-canonical but in-scope model path must reach agentflow cleaned:
+	// agentflow scope-checks the raw string with fnmatch (no normpath) and
+	// rejects a leading "./", which would otherwise abort a legitimate edit.
+	for _, tc := range []struct{ raw, want string }{
+		{"./src/a.go", "src/a.go"},
+		{"src/../src/a.go", "src/a.go"},
+		{"a//b", "a/b"},
+	} {
+		var got string
+		rf := func(_ context.Context, _, _, path string) error { got = path; return nil }
+		_, cancel := context.WithCancel(context.Background())
+		j := newAgentflowJournal(rf, cancel)
+		j.setStep("P1", "A1")
+		j.Record(agenttools.MutationRecord{Path: tc.raw})
+		if got != tc.want {
+			t.Errorf("Record(%q) recorded %q, want canonical %q", tc.raw, got, tc.want)
+		}
+	}
+}
+
 func TestCompositeJournal_FansOut(t *testing.T) {
 	a, b := &recSink{}, &recSink{}
 	c := compositeJournal{sinks: []agenttools.Journal{a, b}}
