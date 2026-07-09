@@ -533,7 +533,9 @@ func TestWorkspace_ScopeGuard_DeniesReadAndWrite(t *testing.T) {
 
 func TestWorkspace_NilGuard_BackwardCompatible(t *testing.T) {
 	dir := t.TempDir()
-	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600)
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	ws, _ := NewWorkspace(dir)
 	if _, _, err := ws.resolveFile("a.txt"); err != nil {
 		t.Fatalf("nil guard must allow: %v", err)

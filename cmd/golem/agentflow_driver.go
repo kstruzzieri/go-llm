@@ -225,11 +225,11 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	d := &driver{af: client, plan: &plan, planPath: f.planPath, evidence: evidence, runStep: runStep, out: stdout}
 	proof, err := d.run(runCtx)
 	if err != nil {
-		fmt.Fprintf(stderr, "agentflow task failed: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %v\n", err)
 		reportAgentflowRecovery(ctx, stderr, client)
 		return errAgentflowTaskFailed
 	}
-	fmt.Fprintf(stdout, "proof pack: %s\n", proof)
+	_, _ = fmt.Fprintf(stdout, "proof pack: %s\n", proof)
 	return nil
 }
 
@@ -243,24 +243,24 @@ func stepGoal(s agentflow.Step) string {
 // executed, so proof state stays adapter-driven.
 func reportAgentflowRecovery(ctx context.Context, out io.Writer, client *agentflow.Client) {
 	if st, err := client.NextAction(ctx); err == nil {
-		fmt.Fprintf(out, "agentflow next-action: %s", st.State)
+		_, _ = fmt.Fprintf(out, "agentflow next-action: %s", st.State)
 		if st.Reason != "" {
-			fmt.Fprintf(out, " (%s)", st.Reason)
+			_, _ = fmt.Fprintf(out, " (%s)", st.Reason)
 		}
-		fmt.Fprintln(out)
+		_, _ = fmt.Fprintln(out)
 		if st.Command != "" {
 			cmd := st.Command
 			if len(st.Args) > 0 {
 				cmd = strings.Join(append([]string{st.Command}, st.Args...), " ")
 			}
-			fmt.Fprintf(out, "agentflow suggested command: %s\n", cmd)
+			_, _ = fmt.Fprintf(out, "agentflow suggested command: %s\n", cmd)
 		}
 		for _, d := range st.Diagnostics {
-			fmt.Fprintf(out, "  %s\n", d)
+			_, _ = fmt.Fprintf(out, "  %s\n", d)
 		}
 	}
 	if b, err := client.Status(ctx); err == nil && len(bytes.TrimSpace(b)) > 0 {
-		fmt.Fprintln(out, strings.TrimSpace(string(b)))
+		_, _ = fmt.Fprintln(out, strings.TrimSpace(string(b)))
 	}
 }
 

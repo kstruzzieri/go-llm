@@ -27,7 +27,7 @@ func stepScopeGuard(plan *agentflow.Plan, stepID string) tools.ScopeGuard {
 			return errProofState
 		}
 		if write {
-			if !(agentflow.MatchesPath(rel, allowed) && !agentflow.MatchesPath(rel, blocked)) {
+			if !agentflow.MatchesPath(rel, allowed) || agentflow.MatchesPath(rel, blocked) {
 				return fmt.Errorf("%q is outside step %s effective scope", rel, stepID)
 			}
 		}
