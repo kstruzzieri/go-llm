@@ -12,7 +12,7 @@
     "architecture_drift": 0
   },
   "evidence_ids": [],
-  "allowed_files": ["src/*"],
+  "allowed_files": ["src/*", ".agent/"],
   "blocked_files": [],
   "validation_gates": ["grep -q expected src/answer.txt"],
   "rollback_plan": "git checkout -- .",
