@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io/fs"
 	"os"
@@ -490,5 +491,91 @@ func TestWriteFileAtomicRejectsSymlinkAncestor(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(outside, "new.txt")); !os.IsNotExist(err) {
 		t.Fatal("write escaped root through symlinked ancestor")
+	}
+}
+
+func TestWorkspace_ScopeGuard_DeniesReadAndWrite(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, ".agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".agent", "plan.lock.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Guard: deny anything under .agent; deny writes outside a.txt.
+	ws.SetScopeGuard(func(rel string, write bool) error {
+		if rel == ".agent" || strings.HasPrefix(rel, ".agent/") {
+			return errors.New("proof state")
+		}
+		if write && rel != "a.txt" {
+			return errors.New("out of scope")
+		}
+		return nil
+	})
+
+	if _, _, err := ws.resolveFile(".agent/plan.lock.json"); err == nil {
+		t.Fatal("expected read of .agent to be denied")
+	}
+	if _, _, err := ws.resolveWriteTarget("b.txt"); err == nil {
+		t.Fatal("expected write of b.txt (out of scope) to be denied")
+	}
+	if _, _, err := ws.resolveWriteTarget("a.txt"); err != nil {
+		t.Fatalf("write of a.txt should pass: %v", err)
+	}
+}
+
+func TestWorkspace_NilGuard_BackwardCompatible(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws, _ := NewWorkspace(dir)
+	if _, _, err := ws.resolveFile("a.txt"); err != nil {
+		t.Fatalf("nil guard must allow: %v", err)
+	}
+}
+
+func TestNewFileToolsForWorkspace_UsesExistingGuardedWorkspace(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := NewWorkspace(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.SetScopeGuard(func(rel string, write bool) error {
+		if rel == "a.txt" {
+			return errors.New("guarded")
+		}
+		return nil
+	})
+	tools := NewFileToolsForWorkspace(ws)
+	var read agent.Tool
+	for _, tool := range tools {
+		if tool.Spec().Name == "read_file" {
+			read = tool
+			break
+		}
+	}
+	if read == nil {
+		t.Fatal("read_file not found")
+	}
+	// ReadFile.Invoke reports expected failures via ToolResult.IsError with a nil
+	// Go error (see readfile.go errResult / the invoke() helper in readfile_test.go),
+	// so the guard denial must be observed on the result, not the error return.
+	res, err := read.Invoke(context.Background(), json.RawMessage(`{"path":"a.txt"}`))
+	if err != nil {
+		t.Fatalf("Invoke returned a Go error (should be IsError ToolResult): %v", err)
+	}
+	if !res.IsError {
+		t.Fatal("read_file must use the supplied guarded workspace")
 	}
 }

@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -168,6 +169,39 @@ func TestListMarksSymlinkEntry(t *testing.T) {
 	res := invoke(t, l, map[string]any{"path": "."})
 	if !strings.Contains(res.Content, "ptr.txt (symlink)") {
 		t.Fatalf("symlink entry inside a real dir should be marked, got %q", res.Content)
+	}
+}
+
+func TestListFiltersScopeGuardedEntries(t *testing.T) {
+	root := t.TempDir()
+	writeTree(t, root, map[string]string{
+		".agent/proof-pack.json": "{}",
+		"main.go":                "package main\n",
+	})
+
+	// Without a guard, .agent is a visible entry (it is not in ignoreDirs).
+	l := NewList(mustWorkspace(t, root))
+	res := invoke(t, l, map[string]any{"path": "."})
+	if !strings.Contains(res.Content, ".agent") {
+		t.Fatalf("without a guard .agent should be listed: %q", res.Content)
+	}
+
+	// With a guard that denies .agent, list must not surface it (matching
+	// search/glob, whose walk consults the same guard), while normal entries
+	// remain visible.
+	ws := mustWorkspace(t, root)
+	ws.SetScopeGuard(func(rel string, _ bool) error {
+		if rel == ".agent" || strings.HasPrefix(rel, ".agent/") {
+			return errors.New("proof")
+		}
+		return nil
+	})
+	res = invoke(t, NewList(ws), map[string]any{"path": "."})
+	if strings.Contains(res.Content, ".agent") {
+		t.Fatalf("guard-denied .agent must not be listed: %q", res.Content)
+	}
+	if !strings.Contains(res.Content, "main.go") {
+		t.Fatalf("normal entry should still be listed: %q", res.Content)
 	}
 }
 

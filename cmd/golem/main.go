@@ -57,6 +57,11 @@ type flags struct {
 	feedback         bool
 	feedbackDB       string
 	think            string
+	planPath         string
+	approveEdits     bool
+	approveGates     bool
+	agentflowSrc     string
+	evidencePath     string
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -97,6 +102,11 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.feedback, "feedback", false, "enable optional behavioral feedback ranking (consume-only; reads a per-workspace feedback DB)")
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
+	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, and -mcp-*")
+	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
+	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
+	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
+	fs.StringVar(&f.evidencePath, "evidence", "", "optional evidence sidecar JSON object/array recorded before lock in task mode")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -151,7 +161,52 @@ func validateFlags(f flags) error {
 	if f.feedbackDB != "" && !f.feedback {
 		return fmt.Errorf("golem: -feedback-db requires -feedback")
 	}
+	if f.planPath != "" && f.promptSet {
+		return fmt.Errorf("golem: -plan (task mode) is incompatible with -p (one-shot)")
+	}
+	if f.planPath != "" && (f.allowWrite || f.allowExec) {
+		return fmt.Errorf("golem: -plan (task mode) uses -approve-plan-edits/-approve-plan-gates; do not pass -allow-write/-allow-exec")
+	}
+	if f.planPath != "" && f.ragDB != "" {
+		return fmt.Errorf("golem: -plan (task mode) does not use RAG; do not pass -rag-db")
+	}
+	if f.planPath != "" && f.delegate {
+		return fmt.Errorf("golem: -plan (task mode) does not attach delegate_code; proof-mode tools are built from the locked plan")
+	}
+	if f.planPath != "" && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
+		return fmt.Errorf("golem: -plan (task mode) does not attach MCP tools; proof-mode tools are built from the locked plan")
+	}
+	if f.planPath != "" && (!f.approveEdits || !f.approveGates) {
+		return fmt.Errorf("golem: -plan (task mode) requires both -approve-plan-edits and -approve-plan-gates")
+	}
 	return nil
+}
+
+// applyTaskMode forces the same non-interactive, ambient-state-free defaults for
+// AgentFlow task mode (-plan) that one-shot mode forces for -p, plus disabling
+// RAG/auto-index: task mode drives a locked plan with a step-scoped toolset and
+// must not open sessions, memory, compression, RAG, or the auto-index worker.
+func applyTaskMode(f flags) (flags, []string) {
+	if f.planPath == "" {
+		return f, nil
+	}
+	var warns []string
+	if f.sessionID != "" || f.fresh {
+		warns = append(warns, "task mode: -session/-fresh ignored (task mode does not persist a session)")
+	}
+	if f.feedback {
+		warns = append(warns, "task mode: -feedback ignored (task mode does not use RAG or feedback ranking)")
+	}
+	if f.trace || f.telemetry {
+		warns = append(warns, "task mode: -trace/-telemetry are not wired for the task run; the AgentFlow proof pack is the durable record")
+	}
+	f.noSession = true
+	f.noCompress = true
+	f.noMemory = true
+	f.agentMemory = false
+	f.noAutoIndex = true
+	f.noRag = true
+	return f, warns
 }
 
 // applyOneShotMode forces the scripting-safe defaults -p implies: no session
@@ -250,7 +305,7 @@ func main() {
 			return
 		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
-		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) {
+		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) {
 			os.Exit(1)
 		}
 		_, _ = fmt.Fprintf(os.Stderr, "golem: %v\n", err)
@@ -277,7 +332,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err := validateFlags(f); err != nil {
 		return err
 	}
+	f, taskWarns := applyTaskMode(f)
 	f, oneShotWarns := applyOneShotMode(f)
+	oneShotWarns = append(taskWarns, oneShotWarns...)
 
 	root, err := filepath.Abs(f.root)
 	if err != nil {
@@ -662,6 +719,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		})
 	}
 
+	if f.planPath != "" {
+		return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
+	}
 	if f.promptSet {
 		return runOneShot(ctx, stdout, stderr, interrupts, sess, f.prompt)
 	}

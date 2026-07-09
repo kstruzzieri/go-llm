@@ -406,3 +406,73 @@ func TestParseFlags_PromptSkipsAutoIndex(t *testing.T) {
 		t.Error("one-shot -p must not start the background auto-index")
 	}
 }
+
+func TestParseFlags_TaskMode(t *testing.T) {
+	f, err := parseFlags([]string{"-plan", "plan.json", "-approve-plan-edits", "-approve-plan-gates"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.planPath != "plan.json" || !f.approveEdits || !f.approveGates {
+		t.Fatalf("flags = %+v", f)
+	}
+}
+
+func TestValidateFlags_PlanIncompatibleWithP(t *testing.T) {
+	f := flags{planPath: "plan.json", promptSet: true, prompt: "hi"}
+	if err := validateFlags(f); err == nil {
+		t.Fatal("expected -plan + -p to be rejected")
+	}
+}
+
+func TestValidateFlags_PlanRejectsAmbientToolFlags(t *testing.T) {
+	for _, f := range []flags{
+		{planPath: "plan.json", allowExec: true},
+		{planPath: "plan.json", allowWrite: true},
+		{planPath: "plan.json", ragDB: "/tmp/rag.db"},
+		{planPath: "plan.json", delegate: true},
+		{planPath: "plan.json", mcpStdio: stringSliceFlag{"server"}},
+		{planPath: "plan.json", mcpHTTP: stringSliceFlag{"https://example.invalid/mcp"}},
+	} {
+		if err := validateFlags(f); err == nil {
+			t.Fatalf("expected proof-mode ambient tool flag to be rejected: %+v", f)
+		}
+	}
+}
+
+func TestApplyTaskMode_DisablesPersistentAndAmbientState(t *testing.T) {
+	f, _ := applyTaskMode(flags{planPath: "plan.json", agentMemory: true})
+	if !f.noSession || !f.noCompress || !f.noMemory || !f.noAutoIndex || !f.noRag || f.agentMemory {
+		t.Fatalf("task-mode defaults not applied: %+v", f)
+	}
+}
+
+func TestValidateFlags_PlanRequiresBothApprovals(t *testing.T) {
+	if err := validateFlags(flags{planPath: "plan.json", approveEdits: false, approveGates: true}); err == nil {
+		t.Fatal("expected error when -approve-plan-edits is missing")
+	} else if !strings.Contains(err.Error(), "-approve-plan-edits") || !strings.Contains(err.Error(), "-approve-plan-gates") {
+		t.Fatalf("error should mention both approval flags, got %v", err)
+	}
+	if err := validateFlags(flags{planPath: "plan.json", approveEdits: true, approveGates: false}); err == nil {
+		t.Fatal("expected error when -approve-plan-gates is missing")
+	} else if !strings.Contains(err.Error(), "-approve-plan-edits") || !strings.Contains(err.Error(), "-approve-plan-gates") {
+		t.Fatalf("error should mention both approval flags, got %v", err)
+	}
+	if err := validateFlags(flags{planPath: "plan.json", approveEdits: true, approveGates: true}); err != nil {
+		t.Fatalf("both approvals set should be allowed, got %v", err)
+	}
+}
+
+func TestApplyTaskMode_WarnsOnIgnoredFlags(t *testing.T) {
+	f, warns := applyTaskMode(flags{planPath: "plan.json", trace: true})
+	if len(warns) == 0 {
+		t.Fatal("expected a warning when -trace is set in task mode")
+	}
+	if !f.noSession {
+		t.Fatalf("task-mode defaults should still apply: %+v", f)
+	}
+
+	_, warns = applyTaskMode(flags{planPath: "plan.json"})
+	if len(warns) != 0 {
+		t.Fatalf("expected no warnings when no ignored flags are set, got %v", warns)
+	}
+}
