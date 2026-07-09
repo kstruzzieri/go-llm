@@ -75,6 +75,11 @@ func compileFnmatch(pattern string) *regexp.Regexp {
 				class := pattern[start:j]
 				if negate {
 					class = "^" + class
+				} else if len(class) > 0 && (class[0] == '^' || class[0] == '[') {
+					// Python fnmatch.translate: a non-negated class whose first
+					// member is '^' or '[' escapes it so RE2 reads it as a literal
+					// member, not a negation / nested class.
+					class = "\\" + class
 				}
 				b.WriteString("[" + class + "]")
 				i = j

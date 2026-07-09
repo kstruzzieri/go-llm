@@ -2,6 +2,8 @@ package agentflow
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -103,6 +105,16 @@ func TestClient_NextStep_ParsesStepOrNull(t *testing.T) {
 	}
 }
 
+func TestClient_NextStep_MalformedSuccessNamesSubcommand(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"next-step": {stdout: []byte(`{"id":`), exit: 0}, // truncated JSON, exit 0
+	})
+	_, err := c.NextStep(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "next-step") {
+		t.Fatalf("parse error must name the subcommand, got %v", err)
+	}
+}
+
 func TestClient_RunGate_ArgvArgvAfterDashDash(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{"run": {exit: 0}})
 	err := c.RunGate(context.Background(), "P1", "A1", "go test ./src", []string{"go", "test", "./src"})
@@ -147,6 +159,42 @@ func TestClient_FinishRun_StopReportsStoppedAt(t *testing.T) {
 	fr, ok := err.(*FinishRunError)
 	if !ok || fr.StoppedAt != "verify-proof" || len(fr.Diagnostics) != 1 {
 		t.Fatalf("err = %#v", err)
+	}
+}
+
+func TestClient_FinishRun_SuccessReturnsProofPath(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"finish-run": {stdout: []byte(`{"ok":true,"gates":[]}`), exit: 0},
+	})
+	path, err := c.FinishRun(context.Background())
+	if err != nil {
+		t.Fatalf("err = %v", err)
+	}
+	if want := filepath.Join("/ws", ".agent", "proof-pack.json"); path != want {
+		t.Fatalf("path = %q, want %q", path, want)
+	}
+}
+
+func TestClient_FinishRun_OKFalseZeroExitStillStops(t *testing.T) {
+	// The ok=false half of `exit != 0 || !r.OK`, exercised with exit 0.
+	c, _ := newTestClient(map[string]fakeReply{
+		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"gate:x","diagnostics":["d"]}`), exit: 0},
+	})
+	_, err := c.FinishRun(context.Background())
+	var fr *FinishRunError
+	if !errors.As(err, &fr) || fr.StoppedAt != "gate:x" {
+		t.Fatalf("err = %#v, want *FinishRunError stopped at gate:x", err)
+	}
+}
+
+func TestClient_FinishRun_UnparseableNonzeroExitIsCommandError(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"finish-run": {stdout: []byte(`not json`), stderr: []byte("boom"), exit: 2},
+	})
+	_, err := c.FinishRun(context.Background())
+	var ce *CommandError
+	if !errors.As(err, &ce) || ce.Cmd != "finish-run" || ce.Exit != 2 {
+		t.Fatalf("err = %#v, want *CommandError finish-run exit 2", err)
 	}
 }
 

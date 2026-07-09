@@ -23,6 +23,17 @@ func TestMatchesPath(t *testing.T) {
 		{"^", []string{"[a!b]"}, false}, // regression: must NOT become [a^b]
 		{"a", []string{"[!ab]"}, false}, // leading '!' negates
 		{"c", []string{"[!ab]"}, true},  // negated class allows others
+		// Leading '^' is a LITERAL member in Python fnmatch (only '!' negates),
+		// so it must not become an RE2 negation. Cross-checked against CPython:
+		// fnmatch('a','[^ab]')=True, fnmatch('z','[^ab]')=False.
+		{"a", []string{"[^ab]"}, true},  // '^','a','b' are members -> 'a' matches
+		{"z", []string{"[^ab]"}, false}, // 'z' is not a member -> no match
+		{"^", []string{"[^ab]"}, true},  // literal caret matches itself
+		// '[!ab]' still negates.
+		{"z", []string{"[!ab]"}, true},
+		{"a", []string{"[!ab]"}, false},
+		// A '^' in a non-leading position is already a literal member.
+		{"^", []string{"[a^b]"}, true},
 	}
 	for _, c := range cases {
 		if got := MatchesPath(c.path, c.patterns); got != c.want {

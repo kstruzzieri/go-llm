@@ -3,6 +3,7 @@ package agentflow
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -15,6 +16,8 @@ type Client struct {
 	root string
 }
 
+// NewClient returns a Client that drives agentflow via r, with --root set to the
+// workspace root for the subcommands that take it.
 func NewClient(r Runner, root string) *Client { return &Client{r: r, root: root} }
 
 // call runs a subcommand and returns stdout, mapping exit!=0 (or a --json
@@ -90,22 +93,28 @@ type EvidenceEntry struct {
 	Supports   []string `json:"supports,omitempty"`
 }
 
+// LockPlan validates and locks the plan JSON at planPath, opening the P0 run.
+// It passes no --root: agentflow locates .agent/ by the runner's Cmd.Dir.
 func (c *Client) LockPlan(ctx context.Context, planPath string) error {
 	_, err := c.call(ctx, "lock-plan",
 		[]string{"lock-plan", "--from-json", planPath, "--json"}, true) // no --root
 	return err
 }
 
+// Init creates the .agent/ planning scaffold under the workspace root.
 func (c *Client) Init(ctx context.Context) error {
 	_, err := c.call(ctx, "init", append([]string{"init"}, c.rootArgs()...), false)
 	return err
 }
 
+// InitExecution creates the execution contract that the step loop runs against.
 func (c *Client) InitExecution(ctx context.Context) error {
 	_, err := c.call(ctx, "init-execution", append([]string{"init-execution"}, c.rootArgs()...), false)
 	return err
 }
 
+// Doctor checks .agent/ integrity and returns a *CommandError carrying any
+// findings when the contract is missing or inconsistent.
 func (c *Client) Doctor(ctx context.Context) error {
 	_, err := c.call(ctx, "doctor", append([]string{"doctor"}, c.rootArgs("--json")...), true)
 	return err
@@ -122,11 +131,12 @@ func (c *Client) NextStep(ctx context.Context) (string, error) {
 	}
 	var r nextStepResult
 	if err := json.Unmarshal(out, &r); err != nil {
-		return "", err
+		return "", fmt.Errorf("agentflow next-step: parse %q: %w", out, err)
 	}
 	return r.ID, nil
 }
 
+// ClaimStep claims step for the golem agent and returns the new attempt id.
 func (c *Client) ClaimStep(ctx context.Context, step string) (string, error) {
 	args := append([]string{"claim-step", step}, c.rootArgs("--agent", agentName, "--json")...)
 	out, err := c.call(ctx, "claim-step", args, true)
@@ -135,11 +145,13 @@ func (c *Client) ClaimStep(ctx context.Context, step string) (string, error) {
 	}
 	var r claimResult
 	if err := json.Unmarshal(out, &r); err != nil {
-		return "", err
+		return "", fmt.Errorf("agentflow claim-step: parse %q: %w", out, err)
 	}
 	return r.AttemptID, nil
 }
 
+// RecordFileChange records an edit to path against (step, attempt) so the
+// journal can later reconcile it; this is the receipt golem cannot forge.
 func (c *Client) RecordFileChange(ctx context.Context, step, attempt, path string) error {
 	args := append([]string{"record-file-change"},
 		c.rootArgs("--step", step, "--attempt", attempt, "--path", path, "--agent", agentName, "--json")...)
@@ -147,6 +159,8 @@ func (c *Client) RecordFileChange(ctx context.Context, step, attempt, path strin
 	return err
 }
 
+// RunGate runs the gate command argv (everything after the `--` separator)
+// under agentflow's proof harness for (step, attempt), recording the result.
 func (c *Client) RunGate(ctx context.Context, step, attempt, gate string, argv []string) error {
 	args := append([]string{"run"},
 		c.rootArgs("--step", step, "--attempt", attempt, "--gate", gate, "--agent", agentName, "--confirm-risk", "--")...)
@@ -155,6 +169,8 @@ func (c *Client) RunGate(ctx context.Context, step, attempt, gate string, argv [
 	return err
 }
 
+// FinishStep closes the attempt, verifying its gates and file-change receipts;
+// a *CommandError surfaces the diagnostics when the step is not yet complete.
 func (c *Client) FinishStep(ctx context.Context, step, attempt string) error {
 	args := append([]string{"finish-step", step}, c.rootArgs("--attempt", attempt, "--agent", agentName, "--json")...)
 	_, err := c.call(ctx, "finish-step", args, true)
@@ -176,7 +192,7 @@ func (c *Client) FinishRun(ctx context.Context) (string, error) {
 		if exit != 0 {
 			return "", &CommandError{Cmd: "finish-run", Exit: exit, Stderr: string(errb)}
 		}
-		return "", err
+		return "", fmt.Errorf("agentflow finish-run: parse %q: %w", out, err)
 	}
 	if exit != 0 || !r.OK {
 		return "", &FinishRunError{StoppedAt: r.StoppedAt, Diagnostics: r.Diagnostics}
@@ -201,7 +217,10 @@ func (c *Client) NextAction(ctx context.Context) (NextActionState, error) {
 		return NextActionState{}, err
 	}
 	var st NextActionState
-	return st, json.Unmarshal(out, &st)
+	if err := json.Unmarshal(out, &st); err != nil {
+		return NextActionState{}, fmt.Errorf("agentflow next-action: parse %q: %w", out, err)
+	}
+	return st, nil
 }
 
 // Status returns agentflow's status output verbatim (printed on recovery).
