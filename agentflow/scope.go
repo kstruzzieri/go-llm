@@ -6,19 +6,6 @@ import (
 	"sync"
 )
 
-// Plan/Step minimal shapes needed by EffectiveScope. Task 3 extends these with
-// JSON tags and more fields in plan.go; keep the field names stable.
-type Plan struct {
-	AllowedFiles []string
-	BlockedFiles []string
-	Steps        []Step
-}
-
-type Step struct {
-	ID    string
-	Files []string
-}
-
 // MatchesPath mirrors agentflow validation.py::matches_path exactly: for each
 // non-blank pattern, a trailing-"/" pattern matches by prefix; otherwise an exact
 // string match or an fnmatch-style glob match (where '*' crosses '/', unlike
