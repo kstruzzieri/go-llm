@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/config"
 )
 
 // stubTool is a minimal agent.Tool to stand in for retrieve.
@@ -110,6 +111,70 @@ func TestBuildExecTools(t *testing.T) {
 	}
 	if len(tools) != 1 || tools[0].Spec().Name != "run_command" {
 		t.Fatalf("got %d tools", len(tools))
+	}
+}
+
+func TestBuildDelegateTool_ResolvesCodingRole(t *testing.T) {
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"coding": {Name: "coder", Provider: "local"},
+		},
+	}
+	tool, chain, err := buildDelegateTool(cfg, nil, "coding", nil)
+	if err != nil {
+		t.Fatalf("buildDelegateTool: %v", err)
+	}
+	if tool == nil || tool.Spec().Name != "delegate_code" {
+		t.Fatalf("expected delegate_code tool, got %+v", tool)
+	}
+	if len(chain) != 1 || chain[0] != "local/coder" {
+		t.Fatalf("chain = %v", chain)
+	}
+}
+
+func TestBuildDelegateTool_NilConfig(t *testing.T) {
+	if _, _, err := buildDelegateTool(nil, nil, "coding", nil); err == nil {
+		t.Fatal("nil config should fail loudly, not no-op")
+	}
+}
+
+func TestBuildDelegateTool_UnknownRole(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{}}
+	if _, _, err := buildDelegateTool(cfg, nil, "coding", nil); err == nil {
+		t.Fatal("unknown role should error")
+	}
+}
+
+func TestBuildDelegateTool_WithStreamSink(t *testing.T) {
+	cfg := &config.Config{
+		Models: map[string]config.ModelConfig{
+			"coding": {Name: "coder", Provider: "local"},
+		},
+	}
+	var sink = func(string) {} // non-nil sink
+	tool, _, err := buildDelegateTool(cfg, nil, "coding", sink)
+	if err != nil {
+		t.Fatalf("buildDelegateTool with sink: %v", err)
+	}
+	if tool == nil || tool.Spec().Name != "delegate_code" {
+		t.Fatalf("expected delegate_code tool, got %+v", tool)
+	}
+}
+
+func TestDelegateSystemFragment(t *testing.T) {
+	if delegateSystemFragment(false, false) != "" || delegateSystemFragment(false, true) != "" {
+		t.Fatal("fragment must be empty when delegation disabled, regardless of allowWrite")
+	}
+	withWrite := delegateSystemFragment(true, true)
+	if !strings.Contains(withWrite, "delegate_code") || !strings.Contains(withWrite, "write_file") {
+		t.Fatalf("write-enabled fragment should mention delegate_code and write_file: %q", withWrite)
+	}
+	noWrite := delegateSystemFragment(true, false)
+	if !strings.Contains(noWrite, "delegate_code") {
+		t.Fatalf("fragment should mention delegate_code: %q", noWrite)
+	}
+	if strings.Contains(noWrite, "write_file") || strings.Contains(noWrite, "edit_file") {
+		t.Fatalf("write-disabled fragment must not instruct writing to disk: %q", noWrite)
 	}
 }
 

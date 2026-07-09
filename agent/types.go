@@ -155,6 +155,10 @@ type ToolCallRecord struct {
 	Denied  bool
 	Invoked bool          // false for synthetic pre-invoke outcomes (no Invoke ran)
 	Latency time.Duration // wall time of Invoke only; zero when !Invoked
+	// RouteOutcome names the model a delegating tool routed to; nil for ordinary
+	// tools. Omitted from marshaled records when nil, so non-delegated run
+	// traces are byte-identical to before.
+	RouteOutcome *provider.RouteOutcome `json:"RouteOutcome,omitempty"`
 }
 
 // Result is the canonical final state of a run.

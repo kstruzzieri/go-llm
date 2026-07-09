@@ -286,6 +286,19 @@ func TestStartupNoticesAgentMemoryLine(t *testing.T) {
 	}
 }
 
+func TestStartupNotices_DelegateLine(t *testing.T) {
+	lines := startupNotices(startupInfo{workspace: "/w", delegateLine: "delegate: enabled -> local/coder"})
+	found := false
+	for _, l := range lines {
+		if l == "delegate: enabled -> local/coder" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("delegate notice not surfaced: %v", lines)
+	}
+}
+
 func TestParseFlags_NoAutoIndex(t *testing.T) {
 	f, err := parseFlags([]string{"-no-auto-index"})
 	if err != nil {

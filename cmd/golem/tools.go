@@ -44,6 +44,54 @@ func buildSystemPrompt(allowWrite, allowExec bool) string {
 	return b + golemPriorityNote
 }
 
+// delegateUseCase is the routing use-case for delegated code generation. It
+// names the TASK (code generation), not the model — the -delegate-role picks
+// the model via the StrictChain-pinned chain.
+const delegateUseCase = "coding"
+
+// buildDelegateTool resolves the delegate role chain and returns the
+// delegate_code tool backed by a caller pinned to that chain (UseCase
+// delegateUseCase). It fails when the role cannot be resolved — an explicit
+// -delegate must not silently no-op. The returned chain is for the caller
+// wiring / the startup notice. The stream sink is optional: nil disables
+// streaming (default runs unchanged); non-nil surfaces generation progress.
+func buildDelegateTool(cfg *config.Config, router *provider.Router, role string, stream func(string)) (agent.Tool, []string, error) {
+	if cfg == nil {
+		return nil, nil, fmt.Errorf("golem: -delegate requires a models.json with a %q role; none found", role)
+	}
+	chain, err := cfg.RoleChain(role)
+	if err != nil {
+		return nil, nil, fmt.Errorf("golem: -delegate-role %q: %w", role, err)
+	}
+	if len(chain) == 0 {
+		return nil, nil, fmt.Errorf("golem: -delegate-role %q resolved to an empty chain", role)
+	}
+	// delegateUseCase describes the TASK, not the model; -delegate-role selects
+	// which model serves it via the StrictChain-pinned chain.
+	caller := newRouterChainCallerFor(router, chain, delegateUseCase)
+	var opts []agenttools.DelegateOption
+	if stream != nil {
+		opts = append(opts, agenttools.WithStream(stream))
+	}
+	return agenttools.NewDelegateCode(caller, opts...), chain, nil
+}
+
+// delegateSystemFragment is appended to the system prompt only when delegation
+// is enabled. Empty otherwise so default runs are byte-for-byte unchanged. The
+// wording is write-aware: it only instructs the model to persist the result
+// with write_file/edit_file when those tools are actually registered
+// (-allow-write); otherwise it frames the output as review-and-present, so the
+// prompt never tells the model to call a tool that isn't available.
+func delegateSystemFragment(enabled, allowWrite bool) string {
+	if !enabled {
+		return ""
+	}
+	if allowWrite {
+		return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model. The result is a proposal: review it, then write it with write_file or edit_file. Use delegate_code for bulk generation, never for planning or decisions, and stay responsible for what you apply."
+	}
+	return " For a well-scoped, self-contained code-generation sub-task you may call delegate_code with a precise prompt; it returns generated code from a specialist model for you to review and present to the user. Use delegate_code for bulk generation, never for planning or decisions."
+}
+
 // buildExecTools constructs the approval-gated exec tool set bound to one Workspace
 // over root. Returned only when -allow-exec is set.
 func buildExecTools(root string) ([]agent.Tool, error) {

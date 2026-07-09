@@ -114,6 +114,11 @@ func (s *TelemetrySink) OnToolResult(_ context.Context, e agent.ToolResultEvent)
 		ContentBytes:  len(e.Result.Content),
 		DurationMS:    ms(e.Latency),
 	}
+	if ro := e.Result.RouteOutcome; ro != nil {
+		span.DelegatedModel = ro.ActualModel.String()
+		span.DelegatedPlannedModel = ro.PlannedModel.String()
+		span.DelegatedFallbacksUsed = ro.FallbacksUsed
+	}
 	s.toolSeq++
 	s.record(span)
 	return nil

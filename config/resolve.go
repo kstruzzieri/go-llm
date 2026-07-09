@@ -217,6 +217,16 @@ func (c *Config) RoleFallbackChain(useCase string) ([]string, error) {
 	if !ok {
 		return nil, fmt.Errorf("config: unknown use-case %q", useCase)
 	}
+	return c.RoleChain(role)
+}
+
+// RoleChain returns the ordered, first-seen-unique chain of provider-qualified
+// selectors for a model role: the role's model first, then each fallback in
+// declared order, transitively. Cycles error; availability is NOT filtered
+// (that is the Router's job). This is the direct role traversal underneath
+// RoleFallbackChain — callers that already hold a role name (not a use-case)
+// use it to reach a specialist without a use-case mapping.
+func (c *Config) RoleChain(role string) ([]string, error) {
 	var chain []string
 	seen := make(map[string]bool)    // dedupe on selector string
 	onStack := make(map[string]bool) // cycle detection on role

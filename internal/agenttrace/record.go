@@ -117,6 +117,12 @@ type toolCallSpan struct {
 	Truncated     bool    `json:"truncated"`
 	ContentBytes  int     `json:"content_bytes"`
 	DurationMS    float64 `json:"duration_ms"`
+	// Delegated* record the model a delegating tool (e.g. delegate_code) routed
+	// to. Identity + fallback count only; omitempty so non-delegated spans are
+	// byte-identical to before.
+	DelegatedModel         string `json:"delegated_model,omitempty"`
+	DelegatedPlannedModel  string `json:"delegated_planned_model,omitempty"`
+	DelegatedFallbacksUsed int    `json:"delegated_fallbacks_used,omitempty"`
 }
 
 // runtimeStageSpan is one content-light runtime-stage record (#63). Today the

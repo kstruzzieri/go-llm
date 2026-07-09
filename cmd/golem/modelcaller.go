@@ -30,14 +30,23 @@ type chatStreamer interface {
 // chain is empty it falls back to the empty-Model recommend behavior of
 // agent.NewRouterModelCaller.
 type chainModelCaller struct {
-	chain []string
-	route func(ctx context.Context, rr provider.RoutingRequest) (chatStreamer, error)
+	chain   []string
+	useCase string
+	route   func(ctx context.Context, rr provider.RoutingRequest) (chatStreamer, error)
 }
 
-// newRouterChainCaller builds a chainModelCaller backed by a live Router.
+// newRouterChainCaller builds the default agent caller (UseCase "agent").
 func newRouterChainCaller(r *provider.Router, chain []string) agent.ModelCaller {
+	return newRouterChainCallerFor(r, chain, "agent")
+}
+
+// newRouterChainCallerFor builds a chainModelCaller that routes UseCase useCase
+// strictly down chain. An empty useCase is treated as "agent". Used to pin a
+// delegate caller to the coding role chain with UseCase "coding".
+func newRouterChainCallerFor(r *provider.Router, chain []string, useCase string) agent.ModelCaller {
 	return &chainModelCaller{
-		chain: chain,
+		chain:   chain,
+		useCase: useCase,
 		route: func(ctx context.Context, rr provider.RoutingRequest) (chatStreamer, error) {
 			plan, err := r.Route(ctx, rr)
 			if err != nil {
@@ -49,8 +58,12 @@ func newRouterChainCaller(r *provider.Router, chain []string) agent.ModelCaller 
 }
 
 func (m *chainModelCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	useCase := m.useCase
+	if useCase == "" {
+		useCase = "agent"
+	}
 	rr := provider.RoutingRequest{
-		UseCase:        "agent",
+		UseCase:        useCase,
 		Messages:       req.Messages,
 		Tools:          req.Tools,
 		Options:        req.Options,
