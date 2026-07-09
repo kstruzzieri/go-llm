@@ -35,7 +35,11 @@ func Run(ctx context.Context, fixture *Fixture, opts RunOptions) (*Report, error
 	defer func() { _ = store.Close() }()
 
 	embedder := newFixtureEmbedder(fixture)
-	retriever, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel("fixture-embedding"))
+	// WithVectorOnly keeps the "static" mode a true dense-cosine baseline
+	// (SQLiteStore.Search). Without it, Retrieve detects the store's
+	// MultiSignalSearcher capability and runs hybrid RRF with an empty
+	// QueryContext, mislabeling the baseline (#275).
+	retriever, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel("fixture-embedding"), rag.WithVectorOnly())
 	if err != nil {
 		return nil, fmt.Errorf("rag eval: create retriever: %w", err)
 	}
