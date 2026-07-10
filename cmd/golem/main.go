@@ -62,7 +62,7 @@ type flags struct {
 	approveGates     bool
 	agentflowSrc     string
 	evidencePath     string
-	goal             string // AgentFlow planning mode goal (-goal); registration/guards land in a later task
+	goal             string // AgentFlow planning mode goal (-goal)
 	goalSet          bool   // -goal was passed (distinguishes an explicit empty goal)
 }
 
@@ -109,6 +109,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
 	fs.StringVar(&f.evidencePath, "evidence", "", "optional evidence sidecar JSON object/array recorded before lock in task mode")
+	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and lock a plan for this goal, then stop")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -124,6 +125,8 @@ func parseFlags(args []string) (flags, error) {
 			f.promptSet = true
 		case "base-url":
 			f.baseURLSet = true
+		case "goal":
+			f.goalSet = true
 		}
 	})
 	return f, nil
@@ -133,7 +136,7 @@ func parseFlags(args []string) (flags, error) {
 // background auto-index job. Flags only: auto-path and embed-chain errors are
 // handled at the wiring site.
 func shouldStartAutoIndex(f flags) bool {
-	return !f.promptSet && !f.noAutoIndex && !f.noRag && f.ragDB == ""
+	return !f.promptSet && !f.goalSet && !f.noAutoIndex && !f.noRag && f.ragDB == ""
 }
 
 // autoIndexEnabled is the wiring gate for the background auto-index job:
@@ -181,6 +184,33 @@ func validateFlags(f flags) error {
 	if f.planPath != "" && (!f.approveEdits || !f.approveGates) {
 		return fmt.Errorf("golem: -plan (task mode) requires both -approve-plan-edits and -approve-plan-gates")
 	}
+	if f.goalSet && strings.TrimSpace(f.goal) == "" {
+		return fmt.Errorf("golem: -goal requires a non-empty goal")
+	}
+	if f.goalSet && f.planPath != "" {
+		return fmt.Errorf("golem: -goal (planning mode) is incompatible with -plan (task execution)")
+	}
+	if f.goalSet && f.promptSet {
+		return fmt.Errorf("golem: -goal (planning mode) is incompatible with -p (one-shot)")
+	}
+	if f.goalSet && (f.allowWrite || f.allowExec) {
+		return fmt.Errorf("golem: -goal (planning mode) is read-only; do not pass -allow-write/-allow-exec")
+	}
+	if f.goalSet && f.ragDB != "" {
+		return fmt.Errorf("golem: -goal (planning mode) does not use RAG; do not pass -rag-db")
+	}
+	if f.goalSet && f.delegate {
+		return fmt.Errorf("golem: -goal (planning mode) does not attach delegate_code")
+	}
+	if f.goalSet && (len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0) {
+		return fmt.Errorf("golem: -goal (planning mode) does not attach MCP tools")
+	}
+	if f.goalSet && f.evidencePath != "" {
+		return fmt.Errorf("golem: -goal (planning mode) authors no evidence; do not pass -evidence")
+	}
+	if f.goalSet && (f.approveEdits || f.approveGates) {
+		return fmt.Errorf("golem: -goal (planning mode) does not execute; the -approve-plan-* approvals apply to -plan")
+	}
 	return nil
 }
 
@@ -208,6 +238,36 @@ func applyTaskMode(f flags) (flags, []string) {
 	f.agentMemory = false
 	f.noAutoIndex = true
 	f.noRag = true
+	return f, warns
+}
+
+// applyGoalMode forces the same non-interactive, ambient-state-free defaults for
+// AgentFlow planning mode (-goal) that task mode forces for -plan: the planner
+// runs read-only with no session, memory, compression, RAG, auto-index, or
+// feedback. Project-context (-no-project-context) is deliberately left untouched:
+// AGENTS.md instructions are planning input, not ambient conversational state.
+func applyGoalMode(f flags) (flags, []string) {
+	if !f.goalSet {
+		return f, nil
+	}
+	var warns []string
+	if f.sessionID != "" || f.fresh {
+		warns = append(warns, "planning mode: -session/-fresh ignored (planning mode does not persist a session)")
+	}
+	if f.feedback {
+		warns = append(warns, "planning mode: -feedback ignored (planning mode does not use RAG or feedback ranking)")
+	}
+	if f.trace || f.telemetry {
+		warns = append(warns, "planning mode: -trace/-telemetry are not wired for the planner run; the locked plan is the durable record")
+	}
+	f.noSession = true
+	f.noCompress = true
+	f.noMemory = true
+	f.agentMemory = false
+	f.noAutoIndex = true
+	f.noRag = true
+	f.feedback = false
+	f.feedbackDB = ""
 	return f, warns
 }
 
@@ -335,6 +395,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		return err
 	}
 	f, taskWarns := applyTaskMode(f)
+	f, goalWarns := applyGoalMode(f)
+	taskWarns = append(taskWarns, goalWarns...)
 	f, oneShotWarns := applyOneShotMode(f)
 	oneShotWarns = append(taskWarns, oneShotWarns...)
 
@@ -724,6 +786,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		})
 	}
 
+	if f.goalSet {
+		return runAgentflowAuthor(ctx, stdout, stderr, sess, f, root)
+	}
 	if f.planPath != "" {
 		return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)
 	}
