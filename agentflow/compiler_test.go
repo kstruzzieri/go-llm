@@ -227,6 +227,43 @@ func TestCheckPlan_PathSafetyAndScope(t *testing.T) {
 	}
 }
 
+func TestCheckPlan_BlankScopeAndInvariantEntries(t *testing.T) {
+	// A non-empty list with a blank entry passes anyNonBlank but is rejected by
+	// validate_plan's _is_non_empty_string_list; flag it locally instead.
+	ir := sampleIR()
+	ir.Scope = []string{"internal/http", ""}
+	ir.Invariants = []string{"no new deps", "   "}
+	ds := CheckPlan(Compile(ir))
+	if !hasCode(ds, "blank_scope_entry") || !hasCode(ds, "blank_invariant_entry") {
+		t.Errorf("want blank_scope_entry + blank_invariant_entry, got %v", codes(ds))
+	}
+	// The missing_* codes must not also fire: these lists are non-empty.
+	if hasCode(ds, "missing_scope") || hasCode(ds, "missing_invariants") {
+		t.Errorf("non-empty lists must not report missing_*, got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_ProofStateTargetSurvivesDotSlash(t *testing.T) {
+	// "./.agent/x" has raw first segment "." — path.Clean must collapse it so the
+	// proof-state pre-check still fires.
+	ir := sampleIR()
+	ir.AllowedFiles = []string{"internal/http/*"}
+	ir.Steps[0].Files = []string{"./.agent/state.json"}
+	if ds := CheckPlan(Compile(ir)); !hasCode(ds, "step_targets_proof_state") {
+		t.Errorf("want step_targets_proof_state for ./.agent/x, got %v", codes(ds))
+	}
+	// An in-bounds "..": ".agent/../src/x" cleans to "src/x" — real target is src/,
+	// not proof state, so it must NOT be flagged as proof state (nor unsafe).
+	ir2 := sampleIR()
+	ir2.AllowedFiles = []string{"src/*"}
+	ir2.Scope = []string{"src"}
+	ir2.Steps[0].Files = []string{".agent/../src/x.go"}
+	ds2 := CheckPlan(Compile(ir2))
+	if hasCode(ds2, "step_targets_proof_state") || hasCode(ds2, "unsafe_path") || hasCode(ds2, "file_out_of_scope") {
+		t.Errorf(".agent/../src/x.go cleans to src/x.go and must be clean, got %v", codes(ds2))
+	}
+}
+
 func TestCheckPlan_GateShape(t *testing.T) {
 	ir := sampleIR()
 	ir.Steps[0].Validations = []GateIR{{Label: "empty", Argv: nil}}

@@ -138,9 +138,16 @@ func CheckPlan(p Plan) []Diagnostic {
 	}
 	if !anyNonBlank(p.Scope) {
 		add("missing_scope", "scope is empty; name at least one area the plan touches")
+	} else if !allNonBlank(p.Scope) {
+		// validate_plan's _is_non_empty_string_list rejects a blank entry outright,
+		// so flag it here: a mixed ["real",""] passes anyNonBlank but would be
+		// rejected at lock-plan, burning one of the two submissions.
+		add("blank_scope_entry", "scope contains a blank entry; every scope area must be a non-empty string")
 	}
 	if !anyNonBlank(p.Invariants) {
 		add("missing_invariants", "invariants is empty; state at least one property that must hold")
+	} else if !allNonBlank(p.Invariants) {
+		add("blank_invariant_entry", "invariants contains a blank entry; every invariant must be a non-empty string")
 	}
 	// allowed_files always has compiler-injected .agent/; require a non-proof-state
 	// workspace entry rather than relying on slice length or duplicate entries.
@@ -200,24 +207,32 @@ func CheckPlan(p Plan) []Diagnostic {
 				add("empty_gate_argv", "step "+sid+" has a validation with empty argv")
 			}
 		}
-		// 6 (step-level): path safety + proof-state target.
+		// 6 (step-level): path safety + proof-state target. path.Clean collapses an
+		// in-bounds "." / "a/../b" so "./.agent/x" (raw first segment ".") cannot slip
+		// a proof-state target past firstSegmentIsAgent. Write-time enforcement still
+		// blocks the actual write, but the lock-time pre-check must not drift from it.
 		for _, f := range s.Files {
-			if firstSegmentIsAgent(f) {
+			cleaned := path.Clean(f)
+			if firstSegmentIsAgent(cleaned) {
 				add("step_targets_proof_state", "step "+sid+" file "+f+" targets .agent/ proof state")
 			}
+			// unsafePath cleans internally (keeping the raw entry for its blank check).
 			if code, msg := unsafePath(f); code != "" {
 				add(code, "step "+sid+" file "+msg)
 			}
 		}
-		// 7: scope coverage (every file allowed and not blocked).
+		// 7: scope coverage (every file allowed and not blocked). Match on the cleaned
+		// path so an in-bounds ".agent/../src/x" is scoped as its real target src/x,
+		// matching write-time filepath.Rel resolution.
 		for _, f := range s.Files {
-			if firstSegmentIsAgent(f) {
+			cleaned := path.Clean(f)
+			if firstSegmentIsAgent(cleaned) {
 				continue // already reported; scope check is meaningless for proof state
 			}
-			if !MatchesPath(f, p.AllowedFiles) {
+			if !MatchesPath(cleaned, p.AllowedFiles) {
 				add("file_out_of_scope", "step "+sid+" file "+f+" is not covered by allowed_files")
 			}
-			if MatchesPath(f, p.BlockedFiles) {
+			if MatchesPath(cleaned, p.BlockedFiles) {
 				add("file_blocked", "step "+sid+" file "+f+" is covered by blocked_files")
 			}
 		}
@@ -272,17 +287,22 @@ func firstSegmentIsAgent(rel string) bool {
 	return strings.EqualFold(strings.TrimSpace(first), ".agent")
 }
 
-// unsafePath rejects absolute paths and parent traversal. Returns ("","") when
-// safe, else a code and a message fragment ("<path> ...").
+// unsafePath rejects absolute paths and parent traversal. It cleans before the
+// abs/escape checks so an in-bounds "a/../b" collapses to "b" and is allowed
+// (matching write-time filepath.Rel resolution), while an escaping "../x" or
+// absolute "/x" survives path.Clean and is still rejected. The blank check runs
+// on the raw input first because path.Clean("") == "." would hide an empty entry.
+// Returns ("","") when safe, else a code and a message fragment ("<path> ...").
 func unsafePath(rel string) (string, string) {
 	r := strings.TrimSpace(rel)
 	if r == "" {
 		return "unsafe_path", "is blank"
 	}
-	if path.IsAbs(r) {
+	c := path.Clean(r)
+	if path.IsAbs(c) {
 		return "unsafe_path", r + " is an absolute path"
 	}
-	for _, seg := range strings.Split(r, "/") {
+	for _, seg := range strings.Split(c, "/") {
 		if seg == ".." {
 			return "unsafe_path", r + " escapes the workspace with .."
 		}

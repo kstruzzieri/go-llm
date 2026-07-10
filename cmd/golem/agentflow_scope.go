@@ -17,6 +17,11 @@ var errProofState = errors.New("path is under .agent/ proof state (opaque to the
 // NOT proof state — only the exact ".agent" first segment is. Case-insensitivity
 // is deliberate: this guards a real filesystem target where APFS case-folding
 // matters (the CRITICAL bypass class fixed in #209).
+//
+// Invariant: callers must pass a filepath.Rel-cleaned relative path (all current
+// callers do via the workspace scope guard); a raw model string like "./.agent/x"
+// would evade the first-segment check. CheckPlan's own pre-check path.Cleans for
+// the same reason.
 func denyProofState(rel string) error {
 	first := rel
 	if i := strings.IndexByte(rel, '/'); i >= 0 {
