@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -79,6 +82,10 @@ func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agen
 		return t.reject(diags)
 	}
 	if err := t.lock(ctx, plan); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
+			s.cancel()
+			return agent.ToolResult{}, context.Canceled
+		}
 		if term := classifyLockError(err); term != nil {
 			s.terminalErr = term
 			s.cancel()
@@ -119,19 +126,19 @@ func renderDiagnostics(diags []agentflow.Diagnostic) string {
 func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan) error {
 	b, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
-		return &terminalError{err} // marshaling our own struct failed: our bug
+		return &terminalError{fmt.Errorf("marshal compiled plan: %w", err)}
 	}
 	tmp, err := os.CreateTemp("", "golem-plan-*.json")
 	if err != nil {
-		return &terminalError{err}
+		return &terminalError{fmt.Errorf("create staged plan: %w", err)}
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
-		return &terminalError{err}
+		return &terminalError{fmt.Errorf("write staged plan %s: %w", tmp.Name(), err)}
 	}
 	if err := tmp.Close(); err != nil {
-		return &terminalError{err}
+		return &terminalError{fmt.Errorf("close staged plan %s: %w", tmp.Name(), err)}
 	}
 	return t.sess.client.LockPlan(ctx, tmp.Name())
 }
@@ -142,14 +149,12 @@ type terminalError struct{ err error }
 func (e *terminalError) Error() string { return e.err.Error() }
 func (e *terminalError) Unwrap() error { return e.err }
 
-// compilerOwnedTokens are substrings of a validation_error message that mean the
+// These validation_error message tokens identify fields emitted by the compiler,
 // failure is in a field the compiler emits (not the model IR): the IR cannot
 // repair it, so it is terminal. Treating schema_version / drift_budget /
 // "missing required field" as terminal is SAFE because CheckPlan is a superset of
 // validate_plan's model-field checks, so any such error that survives CheckPlan to
 // reach lock is compiler-owned, not model-repairable. Kept narrow and test-pinned.
-var compilerOwnedTokens = []string{"schema_version", "drift_budget", "missing required field"}
-
 // classifyLockError returns a non-nil terminal error when the lock failure cannot
 // be repaired by the model, else nil (the caller treats it as repairable).
 func classifyLockError(err error) error {
@@ -168,10 +173,9 @@ func classifyLockError(err error) error {
 		if se.Code != "validation_error" {
 			return err // only ordinary content validation errors are repairable
 		}
-		for _, tok := range compilerOwnedTokens {
-			if strings.Contains(se.Message, tok) {
-				return err
-			}
+		if strings.Contains(se.Message, "schema_version") || strings.Contains(se.Message, "drift_budget") ||
+			strings.Contains(se.Message, "missing required field") {
+			return err
 		}
 	}
 	return nil // ordinary content validation_error(s): repairable
@@ -299,43 +303,12 @@ func runAgentflowAuthor(ctx context.Context, stdout, stderr io.Writer, interrupt
 }
 
 func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, f flags, root string, client afLocker) error {
-	// Keep the guard inside the injected seam so tests exercise the same safety
-	// boundary as production.
-	if err := guardExistingPlan(root); err != nil {
-		return err
-	}
-
-	// Fail before any model work when AgentFlow is unavailable.
-	if err := client.Probe(ctx); err != nil {
-		return fmt.Errorf("agentflow unavailable: %w", err)
-	}
-	// Idempotent scaffold (agentflow 0.4 init skips existing artifacts).
-	if err := client.Init(ctx); err != nil {
-		return fmt.Errorf("agentflow init: %w", err)
-	}
-
-	ws, err := agenttools.NewWorkspace(root)
-	if err != nil {
-		return err
-	}
-	ws.SetScopeGuard(func(rel string, _ bool) error { return denyProofState(rel) })
-
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// Watch for an interrupt (Ctrl-C) for the duration of the authoring loop so
-	// SIGINT cancels the in-flight model call instead of being swallowed, mirroring
-	// runOnce (repl.go) and runAgentflowTask's step loop. interrupts is nil in unit
-	// tests; the goroutine (which would block forever on a nil channel) is guarded.
 	done := make(chan struct{})
 	defer close(done)
 	if interrupts != nil {
-		// Drain a stale interrupt buffered before this run so it cannot spuriously
-		// cancel the loop.
-		select {
-		case <-interrupts:
-		default:
-		}
 		go func() {
 			select {
 			case <-interrupts:
@@ -344,6 +317,42 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 			}
 		}()
 	}
+
+	release, err := acquireAuthorLock(loopCtx, root)
+	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			return errPlannerInterrupted
+		}
+		return fmt.Errorf("acquire planner lock: %w", err)
+	}
+	defer release()
+
+	// Keep the guard inside the injected seam so tests exercise the same safety
+	// boundary as production.
+	if err := guardExistingPlan(root); err != nil {
+		return err
+	}
+
+	// Fail before any model work when AgentFlow is unavailable.
+	if err := client.Probe(loopCtx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(loopCtx.Err(), context.Canceled) {
+			return errPlannerInterrupted
+		}
+		return fmt.Errorf("agentflow unavailable: %w", err)
+	}
+	// Idempotent scaffold (agentflow 0.4 init skips existing artifacts).
+	if err := client.Init(loopCtx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(loopCtx.Err(), context.Canceled) {
+			return errPlannerInterrupted
+		}
+		return fmt.Errorf("agentflow init: %w", err)
+	}
+
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		return fmt.Errorf("planner workspace: %w", err)
+	}
+	ws.SetScopeGuard(func(rel string, _ bool) error { return denyProofState(rel) })
 
 	as := &authorSession{client: client, root: root, cancel: cancel}
 
@@ -373,7 +382,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		// Include -root: #209 resolves proof state against the process cwd, so an
 		// operator running this from another directory would otherwise write to the
 		// wrong tree (the cwd-mismatch class fixed in 45838e7). root is absolute.
-		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -approve-plan-edits -approve-plan-gates\n", as.lockedPath, root)
+		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -approve-plan-edits -approve-plan-gates\n", shellQuote(as.lockedPath), shellQuote(root))
 		return nil
 	case as.terminalErr != nil:
 		return as.terminalErr
@@ -389,5 +398,49 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		return errPlannerInterrupted
 	default:
 		return errPlannerNoSubmission
+	}
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// acquireAuthorLock serializes -goal authoring across processes for one workspace.
+// The stable temp inode is intentionally retained so waiters cannot race an unlink.
+func acquireAuthorLock(ctx context.Context, root string) (func(), error) {
+	sum := sha256.Sum256([]byte(root))
+	lockName := fmt.Sprintf("golem-agentflow-author-%x.lock", sum)
+	lockPath := filepath.Join(os.TempDir(), lockName)
+	tmpRoot, err := os.OpenRoot(os.TempDir())
+	if err != nil {
+		return nil, fmt.Errorf("open temp directory: %w", err)
+	}
+	f, err := tmpRoot.OpenFile(lockName, os.O_CREATE|os.O_RDWR, 0o600)
+	_ = tmpRoot.Close()
+	if err != nil {
+		return nil, fmt.Errorf("open %s: %w", lockPath, err)
+	}
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			_ = f.Close()
+			return nil, err
+		}
+		if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return func() {
+				_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+				_ = f.Close()
+			}, nil
+		} else if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = f.Close()
+			return nil, fmt.Errorf("lock %s: %w", lockPath, err)
+		}
+		select {
+		case <-ctx.Done():
+			_ = f.Close()
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
 	}
 }

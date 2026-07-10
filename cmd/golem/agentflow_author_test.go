@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -18,21 +20,36 @@ import (
 
 // stubLocker satisfies afLocker; LockPlan returns a scripted error per call.
 type stubLocker struct {
-	probeErr error
-	initErr  error
-	lockErrs []error
-	probes   int
-	inits    int
-	locks    int
-	paths    []string
+	probeErr     error
+	initErr      error
+	lockErrs     []error
+	probes       int
+	inits        int
+	locks        int
+	paths        []string
+	probeStarted chan struct{}
+	lockStarted  chan struct{}
 }
 
-func (s *stubLocker) Probe(context.Context) error { s.probes++; return s.probeErr }
-func (s *stubLocker) Init(context.Context) error  { s.inits++; return s.initErr }
-func (s *stubLocker) LockPlan(_ context.Context, path string) error {
+func (s *stubLocker) Probe(ctx context.Context) error {
+	s.probes++
+	if s.probeStarted != nil {
+		close(s.probeStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	return s.probeErr
+}
+func (s *stubLocker) Init(context.Context) error { s.inits++; return s.initErr }
+func (s *stubLocker) LockPlan(ctx context.Context, path string) error {
 	s.paths = append(s.paths, path)
 	i := s.locks
 	s.locks++
+	if s.lockStarted != nil {
+		close(s.lockStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
 	if i < len(s.lockErrs) {
 		return s.lockErrs[i]
 	}
@@ -235,39 +252,28 @@ func writePlanLock(t *testing.T, root string, body string) {
 }
 
 func TestGuardExistingPlan(t *testing.T) {
-	// Absent lock: allowed.
-	if err := guardExistingPlan(t.TempDir()); err != nil {
-		t.Errorf("absent lock should be allowed: %v", err)
+	cases := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{name: "absent"},
+		{name: "pristine", body: `{"schema_version":"0.3.0","objective":"","steps":[],"locked":false}`},
+		{name: "locked", body: `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`, wantErr: true},
+		{name: "draft", body: `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":false}`, wantErr: true},
+		{name: "malformed", body: `{not json`, wantErr: true},
+		{name: "incomplete", body: `{}`, wantErr: true},
 	}
-	// Pristine unlocked scaffold (blank objective, no steps): allowed.
-	r1 := t.TempDir()
-	writePlanLock(t, r1, `{"schema_version":"0.3.0","objective":"","steps":[],"locked":false}`)
-	if err := guardExistingPlan(r1); err != nil {
-		t.Errorf("pristine scaffold should be allowed: %v", err)
-	}
-	// Locked plan: refused.
-	r2 := t.TempDir()
-	writePlanLock(t, r2, `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
-	if err := guardExistingPlan(r2); err == nil {
-		t.Error("locked plan must be refused")
-	}
-	// Non-empty unlocked draft: refused.
-	r3 := t.TempDir()
-	writePlanLock(t, r3, `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":false}`)
-	if err := guardExistingPlan(r3); err == nil {
-		t.Error("non-empty unlocked draft must be refused")
-	}
-	// Malformed: refused.
-	r4 := t.TempDir()
-	writePlanLock(t, r4, `{not json`)
-	if err := guardExistingPlan(r4); err == nil {
-		t.Error("malformed plan must be refused")
-	}
-	// Valid JSON is not enough: an incomplete object is not the known scaffold.
-	r5 := t.TempDir()
-	writePlanLock(t, r5, `{}`)
-	if err := guardExistingPlan(r5); err == nil {
-		t.Error("incomplete plan object must be refused")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			if tc.body != "" {
+				writePlanLock(t, root, tc.body)
+			}
+			if err := guardExistingPlan(root); (err != nil) != tc.wantErr {
+				t.Fatalf("guardExistingPlan() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
 	}
 }
 
@@ -298,7 +304,10 @@ func (c *repairFailureCaller) Chat(_ context.Context, _ provider.ChatRequest, on
 }
 
 func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
-	root := t.TempDir()
+	root := filepath.Join(t.TempDir(), "space and 'quote")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 
@@ -314,8 +323,23 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	}
 	// The execute-separately command must carry -root <absolute root> so #209 writes
 	// proof state to the planning tree even when run from another directory.
-	if !strings.Contains(out.String(), "-root "+root) {
+	if !strings.Contains(out.String(), "-plan "+shellQuote(filepath.Join(root, ".agent", "plan.lock.json"))+" -root "+shellQuote(root)) {
 		t.Errorf("execute-separately command missing -root %s:\n%s", root, out.String())
+	}
+}
+
+func TestAcquireAuthorLockSerializesRoot(t *testing.T) {
+	root := t.TempDir()
+	release, err := acquireAuthorLock(context.Background(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if _, err := acquireAuthorLock(waitCtx, root); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("second lock err = %v, want context deadline", err)
 	}
 }
 
@@ -365,6 +389,41 @@ func TestRunAgentflowAuthor_InterruptReturnsWithoutLock(t *testing.T) {
 	}
 	if strings.Contains(out.String(), "locked plan") {
 		t.Errorf("no plan may be locked after interrupt:\n%s", out.String())
+	}
+}
+
+func TestRunAgentflowAuthor_InterruptCancelsProbe(t *testing.T) {
+	root := t.TempDir()
+	interrupts := make(chan struct{}, 1)
+	client := &stubLocker{probeStarted: make(chan struct{})}
+	sess := newTestSession(t, &scriptCaller{}, root)
+	done := make(chan error, 1)
+	go func() {
+		done <- runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, interrupts, sess, flags{goal: "x", goalSet: true}, root, client)
+	}()
+	<-client.probeStarted
+	interrupts <- struct{}{}
+	if err := <-done; !errors.Is(err, errPlannerInterrupted) {
+		t.Fatalf("probe interrupt err = %v, want errPlannerInterrupted", err)
+	}
+	if client.inits != 0 {
+		t.Fatal("Init must not run after an interrupted Probe")
+	}
+}
+
+func TestRunAgentflowAuthor_InterruptCancelsLockPlan(t *testing.T) {
+	root := t.TempDir()
+	interrupts := make(chan struct{}, 1)
+	client := &stubLocker{lockStarted: make(chan struct{})}
+	sess := newTestSession(t, &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}, root)
+	done := make(chan error, 1)
+	go func() {
+		done <- runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, interrupts, sess, flags{goal: "x", goalSet: true}, root, client)
+	}()
+	<-client.lockStarted
+	interrupts <- struct{}{}
+	if err := <-done; !errors.Is(err, errPlannerInterrupted) {
+		t.Fatalf("lock interrupt err = %v, want errPlannerInterrupted", err)
 	}
 }
 

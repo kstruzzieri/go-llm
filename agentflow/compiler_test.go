@@ -94,6 +94,31 @@ func TestCompile_DoesNotAliasIR(t *testing.T) {
 	}
 }
 
+func TestCompile_CanonicalizesStepFilesAndPreservesDAG(t *testing.T) {
+	ir := sampleIR()
+	ir.AllowedFiles = []string{"src/*"}
+	ir.Steps = []StepIR{
+		{ID: "S1", Action: "first", Files: []string{"tmp/../src/a.go"}, ExpectedDiff: []string{"a"}, DependsOn: []string{"S2"}, Validations: []GateIR{{Argv: []string{"true"}}}},
+		{ID: "S2", Action: "second", Files: []string{"src/b.go"}, ExpectedDiff: []string{"b"}, Validations: []GateIR{{Argv: []string{"true"}}}},
+		{ID: "S3", Action: "independent", Files: []string{"src/c.go"}, ExpectedDiff: []string{"c"}, Validations: []GateIR{{Argv: []string{"true"}}}},
+	}
+
+	p := Compile(ir)
+	if p.Steps[0].Files[0] != "src/a.go" {
+		t.Fatalf("step file = %q, want canonical src/a.go", p.Steps[0].Files[0])
+	}
+	if !slices.Equal(p.Steps[0].DependsOn, []string{"S2"}) || len(p.Steps[2].DependsOn) != 0 {
+		t.Fatalf("DAG edges not preserved: %+v", p.Steps)
+	}
+	if ds := CheckPlan(p); len(ds) != 0 {
+		t.Fatalf("valid forward-reference DAG rejected: %v", ds)
+	}
+	allowed, _ := EffectiveScope(&p, "S1")
+	if !slices.Equal(allowed, []string{"src/a.go"}) {
+		t.Fatalf("effective scope = %v, want canonical step path", allowed)
+	}
+}
+
 func codes(ds []Diagnostic) []string {
 	out := make([]string, len(ds))
 	for i, d := range ds {
@@ -145,6 +170,14 @@ func TestCheckPlan_UnusableStep(t *testing.T) {
 	ds := CheckPlan(Compile(ir))
 	if !hasCode(ds, "empty_expected_diff") || !hasCode(ds, "empty_action") {
 		t.Errorf("got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_BlankExpectedDiffEntry(t *testing.T) {
+	ir := sampleIR()
+	ir.Steps[0].ExpectedDiff = []string{"real change", "   "}
+	if ds := CheckPlan(Compile(ir)); !hasCode(ds, "blank_expected_diff_entry") {
+		t.Errorf("want blank_expected_diff_entry, got %v", codes(ds))
 	}
 }
 

@@ -42,13 +42,23 @@ func TestLockPlan_RealCLI(t *testing.T) {
 		RiskLevel:    "low",
 		RollbackPlan: "git checkout -- .",
 		AllowedFiles: []string{"src/*"},
-		Steps: []StepIR{{
-			ID:           "P1",
-			Action:       "ensure src/answer.txt contains the expected token",
-			Files:        []string{"src/answer.txt"},
-			ExpectedDiff: []string{"src/answer.txt changes pending to expected"},
-			Validations:  []GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}}},
-		}},
+		Steps: []StepIR{
+			{
+				ID:           "P1",
+				Action:       "ensure src/answer.txt contains the expected token",
+				Files:        []string{"src/answer.txt"},
+				ExpectedDiff: []string{"src/answer.txt changes pending to expected"},
+				DependsOn:    []string{"P0"}, // forward reference: P0 is declared below
+				Validations:  []GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}}},
+			},
+			{
+				ID:           "P0",
+				Action:       "prepare src/input.txt",
+				Files:        []string{"src/input.txt"},
+				ExpectedDiff: []string{"src/input.txt is ready"},
+				Validations:  []GateIR{{Label: "input", Argv: []string{"test", "-f", "src/input.txt"}}},
+			},
+		},
 	})
 	if ds := CheckPlan(plan); len(ds) != 0 {
 		t.Fatalf("compiler output failed local pre-check: %v", ds)

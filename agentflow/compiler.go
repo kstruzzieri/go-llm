@@ -68,7 +68,7 @@ func Compile(ir PlanIR) Plan {
 		st := Step{
 			ID:            s.ID,
 			Action:        s.Action,
-			Files:         cloneStrings(s.Files),
+			Files:         cleanPaths(s.Files),
 			Preconditions: []string{},
 			ExpectedDiff:  cloneStrings(s.ExpectedDiff),
 			Validation:    make([]string, 0, len(s.Validations)),
@@ -99,6 +99,16 @@ func cloneStrings(xs []string) []string {
 	return append([]string{}, xs...)
 }
 
+func cleanPaths(xs []string) []string {
+	out := cloneStrings(xs)
+	for i, x := range out {
+		if strings.TrimSpace(x) != "" {
+			out[i] = path.Clean(x)
+		}
+	}
+	return out
+}
+
 // withAgentDir appends the exact ".agent/" prefix when absent so agentflow's own
 // proof-state writes during execution stay in scope for drift accounting even in
 // repositories that do not gitignore .agent/.
@@ -115,8 +125,6 @@ type Diagnostic struct {
 	Code    string
 	Message string
 }
-
-var riskLevels = map[string]bool{"low": true, "medium": true, "high": true}
 
 // CheckPlan runs Golem's narrow local pre-check over a compiled plan. It is NOT a
 // mirror of agentflow's validate_plan: it only reports classes Golem can explain
@@ -157,7 +165,7 @@ func CheckPlan(p Plan) []Diagnostic {
 	if strings.TrimSpace(p.RollbackPlan) == "" {
 		add("missing_rollback", "rollback_plan is empty")
 	}
-	if !riskLevels[p.RiskLevel] {
+	if p.RiskLevel != "low" && p.RiskLevel != "medium" && p.RiskLevel != "high" {
 		add("bad_risk_level", fmt.Sprintf("risk_level %q must be one of: low, medium, high", p.RiskLevel))
 	}
 
@@ -195,6 +203,8 @@ func CheckPlan(p Plan) []Diagnostic {
 		}
 		if !anyNonBlank(s.ExpectedDiff) {
 			add("empty_expected_diff", "step "+sid+" has no expected_diff; state the intended outcome")
+		} else if !allNonBlank(s.ExpectedDiff) {
+			add("blank_expected_diff_entry", "step "+sid+" expected_diff contains a blank entry")
 		}
 		if len(s.Validation) == 0 {
 			add("no_validation", "step "+sid+" has no validation command")
