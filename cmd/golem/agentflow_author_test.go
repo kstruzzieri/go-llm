@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -156,26 +157,71 @@ func TestSubmitPlanTool_CompilerOwnedValidationErrorIsTerminal(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanSchema_ParsesAndPinsRequiredKeys(t *testing.T) {
+func TestSubmitPlanSchema_PinsIRStructs(t *testing.T) {
 	var schema map[string]any
 	if err := json.Unmarshal([]byte(submitPlanSchema), &schema); err != nil {
 		t.Fatalf("submitPlanSchema is not valid JSON: %v", err)
 	}
-	// Pin the model-facing required keys. CheckPlan remains authoritative for the
-	// richer semantic constraints; this test does not pretend to be a JSON Schema
-	// validator.
-	req, _ := schema["required"].([]any)
-	for _, k := range []string{"objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "steps"} {
-		found := false
-		for _, r := range req {
-			if r == k {
-				found = true
+
+	// obj navigates a chain of object keys, failing the test if any hop is missing
+	// or not an object.
+	obj := func(m map[string]any, keys ...string) map[string]any {
+		t.Helper()
+		cur := m
+		for _, k := range keys {
+			next, ok := cur[k].(map[string]any)
+			if !ok {
+				t.Fatalf("schema path %v: %q is not an object", keys, k)
+			}
+			cur = next
+		}
+		return cur
+	}
+	planProps := obj(schema, "properties")
+	stepItems := obj(schema, "properties", "steps", "items")
+	stepProps := obj(stepItems, "properties")
+	gateItems := obj(stepProps, "validations", "items")
+	gateProps := obj(gateItems, "properties")
+
+	// Every struct field's json tag (minus ,omitempty) must appear under the
+	// matching properties object, so a tag rename or drop that would silently
+	// mislead the model fails here rather than in production.
+	checkFields := func(level string, rt reflect.Type, props map[string]any) {
+		for i := 0; i < rt.NumField(); i++ {
+			name, _, _ := strings.Cut(rt.Field(i).Tag.Get("json"), ",")
+			if name == "" || name == "-" {
+				continue
+			}
+			if _, ok := props[name]; !ok {
+				t.Errorf("%s: field %s (json %q) missing from schema properties", level, rt.Field(i).Name, name)
 			}
 		}
-		if !found {
-			t.Errorf("schema required missing %q", k)
+	}
+	checkFields("PlanIR", reflect.TypeOf(agentflow.PlanIR{}), planProps)
+	checkFields("StepIR", reflect.TypeOf(agentflow.StepIR{}), stepProps)
+	checkFields("GateIR", reflect.TypeOf(agentflow.GateIR{}), gateProps)
+
+	// Pin the required-key lists at all three levels. CheckPlan stays authoritative
+	// for the richer semantic constraints; this only pins the model-facing contract.
+	requires := func(m map[string]any, want ...string) {
+		t.Helper()
+		have := map[string]bool{}
+		if req, ok := m["required"].([]any); ok {
+			for _, r := range req {
+				if s, ok := r.(string); ok {
+					have[s] = true
+				}
+			}
+		}
+		for _, k := range want {
+			if !have[k] {
+				t.Errorf("required missing %q; got %v", k, m["required"])
+			}
 		}
 	}
+	requires(schema, "objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "steps")
+	requires(stepItems, "id", "action", "files", "expected_diff", "validations")
+	requires(gateItems, "argv")
 }
 
 func writePlanLock(t *testing.T, root string, body string) {
@@ -288,5 +334,46 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	}
 	if !strings.Contains(caller.system, "Golem's planner") || !strings.Contains(caller.system, "repo rule") {
 		t.Fatalf("planner system omitted prompt/context: %q", caller.system)
+	}
+}
+
+func TestRunAgentflowAuthor_ExhaustionReportsDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "steps[0].files must be non-empty"}}}
+	// Repairable on BOTH submissions: the flow uses its two-attempt budget, then
+	// reports the last diagnostics and exits with errPlannerRejected.
+	client := &stubLocker{lockErrs: []error{verr, verr}}
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t)), submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	var out, errb bytes.Buffer
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, client)
+	if !errors.Is(err, errPlannerRejected) {
+		t.Fatalf("err = %v, want errPlannerRejected", err)
+	}
+	if client.locks != 2 {
+		t.Fatalf("bounded repair should use both submissions; lock attempts = %d", client.locks)
+	}
+	if !strings.Contains(errb.String(), "validation_error") || !strings.Contains(errb.String(), "steps[0].files must be non-empty") {
+		t.Fatalf("stderr missing rendered diagnostics:\n%s", errb.String())
+	}
+}
+
+func TestRunAgentflowAuthor_TerminalLockErrorReturned(t *testing.T) {
+	root := t.TempDir()
+	term := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "invalid_arguments", Message: "boom"}}}
+	// Terminal on the first submission: the flow must surface the terminal error,
+	// not degrade to "no submission". Second error present only so a stray extra
+	// lock (if the loop did not cancel) still cannot succeed.
+	client := &stubLocker{lockErrs: []error{term, term}}
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t)), submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	var out, errb bytes.Buffer
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, client)
+	if errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("terminal lock error must not degrade to no-submission: %v", err)
+	}
+	var ce *agentflow.CommandError
+	if !errors.As(err, &ce) || len(ce.Errors) == 0 || ce.Errors[0].Code != "invalid_arguments" {
+		t.Fatalf("want terminal invalid_arguments CommandError, got %v", err)
 	}
 }

@@ -143,7 +143,10 @@ func (e *terminalError) Unwrap() error { return e.err }
 
 // compilerOwnedTokens are substrings of a validation_error message that mean the
 // failure is in a field the compiler emits (not the model IR): the IR cannot
-// repair it, so it is terminal. Kept narrow and test-pinned.
+// repair it, so it is terminal. Treating schema_version / drift_budget /
+// "missing required field" as terminal is SAFE because CheckPlan is a superset of
+// validate_plan's model-field checks, so any such error that survives CheckPlan to
+// reach lock is compiler-owned, not model-repairable. Kept narrow and test-pinned.
 var compilerOwnedTokens = []string{"schema_version", "drift_budget", "missing required field"}
 
 // classifyLockError returns a non-nil terminal error when the lock failure cannot
@@ -190,7 +193,10 @@ func lockErrorDiagnostics(err error) []agentflow.Diagnostic {
 }
 
 // submitPlanSchema is the model-facing JSON Schema for PlanIR. Hand-written to
-// avoid a schema-generation dependency; a test keeps it aligned with the struct.
+// avoid a schema-generation dependency; TestSubmitPlanSchema keeps it aligned with
+// the IR structs by pinning the top-level, step, and gate required keys and
+// asserting every PlanIR/StepIR/GateIR struct field appears under the matching
+// properties (so a json-tag rename cannot silently mislead the model).
 const submitPlanSchema = `{
   "type": "object",
   "required": ["objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "steps"],
