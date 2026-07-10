@@ -318,6 +318,38 @@ func TestRouterRouteUnqualifiedModel(t *testing.T) {
 	}
 }
 
+func TestRouterModelDefaultsFillOnlyUnsetRequestOptions(t *testing.T) {
+	key := ModelKey{Provider: "test", Model: "qwen3:8b"}
+	router, prov := setupTestRouter(t, WithModelDefaults(map[ModelKey]ModelOptions{
+		key: {
+			Temperature: Ptr(0.7),
+			TopP:        Ptr(0.9),
+			TopK:        Ptr(40),
+		},
+	}))
+
+	_, err := router.Chat(context.Background(), ChatRequest{
+		Model: "test/qwen3:8b",
+		Options: ModelOptions{
+			Temperature: Ptr(0.0),
+			TopP:        Ptr(0.0),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	opts := prov.getLastChatRequest().Options
+	if opts.Temperature == nil || *opts.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit request zero", opts.Temperature)
+	}
+	if opts.TopP == nil || *opts.TopP != 0 {
+		t.Errorf("TopP = %v, want explicit request zero", opts.TopP)
+	}
+	if opts.TopK == nil || *opts.TopK != 40 {
+		t.Errorf("TopK = %v, want model default 40", opts.TopK)
+	}
+}
+
 func TestRouterRouteClosed(t *testing.T) {
 	router, _ := setupTestRouter(t)
 

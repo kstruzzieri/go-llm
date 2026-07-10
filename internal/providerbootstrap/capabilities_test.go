@@ -26,6 +26,22 @@ func TestCapabilitiesForKey_UnknownKeyNil(t *testing.T) {
 	}
 }
 
+func TestBuildModelDefaults_ConflictErrors(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{
+		"chat": {
+			Provider: "lc", Name: "qwen",
+			Options: &config.SamplingOptions{TopK: provider.Ptr(20)},
+		},
+		"review": {
+			Provider: "lc", Name: "qwen",
+			Options: &config.SamplingOptions{TopK: provider.Ptr(40)},
+		},
+	}}
+	if _, err := buildModelDefaults(cfg); err == nil {
+		t.Fatal("expected conflict error for divergent sampling defaults on the same model")
+	}
+}
+
 func TestBuildCapabilityOverrides_OpenAICompatModel(t *testing.T) {
 	cfg := &config.Config{
 		Providers: map[string]config.ProviderConfig{"lc": {APIFormat: "openai-compat"}},

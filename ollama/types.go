@@ -76,6 +76,7 @@ type ChatResponse struct {
 type ModelOptions struct {
 	Temperature   float64  `json:"temperature,omitempty"`
 	TopP          float64  `json:"top_p,omitempty"`
+	TopK          *int     `json:"top_k,omitempty"`
 	NumPredict    int      `json:"num_predict,omitempty"` // max tokens to generate
 	NumCtx        int      `json:"num_ctx,omitempty"`     // context window size
 	Stop          []string `json:"stop,omitempty"`

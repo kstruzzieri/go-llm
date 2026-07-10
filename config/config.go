@@ -65,15 +65,16 @@ type ProviderConfig struct {
 // /v1/completions. When empty, capabilities derive from Type per
 // ResolvedCapabilities. See validCapabilityNames for the accepted vocabulary.
 type ModelConfig struct {
-	Name          string   `json:"name"`
-	Provider      string   `json:"provider,omitempty"`
-	Description   string   `json:"description,omitempty"`
-	Type          string   `json:"type"`
-	Parameters    string   `json:"parameters,omitempty"`
-	ContextWindow int      `json:"context_window,omitempty"`
-	Dimensions    int      `json:"dimensions,omitempty"`
-	Capabilities  []string `json:"capabilities,omitempty"`
-	Fallbacks     []string `json:"fallbacks,omitempty"`
+	Name          string           `json:"name"`
+	Provider      string           `json:"provider,omitempty"`
+	Description   string           `json:"description,omitempty"`
+	Type          string           `json:"type"`
+	Parameters    string           `json:"parameters,omitempty"`
+	ContextWindow int              `json:"context_window,omitempty"`
+	Dimensions    int              `json:"dimensions,omitempty"`
+	Capabilities  []string         `json:"capabilities,omitempty"`
+	Fallbacks     []string         `json:"fallbacks,omitempty"`
+	Options       *SamplingOptions `json:"options,omitempty"`
 	// ThinkMode optionally overrides the catalog/inferred think mode for
 	// this model: "none", "always", "toggle", or "auto" (lowercased at
 	// load). Empty means no override. Invalid values fail Load — user
@@ -81,6 +82,14 @@ type ModelConfig struct {
 	ThinkMode string `json:"think_mode,omitempty"`
 	// ThinkTags optionally overrides the reasoning tag delimiters.
 	ThinkTags *ThinkTagsConfig `json:"think_tags,omitempty"`
+}
+
+// SamplingOptions are optional per-model defaults. Request values override
+// these defaults; nil fields leave provider behavior unchanged.
+type SamplingOptions struct {
+	Temperature *float64 `json:"temperature,omitempty"`
+	TopP        *float64 `json:"top_p,omitempty"`
+	TopK        *int     `json:"top_k,omitempty"`
 }
 
 // ThinkTagsConfig is the models.json shape for custom reasoning delimiters.

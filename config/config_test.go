@@ -140,6 +140,38 @@ func TestLoad_MinimalConfig(t *testing.T) {
 	if m.Provider != "ollama" {
 		t.Errorf("expected implicit provider 'ollama', got %q", m.Provider)
 	}
+	if m.Options != nil {
+		t.Errorf("legacy config Options = %+v, want nil", m.Options)
+	}
+}
+
+func TestLoad_ModelSamplingOptionsPreserveZero(t *testing.T) {
+	path := writeTempJSON(t, `{
+		"providers": {"llamacpp": {"base_url": "http://localhost:8080", "api_format": "openai-compat"}},
+		"models": {"coding": {
+			"name": "qwen", "provider": "llamacpp", "type": "moe",
+			"options": {"temperature": 0, "top_p": 0.9, "top_k": 0}
+		}},
+		"defaults": {"chat": "coding"}
+	}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	opts := cfg.Models["coding"].Options
+	if opts == nil {
+		t.Fatal("Options = nil, want configured sampling defaults")
+	}
+	if opts.Temperature == nil || *opts.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit zero", opts.Temperature)
+	}
+	if opts.TopP == nil || *opts.TopP != 0.9 {
+		t.Errorf("TopP = %v, want 0.9", opts.TopP)
+	}
+	if opts.TopK == nil || *opts.TopK != 0 {
+		t.Errorf("TopK = %v, want explicit zero", opts.TopK)
+	}
 }
 
 func TestLoad_TimeoutDefaulting(t *testing.T) {

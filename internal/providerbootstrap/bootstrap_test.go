@@ -297,6 +297,67 @@ func TestNew_OpenAICompatConfigInstallsOverridesAndBuilds(t *testing.T) {
 	}
 }
 
+func TestNew_ModelSamplingDefaultsReachSelectedProvider(t *testing.T) {
+	ctx := context.Background()
+	var captured struct {
+		Temperature *float64 `json:"temperature"`
+		TopP        *float64 `json:"top_p"`
+		TopK        *int     `json:"top_k"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"qwen3:8b"}]}`))
+		case "/v1/chat/completions":
+			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+				t.Errorf("decode chat request: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {APIFormat: "openai-compat", BaseURL: srv.URL},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat": {
+				Provider: "lc", Name: "qwen3:8b", Type: "dense",
+				Options: &config.SamplingOptions{
+					Temperature: provider.Ptr(0.7),
+					TopP:        provider.Ptr(0.9),
+					TopK:        provider.Ptr(40),
+				},
+			},
+		},
+	}
+	b, err := New(ctx, Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	_, err = b.Router.Chat(ctx, provider.ChatRequest{
+		Model:   "lc/qwen3:8b",
+		Options: provider.ModelOptions{Temperature: provider.Ptr(0.0)},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if captured.Temperature == nil || *captured.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit request zero", captured.Temperature)
+	}
+	if captured.TopP == nil || *captured.TopP != 0.9 {
+		t.Errorf("TopP = %v, want model default 0.9", captured.TopP)
+	}
+	if captured.TopK == nil || *captured.TopK != 40 {
+		t.Errorf("TopK = %v, want model default 40", captured.TopK)
+	}
+}
+
 func TestNew_OpenAICompatURLOverride(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 		"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},

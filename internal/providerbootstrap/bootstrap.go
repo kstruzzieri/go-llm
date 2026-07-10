@@ -117,7 +117,15 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		return nil, err
 	}
 
-	router := provider.NewRouter(mr, pReg, opts.RouterOptions...)
+	modelDefaults, err := buildModelDefaults(effCfg)
+	if err != nil {
+		return nil, err
+	}
+	routerOpts := append([]provider.RouterOption{}, opts.RouterOptions...)
+	if len(modelDefaults) > 0 {
+		routerOpts = append(routerOpts, provider.WithModelDefaults(modelDefaults))
+	}
+	router := provider.NewRouter(mr, pReg, routerOpts...)
 
 	return &Bundle{
 		Config:    effCfg,

@@ -671,13 +671,16 @@ func toOllamaOptions(opts ModelOptions) *ollama.ModelOptions {
 	if opts.TopP != nil {
 		o.TopP = *opts.TopP
 	}
+	if opts.TopK != nil {
+		o.TopK = opts.TopK
+	}
 	if opts.RepeatPenalty != nil {
 		o.RepeatPenalty = *opts.RepeatPenalty
 	}
 
 	// Return nil only if no options were explicitly set.
 	// Check the source pointer fields to distinguish "not set" from "set to zero".
-	if opts.Temperature == nil && opts.TopP == nil && opts.RepeatPenalty == nil &&
+	if opts.Temperature == nil && opts.TopP == nil && opts.TopK == nil && opts.RepeatPenalty == nil &&
 		opts.NumPredict == 0 && opts.NumCtx == 0 && len(opts.Stop) == 0 {
 		return nil
 	}

@@ -1236,6 +1236,7 @@ func TestOllamaProvider_Generate_WithOptions(t *testing.T) {
 		Suffix: "// end",
 		Options: ModelOptions{
 			Temperature: Ptr(0.3),
+			TopK:        Ptr(0),
 			NumPredict:  50,
 		},
 	})
@@ -1244,6 +1245,9 @@ func TestOllamaProvider_Generate_WithOptions(t *testing.T) {
 	}
 	if receivedOpts.Temperature != 0.3 {
 		t.Errorf("Temperature = %f, want 0.3", receivedOpts.Temperature)
+	}
+	if receivedOpts.TopK == nil || *receivedOpts.TopK != 0 {
+		t.Errorf("TopK = %v, want explicit zero", receivedOpts.TopK)
 	}
 	if receivedOpts.NumPredict != 50 {
 		t.Errorf("NumPredict = %d, want 50", receivedOpts.NumPredict)

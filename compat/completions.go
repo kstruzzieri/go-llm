@@ -32,6 +32,7 @@ type CompletionRequest struct {
 	MaxTokens   *int          `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
 	TopP        *float64      `json:"top_p,omitempty"`
+	TopK        *int          `json:"top_k,omitempty"`
 	Stop        StopSequences `json:"stop,omitempty"`
 
 	// Extensions. All optional.
@@ -213,7 +214,7 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 		Model:       selectorFor(key),
 		Prompt:      prompt,
 		Suffix:      req.Suffix,
-		Options:     toModelOptions(req.Temperature, req.TopP, req.MaxTokens, []string(req.Stop)),
+		Options:     toModelOptions(req.Temperature, req.TopP, req.TopK, req.MaxTokens, []string(req.Stop)),
 		AffinityKey: req.AffinityKey,
 		DryRun:      req.DryRun,
 	}
