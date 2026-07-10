@@ -7,6 +7,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -211,6 +213,11 @@ func runModelsWith(
 // another role declares caps for the same key) and a remediation hint line.
 func renderModelLine(sel string, key provider.ModelKey, exp provider.ToolCallExplanation, cfg *config.Config, now time.Time) string {
 	line := fmt.Sprintf("%s\tcaps=%s\t%s", sel, exp.Caps.String(), toolCallField(exp, now))
+	if opts := samplingDefaultsForKey(cfg, key); opts != nil {
+		if field := samplingDefaultsField(opts); field != "" {
+			line += "\t" + field
+		}
+	}
 
 	if role, ok := declaringRole(cfg, key); ok {
 		line += fmt.Sprintf(" (declared by model entry %q)", role)
@@ -219,6 +226,41 @@ func renderModelLine(sel string, key provider.ModelKey, exp provider.ToolCallExp
 		line += "\n  " + remediationHint(sel)
 	}
 	return line
+}
+
+func samplingDefaultsForKey(cfg *config.Config, key provider.ModelKey) *config.SamplingOptions {
+	if cfg == nil {
+		return nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	for _, role := range roles {
+		model := cfg.Models[role]
+		if model.Provider == key.Provider && model.Name == key.Model && model.Options != nil {
+			return model.Options
+		}
+	}
+	return nil
+}
+
+func samplingDefaultsField(opts *config.SamplingOptions) string {
+	parts := make([]string, 0, 3)
+	if opts.Temperature != nil {
+		parts = append(parts, fmt.Sprintf("temperature=%g", *opts.Temperature))
+	}
+	if opts.TopP != nil {
+		parts = append(parts, fmt.Sprintf("top_p=%g", *opts.TopP))
+	}
+	if opts.TopK != nil {
+		parts = append(parts, fmt.Sprintf("top_k=%d", *opts.TopK))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "sampling=" + strings.Join(parts, ",")
 }
 
 // toolCallField renders the tool_call verdict + its provenance source. A

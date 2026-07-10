@@ -29,6 +29,7 @@ type ChatCompletionRequest struct {
 	StreamOptions *StreamOptions     `json:"stream_options,omitempty"`
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
+	TopK          *int               `json:"top_k,omitempty"`
 	MaxTokens     *int               `json:"max_tokens,omitempty"`
 	Stop          StopSequences      `json:"stop,omitempty"` // string or []string
 	Tools         []OpenAIToolParam  `json:"tools,omitempty"`
@@ -247,10 +248,16 @@ func (s *Server) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rr := provider.RoutingRequest{
-		Model:        selectorFor(key),
-		UseCase:      firstNonEmpty(req.UseCase, "chat"),
-		Messages:     toProviderMessages(req.Messages),
-		Options:      toModelOptions(req.Temperature, req.TopP, req.MaxTokens, []string(req.Stop)),
+		Model:    selectorFor(key),
+		UseCase:  firstNonEmpty(req.UseCase, "chat"),
+		Messages: toProviderMessages(req.Messages),
+		Options: toModelOptions(modelOptionParams{
+			temperature: req.Temperature,
+			topP:        req.TopP,
+			topK:        req.TopK,
+			maxTokens:   req.MaxTokens,
+			stop:        []string(req.Stop),
+		}),
 		RequiredCaps: provider.CapChat,
 		Priority:     resolvePriority(req.Priority, provider.PriorityNormal),
 		AffinityKey:  req.AffinityKey,
@@ -700,17 +707,26 @@ func fallbackRequestID() string {
 // entries are filtered out: Ollama treats "" as "stop immediately" which
 // would truncate generation to zero/one token with finish_reason="stop",
 // silently masking a caller mistake ({"stop": ""} or {"stop": [""]}).
-func toModelOptions(temperature, topP *float64, maxTokens *int, stop []string) provider.ModelOptions {
+type modelOptionParams struct {
+	temperature *float64
+	topP        *float64
+	topK        *int
+	maxTokens   *int
+	stop        []string
+}
+
+func toModelOptions(params modelOptionParams) provider.ModelOptions {
 	opts := provider.ModelOptions{
-		Temperature: temperature,
-		TopP:        topP,
+		Temperature: params.temperature,
+		TopP:        params.topP,
+		TopK:        params.topK,
 	}
-	if maxTokens != nil {
-		opts.NumPredict = *maxTokens
+	if params.maxTokens != nil {
+		opts.NumPredict = *params.maxTokens
 	}
-	if len(stop) > 0 {
-		filtered := make([]string, 0, len(stop))
-		for _, s := range stop {
+	if len(params.stop) > 0 {
+		filtered := make([]string, 0, len(params.stop))
+		for _, s := range params.stop {
 			if s != "" {
 				filtered = append(filtered, s)
 			}

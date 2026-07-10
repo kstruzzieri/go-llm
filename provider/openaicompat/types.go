@@ -15,6 +15,7 @@ type chatRequest struct {
 	StreamOptions *chatStreamOptions `json:"stream_options,omitempty"`
 	Temperature   *float64           `json:"temperature,omitempty"`
 	TopP          *float64           `json:"top_p,omitempty"`
+	TopK          *int               `json:"top_k,omitempty"`
 	MaxTokens     int                `json:"max_tokens,omitempty"`
 	Stop          []string           `json:"stop,omitempty"`
 	Tools         []chatTool         `json:"tools,omitempty"`
@@ -141,6 +142,7 @@ type completionRequest struct {
 	Stream      bool     `json:"stream,omitempty"`
 	Temperature *float64 `json:"temperature,omitempty"`
 	TopP        *float64 `json:"top_p,omitempty"`
+	TopK        *int     `json:"top_k,omitempty"`
 	MaxTokens   int      `json:"max_tokens,omitempty"`
 	Stop        []string `json:"stop,omitempty"`
 }

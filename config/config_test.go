@@ -140,6 +140,65 @@ func TestLoad_MinimalConfig(t *testing.T) {
 	if m.Provider != "ollama" {
 		t.Errorf("expected implicit provider 'ollama', got %q", m.Provider)
 	}
+	if m.Options != nil {
+		t.Errorf("legacy config Options = %+v, want nil", m.Options)
+	}
+}
+
+func TestLoad_ModelSamplingOptionsPreserveZero(t *testing.T) {
+	path := writeTempJSON(t, `{
+		"providers": {"llamacpp": {"base_url": "http://localhost:8080", "api_format": "openai-compat"}},
+		"models": {"coding": {
+			"name": "qwen", "provider": "llamacpp", "type": "moe",
+			"options": {"temperature": 0, "top_p": 0.9, "top_k": 0}
+		}},
+		"defaults": {"chat": "coding"}
+	}`)
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	opts := cfg.Models["coding"].Options
+	if opts == nil {
+		t.Fatal("Options = nil, want configured sampling defaults")
+	}
+	if opts.Temperature == nil || *opts.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit zero", opts.Temperature)
+	}
+	if opts.TopP == nil || *opts.TopP != 0.9 {
+		t.Errorf("TopP = %v, want 0.9", opts.TopP)
+	}
+	if opts.TopK == nil || *opts.TopK != 0 {
+		t.Errorf("TopK = %v, want explicit zero", opts.TopK)
+	}
+}
+
+func TestLoad_RejectsInvalidSamplingOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options string
+		want    string
+	}{
+		{name: "negative temperature", options: `{"temperature": -0.1}`, want: "temperature"},
+		{name: "zero top_p", options: `{"top_p": 0}`, want: "top_p"},
+		{name: "top_p above one", options: `{"top_p": 1.1}`, want: "top_p"},
+		{name: "negative top_k", options: `{"top_k": -1}`, want: "top_k"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempJSON(t, `{
+				"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+				"models": {"m": {"name": "x", "type": "dense", "options": `+tt.options+`}},
+				"defaults": {}
+			}`)
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load error = %v, want error containing %q", err, tt.want)
+			}
+		})
+	}
 }
 
 func TestLoad_TimeoutDefaulting(t *testing.T) {

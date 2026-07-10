@@ -32,6 +32,7 @@ type CompletionRequest struct {
 	MaxTokens   *int          `json:"max_tokens,omitempty"`
 	Temperature *float64      `json:"temperature,omitempty"`
 	TopP        *float64      `json:"top_p,omitempty"`
+	TopK        *int          `json:"top_k,omitempty"`
 	Stop        StopSequences `json:"stop,omitempty"`
 
 	// Extensions. All optional.
@@ -210,10 +211,16 @@ func (s *Server) handleCompletions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rr := provider.RoutingRequest{
-		Model:       selectorFor(key),
-		Prompt:      prompt,
-		Suffix:      req.Suffix,
-		Options:     toModelOptions(req.Temperature, req.TopP, req.MaxTokens, []string(req.Stop)),
+		Model:  selectorFor(key),
+		Prompt: prompt,
+		Suffix: req.Suffix,
+		Options: toModelOptions(modelOptionParams{
+			temperature: req.Temperature,
+			topP:        req.TopP,
+			topK:        req.TopK,
+			maxTokens:   req.MaxTokens,
+			stop:        []string(req.Stop),
+		}),
 		AffinityKey: req.AffinityKey,
 		DryRun:      req.DryRun,
 	}

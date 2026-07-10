@@ -26,6 +26,24 @@ func TestCapabilitiesForKey_UnknownKeyNil(t *testing.T) {
 	}
 }
 
+func TestBuildModelDefaults_ConflictErrors(t *testing.T) {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{
+		"chat": {
+			Provider: "lc", Name: "qwen",
+			Options: &config.SamplingOptions{TopK: provider.Ptr(20)},
+		},
+		"review": {
+			Provider: "lc", Name: "qwen",
+			Options: &config.SamplingOptions{TopK: provider.Ptr(40)},
+		},
+	}}
+	_, err := buildModelDefaults(cfg)
+	if err == nil || !strings.Contains(err.Error(), "defaults are per provider/model") ||
+		!strings.Contains(err.Error(), "distinct provider keys") {
+		t.Fatalf("error = %v, want per-model conflict remediation", err)
+	}
+}
+
 func TestBuildCapabilityOverrides_OpenAICompatModel(t *testing.T) {
 	cfg := &config.Config{
 		Providers: map[string]config.ProviderConfig{"lc": {APIFormat: "openai-compat"}},

@@ -754,6 +754,7 @@ func toCompletionRequest(req provider.GenerateRequest, stream bool) completionRe
 func applyOptionsChat(r *chatRequest, opts provider.ModelOptions) {
 	r.Temperature = opts.Temperature
 	r.TopP = opts.TopP
+	r.TopK = opts.TopK
 	r.MaxTokens = opts.NumPredict
 	if len(opts.Stop) > 0 {
 		r.Stop = opts.Stop
@@ -774,6 +775,7 @@ func applyOptionsChat(r *chatRequest, opts provider.ModelOptions) {
 func applyOptionsCompletion(r *completionRequest, opts provider.ModelOptions) {
 	r.Temperature = opts.Temperature
 	r.TopP = opts.TopP
+	r.TopK = opts.TopK
 	r.MaxTokens = opts.NumPredict
 	if len(opts.Stop) > 0 {
 		r.Stop = opts.Stop

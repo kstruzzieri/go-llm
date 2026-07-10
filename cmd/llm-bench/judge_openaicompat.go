@@ -75,9 +75,8 @@ func toProviderJudgeOptions(opts *ollama.ModelOptions) provider.ModelOptions {
 	if opts == nil {
 		return provider.ModelOptions{}
 	}
-	temp := opts.Temperature
 	return provider.ModelOptions{
-		Temperature: &temp,
+		Temperature: opts.Temperature,
 		NumPredict:  opts.NumPredict,
 	}
 }

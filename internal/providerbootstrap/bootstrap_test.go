@@ -297,6 +297,135 @@ func TestNew_OpenAICompatConfigInstallsOverridesAndBuilds(t *testing.T) {
 	}
 }
 
+func TestNew_ModelSamplingDefaultsReachSelectedProvider(t *testing.T) {
+	ctx := context.Background()
+	var captured struct {
+		Temperature *float64 `json:"temperature"`
+		TopP        *float64 `json:"top_p"`
+		TopK        *int     `json:"top_k"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"qwen3:8b"}]}`))
+		case "/v1/chat/completions":
+			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+				t.Errorf("decode chat request: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"lc": {APIFormat: "openai-compat", BaseURL: srv.URL},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat": {
+				Provider: "lc", Name: "qwen3:8b", Type: "dense",
+				Options: &config.SamplingOptions{
+					Temperature: provider.Ptr(0.7),
+					TopP:        provider.Ptr(0.9),
+					TopK:        provider.Ptr(40),
+				},
+			},
+		},
+	}
+	b, err := New(ctx, Options{
+		Config: cfg,
+		RouterOptions: []provider.RouterOption{provider.WithModelDefaults(map[provider.ModelKey]provider.SamplingDefaults{
+			{Provider: "lc", Model: "qwen3:8b"}: {TopK: provider.Ptr(20)},
+		})},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	_, err = b.Router.Chat(ctx, provider.ChatRequest{
+		Model:   "lc/qwen3:8b",
+		Options: provider.ModelOptions{Temperature: provider.Ptr(0.0)},
+	})
+	if err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if captured.Temperature == nil || *captured.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit request zero", captured.Temperature)
+	}
+	if captured.TopP == nil || *captured.TopP != 0.9 {
+		t.Errorf("TopP = %v, want model default 0.9", captured.TopP)
+	}
+	if captured.TopK == nil || *captured.TopK != 20 {
+		t.Errorf("TopK = %v, want caller override 20", captured.TopK)
+	}
+}
+
+func TestNew_ModelSamplingDefaultsPreserveZeroForNativeOllama(t *testing.T) {
+	ctx := context.Background()
+	var captured struct {
+		Options struct {
+			Temperature *float64 `json:"temperature"`
+			TopP        *float64 `json:"top_p"`
+			TopK        *int     `json:"top_k"`
+		} `json:"options"`
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3:8b"}]}`))
+		case "/api/show":
+			_, _ = w.Write([]byte(`{"details":{"family":"qwen3","parameter_size":"8B"},"capabilities":["completion"]}`))
+		case "/api/generate":
+			if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
+				t.Errorf("decode generate request: %v", err)
+			}
+			_, _ = w.Write([]byte(`{"model":"qwen3:8b","response":"ok","done":true}`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	cfg := &config.Config{
+		Providers: map[string]config.ProviderConfig{
+			"ollama": {APIFormat: "ollama", BaseURL: srv.URL},
+		},
+		Models: map[string]config.ModelConfig{
+			"chat": {
+				Provider: "ollama", Name: "qwen3:8b", Type: "dense",
+				Options: &config.SamplingOptions{
+					Temperature: provider.Ptr(0.0),
+					TopP:        provider.Ptr(0.9),
+					TopK:        provider.Ptr(0),
+				},
+			},
+		},
+	}
+	b, err := New(ctx, Options{Config: cfg})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer func() { _ = b.Close() }()
+
+	if _, err := b.Router.Generate(ctx, provider.GenerateRequest{
+		Model: "ollama/qwen3:8b", Prompt: "hello",
+	}); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if captured.Options.Temperature == nil || *captured.Options.Temperature != 0 {
+		t.Errorf("Temperature = %v, want configured zero", captured.Options.Temperature)
+	}
+	if captured.Options.TopP == nil || *captured.Options.TopP != 0.9 {
+		t.Errorf("TopP = %v, want configured 0.9", captured.Options.TopP)
+	}
+	if captured.Options.TopK == nil || *captured.Options.TopK != 0 {
+		t.Errorf("TopK = %v, want configured zero", captured.Options.TopK)
+	}
+}
+
 func TestNew_OpenAICompatURLOverride(t *testing.T) {
 	cfg := &config.Config{Providers: map[string]config.ProviderConfig{
 		"llamacpp": {APIFormat: "openai-compat", BaseURL: "http://127.0.0.1:8080"},

@@ -15,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -427,7 +428,7 @@ func (s *LLMJudgeScorer) buildJudgeCall(trace Trace, actual Result) (ollama.Chat
 		Format: "json",
 		Think:  &think,
 		Options: &ollama.ModelOptions{
-			Temperature: judgeTemperature,
+			Temperature: provider.Ptr(judgeTemperature),
 			NumPredict:  judgeTokenBudget,
 		},
 		KeepAlive: benchKeepAlive,
