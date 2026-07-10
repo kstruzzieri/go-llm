@@ -332,17 +332,19 @@ func TestRunAgentflowAuthor_InstallsProofStateReadGuard(t *testing.T) {
 
 func TestRunAgentflowAuthor_InterruptReturnsWithoutLock(t *testing.T) {
 	root := t.TempDir()
-	// A fired interrupt cancels the authoring loop before it can lock a plan. A
-	// closed channel is deterministic: the watch goroutine cancels immediately, the
-	// model never submits, and the flow falls to errPlannerNoSubmission.
+	// A fired interrupt must cancel the in-flight model call. The caller blocks on
+	// ctx (block channel never closed), so the only way Chat returns is the watch
+	// goroutine cancelling loopCtx off the closed interrupts channel -> Chat returns
+	// context.Canceled -> the flow reports errPlannerInterrupted (distinct from
+	// errPlannerNoSubmission, which is the loop reaching its step cap without a submit).
 	interrupts := make(chan struct{})
 	close(interrupts)
-	caller := &captureCaller{answer: "thinking, no submission"}
+	caller := &scriptCaller{block: make(chan struct{})}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
 	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, interrupts, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
-	if !errors.Is(err, errPlannerNoSubmission) {
-		t.Fatalf("interrupted loop should return errPlannerNoSubmission, got %v", err)
+	if !errors.Is(err, errPlannerInterrupted) {
+		t.Fatalf("interrupted loop should return errPlannerInterrupted, got %v", err)
 	}
 	if strings.Contains(out.String(), "locked plan") {
 		t.Errorf("no plan may be locked after interrupt:\n%s", out.String())

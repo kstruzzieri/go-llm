@@ -247,6 +247,7 @@ const plannerBasePrompt = "You are Golem's planner. From the user's goal, author
 var (
 	errPlannerRejected     = errors.New("planner could not produce a lockable plan within the submission budget")
 	errPlannerNoSubmission = errors.New("the planner did not submit a plan")
+	errPlannerInterrupted  = errors.New("planning interrupted before a plan was locked")
 )
 
 // guardExistingPlan refuses to proceed when locking would discard durable state.
@@ -379,6 +380,11 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		return errPlannerRejected
 	case runErr != nil && !errors.Is(runErr, context.Canceled):
 		return runErr
+	case errors.Is(runErr, context.Canceled):
+		// The loop was cancelled with no locked plan, diagnostics, or terminal
+		// error recorded: an operator interrupt (a successful/exhausted submit is
+		// handled by the cases above, which set those fields before cancelling).
+		return errPlannerInterrupted
 	default:
 		return errPlannerNoSubmission
 	}

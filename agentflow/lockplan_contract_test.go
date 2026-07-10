@@ -3,6 +3,7 @@ package agentflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,7 +88,29 @@ func TestLockPlan_RealCLI_RejectsCycle(t *testing.T) {
 	if err := os.WriteFile(planPath, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.LockPlan(ctx, planPath); err == nil {
+	err := c.LockPlan(ctx, planPath)
+	if err == nil {
 		t.Fatal("expected real lock-plan to reject a dependency cycle")
+	}
+	// Pin the failure-envelope contract the -goal repair loop depends on: a real
+	// lock-plan rejection must be a *CommandError carrying an Errors[] entry with
+	// Code=="validation_error". cmd/golem's classifyLockError keys repair-vs-terminal
+	// on exactly that code+array; if agentflow ever reports validation failures via
+	// findings[]/diagnostics[] or renames the code, the 2-attempt repair loop
+	// silently never engages. Assert it against the real CLI here rather than
+	// trusting the comment in types.go.
+	var ce *CommandError
+	if !errors.As(err, &ce) {
+		t.Fatalf("lock-plan rejection must be *CommandError, got %T: %v", err, err)
+	}
+	found := false
+	for _, se := range ce.Errors {
+		if se.Code == "validation_error" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("lock-plan rejection must carry a validation_error in Errors[]; got %+v", ce.Errors)
 	}
 }
