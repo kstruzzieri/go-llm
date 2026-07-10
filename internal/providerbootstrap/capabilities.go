@@ -10,11 +10,11 @@ import (
 
 type modelDefaultsEntry struct {
 	role string
-	opts provider.ModelOptions
+	opts provider.SamplingDefaults
 }
 
-func buildModelDefaults(cfg *config.Config) (map[provider.ModelKey]provider.ModelOptions, error) {
-	out := make(map[provider.ModelKey]provider.ModelOptions)
+func buildModelDefaults(cfg *config.Config) (map[provider.ModelKey]provider.SamplingDefaults, error) {
+	out := make(map[provider.ModelKey]provider.SamplingDefaults)
 	if cfg == nil {
 		return out, nil
 	}
@@ -29,14 +29,17 @@ func buildModelDefaults(cfg *config.Config) (map[provider.ModelKey]provider.Mode
 		if model.Provider == "" || model.Name == "" || model.Options == nil {
 			continue
 		}
-		opts := provider.ModelOptions{
+		opts := provider.SamplingDefaults{
 			Temperature: model.Options.Temperature,
 			TopP:        model.Options.TopP,
 			TopK:        model.Options.TopK,
 		}
 		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
 		if existing, ok := seen[key]; ok && !sameModelDefaults(existing.opts, opts) {
-			return nil, fmt.Errorf("providerbootstrap: conflicting sampling defaults for %s: models %q and %q", key, existing.role, role)
+			return nil, fmt.Errorf(
+				"providerbootstrap: conflicting sampling defaults for %s: models %q and %q; defaults are per provider/model, so use identical options or distinct provider keys for workload-specific defaults",
+				key, existing.role, role,
+			)
 		}
 		seen[key] = modelDefaultsEntry{role: role, opts: opts}
 		out[key] = opts
@@ -44,7 +47,7 @@ func buildModelDefaults(cfg *config.Config) (map[provider.ModelKey]provider.Mode
 	return out, nil
 }
 
-func sameModelDefaults(a, b provider.ModelOptions) bool {
+func sameModelDefaults(a, b provider.SamplingDefaults) bool {
 	return samePtr(a.Temperature, b.Temperature) && samePtr(a.TopP, b.TopP) && samePtr(a.TopK, b.TopK)
 }
 

@@ -525,6 +525,17 @@ func (cfg *Config) validate() error {
 		if !validModelTypes[m.Type] {
 			return fmt.Errorf("config: model %q: invalid type %q", role, m.Type)
 		}
+		if opts := m.Options; opts != nil {
+			if opts.Temperature != nil && *opts.Temperature < 0 {
+				return fmt.Errorf("config: model %q: temperature must be non-negative", role)
+			}
+			if opts.TopP != nil && (*opts.TopP <= 0 || *opts.TopP > 1) {
+				return fmt.Errorf("config: model %q: top_p must be greater than 0 and at most 1", role)
+			}
+			if opts.TopK != nil && *opts.TopK < 0 {
+				return fmt.Errorf("config: model %q: top_k must be non-negative", role)
+			}
+		}
 
 		// Validate explicit capabilities (only when provided; empty defers to
 		// type-driven derivation). Strict-reject unknowns so typos surface at

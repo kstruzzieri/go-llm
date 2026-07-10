@@ -189,20 +189,14 @@ func toProviderCandidateOptions(opts *ollama.ModelOptions) provider.ModelOptions
 	if opts == nil {
 		return provider.ModelOptions{}
 	}
-	temp := opts.Temperature
-	topP := opts.TopP
 	repeatPenalty := opts.RepeatPenalty
 	out := provider.ModelOptions{
 		NumPredict: opts.NumPredict,
 		NumCtx:     opts.NumCtx,
 		Stop:       opts.Stop,
 	}
-	if opts.Temperature != 0 {
-		out.Temperature = &temp
-	}
-	if opts.TopP != 0 {
-		out.TopP = &topP
-	}
+	out.Temperature = opts.Temperature
+	out.TopP = opts.TopP
 	if opts.RepeatPenalty != 0 {
 		out.RepeatPenalty = &repeatPenalty
 	}

@@ -300,6 +300,14 @@ type ModelOptions struct {
 	ThinkEffort string `json:"think_effort,omitempty"`
 }
 
+// SamplingDefaults contains the generation values that may be filled when a
+// request leaves the matching ModelOptions field unset.
+type SamplingDefaults struct {
+	Temperature *float64
+	TopP        *float64
+	TopK        *int
+}
+
 // ModelInfo holds metadata about a model available from a provider.
 type ModelInfo struct {
 	Name          string   `json:"name"`

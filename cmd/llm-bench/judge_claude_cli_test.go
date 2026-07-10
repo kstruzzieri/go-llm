@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 func argHasValue(args []string, flag, value string) bool {
@@ -35,7 +36,7 @@ func judgeCLIReqFixture() ollama.ChatRequest {
 			{Role: "user", Content: "USER-PROMPT-MARKER"},
 		},
 		Format:  "json",
-		Options: &ollama.ModelOptions{Temperature: 0.1, NumPredict: 512},
+		Options: &ollama.ModelOptions{Temperature: provider.Ptr(0.1), NumPredict: 512},
 	}
 }
 

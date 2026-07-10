@@ -320,7 +320,7 @@ func TestRouterRouteUnqualifiedModel(t *testing.T) {
 
 func TestRouterModelDefaultsFillOnlyUnsetRequestOptions(t *testing.T) {
 	key := ModelKey{Provider: "test", Model: "qwen3:8b"}
-	router, prov := setupTestRouter(t, WithModelDefaults(map[ModelKey]ModelOptions{
+	router, prov := setupTestRouter(t, WithModelDefaults(map[ModelKey]SamplingDefaults{
 		key: {
 			Temperature: Ptr(0.7),
 			TopP:        Ptr(0.9),
@@ -347,6 +347,27 @@ func TestRouterModelDefaultsFillOnlyUnsetRequestOptions(t *testing.T) {
 	}
 	if opts.TopK == nil || *opts.TopK != 40 {
 		t.Errorf("TopK = %v, want model default 40", opts.TopK)
+	}
+}
+
+func TestRouterModelDefaultsAreIsolatedPerRequest(t *testing.T) {
+	key := ModelKey{Provider: "test", Model: "qwen3:8b"}
+	router, _ := setupTestRouter(t, WithModelDefaults(map[ModelKey]SamplingDefaults{
+		key: {Temperature: Ptr(0.7)},
+	}))
+
+	first, err := router.Route(context.Background(), RoutingRequest{Model: key.String(), UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("first Route: %v", err)
+	}
+	*first.Request.Options.Temperature = 0.1
+
+	second, err := router.Route(context.Background(), RoutingRequest{Model: key.String(), UseCase: "chat"})
+	if err != nil {
+		t.Fatalf("second Route: %v", err)
+	}
+	if second.Request.Options.Temperature == nil || *second.Request.Options.Temperature != 0.7 {
+		t.Fatalf("second Temperature = %v, want isolated default 0.7", second.Request.Options.Temperature)
 	}
 }
 

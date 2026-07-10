@@ -55,7 +55,7 @@ type Router struct {
 	breakers        map[string]*CircuitBreaker
 	warmth          WarmthSource
 	tokenBudget     *TokenBudgetValidator
-	modelDefaults   map[ModelKey]ModelOptions
+	modelDefaults   map[ModelKey]SamplingDefaults
 	sticky          *stickyCache
 	availableRAM    float64
 	defaultOpts     routerDefaults
@@ -169,13 +169,26 @@ func WithTokenBudgetValidator(v *TokenBudgetValidator) RouterOption {
 	}
 }
 
-// WithModelDefaults installs per-model sampling defaults. Only temperature,
-// top_p, and top_k are used; explicit request values always win.
-func WithModelDefaults(defaults map[ModelKey]ModelOptions) RouterOption {
+// WithModelDefaults installs per-model sampling defaults. Repeated options
+// merge by model key and field; later non-nil values replace earlier values.
+// Explicit request values always win over every default.
+func WithModelDefaults(defaults map[ModelKey]SamplingDefaults) RouterOption {
 	return func(r *Router) {
-		r.modelDefaults = make(map[ModelKey]ModelOptions, len(defaults))
+		if r.modelDefaults == nil {
+			r.modelDefaults = make(map[ModelKey]SamplingDefaults, len(defaults))
+		}
 		for key, opts := range defaults {
-			r.modelDefaults[key] = cloneSamplingOptions(opts)
+			merged := r.modelDefaults[key]
+			if opts.Temperature != nil {
+				merged.Temperature = clonePtr(opts.Temperature)
+			}
+			if opts.TopP != nil {
+				merged.TopP = clonePtr(opts.TopP)
+			}
+			if opts.TopK != nil {
+				merged.TopK = clonePtr(opts.TopK)
+			}
+			r.modelDefaults[key] = merged
 		}
 	}
 }
@@ -1133,33 +1146,25 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	return plan, nil
 }
 
-func mergeModelDefaults(request, defaults ModelOptions) ModelOptions {
+func mergeModelDefaults(request ModelOptions, defaults SamplingDefaults) ModelOptions {
 	if request.Temperature == nil {
-		request.Temperature = defaults.Temperature
+		request.Temperature = clonePtr(defaults.Temperature)
 	}
 	if request.TopP == nil {
-		request.TopP = defaults.TopP
+		request.TopP = clonePtr(defaults.TopP)
 	}
 	if request.TopK == nil {
-		request.TopK = defaults.TopK
+		request.TopK = clonePtr(defaults.TopK)
 	}
 	return request
-}
-
-func cloneSamplingOptions(opts ModelOptions) ModelOptions {
-	return ModelOptions{
-		Temperature: clonePtr(opts.Temperature),
-		TopP:        clonePtr(opts.TopP),
-		TopK:        clonePtr(opts.TopK),
-	}
 }
 
 func clonePtr[T any](value *T) *T {
 	if value == nil {
 		return nil
 	}
-	copy := *value
-	return &copy
+	cloned := *value
+	return &cloned
 }
 
 // buildReason creates a human-readable reason string from a scored candidate.

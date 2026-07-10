@@ -99,7 +99,17 @@ func TestRunModels_ListsChainWithProvenance(t *testing.T) {
 	}
 	var out, errOut bytes.Buffer
 	chain := []string{"llamacpp/gemma4:31b", "llamacpp/byo-model"}
-	if err := runModelsWith(ctx, reg, chain, nil, nil, nil, modelsOpts{}, &out, &errOut); err != nil {
+	cfg := &config.Config{Models: map[string]config.ModelConfig{
+		"agent": {
+			Provider: "llamacpp", Name: "gemma4:31b",
+			Options: &config.SamplingOptions{
+				Temperature: provider.Ptr(0.0),
+				TopP:        provider.Ptr(0.9),
+				TopK:        provider.Ptr(40),
+			},
+		},
+	}}
+	if err := runModelsWith(ctx, reg, chain, cfg, nil, nil, modelsOpts{}, &out, &errOut); err != nil {
 		t.Fatalf("runModelsWith() error: %v", err)
 	}
 	got := out.String()
@@ -110,6 +120,9 @@ func TestRunModels_ListsChainWithProvenance(t *testing.T) {
 	// A carries tool_call with its provenance.
 	if !strings.Contains(got, "tool_call=yes") || !strings.Contains(got, "explicit") {
 		t.Fatalf("output missing A tool_call provenance:\n%s", got)
+	}
+	if !strings.Contains(got, "sampling=temperature=0,top_p=0.9,top_k=40") {
+		t.Fatalf("output missing A sampling defaults:\n%s", got)
 	}
 	// B is flagged MISSING with the probe verdict.
 	if !strings.Contains(got, "MISSING") {

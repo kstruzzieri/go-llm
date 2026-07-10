@@ -38,7 +38,7 @@ func chatFuncFromOllamaClient(client *ollama.Client) ChatFunc {
 		if req.Options.Temperature != nil || req.Options.NumPredict > 0 {
 			oo := &ollama.ModelOptions{NumPredict: req.Options.NumPredict}
 			if req.Options.Temperature != nil {
-				oo.Temperature = *req.Options.Temperature
+				oo.Temperature = req.Options.Temperature
 			}
 			oReq.Options = oo
 		}

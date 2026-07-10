@@ -106,6 +106,26 @@ The `provider` key on each model selects its backend (here the `llamacpp`
 provider points at the llama-swap proxy on `:8080`); `api_format` defaults to
 `ollama` when omitted. See [Local model backends](../README.md#local-model-backends).
 
+Each model can also declare static sampling defaults:
+
+```json
+"general": {
+  "name": "gemma4:31b",
+  "provider": "llamacpp",
+  "type": "dense",
+  "options": { "temperature": 0, "top_p": 0.9, "top_k": 40 }
+}
+```
+
+`temperature` must be non-negative, `top_p` must be greater than 0 and at most
+1, and `top_k` must be non-negative. Request values fill first, so an explicit
+request value—including zero—overrides the configured default. Defaults are
+per provider/model, not per role: roles sharing one provider/model key must use
+identical options. For workload-specific defaults, use request overrides or
+distinct provider keys. `top_k` is supported by llama.cpp and Ollama but is not
+part of the strict OpenAI request schema; omit it for hosted endpoints that
+reject unknown fields.
+
 Models are organized by **role** (general, coding, embedding, etc.) with a **defaults** map linking use-cases to roles. Each model can specify **fallbacks** — if the preferred model isn't available in Ollama, the config resolver will try alternatives automatically:
 
 ```go

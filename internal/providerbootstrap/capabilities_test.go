@@ -37,8 +37,10 @@ func TestBuildModelDefaults_ConflictErrors(t *testing.T) {
 			Options: &config.SamplingOptions{TopK: provider.Ptr(40)},
 		},
 	}}
-	if _, err := buildModelDefaults(cfg); err == nil {
-		t.Fatal("expected conflict error for divergent sampling defaults on the same model")
+	_, err := buildModelDefaults(cfg)
+	if err == nil || !strings.Contains(err.Error(), "defaults are per provider/model") ||
+		!strings.Contains(err.Error(), "distinct provider keys") {
+		t.Fatalf("error = %v, want per-model conflict remediation", err)
 	}
 }
 

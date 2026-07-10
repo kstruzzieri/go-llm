@@ -366,8 +366,8 @@ func TestCompleteModelOptions(t *testing.T) {
 		if req.Options.NumPredict < 16 || req.Options.NumPredict > 512 {
 			t.Errorf("NumPredict = %d, want within adaptive range [16, 512]", req.Options.NumPredict)
 		}
-		if req.Options.Temperature < 0.0 || req.Options.Temperature > 0.5 {
-			t.Errorf("Temperature = %f, want within adaptive range [0.0, 0.5]", req.Options.Temperature)
+		if req.Options.Temperature == nil || *req.Options.Temperature < 0.0 || *req.Options.Temperature > 0.5 {
+			t.Errorf("Temperature = %v, want within adaptive range [0.0, 0.5]", req.Options.Temperature)
 		}
 		if req.Options.NumPredict > req.Options.NumCtx {
 			t.Errorf("NumPredict (%d) must not exceed NumCtx (%d)",

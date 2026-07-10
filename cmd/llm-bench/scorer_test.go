@@ -588,8 +588,8 @@ func TestLLMJudgeScorerScoresFromJSON(t *testing.T) {
 	if client.req.Options == nil {
 		t.Fatal("judge options = nil, want deterministic-ish judge options")
 	}
-	if client.req.Options.Temperature != judgeTemperature {
-		t.Fatalf("judge temperature = %f, want %f", client.req.Options.Temperature, judgeTemperature)
+	if client.req.Options.Temperature == nil || *client.req.Options.Temperature != judgeTemperature {
+		t.Fatalf("judge temperature = %v, want %f", client.req.Options.Temperature, judgeTemperature)
 	}
 	if client.req.Options.NumPredict != judgeTokenBudget {
 		t.Fatalf("judge num_predict = %d, want %d", client.req.Options.NumPredict, judgeTokenBudget)

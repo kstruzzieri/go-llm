@@ -121,10 +121,13 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
-	routerOpts := append([]provider.RouterOption{}, opts.RouterOptions...)
+	routerOpts := make([]provider.RouterOption, 0, len(opts.RouterOptions)+1)
 	if len(modelDefaults) > 0 {
 		routerOpts = append(routerOpts, provider.WithModelDefaults(modelDefaults))
 	}
+	// Explicit constructor options apply last, so caller-supplied defaults
+	// override config for matching model keys while preserving other config keys.
+	routerOpts = append(routerOpts, opts.RouterOptions...)
 	router := provider.NewRouter(mr, pReg, routerOpts...)
 
 	return &Bundle{

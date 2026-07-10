@@ -666,10 +666,10 @@ func toOllamaOptions(opts ModelOptions) *ollama.ModelOptions {
 		Stop:       opts.Stop,
 	}
 	if opts.Temperature != nil {
-		o.Temperature = *opts.Temperature
+		o.Temperature = opts.Temperature
 	}
 	if opts.TopP != nil {
-		o.TopP = *opts.TopP
+		o.TopP = opts.TopP
 	}
 	if opts.TopK != nil {
 		o.TopK = opts.TopK

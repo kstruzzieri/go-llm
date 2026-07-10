@@ -174,6 +174,33 @@ func TestLoad_ModelSamplingOptionsPreserveZero(t *testing.T) {
 	}
 }
 
+func TestLoad_RejectsInvalidSamplingOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		options string
+		want    string
+	}{
+		{name: "negative temperature", options: `{"temperature": -0.1}`, want: "temperature"},
+		{name: "zero top_p", options: `{"top_p": 0}`, want: "top_p"},
+		{name: "top_p above one", options: `{"top_p": 1.1}`, want: "top_p"},
+		{name: "negative top_k", options: `{"top_k": -1}`, want: "top_k"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeTempJSON(t, `{
+				"providers": {"ollama": {"base_url": "http://localhost:11434"}},
+				"models": {"m": {"name": "x", "type": "dense", "options": `+tt.options+`}},
+				"defaults": {}
+			}`)
+			_, err := Load(path)
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("Load error = %v, want error containing %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestLoad_TimeoutDefaulting(t *testing.T) {
 	// minimal.json has an explicit 30s timeout — it should be preserved.
 	cfg, err := Load("testdata/minimal.json")
