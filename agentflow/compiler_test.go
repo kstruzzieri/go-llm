@@ -92,3 +92,114 @@ func TestCompile_DoesNotAliasIR(t *testing.T) {
 		t.Fatal("Compile must not alias PlanIR slices")
 	}
 }
+
+func codes(ds []Diagnostic) []string {
+	out := make([]string, len(ds))
+	for i, d := range ds {
+		out[i] = d.Code
+	}
+	return out
+}
+
+func hasCode(ds []Diagnostic, code string) bool {
+	for _, d := range ds {
+		if d.Code == code {
+			return true
+		}
+	}
+	return false
+}
+
+func TestCheckPlan_CleanPlanHasNoDiagnostics(t *testing.T) {
+	if ds := CheckPlan(Compile(sampleIR())); len(ds) != 0 {
+		t.Errorf("clean plan produced diagnostics: %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_EmptySteps(t *testing.T) {
+	ir := sampleIR()
+	ir.Steps = nil
+	if ds := CheckPlan(Compile(ir)); !hasCode(ds, "no_steps") {
+		t.Errorf("want no_steps, got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_MissingSemantics(t *testing.T) {
+	ir := sampleIR()
+	ir.Scope = []string{"   "}
+	ir.Invariants = []string{""}
+	ir.AllowedFiles = []string{".agent/", ".agent/"}
+	ir.RiskLevel = "extreme"
+	ds := CheckPlan(Compile(ir))
+	if !hasCode(ds, "missing_scope") || !hasCode(ds, "missing_invariants") ||
+		!hasCode(ds, "missing_allowed_files") || !hasCode(ds, "bad_risk_level") {
+		t.Errorf("got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_UnusableStep(t *testing.T) {
+	ir := sampleIR()
+	ir.Steps[0].ExpectedDiff = nil // present-but-empty after compile
+	ir.Steps[0].Action = "   "
+	ds := CheckPlan(Compile(ir))
+	if !hasCode(ds, "empty_expected_diff") || !hasCode(ds, "empty_action") {
+		t.Errorf("got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_DuplicateAndUnknownDeps(t *testing.T) {
+	ir := sampleIR()
+	ir.Steps = []StepIR{
+		{ID: "S1", Action: "a", Files: []string{"internal/http/a.go"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}, DependsOn: []string{"NOPE"}},
+		{ID: "S1", Action: "b", Files: []string{"internal/http/b.go"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}},
+	}
+	ds := CheckPlan(Compile(ir))
+	if !hasCode(ds, "duplicate_step_id") || !hasCode(ds, "unknown_dependency") {
+		t.Errorf("got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_Cycle(t *testing.T) {
+	ir := sampleIR()
+	ir.AllowedFiles = []string{"a/*"}
+	ir.Steps = []StepIR{
+		{ID: "A", Action: "a", Files: []string{"a/x.go"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}, DependsOn: []string{"B"}},
+		{ID: "B", Action: "b", Files: []string{"a/y.go"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}, DependsOn: []string{"A"}},
+	}
+	ds := CheckPlan(Compile(ir))
+	if !hasCode(ds, "dependency_cycle") {
+		t.Fatalf("want dependency_cycle, got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_PathSafetyAndScope(t *testing.T) {
+	ir := sampleIR()
+	ir.AllowedFiles = []string{"internal/http/*"}
+	ir.Steps[0].Files = []string{"../secrets.txt", "/etc/passwd", "other/pkg.go", ".agent/state.json"}
+	ir.BlockedFiles = []string{".agent/"}
+	ir.AllowedFiles = append(ir.AllowedFiles, "../outside/*")
+	ds := CheckPlan(Compile(ir))
+	// ../ and / -> traversal/absolute; .agent/state.json -> proof-state target;
+	// other/pkg.go -> not covered by allowed_files; .agent/ in blocked_files ->
+	// blocked_files_covers_proof_state. The unsafe allowed_files entry is rejected too.
+	for _, want := range []string{"unsafe_path", "step_targets_proof_state", "file_out_of_scope", "blocked_files_covers_proof_state"} {
+		if !hasCode(ds, want) {
+			t.Errorf("missing %q; got %v", want, codes(ds))
+		}
+	}
+}
+
+func TestCheckPlan_GateShape(t *testing.T) {
+	ir := sampleIR()
+	ir.Steps[0].Validations = []GateIR{{Label: "empty", Argv: nil}}
+	ds := CheckPlan(Compile(ir))
+	if !hasCode(ds, "empty_gate_argv") {
+		t.Errorf("want empty_gate_argv, got %v", codes(ds))
+	}
+	// A step with no validations at all.
+	ir2 := sampleIR()
+	ir2.Steps[0].Validations = nil
+	if ds := CheckPlan(Compile(ir2)); !hasCode(ds, "no_validation") {
+		t.Errorf("want no_validation, got %v", codes(ds))
+	}
+}

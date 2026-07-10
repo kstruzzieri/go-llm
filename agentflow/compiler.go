@@ -1,7 +1,10 @@
 package agentflow
 
 import (
+	"fmt"
+	"path"
 	"slices"
+	"sort"
 	"strings"
 )
 
@@ -104,4 +107,237 @@ func withAgentDir(allowed []string) []string {
 		return allowed
 	}
 	return append(allowed, agentProofDir)
+}
+
+// Diagnostic is one machine-readable local pre-check finding. Code is stable and
+// testable; Message is operator/model-facing.
+type Diagnostic struct {
+	Code    string
+	Message string
+}
+
+var riskLevels = map[string]bool{"low": true, "medium": true, "high": true}
+
+// CheckPlan runs Golem's narrow local pre-check over a compiled plan. It is NOT a
+// mirror of agentflow's validate_plan: it only reports classes Golem can explain
+// better than the CLI (semantic gaps, dependency errors, cycles) or must enforce
+// because the CLI defers them to execution (step-file scope, proof-state safety).
+// All findings are collected, not fail-first.
+func CheckPlan(p Plan) []Diagnostic {
+	var ds []Diagnostic
+	add := func(code, msg string) { ds = append(ds, Diagnostic{Code: code, Message: msg}) }
+
+	// 1. Non-empty steps (the CLI accepts an empty list).
+	if len(p.Steps) == 0 {
+		add("no_steps", "plan has no steps; a plan must contain at least one executable step")
+	}
+
+	// 2. Required semantic content.
+	if strings.TrimSpace(p.Objective) == "" {
+		add("missing_objective", "objective is empty")
+	}
+	if !anyNonBlank(p.Scope) {
+		add("missing_scope", "scope is empty; name at least one area the plan touches")
+	}
+	if !anyNonBlank(p.Invariants) {
+		add("missing_invariants", "invariants is empty; state at least one property that must hold")
+	}
+	// allowed_files always has compiler-injected .agent/; require a non-proof-state
+	// workspace entry rather than relying on slice length or duplicate entries.
+	if !hasWorkspaceAllowance(p.AllowedFiles) {
+		add("missing_allowed_files", "allowed_files names no workspace paths the plan may change")
+	}
+	if strings.TrimSpace(p.RollbackPlan) == "" {
+		add("missing_rollback", "rollback_plan is empty")
+	}
+	if !riskLevels[p.RiskLevel] {
+		add("bad_risk_level", fmt.Sprintf("risk_level %q must be one of: low, medium, high", p.RiskLevel))
+	}
+
+	// 6 (plan-level): blocked_files must not cover proof state.
+	if MatchesPath(".agent/x", p.BlockedFiles) {
+		add("blocked_files_covers_proof_state", "blocked_files may not cover .agent/ proof state")
+	}
+	for _, f := range p.AllowedFiles {
+		if code, msg := unsafePath(f); code != "" {
+			add(code, "allowed_files entry "+msg)
+		}
+	}
+	for _, f := range p.BlockedFiles {
+		if code, msg := unsafePath(f); code != "" {
+			add(code, "blocked_files entry "+msg)
+		}
+	}
+
+	// 3-8 per step.
+	ids := map[string]bool{}
+	for _, s := range p.Steps {
+		known := s.ID // for messages
+		if strings.TrimSpace(s.ID) == "" {
+			add("empty_step_id", "a step has an empty id")
+		} else if ids[s.ID] {
+			add("duplicate_step_id", "duplicate step id: "+s.ID)
+		} else {
+			ids[s.ID] = true
+		}
+		if strings.TrimSpace(s.Action) == "" {
+			add("empty_action", "step "+known+" has an empty action")
+		}
+		if len(s.Files) == 0 {
+			add("no_files", "step "+known+" names no files")
+		}
+		if !anyNonBlank(s.ExpectedDiff) {
+			add("empty_expected_diff", "step "+known+" has no expected_diff; state the intended outcome")
+		}
+		if len(s.Validation) == 0 {
+			add("no_validation", "step "+known+" has no validation command")
+		}
+		if len(s.Validation) != len(s.Gates) {
+			add("gate_misalignment", "step "+known+" validation/gates are not index-aligned")
+		}
+		for _, g := range s.Gates {
+			if len(g.Run) == 0 || !allNonBlank(g.Run) {
+				add("empty_gate_argv", "step "+known+" has a validation with empty argv")
+			}
+		}
+		// 6 (step-level): path safety + proof-state target.
+		for _, f := range s.Files {
+			if firstSegmentIsAgent(f) {
+				add("step_targets_proof_state", "step "+known+" file "+f+" targets .agent/ proof state")
+			}
+			if code, msg := unsafePath(f); code != "" {
+				add(code, "step "+known+" file "+msg)
+			}
+		}
+		// 7: scope coverage (every file allowed and not blocked).
+		for _, f := range s.Files {
+			if firstSegmentIsAgent(f) {
+				continue // already reported; scope check is meaningless for proof state
+			}
+			if !MatchesPath(f, p.AllowedFiles) {
+				add("file_out_of_scope", "step "+known+" file "+f+" is not covered by allowed_files")
+			}
+			if MatchesPath(f, p.BlockedFiles) {
+				add("file_blocked", "step "+known+" file "+f+" is covered by blocked_files")
+			}
+		}
+	}
+
+	// 4-5: dependency integrity + cycle detection.
+	ds = append(ds, dependencyDiagnostics(p.Steps)...)
+	return ds
+}
+
+func hasWorkspaceAllowance(xs []string) bool {
+	for _, x := range xs {
+		x = strings.TrimSpace(x)
+		if x != "" && x != agentProofDir {
+			return true
+		}
+	}
+	return false
+}
+
+func anyNonBlank(xs []string) bool {
+	for _, x := range xs {
+		if strings.TrimSpace(x) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func allNonBlank(xs []string) bool {
+	for _, x := range xs {
+		if strings.TrimSpace(x) == "" {
+			return false
+		}
+	}
+	return true
+}
+
+func firstSegmentIsAgent(rel string) bool {
+	first := rel
+	if i := strings.IndexByte(rel, '/'); i >= 0 {
+		first = rel[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(first), ".agent")
+}
+
+// unsafePath rejects absolute paths and parent traversal. Returns ("","") when
+// safe, else a code and a message fragment ("<path> ...").
+func unsafePath(rel string) (string, string) {
+	r := strings.TrimSpace(rel)
+	if r == "" {
+		return "unsafe_path", "is blank"
+	}
+	if path.IsAbs(r) {
+		return "unsafe_path", r + " is an absolute path"
+	}
+	for _, seg := range strings.Split(r, "/") {
+		if seg == ".." {
+			return "unsafe_path", r + " escapes the workspace with .."
+		}
+	}
+	return "", ""
+}
+
+// dependencyDiagnostics reports unknown/blank dependencies and cycles, mirroring
+// agentflow validation.py::_detect_depends_on_errors so local diagnostics match
+// the CLI's, but running before the lock so the model can repair without a round
+// trip.
+func dependencyDiagnostics(steps []Step) []Diagnostic {
+	var ds []Diagnostic
+	known := map[string]bool{}
+	for _, s := range steps {
+		if s.ID != "" {
+			known[s.ID] = true
+		}
+	}
+	graph := map[string][]string{}
+	for _, s := range steps {
+		if s.ID == "" {
+			continue
+		}
+		graph[s.ID] = nil
+		for _, dep := range s.DependsOn {
+			d := strings.TrimSpace(dep)
+			if d == "" {
+				ds = append(ds, Diagnostic{"empty_dependency", "step " + s.ID + " has a blank depends_on entry"})
+				continue
+			}
+			if !known[d] {
+				ds = append(ds, Diagnostic{"unknown_dependency", "step " + s.ID + " depends_on unknown step " + d})
+			}
+			graph[s.ID] = append(graph[s.ID], d)
+		}
+	}
+	visiting, visited := map[string]bool{}, map[string]bool{}
+	var visit func(id string, chain []string)
+	visit = func(id string, chain []string) {
+		if visited[id] {
+			return
+		}
+		if visiting[id] {
+			ds = append(ds, Diagnostic{"dependency_cycle", "depends_on cycle detected: " + strings.Join(append(chain, id), " -> ")})
+			return
+		}
+		visiting[id] = true
+		for _, dep := range graph[id] {
+			if _, ok := graph[dep]; ok {
+				visit(dep, append(chain, id))
+			}
+		}
+		visiting[id] = false
+		visited[id] = true
+	}
+	ids := make([]string, 0, len(graph))
+	for id := range graph {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		visit(id, nil)
+	}
+	return ds
 }
