@@ -302,6 +302,34 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	}
 }
 
+func TestRunAgentflowAuthor_InstallsProofStateReadGuard(t *testing.T) {
+	// The planner's read tools must be scoped so the model cannot read .agent/
+	// proof state. Drive a model that first reads .agent/plan.lock.json (denied
+	// by the installed denyProofState guard, surfaced to stderr) then submits.
+	root := t.TempDir()
+	readAgent := agent.ModelResult{Response: provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "r1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":".agent/plan.lock.json"}`)},
+		}},
+	}}
+	caller := &scriptCaller{responses: []agent.ModelResult{readAgent, submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+
+	var out, errb bytes.Buffer
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}); err != nil {
+		t.Fatal(err)
+	}
+	// The .agent read must have been denied (guard wired), not served.
+	if !strings.Contains(errb.String(), "proof state") {
+		t.Errorf("planner did not deny the .agent read; guard not wired?\nstderr:\n%s", errb.String())
+	}
+	// The flow still locks after the denied read + valid submission.
+	if !strings.Contains(out.String(), "locked plan") {
+		t.Errorf("flow should still lock after a denied read:\n%s", out.String())
+	}
+}
+
 func TestRunAgentflowAuthor_InterruptReturnsWithoutLock(t *testing.T) {
 	root := t.TempDir()
 	// A fired interrupt cancels the authoring loop before it can lock a plan. A

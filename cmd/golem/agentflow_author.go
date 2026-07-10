@@ -269,7 +269,7 @@ func guardExistingPlan(root string) error {
 		Locked        *bool              `json:"locked"`
 	}
 	if err := json.Unmarshal(b, &existing); err != nil {
-		return fmt.Errorf("refusing to plan: %s exists but is not valid plan JSON; resolve it via agentflow before planning", path)
+		return fmt.Errorf("refusing to plan: %s exists but is not valid plan JSON: %w; resolve it via agentflow before planning", path, err)
 	}
 	if existing.SchemaVersion == nil || strings.TrimSpace(*existing.SchemaVersion) == "" ||
 		existing.Objective == nil || existing.Steps == nil || existing.Locked == nil {
