@@ -77,6 +77,17 @@ func TestGoalAuthor_RealCLI(t *testing.T) {
 		t.Errorf(".agent/plan.lock.json is not locked: %s", b)
 	}
 
+	// The locked bytes must satisfy PreflightP0: this proves the compiler's gates[]
+	// survived the real lock, so the execute-separately handoff to #209 (which runs
+	// PreflightP0 before driving) accepts what the author produced.
+	var lockedPlan agentflow.Plan
+	if err := json.Unmarshal(b, &lockedPlan); err != nil {
+		t.Fatalf("locked plan does not unmarshal into agentflow.Plan: %v\n%s", err, b)
+	}
+	if err := agentflow.PreflightP0(&lockedPlan); err != nil {
+		t.Fatalf("locked plan fails PreflightP0 (gates[] did not survive the lock): %v", err)
+	}
+
 	// Re-lock idempotence (spec §9): the locked artifact must survive a fresh
 	// same-file LockPlan, proving the `golem -plan .agent/plan.lock.json`
 	// execute-separately path can re-lock what the author produced.
