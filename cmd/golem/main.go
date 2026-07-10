@@ -787,7 +787,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	if f.goalSet {
-		return runAgentflowAuthor(ctx, stdout, stderr, sess, f, root)
+		return runAgentflowAuthor(ctx, stdout, stderr, interrupts, sess, f, root)
 	}
 	if f.planPath != "" {
 		return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)

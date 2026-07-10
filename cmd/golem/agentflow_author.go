@@ -286,17 +286,17 @@ func guardExistingPlan(root string) error {
 
 // runAgentflowAuthor is the -goal flow: guard, probe, init, run a read-only
 // authoring loop with submit_plan, and report the locked plan (or diagnostics).
-func runAgentflowAuthor(ctx context.Context, stdout, stderr io.Writer, sess *replSession, f flags, root string) error {
+func runAgentflowAuthor(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, f flags, root string) error {
 	var runner agentflow.Runner
 	if f.agentflowSrc != "" {
 		runner = agentflow.NewSrcExecRunner(root, f.agentflowSrc)
 	} else {
 		runner = agentflow.NewExecRunner(root)
 	}
-	return runAgentflowAuthorWithClient(ctx, stdout, stderr, sess, f, root, agentflow.NewClient(runner, root))
+	return runAgentflowAuthorWithClient(ctx, stdout, stderr, interrupts, sess, f, root, agentflow.NewClient(runner, root))
 }
 
-func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer, sess *replSession, f flags, root string, client afLocker) error {
+func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer, interrupts <-chan struct{}, sess *replSession, f flags, root string, client afLocker) error {
 	// Keep the guard inside the injected seam so tests exercise the same safety
 	// boundary as production.
 	if err := guardExistingPlan(root); err != nil {
@@ -320,6 +320,29 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 
 	loopCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
+
+	// Watch for an interrupt (Ctrl-C) for the duration of the authoring loop so
+	// SIGINT cancels the in-flight model call instead of being swallowed, mirroring
+	// runOnce (repl.go) and runAgentflowTask's step loop. interrupts is nil in unit
+	// tests; the goroutine (which would block forever on a nil channel) is guarded.
+	done := make(chan struct{})
+	defer close(done)
+	if interrupts != nil {
+		// Drain a stale interrupt buffered before this run so it cannot spuriously
+		// cancel the loop.
+		select {
+		case <-interrupts:
+		default:
+		}
+		go func() {
+			select {
+			case <-interrupts:
+				cancel()
+			case <-done:
+			}
+		}()
+	}
+
 	as := &authorSession{client: client, root: root, cancel: cancel}
 
 	planTools := append(agenttools.NewFileToolsForWorkspace(ws), newSubmitPlanTool(as))
@@ -344,7 +367,10 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stdout, "locked plan: %s\n", as.lockedPath)
 		_, _ = fmt.Fprintln(stdout, "review the locked plan, especially validation command argv, before approval")
 		_, _ = fmt.Fprintln(stdout, "execute separately:")
-		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -approve-plan-edits -approve-plan-gates\n", as.lockedPath)
+		// Include -root: #209 resolves proof state against the process cwd, so an
+		// operator running this from another directory would otherwise write to the
+		// wrong tree (the cwd-mismatch class fixed in 45838e7). root is absolute.
+		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -approve-plan-edits -approve-plan-gates\n", as.lockedPath, root)
 		return nil
 	case as.terminalErr != nil:
 		return as.terminalErr

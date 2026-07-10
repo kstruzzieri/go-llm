@@ -287,13 +287,37 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 
 	var out, errb bytes.Buffer
 	// runAgentflowAuthorWithClient injects a stub afLocker so no real CLI runs.
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "add healthz", goalSet: true}, root, &stubLocker{})
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "add healthz", goalSet: true}, root, &stubLocker{})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(out.String(), filepath.Join(root, ".agent", "plan.lock.json")) ||
 		!strings.Contains(out.String(), "review the locked plan") {
 		t.Errorf("missing success output:\n%s", out.String())
+	}
+	// The execute-separately command must carry -root <absolute root> so #209 writes
+	// proof state to the planning tree even when run from another directory.
+	if !strings.Contains(out.String(), "-root "+root) {
+		t.Errorf("execute-separately command missing -root %s:\n%s", root, out.String())
+	}
+}
+
+func TestRunAgentflowAuthor_InterruptReturnsWithoutLock(t *testing.T) {
+	root := t.TempDir()
+	// A fired interrupt cancels the authoring loop before it can lock a plan. A
+	// closed channel is deterministic: the watch goroutine cancels immediately, the
+	// model never submits, and the flow falls to errPlannerNoSubmission.
+	interrupts := make(chan struct{})
+	close(interrupts)
+	caller := &captureCaller{answer: "thinking, no submission"}
+	sess := newTestSession(t, caller, root)
+	var out, errb bytes.Buffer
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, interrupts, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
+	if !errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("interrupted loop should return errPlannerNoSubmission, got %v", err)
+	}
+	if strings.Contains(out.String(), "locked plan") {
+		t.Errorf("no plan may be locked after interrupt:\n%s", out.String())
 	}
 }
 
@@ -303,7 +327,7 @@ func TestRunAgentflowAuthor_RefusesLockedPlan(t *testing.T) {
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}); err == nil {
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}); err == nil {
 		t.Error("expected clobber-guard refusal for a locked plan")
 	}
 }
@@ -314,7 +338,7 @@ func TestRunAgentflowAuthor_ProbeFailsBeforeModel(t *testing.T) {
 	sess := newTestSession(t, caller, root)
 	client := &stubLocker{probeErr: errors.New("missing")}
 	var out, errb bytes.Buffer
-	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, client); err == nil {
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client); err == nil {
 		t.Fatal("expected probe failure")
 	}
 	if caller.i != 0 || client.inits != 0 {
@@ -328,7 +352,7 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	sess := newTestSession(t, caller, root)
 	sess.projectContextBlock = "<<<PROJECT_CONTEXT>>>\nrepo rule\n<<<END_PROJECT_CONTEXT>>>"
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
 	if !errors.Is(err, errPlannerNoSubmission) {
 		t.Fatalf("err = %v, want no submission", err)
 	}
@@ -346,7 +370,7 @@ func TestRunAgentflowAuthor_ExhaustionReportsDiagnostics(t *testing.T) {
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t)), submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, client)
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client)
 	if !errors.Is(err, errPlannerRejected) {
 		t.Fatalf("err = %v, want errPlannerRejected", err)
 	}
@@ -368,7 +392,7 @@ func TestRunAgentflowAuthor_TerminalLockErrorReturned(t *testing.T) {
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t)), submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, client)
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client)
 	if errors.Is(err, errPlannerNoSubmission) {
 		t.Fatalf("terminal lock error must not degrade to no-submission: %v", err)
 	}

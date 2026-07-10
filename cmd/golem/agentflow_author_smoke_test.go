@@ -58,7 +58,7 @@ func TestGoalAuthor_RealCLI(t *testing.T) {
 	// runAgentflowAuthor builds its own client from f.agentflowSrc the same way
 	// agentflowRunnerOrSkip built runner, so both reach the same CLI.
 	f := flags{goal: "ensure the answer token", goalSet: true, agentflowSrc: src}
-	if err := runAgentflowAuthor(context.Background(), &out, &errb, sess, f, dir); err != nil {
+	if err := runAgentflowAuthor(context.Background(), &out, &errb, nil, sess, f, dir); err != nil {
 		t.Fatalf("author flow: %v\n%s", err, errb.String())
 	}
 
