@@ -11,11 +11,6 @@ import (
 
 var errProofState = errors.New("path is under .agent/ proof state (opaque to the model)")
 
-// stepScopeGuard builds the proof-mode scope guard for one claimed step:
-//   - anything under .agent/ is denied for read AND write (proof state is opaque);
-//   - writes must fall in the step's effective scope (step.files ∩ allowed_files,
-//     minus blocked_files) — mirroring agentflow's own record-file-change check
-//     so Golem's pre-write guard and agentflow's scope cannot drift.
 // denyProofState returns errProofState when rel's first path segment is .agent
 // (case-insensitive), else nil. Shared by the step guard (#209) and the planner
 // read guard (#210) so both stay identical. Note ".agentflow" and "agent" are
@@ -33,6 +28,11 @@ func denyProofState(rel string) error {
 	return nil
 }
 
+// stepScopeGuard builds the proof-mode scope guard for one claimed step:
+//   - anything under .agent/ is denied for read AND write (proof state is opaque);
+//   - writes must fall in the step's effective scope (step.files ∩ allowed_files,
+//     minus blocked_files) — mirroring agentflow's own record-file-change check
+//     so Golem's pre-write guard and agentflow's scope cannot drift.
 func stepScopeGuard(plan *agentflow.Plan, stepID string) tools.ScopeGuard {
 	allowed, blocked := agentflow.EffectiveScope(plan, stepID)
 	return func(rel string, write bool) error {
