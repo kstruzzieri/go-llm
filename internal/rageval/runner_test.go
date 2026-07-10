@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -134,6 +135,56 @@ func TestRunFixtureWithoutLiveModel(t *testing.T) {
 	}
 	assertRatifiedThresholdSummary(t, report.Thresholds)
 	assertReportMeetsRatifiedThresholds(t, report)
+}
+
+// TestStaticModeIsDenseVectorOnly proves the "static" mode runs dense cosine
+// retrieval (SQLiteStore.Search), not the hybrid SearchMulti path (#275).
+//
+// The fixture is built so the two paths provably disagree: the query embedding
+// ranks the chunks dense-top > filler > kw-top by cosine, while the query text
+// lexically matches only kw-top. Hybrid RRF fuses the keyword list and lifts
+// kw-top above filler (RRF: dense-top 1/61+1/62 > kw-top 1/63+1/61 > filler
+// 1/62+1/62 — no ties), so:
+//
+//	dense (static): [dense-top, filler, kw-top]
+//	hybrid:         [dense-top, kw-top, filler]
+//
+// Before the #275 fix the static retriever took the SearchMulti branch and
+// returned the hybrid order, making this test fail.
+func TestStaticModeIsDenseVectorOnly(t *testing.T) {
+	const queryText = "flurbomatic"
+	fixture := &Fixture{
+		Corpus: []FixtureChunk{
+			{ID: "dense-top", Source: "a.go", Language: "go", StableKey: "a.go:1", Content: "alpha beta gamma", Embedding: []float64{1, 0, 0}},
+			{ID: "filler", Source: "b.go", Language: "go", StableKey: "b.go:1", Content: "delta epsilon zeta", Embedding: []float64{0.8, 0.6, 0}},
+			{ID: "kw-top", Source: "c.go", Language: "go", StableKey: "c.go:1", Content: "flurbomatic reconciler", Embedding: []float64{0.5, 0.866, 0}},
+		},
+		Queries: []QueryFixture{
+			{ID: "q1", Category: "single_hop", Query: queryText, ExpectedIDs: []string{"dense-top"}, Embedding: []float64{1, 0, 0}},
+		},
+	}
+
+	report, err := Run(context.Background(), fixture, RunOptions{MeasureLatency: false})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	resultsByMode := map[string][]string{}
+	for _, mode := range report.Modes {
+		if len(mode.Queries) != 1 {
+			t.Fatalf("mode %q queries = %d, want 1", mode.Name, len(mode.Queries))
+		}
+		resultsByMode[mode.Name] = mode.Queries[0].ResultIDs
+	}
+
+	wantStatic := []string{"dense-top", "filler", "kw-top"}
+	wantHybrid := []string{"dense-top", "kw-top", "filler"}
+	if got := resultsByMode["static"]; !slices.Equal(got, wantStatic) {
+		t.Fatalf("static result order = %v, want dense cosine order %v (static mode must not run hybrid SearchMulti)", got, wantStatic)
+	}
+	if got := resultsByMode["hybrid_search_multi"]; !slices.Equal(got, wantHybrid) {
+		t.Fatalf("hybrid result order = %v, want RRF order %v (fixture no longer discriminates dense vs hybrid)", got, wantHybrid)
+	}
 }
 
 // TestBaselineReproducible re-runs Run against the fixture and asserts the
