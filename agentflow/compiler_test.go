@@ -3,6 +3,7 @@ package agentflow
 import (
 	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -169,6 +170,43 @@ func TestCheckPlan_Cycle(t *testing.T) {
 	ds := CheckPlan(Compile(ir))
 	if !hasCode(ds, "dependency_cycle") {
 		t.Fatalf("want dependency_cycle, got %v", codes(ds))
+	}
+}
+
+func TestCheckPlan_CycleMessageRendersClosedPath(t *testing.T) {
+	ir := sampleIR()
+	ir.AllowedFiles = []string{"a/*"}
+	ir.Steps = []StepIR{
+		{ID: "A", Action: "a", Files: []string{"a/x.go"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}, DependsOn: []string{"B"}},
+		{ID: "B", Action: "b", Files: []string{"a/y.go"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}, DependsOn: []string{"A"}},
+	}
+	var msg string
+	for _, d := range CheckPlan(Compile(ir)) {
+		if d.Code == "dependency_cycle" {
+			msg = d.Message
+			break
+		}
+	}
+	if msg == "" {
+		t.Fatal("no dependency_cycle diagnostic produced")
+	}
+	// Accept either the A- or B-rooted ordering the sorted DFS produces, but the
+	// rendered path must name both nodes and close on the node it started from.
+	if !strings.Contains(msg, "-> A") || !strings.Contains(msg, "-> B") {
+		t.Errorf("cycle message must name both nodes: %q", msg)
+	}
+	i := strings.Index(msg, ": ")
+	path := strings.Split(msg[i+2:], " -> ")
+	if len(path) < 3 || path[0] != path[len(path)-1] {
+		t.Errorf("cycle path must close on its root: %q", msg)
+	}
+}
+
+func TestCheckPlan_EmptyDependency(t *testing.T) {
+	ir := sampleIR()
+	ir.Steps[0].DependsOn = []string{"   "}
+	if ds := CheckPlan(Compile(ir)); !hasCode(ds, "empty_dependency") {
+		t.Errorf("want empty_dependency, got %v", codes(ds))
 	}
 }
 

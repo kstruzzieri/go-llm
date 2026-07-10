@@ -172,7 +172,7 @@ func CheckPlan(p Plan) []Diagnostic {
 	// 3-8 per step.
 	ids := map[string]bool{}
 	for _, s := range p.Steps {
-		known := s.ID // for messages
+		sid := s.ID // for messages
 		if strings.TrimSpace(s.ID) == "" {
 			add("empty_step_id", "a step has an empty id")
 		} else if ids[s.ID] {
@@ -181,32 +181,32 @@ func CheckPlan(p Plan) []Diagnostic {
 			ids[s.ID] = true
 		}
 		if strings.TrimSpace(s.Action) == "" {
-			add("empty_action", "step "+known+" has an empty action")
+			add("empty_action", "step "+sid+" has an empty action")
 		}
 		if len(s.Files) == 0 {
-			add("no_files", "step "+known+" names no files")
+			add("no_files", "step "+sid+" names no files")
 		}
 		if !anyNonBlank(s.ExpectedDiff) {
-			add("empty_expected_diff", "step "+known+" has no expected_diff; state the intended outcome")
+			add("empty_expected_diff", "step "+sid+" has no expected_diff; state the intended outcome")
 		}
 		if len(s.Validation) == 0 {
-			add("no_validation", "step "+known+" has no validation command")
+			add("no_validation", "step "+sid+" has no validation command")
 		}
 		if len(s.Validation) != len(s.Gates) {
-			add("gate_misalignment", "step "+known+" validation/gates are not index-aligned")
+			add("gate_misalignment", "step "+sid+" validation/gates are not index-aligned")
 		}
 		for _, g := range s.Gates {
 			if len(g.Run) == 0 || !allNonBlank(g.Run) {
-				add("empty_gate_argv", "step "+known+" has a validation with empty argv")
+				add("empty_gate_argv", "step "+sid+" has a validation with empty argv")
 			}
 		}
 		// 6 (step-level): path safety + proof-state target.
 		for _, f := range s.Files {
 			if firstSegmentIsAgent(f) {
-				add("step_targets_proof_state", "step "+known+" file "+f+" targets .agent/ proof state")
+				add("step_targets_proof_state", "step "+sid+" file "+f+" targets .agent/ proof state")
 			}
 			if code, msg := unsafePath(f); code != "" {
-				add(code, "step "+known+" file "+msg)
+				add(code, "step "+sid+" file "+msg)
 			}
 		}
 		// 7: scope coverage (every file allowed and not blocked).
@@ -215,10 +215,10 @@ func CheckPlan(p Plan) []Diagnostic {
 				continue // already reported; scope check is meaningless for proof state
 			}
 			if !MatchesPath(f, p.AllowedFiles) {
-				add("file_out_of_scope", "step "+known+" file "+f+" is not covered by allowed_files")
+				add("file_out_of_scope", "step "+sid+" file "+f+" is not covered by allowed_files")
 			}
 			if MatchesPath(f, p.BlockedFiles) {
-				add("file_blocked", "step "+known+" file "+f+" is covered by blocked_files")
+				add("file_blocked", "step "+sid+" file "+f+" is covered by blocked_files")
 			}
 		}
 	}
@@ -256,6 +256,14 @@ func allNonBlank(xs []string) bool {
 	return true
 }
 
+// firstSegmentIsAgent reports whether rel's first path segment is .agent. It is
+// the ONE proof-state check that is case-insensitive (EqualFold), unlike
+// withAgentDir, hasWorkspaceAllowance, and the blocked_files_covers_proof_state
+// probe, which match ".agent/" case-sensitively. The asymmetry is deliberate:
+// this guards a real filesystem write target, where APFS case-folding lets
+// ".Agent/x" resolve to the same path as ".agent/x" (this exact class was the
+// CRITICAL bug in #209), whereas the pattern probes intentionally mirror
+// agentflow's own case-sensitive matches_path. Do not "fix" the asymmetry.
 func firstSegmentIsAgent(rel string) bool {
 	first := rel
 	if i := strings.IndexByte(rel, '/'); i >= 0 {
@@ -319,13 +327,15 @@ func dependencyDiagnostics(steps []Step) []Diagnostic {
 			return
 		}
 		if visiting[id] {
-			ds = append(ds, Diagnostic{"dependency_cycle", "depends_on cycle detected: " + strings.Join(append(chain, id), " -> ")})
+			// Copy chain before appending: sibling recursions share chain's backing
+			// array, so append(chain, id) could clobber a sibling's rendered path.
+			ds = append(ds, Diagnostic{"dependency_cycle", "depends_on cycle detected: " + strings.Join(append(append([]string{}, chain...), id), " -> ")})
 			return
 		}
 		visiting[id] = true
 		for _, dep := range graph[id] {
 			if _, ok := graph[dep]; ok {
-				visit(dep, append(chain, id))
+				visit(dep, append(append([]string{}, chain...), id))
 			}
 		}
 		visiting[id] = false
