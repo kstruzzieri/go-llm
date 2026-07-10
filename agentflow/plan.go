@@ -5,25 +5,46 @@ import (
 	"strings"
 )
 
-// Plan is the subset of the agentflow plan document Golem authors/consumes.
-// Unknown fields are ignored (agentflow's schema is additive), so this struct
-// need not be exhaustive.
+// Plan is the agentflow plan document Golem authors and the #209 runner consumes.
+// It is now the full lockable document: every field agentflow's validate_plan
+// requires is present. Unknown agentflow fields are still ignored on unmarshal.
 type Plan struct {
-	SchemaVersion string   `json:"schema_version"`
-	Objective     string   `json:"objective"`
-	AllowedFiles  []string `json:"allowed_files"`
-	BlockedFiles  []string `json:"blocked_files"`
-	EvidenceIDs   []string `json:"evidence_ids"`
-	Steps         []Step   `json:"steps"`
+	SchemaVersion   string      `json:"schema_version"`
+	Objective       string      `json:"objective"`
+	Scope           []string    `json:"scope"`
+	NonGoals        []string    `json:"non_goals"`
+	Invariants      []string    `json:"invariants"`
+	RiskLevel       string      `json:"risk_level"`
+	DriftBudget     DriftBudget `json:"drift_budget"`
+	AllowedFiles    []string    `json:"allowed_files"`
+	BlockedFiles    []string    `json:"blocked_files"`
+	ValidationGates []string    `json:"validation_gates"`
+	RollbackPlan    string      `json:"rollback_plan"`
+	EvidenceIDs     []string    `json:"evidence_ids"`
+	Steps           []Step      `json:"steps"`
 }
 
 type Step struct {
-	ID           string   `json:"id"`
-	Action       string   `json:"action"`
-	Files        []string `json:"files"`
-	ExpectedDiff []string `json:"expected_diff"`
-	Validation   []string `json:"validation"`
-	Gates        []Gate   `json:"gates"`
+	ID            string   `json:"id"`
+	Action        string   `json:"action"`
+	Files         []string `json:"files"`
+	Preconditions []string `json:"preconditions"`
+	ExpectedDiff  []string `json:"expected_diff"`
+	Validation    []string `json:"validation"`
+	EvidenceIDs   []string `json:"evidence_ids"`
+	DependsOn     []string `json:"depends_on,omitempty"`
+	Gates         []Gate   `json:"gates,omitempty"`
+}
+
+// DriftBudget is agentflow's drift allowance. validate_plan only checks the four
+// keys are present, but agentflow's own artifacts use string severities for the
+// last two; we match them so a future type-tightening in agentflow does not break
+// us. See src/agentflow/artifacts.py.
+type DriftBudget struct {
+	UnrelatedEdits    int    `json:"unrelated_edits"`
+	NewDependencies   int    `json:"new_dependencies"`
+	FormattingDrift   string `json:"formatting_drift"`
+	ArchitectureDrift string `json:"architecture_drift"`
 }
 
 // Gate is a structured validation gate. kind is "command" or "inspection".
