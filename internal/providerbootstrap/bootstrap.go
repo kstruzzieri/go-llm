@@ -117,7 +117,18 @@ func New(ctx context.Context, opts Options) (*Bundle, error) {
 		return nil, err
 	}
 
-	router := provider.NewRouter(mr, pReg, opts.RouterOptions...)
+	modelDefaults, err := buildModelDefaults(effCfg)
+	if err != nil {
+		return nil, err
+	}
+	routerOpts := make([]provider.RouterOption, 0, len(opts.RouterOptions)+1)
+	if len(modelDefaults) > 0 {
+		routerOpts = append(routerOpts, provider.WithModelDefaults(modelDefaults))
+	}
+	// Explicit constructor options apply last, so caller-supplied defaults
+	// override config for matching model keys while preserving other config keys.
+	routerOpts = append(routerOpts, opts.RouterOptions...)
+	router := provider.NewRouter(mr, pReg, routerOpts...)
 
 	return &Bundle{
 		Config:    effCfg,

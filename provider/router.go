@@ -55,6 +55,7 @@ type Router struct {
 	breakers        map[string]*CircuitBreaker
 	warmth          WarmthSource
 	tokenBudget     *TokenBudgetValidator
+	modelDefaults   map[ModelKey]SamplingDefaults
 	sticky          *stickyCache
 	availableRAM    float64
 	defaultOpts     routerDefaults
@@ -165,6 +166,30 @@ func WithAvailableRAM(gb float64) RouterOption {
 func WithTokenBudgetValidator(v *TokenBudgetValidator) RouterOption {
 	return func(r *Router) {
 		r.tokenBudget = v
+	}
+}
+
+// WithModelDefaults installs per-model sampling defaults. Repeated options
+// merge by model key and field; later non-nil values replace earlier values.
+// Explicit request values always win over every default.
+func WithModelDefaults(defaults map[ModelKey]SamplingDefaults) RouterOption {
+	return func(r *Router) {
+		if r.modelDefaults == nil {
+			r.modelDefaults = make(map[ModelKey]SamplingDefaults, len(defaults))
+		}
+		for key, opts := range defaults {
+			merged := r.modelDefaults[key]
+			if opts.Temperature != nil {
+				merged.Temperature = clonePtr(opts.Temperature)
+			}
+			if opts.TopP != nil {
+				merged.TopP = clonePtr(opts.TopP)
+			}
+			if opts.TopK != nil {
+				merged.TopK = clonePtr(opts.TopK)
+			}
+			r.modelDefaults[key] = merged
+		}
 	}
 }
 
@@ -1062,12 +1087,14 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 		return nil, fmt.Errorf("router: provider resolution failed for %s: %w", winner.profile.Key, err)
 	}
 
+	planReq := req
+	planReq.Options = mergeModelDefaults(req.Options, r.modelDefaults[winner.profile.Key])
 	plan := &RoutePlan{
 		Kind:     inferRouteKind(req),
 		Provider: prov,
 		Model:    winner.profile.Key.Model,
 		Profile:  winner.profile,
-		Request:  req,
+		Request:  planReq,
 		Score:    winner.score,
 		Budget:   winner.budget,
 		Reason:   buildReason(winner),
@@ -1101,12 +1128,14 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 		if fbErr != nil {
 			continue // skip unresolvable fallbacks
 		}
+		fbReq := req
+		fbReq.Options = mergeModelDefaults(req.Options, r.modelDefaults[fb.profile.Key])
 		fbPlan := RoutePlan{
 			Kind:     plan.Kind,
 			Provider: fbProv,
 			Model:    fb.profile.Key.Model,
 			Profile:  fb.profile,
-			Request:  req,
+			Request:  fbReq,
 			Score:    fb.score,
 			Budget:   fb.budget,
 			Reason:   buildReason(fb),
@@ -1115,6 +1144,27 @@ func (r *Router) buildPlan(winner scoredCandidate, fallbacks []scoredCandidate, 
 	}
 
 	return plan, nil
+}
+
+func mergeModelDefaults(request ModelOptions, defaults SamplingDefaults) ModelOptions {
+	if request.Temperature == nil {
+		request.Temperature = clonePtr(defaults.Temperature)
+	}
+	if request.TopP == nil {
+		request.TopP = clonePtr(defaults.TopP)
+	}
+	if request.TopK == nil {
+		request.TopK = clonePtr(defaults.TopK)
+	}
+	return request
+}
+
+func clonePtr[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 // buildReason creates a human-readable reason string from a scored candidate.

@@ -135,6 +135,31 @@ func TestChatCompletions_NonStreaming_Success(t *testing.T) {
 	}
 }
 
+func TestChatCompletions_SamplingOptionsPreserveExplicitZero(t *testing.T) {
+	srv, last, _, teardown := newChatFixture(t, "ok")
+	defer teardown()
+
+	rec := doChat(t, srv, map[string]any{
+		"model":       "ollama/qwen3:8b",
+		"messages":    []map[string]string{{"role": "user", "content": "hi"}},
+		"temperature": 0,
+		"top_p":       0,
+		"top_k":       0,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+	}
+	if last.Options.Temperature == nil || *last.Options.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit zero", last.Options.Temperature)
+	}
+	if last.Options.TopP == nil || *last.Options.TopP != 0 {
+		t.Errorf("TopP = %v, want explicit zero", last.Options.TopP)
+	}
+	if last.Options.TopK == nil || *last.Options.TopK != 0 {
+		t.Errorf("TopK = %v, want explicit zero", last.Options.TopK)
+	}
+}
+
 func TestChatCompletions_BodyTooLarge(t *testing.T) {
 	srv, _, calls, teardown := newChatFixture(t, "unused")
 	defer teardown()

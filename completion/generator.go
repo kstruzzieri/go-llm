@@ -251,7 +251,7 @@ func ollamaGenerateRequest(req GenerateRequest) ollama.GenerateRequest {
 		Options: &ollama.ModelOptions{
 			NumPredict:  req.NumPredict,
 			NumCtx:      req.NumCtx,
-			Temperature: req.Temperature,
+			Temperature: &req.Temperature,
 			Stop:        stop,
 		},
 	}

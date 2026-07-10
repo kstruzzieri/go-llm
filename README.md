@@ -473,6 +473,22 @@ Load model settings from `models.json` with provider configs, role-based default
 
 `go-llm` does not hard-code a model roster — `models.json` is the sole source of truth. Substitute any model your configured provider can load by editing `models.json`; capabilities (chat / embedding / tool-call) are detected at runtime by `fingerprint/`. See [`docs/llm/`](docs/llm/) for the reference lineup shipped by default and the full BYO guide.
 
+Model entries may set static sampling defaults with `options`:
+
+```json
+"coding": {
+  "name": "qwen3-coder-next:latest",
+  "provider": "llamacpp",
+  "type": "moe",
+  "options": { "temperature": 0.15, "top_p": 0.9, "top_k": 40 }
+}
+```
+
+Defaults are keyed by provider/model identity; roles that share the same model
+must declare identical options. Explicit request values, including zero, win.
+`top_k` is a llama.cpp/Ollama extension, so omit it for strict hosted OpenAI
+endpoints that reject unknown request fields.
+
 ```go
 import "github.com/kstruzzieri/go-llm/config"
 

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
 )
 
@@ -42,7 +43,7 @@ func TestOpenAICompatJudgeClient_ChatTranslatesRequestAndResponse(t *testing.T) 
 			{Role: "user", Content: "evaluate this"},
 		},
 		Format:  "json",
-		Options: &ollama.ModelOptions{Temperature: 0.1, NumPredict: 512},
+		Options: &ollama.ModelOptions{Temperature: provider.Ptr(0.1), NumPredict: 512},
 	})
 	if err != nil {
 		t.Fatalf("Chat: %v", err)

@@ -592,6 +592,7 @@ func TestProvider_Chat_RequestBodyShape(t *testing.T) {
 		Messages: []provider.ChatMessage{{Role: "user", Content: "hi"}},
 		Options: provider.ModelOptions{
 			Temperature: provider.Ptr(0.7),
+			TopK:        provider.Ptr(40),
 			NumPredict:  100,
 			Stop:        []string{"\n\n"},
 		},
@@ -611,6 +612,9 @@ func TestProvider_Chat_RequestBodyShape(t *testing.T) {
 	}
 	if captured.Temperature == nil || *captured.Temperature != 0.7 {
 		t.Errorf("Temperature not propagated: %+v", captured.Temperature)
+	}
+	if captured.TopK == nil || *captured.TopK != 40 {
+		t.Errorf("TopK not propagated: %+v", captured.TopK)
 	}
 	if captured.MaxTokens != 100 {
 		t.Errorf("MaxTokens = %d, want 100 (NumPredict -> max_tokens)", captured.MaxTokens)
@@ -1621,6 +1625,11 @@ func TestProvider_Generate_FIM_SuffixPropagated(t *testing.T) {
 		Model:  "m",
 		Prompt: "before",
 		Suffix: "after",
+		Options: provider.ModelOptions{
+			Temperature: provider.Ptr(0.0),
+			TopP:        provider.Ptr(0.9),
+			TopK:        provider.Ptr(0),
+		},
 	})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -1630,6 +1639,15 @@ func TestProvider_Generate_FIM_SuffixPropagated(t *testing.T) {
 	}
 	if captured.Prompt != "before" {
 		t.Errorf("Prompt = %q, want %q", captured.Prompt, "before")
+	}
+	if captured.Temperature == nil || *captured.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit zero", captured.Temperature)
+	}
+	if captured.TopP == nil || *captured.TopP != 0.9 {
+		t.Errorf("TopP = %v, want 0.9", captured.TopP)
+	}
+	if captured.TopK == nil || *captured.TopK != 0 {
+		t.Errorf("TopK = %v, want explicit zero", captured.TopK)
 	}
 	if resp.Response != "middle" {
 		t.Errorf("Response = %q, want middle", resp.Response)

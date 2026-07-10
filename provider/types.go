@@ -286,6 +286,7 @@ type EmbedResponse struct {
 type ModelOptions struct {
 	Temperature   *float64 `json:"temperature,omitempty"`
 	TopP          *float64 `json:"top_p,omitempty"`
+	TopK          *int     `json:"top_k,omitempty"`
 	NumPredict    int      `json:"num_predict,omitempty"`
 	NumCtx        int      `json:"num_ctx,omitempty"`
 	Stop          []string `json:"stop,omitempty"`
@@ -297,6 +298,14 @@ type ModelOptions struct {
 	// false. Values are not validated here; the CLI boundary validates and
 	// openai-compat servers reject unknown efforts themselves.
 	ThinkEffort string `json:"think_effort,omitempty"`
+}
+
+// SamplingDefaults contains the generation values that may be filled when a
+// request leaves the matching ModelOptions field unset.
+type SamplingDefaults struct {
+	Temperature *float64
+	TopP        *float64
+	TopK        *int
 }
 
 // ModelInfo holds metadata about a model available from a provider.

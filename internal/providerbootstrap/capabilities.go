@@ -8,6 +8,53 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+type modelDefaultsEntry struct {
+	role string
+	opts provider.SamplingDefaults
+}
+
+func buildModelDefaults(cfg *config.Config) (map[provider.ModelKey]provider.SamplingDefaults, error) {
+	out := make(map[provider.ModelKey]provider.SamplingDefaults)
+	if cfg == nil {
+		return out, nil
+	}
+	roles := make([]string, 0, len(cfg.Models))
+	for role := range cfg.Models {
+		roles = append(roles, role)
+	}
+	sort.Strings(roles)
+	seen := make(map[provider.ModelKey]modelDefaultsEntry)
+	for _, role := range roles {
+		model := cfg.Models[role]
+		if model.Provider == "" || model.Name == "" || model.Options == nil {
+			continue
+		}
+		opts := provider.SamplingDefaults{
+			Temperature: model.Options.Temperature,
+			TopP:        model.Options.TopP,
+			TopK:        model.Options.TopK,
+		}
+		key := provider.ModelKey{Provider: model.Provider, Model: model.Name}
+		if existing, ok := seen[key]; ok && !sameModelDefaults(existing.opts, opts) {
+			return nil, fmt.Errorf(
+				"providerbootstrap: conflicting sampling defaults for %s: models %q and %q; defaults are per provider/model, so use identical options or distinct provider keys for workload-specific defaults",
+				key, existing.role, role,
+			)
+		}
+		seen[key] = modelDefaultsEntry{role: role, opts: opts}
+		out[key] = opts
+	}
+	return out, nil
+}
+
+func sameModelDefaults(a, b provider.SamplingDefaults) bool {
+	return samePtr(a.Temperature, b.Temperature) && samePtr(a.TopP, b.TopP) && samePtr(a.TopK, b.TopK)
+}
+
+func samePtr[T comparable](a, b *T) bool {
+	return a == nil && b == nil || a != nil && b != nil && *a == *b
+}
+
 // capabilitiesForKey returns the configured capabilities for a model key:
 // explicit Capabilities when set, else ResolvedCapabilities. Nil when unknown.
 func capabilitiesForKey(cfg *config.Config, key provider.ModelKey) []string {

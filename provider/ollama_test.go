@@ -594,8 +594,8 @@ func TestOllamaProvider_Chat_WithOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Chat() error: %v", err)
 	}
-	if receivedOpts.Temperature != 0.7 {
-		t.Errorf("Temperature = %f, want 0.7", receivedOpts.Temperature)
+	if receivedOpts.Temperature == nil || *receivedOpts.Temperature != 0.7 {
+		t.Errorf("Temperature = %v, want 0.7", receivedOpts.Temperature)
 	}
 	if receivedOpts.NumPredict != 100 {
 		t.Errorf("NumPredict = %d, want 100", receivedOpts.NumPredict)
@@ -1041,8 +1041,8 @@ func TestToOllamaChatRequest(t *testing.T) {
 	if oReq.Options == nil {
 		t.Fatal("Options should not be nil")
 	}
-	if oReq.Options.Temperature != 0.5 {
-		t.Errorf("Options.Temperature = %f, want 0.5", oReq.Options.Temperature)
+	if oReq.Options.Temperature == nil || *oReq.Options.Temperature != 0.5 {
+		t.Errorf("Options.Temperature = %v, want 0.5", oReq.Options.Temperature)
 	}
 	if oReq.Options.NumCtx != 8192 {
 		t.Errorf("Options.NumCtx = %d, want 8192", oReq.Options.NumCtx)
@@ -1235,15 +1235,23 @@ func TestOllamaProvider_Generate_WithOptions(t *testing.T) {
 		System: "You are a code assistant.",
 		Suffix: "// end",
 		Options: ModelOptions{
-			Temperature: Ptr(0.3),
+			Temperature: Ptr(0.0),
+			TopP:        Ptr(0.0),
+			TopK:        Ptr(0),
 			NumPredict:  50,
 		},
 	})
 	if err != nil {
 		t.Fatalf("Generate() error: %v", err)
 	}
-	if receivedOpts.Temperature != 0.3 {
-		t.Errorf("Temperature = %f, want 0.3", receivedOpts.Temperature)
+	if receivedOpts.Temperature == nil || *receivedOpts.Temperature != 0 {
+		t.Errorf("Temperature = %v, want explicit zero", receivedOpts.Temperature)
+	}
+	if receivedOpts.TopP == nil || *receivedOpts.TopP != 0 {
+		t.Errorf("TopP = %v, want explicit zero", receivedOpts.TopP)
+	}
+	if receivedOpts.TopK == nil || *receivedOpts.TopK != 0 {
+		t.Errorf("TopK = %v, want explicit zero", receivedOpts.TopK)
 	}
 	if receivedOpts.NumPredict != 50 {
 		t.Errorf("NumPredict = %d, want 50", receivedOpts.NumPredict)
@@ -1707,8 +1715,8 @@ func TestToOllamaGenerateRequest(t *testing.T) {
 	if oReq.Options == nil {
 		t.Fatal("Options should not be nil")
 	}
-	if oReq.Options.Temperature != 0.3 {
-		t.Errorf("Options.Temperature = %f, want 0.3", oReq.Options.Temperature)
+	if oReq.Options.Temperature == nil || *oReq.Options.Temperature != 0.3 {
+		t.Errorf("Options.Temperature = %v, want 0.3", oReq.Options.Temperature)
 	}
 	if oReq.Options.NumPredict != 200 {
 		t.Errorf("Options.NumPredict = %d, want 200", oReq.Options.NumPredict)

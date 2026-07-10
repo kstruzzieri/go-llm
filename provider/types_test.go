@@ -221,6 +221,9 @@ func TestModelOptions_PointerFields(t *testing.T) {
 	if opts.TopP != nil {
 		t.Error("zero-value ModelOptions should have nil TopP")
 	}
+	if opts.TopK != nil {
+		t.Error("zero-value ModelOptions should have nil TopK")
+	}
 	if opts.RepeatPenalty != nil {
 		t.Error("zero-value ModelOptions should have nil RepeatPenalty")
 	}
@@ -229,6 +232,7 @@ func TestModelOptions_PointerFields(t *testing.T) {
 	opts = ModelOptions{
 		Temperature:   Ptr(0.8),
 		TopP:          Ptr(0.9),
+		TopK:          Ptr(40),
 		NumPredict:    256,
 		NumCtx:        4096,
 		Stop:          []string{"\n"},
@@ -239,6 +243,9 @@ func TestModelOptions_PointerFields(t *testing.T) {
 	}
 	if *opts.TopP != 0.9 {
 		t.Errorf("TopP = %v, want 0.9", *opts.TopP)
+	}
+	if *opts.TopK != 40 {
+		t.Errorf("TopK = %v, want 40", *opts.TopK)
 	}
 	if *opts.RepeatPenalty != 1.1 {
 		t.Errorf("RepeatPenalty = %v, want 1.1", *opts.RepeatPenalty)
