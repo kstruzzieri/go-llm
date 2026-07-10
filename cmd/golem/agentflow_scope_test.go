@@ -61,3 +61,16 @@ func TestStepScopeGuardAgentCaseInsensitive(t *testing.T) {
 		t.Errorf(".agentfoo read must not be denied by the .agent rule: %v", err)
 	}
 }
+
+func TestDenyProofState(t *testing.T) {
+	for _, rel := range []string{".agent", ".agent/state.json", ".AGENT/x", ".Agent/deep/f"} {
+		if err := denyProofState(rel); err == nil {
+			t.Errorf("denyProofState(%q) = nil, want proof-state error", rel)
+		}
+	}
+	for _, rel := range []string{"src/main.go", ".agentflow/x", "agent/x", ".agentfoo"} {
+		if err := denyProofState(rel); err != nil {
+			t.Errorf("denyProofState(%q) = %v, want nil", rel, err)
+		}
+	}
+}

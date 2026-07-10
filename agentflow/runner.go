@@ -2,6 +2,13 @@
 // planning/execution/review proof layer behind Golem's #209 task mode. It is
 // deliberately NOT exposed to a model as tools: proof state must be
 // adapter-driven so the model cannot forge receipts.
+//
+// The package also owns the #210 planner surface: PlanIR/StepIR/GateIR (the
+// ergonomic representation a model authors), Compile (a total, deterministic
+// projection of that IR into the rigid lockable Plan), and CheckPlan (a narrow
+// local semantic pre-check). The model authors the IR; the host compiles,
+// pre-checks, and locks it via the CLI on the model's behalf — the model still
+// never touches proof state directly.
 package agentflow
 
 import (

@@ -8,8 +8,8 @@
   "drift_budget": {
     "unrelated_edits": 0,
     "new_dependencies": 0,
-    "formatting_drift": 0,
-    "architecture_drift": 0
+    "formatting_drift": "minimal",
+    "architecture_drift": "requires_approval"
   },
   "evidence_ids": [],
   "allowed_files": ["src/*", ".agent/"],

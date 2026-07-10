@@ -12,4 +12,12 @@
 // GO_LLM_BASE_URL); otherwise, when the configured loopback URL does not
 // serve the agent model, startup scans 127.0.0.1:8080-8090 for it
 // (-no-probe disables the scan).
+//
+// Planning mode (-goal "<text>"): a local model authors an AgentFlow plan for
+// the goal using read-only tools, Golem compiles and locks it via agentflow
+// lock-plan, then stops. The locked .agent/plan.lock.json is the durable output;
+// run it with -plan (task execution) separately. Planning is read-only and
+// mutually exclusive with -p, -plan, -allow-write, -allow-exec, -rag-db,
+// -delegate, -mcp-*, -evidence, and the -approve-plan-edits/-approve-plan-gates
+// execution approvals.
 package main

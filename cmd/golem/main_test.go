@@ -339,6 +339,7 @@ func TestShouldStartAutoIndex(t *testing.T) {
 	}{
 		{name: "default", f: flags{}, want: true},
 		{name: "one-shot -p", f: flags{prompt: "hi", promptSet: true}, want: false},
+		{name: "planning -goal", f: flags{goalSet: true}, want: false},
 		{name: "-no-auto-index", f: flags{noAutoIndex: true}, want: false},
 		{name: "-no-rag", f: flags{noRag: true}, want: false},
 		{name: "-rag-db", f: flags{ragDB: "x.db"}, want: false},
@@ -472,6 +473,91 @@ func TestApplyTaskMode_WarnsOnIgnoredFlags(t *testing.T) {
 	}
 
 	_, warns = applyTaskMode(flags{planPath: "plan.json"})
+	if len(warns) != 0 {
+		t.Fatalf("expected no warnings when no ignored flags are set, got %v", warns)
+	}
+}
+
+func TestParseFlags_GoalMutualExclusions(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+	}{
+		{"goal+prompt", []string{"-goal", "x", "-p", "hi"}},
+		{"goal+plan", []string{"-goal", "x", "-plan", "p.json"}},
+		{"goal+allow-write", []string{"-goal", "x", "-allow-write"}},
+		{"goal+allow-exec", []string{"-goal", "x", "-allow-exec"}},
+		{"goal+rag", []string{"-goal", "x", "-rag-db", "r.db"}},
+		{"goal+delegate", []string{"-goal", "x", "-delegate"}},
+		{"goal+approve-edits", []string{"-goal", "x", "-approve-plan-edits"}},
+		{"goal+approve-gates", []string{"-goal", "x", "-approve-plan-gates"}},
+		{"goal+evidence", []string{"-goal", "x", "-evidence", "e.json"}},
+		{"goal+mcp", []string{"-goal", "x", "-mcp-stdio", "server"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f, err := parseFlags(c.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validateFlags(f); err == nil {
+				t.Errorf("expected mutual-exclusion error for %v", c.args)
+			}
+		})
+	}
+}
+
+func TestParseFlags_GoalAlone(t *testing.T) {
+	f, err := parseFlags([]string{"-goal", "add a healthz endpoint"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFlags(f); err != nil {
+		t.Fatal(err)
+	}
+	if !f.goalSet || f.goal != "add a healthz endpoint" {
+		t.Errorf("goalSet=%v goal=%q", f.goalSet, f.goal)
+	}
+}
+
+func TestParseFlags_GoalRejectsBlankValue(t *testing.T) {
+	f, err := parseFlags([]string{"-goal", "   "})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFlags(f); err == nil {
+		t.Fatal("explicit blank -goal must be rejected")
+	}
+}
+
+func TestApplyGoalMode_DisablesAmbientStateButKeepsProjectContext(t *testing.T) {
+	f, _ := applyGoalMode(flags{goalSet: true, agentMemory: true, feedback: true, feedbackDB: "x.db"})
+	if !f.noSession || !f.noCompress || !f.noMemory || !f.noAutoIndex || !f.noRag || f.agentMemory {
+		t.Fatalf("planning-mode ambient shutdown not applied: %+v", f)
+	}
+	if f.feedback || f.feedbackDB != "" {
+		t.Fatalf("planning mode should disable feedback: %+v", f)
+	}
+	if f.noProjectContext {
+		t.Fatal("planning mode must leave project context enabled")
+	}
+	// Non-goal flags flow through untouched.
+	g, warns := applyGoalMode(flags{})
+	if g.noSession || g.noRag || len(warns) != 0 {
+		t.Fatalf("applyGoalMode must be a no-op without -goal: %+v warns=%v", g, warns)
+	}
+}
+
+func TestApplyGoalMode_WarnsOnIgnoredFlags(t *testing.T) {
+	_, warns := applyGoalMode(flags{goalSet: true, sessionID: "chat"})
+	if len(warns) == 0 {
+		t.Fatal("expected a warning when -session is set in planning mode")
+	}
+	_, warns = applyGoalMode(flags{goalSet: true, trace: true})
+	if len(warns) == 0 {
+		t.Fatal("expected a warning when -trace is set in planning mode")
+	}
+	_, warns = applyGoalMode(flags{goalSet: true})
 	if len(warns) != 0 {
 		t.Fatalf("expected no warnings when no ignored flags are set, got %v", warns)
 	}

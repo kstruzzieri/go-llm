@@ -2,7 +2,8 @@ package agentflow
 
 import (
 	"context"
-	"io/fs"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -24,41 +25,102 @@ func agentflowRunnerForTest(t *testing.T, dir string) Runner {
 
 func TestLockPlan_RealCLI(t *testing.T) {
 	dir := t.TempDir()
-	copyTree(t, "../testdata/agentflow", dir)
 	r := agentflowRunnerForTest(t, dir)
 	c := NewClient(r, dir)
 	ctx := context.Background()
 	if err := c.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.LockPlan(ctx, filepath.Join(dir, "plan.json")); err != nil {
-		t.Fatalf("lock-plan on the fixture must succeed: %v", err)
+
+	// Lock OUR compiler's output, not a hand-authored fixture. This pins the
+	// compiler against the real validator: a legitimate agentflow tightening
+	// fails here, not in production, and we never pin accidental permissiveness.
+	plan := Compile(PlanIR{
+		Objective:    "smoke: compiler output must lock",
+		Scope:        []string{"src"},
+		Invariants:   []string{"only src/answer.txt changes"},
+		RiskLevel:    "low",
+		RollbackPlan: "git checkout -- .",
+		AllowedFiles: []string{"src/*"},
+		Steps: []StepIR{
+			{
+				ID:           "P1",
+				Action:       "ensure src/answer.txt contains the expected token",
+				Files:        []string{"src/answer.txt"},
+				ExpectedDiff: []string{"src/answer.txt changes pending to expected"},
+				DependsOn:    []string{"P0"}, // forward reference: P0 is declared below
+				Validations:  []GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}}},
+			},
+			{
+				ID:           "P0",
+				Action:       "prepare src/input.txt",
+				Files:        []string{"src/input.txt"},
+				ExpectedDiff: []string{"src/input.txt is ready"},
+				Validations:  []GateIR{{Label: "input", Argv: []string{"test", "-f", "src/input.txt"}}},
+			},
+		},
+	})
+	if ds := CheckPlan(plan); len(ds) != 0 {
+		t.Fatalf("compiler output failed local pre-check: %v", ds)
+	}
+	b, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(dir, "compiled-plan.json")
+	if err := os.WriteFile(planPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.LockPlan(ctx, planPath); err != nil {
+		t.Fatalf("real lock-plan rejected compiler output: %v", err)
 	}
 }
 
-// copyTree recursively copies the directory tree rooted at src into dst,
-// preserving the subdirectory structure.
-func copyTree(t *testing.T, src, dst string) {
-	t.Helper()
-	err := filepath.WalkDir(src, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		rel, err := filepath.Rel(src, path)
-		if err != nil {
-			return err
-		}
-		target := filepath.Join(dst, rel)
-		if d.IsDir() {
-			return os.MkdirAll(target, 0o755)
-		}
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return err
-		}
-		return os.WriteFile(target, data, 0o600)
-	})
-	if err != nil {
+func TestLockPlan_RealCLI_RejectsCycle(t *testing.T) {
+	dir := t.TempDir()
+	r := agentflowRunnerForTest(t, dir)
+	c := NewClient(r, dir)
+	ctx := context.Background()
+	if err := c.Init(ctx); err != nil {
 		t.Fatal(err)
+	}
+	// Two mutually dependent steps: the real CLI must reject the lock.
+	plan := Compile(PlanIR{
+		Objective: "cycle", Scope: []string{"src"}, Invariants: []string{"x"},
+		RiskLevel: "low", RollbackPlan: "git checkout -- .", AllowedFiles: []string{"src/*"},
+		Steps: []StepIR{
+			{ID: "A", Action: "a", Files: []string{"src/a"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}, DependsOn: []string{"B"}},
+			{ID: "B", Action: "b", Files: []string{"src/b"}, ExpectedDiff: []string{"x"}, Validations: []GateIR{{Argv: []string{"true"}}}, DependsOn: []string{"A"}},
+		},
+	})
+	b, _ := json.MarshalIndent(plan, "", "  ")
+	planPath := filepath.Join(dir, "cycle-plan.json")
+	if err := os.WriteFile(planPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := c.LockPlan(ctx, planPath)
+	if err == nil {
+		t.Fatal("expected real lock-plan to reject a dependency cycle")
+	}
+	// Pin the failure-envelope contract the -goal repair loop depends on: a real
+	// lock-plan rejection must be a *CommandError carrying an Errors[] entry with
+	// Code=="validation_error". cmd/golem's classifyLockError keys repair-vs-terminal
+	// on exactly that code+array; if agentflow ever reports validation failures via
+	// findings[]/diagnostics[] or renames the code, the 2-attempt repair loop
+	// silently never engages. Assert it against the real CLI here rather than
+	// trusting the comment in types.go.
+	var ce *CommandError
+	if !errors.As(err, &ce) {
+		t.Fatalf("lock-plan rejection must be *CommandError, got %T: %v", err, err)
+	}
+	found := false
+	for _, se := range ce.Errors {
+		if se.Code == "validation_error" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("lock-plan rejection must carry a validation_error in Errors[]; got %+v", ce.Errors)
 	}
 }

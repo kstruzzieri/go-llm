@@ -17,14 +17,15 @@ import (
 
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
-	orch            *agent.Orchestrator
-	tools           []agent.Tool
-	baseSystem      string
-	maxSteps        int
-	budget          agent.Budget
-	color           bool
-	clock           func() time.Time
-	retrieveOmitted bool // when true, /tools appends the omission note
+	orch                *agent.Orchestrator
+	tools               []agent.Tool
+	baseSystem          string
+	projectContextBlock string // raw fenced project-context block; reused by the planner (-goal)
+	maxSteps            int
+	budget              agent.Budget
+	color               bool
+	clock               func() time.Time
+	retrieveOmitted     bool // when true, /tools appends the omission note
 
 	session *session // nil => --no-session (no history, no persistence)
 
