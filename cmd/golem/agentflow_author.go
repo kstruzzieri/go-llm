@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/agentflow"
 )
 
@@ -228,3 +230,124 @@ const submitPlanSchema = `{
     }
   }
 }`
+
+const plannerBasePrompt = "You are Golem's planner. From the user's goal, author a durable execution plan for the AgentFlow contract. " +
+	"First inspect the repository with the read-only tools (read_file, search, glob, list). Then design a minimal directed-acyclic set of steps. " +
+	"Each step needs: concrete workspace-relative files, at least one expected_diff sentence, and at least one executable validation as an argv array (for example [\"go\",\"test\",\"./...\"]). " +
+	"Provide allowed_files globs that cover every step file, at least one invariant, and a rollback_plan. Use depends_on to order steps; do not create cycles. " +
+	"Planning is read-only: you may not edit files or run commands here. When ready, call submit_plan. " +
+	"If that submission is rejected you will receive diagnostics; fix them and make one final resubmission."
+
+var (
+	errPlannerRejected     = errors.New("planner could not produce a lockable plan within the submission budget")
+	errPlannerNoSubmission = errors.New("the planner did not submit a plan")
+)
+
+// guardExistingPlan refuses to proceed when locking would discard durable state.
+// An absent lock or AgentFlow's pristine unlocked scaffold (blank objective, no
+// steps) may proceed; a locked plan, a non-empty unlocked draft, or an
+// unreadable/malformed plan is refused. There is no planner-level override.
+func guardExistingPlan(root string) error {
+	path := filepath.Join(root, ".agent", "plan.lock.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("refusing to plan: cannot read existing %s: %w", path, err)
+	}
+	var existing struct {
+		SchemaVersion *string            `json:"schema_version"`
+		Objective     *string            `json:"objective"`
+		Steps         *[]json.RawMessage `json:"steps"`
+		Locked        *bool              `json:"locked"`
+	}
+	if err := json.Unmarshal(b, &existing); err != nil {
+		return fmt.Errorf("refusing to plan: %s exists but is not valid plan JSON; resolve it via agentflow before planning", path)
+	}
+	if existing.SchemaVersion == nil || strings.TrimSpace(*existing.SchemaVersion) == "" ||
+		existing.Objective == nil || existing.Steps == nil || existing.Locked == nil {
+		return fmt.Errorf("refusing to plan: %s is not the recognized AgentFlow scaffold; resolve it before planning", path)
+	}
+	if *existing.Locked {
+		return fmt.Errorf("refusing to plan: %s is already locked; use agentflow to reset the run before re-planning", path)
+	}
+	if strings.TrimSpace(*existing.Objective) != "" || len(*existing.Steps) > 0 {
+		return fmt.Errorf("refusing to plan: %s holds an unlocked draft; resolve it via agentflow before planning", path)
+	}
+	return nil
+}
+
+// runAgentflowAuthor is the -goal flow: guard, probe, init, run a read-only
+// authoring loop with submit_plan, and report the locked plan (or diagnostics).
+func runAgentflowAuthor(ctx context.Context, stdout, stderr io.Writer, sess *replSession, f flags, root string) error {
+	var runner agentflow.Runner
+	if f.agentflowSrc != "" {
+		runner = agentflow.NewSrcExecRunner(root, f.agentflowSrc)
+	} else {
+		runner = agentflow.NewExecRunner(root)
+	}
+	return runAgentflowAuthorWithClient(ctx, stdout, stderr, sess, f, root, agentflow.NewClient(runner, root))
+}
+
+func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer, sess *replSession, f flags, root string, client afLocker) error {
+	// Keep the guard inside the injected seam so tests exercise the same safety
+	// boundary as production.
+	if err := guardExistingPlan(root); err != nil {
+		return err
+	}
+
+	// Fail before any model work when AgentFlow is unavailable.
+	if err := client.Probe(ctx); err != nil {
+		return fmt.Errorf("agentflow unavailable: %w", err)
+	}
+	// Idempotent scaffold (agentflow 0.4 init skips existing artifacts).
+	if err := client.Init(ctx); err != nil {
+		return fmt.Errorf("agentflow init: %w", err)
+	}
+
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		return err
+	}
+	ws.SetScopeGuard(func(rel string, _ bool) error { return denyProofState(rel) })
+
+	loopCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	as := &authorSession{client: client, root: root, cancel: cancel}
+
+	planTools := append(agenttools.NewFileToolsForWorkspace(ws), newSubmitPlanTool(as))
+
+	system := plannerBasePrompt
+	if sess.projectContextBlock != "" {
+		system = system + "\n\n" + sess.projectContextBlock
+	}
+
+	req := agent.Request{
+		Goal:     f.goal,
+		System:   system,
+		Tools:    planTools,
+		MaxSteps: sess.maxSteps,
+		Budget:   sess.budget,
+		Options:  sess.modelOptions,
+	}
+	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock)))
+
+	switch {
+	case as.lockedPath != "":
+		_, _ = fmt.Fprintf(stdout, "locked plan: %s\n", as.lockedPath)
+		_, _ = fmt.Fprintln(stdout, "review the locked plan, especially validation command argv, before approval")
+		_, _ = fmt.Fprintln(stdout, "execute separately:")
+		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -approve-plan-edits -approve-plan-gates\n", as.lockedPath)
+		return nil
+	case as.terminalErr != nil:
+		return as.terminalErr
+	case len(as.lastDiags) > 0:
+		_, _ = fmt.Fprint(stderr, renderDiagnostics(as.lastDiags))
+		return errPlannerRejected
+	case runErr != nil && !errors.Is(runErr, context.Canceled):
+		return runErr
+	default:
+		return errPlannerNoSubmission
+	}
+}

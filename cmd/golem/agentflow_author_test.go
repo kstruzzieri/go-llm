@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // stubLocker satisfies afLocker; LockPlan returns a scripted error per call.
@@ -171,5 +175,118 @@ func TestSubmitPlanSchema_ParsesAndPinsRequiredKeys(t *testing.T) {
 		if !found {
 			t.Errorf("schema required missing %q", k)
 		}
+	}
+}
+
+func writePlanLock(t *testing.T, root string, body string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(root, ".agent"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, ".agent", "plan.lock.json"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGuardExistingPlan(t *testing.T) {
+	// Absent lock: allowed.
+	if err := guardExistingPlan(t.TempDir()); err != nil {
+		t.Errorf("absent lock should be allowed: %v", err)
+	}
+	// Pristine unlocked scaffold (blank objective, no steps): allowed.
+	r1 := t.TempDir()
+	writePlanLock(t, r1, `{"schema_version":"0.3.0","objective":"","steps":[],"locked":false}`)
+	if err := guardExistingPlan(r1); err != nil {
+		t.Errorf("pristine scaffold should be allowed: %v", err)
+	}
+	// Locked plan: refused.
+	r2 := t.TempDir()
+	writePlanLock(t, r2, `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
+	if err := guardExistingPlan(r2); err == nil {
+		t.Error("locked plan must be refused")
+	}
+	// Non-empty unlocked draft: refused.
+	r3 := t.TempDir()
+	writePlanLock(t, r3, `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":false}`)
+	if err := guardExistingPlan(r3); err == nil {
+		t.Error("non-empty unlocked draft must be refused")
+	}
+	// Malformed: refused.
+	r4 := t.TempDir()
+	writePlanLock(t, r4, `{not json`)
+	if err := guardExistingPlan(r4); err == nil {
+		t.Error("malformed plan must be refused")
+	}
+	// Valid JSON is not enough: an incomplete object is not the known scaffold.
+	r5 := t.TempDir()
+	writePlanLock(t, r5, `{}`)
+	if err := guardExistingPlan(r5); err == nil {
+		t.Error("incomplete plan object must be refused")
+	}
+}
+
+func submitPlanCall(args json.RawMessage) agent.ModelResult {
+	return agent.ModelResult{Response: provider.ChatResponse{
+		ToolCalls: []provider.ToolCall{{
+			ID: "c1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "submit_plan", Arguments: args},
+		}},
+	}}
+}
+
+func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+
+	var out, errb bytes.Buffer
+	// runAgentflowAuthorWithClient injects a stub afLocker so no real CLI runs.
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "add healthz", goalSet: true}, root, &stubLocker{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out.String(), filepath.Join(root, ".agent", "plan.lock.json")) ||
+		!strings.Contains(out.String(), "review the locked plan") {
+		t.Errorf("missing success output:\n%s", out.String())
+	}
+}
+
+func TestRunAgentflowAuthor_RefusesLockedPlan(t *testing.T) {
+	root := t.TempDir()
+	writePlanLock(t, root, `{"schema_version":"0.3.0","objective":"x","steps":[{"id":"S1"}],"locked":true}`)
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	var out, errb bytes.Buffer
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}); err == nil {
+		t.Error("expected clobber-guard refusal for a locked plan")
+	}
+}
+
+func TestRunAgentflowAuthor_ProbeFailsBeforeModel(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{}
+	sess := newTestSession(t, caller, root)
+	client := &stubLocker{probeErr: errors.New("missing")}
+	var out, errb bytes.Buffer
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, client); err == nil {
+		t.Fatal("expected probe failure")
+	}
+	if caller.i != 0 || client.inits != 0 {
+		t.Fatalf("probe failure reached model/init: model=%d init=%d", caller.i, client.inits)
+	}
+}
+
+func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "no submission"}
+	sess := newTestSession(t, caller, root)
+	sess.projectContextBlock = "<<<PROJECT_CONTEXT>>>\nrepo rule\n<<<END_PROJECT_CONTEXT>>>"
+	var out, errb bytes.Buffer
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
+	if !errors.Is(err, errPlannerNoSubmission) {
+		t.Fatalf("err = %v, want no submission", err)
+	}
+	if !strings.Contains(caller.system, "Golem's planner") || !strings.Contains(caller.system, "repo rule") {
+		t.Fatalf("planner system omitted prompt/context: %q", caller.system)
 	}
 }

@@ -62,6 +62,8 @@ type flags struct {
 	approveGates     bool
 	agentflowSrc     string
 	evidencePath     string
+	goal             string // AgentFlow planning mode goal (-goal); registration/guards land in a later task
+	goalSet          bool   // -goal was passed (distinguishes an explicit empty goal)
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -546,11 +548,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	baseSystem += delegateSystemFragment(f.delegate, f.allowWrite)
 	baseSystem += memorySystemFragment(memoryEnabled)
 	projectContextLine := ""
+	projectContextBlock := ""
 	if !f.noProjectContext {
 		if block, n, perr := loadProjectContext(ctx, root, os.Getenv); perr != nil {
 			warns = append(warns, "project context disabled: "+perr.Error())
 		} else if block != "" {
 			baseSystem = baseSystem + "\n\n" + block
+			projectContextBlock = block
 			projectContextLine = fmt.Sprintf("project context: loaded %d file(s)", n)
 		}
 	}
@@ -634,14 +638,15 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
 	sess := &replSession{
-		orch:            agent.New(caller, agent.ContextManager{}),
-		tools:           tools,
-		baseSystem:      baseSystem,
-		maxSteps:        f.maxSteps,
-		budget:          budget,
-		color:           !f.noColor,
-		retrieveOmitted: retrieveOmitted,
-		session:         sessn,
+		orch:                agent.New(caller, agent.ContextManager{}),
+		tools:               tools,
+		baseSystem:          baseSystem,
+		projectContextBlock: projectContextBlock,
+		maxSteps:            f.maxSteps,
+		budget:              budget,
+		color:               !f.noColor,
+		retrieveOmitted:     retrieveOmitted,
+		session:             sessn,
 		compress: compressPolicy{
 			summarize:          agent.NewRouterSummarizer(bundle.Router, summarizeChain),
 			estimate:           conversation.CharRatioEstimator(4.0),
