@@ -280,6 +280,23 @@ func submitPlanCall(args json.RawMessage) agent.ModelResult {
 	}}
 }
 
+type repairFailureCaller struct {
+	first agent.ModelResult
+	err   error
+	calls int
+}
+
+func (c *repairFailureCaller) Chat(_ context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.calls++
+	if c.calls > 1 {
+		return agent.ModelResult{}, c.err
+	}
+	if onToken != nil {
+		_ = onToken(c.first.Response)
+	}
+	return c.first, nil
+}
+
 func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
@@ -409,6 +426,23 @@ func TestRunAgentflowAuthor_ExhaustionReportsDiagnostics(t *testing.T) {
 	}
 	if !strings.Contains(errb.String(), "validation_error") || !strings.Contains(errb.String(), "steps[0].files must be non-empty") {
 		t.Fatalf("stderr missing rendered diagnostics:\n%s", errb.String())
+	}
+}
+
+func TestRunAgentflowAuthor_RepairModelFailureOverridesStaleDiagnostics(t *testing.T) {
+	root := t.TempDir()
+	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "repair me"}}}
+	providerErr := errors.New("provider unavailable during repair")
+	caller := &repairFailureCaller{first: submitPlanCall(validIRJSON(t)), err: providerErr}
+	sess := newTestSession(t, caller, root)
+
+	var out, errb bytes.Buffer
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{lockErrs: []error{verr}})
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("err = %v, want provider error", err)
+	}
+	if errors.Is(err, errPlannerRejected) {
+		t.Fatalf("provider error must not be masked as exhausted submissions: %v", err)
 	}
 }
 

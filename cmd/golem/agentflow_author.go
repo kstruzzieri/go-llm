@@ -68,6 +68,7 @@ func (t *submitPlanTool) Effect() agent.Effect {
 func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
 	s := t.sess
 	s.attempts++
+	s.lastDiags = nil
 
 	var ir agentflow.PlanIR
 	if err := json.Unmarshal(args, &ir); err != nil {
@@ -362,6 +363,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		Options:  sess.modelOptions,
 	}
 	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock)))
+	budgetExhausted := as.attempts >= maxPlanSubmissions
 
 	switch {
 	case as.lockedPath != "":
@@ -375,7 +377,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		return nil
 	case as.terminalErr != nil:
 		return as.terminalErr
-	case len(as.lastDiags) > 0:
+	case budgetExhausted && len(as.lastDiags) > 0:
 		_, _ = fmt.Fprint(stderr, renderDiagnostics(as.lastDiags))
 		return errPlannerRejected
 	case runErr != nil && !errors.Is(runErr, context.Canceled):
