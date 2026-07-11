@@ -77,10 +77,13 @@ type Gate struct {
 
 // CommandGate is an executable gate resolved for a step: an argv slice plus the
 // label agentflow's verify-step credits (aligned to step.validation by index
-// when present, else the joined argv).
+// when present, else the joined argv). CriterionIDs is the source gate's
+// acceptance-criterion mapping, carried here so consumers never index back into
+// step.gates, whose positions do not survive the kind=="command" filter.
 type CommandGate struct {
-	Label string
-	Argv  []string
+	Label        string
+	Argv         []string
+	CriterionIDs []string
 }
 
 // ExtractCommandGates returns the P0-executable gates for a step. Each entry in
@@ -99,7 +102,11 @@ func ExtractCommandGates(s Step) ([]CommandGate, error) {
 		if i < len(s.Validation) {
 			label = s.Validation[i]
 		}
-		out = append(out, CommandGate{Label: label, Argv: append([]string(nil), g.Run...)})
+		out = append(out, CommandGate{
+			Label:        label,
+			Argv:         append([]string(nil), g.Run...),
+			CriterionIDs: append([]string(nil), g.CriterionIDs...),
+		})
 	}
 	return out, nil
 }

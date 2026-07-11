@@ -84,6 +84,29 @@ mode builds its toolset from the locked plan alone, so it refuses to start
 if any of those are also passed — it is a constrained proof surface, not a
 general-purpose agent session with a plan bolted on.
 
+## Locked step instructions
+
+For a plan with `requirements`, each model run is instructed from a
+deterministic projection of the locked plan: the objective, invariants,
+non-goals, current step preconditions/action/files/expected diff, validation
+labels and structured command argv, plus only the acceptance criteria named by
+that step and their parent requirement text. Requirement text appears once even
+when several selected criteria share it. A traced step with no `criterion_ids`
+still receives the enriched plan/step header and an explicit empty criteria
+section. Unrelated requirements and criteria are excluded.
+
+Requirement-free plans retain the previous minimal instruction bytes exactly.
+Before AgentFlow is probed or initialized, evidence is recorded, or a step is
+claimed, task mode rejects malformed or dangling traceability, gate criteria
+outside their parent step, and criteria without an implementing step or a
+proving gate/review floor. The proving-gate/review-floor requirement is an
+intentional Golem strictness: AgentFlow v0.4 currently locks a criterion that is
+step-mapped but has neither verification mapping.
+
+AgentFlow v0.4 has no canonical design-decision or design-reference fields.
+Task mode therefore does not invent a sidecar or proof field for them; projecting
+applicable design references remains blocked on an upstream contract extension.
+
 ## Proof-mode guards
 
 - **`.agent/` is opaque to the model.** Every path under `.agent/` is denied
