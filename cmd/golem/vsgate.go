@@ -10,8 +10,8 @@ const (
 	vsInconsistent               // disable; mixed known vsids, or known+legacy mix
 )
 
-// vsDecision is the gate result. stored holds the offending corpus vsid for the
-// vsMismatch case (used to format the disable warning).
+// vsDecision is the gate result. stored holds the corpus's sole known vsid for
+// both accepted and mismatched corpora.
 type vsDecision struct {
 	register bool
 	kind     vsKind
@@ -30,7 +30,7 @@ func vsGateDecision(known []string, hasUnknown bool, expected []string) vsDecisi
 		return vsDecision{register: true, kind: vsOK}
 	case len(known) == 1 && !hasUnknown:
 		if containsString(expected, known[0]) {
-			return vsDecision{register: true, kind: vsOK}
+			return vsDecision{register: true, kind: vsOK, stored: known[0]}
 		}
 		return vsDecision{register: false, kind: vsMismatch, stored: known[0]}
 	default:

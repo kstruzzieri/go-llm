@@ -154,22 +154,24 @@ func newChainEmbedder(route embedRouteFunc, chain []string) rag.Embedder {
 			RequiredCaps:   provider.CapEmbed,
 			ExpectedOutput: provider.DefaultExpectedOutput("embedding"),
 		}
+		routeLabel := model
 		if len(chain) > 0 {
 			rr.PreferredChain = append([]string(nil), chain...)
 			rr.StrictChain = true
+			routeLabel = strings.Join(chain, " -> ")
 		} else {
 			rr.Model = model
 		}
 		plan, err := route(ctx, rr)
 		if err != nil {
-			return rag.EmbedResult{}, err
+			return rag.EmbedResult{}, fmt.Errorf("golem: route embedding via %q: %w", routeLabel, err)
 		}
 		if plan == nil {
 			return rag.EmbedResult{}, fmt.Errorf("golem: embedding route returned nil plan")
 		}
 		resp, err := plan.ExecuteEmbed(ctx)
 		if err != nil {
-			return rag.EmbedResult{}, err
+			return rag.EmbedResult{}, fmt.Errorf("golem: execute embedding via %q: %w", routeLabel, err)
 		}
 		if resp == nil {
 			return rag.EmbedResult{}, fmt.Errorf("golem: embedding route returned nil response")
@@ -267,10 +269,18 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 		_ = store.Close()
 		return nil, nil, "", dec, stats, nil
 	}
+	queryChain := embChain
+	queryModel := embChain[0]
+	if dec.stored != "" {
+		// A known corpus is usable only in its recorded vector space. A
+		// one-entry strict chain preserves provider identity and forbids fallback.
+		queryChain = []string{dec.stored}
+		queryModel = dec.stored
+	}
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return router.Route(rc, rr)
-	}, embChain)
-	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(embChain[0]))
+	}, queryChain)
+	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(queryModel))
 	if err != nil {
 		_ = store.Close()
 		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("build retriever for %q: %w", dbPath, err)

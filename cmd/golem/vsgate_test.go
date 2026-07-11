@@ -33,8 +33,19 @@ func TestVSGateDecision(t *testing.T) {
 }
 
 func TestVSGateDecision_RecordsStored(t *testing.T) {
-	got := vsGateDecision([]string{"ollama/other"}, false, []string{"ollama/nomic"})
-	if got.stored != "ollama/other" {
-		t.Errorf("stored = %q, want ollama/other", got.stored)
+	tests := []struct {
+		name     string
+		expected []string
+	}{
+		{name: "mismatch", expected: []string{"ollama/nomic"}},
+		{name: "accepted", expected: []string{"ollama/other"}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := vsGateDecision([]string{"ollama/other"}, false, tc.expected)
+			if got.stored != "ollama/other" {
+				t.Errorf("stored = %q, want ollama/other", got.stored)
+			}
+		})
 	}
 }
