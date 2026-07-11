@@ -210,6 +210,18 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 					defer func() { _ = store.Close() }()
 					stages := make(map[string]time.Duration)
 					store.recordStage = func(stage string, elapsed time.Duration) { stages[stage] += elapsed }
+					// Untimed warmup, mirroring the warm sub-benchmarks; its
+					// stage timings are discarded below.
+					var warmErr error
+					if hybrid {
+						_, warmErr = store.SearchMulti(context.Background(), query, queryText, 5, QueryContext{CurrentFile: "pkg000/file000.go"})
+					} else {
+						_, warmErr = store.Search(context.Background(), query, 5)
+					}
+					if warmErr != nil {
+						b.Fatal(warmErr)
+					}
+					clear(stages)
 					b.ReportAllocs()
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
@@ -268,6 +280,12 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 					b.Fatal(err)
 				}
 				store.recordStage = func(stage string, elapsed time.Duration) { stages[stage] += elapsed }
+				// Untimed warmup, mirroring retriever_hybrid_warm; its stage
+				// timings (including query_embedding) are discarded below.
+				if _, err := retriever.Retrieve(context.Background(), queryText, 5); err != nil {
+					b.Fatal(err)
+				}
+				clear(stages)
 				b.ReportAllocs()
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
@@ -283,12 +301,18 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 			b.Run("context_construction", func(b *testing.B) {
 				b.StopTimer()
 				store := openFileBenchStore(b, path, false)
+				embedder := EmbedderFunc(func(context.Context, string, []string) (EmbedResult, error) {
+					return EmbedResult{Embeddings: [][]float64{query}, VectorSpaceID: fileBenchVSID}, nil
+				})
+				retriever, err := NewRetrieverWithEmbedder(embedder, store, WithRetrieverModel("benchmark"))
+				if err != nil {
+					b.Fatal(err)
+				}
 				results, err := store.Search(context.Background(), query, 5)
 				_ = store.Close()
 				if err != nil {
 					b.Fatal(err)
 				}
-				var retriever Retriever
 				b.ReportAllocs()
 				b.StartTimer()
 				for i := 0; i < b.N; i++ {
