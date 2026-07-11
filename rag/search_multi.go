@@ -41,6 +41,7 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	}
 
 	// Build embedding map for the semantic scorer.
+	stopValidation := s.stageTimer("vector_dimension_validation")
 	embMap := make(map[string][]float64, len(chunks))
 	for i, chunk := range chunks {
 		if err := validateSearchEmbeddingDimension(chunk.ID, queryEmbedding, embeddings[i]); err != nil {
@@ -48,6 +49,7 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 		}
 		embMap[chunk.ID] = embeddings[i]
 	}
+	stopValidation()
 
 	// Create and run scorers.
 	semantic := NewSemanticScorer()
@@ -57,37 +59,44 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	temporal := NewTemporalScorer(s.db, 0) // default 7-day half-life
 	structural := NewStructuralScorer()
 
+	stopSemantic := s.stageTimer("semantic_scoring")
 	semanticScores, err := semantic.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: semantic scoring: %w", err)
 	}
+	stopSemantic()
 
+	stopKeyword := s.stageTimer("keyword_scoring")
 	keywordScores, err := keyword.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: keyword scoring: %w", err)
 	}
+	stopKeyword()
 
+	stopTemporal := s.stageTimer("temporal_scoring")
 	temporalScores, err := temporal.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: temporal scoring: %w", err)
 	}
+	stopTemporal()
 
+	stopStructural := s.stageTimer("structural_scoring")
 	structuralScores, err := structural.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: structural scoring: %w", err)
 	}
-
-	// Compute RRF scores from semantic and keyword ranked lists.
-	semanticRanks := computeRanks(semanticScores)
-	keywordRanks := computeRanks(keywordScores)
+	stopStructural()
 
 	// Optional behavioral signal as a third RRF list. It is folded only when a
 	// weighter is configured AND at least one chunk has a non-zero weight, so
 	// cold-start (all-zero) leaves the raw fused score byte-for-byte unchanged.
+	// Scored before the fusion window opens so the fusion stage below is one
+	// contiguous timing span.
 	var behavioralScores []float64
 	var behavioralRanks []int
 	foldBehavioral := false
 	if s.behavioral != nil {
+		stopBehavioral := s.stageTimer("behavioral_scoring")
 		behavioralScores, err = NewBehavioralScorer(s.behavioral).
 			ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 		if err != nil {
@@ -97,7 +106,14 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 			behavioralRanks = computeRanks(behavioralScores)
 			foldBehavioral = true
 		}
+		stopBehavioral()
 	}
+
+	// Compute RRF scores from the semantic, keyword, and (when folded)
+	// behavioral ranked lists.
+	stopFusion := s.stageTimer("fusion_ranking_top_k")
+	semanticRanks := computeRanks(semanticScores)
+	keywordRanks := computeRanks(keywordScores)
 
 	// Build final scored results.
 	results := make([]ScoredResult, len(chunks))
@@ -149,11 +165,13 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
+	stopFusion()
 	return results, nil
 }
 
 // loadChunksWithEmbeddings loads all chunks and their embeddings from the database.
 func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, [][]float64, error) {
+	stopLoad := s.stageTimer("corpus_load_decode_candidate_hydration")
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, content, source, start_line, end_line, language, metadata, embedding, stable_key FROM chunks`)
 	if err != nil {
@@ -187,6 +205,7 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("rag: iterate chunks: %w", err)
 	}
+	stopLoad()
 	return chunks, embeddings, nil
 }
 
