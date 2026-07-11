@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -142,6 +143,9 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if err := agentflow.PreflightP0(&plan); err != nil {
 		return err
 	}
+	if err := validateTraceability(plan); err != nil {
+		return err
+	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
 	if err != nil {
 		return err
@@ -210,8 +214,12 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		tools := append(readTools, writeTools...)
 
 		approver := taskApprover(f.approveEdits) // auto-approve scoped edits only
+		goal, err := stepGoal(&plan, step)
+		if err != nil {
+			return fmt.Errorf("render step %s instructions: %w", step.ID, err)
+		}
 		req := agent.Request{
-			Goal:     stepGoal(step),
+			Goal:     goal,
 			System:   sess.baseSystem,
 			Tools:    tools,
 			MaxSteps: sess.maxSteps,
@@ -238,6 +246,19 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	return nil
 }
 
+func validateTraceability(plan agentflow.Plan) error {
+	ds := agentflow.TraceabilityDiagnostics(plan)
+	if len(ds) == 0 {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("invalid locked plan traceability")
+	for _, diag := range ds {
+		fmt.Fprintf(&b, "; [%s] %s", diag.Code, diag.Message)
+	}
+	return errors.New(b.String())
+}
+
 func resolveTaskPlanPath(path string) (string, error) {
 	if filepath.IsAbs(path) {
 		return path, nil
@@ -245,9 +266,101 @@ func resolveTaskPlanPath(path string) (string, error) {
 	return filepath.Abs(path)
 }
 
-func stepGoal(s agentflow.Step) string {
-	return fmt.Sprintf("Make exactly the change described. Action: %s\nTarget files: %s\nExpected diff:\n%s",
-		s.Action, strings.Join(s.Files, ", "), strings.Join(s.ExpectedDiff, "\n"))
+func stepGoal(p *agentflow.Plan, s agentflow.Step) (string, error) {
+	if len(p.Requirements) == 0 {
+		return fmt.Sprintf("Make exactly the change described. Action: %s\nTarget files: %s\nExpected diff:\n%s",
+			s.Action, strings.Join(s.Files, ", "), strings.Join(s.ExpectedDiff, "\n")), nil
+	}
+
+	var b strings.Builder
+	b.WriteString("Locked specification slice\n\nObjective:\n")
+	b.WriteString(p.Objective)
+	b.WriteString("\n\nInvariants:\n")
+	writeStepGoalList(&b, p.Invariants)
+	b.WriteString("\n\nNon-goals:\n")
+	writeStepGoalList(&b, p.NonGoals)
+	fmt.Fprintf(&b, "\n\nStep %s\nPreconditions:\n", s.ID)
+	writeStepGoalList(&b, s.Preconditions)
+	b.WriteString("\nAction:\n")
+	b.WriteString(s.Action)
+	b.WriteString("\nTarget files:\n")
+	writeStepGoalList(&b, s.Files)
+	b.WriteString("\nExpected diff:\n")
+	writeStepGoalList(&b, s.ExpectedDiff)
+	gates, err := agentflow.ExtractCommandGates(s)
+	if err != nil {
+		return "", err
+	}
+	labels := make([]string, len(gates))
+	for i, gate := range gates {
+		labels[i] = gate.Label
+	}
+	b.WriteString("\nValidation intent:\n")
+	writeStepGoalList(&b, labels)
+	b.WriteString("\nStructured gates:\n")
+	if len(gates) == 0 {
+		b.WriteString("(none)")
+	}
+	for i, gate := range gates {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		argv := make([]string, len(gate.Argv))
+		for j, arg := range gate.Argv {
+			argv[j] = strconv.Quote(arg)
+		}
+		fmt.Fprintf(&b, "- %s: [%s]", gate.Label, strings.Join(argv, ", "))
+		if len(s.Gates[i].CriterionIDs) > 0 {
+			fmt.Fprintf(&b, " (criteria: %s)", strings.Join(s.Gates[i].CriterionIDs, ", "))
+		}
+	}
+
+	b.WriteString("\nRequirements and acceptance criteria:\n")
+	selected := make(map[string]bool, len(s.CriterionIDs))
+	for _, id := range s.CriterionIDs {
+		selected[id] = true
+	}
+	emitted := false
+	for _, requirement := range p.Requirements {
+		var criteria []agentflow.Criterion
+		for _, criterion := range requirement.AcceptanceCriteria {
+			if selected[criterion.ID] {
+				criteria = append(criteria, criterion)
+			}
+		}
+		if len(criteria) == 0 {
+			continue
+		}
+		if emitted {
+			b.WriteByte('\n')
+		}
+		emitted = true
+		fmt.Fprintf(&b, "- %s: %s", requirement.ID, requirement.Text)
+		for _, criterion := range criteria {
+			fmt.Fprintf(&b, "\n  - %s: %s", criterion.ID, criterion.Text)
+			if criterion.Review != nil {
+				fmt.Fprintf(&b, " (review minimum depth: %s)", criterion.Review.MinimumDepth)
+			}
+		}
+	}
+	if !emitted {
+		b.WriteString("(none)")
+	}
+	return b.String(), nil
+}
+
+func writeStepGoalList(b *strings.Builder, values []string) {
+	if len(values) == 0 {
+		b.WriteString("(none)")
+		return
+	}
+	for i, value := range values {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString("- ")
+		b.WriteString(value)
+	}
 }
 
 // reportAgentflowRecovery prints the authoritative AgentFlow recovery state after

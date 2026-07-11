@@ -90,6 +90,44 @@ func TestLockPlan_RealCLI(t *testing.T) {
 	}
 }
 
+func TestLockPlan_RealCLI_AllowsCriterionWithoutVerificationMapping(t *testing.T) {
+	dir := t.TempDir()
+	r := agentflowRunnerForTest(t, dir)
+	c := NewClient(r, dir)
+	ctx := context.Background()
+	if err := c.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := Compile(PlanIR{
+		Objective: "pin intentional host strictness", Scope: []string{"src"}, Invariants: []string{"no mutation"},
+		RiskLevel: "low", RollbackPlan: "git checkout -- .", AllowedFiles: []string{"src/*"},
+		Requirements: []RequirementIR{{
+			ID: "REQ-1", Text: "the behavior is implemented",
+			AcceptanceCriteria: []CriterionIR{{ID: "AC-1", Text: "the behavior works"}},
+		}},
+		Steps: []StepIR{{
+			ID: "P1", Action: "implement behavior", Files: []string{"src/a.go"}, ExpectedDiff: []string{"behavior changes"},
+			CriterionIDs: []string{"AC-1"},
+			Validations:  []GateIR{{Label: "unit", Argv: []string{"true"}}},
+		}},
+	})
+	if ds := TraceabilityDiagnostics(plan); len(ds) != 1 || ds[0].Code != "unmapped_criterion_verification" {
+		t.Fatalf("host diagnostics = %+v, want unmapped_criterion_verification", ds)
+	}
+	b, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(dir, "agentflow-permissive-plan.json")
+	if err := os.WriteFile(planPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.LockPlan(ctx, planPath); err != nil {
+		t.Fatalf("Agentflow contract changed: expected v0.4 to allow no verification mapping: %v", err)
+	}
+}
+
 func TestLockPlan_RealCLI_RejectsCycle(t *testing.T) {
 	dir := t.TempDir()
 	r := agentflowRunnerForTest(t, dir)
