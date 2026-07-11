@@ -27,6 +27,29 @@ var (
 type SQLiteStore struct {
 	db         *sql.DB
 	behavioral BehavioralWeighter // optional; nil => behavioral signal inert
+	// recordStage is used by same-package benchmarks to attribute retrieval
+	// time without adding a public tracing API. Nil in production. It is not
+	// synchronized: it must be set before the store is used and invoked from a
+	// single goroutine. Parallelizing retrieval stages requires revisiting
+	// this hook and the benchmark maps it feeds.
+	recordStage func(string, time.Duration)
+}
+
+// noopStageStop is the shared no-op returned by stageTimer when stage
+// recording is disabled, so the disabled path never reads the clock or
+// allocates.
+var noopStageStop = func() {}
+
+// stageTimer starts timing the named stage and returns a func that records
+// the elapsed time via recordStage. Call the returned func at the point the
+// stage completes; error returns may skip it, dropping that stage's timing,
+// which is acceptable for the benchmark-only hook.
+func (s *SQLiteStore) stageTimer(name string) func() {
+	if s.recordStage == nil {
+		return noopStageStop
+	}
+	start := time.Now()
+	return func() { s.recordStage(name, time.Since(start)) }
 }
 
 type replaceSourceOptions struct {
@@ -121,6 +144,7 @@ func (s *SQLiteStore) DB() *sql.DB {
 // value exists. Returned IDs are also deterministic across SQLite versions,
 // which matters for tests that assert returned IDs.
 func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (VectorSpaceProbe, error) {
+	stopProbe := s.stageTimer("vector_space_probe_validation")
 	var minID string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT vector_space_id
@@ -165,6 +189,7 @@ func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (VectorSpaceProbe, 
 			probe.KnownIDs = []string{minID, maxID}
 		}
 	}
+	stopProbe()
 	return probe, nil
 }
 
@@ -447,6 +472,7 @@ func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source
 
 // Search finds the top-k most similar chunks using brute-force cosine similarity.
 func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k int) ([]SearchResult, error) {
+	stopScan := s.stageTimer("dense_scan_decode_hydrate_semantic")
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, content, source, start_line, end_line, language, metadata, embedding, stable_key FROM chunks`)
 	if err != nil {
@@ -486,8 +512,10 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("rag: iterate chunks: %w", err)
 	}
+	stopScan()
 
 	// Sort by score descending
+	stopRank := s.stageTimer("ranking_top_k")
 	sort.Slice(results, func(i, j int) bool {
 		return results[i].Score > results[j].Score
 	})
@@ -495,6 +523,7 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
+	stopRank()
 	return results, nil
 }
 
