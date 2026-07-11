@@ -63,6 +63,17 @@ func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
 	return options
 }
 
+// plannerBudget floors a nonzero OutputReserve at minPlannerOutput: the agent
+// layer forwards Budget.OutputReserve over Options.NumPredict, so an
+// -output-reserve below the floor would silently undo plannerModelOptions.
+// Zero stays zero — no override fires and the NumPredict floor holds.
+func plannerBudget(budget agent.Budget) agent.Budget {
+	if budget.OutputReserve > 0 {
+		budget.OutputReserve = max(budget.OutputReserve, minPlannerOutput)
+	}
+	return budget
+}
+
 func (t *submitPlanTool) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
 		Name:        "submit_plan",
@@ -378,7 +389,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		System:   system,
 		Tools:    planTools,
 		MaxSteps: sess.maxSteps,
-		Budget:   sess.budget,
+		Budget:   plannerBudget(sess.budget),
 		Options:  plannerModelOptions(sess.modelOptions),
 	}
 	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock)))

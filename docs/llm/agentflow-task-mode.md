@@ -30,9 +30,10 @@ The #277 local-model spike locked 48/48 toy plans against AgentFlow 0.3.0 on the
 first try with both a 9B dense model and a 35B-A3B MoE model. The load-bearing
 request settings were thinking disabled and at least about 3,500 output tokens;
 a worked example was not needed. Planning mode applies those settings only to
-its model request, preserves a larger caller-provided output budget, and keeps
-one bounded repair submission after a rejected first plan. Re-run the spike if
-the AgentFlow validator contract tightens.
+its model request, preserves a larger caller-provided output budget (including
+a `-output-reserve` above the floor; a smaller nonzero reserve is raised to
+it), and keeps one bounded repair submission after a rejected first plan.
+Re-run the spike if the AgentFlow validator contract tightens.
 
 ## Enabling task mode
 

@@ -479,17 +479,23 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 	for _, tt := range []struct {
 		name       string
 		options    provider.ModelOptions
+		budget     agent.Budget
 		wantOutput int
 	}{
 		{name: "default budget", wantOutput: minPlannerOutput},
 		{name: "lower budget and explicit thinking", options: provider.ModelOptions{NumPredict: 1024, Think: &on, ThinkEffort: "high"}, wantOutput: minPlannerOutput},
 		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, wantOutput: 8192},
+		// Budget.OutputReserve overrides Options.NumPredict inside the agent
+		// layer, so the floor must survive it too (Codex review on PR #295).
+		{name: "small output reserve floored", budget: agent.Budget{OutputReserve: 1024}, wantOutput: minPlannerOutput},
+		{name: "large output reserve preserved", budget: agent.Budget{InputCeiling: 32768, OutputReserve: 8192}, wantOutput: 8192},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			root := t.TempDir()
 			caller := &optionsCaptureCaller{}
 			sess := newTestSession(t, caller, root)
 			sess.modelOptions = tt.options
+			sess.budget = tt.budget
 			before, err := json.Marshal(sess.modelOptions)
 			if err != nil {
 				t.Fatal(err)
@@ -508,6 +514,9 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 			}
 			if !bytes.Equal(after, before) {
 				t.Errorf("session options mutated: before=%s after=%s", before, after)
+			}
+			if sess.budget != tt.budget {
+				t.Errorf("session budget mutated: before=%+v after=%+v", tt.budget, sess.budget)
 			}
 		})
 	}
