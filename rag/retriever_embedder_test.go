@@ -81,6 +81,24 @@ func TestNewRetrieverWithEmbedder_AppliesRetrieverModel(t *testing.T) {
 	}
 }
 
+func TestRetrieve_EmbedFailureDoesNotSearch(t *testing.T) {
+	errRoute := errors.New("required vector space unavailable")
+	store := &retrieverPlainStore{}
+	emb := &recordingEmbedder{err: errRoute}
+	r, err := NewRetrieverWithEmbedder(emb, store)
+	if err != nil {
+		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
+	}
+
+	_, err = r.Retrieve(context.Background(), "question", 1)
+	if !errors.Is(err, ErrEmbedderFailed) || !errors.Is(err, errRoute) {
+		t.Fatalf("Retrieve error = %v, want wrapped routing and embedder errors", err)
+	}
+	if store.searchCalls != 0 {
+		t.Fatalf("Search calls = %d, want 0 after embedding route failure", store.searchCalls)
+	}
+}
+
 func TestRetrieve_VSIDMismatch_errsClosed(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
