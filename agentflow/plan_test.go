@@ -89,6 +89,31 @@ func TestParsePlanAndExtractGates(t *testing.T) {
 	}
 }
 
+func TestExtractCommandGates_CarriesCriterionIDsAcrossKindFilter(t *testing.T) {
+	step := Step{
+		ID:         "P1",
+		Validation: []string{"inspect", "unit"},
+		Gates: []Gate{
+			{Kind: "inspection", CriterionIDs: []string{"AC-INSPECT"}},
+			{Kind: "command", Run: []string{"go", "test", "./..."}, CriterionIDs: []string{"AC-1", "AC-2"}},
+		},
+	}
+	gates, err := ExtractCommandGates(step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gates) != 1 || gates[0].Label != "unit" {
+		t.Fatalf("gates = %+v, want the single command gate labeled by its original index", gates)
+	}
+	if got := gates[0].CriterionIDs; len(got) != 2 || got[0] != "AC-1" || got[1] != "AC-2" {
+		t.Fatalf("criterion ids = %v, want the command gate's own mapping", got)
+	}
+	gates[0].CriterionIDs[0] = "mutated"
+	if step.Gates[1].CriterionIDs[0] != "AC-1" {
+		t.Fatal("extracted criterion ids alias the step's gate slice")
+	}
+}
+
 func TestPlan_RequirementTraceabilityRoundTrip(t *testing.T) {
 	p := Compile(PlanIR{
 		Objective: "o", Scope: []string{"src"}, Invariants: []string{"i"}, RiskLevel: "low",

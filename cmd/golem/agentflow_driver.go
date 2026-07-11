@@ -310,8 +310,8 @@ func stepGoal(p *agentflow.Plan, s agentflow.Step) (string, error) {
 			argv[j] = strconv.Quote(arg)
 		}
 		fmt.Fprintf(&b, "- %s: [%s]", gate.Label, strings.Join(argv, ", "))
-		if len(s.Gates[i].CriterionIDs) > 0 {
-			fmt.Fprintf(&b, " (criteria: %s)", strings.Join(s.Gates[i].CriterionIDs, ", "))
+		if len(gate.CriterionIDs) > 0 {
+			fmt.Fprintf(&b, " (criteria: %s)", strings.Join(gate.CriterionIDs, ", "))
 		}
 	}
 

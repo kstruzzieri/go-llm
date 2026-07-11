@@ -272,6 +272,31 @@ func TestStepGoal_UsesExecutionGateLabelFallback(t *testing.T) {
 	}
 }
 
+func TestStepGoal_AttributesCriteriaToCommandGateUnderKindFilter(t *testing.T) {
+	// P0 preflight rejects non-command gates before rendering, but the renderer
+	// must not depend on that: gate criteria have to ride the extracted gate,
+	// not an index back into the unfiltered step.gates slice.
+	plan := &agentflow.Plan{Requirements: []agentflow.Requirement{{
+		ID: "REQ-1", Text: "behavior",
+		AcceptanceCriteria: []agentflow.Criterion{{ID: "AC-1", Text: "verified"}},
+	}}}
+	step := agentflow.Step{
+		ID: "P1", Action: "implement behavior", CriterionIDs: []string{"AC-1"},
+		Gates: []agentflow.Gate{
+			{Kind: "inspection", CriterionIDs: []string{"AC-WRONG"}},
+			{Kind: "command", Run: []string{"go", "test", "./..."}, CriterionIDs: []string{"AC-1"}},
+		},
+	}
+	got, err := stepGoal(plan, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, "Structured gates:\n- go test ./...: [\"go\", \"test\", \"./...\"] (criteria: AC-1)") ||
+		strings.Contains(got, "AC-WRONG") {
+		t.Fatalf("gate criteria misattributed across the command-kind filter:\n%s", got)
+	}
+}
+
 func TestStepGoal_PropagatesInvalidCommandGate(t *testing.T) {
 	plan := &agentflow.Plan{Requirements: []agentflow.Requirement{{ID: "REQ-1"}}}
 	step := agentflow.Step{ID: "P1", Gates: []agentflow.Gate{{Kind: "command"}}}
