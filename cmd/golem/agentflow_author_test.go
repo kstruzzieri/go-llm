@@ -467,6 +467,52 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	}
 }
 
+type optionsCaptureCaller struct{ options provider.ModelOptions }
+
+func (c *optionsCaptureCaller) Chat(_ context.Context, req provider.ChatRequest, _ func(provider.ChatResponse) error) (agent.ModelResult, error) {
+	c.options = req.Options
+	return agent.ModelResult{Response: provider.ChatResponse{Content: "no submission"}}, nil
+}
+
+func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *testing.T) {
+	on := true
+	for _, tt := range []struct {
+		name       string
+		options    provider.ModelOptions
+		wantOutput int
+	}{
+		{name: "default budget", wantOutput: minPlannerOutput},
+		{name: "lower budget and explicit thinking", options: provider.ModelOptions{NumPredict: 1024, Think: &on, ThinkEffort: "high"}, wantOutput: minPlannerOutput},
+		{name: "larger caller budget", options: provider.ModelOptions{NumPredict: 8192, Think: &on, ThinkEffort: "high"}, wantOutput: 8192},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			caller := &optionsCaptureCaller{}
+			sess := newTestSession(t, caller, root)
+			sess.modelOptions = tt.options
+			before, err := json.Marshal(sess.modelOptions)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
+			if !errors.Is(err, errPlannerNoSubmission) {
+				t.Fatalf("err = %v, want no submission", err)
+			}
+			if caller.options.NumPredict != tt.wantOutput || caller.options.Think == nil || *caller.options.Think || caller.options.ThinkEffort != "" {
+				t.Errorf("planner options = %+v, want output %d with thinking disabled", caller.options, tt.wantOutput)
+			}
+			after, err := json.Marshal(sess.modelOptions)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Errorf("session options mutated: before=%s after=%s", before, after)
+			}
+		})
+	}
+}
+
 func TestRunAgentflowAuthor_ExhaustionReportsDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "steps[0].files must be non-empty"}}}

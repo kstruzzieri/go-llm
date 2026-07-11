@@ -16,6 +16,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // afLocker is the narrow agentflow surface the planner needs; *agentflow.Client
@@ -50,8 +51,17 @@ func newSubmitPlanTool(sess *authorSession) *submitPlanTool {
 
 const (
 	maxPlanSubmissions = 2
+	minPlannerOutput   = 3500
 	lockedPlanRel      = ".agent/plan.lock.json"
 )
+
+func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
+	off := false
+	options.NumPredict = max(options.NumPredict, minPlannerOutput)
+	options.Think = &off
+	options.ThinkEffort = ""
+	return options
+}
 
 func (t *submitPlanTool) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
@@ -369,7 +379,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		Tools:    planTools,
 		MaxSteps: sess.maxSteps,
 		Budget:   sess.budget,
-		Options:  sess.modelOptions,
+		Options:  plannerModelOptions(sess.modelOptions),
 	}
 	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock)))
 	budgetExhausted := as.attempts >= maxPlanSubmissions
