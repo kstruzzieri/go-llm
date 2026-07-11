@@ -290,13 +290,16 @@ func CheckPlan(p Plan) []Diagnostic {
 
 	// 4-5: dependency integrity + cycle detection.
 	ds = append(ds, dependencyDiagnostics(p.Steps)...)
-	ds = append(ds, traceabilityDiagnostics(p)...)
+	ds = append(ds, TraceabilityDiagnostics(p)...)
 	return ds
 }
 
 var traceIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,127}$`)
 
-func traceabilityDiagnostics(p Plan) []Diagnostic {
+// TraceabilityDiagnostics validates the optional requirement/criterion mapping
+// family without applying CheckPlan's authoring-only plan-shape policy. It is a
+// no-op for legacy plans that omit requirements and criterion mappings.
+func TraceabilityDiagnostics(p Plan) []Diagnostic {
 	var ds []Diagnostic
 	requirementIDs := map[string]bool{}
 	criterionIDs := map[string]bool{}
