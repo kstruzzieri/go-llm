@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"time"
 )
 
 // Compile-time interface check: SQLiteStore implements MultiSignalSearcher.
@@ -41,12 +42,19 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	}
 
 	// Build embedding map for the semantic scorer.
+	var validationStart time.Time
+	if s.recordStage != nil {
+		validationStart = time.Now()
+	}
 	embMap := make(map[string][]float64, len(chunks))
 	for i, chunk := range chunks {
 		if err := validateSearchEmbeddingDimension(chunk.ID, queryEmbedding, embeddings[i]); err != nil {
 			return nil, err
 		}
 		embMap[chunk.ID] = embeddings[i]
+	}
+	if s.recordStage != nil {
+		s.recordStage("vector_dimension_validation", time.Since(validationStart))
 	}
 
 	// Create and run scorers.
@@ -57,27 +65,59 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	temporal := NewTemporalScorer(s.db, 0) // default 7-day half-life
 	structural := NewStructuralScorer()
 
+	var semanticStart time.Time
+	if s.recordStage != nil {
+		semanticStart = time.Now()
+	}
 	semanticScores, err := semantic.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: semantic scoring: %w", err)
 	}
+	if s.recordStage != nil {
+		s.recordStage("semantic_scoring", time.Since(semanticStart))
+	}
 
+	var keywordStart time.Time
+	if s.recordStage != nil {
+		keywordStart = time.Now()
+	}
 	keywordScores, err := keyword.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: keyword scoring: %w", err)
 	}
+	if s.recordStage != nil {
+		s.recordStage("keyword_scoring", time.Since(keywordStart))
+	}
 
+	var temporalStart time.Time
+	if s.recordStage != nil {
+		temporalStart = time.Now()
+	}
 	temporalScores, err := temporal.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: temporal scoring: %w", err)
 	}
+	if s.recordStage != nil {
+		s.recordStage("temporal_scoring", time.Since(temporalStart))
+	}
 
+	var structuralStart time.Time
+	if s.recordStage != nil {
+		structuralStart = time.Now()
+	}
 	structuralScores, err := structural.ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 	if err != nil {
 		return nil, fmt.Errorf("rag: structural scoring: %w", err)
 	}
+	if s.recordStage != nil {
+		s.recordStage("structural_scoring", time.Since(structuralStart))
+	}
 
 	// Compute RRF scores from semantic and keyword ranked lists.
+	var fusionStart time.Time
+	if s.recordStage != nil {
+		fusionStart = time.Now()
+	}
 	semanticRanks := computeRanks(semanticScores)
 	keywordRanks := computeRanks(keywordScores)
 
@@ -86,12 +126,21 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	// cold-start (all-zero) leaves the raw fused score byte-for-byte unchanged.
 	var behavioralScores []float64
 	var behavioralRanks []int
+	var behavioralElapsed time.Duration
 	foldBehavioral := false
 	if s.behavioral != nil {
+		var behavioralStart time.Time
+		if s.recordStage != nil {
+			behavioralStart = time.Now()
+		}
 		behavioralScores, err = NewBehavioralScorer(s.behavioral).
 			ScoreBatch(ctx, chunks, query, queryEmbedding, qCtx)
 		if err != nil {
 			return nil, fmt.Errorf("rag: behavioral scoring: %w", err)
+		}
+		if s.recordStage != nil {
+			behavioralElapsed = time.Since(behavioralStart)
+			s.recordStage("behavioral_scoring", behavioralElapsed)
 		}
 		if anyNonZero(behavioralScores) {
 			behavioralRanks = computeRanks(behavioralScores)
@@ -149,11 +198,18 @@ func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64,
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
+	if s.recordStage != nil {
+		s.recordStage("fusion_ranking_top_k", time.Since(fusionStart)-behavioralElapsed)
+	}
 	return results, nil
 }
 
 // loadChunksWithEmbeddings loads all chunks and their embeddings from the database.
 func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, [][]float64, error) {
+	var loadStart time.Time
+	if s.recordStage != nil {
+		loadStart = time.Now()
+	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, content, source, start_line, end_line, language, metadata, embedding, stable_key FROM chunks`)
 	if err != nil {
@@ -186,6 +242,9 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 	}
 	if err := rows.Err(); err != nil {
 		return nil, nil, fmt.Errorf("rag: iterate chunks: %w", err)
+	}
+	if s.recordStage != nil {
+		s.recordStage("corpus_load_decode_candidate_hydration", time.Since(loadStart))
 	}
 	return chunks, embeddings, nil
 }
