@@ -7,11 +7,14 @@ class documented in `file-backed-retrieval-baseline-289.md`.
 
 ## Implementation
 
-`OpenSQLiteStoreReadOnly` now initializes a snapshot lazily through the context
-of the first probe or search. Exactly one caller loads at a time; concurrent
-callers share that attempt. A completed snapshot is published atomically. A
-failed or canceled attempt publishes nothing, returns the same attempt result
-to its waiters, and permits a later call to retry.
+`OpenSQLiteStoreReadOnly` now initializes a snapshot lazily on the first probe
+or search. Exactly one load runs at a time; concurrent callers share that
+attempt. The load is decoupled from the initiating request: it runs on its own
+goroutine with cancellation stripped (`context.WithoutCancel`), so a canceled
+or deadline-expired initiator gets its own context error back while the shared
+load still completes and warms the process for every other caller. A completed
+snapshot is published atomically. A failed attempt publishes nothing, returns
+the same failure to its waiters, and permits a later call to retry.
 
 The snapshot is scoped to the lifetime of one immutable `SQLiteStore` and holds:
 
@@ -97,8 +100,9 @@ Focused differential tests compare writable and immutable hybrid results for
 IDs, hydrated chunks/metadata, order, rank score, semantic score/distance, and
 every signal including behavioral weighting. Additional tests cover one-time
 loading, cached probe copies, deterministic ties/top-K equivalence, mixed
-dimensions, decode failure/retry, cancellation during load and scoring, and
-concurrent searches. The race-enabled RAG suite passes.
+dimensions, decode failure/retry, initiator cancellation during a shared load
+(other callers still succeed), cancellation during scoring, and concurrent
+searches. The race-enabled RAG suite passes.
 
 Every proposed #289 budget is met:
 

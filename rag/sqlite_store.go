@@ -28,16 +28,22 @@ var (
 type SQLiteStore struct {
 	db         *sql.DB
 	behavioral BehavioralWeighter // optional; nil => behavioral signal inert
-	immutable  bool
+	immutable  bool               // set by OpenSQLiteStoreReadOnly; enables the resident snapshot paths
 
+	// snapshotMu guards resident and snapshotLoad. resident is the published
+	// process-resident snapshot (nil until the first successful load);
+	// snapshotLoad is the in-flight single-flight load shared by concurrent
+	// callers (nil when no load is running).
 	snapshotMu   sync.Mutex
 	resident     *sqliteSnapshot
 	snapshotLoad *sqliteSnapshotLoad
 	// recordStage is used by same-package benchmarks to attribute retrieval
 	// time without adding a public tracing API. Nil in production. It is not
 	// synchronized: it must be set before the store is used and invoked from a
-	// single goroutine. Parallelizing retrieval stages requires revisiting
-	// this hook and the benchmark maps it feeds.
+	// single goroutine at a time (the decoupled snapshot load invokes it from
+	// the load goroutine while callers are parked on the load). Parallelizing
+	// retrieval stages requires revisiting this hook and the benchmark maps
+	// it feeds.
 	recordStage func(string, time.Duration)
 }
 

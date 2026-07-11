@@ -32,20 +32,27 @@ func (s *SQLiteStore) sqliteSnapshot(ctx context.Context) (*sqliteSnapshot, erro
 		s.snapshotMu.Unlock()
 		return snapshot, nil
 	}
-	if load := s.snapshotLoad; load != nil {
-		s.snapshotMu.Unlock()
-		select {
-		case <-load.done:
-			return load.snapshot, load.err
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+	load := s.snapshotLoad
+	if load == nil {
+		load = &sqliteSnapshotLoad{done: make(chan struct{})}
+		s.snapshotLoad = load
+		// The shared load is decoupled from the initiating request: it runs
+		// on its own goroutine with cancellation stripped, so one caller's
+		// cancellation or deadline cannot fail concurrent waiters or abort
+		// the one-time warm-up they all depend on.
+		go s.runSnapshotLoad(context.WithoutCancel(ctx), load)
 	}
-
-	load := &sqliteSnapshotLoad{done: make(chan struct{})}
-	s.snapshotLoad = load
 	s.snapshotMu.Unlock()
 
+	select {
+	case <-load.done:
+		return load.snapshot, load.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func (s *SQLiteStore) runSnapshotLoad(ctx context.Context, load *sqliteSnapshotLoad) {
 	load.snapshot, load.err = s.loadSQLiteSnapshot(ctx)
 
 	s.snapshotMu.Lock()
@@ -55,7 +62,6 @@ func (s *SQLiteStore) sqliteSnapshot(ctx context.Context) (*sqliteSnapshot, erro
 	s.snapshotLoad = nil
 	close(load.done)
 	s.snapshotMu.Unlock()
-	return load.snapshot, load.err
 }
 
 func (s *SQLiteStore) loadSQLiteSnapshot(ctx context.Context) (*sqliteSnapshot, error) {
@@ -316,7 +322,7 @@ func (snapshot *sqliteSnapshot) temporalScores(ctx context.Context, qCtx QueryCo
 		if age <= 0 {
 			scores[i] = 1
 		} else {
-			scores[i] = math.Pow(2, -age/604800)
+			scores[i] = math.Pow(2, -age/defaultTemporalHalfLifeSeconds)
 		}
 	}
 	return scores, nil

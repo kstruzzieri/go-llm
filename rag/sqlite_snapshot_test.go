@@ -81,6 +81,14 @@ func TestSQLiteSnapshotLoadsOnceAcrossProbeAndSearch(t *testing.T) {
 	}
 }
 
+// residentSnapshot reads the published snapshot under the store lock so tests
+// cannot race the decoupled load goroutine.
+func residentSnapshot(s *SQLiteStore) *sqliteSnapshot {
+	s.snapshotMu.Lock()
+	defer s.snapshotMu.Unlock()
+	return s.resident
+}
+
 type cancelAfterChecksContext struct {
 	mu       sync.Mutex
 	done     chan struct{}
@@ -111,7 +119,7 @@ func newCancelAfterChecksContext(after int) *cancelAfterChecksContext {
 	return &cancelAfterChecksContext{after: after, done: make(chan struct{})}
 }
 
-func TestSQLiteSnapshotCancellationDoesNotPublishPartialState(t *testing.T) {
+func TestSQLiteSnapshotLoadSurvivesInitiatorCancel(t *testing.T) {
 	chunks := []Chunk{
 		{ID: "a", Content: "alpha", Source: "a.go", Metadata: map[string]string{}},
 		{ID: "b", Content: "beta", Source: "b.go", Metadata: map[string]string{}},
@@ -120,18 +128,53 @@ func TestSQLiteSnapshotCancellationDoesNotPublishPartialState(t *testing.T) {
 	}
 	ro := newReadOnlyTestStore(t, chunks, [][]float64{{1, 0}, {0, 1}, {1, 1}, {-1, 0}}, "test/v1")
 
-	ctx := newCancelAfterChecksContext(2)
-	if _, err := ro.ProbeVectorSpaces(ctx); !errors.Is(err, context.Canceled) {
-		t.Fatalf("ProbeVectorSpaces error = %v, want context.Canceled", err)
+	// Block the load goroutine just before it publishes (the load-decode
+	// stage hook fires at the end of the decode) so the initiator's
+	// cancellation deterministically races an in-flight shared load.
+	var loads atomic.Int32
+	gate := make(chan struct{})
+	release := make(chan struct{})
+	var gateOnce sync.Once
+	ro.recordStage = func(stage string, _ time.Duration) {
+		if stage == "snapshot_load_decode" {
+			loads.Add(1)
+			gateOnce.Do(func() {
+				close(gate)
+				<-release
+			})
+		}
 	}
-	if ro.resident != nil {
-		t.Fatal("canceled load published a partial snapshot")
+
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	initiatorErr := make(chan error, 1)
+	go func() {
+		_, err := ro.ProbeVectorSpaces(canceled)
+		initiatorErr <- err
+	}()
+
+	<-gate
+	if err := <-initiatorErr; !errors.Is(err, context.Canceled) {
+		t.Fatalf("initiator error = %v, want context.Canceled", err)
 	}
-	if _, err := ro.ProbeVectorSpaces(context.Background()); err != nil {
-		t.Fatalf("retry ProbeVectorSpaces: %v", err)
+	if snap := residentSnapshot(ro); snap != nil {
+		t.Fatal("snapshot published before the load completed")
 	}
-	if ro.resident == nil || len(ro.resident.chunks) != len(chunks) {
-		t.Fatalf("retry did not publish the complete snapshot: %+v", ro.resident)
+
+	waiterErr := make(chan error, 1)
+	go func() {
+		_, err := ro.Search(context.Background(), []float64{1, 0}, 2)
+		waiterErr <- err
+	}()
+	close(release)
+	if err := <-waiterErr; err != nil {
+		t.Fatalf("concurrent caller with live context failed after initiator cancel: %v", err)
+	}
+	if got := loads.Load(); got != 1 {
+		t.Fatalf("snapshot loads = %d, want 1 (canceled initiator must not abort or rerun the shared load)", got)
+	}
+	if snap := residentSnapshot(ro); snap == nil || len(snap.chunks) != len(chunks) {
+		t.Fatalf("decoupled load did not publish the complete snapshot: %+v", snap)
 	}
 }
 
@@ -259,7 +302,7 @@ func TestSQLiteSnapshotRejectsMixedStoredDimensionsWithoutPublishing(t *testing.
 	if _, err := ro.ProbeVectorSpaces(context.Background()); err == nil || !strings.Contains(err.Error(), "dimension mismatch") {
 		t.Fatalf("ProbeVectorSpaces error = %v, want dimension mismatch", err)
 	}
-	if ro.resident != nil {
+	if residentSnapshot(ro) != nil {
 		t.Fatal("failed mixed-dimension load published a snapshot")
 	}
 }
@@ -332,7 +375,7 @@ func TestSQLiteSnapshotDecodeFailureIsNotPublishedAndCanRetry(t *testing.T) {
 		if _, err := ro.ProbeVectorSpaces(context.Background()); err == nil || !strings.Contains(err.Error(), "unmarshal snapshot embedding") {
 			t.Fatalf("ProbeVectorSpaces error = %v, want embedding decode failure", err)
 		}
-		if ro.resident != nil {
+		if residentSnapshot(ro) != nil {
 			t.Fatal("failed decode published a snapshot")
 		}
 	}

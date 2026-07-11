@@ -19,13 +19,18 @@ type TemporalScorer struct {
 	halfLife float64 // decay half-life in seconds
 }
 
+// defaultTemporalHalfLifeSeconds is the default recency decay half-life
+// (7 days), shared by TemporalScorer and the immutable snapshot path so the
+// two retrieval modes cannot drift.
+const defaultTemporalHalfLifeSeconds = 604800
+
 // NewTemporalScorer creates a temporal scorer backed by the given database.
 // halfLifeSeconds controls how quickly the recency signal decays.
 // Use 0 for the default (7 days = 604800 seconds).
 // The database must have the indexed_at column (see the v2 schema migration).
 func NewTemporalScorer(db *sql.DB, halfLifeSeconds float64) *TemporalScorer {
 	if halfLifeSeconds <= 0 {
-		halfLifeSeconds = 604800 // 7 days
+		halfLifeSeconds = defaultTemporalHalfLifeSeconds
 	}
 	return &TemporalScorer{db: db, halfLife: halfLifeSeconds}
 }
