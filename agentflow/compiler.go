@@ -327,7 +327,11 @@ func traceabilityDiagnostics(p Plan) []Diagnostic {
 			if criterion.Review != nil && criterion.Review.MinimumDepth != "spec_quality" && criterion.Review.MinimumDepth != "deep" {
 				ds = append(ds, Diagnostic{"bad_review_depth", "acceptance criterion " + criterion.ID + " review minimum_depth must be spec_quality or deep"})
 			}
-			if criterion.Review != nil && (criterion.Review.MinimumDepth == "spec_quality" || criterion.Review.MinimumDepth == "deep") {
+			if criterion.Review != nil {
+				// Any declared review floor counts as the verification mapping,
+				// even with an invalid depth: bad_review_depth already reports
+				// that mistake, and it must not double-report as an unmapped
+				// criterion.
 				criterionVerificationMapped[criterion.ID] = true
 			}
 		}

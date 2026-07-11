@@ -31,6 +31,11 @@ func TestLockPlan_RealCLI(t *testing.T) {
 	if err := c.Init(ctx); err != nil {
 		t.Fatal(err)
 	}
+	// Init twice: the -goal author flow re-runs init on every approved lock
+	// attempt and relies on the real CLI's init being idempotent.
+	if err := c.Init(ctx); err != nil {
+		t.Fatalf("second init must be idempotent: %v", err)
+	}
 
 	// Lock OUR compiler's output, not a hand-authored fixture. This pins the
 	// compiler against the real validator: a legitimate agentflow tightening

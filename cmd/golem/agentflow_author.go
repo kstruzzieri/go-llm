@@ -41,6 +41,15 @@ type authorSession struct {
 	terminalErr    error
 	lastDiags      []agentflow.Diagnostic
 	approvalDenied bool
+	// deniedPlanPath/deniedPlanSaveErr record the best-effort artifact written
+	// when the operator denies a previewed plan, so the denial error can point
+	// at the compiled plan instead of discarding the authoring work.
+	deniedPlanPath    string
+	deniedPlanSaveErr error
+	// lastPreview is the previous submission's rendered preview; a resubmission
+	// preview appends a line-level delta against it so re-approval does not
+	// require re-reading the whole plan.
+	lastPreview string
 }
 
 type submitPlanTool struct {
@@ -55,6 +64,10 @@ const (
 	maxPlanSubmissions = 2
 	minPlannerOutput   = 3500
 	lockedPlanRel      = ".agent/plan.lock.json"
+	// submitPlanToolName links the tool spec, the REPL approver's lock prompt,
+	// and the author approver's denial handling; they must agree or a rename
+	// silently downgrades the approval UX to the generic edit prompt.
+	submitPlanToolName = "submit_plan"
 )
 
 func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
@@ -78,7 +91,7 @@ func plannerBudget(budget agent.Budget) agent.Budget {
 
 func (t *submitPlanTool) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
-		Name:        "submit_plan",
+		Name:        submitPlanToolName,
 		Description: "Submit the finished plan as structured arguments. The plan is compiled, pre-checked, previewed for human approval, then locked. If it is rejected you receive diagnostics and may resubmit once.",
 		Parameters:  json.RawMessage(submitPlanSchema),
 	}
@@ -103,7 +116,13 @@ func (t *submitPlanTool) Plan(_ context.Context, args json.RawMessage) (agent.To
 		effect.Approval = agent.ApprovalNever
 		return agent.ToolPlan{Effect: effect}, nil
 	}
-	return agent.ToolPlan{Effect: effect, Preview: renderPlanPreview(plan)}, nil
+	preview := renderPlanPreview(plan)
+	shown := preview
+	if t.sess.lastPreview != "" {
+		shown += previewDelta(t.sess.lastPreview, preview)
+	}
+	t.sess.lastPreview = preview
+	return agent.ToolPlan{Effect: effect, Preview: shown}, nil
 }
 
 func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
@@ -184,7 +203,13 @@ func renderPlanPreview(plan agentflow.Plan) string {
 	writePreviewList(&b, plan.BlockedFiles)
 	b.WriteString("\nRollback\n  ")
 	b.WriteString(previewText(plan.RollbackPlan))
-	b.WriteString("\n\nRequirements\n")
+	b.WriteString("\n\nSchema\n  ")
+	b.WriteString(previewText(plan.SchemaVersion))
+	b.WriteString("\n\nDrift budget\n")
+	fmt.Fprintf(&b, "  unrelated_edits: %d\n  new_dependencies: %d\n  formatting_drift: %s\n  architecture_drift: %s\n",
+		plan.DriftBudget.UnrelatedEdits, plan.DriftBudget.NewDependencies,
+		previewText(plan.DriftBudget.FormattingDrift), previewText(plan.DriftBudget.ArchitectureDrift))
+	b.WriteString("\nRequirements\n")
 	if len(plan.Requirements) == 0 {
 		b.WriteString("  - none\n")
 	}
@@ -211,8 +236,7 @@ func renderPlanPreview(plan agentflow.Plan) string {
 			if i < len(step.Validation) {
 				label = step.Validation[i]
 			}
-			argv, _ := json.Marshal(gate.Run)
-			fmt.Fprintf(&b, "      - %s\n        argv: %s\n        criteria: %s\n", previewText(label), argv, previewValues(gate.CriterionIDs))
+			fmt.Fprintf(&b, "      - %s\n        argv: %s\n        criteria: %s\n", previewText(label), previewValues(gate.Run), previewValues(gate.CriterionIDs))
 		}
 	}
 	return b.String()
@@ -228,16 +252,59 @@ func writePreviewList(b *strings.Builder, values []string) {
 	}
 }
 
+// previewValues renders a list with the same QuoteToGraphic escaping as
+// previewText. json.Marshal is NOT safe here: it leaves DEL and the C1 range
+// (U+0080-U+009F, honored as terminal controls by some emulators) unescaped,
+// which would reopen the preview-spoofing hole for model-authored files/argv.
 func previewValues(values []string) string {
 	if len(values) == 0 {
 		return "none"
 	}
-	b, _ := json.Marshal(values)
-	return string(b)
+	quoted := make([]string, len(values))
+	for i, value := range values {
+		quoted[i] = previewText(value)
+	}
+	return "[" + strings.Join(quoted, ", ") + "]"
 }
 
 func previewText(value string) string {
 	return strconv.QuoteToGraphic(value)
+}
+
+// previewDelta renders a line-level summary of what changed between two
+// deterministic previews so a repair resubmission's re-approval prompt
+// highlights the difference instead of forcing a full re-read. Both inputs are
+// already control-safe, so their lines can be reprinted verbatim.
+func previewDelta(prev, cur string) string {
+	if prev == cur {
+		return "\nResubmission: identical to the previously previewed plan.\n"
+	}
+	var b strings.Builder
+	b.WriteString("\nResubmission changes since the previous preview\n")
+	for _, ln := range extraLines(strings.Split(prev, "\n"), strings.Split(cur, "\n")) {
+		fmt.Fprintf(&b, "  - %s\n", ln)
+	}
+	for _, ln := range extraLines(strings.Split(cur, "\n"), strings.Split(prev, "\n")) {
+		fmt.Fprintf(&b, "  + %s\n", ln)
+	}
+	return b.String()
+}
+
+// extraLines returns the lines of a that exceed b's multiset, in order.
+func extraLines(a, b []string) []string {
+	remaining := map[string]int{}
+	for _, ln := range b {
+		remaining[ln]++
+	}
+	var out []string
+	for _, ln := range a {
+		if remaining[ln] > 0 {
+			remaining[ln]--
+			continue
+		}
+		out = append(out, ln)
+	}
+	return out
 }
 
 // lock stages the compiled plan through a temp file and the real lock-plan. The
@@ -344,7 +411,7 @@ const submitPlanSchema = `{
         "type": "object",
         "required": ["id", "text", "acceptance_criteria"],
         "properties": {
-          "id":   {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+          "id":   {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$", "description": "stable requirement id, unique within the plan"},
           "text": {"type": "string", "minLength": 1, "description": "required behavior or constraint"},
           "acceptance_criteria": {
             "type": "array",
@@ -353,7 +420,7 @@ const submitPlanSchema = `{
               "type": "object",
               "required": ["id", "text"],
               "properties": {
-                "id":   {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$"},
+                "id":   {"type": "string", "pattern": "^[A-Za-z][A-Za-z0-9._-]{0,127}$", "description": "stable criterion id, unique across the entire plan; never reuse across requirements"},
                 "text": {"type": "string", "minLength": 1, "description": "observable acceptance condition"},
                 "review": {
                   "type": "object",
@@ -398,7 +465,7 @@ const submitPlanSchema = `{
 
 const plannerBasePrompt = "You are Golem's planner. From the user's goal, author a durable execution plan for the AgentFlow contract. " +
 	"First inspect the repository with the read-only tools (read_file, search, glob, list). Then design a minimal directed-acyclic set of steps. " +
-	"Author stable requirement and acceptance criterion IDs. Map every criterion into at least one step criterion_ids list and either a proving validation criterion_ids list or a spec_quality/deep review floor. " +
+	"Author stable requirement and acceptance criterion IDs. Criterion IDs share one plan-wide namespace: never reuse an acceptance criterion id across requirements. Map every criterion into at least one step criterion_ids list and either a proving validation criterion_ids list or a spec_quality/deep review floor. " +
 	"Each step needs: concrete workspace-relative files, at least one expected_diff sentence, and at least one executable validation as an argv array (for example [\"go\",\"test\",\"./...\"]). " +
 	"Provide allowed_files globs that cover every step file, at least one invariant, and a rollback_plan. Use depends_on to order steps; do not create cycles. " +
 	"Planning is read-only: you may not edit files or run commands here. When ready, call submit_plan. " +
@@ -455,7 +522,10 @@ func runAgentflowAuthor(ctx context.Context, stdin io.Reader, stdout, stderr io.
 	} else {
 		runner = agentflow.NewExecRunner(root)
 	}
-	approver := newReplApprover(newLineReader(stdin), stdout, sess.color)
+	var approver agent.Approver = newReplApprover(newLineReader(stdin), stdout, sess.color)
+	if f.approvePlanLock {
+		approver = &autoPlanApprover{out: stdout}
+	}
 	return runAgentflowAuthorWithClient(ctx, stdout, stderr, interrupts, sess, f, root, agentflow.NewClient(runner, root), approver)
 }
 
@@ -534,6 +604,12 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -approve-plan-edits -approve-plan-gates\n", shellQuote(as.lockedPath), shellQuote(root))
 		return nil
 	case as.approvalDenied:
+		if as.deniedPlanSaveErr != nil {
+			return fmt.Errorf("%w (failed to save the denied plan for reference: %v)", errPlannerApprovalDenied, as.deniedPlanSaveErr)
+		}
+		if as.deniedPlanPath != "" {
+			return fmt.Errorf("%w; denied plan saved for reference: %s", errPlannerApprovalDenied, as.deniedPlanPath)
+		}
 		return errPlannerApprovalDenied
 	case as.terminalErr != nil:
 		return as.terminalErr
@@ -563,11 +639,55 @@ func (a *authorPlanApprover) Approve(ctx context.Context, call provider.ToolCall
 	if a.delegate != nil {
 		approved, err = a.delegate.Approve(ctx, call, preview)
 	}
-	if err == nil && !approved && call.Function.Name == "submit_plan" {
+	if err == nil && !approved && call.Function.Name == submitPlanToolName {
 		a.sess.approvalDenied = true
+		a.sess.deniedPlanPath, a.sess.deniedPlanSaveErr = saveDeniedPlan(call.Function.Arguments)
 		a.sess.cancel()
 	}
 	return approved, err
+}
+
+// autoPlanApprover implements -approve-plan-lock: the non-interactive -goal
+// path. It prints the same preview an operator would see, then approves the
+// lock. Anything other than submit_plan stays denied (fail-safe: the planner's
+// other tools are read-only and never reach approval).
+type autoPlanApprover struct{ out io.Writer }
+
+func (a *autoPlanApprover) Approve(_ context.Context, call provider.ToolCall, preview string) (bool, error) {
+	if call.Function.Name != submitPlanToolName {
+		return false, nil
+	}
+	_, _ = fmt.Fprintln(a.out, strings.TrimRight(preview, "\n"))
+	_, _ = fmt.Fprintln(a.out, "plan lock auto-approved via -approve-plan-lock")
+	return true, nil
+}
+
+// saveDeniedPlan writes the compiled plan a denied approval rejected to a temp
+// file so the operator can inspect or adapt it without re-running the whole
+// planning loop.
+func saveDeniedPlan(args json.RawMessage) (string, error) {
+	var ir agentflow.PlanIR
+	if err := json.Unmarshal(args, &ir); err != nil {
+		return "", fmt.Errorf("parse denied plan: %w", err)
+	}
+	b, err := json.MarshalIndent(agentflow.Compile(ir), "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("marshal denied plan: %w", err)
+	}
+	f, err := os.CreateTemp("", "golem-denied-plan-*.json")
+	if err != nil {
+		return "", fmt.Errorf("create denied plan file: %w", err)
+	}
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("write denied plan file %s: %w", f.Name(), err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(f.Name())
+		return "", fmt.Errorf("close denied plan file %s: %w", f.Name(), err)
+	}
+	return f.Name(), nil
 }
 
 func shellQuote(s string) string {

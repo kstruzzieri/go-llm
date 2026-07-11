@@ -64,6 +64,7 @@ type flags struct {
 	evidencePath     string
 	goal             string // AgentFlow planning mode goal (-goal)
 	goalSet          bool   // -goal was passed (distinguishes an explicit empty goal)
+	approvePlanLock  bool   // -approve-plan-lock: non-interactive planning-mode lock approval
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -110,6 +111,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
 	fs.StringVar(&f.evidencePath, "evidence", "", "optional evidence sidecar JSON object/array recorded before lock in task mode")
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
+	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -209,7 +211,10 @@ func validateFlags(f flags) error {
 		return fmt.Errorf("golem: -goal (planning mode) authors no evidence; do not pass -evidence")
 	}
 	if f.goalSet && (f.approveEdits || f.approveGates) {
-		return fmt.Errorf("golem: -goal (planning mode) does not execute; the -approve-plan-* approvals apply to -plan")
+		return fmt.Errorf("golem: -goal (planning mode) does not execute; -approve-plan-edits/-approve-plan-gates apply to -plan")
+	}
+	if f.approvePlanLock && !f.goalSet {
+		return fmt.Errorf("golem: -approve-plan-lock applies to -goal (planning mode) only")
 	}
 	return nil
 }

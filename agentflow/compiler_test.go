@@ -85,9 +85,10 @@ func TestCompile_ProjectsRequirementTraceability(t *testing.T) {
 
 func TestCheckPlan_Traceability(t *testing.T) {
 	tests := []struct {
-		name   string
-		mutate func(*PlanIR)
-		want   []string
+		name    string
+		mutate  func(*PlanIR)
+		want    []string
+		notWant []string
 	}{
 		{name: "duplicate ids", mutate: func(ir *PlanIR) {
 			ir.Requirements = append(ir.Requirements, ir.Requirements[0])
@@ -117,7 +118,10 @@ func TestCheckPlan_Traceability(t *testing.T) {
 			}
 			ir.Steps[0].CriterionIDs = []string{"1AC"}
 			ir.Steps[0].Validations[0].CriterionIDs = nil
-		}, want: []string{"invalid_requirement_id", "missing_requirement_text", "missing_acceptance_criteria", "invalid_criterion_id", "missing_criterion_text", "bad_review_depth"}},
+		}, want: []string{"invalid_requirement_id", "missing_requirement_text", "missing_acceptance_criteria", "invalid_criterion_id", "missing_criterion_text", "bad_review_depth"},
+			// An invalid depth is one authoring mistake: bad_review_depth alone
+			// reports it, without a second unmapped-verification finding.
+			notWant: []string{"unmapped_criterion_verification"}},
 	}
 
 	for _, tt := range tests {
@@ -131,6 +135,11 @@ func TestCheckPlan_Traceability(t *testing.T) {
 			for _, want := range tt.want {
 				if !slices.Contains(codes, want) {
 					t.Errorf("diagnostic codes %v missing %s", codes, want)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if slices.Contains(codes, notWant) {
+					t.Errorf("diagnostic codes %v must not include %s", codes, notWant)
 				}
 			}
 		})

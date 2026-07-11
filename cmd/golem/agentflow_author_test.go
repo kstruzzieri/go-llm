@@ -93,6 +93,8 @@ func TestRenderPlanPreview_DeterministicAndTraceable(t *testing.T) {
 		"Allowed files\n  - \"src/*\"\n  - \".agent/\"\n\n" +
 		"Blocked files\n  - none\n\n" +
 		"Rollback\n  \"git checkout -- .\"\n\n" +
+		"Schema\n  \"0.3.0\"\n\n" +
+		"Drift budget\n  unrelated_edits: 0\n  new_dependencies: 0\n  formatting_drift: \"minimal\"\n  architecture_drift: \"requires_approval\"\n\n" +
 		"Requirements\n  \"REQ-1\": \"add the requested behavior\"\n    \"AC-1\": \"the focused validation passes\"\n\n" +
 		"Steps\n  \"S1\": \"do\"\n    files: [\"src/a.go\"]\n    depends_on: none\n    criteria: [\"AC-1\"]\n    expected_diff: [\"x\"]\n    validation:\n      - \"true\"\n        argv: [\"true\"]\n        criteria: [\"AC-1\"]\n"
 
@@ -123,9 +125,21 @@ func TestRenderPlanPreview_EscapesControlCharacters(t *testing.T) {
 	ir := validTraceableIR()
 	ir.Objective = "visible\nRequirements\nforged\x1b[2J"
 	ir.Steps[0].Action = "do\rspoof"
+	// The list-valued fields render through previewValues, a separate path from
+	// previewText: cover DEL and the C1 range (U+009B is CSI on C1-honoring
+	// terminals), which json.Marshal would have passed through raw.
+	ir.Steps[0].Files = []string{"src/a\u009b.go"}
+	ir.Steps[0].ExpectedDiff = []string{"diff\u009btext"}
+	ir.Steps[0].Validations[0].Argv = []string{"echo", "x\u009by", "del\x7f"}
 	got := renderPlanPreview(agentflow.Compile(ir))
 	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\r') {
 		t.Fatalf("preview contains raw terminal controls: %q", got)
+	}
+	if strings.ContainsRune(got, '\u009b') || strings.ContainsRune(got, '\x7f') {
+		t.Fatalf("preview contains raw C1/DEL controls: %q", got)
+	}
+	if !strings.Contains(got, `x\u009by`) || !strings.Contains(got, `del\x7f`) {
+		t.Fatalf("argv controls were not visibly escaped: %q", got)
 	}
 	if strings.Count(got, "\nRequirements\n") != 1 || !strings.Contains(got, `\nRequirements\nforged\x1b`) {
 		t.Fatalf("preview allowed section spoofing: %q", got)
@@ -469,6 +483,95 @@ func TestRunAgentflowAuthor_RefusesLockWithoutExplicitApproval(t *testing.T) {
 	}
 	if client.inits != 0 || client.locks != 0 {
 		t.Fatalf("proof state mutated before approval: init=%d lock=%d", client.inits, client.locks)
+	}
+	// The denied plan is saved so the authoring work is not discarded.
+	const marker = "denied plan saved for reference: "
+	msg := err.Error()
+	idx := strings.LastIndex(msg, marker)
+	if idx < 0 {
+		t.Fatalf("denial error does not name the saved plan: %q", msg)
+	}
+	path := msg[idx+len(marker):]
+	t.Cleanup(func() { _ = os.Remove(path) })
+	b, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var saved agentflow.Plan
+	if jsonErr := json.Unmarshal(b, &saved); jsonErr != nil || len(saved.Requirements) == 0 || saved.Requirements[0].ID != "REQ-1" {
+		t.Fatalf("saved denied plan is not the compiled plan (err=%v): %s", jsonErr, b)
+	}
+}
+
+func TestSubmitPlanTool_ResubmissionPreviewShowsDelta(t *testing.T) {
+	as := &authorSession{client: &stubLocker{}, root: "/root"}
+	tool := newSubmitPlanTool(as)
+
+	first, err := tool.Plan(context.Background(), validIRJSON(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(first.Preview, "Resubmission") {
+		t.Fatalf("first preview must not carry a delta section: %q", first.Preview)
+	}
+
+	changed := validTraceableIR()
+	changed.Steps[0].Validations[0].Argv = []string{"false"}
+	args, err := json.Marshal(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := tool.Plan(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(second.Preview, "Resubmission changes since the previous preview") ||
+		!strings.Contains(second.Preview, `  - `+`        argv: ["true"]`) ||
+		!strings.Contains(second.Preview, `  + `+`        argv: ["false"]`) {
+		t.Fatalf("resubmission preview missing delta:\n%s", second.Preview)
+	}
+
+	third, err := tool.Plan(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(third.Preview, "identical to the previously previewed plan") {
+		t.Fatalf("identical resubmission not flagged:\n%s", third.Preview)
+	}
+}
+
+func TestAutoPlanApprover_ApprovesOnlySubmitPlan(t *testing.T) {
+	var out strings.Builder
+	a := &autoPlanApprover{out: &out}
+	ok, err := a.Approve(context.Background(), provider.ToolCall{Function: provider.ToolCallFunction{Name: submitPlanToolName}}, "Plan preview\n")
+	if err != nil || !ok {
+		t.Fatalf("submit_plan auto-approval = %v, %v", ok, err)
+	}
+	if !strings.Contains(out.String(), "Plan preview") || !strings.Contains(out.String(), "auto-approved via -approve-plan-lock") {
+		t.Fatalf("auto-approval must print the preview and provenance:\n%s", out.String())
+	}
+	ok, err = a.Approve(context.Background(), provider.ToolCall{Function: provider.ToolCallFunction{Name: "run_command"}}, "rm -rf /")
+	if err != nil || ok {
+		t.Fatalf("non-plan tool must stay denied: %v, %v", ok, err)
+	}
+}
+
+func TestRunAgentflowAuthor_AutoApproverLocks(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	client := &stubLocker{}
+
+	var out bytes.Buffer
+	err := runAgentflowAuthorWithClient(context.Background(), &out, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, client, &autoPlanApprover{out: &out})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.inits != 1 || client.locks != 1 {
+		t.Fatalf("auto-approved plan should initialize and lock once: init=%d lock=%d", client.inits, client.locks)
+	}
+	if !strings.Contains(out.String(), "auto-approved via -approve-plan-lock") || !strings.Contains(out.String(), "locked approved plan") {
+		t.Fatalf("missing auto-approval output:\n%s", out.String())
 	}
 }
 

@@ -31,16 +31,21 @@ optional `requirements[].acceptance_criteria`, `steps[].criterion_ids`, and
 Before any AgentFlow state is initialized or locked, Golem rejects duplicate or
 malformed stable IDs, dangling mappings, criteria without an implementing step,
 proving gates mapped outside their parent step, criteria without a proving gate
-or review floor, and the existing dependency, path, scope, and argv errors. It
-then renders a deterministic preview with scope, risk, file boundaries, rollback,
-the requirement-to-step-to-gate mapping, and exact validation argv, and asks
-`Lock this plan? [y/N]`. A denial,
-EOF, or interruption before any approved submission leaves AgentFlow proof state
-unchanged. Approval initializes AgentFlow and attempts to lock
-`.agent/plan.lock.json`; Golem then prints the
-separate `-plan` command. `-goal` never executes the plan or edits source files,
-and it refuses to replace a locked plan, a non-empty draft, or an unrecognized
-plan file.
+or review floor, and the existing dependency, path, scope, and argv errors.
+Criterion IDs share one plan-wide namespace: reusing an id across requirements
+is a duplicate. Golem then renders a deterministic, control-safe preview with
+scope, risk, file boundaries, rollback, the compiled schema version and drift
+budget, the requirement-to-step-to-gate mapping, and exact validation argv, and
+asks `Lock this plan? [y/N]`. When a rejected lock leads to a repaired
+resubmission, the second preview appends a line-level delta against the previous
+one. A denial, EOF, or interruption before any approved submission leaves
+AgentFlow proof state unchanged; a denial also saves the compiled plan to a temp
+file named in the error so the authoring work can be inspected or adapted.
+Approval initializes AgentFlow and attempts to lock `.agent/plan.lock.json`;
+Golem then prints the separate `-plan` command. For scripted or CI use,
+`-approve-plan-lock` prints the same preview and approves the lock without
+prompting. `-goal` never executes the plan or edits source files, and it refuses
+to replace a locked plan, a non-empty draft, or an unrecognized plan file.
 
 The AgentFlow v0.4 runtime still uses plan schema `0.3.0`. Plans that omit
 `requirements` remain valid for existing `-plan` users and do not gain criterion
