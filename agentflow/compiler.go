@@ -3,6 +3,7 @@ package agentflow
 import (
 	"fmt"
 	"path"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -12,15 +13,30 @@ import (
 // submit_plan tool. It carries only semantic decisions; Compile supplies every
 // rigid contract field. See docs/superpowers/specs/2026-07-09-agentflow-plan-compiler-210-design.md.
 type PlanIR struct {
-	Objective    string   `json:"objective"`
-	Scope        []string `json:"scope"`
-	Invariants   []string `json:"invariants"`
-	RiskLevel    string   `json:"risk_level"` // low|medium|high
-	RollbackPlan string   `json:"rollback_plan"`
-	AllowedFiles []string `json:"allowed_files"`
-	BlockedFiles []string `json:"blocked_files"` // optional
-	NonGoals     []string `json:"non_goals"`     // optional
-	Steps        []StepIR `json:"steps"`
+	Objective    string          `json:"objective"`
+	Scope        []string        `json:"scope"`
+	Invariants   []string        `json:"invariants"`
+	RiskLevel    string          `json:"risk_level"` // low|medium|high
+	RollbackPlan string          `json:"rollback_plan"`
+	AllowedFiles []string        `json:"allowed_files"`
+	BlockedFiles []string        `json:"blocked_files"` // optional
+	NonGoals     []string        `json:"non_goals"`     // optional
+	Requirements []RequirementIR `json:"requirements"`  // optional
+	Steps        []StepIR        `json:"steps"`
+}
+
+// RequirementIR is one authored requirement and its acceptance criteria.
+type RequirementIR struct {
+	ID                 string        `json:"id"`
+	Text               string        `json:"text"`
+	AcceptanceCriteria []CriterionIR `json:"acceptance_criteria"`
+}
+
+// CriterionIR is one authored acceptance criterion and optional review floor.
+type CriterionIR struct {
+	ID     string           `json:"id"`
+	Text   string           `json:"text"`
+	Review *CriterionReview `json:"review,omitempty"`
 }
 
 // StepIR is one authored step. Validations are executable commands (argv), not
@@ -30,14 +46,16 @@ type StepIR struct {
 	Action       string   `json:"action"`
 	Files        []string `json:"files"`
 	ExpectedDiff []string `json:"expected_diff"`
-	DependsOn    []string `json:"depends_on"` // optional
+	DependsOn    []string `json:"depends_on"`    // optional
+	CriterionIDs []string `json:"criterion_ids"` // optional
 	Validations  []GateIR `json:"validations"`
 }
 
 // GateIR is one executable validation: argv plus an optional human label.
 type GateIR struct {
-	Label string   `json:"label"` // optional
-	Argv  []string `json:"argv"`
+	Label        string   `json:"label"` // optional
+	Argv         []string `json:"argv"`
+	CriterionIDs []string `json:"criterion_ids"` // optional
 }
 
 const agentProofDir = ".agent/"
@@ -60,6 +78,7 @@ func Compile(ir PlanIR) Plan {
 		BlockedFiles:  cloneStrings(ir.BlockedFiles),
 		RollbackPlan:  ir.RollbackPlan,
 		EvidenceIDs:   []string{},
+		Requirements:  compileRequirements(ir.Requirements),
 		Steps:         make([]Step, 0, len(ir.Steps)),
 	}
 	seen := map[string]bool{}
@@ -73,6 +92,7 @@ func Compile(ir PlanIR) Plan {
 			ExpectedDiff:  cloneStrings(s.ExpectedDiff),
 			Validation:    make([]string, 0, len(s.Validations)),
 			EvidenceIDs:   []string{},
+			CriterionIDs:  cloneStrings(s.CriterionIDs),
 		}
 		if len(s.DependsOn) > 0 {
 			st.DependsOn = cloneStrings(s.DependsOn)
@@ -83,7 +103,7 @@ func Compile(ir PlanIR) Plan {
 				label = strings.Join(g.Argv, " ")
 			}
 			st.Validation = append(st.Validation, label)
-			st.Gates = append(st.Gates, Gate{Kind: "command", Run: cloneStrings(g.Argv)})
+			st.Gates = append(st.Gates, Gate{Kind: "command", Run: cloneStrings(g.Argv), CriterionIDs: cloneStrings(g.CriterionIDs)})
 			if label != "" && !seen[label] {
 				seen[label] = true
 				gates = append(gates, label)
@@ -93,6 +113,26 @@ func Compile(ir PlanIR) Plan {
 	}
 	p.ValidationGates = gates
 	return p
+}
+
+func compileRequirements(in []RequirementIR) []Requirement {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]Requirement, 0, len(in))
+	for _, r := range in {
+		req := Requirement{ID: r.ID, Text: r.Text, AcceptanceCriteria: make([]Criterion, 0, len(r.AcceptanceCriteria))}
+		for _, c := range r.AcceptanceCriteria {
+			criterion := Criterion{ID: c.ID, Text: c.Text}
+			if c.Review != nil {
+				review := *c.Review
+				criterion.Review = &review
+			}
+			req.AcceptanceCriteria = append(req.AcceptanceCriteria, criterion)
+		}
+		out = append(out, req)
+	}
+	return out
 }
 
 func cloneStrings(xs []string) []string {
@@ -250,6 +290,93 @@ func CheckPlan(p Plan) []Diagnostic {
 
 	// 4-5: dependency integrity + cycle detection.
 	ds = append(ds, dependencyDiagnostics(p.Steps)...)
+	ds = append(ds, traceabilityDiagnostics(p)...)
+	return ds
+}
+
+var traceIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,127}$`)
+
+func traceabilityDiagnostics(p Plan) []Diagnostic {
+	var ds []Diagnostic
+	requirementIDs := map[string]bool{}
+	criterionIDs := map[string]bool{}
+	criterionVerificationMapped := map[string]bool{}
+	for _, requirement := range p.Requirements {
+		if !traceIDPattern.MatchString(requirement.ID) {
+			ds = append(ds, Diagnostic{"invalid_requirement_id", "requirement id is not stable: " + requirement.ID})
+		} else if requirementIDs[requirement.ID] {
+			ds = append(ds, Diagnostic{"duplicate_requirement_id", "duplicate requirement id: " + requirement.ID})
+		}
+		requirementIDs[requirement.ID] = true
+		if strings.TrimSpace(requirement.Text) == "" {
+			ds = append(ds, Diagnostic{"missing_requirement_text", "requirement " + requirement.ID + " has empty text"})
+		}
+		if len(requirement.AcceptanceCriteria) == 0 {
+			ds = append(ds, Diagnostic{"missing_acceptance_criteria", "requirement " + requirement.ID + " has no acceptance criteria"})
+		}
+		for _, criterion := range requirement.AcceptanceCriteria {
+			if !traceIDPattern.MatchString(criterion.ID) {
+				ds = append(ds, Diagnostic{"invalid_criterion_id", "acceptance criterion id is not stable: " + criterion.ID})
+			} else if criterionIDs[criterion.ID] {
+				ds = append(ds, Diagnostic{"duplicate_criterion_id", "duplicate acceptance criterion id: " + criterion.ID})
+			}
+			criterionIDs[criterion.ID] = true
+			if strings.TrimSpace(criterion.Text) == "" {
+				ds = append(ds, Diagnostic{"missing_criterion_text", "acceptance criterion " + criterion.ID + " has empty text"})
+			}
+			if criterion.Review != nil && criterion.Review.MinimumDepth != "spec_quality" && criterion.Review.MinimumDepth != "deep" {
+				ds = append(ds, Diagnostic{"bad_review_depth", "acceptance criterion " + criterion.ID + " review minimum_depth must be spec_quality or deep"})
+			}
+			if criterion.Review != nil && (criterion.Review.MinimumDepth == "spec_quality" || criterion.Review.MinimumDepth == "deep") {
+				criterionVerificationMapped[criterion.ID] = true
+			}
+		}
+	}
+	criterionStepMapped := map[string]bool{}
+	for _, step := range p.Steps {
+		stepCriterionIDs := map[string]bool{}
+		for _, criterionID := range step.CriterionIDs {
+			if stepCriterionIDs[criterionID] {
+				ds = append(ds, Diagnostic{"duplicate_step_criterion", "step " + step.ID + " repeats acceptance criterion " + criterionID})
+			}
+			stepCriterionIDs[criterionID] = true
+			if !criterionIDs[criterionID] {
+				ds = append(ds, Diagnostic{"dangling_step_criterion", "step " + step.ID + " references unknown acceptance criterion " + criterionID})
+			} else {
+				criterionStepMapped[criterionID] = true
+			}
+		}
+		for gateIndex, gate := range step.Gates {
+			gateCriterionIDs := map[string]bool{}
+			for _, criterionID := range gate.CriterionIDs {
+				if gateCriterionIDs[criterionID] {
+					ds = append(ds, Diagnostic{"duplicate_gate_criterion", fmt.Sprintf("step %s gate %d repeats acceptance criterion %s", step.ID, gateIndex, criterionID)})
+				}
+				gateCriterionIDs[criterionID] = true
+				if !criterionIDs[criterionID] {
+					ds = append(ds, Diagnostic{"dangling_gate_criterion", fmt.Sprintf("step %s gate %d references unknown acceptance criterion %s", step.ID, gateIndex, criterionID)})
+				}
+				if !stepCriterionIDs[criterionID] {
+					ds = append(ds, Diagnostic{"gate_criterion_not_in_step", fmt.Sprintf("step %s gate %d criterion %s is not mapped to its parent step", step.ID, gateIndex, criterionID)})
+				} else if criterionIDs[criterionID] {
+					criterionVerificationMapped[criterionID] = true
+				}
+			}
+		}
+	}
+	ids := make([]string, 0, len(criterionIDs))
+	for criterionID := range criterionIDs {
+		ids = append(ids, criterionID)
+	}
+	sort.Strings(ids)
+	for _, criterionID := range ids {
+		if !criterionStepMapped[criterionID] {
+			ds = append(ds, Diagnostic{"unmapped_criterion_step", "acceptance criterion " + criterionID + " is not mapped to any step"})
+		}
+		if !criterionVerificationMapped[criterionID] {
+			ds = append(ds, Diagnostic{"unmapped_criterion_verification", "acceptance criterion " + criterionID + " has no proving gate or review floor"})
+		}
+	}
 	return ds
 }
 

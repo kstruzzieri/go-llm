@@ -42,6 +42,13 @@ func TestLockPlan_RealCLI(t *testing.T) {
 		RiskLevel:    "low",
 		RollbackPlan: "git checkout -- .",
 		AllowedFiles: []string{"src/*"},
+		Requirements: []RequirementIR{{
+			ID: "REQ-1", Text: "The compiler output locks with traceability.",
+			AcceptanceCriteria: []CriterionIR{
+				{ID: "AC-1", Text: "The expected token is present."},
+				{ID: "AC-2", Text: "The input fixture exists."},
+			},
+		}},
 		Steps: []StepIR{
 			{
 				ID:           "P1",
@@ -49,14 +56,16 @@ func TestLockPlan_RealCLI(t *testing.T) {
 				Files:        []string{"src/answer.txt"},
 				ExpectedDiff: []string{"src/answer.txt changes pending to expected"},
 				DependsOn:    []string{"P0"}, // forward reference: P0 is declared below
-				Validations:  []GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}}},
+				CriterionIDs: []string{"AC-1"},
+				Validations:  []GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}, CriterionIDs: []string{"AC-1"}}},
 			},
 			{
 				ID:           "P0",
 				Action:       "prepare src/input.txt",
 				Files:        []string{"src/input.txt"},
 				ExpectedDiff: []string{"src/input.txt is ready"},
-				Validations:  []GateIR{{Label: "input", Argv: []string{"test", "-f", "src/input.txt"}}},
+				CriterionIDs: []string{"AC-2"},
+				Validations:  []GateIR{{Label: "input", Argv: []string{"test", "-f", "src/input.txt"}, CriterionIDs: []string{"AC-2"}}},
 			},
 		},
 	})

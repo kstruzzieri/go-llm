@@ -109,7 +109,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
 	fs.StringVar(&f.evidencePath, "evidence", "", "optional evidence sidecar JSON object/array recorded before lock in task mode")
-	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and lock a plan for this goal, then stop")
+	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
@@ -787,7 +787,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	if f.goalSet {
-		return runAgentflowAuthor(ctx, stdout, stderr, interrupts, sess, f, root)
+		return runAgentflowAuthor(ctx, stdin, stdout, stderr, interrupts, sess, f, root)
 	}
 	if f.planPath != "" {
 		return runAgentflowTask(ctx, stdout, stderr, interrupts, sess, f, root)

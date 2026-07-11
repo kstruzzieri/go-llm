@@ -58,15 +58,78 @@ func (s *stubLocker) LockPlan(ctx context.Context, path string) error {
 
 func validIRJSON(t *testing.T) json.RawMessage {
 	t.Helper()
-	b, err := json.Marshal(agentflow.PlanIR{
-		Objective: "obj", Scope: []string{"src"}, Invariants: []string{"x"},
-		RiskLevel: "low", RollbackPlan: "git checkout -- .", AllowedFiles: []string{"src/*"},
-		Steps: []agentflow.StepIR{{ID: "S1", Action: "do", Files: []string{"src/a.go"}, ExpectedDiff: []string{"x"}, Validations: []agentflow.GateIR{{Argv: []string{"true"}}}}},
-	})
+	b, err := json.Marshal(validTraceableIR())
 	if err != nil {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func validTraceableIR() agentflow.PlanIR {
+	return agentflow.PlanIR{
+		Objective: "obj", Scope: []string{"src"}, Invariants: []string{"x"},
+		RiskLevel: "low", RollbackPlan: "git checkout -- .", AllowedFiles: []string{"src/*"},
+		Requirements: []agentflow.RequirementIR{{
+			ID: "REQ-1", Text: "add the requested behavior",
+			AcceptanceCriteria: []agentflow.CriterionIR{{ID: "AC-1", Text: "the focused validation passes"}},
+		}},
+		Steps: []agentflow.StepIR{{
+			ID: "S1", Action: "do", Files: []string{"src/a.go"}, ExpectedDiff: []string{"x"},
+			CriterionIDs: []string{"AC-1"},
+			Validations:  []agentflow.GateIR{{Argv: []string{"true"}, CriterionIDs: []string{"AC-1"}}},
+		}},
+	}
+}
+
+func TestRenderPlanPreview_DeterministicAndTraceable(t *testing.T) {
+	ir := validTraceableIR()
+	ir.NonGoals = []string{"no dependency changes"}
+	want := "Plan preview\n\n" +
+		"Objective\n  \"obj\"\n\n" +
+		"Scope\n  - \"src\"\n\n" +
+		"Risk\n  \"low\"\n\n" +
+		"Non-goals\n  - \"no dependency changes\"\n\n" +
+		"Invariants\n  - \"x\"\n\n" +
+		"Allowed files\n  - \"src/*\"\n  - \".agent/\"\n\n" +
+		"Blocked files\n  - none\n\n" +
+		"Rollback\n  \"git checkout -- .\"\n\n" +
+		"Requirements\n  \"REQ-1\": \"add the requested behavior\"\n    \"AC-1\": \"the focused validation passes\"\n\n" +
+		"Steps\n  \"S1\": \"do\"\n    files: [\"src/a.go\"]\n    depends_on: none\n    criteria: [\"AC-1\"]\n    expected_diff: [\"x\"]\n    validation:\n      - \"true\"\n        argv: [\"true\"]\n        criteria: [\"AC-1\"]\n"
+
+	first := renderPlanPreview(agentflow.Compile(ir))
+	second := renderPlanPreview(agentflow.Compile(ir))
+	if first != want || second != want {
+		t.Fatalf("preview mismatch:\n--- got ---\n%s--- want ---\n%s", first, want)
+	}
+}
+
+func TestRenderPlanPreview_DistinguishesLockedValues(t *testing.T) {
+	a := validTraceableIR()
+	a.Steps[0].ExpectedDiff = []string{"a, b", "c"}
+	b := validTraceableIR()
+	b.Steps[0].ExpectedDiff = []string{"a", "b", "c"}
+	if renderPlanPreview(agentflow.Compile(a)) == renderPlanPreview(agentflow.Compile(b)) {
+		t.Fatal("different expected_diff arrays produced the same approval preview")
+	}
+
+	a.Objective = "a\nb"
+	b.Objective = `"a\nb"`
+	if renderPlanPreview(agentflow.Compile(a)) == renderPlanPreview(agentflow.Compile(b)) {
+		t.Fatal("newline and literal escape text produced the same approval preview")
+	}
+}
+
+func TestRenderPlanPreview_EscapesControlCharacters(t *testing.T) {
+	ir := validTraceableIR()
+	ir.Objective = "visible\nRequirements\nforged\x1b[2J"
+	ir.Steps[0].Action = "do\rspoof"
+	got := renderPlanPreview(agentflow.Compile(ir))
+	if strings.ContainsRune(got, '\x1b') || strings.ContainsRune(got, '\r') {
+		t.Fatalf("preview contains raw terminal controls: %q", got)
+	}
+	if strings.Count(got, "\nRequirements\n") != 1 || !strings.Contains(got, `\nRequirements\nforged\x1b`) {
+		t.Fatalf("preview allowed section spoofing: %q", got)
+	}
 }
 
 func TestSubmitPlanTool_Effect(t *testing.T) {
@@ -76,12 +139,43 @@ func TestSubmitPlanTool_Effect(t *testing.T) {
 	if e.Class != agent.Write|agent.Exec {
 		t.Errorf("effect class = %v, want Write|Exec", e.Class)
 	}
-	if e.Approval != agent.ApprovalNever {
-		t.Errorf("approval = %v, want ApprovalNever", e.Approval)
+	if e.Approval != agent.ApprovalAlways {
+		t.Errorf("approval = %v, want ApprovalAlways", e.Approval)
 	}
 	if e.Scope.CWD != "/root" {
 		t.Errorf("effect cwd = %q, want /root", e.Scope.CWD)
 	}
+}
+
+func TestSubmitPlanTool_PreviewsWithoutMutatingProofState(t *testing.T) {
+	client := &stubLocker{}
+	tool := newSubmitPlanTool(&authorSession{client: client, root: "/root"})
+	plan, err := tool.Plan(context.Background(), validIRJSON(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Effect.Approval != agent.ApprovalAlways || !strings.Contains(plan.Preview, "AC-1") || !strings.Contains(plan.Preview, `argv: ["true"]`) {
+		t.Fatalf("tool plan = %+v", plan)
+	}
+	if client.inits != 0 || client.locks != 0 {
+		t.Fatalf("preview mutated proof state: init=%d lock=%d", client.inits, client.locks)
+	}
+}
+
+type fixedApprover bool
+
+func (a fixedApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	return bool(a), nil
+}
+
+type sequenceApprover struct {
+	decisions []bool
+}
+
+func (a *sequenceApprover) Approve(context.Context, provider.ToolCall, string) (bool, error) {
+	decision := a.decisions[0]
+	a.decisions = a.decisions[1:]
+	return decision, nil
 }
 
 func TestSubmitPlanTool_SuccessLocksAndCancels(t *testing.T) {
@@ -117,6 +211,29 @@ func TestSubmitPlanTool_FirstLocalFailureReturnsDiagnosticsNoCancel(t *testing.T
 	}
 	if !res.IsError || canceled || len(as.lastDiags) == 0 {
 		t.Errorf("attempt1 failure should return diagnostics without cancel; canceled=%v diags=%d", canceled, len(as.lastDiags))
+	}
+}
+
+func TestSubmitPlanTool_RejectsRequirementFreeAuthoring(t *testing.T) {
+	ir := validTraceableIR()
+	ir.Requirements = nil
+	ir.Steps[0].CriterionIDs = nil
+	ir.Steps[0].Validations[0].CriterionIDs = nil
+	args, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &stubLocker{}
+	as := &authorSession{client: client, root: "/root", cancel: func() {}}
+	res, err := newSubmitPlanTool(as).Invoke(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !strings.Contains(res.Content, "missing_requirements") {
+		t.Fatalf("requirement-free submission = %+v", res)
+	}
+	if client.inits != 0 || client.locks != 0 {
+		t.Fatalf("requirement-free authoring mutated Agentflow: init=%d lock=%d", client.inits, client.locks)
 	}
 }
 
@@ -195,6 +312,10 @@ func TestSubmitPlanSchema_PinsIRStructs(t *testing.T) {
 		return cur
 	}
 	planProps := obj(schema, "properties")
+	requirementItems := obj(schema, "properties", "requirements", "items")
+	requirementProps := obj(requirementItems, "properties")
+	criterionItems := obj(requirementProps, "acceptance_criteria", "items")
+	criterionProps := obj(criterionItems, "properties")
 	stepItems := obj(schema, "properties", "steps", "items")
 	stepProps := obj(stepItems, "properties")
 	gateItems := obj(stepProps, "validations", "items")
@@ -215,6 +336,8 @@ func TestSubmitPlanSchema_PinsIRStructs(t *testing.T) {
 		}
 	}
 	checkFields("PlanIR", reflect.TypeOf(agentflow.PlanIR{}), planProps)
+	checkFields("RequirementIR", reflect.TypeOf(agentflow.RequirementIR{}), requirementProps)
+	checkFields("CriterionIR", reflect.TypeOf(agentflow.CriterionIR{}), criterionProps)
 	checkFields("StepIR", reflect.TypeOf(agentflow.StepIR{}), stepProps)
 	checkFields("GateIR", reflect.TypeOf(agentflow.GateIR{}), gateProps)
 
@@ -236,7 +359,9 @@ func TestSubmitPlanSchema_PinsIRStructs(t *testing.T) {
 			}
 		}
 	}
-	requires(schema, "objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "steps")
+	requires(schema, "objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "requirements", "steps")
+	requires(requirementItems, "id", "text", "acceptance_criteria")
+	requires(criterionItems, "id", "text")
 	requires(stepItems, "id", "action", "files", "expected_diff", "validations")
 	requires(gateItems, "argv")
 }
@@ -310,21 +435,57 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	}
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
+	client := &stubLocker{}
 
 	var out, errb bytes.Buffer
 	// runAgentflowAuthorWithClient injects a stub afLocker so no real CLI runs.
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "add healthz", goalSet: true}, root, &stubLocker{})
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "add healthz", goalSet: true}, root, client, fixedApprover(true))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if client.inits != 1 || client.locks != 1 {
+		t.Fatalf("approved plan should initialize and lock once: init=%d lock=%d", client.inits, client.locks)
+	}
 	if !strings.Contains(out.String(), filepath.Join(root, ".agent", "plan.lock.json")) ||
-		!strings.Contains(out.String(), "review the locked plan") {
+		!strings.Contains(out.String(), "locked approved plan") {
 		t.Errorf("missing success output:\n%s", out.String())
 	}
 	// The execute-separately command must carry -root <absolute root> so #209 writes
 	// proof state to the planning tree even when run from another directory.
 	if !strings.Contains(out.String(), "-plan "+shellQuote(filepath.Join(root, ".agent", "plan.lock.json"))+" -root "+shellQuote(root)) {
 		t.Errorf("execute-separately command missing -root %s:\n%s", root, out.String())
+	}
+}
+
+func TestRunAgentflowAuthor_RefusesLockWithoutExplicitApproval(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	client := &stubLocker{}
+
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, client, nil)
+	if !errors.Is(err, errPlannerApprovalDenied) {
+		t.Fatalf("err = %v, want approval denied", err)
+	}
+	if client.inits != 0 || client.locks != 0 {
+		t.Fatalf("proof state mutated before approval: init=%d lock=%d", client.inits, client.locks)
+	}
+}
+
+func TestRunAgentflowAuthor_DenialAfterRepairDoesNotClaimNoMutation(t *testing.T) {
+	root := t.TempDir()
+	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "repair me"}}}
+	client := &stubLocker{lockErrs: []error{verr}}
+	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t)), submitPlanCall(validIRJSON(t))}}
+	sess := newTestSession(t, caller, root)
+	approver := &sequenceApprover{decisions: []bool{true, false}}
+
+	err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, client, approver)
+	if !errors.Is(err, errPlannerApprovalDenied) || strings.Contains(err.Error(), "no Agentflow state was changed") {
+		t.Fatalf("denial after initialized repair returned misleading error: %v", err)
+	}
+	if client.inits != 1 || client.locks != 1 {
+		t.Fatalf("repair denial state = init %d lock %d, want 1/1", client.inits, client.locks)
 	}
 }
 
@@ -358,7 +519,7 @@ func TestRunAgentflowAuthor_InstallsProofStateReadGuard(t *testing.T) {
 	sess := newTestSession(t, caller, root)
 
 	var out, errb bytes.Buffer
-	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}); err != nil {
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, fixedApprover(true)); err != nil {
 		t.Fatal(err)
 	}
 	// The .agent read must have been denied (guard wired), not served.
@@ -366,7 +527,7 @@ func TestRunAgentflowAuthor_InstallsProofStateReadGuard(t *testing.T) {
 		t.Errorf("planner did not deny the .agent read; guard not wired?\nstderr:\n%s", errb.String())
 	}
 	// The flow still locks after the denied read + valid submission.
-	if !strings.Contains(out.String(), "locked plan") {
+	if !strings.Contains(out.String(), "locked approved plan") {
 		t.Errorf("flow should still lock after a denied read:\n%s", out.String())
 	}
 }
@@ -383,7 +544,7 @@ func TestRunAgentflowAuthor_InterruptReturnsWithoutLock(t *testing.T) {
 	caller := &scriptCaller{block: make(chan struct{})}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, interrupts, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, interrupts, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
 	if !errors.Is(err, errPlannerInterrupted) {
 		t.Fatalf("interrupted loop should return errPlannerInterrupted, got %v", err)
 	}
@@ -399,7 +560,7 @@ func TestRunAgentflowAuthor_InterruptCancelsProbe(t *testing.T) {
 	sess := newTestSession(t, &scriptCaller{}, root)
 	done := make(chan error, 1)
 	go func() {
-		done <- runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, interrupts, sess, flags{goal: "x", goalSet: true}, root, client)
+		done <- runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, interrupts, sess, flags{goal: "x", goalSet: true}, root, client, fixedApprover(true))
 	}()
 	<-client.probeStarted
 	interrupts <- struct{}{}
@@ -418,7 +579,7 @@ func TestRunAgentflowAuthor_InterruptCancelsLockPlan(t *testing.T) {
 	sess := newTestSession(t, &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}, root)
 	done := make(chan error, 1)
 	go func() {
-		done <- runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, interrupts, sess, flags{goal: "x", goalSet: true}, root, client)
+		done <- runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, interrupts, sess, flags{goal: "x", goalSet: true}, root, client, fixedApprover(true))
 	}()
 	<-client.lockStarted
 	interrupts <- struct{}{}
@@ -433,7 +594,7 @@ func TestRunAgentflowAuthor_RefusesLockedPlan(t *testing.T) {
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}); err == nil {
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil); err == nil {
 		t.Error("expected clobber-guard refusal for a locked plan")
 	}
 }
@@ -444,7 +605,7 @@ func TestRunAgentflowAuthor_ProbeFailsBeforeModel(t *testing.T) {
 	sess := newTestSession(t, caller, root)
 	client := &stubLocker{probeErr: errors.New("missing")}
 	var out, errb bytes.Buffer
-	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client); err == nil {
+	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client, nil); err == nil {
 		t.Fatal("expected probe failure")
 	}
 	if caller.i != 0 || client.inits != 0 {
@@ -458,11 +619,12 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	sess := newTestSession(t, caller, root)
 	sess.projectContextBlock = "<<<PROJECT_CONTEXT>>>\nrepo rule\n<<<END_PROJECT_CONTEXT>>>"
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
 	if !errors.Is(err, errPlannerNoSubmission) {
 		t.Fatalf("err = %v, want no submission", err)
 	}
-	if !strings.Contains(caller.system, "Golem's planner") || !strings.Contains(caller.system, "repo rule") {
+	if !strings.Contains(caller.system, "Golem's planner") || !strings.Contains(caller.system, "repo rule") ||
+		!strings.Contains(caller.system, "acceptance criterion") || !strings.Contains(caller.system, "criterion_ids") {
 		t.Fatalf("planner system omitted prompt/context: %q", caller.system)
 	}
 }
@@ -501,7 +663,7 @@ func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *tes
 				t.Fatal(err)
 			}
 
-			err = runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{})
+			err = runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{}, nil)
 			if !errors.Is(err, errPlannerNoSubmission) {
 				t.Fatalf("err = %v, want no submission", err)
 			}
@@ -531,7 +693,7 @@ func TestRunAgentflowAuthor_ExhaustionReportsDiagnostics(t *testing.T) {
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t)), submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client)
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client, fixedApprover(true))
 	if !errors.Is(err, errPlannerRejected) {
 		t.Fatalf("err = %v, want errPlannerRejected", err)
 	}
@@ -551,7 +713,7 @@ func TestRunAgentflowAuthor_RepairModelFailureOverridesStaleDiagnostics(t *testi
 	sess := newTestSession(t, caller, root)
 
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{lockErrs: []error{verr}})
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, &stubLocker{lockErrs: []error{verr}}, fixedApprover(true))
 	if !errors.Is(err, providerErr) {
 		t.Fatalf("err = %v, want provider error", err)
 	}
@@ -570,7 +732,7 @@ func TestRunAgentflowAuthor_TerminalLockErrorReturned(t *testing.T) {
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t)), submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
 	var out, errb bytes.Buffer
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client)
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client, fixedApprover(true))
 	if errors.Is(err, errPlannerNoSubmission) {
 		t.Fatalf("terminal lock error must not degrade to no-submission: %v", err)
 	}

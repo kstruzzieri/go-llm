@@ -89,6 +89,33 @@ func TestParsePlanAndExtractGates(t *testing.T) {
 	}
 }
 
+func TestPlan_RequirementTraceabilityRoundTrip(t *testing.T) {
+	p := Compile(PlanIR{
+		Objective: "o", Scope: []string{"src"}, Invariants: []string{"i"}, RiskLevel: "low",
+		RollbackPlan: "git checkout -- .", AllowedFiles: []string{"src/*"},
+		Requirements: []RequirementIR{{
+			ID: "REQ-1", Text: "behavior",
+			AcceptanceCriteria: []CriterionIR{{ID: "AC-1", Text: "verified"}},
+		}},
+		Steps: []StepIR{{
+			ID: "S1", Action: "do", Files: []string{"src/a.go"}, ExpectedDiff: []string{"x"},
+			CriterionIDs: []string{"AC-1"},
+			Validations:  []GateIR{{Argv: []string{"true"}, CriterionIDs: []string{"AC-1"}}},
+		}},
+	})
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Plan
+	if err := json.Unmarshal(b, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Requirements[0].AcceptanceCriteria[0].ID != "AC-1" || got.Steps[0].Gates[0].CriterionIDs[0] != "AC-1" {
+		t.Fatalf("round trip lost traceability: %+v", got)
+	}
+}
+
 func TestPreflightP0_RejectsNonCommandGate(t *testing.T) {
 	p := Plan{Steps: []Step{{
 		ID: "P1", Validation: []string{"manual"},

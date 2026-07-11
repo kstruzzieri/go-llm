@@ -9,19 +9,39 @@ import (
 // It is now the full lockable document: every field agentflow's validate_plan
 // requires is present. Unknown agentflow fields are still ignored on unmarshal.
 type Plan struct {
-	SchemaVersion   string      `json:"schema_version"`
-	Objective       string      `json:"objective"`
-	Scope           []string    `json:"scope"`
-	NonGoals        []string    `json:"non_goals"`
-	Invariants      []string    `json:"invariants"`
-	RiskLevel       string      `json:"risk_level"`
-	DriftBudget     DriftBudget `json:"drift_budget"`
-	AllowedFiles    []string    `json:"allowed_files"`
-	BlockedFiles    []string    `json:"blocked_files"`
-	ValidationGates []string    `json:"validation_gates"`
-	RollbackPlan    string      `json:"rollback_plan"`
-	EvidenceIDs     []string    `json:"evidence_ids"`
-	Steps           []Step      `json:"steps"`
+	SchemaVersion   string        `json:"schema_version"`
+	Objective       string        `json:"objective"`
+	Scope           []string      `json:"scope"`
+	NonGoals        []string      `json:"non_goals"`
+	Invariants      []string      `json:"invariants"`
+	RiskLevel       string        `json:"risk_level"`
+	DriftBudget     DriftBudget   `json:"drift_budget"`
+	AllowedFiles    []string      `json:"allowed_files"`
+	BlockedFiles    []string      `json:"blocked_files"`
+	ValidationGates []string      `json:"validation_gates"`
+	RollbackPlan    string        `json:"rollback_plan"`
+	EvidenceIDs     []string      `json:"evidence_ids"`
+	Requirements    []Requirement `json:"requirements,omitempty"`
+	Steps           []Step        `json:"steps"`
+}
+
+// Requirement is an Agentflow requirement in the lockable plan contract.
+type Requirement struct {
+	ID                 string      `json:"id"`
+	Text               string      `json:"text"`
+	AcceptanceCriteria []Criterion `json:"acceptance_criteria"`
+}
+
+// Criterion is an acceptance criterion traced to steps and proof gates.
+type Criterion struct {
+	ID     string           `json:"id"`
+	Text   string           `json:"text"`
+	Review *CriterionReview `json:"review,omitempty"`
+}
+
+// CriterionReview declares the minimum Agentflow review depth for a criterion.
+type CriterionReview struct {
+	MinimumDepth string `json:"minimum_depth"`
 }
 
 type Step struct {
@@ -32,6 +52,7 @@ type Step struct {
 	ExpectedDiff  []string `json:"expected_diff"`
 	Validation    []string `json:"validation"`
 	EvidenceIDs   []string `json:"evidence_ids"`
+	CriterionIDs  []string `json:"criterion_ids,omitempty"`
 	DependsOn     []string `json:"depends_on,omitempty"`
 	Gates         []Gate   `json:"gates,omitempty"`
 }
@@ -49,8 +70,9 @@ type DriftBudget struct {
 
 // Gate is a structured validation gate. kind is "command" or "inspection".
 type Gate struct {
-	Kind string   `json:"kind"`
-	Run  []string `json:"run"`
+	Kind         string   `json:"kind"`
+	Run          []string `json:"run"`
+	CriterionIDs []string `json:"criterion_ids,omitempty"`
 }
 
 // CommandGate is an executable gate resolved for a step: an argv slice plus the
