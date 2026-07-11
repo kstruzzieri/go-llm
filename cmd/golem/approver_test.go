@@ -78,6 +78,24 @@ func TestApproverExecPromptNeutral(t *testing.T) {
 	}
 }
 
+func TestApproverPlanPromptShowsLockPreview(t *testing.T) {
+	in := strings.NewReader("y\n")
+	var out strings.Builder
+	a := newReplApprover(newLineReader(in), &out, false)
+	call := provider.ToolCall{Function: provider.ToolCallFunction{Name: "submit_plan"}}
+	ok, err := a.Approve(context.Background(), call, "Plan preview\n\nObjective\n  x\n")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v", ok, err)
+	}
+	s := out.String()
+	if !strings.Contains(s, "Plan preview") || !strings.Contains(s, "Lock this plan?") {
+		t.Errorf("plan approval omitted preview or lock prompt:\n%s", s)
+	}
+	if strings.Contains(s, "Apply this change?") {
+		t.Error("plan approval must not use the edit prompt")
+	}
+}
+
 func TestApproverMCPPromptShowsRunTool(t *testing.T) {
 	in := strings.NewReader("y\n")
 	var out strings.Builder

@@ -1,6 +1,7 @@
 # AgentFlow planning and task modes
 
-Golem planning mode (`-goal`) authors and locks an AgentFlow plan, then stops.
+Golem planning mode (`-goal`) authors a traceable AgentFlow plan, previews it,
+and locks it only after explicit human approval, then stops.
 Task mode (`-plan`) separately runs that locked plan step-by-step in a
 proof-carrying, single-writer P0 loop. AgentFlow owns durable proof state on
 disk; Golem owns the model loop and the in-process guards that keep the model
@@ -21,10 +22,36 @@ AgentFlow never runs a model, and Golem never writes proof state directly.
 ## Planning mode
 
 Run `golem -goal "<text>" -root <workspace>` to have the local model inspect the
-workspace with read-only file tools, submit a structured plan, and lock it as
-`.agent/plan.lock.json`. Golem prints the separate `-plan` command after the
-lock succeeds; `-goal` never executes the plan or edits source files. It refuses
+workspace with read-only file tools and submit one typed aggregate containing
+the objective, non-goals, invariants, requirements, acceptance criteria, steps,
+and criterion mappings. Golem compiles that aggregate directly into AgentFlow's
+optional `requirements[].acceptance_criteria`, `steps[].criterion_ids`, and
+`gates[].criterion_ids` fields; there is no second spec file or proof ledger.
+
+Before any AgentFlow state is initialized or locked, Golem rejects duplicate or
+malformed stable IDs, dangling mappings, criteria without an implementing step,
+proving gates mapped outside their parent step, criteria without a proving gate
+or review floor, and the existing dependency, path, scope, and argv errors.
+Criterion IDs share one plan-wide namespace: reusing an id across requirements
+is a duplicate. Golem then renders a deterministic, control-safe preview with
+scope, risk, file boundaries, rollback, the compiled schema version and drift
+budget, the requirement-to-step-to-gate mapping, and exact validation argv, and
+asks `Lock this plan? [y/N]`. When a rejected lock leads to a repaired
+resubmission, the second preview appends a line-level delta against the previous
+one. A denial, EOF, or interruption before any approved submission leaves
+AgentFlow proof state unchanged; a denial also saves the compiled plan to a temp
+file named in the error so the authoring work can be inspected or adapted.
+Approval initializes AgentFlow and attempts to lock `.agent/plan.lock.json`;
+Golem then prints the separate `-plan` command. For scripted or CI use,
+`-approve-plan-lock` prints the same preview and approves the lock without
+prompting. `-goal` never executes the plan or edits source files, and it refuses
 to replace a locked plan, a non-empty draft, or an unrecognized plan file.
+
+The AgentFlow v0.4 runtime still uses plan schema `0.3.0`. Plans that omit
+`requirements` remain valid for existing `-plan` users and do not gain criterion
+coverage. A review-backed criterion may declare `spec_quality` or `deep`; Golem
+authors that floor into the lock, while AgentFlow remains responsible for later
+review evidence and proof projection.
 
 The #277 local-model spike locked 48/48 toy plans against AgentFlow 0.3.0 on the
 first try with both a 9B dense model and a 35B-A3B MoE model. The load-bearing
@@ -89,6 +116,12 @@ AgentFlow does not manage `.gitignore` itself, so one of the two is required
 for `finish-run` to pass. This is independent of Golem's model-facing guard,
 which denies the model any access under `.agent/` unconditionally, whatever
 `allowed_files` says.
+
+For traced plans, every acceptance criterion must appear in at least one
+step's `criterion_ids`. Each command gate that proves a criterion repeats that
+ID in its own `criterion_ids`, which must be a subset of the parent step's
+mapping. Criteria intended for semantic review instead declare a
+`review.minimum_depth`; Golem does not synthesize or cache review results.
 
 ## Scope and deferrals (P0)
 

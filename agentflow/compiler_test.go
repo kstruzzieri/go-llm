@@ -57,6 +57,111 @@ func TestCompile_FillsContractBoilerplate(t *testing.T) {
 	}
 }
 
+func TestCompile_ProjectsRequirementTraceability(t *testing.T) {
+	ir := sampleIR()
+	ir.Requirements = []RequirementIR{{
+		ID:   "REQ-1",
+		Text: "The service exposes a health endpoint.",
+		AcceptanceCriteria: []CriterionIR{{
+			ID:   "AC-1",
+			Text: "GET /healthz returns success.",
+		}},
+	}}
+	ir.Steps[0].CriterionIDs = []string{"AC-1"}
+	ir.Steps[0].Validations[0].CriterionIDs = []string{"AC-1"}
+
+	p := Compile(ir)
+	if len(p.Requirements) != 1 || p.Requirements[0].ID != "REQ-1" ||
+		len(p.Requirements[0].AcceptanceCriteria) != 1 || p.Requirements[0].AcceptanceCriteria[0].ID != "AC-1" {
+		t.Fatalf("requirements = %+v", p.Requirements)
+	}
+	if !slices.Equal(p.Steps[0].CriterionIDs, []string{"AC-1"}) {
+		t.Errorf("step criterion_ids = %v", p.Steps[0].CriterionIDs)
+	}
+	if !slices.Equal(p.Steps[0].Gates[0].CriterionIDs, []string{"AC-1"}) {
+		t.Errorf("gate criterion_ids = %v", p.Steps[0].Gates[0].CriterionIDs)
+	}
+}
+
+func TestCheckPlan_Traceability(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*PlanIR)
+		want    []string
+		notWant []string
+	}{
+		{name: "duplicate ids", mutate: func(ir *PlanIR) {
+			ir.Requirements = append(ir.Requirements, ir.Requirements[0])
+		}, want: []string{"duplicate_requirement_id", "duplicate_criterion_id"}},
+		{name: "dangling step criterion", mutate: func(ir *PlanIR) {
+			ir.Steps[0].CriterionIDs = []string{"AC-MISSING"}
+		}, want: []string{"dangling_step_criterion"}},
+		{name: "gate criterion outside parent step", mutate: func(ir *PlanIR) {
+			ir.Requirements[0].AcceptanceCriteria = append(ir.Requirements[0].AcceptanceCriteria, CriterionIR{ID: "AC-2", Text: "health is tested"})
+			ir.Steps[0].Validations[0].CriterionIDs = []string{"AC-2"}
+		}, want: []string{"gate_criterion_not_in_step"}},
+		{name: "criterion without implementing step", mutate: func(ir *PlanIR) {
+			ir.Steps[0].CriterionIDs = nil
+			ir.Steps[0].Validations[0].CriterionIDs = nil
+		}, want: []string{"unmapped_criterion_step"}},
+		{name: "criterion without verification", mutate: func(ir *PlanIR) {
+			ir.Steps[0].Validations[0].CriterionIDs = nil
+		}, want: []string{"unmapped_criterion_verification"}},
+		{name: "review-backed criterion", mutate: func(ir *PlanIR) {
+			ir.Steps[0].Validations[0].CriterionIDs = nil
+			ir.Requirements[0].AcceptanceCriteria[0].Review = &CriterionReview{MinimumDepth: "spec_quality"}
+		}},
+		{name: "malformed traceability", mutate: func(ir *PlanIR) {
+			ir.Requirements = []RequirementIR{
+				{ID: "REQ 1", Text: " ", AcceptanceCriteria: nil},
+				{ID: "REQ-2", Text: "health endpoint", AcceptanceCriteria: []CriterionIR{{ID: "1AC", Text: " ", Review: &CriterionReview{MinimumDepth: "standard"}}}},
+			}
+			ir.Steps[0].CriterionIDs = []string{"1AC"}
+			ir.Steps[0].Validations[0].CriterionIDs = nil
+		}, want: []string{"invalid_requirement_id", "missing_requirement_text", "missing_acceptance_criteria", "invalid_criterion_id", "missing_criterion_text", "bad_review_depth"},
+			// An invalid depth is one authoring mistake: bad_review_depth alone
+			// reports it, without a second unmapped-verification finding.
+			notWant: []string{"unmapped_criterion_verification"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ir := sampleTraceableIR()
+			tt.mutate(&ir)
+			codes := diagnosticCodes(CheckPlan(Compile(ir)))
+			if len(tt.want) == 0 && len(codes) != 0 {
+				t.Fatalf("unexpected diagnostic codes: %v", codes)
+			}
+			for _, want := range tt.want {
+				if !slices.Contains(codes, want) {
+					t.Errorf("diagnostic codes %v missing %s", codes, want)
+				}
+			}
+			for _, notWant := range tt.notWant {
+				if slices.Contains(codes, notWant) {
+					t.Errorf("diagnostic codes %v must not include %s", codes, notWant)
+				}
+			}
+		})
+	}
+}
+
+func sampleTraceableIR() PlanIR {
+	ir := sampleIR()
+	ir.Requirements = []RequirementIR{{ID: "REQ-1", Text: "health endpoint", AcceptanceCriteria: []CriterionIR{{ID: "AC-1", Text: "health succeeds"}}}}
+	ir.Steps[0].CriterionIDs = []string{"AC-1"}
+	ir.Steps[0].Validations[0].CriterionIDs = []string{"AC-1"}
+	return ir
+}
+
+func diagnosticCodes(ds []Diagnostic) []string {
+	out := make([]string, 0, len(ds))
+	for _, d := range ds {
+		out = append(out, d.Code)
+	}
+	return out
+}
+
 func TestCompile_LabelDefaultsToJoinedArgv(t *testing.T) {
 	ir := sampleIR()
 	ir.Steps[0].Validations[0].Label = ""
@@ -79,6 +184,20 @@ func TestCompile_NilSlicesMarshalAsEmpty(t *testing.T) {
 	// allowed_files gets .agent/ even with no authored entries.
 	if string(m["allowed_files"]) != `[".agent/"]` {
 		t.Errorf("allowed_files = %s", m["allowed_files"])
+	}
+}
+
+func TestCompile_LegacyPlanOmitsTraceability(t *testing.T) {
+	p := Compile(sampleIR())
+	if ds := CheckPlan(p); len(ds) != 0 {
+		t.Fatalf("legacy plan diagnostics: %+v", ds)
+	}
+	b, err := json.Marshal(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(b), `"requirements"`) || strings.Contains(string(b), `"criterion_ids"`) {
+		t.Fatalf("legacy plan gained traceability fields: %s", b)
 	}
 }
 

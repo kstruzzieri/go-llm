@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -16,7 +17,9 @@ import (
 
 // smokeIR is the authored PlanIR for the end-to-end -goal smoke: a single step
 // that targets src/answer.txt with a grep validation, matching the shape the
-// testdata/agentflow fixture locks.
+// testdata/agentflow fixture locks. It carries the requirement/criterion
+// mappings the authoring gate now demands, so the smoke exercises the full
+// traceable path against the real CLI.
 func smokeIR(t *testing.T) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(agentflow.PlanIR{
@@ -26,12 +29,17 @@ func smokeIR(t *testing.T) json.RawMessage {
 		RiskLevel:    "low",
 		RollbackPlan: "git checkout -- .",
 		AllowedFiles: []string{"src/*"},
+		Requirements: []agentflow.RequirementIR{{
+			ID: "REQ-1", Text: "src/answer.txt carries the expected token",
+			AcceptanceCriteria: []agentflow.CriterionIR{{ID: "AC-1", Text: "grep finds the expected token"}},
+		}},
 		Steps: []agentflow.StepIR{{
 			ID:           "P1",
 			Action:       "ensure src/answer.txt contains the expected token",
 			Files:        []string{"src/answer.txt"},
 			ExpectedDiff: []string{"answer.txt changes pending to expected"},
-			Validations:  []agentflow.GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}}},
+			CriterionIDs: []string{"AC-1"},
+			Validations:  []agentflow.GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}, CriterionIDs: []string{"AC-1"}}},
 		}},
 	})
 	if err != nil {
@@ -56,10 +64,14 @@ func TestGoalAuthor_RealCLI(t *testing.T) {
 
 	var out, errb bytes.Buffer
 	// runAgentflowAuthor builds its own client from f.agentflowSrc the same way
-	// agentflowRunnerOrSkip built runner, so both reach the same CLI.
+	// agentflowRunnerOrSkip built runner, so both reach the same CLI. stdin
+	// answers the interactive "Lock this plan? [y/N]" approval prompt.
 	f := flags{goal: "ensure the answer token", goalSet: true, agentflowSrc: src}
-	if err := runAgentflowAuthor(context.Background(), &out, &errb, nil, sess, f, dir); err != nil {
+	if err := runAgentflowAuthor(context.Background(), strings.NewReader("y\n"), &out, &errb, nil, sess, f, dir); err != nil {
 		t.Fatalf("author flow: %v\n%s", err, errb.String())
+	}
+	if !strings.Contains(out.String(), "Lock this plan?") {
+		t.Fatalf("approval prompt missing from output:\n%s", out.String())
 	}
 
 	lockedPath := filepath.Join(dir, ".agent", "plan.lock.json")

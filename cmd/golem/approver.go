@@ -36,7 +36,11 @@ func newReplApprover(lr *lineReader, out io.Writer, color bool) *replApprover {
 func (a *replApprover) Approve(ctx context.Context, call provider.ToolCall, preview string) (bool, error) {
 	isExec := call.Function.Name == "run_command"
 	isMCP := strings.HasPrefix(call.Function.Name, "mcp__")
-	if isExec {
+	isPlan := call.Function.Name == submitPlanToolName
+	if isPlan {
+		a.renderPlain(preview)
+		_, _ = fmt.Fprint(a.out, "Lock this plan? [y/N] ")
+	} else if isExec {
 		a.renderPlain(preview)
 		_, _ = fmt.Fprint(a.out, "Run this command? [y/N] ")
 	} else if isMCP {

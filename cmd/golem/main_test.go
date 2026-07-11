@@ -530,6 +530,32 @@ func TestParseFlags_GoalRejectsBlankValue(t *testing.T) {
 	}
 }
 
+func TestParseFlags_ApprovePlanLock(t *testing.T) {
+	f, err := parseFlags([]string{"-goal", "x", "-approve-plan-lock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateFlags(f); err != nil {
+		t.Fatal(err)
+	}
+	if !f.approvePlanLock {
+		t.Error("approvePlanLock not set")
+	}
+
+	for _, args := range [][]string{
+		{"-approve-plan-lock"},
+		{"-plan", "p.json", "-approve-plan-edits", "-approve-plan-gates", "-approve-plan-lock"},
+	} {
+		f, err := parseFlags(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validateFlags(f); err == nil || !strings.Contains(err.Error(), "-approve-plan-lock") {
+			t.Errorf("args %v: want -approve-plan-lock scope error, got %v", args, err)
+		}
+	}
+}
+
 func TestApplyGoalMode_DisablesAmbientStateButKeepsProjectContext(t *testing.T) {
 	f, _ := applyGoalMode(flags{goalSet: true, agentMemory: true, feedback: true, feedbackDB: "x.db"})
 	if !f.noSession || !f.noCompress || !f.noMemory || !f.noAutoIndex || !f.noRag || f.agentMemory {
