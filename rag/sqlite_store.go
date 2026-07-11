@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -27,6 +28,11 @@ var (
 type SQLiteStore struct {
 	db         *sql.DB
 	behavioral BehavioralWeighter // optional; nil => behavioral signal inert
+	immutable  bool
+
+	snapshotMu   sync.Mutex
+	resident     *sqliteSnapshot
+	snapshotLoad *sqliteSnapshotLoad
 	// recordStage is used by same-package benchmarks to attribute retrieval
 	// time without adding a public tracing API. Nil in production. It is not
 	// synchronized: it must be set before the store is used and invoked from a
@@ -115,7 +121,7 @@ func OpenSQLiteStoreReadOnly(dbPath string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("rag: open sqlite read-only %q: %w", dbPath, err)
 	}
-	return &SQLiteStore{db: db}, nil
+	return &SQLiteStore{db: db, immutable: true}, nil
 }
 
 // SetBehavioralWeighter installs an optional behavioral weighter consumed by
@@ -144,6 +150,14 @@ func (s *SQLiteStore) DB() *sql.DB {
 // value exists. Returned IDs are also deterministic across SQLite versions,
 // which matters for tests that assert returned IDs.
 func (s *SQLiteStore) ProbeVectorSpaces(ctx context.Context) (VectorSpaceProbe, error) {
+	if s.immutable {
+		snapshot, err := s.sqliteSnapshot(ctx)
+		if err != nil {
+			return VectorSpaceProbe{}, err
+		}
+		return cloneVectorSpaceProbe(snapshot.probe), nil
+	}
+
 	stopProbe := s.stageTimer("vector_space_probe_validation")
 	var minID string
 	err := s.db.QueryRowContext(ctx, `
@@ -472,6 +486,10 @@ func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source
 
 // Search finds the top-k most similar chunks using brute-force cosine similarity.
 func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k int) ([]SearchResult, error) {
+	if s.immutable {
+		return s.searchSnapshot(ctx, queryEmbedding, k)
+	}
+
 	stopScan := s.stageTimer("dense_scan_decode_hydrate_semantic")
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, content, source, start_line, end_line, language, metadata, embedding, stable_key FROM chunks`)

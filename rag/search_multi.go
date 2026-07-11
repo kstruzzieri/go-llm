@@ -30,6 +30,9 @@ const (
 // score breakdowns.
 func (s *SQLiteStore) SearchMulti(ctx context.Context, queryEmbedding []float64, query string,
 	k int, qCtx QueryContext) ([]ScoredResult, error) {
+	if s.immutable {
+		return s.searchMultiSnapshot(ctx, queryEmbedding, query, k, qCtx)
+	}
 
 	// Load all chunks with embeddings.
 	chunks, embeddings, err := s.loadChunksWithEmbeddings(ctx)
