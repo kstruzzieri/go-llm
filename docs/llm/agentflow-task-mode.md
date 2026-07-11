@@ -1,6 +1,7 @@
-# AgentFlow task mode
+# AgentFlow planning and task modes
 
-Golem task mode (`-plan`) runs a locked AgentFlow plan step-by-step in a
+Golem planning mode (`-goal`) authors and locks an AgentFlow plan, then stops.
+Task mode (`-plan`) separately runs that locked plan step-by-step in a
 proof-carrying, single-writer P0 loop. AgentFlow owns durable proof state on
 disk; Golem owns the model loop and the in-process guards that keep the model
 inside what the plan allows. The two are separate, cooperating processes:
@@ -16,6 +17,23 @@ AgentFlow never runs a model, and Golem never writes proof state directly.
 | Command-gate execution and receipts (`run`) | The pre-write scope guard mirroring the step's effective scope |
 | Drift detection (`finish-run` audit) | The fatal-on-unreceipted-edit journal |
 | The proof pack — durable, model-opaque `.agent/` state | Recovery reporting |
+
+## Planning mode
+
+Run `golem -goal "<text>" -root <workspace>` to have the local model inspect the
+workspace with read-only file tools, submit a structured plan, and lock it as
+`.agent/plan.lock.json`. Golem prints the separate `-plan` command after the
+lock succeeds; `-goal` never executes the plan or edits source files. It refuses
+to replace a locked plan, a non-empty draft, or an unrecognized plan file.
+
+The #277 local-model spike locked 48/48 toy plans against AgentFlow 0.3.0 on the
+first try with both a 9B dense model and a 35B-A3B MoE model. The load-bearing
+request settings were thinking disabled and at least about 3,500 output tokens;
+a worked example was not needed. Planning mode applies those settings only to
+its model request, preserves a larger caller-provided output budget (including
+a `-output-reserve` above the floor; a smaller nonzero reserve is raised to
+it), and keeps one bounded repair submission after a rejected first plan.
+Re-run the spike if the AgentFlow validator contract tightens.
 
 ## Enabling task mode
 
@@ -74,10 +92,9 @@ which denies the model any access under `.agent/` unconditionally, whatever
 
 ## Scope and deferrals (P0)
 
-P0 executes a plan that has already been authored and provided to Golem, with
-a single writer driving one step at a time. Deferred to later phases:
+P0 executes a locked plan with a single writer driving one step at a time.
+Deferred to later phases:
 
-- Plan authoring or drafting by a model — P0 only consumes an existing plan.
 - Semantic verification — P0 gates are mechanical, command-based checks only
   (`kind: command`); there is no model-judged review of a step's output.
 - Resuming an interrupted run.

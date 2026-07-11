@@ -16,6 +16,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/provider"
 )
 
 // afLocker is the narrow agentflow surface the planner needs; *agentflow.Client
@@ -50,8 +51,28 @@ func newSubmitPlanTool(sess *authorSession) *submitPlanTool {
 
 const (
 	maxPlanSubmissions = 2
+	minPlannerOutput   = 3500
 	lockedPlanRel      = ".agent/plan.lock.json"
 )
+
+func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
+	off := false
+	options.NumPredict = max(options.NumPredict, minPlannerOutput)
+	options.Think = &off
+	options.ThinkEffort = ""
+	return options
+}
+
+// plannerBudget floors a nonzero OutputReserve at minPlannerOutput: the agent
+// layer forwards Budget.OutputReserve over Options.NumPredict, so an
+// -output-reserve below the floor would silently undo plannerModelOptions.
+// Zero stays zero — no override fires and the NumPredict floor holds.
+func plannerBudget(budget agent.Budget) agent.Budget {
+	if budget.OutputReserve > 0 {
+		budget.OutputReserve = max(budget.OutputReserve, minPlannerOutput)
+	}
+	return budget
+}
 
 func (t *submitPlanTool) Spec() agent.ToolSpec {
 	return agent.ToolSpec{
@@ -368,8 +389,8 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		System:   system,
 		Tools:    planTools,
 		MaxSteps: sess.maxSteps,
-		Budget:   sess.budget,
-		Options:  sess.modelOptions,
+		Budget:   plannerBudget(sess.budget),
+		Options:  plannerModelOptions(sess.modelOptions),
 	}
 	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock)))
 	budgetExhausted := as.attempts >= maxPlanSubmissions
