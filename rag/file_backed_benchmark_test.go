@@ -124,6 +124,15 @@ func reportFileBenchSize(b *testing.B, size int64) {
 	b.ReportMetric(float64(size), "db-bytes")
 }
 
+func reportFileBenchSnapshot(b *testing.B, store *SQLiteStore) {
+	store.snapshotMu.Lock()
+	snapshot := store.resident
+	store.snapshotMu.Unlock()
+	if snapshot != nil {
+		b.ReportMetric(float64(len(snapshot.vectors)*8), "snapshot-vector-bytes")
+	}
+}
+
 func reportStages(b *testing.B, stages map[string]time.Duration) {
 	for name, elapsed := range stages {
 		b.ReportMetric(float64(elapsed.Nanoseconds())/float64(b.N), "ns/"+name)
@@ -171,6 +180,7 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 						if err != nil {
 							b.Fatal(err)
 						}
+						reportFileBenchSnapshot(b, store)
 						if err := store.Close(); err != nil {
 							b.Fatal(err)
 						}
@@ -189,6 +199,7 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 						b.Fatal(err)
 					}
 					b.ReportAllocs()
+					reportFileBenchSnapshot(b, store)
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
 						var err error
@@ -223,6 +234,7 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 					}
 					clear(stages)
 					b.ReportAllocs()
+					reportFileBenchSnapshot(b, store)
 					b.ResetTimer()
 					for i := 0; i < b.N; i++ {
 						var err error
@@ -255,6 +267,7 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 					b.Fatal(err)
 				}
 				b.ReportAllocs()
+				reportFileBenchSnapshot(b, store)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					if _, err := retriever.Retrieve(context.Background(), queryText, 5); err != nil {
@@ -287,6 +300,7 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 				}
 				clear(stages)
 				b.ReportAllocs()
+				reportFileBenchSnapshot(b, store)
 				b.ResetTimer()
 				for i := 0; i < b.N; i++ {
 					if _, err := retriever.Retrieve(context.Background(), queryText, 5); err != nil {
@@ -313,6 +327,7 @@ func BenchmarkFileBackedRAG(b *testing.B) {
 				if err != nil {
 					b.Fatal(err)
 				}
+				reportFileBenchSnapshot(b, store)
 				b.ReportAllocs()
 				b.StartTimer()
 				for i := 0; i < b.N; i++ {
