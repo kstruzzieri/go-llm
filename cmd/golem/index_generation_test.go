@@ -141,10 +141,10 @@ func TestResolveActiveGeneration_RejectsInvalidMetadataAndDatabase(t *testing.T)
 				if _, err := store.DB().Exec(`UPDATE chunks SET vector_space_id = 'other/model' WHERE rowid = (SELECT MIN(rowid) FROM chunks)`); err != nil {
 					t.Fatal(err)
 				}
-				vectorJSON := "[1" + strings.Repeat(",0", 767) + "]"
-				if _, err := store.DB().Exec(`
-					INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
-					VALUES ('mixed', 'x', 'mixed.go', 1, 1, 'go', '{}', ?, 1, '', '', 'ollama/nomic')`, vectorJSON); err != nil {
+				if err := store.Store(context.Background(), []rag.Chunk{{ID: "mixed", Content: "x", Source: "mixed.go", StartLine: 1, EndLine: 1, Language: "go"}}, [][]float64{realisticTestVector()}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.DB().Exec(`UPDATE chunks SET vector_space_id = 'ollama/nomic' WHERE id = 'mixed'`); err != nil {
 					t.Fatal(err)
 				}
 				if err := store.Close(); err != nil {

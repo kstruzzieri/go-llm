@@ -277,6 +277,59 @@ func TestRunAutoIndex_InvalidSidecarRebuildsAndEndsReady(t *testing.T) {
 	}
 }
 
+func TestRunAutoIndex_LegacyEmbeddingFormatRebuildsNewGenerationWithoutMutatingActive(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	seedAutoIndexStore(t, dbPath, "ollama/nomic", "workspace:k")
+	rewriteEmbeddingsAsLegacyJSON(t, dbPath)
+	wantDB, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSidecar, err := os.ReadFile(sidecarPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+	runAutoIndex(context.Background(), job)
+	if got := retrieveStateOf(job.ready); got != retrieveReady {
+		t.Fatalf("state = %d, want ready; notices = %v", got, notices)
+	}
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.legacy || active.dbPath == dbPath {
+		t.Fatalf("active generation = %+v, want new immutable generation", active)
+	}
+	store, err := rag.OpenSQLiteStoreReadOnly(active.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats, statsErr := store.Stats(context.Background())
+	closeErr := store.Close()
+	if statsErr != nil || closeErr != nil {
+		t.Fatalf("packed generation stats/close = %v/%v", statsErr, closeErr)
+	}
+	if stats.EmbeddingFormat != rag.EmbeddingFormatPackedFloat32 {
+		t.Fatalf("active format = %q", stats.EmbeddingFormat)
+	}
+	gotDB, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotSidecar, err := os.ReadFile(sidecarPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotDB, wantDB) || !bytes.Equal(gotSidecar, wantSidecar) {
+		t.Fatal("legacy active DB or sidecar was mutated")
+	}
+}
+
 func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")

@@ -261,13 +261,18 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 		}
 		return cause
 	}
-	probe, err := store.ProbeVectorSpaces(ctx)
-	if err != nil {
-		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: probe index db %q: %w", dbPath, err))
-	}
 	stats, err := store.Stats(ctx)
 	if err != nil {
 		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: read index stats %q: %w", dbPath, err))
+	}
+	if stats.EmbeddingFormat != rag.EmbeddingFormatEmpty && stats.EmbeddingFormat != rag.EmbeddingFormatPackedFloat32 {
+		return nil, "", vsDecision{}, stats, closeStore(fmt.Errorf(
+			"golem: rag-db %q uses embedding format %s; explicit indexes are read-only and will not be migrated; rebuild it deliberately or remove -rag-db to use the packed auto index",
+			dbPath, stats.EmbeddingFormat))
+	}
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: probe index db %q: %w", dbPath, err))
 	}
 	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
 	if !dec.register {

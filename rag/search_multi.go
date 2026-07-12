@@ -184,11 +184,13 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 
 	var chunks []Chunk
 	var embeddings [][]float64
+	var decoder corpusEmbeddingDecoder
 	for rows.Next() {
 		var chunk Chunk
-		var metaJSON, embJSON string
+		var metaJSON string
+		var encodedEmbedding []byte
 		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
-			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &embJSON, &chunk.StableKey); err != nil {
+			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &encodedEmbedding, &chunk.StableKey); err != nil {
 			return nil, nil, fmt.Errorf("rag: scan chunk: %w", err)
 		}
 
@@ -197,9 +199,9 @@ func (s *SQLiteStore) loadChunksWithEmbeddings(ctx context.Context) ([]Chunk, []
 			return nil, nil, fmt.Errorf("rag: unmarshal metadata for chunk %q: %w", chunk.ID, err)
 		}
 
-		var embedding []float64
-		if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
-			return nil, nil, fmt.Errorf("rag: unmarshal embedding: %w", err)
+		embedding, err := decoder.decode(encodedEmbedding, chunk.ID)
+		if err != nil {
+			return nil, nil, err
 		}
 
 		chunks = append(chunks, chunk)

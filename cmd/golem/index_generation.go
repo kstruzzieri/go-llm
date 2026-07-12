@@ -448,6 +448,9 @@ func validateGenerationDatabase(ctx context.Context, gen indexGeneration, fullIn
 	if err != nil {
 		return fmt.Errorf("golem: generation database stats: %w", err)
 	}
+	if stats.EmbeddingFormat != rag.EmbeddingFormatPackedFloat32 {
+		return fmt.Errorf("golem: generation database embedding format %q is unsupported; rebuild as %s", stats.EmbeddingFormat, rag.EmbeddingFormatPackedFloat32)
+	}
 	if stats.TotalSources != gen.metadata.SourceCount {
 		return fmt.Errorf("golem: generation source count %d does not match metadata %d", stats.TotalSources, gen.metadata.SourceCount)
 	}
