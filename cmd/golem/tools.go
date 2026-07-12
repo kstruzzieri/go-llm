@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -234,40 +235,43 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 // fails to open. feedbackWarn is non-empty when feedback failed to open, in which
 // case retrieval still registers and ranks neutrally.
 //
-// The opened store lives for the process on success (closed by the OS at exit).
-func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, feedbackDB string) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
+// The returned retrievalReader owns and closes the opened store.
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, feedbackDB string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
 	if cfg == nil || router == nil {
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("no provider configured for embeddings")
+		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
 	}
 	embChain, err := embeddingChain(cfg)
 	if err != nil {
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, err
+		return nil, "", vsDecision{}, rag.StoreStats{}, err
 	}
 	info, err := os.Stat(dbPath)
 	if err != nil {
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q: %w", dbPath, err)
+		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q: %w", dbPath, err)
 	}
 	if info.IsDir() {
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("rag-db %q is a directory, not a SQLite file", dbPath)
+		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: rag-db %q is a directory, not a SQLite file", dbPath)
 	}
 	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 	if err != nil {
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("open index db %q: %w", dbPath, err)
+		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: open index db %q: %w", dbPath, err)
+	}
+	closeStore := func(cause error) error {
+		if closeErr := store.Close(); closeErr != nil {
+			return errors.Join(cause, fmt.Errorf("golem: close index db %q: %w", dbPath, closeErr))
+		}
+		return cause
 	}
 	probe, err := store.ProbeVectorSpaces(ctx)
 	if err != nil {
-		_ = store.Close()
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("probe index db %q: %w", dbPath, err)
+		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: probe index db %q: %w", dbPath, err))
 	}
 	stats, err := store.Stats(ctx)
 	if err != nil {
-		_ = store.Close()
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("read index stats %q: %w", dbPath, err)
+		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: read index stats %q: %w", dbPath, err))
 	}
 	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
 	if !dec.register {
-		_ = store.Close()
-		return nil, nil, "", dec, stats, nil
+		return nil, "", dec, stats, closeStore(nil)
 	}
 	queryChain := embChain
 	queryModel := embChain[0]
@@ -282,8 +286,7 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 	}, queryChain)
 	retr, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel(queryModel))
 	if err != nil {
-		_ = store.Close()
-		return nil, nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("build retriever for %q: %w", dbPath, err)
+		return nil, "", vsDecision{}, rag.StoreStats{}, closeStore(fmt.Errorf("golem: build retriever for %q: %w", dbPath, err))
 	}
 	var feedbackHandle *behavioralWeighterHandle
 	feedbackWarn := ""
@@ -295,7 +298,8 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 			feedbackWarn = warn
 		}
 	}
-	return &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}, feedbackHandle, feedbackWarn, dec, stats, nil
+	tool := &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}
+	return newOwnedRetrievalReader(tool, store, feedbackHandle), feedbackWarn, dec, stats, nil
 }
 
 // effectClassName renders an agent.EffectClass bitset for /tools. The agent

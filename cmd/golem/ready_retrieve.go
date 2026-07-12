@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -36,10 +38,61 @@ const warmingRetrieveMessage = "retrieve: the workspace index is warming in the 
 type readyRetrieve struct {
 	mu       sync.RWMutex
 	state    retrieveReadyState
-	tool     agent.Tool
-	feedback *behavioralWeighterHandle
+	reader   *retrievalReader
 	message  string
-	closed   bool // close() ran; a later markReady must not strand a handle
+	closed   bool // close() ran; a later install must retire the incoming reader
+	retiring sync.WaitGroup
+	closeErr error
+}
+
+// retrievalReader owns one immutable generation's model-facing tool and all
+// resources that must outlive its admitted calls. readyRetrieve serializes
+// WaitGroup admission against replacement; closeAfterDrain is therefore never
+// concurrent with a new Add for the retired reader.
+type retrievalReader struct {
+	tool      agent.Tool
+	store     interface{ Close() error }
+	feedback  *behavioralWeighterHandle
+	inflight  sync.WaitGroup
+	closeOnce sync.Once
+	closeFn   func() error
+	closeErr  error
+}
+
+func newRetrievalReader(tool agent.Tool, closeFn func() error) *retrievalReader {
+	return &retrievalReader{tool: tool, closeFn: closeFn}
+}
+
+func newOwnedRetrievalReader(tool agent.Tool, store interface{ Close() error }, feedback *behavioralWeighterHandle) *retrievalReader {
+	reader := &retrievalReader{tool: tool, store: store, feedback: feedback}
+	reader.closeFn = func() error {
+		var closeErr error
+		if feedback != nil && feedback.db != nil {
+			if err := feedback.db.Close(); err != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("golem: close behavioral feedback database: %w", err))
+			}
+		}
+		if store != nil {
+			if err := store.Close(); err != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("golem: close retrieval generation store: %w", err))
+			}
+		}
+		return closeErr
+	}
+	return reader
+}
+
+func (r *retrievalReader) closeAfterDrain() error {
+	if r == nil {
+		return nil
+	}
+	r.inflight.Wait()
+	r.closeOnce.Do(func() {
+		if r.closeFn != nil {
+			r.closeErr = r.closeFn()
+		}
+	})
+	return r.closeErr
 }
 
 // newReadyRetrieve returns a wrapper in the warming state; warmingMessage is
@@ -57,12 +110,49 @@ func (r *readyRetrieve) Effect() agent.Effect { return agenttools.Retrieve{}.Eff
 // file tools instead of abandoning tool use.
 func (r *readyRetrieve) Invoke(ctx context.Context, args json.RawMessage) (agent.ToolResult, error) {
 	r.mu.RLock()
-	state, tool, message := r.state, r.tool, r.message
+	state, reader, message := r.state, r.reader, r.message
+	if state == retrieveReady && reader != nil {
+		reader.inflight.Add(1)
+	}
 	r.mu.RUnlock()
-	if state == retrieveReady {
-		return tool.Invoke(ctx, args)
+	if state == retrieveReady && reader != nil {
+		defer reader.inflight.Done()
+		return reader.tool.Invoke(ctx, args)
 	}
 	return agent.ToolResult{Content: message}, nil
+}
+
+// install publishes reader for new calls and retires the previous generation
+// after its already-admitted calls finish. It returns false when shutdown or a
+// terminal pre-ready failure rejects the reader; rejected readers are closed.
+func (r *readyRetrieve) install(reader *retrievalReader, message string) bool {
+	if reader == nil || reader.tool == nil {
+		if reader != nil {
+			r.recordCloseError(reader.closeAfterDrain())
+		}
+		return false
+	}
+	r.mu.Lock()
+	if r.closed || r.state == retrieveFailed {
+		r.mu.Unlock()
+		r.recordCloseError(reader.closeAfterDrain())
+		return false
+	}
+	old := r.reader
+	r.reader = reader
+	r.state = retrieveReady
+	r.message = message
+	if old != nil {
+		r.retiring.Add(1)
+	}
+	r.mu.Unlock()
+	if old != nil {
+		go func() {
+			defer r.retiring.Done()
+			r.recordCloseError(old.closeAfterDrain())
+		}()
+	}
+	return true
 }
 
 // markReady installs the opened retriever, records the ready message (kept
@@ -72,22 +162,14 @@ func (r *readyRetrieve) Invoke(ctx context.Context, args json.RawMessage) (agent
 // terminal transition wins: a late markReady after markFailed is ignored so
 // racing outcomes cannot flap the tool.
 func (r *readyRetrieve) markReady(tool agent.Tool, message string, feedback *behavioralWeighterHandle) {
-	r.mu.Lock()
-	if r.state == retrieveWarming {
-		r.state = retrieveReady
-		r.tool = tool
-		r.message = message
-		if !r.closed {
-			r.feedback = feedback
-			feedback = nil // ownership transferred to close()
+	r.install(newRetrievalReader(tool, func() error {
+		if feedback != nil && feedback.db != nil {
+			if err := feedback.db.Close(); err != nil {
+				return fmt.Errorf("golem: close behavioral feedback database: %w", err)
+			}
 		}
-	}
-	r.mu.Unlock()
-	// Not installed (lost the transition race, or close() already ran during
-	// shutdown): nothing will ever release the handle, so release it here.
-	if feedback != nil && feedback.db != nil {
-		_ = feedback.db.Close()
-	}
+		return nil
+	}), message)
 }
 
 // markFailed records the terminal failure message served to the model. First
@@ -102,15 +184,32 @@ func (r *readyRetrieve) markFailed(message string) {
 	r.message = message
 }
 
+func (r *readyRetrieve) hasReader() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.reader != nil
+}
+
 // close releases the retained feedback DB handle. Nil-safe and idempotent so
 // main can defer it unconditionally in auto mode.
-func (r *readyRetrieve) close() {
+func (r *readyRetrieve) recordCloseError(err error) {
+	if err == nil {
+		return
+	}
 	r.mu.Lock()
-	f := r.feedback
-	r.feedback = nil
+	r.closeErr = errors.Join(r.closeErr, err)
+	r.mu.Unlock()
+}
+
+func (r *readyRetrieve) close() error {
+	r.mu.Lock()
+	reader := r.reader
+	r.reader = nil
 	r.closed = true
 	r.mu.Unlock()
-	if f != nil && f.db != nil {
-		_ = f.db.Close()
-	}
+	r.recordCloseError(reader.closeAfterDrain())
+	r.retiring.Wait()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeErr
 }

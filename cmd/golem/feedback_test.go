@@ -84,18 +84,21 @@ func TestEnableRetrieveFeedbackValid(t *testing.T) {
 
 	feedbackDB := filepath.Join(dataDir, "feedback", "fb.db")
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
-		autoDBPath:      dbPath,
-		autoSidecarPath: sidecarPath(dbPath),
-		workspaceID:     "workspace:k",
-		feedbackDB:      feedbackDB,
+		autoDBPath:  dbPath,
+		workspaceID: "workspace:k",
+		feedbackDB:  feedbackDB,
 	})
 	if got.tool == nil {
 		t.Fatalf("retrieve should register; warns=%v", got.warns)
 	}
-	if got.feedback == nil || got.feedback.db == nil || got.feedback.weighter == nil {
-		t.Fatalf("feedback handle not returned: %#v", got.feedback)
+	if got.reader == nil || got.reader.feedback == nil || got.reader.feedback.db == nil || got.reader.feedback.weighter == nil {
+		t.Fatalf("feedback handle not retained by reader: %#v", got.reader)
 	}
-	defer func() { _ = got.feedback.db.Close() }()
+	defer func() {
+		if err := got.reader.closeAfterDrain(); err != nil {
+			t.Error(err)
+		}
+	}()
 }
 
 func TestEnableRetrieveFeedbackFailsOpen(t *testing.T) {
@@ -105,15 +108,14 @@ func TestEnableRetrieveFeedbackFailsOpen(t *testing.T) {
 	removeSQLiteSidecars(t, dbPath)
 
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
-		autoDBPath:      dbPath,
-		autoSidecarPath: sidecarPath(dbPath),
-		workspaceID:     "workspace:k",
-		feedbackDB:      t.TempDir(), // directory path: invalid SQLite file target
+		autoDBPath:  dbPath,
+		workspaceID: "workspace:k",
+		feedbackDB:  t.TempDir(), // directory path: invalid SQLite file target
 	})
 	if got.tool == nil {
 		t.Fatalf("retrieve should remain registered when feedback fails open; warns=%v", got.warns)
 	}
-	if got.feedback != nil {
+	if got.reader != nil && got.reader.feedback != nil {
 		t.Fatalf("bad feedback DB should not return a handle")
 	}
 	joined := strings.Join(got.warns, "\n")

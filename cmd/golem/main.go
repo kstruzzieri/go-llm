@@ -480,10 +480,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	thinkOpts, thinkLine := resolveThinkOptions(ctx, bundle.Models, plan.chain, f.think)
 
 	autoDBPath, autoWorkspaceID, autoErr := indexDBPathForWorkspace(os.Getenv, root)
-	autoSidecar := ""
-	if autoErr == nil {
-		autoSidecar = sidecarPath(autoDBPath)
-	} else if !f.noRag && f.ragDB == "" {
+	if autoErr != nil && !f.noRag && f.ragDB == "" {
 		warns = append(warns, "retrieve auto-index disabled: "+autoErr.Error())
 	}
 	feedbackDB := ""
@@ -506,26 +503,43 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	retrieveRequested := f.ragDB != "" || f.noRag
 	var ready *readyRetrieve
 	if autoIndexEnabled(f, autoErr, embChainErr) {
-		// Default REPL auto mode: register the warming wrapper now; the
-		// background job (launched after the startup notices below) flips it.
+		// Install a valid prior immutable generation before the background
+		// refresh starts. The wrapper remains warming only on a true first run.
 		ready = newReadyRetrieve(warmingRetrieveMessage)
-		defer ready.close()
+		defer func() {
+			if closeErr := ready.close(); closeErr != nil {
+				_, _ = fmt.Fprintln(stderr, closeErr)
+			}
+		}()
 		retrieve = ready
-		retrieveLine = "retrieve: auto-index warming in background"
+		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
+			autoDBPath:  autoDBPath,
+			workspaceID: autoWorkspaceID, feedbackDB: feedbackDB,
+		})
+		warns = append(warns, rr.warns...)
+		if rr.reader != nil {
+			ready.install(rr.reader, rr.line)
+			retrieveLine = rr.line + "; refresh in background"
+		} else {
+			retrieveLine = "retrieve: auto-index warming in background"
+		}
 		// Defensive only: the non-nil wrapper already makes retrieveOmitted
 		// false, which is what actually suppresses the generic no-index notice.
 		retrieveRequested = true
 	} else {
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
-			noRag:           f.noRag,
-			ragDB:           f.ragDB,
-			autoDBPath:      autoDBPath,
-			autoSidecarPath: autoSidecar,
-			workspaceID:     autoWorkspaceID,
-			feedbackDB:      feedbackDB,
+			noRag:       f.noRag,
+			ragDB:       f.ragDB,
+			autoDBPath:  autoDBPath,
+			workspaceID: autoWorkspaceID,
+			feedbackDB:  feedbackDB,
 		})
-		if rr.feedback != nil && rr.feedback.db != nil {
-			defer func() { _ = rr.feedback.db.Close() }()
+		if rr.reader != nil {
+			defer func() {
+				if closeErr := rr.reader.closeAfterDrain(); closeErr != nil {
+					_, _ = fmt.Fprintln(stderr, closeErr)
+				}
+			}()
 		}
 		retrieve = rr.tool
 		warns = append(warns, rr.warns...)
@@ -774,21 +788,31 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		// Launched after startup construction succeeds so async notices never
 		// interleave the synchronous startup block, and setup errors do not race
 		// the background job against deferred provider cleanup.
-		go runAutoIndex(ctx, autoIndexJob{
-			root:        root,
-			dbPath:      autoDBPath,
-			sidecarPath: autoSidecar,
-			workspaceID: autoWorkspaceID,
-			cfg:         bundle.Config,
-			router:      bundle.Router,
-			embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
-				return bundle.Router.Route(rc, rreq)
-			}, embChain),
-			embChain:   embChain,
-			feedbackDB: feedbackDB,
-			ready:      ready,
-			notice:     notice,
-		})
+		autoCtx, cancelAuto := context.WithCancel(ctx)
+		autoDone := make(chan struct{})
+		go func() {
+			defer close(autoDone)
+			runAutoIndex(autoCtx, autoIndexJob{
+				root:        root,
+				dbPath:      autoDBPath,
+				workspaceID: autoWorkspaceID,
+				cfg:         bundle.Config,
+				router:      bundle.Router,
+				embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
+					return bundle.Router.Route(rc, rreq)
+				}, embChain),
+				embChain:   embChain,
+				feedbackDB: feedbackDB,
+				ready:      ready,
+				notice:     notice,
+			})
+		}()
+		// Registered after the reader/provider defers, so shutdown first
+		// cancels and joins the writer while all of its dependencies are live.
+		defer func() {
+			cancelAuto()
+			<-autoDone
+		}()
 	}
 
 	if f.goalSet {

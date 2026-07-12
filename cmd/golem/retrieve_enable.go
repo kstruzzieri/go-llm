@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -14,12 +15,11 @@ import (
 // retrieveOpts selects how retrieve is enabled. Exactly one of the modes
 // applies: noRag, explicit ragDB, or auto-discovery (autoDBPath+sidecar).
 type retrieveOpts struct {
-	noRag           bool
-	ragDB           string // explicit -rag-db path
-	autoDBPath      string // per-workspace index DB path
-	autoSidecarPath string // per-workspace sidecar path
-	workspaceID     string // workspace:<sha16> for sidecar validation
-	feedbackDB      string // resolved feedback DB path; "" => behavioral ranking off
+	noRag       bool
+	ragDB       string // explicit -rag-db path
+	autoDBPath  string // per-workspace index DB path
+	workspaceID string // workspace:<sha16> for sidecar validation
+	feedbackDB  string // resolved feedback DB path; "" => behavioral ranking off
 }
 
 // retrieveResult is the startup outcome. line is the positive disclosure to show
@@ -29,7 +29,7 @@ type retrieveOpts struct {
 // auto index). It stays false only when there genuinely is no usable index.
 type retrieveResult struct {
 	tool           agent.Tool
-	feedback       *behavioralWeighterHandle
+	reader         *retrievalReader
 	line           string
 	warns          []string
 	suppressNotice bool
@@ -44,40 +44,38 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 
 	if opts.ragDB != "" {
-		tool, feedback, feedbackWarn, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.feedbackDB)
+		reader, feedbackWarn, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.feedbackDB)
 		if err != nil {
 			return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 		}
-		if tool == nil {
+		if reader == nil {
 			return retrieveResult{warns: []string{explicitMismatchWarning(opts.ragDB, dec, expected)}, suppressNotice: true}
 		}
 		warns := legacyWarnIfAny(dec)
 		if feedbackWarn != "" {
 			warns = append(warns, feedbackWarn)
 		}
-		return retrieveResult{tool: tool, feedback: feedback, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
+		return retrieveResult{tool: reader.tool, reader: reader, line: "retrieve: rag-db " + opts.ragDB, suppressNotice: true,
 			warns: warns}
 	}
 
-	// Auto-discovery: require both the DB and a valid sidecar.
-	if _, err := os.Stat(opts.autoDBPath); err != nil {
-		return retrieveResult{} // no index; generic notice applies
-	}
-	sc, err := readSidecar(opts.autoSidecarPath)
+	// Auto-discovery resolves the atomic pointer first and falls back to the
+	// immutable legacy DB/sidecar pair only when no pointer exists.
+	gen, err := resolveActiveGeneration(ctx, opts.autoDBPath, opts.workspaceID)
 	if err != nil {
-		return retrieveResult{} // missing/corrupt sidecar => not trusted; generic notice
+		if errors.Is(err, os.ErrNotExist) {
+			return retrieveResult{}
+		}
+		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
-	if verr := validateSidecar(sc, opts.workspaceID); verr != nil {
-		return retrieveResult{}
-	}
-	tool, feedback, feedbackWarn, dec, stats, err := buildGatedRetriever(ctx, cfg, router, opts.autoDBPath, expected, opts.feedbackDB)
+	reader, feedbackWarn, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.feedbackDB)
 	if err != nil {
 		// An index exists but could not be opened/probed: a specific warning
 		// already explains why, so suppress the contradictory generic "no index"
 		// notice (mirrors the explicit -rag-db branches above).
 		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
-	if tool == nil {
+	if reader == nil {
 		// Index exists but the vector-space gate disabled it: the mismatch warning
 		// stands alone; suppress the generic "no index" notice.
 		return retrieveResult{warns: []string{autoMismatchWarning(dec, expected)}, suppressNotice: true}
@@ -86,7 +84,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	if feedbackWarn != "" {
 		warns = append(warns, feedbackWarn)
 	}
-	return retrieveResult{tool: tool, feedback: feedback, line: autoLine(sc, stats), warns: warns}
+	return retrieveResult{tool: reader.tool, reader: reader, line: autoGenerationLine(gen.metadata, stats), warns: warns}
 }
 
 // expectedVectorSpaces returns the provider-qualified vsid set the current
@@ -106,11 +104,11 @@ func legacyWarnIfAny(dec vsDecision) []string {
 	return nil
 }
 
-func autoLine(sc indexSidecar, stats rag.StoreStats) string {
-	if sc.Status == "partial" {
-		return fmt.Sprintf("retrieve: auto index is partial, %d sources, %d errors from last run; rerun \"golem index\"", stats.TotalSources, sc.ErrorCount)
+func autoGenerationLine(metadata generationMetadata, stats rag.StoreStats) string {
+	if metadata.Status == "partial" {
+		return fmt.Sprintf("retrieve: auto index is partial, %d sources, %d errors from last run; rerun \"golem index\"", stats.TotalSources, metadata.ErrorCount)
 	}
-	return fmt.Sprintf("retrieve: auto index, %d sources, %s, updated %s", stats.TotalSources, sc.VectorSpaceID, sc.IndexedAt)
+	return fmt.Sprintf("retrieve: auto index, %d sources, %s, updated %s", stats.TotalSources, metadata.VectorSpaceID, metadata.IndexedAt)
 }
 
 func autoMismatchWarning(dec vsDecision, expected []string) string {

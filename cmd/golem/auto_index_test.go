@@ -3,14 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
-	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -23,11 +25,15 @@ func TestProbeAutoIndexEmbedder_CallsWithOneInputAndModel(t *testing.T) {
 		gotModel = model
 		gotInputs = inputs
 		_, hadDeadline = ctx.Deadline()
-		return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+		return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}, VectorSpaceID: "ollama/nomic"}, nil
 	})
 
-	if err := probeAutoIndexEmbedder(context.Background(), emb, "ollama/nomic"); err != nil {
+	actual, err := probeAutoIndexEmbedder(context.Background(), emb, "ollama/nomic")
+	if err != nil {
 		t.Fatalf("probe: %v", err)
+	}
+	if actual != "ollama/nomic" {
+		t.Fatalf("actual vector space = %q", actual)
 	}
 	if gotModel != "ollama/nomic" {
 		t.Errorf("model = %q, want ollama/nomic", gotModel)
@@ -44,7 +50,7 @@ func TestProbeAutoIndexEmbedder_EmbedErrorIsOrdinaryError(t *testing.T) {
 	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
 		return rag.EmbedResult{}, errTestEmbedCmd
 	})
-	err := probeAutoIndexEmbedder(context.Background(), emb, "m")
+	_, err := probeAutoIndexEmbedder(context.Background(), emb, "m")
 	if err == nil {
 		t.Fatal("embed failure must fail the probe")
 	}
@@ -63,10 +69,19 @@ func TestProbeAutoIndexEmbedder_WrongVectorCount(t *testing.T) {
 			emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
 				return rag.EmbedResult{Embeddings: vecs}, nil
 			})
-			if err := probeAutoIndexEmbedder(context.Background(), emb, "m"); err == nil {
+			if _, err := probeAutoIndexEmbedder(context.Background(), emb, "m"); err == nil {
 				t.Fatal("probe must require exactly one vector")
 			}
 		})
+	}
+}
+
+func TestProbeAutoIndexEmbedder_RejectsMissingVectorSpaceIdentity(t *testing.T) {
+	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}}, nil
+	})
+	if _, err := probeAutoIndexEmbedder(context.Background(), emb, "m"); err == nil || !strings.Contains(err.Error(), "vector-space identity") {
+		t.Fatalf("error = %v, want missing vector-space identity", err)
 	}
 }
 
@@ -84,89 +99,13 @@ func seedAutoIndexStore(t *testing.T, dbPath, vsid, workspaceID string) {
 		sidecarPath: sidecarPath(dbPath), workspaceID: workspaceID,
 		requestedModel: vsid, out: &out,
 	})
-	_ = store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if res.exitErr != nil {
 		t.Fatalf("seed index failed: %v\n%s", res.exitErr, out.String())
 	}
 	removeSQLiteSidecars(t, dbPath)
-}
-
-func TestClassifyAutoIndex_AbsentDBIsIncremental(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "k.db")
-	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"})
-	if got.full {
-		t.Fatalf("absent DB must be incremental, got full (reason %q)", got.reason)
-	}
-}
-
-func TestClassifyAutoIndex_MissingSidecarIsFull(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "k.db")
-	seedAutoIndexStore(t, dbPath, "ollama/nomic", "workspace:k")
-	if err := os.Remove(sidecarPath(dbPath)); err != nil {
-		t.Fatal(err)
-	}
-
-	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"})
-	if !got.full {
-		t.Fatal("existing DB without sidecar must select full rebuild")
-	}
-	if got.reason == "" {
-		t.Error("full rebuild must carry a reason for the notice")
-	}
-}
-
-func TestClassifyAutoIndex_CorruptSidecarIsFull(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "k.db")
-	seedAutoIndexStore(t, dbPath, "ollama/nomic", "workspace:k")
-	if err := os.WriteFile(sidecarPath(dbPath), []byte("{not json"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"})
-	if !got.full || got.reason == "" {
-		t.Fatalf("corrupt sidecar must select full rebuild with reason, got %+v", got)
-	}
-}
-
-func TestClassifyAutoIndex_WrongWorkspaceSidecarIsFull(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "k.db")
-	seedAutoIndexStore(t, dbPath, "ollama/nomic", "workspace:other")
-
-	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"})
-	if !got.full || got.reason == "" {
-		t.Fatalf("wrong-workspace sidecar must select full rebuild with reason, got %+v", got)
-	}
-}
-
-func TestClassifyAutoIndex_VectorSpaceMismatchIsFull(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "k.db")
-	seedAutoIndexStore(t, dbPath, "ollama/OLD", "workspace:k")
-
-	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/NEW"})
-	if !got.full {
-		t.Fatal("vector-space mismatch must select full rebuild")
-	}
-	if !strings.Contains(got.reason, "ollama/OLD") {
-		t.Errorf("reason should name the stored vector space: %q", got.reason)
-	}
-}
-
-func TestClassifyAutoIndex_CompatibleStoreIsIncremental(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "k.db")
-	seedAutoIndexStore(t, dbPath, "ollama/nomic", "workspace:k")
-
-	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"})
-	if got.full {
-		t.Fatalf("compatible store must be incremental, got full (reason %q)", got.reason)
-	}
-	// Read-only classification must not have created WAL/SHM.
-	assertNoSQLiteSidecars(t, dbPath)
 }
 
 // autoIndexTestEmbedder emits fixed vectors under vsid, failing any batch whose
@@ -183,7 +122,7 @@ func autoIndexTestEmbedder(vsid, failSubstr string) rag.Embedder {
 		}
 		vecs := make([][]float64, len(inputs))
 		for i := range vecs {
-			vecs[i] = []float64{1, 0, 0}
+			vecs[i] = realisticTestVector()
 		}
 		return rag.EmbedResult{Embeddings: vecs, Model: "nomic", Provider: "ollama", VectorSpaceID: vsid}, nil
 	})
@@ -194,18 +133,17 @@ func autoIndexTestEmbedder(vsid, failSubstr string) rag.Embedder {
 // against a stale pre-checkpoint snapshot even while a writer is live, so the
 // ordering invariant is pinned by the source counts the callers assert on
 // (a stale snapshot reads 0 sources), not by this open failing.
-func realReadOnlyOpen(dbPath string) func(context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
-	return func(ctx context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
+func realReadOnlyOpen(_ string) func(context.Context, string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+	return func(ctx context.Context, dbPath string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
 		store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 		if err != nil {
-			return nil, nil, "", vsDecision{}, rag.StoreStats{}, err
+			return nil, "", vsDecision{}, rag.StoreStats{}, err
 		}
-		defer func() { _ = store.Close() }()
 		stats, err := store.Stats(ctx)
 		if err != nil {
-			return nil, nil, "", vsDecision{}, rag.StoreStats{}, err
+			return nil, "", vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
 		}
-		return &agenttools.Retrieve{}, nil, "", vsDecision{}, stats, nil
+		return newOwnedRetrievalReader(&agenttools.Retrieve{}, store, nil), "", vsDecision{}, stats, nil
 	}
 }
 
@@ -222,7 +160,6 @@ func newAutoIndexTestJob(root, dbPath string, emb rag.Embedder, notices *[]strin
 	return autoIndexJob{
 		root:        root,
 		dbPath:      dbPath,
-		sidecarPath: sidecarPath(dbPath),
 		workspaceID: "workspace:k",
 		embedder:    emb,
 		embChain:    []string{"ollama/nomic"},
@@ -231,6 +168,22 @@ func newAutoIndexTestJob(root, dbPath string, emb rag.Embedder, notices *[]strin
 
 		openRetriever: realReadOnlyOpen(dbPath),
 	}
+}
+
+func installActiveTestReader(t *testing.T, ready *readyRetrieve, dbPath string) indexGeneration {
+	t.Helper()
+	gen, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, _, _, _, err := realReadOnlyOpen(dbPath)(context.Background(), gen.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ready.install(reader, "active") {
+		t.Fatal("install active reader")
+	}
+	return gen
 }
 
 func TestRunAutoIndex_FirstRunBuildsAndMarksReady(t *testing.T) {
@@ -249,14 +202,14 @@ func TestRunAutoIndex_FirstRunBuildsAndMarksReady(t *testing.T) {
 	if len(notices) != 1 || !strings.HasPrefix(notices[0], want) {
 		t.Fatalf("notices = %v, want one line with prefix %q", notices, want)
 	}
-	sc, err := readSidecar(sidecarPath(dbPath))
+	gen, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
 	if err != nil {
-		t.Fatalf("sidecar not written: %v", err)
+		t.Fatalf("active generation not published: %v", err)
 	}
-	if verr := validateSidecar(sc, "workspace:k"); verr != nil {
-		t.Fatalf("sidecar invalid: %v", verr)
+	if gen.metadata.VectorSpaceID != "ollama/nomic" || gen.metadata.SourceCount != 1 {
+		t.Fatalf("generation metadata = %+v", gen.metadata)
 	}
-	assertIndexDBModes(t, dbPath)
+	assertIndexDBModes(t, gen.dbPath)
 }
 
 func TestRunAutoIndex_PartialRunMarksReadyWithWarning(t *testing.T) {
@@ -319,10 +272,8 @@ func TestRunAutoIndex_InvalidSidecarRebuildsAndEndsReady(t *testing.T) {
 	if got := retrieveStateOf(job.ready); got != retrieveReady {
 		t.Fatalf("self-heal run must end ready, state = %d; notices = %v", got, notices)
 	}
-	if len(notices) != 2 ||
-		!strings.HasPrefix(notices[0], "warning: retrieve auto-index rebuilding private store: ") ||
-		!strings.HasPrefix(notices[1], "retrieve: auto-index ready, ") {
-		t.Fatalf("notices = %v, want rebuild warning then ready line", notices)
+	if len(notices) != 1 || !strings.HasPrefix(notices[0], "retrieve: auto-index ready, ") {
+		t.Fatalf("notices = %v, want ready line", notices)
 	}
 }
 
@@ -357,11 +308,19 @@ func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) 
 		t.Fatalf("refresh state = %d, want ready; notices = %v", got, notices2)
 	}
 
-	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := rag.OpenSQLiteStoreReadOnly(active.dbPath)
 	if err != nil {
 		t.Fatalf("open after refresh: %v", err)
 	}
-	defer func() { _ = store.Close() }()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	sources, err := store.ListSources(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -380,6 +339,51 @@ func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) 
 	}
 }
 
+func TestRunAutoIndex_CollectsSupersededGenerations(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	for i := 0; i < 3; i++ {
+		var notices []string
+		job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+		runAutoIndex(context.Background(), job)
+		if got := retrieveStateOf(job.ready); got != retrieveReady {
+			t.Fatalf("run %d state = %d, want ready; notices = %v", i, got, notices)
+		}
+		if err := job.ready.close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(generationsPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finalized []string
+	for _, e := range entries {
+		if e.IsDir() && validGenerationID(e.Name()) {
+			finalized = append(finalized, e.Name())
+		}
+	}
+	// Steady state: the generation that was active during the last build's
+	// cleanup plus the newly published one.
+	if len(finalized) != 2 {
+		t.Fatalf("finalized generations = %v, want 2 (previous active + new)", finalized)
+	}
+	found := false
+	for _, id := range finalized {
+		if id == active.id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("active generation %s missing from %v", active.id, finalized)
+	}
+}
+
 func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
@@ -392,7 +396,7 @@ func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
 	var calls atomic.Int32
 	emb := rag.EmbedderFunc(func(c context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
 		if calls.Add(1) == 1 {
-			return rag.EmbedResult{Embeddings: [][]float64{{1, 0, 0}}, Model: "nomic", Provider: "ollama", VectorSpaceID: "ollama/nomic"}, nil
+			return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}, Model: "nomic", Provider: "ollama", VectorSpaceID: "ollama/nomic"}, nil
 		}
 		cancel()
 		return rag.EmbedResult{}, context.Canceled
@@ -410,96 +414,86 @@ func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
 	}
 }
 
-func TestClassifyAutoIndex_SidecarWithoutDBIsFull(t *testing.T) {
-	dir := t.TempDir()
-	dbPath := filepath.Join(dir, "k.db")
-	// Torn artifact removal / hand-deleted .db: only the sidecar remains.
-	if err := os.WriteFile(sidecarPath(dbPath), []byte("{}"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-
-	got := classifyAutoIndex(context.Background(), dbPath, sidecarPath(dbPath), "workspace:k", []string{"ollama/nomic"})
-	if !got.full {
-		t.Fatal("sidecar without a database must select full rebuild (removes the stale marker)")
-	}
-	if !strings.Contains(got.reason, "sidecar exists without a database") {
-		t.Errorf("reason = %q", got.reason)
-	}
-}
-
-// A refresh that fails BEFORE writing a new marker, while a valid complete
-// sidecar from the previous run survives, must serve the previous index but
-// say so — not report a plain ready line. The deterministic pre-marker
-// failure: the sidecar directory is unwritable, so executeIndex's final
-// writeSidecar fails after an otherwise clean incremental run.
-func TestRunAutoIndex_FailedRefreshWarnsServingPreviousIndex(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("directory write permissions not enforced this way on windows")
-	}
-	if os.Getuid() == 0 {
-		t.Skip("root bypasses directory permissions")
-	}
-
+func TestRunAutoIndex_FailedRefreshPreservesActiveGenerationByteForByte(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
-	scDir := t.TempDir()
-	scPath := filepath.Join(scDir, "k.json")
-
-	// Seed a valid complete index whose sidecar lives in its own directory.
-	store, idx := buildTestIndexer(t, dbPath, "ollama/nomic")
-	var out bytes.Buffer
-	res := executeIndex(context.Background(), indexJob{
-		indexer: idx, store: store, root: root, dbPath: dbPath,
-		sidecarPath: scPath, workspaceID: "workspace:k",
-		requestedModel: "ollama/nomic", out: &out,
-	})
-	_ = store.Close()
-	if res.exitErr != nil {
-		t.Fatalf("seed index failed: %v\n%s", res.exitErr, out.String())
-	}
-	removeSQLiteSidecars(t, dbPath)
-
-	// Make the sidecar directory unwritable so the refresh cannot write a new
-	// marker; verify the OS actually enforces it (some filesystems do not).
-	if err := os.Chmod(scDir, 0o500); err != nil {
+	var seedNotices []string
+	seed := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &seedNotices)
+	runAutoIndex(context.Background(), seed)
+	active := installActiveTestReader(t, seed.ready, dbPath)
+	wantDB, err := os.ReadFile(active.dbPath)
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(scDir, 0o700) })
-	if probe := os.WriteFile(filepath.Join(scDir, "probe"), nil, 0o600); probe == nil {
-		t.Skip("filesystem does not enforce directory write permissions")
+	wantMetadata, err := os.ReadFile(active.metadataPath)
+	if err != nil {
+		t.Fatal(err)
 	}
-
+	wantPointer, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	failing := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		return rag.EmbedResult{}, errTestEmbedCmd
+	})
 	var notices []string
-	job := autoIndexJob{
-		root:          root,
-		dbPath:        dbPath,
-		sidecarPath:   scPath,
-		workspaceID:   "workspace:k",
-		embedder:      autoIndexTestEmbedder("ollama/nomic", ""),
-		embChain:      []string{"ollama/nomic"},
-		ready:         newReadyRetrieve(warmingRetrieveMessage),
-		notice:        func(s string) { notices = append(notices, s) },
-		openRetriever: realReadOnlyOpen(dbPath),
-	}
+	job := newAutoIndexTestJob(root, dbPath, failing, &notices)
+	installActiveTestReader(t, job.ready, dbPath)
 	runAutoIndex(context.Background(), job)
 
 	if got := retrieveStateOf(job.ready); got != retrieveReady {
-		t.Fatalf("state = %d, want ready over the previous index; notices = %v", got, notices)
+		t.Fatalf("state = %d, want active reader preserved; notices = %v", got, notices)
 	}
-	var sawStaleWarn bool
-	for _, n := range notices {
-		if strings.Contains(n, "warning: retrieve auto-index refresh failed:") &&
-			strings.Contains(n, "serving previous index") {
-			sawStaleWarn = true
+	if len(notices) != 1 || !strings.Contains(notices[0], "serving active generation") {
+		t.Fatalf("notices = %v, want one active-generation warning", notices)
+	}
+	for path, want := range map[string][]byte{active.dbPath: wantDB, active.metadataPath: wantMetadata, activePointerPath(dbPath): wantPointer} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("active artifact %q changed after failed refresh", path)
 		}
 	}
-	if !sawStaleWarn {
-		t.Fatalf("missing serving-previous-index warning; notices = %v", notices)
+}
+
+func TestRunAutoIndex_RetrieverOpenFailureDoesNotPublish(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	var seedNotices []string
+	seed := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &seedNotices)
+	runAutoIndex(context.Background(), seed)
+	wantPointer, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
 	}
-	last := notices[len(notices)-1]
-	if !strings.Contains(last, "retrieve: auto-index ready,") {
-		t.Fatalf("final notice should still be the ready line, got %q; all = %v", last, notices)
+
+	ready := newReadyRetrieve(warmingRetrieveMessage)
+	ready.install(newRetrievalReader(&countingTool{content: "old"}, nil), "old")
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+	job.ready = ready
+	job.openRetriever = func(context.Context, string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+		return nil, "", vsDecision{}, rag.StoreStats{}, errors.New("reader open failed")
+	}
+	runAutoIndex(context.Background(), job)
+
+	gotPointer, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotPointer, wantPointer) {
+		t.Fatal("retriever open failure changed the active generation pointer")
+	}
+	result, err := ready.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil || result.Content != "old" {
+		t.Fatalf("active reader after failed replacement = %+v, %v", result, err)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "serving active generation") {
+		t.Fatalf("notices = %v", notices)
 	}
 }
 
@@ -520,14 +514,297 @@ func TestRunAutoIndex_DeletedLastSourceFailsInsteadOfServingStaleMarker(t *testi
 	}
 	var notices2 []string
 	job2 := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices2)
+	installActiveTestReader(t, job2.ready, dbPath)
 	runAutoIndex(context.Background(), job2)
 
-	if got := retrieveStateOf(job2.ready); got != retrieveFailed {
-		t.Fatalf("empty refresh must fail, state = %d; notices = %v", got, notices2)
+	if got := retrieveStateOf(job2.ready); got != retrieveReady {
+		t.Fatalf("empty refresh must preserve active reader, state = %d; notices = %v", got, notices2)
 	}
 	if len(notices2) != 1 ||
 		!strings.Contains(notices2[0], "corpus not usable (sources=0") ||
-		!strings.Contains(notices2[0], "using file/search tools") {
+		!strings.Contains(notices2[0], "serving active generation") {
 		t.Fatalf("notices = %v, want unusable-corpus failure", notices2)
+	}
+}
+
+func TestRunAutoIndex_ServesActiveWhileBlockedThenPublishesAndSwaps(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	var seedNotices []string
+	seed := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &seedNotices)
+	runAutoIndex(context.Background(), seed)
+	old, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ready := newReadyRetrieve(warmingRetrieveMessage)
+	ready.install(newRetrievalReader(&countingTool{content: "old"}, nil), "old")
+	entered, release := make(chan struct{}), make(chan struct{})
+	var once sync.Once
+	emb := rag.EmbedderFunc(func(_ context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+		once.Do(func() { close(entered); <-release })
+		vectors := make([][]float64, len(inputs))
+		for i := range vectors {
+			vectors[i] = realisticTestVector()
+		}
+		return rag.EmbedResult{Embeddings: vectors, Provider: "ollama", Model: "nomic", VectorSpaceID: "ollama/nomic"}, nil
+	})
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	job.ready = ready
+	job.openRetriever = func(ctx context.Context, path string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+		store, err := rag.OpenSQLiteStoreReadOnly(path)
+		if err != nil {
+			return nil, "", vsDecision{}, rag.StoreStats{}, err
+		}
+		stats, err := store.Stats(ctx)
+		if err != nil {
+			return nil, "", vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
+		}
+		return newOwnedRetrievalReader(&countingTool{content: "new"}, store, nil), "", vsDecision{}, stats, nil
+	}
+	done := make(chan struct{})
+	go func() { runAutoIndex(context.Background(), job); close(done) }()
+	<-entered
+	result, err := ready.Invoke(context.Background(), json.RawMessage(`{"query":"during"}`))
+	if err != nil || result.Content != "old" {
+		t.Fatalf("retrieval during refresh = %+v, %v", result, err)
+	}
+	close(release)
+	<-done
+	result, err = ready.Invoke(context.Background(), json.RawMessage(`{"query":"after"}`))
+	if err != nil || result.Content != "new" {
+		t.Fatalf("retrieval after swap = %+v, %v", result, err)
+	}
+	current, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.id == old.id {
+		t.Fatal("successful refresh did not publish a new generation")
+	}
+}
+
+func TestRunAutoIndex_LeaseContentionPreservesActiveAndLiveStaging(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	var seedNotices []string
+	seed := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &seedNotices)
+	runAutoIndex(context.Background(), seed)
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pointerBefore, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging, err := createStagingGeneration(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := acquireIndexWriterLease(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	ready := newReadyRetrieve(warmingRetrieveMessage)
+	ready.install(newRetrievalReader(&countingTool{content: "active"}, nil), "active")
+	var embedCalls atomic.Int32
+	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		embedCalls.Add(1)
+		return rag.EmbedResult{}, errors.New("must not run")
+	})
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	job.ready = ready
+	runAutoIndex(context.Background(), job)
+	if embedCalls.Load() != 0 {
+		t.Fatal("contending writer reached embedding probe")
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "writer lease already held") {
+		t.Fatalf("notices = %v", notices)
+	}
+	if _, err := os.Stat(filepath.Dir(staging.dbPath)); err != nil {
+		t.Fatalf("contending writer removed live staging: %v", err)
+	}
+	pointerAfter, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(pointerBefore, pointerAfter) {
+		t.Fatal("lease contention changed active pointer")
+	}
+	current, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil || current.id != active.id {
+		t.Fatalf("active after contention = %+v, %v", current, err)
+	}
+}
+
+func TestRunAutoIndex_WaitsOutLeaseAndAdoptsPublishedGeneration(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	lease, err := acquireIndexWriterLease(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The loser must adopt, never rebuild: any embed call is a failure.
+	var embedCalls atomic.Int32
+	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		embedCalls.Add(1)
+		return rag.EmbedResult{}, errTestEmbedCmd
+	})
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	done := make(chan struct{})
+	go func() { runAutoIndex(context.Background(), job); close(done) }()
+
+	// Publish as the winning writer while the loser polls for the lease.
+	published := publishTestGeneration(t, dbPath, "workspace:k", strings.Repeat("d", 32))
+	select {
+	case <-done:
+		t.Fatal("loser returned while the lease was still held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("loser did not adopt after lease release")
+	}
+
+	if got := retrieveStateOf(job.ready); got != retrieveReady {
+		t.Fatalf("state = %d, want adopted ready; notices = %v", got, notices)
+	}
+	if embedCalls.Load() != 0 {
+		t.Fatalf("adoption ran %d embed calls, want none", embedCalls.Load())
+	}
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil || active.id != published.id {
+		t.Fatalf("active = %+v, %v; want winner's %q untouched", active, err, published.id)
+	}
+	if len(notices) == 0 || !strings.Contains(notices[0], "retrieve: auto index") {
+		t.Fatalf("notices = %v, want adopted auto-index line", notices)
+	}
+	if err := job.ready.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunAutoIndex_LeaseWaitCancelledStaysSilentWarming(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	lease, err := acquireIndexWriterLease(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+	done := make(chan struct{})
+	go func() { runAutoIndex(ctx, job); close(done) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled lease wait did not return")
+	}
+	if got := retrieveStateOf(job.ready); got != retrieveWarming {
+		t.Fatalf("state = %d, want warming after cancelled wait", got)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("cancelled wait must be silent, notices = %v", notices)
+	}
+}
+
+func TestRunAutoIndex_CancellationPreservesActiveGenerationByteForByte(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	var seedNotices []string
+	seed := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &seedNotices)
+	runAutoIndex(context.Background(), seed)
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantDB, err := os.ReadFile(active.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMetadata, err := os.ReadFile(active.metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPointer, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() { println(\"changed\") }\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var calls atomic.Int32
+	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		if calls.Add(1) > 1 {
+			cancel()
+			return rag.EmbedResult{}, context.Canceled
+		}
+		return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}, Provider: "ollama", Model: "nomic", VectorSpaceID: "ollama/nomic"}, nil
+	})
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	installActiveTestReader(t, job.ready, dbPath)
+	runAutoIndex(ctx, job)
+	if len(notices) != 0 {
+		t.Fatalf("cancellation notices = %v", notices)
+	}
+	if !job.ready.hasReader() {
+		t.Fatal("cancellation removed active reader")
+	}
+	for path, want := range map[string][]byte{active.dbPath: wantDB, active.metadataPath: wantMetadata, activePointerPath(dbPath): wantPointer} {
+		got, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("active artifact %q changed after cancellation", path)
+		}
+	}
+}
+
+func TestRunAutoIndex_PinsGenerationToSuccessfulProbeVectorSpace(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	emb := autoIndexTestEmbedder("actual/fallback", "")
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	job.embChain = []string{"configured/primary", "actual/fallback"}
+	runAutoIndex(context.Background(), job)
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.metadata.VectorSpaceID != "actual/fallback" {
+		t.Fatalf("published vector space = %q, want actual/fallback", active.metadata.VectorSpaceID)
 	}
 }

@@ -45,7 +45,7 @@ func TestEnableRetrieve_AutoRegistersOnMatch(t *testing.T) {
 	removeSQLiteSidecars(t, dbPath)
 
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
-		autoDBPath: dbPath, autoSidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
+		autoDBPath: dbPath, workspaceID: "workspace:k",
 	})
 	if got.tool == nil {
 		t.Fatalf("auto index with matching vsid should register; warns=%v", got.warns)
@@ -62,7 +62,7 @@ func TestEnableRetrieve_AutoDisablesOnMismatch(t *testing.T) {
 	seedIndex(t, dbPath, "workspace:k", "ollama/OLD")
 
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
-		autoDBPath: dbPath, autoSidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
+		autoDBPath: dbPath, workspaceID: "workspace:k",
 	})
 	if got.tool != nil {
 		t.Error("mismatched auto index must not register retrieve")
@@ -84,7 +84,7 @@ func TestEnableRetrieve_AutoRequiresSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{
-		autoDBPath: dbPath, autoSidecarPath: sidecarPath(dbPath), workspaceID: "workspace:k",
+		autoDBPath: dbPath, workspaceID: "workspace:k",
 	})
 	if got.tool != nil {
 		t.Error("auto-discovery without a valid sidecar must not register")
