@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -19,6 +20,20 @@ import (
 type countingTool struct {
 	calls   atomic.Int64
 	content string
+}
+
+type blockingTool struct {
+	content string
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingTool) Spec() agent.ToolSpec { return agenttools.Retrieve{}.Spec() }
+func (b *blockingTool) Effect() agent.Effect { return agenttools.Retrieve{}.Effect() }
+func (b *blockingTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	close(b.entered)
+	<-b.release
+	return agent.ToolResult{Content: b.content}, nil
 }
 
 func (c *countingTool) Spec() agent.ToolSpec { return agenttools.Retrieve{}.Spec() }
@@ -230,5 +245,142 @@ func TestReadyRetrieve_ConcurrentMarkReadyAndInvoke(t *testing.T) {
 	}
 	if res.Content != "chunks" {
 		t.Fatalf("post-swap invoke = %q", res.Content)
+	}
+}
+
+func TestReadyRetrieve_InstallSwapsLiveDelegate(t *testing.T) {
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	oldClosed := make(chan struct{})
+	r.install(newRetrievalReader(&countingTool{content: "old"}, func() { close(oldClosed) }), "old ready")
+
+	before, err := r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil || before.Content != "old" {
+		t.Fatalf("before swap = %+v, %v", before, err)
+	}
+	r.install(newRetrievalReader(&countingTool{content: "new"}, nil), "new ready")
+	after, err := r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil || after.Content != "new" {
+		t.Fatalf("after swap = %+v, %v", after, err)
+	}
+	select {
+	case <-oldClosed:
+	case <-time.After(time.Second):
+		t.Fatal("replaced delegate did not close")
+	}
+}
+
+func TestReadyRetrieve_InFlightOldDelegateDrainsWhileNewCallsUseReplacement(t *testing.T) {
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	oldTool := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
+	oldClosed := make(chan struct{})
+	r.install(newRetrievalReader(oldTool, func() { close(oldClosed) }), "old ready")
+
+	oldResult := make(chan agent.ToolResult, 1)
+	go func() {
+		res, _ := r.Invoke(context.Background(), json.RawMessage(`{"query":"old"}`))
+		oldResult <- res
+	}()
+	<-oldTool.entered
+	r.install(newRetrievalReader(&countingTool{content: "new"}, nil), "new ready")
+
+	newResult, err := r.Invoke(context.Background(), json.RawMessage(`{"query":"new"}`))
+	if err != nil || newResult.Content != "new" {
+		t.Fatalf("new call = %+v, %v", newResult, err)
+	}
+	select {
+	case <-oldClosed:
+		t.Fatal("old delegate closed before its in-flight call completed")
+	default:
+	}
+	close(oldTool.release)
+	if got := <-oldResult; got.Content != "old" {
+		t.Fatalf("in-flight result = %q, want old", got.Content)
+	}
+	select {
+	case <-oldClosed:
+	case <-time.After(time.Second):
+		t.Fatal("old delegate did not close after drain")
+	}
+}
+
+func TestReadyRetrieve_CloseRejectsAndClosesLateInstall(t *testing.T) {
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	r.close()
+	closed := make(chan struct{})
+	if r.install(newRetrievalReader(&countingTool{content: "late"}, func() { close(closed) }), "late") {
+		t.Fatal("install after close must be rejected")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("rejected delegate was not closed")
+	}
+}
+
+func TestRetrievalReader_CloseIsIdempotent(t *testing.T) {
+	var closes atomic.Int64
+	reader := newRetrievalReader(&countingTool{content: "x"}, func() { closes.Add(1) })
+	reader.closeAfterDrain()
+	reader.closeAfterDrain()
+	if got := closes.Load(); got != 1 {
+		t.Fatalf("close calls = %d, want 1", got)
+	}
+}
+
+func TestReadyRetrieve_RepeatedConcurrentInvokeAndSwap(t *testing.T) {
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	r.install(newRetrievalReader(&countingTool{content: "seed"}, nil), "seed")
+	stop := make(chan struct{})
+	var invokes sync.WaitGroup
+	for range 8 {
+		invokes.Add(1)
+		go func() {
+			defer invokes.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if _, err := r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`)); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}()
+	}
+	for i := 0; i < 100; i++ {
+		r.install(newRetrievalReader(&countingTool{content: "next"}, nil), "next")
+	}
+	close(stop)
+	invokes.Wait()
+	r.close()
+}
+
+func TestReadyRetrieve_CloseWaitsForRetiredInFlightDelegate(t *testing.T) {
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	old := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
+	oldClosed := make(chan struct{})
+	r.install(newRetrievalReader(old, func() { close(oldClosed) }), "old")
+	go func() { _, _ = r.Invoke(context.Background(), json.RawMessage(`{"query":"old"}`)) }()
+	<-old.entered
+	r.install(newRetrievalReader(&countingTool{content: "new"}, nil), "new")
+	closed := make(chan struct{})
+	go func() { r.close(); close(closed) }()
+	select {
+	case <-closed:
+		t.Fatal("close returned while a retired delegate call was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(old.release)
+	select {
+	case <-oldClosed:
+	case <-time.After(time.Second):
+		t.Fatal("retired delegate did not close")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("wrapper close did not wait for retired delegate")
 	}
 }

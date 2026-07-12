@@ -112,13 +112,14 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 			seedIndex(t, dbPath, "workspace:ignored", tc.stored)
 			cfg, router, p := testRoutingEmbedder(t)
 
-			tool, _, _, _, _, err := buildGatedRetriever(
+			reader, _, _, _, err := buildGatedRetriever(
 				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
 			)
 			if err != nil {
 				t.Fatalf("buildGatedRetriever: %v", err)
 			}
-			result, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+			defer reader.closeAfterDrain()
+			result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 			if err != nil {
 				t.Fatalf("Invoke: %v", err)
 			}
@@ -138,13 +139,14 @@ func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *
 	seedIndex(t, dbPath, "workspace:ignored", stored)
 	cfg, router, p := testRoutingEmbedder(t, "a")
 
-	tool, _, _, _, _, err := buildGatedRetriever(
+	reader, _, _, _, err := buildGatedRetriever(
 		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
 	}
-	result, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+	defer reader.closeAfterDrain()
+	result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -166,13 +168,14 @@ func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing
 	cfg, router, p := testRoutingEmbedder(t)
 	p.failEmbedding(errors.New("backend offline"))
 
-	tool, _, _, _, _, err := buildGatedRetriever(
+	reader, _, _, _, err := buildGatedRetriever(
 		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
 	}
-	result, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
+	defer reader.closeAfterDrain()
+	result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}
@@ -205,7 +208,7 @@ func TestEnableRetrieve_PinsStoredVectorSpaceForExplicitAndAutoIndexes(t *testin
 			name: "auto-discovered index",
 			opts: func(dbPath string) retrieveOpts {
 				return retrieveOpts{
-					autoDBPath: dbPath, autoSidecarPath: sidecarPath(dbPath), workspaceID: "workspace:test",
+					autoDBPath: dbPath, workspaceID: "workspace:test",
 				}
 			},
 		},
@@ -255,16 +258,17 @@ func TestBuildGatedRetriever_LegacyCorpusKeepsConfiguredChainBehavior(t *testing
 	}
 	cfg, router, p := testRoutingEmbedder(t)
 
-	tool, _, _, dec, _, err := buildGatedRetriever(
+	reader, _, dec, _, err := buildGatedRetriever(
 		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
 	}
+	defer reader.closeAfterDrain()
 	if dec.kind != vsLegacy {
 		t.Fatalf("gate kind = %v, want vsLegacy", dec.kind)
 	}
-	result, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"find legacy"}`))
+	result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find legacy"}`))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
 	}

@@ -3,11 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -20,71 +23,24 @@ const autoIndexProbeTimeout = 30 * time.Second
 // probeAutoIndexEmbedder verifies the exact indexing path (routing, fallback
 // chain, model load) with one real embed call before any background indexing
 // starts. Errors are concise and safe to surface in a startup warning.
-func probeAutoIndexEmbedder(ctx context.Context, embedder rag.Embedder, model string) error {
+func probeAutoIndexEmbedder(ctx context.Context, embedder rag.Embedder, model string) (string, error) {
 	child, cancel := context.WithTimeout(ctx, autoIndexProbeTimeout)
 	defer cancel()
 	res, err := embedder.Embed(child, model, []string{"golem startup index probe"})
 	if err != nil {
-		return fmt.Errorf("embed probe (%s): %w", model, err)
+		return "", fmt.Errorf("embed probe (%s): %w", model, err)
 	}
 	if len(res.Embeddings) != 1 || len(res.Embeddings[0]) == 0 {
-		return fmt.Errorf("embed probe (%s): want one non-empty vector, got %d vector(s)", model, len(res.Embeddings))
+		return "", fmt.Errorf("embed probe (%s): want one non-empty vector, got %d vector(s)", model, len(res.Embeddings))
 	}
-	return nil
-}
-
-// autoIndexClass is classifyAutoIndex's outcome. full=true means the runner
-// must pass full=true to prepareIndexStore (which removes the artifacts —
-// classification itself deletes nothing); reason feeds the self-heal rebuild
-// notice and is empty for incremental runs.
-type autoIndexClass struct {
-	full   bool
-	reason string
-}
-
-// classifyAutoIndex decides whether the startup auto refresh runs incremental
-// or full on the PRIVATE autoDBPath store. It mirrors preflightExistingIndex's
-// checks but maps every failure to "full rebuild" instead of refusing: the
-// private store is golem-owned and disposable (self-heal policy). It must
-// never be pointed at a user-supplied -rag-db, which never self-heals.
-//
-// The vector-space probe opens the DB read-only so classification never
-// creates WAL/SHM (matching preflightExistingIndex). An existing DB we cannot
-// even open or probe is not trustworthy for an incremental run either, so
-// those errors also select a full rebuild.
-func classifyAutoIndex(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string) autoIndexClass {
-	if !fileExists(dbPath) {
-		// A sidecar without its database (torn artifact removal, or the .db
-		// deleted by hand) must not survive: if this build fails before
-		// writing a new marker, the stale sidecar would validate and the run
-		// would report ready with the old run's metadata. Full removes it.
-		if fileExists(sidecarPath) {
-			return autoIndexClass{full: true, reason: "sidecar exists without a database"}
-		}
-		// First build: incremental on an empty store is a full build anyway.
-		return autoIndexClass{}
+	vectorSpaceID := res.VectorSpaceID
+	if vectorSpaceID == "" && res.Provider != "" && res.Model != "" {
+		vectorSpaceID = res.Provider + "/" + res.Model
 	}
-	sc, err := readSidecar(sidecarPath)
-	if err != nil {
-		return autoIndexClass{full: true, reason: "existing index has no valid sidecar"}
+	if vectorSpaceID == "" {
+		return "", fmt.Errorf("embed probe (%s): successful route returned no vector-space identity", model)
 	}
-	if err := validateSidecar(sc, workspaceID); err != nil {
-		return autoIndexClass{full: true, reason: fmt.Sprintf("index sidecar invalid: %v", err)}
-	}
-	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
-	if err != nil {
-		return autoIndexClass{full: true, reason: fmt.Sprintf("cannot open existing index: %v", err)}
-	}
-	defer func() { _ = store.Close() }()
-	probe, err := store.ProbeVectorSpaces(ctx)
-	if err != nil {
-		return autoIndexClass{full: true, reason: fmt.Sprintf("cannot probe existing index: %v", err)}
-	}
-	if dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected); !dec.register {
-		return autoIndexClass{full: true, reason: fmt.Sprintf("index vector space %s does not match embedding chain %v",
-			describeStored(probe), expected)}
-	}
-	return autoIndexClass{}
+	return vectorSpaceID, nil
 }
 
 // autoIndexJob carries the background auto-index runner's dependencies. The
@@ -95,7 +51,6 @@ func classifyAutoIndex(ctx context.Context, dbPath, sidecarPath, workspaceID str
 type autoIndexJob struct {
 	root        string
 	dbPath      string
-	sidecarPath string
 	workspaceID string
 	cfg         *config.Config
 	router      *provider.Router
@@ -108,18 +63,22 @@ type autoIndexJob struct {
 	// openRetriever is a test seam: nil selects the real buildGatedRetriever
 	// over cfg/router; tests inject a fake because buildGatedRetriever needs
 	// a live provider router to construct the query-time chain embedder.
-	openRetriever func(context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error)
+	openRetriever func(context.Context, string) (*retrievalReader, string, vsDecision, rag.StoreStats, error)
 }
 
-// runAutoIndex is the startup auto-index pipeline (spec "Startup Flow" step 5):
-// probe the embedder, classify/self-heal the private store, run the index with
-// deleted-source pruning, close the writer, then open read-only retrieval and
-// flip the ready wrapper. It is synchronous; the caller launches the goroutine.
+// runAutoIndex acquires the workspace writer lease, probes the actual vector
+// space, builds and validates an immutable staging generation, publishes its
+// active pointer, then swaps the read-only delegate. It is synchronous; the
+// caller launches the goroutine.
 // A cancelled ctx returns silently: the wrapper stays warming and no notices
 // print during shutdown.
 func runAutoIndex(ctx context.Context, job autoIndexJob) {
 	fail := func(reason string) {
 		if ctx.Err() != nil {
+			return
+		}
+		if job.ready.hasReader() {
+			job.notice("warning: retrieve auto-index refresh failed: " + reason + "; serving active generation")
 			return
 		}
 		job.ready.markFailed("retrieve: the workspace auto-index failed (" + reason + "); " +
@@ -133,18 +92,59 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		fail("no embedding chain configured")
 		return
 	}
+	lease, err := acquireIndexWriterLease(job.dbPath)
+	if errors.Is(err, errIndexWriterLeaseHeld) {
+		if job.ready.hasReader() {
+			job.notice("warning: retrieve auto-index writer lease already held; serving active generation")
+		} else {
+			fail("workspace index writer lease already held")
+		}
+		return
+	}
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	defer func() { _ = lease.Close() }()
 
 	// Probe FIRST: a dead embedder must not create or write the store.
-	if err := probeAutoIndexEmbedder(ctx, job.embedder, job.embChain[0]); err != nil {
+	actualVectorSpace, err := probeAutoIndexEmbedder(ctx, job.embedder, job.embChain[0])
+	if err != nil {
 		fail(err.Error())
 		return
 	}
 
-	class := classifyAutoIndex(ctx, job.dbPath, job.sidecarPath, job.workspaceID, job.embChain)
-	if class.full && class.reason != "" {
-		job.notice("warning: retrieve auto-index rebuilding private store: " + class.reason)
+	active, activeErr := resolveActiveGeneration(ctx, job.dbPath, job.workspaceID)
+	if activeErr != nil && !errors.Is(activeErr, os.ErrNotExist) {
+		job.notice("warning: retrieve auto-index rebuilding private store: " + activeErr.Error())
 	}
-	store, err := prepareIndexStore(ctx, job.dbPath, job.sidecarPath, job.workspaceID, job.embChain, class.full)
+	activeID := ""
+	if activeErr == nil {
+		activeID = active.id
+	}
+	if err := cleanupStaleGenerations(job.dbPath, activeID); err != nil {
+		fail(err.Error())
+		return
+	}
+	staging, err := createStagingGeneration(job.dbPath)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	stagingDir := filepath.Dir(staging.dbPath)
+	discardStaging := true
+	defer func() {
+		if discardStaging {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+	if activeErr == nil && active.metadata.VectorSpaceID == actualVectorSpace {
+		if err := copyImmutableFile(active.dbPath, staging.dbPath); err != nil {
+			fail(err.Error())
+			return
+		}
+	}
+	store, err := rag.NewSQLiteStore(staging.dbPath)
 	if err != nil {
 		fail(err.Error())
 		return
@@ -160,8 +160,8 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		indexer:        indexer,
 		store:          store,
 		root:           job.root,
-		dbPath:         job.dbPath,
-		sidecarPath:    job.sidecarPath,
+		dbPath:         staging.dbPath,
+		sidecarPath:    staging.metadataPath,
 		workspaceID:    job.workspaceID,
 		requestedModel: job.embChain[0],
 		out:            &buf,
@@ -169,54 +169,136 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 	})
 	// Close the writer BEFORE any read-only open: retrieval opens the DB with
 	// immutable=1 and must not race a live write handle.
-	_ = store.Close()
+	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
+		_ = store.Close()
+		fail(checkpointErr.Error())
+		return
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		fail(fmt.Sprintf("close staging generation: %v", closeErr))
+		return
+	}
 	if ctx.Err() != nil {
 		return
 	}
 
 	// Interpret the outcome through the store, not the exit sentinel alone
 	// (spec "Partial Indexes"): a partial run still writes a usable sidecar.
-	sc, scErr := readSidecar(job.sidecarPath)
+	sc, scErr := readSidecar(staging.metadataPath)
 	if scErr != nil || validateSidecar(sc, job.workspaceID) != nil {
 		fail(autoIndexFailReason(&buf, res.exitErr))
 		return
 	}
 
-	open := job.openRetriever
-	if open == nil {
-		open = func(oc context.Context) (agent.Tool, *behavioralWeighterHandle, string, vsDecision, rag.StoreStats, error) {
-			return buildGatedRetriever(oc, job.cfg, job.router, job.dbPath, job.embChain, job.feedbackDB)
-		}
+	if res.exitErr != nil && sc.Status != "partial" {
+		fail(autoIndexFailReason(&buf, res.exitErr))
+		return
 	}
-	tool, feedback, feedbackWarn, dec, stats, err := open(ctx)
+	readOnly, err := rag.OpenSQLiteStoreReadOnly(staging.dbPath)
 	if err != nil {
 		fail(err.Error())
 		return
 	}
-	if tool == nil {
-		// The gate refusing a store this run just wrote should be impossible;
-		// surface it rather than serving a mismatched corpus.
-		fail(fmt.Sprintf("index vector space %s does not match embedding chain %v", dec.stored, job.embChain))
+	stats, err := readOnly.Stats(ctx)
+	_ = readOnly.Close()
+	if err != nil {
+		fail(err.Error())
 		return
 	}
 	if res.exitErr != nil && stats.TotalSources < 1 {
 		fail(autoIndexFailReason(&buf, res.exitErr))
 		return
 	}
-	// A non-nil exitErr with a COMPLETE sidecar means this run failed before
-	// writing a new marker and an older valid index survived (a completed
-	// partial run writes status "partial" and warns below). Serving the
-	// previous corpus is correct, but say so instead of a plain ready line.
-	if res.exitErr != nil && sc.Status != "partial" {
-		job.notice("warning: retrieve auto-index refresh failed: " + autoIndexFailReason(&buf, res.exitErr) +
-			"; serving previous index")
+	if sc.VectorSpaceID != actualVectorSpace {
+		fail(fmt.Sprintf("staging vector space %q does not match successful probe %q", sc.VectorSpaceID, actualVectorSpace))
+		return
 	}
-	line := autoIndexReadyLine(sc, stats)
-	job.ready.markReady(tool, line, feedback)
+	staging.metadata = generationMetadata{
+		SchemaVersion: generationSchemaVersion, Generation: staging.id,
+		WorkspaceID: job.workspaceID, RequestedEmbeddingModel: job.embChain[0],
+		VectorSpaceID: sc.VectorSpaceID, IndexedAt: sc.IndexedAt,
+		Status: sc.Status, ErrorCount: sc.ErrorCount,
+		SourceCount: stats.TotalSources, ChunkCount: stats.TotalChunks,
+	}
+	if err := writeGenerationMetadata(staging.metadataPath, staging.metadata); err != nil {
+		fail(err.Error())
+		return
+	}
+	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: job.workspaceID, Generation: staging.id}
+	if err := validateGenerationMetadata(staging.metadata, pointer); err != nil {
+		fail(err.Error())
+		return
+	}
+	if err := validateGenerationDatabase(ctx, staging); err != nil {
+		fail(err.Error())
+		return
+	}
+	final, err := finalizeStagingGeneration(job.dbPath, staging)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	stagingDir = filepath.Dir(final.dbPath)
+	if err := publishActiveGeneration(job.dbPath, pointer, nil); err != nil {
+		if current, readErr := readActivePointer(job.dbPath); readErr != nil || current.Generation != final.id {
+			_ = os.RemoveAll(stagingDir)
+		}
+		discardStaging = false
+		fail(err.Error())
+		return
+	}
+	discardStaging = false
+	open := job.openRetriever
+	if open == nil {
+		open = func(oc context.Context, dbPath string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+			return buildGatedRetriever(oc, job.cfg, job.router, dbPath, job.embChain, job.feedbackDB)
+		}
+	}
+	reader, feedbackWarn, dec, openedStats, err := open(ctx, final.dbPath)
+	if err != nil {
+		fail(err.Error())
+		return
+	}
+	if reader == nil {
+		fail(fmt.Sprintf("index vector space %s does not match embedding chain %v", dec.stored, job.embChain))
+		return
+	}
+	line := autoIndexReadyLine(sc, openedStats)
+	job.ready.install(reader, line)
 	job.notice(line)
 	if feedbackWarn != "" {
 		job.notice("warning: " + feedbackWarn)
 	}
+}
+
+func copyImmutableFile(source, destination string) error {
+	in, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("open active generation for staging copy: %w", err)
+	}
+	defer func() { _ = in.Close() }()
+	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("create staging database: %w", err)
+	}
+	remove := true
+	defer func() {
+		_ = out.Close()
+		if remove {
+			_ = os.Remove(destination)
+		}
+	}()
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy active generation: %w", err)
+	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("sync staging database: %w", err)
+	}
+	if err := out.Close(); err != nil {
+		return fmt.Errorf("close staging database: %w", err)
+	}
+	remove = false
+	return nil
 }
 
 // autoIndexReadyLine renders the completion notice (spec "Notices"): the ready

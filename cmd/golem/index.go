@@ -27,6 +27,7 @@ type indexJob struct {
 	store          *rag.SQLiteStore
 	root           string
 	dbPath         string
+	displayDBPath  string
 	sidecarPath    string
 	workspaceID    string
 	requestedModel string // embChain[0], the configured primary selector
@@ -107,8 +108,12 @@ func executeIndex(ctx context.Context, job indexJob) indexResult {
 		return indexResult{exitErr: errIndexFailed}
 	}
 
+	displayPath := job.dbPath
+	if job.displayDBPath != "" {
+		displayPath = job.displayDBPath
+	}
 	_, _ = fmt.Fprintf(job.out, "indexed %d sources, %d chunks (%d errors) -> %s\n",
-		stats.TotalSources, stats.TotalChunks, errCount, job.dbPath)
+		stats.TotalSources, stats.TotalChunks, errCount, displayPath)
 	if errCount > 0 {
 		printCappedErrors(job.out, status.Errors, 10)
 		// Partial run: usable index persisted + marker written, but exit non-zero.
@@ -130,33 +135,9 @@ func printCappedErrors(w io.Writer, errs []string, limit int) {
 	}
 }
 
-// osRemove and errNotExist are indirected so removal is testable without real files.
-var (
-	osRemove    = os.Remove
-	errNotExist = os.ErrNotExist
-)
-
 func fileExists(p string) bool {
 	_, err := os.Stat(p)
 	return err == nil
-}
-
-// removeIndexArtifacts deletes the DB, its WAL/SHM sidecars, and the marker so a
-// -full run cannot inherit an old vector space. Not-exist is fine (first run).
-func removeIndexArtifacts(dbPath, sidecar string) error {
-	for _, p := range []string{dbPath, dbPath + "-wal", dbPath + "-shm", sidecar} {
-		if err := removeIfExists(p); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func removeIfExists(p string) error {
-	if err := osRemove(p); err != nil && !errors.Is(err, errNotExist) {
-		return fmt.Errorf("remove %q: %w", p, err)
-	}
-	return nil
 }
 
 func chmodIndexDBFiles(dbPath string) error {
@@ -169,73 +150,6 @@ func chmodIndexDBFiles(dbPath string) error {
 		}
 	}
 	return nil
-}
-
-// prepareIndexStore handles the pre-open lifecycle for the index store:
-//   - full=true: remove all artifacts (DB, WAL, SHM, sidecar) then open a fresh store.
-//   - full=false: if the DB pre-existed, run preflightExistingIndex to enforce
-//     spec §5.2 (valid sidecar + matching vector-space id required), then open
-//     the write-capable store only after preflight passes.
-//
-// Preflight and removal always happen BEFORE SQLite is opened so no DB file is
-// ever deleted underneath a live handle. The parent directory is created on
-// first call so callers need not manage it separately.
-func prepareIndexStore(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string, full bool) (*rag.SQLiteStore, error) {
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
-		return nil, fmt.Errorf("create index dir: %w", err)
-	}
-	if full {
-		if err := removeIndexArtifacts(dbPath, sidecarPath); err != nil {
-			return nil, err
-		}
-		return rag.NewSQLiteStore(dbPath)
-	}
-	preexisting := fileExists(dbPath)
-	if preexisting {
-		if err := preflightExistingIndex(ctx, dbPath, sidecarPath, workspaceID, expected); err != nil {
-			return nil, err
-		}
-	}
-	return rag.NewSQLiteStore(dbPath)
-}
-
-// preflightExistingIndex enforces spec §5.2 for a DEFAULT (incremental) run
-// when dbPath existed before opening SQLite for writes. A matching sidecar is
-// required before any DB open; otherwise a copied/foreign empty DB could be
-// blessed or modified by an incremental run. The vector-space probe uses a
-// read-only store so a mismatch refusal does not create WAL/SHM or migrate.
-// Mirrored by classifyAutoIndex (auto_index.go), which maps these refusals to
-// a self-heal full rebuild; keep the checks in sync.
-func preflightExistingIndex(ctx context.Context, dbPath, sidecarPath, workspaceID string, expected []string) error {
-	sc, serr := readSidecar(sidecarPath)
-	if serr != nil {
-		return fmt.Errorf("existing index has no valid sidecar; run \"golem index -full\" to rebuild")
-	}
-	if verr := validateSidecar(sc, workspaceID); verr != nil {
-		return fmt.Errorf("existing index sidecar invalid (%v); run \"golem index -full\" to rebuild", verr)
-	}
-	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
-	if err != nil {
-		return fmt.Errorf("preflight open read-only: %w", err)
-	}
-	defer func() { _ = store.Close() }()
-	probe, perr := store.ProbeVectorSpaces(ctx)
-	if perr != nil {
-		return fmt.Errorf("preflight probe: %w", perr)
-	}
-	dec := vsGateDecision(probe.KnownIDs, probe.HasUnknown, expected)
-	if !dec.register {
-		return fmt.Errorf("existing index was built with vector space %s, current embedding chain is %v; run \"golem index -full\" to rebuild",
-			describeStored(probe), expected)
-	}
-	return nil
-}
-
-func describeStored(p rag.VectorSpaceProbe) string {
-	if len(p.KnownIDs) == 1 {
-		return p.KnownIDs[0]
-	}
-	return fmt.Sprintf("%v", p.KnownIDs)
 }
 
 // runIndex is the `golem index` entry point: parse flags, bootstrap providers,
@@ -289,19 +203,74 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	if err != nil {
 		return err
 	}
-	// prepareIndexStore creates the parent dir itself; no MkdirAll needed here.
-	store, err := prepareIndexStore(ctx, dbPath, sidecarPath(dbPath), workspaceID, embChain, full)
+	lease, err := acquireIndexWriterLease(dbPath)
+	if errors.Is(err, errIndexWriterLeaseHeld) {
+		_, _ = fmt.Fprintln(out, "golem index: workspace index writer lease already held")
+		return errIndexFailed
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
 		return errIndexFailed
 	}
-	defer func() { _ = store.Close() }()
+	defer func() { _ = lease.Close() }()
 
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return bundle.Router.Route(rc, rr)
 	}, embChain)
+	actualVectorSpace, err := probeAutoIndexEmbedder(ctx, embedder, embChain[0])
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
+		return errIndexFailed
+	}
+	active, activeErr := resolveActiveGeneration(ctx, dbPath, workspaceID)
+	if !full {
+		switch {
+		case activeErr == nil && active.metadata.VectorSpaceID != actualVectorSpace:
+			_, _ = fmt.Fprintf(out, "golem index: existing index uses vector space %s, successful embedding route is %s; run \"golem index -full\" to rebuild\n",
+				active.metadata.VectorSpaceID, actualVectorSpace)
+			return errIndexFailed
+		case activeErr != nil && !errors.Is(activeErr, os.ErrNotExist):
+			_, _ = fmt.Fprintf(out, "golem index: existing index is invalid (%v); run \"golem index -full\" to rebuild\n", activeErr)
+			return errIndexFailed
+		case errors.Is(activeErr, os.ErrNotExist) && (fileExists(dbPath) || fileExists(sidecarPath(dbPath))):
+			_, _ = fmt.Fprintln(out, "golem index: existing index has no valid sidecar; run \"golem index -full\" to rebuild")
+			return errIndexFailed
+		}
+	}
+	activeID := ""
+	if activeErr == nil {
+		activeID = active.id
+	}
+	if err := cleanupStaleGenerations(dbPath, activeID); err != nil {
+		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
+		return errIndexFailed
+	}
+	staging, err := createStagingGeneration(dbPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
+		return errIndexFailed
+	}
+	stagingDir := filepath.Dir(staging.dbPath)
+	discardStaging := true
+	defer func() {
+		if discardStaging {
+			_ = os.RemoveAll(stagingDir)
+		}
+	}()
+	if !full && activeErr == nil {
+		if err := copyImmutableFile(active.dbPath, staging.dbPath); err != nil {
+			_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
+			return errIndexFailed
+		}
+	}
+	store, err := rag.NewSQLiteStore(staging.dbPath)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
+		return errIndexFailed
+	}
 	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithEmbeddingModel(embChain[0]))
 	if err != nil {
+		_ = store.Close()
 		return fmt.Errorf("build indexer: %w", err)
 	}
 
@@ -309,11 +278,75 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		indexer:        indexer,
 		store:          store,
 		root:           root,
-		dbPath:         dbPath,
-		sidecarPath:    sidecarPath(dbPath),
+		dbPath:         staging.dbPath,
+		displayDBPath:  dbPath,
+		sidecarPath:    staging.metadataPath,
 		workspaceID:    workspaceID,
 		requestedModel: embChain[0],
 		out:            out,
 	})
+	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
+		_ = store.Close()
+		_, _ = fmt.Fprintf(out, "golem index: %v\n", checkpointErr)
+		return errIndexFailed
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		_, _ = fmt.Fprintf(out, "golem index: close staging generation: %v\n", closeErr)
+		return errIndexFailed
+	}
+	if ctx.Err() != nil {
+		return res.exitErr
+	}
+	sc, err := readSidecar(staging.metadataPath)
+	if err != nil || validateSidecar(sc, workspaceID) != nil {
+		if res.exitErr != nil {
+			return res.exitErr
+		}
+		_, _ = fmt.Fprintln(out, "golem index: staging generation did not produce valid metadata")
+		return errIndexFailed
+	}
+	readOnly, err := rag.OpenSQLiteStoreReadOnly(staging.dbPath)
+	if err != nil {
+		return fmt.Errorf("validate staging generation: %w", err)
+	}
+	stats, err := readOnly.Stats(ctx)
+	_ = readOnly.Close()
+	if err != nil {
+		return fmt.Errorf("validate staging generation: %w", err)
+	}
+	if sc.VectorSpaceID != actualVectorSpace {
+		_, _ = fmt.Fprintf(out, "golem index: staging vector space %q does not match successful probe %q\n", sc.VectorSpaceID, actualVectorSpace)
+		return errIndexFailed
+	}
+	staging.metadata = generationMetadata{
+		SchemaVersion: generationSchemaVersion, Generation: staging.id,
+		WorkspaceID: workspaceID, RequestedEmbeddingModel: embChain[0],
+		VectorSpaceID: sc.VectorSpaceID, IndexedAt: sc.IndexedAt,
+		Status: sc.Status, ErrorCount: sc.ErrorCount,
+		SourceCount: stats.TotalSources, ChunkCount: stats.TotalChunks,
+	}
+	if err := writeGenerationMetadata(staging.metadataPath, staging.metadata); err != nil {
+		return fmt.Errorf("write generation metadata: %w", err)
+	}
+	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: workspaceID, Generation: staging.id}
+	if err := validateGenerationMetadata(staging.metadata, pointer); err != nil {
+		return err
+	}
+	if err := validateGenerationDatabase(ctx, staging); err != nil {
+		return err
+	}
+	final, err := finalizeStagingGeneration(dbPath, staging)
+	if err != nil {
+		return err
+	}
+	stagingDir = filepath.Dir(final.dbPath)
+	if err := publishActiveGeneration(dbPath, pointer, nil); err != nil {
+		if current, readErr := readActivePointer(dbPath); readErr != nil || current.Generation != final.id {
+			_ = os.RemoveAll(stagingDir)
+		}
+		discardStaging = false
+		return err
+	}
+	discardStaging = false
 	return res.exitErr
 }

@@ -17,9 +17,10 @@ For the legacy base path `<workspace>.db`, generation state lives at:
 <workspace>.lock                        workspace writer lease
 ```
 
-A writer acquires the workspace lease, removes only unreferenced generation
-directories left by earlier crashed writers, and creates a new unique
-generation directory. When the active vector space matches the successful
+A writer acquires the workspace lease, removes only `.staging-*` directories
+left by earlier interrupted writers, and creates a new unique staging
+directory. Finalized historical generations are retained because another
+process may still be draining one. When the active vector space matches the successful
 startup embedding probe, the writer copies the immutable active database into
 the staging generation for incremental refresh. Otherwise it starts a fresh
 database. The active files are never opened writable.
@@ -35,8 +36,11 @@ the pointer rename is the sole publication event.
 
 Crash recovery is deterministic:
 
-- Before pointer rename, restart serves the old pointer (or legacy pair) and
-  the next lease holder removes the unreferenced staging generation.
+- Before the generation-directory rename, restart serves the old pointer (or
+  legacy pair) and the next lease holder removes the `.staging-*` directory.
+- After the generation-directory rename but before pointer rename, restart
+  serves the old pointer and leaves the finalized orphan untouched; it cannot
+  be distinguished safely from a generation still served by another process.
 - After pointer rename, restart validates and serves the new generation; an
   orphaned pointer temporary file is ignored and later removed under the lease.
 - A missing, corrupt, mixed-space, count-mismatched, or generation-mismatched
@@ -66,7 +70,8 @@ Crash recovery is deterministic:
   releases resources, and makes late background completions retire their new
   delegate instead of resurrecting it.
 - **Cleanup:** staging cleanup runs only while holding the workspace lease and
-  excludes the pointer target. It never touches explicit `-rag-db` data.
+  is restricted to `.staging-*` directories and the pointer temp file. It never
+  deletes finalized generations or touches explicit `-rag-db` data.
 
 ## Alternatives rejected
 
