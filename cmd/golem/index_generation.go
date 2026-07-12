@@ -17,9 +17,9 @@ import (
 )
 
 const (
-	activePointerSchemaVersion  = 1
-	generationSchemaVersion     = 1
-	generationCheckpointTimeout = 5 * time.Second
+	activePointerSchemaVersion = 1
+	generationSchemaVersion    = 1
+	generationCleanupTimeout   = 5 * time.Second
 )
 
 type activeGenerationPointer struct {
@@ -115,7 +115,7 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 		if keepGeneration {
 			return
 		}
-		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationCheckpointTimeout)
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationCleanupTimeout)
 		defer cancel()
 		if cleanupErr := removeGenerationPath(cleanupCtx, cleanupPath); cleanupErr != nil {
 			err = errors.Join(err, cleanupErr)
@@ -225,9 +225,10 @@ func checkpointGeneration(ctx context.Context, store *rag.SQLiteStore) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationCheckpointTimeout)
-	defer cancel()
-	if _, err := store.DB().ExecContext(checkpointCtx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+	// Checkpoint time is data-dependent — a full rebuild's WAL is the whole
+	// database — so no fixed ceiling; cancellation aborts the build and the
+	// cleanup defer discards the staging directory.
+	if _, err := store.DB().ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
 		return fmt.Errorf("golem: checkpoint staging generation: %w", err)
 	}
 	return nil
