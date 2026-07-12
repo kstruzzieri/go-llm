@@ -24,7 +24,7 @@ func TestProbeAutoIndexEmbedder_CallsWithOneInputAndModel(t *testing.T) {
 		gotModel = model
 		gotInputs = inputs
 		_, hadDeadline = ctx.Deadline()
-		return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "ollama/nomic"}, nil
+		return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}, VectorSpaceID: "ollama/nomic"}, nil
 	})
 
 	actual, err := probeAutoIndexEmbedder(context.Background(), emb, "ollama/nomic")
@@ -77,7 +77,7 @@ func TestProbeAutoIndexEmbedder_WrongVectorCount(t *testing.T) {
 
 func TestProbeAutoIndexEmbedder_RejectsMissingVectorSpaceIdentity(t *testing.T) {
 	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
-		return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+		return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}}, nil
 	})
 	if _, err := probeAutoIndexEmbedder(context.Background(), emb, "m"); err == nil || !strings.Contains(err.Error(), "vector-space identity") {
 		t.Fatalf("error = %v, want missing vector-space identity", err)
@@ -98,7 +98,9 @@ func seedAutoIndexStore(t *testing.T, dbPath, vsid, workspaceID string) {
 		sidecarPath: sidecarPath(dbPath), workspaceID: workspaceID,
 		requestedModel: vsid, out: &out,
 	})
-	_ = store.Close()
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	if res.exitErr != nil {
 		t.Fatalf("seed index failed: %v\n%s", res.exitErr, out.String())
 	}
@@ -119,7 +121,7 @@ func autoIndexTestEmbedder(vsid, failSubstr string) rag.Embedder {
 		}
 		vecs := make([][]float64, len(inputs))
 		for i := range vecs {
-			vecs[i] = []float64{1, 0, 0}
+			vecs[i] = realisticTestVector()
 		}
 		return rag.EmbedResult{Embeddings: vecs, Model: "nomic", Provider: "ollama", VectorSpaceID: vsid}, nil
 	})
@@ -138,8 +140,7 @@ func realReadOnlyOpen(_ string) func(context.Context, string) (*retrievalReader,
 		}
 		stats, err := store.Stats(ctx)
 		if err != nil {
-			_ = store.Close()
-			return nil, "", vsDecision{}, rag.StoreStats{}, err
+			return nil, "", vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
 		}
 		return newOwnedRetrievalReader(&agenttools.Retrieve{}, store, nil), "", vsDecision{}, stats, nil
 	}
@@ -314,7 +315,11 @@ func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) 
 	if err != nil {
 		t.Fatalf("open after refresh: %v", err)
 	}
-	defer func() { _ = store.Close() }()
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	sources, err := store.ListSources(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -345,7 +350,7 @@ func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
 	var calls atomic.Int32
 	emb := rag.EmbedderFunc(func(c context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
 		if calls.Add(1) == 1 {
-			return rag.EmbedResult{Embeddings: [][]float64{{1, 0, 0}}, Model: "nomic", Provider: "ollama", VectorSpaceID: "ollama/nomic"}, nil
+			return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}, Model: "nomic", Provider: "ollama", VectorSpaceID: "ollama/nomic"}, nil
 		}
 		cancel()
 		return rag.EmbedResult{}, context.Canceled
@@ -408,6 +413,44 @@ func TestRunAutoIndex_FailedRefreshPreservesActiveGenerationByteForByte(t *testi
 	}
 }
 
+func TestRunAutoIndex_RetrieverOpenFailureDoesNotPublish(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	var seedNotices []string
+	seed := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &seedNotices)
+	runAutoIndex(context.Background(), seed)
+	wantPointer, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ready := newReadyRetrieve(warmingRetrieveMessage)
+	ready.install(newRetrievalReader(&countingTool{content: "old"}, nil), "old")
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+	job.ready = ready
+	job.openRetriever = func(context.Context, string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+		return nil, "", vsDecision{}, rag.StoreStats{}, errors.New("reader open failed")
+	}
+	runAutoIndex(context.Background(), job)
+
+	gotPointer, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotPointer, wantPointer) {
+		t.Fatal("retriever open failure changed the active generation pointer")
+	}
+	result, err := ready.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil || result.Content != "old" {
+		t.Fatalf("active reader after failed replacement = %+v, %v", result, err)
+	}
+	if len(notices) != 1 || !strings.Contains(notices[0], "serving active generation") {
+		t.Fatalf("notices = %v", notices)
+	}
+}
+
 func TestRunAutoIndex_DeletedLastSourceFailsInsteadOfServingStaleMarker(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
@@ -458,7 +501,7 @@ func TestRunAutoIndex_ServesActiveWhileBlockedThenPublishesAndSwaps(t *testing.T
 		once.Do(func() { close(entered); <-release })
 		vectors := make([][]float64, len(inputs))
 		for i := range vectors {
-			vectors[i] = []float64{1, 0, 0}
+			vectors[i] = realisticTestVector()
 		}
 		return rag.EmbedResult{Embeddings: vectors, Provider: "ollama", Model: "nomic", VectorSpaceID: "ollama/nomic"}, nil
 	})
@@ -472,8 +515,7 @@ func TestRunAutoIndex_ServesActiveWhileBlockedThenPublishesAndSwaps(t *testing.T
 		}
 		stats, err := store.Stats(ctx)
 		if err != nil {
-			_ = store.Close()
-			return nil, "", vsDecision{}, rag.StoreStats{}, err
+			return nil, "", vsDecision{}, rag.StoreStats{}, errors.Join(err, store.Close())
 		}
 		return newOwnedRetrievalReader(&countingTool{content: "new"}, store, nil), "", vsDecision{}, stats, nil
 	}
@@ -514,7 +556,7 @@ func TestRunAutoIndex_LeaseContentionPreservesActiveAndLiveStaging(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	staging, err := createStagingGeneration(dbPath)
+	staging, err := createStagingGeneration(context.Background(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +564,11 @@ func TestRunAutoIndex_LeaseContentionPreservesActiveAndLiveStaging(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = lease.Close() }()
+	t.Cleanup(func() {
+		if err := lease.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	ready := newReadyRetrieve(warmingRetrieveMessage)
 	ready.install(newRetrievalReader(&countingTool{content: "active"}, nil), "active")
@@ -568,9 +614,18 @@ func TestRunAutoIndex_CancellationPreservesActiveGenerationByteForByte(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDB, _ := os.ReadFile(active.dbPath)
-	wantMetadata, _ := os.ReadFile(active.metadataPath)
-	wantPointer, _ := os.ReadFile(activePointerPath(dbPath))
+	wantDB, err := os.ReadFile(active.dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantMetadata, err := os.ReadFile(active.metadataPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantPointer, err := os.ReadFile(activePointerPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() { println(\"changed\") }\n")
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -580,7 +635,7 @@ func TestRunAutoIndex_CancellationPreservesActiveGenerationByteForByte(t *testin
 			cancel()
 			return rag.EmbedResult{}, context.Canceled
 		}
-		return rag.EmbedResult{Embeddings: [][]float64{{1, 0, 0}}, Provider: "ollama", Model: "nomic", VectorSpaceID: "ollama/nomic"}, nil
+		return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}, Provider: "ollama", Model: "nomic", VectorSpaceID: "ollama/nomic"}, nil
 	})
 	var notices []string
 	job := newAutoIndexTestJob(root, dbPath, emb, &notices)

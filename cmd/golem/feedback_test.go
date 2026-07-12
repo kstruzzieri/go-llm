@@ -94,7 +94,11 @@ func TestEnableRetrieveFeedbackValid(t *testing.T) {
 	if got.reader == nil || got.reader.feedback == nil || got.reader.feedback.db == nil || got.reader.feedback.weighter == nil {
 		t.Fatalf("feedback handle not retained by reader: %#v", got.reader)
 	}
-	defer got.reader.closeAfterDrain()
+	defer func() {
+		if err := got.reader.closeAfterDrain(); err != nil {
+			t.Error(err)
+		}
+	}()
 }
 
 func TestEnableRetrieveFeedbackFailsOpen(t *testing.T) {

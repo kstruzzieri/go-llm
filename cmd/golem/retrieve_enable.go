@@ -104,13 +104,6 @@ func legacyWarnIfAny(dec vsDecision) []string {
 	return nil
 }
 
-func autoLine(sc indexSidecar, stats rag.StoreStats) string {
-	if sc.Status == "partial" {
-		return fmt.Sprintf("retrieve: auto index is partial, %d sources, %d errors from last run; rerun \"golem index\"", stats.TotalSources, sc.ErrorCount)
-	}
-	return fmt.Sprintf("retrieve: auto index, %d sources, %s, updated %s", stats.TotalSources, sc.VectorSpaceID, sc.IndexedAt)
-}
-
 func autoGenerationLine(metadata generationMetadata, stats rag.StoreStats) string {
 	if metadata.Status == "partial" {
 		return fmt.Sprintf("retrieve: auto index is partial, %d sources, %d errors from last run; rerun \"golem index\"", stats.TotalSources, metadata.ErrorCount)

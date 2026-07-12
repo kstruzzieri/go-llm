@@ -3,6 +3,8 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"sync"
 
 	"github.com/kstruzzieri/go-llm/agent"
@@ -40,6 +42,7 @@ type readyRetrieve struct {
 	message  string
 	closed   bool // close() ran; a later install must retire the incoming reader
 	retiring sync.WaitGroup
+	closeErr error
 }
 
 // retrievalReader owns one immutable generation's model-facing tool and all
@@ -52,36 +55,44 @@ type retrievalReader struct {
 	feedback  *behavioralWeighterHandle
 	inflight  sync.WaitGroup
 	closeOnce sync.Once
-	closeFn   func()
+	closeFn   func() error
+	closeErr  error
 }
 
-func newRetrievalReader(tool agent.Tool, closeFn func()) *retrievalReader {
+func newRetrievalReader(tool agent.Tool, closeFn func() error) *retrievalReader {
 	return &retrievalReader{tool: tool, closeFn: closeFn}
 }
 
 func newOwnedRetrievalReader(tool agent.Tool, store interface{ Close() error }, feedback *behavioralWeighterHandle) *retrievalReader {
 	reader := &retrievalReader{tool: tool, store: store, feedback: feedback}
-	reader.closeFn = func() {
+	reader.closeFn = func() error {
+		var closeErr error
 		if feedback != nil && feedback.db != nil {
-			_ = feedback.db.Close()
+			if err := feedback.db.Close(); err != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("golem: close behavioral feedback database: %w", err))
+			}
 		}
 		if store != nil {
-			_ = store.Close()
+			if err := store.Close(); err != nil {
+				closeErr = errors.Join(closeErr, fmt.Errorf("golem: close retrieval generation store: %w", err))
+			}
 		}
+		return closeErr
 	}
 	return reader
 }
 
-func (r *retrievalReader) closeAfterDrain() {
+func (r *retrievalReader) closeAfterDrain() error {
 	if r == nil {
-		return
+		return nil
 	}
 	r.inflight.Wait()
 	r.closeOnce.Do(func() {
 		if r.closeFn != nil {
-			r.closeFn()
+			r.closeErr = r.closeFn()
 		}
 	})
+	return r.closeErr
 }
 
 // newReadyRetrieve returns a wrapper in the warming state; warmingMessage is
@@ -117,14 +128,14 @@ func (r *readyRetrieve) Invoke(ctx context.Context, args json.RawMessage) (agent
 func (r *readyRetrieve) install(reader *retrievalReader, message string) bool {
 	if reader == nil || reader.tool == nil {
 		if reader != nil {
-			reader.closeAfterDrain()
+			r.recordCloseError(reader.closeAfterDrain())
 		}
 		return false
 	}
 	r.mu.Lock()
 	if r.closed || r.state == retrieveFailed {
 		r.mu.Unlock()
-		reader.closeAfterDrain()
+		r.recordCloseError(reader.closeAfterDrain())
 		return false
 	}
 	old := r.reader
@@ -138,7 +149,7 @@ func (r *readyRetrieve) install(reader *retrievalReader, message string) bool {
 	if old != nil {
 		go func() {
 			defer r.retiring.Done()
-			old.closeAfterDrain()
+			r.recordCloseError(old.closeAfterDrain())
 		}()
 	}
 	return true
@@ -151,10 +162,13 @@ func (r *readyRetrieve) install(reader *retrievalReader, message string) bool {
 // terminal transition wins: a late markReady after markFailed is ignored so
 // racing outcomes cannot flap the tool.
 func (r *readyRetrieve) markReady(tool agent.Tool, message string, feedback *behavioralWeighterHandle) {
-	r.install(newRetrievalReader(tool, func() {
+	r.install(newRetrievalReader(tool, func() error {
 		if feedback != nil && feedback.db != nil {
-			_ = feedback.db.Close()
+			if err := feedback.db.Close(); err != nil {
+				return fmt.Errorf("golem: close behavioral feedback database: %w", err)
+			}
 		}
+		return nil
 	}), message)
 }
 
@@ -178,12 +192,24 @@ func (r *readyRetrieve) hasReader() bool {
 
 // close releases the retained feedback DB handle. Nil-safe and idempotent so
 // main can defer it unconditionally in auto mode.
-func (r *readyRetrieve) close() {
+func (r *readyRetrieve) recordCloseError(err error) {
+	if err == nil {
+		return
+	}
+	r.mu.Lock()
+	r.closeErr = errors.Join(r.closeErr, err)
+	r.mu.Unlock()
+}
+
+func (r *readyRetrieve) close() error {
 	r.mu.Lock()
 	reader := r.reader
 	r.reader = nil
 	r.closed = true
 	r.mu.Unlock()
-	reader.closeAfterDrain()
+	r.recordCloseError(reader.closeAfterDrain())
 	r.retiring.Wait()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.closeErr
 }

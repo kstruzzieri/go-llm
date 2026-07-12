@@ -14,6 +14,12 @@ import (
 
 var errTestEmbedCmd = errors.New("cmd test embed failure")
 
+func realisticTestVector() []float64 {
+	vector := make([]float64, 768)
+	vector[0] = 1
+	return vector
+}
+
 // buildTestIndexer wires a fake embedder (fixed vsid) to a fresh on-disk store.
 func buildTestIndexer(t *testing.T, dbPath, vsid string) (*rag.SQLiteStore, *rag.Indexer) {
 	t.Helper()
@@ -27,7 +33,7 @@ func buildTestIndexer(t *testing.T, dbPath, vsid string) (*rag.SQLiteStore, *rag
 	emb := rag.EmbedderFunc(func(_ context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
 		vecs := make([][]float64, len(inputs))
 		for i := range vecs {
-			vecs[i] = []float64{1, 0, 0}
+			vecs[i] = realisticTestVector()
 		}
 		return rag.EmbedResult{Embeddings: vecs, Model: "nomic", Provider: "ollama", VectorSpaceID: vsid}, nil
 	})
@@ -156,7 +162,7 @@ func TestExecuteIndex_PartialExitsNonZeroButWritesSidecar(t *testing.T) {
 		}
 		vecs := make([][]float64, len(inputs))
 		for i := range vecs {
-			vecs[i] = []float64{1, 0, 0}
+			vecs[i] = realisticTestVector()
 		}
 		return rag.EmbedResult{Embeddings: vecs, Model: "nomic", Provider: "ollama", VectorSpaceID: "ollama/nomic"}, nil
 	})

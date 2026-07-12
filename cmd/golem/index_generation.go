@@ -49,11 +49,175 @@ type indexGeneration struct {
 	legacy       bool
 }
 
+type generationBuildOptions struct {
+	root                string
+	dbPath              string
+	workspaceID         string
+	requestedModel      string
+	actualVectorSpace   string
+	embedder            rag.Embedder
+	full                bool
+	pruneDeleted        bool
+	refuseInvalidActive bool
+	out                 io.Writer
+	finalizationHook    finalizationHook
+}
+
+type generationBuildResult struct {
+	generation indexGeneration
+	sidecar    indexSidecar
+	stats      rag.StoreStats
+	index      indexResult
+	activeErr  error
+}
+
+func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (result generationBuildResult, err error) {
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	if opts.dbPath == "" || opts.workspaceID == "" || opts.requestedModel == "" || opts.actualVectorSpace == "" || opts.embedder == nil || opts.out == nil {
+		return result, fmt.Errorf("golem: build index generation: db path, workspace, requested model, actual vector space, embedder, and output are required")
+	}
+	active, activeErr := resolveActiveGeneration(ctx, opts.dbPath, opts.workspaceID)
+	result.activeErr = activeErr
+	if opts.refuseInvalidActive && !opts.full {
+		switch {
+		case activeErr == nil && active.metadata.VectorSpaceID != opts.actualVectorSpace:
+			return result, fmt.Errorf("golem: existing index uses vector space %s, successful embedding route is %s; run \"golem index -full\" to rebuild",
+				active.metadata.VectorSpaceID, opts.actualVectorSpace)
+		case activeErr != nil && !errors.Is(activeErr, os.ErrNotExist):
+			return result, fmt.Errorf("golem: existing index is invalid (%v); run \"golem index -full\" to rebuild", activeErr)
+		case errors.Is(activeErr, os.ErrNotExist) && (fileExists(opts.dbPath) || fileExists(sidecarPath(opts.dbPath))):
+			return result, fmt.Errorf("golem: existing index has no valid sidecar; run \"golem index -full\" to rebuild")
+		}
+	}
+	if err := cleanupStaleGenerations(ctx, opts.dbPath); err != nil {
+		return result, err
+	}
+	staging, err := createStagingGeneration(ctx, opts.dbPath)
+	if err != nil {
+		return result, err
+	}
+	cleanupPath := filepath.Dir(staging.dbPath)
+	keepGeneration := false
+	defer func() {
+		if keepGeneration {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationCheckpointTimeout)
+		defer cancel()
+		if cleanupErr := removeGenerationPath(cleanupCtx, cleanupPath); cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+	if !opts.full && activeErr == nil && active.metadata.VectorSpaceID == opts.actualVectorSpace {
+		if err := copyImmutableFile(ctx, active.dbPath, staging.dbPath); err != nil {
+			return result, err
+		}
+	}
+	store, err := rag.NewSQLiteStore(staging.dbPath)
+	if err != nil {
+		return result, fmt.Errorf("golem: open staging database %q: %w", staging.dbPath, err)
+	}
+	storeClosed := false
+	defer func() {
+		if !storeClosed {
+			if closeErr := store.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("golem: close staging database %q: %w", staging.dbPath, closeErr))
+			}
+		}
+	}()
+	indexer, err := rag.NewIndexerWithEmbedder(opts.embedder, store, rag.WithEmbeddingModel(opts.requestedModel))
+	if err != nil {
+		return result, fmt.Errorf("golem: build staging indexer: %w", err)
+	}
+	result.index = executeIndex(ctx, indexJob{
+		indexer: indexer, store: store, root: opts.root,
+		dbPath: staging.dbPath, displayDBPath: opts.dbPath,
+		sidecarPath: staging.metadataPath, workspaceID: opts.workspaceID,
+		requestedModel: opts.requestedModel, out: opts.out, pruneDeleted: opts.pruneDeleted,
+	})
+	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
+		return result, checkpointErr
+	}
+	if closeErr := store.Close(); closeErr != nil {
+		storeClosed = true
+		return result, fmt.Errorf("golem: close staging database %q: %w", staging.dbPath, closeErr)
+	}
+	storeClosed = true
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	sc, sidecarErr := readSidecar(staging.metadataPath)
+	if sidecarErr != nil {
+		return result, fmt.Errorf("golem: read staging metadata %q: %w", staging.metadataPath, sidecarErr)
+	}
+	if validateErr := validateSidecar(sc, opts.workspaceID); validateErr != nil {
+		return result, fmt.Errorf("golem: validate staging metadata %q: %w", staging.metadataPath, validateErr)
+	}
+	if result.index.exitErr != nil && sc.Status != "partial" {
+		return result, fmt.Errorf("golem: indexing did not produce a publishable generation")
+	}
+	readOnly, err := rag.OpenSQLiteStoreReadOnly(staging.dbPath)
+	if err != nil {
+		return result, fmt.Errorf("golem: open staging generation %q read-only: %w", staging.dbPath, err)
+	}
+	stats, statsErr := readOnly.Stats(ctx)
+	closeErr := readOnly.Close()
+	if statsErr != nil {
+		err = errors.Join(err, fmt.Errorf("golem: read staging generation stats %q: %w", staging.dbPath, statsErr))
+	}
+	if closeErr != nil {
+		err = errors.Join(err, fmt.Errorf("golem: close staging generation %q after stats: %w", staging.dbPath, closeErr))
+	}
+	if err != nil {
+		return result, err
+	}
+	if result.index.exitErr != nil && stats.TotalSources < 1 {
+		return result, fmt.Errorf("golem: partial staging generation has no usable sources")
+	}
+	if sc.VectorSpaceID != opts.actualVectorSpace {
+		return result, fmt.Errorf("golem: staging vector space %q does not match successful probe %q", sc.VectorSpaceID, opts.actualVectorSpace)
+	}
+	staging.metadata = generationMetadata{
+		SchemaVersion: generationSchemaVersion, Generation: staging.id,
+		WorkspaceID: opts.workspaceID, RequestedEmbeddingModel: opts.requestedModel,
+		VectorSpaceID: sc.VectorSpaceID, IndexedAt: sc.IndexedAt,
+		Status: sc.Status, ErrorCount: sc.ErrorCount,
+		SourceCount: stats.TotalSources, ChunkCount: stats.TotalChunks,
+	}
+	if err := writeGenerationMetadata(ctx, staging.metadataPath, staging.metadata); err != nil {
+		return result, err
+	}
+	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: opts.workspaceID, Generation: staging.id}
+	if err := validateGenerationMetadata(staging.metadata, pointer); err != nil {
+		return result, err
+	}
+	if err := validateGenerationDatabase(ctx, staging); err != nil {
+		return result, err
+	}
+	if err := ctx.Err(); err != nil {
+		return result, err
+	}
+	final, err := finalizeStagingGeneration(ctx, opts.dbPath, staging, opts.finalizationHook)
+	if err != nil {
+		return result, err
+	}
+	keepGeneration = true
+	result.generation = final
+	result.sidecar = sc
+	result.stats = stats
+	return result, nil
+}
+
 func checkpointGeneration(ctx context.Context, store *rag.SQLiteStore) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), generationCheckpointTimeout)
 	defer cancel()
 	if _, err := store.DB().ExecContext(checkpointCtx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-		return fmt.Errorf("checkpoint staging generation: %w", err)
+		return fmt.Errorf("golem: checkpoint staging generation: %w", err)
 	}
 	return nil
 }
@@ -83,14 +247,17 @@ func validGenerationID(id string) bool {
 	return err == nil
 }
 
-func createStagingGeneration(dbPath string) (indexGeneration, error) {
+func createStagingGeneration(ctx context.Context, dbPath string) (indexGeneration, error) {
+	if err := ctx.Err(); err != nil {
+		return indexGeneration{}, err
+	}
 	if err := os.MkdirAll(generationsPath(dbPath), 0o700); err != nil {
-		return indexGeneration{}, fmt.Errorf("create generations directory: %w", err)
+		return indexGeneration{}, fmt.Errorf("golem: create generations directory %q: %w", generationsPath(dbPath), err)
 	}
 	for range 4 {
 		var token [16]byte
 		if _, err := rand.Read(token[:]); err != nil {
-			return indexGeneration{}, fmt.Errorf("create generation id: %w", err)
+			return indexGeneration{}, fmt.Errorf("golem: create generation id: %w", err)
 		}
 		gen := generationPaths(dbPath, hex.EncodeToString(token[:]))
 		gen.dbPath = filepath.Join(generationsPath(dbPath), ".staging-"+gen.id, "index.db")
@@ -98,153 +265,192 @@ func createStagingGeneration(dbPath string) (indexGeneration, error) {
 		if err := os.Mkdir(filepath.Dir(gen.dbPath), 0o700); err == nil {
 			return gen, nil
 		} else if !os.IsExist(err) {
-			return indexGeneration{}, fmt.Errorf("create staging generation: %w", err)
+			return indexGeneration{}, fmt.Errorf("golem: create staging generation under %q: %w", generationsPath(dbPath), err)
 		}
 	}
-	return indexGeneration{}, fmt.Errorf("create staging generation: repeated id collision")
+	return indexGeneration{}, fmt.Errorf("golem: create staging generation under %q: repeated id collision", generationsPath(dbPath))
 }
 
-func finalizeStagingGeneration(dbPath string, staging indexGeneration) (indexGeneration, error) {
+type finalizationBoundary string
+
+const (
+	finalizationBeforeRename finalizationBoundary = "before-generation-rename"
+	finalizationAfterRename  finalizationBoundary = "after-generation-rename"
+	finalizationAfterDirSync finalizationBoundary = "after-generation-dir-sync"
+)
+
+type finalizationHook func(finalizationBoundary) error
+
+func finalizeStagingGeneration(ctx context.Context, dbPath string, staging indexGeneration, hook finalizationHook) (indexGeneration, error) {
+	if err := ctx.Err(); err != nil {
+		return indexGeneration{}, err
+	}
+	if hook != nil {
+		if err := hook(finalizationBeforeRename); err != nil {
+			return indexGeneration{}, err
+		}
+	}
 	final := generationPaths(dbPath, staging.id)
 	if err := os.Rename(filepath.Dir(staging.dbPath), filepath.Dir(final.dbPath)); err != nil {
-		return indexGeneration{}, fmt.Errorf("finalize staging generation: %w", err)
+		return indexGeneration{}, fmt.Errorf("golem: finalize staging generation %q: %w", staging.id, err)
+	}
+	if hook != nil {
+		if err := hook(finalizationAfterRename); err != nil {
+			return indexGeneration{}, err
+		}
 	}
 	dir, err := os.Open(generationsPath(dbPath))
 	if err != nil {
-		return indexGeneration{}, fmt.Errorf("open generations directory: %w", err)
+		return indexGeneration{}, fmt.Errorf("golem: open generations directory %q: %w", generationsPath(dbPath), err)
 	}
 	if err := dir.Sync(); err != nil {
-		_ = dir.Close()
-		return indexGeneration{}, fmt.Errorf("sync generations directory: %w", err)
+		closeErr := dir.Close()
+		return indexGeneration{}, errors.Join(fmt.Errorf("golem: sync generations directory %q: %w", generationsPath(dbPath), err), closeErr)
 	}
 	if err := dir.Close(); err != nil {
-		return indexGeneration{}, fmt.Errorf("close generations directory: %w", err)
+		return indexGeneration{}, fmt.Errorf("golem: close generations directory %q: %w", generationsPath(dbPath), err)
+	}
+	if hook != nil {
+		if err := hook(finalizationAfterDirSync); err != nil {
+			return indexGeneration{}, err
+		}
 	}
 	final.metadata = staging.metadata
 	return final, nil
 }
 
-func writeGenerationMetadata(path string, metadata generationMetadata) error {
-	return writeAtomicJSON(path, metadata, nil)
+func writeGenerationMetadata(ctx context.Context, path string, metadata generationMetadata) error {
+	return writeAtomicJSON(ctx, path, metadata, nil)
 }
 
-func readStrictJSON(path string, dst any) error {
+func readStrictJSON(ctx context.Context, path string, dst any) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = f.Close() }()
+	defer func() {
+		if closeErr := f.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("golem: close %q after reading JSON: %w", path, closeErr))
+		}
+	}()
 	dec := json.NewDecoder(f)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
-		return fmt.Errorf("decode %q: %w", path, err)
+		return fmt.Errorf("golem: decode %q: %w", path, err)
 	}
 	if err := dec.Decode(new(any)); !errors.Is(err, io.EOF) {
 		if err == nil {
 			err = fmt.Errorf("multiple JSON values")
 		}
-		return fmt.Errorf("decode %q: %w", path, err)
+		return fmt.Errorf("golem: decode %q: %w", path, err)
 	}
 	return nil
 }
 
-func readActivePointer(dbPath string) (activeGenerationPointer, error) {
+func readActivePointer(ctx context.Context, dbPath string) (activeGenerationPointer, error) {
 	var pointer activeGenerationPointer
-	if err := readStrictJSON(activePointerPath(dbPath), &pointer); err != nil {
-		return activeGenerationPointer{}, fmt.Errorf("read active generation pointer: %w", err)
+	if err := readStrictJSON(ctx, activePointerPath(dbPath), &pointer); err != nil {
+		return activeGenerationPointer{}, fmt.Errorf("golem: read active generation pointer %q: %w", activePointerPath(dbPath), err)
 	}
 	return pointer, nil
 }
 
 func validatePointer(pointer activeGenerationPointer, workspaceID string) error {
 	if pointer.SchemaVersion != activePointerSchemaVersion {
-		return fmt.Errorf("active generation pointer schemaVersion %d unsupported", pointer.SchemaVersion)
+		return fmt.Errorf("golem: active generation pointer schemaVersion %d unsupported", pointer.SchemaVersion)
 	}
 	if pointer.WorkspaceID != workspaceID {
-		return fmt.Errorf("active generation pointer workspaceID %q does not match %q", pointer.WorkspaceID, workspaceID)
+		return fmt.Errorf("golem: active generation pointer workspaceID %q does not match %q", pointer.WorkspaceID, workspaceID)
 	}
 	if !validGenerationID(pointer.Generation) {
-		return fmt.Errorf("active generation pointer has invalid generation %q", pointer.Generation)
+		return fmt.Errorf("golem: active generation pointer has invalid generation %q", pointer.Generation)
 	}
 	return nil
 }
 
 func validateGenerationMetadata(metadata generationMetadata, pointer activeGenerationPointer) error {
 	if metadata.SchemaVersion != generationSchemaVersion {
-		return fmt.Errorf("generation metadata schemaVersion %d unsupported", metadata.SchemaVersion)
+		return fmt.Errorf("golem: generation metadata schemaVersion %d unsupported", metadata.SchemaVersion)
 	}
 	if metadata.Generation != pointer.Generation {
-		return fmt.Errorf("generation metadata id %q does not match pointer %q", metadata.Generation, pointer.Generation)
+		return fmt.Errorf("golem: generation metadata id %q does not match pointer %q", metadata.Generation, pointer.Generation)
 	}
 	if metadata.WorkspaceID != pointer.WorkspaceID {
-		return fmt.Errorf("generation metadata workspaceID %q does not match pointer %q", metadata.WorkspaceID, pointer.WorkspaceID)
+		return fmt.Errorf("golem: generation metadata workspaceID %q does not match pointer %q", metadata.WorkspaceID, pointer.WorkspaceID)
 	}
 	if metadata.VectorSpaceID == "" {
-		return fmt.Errorf("generation metadata vector space is empty")
+		return fmt.Errorf("golem: generation metadata vector space is empty")
 	}
 	if metadata.SourceCount < 1 || metadata.ChunkCount < 1 {
-		return fmt.Errorf("generation metadata has unusable counts sources=%d chunks=%d", metadata.SourceCount, metadata.ChunkCount)
+		return fmt.Errorf("golem: generation metadata has unusable counts sources=%d chunks=%d", metadata.SourceCount, metadata.ChunkCount)
 	}
 	switch metadata.Status {
 	case "complete":
 		if metadata.ErrorCount != 0 {
-			return fmt.Errorf("complete generation has %d errors", metadata.ErrorCount)
+			return fmt.Errorf("golem: complete generation has %d errors", metadata.ErrorCount)
 		}
 	case "partial":
 		if metadata.ErrorCount < 1 {
-			return fmt.Errorf("partial generation has no errors")
+			return fmt.Errorf("golem: partial generation has no errors")
 		}
 	default:
-		return fmt.Errorf("generation metadata status %q is invalid", metadata.Status)
+		return fmt.Errorf("golem: generation metadata status %q is invalid", metadata.Status)
 	}
 	if _, err := time.Parse(time.RFC3339, metadata.IndexedAt); err != nil {
-		return fmt.Errorf("generation metadata indexedAt: %w", err)
+		return fmt.Errorf("golem: generation metadata indexedAt: %w", err)
 	}
 	return nil
 }
 
-func validateGenerationDatabase(ctx context.Context, gen indexGeneration) error {
+func validateGenerationDatabase(ctx context.Context, gen indexGeneration) (err error) {
 	store, err := rag.OpenSQLiteStoreReadOnly(gen.dbPath)
 	if err != nil {
-		return fmt.Errorf("generation database open: %w", err)
+		return fmt.Errorf("golem: generation database open: %w", err)
 	}
-	defer func() { _ = store.Close() }()
+	defer func() {
+		if closeErr := store.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("golem: close generation database %q after validation: %w", gen.dbPath, closeErr))
+		}
+	}()
 	var integrity string
 	if err := store.DB().QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
-		return fmt.Errorf("generation database integrity: %w", err)
+		return fmt.Errorf("golem: generation database integrity: %w", err)
 	}
 	if integrity != "ok" {
-		return fmt.Errorf("generation database integrity: %s", integrity)
+		return fmt.Errorf("golem: generation database integrity: %s", integrity)
 	}
 	stats, err := store.Stats(ctx)
 	if err != nil {
-		return fmt.Errorf("generation database stats: %w", err)
+		return fmt.Errorf("golem: generation database stats: %w", err)
 	}
 	if stats.TotalSources != gen.metadata.SourceCount {
-		return fmt.Errorf("generation source count %d does not match metadata %d", stats.TotalSources, gen.metadata.SourceCount)
+		return fmt.Errorf("golem: generation source count %d does not match metadata %d", stats.TotalSources, gen.metadata.SourceCount)
 	}
 	if stats.TotalChunks != gen.metadata.ChunkCount {
-		return fmt.Errorf("generation chunk count %d does not match metadata %d", stats.TotalChunks, gen.metadata.ChunkCount)
+		return fmt.Errorf("golem: generation chunk count %d does not match metadata %d", stats.TotalChunks, gen.metadata.ChunkCount)
 	}
 	probe, err := store.ProbeVectorSpaces(ctx)
 	if err != nil {
-		return fmt.Errorf("generation database vector space probe: %w", err)
+		return fmt.Errorf("golem: generation database vector space probe: %w", err)
 	}
 	if probe.HasUnknown || len(probe.KnownIDs) != 1 || probe.KnownIDs[0] != gen.metadata.VectorSpaceID {
-		return fmt.Errorf("generation database vector space known=%v unknown=%v does not match metadata %q", probe.KnownIDs, probe.HasUnknown, gen.metadata.VectorSpaceID)
+		return fmt.Errorf("golem: generation database vector space known=%v unknown=%v does not match metadata %q", probe.KnownIDs, probe.HasUnknown, gen.metadata.VectorSpaceID)
 	}
 	return nil
 }
 
 func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (indexGeneration, error) {
-	pointer, err := readActivePointer(dbPath)
+	pointer, err := readActivePointer(ctx, dbPath)
 	if err == nil {
 		if err := validatePointer(pointer, workspaceID); err != nil {
 			return indexGeneration{}, err
 		}
 		gen := generationPaths(dbPath, pointer.Generation)
-		if err := readStrictJSON(gen.metadataPath, &gen.metadata); err != nil {
-			return indexGeneration{}, fmt.Errorf("read generation metadata: %w", err)
+		if err := readStrictJSON(ctx, gen.metadataPath, &gen.metadata); err != nil {
+			return indexGeneration{}, fmt.Errorf("golem: read generation metadata %q: %w", gen.metadataPath, err)
 		}
 		if err := validateGenerationMetadata(gen.metadata, pointer); err != nil {
 			return indexGeneration{}, err
@@ -258,11 +464,11 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 		return indexGeneration{}, err
 	}
 	if !fileExists(dbPath) || !fileExists(sidecarPath(dbPath)) {
-		return indexGeneration{}, fmt.Errorf("%w: no active generation", os.ErrNotExist)
+		return indexGeneration{}, fmt.Errorf("golem: %w: no active generation for %q", os.ErrNotExist, dbPath)
 	}
 	sidecar, err := readSidecar(sidecarPath(dbPath))
 	if err != nil {
-		return indexGeneration{}, fmt.Errorf("read legacy generation metadata: %w", err)
+		return indexGeneration{}, fmt.Errorf("golem: read legacy generation metadata %q: %w", sidecarPath(dbPath), err)
 	}
 	if err := validateSidecar(sidecar, workspaceID); err != nil {
 		return indexGeneration{}, err
@@ -281,16 +487,19 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 	}
 	store, err := rag.OpenSQLiteStoreReadOnly(dbPath)
 	if err != nil {
-		return indexGeneration{}, fmt.Errorf("legacy generation database: %w", err)
+		return indexGeneration{}, fmt.Errorf("golem: open legacy generation database %q: %w", dbPath, err)
 	}
 	stats, err := store.Stats(ctx)
 	if err == nil {
 		legacy.metadata.SourceCount = stats.TotalSources
 		legacy.metadata.ChunkCount = stats.TotalChunks
 	}
-	_ = store.Close()
+	closeErr := store.Close()
 	if err != nil {
-		return indexGeneration{}, fmt.Errorf("legacy generation database stats: %w", err)
+		return indexGeneration{}, errors.Join(fmt.Errorf("golem: read legacy generation database stats %q: %w", dbPath, err), closeErr)
+	}
+	if closeErr != nil {
+		return indexGeneration{}, fmt.Errorf("golem: close legacy generation database %q: %w", dbPath, closeErr)
 	}
 	pseudo := activeGenerationPointer{WorkspaceID: workspaceID}
 	if err := validateGenerationMetadataLegacy(legacy.metadata, pseudo); err != nil {
@@ -319,11 +528,11 @@ const (
 
 type publicationHook func(publicationBoundary) error
 
-func publishActiveGeneration(dbPath string, pointer activeGenerationPointer, hook publicationHook) error {
+func publishActiveGeneration(ctx context.Context, dbPath string, pointer activeGenerationPointer, hook publicationHook) error {
 	if err := validatePointer(pointer, pointer.WorkspaceID); err != nil {
 		return err
 	}
-	return writeAtomicJSON(activePointerPath(dbPath), pointer, func(boundary publicationBoundary) error {
+	return writeAtomicJSON(ctx, activePointerPath(dbPath), pointer, func(boundary publicationBoundary) error {
 		if hook == nil {
 			return nil
 		}
@@ -331,7 +540,10 @@ func publishActiveGeneration(dbPath string, pointer activeGenerationPointer, hoo
 	})
 }
 
-func writeAtomicJSON(path string, value any, hook publicationHook) error {
+func writeAtomicJSON(ctx context.Context, path string, value any, hook publicationHook) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if hook != nil {
 		if err := hook(publicationBeforePointerTemp); err != nil {
 			return err
@@ -339,36 +551,45 @@ func writeAtomicJSON(path string, value any, hook publicationHook) error {
 	}
 	data, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
-		return fmt.Errorf("marshal %q: %w", path, err)
+		return fmt.Errorf("golem: marshal %q: %w", path, err)
 	}
 	data = append(data, '\n')
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+		return fmt.Errorf("golem: create publication directory %q: %w", filepath.Dir(path), err)
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 	if err != nil {
-		return fmt.Errorf("create %q: %w", tmp, err)
+		return fmt.Errorf("golem: create %q: %w", tmp, err)
 	}
 	cleanup := true
+	closed := false
 	defer func() {
-		_ = f.Close()
+		if !closed {
+			if closeErr := f.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("golem: close publication temp %q: %w", tmp, closeErr))
+			}
+		}
 		if cleanup {
-			_ = os.Remove(tmp)
+			if removeErr := os.Remove(tmp); removeErr != nil && !os.IsNotExist(removeErr) {
+				err = errors.Join(err, fmt.Errorf("golem: remove publication temp %q: %w", tmp, removeErr))
+			}
 		}
 	}()
 	if _, err := f.Write(data); err != nil {
-		return fmt.Errorf("write %q: %w", tmp, err)
+		return fmt.Errorf("golem: write %q: %w", tmp, err)
 	}
 	if err := f.Chmod(0o600); err != nil {
-		return fmt.Errorf("chmod %q: %w", tmp, err)
+		return fmt.Errorf("golem: chmod %q: %w", tmp, err)
 	}
 	if err := f.Sync(); err != nil {
-		return fmt.Errorf("sync %q: %w", tmp, err)
+		return fmt.Errorf("golem: sync %q: %w", tmp, err)
 	}
 	if err := f.Close(); err != nil {
-		return fmt.Errorf("close %q: %w", tmp, err)
+		closed = true
+		return fmt.Errorf("golem: close %q: %w", tmp, err)
 	}
+	closed = true
 	if hook != nil {
 		if err := hook(publicationAfterPointerTempSync); err != nil {
 			cleanup = false
@@ -376,7 +597,7 @@ func writeAtomicJSON(path string, value any, hook publicationHook) error {
 		}
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		return fmt.Errorf("rename %q: %w", path, err)
+		return fmt.Errorf("golem: rename active metadata %q: %w", path, err)
 	}
 	cleanup = false
 	if hook != nil {
@@ -386,14 +607,14 @@ func writeAtomicJSON(path string, value any, hook publicationHook) error {
 	}
 	dir, err := os.Open(filepath.Dir(path))
 	if err != nil {
-		return fmt.Errorf("open publication directory: %w", err)
+		return fmt.Errorf("golem: open publication directory %q: %w", filepath.Dir(path), err)
 	}
 	if err := dir.Sync(); err != nil {
-		_ = dir.Close()
-		return fmt.Errorf("sync publication directory: %w", err)
+		closeErr := dir.Close()
+		return errors.Join(fmt.Errorf("golem: sync publication directory %q: %w", filepath.Dir(path), err), closeErr)
 	}
 	if err := dir.Close(); err != nil {
-		return fmt.Errorf("close publication directory: %w", err)
+		return fmt.Errorf("golem: close publication directory %q: %w", filepath.Dir(path), err)
 	}
 	if hook != nil {
 		if err := hook(publicationAfterPointerDirSync); err != nil {
@@ -403,21 +624,98 @@ func writeAtomicJSON(path string, value any, hook publicationHook) error {
 	return nil
 }
 
-func cleanupStaleGenerations(dbPath, activeID string) error {
+func cleanupStaleGenerations(ctx context.Context, dbPath string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(generationsPath(dbPath))
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("read generations directory: %w", err)
+		return fmt.Errorf("golem: read generations directory %q: %w", generationsPath(dbPath), err)
 	}
 	for _, entry := range entries {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".staging-") || !validGenerationID(strings.TrimPrefix(entry.Name(), ".staging-")) {
 			continue
 		}
-		if err := os.RemoveAll(filepath.Join(generationsPath(dbPath), entry.Name())); err != nil {
-			return fmt.Errorf("remove stale generation %q: %w", entry.Name(), err)
+		if err := removeGenerationPath(ctx, filepath.Join(generationsPath(dbPath), entry.Name())); err != nil {
+			return err
 		}
 	}
 	if err := os.Remove(activePointerPath(dbPath) + ".tmp"); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale active pointer temp: %w", err)
+		return fmt.Errorf("golem: remove stale active pointer temp %q: %w", activePointerPath(dbPath)+".tmp", err)
 	}
+	return nil
+}
+
+func removeGenerationPath(ctx context.Context, path string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(path); err != nil {
+		return fmt.Errorf("golem: remove generation path %q: %w", path, err)
+	}
+	return nil
+}
+
+func copyImmutableFile(ctx context.Context, source, destination string) (err error) {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	in, err := os.Open(source)
+	if err != nil {
+		return fmt.Errorf("golem: open active generation %q for staging copy: %w", source, err)
+	}
+	defer func() {
+		if closeErr := in.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("golem: close active generation %q after staging copy: %w", source, closeErr))
+		}
+	}()
+	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return fmt.Errorf("golem: create staging database %q: %w", destination, err)
+	}
+	outClosed := false
+	keep := false
+	defer func() {
+		if !outClosed {
+			if closeErr := out.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("golem: close staging database %q: %w", destination, closeErr))
+			}
+		}
+		if !keep {
+			if removeErr := os.Remove(destination); removeErr != nil && !os.IsNotExist(removeErr) {
+				err = errors.Join(err, fmt.Errorf("golem: remove failed staging database %q: %w", destination, removeErr))
+			}
+		}
+	}()
+	buf := make([]byte, 1024*1024)
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		n, readErr := in.Read(buf)
+		if n > 0 {
+			if _, writeErr := out.Write(buf[:n]); writeErr != nil {
+				return fmt.Errorf("golem: copy active generation %q to %q: %w", source, destination, writeErr)
+			}
+		}
+		if errors.Is(readErr, io.EOF) {
+			break
+		}
+		if readErr != nil {
+			return fmt.Errorf("golem: read active generation %q: %w", source, readErr)
+		}
+	}
+	if err := out.Sync(); err != nil {
+		return fmt.Errorf("golem: sync staging database %q: %w", destination, err)
+	}
+	if err := out.Close(); err != nil {
+		outClosed = true
+		return fmt.Errorf("golem: close staging database %q: %w", destination, err)
+	}
+	outClosed = true
+	keep = true
 	return nil
 }

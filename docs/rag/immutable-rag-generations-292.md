@@ -28,11 +28,13 @@ database. The active files are never opened writable.
 After indexing, the writer checkpoints and closes SQLite, then reopens the
 staging database immutable and validates its database integrity, source and
 chunk counts, completeness status, generation metadata, and exactly one known
-vector space equal to the probe's actual provider/model identity. Only then
-does it fsync and atomically rename one pointer file. Directory fsync makes the
-rename durable. There is no claim that the database and metadata renames are a
-single atomic operation: they become immutable staging artifacts first, and
-the pointer rename is the sole publication event.
+vector space equal to the probe's actual provider/model identity. It then
+renames and fsyncs the generation directory. Auto-refresh also opens the new
+retrieval reader successfully before publishing. Only then does the writer
+fsync and atomically rename one pointer file. Directory fsync makes the rename
+durable. There is no claim that the database and metadata renames are a single
+atomic operation: they become immutable staging artifacts first, and the
+pointer rename is the sole publication event.
 
 Crash recovery is deterministic:
 

@@ -176,10 +176,10 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 
 	root, err := filepath.Abs(rootFlag)
 	if err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return fmt.Errorf("golem: resolve root: %w", err)
 	}
 	if root, err = filepath.EvalSymlinks(root); err != nil {
-		return fmt.Errorf("resolve root: %w", err)
+		return fmt.Errorf("golem: resolve root: %w", err)
 	}
 
 	cfg, err := loadConfig(configPath)
@@ -191,9 +191,13 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		OllamaURLOverride: ollamaURL,
 	})
 	if err != nil {
-		return fmt.Errorf("bootstrap providers: %w", err)
+		return fmt.Errorf("golem: bootstrap providers: %w", err)
 	}
-	defer func() { _ = bundle.Close() }()
+	defer func() {
+		if closeErr := bundle.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(errOut, "golem: close provider bundle: %v\n", closeErr)
+		}
+	}()
 
 	embChain, err := embeddingChain(bundle.Config)
 	if err != nil {
@@ -212,7 +216,11 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
 		return errIndexFailed
 	}
-	defer func() { _ = lease.Close() }()
+	defer func() {
+		if closeErr := lease.Close(); closeErr != nil {
+			_, _ = fmt.Fprintf(errOut, "golem: close index writer lease: %v\n", closeErr)
+		}
+	}()
 
 	embedder := newChainEmbedder(func(rc context.Context, rr provider.RoutingRequest) (embedExecutor, error) {
 		return bundle.Router.Route(rc, rr)
@@ -222,131 +230,31 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
 		return errIndexFailed
 	}
-	active, activeErr := resolveActiveGeneration(ctx, dbPath, workspaceID)
-	if !full {
-		switch {
-		case activeErr == nil && active.metadata.VectorSpaceID != actualVectorSpace:
-			_, _ = fmt.Fprintf(out, "golem index: existing index uses vector space %s, successful embedding route is %s; run \"golem index -full\" to rebuild\n",
-				active.metadata.VectorSpaceID, actualVectorSpace)
-			return errIndexFailed
-		case activeErr != nil && !errors.Is(activeErr, os.ErrNotExist):
-			_, _ = fmt.Fprintf(out, "golem index: existing index is invalid (%v); run \"golem index -full\" to rebuild\n", activeErr)
-			return errIndexFailed
-		case errors.Is(activeErr, os.ErrNotExist) && (fileExists(dbPath) || fileExists(sidecarPath(dbPath))):
-			_, _ = fmt.Fprintln(out, "golem index: existing index has no valid sidecar; run \"golem index -full\" to rebuild")
-			return errIndexFailed
-		}
-	}
-	activeID := ""
-	if activeErr == nil {
-		activeID = active.id
-	}
-	if err := cleanupStaleGenerations(dbPath, activeID); err != nil {
-		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
-		return errIndexFailed
-	}
-	staging, err := createStagingGeneration(dbPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
-		return errIndexFailed
-	}
-	stagingDir := filepath.Dir(staging.dbPath)
-	discardStaging := true
-	defer func() {
-		if discardStaging {
-			_ = os.RemoveAll(stagingDir)
-		}
-	}()
-	if !full && activeErr == nil {
-		if err := copyImmutableFile(active.dbPath, staging.dbPath); err != nil {
-			_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
-			return errIndexFailed
-		}
-	}
-	store, err := rag.NewSQLiteStore(staging.dbPath)
-	if err != nil {
-		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
-		return errIndexFailed
-	}
-	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithEmbeddingModel(embChain[0]))
-	if err != nil {
-		_ = store.Close()
-		return fmt.Errorf("build indexer: %w", err)
-	}
-
-	res := executeIndex(ctx, indexJob{
-		indexer:        indexer,
-		store:          store,
-		root:           root,
-		dbPath:         staging.dbPath,
-		displayDBPath:  dbPath,
-		sidecarPath:    staging.metadataPath,
-		workspaceID:    workspaceID,
-		requestedModel: embChain[0],
-		out:            out,
+	built, err := buildIndexGeneration(ctx, generationBuildOptions{
+		root:                root,
+		dbPath:              dbPath,
+		workspaceID:         workspaceID,
+		requestedModel:      embChain[0],
+		actualVectorSpace:   actualVectorSpace,
+		embedder:            embedder,
+		full:                full,
+		refuseInvalidActive: true,
+		out:                 out,
 	})
-	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
-		_ = store.Close()
-		_, _ = fmt.Fprintf(out, "golem index: %v\n", checkpointErr)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
 		return errIndexFailed
 	}
-	if closeErr := store.Close(); closeErr != nil {
-		_, _ = fmt.Fprintf(out, "golem index: close staging generation: %v\n", closeErr)
-		return errIndexFailed
-	}
-	if ctx.Err() != nil {
-		return res.exitErr
-	}
-	sc, err := readSidecar(staging.metadataPath)
-	if err != nil || validateSidecar(sc, workspaceID) != nil {
-		if res.exitErr != nil {
-			return res.exitErr
+	final := built.generation
+	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: workspaceID, Generation: final.id}
+	if err := publishActiveGeneration(ctx, dbPath, pointer, nil); err != nil {
+		if current, readErr := readActivePointer(context.WithoutCancel(ctx), dbPath); readErr != nil || current.Generation != final.id {
+			cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
+			if cleanupErr != nil {
+				err = errors.Join(err, cleanupErr)
+			}
 		}
-		_, _ = fmt.Fprintln(out, "golem index: staging generation did not produce valid metadata")
-		return errIndexFailed
-	}
-	readOnly, err := rag.OpenSQLiteStoreReadOnly(staging.dbPath)
-	if err != nil {
-		return fmt.Errorf("validate staging generation: %w", err)
-	}
-	stats, err := readOnly.Stats(ctx)
-	_ = readOnly.Close()
-	if err != nil {
-		return fmt.Errorf("validate staging generation: %w", err)
-	}
-	if sc.VectorSpaceID != actualVectorSpace {
-		_, _ = fmt.Fprintf(out, "golem index: staging vector space %q does not match successful probe %q\n", sc.VectorSpaceID, actualVectorSpace)
-		return errIndexFailed
-	}
-	staging.metadata = generationMetadata{
-		SchemaVersion: generationSchemaVersion, Generation: staging.id,
-		WorkspaceID: workspaceID, RequestedEmbeddingModel: embChain[0],
-		VectorSpaceID: sc.VectorSpaceID, IndexedAt: sc.IndexedAt,
-		Status: sc.Status, ErrorCount: sc.ErrorCount,
-		SourceCount: stats.TotalSources, ChunkCount: stats.TotalChunks,
-	}
-	if err := writeGenerationMetadata(staging.metadataPath, staging.metadata); err != nil {
-		return fmt.Errorf("write generation metadata: %w", err)
-	}
-	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: workspaceID, Generation: staging.id}
-	if err := validateGenerationMetadata(staging.metadata, pointer); err != nil {
 		return err
 	}
-	if err := validateGenerationDatabase(ctx, staging); err != nil {
-		return err
-	}
-	final, err := finalizeStagingGeneration(dbPath, staging)
-	if err != nil {
-		return err
-	}
-	stagingDir = filepath.Dir(final.dbPath)
-	if err := publishActiveGeneration(dbPath, pointer, nil); err != nil {
-		if current, readErr := readActivePointer(dbPath); readErr != nil || current.Generation != final.id {
-			_ = os.RemoveAll(stagingDir)
-		}
-		discardStaging = false
-		return err
-	}
-	discardStaging = false
-	return res.exitErr
+	return built.index.exitErr
 }

@@ -139,11 +139,15 @@ func TestReadyRetrieve_CloseReleasesFeedbackHandle(t *testing.T) {
 	}
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
-	r.close()
+	if err := r.close(); err != nil {
+		t.Fatal(err)
+	}
 	if err := db.Ping(); err == nil {
 		t.Fatal("close() must close the retained feedback DB handle")
 	}
-	r.close() // idempotent, nil-safe second close
+	if err := r.close(); err != nil { // idempotent, nil-safe second close
+		t.Fatal(err)
+	}
 }
 
 // Shutdown can race the background job: close() may run while the wrapper is
@@ -159,7 +163,9 @@ func TestReadyRetrieve_MarkReadyAfterCloseReleasesHandle(t *testing.T) {
 		t.Fatal(err)
 	}
 	r := newReadyRetrieve(warmingRetrieveMessage)
-	r.close()
+	if err := r.close(); err != nil {
+		t.Fatal(err)
+	}
 	r.markReady(&countingTool{content: "chunks"}, "ready", &behavioralWeighterHandle{db: db})
 	if err := db.Ping(); err == nil {
 		t.Fatal("markReady after close() must release the incoming feedback handle")
@@ -168,7 +174,9 @@ func TestReadyRetrieve_MarkReadyAfterCloseReleasesHandle(t *testing.T) {
 
 func TestReadyRetrieve_CloseNilSafe(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
-	r.close() // no feedback handle retained; must not panic
+	if err := r.close(); err != nil { // no feedback handle retained; must not panic
+		t.Fatal(err)
+	}
 }
 
 // A markReady that loses the terminal-transition race to markFailed must not
@@ -208,7 +216,9 @@ func TestReadyRetrieve_ConcurrentCloseAndMarkReady(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			r.close()
+			if err := r.close(); err != nil {
+				t.Error(err)
+			}
 		}()
 		wg.Wait()
 		// Whichever side lost the race must have released the handle already;
@@ -251,7 +261,7 @@ func TestReadyRetrieve_ConcurrentMarkReadyAndInvoke(t *testing.T) {
 func TestReadyRetrieve_InstallSwapsLiveDelegate(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	oldClosed := make(chan struct{})
-	r.install(newRetrievalReader(&countingTool{content: "old"}, func() { close(oldClosed) }), "old ready")
+	r.install(newRetrievalReader(&countingTool{content: "old"}, func() error { close(oldClosed); return nil }), "old ready")
 
 	before, err := r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
 	if err != nil || before.Content != "old" {
@@ -273,7 +283,7 @@ func TestReadyRetrieve_InFlightOldDelegateDrainsWhileNewCallsUseReplacement(t *t
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	oldTool := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
 	oldClosed := make(chan struct{})
-	r.install(newRetrievalReader(oldTool, func() { close(oldClosed) }), "old ready")
+	r.install(newRetrievalReader(oldTool, func() error { close(oldClosed); return nil }), "old ready")
 
 	oldResult := make(chan agent.ToolResult, 1)
 	go func() {
@@ -305,9 +315,11 @@ func TestReadyRetrieve_InFlightOldDelegateDrainsWhileNewCallsUseReplacement(t *t
 
 func TestReadyRetrieve_CloseRejectsAndClosesLateInstall(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
-	r.close()
+	if err := r.close(); err != nil {
+		t.Fatal(err)
+	}
 	closed := make(chan struct{})
-	if r.install(newRetrievalReader(&countingTool{content: "late"}, func() { close(closed) }), "late") {
+	if r.install(newRetrievalReader(&countingTool{content: "late"}, func() error { close(closed); return nil }), "late") {
 		t.Fatal("install after close must be rejected")
 	}
 	select {
@@ -319,9 +331,13 @@ func TestReadyRetrieve_CloseRejectsAndClosesLateInstall(t *testing.T) {
 
 func TestRetrievalReader_CloseIsIdempotent(t *testing.T) {
 	var closes atomic.Int64
-	reader := newRetrievalReader(&countingTool{content: "x"}, func() { closes.Add(1) })
-	reader.closeAfterDrain()
-	reader.closeAfterDrain()
+	reader := newRetrievalReader(&countingTool{content: "x"}, func() error { closes.Add(1); return nil })
+	if err := reader.closeAfterDrain(); err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.closeAfterDrain(); err != nil {
+		t.Fatal(err)
+	}
 	if got := closes.Load(); got != 1 {
 		t.Fatalf("close calls = %d, want 1", got)
 	}
@@ -354,19 +370,26 @@ func TestReadyRetrieve_RepeatedConcurrentInvokeAndSwap(t *testing.T) {
 	}
 	close(stop)
 	invokes.Wait()
-	r.close()
+	if err := r.close(); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestReadyRetrieve_CloseWaitsForRetiredInFlightDelegate(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	old := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
 	oldClosed := make(chan struct{})
-	r.install(newRetrievalReader(old, func() { close(oldClosed) }), "old")
+	r.install(newRetrievalReader(old, func() error { close(oldClosed); return nil }), "old")
 	go func() { _, _ = r.Invoke(context.Background(), json.RawMessage(`{"query":"old"}`)) }()
 	<-old.entered
 	r.install(newRetrievalReader(&countingTool{content: "new"}, nil), "new")
 	closed := make(chan struct{})
-	go func() { r.close(); close(closed) }()
+	go func() {
+		if err := r.close(); err != nil {
+			t.Error(err)
+		}
+		close(closed)
+	}()
 	select {
 	case <-closed:
 		t.Fatal("close returned while a retired delegate call was still in flight")

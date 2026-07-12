@@ -19,7 +19,9 @@ func TestIndexWriterLeaseHelper(t *testing.T) {
 	if err != nil {
 		os.Exit(4)
 	}
-	_ = lease.Close()
+	if err := lease.Close(); err != nil {
+		os.Exit(5)
+	}
 	os.Exit(0)
 }
 

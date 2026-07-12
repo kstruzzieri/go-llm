@@ -506,7 +506,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		// Install a valid prior immutable generation before the background
 		// refresh starts. The wrapper remains warming only on a true first run.
 		ready = newReadyRetrieve(warmingRetrieveMessage)
-		defer ready.close()
+		defer func() {
+			if closeErr := ready.close(); closeErr != nil {
+				_, _ = fmt.Fprintln(stderr, closeErr)
+			}
+		}()
 		retrieve = ready
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
@@ -531,7 +535,11 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			feedbackDB:  feedbackDB,
 		})
 		if rr.reader != nil {
-			defer rr.reader.closeAfterDrain()
+			defer func() {
+				if closeErr := rr.reader.closeAfterDrain(); closeErr != nil {
+					_, _ = fmt.Fprintln(stderr, closeErr)
+				}
+			}()
 		}
 		retrieve = rr.tool
 		warns = append(warns, rr.warns...)

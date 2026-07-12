@@ -27,9 +27,12 @@ func seedPublishedGeneration(t *testing.T, baseDB, generation, workspaceID, vsid
 		t.Fatal(err)
 	}
 	stats, err := store.Stats(context.Background())
-	_ = store.Close()
+	closeErr := store.Close()
 	if err != nil {
 		t.Fatal(err)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
 	}
 	gen.metadata = generationMetadata{
 		SchemaVersion:           generationSchemaVersion,
@@ -43,7 +46,7 @@ func seedPublishedGeneration(t *testing.T, baseDB, generation, workspaceID, vsid
 		SourceCount:             stats.TotalSources,
 		ChunkCount:              stats.TotalChunks,
 	}
-	if err := writeGenerationMetadata(gen.metadataPath, gen.metadata); err != nil {
+	if err := writeGenerationMetadata(context.Background(), gen.metadataPath, gen.metadata); err != nil {
 		t.Fatal(err)
 	}
 	return gen
@@ -52,7 +55,7 @@ func seedPublishedGeneration(t *testing.T, baseDB, generation, workspaceID, vsid
 func publishTestGeneration(t *testing.T, baseDB, workspaceID, generation string) indexGeneration {
 	t.Helper()
 	gen := seedPublishedGeneration(t, baseDB, generation, workspaceID, "ollama/nomic")
-	if err := publishActiveGeneration(baseDB, activeGenerationPointer{
+	if err := publishActiveGeneration(context.Background(), baseDB, activeGenerationPointer{
 		SchemaVersion: activePointerSchemaVersion,
 		WorkspaceID:   workspaceID,
 		Generation:    generation,
@@ -96,7 +99,7 @@ func TestResolveActiveGeneration_RejectsInvalidMetadataAndDatabase(t *testing.T)
 			name: "generation mismatch",
 			mutate: func(t *testing.T, gen indexGeneration) {
 				gen.metadata.Generation = strings.Repeat("b", 32)
-				if err := writeGenerationMetadata(gen.metadataPath, gen.metadata); err != nil {
+				if err := writeGenerationMetadata(context.Background(), gen.metadataPath, gen.metadata); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -106,7 +109,7 @@ func TestResolveActiveGeneration_RejectsInvalidMetadataAndDatabase(t *testing.T)
 			name: "source count mismatch",
 			mutate: func(t *testing.T, gen indexGeneration) {
 				gen.metadata.SourceCount++
-				if err := writeGenerationMetadata(gen.metadataPath, gen.metadata); err != nil {
+				if err := writeGenerationMetadata(context.Background(), gen.metadataPath, gen.metadata); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -138,9 +141,10 @@ func TestResolveActiveGeneration_RejectsInvalidMetadataAndDatabase(t *testing.T)
 				if _, err := store.DB().Exec(`UPDATE chunks SET vector_space_id = 'other/model' WHERE rowid = (SELECT MIN(rowid) FROM chunks)`); err != nil {
 					t.Fatal(err)
 				}
+				vectorJSON := "[1" + strings.Repeat(",0", 767) + "]"
 				if _, err := store.DB().Exec(`
 					INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
-					VALUES ('mixed', 'x', 'mixed.go', 1, 1, 'go', '{}', '[1,0,0]', 1, '', '', 'ollama/nomic')`); err != nil {
+					VALUES ('mixed', 'x', 'mixed.go', 1, 1, 'go', '{}', ?, 1, '', '', 'ollama/nomic')`, vectorJSON); err != nil {
 					t.Fatal(err)
 				}
 				if err := store.Close(); err != nil {
@@ -148,7 +152,7 @@ func TestResolveActiveGeneration_RejectsInvalidMetadataAndDatabase(t *testing.T)
 				}
 				gen.metadata.SourceCount++
 				gen.metadata.ChunkCount++
-				if err := writeGenerationMetadata(gen.metadataPath, gen.metadata); err != nil {
+				if err := writeGenerationMetadata(context.Background(), gen.metadataPath, gen.metadata); err != nil {
 					t.Fatal(err)
 				}
 			},
@@ -181,7 +185,7 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 	baseDB := filepath.Join(t.TempDir(), "k.db")
 	activeID := strings.Repeat("a", 32)
 	active := publishTestGeneration(t, baseDB, "workspace:k", activeID)
-	stale, err := createStagingGeneration(baseDB)
+	stale, err := createStagingGeneration(context.Background(), baseDB)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +197,7 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := cleanupStaleGenerations(baseDB, activeID); err != nil {
+	if err := cleanupStaleGenerations(context.Background(), baseDB); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{active.dbPath, baseDB, sidecarPath(baseDB)} {
@@ -226,7 +230,7 @@ func TestPublishActiveGeneration_InterruptionHasDeterministicRecovery(t *testing
 			oldID, newID := strings.Repeat("a", 32), strings.Repeat("b", 32)
 			publishTestGeneration(t, baseDB, "workspace:k", oldID)
 			seedPublishedGeneration(t, baseDB, newID, "workspace:k", "ollama/nomic")
-			err := publishActiveGeneration(baseDB, activeGenerationPointer{
+			err := publishActiveGeneration(context.Background(), baseDB, activeGenerationPointer{
 				SchemaVersion: activePointerSchemaVersion,
 				WorkspaceID:   "workspace:k",
 				Generation:    newID,
@@ -249,6 +253,59 @@ func TestPublishActiveGeneration_InterruptionHasDeterministicRecovery(t *testing
 			}
 			if active.id != want {
 				t.Fatalf("active generation = %q, want %q", active.id, want)
+			}
+		})
+	}
+}
+
+func TestFinalizeStagingGeneration_InterruptionRecovery(t *testing.T) {
+	stop := errors.New("stop")
+	tests := []struct {
+		boundary  finalizationBoundary
+		wantFinal bool
+	}{
+		{finalizationBeforeRename, false},
+		{finalizationAfterRename, true},
+		{finalizationAfterDirSync, true},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.boundary), func(t *testing.T) {
+			baseDB := filepath.Join(t.TempDir(), "k.db")
+			oldID := strings.Repeat("a", 32)
+			publishTestGeneration(t, baseDB, "workspace:k", oldID)
+			staging, err := createStagingGeneration(context.Background(), baseDB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(staging.dbPath, []byte("staging"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			_, err = finalizeStagingGeneration(context.Background(), baseDB, staging, func(got finalizationBoundary) error {
+				if got == tc.boundary {
+					return stop
+				}
+				return nil
+			})
+			if !errors.Is(err, stop) {
+				t.Fatalf("finalize error = %v, want injected stop", err)
+			}
+			active, err := resolveActiveGeneration(context.Background(), baseDB, "workspace:k")
+			if err != nil || active.id != oldID {
+				t.Fatalf("active generation = %+v, %v; want old %q", active, err, oldID)
+			}
+			final := generationPaths(baseDB, staging.id)
+			_, finalErr := os.Stat(filepath.Dir(final.dbPath))
+			if tc.wantFinal && finalErr != nil {
+				t.Fatalf("finalized orphan missing: %v", finalErr)
+			}
+			if !tc.wantFinal {
+				if err := cleanupStaleGenerations(context.Background(), baseDB); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Stat(filepath.Dir(staging.dbPath)); !os.IsNotExist(err) {
+					t.Fatalf("stale staging was not cleaned: %v", err)
+				}
 			}
 		})
 	}

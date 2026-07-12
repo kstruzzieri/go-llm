@@ -54,7 +54,7 @@ func (p *routingEmbedProvider) Embed(_ context.Context, req provider.EmbedReques
 		return nil, err
 	}
 	return &provider.EmbedResponse{
-		Model: req.Model, Provider: p.Name(), Embeddings: [][]float64{{1, 0, 0}},
+		Model: req.Model, Provider: p.Name(), Embeddings: [][]float64{realisticTestVector()},
 	}, nil
 }
 func (p *routingEmbedProvider) failEmbedding(err error) {
@@ -118,7 +118,11 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 			if err != nil {
 				t.Fatalf("buildGatedRetriever: %v", err)
 			}
-			defer reader.closeAfterDrain()
+			defer func() {
+				if err := reader.closeAfterDrain(); err != nil {
+					t.Error(err)
+				}
+			}()
 			result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 			if err != nil {
 				t.Fatalf("Invoke: %v", err)
@@ -145,7 +149,11 @@ func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
 	}
-	defer reader.closeAfterDrain()
+	defer func() {
+		if err := reader.closeAfterDrain(); err != nil {
+			t.Error(err)
+		}
+	}()
 	result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
@@ -174,7 +182,11 @@ func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
 	}
-	defer reader.closeAfterDrain()
+	defer func() {
+		if err := reader.closeAfterDrain(); err != nil {
+			t.Error(err)
+		}
+	}()
 	result, err := reader.tool.Invoke(context.Background(), json.RawMessage(`{"query":"find A"}`))
 	if err != nil {
 		t.Fatalf("Invoke: %v", err)
@@ -248,7 +260,7 @@ func TestBuildGatedRetriever_LegacyCorpusKeepsConfiguredChainBehavior(t *testing
 		context.Background(),
 		"legacy.go",
 		[]rag.Chunk{{ID: "legacy", Content: "package legacy", Source: "legacy.go", StartLine: 1, EndLine: 1}},
-		[][]float64{{1, 0, 0}},
+		[][]float64{realisticTestVector()},
 		"legacy-hash",
 	); err != nil {
 		t.Fatalf("seed legacy store: %v", err)
@@ -264,7 +276,11 @@ func TestBuildGatedRetriever_LegacyCorpusKeepsConfiguredChainBehavior(t *testing
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
 	}
-	defer reader.closeAfterDrain()
+	defer func() {
+		if err := reader.closeAfterDrain(); err != nil {
+			t.Error(err)
+		}
+	}()
 	if dec.kind != vsLegacy {
 		t.Fatalf("gate kind = %v, want vsLegacy", dec.kind)
 	}

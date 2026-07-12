@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,17 +27,17 @@ func probeAutoIndexEmbedder(ctx context.Context, embedder rag.Embedder, model st
 	defer cancel()
 	res, err := embedder.Embed(child, model, []string{"golem startup index probe"})
 	if err != nil {
-		return "", fmt.Errorf("embed probe (%s): %w", model, err)
+		return "", fmt.Errorf("golem: embed probe (%s): %w", model, err)
 	}
 	if len(res.Embeddings) != 1 || len(res.Embeddings[0]) == 0 {
-		return "", fmt.Errorf("embed probe (%s): want one non-empty vector, got %d vector(s)", model, len(res.Embeddings))
+		return "", fmt.Errorf("golem: embed probe (%s): want one non-empty vector, got %d vector(s)", model, len(res.Embeddings))
 	}
 	vectorSpaceID := res.VectorSpaceID
 	if vectorSpaceID == "" && res.Provider != "" && res.Model != "" {
 		vectorSpaceID = res.Provider + "/" + res.Model
 	}
 	if vectorSpaceID == "" {
-		return "", fmt.Errorf("embed probe (%s): successful route returned no vector-space identity", model)
+		return "", fmt.Errorf("golem: embed probe (%s): successful route returned no vector-space identity", model)
 	}
 	return vectorSpaceID, nil
 }
@@ -105,7 +104,11 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		fail(err.Error())
 		return
 	}
-	defer func() { _ = lease.Close() }()
+	defer func() {
+		if closeErr := lease.Close(); closeErr != nil && ctx.Err() == nil {
+			job.notice("warning: retrieve auto-index writer lease close failed: " + closeErr.Error())
+		}
+	}()
 
 	// Probe FIRST: a dead embedder must not create or write the store.
 	actualVectorSpace, err := probeAutoIndexEmbedder(ctx, job.embedder, job.embChain[0])
@@ -114,140 +117,26 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		return
 	}
 
-	active, activeErr := resolveActiveGeneration(ctx, job.dbPath, job.workspaceID)
-	if activeErr != nil && !errors.Is(activeErr, os.ErrNotExist) {
-		job.notice("warning: retrieve auto-index rebuilding private store: " + activeErr.Error())
-	}
-	activeID := ""
-	if activeErr == nil {
-		activeID = active.id
-	}
-	if err := cleanupStaleGenerations(job.dbPath, activeID); err != nil {
-		fail(err.Error())
-		return
-	}
-	staging, err := createStagingGeneration(job.dbPath)
-	if err != nil {
-		fail(err.Error())
-		return
-	}
-	stagingDir := filepath.Dir(staging.dbPath)
-	discardStaging := true
-	defer func() {
-		if discardStaging {
-			_ = os.RemoveAll(stagingDir)
-		}
-	}()
-	if activeErr == nil && active.metadata.VectorSpaceID == actualVectorSpace {
-		if err := copyImmutableFile(active.dbPath, staging.dbPath); err != nil {
-			fail(err.Error())
-			return
-		}
-	}
-	store, err := rag.NewSQLiteStore(staging.dbPath)
-	if err != nil {
-		fail(err.Error())
-		return
-	}
-	indexer, err := rag.NewIndexerWithEmbedder(job.embedder, store, rag.WithEmbeddingModel(job.embChain[0]))
-	if err != nil {
-		_ = store.Close()
-		fail(err.Error())
-		return
-	}
 	var buf bytes.Buffer
-	res := executeIndex(ctx, indexJob{
-		indexer:        indexer,
-		store:          store,
-		root:           job.root,
-		dbPath:         staging.dbPath,
-		sidecarPath:    staging.metadataPath,
-		workspaceID:    job.workspaceID,
-		requestedModel: job.embChain[0],
-		out:            &buf,
-		pruneDeleted:   true,
+	built, err := buildIndexGeneration(ctx, generationBuildOptions{
+		root:              job.root,
+		dbPath:            job.dbPath,
+		workspaceID:       job.workspaceID,
+		requestedModel:    job.embChain[0],
+		actualVectorSpace: actualVectorSpace,
+		embedder:          job.embedder,
+		pruneDeleted:      true,
+		out:               &buf,
 	})
-	// Close the writer BEFORE any read-only open: retrieval opens the DB with
-	// immutable=1 and must not race a live write handle.
-	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
-		_ = store.Close()
-		fail(checkpointErr.Error())
-		return
+	if built.activeErr != nil && !errors.Is(built.activeErr, os.ErrNotExist) {
+		job.notice("warning: retrieve auto-index rebuilding private store: " + built.activeErr.Error())
 	}
-	if closeErr := store.Close(); closeErr != nil {
-		fail(fmt.Sprintf("close staging generation: %v", closeErr))
-		return
-	}
-	if ctx.Err() != nil {
-		return
-	}
-
-	// Interpret the outcome through the store, not the exit sentinel alone
-	// (spec "Partial Indexes"): a partial run still writes a usable sidecar.
-	sc, scErr := readSidecar(staging.metadataPath)
-	if scErr != nil || validateSidecar(sc, job.workspaceID) != nil {
-		fail(autoIndexFailReason(&buf, res.exitErr))
-		return
-	}
-
-	if res.exitErr != nil && sc.Status != "partial" {
-		fail(autoIndexFailReason(&buf, res.exitErr))
-		return
-	}
-	readOnly, err := rag.OpenSQLiteStoreReadOnly(staging.dbPath)
 	if err != nil {
-		fail(err.Error())
+		fail(autoIndexFailReason(&buf, errors.Join(built.index.exitErr, err)))
 		return
 	}
-	stats, err := readOnly.Stats(ctx)
-	_ = readOnly.Close()
-	if err != nil {
-		fail(err.Error())
-		return
-	}
-	if res.exitErr != nil && stats.TotalSources < 1 {
-		fail(autoIndexFailReason(&buf, res.exitErr))
-		return
-	}
-	if sc.VectorSpaceID != actualVectorSpace {
-		fail(fmt.Sprintf("staging vector space %q does not match successful probe %q", sc.VectorSpaceID, actualVectorSpace))
-		return
-	}
-	staging.metadata = generationMetadata{
-		SchemaVersion: generationSchemaVersion, Generation: staging.id,
-		WorkspaceID: job.workspaceID, RequestedEmbeddingModel: job.embChain[0],
-		VectorSpaceID: sc.VectorSpaceID, IndexedAt: sc.IndexedAt,
-		Status: sc.Status, ErrorCount: sc.ErrorCount,
-		SourceCount: stats.TotalSources, ChunkCount: stats.TotalChunks,
-	}
-	if err := writeGenerationMetadata(staging.metadataPath, staging.metadata); err != nil {
-		fail(err.Error())
-		return
-	}
-	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: job.workspaceID, Generation: staging.id}
-	if err := validateGenerationMetadata(staging.metadata, pointer); err != nil {
-		fail(err.Error())
-		return
-	}
-	if err := validateGenerationDatabase(ctx, staging); err != nil {
-		fail(err.Error())
-		return
-	}
-	final, err := finalizeStagingGeneration(job.dbPath, staging)
-	if err != nil {
-		fail(err.Error())
-		return
-	}
-	stagingDir = filepath.Dir(final.dbPath)
-	if err := publishActiveGeneration(job.dbPath, pointer, nil); err != nil {
-		if current, readErr := readActivePointer(job.dbPath); readErr != nil || current.Generation != final.id {
-			_ = os.RemoveAll(stagingDir)
-		}
-		discardStaging = false
-		fail(err.Error())
-		return
-	}
-	discardStaging = false
+	final := built.generation
+	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: job.workspaceID, Generation: final.id}
 	open := job.openRetriever
 	if open == nil {
 		open = func(oc context.Context, dbPath string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
@@ -256,49 +145,42 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 	}
 	reader, feedbackWarn, dec, openedStats, err := open(ctx, final.dbPath)
 	if err != nil {
-		fail(err.Error())
+		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
+		fail(errors.Join(err, cleanupErr).Error())
 		return
 	}
 	if reader == nil {
-		fail(fmt.Sprintf("index vector space %s does not match embedding chain %v", dec.stored, job.embChain))
+		mismatchErr := fmt.Errorf("golem: index vector space %s does not match embedding chain %v", dec.stored, job.embChain)
+		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
+		fail(errors.Join(mismatchErr, cleanupErr).Error())
 		return
 	}
-	line := autoIndexReadyLine(sc, openedStats)
-	job.ready.install(reader, line)
+	if err := ctx.Err(); err != nil {
+		closeErr := reader.closeAfterDrain()
+		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
+		if joined := errors.Join(closeErr, cleanupErr); joined != nil && ctx.Err() == nil {
+			fail(joined.Error())
+		}
+		return
+	}
+	if err := publishActiveGeneration(ctx, job.dbPath, pointer, nil); err != nil {
+		closeErr := reader.closeAfterDrain()
+		if current, readErr := readActivePointer(context.WithoutCancel(ctx), job.dbPath); readErr == nil && current.Generation == final.id {
+			fail(errors.Join(err, closeErr).Error())
+			return
+		}
+		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
+		fail(errors.Join(err, closeErr, cleanupErr).Error())
+		return
+	}
+	line := autoIndexReadyLine(built.sidecar, openedStats)
+	if !job.ready.install(reader, line) {
+		return
+	}
 	job.notice(line)
 	if feedbackWarn != "" {
 		job.notice("warning: " + feedbackWarn)
 	}
-}
-
-func copyImmutableFile(source, destination string) error {
-	in, err := os.Open(source)
-	if err != nil {
-		return fmt.Errorf("open active generation for staging copy: %w", err)
-	}
-	defer func() { _ = in.Close() }()
-	out, err := os.OpenFile(destination, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
-	if err != nil {
-		return fmt.Errorf("create staging database: %w", err)
-	}
-	remove := true
-	defer func() {
-		_ = out.Close()
-		if remove {
-			_ = os.Remove(destination)
-		}
-	}()
-	if _, err := io.Copy(out, in); err != nil {
-		return fmt.Errorf("copy active generation: %w", err)
-	}
-	if err := out.Sync(); err != nil {
-		return fmt.Errorf("sync staging database: %w", err)
-	}
-	if err := out.Close(); err != nil {
-		return fmt.Errorf("close staging database: %w", err)
-	}
-	remove = false
-	return nil
 }
 
 // autoIndexReadyLine renders the completion notice (spec "Notices"): the ready
