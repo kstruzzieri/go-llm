@@ -185,6 +185,7 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 	baseDB := filepath.Join(t.TempDir(), "k.db")
 	activeID := strings.Repeat("a", 32)
 	active := publishTestGeneration(t, baseDB, "workspace:k", activeID)
+	superseded := seedPublishedGeneration(t, baseDB, strings.Repeat("c", 32), "workspace:k", "ollama/nomic")
 	stale, err := createStagingGeneration(context.Background(), baseDB)
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +198,22 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := cleanupStaleGenerations(context.Background(), baseDB); err != nil {
+	// Without finalized GC (active resolution failed for an unknown reason)
+	// every finalized generation survives.
+	if err := cleanupStaleGenerations(context.Background(), baseDB, "", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(superseded.dbPath); err != nil {
+		t.Fatalf("superseded generation must survive without finalized GC: %v", err)
+	}
+	if _, err := os.Stat(filepath.Dir(stale.dbPath)); !os.IsNotExist(err) {
+		t.Fatalf("stale staging generation still exists: %v", err)
+	}
+	if _, err := os.Stat(activePointerPath(baseDB) + ".tmp"); !os.IsNotExist(err) {
+		t.Fatalf("orphan pointer temp still exists: %v", err)
+	}
+
+	if err := cleanupStaleGenerations(context.Background(), baseDB, activeID, true); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{active.dbPath, baseDB, sidecarPath(baseDB)} {
@@ -205,11 +221,44 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 			t.Fatalf("preserved path %q: %v", path, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Dir(stale.dbPath)); !os.IsNotExist(err) {
-		t.Fatalf("stale generation still exists: %v", err)
+	if _, err := os.Stat(filepath.Dir(superseded.dbPath)); !os.IsNotExist(err) {
+		t.Fatalf("superseded generation still exists after finalized GC: %v", err)
 	}
-	if _, err := os.Stat(activePointerPath(baseDB) + ".tmp"); !os.IsNotExist(err) {
-		t.Fatalf("orphan pointer temp still exists: %v", err)
+}
+
+func TestShouldRemoveUnpublished(t *testing.T) {
+	baseDB := filepath.Join(t.TempDir(), "k.db")
+	genID := strings.Repeat("a", 32)
+	if shouldRemoveUnpublished(context.Background(), baseDB, genID) {
+		t.Fatal("missing pointer must keep the unpublished generation")
+	}
+	publishTestGeneration(t, baseDB, "workspace:k", genID)
+	if shouldRemoveUnpublished(context.Background(), baseDB, genID) {
+		t.Fatal("pointer naming the generation must keep it")
+	}
+	if !shouldRemoveUnpublished(context.Background(), baseDB, strings.Repeat("b", 32)) {
+		t.Fatal("pointer naming another generation must allow removal")
+	}
+	if err := os.WriteFile(activePointerPath(baseDB), []byte("{broken"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if shouldRemoveUnpublished(context.Background(), baseDB, strings.Repeat("b", 32)) {
+		t.Fatal("unreadable pointer must keep the unpublished generation")
+	}
+}
+
+func TestResolveActiveGeneration_RejectsLegacyWithLiveWAL(t *testing.T) {
+	baseDB := filepath.Join(t.TempDir(), "k.db")
+	seedIndex(t, baseDB, "workspace:k", "ollama/nomic")
+	if err := os.WriteFile(baseDB+"-wal", []byte("frame"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := resolveActiveGeneration(context.Background(), baseDB, "workspace:k")
+	if err == nil || !strings.Contains(err.Error(), "write-ahead log") {
+		t.Fatalf("error = %v, want live-WAL rejection", err)
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		t.Fatal("live-WAL rejection must not classify as no-index")
 	}
 }
 
@@ -299,13 +348,15 @@ func TestFinalizeStagingGeneration_InterruptionRecovery(t *testing.T) {
 			if tc.wantFinal && finalErr != nil {
 				t.Fatalf("finalized orphan missing: %v", finalErr)
 			}
+			if err := cleanupStaleGenerations(context.Background(), baseDB, oldID, true); err != nil {
+				t.Fatal(err)
+			}
 			if !tc.wantFinal {
-				if err := cleanupStaleGenerations(context.Background(), baseDB); err != nil {
-					t.Fatal(err)
-				}
 				if _, err := os.Stat(filepath.Dir(staging.dbPath)); !os.IsNotExist(err) {
 					t.Fatalf("stale staging was not cleaned: %v", err)
 				}
+			} else if _, err := os.Stat(filepath.Dir(final.dbPath)); !os.IsNotExist(err) {
+				t.Fatalf("finalized orphan was not collected by the next lease holder: %v", err)
 			}
 		})
 	}

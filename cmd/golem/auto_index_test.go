@@ -338,6 +338,51 @@ func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) 
 	}
 }
 
+func TestRunAutoIndex_CollectsSupersededGenerations(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	for i := 0; i < 3; i++ {
+		var notices []string
+		job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+		runAutoIndex(context.Background(), job)
+		if got := retrieveStateOf(job.ready); got != retrieveReady {
+			t.Fatalf("run %d state = %d, want ready; notices = %v", i, got, notices)
+		}
+		if err := job.ready.close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(generationsPath(dbPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var finalized []string
+	for _, e := range entries {
+		if e.IsDir() && validGenerationID(e.Name()) {
+			finalized = append(finalized, e.Name())
+		}
+	}
+	// Steady state: the generation that was active during the last build's
+	// cleanup plus the newly published one.
+	if len(finalized) != 2 {
+		t.Fatalf("finalized generations = %v, want 2 (previous active + new)", finalized)
+	}
+	found := false
+	for _, id := range finalized {
+		if id == active.id {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("active generation %s missing from %v", active.id, finalized)
+	}
+}
+
 func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")

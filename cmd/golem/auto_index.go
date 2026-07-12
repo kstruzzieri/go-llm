@@ -128,7 +128,7 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		pruneDeleted:      true,
 		out:               &buf,
 	})
-	if built.activeErr != nil && !errors.Is(built.activeErr, os.ErrNotExist) {
+	if built.activeErr != nil && !errors.Is(built.activeErr, os.ErrNotExist) && ctx.Err() == nil {
 		job.notice("warning: retrieve auto-index rebuilding private store: " + built.activeErr.Error())
 	}
 	if err != nil {
@@ -156,25 +156,23 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		return
 	}
 	if err := ctx.Err(); err != nil {
-		closeErr := reader.closeAfterDrain()
-		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
-		if joined := errors.Join(closeErr, cleanupErr); joined != nil && ctx.Err() == nil {
-			fail(joined.Error())
-		}
+		// Shutdown is silent by contract: drain and cleanup errors have no
+		// live channel to report on.
+		_ = reader.closeAfterDrain()
+		_ = removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
 		return
 	}
 	if err := publishActiveGeneration(ctx, job.dbPath, pointer, nil); err != nil {
 		closeErr := reader.closeAfterDrain()
-		if current, readErr := readActivePointer(context.WithoutCancel(ctx), job.dbPath); readErr == nil && current.Generation == final.id {
-			fail(errors.Join(err, closeErr).Error())
-			return
+		var cleanupErr error
+		if shouldRemoveUnpublished(context.WithoutCancel(ctx), job.dbPath, final.id) {
+			cleanupErr = removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
 		}
-		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
 		fail(errors.Join(err, closeErr, cleanupErr).Error())
 		return
 	}
 	line := autoIndexReadyLine(built.sidecar, openedStats)
-	if !job.ready.install(reader, line) {
+	if !job.ready.install(reader, line) || ctx.Err() != nil {
 		return
 	}
 	job.notice(line)

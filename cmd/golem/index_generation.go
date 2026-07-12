@@ -91,7 +91,18 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 			return result, fmt.Errorf("golem: existing index has no valid sidecar; run \"golem index -full\" to rebuild")
 		}
 	}
-	if err := cleanupStaleGenerations(ctx, opts.dbPath); err != nil {
+	keepID := ""
+	gcFinalized := false
+	switch {
+	case activeErr == nil:
+		// active.id is "" for a legacy pair, so every finalized directory is a
+		// pre-publication orphan and collectable.
+		gcFinalized, keepID = true, active.id
+	case errors.Is(activeErr, os.ErrNotExist):
+		// Nothing was ever published: finalized directories are crash orphans.
+		gcFinalized = true
+	}
+	if err := cleanupStaleGenerations(ctx, opts.dbPath, keepID, gcFinalized); err != nil {
 		return result, err
 	}
 	staging, err := createStagingGeneration(ctx, opts.dbPath)
@@ -193,7 +204,7 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 	if err := validateGenerationMetadata(staging.metadata, pointer); err != nil {
 		return result, err
 	}
-	if err := validateGenerationDatabase(ctx, staging); err != nil {
+	if err := validateGenerationDatabase(ctx, staging, true); err != nil {
 		return result, err
 	}
 	if err := ctx.Err(); err != nil {
@@ -405,7 +416,12 @@ func validateGenerationMetadata(metadata generationMetadata, pointer activeGener
 	return nil
 }
 
-func validateGenerationDatabase(ctx context.Context, gen indexGeneration) (err error) {
+// validateGenerationDatabase cross-checks the generation database against its
+// metadata. fullIntegrity additionally runs PRAGMA integrity_check — a full
+// page scan reserved for the writer's staging validation; readers of an
+// already-validated immutable generation skip it so startup stays O(row
+// counts), not O(database bytes).
+func validateGenerationDatabase(ctx context.Context, gen indexGeneration, fullIntegrity bool) (err error) {
 	store, err := rag.OpenSQLiteStoreReadOnly(gen.dbPath)
 	if err != nil {
 		return fmt.Errorf("golem: generation database open: %w", err)
@@ -415,12 +431,14 @@ func validateGenerationDatabase(ctx context.Context, gen indexGeneration) (err e
 			err = errors.Join(err, fmt.Errorf("golem: close generation database %q after validation: %w", gen.dbPath, closeErr))
 		}
 	}()
-	var integrity string
-	if err := store.DB().QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
-		return fmt.Errorf("golem: generation database integrity: %w", err)
-	}
-	if integrity != "ok" {
-		return fmt.Errorf("golem: generation database integrity: %s", integrity)
+	if fullIntegrity {
+		var integrity string
+		if err := store.DB().QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&integrity); err != nil {
+			return fmt.Errorf("golem: generation database integrity: %w", err)
+		}
+		if integrity != "ok" {
+			return fmt.Errorf("golem: generation database integrity: %s", integrity)
+		}
 	}
 	stats, err := store.Stats(ctx)
 	if err != nil {
@@ -455,7 +473,7 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 		if err := validateGenerationMetadata(gen.metadata, pointer); err != nil {
 			return indexGeneration{}, err
 		}
-		if err := validateGenerationDatabase(ctx, gen); err != nil {
+		if err := validateGenerationDatabase(ctx, gen, false); err != nil {
 			return indexGeneration{}, err
 		}
 		return gen, nil
@@ -465,6 +483,12 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 	}
 	if !fileExists(dbPath) || !fileExists(sidecarPath(dbPath)) {
 		return indexGeneration{}, fmt.Errorf("golem: %w: no active generation for %q", os.ErrNotExist, dbPath)
+	}
+	// A live write-ahead log means an interrupted pre-generation writer: the
+	// immutable read-only open would silently serve (and the staging copy
+	// would bake in) only the last-checkpointed state, so fail closed instead.
+	if info, statErr := os.Stat(dbPath + "-wal"); statErr == nil && info.Size() > 0 {
+		return indexGeneration{}, fmt.Errorf("golem: legacy index %q has an unapplied write-ahead log from an interrupted writer; run \"golem index -full\" to rebuild", dbPath)
 	}
 	sidecar, err := readSidecar(sidecarPath(dbPath))
 	if err != nil {
@@ -505,7 +529,7 @@ func resolveActiveGeneration(ctx context.Context, dbPath, workspaceID string) (i
 	if err := validateGenerationMetadataLegacy(legacy.metadata, pseudo); err != nil {
 		return indexGeneration{}, err
 	}
-	if err := validateGenerationDatabase(ctx, legacy); err != nil {
+	if err := validateGenerationDatabase(ctx, legacy, false); err != nil {
 		return indexGeneration{}, err
 	}
 	return legacy, nil
@@ -624,7 +648,14 @@ func writeAtomicJSON(ctx context.Context, path string, value any, hook publicati
 	return nil
 }
 
-func cleanupStaleGenerations(ctx context.Context, dbPath string) error {
+// cleanupStaleGenerations removes interrupted staging directories, the stale
+// pointer temp, and — when gcFinalized is set — superseded finalized
+// generations (every valid generation directory except keepID). Finalized
+// removal is best-effort: on POSIX an unlinked directory stays readable
+// through a draining reader's open descriptors, and on Windows the removal
+// fails closed while any handle is open and is retried by the next lease
+// holder.
+func cleanupStaleGenerations(ctx context.Context, dbPath, keepID string, gcFinalized bool) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -636,7 +667,14 @@ func cleanupStaleGenerations(ctx context.Context, dbPath string) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if !entry.IsDir() || !strings.HasPrefix(entry.Name(), ".staging-") || !validGenerationID(strings.TrimPrefix(entry.Name(), ".staging-")) {
+		if !entry.IsDir() {
+			continue
+		}
+		if gcFinalized && validGenerationID(entry.Name()) && entry.Name() != keepID {
+			_ = os.RemoveAll(filepath.Join(generationsPath(dbPath), entry.Name()))
+			continue
+		}
+		if !strings.HasPrefix(entry.Name(), ".staging-") || !validGenerationID(strings.TrimPrefix(entry.Name(), ".staging-")) {
 			continue
 		}
 		if err := removeGenerationPath(ctx, filepath.Join(generationsPath(dbPath), entry.Name())); err != nil {
@@ -647,6 +685,17 @@ func cleanupStaleGenerations(ctx context.Context, dbPath string) error {
 		return fmt.Errorf("golem: remove stale active pointer temp %q: %w", activePointerPath(dbPath)+".tmp", err)
 	}
 	return nil
+}
+
+// shouldRemoveUnpublished reports whether a generation whose publication
+// failed can be removed: only when the active pointer is readable and names a
+// different generation. An unreadable pointer keeps the directory — a failed
+// publish may already have renamed the pointer onto this generation, and
+// deleting the target of a possibly-live pointer is worse than leaking one
+// directory to the next lease holder's garbage collection.
+func shouldRemoveUnpublished(ctx context.Context, dbPath, generationID string) bool {
+	current, err := readActivePointer(ctx, dbPath)
+	return err == nil && current.Generation != generationID
 }
 
 func removeGenerationPath(ctx context.Context, path string) error {

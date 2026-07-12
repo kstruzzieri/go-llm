@@ -248,9 +248,8 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	final := built.generation
 	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: workspaceID, Generation: final.id}
 	if err := publishActiveGeneration(ctx, dbPath, pointer, nil); err != nil {
-		if current, readErr := readActivePointer(context.WithoutCancel(ctx), dbPath); readErr != nil || current.Generation != final.id {
-			cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
-			if cleanupErr != nil {
+		if shouldRemoveUnpublished(context.WithoutCancel(ctx), dbPath, final.id) {
+			if cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath)); cleanupErr != nil {
 				err = errors.Join(err, cleanupErr)
 			}
 		}

@@ -375,6 +375,78 @@ func TestReadyRetrieve_RepeatedConcurrentInvokeAndSwap(t *testing.T) {
 	}
 }
 
+func TestReadyRetrieve_CloseWaitsForCurrentInFlightDelegate(t *testing.T) {
+	r := newReadyRetrieve(warmingRetrieveMessage)
+	cur := &blockingTool{content: "cur", entered: make(chan struct{}), release: make(chan struct{})}
+	curClosed := make(chan struct{})
+	r.install(newRetrievalReader(cur, func() error { close(curClosed); return nil }), "cur")
+	go func() { _, _ = r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`)) }()
+	<-cur.entered
+	closed := make(chan struct{})
+	go func() {
+		if err := r.close(); err != nil {
+			t.Error(err)
+		}
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("close returned while the current delegate call was still in flight")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(cur.release)
+	select {
+	case <-curClosed:
+	case <-time.After(time.Second):
+		t.Fatal("current delegate did not close")
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("wrapper close did not wait for the current delegate")
+	}
+}
+
+// TestReadyRetrieve_ConcurrentInvokeInstallClose races Invoke, install, and
+// close together and pins exactly-once reader closure: retired readers are
+// joined by close via retiring, rejected post-close installs close their
+// reader synchronously, and the current reader is drained by close itself.
+func TestReadyRetrieve_ConcurrentInvokeInstallClose(t *testing.T) {
+	for range 50 {
+		r := newReadyRetrieve(warmingRetrieveMessage)
+		var opened, released atomic.Int64
+		mk := func() *retrievalReader {
+			opened.Add(1)
+			return newRetrievalReader(&countingTool{content: "x"}, func() error { released.Add(1); return nil })
+		}
+		r.install(mk(), "seed")
+		var wg sync.WaitGroup
+		for range 4 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, _ = r.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+			}()
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				r.install(mk(), "swap")
+			}()
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := r.close(); err != nil {
+				t.Error(err)
+			}
+		}()
+		wg.Wait()
+		if opened.Load() != released.Load() {
+			t.Fatalf("opened %d readers, closed %d", opened.Load(), released.Load())
+		}
+	}
+}
+
 func TestReadyRetrieve_CloseWaitsForRetiredInFlightDelegate(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	old := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
