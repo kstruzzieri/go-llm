@@ -200,7 +200,7 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 
 	// Without finalized GC (active resolution failed for an unknown reason)
 	// every finalized generation survives.
-	if err := cleanupStaleGenerations(context.Background(), baseDB, "", false); err != nil {
+	if _, err := cleanupStaleGenerations(context.Background(), baseDB, "", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(superseded.dbPath); err != nil {
@@ -213,8 +213,12 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 		t.Fatalf("orphan pointer temp still exists: %v", err)
 	}
 
-	if err := cleanupStaleGenerations(context.Background(), baseDB, activeID, true); err != nil {
+	warn, err := cleanupStaleGenerations(context.Background(), baseDB, activeID, true)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if warn != "" {
+		t.Fatalf("unexpected GC warning: %q", warn)
 	}
 	for _, path := range []string{active.dbPath, baseDB, sidecarPath(baseDB)} {
 		if _, err := os.Stat(path); err != nil {
@@ -223,6 +227,37 @@ func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Dir(superseded.dbPath)); !os.IsNotExist(err) {
 		t.Fatalf("superseded generation still exists after finalized GC: %v", err)
+	}
+}
+
+func TestCleanupStaleGenerations_ReportsFinalizedRemovalFailure(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("removal-failure injection via directory permissions requires non-root")
+	}
+	baseDB := filepath.Join(t.TempDir(), "k.db")
+	activeID := strings.Repeat("a", 32)
+	publishTestGeneration(t, baseDB, "workspace:k", activeID)
+	supersededID := strings.Repeat("c", 32)
+	superseded := seedPublishedGeneration(t, baseDB, supersededID, "workspace:k", "ollama/nomic")
+	dir := filepath.Dir(superseded.dbPath)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			t.Error(err)
+		}
+	})
+
+	warn, err := cleanupStaleGenerations(context.Background(), baseDB, activeID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(warn, supersededID) || !strings.Contains(warn, "retry") {
+		t.Fatalf("warn = %q, want failed removal of %q with retry note", warn, supersededID)
+	}
+	if _, err := os.Stat(superseded.dbPath); err != nil {
+		t.Fatalf("superseded generation must survive a failed removal: %v", err)
 	}
 }
 
@@ -348,7 +383,7 @@ func TestFinalizeStagingGeneration_InterruptionRecovery(t *testing.T) {
 			if tc.wantFinal && finalErr != nil {
 				t.Fatalf("finalized orphan missing: %v", finalErr)
 			}
-			if err := cleanupStaleGenerations(context.Background(), baseDB, oldID, true); err != nil {
+			if _, err := cleanupStaleGenerations(context.Background(), baseDB, oldID, true); err != nil {
 				t.Fatal(err)
 			}
 			if !tc.wantFinal {

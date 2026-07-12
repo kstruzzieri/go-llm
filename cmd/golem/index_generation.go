@@ -69,6 +69,7 @@ type generationBuildResult struct {
 	stats      rag.StoreStats
 	index      indexResult
 	activeErr  error
+	gcWarn     string // non-fatal superseded-generation removal failure
 }
 
 func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (result generationBuildResult, err error) {
@@ -102,9 +103,11 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 		// Nothing was ever published: finalized directories are crash orphans.
 		gcFinalized = true
 	}
-	if err := cleanupStaleGenerations(ctx, opts.dbPath, keepID, gcFinalized); err != nil {
+	gcWarn, err := cleanupStaleGenerations(ctx, opts.dbPath, keepID, gcFinalized)
+	if err != nil {
 		return result, err
 	}
+	result.gcWarn = gcWarn
 	staging, err := createStagingGeneration(ctx, opts.dbPath)
 	if err != nil {
 		return result, err
@@ -655,37 +658,42 @@ func writeAtomicJSON(ctx context.Context, path string, value any, hook publicati
 // removal is best-effort: on POSIX an unlinked directory stays readable
 // through a draining reader's open descriptors, and on Windows the removal
 // fails closed while any handle is open and is retried by the next lease
-// holder.
-func cleanupStaleGenerations(ctx context.Context, dbPath, keepID string, gcFinalized bool) error {
+// holder. The first such failure is returned as a warning so a persistently
+// failing removal (and its disk growth) stays visible without aborting the
+// build.
+func cleanupStaleGenerations(ctx context.Context, dbPath, keepID string, gcFinalized bool) (string, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return "", err
 	}
 	entries, err := os.ReadDir(generationsPath(dbPath))
 	if err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("golem: read generations directory %q: %w", generationsPath(dbPath), err)
+		return "", fmt.Errorf("golem: read generations directory %q: %w", generationsPath(dbPath), err)
 	}
+	gcWarn := ""
 	for _, entry := range entries {
 		if err := ctx.Err(); err != nil {
-			return err
+			return gcWarn, err
 		}
 		if !entry.IsDir() {
 			continue
 		}
 		if gcFinalized && validGenerationID(entry.Name()) && entry.Name() != keepID {
-			_ = os.RemoveAll(filepath.Join(generationsPath(dbPath), entry.Name()))
+			if removeErr := os.RemoveAll(filepath.Join(generationsPath(dbPath), entry.Name())); removeErr != nil && gcWarn == "" {
+				gcWarn = fmt.Sprintf("could not remove superseded generation %q (will retry under the next writer lease): %v", entry.Name(), removeErr)
+			}
 			continue
 		}
 		if !strings.HasPrefix(entry.Name(), ".staging-") || !validGenerationID(strings.TrimPrefix(entry.Name(), ".staging-")) {
 			continue
 		}
 		if err := removeGenerationPath(ctx, filepath.Join(generationsPath(dbPath), entry.Name())); err != nil {
-			return err
+			return gcWarn, err
 		}
 	}
 	if err := os.Remove(activePointerPath(dbPath) + ".tmp"); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("golem: remove stale active pointer temp %q: %w", activePointerPath(dbPath)+".tmp", err)
+		return gcWarn, fmt.Errorf("golem: remove stale active pointer temp %q: %w", activePointerPath(dbPath)+".tmp", err)
 	}
-	return nil
+	return gcWarn, nil
 }
 
 // shouldRemoveUnpublished reports whether a generation whose publication

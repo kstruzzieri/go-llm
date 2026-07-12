@@ -72,7 +72,9 @@ Crash recovery is deterministic:
   directory.
 - **Lease:** one OS-backed nonblocking file lock covers build, validation,
   cleanup, and publication for a workspace. Contention performs no cleanup or
-  writes and leaves the active reader installed.
+  writes and leaves the active reader installed; a first run with no active
+  reader waits for the winning writer and adopts its published generation
+  instead of failing the session.
 - **Publication:** the fsynced pointer rename is the only visibility change.
   Every observable pointer is either the complete old JSON object or the
   complete new JSON object.

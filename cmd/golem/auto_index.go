@@ -91,14 +91,18 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		fail("no embedding chain configured")
 		return
 	}
+	contended := false
 	lease, err := acquireIndexWriterLease(job.dbPath)
 	if errors.Is(err, errIndexWriterLeaseHeld) {
 		if job.ready.hasReader() {
 			job.notice("warning: retrieve auto-index writer lease already held; serving active generation")
-		} else {
-			fail("workspace index writer lease already held")
+			return
 		}
-		return
+		// A first run lost the writer race. Failing the session's retrieve
+		// while the winning writer publishes moments later is worse than
+		// waiting: poll for the lease, then adopt whatever was published.
+		contended = true
+		lease, err = awaitIndexWriterLease(ctx, job.dbPath)
 	}
 	if err != nil {
 		fail(err.Error())
@@ -109,6 +113,12 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 			job.notice("warning: retrieve auto-index writer lease close failed: " + closeErr.Error())
 		}
 	}()
+
+	if contended && adoptActiveGeneration(ctx, job) {
+		return
+	}
+	// Contention fall-through: the winner published nothing usable, so build
+	// under the lease we now hold.
 
 	// Probe FIRST: a dead embedder must not create or write the store.
 	actualVectorSpace, err := probeAutoIndexEmbedder(ctx, job.embedder, job.embChain[0])
@@ -131,19 +141,16 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 	if built.activeErr != nil && !errors.Is(built.activeErr, os.ErrNotExist) && ctx.Err() == nil {
 		job.notice("warning: retrieve auto-index rebuilding private store: " + built.activeErr.Error())
 	}
+	if built.gcWarn != "" && ctx.Err() == nil {
+		job.notice("warning: retrieve auto-index " + built.gcWarn)
+	}
 	if err != nil {
 		fail(autoIndexFailReason(&buf, errors.Join(built.index.exitErr, err)))
 		return
 	}
 	final := built.generation
 	pointer := activeGenerationPointer{SchemaVersion: activePointerSchemaVersion, WorkspaceID: job.workspaceID, Generation: final.id}
-	open := job.openRetriever
-	if open == nil {
-		open = func(oc context.Context, dbPath string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
-			return buildGatedRetriever(oc, job.cfg, job.router, dbPath, job.embChain, job.feedbackDB)
-		}
-	}
-	reader, feedbackWarn, dec, openedStats, err := open(ctx, final.dbPath)
+	reader, feedbackWarn, dec, openedStats, err := job.open(ctx, final.dbPath)
 	if err != nil {
 		cleanupErr := removeGenerationPath(context.WithoutCancel(ctx), filepath.Dir(final.dbPath))
 		fail(errors.Join(err, cleanupErr).Error())
@@ -179,6 +186,61 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 	if feedbackWarn != "" {
 		job.notice("warning: " + feedbackWarn)
 	}
+}
+
+// indexLeaseRetryInterval paces the first-run writer-lease wait; contention is
+// human-scale (another golem session indexing the same workspace).
+const indexLeaseRetryInterval = 500 * time.Millisecond
+
+// awaitIndexWriterLease polls for the workspace writer lease until it is
+// acquired, a non-contention error occurs, or ctx is cancelled.
+func awaitIndexWriterLease(ctx context.Context, dbPath string) (*indexWriterLease, error) {
+	ticker := time.NewTicker(indexLeaseRetryInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-ticker.C:
+		}
+		lease, err := acquireIndexWriterLease(dbPath)
+		if !errors.Is(err, errIndexWriterLeaseHeld) {
+			return lease, err
+		}
+	}
+}
+
+// open builds the query-time retrieval reader over dbPath, via the injected
+// test seam when one is set.
+func (job autoIndexJob) open(ctx context.Context, dbPath string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+	if job.openRetriever != nil {
+		return job.openRetriever(ctx, dbPath)
+	}
+	return buildGatedRetriever(ctx, job.cfg, job.router, dbPath, job.embChain, job.feedbackDB)
+}
+
+// adoptActiveGeneration installs the generation a competing writer published
+// while this run waited for the lease. It returns false when nothing valid was
+// published, the open failed, or the vector-space gate rejected it — the
+// caller then builds under the lease it holds.
+func adoptActiveGeneration(ctx context.Context, job autoIndexJob) bool {
+	gen, err := resolveActiveGeneration(ctx, job.dbPath, job.workspaceID)
+	if err != nil {
+		return false
+	}
+	reader, feedbackWarn, _, stats, err := job.open(ctx, gen.dbPath)
+	if err != nil || reader == nil {
+		return false
+	}
+	line := autoGenerationLine(gen.metadata, stats)
+	if !job.ready.install(reader, line) || ctx.Err() != nil {
+		return true
+	}
+	job.notice(line)
+	if feedbackWarn != "" {
+		job.notice("warning: " + feedbackWarn)
+	}
+	return true
 }
 
 // autoIndexReadyLine renders the completion notice (spec "Notices"): the ready

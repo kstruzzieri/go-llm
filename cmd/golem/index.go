@@ -241,6 +241,9 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		refuseInvalidActive: true,
 		out:                 out,
 	})
+	if built.gcWarn != "" {
+		_, _ = fmt.Fprintf(errOut, "golem index: warning: %s\n", built.gcWarn)
+	}
 	if err != nil {
 		_, _ = fmt.Fprintf(out, "golem index: %v\n", err)
 		return errIndexFailed

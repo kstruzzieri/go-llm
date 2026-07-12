@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -645,6 +646,93 @@ func TestRunAutoIndex_LeaseContentionPreservesActiveAndLiveStaging(t *testing.T)
 	current, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
 	if err != nil || current.id != active.id {
 		t.Fatalf("active after contention = %+v, %v", current, err)
+	}
+}
+
+func TestRunAutoIndex_WaitsOutLeaseAndAdoptsPublishedGeneration(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	lease, err := acquireIndexWriterLease(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The loser must adopt, never rebuild: any embed call is a failure.
+	var embedCalls atomic.Int32
+	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		embedCalls.Add(1)
+		return rag.EmbedResult{}, errTestEmbedCmd
+	})
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, emb, &notices)
+	done := make(chan struct{})
+	go func() { runAutoIndex(context.Background(), job); close(done) }()
+
+	// Publish as the winning writer while the loser polls for the lease.
+	published := publishTestGeneration(t, dbPath, "workspace:k", strings.Repeat("d", 32))
+	select {
+	case <-done:
+		t.Fatal("loser returned while the lease was still held")
+	case <-time.After(50 * time.Millisecond):
+	}
+	if err := lease.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("loser did not adopt after lease release")
+	}
+
+	if got := retrieveStateOf(job.ready); got != retrieveReady {
+		t.Fatalf("state = %d, want adopted ready; notices = %v", got, notices)
+	}
+	if embedCalls.Load() != 0 {
+		t.Fatalf("adoption ran %d embed calls, want none", embedCalls.Load())
+	}
+	active, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+	if err != nil || active.id != published.id {
+		t.Fatalf("active = %+v, %v; want winner's %q untouched", active, err, published.id)
+	}
+	if len(notices) == 0 || !strings.Contains(notices[0], "retrieve: auto index") {
+		t.Fatalf("notices = %v, want adopted auto-index line", notices)
+	}
+	if err := job.ready.close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunAutoIndex_LeaseWaitCancelledStaysSilentWarming(t *testing.T) {
+	root := t.TempDir()
+	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+	lease, err := acquireIndexWriterLease(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := lease.Close(); err != nil {
+			t.Error(err)
+		}
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var notices []string
+	job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+	done := make(chan struct{})
+	go func() { runAutoIndex(ctx, job); close(done) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("cancelled lease wait did not return")
+	}
+	if got := retrieveStateOf(job.ready); got != retrieveWarming {
+		t.Fatalf("state = %d, want warming after cancelled wait", got)
+	}
+	if len(notices) != 0 {
+		t.Fatalf("cancelled wait must be silent, notices = %v", notices)
 	}
 }
 
