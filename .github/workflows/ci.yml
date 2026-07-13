@@ -37,4 +37,6 @@ jobs:
           GOOS: windows
           GOARCH: amd64
           CGO_ENABLED: "0"
-        run: go build -o "${RUNNER_TEMP}/golem-windows-amd64.exe" ./cmd/golem
+        run: |
+          go build -o /dev/null ./cmd/golem
+          go test -c -o /dev/null ./cmd/golem

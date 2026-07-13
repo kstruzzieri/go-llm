@@ -2,11 +2,9 @@
 
 package main
 
-import (
-	"context"
-	"errors"
-)
+import "context"
 
+// acquireAuthorLock returns a non-nil release function exactly when err is nil.
 func acquireAuthorLock(context.Context, string) (func(), error) {
-	return nil, errors.New("golem: Agentflow plan authoring is unsupported on this platform")
+	return nil, errAgentflowAuthoringUnsupported
 }

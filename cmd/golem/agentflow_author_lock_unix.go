@@ -13,8 +13,9 @@ import (
 	"time"
 )
 
-// acquireAuthorLock serializes -goal authoring across processes for one workspace.
-// The stable temp inode is intentionally retained so waiters cannot race an unlink.
+// acquireAuthorLock serializes -goal authoring across processes for one workspace
+// and returns a non-nil release function exactly when err is nil. The stable temp
+// inode is intentionally retained so waiters cannot race an unlink.
 func acquireAuthorLock(ctx context.Context, root string) (func(), error) {
 	sum := sha256.Sum256([]byte(root))
 	lockName := fmt.Sprintf("golem-agentflow-author-%x.lock", sum)

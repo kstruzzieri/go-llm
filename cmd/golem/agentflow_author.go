@@ -469,10 +469,11 @@ const plannerBasePrompt = "You are Golem's planner. From the user's goal, author
 	"If that submission is rejected you will receive diagnostics; fix them and make one final resubmission."
 
 var (
-	errPlannerRejected       = errors.New("planner could not produce a lockable plan within the submission budget")
-	errPlannerNoSubmission   = errors.New("the planner did not submit a plan")
-	errPlannerInterrupted    = errors.New("planning interrupted before a plan was locked")
-	errPlannerApprovalDenied = errors.New("plan approval denied; plan was not locked")
+	errPlannerRejected               = errors.New("planner could not produce a lockable plan within the submission budget")
+	errPlannerNoSubmission           = errors.New("the planner did not submit a plan")
+	errPlannerInterrupted            = errors.New("planning interrupted before a plan was locked")
+	errPlannerApprovalDenied         = errors.New("plan approval denied; plan was not locked")
+	errAgentflowAuthoringUnsupported = errors.New("golem: Agentflow plan authoring is unsupported on this platform")
 )
 
 // guardExistingPlan refuses to proceed when locking would discard durable state.
@@ -546,6 +547,9 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			return errPlannerInterrupted
+		}
+		if errors.Is(err, errAgentflowAuthoringUnsupported) {
+			return err
 		}
 		return fmt.Errorf("acquire planner lock: %w", err)
 	}

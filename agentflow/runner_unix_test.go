@@ -3,10 +3,12 @@
 package agentflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -80,6 +82,26 @@ func TestExecRunner_CancelKillsProcessGroup(t *testing.T) {
 	waitForProcessExit(t, grandchildPID)
 }
 
+func TestProcessStatIsZombie(t *testing.T) {
+	tests := []struct {
+		name string
+		stat string
+		want bool
+	}{
+		{name: "zombie", stat: "123 (go test) Z 1 2 3", want: true},
+		{name: "running", stat: "123 (go test) R 1 2 3", want: false},
+		{name: "closing parenthesis in name", stat: "123 (go) test) Z 1 2 3", want: true},
+		{name: "malformed", stat: "123 go-test Z 1 2 3", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := processStatIsZombie([]byte(tt.stat)); got != tt.want {
+				t.Fatalf("processStatIsZombie(%q) = %v, want %v", tt.stat, got, tt.want)
+			}
+		})
+	}
+}
+
 func waitForRunnerPIDFile(t *testing.T, path string) int {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -101,10 +123,29 @@ func waitForProcessExit(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		if processExited(pid) {
 			return
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
 	t.Fatalf("grandchild pid %d still exists after process-group cancellation", pid)
+}
+
+func processExited(pid int) bool {
+	if err := syscall.Kill(pid, 0); errors.Is(err, syscall.ESRCH) {
+		return true
+	}
+	if runtime.GOOS != "linux" {
+		return false
+	}
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	return err == nil && processStatIsZombie(stat)
+}
+
+func processStatIsZombie(stat []byte) bool {
+	closeParen := bytes.LastIndexByte(stat, ')')
+	return closeParen >= 0 && len(stat) > closeParen+2 && stat[closeParen+1] == ' ' && stat[closeParen+2] == 'Z'
 }
