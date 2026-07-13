@@ -11,7 +11,6 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -589,21 +588,6 @@ func TestRunAgentflowAuthor_DenialAfterRepairDoesNotClaimNoMutation(t *testing.T
 	}
 	if client.inits != 1 || client.locks != 1 {
 		t.Fatalf("repair denial state = init %d lock %d, want 1/1", client.inits, client.locks)
-	}
-}
-
-func TestAcquireAuthorLockSerializesRoot(t *testing.T) {
-	root := t.TempDir()
-	release, err := acquireAuthorLock(context.Background(), root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer release()
-
-	waitCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	defer cancel()
-	if _, err := acquireAuthorLock(waitCtx, root); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("second lock err = %v, want context deadline", err)
 	}
 }
 

@@ -16,7 +16,6 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"syscall"
 	"time"
 )
 
@@ -63,18 +62,7 @@ func (r *ExecRunner) commandFor(args []string) (bin string, argv []string, env [
 func (r *ExecRunner) Run(ctx context.Context, args []string, stdin []byte) ([]byte, []byte, int, error) {
 	bin, argv, extraEnv := r.commandFor(args)
 	cmd := exec.CommandContext(ctx, bin, argv...)
-	// Run the child in its own process group and kill the whole group on cancel:
-	// exec.CommandContext SIGKILLs only the direct child (python3/agentflow), but
-	// the `run` subcommand spawns gate commands (go test, etc.) as grandchildren.
-	// Signalling the negative pid reaps them too instead of leaving orphans.
-	// macOS/Linux only (Setpgid exists on both); no Windows handling needed.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
+	configureProcessCancellation(cmd)
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Dir = r.dir
 	if len(extraEnv) > 0 {

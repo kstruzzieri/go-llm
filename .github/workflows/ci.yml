@@ -31,3 +31,12 @@ jobs:
 
       - name: Test
         run: go test -race ./...
+
+      - name: Windows compile smoke
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: "0"
+        run: |
+          go build -o /dev/null ./cmd/golem
+          go test -c -o /dev/null ./cmd/golem
