@@ -322,6 +322,55 @@ func TestSQLiteStoreAllowsNewDimensionAfterDeletingLastRow(t *testing.T) {
 	}
 }
 
+func TestSQLiteStoreRejectsWriteAfterForeignTailRowAppendedMidSession(t *testing.T) {
+	appendTailRow := func(t *testing.T, store *SQLiteStore, embedding any) {
+		t.Helper()
+		if _, err := store.DB().Exec(`INSERT INTO chunks
+			(id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+			VALUES ('tail', 'tail', 'tail.go', 1, 1, '', '{}', ?, 1, '', '', '')`, embedding); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("LegacyJSONTail", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+		if err := store.Store(ctx, []Chunk{{ID: "packed", Content: "packed", Source: "packed.go"}}, [][]float64{{1, 0}}); err != nil {
+			t.Fatal(err)
+		}
+		// Simulate an older writer appending a legacy JSON row after this
+		// handle validated the corpus at open time.
+		appendTailRow(t, store, `[0,1]`)
+		err := store.Store(ctx, []Chunk{{ID: "later", Content: "later", Source: "later.go"}}, [][]float64{{1, 0}})
+		if err == nil || !strings.Contains(err.Error(), EmbeddingFormatLegacyJSON) {
+			t.Fatalf("Store error = %v, want legacy-format refusal", err)
+		}
+		if got := countChunks(t, store); got != 2 {
+			t.Fatalf("chunks = %d, want packed row plus foreign tail only", got)
+		}
+	})
+
+	t.Run("PackedDimensionDriftTail", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+		if err := store.Store(ctx, []Chunk{{ID: "packed", Content: "packed", Source: "packed.go"}}, [][]float64{{1, 0}}); err != nil {
+			t.Fatal(err)
+		}
+		three, err := encodeEmbedding([]float64{1, 0, 0})
+		if err != nil {
+			t.Fatal(err)
+		}
+		appendTailRow(t, store, three)
+		err = store.Store(ctx, []Chunk{{ID: "later", Content: "later", Source: "later.go"}}, [][]float64{{1, 0}})
+		if err == nil || !strings.Contains(err.Error(), "dimension") {
+			t.Fatalf("Store error = %v, want dimension mismatch", err)
+		}
+		if got := countChunks(t, store); got != 2 {
+			t.Fatalf("chunks = %d, want packed row plus foreign tail only", got)
+		}
+	})
+}
+
 func TestPackedFloat32RetrievalQualityAgainstLegacyJSON(t *testing.T) {
 	const (
 		dimension = 4096

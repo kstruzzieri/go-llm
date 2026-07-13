@@ -53,6 +53,20 @@ adding `EmbeddingFormat` and `EmbeddingBytes`. It reports `packed-f32-v1`,
 `legacy-json-f64`, `mixed`, or `empty`, plus the decoded dimension and actual
 sum of embedding value bytes.
 
+## Validation cost and write-block lifetime
+
+- Opening a writable store and every `Stats` call scan and validate all
+  embedding rows (`O(chunks × dimension)`). Read-only opens defer validation
+  to the first snapshot load. Golem pays the scan during generation
+  validation and again when the gated retriever opens; it is a per-open cost,
+  never a per-query cost.
+- Each write transaction re-inspects only the corpus's first and last rows as
+  a best-effort guard against foreign-format rows appended by an older writer
+  after open; the complete scan runs at open time.
+- The write block computed at open persists for the lifetime of the handle: a
+  legacy or mixed corpus emptied through deletes accepts writes again only
+  after reopening the store.
+
 ## Retrieval quality
 
 The committed `internal/rageval` fixture and baseline reproduce unchanged with

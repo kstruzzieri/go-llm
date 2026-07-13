@@ -455,24 +455,40 @@ func (s *SQLiteStore) validateWriteEmbeddingDimensionTx(ctx context.Context, tx 
 	if s.writeEmbeddingErr != nil {
 		return s.writeEmbeddingErr
 	}
-	var chunkID string
-	var encoded []byte
-	err := tx.QueryRowContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid LIMIT 1`).Scan(&chunkID, &encoded)
+	// Best-effort re-check inside the write transaction: the complete every-row
+	// scan runs once at open, so inspect the corpus's first and last rows here
+	// to also catch foreign-format rows appended after open (for example an
+	// older writer overlapping a deploy always appends at the highest rowid).
+	var firstID, lastID string
+	var firstEncoded, lastEncoded []byte
+	err := tx.QueryRowContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid LIMIT 1`).Scan(&firstID, &firstEncoded)
 	if err == sql.ErrNoRows {
 		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("rag: write embeddings: inspect existing corpus: %w", err)
 	}
-	format, existingDimension, err := inspectEmbedding(encoded)
-	if err != nil {
-		return fmt.Errorf("rag: write embeddings: inspect existing chunk %q: %w", chunkID, err)
+	if err := tx.QueryRowContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid DESC LIMIT 1`).Scan(&lastID, &lastEncoded); err != nil {
+		return fmt.Errorf("rag: write embeddings: inspect existing corpus: %w", err)
 	}
-	if format != embeddingFormatPackedFloat32 {
-		return fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+	inspect := func(chunkID string, encoded []byte) error {
+		format, existingDimension, err := inspectEmbedding(encoded)
+		if err != nil {
+			return fmt.Errorf("rag: write embeddings: inspect existing chunk %q: %w", chunkID, err)
+		}
+		if format != embeddingFormatPackedFloat32 {
+			return fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+		}
+		if dimension != existingDimension {
+			return fmt.Errorf("rag: write embeddings: dimension %d does not match existing corpus dimension %d", dimension, existingDimension)
+		}
+		return nil
 	}
-	if dimension != existingDimension {
-		return fmt.Errorf("rag: write embeddings: dimension %d does not match existing corpus dimension %d", dimension, existingDimension)
+	if err := inspect(firstID, firstEncoded); err != nil {
+		return err
+	}
+	if lastID != firstID {
+		return inspect(lastID, lastEncoded)
 	}
 	return nil
 }
