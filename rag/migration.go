@@ -56,7 +56,7 @@ func migrateV1(tx *sql.Tx) error {
 			end_line INTEGER NOT NULL,
 			language TEXT NOT NULL DEFAULT '',
 			metadata TEXT NOT NULL DEFAULT '{}',
-			embedding TEXT NOT NULL
+			embedding BLOB NOT NULL
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_source_line ON chunks(source, start_line)`,
 		`CREATE INDEX IF NOT EXISTS idx_chunks_lang_source_line ON chunks(language, source, start_line)`,

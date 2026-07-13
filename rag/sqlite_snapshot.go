@@ -89,26 +89,27 @@ func (s *SQLiteStore) loadSQLiteSnapshot(ctx context.Context) (*sqliteSnapshot, 
 	}
 	var minVectorSpaceID, maxVectorSpaceID string
 	dimensionSet := false
+	var decoder corpusEmbeddingDecoder
 	for rows.Next() {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
 		var (
-			chunk         Chunk
-			rowID         int64
-			indexedAt     int64
-			embeddingJSON string
-			vectorSpaceID string
+			chunk            Chunk
+			rowID            int64
+			indexedAt        int64
+			encodedEmbedding []byte
+			vectorSpaceID    string
 		)
 		if err := rows.Scan(&rowID, &chunk.ID, &chunk.Source, &chunk.StartLine,
 			&chunk.EndLine, &chunk.Language, &chunk.StableKey, &indexedAt,
-			&embeddingJSON, &vectorSpaceID); err != nil {
+			&encodedEmbedding, &vectorSpaceID); err != nil {
 			return nil, fmt.Errorf("rag: scan snapshot chunk: %w", err)
 		}
 
-		var embedding []float64
-		if err := json.Unmarshal([]byte(embeddingJSON), &embedding); err != nil {
-			return nil, fmt.Errorf("rag: unmarshal snapshot embedding for chunk %q: %w", chunk.ID, err)
+		embedding, err := decoder.decode(encodedEmbedding, chunk.ID)
+		if err != nil {
+			return nil, err
 		}
 		if !dimensionSet {
 			snapshot.dimension = len(embedding)

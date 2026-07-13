@@ -283,7 +283,7 @@ func TestSQLiteSnapshotRejectsMixedStoredDimensionsWithoutPublishing(t *testing.
 	for _, row := range []struct {
 		id        string
 		embedding string
-	}{{"empty", "[]"}, {"two", "[1,0]"}} {
+	}{{"one", "[1]"}, {"two", "[1,0]"}} {
 		if _, err := w.db.Exec(`
 			INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
 			VALUES (?, 'body', 'mixed.go', 1, 1, 'go', '{}', ?, 1, '', '', 'test/v1')`, row.id, row.embedding); err != nil {
@@ -372,7 +372,7 @@ func TestSQLiteSnapshotDecodeFailureIsNotPublishedAndCanRetry(t *testing.T) {
 	}
 
 	for range 2 {
-		if _, err := ro.ProbeVectorSpaces(context.Background()); err == nil || !strings.Contains(err.Error(), "unmarshal snapshot embedding") {
+		if _, err := ro.ProbeVectorSpaces(context.Background()); err == nil || !strings.Contains(err.Error(), "decode embedding for chunk") {
 			t.Fatalf("ProbeVectorSpaces error = %v, want embedding decode failure", err)
 		}
 		if residentSnapshot(ro) != nil {

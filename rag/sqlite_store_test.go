@@ -917,6 +917,10 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsVe
 func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsMixedExistingVSID(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
+	embedding, err := encodeEmbedding([]float64{1})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	// Intentional schema-coupled seed: public replace APIs enforce one VSID per
 	// source, so this test owns the raw INSERT needed to simulate corruption.
@@ -929,8 +933,8 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsMi
 	} {
 		if _, err := store.db.ExecContext(ctx,
 			`INSERT INTO chunks (id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
-			 VALUES (?, 'x', 'main.go', 1, 1, 'go', '{}', '[1]', 1, ?, 'h1', ?)`,
-			row.id, row.id, row.vsid); err != nil {
+			 VALUES (?, 'x', 'main.go', 1, 1, 'go', '{}', ?, 1, ?, 'h1', ?)`,
+			row.id, embedding, row.id, row.vsid); err != nil {
 			t.Fatalf("insert mixed row %q: %v", row.id, err)
 		}
 	}
@@ -939,7 +943,7 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_rejectsMi
 		ID: "new", Content: "replacement", Source: "main.go",
 		StartLine: 1, EndLine: 1, Language: "go", Metadata: map[string]string{},
 	}}
-	err := store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "X", "h1")
+	err = store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "main.go", replacement, [][]float64{{2}}, "h2", "X", "h1")
 	if !errors.Is(err, ErrCorpusMixedVectorSpaces) {
 		t.Fatalf("CAS replace error = %v, want ErrCorpusMixedVectorSpaces", err)
 	}

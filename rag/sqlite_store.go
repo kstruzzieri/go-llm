@@ -26,9 +26,10 @@ var (
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
 type SQLiteStore struct {
-	db         *sql.DB
-	behavioral BehavioralWeighter // optional; nil => behavioral signal inert
-	immutable  bool               // set by OpenSQLiteStoreReadOnly; enables the resident snapshot paths
+	db                *sql.DB
+	behavioral        BehavioralWeighter // optional; nil => behavioral signal inert
+	immutable         bool               // set by OpenSQLiteStoreReadOnly; enables the resident snapshot paths
+	writeEmbeddingErr error              // non-nil when existing rows are not a homogeneous packed corpus
 
 	// snapshotMu guards resident and snapshotLoad. resident is the published
 	// process-resident snapshot (nil until the first successful load);
@@ -101,8 +102,16 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		_ = db.Close()
 		return nil, err
 	}
-
-	return &SQLiteStore{db: db}, nil
+	store := &SQLiteStore{db: db}
+	format, _, _, err := store.embeddingStorageSummary(context.Background())
+	if err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("rag: inspect embedding storage: %w", err)
+	}
+	if format != EmbeddingFormatEmpty && format != EmbeddingFormatPackedFloat32 {
+		store.writeEmbeddingErr = fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+	}
+	return store, nil
 }
 
 // OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
@@ -234,6 +243,9 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 }
 
 func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
+	if s.writeEmbeddingErr != nil {
+		return s.writeEmbeddingErr
+	}
 	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
 	// INSERT OR REPLACE deletes the old row and inserts a new one, but
 	// SQLite does not fire DELETE triggers for rows removed by REPLACE
@@ -267,12 +279,12 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 		if err != nil {
 			return fmt.Errorf("rag: marshal metadata: %w", err)
 		}
-		embJSON, err := json.Marshal(embeddings[i])
+		embedding, err := encodeEmbedding(embeddings[i])
 		if err != nil {
-			return fmt.Errorf("rag: marshal embedding: %w", err)
+			return err
 		}
 		if _, err := stmt.ExecContext(ctx, chunk.ID, chunk.Content, chunk.Source,
-			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), string(embJSON), now, chunk.StableKey, sourceContentHash, vectorSpaceID); err != nil {
+			chunk.StartLine, chunk.EndLine, chunk.Language, string(metaJSON), embedding, now, chunk.StableKey, sourceContentHash, vectorSpaceID); err != nil {
 			return fmt.Errorf("rag: insert chunk %q: %w", chunk.ID, err)
 		}
 	}
@@ -304,12 +316,14 @@ func (s *SQLiteStore) Store(ctx context.Context, chunks []Chunk, embeddings [][]
 	if len(chunks) == 0 {
 		return nil
 	}
-
 	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return fmt.Errorf("rag: begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if err := s.validateWriteEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
+		return err
+	}
 
 	if err := s.insertChunksTx(ctx, tx, chunks, embeddings, "", ""); err != nil {
 		return err
@@ -395,12 +409,16 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 	if opts.requireVectorSpaceID && len(chunks) > 0 && opts.vectorSpaceID == "" {
 		return fmt.Errorf("%w: replace source %q with non-empty chunks", ErrMissingVectorSpaceID, source)
 	}
-
 	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: replace source %q: begin transaction: %w", ErrStoreOperation, source, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if len(embeddings) > 0 {
+		if err := s.validateWriteEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
+			return fmt.Errorf("rag: replace source %q: %w", source, err)
+		}
+	}
 
 	if opts.checkExpectedSourceHash {
 		matches, err := sourceHashMatchesTx(ctx, tx, source, opts.expectedSourceHash)
@@ -429,6 +447,48 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("rag: replace source %q: commit: %w", source, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) validateWriteEmbeddingDimensionTx(ctx context.Context, tx *sql.Tx, dimension int) error {
+	if s.writeEmbeddingErr != nil {
+		return s.writeEmbeddingErr
+	}
+	// Best-effort re-check inside the write transaction: the complete every-row
+	// scan runs once at open, so inspect the corpus's first and last rows here
+	// to also catch foreign-format rows appended after open (for example an
+	// older writer overlapping a deploy always appends at the highest rowid).
+	var firstID, lastID string
+	var firstEncoded, lastEncoded []byte
+	err := tx.QueryRowContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid LIMIT 1`).Scan(&firstID, &firstEncoded)
+	if err == sql.ErrNoRows {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("rag: write embeddings: inspect existing corpus: %w", err)
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid DESC LIMIT 1`).Scan(&lastID, &lastEncoded); err != nil {
+		return fmt.Errorf("rag: write embeddings: inspect existing corpus: %w", err)
+	}
+	inspect := func(chunkID string, encoded []byte) error {
+		format, existingDimension, err := inspectEmbedding(encoded)
+		if err != nil {
+			return fmt.Errorf("rag: write embeddings: inspect existing chunk %q: %w", chunkID, err)
+		}
+		if format != embeddingFormatPackedFloat32 {
+			return fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+		}
+		if dimension != existingDimension {
+			return fmt.Errorf("rag: write embeddings: dimension %d does not match existing corpus dimension %d", dimension, existingDimension)
+		}
+		return nil
+	}
+	if err := inspect(firstID, firstEncoded); err != nil {
+		return err
+	}
+	if lastID != firstID {
+		return inspect(lastID, lastEncoded)
 	}
 	return nil
 }
@@ -505,11 +565,13 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 	defer func() { _ = rows.Close() }()
 
 	var results []SearchResult
+	var decoder corpusEmbeddingDecoder
 	for rows.Next() {
 		var chunk Chunk
-		var metaJSON, embJSON string
+		var metaJSON string
+		var encodedEmbedding []byte
 		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
-			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &embJSON, &chunk.StableKey); err != nil {
+			&chunk.StartLine, &chunk.EndLine, &chunk.Language, &metaJSON, &encodedEmbedding, &chunk.StableKey); err != nil {
 			return nil, fmt.Errorf("rag: scan chunk: %w", err)
 		}
 
@@ -518,9 +580,9 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 			return nil, fmt.Errorf("rag: unmarshal metadata for chunk %q: %w", chunk.ID, err)
 		}
 
-		var embedding []float64
-		if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
-			return nil, fmt.Errorf("rag: unmarshal embedding: %w", err)
+		embedding, err := decoder.decode(encodedEmbedding, chunk.ID)
+		if err != nil {
+			return nil, err
 		}
 		if err := validateSearchEmbeddingDimension(chunk.ID, queryEmbedding, embedding); err != nil {
 			return nil, err
@@ -598,13 +660,15 @@ func (s *SQLiteStore) GetBySource(ctx context.Context, source string) ([]ChunkWi
 	defer func() { _ = rows.Close() }()
 
 	var results []ChunkWithEmbedding
+	var decoder corpusEmbeddingDecoder
 	for rows.Next() {
 		var chunk Chunk
-		var metaJSON, embJSON string
+		var metaJSON string
+		var encodedEmbedding []byte
 		var vectorSpaceID string
 		if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
 			&chunk.StartLine, &chunk.EndLine, &chunk.Language,
-			&metaJSON, &embJSON, &chunk.StableKey, &vectorSpaceID); err != nil {
+			&metaJSON, &encodedEmbedding, &chunk.StableKey, &vectorSpaceID); err != nil {
 			return nil, fmt.Errorf("rag: scan chunk for source %q: %w", source, err)
 		}
 
@@ -613,9 +677,9 @@ func (s *SQLiteStore) GetBySource(ctx context.Context, source string) ([]ChunkWi
 			return nil, fmt.Errorf("rag: unmarshal metadata for chunk %q: %w", chunk.ID, err)
 		}
 
-		var embedding []float64
-		if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
-			return nil, fmt.Errorf("rag: unmarshal embedding for chunk %q: %w", chunk.ID, err)
+		embedding, err := decoder.decode(encodedEmbedding, chunk.ID)
+		if err != nil {
+			return nil, err
 		}
 
 		results = append(results, ChunkWithEmbedding{
@@ -659,6 +723,46 @@ func (s *SQLiteStore) UpdateSourceHash(ctx context.Context, source, hash string)
 	return nil
 }
 
+func (s *SQLiteStore) embeddingStorageSummary(ctx context.Context) (format string, dimension int, storageBytes int64, err error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid`)
+	if err != nil {
+		return "", 0, 0, fmt.Errorf("rag: inspect embedding storage: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var firstFormat embeddingFormat
+	mixed := false
+	for rows.Next() {
+		var chunkID string
+		var encoded []byte
+		if err := rows.Scan(&chunkID, &encoded); err != nil {
+			return "", 0, storageBytes, fmt.Errorf("rag: inspect embedding storage row: %w", err)
+		}
+		storageBytes += int64(len(encoded))
+		rowFormat, rowDimension, err := inspectEmbedding(encoded)
+		if err != nil {
+			return "", 0, storageBytes, fmt.Errorf("rag: inspect embedding for chunk %q: %w", chunkID, err)
+		}
+		if firstFormat == "" {
+			firstFormat, dimension = rowFormat, rowDimension
+			continue
+		}
+		if rowFormat != firstFormat || rowDimension != dimension {
+			mixed = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", 0, storageBytes, fmt.Errorf("rag: inspect embedding storage rows: %w", err)
+	}
+	if firstFormat == "" {
+		return EmbeddingFormatEmpty, 0, 0, nil
+	}
+	if mixed {
+		return EmbeddingFormatMixed, 0, storageBytes, nil
+	}
+	return string(firstFormat), dimension, storageBytes, nil
+}
+
 // Stats returns index statistics.
 func (s *SQLiteStore) Stats(ctx context.Context) (StoreStats, error) {
 	var stats StoreStats
@@ -673,14 +777,9 @@ func (s *SQLiteStore) Stats(ctx context.Context) (StoreStats, error) {
 		return stats, fmt.Errorf("rag: count sources: %w", err)
 	}
 
-	// Get embedding dimension from first row
-	var embJSON string
-	err = s.db.QueryRowContext(ctx, `SELECT embedding FROM chunks LIMIT 1`).Scan(&embJSON)
-	if err == nil {
-		var emb []float64
-		if json.Unmarshal([]byte(embJSON), &emb) == nil {
-			stats.EmbeddingDim = len(emb)
-		}
+	stats.EmbeddingFormat, stats.EmbeddingDim, stats.EmbeddingBytes, err = s.embeddingStorageSummary(ctx)
+	if err != nil {
+		return stats, err
 	}
 
 	// Get database page count and page size for storage estimate
@@ -731,12 +830,13 @@ func (s *SQLiteStore) ExportChunks(ctx context.Context, filter *ExportFilter) (i
 	}
 	return func(yield func(ExportedChunk, error) bool) {
 		defer func() { _ = rows.Close() }()
+		var decoder corpusEmbeddingDecoder
 		for rows.Next() {
 			if err := ctx.Err(); err != nil {
 				yield(ExportedChunk{}, err)
 				return
 			}
-			chunk, embedding, err := scanExportRow(rows)
+			chunk, embedding, err := scanExportRow(rows, &decoder)
 			if err != nil {
 				yield(ExportedChunk{}, err)
 				return
@@ -777,17 +877,17 @@ func buildExportQuery(filter *ExportFilter) (string, []any) {
 
 // scanExportRow scans a row from the export query into a Chunk and embedding.
 // Metadata is intentionally not selected — it's excluded from the Parquet schema.
-func scanExportRow(rows *sql.Rows) (Chunk, []float64, error) {
+func scanExportRow(rows *sql.Rows, decoder *corpusEmbeddingDecoder) (Chunk, []float64, error) {
 	var chunk Chunk
-	var embJSON string
+	var encodedEmbedding []byte
 	if err := rows.Scan(&chunk.ID, &chunk.Content, &chunk.Source,
-		&chunk.StartLine, &chunk.EndLine, &chunk.Language, &embJSON, &chunk.StableKey); err != nil {
+		&chunk.StartLine, &chunk.EndLine, &chunk.Language, &encodedEmbedding, &chunk.StableKey); err != nil {
 		return Chunk{}, nil, fmt.Errorf("rag: scan export row: %w", err)
 	}
 
-	var embedding []float64
-	if err := json.Unmarshal([]byte(embJSON), &embedding); err != nil {
-		return Chunk{}, nil, fmt.Errorf("rag: unmarshal export embedding: %w", err)
+	embedding, err := decoder.decode(encodedEmbedding, chunk.ID)
+	if err != nil {
+		return Chunk{}, nil, err
 	}
 
 	return chunk, embedding, nil

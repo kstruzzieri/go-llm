@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -111,4 +112,30 @@ func TestEnableRetrieve_ExplicitMismatchHintHasNoFull(t *testing.T) {
 	if strings.Contains(got.warns[0], "golem index -full") {
 		t.Errorf("explicit -rag-db mismatch must NOT suggest golem index -full: %q", got.warns[0])
 	}
+}
+
+func TestEnableRetrieve_ExplicitLegacyEmbeddingFormatRefusesWithoutMutation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "explicit.db")
+	seedIndex(t, dbPath, "workspace:ignored", "ollama/nomic")
+	rewriteEmbeddingsAsLegacyJSON(t, dbPath)
+	want, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := enableRetrieve(context.Background(), embedCfg(), &provider.Router{}, retrieveOpts{ragDB: dbPath})
+	if got.tool != nil || len(got.warns) != 1 {
+		t.Fatalf("explicit legacy result = %+v", got)
+	}
+	if warning := got.warns[0]; !strings.Contains(warning, "legacy-json-f64") || !strings.Contains(warning, "will not") {
+		t.Fatalf("warning = %q, want format and no-migration guidance", warning)
+	}
+	after, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(after, want) {
+		t.Fatal("explicit legacy -rag-db was mutated")
+	}
+	assertNoSQLiteSidecars(t, dbPath)
 }

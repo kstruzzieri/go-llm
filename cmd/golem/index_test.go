@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -62,6 +63,28 @@ func removeSQLiteSidecars(t *testing.T, dbPath string) {
 			t.Fatal(err)
 		}
 	}
+}
+
+func rewriteEmbeddingsAsLegacyJSON(t *testing.T, dbPath string) {
+	t.Helper()
+	store, err := rag.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(realisticTestVector())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`UPDATE chunks SET embedding = ?`, string(encoded)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	removeSQLiteSidecars(t, dbPath)
 }
 
 func assertNoSQLiteSidecars(t *testing.T, dbPath string) {
