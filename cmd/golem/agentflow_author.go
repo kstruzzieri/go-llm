@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -59,6 +60,7 @@ type authorSession struct {
 	workflowProfile       string
 	workflowReason        string
 	taskBriefPath         string
+	workflowHandoffPath   string
 }
 
 type submitPlanTool struct {
@@ -70,14 +72,22 @@ func newSubmitPlanTool(sess *authorSession) *submitPlanTool {
 }
 
 const (
-	maxPlanSubmissions = 2
-	minPlannerOutput   = 3500
-	lockedPlanRel      = ".agent/plan.lock.json"
+	maxPlanSubmissions                   = 2
+	minPlannerOutput                     = 3500
+	lockedPlanRel                        = ".agent/plan.lock.json"
+	approvedWorkflowHandoffSchemaVersion = "0.1.0"
 	// submitPlanToolName links the tool spec, the REPL approver's lock prompt,
 	// and the author approver's denial handling; they must agree or a rename
 	// silently downgrades the approval UX to the generic edit prompt.
 	submitPlanToolName = "submit_plan"
 )
+
+type approvedWorkflowHandoff struct {
+	SchemaVersion   string                           `json:"schema_version"`
+	PlanSHA256      string                           `json:"plan_sha256"`
+	TaskBriefSHA256 string                           `json:"task_brief_sha256"`
+	Recommendation  agentflow.WorkflowRecommendation `json:"recommendation"`
+}
 
 func plannerModelOptions(options provider.ModelOptions) provider.ModelOptions {
 	off := false
@@ -167,7 +177,7 @@ func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agen
 	s.previewArgs = nil
 	s.previewRecommendation = nil
 	s.previewBrief = nil
-	briefPath, err := t.lock(ctx, plan, recommendation, brief)
+	briefPath, handoffPath, err := t.lock(ctx, plan, recommendation, brief)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			s.cancel()
@@ -181,6 +191,7 @@ func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agen
 		return t.reject(lockErrorDiagnostics(err))
 	}
 	s.taskBriefPath = briefPath
+	s.workflowHandoffPath = handoffPath
 	// #209 resolves relative -plan paths against the process cwd, not -root.
 	// Preserve an absolute handoff path so an explicit -root works from anywhere.
 	s.lockedPath = filepath.Join(s.root, filepath.FromSlash(lockedPlanRel))
@@ -405,41 +416,68 @@ func extraLines(a, b []string) []string {
 // lock stages the compiled plan through a temp file and the real lock-plan. The
 // temp lives outside .agent/ so a failed lock leaves no stray workspace artifact;
 // LockPlan itself writes the durable .agent/plan.lock.json.
-func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan, recommendation agentflow.WorkflowRecommendation, brief agentflow.TaskBrief) (string, error) {
+func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan, recommendation agentflow.WorkflowRecommendation, brief agentflow.TaskBrief) (string, string, error) {
 	if err := t.sess.client.Init(ctx); err != nil {
-		return "", &terminalError{fmt.Errorf("agentflow init: %w", err)}
+		return "", "", &terminalError{fmt.Errorf("agentflow init: %w", err)}
 	}
 	b, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
-		return "", &terminalError{fmt.Errorf("marshal compiled plan: %w", err)}
+		return "", "", &terminalError{fmt.Errorf("marshal compiled plan: %w", err)}
 	}
 	tmp, err := os.CreateTemp("", "golem-plan-*.json")
 	if err != nil {
-		return "", &terminalError{fmt.Errorf("create staged plan: %w", err)}
+		return "", "", &terminalError{fmt.Errorf("create staged plan: %w", err)}
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
-		return "", &terminalError{fmt.Errorf("write staged plan %s: %w", tmp.Name(), err)}
+		return "", "", &terminalError{fmt.Errorf("write staged plan %s: %w", tmp.Name(), err)}
 	}
 	if err := tmp.Close(); err != nil {
-		return "", &terminalError{fmt.Errorf("close staged plan %s: %w", tmp.Name(), err)}
+		return "", "", &terminalError{fmt.Errorf("close staged plan %s: %w", tmp.Name(), err)}
 	}
 	if err := t.sess.client.LockPlan(ctx, tmp.Name()); err != nil {
-		return "", err
+		return "", "", err
 	}
 	if err := t.sess.client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
-		return "", &terminalError{fmt.Errorf("materialize Agentflow workflow contract after plan lock: %w", err)}
+		return "", "", &terminalError{fmt.Errorf("materialize Agentflow workflow contract after plan lock: %w", err)}
 	}
 	briefPath, err := saveApprovedTaskBrief(t.sess.root, brief)
 	if err != nil {
-		return "", &terminalError{fmt.Errorf("save approved Agentflow task brief after plan lock: %w", err)}
+		return "", "", &terminalError{fmt.Errorf("save approved Agentflow task brief after plan lock: %w", err)}
 	}
-	return briefPath, nil
+	handoffPath, err := saveApprovedWorkflowHandoff(t.sess.root, plan, brief, recommendation)
+	if err != nil {
+		_ = os.Remove(briefPath)
+		return "", "", &terminalError{fmt.Errorf("save approved Agentflow workflow handoff after plan lock: %w", err)}
+	}
+	return briefPath, handoffPath, nil
 }
 
 func saveApprovedTaskBrief(root string, brief agentflow.TaskBrief) (string, error) {
-	b, err := json.MarshalIndent(brief, "", "  ")
+	return saveApprovedJSON(root, "golem-task-brief-*.json", brief)
+}
+
+func saveApprovedWorkflowHandoff(root string, plan agentflow.Plan, brief agentflow.TaskBrief, recommendation agentflow.WorkflowRecommendation) (string, error) {
+	planSHA256, err := canonicalJSONSHA256(plan)
+	if err != nil {
+		return "", fmt.Errorf("digest approved plan: %w", err)
+	}
+	taskBriefSHA256, err := canonicalJSONSHA256(brief)
+	if err != nil {
+		return "", fmt.Errorf("digest approved task brief: %w", err)
+	}
+	handoff := approvedWorkflowHandoff{
+		SchemaVersion:   approvedWorkflowHandoffSchemaVersion,
+		PlanSHA256:      planSHA256,
+		TaskBriefSHA256: taskBriefSHA256,
+		Recommendation:  recommendation,
+	}
+	return saveApprovedJSON(root, "golem-workflow-handoff-*.json", handoff)
+}
+
+func saveApprovedJSON(root, pattern string, value any) (string, error) {
+	b, err := json.MarshalIndent(value, "", "  ")
 	if err != nil {
 		return "", err
 	}
@@ -447,7 +485,7 @@ func saveApprovedTaskBrief(root string, brief agentflow.TaskBrief) (string, erro
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
-	f, err := os.CreateTemp(dir, "golem-task-brief-*.json")
+	f, err := os.CreateTemp(dir, pattern)
 	if err != nil {
 		return "", err
 	}
@@ -466,6 +504,15 @@ func saveApprovedTaskBrief(root string, brief agentflow.TaskBrief) (string, erro
 	}
 	remove = false
 	return f.Name(), nil
+}
+
+func canonicalJSONSHA256(value any) (string, error) {
+	b, err := json.Marshal(value)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(b)
+	return fmt.Sprintf("%x", sum), nil
 }
 
 // terminalError marks a fail-fast condition that no model repair can fix.
@@ -754,10 +801,8 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		// Include -root: #209 resolves proof state against the process cwd, so an
 		// operator running this from another directory would otherwise write to the
 		// wrong tree (the cwd-mismatch class fixed in 45838e7). root is absolute.
-		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -task-brief %s", shellQuote(as.lockedPath), shellQuote(root), shellQuote(as.taskBriefPath))
-		if as.workflowProfile != "" {
-			_, _ = fmt.Fprintf(stdout, " -workflow-profile %s -workflow-reason %s", shellQuote(as.workflowProfile), shellQuote(as.workflowReason))
-		}
+		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -task-brief %s -workflow-handoff %s",
+			shellQuote(as.lockedPath), shellQuote(root), shellQuote(as.taskBriefPath), shellQuote(as.workflowHandoffPath))
 		_, _ = fmt.Fprintln(stdout, " -approve-plan-edits -approve-plan-gates")
 		return nil
 	case as.approvalDenied:

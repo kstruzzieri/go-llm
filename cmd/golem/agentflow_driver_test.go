@@ -3,10 +3,12 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -146,6 +148,26 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 	}
 }
 
+func TestDriver_PreapprovedWorkflowIsReusedWithoutRecommendationOrMaterialization(t *testing.T) {
+	af := &fakeAF{}
+	recommendation := defaultWorkflowRecommendation()
+	d := &driver{
+		af: af, plan: &agentflow.Plan{}, planPath: "plan.json", out: io.Discard,
+		approvedRecommendation: &recommendation,
+		runStep:                func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	if _, err := d.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"probe", "probe-workflow", "init", "lock:plan.json", "init-exec", "doctor", "next-step", "finish-run"}
+	if !equalSeq(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+	if len(af.briefs) != 0 || len(af.materializedRoutes) != 0 {
+		t.Fatalf("preapproved route was recomputed/materialized: briefs=%v routes=%v", af.briefs, af.materializedRoutes)
+	}
+}
+
 func TestReadExternalTaskBrief_ConservativeFallbackUsesOnlyExactPlanFacts(t *testing.T) {
 	plan := agentflow.Plan{
 		RiskLevel:       "low",
@@ -189,7 +211,7 @@ func TestReadExternalTaskBrief_StrictExplicitInputAndExactFactFill(t *testing.T)
 		return name
 	}
 
-	path := write("brief.json", `{"schema_version":"0.1.0","task_type":"refactor","declared_risk":"high","security_sensitive":false,"blast_radius":"local","declared_size":"s"}`)
+	path := write("brief.json", `{"schema_version":"0.1.0","task_type":"refactor","declared_risk":"high","security_sensitive":false,"candidate_files":["external/context.go"],"blast_radius":"local","validation_needs":["lint"],"declared_size":"s"}`)
 	brief, err := readExternalTaskBrief(path, plan)
 	if err != nil {
 		t.Fatal(err)
@@ -198,9 +220,9 @@ func TestReadExternalTaskBrief_StrictExplicitInputAndExactFactFill(t *testing.T)
 		brief.BlastRadius == nil || *brief.BlastRadius != "local" || brief.DeclaredSize == nil || *brief.DeclaredSize != "s" {
 		t.Fatalf("explicit fields not preserved: %+v", brief)
 	}
-	if brief.CandidateFiles == nil || strings.Join(*brief.CandidateFiles, ",") != "src/a.go" ||
-		brief.ValidationNeeds == nil || strings.Join(*brief.ValidationNeeds, ",") != "unit" {
-		t.Fatalf("absent exact facts not filled: %+v", brief)
+	if brief.CandidateFiles == nil || strings.Join(*brief.CandidateFiles, ",") != "src/a.go,external/context.go" ||
+		brief.ValidationNeeds == nil || strings.Join(*brief.ValidationNeeds, ",") != "unit,lint" {
+		t.Fatalf("exact plan facts were not conservatively unioned: %+v", brief)
 	}
 
 	emptyPath := write("explicit-empty.json", `{"schema_version":"0.1.0","task_type":"feature","declared_risk":"high","candidate_files":[],"validation_needs":[]}`)
@@ -208,8 +230,9 @@ func TestReadExternalTaskBrief_StrictExplicitInputAndExactFactFill(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if empty.CandidateFiles == nil || len(*empty.CandidateFiles) != 0 || empty.ValidationNeeds == nil || len(*empty.ValidationNeeds) != 0 {
-		t.Fatalf("present empty fields were overwritten: %+v", empty)
+	if empty.CandidateFiles == nil || strings.Join(*empty.CandidateFiles, ",") != "src/a.go" ||
+		empty.ValidationNeeds == nil || strings.Join(*empty.ValidationNeeds, ",") != "unit" {
+		t.Fatalf("explicit empty fields concealed exact plan facts: %+v", empty)
 	}
 
 	for _, tc := range []struct {
@@ -228,6 +251,145 @@ func TestReadExternalTaskBrief_StrictExplicitInputAndExactFactFill(t *testing.T)
 				t.Fatalf("error = %v, want %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestReadExternalTaskBrief_CannotHideExactPlanScope(t *testing.T) {
+	files := []string{
+		"src/f01.go", "src/f02.go", "src/f03.go", "src/f04.go", "src/f05.go",
+		"src/f06.go", "src/f07.go", "src/f08.go", "src/f09.go", "src/f10.go",
+		"src/f11.go", "src/f12.go", "src/f13.go", "src/f14.go", "src/f15.go",
+		"src/f16.go", "src/f17.go", "src/f18.go", "src/f19.go", "src/f20.go",
+	}
+	plan := agentflow.Plan{
+		RiskLevel:       "low",
+		ValidationGates: []string{"unit-tests"},
+		Steps:           []agentflow.Step{{Files: files}},
+	}
+	claimedFiles := []string{files[0]}
+	claimedGates := []string{}
+	blast := "local"
+	size := "xs"
+	brief := agentflow.TaskBrief{
+		SchemaVersion: agentflow.TaskBriefSchemaVersion,
+		TaskType:      "bugfix", DeclaredRisk: "low",
+		CandidateFiles: &claimedFiles, ValidationNeeds: &claimedGates,
+		BlastRadius: &blast, DeclaredSize: &size,
+	}
+	b, err := json.Marshal(brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "brief.json")
+	if err := os.WriteFile(path, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readExternalTaskBrief(path, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CandidateFiles == nil || !reflect.DeepEqual(*got.CandidateFiles, files) {
+		t.Fatalf("explicit brief hid exact plan files: %v", got.CandidateFiles)
+	}
+	if got.ValidationNeeds == nil || !reflect.DeepEqual(*got.ValidationNeeds, plan.ValidationGates) {
+		t.Fatalf("explicit brief hid exact plan gates: %v", got.ValidationNeeds)
+	}
+}
+
+func TestReadApprovedWorkflowHandoff_VerifiesExistingAgentflowContract(t *testing.T) {
+	root := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(root, ".agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := agentflow.Plan{Objective: "approved objective", RiskLevel: "low", ValidationGates: []string{"unit"}, Steps: []agentflow.Step{{Files: []string{"src/a.go"}}}}
+	brief := agentflow.TaskBriefFromPlan(plan, "feature")
+	recommendation := defaultWorkflowRecommendation()
+	handoffPath, err := saveApprovedWorkflowHandoff(root, plan, brief, recommendation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contract, err := json.Marshal(recommendation.Contract)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contractPath := filepath.Join(root, ".agent", "workflow.contract.json")
+	if err := os.WriteFile(contractPath, contract, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := readApprovedWorkflowHandoff(handoffPath, root, plan, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Selected != recommendation.Selected {
+		t.Fatalf("approved recommendation = %+v", got)
+	}
+	tampered := bytes.Replace(contract, []byte(`"review_depth":"standard"`), []byte(`"review_depth":"deep"`), 1)
+	if err := os.WriteFile(contractPath, tampered, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readApprovedWorkflowHandoff(handoffPath, root, plan, brief); err == nil || !strings.Contains(err.Error(), "approved workflow handoff") {
+		t.Fatalf("tampered contract error = %v", err)
+	}
+}
+
+func TestReadApprovedWorkflowHandoff_RejectsDifferentPlanOrBrief(t *testing.T) {
+	root := t.TempDir()
+	approvedPlan := agentflow.Plan{Objective: "approved objective", RiskLevel: "low"}
+	brief := agentflow.TaskBriefFromPlan(approvedPlan, "feature")
+	recommendation := defaultWorkflowRecommendation()
+	handoffPath, err := saveApprovedWorkflowHandoff(root, approvedPlan, brief, recommendation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePairing := approvedPlan
+	stalePairing.Objective = "different broad plan"
+	if _, err := readApprovedWorkflowHandoff(handoffPath, root, stalePairing, brief); err == nil || !strings.Contains(err.Error(), "plan does not match") {
+		t.Fatalf("stale plan pairing error = %v", err)
+	}
+	staleBrief := brief
+	staleBrief.TaskType = "docs"
+	if _, err := readApprovedWorkflowHandoff(handoffPath, root, approvedPlan, staleBrief); err == nil || !strings.Contains(err.Error(), "task brief does not match") {
+		t.Fatalf("stale task brief pairing error = %v", err)
+	}
+}
+
+func TestRunAgentflowTask_RejectsStaleWorkflowHandoffBeforeClientUse(t *testing.T) {
+	root := t.TempDir()
+	ir := validTraceableIR()
+	approvedPlan := agentflow.Compile(ir)
+	brief := taskBriefFromIR(ir, approvedPlan)
+	handoffPath, err := saveApprovedWorkflowHandoff(root, approvedPlan, brief, defaultWorkflowRecommendation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	briefPath, err := saveApprovedTaskBrief(root, brief)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stalePairing := approvedPlan
+	stalePairing.Objective = "a different plan must not inherit the approved route"
+	planBytes, err := json.Marshal(stalePairing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(root, "different-plan.json")
+	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	err = runAgentflowTask(context.Background(), &stdout, &stderr, nil, &replSession{}, flags{
+		planPath: planPath, taskBriefPath: briefPath, workflowHandoffPath: handoffPath,
+		approveEdits: true, approveGates: true,
+		agentflowSrc: filepath.Join(t.TempDir(), "must-not-run"),
+	}, root)
+	if err == nil || !strings.Contains(err.Error(), "plan does not match approved workflow handoff") {
+		t.Fatalf("stale handoff error = %v", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("stale handoff reached task output/recovery: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 

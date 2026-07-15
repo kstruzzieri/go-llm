@@ -4,7 +4,7 @@
 
 **Goal:** Route every Agentflow-backed Golem task through Agentflow's authoritative workflow recommendation and proof policy.
 
-**Architecture:** Add one typed recommendation/materialization seam to the existing Agentflow client. Planning mode derives a brief from PlanIR and previews the returned contract before approval; task mode consumes an explicit brief or a conservative exact-fact projection, previews before mutation, and materializes the same candidate after plan lock. Agentflow alone enforces proof and review floors.
+**Architecture:** Add one typed recommendation/materialization seam to the existing Agentflow client. Planning mode derives a brief from PlanIR, previews the returned contract before approval, materializes it after approval, and saves a digest-bound handoff. Task mode either validates and reuses that approved handoff or recommends and materializes once for an external plan. Agentflow remains the review/proof-policy authority.
 
 **Tech Stack:** Go standard library, existing `agentflow.Runner`, Agentflow CLI contracts, Go tests.
 
@@ -71,7 +71,7 @@
 - [ ] Write failing tests for mismatched or stale plan/recommendation arguments and exact-once post-lock materialization.
 - [ ] Implement PlanIR fields and prompt/schema text without adding a second planning document.
 - [ ] Append a control-safe workflow section to the existing deterministic plan preview and include it in resubmission deltas.
-- [ ] Store the recommendation bound to the previewed tool arguments; after approval lock the plan and materialize only that candidate.
+- [ ] Store the recommendation bound to the previewed tool arguments; after approval lock the plan, materialize only that candidate, and save a handoff bound to canonical plan/task-brief digests.
 - [ ] Run `rtk go test ./agentflow ./cmd/golem -run 'Agentflow|Workflow|Recommend|Plan'`.
 
 ### Task 4: Flags and conservative external-plan brief
@@ -83,14 +83,14 @@
 - Modify: `cmd/golem/agentflow_driver_test.go`
 
 **Interfaces:**
-- Produces flags `-task-brief`, `-workflow-profile`, and `-workflow-reason` limited to Agentflow modes.
+- Produces flags `-task-brief`, `-workflow-handoff`, `-workflow-profile`, and `-workflow-reason` limited to Agentflow modes.
 - Produces a strict external brief reader and a conservative `task_type=feature` fallback using plan risk/files/gates only.
 
 - [ ] Write failing flag tests: brief is task-mode-only; profile and reason must be paired and limited to Agentflow modes.
 - [ ] Write failing brief tests for closed JSON, plan-risk mismatch, exact plan-file/gate fill-in, and conservative fallback that cannot select a lightweight profile from absent signals.
-- [ ] Implement only the three flags and narrow validations.
+- [ ] Implement only the four narrow flags and their mode/pairing validations.
 - [ ] Resolve the brief path against caller cwd; decode before any Agentflow call.
-- [ ] Preserve explicit fields; fill only absent candidate files and validation needs from exact plan facts; reject risk mismatch.
+- [ ] Preserve explicit signals, always union exact plan files/gates so an explicit brief cannot hide scope, and reject risk mismatch.
 - [ ] Run `rtk go test ./cmd/golem -run 'Agentflow|Workflow|Recommend|Plan'`.
 
 ### Task 5: Task startup, review, and proof sequencing
@@ -101,7 +101,8 @@
 - Modify: `cmd/golem/agentflow_smoke_test.go`
 
 **Interfaces:**
-- Driver order: probe -> workflow probe -> recommend -> preview -> init -> evidence -> lock -> materialize -> init execution -> steps -> route reminder -> review ingestion -> finish run.
+- External-plan driver order: probe -> workflow probe -> recommend -> preview -> init -> evidence -> lock -> materialize -> init execution -> steps -> route reminder -> review ingestion -> finish run.
+- Planning handoff order: validate plan/brief digests and existing contract before client construction -> probe -> workflow probe -> preview saved route -> init -> evidence -> lock -> init execution -> steps -> route reminder -> review ingestion -> finish run. It does not recommend or materialize again.
 
 - [ ] Write failing sequence tests proving recommendation is read-only/pre-mutation, materialization is exact-once and post-lock, and the same candidate reaches proof.
 - [ ] Write failing output tests for startup and pre-review route fields.
@@ -115,7 +116,7 @@
 - Modify: `docs/llm/agentflow-task-mode.md`
 
 **Interfaces:**
-- Documents authored signals, explicit brief/override flags, conservative external-plan behavior, preview/approval timing, materialization ownership, and Agentflow proof enforcement.
+- Documents authored signals, brief/handoff/override flags, conservative external-plan behavior, preview/approval timing, digest binding, materialization ownership, and Agentflow proof semantics.
 
 - [ ] Update only Agentflow task-mode documentation.
 - [ ] Search the diff for local-classifier language, Track B paths, placeholders, and direct `.agent/workflow.contract.json` writes.

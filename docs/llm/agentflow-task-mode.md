@@ -67,10 +67,16 @@ Approval initializes AgentFlow, locks `.agent/plan.lock.json`, and asks
 AgentFlow to materialize the exact validated candidate through
 `workflow-contract --from-json`. Golem never writes
 `.agent/workflow.contract.json` itself. It also saves the approved task brief in
-a mode-0600 `.agent/golem-task-brief-*.json` handoff file and includes that path,
-plus any explicit profile override and reason, in the separate `-plan` command.
-This prevents task execution from losing an authored security/blast/size signal
-that AgentFlow's closed plan schema does not carry. For scripted or CI use,
+a mode-0600 `.agent/golem-task-brief-*.json` file. A second mode-0600
+`.agent/golem-workflow-handoff-*.json` file contains the validated
+recommendation plus SHA-256 digests of the canonical approved plan and task
+brief. The separate `-plan` command includes both paths. At task startup, Golem
+revalidates the handoff, matches both digests, and verifies its candidate against
+AgentFlow's already-materialized contract. The task driver then reuses that
+approved route without recommending or materializing it a second time. This
+prevents a stale or edited plan/brief, or a changed AgentFlow version, from
+silently replacing or inheriting the human-approved route. For scripted or CI
+use,
 `-approve-plan-lock` prints the same preview and approves the lock without
 prompting. `-goal` never executes the plan or edits source files, and it refuses
 to replace a locked plan, a non-empty draft, or an unrecognized plan file.
@@ -113,10 +119,17 @@ Re-run the spike if the AgentFlow validator contract tightens.
 - `-task-brief <brief.json>` — optional and valid only with `-plan`. Supplies a
   closed AgentFlow task-brief `0.1.0` document for an externally supplied plan.
   The path is resolved against the caller's cwd. Its `declared_risk` must equal
-  the plan's `risk_level`. If `candidate_files` or `validation_needs` is absent,
-  Golem fills only that absent field from the plan's exact step files or gate
-  labels; an explicitly present value, including an empty array, is preserved
-  for AgentFlow to validate.
+  the plan's `risk_level`. Golem always unions the plan's exact step files and
+  gate labels into `candidate_files` and `validation_needs`, respectively.
+  Explicit values may add context but cannot remove exact plan facts, including
+  by supplying an empty array.
+- `-workflow-handoff <recommendation.json>` — optional, task-mode-only input
+  emitted by planning mode. It binds task execution to the recommendation that
+  was visible at approval. Golem verifies its canonical plan/brief digests and
+  compares its candidate with `.agent/workflow.contract.json` before
+  constructing the AgentFlow client. It fails closed on a missing, changed, or
+  mismatched file. Do not combine it with
+  `-workflow-profile` / `-workflow-reason`.
 - `-workflow-profile <profile> -workflow-reason <reason>` — optional, paired
   flags for either `-goal` or `-plan`. Both are required together and the reason
   must be non-empty. Golem forwards them to AgentFlow and previews the returned
@@ -138,9 +151,11 @@ come from its steps and gates. Security sensitivity, blast radius, and size stay
 absent. This deliberately floors an underspecified low-risk legacy plan at
 AgentFlow's medium-feature route; missing signals cannot select docs-only or
 small-bugfix. Use an explicit brief when a lighter or stricter task type is
-known. Golem still does no local classification.
+known. Exact plan files and gate labels remain authoritative and are unioned
+into that brief, so a claimed small scope cannot hide a larger locked-plan
+scope. Golem still does no local classification.
 
-The task driver order is:
+For an external plan, the task driver order is:
 
 1. Probe the base and workflow-routing CLI surfaces.
 2. Ask AgentFlow for the route and print it at task startup, before `init` or any
@@ -152,13 +167,22 @@ The task driver order is:
    route again immediately before review-manifest ingestion.
 5. Let `finish-run` build and verify proof under the materialized policy.
 
+For a planning-mode handoff, Golem first validates the saved recommendation,
+matches the loaded plan and task brief to their approved digests, and compares
+the candidate with AgentFlow's existing workflow contract before any AgentFlow
+call. The driver then probes the CLI, prints the saved route, and follows the
+same execution sequence while skipping both `recommend-workflow` and
+`workflow-contract`; the approved candidate is not materialized twice.
+
 The workflow contract may require gates or capabilities beyond what the loaded
 plan/run supplies. Golem does not invent a security scanner, review agent,
-capability receipt, waiver, or manifest. AgentFlow proof reports the unmet
-requirement. In particular, `spec_quality` and `deep` policies can require a
-recorded review run at adequate depth; without one, Golem fails closed and
-surfaces AgentFlow's failed `required_review_satisfied` proof check as the
-actionable error.
+capability receipt, waiver, manifest, or plan gate, and it does not claim that
+direct contract materialization hydrates those declarations into the plan.
+AgentFlow remains responsible for interpreting the contract under its own
+validation and proof semantics. In particular, `spec_quality` and `deep`
+policies can require a recorded review run at adequate depth; without one,
+Golem fails closed and surfaces AgentFlow's failed
+`required_review_satisfied` proof check as the actionable error.
 
 ## Locked step instructions
 

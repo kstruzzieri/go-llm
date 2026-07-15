@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"reflect"
 	"strings"
 )
 
@@ -114,6 +115,68 @@ type WorkflowRecommendation struct {
 // workflow_contract_candidate payload.
 func (r WorkflowRecommendation) CandidateJSON() []byte {
 	return append([]byte(nil), r.candidateJSON...)
+}
+
+// MarshalJSON persists the validated Agentflow report in its wire shape. Real
+// recommendations retain Agentflow's candidate bytes; the Contract fallback
+// keeps programmatically constructed test/client values serializable while the
+// validation below still rejects inconsistent reports.
+func (r WorkflowRecommendation) MarshalJSON() ([]byte, error) {
+	candidate := r.CandidateJSON()
+	if len(candidate) == 0 {
+		var err error
+		candidate, err = json.Marshal(r.Contract)
+		if err != nil {
+			return nil, fmt.Errorf("marshal workflow contract candidate: %w", err)
+		}
+	}
+	payload := struct {
+		SchemaVersion             string                `json:"schema_version"`
+		Recommended               WorkflowSelection     `json:"recommended"`
+		Selected                  WorkflowSelection     `json:"selected"`
+		Signals                   []string              `json:"signals"`
+		Rationale                 string                `json:"rationale"`
+		Alternatives              []WorkflowAlternative `json:"alternatives"`
+		Override                  *WorkflowOverride     `json:"override"`
+		WorkflowContractCandidate json.RawMessage       `json:"workflow_contract_candidate"`
+	}{
+		SchemaVersion: r.SchemaVersion, Recommended: r.Recommended, Selected: r.Selected,
+		Signals: append([]string(nil), r.Signals...), Rationale: r.Rationale,
+		Alternatives: append([]WorkflowAlternative(nil), r.Alternatives...), Override: r.Override,
+		WorkflowContractCandidate: candidate,
+	}
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Agentflow workflow recommendation: %w", err)
+	}
+	if _, err := parseWorkflowRecommendation(b); err != nil {
+		return nil, fmt.Errorf("marshal Agentflow workflow recommendation: %w", err)
+	}
+	return b, nil
+}
+
+// UnmarshalJSON re-applies the same fail-closed validation used for live
+// recommend-workflow output, so a durable handoff cannot bypass contract checks.
+func (r *WorkflowRecommendation) UnmarshalJSON(data []byte) error {
+	parsed, err := parseWorkflowRecommendation(data)
+	if err != nil {
+		return err
+	}
+	*r = parsed
+	return nil
+}
+
+// VerifyMaterializedWorkflowContract binds a persisted recommendation to the
+// Agentflow-owned contract already approved and written during planning.
+func (r WorkflowRecommendation) VerifyMaterializedWorkflowContract(data []byte) error {
+	materialized, err := parseWorkflowContract(data)
+	if err != nil {
+		return fmt.Errorf("parse materialized Agentflow workflow contract: %w", err)
+	}
+	if !reflect.DeepEqual(materialized, r.Contract) {
+		return fmt.Errorf("materialized Agentflow workflow contract does not match the approved workflow handoff")
+	}
+	return nil
 }
 
 type recommendationProjection struct {

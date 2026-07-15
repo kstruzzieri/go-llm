@@ -36,6 +36,8 @@ without a brief remains supported through a conservative exact-fact projection:
 gates. Blast radius, size, and security sensitivity stay absent. This floors an
 underspecified legacy plan at `medium-feature` instead of inventing a lightweight
 route. An explicit brief whose risk conflicts with the plan is rejected.
+Exact step files and gate labels are always unioned into an explicit brief, so
+caller hints may add context but cannot conceal the locked plan's scope.
 
 ## Recommendation adapter
 
@@ -67,13 +69,20 @@ alternatives, and override reason. Approval still gates all mutation.
 After approval, Golem initializes and locks the plan, then stages the retained
 candidate in a mode-0600 temporary file and invokes
 `workflow-contract --from-json`. The temporary file is removed. Golem never
-writes `.agent/workflow.contract.json` directly.
+writes `.agent/workflow.contract.json` directly. It saves the validated
+recommendation in a mode-0600 handoff envelope containing SHA-256 digests of
+the canonical approved plan and task brief.
 
-Task mode recommends and prints the route before `init`, plan locking, or any
-other `.agent` write. After plan lock it materializes the same candidate exactly
-once, then initializes execution. The selected route is printed again before
-review-manifest ingestion. `finish-run` remains the proof authority for required
-review depth, review-run adequacy, capabilities, and gates.
+For a planning handoff, task mode validates both digests and compares the saved
+candidate with Agentflow's existing workflow contract before constructing the
+client. It prints and reuses that approved route without recommending or
+materializing again. For an external plan, task mode recommends and prints the
+route before `init`, then materializes the returned candidate exactly once after
+plan lock. Both paths print the selected route again before review-manifest
+ingestion. Agentflow remains authoritative for its contract semantics; Golem
+does not claim that direct materialization hydrates declared capabilities or
+gates into the plan. `finish-run` enforces the effective review floor and
+required review run, including a fail-closed deep-review requirement.
 
 ## Compatibility and ownership
 
@@ -90,8 +99,9 @@ No `mcp/**` or RAG/chat wiring is touched.
 ## Verification
 
 Unit tests use fake `Runner` responses to pin argv, stdin, typed validation,
-read-only ordering, previews, override rules, exact-once materialization, legacy
-brief derivation, and #212 sequencing. Contract tests run the real current
+read-only ordering, previews, override rules, exact-once materialization,
+plan/brief/contract handoff binding, legacy brief derivation, and #212
+sequencing. Contract tests run the real current
 Agentflow checkout for all five representative routes, read-only recommendation,
 contract materialization, and proof failure when a deep route lacks an adequate
 review run. Focused, race, full, integration-tagged, and vet commands from the

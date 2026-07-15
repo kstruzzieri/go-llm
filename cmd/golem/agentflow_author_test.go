@@ -388,6 +388,9 @@ func TestSubmitPlanTool_SuccessLocksAndCancels(t *testing.T) {
 	if !strings.HasPrefix(as.taskBriefPath, filepath.Join(root, ".agent", "golem-task-brief-")) {
 		t.Fatalf("approved task brief path = %q", as.taskBriefPath)
 	}
+	if !strings.HasPrefix(as.workflowHandoffPath, filepath.Join(root, ".agent", "golem-workflow-handoff-")) {
+		t.Fatalf("approved workflow handoff path = %q", as.workflowHandoffPath)
+	}
 	b, err := os.ReadFile(as.taskBriefPath)
 	if err != nil {
 		t.Fatal(err)
@@ -404,6 +407,24 @@ func TestSubmitPlanTool_SuccessLocksAndCancels(t *testing.T) {
 	}
 	if info.Mode().Perm() != 0o600 {
 		t.Fatalf("approved task brief mode = %v", info.Mode().Perm())
+	}
+	handoff, err := os.ReadFile(as.workflowHandoffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var handoffEnvelope approvedWorkflowHandoff
+	if err := json.Unmarshal(handoff, &handoffEnvelope); err != nil ||
+		handoffEnvelope.SchemaVersion != approvedWorkflowHandoffSchemaVersion ||
+		handoffEnvelope.PlanSHA256 == "" || handoffEnvelope.TaskBriefSHA256 == "" ||
+		handoffEnvelope.Recommendation.Selected.Profile != "medium-feature" {
+		t.Fatalf("saved approved workflow handoff = %+v, err %v", handoffEnvelope, err)
+	}
+	info, err = os.Stat(as.workflowHandoffPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("approved workflow handoff mode = %v", info.Mode().Perm())
 	}
 	if len(client.paths) != 1 {
 		t.Fatalf("LockPlan calls = %d, want 1", len(client.paths))
@@ -741,9 +762,9 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	if !strings.Contains(out.String(), "-plan "+shellQuote(filepath.Join(root, ".agent", "plan.lock.json"))+" -root "+shellQuote(root)) {
 		t.Errorf("execute-separately command missing -root %s:\n%s", root, out.String())
 	}
-	if !strings.Contains(out.String(), " -task-brief ") ||
-		!strings.Contains(out.String(), "-workflow-profile 'high-risk' -workflow-reason 'operator requires deep review'") {
-		t.Errorf("execute-separately command did not preserve route inputs:\n%s", out.String())
+	if !strings.Contains(out.String(), " -task-brief ") || !strings.Contains(out.String(), " -workflow-handoff ") ||
+		strings.Contains(out.String(), "-workflow-profile") || strings.Contains(out.String(), "-workflow-reason") {
+		t.Errorf("execute-separately command did not bind the approved route handoff:\n%s", out.String())
 	}
 }
 

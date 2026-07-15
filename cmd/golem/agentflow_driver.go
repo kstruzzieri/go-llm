@@ -60,9 +60,13 @@ type driver struct {
 	workflowProfile string
 	workflowReason  string
 	recommendation  agentflow.WorkflowRecommendation
-	evidence        []agentflow.EvidenceEntry
-	runStep         runStepFunc
-	out             io.Writer
+	// approvedRecommendation is the exact route approved and materialized by
+	// planning mode. When present, task mode verifies it before constructing the
+	// client and must neither recommend nor materialize a replacement.
+	approvedRecommendation *agentflow.WorkflowRecommendation
+	evidence               []agentflow.EvidenceEntry
+	runStep                runStepFunc
+	out                    io.Writer
 }
 
 // run drives the P0 sequence and returns the proof-pack path on success.
@@ -73,9 +77,15 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.ProbeWorkflow(ctx); err != nil {
 		return "", fmt.Errorf("agentflow workflow routing unavailable: %w", err)
 	}
-	recommendation, err := d.af.RecommendWorkflow(ctx, d.taskBrief, d.workflowProfile, d.workflowReason)
-	if err != nil {
-		return "", fmt.Errorf("recommend Agentflow workflow: %w", err)
+	var recommendation agentflow.WorkflowRecommendation
+	if d.approvedRecommendation != nil {
+		recommendation = *d.approvedRecommendation
+	} else {
+		var err error
+		recommendation, err = d.af.RecommendWorkflow(ctx, d.taskBrief, d.workflowProfile, d.workflowReason)
+		if err != nil {
+			return "", fmt.Errorf("recommend Agentflow workflow: %w", err)
+		}
 	}
 	d.recommendation = recommendation
 	if d.out != nil {
@@ -98,8 +108,10 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.LockPlan(ctx, d.planPath); err != nil {
 		return "", err // *CommandError carries the structured validation errors
 	}
-	if err := d.af.MaterializeWorkflowContract(ctx, recommendation); err != nil {
-		return "", fmt.Errorf("materialize Agentflow workflow contract: %w", err)
+	if d.approvedRecommendation == nil {
+		if err := d.af.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+			return "", fmt.Errorf("materialize Agentflow workflow contract: %w", err)
+		}
 	}
 	if err := d.af.InitExecution(ctx); err != nil {
 		return "", err
@@ -364,6 +376,10 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if err != nil {
 		return err
 	}
+	approvedRecommendation, err := readApprovedWorkflowHandoff(f.workflowHandoffPath, root, plan, taskBrief)
+	if err != nil {
+		return err
+	}
 
 	// 3. Build the agentflow client (binary or python-src).
 	var runner agentflow.Runner
@@ -438,7 +454,8 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	d := &driver{
 		af: client, plan: &plan, planPath: planPath, reviewManifest: reviewManifest,
 		taskBrief: taskBrief, workflowProfile: f.workflowProfile, workflowReason: f.workflowReason,
-		evidence: evidence, runStep: runStep, out: stdout,
+		approvedRecommendation: approvedRecommendation,
+		evidence:               evidence, runStep: runStep, out: stdout,
 	}
 	proof, err := d.run(runCtx)
 	if err != nil {
@@ -450,10 +467,64 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	return nil
 }
 
+// readApprovedWorkflowHandoff verifies that the durable route report still
+// matches Agentflow's already-materialized contract before task mode makes any
+// Agentflow call. A changed handoff, contract, or planning/execution pairing
+// therefore fails closed instead of silently re-routing the approved plan.
+func readApprovedWorkflowHandoff(path, root string, plan agentflow.Plan, brief agentflow.TaskBrief) (*agentflow.WorkflowRecommendation, error) {
+	if path == "" {
+		return nil, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("resolve approved workflow handoff: %w", err)
+	}
+	b, err := os.ReadFile(abs)
+	if err != nil {
+		return nil, fmt.Errorf("read approved workflow handoff: %w", err)
+	}
+	var handoff approvedWorkflowHandoff
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&handoff); err != nil {
+		return nil, fmt.Errorf("parse approved workflow handoff: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("parse approved workflow handoff: trailing JSON")
+	}
+	if handoff.SchemaVersion != approvedWorkflowHandoffSchemaVersion {
+		return nil, fmt.Errorf("approved workflow handoff schema_version %q is incompatible; want %s", handoff.SchemaVersion, approvedWorkflowHandoffSchemaVersion)
+	}
+	planSHA256, err := canonicalJSONSHA256(plan)
+	if err != nil {
+		return nil, fmt.Errorf("digest task plan for approved workflow handoff: %w", err)
+	}
+	if handoff.PlanSHA256 != planSHA256 {
+		return nil, fmt.Errorf("task plan does not match approved workflow handoff")
+	}
+	taskBriefSHA256, err := canonicalJSONSHA256(brief)
+	if err != nil {
+		return nil, fmt.Errorf("digest task brief for approved workflow handoff: %w", err)
+	}
+	if handoff.TaskBriefSHA256 != taskBriefSHA256 {
+		return nil, fmt.Errorf("task brief does not match approved workflow handoff")
+	}
+	materialized, err := os.ReadFile(filepath.Join(root, ".agent", "workflow.contract.json"))
+	if err != nil {
+		return nil, fmt.Errorf("read Agentflow contract for approved workflow handoff: %w", err)
+	}
+	if err := handoff.Recommendation.VerifyMaterializedWorkflowContract(materialized); err != nil {
+		return nil, fmt.Errorf("verify approved workflow handoff: %w", err)
+	}
+	return &handoff.Recommendation, nil
+}
+
 // readExternalTaskBrief resolves and strictly decodes an optional caller brief.
-// Missing exact file/gate facts are filled from the plan; all other missing
-// signals remain unknown. Without a brief, task_type=feature is the conservative
-// compatibility floor—Golem does not infer a lighter task class from prose.
+// Exact file/gate facts from the locked plan are always unioned into an explicit
+// brief, so caller-supplied routing hints can add context but cannot conceal
+// scope. All other missing signals remain unknown. Without a brief,
+// task_type=feature is the conservative compatibility floor—Golem does not
+// infer a lighter task class from prose.
 func readExternalTaskBrief(path string, plan agentflow.Plan) (agentflow.TaskBrief, error) {
 	if path == "" {
 		brief := agentflow.TaskBriefFromPlan(plan, "feature")
@@ -483,13 +554,40 @@ func readExternalTaskBrief(path string, plan agentflow.Plan) (agentflow.TaskBrie
 		return agentflow.TaskBrief{}, err
 	}
 	facts := agentflow.TaskBriefFromPlan(plan, brief.TaskType)
-	if brief.CandidateFiles == nil {
-		brief.CandidateFiles = facts.CandidateFiles
-	}
-	if brief.ValidationNeeds == nil {
-		brief.ValidationNeeds = facts.ValidationNeeds
-	}
+	brief.CandidateFiles = unionTaskBriefFacts(facts.CandidateFiles, brief.CandidateFiles)
+	brief.ValidationNeeds = unionTaskBriefFacts(facts.ValidationNeeds, brief.ValidationNeeds)
 	return brief, nil
+}
+
+func unionTaskBriefFacts(exact, supplied *[]string) *[]string {
+	if exact == nil && supplied == nil {
+		return nil
+	}
+	length := 0
+	if exact != nil {
+		length += len(*exact)
+	}
+	if supplied != nil {
+		length += len(*supplied)
+	}
+	out := make([]string, 0, length)
+	seen := make(map[string]struct{}, length)
+	if exact != nil {
+		for _, value := range *exact {
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	if supplied != nil {
+		for _, value := range *supplied {
+			if _, ok := seen[value]; ok {
+				continue
+			}
+			seen[value] = struct{}{}
+			out = append(out, value)
+		}
+	}
+	return &out
 }
 
 func validateExternalTaskBrief(brief agentflow.TaskBrief, planRisk string) error {

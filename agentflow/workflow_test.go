@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"os"
@@ -101,6 +102,44 @@ func TestClient_RecommendWorkflow_ForwardsExplicitSelectionAndReason(t *testing.
 	want := []string{"recommend-workflow", "--stdin", "--json", "--selected-profile", "medium-feature", "--reason", "shared API"}
 	if !reflect.DeepEqual(runner.calls[0], want) {
 		t.Fatalf("argv = %v, want %v", runner.calls[0], want)
+	}
+}
+
+func TestWorkflowRecommendation_JSONHandoffRoundTripsAndVerifiesMaterializedContract(t *testing.T) {
+	recommendation, err := parseWorkflowRecommendation([]byte(validRecommendationJSON))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := json.MarshalIndent(recommendation, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(b, []byte(`"workflow_contract_candidate"`)) || !bytes.Contains(b, []byte(`"selected"`)) {
+		t.Fatalf("handoff JSON omitted Agentflow fields:\n%s", b)
+	}
+	var restored WorkflowRecommendation
+	if err := json.Unmarshal(b, &restored); err != nil {
+		t.Fatal(err)
+	}
+	materialized := recommendation.CandidateJSON()
+	var gotCandidate, wantCandidate any
+	if err := json.Unmarshal(restored.CandidateJSON(), &gotCandidate); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(recommendation.CandidateJSON(), &wantCandidate); err != nil {
+		t.Fatal(err)
+	}
+	restored.candidateJSON = nil
+	recommendation.candidateJSON = nil
+	if !reflect.DeepEqual(restored, recommendation) || !reflect.DeepEqual(gotCandidate, wantCandidate) {
+		t.Fatalf("round trip changed recommendation:\n got: %+v\nwant: %+v", restored, recommendation)
+	}
+	if err := restored.VerifyMaterializedWorkflowContract(materialized); err != nil {
+		t.Fatalf("matching materialized contract: %v", err)
+	}
+	tampered := bytes.Replace(materialized, []byte(`"review_depth":"light"`), []byte(`"review_depth":"deep"`), 1)
+	if err := restored.VerifyMaterializedWorkflowContract(tampered); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("tampered materialized contract error = %v", err)
 	}
 }
 

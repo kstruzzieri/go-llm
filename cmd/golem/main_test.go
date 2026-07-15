@@ -579,6 +579,7 @@ func TestParseFlags_ApprovePlanLock(t *testing.T) {
 func TestParseFlags_AgentflowWorkflowRouting(t *testing.T) {
 	valid := [][]string{
 		{"-plan", "plan.json", "-task-brief", "brief.json", "-approve-plan-edits", "-approve-plan-gates"},
+		{"-plan", "plan.json", "-task-brief", "brief.json", "-workflow-handoff", "route.json", "-approve-plan-edits", "-approve-plan-gates"},
 		{"-plan", "plan.json", "-workflow-profile", "high-risk", "-workflow-reason", "security review required", "-approve-plan-edits", "-approve-plan-gates"},
 		{"-goal", "ship it", "-workflow-profile", "high-risk", "-workflow-reason", "security review required"},
 	}
@@ -594,6 +595,9 @@ func TestParseFlags_AgentflowWorkflowRouting(t *testing.T) {
 
 	invalid := [][]string{
 		{"-task-brief", "brief.json"},
+		{"-workflow-handoff", "route.json"},
+		{"-goal", "ship it", "-workflow-handoff", "route.json"},
+		{"-plan", "plan.json", "-workflow-handoff", "route.json", "-workflow-profile", "high-risk", "-workflow-reason", "reason"},
 		{"-goal", "ship it", "-task-brief", "brief.json"},
 		{"-workflow-profile", "high-risk", "-workflow-reason", "security review required"},
 		{"-goal", "ship it", "-workflow-profile", "high-risk"},
@@ -617,7 +621,14 @@ func TestParseFlags_AgentflowWorkflowRouting(t *testing.T) {
 	if f.taskBriefPath != "brief.json" {
 		t.Fatalf("task brief path = %q", f.taskBriefPath)
 	}
-	f, err = parseFlags(valid[2])
+	f, err = parseFlags(valid[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.workflowHandoffPath != "route.json" {
+		t.Fatalf("workflow handoff path = %q", f.workflowHandoffPath)
+	}
+	f, err = parseFlags(valid[3])
 	if err != nil {
 		t.Fatal(err)
 	}
