@@ -10,7 +10,7 @@ require_cmd() {
 
 require_cmd git
 
-script_dir="$(cd "$(dirname "$0")" && pwd -P)"
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 repo_root="$(git -C "$script_dir/.." rev-parse --show-toplevel)"
 hook_path="$repo_root/.githooks/pre-push"
 

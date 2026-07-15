@@ -20,6 +20,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: CI script self-test
+        run: ./scripts/test-ci-local
+
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod

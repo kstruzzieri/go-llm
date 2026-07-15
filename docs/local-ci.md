@@ -22,7 +22,13 @@ Run the faster pre-push subset manually when you do not need the compile-smoke p
 docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode pre-push
 ```
 
-The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data.
+The Docker runner builds from `Dockerfile.ci`, mounts the repository at `/workspace`, and keeps named cache volumes for Go modules, Go build output, and golangci-lint data. The compose file pins the project name to `go-llm`, so linked worktrees share the same image and cache volumes as the main checkout.
+
+## Linked Worktrees
+
+`scripts/ci-local` resolves the module root from its own location and validates that the root contains `go.mod` (declaring this module) and `docker-compose.ci.yml`, instead of asking Git. Linked worktrees store `.git` as a file pointing at host-only metadata that is not visible inside the container, so Git-based root discovery would fail there. The Docker gate and the pre-push hook therefore work from both normal checkouts and `git worktree add` checkouts.
+
+`scripts/test-ci-local` is a hermetic regression harness for this root-discovery behavior. It stubs `go` and `golangci-lint`, needs no toolchain or Docker, and covers outside-CWD invocation, unusable worktree `.git` metadata, hostile `CDPATH`, the exact gate commands per mode, and invalid or wrong-module layouts. The `CI` workflow runs it on every pull request.
 
 ## Typical Workflow
 
