@@ -62,6 +62,7 @@ type flags struct {
 	approveGates     bool
 	agentflowSrc     string
 	evidencePath     string
+	reviewManifest   string
 	goal             string // AgentFlow planning mode goal (-goal)
 	goalSet          bool   // -goal was passed (distinguishes an explicit empty goal)
 	approvePlanLock  bool   // -approve-plan-lock: non-interactive planning-mode lock approval
@@ -110,6 +111,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
 	fs.StringVar(&f.evidencePath, "evidence", "", "optional evidence sidecar JSON object/array recorded before lock in task mode")
+	fs.StringVar(&f.reviewManifest, "review-manifest", "", "task mode: Agentflow review manifest to record and execute as finding-linked amendments; requires -plan")
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	if err := fs.Parse(args); err != nil {
@@ -167,6 +169,9 @@ func validateFlags(f flags) error {
 	}
 	if f.feedbackDB != "" && !f.feedback {
 		return fmt.Errorf("golem: -feedback-db requires -feedback")
+	}
+	if f.reviewManifest != "" && f.planPath == "" {
+		return fmt.Errorf("golem: -review-manifest is valid only with -plan (task mode)")
 	}
 	if f.planPath != "" && f.promptSet {
 		return fmt.Errorf("golem: -plan (task mode) is incompatible with -p (one-shot)")

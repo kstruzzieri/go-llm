@@ -3,6 +3,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,13 +16,27 @@ import (
 
 // fakeAF records the ordered sequence of driver->agentflow calls.
 type fakeAF struct {
-	seq       []string
-	nextSteps []string // ids to hand out, then "" (done)
-	i         int
+	seq        []string
+	nextSteps  []string // ids to hand out, then "" (done)
+	i          int
+	review     agentflow.ReviewRun
+	failAt     map[string]error
+	proofError error
+}
+
+func (f *fakeAF) failure(name string) error {
+	if f.failAt == nil {
+		return nil
+	}
+	return f.failAt[name]
 }
 
 func (f *fakeAF) Probe(context.Context) error { f.seq = append(f.seq, "probe"); return nil }
-func (f *fakeAF) Init(context.Context) error  { f.seq = append(f.seq, "init"); return nil }
+func (f *fakeAF) ProbeReview(context.Context) error {
+	f.seq = append(f.seq, "probe-review")
+	return f.failure("probe-review")
+}
+func (f *fakeAF) Init(context.Context) error { f.seq = append(f.seq, "init"); return nil }
 func (f *fakeAF) LockPlan(_ context.Context, p string) error {
 	f.seq = append(f.seq, "lock:"+p)
 	return nil
@@ -40,16 +56,27 @@ func (f *fakeAF) ClaimStep(_ context.Context, id string) (string, error) {
 	f.seq = append(f.seq, "claim:"+id)
 	return "A-" + id, nil
 }
+func (f *fakeAF) RecordReview(_ context.Context, path string) (agentflow.ReviewRun, error) {
+	f.seq = append(f.seq, "record-review:"+path)
+	return f.review, f.failure("record-review")
+}
+func (f *fakeAF) AmendStep(_ context.Context, id string, refs []string) (string, error) {
+	f.seq = append(f.seq, "amend:"+id+":"+strings.Join(refs, ","))
+	return "AM-" + id, f.failure("amend-step")
+}
 func (f *fakeAF) RunGate(_ context.Context, step, attempt, gate string, argv []string) error {
 	f.seq = append(f.seq, "gate:"+step+":"+gate)
-	return nil
+	return f.failure("gate")
 }
 func (f *fakeAF) FinishStep(_ context.Context, id, attempt string) error {
 	f.seq = append(f.seq, "finish-step:"+id+":"+attempt)
-	return nil
+	return f.failure("finish-step")
 }
 func (f *fakeAF) FinishRun(context.Context) (string, error) {
 	f.seq = append(f.seq, "finish-run")
+	if f.proofError != nil {
+		return "", f.proofError
+	}
 	return "proof-pack.md", nil
 }
 func (f *fakeAF) RecordFileChange(context.Context, string, string, string) error { return nil }
@@ -70,7 +97,9 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 	plan.AllowedFiles = []string{"src/*"}
 
 	// runStep is scripted to "succeed" without a real model.
-	runStep := func(ctx context.Context, step agentflow.Step, attempt string) error { return nil }
+	runStep := func(ctx context.Context, step agentflow.Step, attempt, goal string) error {
+		return nil
+	}
 
 	d := &driver{
 		af: af, plan: plan, planPath: "plan.json", runStep: runStep,
@@ -87,6 +116,232 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 	}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
+	}
+}
+
+func reviewRun(ready bool, findings ...agentflow.ReviewFinding) agentflow.ReviewRun {
+	return agentflow.ReviewRun{
+		ReviewRunID: "RR-20260714T120000Z-1234abcd", AmendmentReady: ready,
+		GateStatus: "fail", ActiveBlocking: []string{"RF-1"},
+		Findings: agentflow.ReviewFindings{Index: findings},
+	}
+}
+
+func reviewPlan() *agentflow.Plan {
+	return &agentflow.Plan{
+		Objective: "repair the reviewed implementation", AllowedFiles: []string{"src/*"},
+		Steps: []agentflow.Step{
+			{ID: "P1", Action: "repair one", Files: []string{"src/a.go"}, Validation: []string{"test one"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./src/a"}}}},
+			{ID: "P2", Action: "repair two", Files: []string{"src/b.go"}, Validation: []string{"test two"}, Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./src/b"}}}},
+		},
+	}
+}
+
+func activeFinding(id, owner string) agentflow.ReviewFinding {
+	return agentflow.ReviewFinding{
+		FindingID: id, Severity: "high", Status: "accepted", OwningStep: owner,
+		Claim: "the implementation omits " + id, SuggestedFix: "repair " + id,
+	}
+}
+
+func TestDriver_AmendmentReadyFindingUsesExistingAttemptLifecycle(t *testing.T) {
+	finding := activeFinding("RF-1", "P1")
+	finding.Location = &agentflow.ReviewLocation{Path: "src/a.go", Line: 7, LineEnd: 9}
+	af := &fakeAF{review: reviewRun(true, finding)}
+	var gotAttempt string
+	var gotGoal string
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+		runStep: func(_ context.Context, _ agentflow.Step, attempt, goal string) error {
+			gotAttempt, gotGoal = attempt, goal
+			return nil
+		},
+	}
+	proof, err := d.run(context.Background())
+	if err != nil || proof != "proof-pack.md" {
+		t.Fatalf("proof=%q err=%v", proof, err)
+	}
+	ref := "RR-20260714T120000Z-1234abcd#RF-1"
+	want := []string{
+		"probe", "probe-review", "init", "lock:plan.json", "init-exec", "doctor", "next-step",
+		"record-review:review.json", "amend:P1:" + ref, "gate:P1:test one", "finish-step:P1:AM-P1", "finish-run",
+	}
+	if !equalSeq(af.seq, want) {
+		t.Fatalf("seq=%v want=%v", af.seq, want)
+	}
+	if gotAttempt != "AM-P1" || !strings.Contains(gotGoal, ref) || !strings.Contains(gotGoal, "src/a.go:7-9") {
+		t.Fatalf("attempt=%q goal=%q", gotAttempt, gotGoal)
+	}
+}
+
+func TestAmendmentGoal_ContainsOnlyLockedSliceAndAuthoritativeRepairContext(t *testing.T) {
+	plan := reviewPlan()
+	finding := activeFinding("RF-1", "P1")
+	finding.Location = &agentflow.ReviewLocation{Path: "src/a.go", Line: 7, LineEnd: 9}
+	goal, err := amendmentGoal(plan, plan.Steps[0], "RR-20260714T120000Z-1234abcd", []agentflow.ReviewFinding{finding})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		"repair one", "src/a.go", "RR-20260714T120000Z-1234abcd#RF-1",
+		"the implementation omits RF-1", "src/a.go:7-9", "repair RF-1",
+	} {
+		if !strings.Contains(goal, want) {
+			t.Fatalf("goal missing %q:\n%s", want, goal)
+		}
+	}
+	for _, unwanted := range []string{"repair two", "src/b.go", "Severity:", "Status:"} {
+		if strings.Contains(goal, unwanted) {
+			t.Fatalf("goal leaked %q:\n%s", unwanted, goal)
+		}
+	}
+}
+
+func TestDriver_LegacyAndInactiveFindingsRemainVisibleWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name string
+		run  agentflow.ReviewRun
+	}{
+		{"legacy active", reviewRun(false, activeFinding("RF-1", ""))},
+		{"inactive", reviewRun(true, agentflow.ReviewFinding{FindingID: "RF-2", Severity: "low", Status: "fixed"})},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			af := &fakeAF{review: tt.run}
+			var out bytes.Buffer
+			edits := 0
+			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: &out,
+				runStep: func(context.Context, agentflow.Step, string, string) error { edits++; return nil }}
+			if _, err := d.run(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			if edits != 0 || strings.Contains(strings.Join(af.seq, "\n"), "amend:") {
+				t.Fatalf("display-only finding mutated: edits=%d seq=%v", edits, af.seq)
+			}
+			finding := tt.run.Findings.Index[0]
+			want := tt.run.ReviewRunID + "#" + finding.FindingID + " status=" + finding.Status + " amendment=display-only"
+			if !strings.Contains(out.String(), want) {
+				t.Fatalf("output %q missing %q", out.String(), want)
+			}
+		})
+	}
+}
+
+func TestDriver_RejectsMalformedAmendmentProjectionBeforeEdit(t *testing.T) {
+	tests := []struct {
+		name    string
+		finding agentflow.ReviewFinding
+		second  *agentflow.ReviewFinding
+	}{
+		{"unknown owner", activeFinding("RF-1", "PX"), nil},
+		{"missing claim", func() agentflow.ReviewFinding { f := activeFinding("RF-1", "P1"); f.Claim = ""; return f }(), nil},
+		{"bad location", func() agentflow.ReviewFinding {
+			f := activeFinding("RF-1", "P1")
+			f.Location = &agentflow.ReviewLocation{Line: 2}
+			return f
+		}(), nil},
+		{"duplicate id", activeFinding("RF-1", "P1"), func() *agentflow.ReviewFinding { f := activeFinding("RF-1", "P2"); return &f }()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			findings := []agentflow.ReviewFinding{tt.finding}
+			if tt.second != nil {
+				findings = append(findings, *tt.second)
+			}
+			af := &fakeAF{review: reviewRun(true, findings...)}
+			edits := 0
+			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+				runStep: func(context.Context, agentflow.Step, string, string) error { edits++; return nil }}
+			if _, err := d.run(context.Background()); err == nil {
+				t.Fatal("expected malformed projection error")
+			}
+			if edits != 0 || strings.Contains(strings.Join(af.seq, "\n"), "amend:") || strings.Contains(strings.Join(af.seq, "\n"), "finish-run") {
+				t.Fatalf("malformed projection advanced execution: edits=%d seq=%v", edits, af.seq)
+			}
+		})
+	}
+}
+
+func TestDriver_GroupsMultipleFindingsByLockedPlanOrder(t *testing.T) {
+	af := &fakeAF{review: reviewRun(true,
+		activeFinding("RF-2", "P2"), activeFinding("RF-1", "P1"), activeFinding("RF-3", "P2"),
+	)}
+	var calls []string
+	var goals []string
+	d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+		runStep: func(_ context.Context, step agentflow.Step, _ string, goal string) error {
+			var ids []string
+			for _, id := range []string{"RF-1", "RF-2", "RF-3"} {
+				if strings.Contains(goal, "#"+id) {
+					ids = append(ids, id)
+				}
+			}
+			calls = append(calls, step.ID+":"+strings.Join(ids, ","))
+			goals = append(goals, goal)
+			return nil
+		}}
+	if _, err := d.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"P1:RF-1", "P2:RF-2,RF-3"}; !equalSeq(calls, want) {
+		t.Fatalf("calls=%v want=%v", calls, want)
+	}
+	if len(goals) != 2 || strings.Index(goals[1], "#RF-2") > strings.Index(goals[1], "#RF-3") {
+		t.Fatalf("P2 finding order changed:\n%s", goals[1])
+	}
+}
+
+func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
+	tests := []struct {
+		name   string
+		failAt string
+		runErr error
+	}{
+		{"record review command", "record-review", nil},
+		{"amend command", "amend-step", nil},
+		{"model", "", errors.New("model failed")},
+		{"receipt", "", errors.New("unreceipted edit aborted the run")},
+		{"gate", "gate", nil},
+		{"finish step", "finish-step", nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			af := &fakeAF{review: reviewRun(true, activeFinding("RF-1", "P1"))}
+			if tt.failAt != "" {
+				af.failAt = map[string]error{tt.failAt: errors.New(tt.failAt + " failed")}
+			}
+			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+				runStep: func(context.Context, agentflow.Step, string, string) error { return tt.runErr }}
+			if _, err := d.run(context.Background()); err == nil {
+				t.Fatal("expected failure")
+			}
+			seq := strings.Join(af.seq, "\n")
+			if strings.Contains(seq, "finish-run") {
+				t.Fatalf("failed amendment reached finish-run: %v", af.seq)
+			}
+			if tt.failAt != "record-review" && !strings.Contains(seq, "record-review:") {
+				t.Fatalf("review evidence was not recorded first: %v", af.seq)
+			}
+			if (tt.runErr != nil || tt.failAt == "gate" || tt.failAt == "finish-step") && !strings.Contains(seq, "amend:P1:") {
+				t.Fatalf("failure did not leave an opened amendment: %v", af.seq)
+			}
+		})
+	}
+}
+
+func TestDriver_BlockingReviewRequiresAuthoritativeRereview(t *testing.T) {
+	af := &fakeAF{
+		review:     reviewRun(true, activeFinding("RF-1", "P1")),
+		proofError: &agentflow.FinishRunError{StoppedAt: "verify-proof", Diagnostics: []string{"review gate still blocked"}},
+	}
+	d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
+	proof, err := d.run(context.Background())
+	if err == nil || proof != "" || !strings.Contains(err.Error(), "review gate still blocked") {
+		t.Fatalf("proof=%q err=%v", proof, err)
+	}
+	if !strings.Contains(strings.Join(af.seq, "\n"), "finish-step:P1:AM-P1") {
+		t.Fatalf("amendment did not complete before authoritative re-review block: %v", af.seq)
 	}
 }
 
@@ -421,6 +676,146 @@ func TestResolveTaskPlanPath(t *testing.T) {
 	}
 	if got != abs {
 		t.Fatalf("absolute path = %q, want unchanged %q", got, abs)
+	}
+}
+
+func TestResolveReviewManifest(t *testing.T) {
+	if got, err := resolveReviewManifest(""); err != nil || got != "" {
+		t.Fatalf(`empty manifest: got %q err %v (want "", nil)`, got, err)
+	}
+
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "review.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+
+	// A relative manifest resolves against the caller's cwd, not agentflow's -root.
+	got, err := resolveReviewManifest("review.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := filepath.Join(cwd, "review.json"); got != want {
+		t.Fatalf("relative manifest = %q, want %q", got, want)
+	}
+
+	// A missing manifest fails fast, before any agentflow call.
+	if _, err := resolveReviewManifest(filepath.Join(cwd, "missing.json")); err == nil ||
+		!strings.Contains(err.Error(), "review manifest") {
+		t.Fatalf("missing manifest err = %v, want review manifest preflight failure", err)
+	}
+}
+
+func TestReviewAmendments_ValidatesActiveButToleratesDisplayOnly(t *testing.T) {
+	plan := reviewPlan()
+
+	reject := []struct {
+		name string
+		run  agentflow.ReviewRun
+		want string
+	}{
+		{"bad review_run_id", func() agentflow.ReviewRun {
+			r := reviewRun(true, activeFinding("RF-1", "P1"))
+			r.ReviewRunID = "not-a-run-id"
+			return r
+		}(), "review_run_id"},
+		{"empty finding_id", reviewRun(true, agentflow.ReviewFinding{
+			FindingID: "  ", Severity: "high", Status: "accepted",
+			OwningStep: "P1", Claim: "c", SuggestedFix: "f",
+		}), "finding_id"},
+		{"invalid severity on active", reviewRun(true, func() agentflow.ReviewFinding {
+			f := activeFinding("RF-1", "P1")
+			f.Severity = "info"
+			return f
+		}()), "invalid severity"},
+	}
+	for _, tt := range reject {
+		t.Run("reject/"+tt.name, func(t *testing.T) {
+			if _, err := reviewAmendments(plan, tt.run); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want %q", err, tt.want)
+			}
+		})
+	}
+
+	// Display-only findings are never turned into work, so unrecognized
+	// severity/status vocabulary and a location they never consume must not
+	// abort a completed run.
+	tolerate := []struct {
+		name    string
+		finding agentflow.ReviewFinding
+	}{
+		{"unknown severity and status", agentflow.ReviewFinding{FindingID: "RF-9", Severity: "info", Status: "acknowledged"}},
+		{"inactive with pathless location", agentflow.ReviewFinding{
+			FindingID: "RF-8", Severity: "low", Status: "fixed", Location: &agentflow.ReviewLocation{Line: 5},
+		}},
+	}
+	for _, tt := range tolerate {
+		t.Run("tolerate/"+tt.name, func(t *testing.T) {
+			amendments, err := reviewAmendments(plan, reviewRun(true, tt.finding))
+			if err != nil {
+				t.Fatalf("display-only finding rejected: %v", err)
+			}
+			if len(amendments) != 0 {
+				t.Fatalf("display-only finding produced amendments: %v", amendments)
+			}
+		})
+	}
+}
+
+func TestDriver_MixedFindingsReportQueuedAndDisplayOnly(t *testing.T) {
+	active := activeFinding("RF-1", "P1")
+	inactive := agentflow.ReviewFinding{FindingID: "RF-2", Severity: "low", Status: "superseded"}
+	af := &fakeAF{review: reviewRun(true, active, inactive)}
+	var out bytes.Buffer
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: &out,
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	if _, err := d.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s := out.String()
+	for _, want := range []string{
+		"#RF-1 status=accepted amendment=queued",
+		"#RF-2 status=superseded amendment=display-only",
+		"gate=fail amendment_ready=true active_blocking=RF-1",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("output missing %q:\n%s", want, s)
+		}
+	}
+}
+
+func TestFormatReviewLocation_Variants(t *testing.T) {
+	cases := []struct {
+		loc  agentflow.ReviewLocation
+		want string
+	}{
+		{agentflow.ReviewLocation{Path: "src/a.go"}, "src/a.go"},
+		{agentflow.ReviewLocation{Path: "src/a.go", Line: 7}, "src/a.go:7"},
+		{agentflow.ReviewLocation{Path: "src/a.go", Line: 7, LineEnd: 9}, "src/a.go:7-9"},
+	}
+	for _, tt := range cases {
+		if got := formatReviewLocation(tt.loc); got != tt.want {
+			t.Fatalf("formatReviewLocation(%+v) = %q, want %q", tt.loc, got, tt.want)
+		}
+	}
+}
+
+func TestDriver_ReviewProbeFailureAbortsBeforeInit(t *testing.T) {
+	af := &fakeAF{
+		review: reviewRun(true, activeFinding("RF-1", "P1")),
+		failAt: map[string]error{"probe-review": errors.New("amend-step unavailable")},
+	}
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	if _, err := d.run(context.Background()); err == nil || !strings.Contains(err.Error(), "review unavailable") {
+		t.Fatalf("err = %v, want review unavailable", err)
+	}
+	if want := []string{"probe", "probe-review"}; !equalSeq(af.seq, want) {
+		t.Fatalf("review-probe failure must abort before Init: seq = %v", af.seq)
 	}
 }
 

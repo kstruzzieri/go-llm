@@ -16,8 +16,8 @@ import (
 )
 
 // TestAgentflowSmoke drives the full spine over the fixture with the real CLI to
-// a verify-proof pass. Uses AGENTFLOW_SRC when the binary is absent; skips
-// otherwise. Asserts driver.run returns a non-empty proof path and no error, the
+// a verify-proof pass. Honors AGENTFLOW_SRC when set, otherwise uses an installed
+// binary or skips. Asserts driver.run returns a non-empty proof path and no error, the
 // fixture gate passes, and the proof pack exists on disk.
 func TestAgentflowSmoke(t *testing.T) {
 	dir := t.TempDir()
@@ -36,7 +36,7 @@ func TestAgentflowSmoke(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runStep := func(ctx context.Context, step agentflow.Step, attempt string) error {
+	runStep := func(ctx context.Context, step agentflow.Step, attempt, _ string) error {
 		if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("expected\n"), 0o600); err != nil {
 			return err
 		}
@@ -71,16 +71,16 @@ func TestAgentflowSmoke(t *testing.T) {
 	}
 }
 
-// agentflowRunnerOrSkip returns a Runner for the installed binary, or the
-// python-src fallback checkout from AGENTFLOW_SRC, or skips. Mirrors
+// agentflowRunnerOrSkip honors the explicit AGENTFLOW_SRC checkout, otherwise
+// uses an installed binary or skips. Mirrors
 // agentflow.agentflowRunnerForTest, which is unexported in another package.
 func agentflowRunnerOrSkip(t *testing.T, dir string) agentflow.Runner {
 	t.Helper()
-	if _, err := exec.LookPath("agentflow"); err == nil {
-		return agentflow.NewExecRunner(dir)
-	}
 	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
 		return agentflow.NewSrcExecRunner(dir, src)
+	}
+	if _, err := exec.LookPath("agentflow"); err == nil {
+		return agentflow.NewExecRunner(dir)
 	}
 	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
 	return nil

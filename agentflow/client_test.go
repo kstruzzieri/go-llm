@@ -213,3 +213,126 @@ func TestClient_RecordEvidence_Argv(t *testing.T) {
 		t.Fatalf("argv = %v, want %v", f.calls[0], want)
 	}
 }
+
+func TestClient_RecordReview_ParsesProjectionAndUsesJSON(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{
+		"record-review": {stdout: []byte(`{
+			"review_run_id":"RR-20260714T120000Z-1234abcd",
+			"gate_status":"fail",
+			"active_blocking":["RF-1"],
+			"amendment_ready":true,
+			"findings":{"index":[{
+				"finding_id":"RF-1","severity":"high","status":"accepted",
+				"owning_step":"P1","claim":"proof omits a receipt",
+				"location":{"path":"src/a.go","line":7,"line_end":9},
+				"suggested_fix":"record the receipt"
+			}]}
+		}`), exit: 0},
+	})
+
+	run, err := c.RecordReview(context.Background(), "docs/review-manifest.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.ReviewRunID != "RR-20260714T120000Z-1234abcd" || !run.AmendmentReady || len(run.Findings.Index) != 1 {
+		t.Fatalf("run = %+v", run)
+	}
+	finding := run.Findings.Index[0]
+	if finding.OwningStep != "P1" || finding.Location == nil || finding.Location.LineEnd != 9 {
+		t.Fatalf("finding = %+v", finding)
+	}
+	want := []string{"record-review", "--root", "/ws", "--manifest", "docs/review-manifest.json", "--json"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+}
+
+func TestClient_RecordReview_RejectsMalformedRequiredProjectionFields(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want string
+	}{
+		{"review run id", `{"gate_status":"pass","active_blocking":[],"amendment_ready":false,"findings":{"index":[]}}`, "review_run_id"},
+		{"amendment readiness", `{"review_run_id":"RR-20260714T120000Z-1234abcd","gate_status":"pass","active_blocking":[],"findings":{"index":[]}}`, "amendment_ready"},
+		{"gate status", `{"review_run_id":"RR-20260714T120000Z-1234abcd","active_blocking":[],"amendment_ready":false,"findings":{"index":[]}}`, "gate_status"},
+		{"invalid gate status", `{"review_run_id":"RR-20260714T120000Z-1234abcd","gate_status":"unknown","active_blocking":[],"amendment_ready":false,"findings":{"index":[]}}`, "gate_status"},
+		{"active blockers", `{"review_run_id":"RR-20260714T120000Z-1234abcd","gate_status":"pass","amendment_ready":false,"findings":{"index":[]}}`, "active_blocking"},
+		{"findings", `{"review_run_id":"RR-20260714T120000Z-1234abcd","gate_status":"pass","active_blocking":[],"amendment_ready":false}`, "findings"},
+		{"ready finding index", `{"review_run_id":"RR-20260714T120000Z-1234abcd","gate_status":"pass","active_blocking":[],"amendment_ready":true,"findings":{}}`, "findings.index"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := newTestClient(map[string]fakeReply{
+				"record-review": {stdout: []byte(tt.json), exit: 0},
+			})
+			if _, err := c.RecordReview(context.Background(), "review.json"); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("err = %v, want missing %s", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestClient_RecordReview_AllowsLegacyProjectionWithoutFindingIndex(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"record-review": {stdout: []byte(`{
+			"review_run_id":"RR-20260714T120000Z-1234abcd",
+			"gate_status":"pass",
+			"active_blocking":[],
+			"amendment_ready":false,
+			"findings":{}
+		}`), exit: 0},
+	})
+	run, err := c.RecordReview(context.Background(), "legacy-review.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.AmendmentReady || len(run.Findings.Index) != 0 {
+		t.Fatalf("run = %+v, want empty display-only legacy projection", run)
+	}
+}
+
+func TestClient_AmendStep_PreservesEveryFindingReference(t *testing.T) {
+	c, f := newTestClient(map[string]fakeReply{
+		"amend-step": {stdout: []byte(`{"event":"amendment_started","step_id":"P1","attempt_id":"A2"}`), exit: 0},
+	})
+	refs := []string{"RR-20260714T120000Z-1234abcd#RF-1", "RR-20260714T120000Z-1234abcd#RF-2"}
+
+	attempt, err := c.AmendStep(context.Background(), "P1", refs)
+	if err != nil || attempt != "A2" {
+		t.Fatalf("attempt=%q err=%v", attempt, err)
+	}
+	want := []string{
+		"amend-step", "P1", "--root", "/ws", "--agent", "golem",
+		"--reason", "address review findings " + strings.Join(refs, ", "),
+		"--reason-code", "review_feedback",
+		"--finding", refs[0], "--finding", refs[1], "--json",
+	}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+}
+
+func TestClient_AmendStep_RejectsMalformedSuccessProjection(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+	}{
+		{"empty object", `{}`},
+		{"wrong event", `{"event":"claimed","step_id":"P1","attempt_id":"A2"}`},
+		{"wrong step", `{"event":"amendment_started","step_id":"P2","attempt_id":"A2"}`},
+		{"empty attempt", `{"event":"amendment_started","step_id":"P1","attempt_id":""}`},
+		{"malformed attempt", `{"event":"amendment_started","step_id":"P1","attempt_id":"not-an-attempt"}`},
+		{"padded attempt", `{"event":"amendment_started","step_id":"P1","attempt_id":" A2 "}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := newTestClient(map[string]fakeReply{
+				"amend-step": {stdout: []byte(tt.json), exit: 0},
+			})
+			if attempt, err := c.AmendStep(context.Background(), "P1", []string{"RR-20260714T120000Z-1234abcd#RF-1"}); err == nil {
+				t.Fatalf("attempt = %q, want malformed success error", attempt)
+			}
+		})
+	}
+}
