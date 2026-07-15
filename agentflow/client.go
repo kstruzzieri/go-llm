@@ -26,7 +26,11 @@ func NewClient(r Runner, root string) *Client { return &Client{r: r, root: root}
 // call runs a subcommand and returns stdout, mapping exit!=0 (or a --json
 // invalid envelope) to *CommandError. Pass wantJSON=true for --json commands.
 func (c *Client) call(ctx context.Context, name string, args []string, wantJSON bool) ([]byte, error) {
-	out, errb, exit, err := c.r.Run(ctx, args, nil)
+	return c.callInput(ctx, name, args, wantJSON, nil)
+}
+
+func (c *Client) callInput(ctx context.Context, name string, args []string, wantJSON bool, stdin []byte) ([]byte, error) {
+	out, errb, exit, err := c.r.Run(ctx, args, stdin)
 	if err != nil {
 		return nil, err
 	}

@@ -41,6 +41,11 @@ var requiredReviewFeatures = []featureProbe{
 	{"amend-step", []string{"--root", "--agent", "--reason", "--reason-code", "--finding", "--json"}},
 }
 
+var requiredWorkflowFeatures = []featureProbe{
+	{"recommend-workflow", []string{"--stdin", "--json", "--selected-profile", "--reason"}},
+	{"workflow-contract", []string{"--root", "--from-json"}},
+}
+
 // Probe fail-closes unless the CLI is present, new enough, and exposes every
 // required subcommand and per-subcommand flag. Version alone is not trusted.
 func (c *Client) Probe(ctx context.Context) error {
@@ -103,6 +108,32 @@ func (c *Client) ProbeReview(ctx context.Context) error {
 		for _, needle := range feature.needles {
 			if !strings.Contains(usage, needle) {
 				return fmt.Errorf("agentflow %s %s unavailable", feature.subcommand, needle)
+			}
+		}
+	}
+	return nil
+}
+
+// ProbeWorkflow checks Agentflow's stable recommendation and contract-writing
+// commands before Golem does model work or mutates proof state.
+func (c *Client) ProbeWorkflow(ctx context.Context) error {
+	hout, _, exit, err := c.r.Run(ctx, []string{"--help"}, nil)
+	if err != nil || exit != 0 {
+		return fmt.Errorf("agentflow unavailable (--help failed): %w", errOrExit(err, exit))
+	}
+	help := string(hout)
+	for _, feature := range requiredWorkflowFeatures {
+		if !strings.Contains(help, feature.subcommand) {
+			return fmt.Errorf("agentflow is missing required workflow subcommand: %s (upgrade Agentflow)", feature.subcommand)
+		}
+		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
+		if err != nil || exit != 0 {
+			return fmt.Errorf("agentflow %s --help failed: %w", feature.subcommand, errOrExit(err, exit))
+		}
+		usage := string(sout)
+		for _, needle := range feature.needles {
+			if !strings.Contains(usage, needle) {
+				return fmt.Errorf("agentflow %s %s unavailable (upgrade Agentflow)", feature.subcommand, needle)
 			}
 		}
 	}
