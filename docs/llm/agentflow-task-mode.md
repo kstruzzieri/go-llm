@@ -13,6 +13,7 @@ AgentFlow never runs a model, and Golem never writes proof state directly.
 | AgentFlow owns | Golem owns |
 |---|---|
 | Plan lock and validation (`lock-plan`) | Reading the plan document |
+| Workflow recommendation and contract policy (`recommend-workflow`, `workflow-contract`) | Projecting explicit task facts and showing the selected route |
 | Per-step claim and attempt tracking (`claim-step`) | Driving the state machine (the `driver`) |
 | File-change receipts (`record-file-change`) | Running the model per step |
 | Review evidence and finding-linked amendments (`record-review`, `amend-step`) | Selecting AgentFlow's amendment-ready projection and driving each attempt |
@@ -24,8 +25,13 @@ AgentFlow never runs a model, and Golem never writes proof state directly.
 
 Run `golem -goal "<text>" -root <workspace>` to have the local model inspect the
 workspace with read-only file tools and submit one typed aggregate containing
-the objective, non-goals, invariants, requirements, acceptance criteria, steps,
-and criterion mappings. Golem compiles that aggregate directly into AgentFlow's
+the task type, objective, non-goals, invariants, requirements, acceptance
+criteria, steps, and criterion mappings. The required `task_type` is one of
+`docs`, `bugfix`, `feature`, or `refactor`. The planner may also provide
+`security_sensitive`, `blast_radius`, and `declared_size`, but is told to omit
+them when repository evidence or the user's request does not make them explicit.
+An omitted signal stays unknown; Golem never converts absence into a safe value.
+Golem compiles the aggregate directly into AgentFlow's
 optional `requirements[].acceptance_criteria`, `steps[].criterion_ids`, and
 `gates[].criterion_ids` fields; there is no second spec file or proof ledger.
 
@@ -34,16 +40,37 @@ malformed stable IDs, dangling mappings, criteria without an implementing step,
 proving gates mapped outside their parent step, criteria without a proving gate
 or review floor, and the existing dependency, path, scope, and argv errors.
 Criterion IDs share one plan-wide namespace: reusing an id across requirements
-is a duplicate. Golem then renders a deterministic, control-safe preview with
+is a duplicate.
+
+For a locally valid submission, Golem sends AgentFlow task-brief schema `0.1.0`
+to the read-only `recommend-workflow --stdin --json` command. Existing plan facts
+are reused exactly: `risk_level` becomes `declared_risk`, the first-seen union of
+step file scopes becomes `candidate_files`, and structured validation labels
+become `validation_needs`. Golem does not scan the repository, keyword-match
+prose, infer task type, or implement a second risk classifier. It fails before
+model work when the installed AgentFlow lacks the stable recommendation or
+contract commands and flags.
+
+Golem then renders a deterministic, control-safe preview with
 scope, risk, file boundaries, rollback, the compiled schema version and drift
-budget, the requirement-to-step-to-gate mapping, and exact validation argv, and
-asks `Lock this plan? [y/N]`. When a rejected lock leads to a repaired
+budget, the requirement-to-step-to-gate mapping, exact validation argv, and the
+AgentFlow recommendation. The route section shows recommended and selected
+pack/profile, signals and rationale, alternatives, selection/override reason,
+review depth, whether a review run is required, required capabilities, required
+gates, and hunk-attribution policy. Golem asks `Lock this plan? [y/N]` only after
+that route is visible. When a rejected lock leads to a repaired
 resubmission, the second preview appends a line-level delta against the previous
 one. A denial, EOF, or interruption before any approved submission leaves
 AgentFlow proof state unchanged; a denial also saves the compiled plan to a temp
 file named in the error so the authoring work can be inspected or adapted.
-Approval initializes AgentFlow and attempts to lock `.agent/plan.lock.json`;
-Golem then prints the separate `-plan` command. For scripted or CI use,
+Approval initializes AgentFlow, locks `.agent/plan.lock.json`, and asks
+AgentFlow to materialize the exact validated candidate through
+`workflow-contract --from-json`. Golem never writes
+`.agent/workflow.contract.json` itself. It also saves the approved task brief in
+a mode-0600 `.agent/golem-task-brief-*.json` handoff file and includes that path,
+plus any explicit profile override and reason, in the separate `-plan` command.
+This prevents task execution from losing an authored security/blast/size signal
+that AgentFlow's closed plan schema does not carry. For scripted or CI use,
 `-approve-plan-lock` prints the same preview and approves the lock without
 prompting. `-goal` never executes the plan or edits source files, and it refuses
 to replace a locked plan, a non-empty draft, or an unrecognized plan file.
@@ -83,12 +110,55 @@ Re-run the spike if the AgentFlow validator contract tightens.
   finding-linked amendment attempts for amendment-ready active findings. The
   path is resolved against the caller's cwd (like `-plan`, not `-root`) and is
   preflighted, so a missing manifest fails before any step runs.
+- `-task-brief <brief.json>` — optional and valid only with `-plan`. Supplies a
+  closed AgentFlow task-brief `0.1.0` document for an externally supplied plan.
+  The path is resolved against the caller's cwd. Its `declared_risk` must equal
+  the plan's `risk_level`. If `candidate_files` or `validation_needs` is absent,
+  Golem fills only that absent field from the plan's exact step files or gate
+  labels; an explicitly present value, including an empty array, is preserved
+  for AgentFlow to validate.
+- `-workflow-profile <profile> -workflow-reason <reason>` — optional, paired
+  flags for either `-goal` or `-plan`. Both are required together and the reason
+  must be non-empty. Golem forwards them to AgentFlow and previews the returned
+  override; it never changes a recommendation silently or accepts a changed
+  selection whose AgentFlow response lacks override provenance.
 
 `-plan` is mutually exclusive with `-p` (one-shot mode), `-allow-write` /
 `-allow-exec`, `-rag-db`, `-delegate`, and `-mcp-stdio` / `-mcp-http`. Task
 mode builds its toolset from the locked plan alone, so it refuses to start
 if any of those are also passed — it is a constrained proof surface, not a
 general-purpose agent session with a plan bolted on.
+
+## Workflow routing in task mode
+
+An external plan without `-task-brief` remains backward-compatible through a
+conservative exact-fact projection: `task_type` is fixed to `feature`,
+`declared_risk` comes from the plan, and candidate files and validation needs
+come from its steps and gates. Security sensitivity, blast radius, and size stay
+absent. This deliberately floors an underspecified low-risk legacy plan at
+AgentFlow's medium-feature route; missing signals cannot select docs-only or
+small-bugfix. Use an explicit brief when a lighter or stricter task type is
+known. Golem still does no local classification.
+
+The task driver order is:
+
+1. Probe the base and workflow-routing CLI surfaces.
+2. Ask AgentFlow for the route and print it at task startup, before `init` or any
+   other `.agent` mutation.
+3. When a review manifest is present, probe review ingestion; then initialize,
+   record evidence, lock the plan, and materialize that exact
+   recommendation once through AgentFlow.
+4. Initialize execution, run plan steps and declared gates, and print the same
+   route again immediately before review-manifest ingestion.
+5. Let `finish-run` build and verify proof under the materialized policy.
+
+The workflow contract may require gates or capabilities beyond what the loaded
+plan/run supplies. Golem does not invent a security scanner, review agent,
+capability receipt, waiver, or manifest. AgentFlow proof reports the unmet
+requirement. In particular, `spec_quality` and `deep` policies can require a
+recorded review run at adequate depth; without one, Golem fails closed and
+surfaces AgentFlow's failed `required_review_satisfied` proof check as the
+actionable error.
 
 ## Locked step instructions
 
@@ -115,8 +185,9 @@ applicable design references remains blocked on an upstream contract extension.
 
 ## Review amendments
 
-With `-review-manifest`, task mode completes any ordinary eligible steps and
-then calls `record-review --json`. AgentFlow validates and records the review
+With `-review-manifest`, task mode completes any ordinary eligible steps, prints
+the selected workflow route again, and then calls `record-review --json`.
+AgentFlow validates and records the review
 evidence before Golem opens an amendment. Golem then validates the returned
 projection against the loaded plan and fails before model edits when it is
 malformed. The `review_run_id` must match `RR-<UTC timestamp>-<8 hex>`, every
