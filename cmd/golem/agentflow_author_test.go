@@ -19,15 +19,26 @@ import (
 
 // stubLocker satisfies afLocker; LockPlan returns a scripted error per call.
 type stubLocker struct {
-	probeErr     error
-	initErr      error
-	lockErrs     []error
-	probes       int
-	inits        int
-	locks        int
-	paths        []string
-	probeStarted chan struct{}
-	lockStarted  chan struct{}
+	probeErr         error
+	workflowProbeErr error
+	recommendErr     error
+	initErr          error
+	lockErrs         []error
+	materializeErr   error
+	recommendation   agentflow.WorkflowRecommendation
+	probes           int
+	workflowProbes   int
+	recommendations  int
+	inits            int
+	locks            int
+	materializations int
+	paths            []string
+	briefs           []agentflow.TaskBrief
+	selectedProfiles []string
+	reasons          []string
+	sequence         []string
+	probeStarted     chan struct{}
+	lockStarted      chan struct{}
 }
 
 func (s *stubLocker) Probe(ctx context.Context) error {
@@ -39,11 +50,34 @@ func (s *stubLocker) Probe(ctx context.Context) error {
 	}
 	return s.probeErr
 }
-func (s *stubLocker) Init(context.Context) error { s.inits++; return s.initErr }
+func (s *stubLocker) ProbeWorkflow(context.Context) error {
+	s.workflowProbes++
+	return s.workflowProbeErr
+}
+func (s *stubLocker) RecommendWorkflow(_ context.Context, brief agentflow.TaskBrief, selectedProfile, reason string) (agentflow.WorkflowRecommendation, error) {
+	s.recommendations++
+	s.sequence = append(s.sequence, "recommend")
+	s.briefs = append(s.briefs, brief)
+	s.selectedProfiles = append(s.selectedProfiles, selectedProfile)
+	s.reasons = append(s.reasons, reason)
+	if s.recommendErr != nil {
+		return agentflow.WorkflowRecommendation{}, s.recommendErr
+	}
+	if s.recommendation.SchemaVersion != "" {
+		return s.recommendation, nil
+	}
+	return defaultWorkflowRecommendation(), nil
+}
+func (s *stubLocker) Init(context.Context) error {
+	s.inits++
+	s.sequence = append(s.sequence, "init")
+	return s.initErr
+}
 func (s *stubLocker) LockPlan(ctx context.Context, path string) error {
 	s.paths = append(s.paths, path)
 	i := s.locks
 	s.locks++
+	s.sequence = append(s.sequence, "lock")
 	if s.lockStarted != nil {
 		close(s.lockStarted)
 		<-ctx.Done()
@@ -53,6 +87,33 @@ func (s *stubLocker) LockPlan(ctx context.Context, path string) error {
 		return s.lockErrs[i]
 	}
 	return nil
+}
+func (s *stubLocker) MaterializeWorkflowContract(context.Context, agentflow.WorkflowRecommendation) error {
+	s.materializations++
+	s.sequence = append(s.sequence, "materialize")
+	return s.materializeErr
+}
+
+func defaultWorkflowRecommendation() agentflow.WorkflowRecommendation {
+	return agentflow.WorkflowRecommendation{
+		SchemaVersion: "0.1.0",
+		Recommended:   agentflow.WorkflowSelection{Pack: "agentflow-default", Profile: "medium-feature"},
+		Selected:      agentflow.WorkflowSelection{Pack: "agentflow-default", Profile: "medium-feature"},
+		Signals:       []string{"task_type=feature", "declared_risk=low"},
+		Rationale:     "feature work uses the medium route",
+		Alternatives: []agentflow.WorkflowAlternative{
+			{Profile: "small-bugfix", Relation: "cheaper", Reason: "only if scope contracts"},
+			{Profile: "large-feature", Relation: "safer", Reason: "if scope expands"},
+		},
+		Contract: agentflow.WorkflowContract{
+			SchemaVersion: "0.1.0", WorkflowPack: "agentflow-default", WorkflowProfile: "medium-feature",
+			SelectedBy: "recommend-workflow", SelectionReason: "recommended from explicit task signals",
+			RequiredCapabilities: []agentflow.WorkflowCapability{{ID: "implementation", Required: true}},
+			ReviewDepth:          "standard",
+			ValidationPolicy:     agentflow.WorkflowValidationPolicy{RequiredGates: []string{"unit"}},
+			ProofPolicy:          agentflow.WorkflowProofPolicy{HunkAttribution: "observe", RequireReviewRun: false},
+		},
+	}
 }
 
 func validIRJSON(t *testing.T) json.RawMessage {
@@ -66,6 +127,7 @@ func validIRJSON(t *testing.T) json.RawMessage {
 
 func validTraceableIR() agentflow.PlanIR {
 	return agentflow.PlanIR{
+		TaskType:  "feature",
 		Objective: "obj", Scope: []string{"src"}, Invariants: []string{"x"},
 		RiskLevel: "low", RollbackPlan: "git checkout -- .", AllowedFiles: []string{"src/*"},
 		Requirements: []agentflow.RequirementIR{{
@@ -167,11 +229,116 @@ func TestSubmitPlanTool_PreviewsWithoutMutatingProofState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan.Effect.Approval != agent.ApprovalAlways || !strings.Contains(plan.Preview, "AC-1") || !strings.Contains(plan.Preview, `argv: ["true"]`) {
+	if plan.Effect.Approval != agent.ApprovalAlways || !strings.Contains(plan.Preview, "AC-1") || !strings.Contains(plan.Preview, `argv: ["true"]`) ||
+		!strings.Contains(plan.Preview, "Workflow recommendation") || !strings.Contains(plan.Preview, `review_depth: "standard"`) {
 		t.Fatalf("tool plan = %+v", plan)
 	}
-	if client.inits != 0 || client.locks != 0 {
-		t.Fatalf("preview mutated proof state: init=%d lock=%d", client.inits, client.locks)
+	if client.recommendations != 1 || client.inits != 0 || client.locks != 0 || client.materializations != 0 {
+		t.Fatalf("preview calls = recommend %d init %d lock %d materialize %d", client.recommendations, client.inits, client.locks, client.materializations)
+	}
+}
+
+func TestSubmitPlanTool_PreviewsExactTaskSignalsAndOverrideControlSafely(t *testing.T) {
+	truth := true
+	ir := validTraceableIR()
+	ir.SecuritySensitive = &truth
+	ir.BlastRadius = "cross_cutting"
+	ir.DeclaredSize = "l"
+	args, err := json.Marshal(ir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := defaultWorkflowRecommendation()
+	rec.Selected.Profile = "high-risk"
+	rec.Contract.WorkflowProfile = "high-risk"
+	rec.Signals = []string{"security_sensitive=true", "candidate_files=1\u009b"}
+	rec.Rationale = "security-sensitive\nroute"
+	rec.Contract.ReviewDepth = "deep"
+	rec.Contract.ProofPolicy.RequireReviewRun = true
+	rec.Contract.RequiredCapabilities = append(rec.Contract.RequiredCapabilities, agentflow.WorkflowCapability{ID: "security-review", Required: true})
+	rec.Contract.ValidationPolicy.RequiredGates = []string{"unit", "security\x1b[2J"}
+	rec.Override = &agentflow.WorkflowOverride{FromProfile: "medium-feature", ToProfile: "high-risk", Reason: "operator requires deep review\r"}
+	client := &stubLocker{recommendation: rec}
+	tool := newSubmitPlanTool(&authorSession{client: client, root: "/root", workflowProfile: "high-risk", workflowReason: "operator requires deep review"})
+
+	plan, err := tool.Plan(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`recommended: "agentflow-default" / "medium-feature"`, `selected: "agentflow-default" / "high-risk"`,
+		`signals: ["security_sensitive=true", "candidate_files=1\u009b"]`, `rationale: "security-sensitive\nroute"`,
+		`review_depth: "deep"`, `require_review_run: true`, `required_capabilities: ["implementation", "security-review"]`,
+		`required_gates: ["unit", "security\x1b[2J"]`, `hunk_attribution: "observe"`,
+		`selection_reason: "recommended from explicit task signals"`, `override_reason: "operator requires deep review\r"`,
+		`profile: "small-bugfix"; relation: "cheaper"; reason: "only if scope contracts"`,
+	} {
+		if !strings.Contains(plan.Preview, want) {
+			t.Errorf("workflow preview missing %q:\n%s", want, plan.Preview)
+		}
+	}
+	if strings.ContainsRune(plan.Preview, '\u009b') || strings.ContainsRune(plan.Preview, '\x1b') || strings.ContainsRune(plan.Preview, '\r') {
+		t.Fatalf("workflow preview contains raw terminal controls: %q", plan.Preview)
+	}
+	if len(client.briefs) != 1 || client.briefs[0].SecuritySensitive == nil || !*client.briefs[0].SecuritySensitive ||
+		client.briefs[0].BlastRadius == nil || *client.briefs[0].BlastRadius != "cross_cutting" ||
+		client.briefs[0].DeclaredSize == nil || *client.briefs[0].DeclaredSize != "l" {
+		t.Fatalf("recommendation did not receive exact optional signals: %+v", client.briefs)
+	}
+	if client.selectedProfiles[0] != "high-risk" || client.reasons[0] != "operator requires deep review" {
+		t.Fatalf("override forwarding = %v / %v", client.selectedProfiles, client.reasons)
+	}
+}
+
+func TestSubmitPlanTool_PreservesExplicitFalseSecuritySignal(t *testing.T) {
+	falsity := false
+	ir := validTraceableIR()
+	ir.SecuritySensitive = &falsity
+	args, _ := json.Marshal(ir)
+	client := &stubLocker{}
+	tool := newSubmitPlanTool(&authorSession{client: client, root: "/root"})
+	if _, err := tool.Plan(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.briefs) != 1 || client.briefs[0].SecuritySensitive == nil || *client.briefs[0].SecuritySensitive {
+		t.Fatalf("explicit false security signal was lost: %+v", client.briefs)
+	}
+}
+
+func TestSubmitPlanTool_InvalidTaskSignalsFailBeforeRecommendation(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mutate func(*agentflow.PlanIR)
+	}{
+		{name: "missing task type", mutate: func(ir *agentflow.PlanIR) { ir.TaskType = "" }},
+		{name: "unknown task type", mutate: func(ir *agentflow.PlanIR) { ir.TaskType = "chore" }},
+		{name: "unknown blast radius", mutate: func(ir *agentflow.PlanIR) { ir.BlastRadius = "global" }},
+		{name: "unknown size", mutate: func(ir *agentflow.PlanIR) { ir.DeclaredSize = "xxl" }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ir := validTraceableIR()
+			tt.mutate(&ir)
+			args, _ := json.Marshal(ir)
+			client := &stubLocker{}
+			plan, err := newSubmitPlanTool(&authorSession{client: client, root: "/root"}).Plan(context.Background(), args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if plan.Effect.Approval != agent.ApprovalNever || client.recommendations != 0 {
+				t.Fatalf("invalid signals reached approval/recommendation: %+v, calls=%d", plan, client.recommendations)
+			}
+		})
+	}
+}
+
+func TestSubmitPlanTool_RecommendationFailurePreventsApproval(t *testing.T) {
+	client := &stubLocker{recommendErr: errors.New("routing unavailable")}
+	plan, err := newSubmitPlanTool(&authorSession{client: client, root: "/root"}).Plan(context.Background(), validIRJSON(t))
+	if err == nil || !strings.Contains(err.Error(), "routing unavailable") {
+		t.Fatalf("recommendation failure = plan %+v, err %v", plan, err)
+	}
+	if plan.Effect.Approval != agent.ApprovalNever || client.inits != 0 || client.locks != 0 || client.materializations != 0 {
+		t.Fatalf("recommendation failure reached approval/mutation: %+v, client=%+v", plan, client)
 	}
 }
 
@@ -198,6 +365,9 @@ func TestSubmitPlanTool_SuccessLocksAndCancels(t *testing.T) {
 	as := &authorSession{client: client, root: "/root",
 		cancel: func() { canceled = true; cancel() }}
 	tool := newSubmitPlanTool(as)
+	if _, err := tool.Plan(context.Background(), validIRJSON(t)); err != nil {
+		t.Fatal(err)
+	}
 	res, err := tool.Invoke(context.Background(), validIRJSON(t))
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +380,67 @@ func TestSubmitPlanTool_SuccessLocksAndCancels(t *testing.T) {
 	}
 	if _, err := os.Stat(client.paths[0]); !os.IsNotExist(err) {
 		t.Errorf("staged plan was not removed: %v", err)
+	}
+	if !reflect.DeepEqual(client.sequence, []string{"recommend", "init", "lock", "materialize"}) {
+		t.Fatalf("workflow mutation order = %v", client.sequence)
+	}
+}
+
+func TestSubmitPlanTool_RejectsUnpreviewedOrStaleInvokeWithoutMutation(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		preview bool
+		stale   bool
+	}{
+		{name: "unpreviewed"},
+		{name: "stale", preview: true, stale: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &stubLocker{}
+			as := &authorSession{client: client, root: "/root", cancel: func() {}}
+			tool := newSubmitPlanTool(as)
+			args := validIRJSON(t)
+			if tt.preview {
+				if _, err := tool.Plan(context.Background(), args); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tt.stale {
+				ir := validTraceableIR()
+				ir.Objective = "changed after preview"
+				args, _ = json.Marshal(ir)
+			}
+			res, err := tool.Invoke(context.Background(), args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.IsError || !strings.Contains(res.Content, "workflow_preview_required") {
+				t.Fatalf("stale invoke = %+v", res)
+			}
+			if client.inits != 0 || client.locks != 0 || client.materializations != 0 {
+				t.Fatalf("stale invoke mutated proof state: %+v", client)
+			}
+		})
+	}
+}
+
+func TestSubmitPlanTool_MaterializationFailureIsTerminalAfterLock(t *testing.T) {
+	canceled := false
+	client := &stubLocker{materializeErr: errors.New("contract rejected")}
+	as := &authorSession{client: client, root: "/root", cancel: func() { canceled = true }}
+	tool := newSubmitPlanTool(as)
+	if _, err := tool.Plan(context.Background(), validIRJSON(t)); err != nil {
+		t.Fatal(err)
+	}
+	res, err := tool.Invoke(context.Background(), validIRJSON(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.IsError || !canceled || as.terminalErr == nil || !strings.Contains(as.terminalErr.Error(), "materialize Agentflow workflow contract") {
+		t.Fatalf("materialization failure = res %+v canceled=%v terminal=%v", res, canceled, as.terminalErr)
+	}
+	if !reflect.DeepEqual(client.sequence, []string{"recommend", "init", "lock", "materialize"}) {
+		t.Fatalf("materialization failure sequence = %v", client.sequence)
 	}
 }
 
@@ -266,6 +497,7 @@ func TestSubmitPlanTool_TerminalLockErrorFailsFast(t *testing.T) {
 	term := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "invalid_arguments", Message: "boom"}}}
 	as := &authorSession{client: &stubLocker{lockErrs: []error{term}}, root: "/root", cancel: func() { canceled = true }}
 	tool := newSubmitPlanTool(as)
+	_, _ = tool.Plan(context.Background(), validIRJSON(t))
 	res, _ := tool.Invoke(context.Background(), validIRJSON(t))
 	if as.terminalErr == nil || !canceled || !res.IsError {
 		t.Errorf("terminal lock error should fail fast; terminalErr=%v canceled=%v", as.terminalErr, canceled)
@@ -276,7 +508,9 @@ func TestSubmitPlanTool_UnknownStructuredLockErrorFailsClosed(t *testing.T) {
 	canceled := false
 	term := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "future_error", Message: "unknown contract failure"}}}
 	as := &authorSession{client: &stubLocker{lockErrs: []error{term}}, root: "/root", cancel: func() { canceled = true }}
-	_, _ = newSubmitPlanTool(as).Invoke(context.Background(), validIRJSON(t))
+	tool := newSubmitPlanTool(as)
+	_, _ = tool.Plan(context.Background(), validIRJSON(t))
+	_, _ = tool.Invoke(context.Background(), validIRJSON(t))
 	if as.terminalErr == nil || !canceled {
 		t.Fatal("unknown structured lock errors must fail closed")
 	}
@@ -287,6 +521,7 @@ func TestSubmitPlanTool_ContentValidationErrorIsRepairable(t *testing.T) {
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "steps[1].action must be a non-empty string"}}}
 	as := &authorSession{client: &stubLocker{lockErrs: []error{verr}}, root: "/root", cancel: func() { canceled = true }}
 	tool := newSubmitPlanTool(as)
+	_, _ = tool.Plan(context.Background(), validIRJSON(t))
 	res, _ := tool.Invoke(context.Background(), validIRJSON(t))
 	if canceled || !res.IsError || len(as.lastDiags) == 0 {
 		t.Errorf("content validation_error should be repairable; canceled=%v", canceled)
@@ -298,6 +533,7 @@ func TestSubmitPlanTool_CompilerOwnedValidationErrorIsTerminal(t *testing.T) {
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "plan-lock schema_version 9.9.9 is incompatible"}}}
 	as := &authorSession{client: &stubLocker{lockErrs: []error{verr}}, root: "/root", cancel: func() { canceled = true }}
 	tool := newSubmitPlanTool(as)
+	_, _ = tool.Plan(context.Background(), validIRJSON(t))
 	_, _ = tool.Invoke(context.Background(), validIRJSON(t))
 	if as.terminalErr == nil || !canceled {
 		t.Errorf("schema_version validation_error is compiler-owned -> terminal")
@@ -372,7 +608,7 @@ func TestSubmitPlanSchema_PinsIRStructs(t *testing.T) {
 			}
 		}
 	}
-	requires(schema, "objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "requirements", "steps")
+	requires(schema, "task_type", "objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "requirements", "steps")
 	requires(requirementItems, "id", "text", "acceptance_criteria")
 	requires(criterionItems, "id", "text")
 	requires(stepItems, "id", "action", "files", "expected_diff", "validations")
@@ -456,8 +692,9 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.inits != 1 || client.locks != 1 {
-		t.Fatalf("approved plan should initialize and lock once: init=%d lock=%d", client.inits, client.locks)
+	if client.probes != 1 || client.workflowProbes != 1 || client.recommendations != 1 || client.inits != 1 || client.locks != 1 || client.materializations != 1 {
+		t.Fatalf("approved plan calls = probe %d workflow-probe %d recommend %d init %d lock %d materialize %d",
+			client.probes, client.workflowProbes, client.recommendations, client.inits, client.locks, client.materializations)
 	}
 	if !strings.Contains(out.String(), filepath.Join(root, ".agent", "plan.lock.json")) ||
 		!strings.Contains(out.String(), "locked approved plan") {
@@ -482,6 +719,9 @@ func TestRunAgentflowAuthor_RefusesLockWithoutExplicitApproval(t *testing.T) {
 	}
 	if client.inits != 0 || client.locks != 0 {
 		t.Fatalf("proof state mutated before approval: init=%d lock=%d", client.inits, client.locks)
+	}
+	if client.recommendations != 1 || client.materializations != 0 {
+		t.Fatalf("denial route calls = recommend %d materialize %d", client.recommendations, client.materializations)
 	}
 	// The denied plan is saved so the authoring work is not discarded.
 	const marker = "denied plan saved for reference: "
@@ -566,8 +806,8 @@ func TestRunAgentflowAuthor_AutoApproverLocks(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.inits != 1 || client.locks != 1 {
-		t.Fatalf("auto-approved plan should initialize and lock once: init=%d lock=%d", client.inits, client.locks)
+	if client.inits != 1 || client.locks != 1 || client.materializations != 1 {
+		t.Fatalf("auto-approved plan should initialize, lock, and materialize once: init=%d lock=%d materialize=%d", client.inits, client.locks, client.materializations)
 	}
 	if !strings.Contains(out.String(), "auto-approved via -approve-plan-lock") || !strings.Contains(out.String(), "locked approved plan") {
 		t.Fatalf("missing auto-approval output:\n%s", out.String())
@@ -695,8 +935,21 @@ func TestRunAgentflowAuthor_ProbeFailsBeforeModel(t *testing.T) {
 	if err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "x", goalSet: true}, root, client, nil); err == nil {
 		t.Fatal("expected probe failure")
 	}
-	if caller.i != 0 || client.inits != 0 {
-		t.Fatalf("probe failure reached model/init: model=%d init=%d", caller.i, client.inits)
+	if caller.i != 0 || client.workflowProbes != 0 || client.inits != 0 {
+		t.Fatalf("probe failure reached workflow probe/model/init: workflow-probe=%d model=%d init=%d", client.workflowProbes, caller.i, client.inits)
+	}
+}
+
+func TestRunAgentflowAuthor_WorkflowProbeFailsBeforeModel(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{}
+	sess := newTestSession(t, caller, root)
+	client := &stubLocker{workflowProbeErr: errors.New("recommend-workflow too old")}
+	if err := runAgentflowAuthorWithClient(context.Background(), io.Discard, io.Discard, nil, sess, flags{goal: "x", goalSet: true}, root, client, nil); err == nil || !strings.Contains(err.Error(), "workflow routing unavailable") {
+		t.Fatalf("workflow probe error = %v", err)
+	}
+	if client.probes != 1 || client.workflowProbes != 1 || caller.i != 0 || client.recommendations != 0 || client.inits != 0 {
+		t.Fatalf("workflow probe failure crossed boundary: client=%+v model=%d", client, caller.i)
 	}
 }
 
@@ -711,7 +964,7 @@ func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 		t.Fatalf("err = %v, want no submission", err)
 	}
 	if !strings.Contains(caller.system, "Golem's planner") || !strings.Contains(caller.system, "repo rule") ||
-		!strings.Contains(caller.system, "acceptance criterion") || !strings.Contains(caller.system, "criterion_ids") {
+		!strings.Contains(caller.system, "acceptance criterion") || !strings.Contains(caller.system, "criterion_ids") || !strings.Contains(caller.system, "task_type") {
 		t.Fatalf("planner system omitted prompt/context: %q", caller.system)
 	}
 }

@@ -9,6 +9,7 @@ import (
 
 func sampleIR() PlanIR {
 	return PlanIR{
+		TaskType:     "feature",
 		Objective:    "add a health endpoint",
 		Scope:        []string{"internal/http"},
 		Invariants:   []string{"no new deps"},
@@ -22,6 +23,44 @@ func sampleIR() PlanIR {
 			ExpectedDiff: []string{"new health.go with a handler"},
 			Validations:  []GateIR{{Label: "unit", Argv: []string{"go", "test", "./internal/http/..."}}},
 		}},
+	}
+}
+
+func TestTaskBriefFromPlan_UsesExactCompiledFacts(t *testing.T) {
+	ir := sampleIR()
+	ir.RiskLevel = "medium"
+	ir.Steps[0].Files = []string{"internal/http/health.go", "internal/http/shared.go"}
+	ir.Steps[0].Validations = append(ir.Steps[0].Validations,
+		GateIR{Label: "integration", Argv: []string{"go", "test", "./integration/..."}},
+	)
+	ir.Steps = append(ir.Steps, StepIR{
+		ID:           "S2",
+		Action:       "reuse shared helper",
+		Files:        []string{"internal/http/shared.go"},
+		ExpectedDiff: []string{"shared helper used by handler"},
+		Validations: []GateIR{
+			{Label: "unit", Argv: []string{"go", "test", "./internal/http/..."}},
+			{Label: "race", Argv: []string{"go", "test", "-race", "./internal/http/..."}},
+		},
+	})
+
+	brief := TaskBriefFromPlan(Compile(ir), "feature")
+	if brief.SchemaVersion != TaskBriefSchemaVersion || brief.TaskType != "feature" || brief.DeclaredRisk != "medium" {
+		t.Fatalf("task brief identity = %+v", brief)
+	}
+	if brief.CandidateFiles == nil || !slices.Equal(*brief.CandidateFiles, []string{"internal/http/health.go", "internal/http/shared.go"}) {
+		t.Fatalf("candidate files = %v, want first-seen exact union", brief.CandidateFiles)
+	}
+	if brief.ValidationNeeds == nil || !slices.Equal(*brief.ValidationNeeds, []string{"unit", "integration", "race"}) {
+		t.Fatalf("validation needs = %v, want compiled deduplicated gates", brief.ValidationNeeds)
+	}
+	if brief.SecuritySensitive != nil || brief.BlastRadius != nil || brief.DeclaredSize != nil {
+		t.Fatalf("unknown optional signals must stay absent: %+v", brief)
+	}
+
+	empty := TaskBriefFromPlan(Plan{RiskLevel: "low"}, "bugfix")
+	if empty.CandidateFiles != nil || empty.ValidationNeeds != nil {
+		t.Fatalf("empty optional facts must be omitted: %+v", empty)
 	}
 }
 

@@ -25,6 +25,36 @@ type TaskBrief struct {
 	DeclaredSize      *string   `json:"declared_size,omitempty"`
 }
 
+// TaskBriefFromPlan projects only facts already present in a compiled plan.
+// Routing remains Agentflow-owned: this function does not infer task type,
+// security sensitivity, blast radius, or size.
+func TaskBriefFromPlan(plan Plan, taskType string) TaskBrief {
+	brief := TaskBrief{
+		SchemaVersion: TaskBriefSchemaVersion,
+		TaskType:      taskType,
+		DeclaredRisk:  plan.RiskLevel,
+	}
+	seen := make(map[string]struct{})
+	files := make([]string, 0)
+	for _, step := range plan.Steps {
+		for _, file := range step.Files {
+			if _, ok := seen[file]; ok {
+				continue
+			}
+			seen[file] = struct{}{}
+			files = append(files, file)
+		}
+	}
+	if len(files) > 0 {
+		brief.CandidateFiles = &files
+	}
+	if len(plan.ValidationGates) > 0 {
+		needs := append([]string(nil), plan.ValidationGates...)
+		brief.ValidationNeeds = &needs
+	}
+	return brief
+}
+
 type WorkflowSelection struct {
 	Pack    string `json:"pack"`
 	Profile string `json:"profile"`

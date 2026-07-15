@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -21,8 +22,11 @@ import (
 // satisfies it. Tests inject a stub instead of a second client implementation.
 type afLocker interface {
 	Probe(ctx context.Context) error
+	ProbeWorkflow(ctx context.Context) error
+	RecommendWorkflow(ctx context.Context, brief agentflow.TaskBrief, selectedProfile, reason string) (agentflow.WorkflowRecommendation, error)
 	Init(ctx context.Context) error
 	LockPlan(ctx context.Context, planPath string) error
+	MaterializeWorkflowContract(ctx context.Context, recommendation agentflow.WorkflowRecommendation) error
 }
 
 // authorSession is the shared, single-Run state the submit_plan tool mutates and
@@ -47,6 +51,12 @@ type authorSession struct {
 	// preview appends a line-level delta against it so re-approval does not
 	// require re-reading the whole plan.
 	lastPreview string
+	// The displayed route and exact tool arguments form one approval unit. Invoke
+	// may mutate state only when both are still bound to the approved call.
+	previewArgs           []byte
+	previewRecommendation *agentflow.WorkflowRecommendation
+	workflowProfile       string
+	workflowReason        string
 }
 
 type submitPlanTool struct {
@@ -101,24 +111,34 @@ func (t *submitPlanTool) Effect() agent.Effect {
 	return agent.Effect{Class: agent.Write | agent.Exec, Approval: agent.ApprovalAlways, Scope: agent.Scope{CWD: t.sess.root}}
 }
 
-func (t *submitPlanTool) Plan(_ context.Context, args json.RawMessage) (agent.ToolPlan, error) {
+func (t *submitPlanTool) Plan(ctx context.Context, args json.RawMessage) (agent.ToolPlan, error) {
 	effect := t.Effect()
+	t.sess.previewArgs = nil
+	t.sess.previewRecommendation = nil
 	var ir agentflow.PlanIR
 	if err := json.Unmarshal(args, &ir); err != nil {
 		effect.Approval = agent.ApprovalNever
 		return agent.ToolPlan{Effect: effect}, nil
 	}
 	plan := agentflow.Compile(ir)
-	if len(authorPlanDiagnostics(plan)) > 0 {
+	if len(authorPlanDiagnostics(ir, plan)) > 0 {
 		effect.Approval = agent.ApprovalNever
 		return agent.ToolPlan{Effect: effect}, nil
 	}
-	preview := renderPlanPreview(plan)
+	brief := taskBriefFromIR(ir, plan)
+	recommendation, err := t.sess.client.RecommendWorkflow(ctx, brief, t.sess.workflowProfile, t.sess.workflowReason)
+	if err != nil {
+		effect.Approval = agent.ApprovalNever
+		return agent.ToolPlan{Effect: effect}, fmt.Errorf("recommend Agentflow workflow: %w", err)
+	}
+	preview := renderPlanPreview(plan) + "\n" + renderWorkflowPreview(recommendation)
 	shown := preview
 	if t.sess.lastPreview != "" {
 		shown += previewDelta(t.sess.lastPreview, preview)
 	}
 	t.sess.lastPreview = preview
+	t.sess.previewArgs = append([]byte(nil), args...)
+	t.sess.previewRecommendation = &recommendation
 	return agent.ToolPlan{Effect: effect, Preview: shown}, nil
 }
 
@@ -132,10 +152,16 @@ func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agen
 		return t.reject([]agentflow.Diagnostic{{Code: "invalid_plan_ir", Message: "submit_plan arguments did not parse as a plan: " + err.Error()}})
 	}
 	plan := agentflow.Compile(ir)
-	if diags := authorPlanDiagnostics(plan); len(diags) > 0 {
+	if diags := authorPlanDiagnostics(ir, plan); len(diags) > 0 {
 		return t.reject(diags)
 	}
-	if err := t.lock(ctx, plan); err != nil {
+	if s.previewRecommendation == nil || !bytes.Equal(s.previewArgs, args) {
+		return t.reject([]agentflow.Diagnostic{{Code: "workflow_preview_required", Message: "the exact plan and Agentflow route must be previewed before approval"}})
+	}
+	recommendation := *s.previewRecommendation
+	s.previewArgs = nil
+	s.previewRecommendation = nil
+	if err := t.lock(ctx, plan, recommendation); err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			s.cancel()
 			return agent.ToolResult{}, context.Canceled
@@ -154,12 +180,40 @@ func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agen
 	return agent.ToolResult{Content: "plan locked: " + s.lockedPath}, nil
 }
 
-func authorPlanDiagnostics(plan agentflow.Plan) []agentflow.Diagnostic {
+func authorPlanDiagnostics(ir agentflow.PlanIR, plan agentflow.Plan) []agentflow.Diagnostic {
 	diags := agentflow.CheckPlan(plan)
+	switch ir.TaskType {
+	case "docs", "bugfix", "feature", "refactor":
+	default:
+		diags = append(diags, agentflow.Diagnostic{Code: "bad_task_type", Message: fmt.Sprintf("task_type %q must be one of: docs, bugfix, feature, refactor", ir.TaskType)})
+	}
+	if ir.BlastRadius != "" && ir.BlastRadius != "isolated" && ir.BlastRadius != "local" && ir.BlastRadius != "cross_cutting" {
+		diags = append(diags, agentflow.Diagnostic{Code: "bad_blast_radius", Message: fmt.Sprintf("blast_radius %q must be one of: isolated, local, cross_cutting", ir.BlastRadius)})
+	}
+	if ir.DeclaredSize != "" && ir.DeclaredSize != "xs" && ir.DeclaredSize != "s" && ir.DeclaredSize != "m" && ir.DeclaredSize != "l" && ir.DeclaredSize != "xl" {
+		diags = append(diags, agentflow.Diagnostic{Code: "bad_declared_size", Message: fmt.Sprintf("declared_size %q must be one of: xs, s, m, l, xl", ir.DeclaredSize)})
+	}
 	if len(plan.Requirements) == 0 {
 		diags = append(diags, agentflow.Diagnostic{Code: "missing_requirements", Message: "authored plans require at least one requirement with acceptance criteria"})
 	}
 	return diags
+}
+
+func taskBriefFromIR(ir agentflow.PlanIR, plan agentflow.Plan) agentflow.TaskBrief {
+	brief := agentflow.TaskBriefFromPlan(plan, ir.TaskType)
+	if ir.SecuritySensitive != nil {
+		value := *ir.SecuritySensitive
+		brief.SecuritySensitive = &value
+	}
+	if ir.BlastRadius != "" {
+		value := ir.BlastRadius
+		brief.BlastRadius = &value
+	}
+	if ir.DeclaredSize != "" {
+		value := ir.DeclaredSize
+		brief.DeclaredSize = &value
+	}
+	return brief
 }
 
 // reject records the diagnostics, ends the loop when the submission budget is
@@ -239,6 +293,42 @@ func renderPlanPreview(plan agentflow.Plan) string {
 	return b.String()
 }
 
+func renderWorkflowPreview(recommendation agentflow.WorkflowRecommendation) string {
+	contract := recommendation.Contract
+	capabilities := make([]string, 0, len(contract.RequiredCapabilities))
+	for _, capability := range contract.RequiredCapabilities {
+		if capability.Required {
+			capabilities = append(capabilities, capability.ID)
+		}
+	}
+	var b strings.Builder
+	b.WriteString("Workflow recommendation\n\n")
+	fmt.Fprintf(&b, "  recommended: %s / %s\n", previewText(recommendation.Recommended.Pack), previewText(recommendation.Recommended.Profile))
+	fmt.Fprintf(&b, "  selected: %s / %s\n", previewText(recommendation.Selected.Pack), previewText(recommendation.Selected.Profile))
+	fmt.Fprintf(&b, "  signals: %s\n", previewValues(recommendation.Signals))
+	fmt.Fprintf(&b, "  rationale: %s\n", previewText(recommendation.Rationale))
+	fmt.Fprintf(&b, "  selection_reason: %s\n", previewText(contract.SelectionReason))
+	fmt.Fprintf(&b, "  review_depth: %s\n", previewText(contract.ReviewDepth))
+	fmt.Fprintf(&b, "  require_review_run: %t\n", contract.ProofPolicy.RequireReviewRun)
+	fmt.Fprintf(&b, "  hunk_attribution: %s\n", previewText(contract.ProofPolicy.HunkAttribution))
+	fmt.Fprintf(&b, "  required_capabilities: %s\n", previewValues(capabilities))
+	fmt.Fprintf(&b, "  required_gates: %s\n", previewValues(contract.ValidationPolicy.RequiredGates))
+	if recommendation.Override == nil {
+		b.WriteString("  override: none\n")
+	} else {
+		fmt.Fprintf(&b, "  override: %s -> %s\n", previewText(recommendation.Override.FromProfile), previewText(recommendation.Override.ToProfile))
+		fmt.Fprintf(&b, "  override_reason: %s\n", previewText(recommendation.Override.Reason))
+	}
+	b.WriteString("  alternatives:\n")
+	if len(recommendation.Alternatives) == 0 {
+		b.WriteString("    - none\n")
+	}
+	for _, alternative := range recommendation.Alternatives {
+		fmt.Fprintf(&b, "    - profile: %s; relation: %s; reason: %s\n", previewText(alternative.Profile), previewText(alternative.Relation), previewText(alternative.Reason))
+	}
+	return b.String()
+}
+
 func writePreviewList(b *strings.Builder, values []string) {
 	if len(values) == 0 {
 		b.WriteString("  - none\n")
@@ -307,7 +397,7 @@ func extraLines(a, b []string) []string {
 // lock stages the compiled plan through a temp file and the real lock-plan. The
 // temp lives outside .agent/ so a failed lock leaves no stray workspace artifact;
 // LockPlan itself writes the durable .agent/plan.lock.json.
-func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan) error {
+func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan, recommendation agentflow.WorkflowRecommendation) error {
 	if err := t.sess.client.Init(ctx); err != nil {
 		return &terminalError{fmt.Errorf("agentflow init: %w", err)}
 	}
@@ -327,7 +417,13 @@ func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan) error {
 	if err := tmp.Close(); err != nil {
 		return &terminalError{fmt.Errorf("close staged plan %s: %w", tmp.Name(), err)}
 	}
-	return t.sess.client.LockPlan(ctx, tmp.Name())
+	if err := t.sess.client.LockPlan(ctx, tmp.Name()); err != nil {
+		return err
+	}
+	if err := t.sess.client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		return &terminalError{fmt.Errorf("materialize Agentflow workflow contract after plan lock: %w", err)}
+	}
+	return nil
 }
 
 // terminalError marks a fail-fast condition that no model repair can fix.
@@ -391,8 +487,9 @@ func lockErrorDiagnostics(err error) []agentflow.Diagnostic {
 // matching properties (so a json-tag rename cannot silently mislead the model).
 const submitPlanSchema = `{
   "type": "object",
-  "required": ["objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "requirements", "steps"],
+  "required": ["task_type", "objective", "scope", "invariants", "risk_level", "rollback_plan", "allowed_files", "requirements", "steps"],
   "properties": {
+    "task_type":     {"type": "string", "enum": ["docs", "bugfix", "feature", "refactor"], "description": "the kind of task being planned"},
     "objective":     {"type": "string", "description": "one-sentence goal of the whole plan"},
     "scope":         {"type": "array", "items": {"type": "string"}, "description": "areas the plan touches"},
     "invariants":    {"type": "array", "items": {"type": "string"}, "description": "properties that must hold after the plan"},
@@ -401,6 +498,9 @@ const submitPlanSchema = `{
     "allowed_files": {"type": "array", "items": {"type": "string"}, "description": "glob patterns of files the plan may change; must cover every step file"},
     "blocked_files": {"type": "array", "items": {"type": "string"}, "description": "optional glob patterns that must never change"},
     "non_goals":     {"type": "array", "items": {"type": "string"}, "description": "optional explicit exclusions"},
+    "security_sensitive": {"type": "boolean", "description": "optional; set only when the task explicitly affects security-sensitive behavior"},
+    "blast_radius": {"type": "string", "enum": ["isolated", "local", "cross_cutting"], "description": "optional explicit blast radius; omit when unknown"},
+    "declared_size": {"type": "string", "enum": ["xs", "s", "m", "l", "xl"], "description": "optional explicit task size; omit when unknown"},
     "requirements": {
       "type": "array",
       "minItems": 1,
@@ -462,6 +562,7 @@ const submitPlanSchema = `{
 
 const plannerBasePrompt = "You are Golem's planner. From the user's goal, author a durable execution plan for the AgentFlow contract. " +
 	"First inspect the repository with the read-only tools (read_file, search, glob, list). Then design a minimal directed-acyclic set of steps. " +
+	"Choose the required task_type from docs, bugfix, feature, or refactor. Set security_sensitive, blast_radius, or declared_size only when repository evidence or the user's request makes that signal explicit; otherwise omit it rather than guessing. " +
 	"Author stable requirement and acceptance criterion IDs. Criterion IDs share one plan-wide namespace: never reuse an acceptance criterion id across requirements. Map every criterion into at least one step criterion_ids list and either a proving validation criterion_ids list or a spec_quality/deep review floor. " +
 	"Each step needs: concrete workspace-relative files, at least one expected_diff sentence, and at least one executable validation as an argv array (for example [\"go\",\"test\",\"./...\"]). " +
 	"Provide allowed_files globs that cover every step file, at least one invariant, and a rollback_plan. Use depends_on to order steps; do not create cycles. " +
@@ -567,6 +668,12 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 			return errPlannerInterrupted
 		}
 		return fmt.Errorf("agentflow unavailable: %w", err)
+	}
+	if err := client.ProbeWorkflow(loopCtx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(loopCtx.Err(), context.Canceled) {
+			return errPlannerInterrupted
+		}
+		return fmt.Errorf("agentflow workflow routing unavailable: %w", err)
 	}
 	ws, err := agenttools.NewWorkspace(root)
 	if err != nil {
