@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+tmp="$(cd "$(mktemp -d)" && pwd -P)"
+trap 'rm -rf "$tmp"' EXIT
+
+module="$tmp/module"
+mkdir -p "$module/scripts" "$tmp/bin" "$tmp/outside"
+cp "$script_dir/ci-local" "$module/scripts/ci-local"
+touch "$module/go.mod" "$module/docker-compose.ci.yml"
+printf 'gitdir: /unmounted/main/.git/worktrees/test\n' >"$module/.git"
+
+cat >"$tmp/bin/golangci-lint" <<'STUB'
+#!/usr/bin/env sh
+printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
+STUB
+chmod +x "$tmp/bin/golangci-lint"
+ln -s golangci-lint "$tmp/bin/go"
+
+if ! (cd "$tmp/outside" && PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/actual" "$module/scripts/ci-local" --mode full); then
+  printf 'absolute-path invocation failed\n' >&2
+  exit 1
+fi
+
+cat >"$tmp/expected" <<EOF
+$module|run
+$module|test -race ./...
+$module|test -run ^$ ./...
+EOF
+diff -u "$tmp/expected" "$tmp/actual"
+
+mkdir -p "$tmp/misplaced/scripts"
+cp "$script_dir/ci-local" "$tmp/misplaced/scripts/ci-local"
+if PATH="$tmp/bin:$PATH" "$tmp/misplaced/scripts/ci-local" --mode pre-push >"$tmp/error" 2>&1; then
+  printf 'misplaced script unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F "invalid local CI layout: expected go.mod and docker-compose.ci.yml in $tmp/misplaced" "$tmp/error" >/dev/null
