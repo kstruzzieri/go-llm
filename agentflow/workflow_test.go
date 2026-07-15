@@ -34,6 +34,20 @@ const validRecommendationJSON = `{
   }
 }`
 
+func validOverrideRecommendationJSON() string {
+	overridden := strings.Replace(validRecommendationJSON,
+		`"selected":{"pack":"agentflow-default","profile":"small-bugfix"}`,
+		`"selected":{"pack":"agentflow-default","profile":"medium-feature"}`,
+		1)
+	overridden = strings.Replace(overridden, `"override":null`,
+		`"override":{"from_profile":"small-bugfix","to_profile":"medium-feature","reason":"shared API"}`, 1)
+	overridden = strings.Replace(overridden, `"workflow_profile":"small-bugfix"`, `"workflow_profile":"medium-feature"`, 1)
+	overridden = strings.Replace(overridden, `"selected_by":"recommend-workflow"`, `"selected_by":"recommend-workflow --selected-profile"`, 1)
+	return strings.Replace(overridden,
+		`"selection_reason":"Recommended small-bugfix: bounded low-risk fix."`,
+		`"selection_reason":"Override: small-bugfix -> medium-feature. shared API"`, 1)
+}
+
 func TestClient_RecommendWorkflow_UsesStdinJSONAndParsesTypedProjection(t *testing.T) {
 	c, runner := newTestClient(map[string]fakeReply{
 		"recommend-workflow": {stdout: []byte(validRecommendationJSON)},
@@ -81,14 +95,7 @@ func TestClient_RecommendWorkflow_UsesStdinJSONAndParsesTypedProjection(t *testi
 }
 
 func TestClient_RecommendWorkflow_ForwardsExplicitSelectionAndReason(t *testing.T) {
-	overridden := strings.Replace(validRecommendationJSON,
-		`"selected":{"pack":"agentflow-default","profile":"small-bugfix"}`,
-		`"selected":{"pack":"agentflow-default","profile":"medium-feature"}`,
-		1)
-	overridden = strings.Replace(overridden, `"override":null`,
-		`"override":{"from_profile":"small-bugfix","to_profile":"medium-feature","reason":"shared API"}`, 1)
-	overridden = strings.Replace(overridden, `"workflow_profile":"small-bugfix"`, `"workflow_profile":"medium-feature"`, 1)
-	c, runner := newTestClient(map[string]fakeReply{"recommend-workflow": {stdout: []byte(overridden)}})
+	c, runner := newTestClient(map[string]fakeReply{"recommend-workflow": {stdout: []byte(validOverrideRecommendationJSON())}})
 
 	got, err := c.RecommendWorkflow(context.Background(), TaskBrief{
 		SchemaVersion: TaskBriefSchemaVersion, TaskType: "bugfix", DeclaredRisk: "low",
@@ -164,6 +171,18 @@ func TestClient_RecommendWorkflow_RejectsMalformedOrInconsistentSuccess(t *testi
 		{"candidate selection mismatch", func(s string) string {
 			return strings.Replace(s, `"workflow_profile":"small-bugfix"`, `"workflow_profile":"medium-feature"`, 1)
 		}, "workflow_profile"},
+		{"candidate automatic selector mismatch", func(s string) string {
+			return strings.Replace(s, `"selected_by":"recommend-workflow"`, `"selected_by":"recommend-workflow --selected-profile"`, 1)
+		}, "selected_by"},
+		{"candidate automatic reason mismatch", func(s string) string {
+			return strings.Replace(s, `"selection_reason":"Recommended small-bugfix: bounded low-risk fix."`, `"selection_reason":"different reason"`, 1)
+		}, "selection_reason"},
+		{"candidate override selector mismatch", func(string) string {
+			return strings.Replace(validOverrideRecommendationJSON(), `"selected_by":"recommend-workflow --selected-profile"`, `"selected_by":"recommend-workflow"`, 1)
+		}, "selected_by"},
+		{"candidate override reason mismatch", func(string) string {
+			return strings.Replace(validOverrideRecommendationJSON(), `"selection_reason":"Override: small-bugfix -> medium-feature. shared API"`, `"selection_reason":"different reason"`, 1)
+		}, "selection_reason"},
 		{"unknown review depth", func(s string) string {
 			return strings.Replace(s, `"review_depth":"light"`, `"review_depth":"maximum"`, 1)
 		}, "review_depth"},

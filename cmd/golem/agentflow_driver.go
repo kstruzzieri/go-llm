@@ -376,7 +376,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if err != nil {
 		return err
 	}
-	approvedRecommendation, err := readApprovedWorkflowHandoff(f.workflowHandoffPath, root, plan, taskBrief)
+	approvedRecommendation, err := readApprovedWorkflowHandoff(f.workflowHandoffPath, root, planBytes, taskBrief)
 	if err != nil {
 		return err
 	}
@@ -471,7 +471,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 // matches Agentflow's already-materialized contract before task mode makes any
 // Agentflow call. A changed handoff, contract, or planning/execution pairing
 // therefore fails closed instead of silently re-routing the approved plan.
-func readApprovedWorkflowHandoff(path, root string, plan agentflow.Plan, brief agentflow.TaskBrief) (*agentflow.WorkflowRecommendation, error) {
+func readApprovedWorkflowHandoff(path, root string, planJSON []byte, brief agentflow.TaskBrief) (*agentflow.WorkflowRecommendation, error) {
 	if path == "" {
 		return nil, nil
 	}
@@ -495,7 +495,7 @@ func readApprovedWorkflowHandoff(path, root string, plan agentflow.Plan, brief a
 	if handoff.SchemaVersion != approvedWorkflowHandoffSchemaVersion {
 		return nil, fmt.Errorf("approved workflow handoff schema_version %q is incompatible; want %s", handoff.SchemaVersion, approvedWorkflowHandoffSchemaVersion)
 	}
-	planSHA256, err := canonicalJSONSHA256(plan)
+	planSHA256, err := canonicalPlanJSONSHA256(planJSON)
 	if err != nil {
 		return nil, fmt.Errorf("digest task plan for approved workflow handoff: %w", err)
 	}

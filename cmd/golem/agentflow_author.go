@@ -459,7 +459,11 @@ func saveApprovedTaskBrief(root string, brief agentflow.TaskBrief) (string, erro
 }
 
 func saveApprovedWorkflowHandoff(root string, plan agentflow.Plan, brief agentflow.TaskBrief, recommendation agentflow.WorkflowRecommendation) (string, error) {
-	planSHA256, err := canonicalJSONSHA256(plan)
+	planJSON, err := json.Marshal(plan)
+	if err != nil {
+		return "", fmt.Errorf("marshal approved plan: %w", err)
+	}
+	planSHA256, err := canonicalPlanJSONSHA256(planJSON)
 	if err != nil {
 		return "", fmt.Errorf("digest approved plan: %w", err)
 	}
@@ -513,6 +517,28 @@ func canonicalJSONSHA256(value any) (string, error) {
 	}
 	sum := sha256.Sum256(b)
 	return fmt.Sprintf("%x", sum), nil
+}
+
+// canonicalPlanJSONSHA256 binds every semantic Agentflow plan field while
+// excluding only lock-plan's restamped bookkeeping, matching Agentflow's plan
+// binding contract. Decoding through any preserves fields outside Golem's
+// narrow execution projection instead of silently dropping them.
+func canonicalPlanJSONSHA256(data []byte) (string, error) {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var plan map[string]any
+	if err := dec.Decode(&plan); err != nil {
+		return "", err
+	}
+	if plan == nil {
+		return "", errors.New("plan must be a JSON object")
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return "", errors.New("trailing JSON")
+	}
+	delete(plan, "locked")
+	delete(plan, "locked_at")
+	return canonicalJSONSHA256(plan)
 }
 
 // terminalError marks a fail-fast condition that no model repair can fix.
@@ -803,6 +829,9 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		// wrong tree (the cwd-mismatch class fixed in 45838e7). root is absolute.
 		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -task-brief %s -workflow-handoff %s",
 			shellQuote(as.lockedPath), shellQuote(root), shellQuote(as.taskBriefPath), shellQuote(as.workflowHandoffPath))
+		if f.agentflowSrc != "" {
+			_, _ = fmt.Fprintf(stdout, " -agentflow-src %s", shellQuote(f.agentflowSrc))
+		}
 		_, _ = fmt.Fprintln(stdout, " -approve-plan-edits -approve-plan-gates")
 		return nil
 	case as.approvalDenied:

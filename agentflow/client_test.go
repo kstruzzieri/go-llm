@@ -173,12 +173,31 @@ func TestClient_FinishRun_SurfacesAuthoritativeFailedProofCheck(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := &fakeRunner{replies: map[string]fakeReply{
-		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"build-proof","diagnostics":["created proof pack"]}`), exit: 1},
+		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"build-proof","diagnostics":["created .agent/proof-pack.json"]}`), exit: 1},
 	}}
 	c := NewClient(f, root)
 	_, err := c.FinishRun(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "required_review_satisfied: review_depth=deep requires a review run at depth deep") {
 		t.Fatalf("finish-run error omitted authoritative proof requirement: %v", err)
+	}
+}
+
+func TestClient_FinishRun_DoesNotSurfaceStaleProofWhenBuildStopsBeforeWrite(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	proof := `{"checks":[{"id":"stale","status":"failed","message":"old run failure"}]}`
+	if err := os.WriteFile(filepath.Join(root, ".agent", "proof-pack.json"), []byte(proof), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRunner{replies: map[string]fakeReply{
+		"finish-run": {stdout: []byte(`{"ok":false,"stopped_at":"build-proof","diagnostics":["invalid requirement traceability"]}`), exit: 1},
+	}}
+
+	_, err := NewClient(f, root).FinishRun(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "invalid requirement traceability") || strings.Contains(err.Error(), "old run failure") {
+		t.Fatalf("finish-run mixed a stale proof pack into a pre-write build failure: %v", err)
 	}
 }
 

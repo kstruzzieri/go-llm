@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -323,7 +324,8 @@ func (c *Client) FinishRun(ctx context.Context) (string, error) {
 	}
 	if exit != 0 || !r.OK {
 		diagnostics := append([]string(nil), r.Diagnostics...)
-		if r.StoppedAt == "build-proof" || r.StoppedAt == "verify-proof" {
+		if r.StoppedAt == "verify-proof" ||
+			(r.StoppedAt == "build-proof" && slices.Contains(r.Diagnostics, "created .agent/proof-pack.json")) {
 			diagnostics = append(diagnostics, c.failedProofCheckDiagnostics()...)
 		}
 		return "", &FinishRunError{StoppedAt: r.StoppedAt, Diagnostics: diagnostics}
@@ -332,8 +334,8 @@ func (c *Client) FinishRun(ctx context.Context) (string, error) {
 }
 
 // failedProofCheckDiagnostics reads only Agentflow's generated failed checks.
-// It does not decide policy; it preserves the actionable reason that current
-// finish-run envelopes omit when build-proof writes a failing proof pack.
+// The caller first confirms this finish-run wrote the pack, so an earlier pack
+// cannot supply a stale reason for a pre-write build failure.
 func (c *Client) failedProofCheckDiagnostics() []string {
 	b, err := os.ReadFile(filepath.Join(c.root, ".agent", "proof-pack.json"))
 	if err != nil {

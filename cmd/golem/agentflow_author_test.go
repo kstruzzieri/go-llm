@@ -107,7 +107,7 @@ func defaultWorkflowRecommendation() agentflow.WorkflowRecommendation {
 		},
 		Contract: agentflow.WorkflowContract{
 			SchemaVersion: "0.1.0", WorkflowPack: "agentflow-default", WorkflowProfile: "medium-feature",
-			SelectedBy: "recommend-workflow", SelectionReason: "recommended from explicit task signals",
+			SelectedBy: "recommend-workflow", SelectionReason: "feature work uses the medium route",
 			RequiredCapabilities: []agentflow.WorkflowCapability{{ID: "implementation", Required: true}},
 			ReviewDepth:          "standard",
 			ValidationPolicy:     agentflow.WorkflowValidationPolicy{RequiredGates: []string{"unit"}},
@@ -258,6 +258,8 @@ func TestSubmitPlanTool_PreviewsExactTaskSignalsAndOverrideControlSafely(t *test
 	rec.Contract.RequiredCapabilities = append(rec.Contract.RequiredCapabilities, agentflow.WorkflowCapability{ID: "security-review", Required: true})
 	rec.Contract.ValidationPolicy.RequiredGates = []string{"unit", "security\x1b[2J"}
 	rec.Override = &agentflow.WorkflowOverride{FromProfile: "medium-feature", ToProfile: "high-risk", Reason: "operator requires deep review\r"}
+	rec.Contract.SelectedBy = "recommend-workflow --selected-profile"
+	rec.Contract.SelectionReason = "Override: medium-feature -> high-risk. operator requires deep review\r"
 	client := &stubLocker{recommendation: rec}
 	tool := newSubmitPlanTool(&authorSession{client: client, root: "/root", workflowProfile: "high-risk", workflowReason: "operator requires deep review"})
 
@@ -270,7 +272,7 @@ func TestSubmitPlanTool_PreviewsExactTaskSignalsAndOverrideControlSafely(t *test
 		`signals: ["security_sensitive=true", "candidate_files=1\u009b"]`, `rationale: "security-sensitive\nroute"`,
 		`review_depth: "deep"`, `require_review_run: true`, `required_capabilities: ["implementation", "security-review"]`,
 		`required_gates: ["unit", "security\x1b[2J"]`, `hunk_attribution: "observe"`,
-		`selection_reason: "recommended from explicit task signals"`, `override_reason: "operator requires deep review\r"`,
+		`selection_reason: "Override: medium-feature -> high-risk. operator requires deep review\r"`, `override_reason: "operator requires deep review\r"`,
 		`profile: "small-bugfix"; relation: "cheaper"; reason: "only if scope contracts"`,
 	} {
 		if !strings.Contains(plan.Preview, want) {
@@ -730,6 +732,7 @@ func (c *repairFailureCaller) Chat(_ context.Context, _ provider.ChatRequest, on
 
 func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "space and 'quote")
+	agentflowSrc := filepath.Join(t.TempDir(), "agentflow source and 'quote")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -742,6 +745,7 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{
 		goal: "add healthz", goalSet: true,
 		workflowProfile: "high-risk", workflowReason: "operator requires deep review",
+		agentflowSrc: agentflowSrc,
 	}, root, client, fixedApprover(true))
 	if err != nil {
 		t.Fatal(err)
@@ -765,6 +769,9 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	if !strings.Contains(out.String(), " -task-brief ") || !strings.Contains(out.String(), " -workflow-handoff ") ||
 		strings.Contains(out.String(), "-workflow-profile") || strings.Contains(out.String(), "-workflow-reason") {
 		t.Errorf("execute-separately command did not bind the approved route handoff:\n%s", out.String())
+	}
+	if !strings.Contains(out.String(), " -agentflow-src "+shellQuote(agentflowSrc)) {
+		t.Errorf("execute-separately command did not preserve source-checkout runtime %s:\n%s", agentflowSrc, out.String())
 	}
 }
 

@@ -56,37 +56,44 @@ func TaskBriefFromPlan(plan Plan, taskType string) TaskBrief {
 	return brief
 }
 
+// WorkflowSelection identifies one Agentflow workflow pack and profile.
 type WorkflowSelection struct {
 	Pack    string `json:"pack"`
 	Profile string `json:"profile"`
 }
 
+// WorkflowAlternative describes a neighboring cheaper or safer profile.
 type WorkflowAlternative struct {
 	Profile  string `json:"profile"`
 	Relation string `json:"relation"`
 	Reason   string `json:"reason"`
 }
 
+// WorkflowOverride records an explicit profile change and its rationale.
 type WorkflowOverride struct {
 	FromProfile string `json:"from_profile"`
 	ToProfile   string `json:"to_profile"`
 	Reason      string `json:"reason"`
 }
 
+// WorkflowCapability is one capability declaration in a workflow contract.
 type WorkflowCapability struct {
 	ID       string `json:"id"`
 	Required bool   `json:"required"`
 }
 
+// WorkflowValidationPolicy lists the validation gates a workflow requires.
 type WorkflowValidationPolicy struct {
 	RequiredGates []string `json:"required_gates"`
 }
 
+// WorkflowProofPolicy controls hunk attribution and required review evidence.
 type WorkflowProofPolicy struct {
 	HunkAttribution  string `json:"hunk_attribution"`
 	RequireReviewRun bool   `json:"require_review_run"`
 }
 
+// WorkflowContract is Golem's typed projection of Agentflow's selected policy.
 type WorkflowContract struct {
 	SchemaVersion        string                   `json:"schema_version"`
 	WorkflowPack         string                   `json:"workflow_pack"`
@@ -99,6 +106,7 @@ type WorkflowContract struct {
 	ProofPolicy          WorkflowProofPolicy      `json:"proof_policy"`
 }
 
+// WorkflowRecommendation is Agentflow's validated route report and candidate.
 type WorkflowRecommendation struct {
 	SchemaVersion string
 	Recommended   WorkflowSelection
@@ -312,6 +320,22 @@ func parseWorkflowRecommendation(out []byte) (WorkflowRecommendation, error) {
 	}
 	if contract.WorkflowPack != p.Selected.Pack || contract.WorkflowProfile != p.Selected.Profile {
 		return WorkflowRecommendation{}, fmt.Errorf("agentflow recommend-workflow: workflow_contract_candidate workflow_profile does not match selected profile")
+	}
+	if override == nil {
+		if contract.SelectedBy != "recommend-workflow" {
+			return WorkflowRecommendation{}, fmt.Errorf("agentflow recommend-workflow: workflow_contract_candidate selected_by does not match automatic selection")
+		}
+		if contract.SelectionReason != *p.Rationale {
+			return WorkflowRecommendation{}, fmt.Errorf("agentflow recommend-workflow: workflow_contract_candidate selection_reason does not match recommendation rationale")
+		}
+	} else {
+		if contract.SelectedBy != "recommend-workflow --selected-profile" {
+			return WorkflowRecommendation{}, fmt.Errorf("agentflow recommend-workflow: workflow_contract_candidate selected_by does not record the override")
+		}
+		expectedReason := fmt.Sprintf("Override: %s -> %s. %s", override.FromProfile, override.ToProfile, override.Reason)
+		if contract.SelectionReason != expectedReason {
+			return WorkflowRecommendation{}, fmt.Errorf("agentflow recommend-workflow: workflow_contract_candidate selection_reason does not match the override")
+		}
 	}
 	return WorkflowRecommendation{
 		SchemaVersion: *p.SchemaVersion, Recommended: *p.Recommended, Selected: *p.Selected,

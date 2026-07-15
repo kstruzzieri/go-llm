@@ -137,7 +137,7 @@ func TestGoalAuthor_RealCLI(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read approved task brief: %v", err)
 	}
-	if _, err := readApprovedWorkflowHandoff(handoffs[0], dir, lockedPlan, approvedBrief); err != nil {
+	if _, err := readApprovedWorkflowHandoff(handoffs[0], dir, b, approvedBrief); err != nil {
 		t.Fatalf("planning handoff does not bind to the locked plan and brief: %v", err)
 	}
 

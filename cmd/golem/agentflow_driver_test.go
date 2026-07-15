@@ -117,6 +117,15 @@ func (f *fakeAF) NextAction(context.Context) (agentflow.NextActionState, error) 
 	return agentflow.NextActionState{}, nil
 }
 
+func marshalPlanJSON(t *testing.T, plan agentflow.Plan) []byte {
+	t.Helper()
+	b, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 func TestDriver_HappyPathOrdering(t *testing.T) {
 	af := &fakeAF{nextSteps: []string{"P1"}}
 	plan := &agentflow.Plan{Steps: []agentflow.Step{{
@@ -318,7 +327,18 @@ func TestReadApprovedWorkflowHandoff_VerifiesExistingAgentflowContract(t *testin
 		t.Fatal(err)
 	}
 
-	got, err := readApprovedWorkflowHandoff(handoffPath, root, plan, brief)
+	planJSON := marshalPlanJSON(t, plan)
+	var lockedPlan map[string]any
+	if err := json.Unmarshal(planJSON, &lockedPlan); err != nil {
+		t.Fatal(err)
+	}
+	lockedPlan["locked"] = true
+	lockedPlan["locked_at"] = "2026-07-15T00:00:00+00:00"
+	planJSON, err = json.Marshal(lockedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := readApprovedWorkflowHandoff(handoffPath, root, planJSON, brief)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +349,7 @@ func TestReadApprovedWorkflowHandoff_VerifiesExistingAgentflowContract(t *testin
 	if err := os.WriteFile(contractPath, tampered, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readApprovedWorkflowHandoff(handoffPath, root, plan, brief); err == nil || !strings.Contains(err.Error(), "approved workflow handoff") {
+	if _, err := readApprovedWorkflowHandoff(handoffPath, root, planJSON, brief); err == nil || !strings.Contains(err.Error(), "approved workflow handoff") {
 		t.Fatalf("tampered contract error = %v", err)
 	}
 }
@@ -345,13 +365,40 @@ func TestReadApprovedWorkflowHandoff_RejectsDifferentPlanOrBrief(t *testing.T) {
 	}
 	stalePairing := approvedPlan
 	stalePairing.Objective = "different broad plan"
-	if _, err := readApprovedWorkflowHandoff(handoffPath, root, stalePairing, brief); err == nil || !strings.Contains(err.Error(), "plan does not match") {
+	if _, err := readApprovedWorkflowHandoff(handoffPath, root, marshalPlanJSON(t, stalePairing), brief); err == nil || !strings.Contains(err.Error(), "plan does not match") {
 		t.Fatalf("stale plan pairing error = %v", err)
 	}
 	staleBrief := brief
 	staleBrief.TaskType = "docs"
-	if _, err := readApprovedWorkflowHandoff(handoffPath, root, approvedPlan, staleBrief); err == nil || !strings.Contains(err.Error(), "task brief does not match") {
+	if _, err := readApprovedWorkflowHandoff(handoffPath, root, marshalPlanJSON(t, approvedPlan), staleBrief); err == nil || !strings.Contains(err.Error(), "task brief does not match") {
 		t.Fatalf("stale task brief pairing error = %v", err)
+	}
+}
+
+func TestReadApprovedWorkflowHandoff_RejectsUnapprovedAgentflowPlanFields(t *testing.T) {
+	root := t.TempDir()
+	approvedPlan := agentflow.Plan{Objective: "approved objective", RiskLevel: "low"}
+	brief := agentflow.TaskBriefFromPlan(approvedPlan, "feature")
+	handoffPath, err := saveApprovedWorkflowHandoff(root, approvedPlan, brief, defaultWorkflowRecommendation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	planJSON, err := json.Marshal(approvedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var changed map[string]any
+	if err := json.Unmarshal(planJSON, &changed); err != nil {
+		t.Fatal(err)
+	}
+	changed["context_budget"] = map[string]any{"max_total_bytes": 1}
+	planJSON, err = json.Marshal(changed)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := readApprovedWorkflowHandoff(handoffPath, root, planJSON, brief); err == nil || !strings.Contains(err.Error(), "plan does not match") {
+		t.Fatalf("unapproved Agentflow plan field error = %v", err)
 	}
 }
 
