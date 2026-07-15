@@ -23,6 +23,7 @@ import (
 func smokeIR(t *testing.T) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(agentflow.PlanIR{
+		TaskType:     "feature",
 		Objective:    "ensure the answer token",
 		Scope:        []string{"src"},
 		Invariants:   []string{"only src/answer.txt changes"},
@@ -39,7 +40,7 @@ func smokeIR(t *testing.T) json.RawMessage {
 			Files:        []string{"src/answer.txt"},
 			ExpectedDiff: []string{"answer.txt changes pending to expected"},
 			CriterionIDs: []string{"AC-1"},
-			Validations:  []agentflow.GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}, CriterionIDs: []string{"AC-1"}}},
+			Validations:  []agentflow.GateIR{{Label: "unit-tests", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}, CriterionIDs: []string{"AC-1"}}},
 		}},
 	})
 	if err != nil {

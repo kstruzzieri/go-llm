@@ -44,11 +44,12 @@ func TestAgentflowSmoke(t *testing.T) {
 	}
 
 	d := &driver{
-		af:       client,
-		plan:     &plan,
-		planPath: filepath.Join(dir, "plan.json"),
-		runStep:  runStep,
-		out:      io.Discard,
+		af:        client,
+		plan:      &plan,
+		planPath:  filepath.Join(dir, "plan.json"),
+		taskBrief: agentflow.TaskBriefFromPlan(plan, "feature"),
+		runStep:   runStep,
+		out:       io.Discard,
 	}
 	proof, err := d.run(context.Background())
 	if err != nil {

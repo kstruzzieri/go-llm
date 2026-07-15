@@ -362,18 +362,48 @@ func TestSubmitPlanTool_SuccessLocksAndCancels(t *testing.T) {
 	_, cancel := context.WithCancel(context.Background())
 	canceled := false
 	client := &stubLocker{}
-	as := &authorSession{client: client, root: "/root",
+	root := t.TempDir()
+	as := &authorSession{client: client, root: root,
 		cancel: func() { canceled = true; cancel() }}
 	tool := newSubmitPlanTool(as)
-	if _, err := tool.Plan(context.Background(), validIRJSON(t)); err != nil {
-		t.Fatal(err)
-	}
-	res, err := tool.Invoke(context.Background(), validIRJSON(t))
+	security := true
+	ir := validTraceableIR()
+	ir.SecuritySensitive = &security
+	ir.BlastRadius = "local"
+	ir.DeclaredSize = "s"
+	args, err := json.Marshal(ir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if as.lockedPath != filepath.Join("/root", ".agent", "plan.lock.json") || !canceled || res.IsError {
+	if _, err := tool.Plan(context.Background(), args); err != nil {
+		t.Fatal(err)
+	}
+	res, err := tool.Invoke(context.Background(), args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if as.lockedPath != filepath.Join(root, ".agent", "plan.lock.json") || !canceled || res.IsError {
 		t.Errorf("success path: locked=%q canceled=%v res=%+v", as.lockedPath, canceled, res)
+	}
+	if !strings.HasPrefix(as.taskBriefPath, filepath.Join(root, ".agent", "golem-task-brief-")) {
+		t.Fatalf("approved task brief path = %q", as.taskBriefPath)
+	}
+	b, err := os.ReadFile(as.taskBriefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var brief agentflow.TaskBrief
+	if err := json.Unmarshal(b, &brief); err != nil || brief.TaskType != "feature" || brief.DeclaredRisk != "low" ||
+		brief.SecuritySensitive == nil || !*brief.SecuritySensitive || brief.BlastRadius == nil || *brief.BlastRadius != "local" ||
+		brief.DeclaredSize == nil || *brief.DeclaredSize != "s" || brief.CandidateFiles == nil || brief.ValidationNeeds == nil {
+		t.Fatalf("saved approved task brief = %+v, err %v", brief, err)
+	}
+	info, err := os.Stat(as.taskBriefPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Fatalf("approved task brief mode = %v", info.Mode().Perm())
 	}
 	if len(client.paths) != 1 {
 		t.Fatalf("LockPlan calls = %d, want 1", len(client.paths))
@@ -688,13 +718,19 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 
 	var out, errb bytes.Buffer
 	// runAgentflowAuthorWithClient injects a stub afLocker so no real CLI runs.
-	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{goal: "add healthz", goalSet: true}, root, client, fixedApprover(true))
+	err := runAgentflowAuthorWithClient(context.Background(), &out, &errb, nil, sess, flags{
+		goal: "add healthz", goalSet: true,
+		workflowProfile: "high-risk", workflowReason: "operator requires deep review",
+	}, root, client, fixedApprover(true))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if client.probes != 1 || client.workflowProbes != 1 || client.recommendations != 1 || client.inits != 1 || client.locks != 1 || client.materializations != 1 {
 		t.Fatalf("approved plan calls = probe %d workflow-probe %d recommend %d init %d lock %d materialize %d",
 			client.probes, client.workflowProbes, client.recommendations, client.inits, client.locks, client.materializations)
+	}
+	if client.selectedProfiles[0] != "high-risk" || client.reasons[0] != "operator requires deep review" {
+		t.Fatalf("author workflow override was not forwarded: %v / %v", client.selectedProfiles, client.reasons)
 	}
 	if !strings.Contains(out.String(), filepath.Join(root, ".agent", "plan.lock.json")) ||
 		!strings.Contains(out.String(), "locked approved plan") {
@@ -704,6 +740,10 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	// proof state to the planning tree even when run from another directory.
 	if !strings.Contains(out.String(), "-plan "+shellQuote(filepath.Join(root, ".agent", "plan.lock.json"))+" -root "+shellQuote(root)) {
 		t.Errorf("execute-separately command missing -root %s:\n%s", root, out.String())
+	}
+	if !strings.Contains(out.String(), " -task-brief ") ||
+		!strings.Contains(out.String(), "-workflow-profile 'high-risk' -workflow-reason 'operator requires deep review'") {
+		t.Errorf("execute-separately command did not preserve route inputs:\n%s", out.String())
 	}
 }
 

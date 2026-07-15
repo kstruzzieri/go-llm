@@ -26,9 +26,12 @@ var errAgentflowTaskFailed = errors.New("agentflow task failed")
 // afClient is the driver's view of agentflow (satisfied by *agentflow.Client).
 type afClient interface {
 	Probe(context.Context) error
+	ProbeWorkflow(context.Context) error
+	RecommendWorkflow(context.Context, agentflow.TaskBrief, string, string) (agentflow.WorkflowRecommendation, error)
 	ProbeReview(context.Context) error
 	Init(context.Context) error
 	LockPlan(context.Context, string) error
+	MaterializeWorkflowContract(context.Context, agentflow.WorkflowRecommendation) error
 	InitExecution(context.Context) error
 	Doctor(context.Context) error
 	NextStep(context.Context) (string, error)
@@ -49,19 +52,35 @@ type afClient interface {
 type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal string) error
 
 type driver struct {
-	af             afClient
-	plan           *agentflow.Plan
-	planPath       string
-	reviewManifest string
-	evidence       []agentflow.EvidenceEntry
-	runStep        runStepFunc
-	out            io.Writer
+	af              afClient
+	plan            *agentflow.Plan
+	planPath        string
+	reviewManifest  string
+	taskBrief       agentflow.TaskBrief
+	workflowProfile string
+	workflowReason  string
+	recommendation  agentflow.WorkflowRecommendation
+	evidence        []agentflow.EvidenceEntry
+	runStep         runStepFunc
+	out             io.Writer
 }
 
 // run drives the P0 sequence and returns the proof-pack path on success.
 func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.Probe(ctx); err != nil {
 		return "", fmt.Errorf("agentflow unavailable: %w", err)
+	}
+	if err := d.af.ProbeWorkflow(ctx); err != nil {
+		return "", fmt.Errorf("agentflow workflow routing unavailable: %w", err)
+	}
+	recommendation, err := d.af.RecommendWorkflow(ctx, d.taskBrief, d.workflowProfile, d.workflowReason)
+	if err != nil {
+		return "", fmt.Errorf("recommend Agentflow workflow: %w", err)
+	}
+	d.recommendation = recommendation
+	if d.out != nil {
+		_, _ = fmt.Fprintln(d.out, "Agentflow workflow route at task startup")
+		_, _ = fmt.Fprint(d.out, renderWorkflowPreview(recommendation))
 	}
 	if d.reviewManifest != "" {
 		if err := d.af.ProbeReview(ctx); err != nil {
@@ -78,6 +97,9 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	}
 	if err := d.af.LockPlan(ctx, d.planPath); err != nil {
 		return "", err // *CommandError carries the structured validation errors
+	}
+	if err := d.af.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		return "", fmt.Errorf("materialize Agentflow workflow contract: %w", err)
 	}
 	if err := d.af.InitExecution(ctx); err != nil {
 		return "", err
@@ -145,6 +167,10 @@ type reviewAmendment struct {
 var reviewRunIDPattern = regexp.MustCompile(`^RR-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
 
 func (d *driver) runReviewAmendments(ctx context.Context) error {
+	if d.out != nil {
+		_, _ = fmt.Fprintln(d.out, "Workflow route before review ingestion")
+		_, _ = fmt.Fprint(d.out, renderWorkflowPreview(d.recommendation))
+	}
 	run, err := d.af.RecordReview(ctx, d.reviewManifest)
 	if err != nil {
 		return fmt.Errorf("record review: %w", err)
@@ -334,6 +360,10 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if !f.approveGates {
 		return errors.New("task mode needs -approve-plan-gates to run validation gates headlessly")
 	}
+	taskBrief, err := readExternalTaskBrief(f.taskBriefPath, plan)
+	if err != nil {
+		return err
+	}
 
 	// 3. Build the agentflow client (binary or python-src).
 	var runner agentflow.Runner
@@ -407,6 +437,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	// 7. Drive.
 	d := &driver{
 		af: client, plan: &plan, planPath: planPath, reviewManifest: reviewManifest,
+		taskBrief: taskBrief, workflowProfile: f.workflowProfile, workflowReason: f.workflowReason,
 		evidence: evidence, runStep: runStep, out: stdout,
 	}
 	proof, err := d.run(runCtx)
@@ -416,6 +447,82 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		return errAgentflowTaskFailed
 	}
 	_, _ = fmt.Fprintf(stdout, "proof pack: %s\n", proof)
+	return nil
+}
+
+// readExternalTaskBrief resolves and strictly decodes an optional caller brief.
+// Missing exact file/gate facts are filled from the plan; all other missing
+// signals remain unknown. Without a brief, task_type=feature is the conservative
+// compatibility floor—Golem does not infer a lighter task class from prose.
+func readExternalTaskBrief(path string, plan agentflow.Plan) (agentflow.TaskBrief, error) {
+	if path == "" {
+		brief := agentflow.TaskBriefFromPlan(plan, "feature")
+		if err := validateExternalTaskBrief(brief, plan.RiskLevel); err != nil {
+			return agentflow.TaskBrief{}, err
+		}
+		return brief, nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return agentflow.TaskBrief{}, fmt.Errorf("resolve task brief: %w", err)
+	}
+	b, err := os.ReadFile(abs)
+	if err != nil {
+		return agentflow.TaskBrief{}, fmt.Errorf("read task brief: %w", err)
+	}
+	var brief agentflow.TaskBrief
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&brief); err != nil {
+		return agentflow.TaskBrief{}, fmt.Errorf("parse task brief: %w", err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return agentflow.TaskBrief{}, fmt.Errorf("parse task brief: trailing JSON")
+	}
+	if err := validateExternalTaskBrief(brief, plan.RiskLevel); err != nil {
+		return agentflow.TaskBrief{}, err
+	}
+	facts := agentflow.TaskBriefFromPlan(plan, brief.TaskType)
+	if brief.CandidateFiles == nil {
+		brief.CandidateFiles = facts.CandidateFiles
+	}
+	if brief.ValidationNeeds == nil {
+		brief.ValidationNeeds = facts.ValidationNeeds
+	}
+	return brief, nil
+}
+
+func validateExternalTaskBrief(brief agentflow.TaskBrief, planRisk string) error {
+	if brief.SchemaVersion != agentflow.TaskBriefSchemaVersion {
+		return fmt.Errorf("task brief schema_version %q is incompatible; want %s", brief.SchemaVersion, agentflow.TaskBriefSchemaVersion)
+	}
+	switch brief.TaskType {
+	case "docs", "bugfix", "feature", "refactor":
+	default:
+		return fmt.Errorf("task brief task_type %q must be docs, bugfix, feature, or refactor", brief.TaskType)
+	}
+	if brief.DeclaredRisk != "low" && brief.DeclaredRisk != "medium" && brief.DeclaredRisk != "high" {
+		return fmt.Errorf("task brief declared_risk %q must be low, medium, or high", brief.DeclaredRisk)
+	}
+	if brief.DeclaredRisk != planRisk {
+		return fmt.Errorf("task brief declared_risk %q does not match plan risk %q", brief.DeclaredRisk, planRisk)
+	}
+	if brief.BlastRadius != nil && *brief.BlastRadius != "isolated" && *brief.BlastRadius != "local" && *brief.BlastRadius != "cross_cutting" {
+		return fmt.Errorf("task brief blast_radius %q is invalid", *brief.BlastRadius)
+	}
+	if brief.DeclaredSize != nil && *brief.DeclaredSize != "xs" && *brief.DeclaredSize != "s" && *brief.DeclaredSize != "m" && *brief.DeclaredSize != "l" && *brief.DeclaredSize != "xl" {
+		return fmt.Errorf("task brief declared_size %q is invalid", *brief.DeclaredSize)
+	}
+	for field, values := range map[string]*[]string{"candidate_files": brief.CandidateFiles, "validation_needs": brief.ValidationNeeds} {
+		if values == nil {
+			continue
+		}
+		for _, value := range *values {
+			if strings.TrimSpace(value) == "" {
+				return fmt.Errorf("task brief %s must contain non-empty strings", field)
+			}
+		}
+	}
 	return nil
 }
 

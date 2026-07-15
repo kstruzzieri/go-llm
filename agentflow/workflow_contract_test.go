@@ -182,6 +182,9 @@ func TestWorkflowContract_RealCLI_DeepRouteRequiresAdequateReviewRun(t *testing.
 	if !errors.As(err, &stopped) || stopped.StoppedAt != "build-proof" {
 		t.Fatalf("finish-run err = %#v, want proof build to stop on required review", err)
 	}
+	if !strings.Contains(stopped.Error(), "required_review_satisfied: review_depth=deep requires a review run") {
+		t.Fatalf("finish-run omitted actionable review requirement: %v", stopped)
+	}
 	proofBytes, err := os.ReadFile(filepath.Join(dir, ".agent", "proof-pack.json"))
 	if err != nil {
 		t.Fatal(err)

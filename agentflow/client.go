@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -321,9 +322,45 @@ func (c *Client) FinishRun(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("agentflow finish-run: parse %q: %w", out, err)
 	}
 	if exit != 0 || !r.OK {
-		return "", &FinishRunError{StoppedAt: r.StoppedAt, Diagnostics: r.Diagnostics}
+		diagnostics := append([]string(nil), r.Diagnostics...)
+		if r.StoppedAt == "build-proof" || r.StoppedAt == "verify-proof" {
+			diagnostics = append(diagnostics, c.failedProofCheckDiagnostics()...)
+		}
+		return "", &FinishRunError{StoppedAt: r.StoppedAt, Diagnostics: diagnostics}
 	}
 	return filepath.Join(c.root, ".agent", "proof-pack.json"), nil
+}
+
+// failedProofCheckDiagnostics reads only Agentflow's generated failed checks.
+// It does not decide policy; it preserves the actionable reason that current
+// finish-run envelopes omit when build-proof writes a failing proof pack.
+func (c *Client) failedProofCheckDiagnostics() []string {
+	b, err := os.ReadFile(filepath.Join(c.root, ".agent", "proof-pack.json"))
+	if err != nil {
+		return nil
+	}
+	var proof struct {
+		Checks []struct {
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(b, &proof); err != nil {
+		return nil
+	}
+	var diagnostics []string
+	for _, check := range proof.Checks {
+		if check.Status != "failed" || strings.TrimSpace(check.Message) == "" {
+			continue
+		}
+		message := check.Message
+		if strings.TrimSpace(check.ID) != "" {
+			message = check.ID + ": " + message
+		}
+		diagnostics = append(diagnostics, message)
+	}
+	return diagnostics
 }
 
 // NextActionState is the advisory recovery hint agentflow's next-action reports.

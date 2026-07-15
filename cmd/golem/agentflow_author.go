@@ -55,8 +55,10 @@ type authorSession struct {
 	// may mutate state only when both are still bound to the approved call.
 	previewArgs           []byte
 	previewRecommendation *agentflow.WorkflowRecommendation
+	previewBrief          *agentflow.TaskBrief
 	workflowProfile       string
 	workflowReason        string
+	taskBriefPath         string
 }
 
 type submitPlanTool struct {
@@ -115,6 +117,7 @@ func (t *submitPlanTool) Plan(ctx context.Context, args json.RawMessage) (agent.
 	effect := t.Effect()
 	t.sess.previewArgs = nil
 	t.sess.previewRecommendation = nil
+	t.sess.previewBrief = nil
 	var ir agentflow.PlanIR
 	if err := json.Unmarshal(args, &ir); err != nil {
 		effect.Approval = agent.ApprovalNever
@@ -139,6 +142,7 @@ func (t *submitPlanTool) Plan(ctx context.Context, args json.RawMessage) (agent.
 	t.sess.lastPreview = preview
 	t.sess.previewArgs = append([]byte(nil), args...)
 	t.sess.previewRecommendation = &recommendation
+	t.sess.previewBrief = &brief
 	return agent.ToolPlan{Effect: effect, Preview: shown}, nil
 }
 
@@ -155,13 +159,16 @@ func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agen
 	if diags := authorPlanDiagnostics(ir, plan); len(diags) > 0 {
 		return t.reject(diags)
 	}
-	if s.previewRecommendation == nil || !bytes.Equal(s.previewArgs, args) {
+	if s.previewRecommendation == nil || s.previewBrief == nil || !bytes.Equal(s.previewArgs, args) {
 		return t.reject([]agentflow.Diagnostic{{Code: "workflow_preview_required", Message: "the exact plan and Agentflow route must be previewed before approval"}})
 	}
 	recommendation := *s.previewRecommendation
+	brief := *s.previewBrief
 	s.previewArgs = nil
 	s.previewRecommendation = nil
-	if err := t.lock(ctx, plan, recommendation); err != nil {
+	s.previewBrief = nil
+	briefPath, err := t.lock(ctx, plan, recommendation, brief)
+	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(ctx.Err(), context.Canceled) {
 			s.cancel()
 			return agent.ToolResult{}, context.Canceled
@@ -173,6 +180,7 @@ func (t *submitPlanTool) Invoke(ctx context.Context, args json.RawMessage) (agen
 		}
 		return t.reject(lockErrorDiagnostics(err))
 	}
+	s.taskBriefPath = briefPath
 	// #209 resolves relative -plan paths against the process cwd, not -root.
 	// Preserve an absolute handoff path so an explicit -root works from anywhere.
 	s.lockedPath = filepath.Join(s.root, filepath.FromSlash(lockedPlanRel))
@@ -397,33 +405,67 @@ func extraLines(a, b []string) []string {
 // lock stages the compiled plan through a temp file and the real lock-plan. The
 // temp lives outside .agent/ so a failed lock leaves no stray workspace artifact;
 // LockPlan itself writes the durable .agent/plan.lock.json.
-func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan, recommendation agentflow.WorkflowRecommendation) error {
+func (t *submitPlanTool) lock(ctx context.Context, plan agentflow.Plan, recommendation agentflow.WorkflowRecommendation, brief agentflow.TaskBrief) (string, error) {
 	if err := t.sess.client.Init(ctx); err != nil {
-		return &terminalError{fmt.Errorf("agentflow init: %w", err)}
+		return "", &terminalError{fmt.Errorf("agentflow init: %w", err)}
 	}
 	b, err := json.MarshalIndent(plan, "", "  ")
 	if err != nil {
-		return &terminalError{fmt.Errorf("marshal compiled plan: %w", err)}
+		return "", &terminalError{fmt.Errorf("marshal compiled plan: %w", err)}
 	}
 	tmp, err := os.CreateTemp("", "golem-plan-*.json")
 	if err != nil {
-		return &terminalError{fmt.Errorf("create staged plan: %w", err)}
+		return "", &terminalError{fmt.Errorf("create staged plan: %w", err)}
 	}
 	defer func() { _ = os.Remove(tmp.Name()) }()
 	if _, err := tmp.Write(b); err != nil {
 		_ = tmp.Close()
-		return &terminalError{fmt.Errorf("write staged plan %s: %w", tmp.Name(), err)}
+		return "", &terminalError{fmt.Errorf("write staged plan %s: %w", tmp.Name(), err)}
 	}
 	if err := tmp.Close(); err != nil {
-		return &terminalError{fmt.Errorf("close staged plan %s: %w", tmp.Name(), err)}
+		return "", &terminalError{fmt.Errorf("close staged plan %s: %w", tmp.Name(), err)}
 	}
 	if err := t.sess.client.LockPlan(ctx, tmp.Name()); err != nil {
-		return err
+		return "", err
 	}
 	if err := t.sess.client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
-		return &terminalError{fmt.Errorf("materialize Agentflow workflow contract after plan lock: %w", err)}
+		return "", &terminalError{fmt.Errorf("materialize Agentflow workflow contract after plan lock: %w", err)}
 	}
-	return nil
+	briefPath, err := saveApprovedTaskBrief(t.sess.root, brief)
+	if err != nil {
+		return "", &terminalError{fmt.Errorf("save approved Agentflow task brief after plan lock: %w", err)}
+	}
+	return briefPath, nil
+}
+
+func saveApprovedTaskBrief(root string, brief agentflow.TaskBrief) (string, error) {
+	b, err := json.MarshalIndent(brief, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	dir := filepath.Join(root, ".agent")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return "", err
+	}
+	f, err := os.CreateTemp(dir, "golem-task-brief-*.json")
+	if err != nil {
+		return "", err
+	}
+	remove := true
+	defer func() {
+		if remove {
+			_ = os.Remove(f.Name())
+		}
+	}()
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		return "", err
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	remove = false
+	return f.Name(), nil
 }
 
 // terminalError marks a fail-fast condition that no model repair can fix.
@@ -681,7 +723,10 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 	}
 	ws.SetScopeGuard(func(rel string, _ bool) error { return denyProofState(rel) })
 
-	as := &authorSession{client: client, root: root, cancel: cancel}
+	as := &authorSession{
+		client: client, root: root, cancel: cancel,
+		workflowProfile: f.workflowProfile, workflowReason: f.workflowReason,
+	}
 
 	planTools := append(agenttools.NewFileToolsForWorkspace(ws), newSubmitPlanTool(as))
 
@@ -709,7 +754,11 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		// Include -root: #209 resolves proof state against the process cwd, so an
 		// operator running this from another directory would otherwise write to the
 		// wrong tree (the cwd-mismatch class fixed in 45838e7). root is absolute.
-		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -approve-plan-edits -approve-plan-gates\n", shellQuote(as.lockedPath), shellQuote(root))
+		_, _ = fmt.Fprintf(stdout, "  golem -plan %s -root %s -task-brief %s", shellQuote(as.lockedPath), shellQuote(root), shellQuote(as.taskBriefPath))
+		if as.workflowProfile != "" {
+			_, _ = fmt.Fprintf(stdout, " -workflow-profile %s -workflow-reason %s", shellQuote(as.workflowProfile), shellQuote(as.workflowReason))
+		}
+		_, _ = fmt.Fprintln(stdout, " -approve-plan-edits -approve-plan-gates")
 		return nil
 	case as.approvalDenied:
 		if as.deniedPlanSaveErr != nil {

@@ -16,12 +16,17 @@ import (
 
 // fakeAF records the ordered sequence of driver->agentflow calls.
 type fakeAF struct {
-	seq        []string
-	nextSteps  []string // ids to hand out, then "" (done)
-	i          int
-	review     agentflow.ReviewRun
-	failAt     map[string]error
-	proofError error
+	seq                []string
+	nextSteps          []string // ids to hand out, then "" (done)
+	i                  int
+	review             agentflow.ReviewRun
+	failAt             map[string]error
+	proofError         error
+	recommendation     agentflow.WorkflowRecommendation
+	briefs             []agentflow.TaskBrief
+	selectedProfiles   []string
+	reasons            []string
+	materializedRoutes []string
 }
 
 func (f *fakeAF) failure(name string) error {
@@ -32,6 +37,23 @@ func (f *fakeAF) failure(name string) error {
 }
 
 func (f *fakeAF) Probe(context.Context) error { f.seq = append(f.seq, "probe"); return nil }
+func (f *fakeAF) ProbeWorkflow(context.Context) error {
+	f.seq = append(f.seq, "probe-workflow")
+	return f.failure("probe-workflow")
+}
+func (f *fakeAF) RecommendWorkflow(_ context.Context, brief agentflow.TaskBrief, selectedProfile, reason string) (agentflow.WorkflowRecommendation, error) {
+	f.seq = append(f.seq, "recommend")
+	f.briefs = append(f.briefs, brief)
+	f.selectedProfiles = append(f.selectedProfiles, selectedProfile)
+	f.reasons = append(f.reasons, reason)
+	if err := f.failure("recommend"); err != nil {
+		return agentflow.WorkflowRecommendation{}, err
+	}
+	if f.recommendation.SchemaVersion != "" {
+		return f.recommendation, nil
+	}
+	return defaultWorkflowRecommendation(), nil
+}
 func (f *fakeAF) ProbeReview(context.Context) error {
 	f.seq = append(f.seq, "probe-review")
 	return f.failure("probe-review")
@@ -40,6 +62,11 @@ func (f *fakeAF) Init(context.Context) error { f.seq = append(f.seq, "init"); re
 func (f *fakeAF) LockPlan(_ context.Context, p string) error {
 	f.seq = append(f.seq, "lock:"+p)
 	return nil
+}
+func (f *fakeAF) MaterializeWorkflowContract(_ context.Context, recommendation agentflow.WorkflowRecommendation) error {
+	f.seq = append(f.seq, "materialize")
+	f.materializedRoutes = append(f.materializedRoutes, recommendation.Selected.Profile)
+	return f.failure("materialize")
 }
 func (f *fakeAF) InitExecution(context.Context) error { f.seq = append(f.seq, "init-exec"); return nil }
 func (f *fakeAF) Doctor(context.Context) error        { f.seq = append(f.seq, "doctor"); return nil }
@@ -110,12 +137,155 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 		t.Fatalf("proof=%q err=%v", proof, err)
 	}
 	want := []string{
-		"probe", "init", "evidence:E1", "lock:plan.json", "init-exec", "doctor",
+		"probe", "probe-workflow", "recommend", "init", "evidence:E1", "lock:plan.json", "materialize", "init-exec", "doctor",
 		"next-step", "claim:P1", "gate:P1:go test", "finish-step:P1:A-P1",
 		"next-step", "finish-run",
 	}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
+	}
+}
+
+func TestReadExternalTaskBrief_ConservativeFallbackUsesOnlyExactPlanFacts(t *testing.T) {
+	plan := agentflow.Plan{
+		RiskLevel:       "low",
+		ValidationGates: []string{"unit", "integration"},
+		Steps: []agentflow.Step{
+			{Files: []string{"src/a.go", "src/shared.go"}},
+			{Files: []string{"src/shared.go", "src/b.go"}},
+		},
+	}
+	brief, err := readExternalTaskBrief("", plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.SchemaVersion != agentflow.TaskBriefSchemaVersion || brief.TaskType != "feature" || brief.DeclaredRisk != "low" {
+		t.Fatalf("fallback identity = %+v", brief)
+	}
+	if brief.CandidateFiles == nil || strings.Join(*brief.CandidateFiles, ",") != "src/a.go,src/shared.go,src/b.go" {
+		t.Fatalf("fallback candidate files = %v", brief.CandidateFiles)
+	}
+	if brief.ValidationNeeds == nil || strings.Join(*brief.ValidationNeeds, ",") != "unit,integration" {
+		t.Fatalf("fallback validation needs = %v", brief.ValidationNeeds)
+	}
+	if brief.SecuritySensitive != nil || brief.BlastRadius != nil || brief.DeclaredSize != nil {
+		t.Fatalf("fallback guessed optional signals: %+v", brief)
+	}
+}
+
+func TestReadExternalTaskBrief_StrictExplicitInputAndExactFactFill(t *testing.T) {
+	cwd := t.TempDir()
+	t.Chdir(cwd)
+	plan := agentflow.Plan{
+		RiskLevel: "high", ValidationGates: []string{"unit"},
+		Steps: []agentflow.Step{{Files: []string{"src/a.go"}}},
+	}
+	write := func(name, body string) string {
+		t.Helper()
+		path := filepath.Join(cwd, name)
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return name
+	}
+
+	path := write("brief.json", `{"schema_version":"0.1.0","task_type":"refactor","declared_risk":"high","security_sensitive":false,"blast_radius":"local","declared_size":"s"}`)
+	brief, err := readExternalTaskBrief(path, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if brief.TaskType != "refactor" || brief.SecuritySensitive == nil || *brief.SecuritySensitive ||
+		brief.BlastRadius == nil || *brief.BlastRadius != "local" || brief.DeclaredSize == nil || *brief.DeclaredSize != "s" {
+		t.Fatalf("explicit fields not preserved: %+v", brief)
+	}
+	if brief.CandidateFiles == nil || strings.Join(*brief.CandidateFiles, ",") != "src/a.go" ||
+		brief.ValidationNeeds == nil || strings.Join(*brief.ValidationNeeds, ",") != "unit" {
+		t.Fatalf("absent exact facts not filled: %+v", brief)
+	}
+
+	emptyPath := write("explicit-empty.json", `{"schema_version":"0.1.0","task_type":"feature","declared_risk":"high","candidate_files":[],"validation_needs":[]}`)
+	empty, err := readExternalTaskBrief(emptyPath, plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.CandidateFiles == nil || len(*empty.CandidateFiles) != 0 || empty.ValidationNeeds == nil || len(*empty.ValidationNeeds) != 0 {
+		t.Fatalf("present empty fields were overwritten: %+v", empty)
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"unknown field", `{"schema_version":"0.1.0","task_type":"feature","declared_risk":"high","future":true}`, "unknown field"},
+		{"trailing json", `{"schema_version":"0.1.0","task_type":"feature","declared_risk":"high"}{}`, "trailing"},
+		{"wrong version", `{"schema_version":"9.0.0","task_type":"feature","declared_risk":"high"}`, "schema_version"},
+		{"missing task type", `{"schema_version":"0.1.0","declared_risk":"high"}`, "task_type"},
+		{"risk mismatch", `{"schema_version":"0.1.0","task_type":"feature","declared_risk":"low"}`, "does not match plan risk"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := readExternalTaskBrief(write(strings.ReplaceAll(tc.name, " ", "-")+".json", tc.body), plan); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestDriver_RouteIsReadOnlyBeforeMutationAndShownBeforeReview(t *testing.T) {
+	rec := defaultWorkflowRecommendation()
+	rec.Selected.Profile = "high-risk"
+	rec.Contract.WorkflowProfile = "high-risk"
+	rec.Contract.ReviewDepth = "deep"
+	rec.Contract.ProofPolicy.RequireReviewRun = true
+	af := &fakeAF{recommendation: rec, review: reviewRun(false)}
+	var out strings.Builder
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: &out,
+		taskBrief:       agentflow.TaskBrief{SchemaVersion: "0.1.0", TaskType: "feature", DeclaredRisk: "high"},
+		workflowProfile: "high-risk", workflowReason: "operator requires deep review",
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	if _, err := d.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantPrefix := []string{"probe", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize"}
+	if len(af.seq) < len(wantPrefix) || !equalSeq(af.seq[:len(wantPrefix)], wantPrefix) {
+		t.Fatalf("route/mutation prefix = %v, want %v", af.seq, wantPrefix)
+	}
+	if len(af.materializedRoutes) != 1 || af.materializedRoutes[0] != "high-risk" {
+		t.Fatalf("materialized routes = %v", af.materializedRoutes)
+	}
+	if len(af.briefs) != 1 || af.briefs[0].DeclaredRisk != "high" || af.selectedProfiles[0] != "high-risk" || af.reasons[0] != "operator requires deep review" {
+		t.Fatalf("route inputs = briefs %+v profile %v reason %v", af.briefs, af.selectedProfiles, af.reasons)
+	}
+	if strings.Count(out.String(), `selected: "agentflow-default" / "high-risk"`) != 2 ||
+		!strings.Contains(out.String(), `review_depth: "deep"`) || !strings.Contains(out.String(), "Workflow route before review") {
+		t.Fatalf("startup/review route output:\n%s", out.String())
+	}
+}
+
+func TestDriver_WorkflowFailuresStopAtTheirMutationBoundary(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		failAt   string
+		wantSeq  []string
+		wantText string
+	}{
+		{name: "workflow probe", failAt: "probe-workflow", wantSeq: []string{"probe", "probe-workflow"}, wantText: "workflow routing unavailable"},
+		{name: "recommendation", failAt: "recommend", wantSeq: []string{"probe", "probe-workflow", "recommend"}, wantText: "recommend Agentflow workflow"},
+		{name: "materialization", failAt: "materialize", wantSeq: []string{"probe", "probe-workflow", "recommend", "init", "lock:plan.json", "materialize"}, wantText: "materialize Agentflow workflow contract"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			af := &fakeAF{failAt: map[string]error{tt.failAt: errors.New("scripted failure")}}
+			d := &driver{af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
+				runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
+			if _, err := d.run(context.Background()); err == nil || !strings.Contains(err.Error(), tt.wantText) {
+				t.Fatalf("error = %v, want %q", err, tt.wantText)
+			}
+			if !equalSeq(af.seq, tt.wantSeq) {
+				t.Fatalf("failure sequence = %v, want %v", af.seq, tt.wantSeq)
+			}
+		})
 	}
 }
 
@@ -163,7 +333,7 @@ func TestDriver_AmendmentReadyFindingUsesExistingAttemptLifecycle(t *testing.T) 
 	}
 	ref := "RR-20260714T120000Z-1234abcd#RF-1"
 	want := []string{
-		"probe", "probe-review", "init", "lock:plan.json", "init-exec", "doctor", "next-step",
+		"probe", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize", "init-exec", "doctor", "next-step",
 		"record-review:review.json", "amend:P1:" + ref, "gate:P1:test one", "finish-step:P1:AM-P1", "finish-run",
 	}
 	if !equalSeq(af.seq, want) {
@@ -814,7 +984,7 @@ func TestDriver_ReviewProbeFailureAbortsBeforeInit(t *testing.T) {
 	if _, err := d.run(context.Background()); err == nil || !strings.Contains(err.Error(), "review unavailable") {
 		t.Fatalf("err = %v, want review unavailable", err)
 	}
-	if want := []string{"probe", "probe-review"}; !equalSeq(af.seq, want) {
+	if want := []string{"probe", "probe-workflow", "recommend", "probe-review"}; !equalSeq(af.seq, want) {
 		t.Fatalf("review-probe failure must abort before Init: seq = %v", af.seq)
 	}
 }
