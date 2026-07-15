@@ -154,6 +154,12 @@ func (d *driver) runReviewAmendments(ctx context.Context) error {
 		return fmt.Errorf("invalid Agentflow review projection: %w", err)
 	}
 	if d.out != nil {
+		blocking := "none"
+		if len(run.ActiveBlocking) > 0 {
+			blocking = strings.Join(run.ActiveBlocking, ", ")
+		}
+		_, _ = fmt.Fprintf(d.out, "review %s gate=%s amendment_ready=%t active_blocking=%s\n",
+			run.ReviewRunID, run.GateStatus, run.AmendmentReady, blocking)
 		for _, finding := range run.Findings.Index {
 			mode := "display-only"
 			if run.AmendmentReady && activeReviewFinding(finding.Status) {
@@ -193,17 +199,22 @@ func reviewAmendments(plan *agentflow.Plan, run agentflow.ReviewRun) ([]reviewAm
 		if strings.TrimSpace(finding.FindingID) == "" {
 			return nil, errors.New("finding_id must be non-empty")
 		}
-		if !validReviewSeverity(finding.Severity) {
-			return nil, fmt.Errorf("finding %s has invalid severity %q", finding.FindingID, finding.Severity)
-		}
-		if !validReviewStatus(finding.Status) {
-			return nil, fmt.Errorf("finding %s has invalid status %q", finding.FindingID, finding.Status)
-		}
 		if run.AmendmentReady {
 			if seen[finding.FindingID] {
 				return nil, fmt.Errorf("duplicate finding_id %q", finding.FindingID)
 			}
 			seen[finding.FindingID] = true
+		}
+		// Display-only findings (legacy amendment_ready=false runs, or inactive
+		// statuses) are surfaced but never amended, and their severity and
+		// location are never consumed. Tolerate unrecognized vocabulary there so
+		// one forward-compat finding cannot abort a fully completed run; only
+		// findings we are about to turn into work are strictly validated.
+		if !run.AmendmentReady || !activeReviewFinding(finding.Status) {
+			continue
+		}
+		if !validReviewSeverity(finding.Severity) {
+			return nil, fmt.Errorf("finding %s has invalid severity %q", finding.FindingID, finding.Severity)
 		}
 		if finding.Location != nil {
 			loc := finding.Location
@@ -211,9 +222,6 @@ func reviewAmendments(plan *agentflow.Plan, run agentflow.ReviewRun) ([]reviewAm
 				(loc.LineEnd > 0 && loc.Line == 0) || (loc.LineEnd > 0 && loc.LineEnd < loc.Line) {
 				return nil, fmt.Errorf("finding %s has invalid location", finding.FindingID)
 			}
-		}
-		if !run.AmendmentReady || !activeReviewFinding(finding.Status) {
-			continue
 		}
 		if strings.TrimSpace(finding.OwningStep) == "" || strings.TrimSpace(finding.Claim) == "" || strings.TrimSpace(finding.SuggestedFix) == "" {
 			return nil, fmt.Errorf("finding %s requires owning_step, claim, and suggested_fix", finding.FindingID)
@@ -233,14 +241,15 @@ func reviewAmendments(plan *agentflow.Plan, run agentflow.ReviewRun) ([]reviewAm
 	return amendments, nil
 }
 
+// activeReviewFinding reports whether a finding is amendment work. Agentflow's
+// other statuses (fixed, rejected, superseded) are inactive and stay
+// display-only; any status outside "open"/"accepted" degrades to display-only
+// rather than being rejected. The severity/status vocabulary this adapter is
+// coupled to is pinned by agentflow/review_contract_test.go (AGENTFLOW_SRC).
 func activeReviewFinding(status string) bool { return status == "open" || status == "accepted" }
 
 func validReviewSeverity(severity string) bool {
 	return severity == "critical" || severity == "high" || severity == "medium" || severity == "low"
-}
-
-func validReviewStatus(status string) bool {
-	return activeReviewFinding(status) || status == "fixed" || status == "rejected" || status == "superseded"
 }
 
 func amendmentGoal(plan *agentflow.Plan, step agentflow.Step, reviewRunID string, findings []agentflow.ReviewFinding) (string, error) {
@@ -304,6 +313,14 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		return err
 	}
 	evidence, err := readEvidenceSidecar(f.evidencePath)
+	if err != nil {
+		return err
+	}
+
+	// Resolve the optional review manifest against the process cwd (like the
+	// plan) and preflight it, so a relative path never resolves against
+	// agentflow's --root and a bad path fails before the step loop runs.
+	reviewManifest, err := resolveReviewManifest(f.reviewManifest)
 	if err != nil {
 		return err
 	}
@@ -389,7 +406,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 
 	// 7. Drive.
 	d := &driver{
-		af: client, plan: &plan, planPath: planPath, reviewManifest: f.reviewManifest,
+		af: client, plan: &plan, planPath: planPath, reviewManifest: reviewManifest,
 		evidence: evidence, runStep: runStep, out: stdout,
 	}
 	proof, err := d.run(runCtx)
@@ -420,6 +437,25 @@ func resolveTaskPlanPath(path string) (string, error) {
 		return path, nil
 	}
 	return filepath.Abs(path)
+}
+
+// resolveReviewManifest absolutizes an optional review manifest against the
+// process cwd and confirms it exists. Returning early on "" keeps task mode
+// review-free by default. Absolutizing here is load-bearing: the agentflow
+// runner's Cmd.Dir is the workspace root, so a relative --manifest would
+// otherwise resolve against -root rather than the caller's cwd.
+func resolveReviewManifest(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve review manifest: %w", err)
+	}
+	if _, err := os.Stat(abs); err != nil {
+		return "", fmt.Errorf("review manifest: %w", err)
+	}
+	return abs, nil
 }
 
 func stepGoal(p *agentflow.Plan, s agentflow.Step) (string, error) {

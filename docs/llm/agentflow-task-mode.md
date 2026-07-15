@@ -80,7 +80,9 @@ Re-run the spike if the AgentFlow validator contract tightens.
   each entry needs `id`, `claim`, and `source`.
 - `-review-manifest <review-manifest.json>` — optional and valid only with
   `-plan`. Records the manifest through AgentFlow, then opens explicit
-  finding-linked amendment attempts for amendment-ready active findings.
+  finding-linked amendment attempts for amendment-ready active findings. The
+  path is resolved against the caller's cwd (like `-plan`, not `-root`) and is
+  preflighted, so a missing manifest fails before any step runs.
 
 `-plan` is mutually exclusive with `-p` (one-shot mode), `-allow-write` /
 `-allow-exec`, `-rag-db`, `-delegate`, and `-mcp-stdio` / `-mcp-http`. Task
@@ -115,10 +117,14 @@ applicable design references remains blocked on an upstream contract extension.
 
 With `-review-manifest`, task mode completes any ordinary eligible steps and
 then calls `record-review --json`. AgentFlow validates and records the review
-evidence before Golem opens an amendment. Golem validates the returned
-projection against the loaded plan and fails before model edits if an active
-finding lacks `owning_step`, `claim`, or `suggested_fix`, names an unknown
-step, or otherwise has malformed amendment context.
+evidence before Golem opens an amendment. Golem then validates the returned
+projection against the loaded plan and fails before model edits when it is
+malformed. The `review_run_id` must match `RR-<UTC timestamp>-<8 hex>`, every
+finding needs a non-empty `finding_id`, and (under `amendment_ready: true`)
+finding ids must be unique. A finding Golem is about to turn into work is
+validated further: its `severity` must be a known value and, if present, its
+`location` well-formed; it must carry `owning_step`, `claim`, and
+`suggested_fix`; and its `owning_step` must name a locked step.
 
 Only `amendment_ready: true` findings with status `open` or `accepted` become
 work. Golem groups them by locked plan order, preserves manifest order within
@@ -130,8 +136,11 @@ receipts, structured gates, and `finish-step` path as an ordinary attempt.
 
 Legacy runs with `amendment_ready: false` and inactive `fixed`, `rejected`, or
 `superseded` findings are printed with their reference and status but never
-open attempts. Golem does not infer ownership, mark findings fixed, or rewrite
-review state. After an amendment, the recorded review may still block
+open attempts. Because such findings are display-only, an unrecognized
+`severity` or `status`, or a location Golem never consumes, degrades them to
+display-only rather than aborting a completed run — only findings queued for
+amendment are strictly validated. Golem does not infer ownership, mark findings
+fixed, or rewrite review state. After an amendment, the recorded review may still block
 `finish-run`; that failure and AgentFlow's recovery state are reported until a
 new authoritative review manifest records the updated finding status.
 
