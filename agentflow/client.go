@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
 const agentName = "golem"
+
+var attemptIDPattern = regexp.MustCompile(`^(WT[a-z0-9]{1,16}-)?A[0-9]+$`)
 
 // Client is a host-owned typed wrapper over the agentflow CLI.
 type Client struct {
@@ -62,6 +65,53 @@ type finishRunResult struct {
 	OK          bool     `json:"ok"`
 	StoppedAt   string   `json:"stopped_at"`
 	Diagnostics []string `json:"diagnostics"`
+}
+
+// ReviewRun is Agentflow's authoritative record-review --json projection.
+type ReviewRun struct {
+	ReviewRunID    string         `json:"review_run_id"`
+	GateStatus     string         `json:"gate_status"`
+	ActiveBlocking []string       `json:"active_blocking"`
+	AmendmentReady bool           `json:"amendment_ready"`
+	Findings       ReviewFindings `json:"findings"`
+}
+
+type ReviewFindings struct {
+	Index []ReviewFinding `json:"index"`
+}
+
+type ReviewFinding struct {
+	FindingID    string          `json:"finding_id"`
+	Severity     string          `json:"severity"`
+	Status       string          `json:"status"`
+	OwningStep   string          `json:"owning_step"`
+	Claim        string          `json:"claim"`
+	Location     *ReviewLocation `json:"location,omitempty"`
+	SuggestedFix string          `json:"suggested_fix"`
+}
+
+type ReviewLocation struct {
+	Path    string `json:"path"`
+	Line    int    `json:"line,omitempty"`
+	LineEnd int    `json:"line_end,omitempty"`
+}
+
+type reviewRunProjection struct {
+	ReviewRunID    *string                   `json:"review_run_id"`
+	GateStatus     *string                   `json:"gate_status"`
+	ActiveBlocking *[]string                 `json:"active_blocking"`
+	AmendmentReady *bool                     `json:"amendment_ready"`
+	Findings       *reviewFindingsProjection `json:"findings"`
+}
+
+type reviewFindingsProjection struct {
+	Index *[]ReviewFinding `json:"index"`
+}
+
+type amendStepResult struct {
+	Event     string `json:"event"`
+	StepID    string `json:"step_id"`
+	AttemptID string `json:"attempt_id"`
 }
 
 // FinishRunError reports a finish-run that stopped before completion (nonzero
@@ -146,6 +196,78 @@ func (c *Client) ClaimStep(ctx context.Context, step string) (string, error) {
 	var r claimResult
 	if err := json.Unmarshal(out, &r); err != nil {
 		return "", fmt.Errorf("agentflow claim-step: parse %q: %w", out, err)
+	}
+	return r.AttemptID, nil
+}
+
+// RecordReview validates and records a review manifest through Agentflow,
+// returning its amendment projection without reading review source artifacts.
+func (c *Client) RecordReview(ctx context.Context, manifestPath string) (ReviewRun, error) {
+	args := append([]string{"record-review"}, c.rootArgs("--manifest", manifestPath, "--json")...)
+	out, err := c.call(ctx, "record-review", args, true)
+	if err != nil {
+		return ReviewRun{}, err
+	}
+	var projection reviewRunProjection
+	if err := json.Unmarshal(out, &projection); err != nil {
+		return ReviewRun{}, fmt.Errorf("agentflow record-review: parse %q: %w", out, err)
+	}
+	missing := ""
+	switch {
+	case projection.ReviewRunID == nil:
+		missing = "review_run_id"
+	case projection.GateStatus == nil:
+		missing = "gate_status"
+	case projection.ActiveBlocking == nil:
+		missing = "active_blocking"
+	case projection.AmendmentReady == nil:
+		missing = "amendment_ready"
+	case projection.Findings == nil:
+		missing = "findings"
+	}
+	if missing == "" && *projection.AmendmentReady && projection.Findings.Index == nil {
+		missing = "findings.index"
+	}
+	if missing != "" {
+		return ReviewRun{}, fmt.Errorf("agentflow record-review: missing required field %s", missing)
+	}
+	if *projection.GateStatus != "pass" && *projection.GateStatus != "warn" && *projection.GateStatus != "fail" {
+		return ReviewRun{}, fmt.Errorf("agentflow record-review: invalid gate_status %q", *projection.GateStatus)
+	}
+	findings := []ReviewFinding{}
+	if projection.Findings.Index != nil {
+		findings = *projection.Findings.Index
+	}
+	return ReviewRun{
+		ReviewRunID:    *projection.ReviewRunID,
+		GateStatus:     *projection.GateStatus,
+		ActiveBlocking: *projection.ActiveBlocking,
+		AmendmentReady: *projection.AmendmentReady,
+		Findings:       ReviewFindings{Index: findings},
+	}, nil
+}
+
+// AmendStep opens one review-feedback amendment linked to every supplied
+// canonical finding reference and returns the new attempt id.
+func (c *Client) AmendStep(ctx context.Context, step string, findingRefs []string) (string, error) {
+	reason := "address review findings " + strings.Join(findingRefs, ", ")
+	args := append([]string{"amend-step", step}, c.rootArgs(
+		"--agent", agentName, "--reason", reason, "--reason-code", "review_feedback")...)
+	for _, ref := range findingRefs {
+		args = append(args, "--finding", ref)
+	}
+	args = append(args, "--json")
+	out, err := c.call(ctx, "amend-step", args, true)
+	if err != nil {
+		return "", err
+	}
+	var r amendStepResult
+	if err := json.Unmarshal(out, &r); err != nil {
+		return "", fmt.Errorf("agentflow amend-step: parse %q: %w", out, err)
+	}
+	if r.Event != "amendment_started" || r.StepID != step || !attemptIDPattern.MatchString(r.AttemptID) {
+		return "", fmt.Errorf("agentflow amend-step: invalid success projection (event=%q step_id=%q attempt_id valid=%t)",
+			r.Event, r.StepID, attemptIDPattern.MatchString(r.AttemptID))
 	}
 	return r.AttemptID, nil
 }

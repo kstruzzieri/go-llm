@@ -7,20 +7,40 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"testing"
 )
 
-// agentflowRunnerForTest returns a Runner for the installed binary, or the
-// python-src fallback checkout from AGENTFLOW_SRC, or skips.
+// agentflowRunnerForTest honors the explicit AGENTFLOW_SRC checkout, otherwise
+// uses an installed binary or skips.
 func agentflowRunnerForTest(t *testing.T, dir string) Runner {
-	if _, err := exec.LookPath("agentflow"); err == nil {
-		return NewExecRunner(dir)
-	}
 	if src := os.Getenv("AGENTFLOW_SRC"); src != "" {
 		return NewSrcExecRunner(dir, src)
 	}
+	if _, err := exec.LookPath("agentflow"); err == nil {
+		return NewExecRunner(dir)
+	}
 	t.Skip("agentflow CLI not available (set AGENTFLOW_SRC=<checkout> to run)")
 	return nil
+}
+
+func TestAgentflowRunnerForTest_PrefersSourceOverride(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "agentflow"), []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("AGENTFLOW_SRC", "/preferred-checkout")
+
+	runner, ok := agentflowRunnerForTest(t, t.TempDir()).(*ExecRunner)
+	if !ok {
+		t.Fatalf("runner = %T, want *ExecRunner", runner)
+	}
+	bin, argv, env := runner.commandFor([]string{"--version"})
+	if bin != "python3" || !reflect.DeepEqual(argv, []string{"-m", "agentflow", "--version"}) ||
+		!reflect.DeepEqual(env, []string{"PYTHONPATH=/preferred-checkout/src"}) {
+		t.Fatalf("command = (%q, %v, %v), want explicit source checkout", bin, argv, env)
+	}
 }
 
 func TestLockPlan_RealCLI(t *testing.T) {

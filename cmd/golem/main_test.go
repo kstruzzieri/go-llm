@@ -418,6 +418,26 @@ func TestParseFlags_TaskMode(t *testing.T) {
 	}
 }
 
+func TestParseFlags_TaskModeReviewManifest(t *testing.T) {
+	f, err := parseFlags([]string{"-plan", "plan.json", "-review-manifest", "review.json", "-approve-plan-edits", "-approve-plan-gates"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.reviewManifest != "review.json" {
+		t.Fatalf("reviewManifest = %q", f.reviewManifest)
+	}
+	if err := validateFlags(f); err != nil {
+		t.Fatalf("review manifest with task mode rejected: %v", err)
+	}
+}
+
+func TestValidateFlags_ReviewManifestRequiresPlan(t *testing.T) {
+	err := validateFlags(flags{reviewManifest: "review.json"})
+	if err == nil || !strings.Contains(err.Error(), "-review-manifest") || !strings.Contains(err.Error(), "-plan") {
+		t.Fatalf("err = %v, want task-mode-only validation", err)
+	}
+}
+
 func TestValidateFlags_PlanIncompatibleWithP(t *testing.T) {
 	f := flags{planPath: "plan.json", promptSet: true, prompt: "hi"}
 	if err := validateFlags(f); err == nil {

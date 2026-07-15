@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 
@@ -25,12 +26,15 @@ var errAgentflowTaskFailed = errors.New("agentflow task failed")
 // afClient is the driver's view of agentflow (satisfied by *agentflow.Client).
 type afClient interface {
 	Probe(context.Context) error
+	ProbeReview(context.Context) error
 	Init(context.Context) error
 	LockPlan(context.Context, string) error
 	InitExecution(context.Context) error
 	Doctor(context.Context) error
 	NextStep(context.Context) (string, error)
 	ClaimStep(context.Context, string) (string, error)
+	RecordReview(context.Context, string) (agentflow.ReviewRun, error)
+	AmendStep(context.Context, string, []string) (string, error)
 	RunGate(context.Context, string, string, string, []string) error
 	FinishStep(context.Context, string, string) error
 	FinishRun(context.Context) (string, error)
@@ -42,21 +46,27 @@ type afClient interface {
 // runStepFunc runs the agent loop for one claimed step. Injected so the state
 // machine is testable without a model; production wiring (runAgentflowTask)
 // builds the step-scoped Request and calls sess.orch.Run.
-type runStepFunc func(ctx context.Context, step agentflow.Step, attempt string) error
+type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal string) error
 
 type driver struct {
-	af       afClient
-	plan     *agentflow.Plan
-	planPath string
-	evidence []agentflow.EvidenceEntry
-	runStep  runStepFunc
-	out      io.Writer
+	af             afClient
+	plan           *agentflow.Plan
+	planPath       string
+	reviewManifest string
+	evidence       []agentflow.EvidenceEntry
+	runStep        runStepFunc
+	out            io.Writer
 }
 
 // run drives the P0 sequence and returns the proof-pack path on success.
 func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.Probe(ctx); err != nil {
 		return "", fmt.Errorf("agentflow unavailable: %w", err)
+	}
+	if d.reviewManifest != "" {
+		if err := d.af.ProbeReview(ctx); err != nil {
+			return "", fmt.Errorf("agentflow review unavailable: %w", err)
+		}
 	}
 	if err := d.af.Init(ctx); err != nil {
 		return "", err
@@ -87,6 +97,11 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", err
 		}
 	}
+	if d.reviewManifest != "" {
+		if err := d.runReviewAmendments(ctx); err != nil {
+			return "", err
+		}
+	}
 	return d.af.FinishRun(ctx)
 }
 
@@ -99,7 +114,15 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := d.runStep(ctx, step, attempt); err != nil {
+	goal, err := stepGoal(d.plan, step)
+	if err != nil {
+		return err
+	}
+	return d.runAttempt(ctx, step, attempt, goal)
+}
+
+func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
+	if err := d.runStep(ctx, step, attempt, goal); err != nil {
 		return err // includes a fatal record-file-change failure surfaced via ctx cancel
 	}
 	gates, err := agentflow.ExtractCommandGates(step)
@@ -107,11 +130,145 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 		return err
 	}
 	for _, g := range gates {
-		if err := d.af.RunGate(ctx, id, attempt, g.Label, g.Argv); err != nil {
+		if err := d.af.RunGate(ctx, step.ID, attempt, g.Label, g.Argv); err != nil {
 			return fmt.Errorf("gate %q failed: %w", g.Label, err)
 		}
 	}
-	return d.af.FinishStep(ctx, id, attempt)
+	return d.af.FinishStep(ctx, step.ID, attempt)
+}
+
+type reviewAmendment struct {
+	step     agentflow.Step
+	findings []agentflow.ReviewFinding
+}
+
+var reviewRunIDPattern = regexp.MustCompile(`^RR-[0-9]{8}T[0-9]{6}Z-[0-9a-f]{8}$`)
+
+func (d *driver) runReviewAmendments(ctx context.Context) error {
+	run, err := d.af.RecordReview(ctx, d.reviewManifest)
+	if err != nil {
+		return fmt.Errorf("record review: %w", err)
+	}
+	amendments, err := reviewAmendments(d.plan, run)
+	if err != nil {
+		return fmt.Errorf("invalid Agentflow review projection: %w", err)
+	}
+	if d.out != nil {
+		for _, finding := range run.Findings.Index {
+			mode := "display-only"
+			if run.AmendmentReady && activeReviewFinding(finding.Status) {
+				mode = "queued"
+			}
+			_, _ = fmt.Fprintf(d.out, "review finding %s#%s status=%s amendment=%s\n",
+				run.ReviewRunID, finding.FindingID, finding.Status, mode)
+		}
+	}
+	for _, amendment := range amendments {
+		refs := make([]string, len(amendment.findings))
+		for i, finding := range amendment.findings {
+			refs[i] = run.ReviewRunID + "#" + finding.FindingID
+		}
+		goal, err := amendmentGoal(d.plan, amendment.step, run.ReviewRunID, amendment.findings)
+		if err != nil {
+			return err
+		}
+		attempt, err := d.af.AmendStep(ctx, amendment.step.ID, refs)
+		if err != nil {
+			return err
+		}
+		if err := d.runAttempt(ctx, amendment.step, attempt, goal); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func reviewAmendments(plan *agentflow.Plan, run agentflow.ReviewRun) ([]reviewAmendment, error) {
+	if !reviewRunIDPattern.MatchString(run.ReviewRunID) {
+		return nil, fmt.Errorf("invalid review_run_id %q", run.ReviewRunID)
+	}
+	byStep := make(map[string][]agentflow.ReviewFinding)
+	seen := make(map[string]bool)
+	for _, finding := range run.Findings.Index {
+		if strings.TrimSpace(finding.FindingID) == "" {
+			return nil, errors.New("finding_id must be non-empty")
+		}
+		if !validReviewSeverity(finding.Severity) {
+			return nil, fmt.Errorf("finding %s has invalid severity %q", finding.FindingID, finding.Severity)
+		}
+		if !validReviewStatus(finding.Status) {
+			return nil, fmt.Errorf("finding %s has invalid status %q", finding.FindingID, finding.Status)
+		}
+		if run.AmendmentReady {
+			if seen[finding.FindingID] {
+				return nil, fmt.Errorf("duplicate finding_id %q", finding.FindingID)
+			}
+			seen[finding.FindingID] = true
+		}
+		if finding.Location != nil {
+			loc := finding.Location
+			if strings.TrimSpace(loc.Path) == "" || loc.Line < 0 || loc.LineEnd < 0 ||
+				(loc.LineEnd > 0 && loc.Line == 0) || (loc.LineEnd > 0 && loc.LineEnd < loc.Line) {
+				return nil, fmt.Errorf("finding %s has invalid location", finding.FindingID)
+			}
+		}
+		if !run.AmendmentReady || !activeReviewFinding(finding.Status) {
+			continue
+		}
+		if strings.TrimSpace(finding.OwningStep) == "" || strings.TrimSpace(finding.Claim) == "" || strings.TrimSpace(finding.SuggestedFix) == "" {
+			return nil, fmt.Errorf("finding %s requires owning_step, claim, and suggested_fix", finding.FindingID)
+		}
+		if _, ok := findStep(plan, finding.OwningStep); !ok {
+			return nil, fmt.Errorf("finding %s has unknown owning_step %q", finding.FindingID, finding.OwningStep)
+		}
+		byStep[finding.OwningStep] = append(byStep[finding.OwningStep], finding)
+	}
+
+	var amendments []reviewAmendment
+	for _, step := range plan.Steps {
+		if findings := byStep[step.ID]; len(findings) > 0 {
+			amendments = append(amendments, reviewAmendment{step: step, findings: findings})
+		}
+	}
+	return amendments, nil
+}
+
+func activeReviewFinding(status string) bool { return status == "open" || status == "accepted" }
+
+func validReviewSeverity(severity string) bool {
+	return severity == "critical" || severity == "high" || severity == "medium" || severity == "low"
+}
+
+func validReviewStatus(status string) bool {
+	return activeReviewFinding(status) || status == "fixed" || status == "rejected" || status == "superseded"
+}
+
+func amendmentGoal(plan *agentflow.Plan, step agentflow.Step, reviewRunID string, findings []agentflow.ReviewFinding) (string, error) {
+	base, err := stepGoal(plan, step)
+	if err != nil {
+		return "", err
+	}
+	var b strings.Builder
+	b.WriteString(base)
+	b.WriteString("\n\nReview amendment context (authoritative Agentflow projection):")
+	for _, finding := range findings {
+		fmt.Fprintf(&b, "\n- Reference: %s#%s\n  Claim: %s", reviewRunID, finding.FindingID, finding.Claim)
+		if finding.Location != nil {
+			fmt.Fprintf(&b, "\n  Location: %s", formatReviewLocation(*finding.Location))
+		}
+		fmt.Fprintf(&b, "\n  Suggested fix: %s", finding.SuggestedFix)
+	}
+	return b.String(), nil
+}
+
+func formatReviewLocation(location agentflow.ReviewLocation) string {
+	if location.Line == 0 {
+		return location.Path
+	}
+	if location.LineEnd > 0 {
+		return fmt.Sprintf("%s:%d-%d", location.Path, location.Line, location.LineEnd)
+	}
+	return fmt.Sprintf("%s:%d", location.Path, location.Line)
 }
 
 func findStep(p *agentflow.Plan, id string) (agentflow.Step, bool) {
@@ -184,7 +341,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	journal := compositeJournal{sinks: []agenttools.Journal{undo, afJournal}}
 
 	// 6. runStep: set scope guard + step, build a step-scoped Request, run the loop.
-	runStep := func(sctx context.Context, step agentflow.Step, attempt string) error {
+	runStep := func(sctx context.Context, step agentflow.Step, attempt, goal string) error {
 		stepCtx, stepCancel := context.WithCancel(sctx)
 		defer stepCancel()
 		done := make(chan struct{})
@@ -214,10 +371,6 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		tools := append(readTools, writeTools...)
 
 		approver := taskApprover(f.approveEdits) // auto-approve scoped edits only
-		goal, err := stepGoal(&plan, step)
-		if err != nil {
-			return fmt.Errorf("render step %s instructions: %w", step.ID, err)
-		}
 		req := agent.Request{
 			Goal:     goal,
 			System:   sess.baseSystem,
@@ -235,7 +388,10 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	}
 
 	// 7. Drive.
-	d := &driver{af: client, plan: &plan, planPath: planPath, evidence: evidence, runStep: runStep, out: stdout}
+	d := &driver{
+		af: client, plan: &plan, planPath: planPath, reviewManifest: f.reviewManifest,
+		evidence: evidence, runStep: runStep, out: stdout,
+	}
 	proof, err := d.run(runCtx)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %v\n", err)

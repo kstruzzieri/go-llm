@@ -15,6 +15,7 @@ AgentFlow never runs a model, and Golem never writes proof state directly.
 | Plan lock and validation (`lock-plan`) | Reading the plan document |
 | Per-step claim and attempt tracking (`claim-step`) | Driving the state machine (the `driver`) |
 | File-change receipts (`record-file-change`) | Running the model per step |
+| Review evidence and finding-linked amendments (`record-review`, `amend-step`) | Selecting AgentFlow's amendment-ready projection and driving each attempt |
 | Command-gate execution and receipts (`run`) | The pre-write scope guard mirroring the step's effective scope |
 | Drift detection (`finish-run` audit) | The fatal-on-unreceipted-edit journal |
 | The proof pack — durable, model-opaque `.agent/` state | Recovery reporting |
@@ -77,6 +78,9 @@ Re-run the spike if the AgentFlow validator contract tightens.
 - `-evidence <sidecar.json>` — optional. Records evidence with AgentFlow
   before the plan is locked. Accepts one JSON object or an array of objects;
   each entry needs `id`, `claim`, and `source`.
+- `-review-manifest <review-manifest.json>` — optional and valid only with
+  `-plan`. Records the manifest through AgentFlow, then opens explicit
+  finding-linked amendment attempts for amendment-ready active findings.
 
 `-plan` is mutually exclusive with `-p` (one-shot mode), `-allow-write` /
 `-allow-exec`, `-rag-db`, `-delegate`, and `-mcp-stdio` / `-mcp-http`. Task
@@ -106,6 +110,30 @@ step-mapped but has neither verification mapping.
 AgentFlow v0.4 has no canonical design-decision or design-reference fields.
 Task mode therefore does not invent a sidecar or proof field for them; projecting
 applicable design references remains blocked on an upstream contract extension.
+
+## Review amendments
+
+With `-review-manifest`, task mode completes any ordinary eligible steps and
+then calls `record-review --json`. AgentFlow validates and records the review
+evidence before Golem opens an amendment. Golem validates the returned
+projection against the loaded plan and fails before model edits if an active
+finding lacks `owning_step`, `claim`, or `suggested_fix`, names an unknown
+step, or otherwise has malformed amendment context.
+
+Only `amendment_ready: true` findings with status `open` or `accepted` become
+work. Golem groups them by locked plan order, preserves manifest order within
+each step, and opens one `amend-step` with every canonical
+`RR-...#finding-id` reference in that group. The model receives the locked step
+slice plus only those references, claims, optional locations, and suggested
+fixes. The amendment uses the same scope guard, mutation journal, file
+receipts, structured gates, and `finish-step` path as an ordinary attempt.
+
+Legacy runs with `amendment_ready: false` and inactive `fixed`, `rejected`, or
+`superseded` findings are printed with their reference and status but never
+open attempts. Golem does not infer ownership, mark findings fixed, or rewrite
+review state. After an amendment, the recorded review may still block
+`finish-run`; that failure and AgentFlow's recovery state are reported until a
+new authoritative review manifest records the updated finding status.
 
 ## Proof-mode guards
 
@@ -154,7 +182,6 @@ Deferred to later phases:
 - Semantic verification — P0 gates are mechanical, command-based checks only
   (`kind: command`); there is no model-judged review of a step's output.
 - Resuming an interrupted run.
-- The review phase.
 - Parallel or multi-writer steps.
 
 AgentFlow's `next-action` output is surfaced to the operator on a failed run

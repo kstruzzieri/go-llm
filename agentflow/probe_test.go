@@ -69,3 +69,22 @@ func TestProbe_FailsOnOldVersion(t *testing.T) {
 		t.Fatal("expected version-too-old error")
 	}
 }
+
+func TestProbeReview_RequiresReviewCommandsWithoutChangingBaseProbe(t *testing.T) {
+	baseHelp := "usage: agentflow {init,init-execution,lock-plan,record-file-change,run,finish-step,finish-run,next-step,next-action,doctor,status}"
+	base := &fakeRunner{replies: probeReplies(baseHelp)}
+	if err := NewClient(base, "/ws").Probe(context.Background()); err != nil {
+		t.Fatalf("base Probe = %v", err)
+	}
+	if err := NewClient(base, "/ws").ProbeReview(context.Background()); err == nil || !strings.Contains(err.Error(), "record-review") {
+		t.Fatalf("ProbeReview missing command error = %v", err)
+	}
+
+	reviewHelp := baseHelp[:len(baseHelp)-1] + ",record-review,amend-step}"
+	replies := probeReplies(reviewHelp)
+	replies["record-review"] = fakeReply{stdout: []byte("--root --manifest --json")}
+	replies["amend-step"] = fakeReply{stdout: []byte("--root --agent --reason --reason-code --finding --json")}
+	if err := NewClient(&fakeRunner{replies: replies}, "/ws").ProbeReview(context.Background()); err != nil {
+		t.Fatalf("ProbeReview = %v", err)
+	}
+}
