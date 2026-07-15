@@ -1,3 +1,7 @@
+# Fixed project name so linked worktrees share the image and cache volumes
+# instead of rebuilding cold per checkout directory.
+name: go-llm
+
 services:
   ci:
     build:

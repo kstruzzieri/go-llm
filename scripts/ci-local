@@ -65,9 +65,18 @@ esac
 # packages regardless of the caller's working directory. Resolve the root from
 # this script's location, not the caller's CWD, so absolute-path invocations
 # from outside the repo cannot select the wrong enclosing git checkout.
-require_cmd git
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-repo_root="$(git -C "$script_dir" rev-parse --show-toplevel)"
+# CDPATH= keeps an exported CDPATH from redirecting the relative `cd` into a
+# different checkout when the script is invoked by a relative path.
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+repo_root="$(cd "$script_dir/.." && pwd -P)"
+if [ ! -f "$repo_root/go.mod" ] || [ ! -f "$repo_root/docker-compose.ci.yml" ]; then
+  printf 'invalid local CI layout: expected go.mod and docker-compose.ci.yml in %s\n' "$repo_root" >&2
+  exit 1
+fi
+if ! grep -q '^module github.com/kstruzzieri/go-llm$' "$repo_root/go.mod"; then
+  printf 'invalid local CI layout: %s/go.mod does not declare module github.com/kstruzzieri/go-llm\n' "$repo_root" >&2
+  exit 1
+fi
 cd "$repo_root"
 
 require_cmd golangci-lint
