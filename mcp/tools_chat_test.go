@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -13,7 +14,218 @@ import (
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
 )
+
+func TestChatSchema_QueryContext(t *testing.T) {
+	env := newTestEnv(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	}))
+	defer env.cleanup()
+
+	properties := toolSchemaProperties(t, env.session, "chat")
+	for name, wantType := range map[string]string{
+		"current_file": "string", "workspace_root": "string", "open_files": "array",
+	} {
+		property, ok := properties[name].(map[string]any)
+		if !ok {
+			t.Fatalf("property %q = %T, want map[string]any", name, properties[name])
+		}
+		if got := property["type"]; got != wantType {
+			t.Errorf("property %q type = %v, want %q", name, got, wantType)
+		}
+	}
+	openFiles := properties["open_files"].(map[string]any)
+	items, ok := openFiles["items"].(map[string]any)
+	if !ok || items["type"] != "string" {
+		t.Errorf("open_files items = %v, want string schema", openFiles["items"])
+	}
+}
+
+func TestHandleChat_RAGDefaultPathAndPromptRemainUnchanged(t *testing.T) {
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{
+			Chunk: rag.Chunk{ID: "c1", Source: "default.go", StartLine: 10, EndLine: 11, Content: "line one\nline two"},
+			Score: 0.016, Distance: 0.2,
+		},
+		RankScore: 0.016,
+		Signals:   map[string]float64{"semantic": 0.8, "keyword": 0.5},
+	}}}
+	router := newRecordingRouteEngine("answer")
+	s := &Server{router: router, retriever: mcpTestRetriever(t, store)}
+
+	result, err := s.handleChat(context.Background(), rawArgs(t, `{
+		"model":"ollama/test","use_rag":true,
+		"current_file":"","workspace_root":"","open_files":[],
+		"messages":[{"role":"system","content":"original"},{"role":"user","content":"question"}]
+	}`))
+	if err != nil || result.IsError {
+		t.Fatalf("handleChat: err=%v isError=%v text=%q", err, result.IsError, extractText(result))
+	}
+	if !reflect.DeepEqual(store.qCtx, rag.QueryContext{}) {
+		t.Fatalf("default QueryContext = %+v, want zero value", store.qCtx)
+	}
+	wantPrompt := "Relevant context from the codebase:\n\nRelevant code context:\n\n" +
+		"--- default.go (lines 10-11, similarity: 0.80) ---\n10| line one\n11| line two\n\n"
+	if len(router.last.Messages) != 3 || router.last.Messages[0].Role != "system" || router.last.Messages[0].Content != wantPrompt {
+		t.Fatalf("model messages = %+v, want unchanged compact RAG prompt", router.last.Messages)
+	}
+	if router.last.Messages[1].Content != "original" || router.last.Messages[2].Content != "question" {
+		t.Fatalf("message order changed: %+v", router.last.Messages)
+	}
+	if strings.Contains(wantPrompt, "RankScore") || strings.Contains(wantPrompt, "keyword") {
+		t.Fatalf("default prompt leaked score metadata: %q", wantPrompt)
+	}
+}
+
+func TestHandleChat_RAGForwardsQueryContextAndKeepsPromptCompact(t *testing.T) {
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{
+		{
+			SearchResult: rag.SearchResult{
+				Chunk: rag.Chunk{ID: "c1", Source: "context.go", StartLine: 7, EndLine: 7, Content: "context line"},
+				Score: 0.8, Distance: 0.2,
+			},
+			RankScore: 0.047,
+			Signals:   map[string]float64{"semantic": 0.8, "keyword": 0.4, "structural": 1},
+		},
+		{
+			SearchResult: rag.SearchResult{
+				Chunk: rag.Chunk{ID: "c2", Source: "too-large.go", StartLine: 1, EndLine: 1, Content: strings.Repeat("x", ragContextMaxTokens*4)},
+				Score: 0.7, Distance: 0.3,
+			},
+			RankScore: 0.03,
+			Signals:   map[string]float64{"semantic": 0.7},
+		},
+	}}
+	router := newRecordingRouteEngine("answer")
+	s := &Server{router: router, retriever: mcpTestRetriever(t, store)}
+
+	result, err := s.handleChat(context.Background(), rawArgs(t, `{
+		"model":"ollama/test","use_rag":true,"rag_top_k":2,
+		"current_file":"pkg/current.go","workspace_root":"/workspace","open_files":["pkg/a.go","pkg/b.go"],
+		"messages":[{"role":"user","content":"first"},{"role":"assistant","content":"reply"},{"role":"user","content":"last question"}]
+	}`))
+	if err != nil || result.IsError {
+		t.Fatalf("handleChat: err=%v isError=%v text=%q", err, result.IsError, extractText(result))
+	}
+	wantContext := rag.QueryContext{
+		CurrentFile: "pkg/current.go", WorkspaceRoot: "/workspace", OpenFiles: []string{"pkg/a.go", "pkg/b.go"},
+	}
+	if store.query != "last question" || store.topK != 2 || !reflect.DeepEqual(store.qCtx, wantContext) {
+		t.Fatalf("retrieval query=%q topK=%d context=%+v, want last question/2/%+v", store.query, store.topK, store.qCtx, wantContext)
+	}
+	if len(router.last.Messages) != 4 {
+		t.Fatalf("model messages = %d, want injected context plus three original messages", len(router.last.Messages))
+	}
+	contextMessage := router.last.Messages[0].Content
+	for _, unwanted := range []string{"RankScore", "Signals", "keyword", "structural", "0.047", "too-large.go"} {
+		if strings.Contains(contextMessage, unwanted) {
+			t.Errorf("ordinary chat context contains %q: %s", unwanted, contextMessage)
+		}
+	}
+	for i, want := range []struct{ role, content string }{{"user", "first"}, {"assistant", "reply"}, {"user", "last question"}} {
+		got := router.last.Messages[i+1]
+		if got.Role != want.role || got.Content != want.content {
+			t.Fatalf("message %d = %+v, want role=%q content=%q", i+1, got, want.role, want.content)
+		}
+	}
+}
+
+func TestHandleChat_QueryContextRequiresUseRAG(t *testing.T) {
+	router := newRecordingRouteEngine("answer")
+	s := &Server{router: router}
+
+	result, err := s.handleChat(context.Background(), rawArgs(t, `{
+		"model":"ollama/test","current_file":"pkg/current.go",
+		"messages":[{"role":"user","content":"question"}]
+	}`))
+	if err != nil {
+		t.Fatalf("handleChat: %v", err)
+	}
+	if !result.IsError || !strings.Contains(extractText(result), "require use_rag=true") {
+		t.Fatalf("result = isError:%v text:%q, want context/use_rag validation error", result.IsError, extractText(result))
+	}
+	if router.called {
+		t.Fatal("router called despite invalid context without use_rag")
+	}
+}
+
+func TestChatToolRejectsMalformedOpenFiles(t *testing.T) {
+	s := &Server{
+		router: newRecordingRouteEngine("answer"),
+		mcpServer: gomcp.NewServer(&gomcp.Implementation{
+			Name: "test", Version: "0.0.1",
+		}, nil),
+	}
+	s.registerChatTools()
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "chat",
+		Arguments: map[string]any{
+			"model": "ollama/test", "use_rag": false, "open_files": "pkg/a.go",
+			"messages": []map[string]any{{"role": "user", "content": "question"}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if !result.IsError {
+		t.Fatal("malformed open_files accepted, want schema/JSON validation error")
+	}
+}
+
+func TestHandleChat_ContextualRAGErrors(t *testing.T) {
+	t.Run("retriever error", func(t *testing.T) {
+		router := newRecordingRouteEngine("answer")
+		store := &recordingMCPMultiStore{err: errors.New("boom")}
+		s := &Server{router: router, retriever: mcpTestRetriever(t, store)}
+		result, err := s.handleChat(context.Background(), rawArgs(t, `{
+			"model":"ollama/test","use_rag":true,"current_file":"a.go",
+			"messages":[{"role":"user","content":"question"}]
+		}`))
+		if err != nil {
+			t.Fatalf("handleChat: %v", err)
+		}
+		if !result.IsError || !strings.Contains(extractText(result), "retrieve:") || !strings.Contains(extractText(result), "boom") {
+			t.Fatalf("result = isError:%v text:%q, want established retrieve error", result.IsError, extractText(result))
+		}
+		if router.called {
+			t.Fatal("router called after retrieval error")
+		}
+	})
+
+	t.Run("no results", func(t *testing.T) {
+		s := &Server{router: newRecordingRouteEngine("answer"), retriever: mcpTestRetriever(t, &recordingMCPMultiStore{})}
+		result, err := s.handleChat(context.Background(), rawArgs(t, `{
+			"model":"ollama/test","use_rag":true,"workspace_root":"/workspace",
+			"messages":[{"role":"user","content":"question"}]
+		}`))
+		if err != nil {
+			t.Fatalf("handleChat: %v", err)
+		}
+		if !result.IsError || !strings.Contains(extractText(result), "RAG index is empty") {
+			t.Fatalf("result = isError:%v text:%q, want established empty-index error", result.IsError, extractText(result))
+		}
+	})
+
+	t.Run("cancellation", func(t *testing.T) {
+		s := &Server{router: newRecordingRouteEngine("answer"), retriever: mcpTestRetriever(t, &recordingMCPMultiStore{})}
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		result, err := s.handleChat(ctx, rawArgs(t, `{
+			"model":"ollama/test","use_rag":true,"open_files":["a.go"],
+			"messages":[{"role":"user","content":"question"}]
+		}`))
+		if err != nil {
+			t.Fatalf("handleChat: %v", err)
+		}
+		if !result.IsError || !strings.Contains(extractText(result), "context canceled") {
+			t.Fatalf("result = isError:%v text:%q, want cancellation error", result.IsError, extractText(result))
+		}
+	})
+}
 
 func TestChatToolBasic(t *testing.T) {
 	t.Skip("end-to-end Ollama-traffic test requires /api/show context_length " +

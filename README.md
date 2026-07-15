@@ -580,6 +580,8 @@ Claude Desktop configuration (`claude_desktop_config.json`):
 
 The server exposes 19 tools by default (chat, generate, code completion, embeddings, RAG, model management, analysis) plus 3 opt-in agent-memory tools (`agent_memory_search`, `agent_memory_create`, `agent_memory_promote`) registered only when `--agent-memory-db <path>` is set, 4 prompt templates, 7 concrete resources, and 1 resource template. Chat, generate, completion, embedding, and analysis tools accept an optional `model` parameter; when omitted, the request is routed by `provider.Router` using a use-case-appropriate weight profile (chat / fim / embedding / reasoning / analysis / code-review / agent), with circuit-breaker-aware fallback. Routing state for diagnostics is exposed via the `route://breakers`, `route://warmth`, and `route://sticky` resources. (The actual model that served a given call is computed internally as `RouteOutcome.ActualModel` but is not currently included in tool responses; see Roadmap.)
 
+`rag_search` and chat requests with `use_rag=true` also accept optional `current_file`, `workspace_root`, and `open_files` fields for contextual ranking; chat rejects non-empty context fields when `use_rag=false`. Omitted or empty fields preserve the current hybrid-by-default retrieval path, response shape, and compact chat prompt. `rag_search` can additionally set `explain_scores=true` to return the existing scored-result JSON, including fused `RankScore` and available per-signal `Signals`; without that flag, contextual results are flattened back to the ordinary semantic-similarity `SearchResult` shape.
+
 ## Parquet Export
 
 Export vector store contents to Parquet format for ML pipeline interop.
@@ -634,7 +636,7 @@ insight, _ := analyzer.AnalyzeTraining(ctx, analysis.TrainingMetrics{
 
 | Feature | Description |
 |---------|-------------|
-| Agentic RAG | Opt-in agentic retrieval layer planned on top of static RAG. Static RAG remains the default. Phase 0 gates are active. |
+| Agentic RAG | Opt-in agentic orchestration planned on top of the current hybrid-by-default retrieval path. Contextual score explanations remain opt-in. |
 | In-band routing transparency | Surface `RouteOutcome` (actual model, fallbacks used, sticky decision) in MCP tool responses so callers see which model served a request rather than only the planned default. Out-of-band today via `route://*` resources. |
 | Vision support | Image inputs in chat messages |
 | ANN search | Approximate nearest neighbor search for large vector stores |
