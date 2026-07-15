@@ -109,7 +109,10 @@ func TestHandleChat_RAGForwardsQueryContextAndKeepsPromptCompact(t *testing.T) {
 		t.Fatalf("handleChat: err=%v isError=%v text=%q", err, result.IsError, extractText(result))
 	}
 	wantContext := rag.QueryContext{
-		CurrentFile: "pkg/current.go", WorkspaceRoot: "/workspace", OpenFiles: []string{"pkg/a.go", "pkg/b.go"},
+		CurrentFile: "pkg/current.go", WorkspaceRoot: "/workspace", OpenFiles: []string{"pkg/a.go", "pkg/b.go"}, Timestamp: store.qCtx.Timestamp,
+	}
+	if store.qCtx.Timestamp.IsZero() {
+		t.Fatal("QueryContext.Timestamp is zero, want request time")
 	}
 	if store.query != "last question" || store.topK != 2 || !reflect.DeepEqual(store.qCtx, wantContext) {
 		t.Fatalf("retrieval query=%q topK=%d context=%+v, want last question/2/%+v", store.query, store.topK, store.qCtx, wantContext)

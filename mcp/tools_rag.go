@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -17,7 +18,7 @@ type queryContextArgs struct {
 
 func (a queryContextArgs) queryContext() rag.QueryContext {
 	return rag.QueryContext{
-		CurrentFile: a.CurrentFile, WorkspaceRoot: a.WorkspaceRoot, OpenFiles: a.OpenFiles,
+		CurrentFile: a.CurrentFile, WorkspaceRoot: a.WorkspaceRoot, OpenFiles: a.OpenFiles, Timestamp: time.Now(),
 	}
 }
 

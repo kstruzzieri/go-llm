@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -142,15 +143,20 @@ func TestHandleRAGSearch_ForwardsQueryContextWithoutChangingResponseContract(t *
 	store := &recordingMCPMultiStore{results: []rag.ScoredResult{scored}}
 	s := &Server{retriever: mcpTestRetriever(t, store)}
 
+	before := time.Now()
 	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{
 		"query":"question","current_file":"pkg/current.go","workspace_root":"/workspace",
 		"open_files":["pkg/a.go","pkg/b.go"]
 	}`))
+	after := time.Now()
 	if err != nil {
 		t.Fatalf("handleRAGSearch: %v", err)
 	}
+	if store.qCtx.Timestamp.Before(before) || store.qCtx.Timestamp.After(after) {
+		t.Fatalf("QueryContext.Timestamp = %v, want request time in [%v, %v]", store.qCtx.Timestamp, before, after)
+	}
 	wantContext := rag.QueryContext{
-		CurrentFile: "pkg/current.go", WorkspaceRoot: "/workspace", OpenFiles: []string{"pkg/a.go", "pkg/b.go"},
+		CurrentFile: "pkg/current.go", WorkspaceRoot: "/workspace", OpenFiles: []string{"pkg/a.go", "pkg/b.go"}, Timestamp: store.qCtx.Timestamp,
 	}
 	if !reflect.DeepEqual(store.qCtx, wantContext) {
 		t.Fatalf("QueryContext = %+v, want %+v", store.qCtx, wantContext)
