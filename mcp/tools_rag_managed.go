@@ -66,8 +66,8 @@ func (s *Server) registerManagedRAGTools() {
 			"properties": map[string]any{
 				"collection": map[string]any{"type": "string", "description": "Exact collection filter"},
 				"tags":       map[string]any{"type": "array", "description": "Required tags", "items": map[string]any{"type": "string"}},
-				"state":      map[string]any{"type": "string", "description": "Exact document state filter"},
-				"freshness":  map[string]any{"type": "string", "description": "Exact freshness filter"},
+				"state":      map[string]any{"type": "string", "enum": []string{"indexing", "indexed", "failed"}, "description": "Exact document state filter"},
+				"freshness":  map[string]any{"type": "string", "enum": []string{"unknown", "fresh", "stale"}, "description": "Exact freshness filter"},
 			},
 		},
 	}, s.handleRAGListDocuments)
@@ -172,6 +172,14 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
+	state, ok := parseManagedDocumentState(args.State)
+	if !ok {
+		return toolError("validation", "invalid state %q (indexing|indexed|failed)", args.State), nil
+	}
+	freshness, ok := parseManagedDocumentFreshness(args.Freshness)
+	if !ok {
+		return toolError("validation", "invalid freshness %q (unknown|fresh|stale)", args.Freshness), nil
+	}
 	if result := s.lockManagedOperation(ctx); result != nil {
 		return result, nil
 	}
@@ -183,8 +191,8 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 	documents, err := managed.ListDocuments(ctx, rag.DocumentFilter{
 		Collection: args.Collection,
 		Tags:       args.Tags,
-		State:      rag.DocumentState(args.State),
-		Freshness:  rag.DocumentFreshness(args.Freshness),
+		State:      state,
+		Freshness:  freshness,
 	})
 	if err != nil {
 		return managedRAGError("list documents", err), nil
@@ -247,6 +255,28 @@ func (s *Server) handleRAGReindexDocument(ctx context.Context, req *gomcp.CallTo
 		return managedRAGError("reindex document", err), nil
 	}
 	return managedRAGResult(document), nil
+}
+
+// parseManagedDocumentState maps the wire value to a state filter; empty
+// means no filter. Mirrors the parseAgentMemoryKind validation convention.
+func parseManagedDocumentState(raw string) (rag.DocumentState, bool) {
+	switch state := rag.DocumentState(raw); state {
+	case "", rag.DocumentStateIndexing, rag.DocumentStateIndexed, rag.DocumentStateFailed:
+		return state, true
+	default:
+		return "", false
+	}
+}
+
+// parseManagedDocumentFreshness maps the wire value to a freshness filter;
+// empty means no filter.
+func parseManagedDocumentFreshness(raw string) (rag.DocumentFreshness, bool) {
+	switch freshness := rag.DocumentFreshness(raw); freshness {
+	case "", rag.DocumentFreshnessUnknown, rag.DocumentFreshnessFresh, rag.DocumentFreshnessStale:
+		return freshness, true
+	default:
+		return "", false
+	}
 }
 
 func (s *Server) managedSourcesSnapshot() *rag.ManagedSources {

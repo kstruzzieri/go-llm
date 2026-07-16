@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -53,6 +54,41 @@ func TestSQLiteStoreStoreAndSearch(t *testing.T) {
 	}
 	if math.Abs(results[0].Score-1.0) > 0.001 {
 		t.Errorf("top result score = %f, want ~1.0", results[0].Score)
+	}
+}
+
+func TestSQLiteStoreConcurrentWritersWaitInsteadOfFailingBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rag.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	tx, err := store.beginWriteTx(ctx)
+	if err != nil {
+		t.Fatalf("beginWriteTx() error: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = 'none'`); err != nil {
+		t.Fatalf("write inside held transaction: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		done <- tx.Commit()
+	}()
+
+	// Without the pool-wide busy_timeout DSN pragma this fails in
+	// microseconds with SQLITE_BUSY instead of waiting for the held lock:
+	// modernc.org/sqlite applies PRAGMAs per connection, and this write runs
+	// on a different pooled connection than the one holding the lock.
+	if err := store.DeleteBySource(ctx, "other"); err != nil {
+		t.Fatalf("concurrent DeleteBySource() error: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("commit held transaction: %v", err)
 	}
 }
 

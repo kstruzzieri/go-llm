@@ -55,6 +55,7 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 		properties map[string]string
 		arrays     []string
 		required   []string
+		enums      map[string][]string
 	}{
 		"rag_ingest_text": {
 			properties: map[string]string{
@@ -78,6 +79,10 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 				"state": "string", "freshness": "string",
 			},
 			arrays: []string{"tags"},
+			enums: map[string][]string{
+				"state":     {"indexing", "indexed", "failed"},
+				"freshness": {"unknown", "fresh", "stale"},
+			},
 		},
 		"rag_delete_document": {
 			properties: map[string]string{"id": "string"},
@@ -114,6 +119,12 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 				items, ok := property["items"].(map[string]any)
 				if !ok || items["type"] != "string" {
 					t.Fatalf("%s items = %#v, want string schema", field, property["items"])
+				}
+			}
+			for field, wantEnum := range want.enums {
+				property := properties[field].(map[string]any)
+				if got := schemaStringSlice(t, property["enum"]); !reflect.DeepEqual(got, wantEnum) {
+					t.Fatalf("%s enum = %#v, want %#v", field, got, wantEnum)
 				}
 			}
 			gotRequired := schemaStringSlice(t, schema["required"])
@@ -204,6 +215,8 @@ func TestManagedRAGToolValidation(t *testing.T) {
 		{"ingest_file/path", s.handleRAGIngestFile, `{"path":" \t "}`, "path"},
 		{"delete/id", s.handleRAGDeleteDocument, `{"id":" \n "}`, "id"},
 		{"reindex/id", s.handleRAGReindexDocument, `{"id":" \t "}`, "id"},
+		{"list/state", s.handleRAGListDocuments, `{"state":"bogus"}`, "state"},
+		{"list/freshness", s.handleRAGListDocuments, `{"freshness":"Fresh"}`, "freshness"},
 	} {
 		t.Run(tc.name+"/blank", func(t *testing.T) {
 			result := callManagedRAGHandler(t, tc.handler, tc.arguments)

@@ -79,7 +79,7 @@ type replaceSourceOptions struct {
 // NewSQLiteStore creates a vector store backed by SQLite.
 // Use ":memory:" for dbPath to create an in-memory database (for testing).
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := sql.Open("sqlite", sqliteReadWriteDSN(dbPath))
 	if err != nil {
 		return nil, fmt.Errorf("rag: open sqlite: %w", err)
 	}
@@ -91,7 +91,9 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		db.SetMaxOpenConns(1)
 	} else {
 		// File-backed databases: enable WAL mode for better concurrent read performance.
-		// WAL is not meaningful for :memory: databases.
+		// WAL is not meaningful for :memory: databases. journal_mode persists in
+		// the database file, so one Exec suffices; busy_timeout is per-connection
+		// and therefore set via the DSN in sqliteReadWriteDSN.
 		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("rag: set WAL mode: %w", err)
@@ -112,6 +114,31 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		store.writeEmbeddingErr = fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
 	}
 	return store, nil
+}
+
+// sqliteReadWriteDSN builds the read-write DSN for dbPath. File-backed
+// databases get busy_timeout via a file: URI _pragma so it applies to every
+// pooled connection: modernc.org/sqlite applies PRAGMAs per-connection, so a
+// plain Exec would configure only whichever connection served it and
+// concurrent writers on the other connections would fail immediately with
+// SQLITE_BUSY instead of waiting. _txlock=immediate makes BeginTx issue
+// BEGIN IMMEDIATE: with the default deferred BEGIN, the first write inside
+// the transaction upgrades a read lock, and SQLite skips the busy handler on
+// that upgrade path (deadlock avoidance), so contended writers would still
+// fail instantly despite the timeout. The pool is deliberately NOT clamped
+// to one connection (the routing-feedback store's alternative) because
+// retrieval reads are in the user-facing latency path and rely on WAL read
+// concurrency.
+func sqliteReadWriteDSN(dbPath string) string {
+	if dbPath == ":memory:" {
+		return dbPath
+	}
+	u := url.URL{Scheme: "file", Path: dbPath}
+	q := u.Query()
+	q.Set("_pragma", "busy_timeout(5000)")
+	q.Set("_txlock", "immediate")
+	u.RawQuery = q.Encode()
+	return u.String()
 }
 
 // OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
@@ -507,9 +534,12 @@ func (s *SQLiteStore) validateWriteEmbeddingDimensionTx(ctx context.Context, tx 
 }
 
 func (s *SQLiteStore) beginWriteTx(ctx context.Context) (*sql.Tx, error) {
-	// Passing explicit non-read-only options asks modernc.org/sqlite to acquire
-	// the write lock at BEGIN time, which keeps CAS reads and writes in one
-	// write transaction instead of upgrading after the validation SELECT.
+	// TxOptions{ReadOnly: false} alone still issues a deferred BEGIN in
+	// modernc.org/sqlite; the write lock at BEGIN time comes from the
+	// _txlock=immediate DSN option set in sqliteReadWriteDSN, which keeps CAS
+	// reads and writes in one write transaction instead of upgrading after
+	// the validation SELECT (an upgrade SQLite fails with SQLITE_BUSY without
+	// consulting the busy handler).
 	return s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 }
 
@@ -574,11 +604,14 @@ func validateCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, excludedSource
 		 WHERE source <> ?`, excludedSource, excludedSource).Scan(&minID, &maxID, &hasUnknown); err != nil {
 		return fmt.Errorf("%w: validate corpus vector space: %w", ErrStoreOperation, err)
 	}
-	if minID != maxID || (hasUnknown && minID != "") {
-		return fmt.Errorf("%w: existing corpus contains incompatible vector spaces", ErrCorpusMixedVectorSpaces)
+	if minID != maxID {
+		return fmt.Errorf("%w: existing corpus mixes vector spaces %q and %q; reindex existing sources into one embedding space before managed ingest", ErrCorpusMixedVectorSpaces, minID, maxID)
+	}
+	if hasUnknown && minID != "" {
+		return fmt.Errorf("%w: existing corpus mixes vector space %q with legacy chunks missing vector-space identity; reindex legacy sources before managed ingest", ErrCorpusMixedVectorSpaces, minID)
 	}
 	if hasUnknown {
-		return fmt.Errorf("%w: incoming vector space %q would mix with legacy unknown rows", ErrCorpusMixedVectorSpaces, vectorSpaceID)
+		return fmt.Errorf("%w: incoming vector space %q would mix with legacy chunks missing vector-space identity; reindex legacy sources before managed ingest", ErrCorpusMixedVectorSpaces, vectorSpaceID)
 	}
 	if minID != "" && minID != vectorSpaceID {
 		return fmt.Errorf("%w: incoming vector space %q differs from corpus vector space %q", ErrVectorSpaceDrift, vectorSpaceID, minID)

@@ -145,7 +145,7 @@ func (m *ManagedSources) IngestText(ctx context.Context, name, content string, o
 	if name == "" {
 		return Document{}, fmt.Errorf("rag: ingest text: name is required")
 	}
-	if content == "" {
+	if strings.TrimSpace(content) == "" {
 		return Document{}, fmt.Errorf("rag: ingest text %q: content is required", name)
 	}
 	if !utf8.ValidString(name) || !utf8.ValidString(content) {
@@ -174,7 +174,7 @@ func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts Docum
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
-	data, err := os.ReadFile(abs)
+	data, err := readManagedRegularFile(abs)
 	if err != nil {
 		return Document{}, fmt.Errorf("rag: ingest file %q: %w", abs, err)
 	}
@@ -231,7 +231,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		return nil, err
 	}
 	defer m.gate.unlock()
-	rows, err := m.store.db.QueryContext(ctx, managedDocumentSelect+` ORDER BY id`)
+	rows, err := m.store.db.QueryContext(ctx, managedDocumentListSelect+` ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("rag: list managed documents: %w", err)
 	}
@@ -254,6 +254,16 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 
 	for i := range documents {
 		document := &documents[i]
+		if document.State == DocumentStateIndexing {
+			// The gate serializes every managed write, so a row still marked
+			// indexing was orphaned by an interrupted ingest (crash, or a
+			// failure whose status persist itself failed). Surface it as
+			// failed instead of reporting "indexing" forever.
+			if err := m.persistStatus(ctx, document, DocumentStateFailed, document.Freshness, "indexing interrupted before completion; reindex or delete this document"); err != nil {
+				return nil, err
+			}
+			continue
+		}
 		if document.State != DocumentStateIndexed {
 			continue
 		}
@@ -285,7 +295,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 
 		desired := DocumentFreshnessFresh
 		if document.Kind == DocumentKindFile {
-			data, err := os.ReadFile(document.Origin)
+			data, err := readManagedRegularFile(document.Origin)
 			if err != nil || !utf8.Valid(data) || contentHash(string(data)) != document.ContentHash {
 				desired = DocumentFreshnessStale
 			}
@@ -362,7 +372,7 @@ func (m *ManagedSources) ReindexDocument(ctx context.Context, id string) (Docume
 	}
 	content := document.storedText
 	if document.Kind == DocumentKindFile {
-		data, readErr := os.ReadFile(document.Origin)
+		data, readErr := readManagedRegularFile(document.Origin)
 		if readErr != nil {
 			cause := fmt.Errorf("rag: read managed file %q: %w", document.Origin, readErr)
 			return m.failedDocument(ctx, document, false, cause)
@@ -517,6 +527,14 @@ const managedDocumentSelect = `
 	       chunk_count, collection, tags, state, freshness, last_error
 	  FROM managed_documents`
 
+// managedDocumentListSelect mirrors managedDocumentSelect but skips loading
+// stored_text: retained bodies can be large and listing never needs them.
+const managedDocumentListSelect = `
+	SELECT id, source, title, kind, origin, mime_type, '' AS stored_text,
+	       content_hash, source_signature, indexed_at, vector_space_id,
+	       chunk_count, collection, tags, state, freshness, last_error
+	  FROM managed_documents`
+
 type managedRowScanner interface {
 	Scan(dest ...any) error
 }
@@ -569,6 +587,21 @@ func managedDocumentMetadata(document Document) map[string]string {
 	}
 }
 
+// readManagedRegularFile reads path after verifying it is a regular file.
+// The Stat-first guard keeps managed operations from blocking forever while
+// holding the managed gates: opening a FIFO (or similar special file) for
+// read blocks until a writer appears, and os.ReadFile cannot be canceled.
+func readManagedRegularFile(path string) ([]byte, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errors.New("not a regular file")
+	}
+	return os.ReadFile(path)
+}
+
 func newManagedDocumentID() (string, error) {
 	var bytes [16]byte
 	if _, err := rand.Read(bytes[:]); err != nil {
@@ -616,6 +649,18 @@ func containsManagedTags(have, wanted []string) bool {
 		}
 	}
 	return true
+}
+
+// rejectReservedManagedSource fails indexer writes aimed at the managed
+// namespace. Managed chunks carry provenance metadata the plain indexing
+// pipeline does not stamp; letting IndexText/IndexFile write a "managed:"
+// source would silently strip that provenance until the next list-time
+// reconciliation flagged the document failed.
+func rejectReservedManagedSource(source string) error {
+	if strings.HasPrefix(source, managedSourcePrefix) {
+		return fmt.Errorf("rag: source %q uses the reserved managed prefix %q; use ManagedSources to write managed documents", source, managedSourcePrefix)
+	}
+	return nil
 }
 
 func (s *SQLiteStore) hasManagedDocumentSource(ctx context.Context, source string) (bool, error) {

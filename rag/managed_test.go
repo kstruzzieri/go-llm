@@ -272,6 +272,49 @@ func TestManagedSourcesListMarksPartialChunkLossFailedAndStale(t *testing.T) {
 	}
 }
 
+func TestManagedSourcesIngestTextRejectsWhitespaceOnlyContent(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	if _, err := managed.IngestText(context.Background(), "doc.md", " \n\t", DocumentOptions{}); err == nil || !strings.Contains(err.Error(), "content is required") {
+		t.Fatalf("IngestText(whitespace-only) error = %v, want content-required error", err)
+	}
+}
+
+func TestManagedSourcesListMarksInterruptedIndexingFailed(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+
+	document, err := managed.IngestText(ctx, "doc.md", "hello", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+	// Simulate a crash between the registry INSERT and index finalize: the row
+	// is left behind in the transient indexing state.
+	if _, err := store.db.Exec(`UPDATE managed_documents SET state = 'indexing' WHERE id = ?`, document.ID); err != nil {
+		t.Fatalf("force indexing state: %v", err)
+	}
+
+	got := requireManagedDocument(t, managed, document.ID)
+	if got.State != DocumentStateFailed {
+		t.Fatalf("state = %s, want %s", got.State, DocumentStateFailed)
+	}
+	if !strings.Contains(got.LastError, "indexing interrupted") {
+		t.Fatalf("last error = %q, want interrupted-indexing message", got.LastError)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessFresh)
+}
+
+func TestIndexerRejectsReservedManagedSourcePrefix(t *testing.T) {
+	_, idx, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+
+	if err := idx.IndexText(ctx, managedSourcePrefix+"abc.md", "content"); err == nil || !strings.Contains(err.Error(), "reserved managed prefix") {
+		t.Fatalf("IndexText(managed prefix) error = %v, want reserved-prefix error", err)
+	}
+	if err := idx.replaceSourceWithProvenanceIfSourceHash(ctx, managedSourcePrefix+"abc.md", nil, nil, "", "", ""); err == nil || !strings.Contains(err.Error(), "reserved managed prefix") {
+		t.Fatalf("replaceSourceWithProvenanceIfSourceHash(managed prefix) error = %v, want reserved-prefix error", err)
+	}
+}
+
 func TestManagedSourcesListFiltersAndOrdersByID(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
@@ -829,8 +872,12 @@ func TestIndexDirectoryPruneDoesNotReserveManagedSourcePrefix(t *testing.T) {
 	_, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
 	source := managedSourcePrefix + "notes.md"
-	if err := idx.IndexText(ctx, source, "legacy content"); err != nil {
-		t.Fatalf("IndexText() error: %v", err)
+	// The indexer rejects the reserved prefix, so a prefix-colliding source
+	// that is NOT registered as a managed document can only arrive via
+	// low-level store writes; prune must still delete it normally.
+	chunk := makeChunk(source, "legacy content", 1, 1, "")
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, []Chunk{chunk}, [][]float64{{1, 1}}, "sig", "test/v1"); err != nil {
+		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID() error: %v", err)
 	}
 	root, err := os.Getwd()
 	if err != nil {
