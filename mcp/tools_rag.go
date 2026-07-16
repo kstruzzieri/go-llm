@@ -18,20 +18,25 @@ type queryContextArgs struct {
 
 func (a queryContextArgs) queryContext() rag.QueryContext {
 	return rag.QueryContext{
-		CurrentFile: a.CurrentFile, WorkspaceRoot: a.WorkspaceRoot, OpenFiles: a.OpenFiles, Timestamp: time.Now(),
+		CurrentFile: a.CurrentFile, WorkspaceRoot: a.WorkspaceRoot, OpenFiles: a.openFiles(), Timestamp: time.Now(),
 	}
 }
 
-func (a queryContextArgs) empty() bool {
-	if a.CurrentFile != "" || a.WorkspaceRoot != "" {
-		return false
-	}
+// openFiles returns the open-file paths with empty entries dropped. Routing both
+// empty() and queryContext() through it keeps the contextual-signal decision and
+// the QueryContext handed to the scorers agreed on what counts as an open file.
+func (a queryContextArgs) openFiles() []string {
+	var files []string
 	for _, file := range a.OpenFiles {
 		if file != "" {
-			return false
+			files = append(files, file)
 		}
 	}
-	return true
+	return files
+}
+
+func (a queryContextArgs) empty() bool {
+	return a.CurrentFile == "" && a.WorkspaceRoot == "" && len(a.openFiles()) == 0
 }
 
 func (s *Server) registerRAGTools() {

@@ -167,6 +167,23 @@ func TestHandleRAGSearch_ForwardsQueryContextWithoutChangingResponseContract(t *
 	}
 }
 
+func TestHandleRAGSearch_DropsEmptyOpenFilesBeforeForwarding(t *testing.T) {
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "c1"}, Score: 0.75, Distance: 0.25},
+		RankScore:    0.05,
+	}}}
+	s := &Server{retriever: mcpTestRetriever(t, store)}
+
+	if _, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{
+		"query":"question","current_file":"pkg/current.go","open_files":["","pkg/a.go",""]
+	}`)); err != nil {
+		t.Fatalf("handleRAGSearch: %v", err)
+	}
+	if !reflect.DeepEqual(store.qCtx.OpenFiles, []string{"pkg/a.go"}) {
+		t.Fatalf("forwarded OpenFiles = %#v, want empty entries dropped to [pkg/a.go]", store.qCtx.OpenFiles)
+	}
+}
+
 func TestHandleRAGSearch_ExplainScoresPreservesRankAndSignals(t *testing.T) {
 	scored := rag.ScoredResult{
 		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "c1"}, Score: 0.8, Distance: 0.2},
