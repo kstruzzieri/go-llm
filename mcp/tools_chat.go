@@ -13,11 +13,13 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
 	"github.com/kstruzzieri/go-llm/transcript"
 )
 
 // chatArgs are the parameters for the chat tool.
 type chatArgs struct {
+	queryContextArgs
 	Messages       []ollama.ChatMessage `json:"messages"`
 	Model          string               `json:"model,omitempty"`
 	UseRAG         bool                 `json:"use_rag,omitempty"`
@@ -51,6 +53,9 @@ func (s *Server) registerChatTools() {
 				"model":           map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
 				"use_rag":         map[string]any{"type": "boolean", "description": "Prepend RAG context from the vector store"},
 				"rag_top_k":       map[string]any{"type": "integer", "description": "Number of RAG results (default: 5)"},
+				"current_file":    map[string]any{"type": "string", "description": "File currently being edited for contextual RAG ranking"},
+				"workspace_root":  map[string]any{"type": "string", "description": "Workspace root used to normalize contextual paths"},
+				"open_files":      map[string]any{"type": "array", "description": "Files currently open for contextual RAG ranking", "items": map[string]any{"type": "string"}},
 				"temperature":     map[string]any{"type": "number", "description": "Sampling temperature"},
 				"conversation_id": map[string]any{"type": "string", "description": "Optional stable id to group calls of one conversation; omit to derive identity from message content"},
 			},
@@ -66,6 +71,9 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	}
 	if len(args.Messages) == 0 {
 		return toolError("validation", "messages must not be empty"), nil
+	}
+	if !args.UseRAG && !args.empty() {
+		return toolError("validation", "current_file, workspace_root, and open_files require use_rag=true"), nil
 	}
 
 	router := s.routerSnapshot()
@@ -101,9 +109,24 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 			return toolError("validation", "use_rag requires at least one user message"), nil
 		}
 
-		results, rerr := retriever.Retrieve(ctx, query, topK)
-		if rerr != nil {
-			return toolError("rag", "retrieve: %v", rerr), nil
+		var results []rag.SearchResult
+		if args.empty() {
+			var rerr error
+			results, rerr = retriever.Retrieve(ctx, query, topK)
+			if rerr != nil {
+				return toolError("rag", "retrieve: %v", rerr), nil
+			}
+		} else {
+			scored, rerr := retriever.RetrieveScored(ctx, query, topK, args.queryContext())
+			if rerr != nil {
+				return toolError("rag", "retrieve: %v", rerr), nil
+			}
+			if scored != nil {
+				results = make([]rag.SearchResult, len(scored))
+				for i := range scored {
+					results[i] = scored[i].SearchResult
+				}
+			}
 		}
 		if len(results) == 0 {
 			return toolError("rag", "RAG index is empty; run rag_index_file or rag_index_directory first"), nil

@@ -3,11 +3,41 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/rag"
 )
+
+type queryContextArgs struct {
+	CurrentFile   string   `json:"current_file,omitempty"`
+	WorkspaceRoot string   `json:"workspace_root,omitempty"`
+	OpenFiles     []string `json:"open_files,omitempty"`
+}
+
+func (a queryContextArgs) queryContext() rag.QueryContext {
+	return rag.QueryContext{
+		CurrentFile: a.CurrentFile, WorkspaceRoot: a.WorkspaceRoot, OpenFiles: a.openFiles(), Timestamp: time.Now(),
+	}
+}
+
+// openFiles returns the open-file paths with empty entries dropped. Routing both
+// empty() and queryContext() through it keeps the contextual-signal decision and
+// the QueryContext handed to the scorers agreed on what counts as an open file.
+func (a queryContextArgs) openFiles() []string {
+	var files []string
+	for _, file := range a.OpenFiles {
+		if file != "" {
+			files = append(files, file)
+		}
+	}
+	return files
+}
+
+func (a queryContextArgs) empty() bool {
+	return a.CurrentFile == "" && a.WorkspaceRoot == "" && len(a.openFiles()) == 0
+}
 
 func (s *Server) registerRAGTools() {
 	s.mcpServer.AddTool(&gomcp.Tool{
@@ -42,8 +72,12 @@ func (s *Server) registerRAGTools() {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"query": map[string]any{"type": "string", "description": "Search query"},
-				"top_k": map[string]any{"type": "integer", "description": "Number of results (default: 5)"},
+				"query":          map[string]any{"type": "string", "description": "Search query"},
+				"top_k":          map[string]any{"type": "integer", "description": "Number of results (default: 5)"},
+				"current_file":   map[string]any{"type": "string", "description": "File currently being edited for contextual ranking"},
+				"workspace_root": map[string]any{"type": "string", "description": "Workspace root used to normalize contextual paths"},
+				"open_files":     map[string]any{"type": "array", "description": "Files currently open for contextual ranking", "items": map[string]any{"type": "string"}},
+				"explain_scores": map[string]any{"type": "boolean", "description": "Return fused rank and per-signal scores"},
 			},
 			"required": []string{"query"},
 		},
@@ -171,8 +205,10 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 	}
 
 	var args struct {
-		Query string `json:"query"`
-		TopK  int    `json:"top_k,omitempty"`
+		queryContextArgs
+		Query         string `json:"query"`
+		TopK          int    `json:"top_k,omitempty"`
+		ExplainScores bool   `json:"explain_scores,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
@@ -194,9 +230,32 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		topK = 5
 	}
 
-	results, err := retriever.Retrieve(ctx, args.Query, topK)
-	if err != nil {
-		return toolError("rag", "search: %v", err), nil
+	var results []rag.SearchResult
+	contextual := !args.empty()
+	if args.ExplainScores || contextual {
+		scored, err := retriever.RetrieveScored(ctx, args.Query, topK, args.queryContext())
+		if err != nil {
+			return toolError("rag", "search: %v", err), nil
+		}
+		if args.ExplainScores {
+			data, err := json.Marshal(scored)
+			if err != nil {
+				return toolError("rag", "marshal results: %v", err), nil
+			}
+			return toolResult(string(data)), nil
+		}
+		if scored != nil {
+			results = make([]rag.SearchResult, len(scored))
+			for i := range scored {
+				results[i] = scored[i].SearchResult
+			}
+		}
+	} else {
+		var err error
+		results, err = retriever.Retrieve(ctx, args.Query, topK)
+		if err != nil {
+			return toolError("rag", "search: %v", err), nil
+		}
 	}
 
 	data, err := json.Marshal(results)
