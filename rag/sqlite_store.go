@@ -398,6 +398,24 @@ func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx cont
 }
 
 func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, opts replaceSourceOptions) error {
+	if err := s.validateReplaceSource(source, chunks, embeddings, opts); err != nil {
+		return err
+	}
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: replace source %q: begin transaction: %w", ErrStoreOperation, source, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.replaceSourceTx(ctx, tx, source, chunks, embeddings, opts); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rag: replace source %q: commit: %w", source, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) validateReplaceSource(source string, chunks []Chunk, embeddings [][]float64, opts replaceSourceOptions) error {
 	if err := validateStoreInputs(chunks, embeddings); err != nil {
 		return fmt.Errorf("rag: replace source %q: %w", source, err)
 	}
@@ -409,11 +427,10 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 	if opts.requireVectorSpaceID && len(chunks) > 0 && opts.vectorSpaceID == "" {
 		return fmt.Errorf("%w: replace source %q with non-empty chunks", ErrMissingVectorSpaceID, source)
 	}
-	tx, err := s.beginWriteTx(ctx)
-	if err != nil {
-		return fmt.Errorf("%w: replace source %q: begin transaction: %w", ErrStoreOperation, source, err)
-	}
-	defer func() { _ = tx.Rollback() }()
+	return nil
+}
+
+func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source string, chunks []Chunk, embeddings [][]float64, opts replaceSourceOptions) error {
 	if len(embeddings) > 0 {
 		if err := s.validateWriteEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
@@ -443,10 +460,6 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, opts.sourceHash, opts.vectorSpaceID); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("rag: replace source %q: commit: %w", source, err)
 	}
 	return nil
 }
@@ -615,8 +628,23 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 
 // DeleteBySource removes all chunks with the given source path.
 func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return fmt.Errorf("rag: delete by source %q: begin transaction: %w", source, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: delete by source %q: %w", source, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE managed_documents
+		   SET state = 'failed', freshness = 'stale',
+		       last_error = 'chunks deleted by low-level source deletion', updated_at = ?
+		 WHERE source = ?`, time.Now().Unix(), source); err != nil {
+		return fmt.Errorf("rag: mark managed source %q deleted: %w", source, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rag: delete by source %q: commit: %w", source, err)
 	}
 	return nil
 }

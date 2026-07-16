@@ -42,6 +42,11 @@ var migrations = []migration{
 		description: "add vector_space_id column with non-empty partial index",
 		fn:          migrateV5,
 	},
+	{
+		version:     6,
+		description: "add managed document registry",
+		fn:          migrateV6,
+	},
 }
 
 // migrateV1 creates the baseline chunks table and indexes.
@@ -156,6 +161,38 @@ func migrateV5(tx *sql.Tx) error {
 	for _, stmt := range stmts {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("rag: migrate v5: %w", err)
+		}
+	}
+	return nil
+}
+
+func migrateV6(tx *sql.Tx) error {
+	stmts := []string{
+		`CREATE TABLE managed_documents (
+			id TEXT PRIMARY KEY,
+			source TEXT NOT NULL UNIQUE,
+			title TEXT NOT NULL,
+			kind TEXT NOT NULL CHECK (kind IN ('text', 'file')),
+			origin TEXT NOT NULL DEFAULT '',
+			mime_type TEXT NOT NULL,
+			stored_text TEXT NOT NULL DEFAULT '',
+			content_hash TEXT NOT NULL,
+			source_signature TEXT NOT NULL,
+			indexed_at INTEGER NOT NULL DEFAULT 0,
+			vector_space_id TEXT NOT NULL DEFAULT '',
+			collection TEXT NOT NULL DEFAULT '',
+			tags TEXT NOT NULL DEFAULT '[]',
+			state TEXT NOT NULL CHECK (state IN ('indexing', 'indexed', 'failed')),
+			freshness TEXT NOT NULL CHECK (freshness IN ('unknown', 'fresh', 'stale')),
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE INDEX idx_managed_documents_collection_id ON managed_documents(collection, id)`,
+	}
+	for _, stmt := range stmts {
+		if _, err := tx.Exec(stmt); err != nil {
+			return fmt.Errorf("rag: migrate v6: %w", err)
 		}
 	}
 	return nil

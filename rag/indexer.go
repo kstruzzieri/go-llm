@@ -210,6 +210,13 @@ func (idx *Indexer) replaceSourceWithProvenanceLocked(ctx context.Context, path 
 	return nil
 }
 
+type preparedSource struct {
+	chunks        []Chunk
+	embeddings    [][]float64
+	sourceHash    string
+	vectorSpaceID string
+}
+
 // IndexFile indexes a single file: reads, chunks, embeds, and stores it.
 // Existing data is preserved if chunking or embedding fails.
 // If the underlying store supports atomic source replacement (SQLiteStore does),
@@ -219,25 +226,47 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("rag: read file %q: %w", path, err)
 	}
+	return idx.IndexText(ctx, path, string(data))
+}
 
-	content := string(data)
+// IndexText indexes content under source using the same chunk/embed/replace
+// pipeline as IndexFile.
+func (idx *Indexer) IndexText(ctx context.Context, source, content string) error {
+	prepared, err := idx.prepareSource(ctx, source, content, nil)
+	if err != nil {
+		return err
+	}
+	if err := idx.replaceSourceWithProvenance(ctx, source, prepared.chunks, prepared.embeddings, prepared.sourceHash, prepared.vectorSpaceID); err != nil {
+		return fmt.Errorf("rag: replace chunks for %q: %w", source, err)
+	}
+	return nil
+}
+
+func (idx *Indexer) prepareSource(ctx context.Context, source, content string, metadata map[string]string) (preparedSource, error) {
+	prepared := preparedSource{sourceHash: idx.currentSourceSignature(content).String()}
 	if content == "" {
-		if err := idx.replaceSource(ctx, path, nil, nil); err != nil {
-			return fmt.Errorf("rag: clear chunks for empty file %q: %w", path, err)
-		}
-		return nil
+		return prepared, nil
 	}
 
 	// Step 1: Chunk the file
-	chunks, err := idx.chunker.Chunk(path, content)
+	chunks, err := idx.chunker.Chunk(source, content)
 	if err != nil {
-		return fmt.Errorf("rag: chunk %q: %w", path, err)
+		return preparedSource{}, fmt.Errorf("rag: chunk %q: %w", source, err)
 	}
 	if len(chunks) == 0 {
-		if err := idx.replaceSource(ctx, path, nil, nil); err != nil {
-			return fmt.Errorf("rag: clear chunks for %q with no chunk output: %w", path, err)
+		return prepared, nil
+	}
+	if len(metadata) > 0 {
+		for i := range chunks {
+			merged := make(map[string]string, len(chunks[i].Metadata)+len(metadata))
+			for key, value := range chunks[i].Metadata {
+				merged[key] = value
+			}
+			for key, value := range metadata {
+				merged[key] = value
+			}
+			chunks[i].Metadata = merged
 		}
-		return nil
 	}
 
 	// Step 1.5: Compute stable keys if workspace root is set.
@@ -261,24 +290,15 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	res, err := idx.embedder.Embed(ctx, idx.model, texts)
 	if err != nil {
 		// Embedding failed — preserve existing indexed data for this file
-		return fmt.Errorf("%w: embed chunks for %q: %w", ErrEmbedderFailed, path, err)
+		return preparedSource{}, fmt.Errorf("%w: embed chunks for %q: %w", ErrEmbedderFailed, source, err)
 	}
 	if len(res.Embeddings) != len(texts) {
-		return fmt.Errorf("%w: embed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, path, len(res.Embeddings), len(texts))
+		return preparedSource{}, fmt.Errorf("%w: embed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, source, len(res.Embeddings), len(texts))
 	}
-	embeddings := res.Embeddings
-
-	// Step 3: Replace old chunks with new ones. Store the source signature so
-	// subsequent IndexFileIncremental calls can safely use the fast path.
-	// Persist the resolved vector-space identity so retrieval-time drift
-	// detection can fail closed across cross-run embedding-model changes.
-	vsid := resolveVectorSpaceID(res)
-	sourceHash := idx.currentSourceSignature(content).String()
-	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vsid); err != nil {
-		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
-	}
-
-	return nil
+	prepared.chunks = chunks
+	prepared.embeddings = res.Embeddings
+	prepared.vectorSpaceID = resolveVectorSpaceID(res)
+	return prepared, nil
 }
 
 // resolveVectorSpaceID picks the vsid the indexer will persist for a batch.
@@ -590,6 +610,9 @@ func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []s
 	rootPrefix := idx.workspaceRoot + string(filepath.Separator)
 	var errs []string
 	for _, src := range sources {
+		if strings.HasPrefix(src, managedSourcePrefix) {
+			continue
+		}
 		abs, err := filepath.Abs(src)
 		if err != nil || !strings.HasPrefix(abs, rootPrefix) {
 			continue

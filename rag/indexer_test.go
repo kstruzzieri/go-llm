@@ -31,6 +31,39 @@ func newMockEmbedServer(dim int) *httptest.Server {
 	}))
 }
 
+func testManagedIndexer(t *testing.T, store *SQLiteStore, vectorSpaceID string, embedErr error) *Indexer {
+	t.Helper()
+	idx, err := NewIndexerWithEmbedder(EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		if embedErr != nil {
+			return EmbedResult{}, embedErr
+		}
+		embeddings := make([][]float64, len(inputs))
+		for i := range embeddings {
+			embeddings[i] = []float64{float64(i + 1), 1}
+		}
+		return EmbedResult{Embeddings: embeddings, VectorSpaceID: vectorSpaceID}, nil
+	}), store, WithEmbeddingModel("test"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	return idx
+}
+
+func TestIndexerIndexTextUsesExistingPipeline(t *testing.T) {
+	store := newTestStore(t)
+	idx := testManagedIndexer(t, store, "test/v1", nil)
+	if err := idx.IndexText(context.Background(), "notes.md", "# Runbook\nrestart safely"); err != nil {
+		t.Fatal(err)
+	}
+	chunks, err := store.GetBySource(context.Background(), "notes.md")
+	if err != nil || len(chunks) == 0 {
+		t.Fatalf("chunks=%d err=%v", len(chunks), err)
+	}
+	if chunks[0].Chunk.Metadata["vector_space_id"] != "test/v1" {
+		t.Fatalf("metadata=%v", chunks[0].Chunk.Metadata)
+	}
+}
+
 func TestIndexerIndexFile(t *testing.T) {
 	srv := newMockEmbedServer(4)
 	defer srv.Close()
