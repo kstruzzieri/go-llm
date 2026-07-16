@@ -69,6 +69,7 @@ type Server struct {
 	store            rag.VectorStore
 	indexer          *rag.Indexer
 	retriever        *rag.Retriever
+	managedSources   *rag.ManagedSources
 	completer        *completion.Provider
 	modelRegistry    *provider.ModelRegistry
 	providerRegistry *provider.Registry
@@ -84,8 +85,9 @@ type Server struct {
 	fimPriorityCfg      provider.Priority
 	fimPriorityExplicit bool
 
-	mu       sync.RWMutex
-	resolved map[string]config.ResolvedModel
+	managedMu sync.Mutex // serializes managed lifecycle calls across rebuilt service instances
+	mu        sync.RWMutex
+	resolved  map[string]config.ResolvedModel
 
 	httpServer *http.Server
 	mcpServer  *gomcp.Server
@@ -509,6 +511,11 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 		}
 	}
 
+	var managedSources *rag.ManagedSources
+	if sqliteStore, ok := store.(*rag.SQLiteStore); ok {
+		managedSources, _ = rag.NewManagedSources(indexer, sqliteStore)
+	}
+
 	s.mu.Lock()
 	if s.closed || s.stateVersion != stateVersion {
 		s.mu.Unlock()
@@ -517,6 +524,7 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 	s.completer = completer
 	s.indexer = indexer
 	s.retriever = retriever
+	s.managedSources = managedSources
 	s.mu.Unlock()
 }
 
@@ -816,6 +824,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 // Close releases all resources held by the server.
 // Safe to call multiple times; serialized with handler reads via s.mu.
 func (s *Server) Close() error {
+	s.managedMu.Lock()
+	defer s.managedMu.Unlock()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -832,6 +843,7 @@ func (s *Server) Close() error {
 	s.store = nil
 	s.indexer = nil
 	s.retriever = nil
+	s.managedSources = nil
 	s.completer = nil
 	s.router = nil
 	s.warmthSource = nil

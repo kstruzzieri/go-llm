@@ -118,6 +118,8 @@ func (s *Server) registerRAGTools() {
 			"required": []string{"source"},
 		},
 	}, s.handleRAGDelete)
+
+	s.registerManagedRAGTools()
 }
 
 // requireRAG checks that RAG is enabled and the relevant component is available.

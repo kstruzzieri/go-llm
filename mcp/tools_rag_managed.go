@@ -1,0 +1,261 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"strings"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/rag"
+)
+
+type managedOptionsArgs struct {
+	Title      string   `json:"title,omitempty"`
+	MIMEType   string   `json:"mime_type,omitempty"`
+	Collection string   `json:"collection,omitempty"`
+	Tags       []string `json:"tags,omitempty"`
+}
+
+func (a managedOptionsArgs) options() rag.DocumentOptions {
+	return rag.DocumentOptions{
+		Title: a.Title, MIMEType: a.MIMEType, Collection: a.Collection, Tags: a.Tags,
+	}
+}
+
+func (s *Server) registerManagedRAGTools() {
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "rag_ingest_text",
+		Description: "Save and index a named text document as a managed RAG source.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":       map[string]any{"type": "string", "description": "Document name"},
+				"content":    map[string]any{"type": "string", "description": "UTF-8 document content"},
+				"title":      map[string]any{"type": "string", "description": "Optional display title"},
+				"mime_type":  map[string]any{"type": "string", "description": "Optional MIME type"},
+				"collection": map[string]any{"type": "string", "description": "Optional collection"},
+				"tags":       map[string]any{"type": "array", "description": "Optional tags", "items": map[string]any{"type": "string"}},
+			},
+			"required": []string{"name", "content"},
+		},
+	}, s.handleRAGIngestText)
+
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "rag_ingest_file",
+		Description: "Save and index a local file as a managed RAG source.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"path":       map[string]any{"type": "string", "description": "Local file path"},
+				"title":      map[string]any{"type": "string", "description": "Optional display title"},
+				"mime_type":  map[string]any{"type": "string", "description": "Optional MIME type"},
+				"collection": map[string]any{"type": "string", "description": "Optional collection"},
+				"tags":       map[string]any{"type": "array", "description": "Optional tags", "items": map[string]any{"type": "string"}},
+			},
+			"required": []string{"path"},
+		},
+	}, s.handleRAGIngestFile)
+
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "rag_list_documents",
+		Description: "List managed RAG documents.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"collection": map[string]any{"type": "string", "description": "Exact collection filter"},
+				"tags":       map[string]any{"type": "array", "description": "Required tags", "items": map[string]any{"type": "string"}},
+				"state":      map[string]any{"type": "string", "description": "Exact document state filter"},
+				"freshness":  map[string]any{"type": "string", "description": "Exact freshness filter"},
+			},
+		},
+	}, s.handleRAGListDocuments)
+
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "rag_delete_document",
+		Description: "Delete a managed RAG document and its indexed chunks.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id": map[string]any{"type": "string", "description": "Managed document ID"},
+			},
+			"required": []string{"id"},
+		},
+	}, s.handleRAGDeleteDocument)
+
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "rag_reindex_document",
+		Description: "Reindex a managed RAG document by stable ID.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"id": map[string]any{"type": "string", "description": "Managed document ID"},
+			},
+			"required": []string{"id"},
+		},
+	}, s.handleRAGReindexDocument)
+}
+
+func (s *Server) handleRAGIngestText(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if result := s.requireRAG(); result != nil {
+		return result, nil
+	}
+	var args struct {
+		managedOptionsArgs
+		Name    string `json:"name"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if strings.TrimSpace(args.Name) == "" {
+		return toolError("validation", "name must not be empty"), nil
+	}
+	if strings.TrimSpace(args.Content) == "" {
+		return toolError("validation", "content must not be empty"), nil
+	}
+	s.managedMu.Lock()
+	defer s.managedMu.Unlock()
+	managed := s.managedSourcesSnapshot()
+	if managed == nil {
+		return toolError("rag", "managed sources unavailable"), nil
+	}
+	document, err := managed.IngestText(ctx, args.Name, args.Content, args.options())
+	if err != nil {
+		return managedRAGError("ingest text", err), nil
+	}
+	return managedRAGResult(document), nil
+}
+
+func (s *Server) handleRAGIngestFile(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if result := s.requireRAG(); result != nil {
+		return result, nil
+	}
+	var args struct {
+		managedOptionsArgs
+		Path string `json:"path"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if strings.TrimSpace(args.Path) == "" {
+		return toolError("validation", "path must not be empty"), nil
+	}
+	s.managedMu.Lock()
+	defer s.managedMu.Unlock()
+	managed := s.managedSourcesSnapshot()
+	if managed == nil {
+		return toolError("rag", "managed sources unavailable"), nil
+	}
+	document, err := managed.IngestFile(ctx, args.Path, args.options())
+	if err != nil {
+		return managedRAGError("ingest file", err), nil
+	}
+	return managedRAGResult(document), nil
+}
+
+func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if result := s.requireRAG(); result != nil {
+		return result, nil
+	}
+	var args struct {
+		Collection string   `json:"collection,omitempty"`
+		Tags       []string `json:"tags,omitempty"`
+		State      string   `json:"state,omitempty"`
+		Freshness  string   `json:"freshness,omitempty"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	s.managedMu.Lock()
+	defer s.managedMu.Unlock()
+	managed := s.managedSourcesSnapshot()
+	if managed == nil {
+		return toolError("rag", "managed sources unavailable"), nil
+	}
+	documents, err := managed.ListDocuments(ctx, rag.DocumentFilter{
+		Collection: args.Collection,
+		Tags:       args.Tags,
+		State:      rag.DocumentState(args.State),
+		Freshness:  rag.DocumentFreshness(args.Freshness),
+	})
+	if err != nil {
+		return managedRAGError("list documents", err), nil
+	}
+	return managedRAGResult(documents), nil
+}
+
+func (s *Server) handleRAGDeleteDocument(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if result := s.requireRAG(); result != nil {
+		return result, nil
+	}
+	var args struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if strings.TrimSpace(args.ID) == "" {
+		return toolError("validation", "id must not be empty"), nil
+	}
+	s.managedMu.Lock()
+	defer s.managedMu.Unlock()
+	managed := s.managedSourcesSnapshot()
+	if managed == nil {
+		return toolError("rag", "managed sources unavailable"), nil
+	}
+	if err := managed.DeleteDocument(ctx, args.ID); err != nil {
+		return managedRAGError("delete document", err), nil
+	}
+	return managedRAGResult(struct {
+		DeletedID string `json:"deleted_id"`
+	}{DeletedID: args.ID}), nil
+}
+
+func (s *Server) handleRAGReindexDocument(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	if result := s.requireRAG(); result != nil {
+		return result, nil
+	}
+	var args struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if strings.TrimSpace(args.ID) == "" {
+		return toolError("validation", "id must not be empty"), nil
+	}
+	s.managedMu.Lock()
+	defer s.managedMu.Unlock()
+	managed := s.managedSourcesSnapshot()
+	if managed == nil {
+		return toolError("rag", "managed sources unavailable"), nil
+	}
+	document, err := managed.ReindexDocument(ctx, args.ID)
+	if err != nil {
+		return managedRAGError("reindex document", err), nil
+	}
+	return managedRAGResult(document), nil
+}
+
+func (s *Server) managedSourcesSnapshot() *rag.ManagedSources {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.managedSources
+}
+
+func managedRAGError(action string, err error) *gomcp.CallToolResult {
+	if errors.Is(err, rag.ErrDocumentNotFound) {
+		return toolError("not_found", "%v", err)
+	}
+	return toolError("rag", "%s: %v", action, err)
+}
+
+func managedRAGResult(value any) *gomcp.CallToolResult {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return toolError("rag", "marshal result: %v", err)
+	}
+	return toolResult(string(data))
+}
