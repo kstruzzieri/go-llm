@@ -225,7 +225,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		if err := m.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE source = ?`, document.source).Scan(&chunks); err != nil {
 			return nil, fmt.Errorf("rag: count chunks for managed document %q: %w", document.ID, err)
 		}
-		if document.chunkCount > 0 && chunks == 0 {
+		if chunks != document.chunkCount {
 			if err := m.persistStatus(ctx, document, DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing"); err != nil {
 				return nil, err
 			}

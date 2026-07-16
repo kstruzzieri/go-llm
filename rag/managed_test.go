@@ -225,6 +225,47 @@ func TestManagedSourcesNonEmptyZeroChunkDocumentRemainsFresh(t *testing.T) {
 	}
 }
 
+func TestManagedSourcesListMarksPartialChunkLossFailedAndStale(t *testing.T) {
+	managed, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	idx.chunker = chunkerFunc(func(source, _ string) ([]Chunk, error) {
+		return []Chunk{
+			makeChunk(source, "alpha", 1, 1, ""),
+			makeChunk(source, "beta", 2, 2, ""),
+			makeChunk(source, "gamma", 3, 3, ""),
+		}, nil
+	})
+	document, err := managed.IngestText(context.Background(), "partial.md", "alpha\nbeta\ngamma", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+	chunks := requireManagedChunks(t, store, document.source)
+	if len(chunks) != 3 {
+		t.Fatalf("ingested chunks = %#v, want 3", chunks)
+	}
+	result, err := store.db.Exec(`DELETE FROM chunks WHERE id = ?`, chunks[0].Chunk.ID)
+	if err != nil {
+		t.Fatalf("delete one chunk: %v", err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		t.Fatalf("deleted rows = %d, error = %v; want 1", affected, err)
+	}
+
+	listed := requireManagedDocument(t, managed, document.ID)
+	if listed.State != DocumentStateFailed || listed.Freshness != DocumentFreshnessStale {
+		t.Fatalf("listed partial document = %#v", listed)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+	remaining := requireManagedChunks(t, store, document.source)
+	if len(remaining) != 2 {
+		t.Fatalf("remaining chunks = %#v, want 2", remaining)
+	}
+	for _, chunk := range remaining {
+		if chunk.Chunk.Metadata["managed_state"] != string(DocumentStateFailed) || chunk.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
+			t.Fatalf("remaining chunk metadata = %#v", chunk.Chunk.Metadata)
+		}
+	}
+}
+
 func TestManagedSourcesListFiltersAndOrdersByID(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
