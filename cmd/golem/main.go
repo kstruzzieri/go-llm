@@ -22,50 +22,58 @@ import (
 )
 
 type flags struct {
-	configPath       string
-	root             string
-	prompt           string
-	promptSet        bool // -p was passed (distinguishes an explicit empty prompt)
-	ollamaURL        string
-	baseURL          string
-	baseURLSet       bool // -base-url was passed (distinguishes an explicit empty value)
-	noProbe          bool
-	noCapProbe       bool
-	ragDB            string
-	maxSteps         int
-	inputCeiling     int
-	outputReserve    int
-	noColor          bool
-	noSession        bool
-	fresh            bool
-	sessionID        string
-	allowWrite       bool
-	allowExec        bool
-	delegate         bool
-	delegateRole     string
-	mcpStdio         stringSliceFlag
-	mcpHTTP          stringSliceFlag
-	noRag            bool
-	noAutoIndex      bool
-	noProjectContext bool
-	noCompress       bool
-	noMemory         bool
-	agentMemory      bool
-	trace            bool
-	telemetry        bool
-	pressureWarn     int
-	feedback         bool
-	feedbackDB       string
-	think            string
-	planPath         string
-	approveEdits     bool
-	approveGates     bool
-	agentflowSrc     string
-	evidencePath     string
-	reviewManifest   string
-	goal             string // AgentFlow planning mode goal (-goal)
-	goalSet          bool   // -goal was passed (distinguishes an explicit empty goal)
-	approvePlanLock  bool   // -approve-plan-lock: non-interactive planning-mode lock approval
+	configPath          string
+	root                string
+	prompt              string
+	promptSet           bool // -p was passed (distinguishes an explicit empty prompt)
+	ollamaURL           string
+	baseURL             string
+	baseURLSet          bool // -base-url was passed (distinguishes an explicit empty value)
+	noProbe             bool
+	noCapProbe          bool
+	ragDB               string
+	maxSteps            int
+	inputCeiling        int
+	outputReserve       int
+	noColor             bool
+	noSession           bool
+	fresh               bool
+	sessionID           string
+	allowWrite          bool
+	allowExec           bool
+	delegate            bool
+	delegateRole        string
+	mcpStdio            stringSliceFlag
+	mcpHTTP             stringSliceFlag
+	noRag               bool
+	noAutoIndex         bool
+	noProjectContext    bool
+	noCompress          bool
+	noMemory            bool
+	agentMemory         bool
+	trace               bool
+	telemetry           bool
+	pressureWarn        int
+	feedback            bool
+	feedbackDB          string
+	think               string
+	planPath            string
+	approveEdits        bool
+	approveGates        bool
+	agentflowSrc        string
+	evidencePath        string
+	reviewManifest      string
+	taskBriefPath       string // -task-brief: explicit Agentflow task brief for external -plan input
+	taskBriefSet        bool
+	workflowHandoffPath string // -workflow-handoff: exact route approved and materialized by planning mode
+	workflowHandoffSet  bool
+	workflowProfile     string // optional Agentflow-selected profile override
+	workflowReason      string // required rationale paired with workflowProfile
+	wfProfileSet        bool
+	wfReasonSet         bool
+	goal                string // AgentFlow planning mode goal (-goal)
+	goalSet             bool   // -goal was passed (distinguishes an explicit empty goal)
+	approvePlanLock     bool   // -approve-plan-lock: non-interactive planning-mode lock approval
 }
 
 func parseFlags(args []string) (flags, error) {
@@ -112,6 +120,10 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
 	fs.StringVar(&f.evidencePath, "evidence", "", "optional evidence sidecar JSON object/array recorded before lock in task mode")
 	fs.StringVar(&f.reviewManifest, "review-manifest", "", "task mode: Agentflow review manifest to record and execute as finding-linked amendments; requires -plan")
+	fs.StringVar(&f.taskBriefPath, "task-brief", "", "task mode: explicit Agentflow task brief JSON for an externally supplied plan (default: conservative exact-fact projection)")
+	fs.StringVar(&f.workflowHandoffPath, "workflow-handoff", "", "task mode: approved workflow recommendation already materialized by planning mode")
+	fs.StringVar(&f.workflowProfile, "workflow-profile", "", "Agentflow modes: explicitly select a workflow profile; requires -workflow-reason")
+	fs.StringVar(&f.workflowReason, "workflow-reason", "", "Agentflow modes: non-empty rationale paired with -workflow-profile")
 	fs.StringVar(&f.goal, "goal", "", "AgentFlow planning mode: author and preview a traceable plan, require approval to lock it, then stop")
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	if err := fs.Parse(args); err != nil {
@@ -131,6 +143,14 @@ func parseFlags(args []string) (flags, error) {
 			f.baseURLSet = true
 		case "goal":
 			f.goalSet = true
+		case "task-brief":
+			f.taskBriefSet = true
+		case "workflow-handoff":
+			f.workflowHandoffSet = true
+		case "workflow-profile":
+			f.wfProfileSet = true
+		case "workflow-reason":
+			f.wfReasonSet = true
 		}
 	})
 	return f, nil
@@ -172,6 +192,30 @@ func validateFlags(f flags) error {
 	}
 	if f.reviewManifest != "" && f.planPath == "" {
 		return fmt.Errorf("golem: -review-manifest is valid only with -plan (task mode)")
+	}
+	if f.taskBriefSet && strings.TrimSpace(f.taskBriefPath) == "" {
+		return fmt.Errorf("golem: -task-brief requires a non-empty path")
+	}
+	if f.taskBriefPath != "" && f.planPath == "" {
+		return fmt.Errorf("golem: -task-brief is valid only with -plan (task mode)")
+	}
+	if f.workflowHandoffSet && strings.TrimSpace(f.workflowHandoffPath) == "" {
+		return fmt.Errorf("golem: -workflow-handoff requires a non-empty path")
+	}
+	if f.workflowHandoffPath != "" && f.planPath == "" {
+		return fmt.Errorf("golem: -workflow-handoff is valid only with -plan (task mode)")
+	}
+	profileSet := f.wfProfileSet || f.workflowProfile != ""
+	reasonSet := f.wfReasonSet || f.workflowReason != ""
+	if profileSet != reasonSet ||
+		(profileSet && (strings.TrimSpace(f.workflowProfile) == "" || strings.TrimSpace(f.workflowReason) == "")) {
+		return fmt.Errorf("golem: -workflow-profile and a non-empty -workflow-reason must be supplied together")
+	}
+	if (profileSet || reasonSet) && f.planPath == "" && !f.goalSet {
+		return fmt.Errorf("golem: -workflow-profile/-workflow-reason apply only to -goal or -plan Agentflow modes")
+	}
+	if f.workflowHandoffPath != "" && (profileSet || reasonSet) {
+		return fmt.Errorf("golem: -workflow-handoff already binds the approved route; do not pass -workflow-profile/-workflow-reason")
 	}
 	if f.planPath != "" && f.promptSet {
 		return fmt.Errorf("golem: -plan (task mode) is incompatible with -p (one-shot)")

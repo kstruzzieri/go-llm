@@ -13,16 +13,22 @@ import (
 // submit_plan tool. It carries only semantic decisions; Compile supplies every
 // rigid contract field. See docs/superpowers/specs/2026-07-09-agentflow-plan-compiler-210-design.md.
 type PlanIR struct {
-	Objective    string          `json:"objective"`
-	Scope        []string        `json:"scope"`
-	Invariants   []string        `json:"invariants"`
-	RiskLevel    string          `json:"risk_level"` // low|medium|high
-	RollbackPlan string          `json:"rollback_plan"`
-	AllowedFiles []string        `json:"allowed_files"`
-	BlockedFiles []string        `json:"blocked_files"` // optional
-	NonGoals     []string        `json:"non_goals"`     // optional
-	Requirements []RequirementIR `json:"requirements"`  // optional
-	Steps        []StepIR        `json:"steps"`
+	TaskType     string   `json:"task_type"` // docs|bugfix|feature|refactor
+	Objective    string   `json:"objective"`
+	Scope        []string `json:"scope"`
+	Invariants   []string `json:"invariants"`
+	RiskLevel    string   `json:"risk_level"` // low|medium|high
+	RollbackPlan string   `json:"rollback_plan"`
+	AllowedFiles []string `json:"allowed_files"`
+	BlockedFiles []string `json:"blocked_files"` // optional
+	NonGoals     []string `json:"non_goals"`     // optional
+	// Optional task signals are forwarded only when the author explicitly sets
+	// them. Golem does not infer routing policy from plan content.
+	SecuritySensitive *bool           `json:"security_sensitive,omitempty"`
+	BlastRadius       string          `json:"blast_radius,omitempty"`  // isolated|local|cross_cutting
+	DeclaredSize      string          `json:"declared_size,omitempty"` // xs|s|m|l|xl
+	Requirements      []RequirementIR `json:"requirements"`            // optional
+	Steps             []StepIR        `json:"steps"`
 }
 
 // RequirementIR is one authored requirement and its acceptance criteria.

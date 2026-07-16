@@ -23,6 +23,7 @@ import (
 func smokeIR(t *testing.T) json.RawMessage {
 	t.Helper()
 	b, err := json.Marshal(agentflow.PlanIR{
+		TaskType:     "feature",
 		Objective:    "ensure the answer token",
 		Scope:        []string{"src"},
 		Invariants:   []string{"only src/answer.txt changes"},
@@ -39,7 +40,7 @@ func smokeIR(t *testing.T) json.RawMessage {
 			Files:        []string{"src/answer.txt"},
 			ExpectedDiff: []string{"answer.txt changes pending to expected"},
 			CriterionIDs: []string{"AC-1"},
-			Validations:  []agentflow.GateIR{{Label: "grep", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}, CriterionIDs: []string{"AC-1"}}},
+			Validations:  []agentflow.GateIR{{Label: "unit-tests", Argv: []string{"grep", "-q", "expected", "src/answer.txt"}, CriterionIDs: []string{"AC-1"}}},
 		}},
 	})
 	if err != nil {
@@ -89,6 +90,32 @@ func TestGoalAuthor_RealCLI(t *testing.T) {
 		t.Errorf(".agent/plan.lock.json is not locked: %s", b)
 	}
 
+	handoffs, err := filepath.Glob(filepath.Join(dir, ".agent", "golem-workflow-handoff-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(handoffs) != 1 {
+		t.Fatalf("approved workflow handoffs = %v, want exactly one", handoffs)
+	}
+	handoffBytes, err := os.ReadFile(handoffs[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var handoff approvedWorkflowHandoff
+	if err := json.Unmarshal(handoffBytes, &handoff); err != nil {
+		t.Fatalf("approved workflow handoff is invalid: %v\n%s", err, handoffBytes)
+	}
+	contractBytes, err := os.ReadFile(filepath.Join(dir, ".agent", "workflow.contract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := handoff.Recommendation.VerifyMaterializedWorkflowContract(contractBytes); err != nil {
+		t.Fatalf("approved workflow handoff is not bound to the materialized contract: %v", err)
+	}
+	if !strings.Contains(out.String(), " -workflow-handoff "+shellQuote(handoffs[0])) {
+		t.Fatalf("execute-separately command omitted approved workflow handoff:\n%s", out.String())
+	}
+
 	// The locked bytes must satisfy PreflightP0: this proves the compiler's gates[]
 	// survived the real lock, so the execute-separately handoff to #209 (which runs
 	// PreflightP0 before driving) accepts what the author produced.
@@ -98,6 +125,20 @@ func TestGoalAuthor_RealCLI(t *testing.T) {
 	}
 	if err := agentflow.PreflightP0(&lockedPlan); err != nil {
 		t.Fatalf("locked plan fails PreflightP0 (gates[] did not survive the lock): %v", err)
+	}
+	briefs, err := filepath.Glob(filepath.Join(dir, ".agent", "golem-task-brief-*.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(briefs) != 1 {
+		t.Fatalf("approved task briefs = %v, want exactly one", briefs)
+	}
+	approvedBrief, err := readExternalTaskBrief(briefs[0], lockedPlan)
+	if err != nil {
+		t.Fatalf("read approved task brief: %v", err)
+	}
+	if _, err := readApprovedWorkflowHandoff(handoffs[0], dir, b, approvedBrief); err != nil {
+		t.Fatalf("planning handoff does not bind to the locked plan and brief: %v", err)
 	}
 
 	// Re-lock idempotence (spec §9): the locked artifact must survive a fresh

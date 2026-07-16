@@ -576,6 +576,67 @@ func TestParseFlags_ApprovePlanLock(t *testing.T) {
 	}
 }
 
+func TestParseFlags_AgentflowWorkflowRouting(t *testing.T) {
+	valid := [][]string{
+		{"-plan", "plan.json", "-task-brief", "brief.json", "-approve-plan-edits", "-approve-plan-gates"},
+		{"-plan", "plan.json", "-task-brief", "brief.json", "-workflow-handoff", "route.json", "-approve-plan-edits", "-approve-plan-gates"},
+		{"-plan", "plan.json", "-workflow-profile", "high-risk", "-workflow-reason", "security review required", "-approve-plan-edits", "-approve-plan-gates"},
+		{"-goal", "ship it", "-workflow-profile", "high-risk", "-workflow-reason", "security review required"},
+	}
+	for _, args := range valid {
+		f, err := parseFlags(args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", args, err)
+		}
+		if err := validateFlags(f); err != nil {
+			t.Errorf("validateFlags(%v): %v", args, err)
+		}
+	}
+
+	invalid := [][]string{
+		{"-task-brief", "brief.json"},
+		{"-workflow-handoff", "route.json"},
+		{"-goal", "ship it", "-workflow-handoff", "route.json"},
+		{"-plan", "plan.json", "-workflow-handoff", "route.json", "-workflow-profile", "high-risk", "-workflow-reason", "reason"},
+		{"-goal", "ship it", "-task-brief", "brief.json"},
+		{"-workflow-profile", "high-risk", "-workflow-reason", "security review required"},
+		{"-goal", "ship it", "-workflow-profile", "high-risk"},
+		{"-goal", "ship it", "-workflow-reason", "security review required"},
+		{"-goal", "ship it", "-workflow-profile", "high-risk", "-workflow-reason", "   "},
+	}
+	for _, args := range invalid {
+		f, err := parseFlags(args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", args, err)
+		}
+		if err := validateFlags(f); err == nil {
+			t.Errorf("validateFlags(%v) unexpectedly succeeded", args)
+		}
+	}
+
+	f, err := parseFlags(valid[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.taskBriefPath != "brief.json" {
+		t.Fatalf("task brief path = %q", f.taskBriefPath)
+	}
+	f, err = parseFlags(valid[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.workflowHandoffPath != "route.json" {
+		t.Fatalf("workflow handoff path = %q", f.workflowHandoffPath)
+	}
+	f, err = parseFlags(valid[3])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.workflowProfile != "high-risk" || f.workflowReason != "security review required" {
+		t.Fatalf("workflow override = %q / %q", f.workflowProfile, f.workflowReason)
+	}
+}
+
 func TestApplyGoalMode_DisablesAmbientStateButKeepsProjectContext(t *testing.T) {
 	f, _ := applyGoalMode(flags{goalSet: true, agentMemory: true, feedback: true, feedbackDB: "x.db"})
 	if !f.noSession || !f.noCompress || !f.noMemory || !f.noAutoIndex || !f.noRag || f.agentMemory {

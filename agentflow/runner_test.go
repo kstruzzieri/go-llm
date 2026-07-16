@@ -96,10 +96,12 @@ type fakeReply struct {
 type fakeRunner struct {
 	replies map[string]fakeReply
 	calls   [][]string
+	inputs  [][]byte
 }
 
-func (f *fakeRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
+func (f *fakeRunner) Run(_ context.Context, args []string, stdin []byte) ([]byte, []byte, int, error) {
 	f.calls = append(f.calls, append([]string(nil), args...))
+	f.inputs = append(f.inputs, append([]byte(nil), stdin...))
 	if len(args) == 0 {
 		return nil, nil, 0, nil
 	}

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 )
 
@@ -26,7 +28,11 @@ func NewClient(r Runner, root string) *Client { return &Client{r: r, root: root}
 // call runs a subcommand and returns stdout, mapping exit!=0 (or a --json
 // invalid envelope) to *CommandError. Pass wantJSON=true for --json commands.
 func (c *Client) call(ctx context.Context, name string, args []string, wantJSON bool) ([]byte, error) {
-	out, errb, exit, err := c.r.Run(ctx, args, nil)
+	return c.callInput(ctx, name, args, wantJSON, nil)
+}
+
+func (c *Client) callInput(ctx context.Context, name string, args []string, wantJSON bool, stdin []byte) ([]byte, error) {
+	out, errb, exit, err := c.r.Run(ctx, args, stdin)
 	if err != nil {
 		return nil, err
 	}
@@ -317,9 +323,46 @@ func (c *Client) FinishRun(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("agentflow finish-run: parse %q: %w", out, err)
 	}
 	if exit != 0 || !r.OK {
-		return "", &FinishRunError{StoppedAt: r.StoppedAt, Diagnostics: r.Diagnostics}
+		diagnostics := append([]string(nil), r.Diagnostics...)
+		if r.StoppedAt == "verify-proof" ||
+			(r.StoppedAt == "build-proof" && slices.Contains(r.Diagnostics, "created .agent/proof-pack.json")) {
+			diagnostics = append(diagnostics, c.failedProofCheckDiagnostics()...)
+		}
+		return "", &FinishRunError{StoppedAt: r.StoppedAt, Diagnostics: diagnostics}
 	}
 	return filepath.Join(c.root, ".agent", "proof-pack.json"), nil
+}
+
+// failedProofCheckDiagnostics reads only Agentflow's generated failed checks.
+// The caller first confirms this finish-run wrote the pack, so an earlier pack
+// cannot supply a stale reason for a pre-write build failure.
+func (c *Client) failedProofCheckDiagnostics() []string {
+	b, err := os.ReadFile(filepath.Join(c.root, ".agent", "proof-pack.json"))
+	if err != nil {
+		return nil
+	}
+	var proof struct {
+		Checks []struct {
+			ID      string `json:"id"`
+			Status  string `json:"status"`
+			Message string `json:"message"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(b, &proof); err != nil {
+		return nil
+	}
+	var diagnostics []string
+	for _, check := range proof.Checks {
+		if check.Status != "failed" || strings.TrimSpace(check.Message) == "" {
+			continue
+		}
+		message := check.Message
+		if strings.TrimSpace(check.ID) != "" {
+			message = check.ID + ": " + message
+		}
+		diagnostics = append(diagnostics, message)
+	}
+	return diagnostics
 }
 
 // NextActionState is the advisory recovery hint agentflow's next-action reports.

@@ -14,7 +14,7 @@
   "evidence_ids": [],
   "allowed_files": ["src/*", ".agent/"],
   "blocked_files": [],
-  "validation_gates": ["grep -q expected src/answer.txt"],
+  "validation_gates": ["unit-tests"],
   "rollback_plan": "git checkout -- .",
   "steps": [
     {
@@ -23,7 +23,7 @@
       "files": ["src/answer.txt"],
       "preconditions": [],
       "expected_diff": ["src/answer.txt changes pending to expected"],
-      "validation": ["grep -q expected src/answer.txt"],
+      "validation": ["unit-tests"],
       "evidence_ids": [],
       "gates": [{ "kind": "command", "run": ["grep", "-q", "expected", "src/answer.txt"] }]
     }

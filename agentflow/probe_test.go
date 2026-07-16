@@ -88,3 +88,28 @@ func TestProbeReview_RequiresReviewCommandsWithoutChangingBaseProbe(t *testing.T
 		t.Fatalf("ProbeReview = %v", err)
 	}
 }
+
+func TestProbeWorkflow_RequiresStableRecommendationAndMaterializationSurface(t *testing.T) {
+	baseHelp := "usage: agentflow {init,workflow-contract}"
+	missing := &fakeRunner{replies: map[string]fakeReply{"--help": {stdout: []byte(baseHelp)}}}
+	if err := NewClient(missing, "/ws").ProbeWorkflow(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "recommend-workflow") || !strings.Contains(err.Error(), "upgrade") {
+		t.Fatalf("missing command error = %v", err)
+	}
+
+	help := "usage: agentflow {init,recommend-workflow,workflow-contract}"
+	replies := map[string]fakeReply{
+		"--help":             {stdout: []byte(help)},
+		"recommend-workflow": {stdout: []byte("--stdin --json --selected-profile --reason")},
+		"workflow-contract":  {stdout: []byte("--root --from-json")},
+	}
+	if err := NewClient(&fakeRunner{replies: replies}, "/ws").ProbeWorkflow(context.Background()); err != nil {
+		t.Fatalf("ProbeWorkflow = %v", err)
+	}
+
+	replies["recommend-workflow"] = fakeReply{stdout: []byte("--stdin --json --selected-profile")}
+	if err := NewClient(&fakeRunner{replies: replies}, "/ws").ProbeWorkflow(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "--reason") {
+		t.Fatalf("missing flag error = %v", err)
+	}
+}
