@@ -13,12 +13,14 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 	"unicode/utf8"
 )
 
-const managedSourcePrefix = "managed:"
+const (
+	managedSourcePrefix              = "managed:"
+	managedFailurePersistenceTimeout = 5 * time.Second
+)
 
 // DocumentKind identifies how a managed document's content is retained.
 type DocumentKind string
@@ -90,7 +92,35 @@ type DocumentFilter struct {
 type ManagedSources struct {
 	indexer *Indexer
 	store   *SQLiteStore
-	mu      sync.Mutex
+	gate    managedSourceGate
+}
+
+type managedSourceGate chan struct{}
+
+func newManagedSourceGate() managedSourceGate {
+	gate := make(managedSourceGate, 1)
+	gate <- struct{}{}
+	return gate
+}
+
+func (g managedSourceGate) lock(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g:
+	}
+	if err := ctx.Err(); err != nil {
+		g <- struct{}{}
+		return err
+	}
+	return nil
+}
+
+func (g managedSourceGate) unlock() {
+	g <- struct{}{}
 }
 
 // NewManagedSources creates a managed source service. A nil indexer leaves
@@ -99,13 +129,15 @@ func NewManagedSources(indexer *Indexer, store *SQLiteStore) (*ManagedSources, e
 	if store == nil {
 		return nil, fmt.Errorf("rag: NewManagedSources: store is required")
 	}
-	return &ManagedSources{indexer: indexer, store: store}, nil
+	return &ManagedSources{indexer: indexer, store: store, gate: newManagedSourceGate()}, nil
 }
 
 // IngestText saves and indexes a named UTF-8 text document.
 func (m *ManagedSources) IngestText(ctx context.Context, name, content string, opts DocumentOptions) (Document, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.gate.lock(ctx); err != nil {
+		return Document{}, err
+	}
+	defer m.gate.unlock()
 	if m.indexer == nil {
 		return Document{}, fmt.Errorf("rag: managed sources: indexer is unavailable")
 	}
@@ -124,8 +156,10 @@ func (m *ManagedSources) IngestText(ctx context.Context, name, content string, o
 
 // IngestFile reads and indexes a local UTF-8 file by canonical path.
 func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts DocumentOptions) (Document, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.gate.lock(ctx); err != nil {
+		return Document{}, err
+	}
+	defer m.gate.unlock()
 	if m.indexer == nil {
 		return Document{}, fmt.Errorf("rag: managed sources: indexer is unavailable")
 	}
@@ -193,8 +227,10 @@ func (m *ManagedSources) ingestLocked(ctx context.Context, name, content string,
 
 // ListDocuments returns reconciled managed documents ordered by ID.
 func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilter) ([]Document, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.gate.lock(ctx); err != nil {
+		return nil, err
+	}
+	defer m.gate.unlock()
 	rows, err := m.store.db.QueryContext(ctx, managedDocumentSelect+` ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("rag: list managed documents: %w", err)
@@ -222,11 +258,26 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 			continue
 		}
 		var chunks int
-		if err := m.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE source = ?`, document.source).Scan(&chunks); err != nil {
+		var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID, minDocumentID, maxDocumentID string
+		if err := m.store.db.QueryRowContext(ctx, `
+			SELECT COUNT(*),
+			       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
+			       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
+			       COALESCE(MIN(json_extract(metadata, '$.managed_document_id')), ''),
+			       COALESCE(MAX(json_extract(metadata, '$.managed_document_id')), '')
+			  FROM chunks
+			 WHERE source = ?`, document.source).Scan(
+			&chunks, &minSignature, &maxSignature, &minVectorSpaceID, &maxVectorSpaceID,
+			&minDocumentID, &maxDocumentID,
+		); err != nil {
 			return nil, fmt.Errorf("rag: count chunks for managed document %q: %w", document.ID, err)
 		}
-		if chunks != document.chunkCount {
-			if err := m.persistStatus(ctx, document, DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing"); err != nil {
+		provenanceMismatch := chunks > 0 &&
+			(minSignature != document.SourceSignature || maxSignature != document.SourceSignature ||
+				minVectorSpaceID != document.VectorSpaceID || maxVectorSpaceID != document.VectorSpaceID ||
+				minDocumentID != document.ID || maxDocumentID != document.ID)
+		if chunks != document.chunkCount || provenanceMismatch {
+			if err := m.persistStatus(ctx, document, DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing or inconsistent"); err != nil {
 				return nil, err
 			}
 			continue
@@ -268,8 +319,10 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 
 // DeleteDocument atomically removes a managed document and its chunks.
 func (m *ManagedSources) DeleteDocument(ctx context.Context, id string) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.gate.lock(ctx); err != nil {
+		return err
+	}
+	defer m.gate.unlock()
 	tx, err := m.store.beginWriteTx(ctx)
 	if err != nil {
 		return fmt.Errorf("rag: delete managed document %q: begin transaction: %w", id, err)
@@ -296,8 +349,10 @@ func (m *ManagedSources) DeleteDocument(ctx context.Context, id string) error {
 
 // ReindexDocument rereads retained content and atomically replaces its chunks.
 func (m *ManagedSources) ReindexDocument(ctx context.Context, id string) (Document, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	if err := m.gate.lock(ctx); err != nil {
+		return Document{}, err
+	}
+	defer m.gate.unlock()
 	if m.indexer == nil {
 		return Document{}, fmt.Errorf("rag: managed sources: indexer is unavailable")
 	}
@@ -371,6 +426,11 @@ func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Docum
 	if retainedVectorSpaceID != "" && prepared.vectorSpaceID != "" && retainedVectorSpaceID != prepared.vectorSpaceID {
 		return "", fmt.Errorf("%w: managed document %q retained vector space %q differs from incoming %q", ErrVectorSpaceDrift, document.ID, retainedVectorSpaceID, prepared.vectorSpaceID)
 	}
+	if len(prepared.chunks) > 0 {
+		if err := validateCorpusVectorSpaceTx(ctx, tx, document.source, prepared.vectorSpaceID); err != nil {
+			return "", err
+		}
+	}
 	vectorSpaceID := prepared.vectorSpaceID
 	if vectorSpaceID == "" {
 		vectorSpaceID = retainedVectorSpaceID
@@ -408,7 +468,9 @@ func (m *ManagedSources) failedDocument(ctx context.Context, document Document, 
 	document.State = DocumentStateFailed
 	document.Freshness = freshness
 	document.LastError = cause.Error()
-	if err := m.persistStatus(ctx, &document, document.State, document.Freshness, document.LastError); err != nil {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), managedFailurePersistenceTimeout)
+	defer cancel()
+	if err := m.persistStatus(persistCtx, &document, document.State, document.Freshness, document.LastError); err != nil {
 		return document, errors.Join(cause, fmt.Errorf("rag: record managed document failure: %w", err))
 	}
 	return document, cause
@@ -554,4 +616,16 @@ func containsManagedTags(have, wanted []string) bool {
 		}
 	}
 	return true
+}
+
+func (s *SQLiteStore) hasManagedDocumentSource(ctx context.Context, source string) (bool, error) {
+	var exists bool
+	if err := s.db.QueryRowContext(
+		ctx,
+		`SELECT EXISTS(SELECT 1 FROM managed_documents WHERE source = ?)`,
+		source,
+	).Scan(&exists); err != nil {
+		return false, fmt.Errorf("rag: check managed source %q: %w", source, err)
+	}
+	return exists, nil
 }

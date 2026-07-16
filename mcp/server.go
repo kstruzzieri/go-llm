@@ -48,6 +48,33 @@ type routeEngine interface {
 	StickyRoutes() map[string]provider.StickyRouteInfo
 }
 
+type contextGate struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (g *contextGate) lock(ctx context.Context) error {
+	g.once.Do(func() {
+		g.token = make(chan struct{}, 1)
+		g.token <- struct{}{}
+	})
+	select {
+	case <-g.token:
+		return nil
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.token:
+		return nil
+	}
+}
+
+func (g *contextGate) unlock() {
+	g.token <- struct{}{}
+}
+
 type Server struct {
 	ollamaURL         string
 	ollamaURLExplicit bool
@@ -85,9 +112,9 @@ type Server struct {
 	fimPriorityCfg      provider.Priority
 	fimPriorityExplicit bool
 
-	managedMu sync.Mutex // serializes managed lifecycle calls across rebuilt service instances
-	mu        sync.RWMutex
-	resolved  map[string]config.ResolvedModel
+	managedGate contextGate // serializes managed lifecycle calls across rebuilt service instances
+	mu          sync.RWMutex
+	resolved    map[string]config.ResolvedModel
 
 	httpServer *http.Server
 	mcpServer  *gomcp.Server
@@ -817,15 +844,21 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	closeErr := s.Close()
+	closeErr := s.close(ctx)
 	return errors.Join(httpErr, closeErr)
 }
 
 // Close releases all resources held by the server.
 // Safe to call multiple times; serialized with handler reads via s.mu.
 func (s *Server) Close() error {
-	s.managedMu.Lock()
-	defer s.managedMu.Unlock()
+	return s.close(context.Background())
+}
+
+func (s *Server) close(ctx context.Context) error {
+	if err := s.managedGate.lock(ctx); err != nil {
+		return err
+	}
+	defer s.managedGate.unlock()
 
 	s.mu.Lock()
 	if s.closed {

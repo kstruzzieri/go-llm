@@ -9,14 +9,20 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 type managedTestEmbedder struct {
 	vectorSpaceID string
 	err           error
+	cancel        context.CancelFunc
 }
 
-func (e *managedTestEmbedder) Embed(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+func (e *managedTestEmbedder) Embed(ctx context.Context, _ string, inputs []string) (EmbedResult, error) {
+	if e.cancel != nil {
+		e.cancel()
+		return EmbedResult{}, ctx.Err()
+	}
 	if e.err != nil {
 		return EmbedResult{}, e.err
 	}
@@ -27,7 +33,7 @@ func (e *managedTestEmbedder) Embed(_ context.Context, _ string, inputs []string
 	return EmbedResult{Embeddings: embeddings, VectorSpaceID: e.vectorSpaceID}, nil
 }
 
-func newManagedTestService(t *testing.T, embedder *managedTestEmbedder) (*ManagedSources, *Indexer, *SQLiteStore) {
+func newManagedTestService(t *testing.T, embedder Embedder) (*ManagedSources, *Indexer, *SQLiteStore) {
 	t.Helper()
 	store := newTestStore(t)
 	idx, err := NewIndexerWithEmbedder(embedder, store, WithEmbeddingModel("test"))
@@ -456,6 +462,102 @@ func TestManagedSourcesInitialEmbedFailureIsFailedNotIndexed(t *testing.T) {
 	}
 }
 
+func TestManagedSourcesCanceledInitialIngestPersistsFailedState(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{
+		vectorSpaceID: "test/v1",
+		cancel:        cancel,
+	})
+
+	document, err := managed.IngestText(ctx, "runbook.md", "restart safely", DocumentOptions{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("IngestText() error = %v, want context.Canceled", err)
+	}
+	if document.State != DocumentStateFailed || document.Freshness != DocumentFreshnessUnknown {
+		t.Fatalf("document = %#v, want failed/unknown", document)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessUnknown)
+}
+
+func TestManagedSourcesCanceledReindexPersistsFailedState(t *testing.T) {
+	embedder := &managedTestEmbedder{vectorSpaceID: "test/v1"}
+	managed, _, store := newManagedTestService(t, embedder)
+	document, err := managed.IngestText(context.Background(), "runbook.md", "restart safely", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	embedder.cancel = cancel
+	failed, err := managed.ReindexDocument(ctx, document.ID)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReindexDocument() error = %v, want context.Canceled", err)
+	}
+	if failed.State != DocumentStateFailed || failed.Freshness != DocumentFreshnessStale {
+		t.Fatalf("document = %#v, want failed/stale", failed)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+}
+
+func TestManagedSourcesQueuedCallHonorsCanceledContext(t *testing.T) {
+	embedStarted := make(chan struct{})
+	releaseEmbed := make(chan struct{})
+	managed, _, _ := newManagedTestService(t, EmbedderFunc(
+		func(ctx context.Context, _ string, inputs []string) (EmbedResult, error) {
+			close(embedStarted)
+			select {
+			case <-releaseEmbed:
+			case <-ctx.Done():
+				return EmbedResult{}, ctx.Err()
+			}
+			embeddings := make([][]float64, len(inputs))
+			for i := range embeddings {
+				embeddings[i] = []float64{1, float64(i + 1)}
+			}
+			return EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/v1"}, nil
+		},
+	))
+	defer func() {
+		select {
+		case <-releaseEmbed:
+		default:
+			close(releaseEmbed)
+		}
+	}()
+
+	ingestDone := make(chan error, 1)
+	go func() {
+		_, err := managed.IngestText(context.Background(), "runbook.md", "restart safely", DocumentOptions{})
+		ingestDone <- err
+	}()
+	select {
+	case <-embedStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not reach blocking embedder")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	listDone := make(chan error, 1)
+	go func() {
+		_, err := managed.ListDocuments(ctx, DocumentFilter{})
+		listDone <- err
+	}()
+	select {
+	case err := <-listDone:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("ListDocuments() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("canceled ListDocuments() remained queued behind ingest")
+	}
+
+	close(releaseEmbed)
+	if err := <-ingestDone; err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+}
+
 func TestManagedSourcesRegistryFinalizeFailureRollsBackChunks(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	if _, err := store.db.Exec(`
@@ -546,6 +648,60 @@ func TestManagedSourcesVectorSpaceDriftFailsClosed(t *testing.T) {
 	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
 }
 
+func TestManagedSourcesNewDocumentRejectsCorpusVectorSpaceDrift(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/new"})
+	ctx := context.Background()
+	legacy := []Chunk{makeChunk("legacy.md", "legacy content", 1, 1, "")}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(
+		ctx, "legacy.md", legacy, [][]float64{{1, 1}}, "legacy-hash", "test/old",
+	); err != nil {
+		t.Fatalf("seed legacy source: %v", err)
+	}
+
+	document, err := managed.IngestText(ctx, "runbook.md", "restart safely", DocumentOptions{})
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("IngestText() error = %v, want ErrVectorSpaceDrift", err)
+	}
+	if document.State != DocumentStateFailed || document.Freshness != DocumentFreshnessUnknown {
+		t.Fatalf("document = %#v, want failed/unknown", document)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessUnknown)
+	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 0 {
+		t.Fatalf("managed chunks committed despite corpus drift: %#v", chunks)
+	}
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(probe.KnownIDs) != 1 || probe.KnownIDs[0] != "test/old" || probe.HasUnknown {
+		t.Fatalf("probe = %#v, want only test/old", probe)
+	}
+}
+
+func TestManagedSourcesNewDocumentRejectsKnownLegacyVectorSpaceMixture(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/new"})
+	ctx := context.Background()
+	if err := store.Store(
+		ctx,
+		[]Chunk{makeChunk("legacy.md", "legacy content", 1, 1, "")},
+		[][]float64{{1, 1}},
+	); err != nil {
+		t.Fatalf("seed legacy source: %v", err)
+	}
+
+	document, err := managed.IngestText(ctx, "runbook.md", "restart safely", DocumentOptions{})
+	if !errors.Is(err, ErrCorpusMixedVectorSpaces) {
+		t.Fatalf("IngestText() error = %v, want ErrCorpusMixedVectorSpaces", err)
+	}
+	if document.State != DocumentStateFailed || document.Freshness != DocumentFreshnessUnknown {
+		t.Fatalf("document = %#v, want failed/unknown", document)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessUnknown)
+	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 0 {
+		t.Fatalf("managed chunks committed into legacy corpus: %#v", chunks)
+	}
+}
+
 func TestManagedSourcesVectorSpaceDriftAfterLowLevelDeleteFailsClosed(t *testing.T) {
 	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
 	managed, _, store := newManagedTestService(t, embedder)
@@ -628,6 +784,27 @@ func TestManagedSourcesLowLevelDeleteCannotLeaveIndexedRegistryState(t *testing.
 	}
 }
 
+func TestManagedSourcesDetectsSameCountLowLevelReplacement(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	document, err := managed.IngestText(ctx, "runbook.md", "restart safely", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replacement := []Chunk{makeChunk(document.source, "foreign content", 1, 1, "")}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(
+		ctx, document.source, replacement, [][]float64{{1, 1}}, "foreign-signature", "test/v1",
+	); err != nil {
+		t.Fatalf("low-level replacement: %v", err)
+	}
+
+	got := requireManagedDocument(t, managed, document.ID)
+	if got.State != DocumentStateFailed || got.Freshness != DocumentFreshnessStale {
+		t.Fatalf("document = %#v, want failed/stale after foreign replacement", got)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+}
+
 func TestIndexDirectoryPruneSkipsManagedSources(t *testing.T) {
 	managed, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	document, err := managed.IngestText(context.Background(), "runbook.md", "restart safely", DocumentOptions{})
@@ -646,6 +823,27 @@ func TestIndexDirectoryPruneSkipsManagedSources(t *testing.T) {
 		t.Fatal("directory prune removed managed chunks")
 	}
 	requireManagedStatus(t, store, document.ID, DocumentStateIndexed, DocumentFreshnessFresh)
+}
+
+func TestIndexDirectoryPruneDoesNotReserveManagedSourcePrefix(t *testing.T) {
+	_, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	source := managedSourcePrefix + "notes.md"
+	if err := idx.IndexText(ctx, source, "legacy content"); err != nil {
+		t.Fatalf("IndexText() error: %v", err)
+	}
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.workspaceRoot = filepath.Clean(root)
+
+	if errs := idx.pruneDeletedSources(ctx, nil); len(errs) != 0 {
+		t.Fatalf("prune errors = %#v", errs)
+	}
+	if chunks := requireManagedChunks(t, store, source); len(chunks) != 0 {
+		t.Fatalf("legacy prefixed source survived prune: %#v", chunks)
+	}
 }
 
 func TestManagedSourcesValidationAndNilIndexer(t *testing.T) {

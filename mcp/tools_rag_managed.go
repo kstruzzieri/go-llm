@@ -115,8 +115,10 @@ func (s *Server) handleRAGIngestText(ctx context.Context, req *gomcp.CallToolReq
 	if strings.TrimSpace(args.Content) == "" {
 		return toolError("validation", "content must not be empty"), nil
 	}
-	s.managedMu.Lock()
-	defer s.managedMu.Unlock()
+	if result := s.lockManagedOperation(ctx); result != nil {
+		return result, nil
+	}
+	defer s.managedGate.unlock()
 	managed := s.managedSourcesSnapshot()
 	if managed == nil {
 		return toolError("rag", "managed sources unavailable"), nil
@@ -142,8 +144,10 @@ func (s *Server) handleRAGIngestFile(ctx context.Context, req *gomcp.CallToolReq
 	if strings.TrimSpace(args.Path) == "" {
 		return toolError("validation", "path must not be empty"), nil
 	}
-	s.managedMu.Lock()
-	defer s.managedMu.Unlock()
+	if result := s.lockManagedOperation(ctx); result != nil {
+		return result, nil
+	}
+	defer s.managedGate.unlock()
 	managed := s.managedSourcesSnapshot()
 	if managed == nil {
 		return toolError("rag", "managed sources unavailable"), nil
@@ -168,8 +172,10 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
-	s.managedMu.Lock()
-	defer s.managedMu.Unlock()
+	if result := s.lockManagedOperation(ctx); result != nil {
+		return result, nil
+	}
+	defer s.managedGate.unlock()
 	managed := s.managedSourcesSnapshot()
 	if managed == nil {
 		return toolError("rag", "managed sources unavailable"), nil
@@ -199,8 +205,10 @@ func (s *Server) handleRAGDeleteDocument(ctx context.Context, req *gomcp.CallToo
 	if strings.TrimSpace(args.ID) == "" {
 		return toolError("validation", "id must not be empty"), nil
 	}
-	s.managedMu.Lock()
-	defer s.managedMu.Unlock()
+	if result := s.lockManagedOperation(ctx); result != nil {
+		return result, nil
+	}
+	defer s.managedGate.unlock()
 	managed := s.managedSourcesSnapshot()
 	if managed == nil {
 		return toolError("rag", "managed sources unavailable"), nil
@@ -226,8 +234,10 @@ func (s *Server) handleRAGReindexDocument(ctx context.Context, req *gomcp.CallTo
 	if strings.TrimSpace(args.ID) == "" {
 		return toolError("validation", "id must not be empty"), nil
 	}
-	s.managedMu.Lock()
-	defer s.managedMu.Unlock()
+	if result := s.lockManagedOperation(ctx); result != nil {
+		return result, nil
+	}
+	defer s.managedGate.unlock()
 	managed := s.managedSourcesSnapshot()
 	if managed == nil {
 		return toolError("rag", "managed sources unavailable"), nil
@@ -243,6 +253,13 @@ func (s *Server) managedSourcesSnapshot() *rag.ManagedSources {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.managedSources
+}
+
+func (s *Server) lockManagedOperation(ctx context.Context) *gomcp.CallToolResult {
+	if err := s.managedGate.lock(ctx); err != nil {
+		return toolError("rag", "managed operation: %v", err)
+	}
+	return nil
 }
 
 func managedRAGError(action string, err error) *gomcp.CallToolResult {

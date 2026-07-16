@@ -611,7 +611,16 @@ func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []s
 	var errs []string
 	for _, src := range sources {
 		if strings.HasPrefix(src, managedSourcePrefix) {
-			continue
+			if store, ok := idx.store.(*SQLiteStore); ok {
+				managed, err := store.hasManagedDocumentSource(ctx, src)
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("check managed source %q for prune: %v", src, err))
+					continue
+				}
+				if managed {
+					continue
+				}
+			}
 		}
 		abs, err := filepath.Abs(src)
 		if err != nil || !strings.HasPrefix(abs, rootPrefix) {

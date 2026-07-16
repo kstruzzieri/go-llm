@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -326,6 +327,22 @@ func TestManagedRAGToolsLifecycleEndToEnd(t *testing.T) {
 		t.Fatalf("ingested document = %#v", ingested)
 	}
 
+	text, isError = callTool(t, env.session, "rag_search", map[string]any{
+		"query": "restart safely",
+		"top_k": 1,
+	})
+	if isError {
+		t.Fatalf("rag_search returned tool error: %s", text)
+	}
+	var results []rag.SearchResult
+	if err := json.Unmarshal([]byte(text), &results); err != nil {
+		t.Fatalf("decode search results: %v (%s)", err, text)
+	}
+	if len(results) != 1 || results[0].Chunk.Content != "restart safely" ||
+		results[0].Chunk.Metadata["managed_document_id"] != ingested.ID {
+		t.Fatalf("search results = %#v, want managed document %q", results, ingested.ID)
+	}
+
 	text, isError = callTool(t, env.session, "rag_list_documents", map[string]any{
 		"collection": "ops",
 		"tags":       []string{"safe"},
@@ -588,6 +605,122 @@ func TestManagedRAGToolsCloseWaitsForInFlightOperation(t *testing.T) {
 	}
 }
 
+func TestManagedRAGToolsShutdownExpiredContextClosesWhenIdle(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := s.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v, want nil with idle managed gate", err)
+	}
+	s.mu.RLock()
+	closed := s.closed
+	store := s.store
+	managed := s.managedSources
+	s.mu.RUnlock()
+	if !closed || store != nil || managed != nil {
+		t.Fatalf("server after Shutdown() = closed:%v store:%v managed:%v", closed, store, managed)
+	}
+}
+
+func TestManagedRAGToolsQueuedCancellationAndShutdownDeadline(t *testing.T) {
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	embedStarted := make(chan struct{})
+	releaseEmbed := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEmbed) }) }
+	indexer, err := rag.NewIndexerWithEmbedder(rag.EmbedderFunc(
+		func(ctx context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+			close(embedStarted)
+			select {
+			case <-releaseEmbed:
+			case <-ctx.Done():
+				return rag.EmbedResult{}, ctx.Err()
+			}
+			embeddings := make([][]float64, len(inputs))
+			for i := range embeddings {
+				embeddings[i] = []float64{1, float64(i + 1)}
+			}
+			return rag.EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/cancel"}, nil
+		},
+	), store, rag.WithEmbeddingModel("test"))
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewIndexerWithEmbedder() error = %v", err)
+	}
+	managedSources, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewManagedSources() error = %v", err)
+	}
+	s := &Server{store: store, indexer: indexer, managedSources: managedSources}
+	t.Cleanup(func() {
+		release()
+		_ = s.Close()
+	})
+
+	type outcome struct {
+		result *gomcp.CallToolResult
+		err    error
+	}
+	ingestDone := make(chan outcome, 1)
+	go func() {
+		result, err := s.handleRAGIngestText(
+			context.Background(),
+			rawArgs(t, `{"name":"runbook.md","content":"restart safely"}`),
+		)
+		ingestDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case <-embedStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not reach blocking embedder")
+	}
+
+	queuedCtx, cancelQueued := context.WithCancel(context.Background())
+	cancelQueued()
+	listDone := make(chan outcome, 1)
+	go func() {
+		result, err := s.handleRAGListDocuments(queuedCtx, rawArgs(t, `{}`))
+		listDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case result := <-listDone:
+		if result.err != nil || result.result == nil || !result.result.IsError ||
+			!strings.Contains(extractText(result.result), context.Canceled.Error()) {
+			t.Fatalf("canceled list result = %#v, err = %v", result.result, result.err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("canceled list remained queued behind ingest")
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShutdown()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- s.Shutdown(shutdownCtx) }()
+	select {
+	case err := <-shutdownDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Shutdown() exceeded its context deadline")
+	}
+
+	release()
+	select {
+	case result := <-ingestDone:
+		if result.err != nil || result.result == nil || result.result.IsError {
+			t.Fatalf("ingest result = %#v, err = %v", result.result, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not finish")
+	}
+}
+
 func newManagedRAGTestServer(t *testing.T) *Server {
 	t.Helper()
 	store, err := rag.NewSQLiteStore(":memory:")
@@ -611,6 +744,11 @@ func newManagedRAGTestServer(t *testing.T) *Server {
 		_ = store.Close()
 		t.Fatalf("NewIndexerWithEmbedder() error = %v", err)
 	}
+	retriever, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel("test"))
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewRetrieverWithEmbedder() error = %v", err)
+	}
 	managedSources, err := rag.NewManagedSources(indexer, store)
 	if err != nil {
 		_ = store.Close()
@@ -619,6 +757,7 @@ func newManagedRAGTestServer(t *testing.T) *Server {
 	s := &Server{
 		store:          store,
 		indexer:        indexer,
+		retriever:      retriever,
 		managedSources: managedSources,
 		mcpServer: gomcp.NewServer(&gomcp.Implementation{
 			Name: "test", Version: "0.0.1",

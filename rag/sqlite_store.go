@@ -563,6 +563,29 @@ func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source
 	return nil
 }
 
+func validateCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, excludedSource, vectorSpaceID string) error {
+	var minID, maxID string
+	var hasUnknown bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MIN(NULLIF(vector_space_id, '')), ''),
+		       COALESCE(MAX(NULLIF(vector_space_id, '')), ''),
+		       EXISTS(SELECT 1 FROM chunks WHERE source <> ? AND vector_space_id = '')
+		  FROM chunks
+		 WHERE source <> ?`, excludedSource, excludedSource).Scan(&minID, &maxID, &hasUnknown); err != nil {
+		return fmt.Errorf("%w: validate corpus vector space: %w", ErrStoreOperation, err)
+	}
+	if minID != maxID || (hasUnknown && minID != "") {
+		return fmt.Errorf("%w: existing corpus contains incompatible vector spaces", ErrCorpusMixedVectorSpaces)
+	}
+	if hasUnknown {
+		return fmt.Errorf("%w: incoming vector space %q would mix with legacy unknown rows", ErrCorpusMixedVectorSpaces, vectorSpaceID)
+	}
+	if minID != "" && minID != vectorSpaceID {
+		return fmt.Errorf("%w: incoming vector space %q differs from corpus vector space %q", ErrVectorSpaceDrift, vectorSpaceID, minID)
+	}
+	return nil
+}
+
 // Search finds the top-k most similar chunks using brute-force cosine similarity.
 func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k int) ([]SearchResult, error) {
 	if s.immutable {
