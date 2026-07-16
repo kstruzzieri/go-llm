@@ -57,6 +57,32 @@ func TestSQLiteStoreStoreAndSearch(t *testing.T) {
 	}
 }
 
+func TestNewSQLiteStoreAcceptsRelativePath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	store, err := NewSQLiteStore("rel.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(relative) error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// The DSN must resolve to a real file: URI, not treat the relative path
+	// as a URI host, and the per-connection pragmas must take effect.
+	var timeout int
+	if err := store.db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000", timeout)
+	}
+	chunk := Chunk{ID: "c", Content: "x", Source: "s", StartLine: 1, EndLine: 1, Metadata: map[string]string{}}
+	if err := store.Store(context.Background(), []Chunk{chunk}, [][]float64{{1}}); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+	if _, err := os.Stat("rel.db"); err != nil {
+		t.Fatalf("relative database file missing: %v", err)
+	}
+}
+
 func TestSQLiteStoreConcurrentWritersWaitInsteadOfFailingBusy(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "rag.db")
 	store, err := NewSQLiteStore(path)

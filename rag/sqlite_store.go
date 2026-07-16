@@ -8,6 +8,7 @@ import (
 	"iter"
 	"math"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -79,7 +80,11 @@ type replaceSourceOptions struct {
 // NewSQLiteStore creates a vector store backed by SQLite.
 // Use ":memory:" for dbPath to create an in-memory database (for testing).
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", sqliteReadWriteDSN(dbPath))
+	dsn, err := sqliteReadWriteDSN(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("rag: open sqlite: %w", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("rag: open sqlite: %w", err)
 	}
@@ -129,16 +134,24 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 // to one connection (the routing-feedback store's alternative) because
 // retrieval reads are in the user-facing latency path and rely on WAL read
 // concurrency.
-func sqliteReadWriteDSN(dbPath string) string {
+// The path is made absolute first: a relative path in url.URL.Path renders
+// as file://<path>, which the URI parser reads as a host name, not a file.
+// Windows drive-letter/UNC normalization is deferred with the Windows build
+// work (issue #303); this mirrors OpenSQLiteStoreReadOnly's exposure.
+func sqliteReadWriteDSN(dbPath string) (string, error) {
 	if dbPath == ":memory:" {
-		return dbPath
+		return dbPath, nil
 	}
-	u := url.URL{Scheme: "file", Path: dbPath}
+	abs, err := filepath.Abs(dbPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve path %q: %w", dbPath, err)
+	}
+	u := url.URL{Scheme: "file", Path: abs}
 	q := u.Query()
 	q.Set("_pragma", "busy_timeout(5000)")
 	q.Set("_txlock", "immediate")
 	u.RawQuery = q.Encode()
-	return u.String()
+	return u.String(), nil
 }
 
 // OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
