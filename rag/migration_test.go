@@ -1070,6 +1070,13 @@ func TestMigrationV6PreservesChunksAndCreatesManagedRegistry(t *testing.T) {
 	if managed != 0 {
 		t.Fatalf("managed registry rows = %d, want 0", managed)
 	}
+	var chunkCountColumn int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('managed_documents') WHERE name = 'chunk_count'`).Scan(&chunkCountColumn); err != nil {
+		t.Fatalf("query managed chunk_count column: %v", err)
+	}
+	if chunkCountColumn != 1 {
+		t.Fatalf("managed chunk_count columns = %d, want 1", chunkCountColumn)
+	}
 }
 
 func TestMigration_v5_open_idempotent(t *testing.T) {

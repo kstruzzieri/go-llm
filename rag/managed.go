@@ -67,6 +67,7 @@ type Document struct {
 	LastError       string            `json:"last_error,omitempty"`
 	source          string
 	storedText      string
+	chunkCount      int
 }
 
 // DocumentOptions supplies optional metadata for a managed document.
@@ -224,7 +225,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		if err := m.store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM chunks WHERE source = ?`, document.source).Scan(&chunks); err != nil {
 			return nil, fmt.Errorf("rag: count chunks for managed document %q: %w", document.ID, err)
 		}
-		if chunks == 0 && document.ContentHash != contentHash("") {
+		if document.chunkCount > 0 && chunks == 0 {
 			if err := m.persistStatus(ctx, document, DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing"); err != nil {
 				return nil, err
 			}
@@ -329,19 +330,21 @@ func (m *ManagedSources) indexDocumentLocked(ctx context.Context, document Docum
 		return m.failedDocument(ctx, document, first, err)
 	}
 	indexedAt := time.Now().Unix()
-	if err := m.commitDocumentIndex(ctx, candidate, prepared, indexedAt); err != nil {
+	vectorSpaceID, err := m.commitDocumentIndex(ctx, candidate, prepared, indexedAt)
+	if err != nil {
 		return m.failedDocument(ctx, document, first, err)
 	}
 	candidate.SourceSignature = prepared.sourceHash
 	candidate.IndexedAt = indexedAt
-	candidate.VectorSpaceID = prepared.vectorSpaceID
+	candidate.VectorSpaceID = vectorSpaceID
+	candidate.chunkCount = len(prepared.chunks)
 	candidate.State = DocumentStateIndexed
 	candidate.Freshness = DocumentFreshnessFresh
 	candidate.LastError = ""
 	return candidate, nil
 }
 
-func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Document, prepared preparedSource, indexedAt int64) error {
+func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Document, prepared preparedSource, indexedAt int64) (string, error) {
 	opts := replaceSourceOptions{
 		sourceHash:               prepared.sourceHash,
 		vectorSpaceID:            prepared.vectorSpaceID,
@@ -351,35 +354,50 @@ func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Docum
 		allowLegacyUnknown:       true,
 	}
 	if err := m.store.validateReplaceSource(document.source, prepared.chunks, prepared.embeddings, opts); err != nil {
-		return err
+		return "", err
 	}
 	tx, err := m.store.beginWriteTx(ctx)
 	if err != nil {
-		return fmt.Errorf("%w: finalize managed document %q: begin transaction: %w", ErrStoreOperation, document.ID, err)
+		return "", fmt.Errorf("%w: finalize managed document %q: begin transaction: %w", ErrStoreOperation, document.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var retainedVectorSpaceID string
+	if err := tx.QueryRowContext(ctx, `SELECT vector_space_id FROM managed_documents WHERE id = ?`, document.ID).Scan(&retainedVectorSpaceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", fmt.Errorf("%w: %s", ErrDocumentNotFound, document.ID)
+		}
+		return "", fmt.Errorf("rag: load managed document %q vector space: %w", document.ID, err)
+	}
+	if retainedVectorSpaceID != "" && prepared.vectorSpaceID != "" && retainedVectorSpaceID != prepared.vectorSpaceID {
+		return "", fmt.Errorf("%w: managed document %q retained vector space %q differs from incoming %q", ErrVectorSpaceDrift, document.ID, retainedVectorSpaceID, prepared.vectorSpaceID)
+	}
+	vectorSpaceID := prepared.vectorSpaceID
+	if vectorSpaceID == "" {
+		vectorSpaceID = retainedVectorSpaceID
+	}
+	opts.vectorSpaceID = vectorSpaceID
 	if err := m.store.replaceSourceTx(ctx, tx, document.source, prepared.chunks, prepared.embeddings, opts); err != nil {
-		return err
+		return "", err
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents
-		   SET content_hash = ?, source_signature = ?, indexed_at = ?, vector_space_id = ?,
+		   SET content_hash = ?, source_signature = ?, indexed_at = ?, vector_space_id = ?, chunk_count = ?,
 		       state = 'indexed', freshness = 'fresh', last_error = '', updated_at = ?
 		 WHERE id = ?`, document.ContentHash, prepared.sourceHash, indexedAt,
-		prepared.vectorSpaceID, indexedAt, document.ID)
+		vectorSpaceID, len(prepared.chunks), indexedAt, document.ID)
 	if err != nil {
-		return fmt.Errorf("rag: finalize managed document %q: %w", document.ID, err)
+		return "", fmt.Errorf("rag: finalize managed document %q: %w", document.ID, err)
 	}
 	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
 		if err != nil {
-			return fmt.Errorf("rag: finalize managed document %q: rows affected: %w", document.ID, err)
+			return "", fmt.Errorf("rag: finalize managed document %q: rows affected: %w", document.ID, err)
 		}
-		return fmt.Errorf("%w: %s", ErrDocumentNotFound, document.ID)
+		return "", fmt.Errorf("%w: %s", ErrDocumentNotFound, document.ID)
 	}
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("rag: finalize managed document %q: commit: %w", document.ID, err)
+		return "", fmt.Errorf("rag: finalize managed document %q: commit: %w", document.ID, err)
 	}
-	return nil
+	return vectorSpaceID, nil
 }
 
 func (m *ManagedSources) failedDocument(ctx context.Context, document Document, first bool, cause error) (Document, error) {
@@ -434,7 +452,7 @@ func (m *ManagedSources) persistStatus(ctx context.Context, document *Document, 
 const managedDocumentSelect = `
 	SELECT id, source, title, kind, origin, mime_type, stored_text,
 	       content_hash, source_signature, indexed_at, vector_space_id,
-	       collection, tags, state, freshness, last_error
+	       chunk_count, collection, tags, state, freshness, last_error
 	  FROM managed_documents`
 
 type managedRowScanner interface {
@@ -448,7 +466,7 @@ func scanManagedDocument(scanner managedRowScanner) (Document, error) {
 		&document.ID, &document.source, &document.Title, &document.Kind,
 		&document.Origin, &document.MIMEType, &document.storedText,
 		&document.ContentHash, &document.SourceSignature, &document.IndexedAt,
-		&document.VectorSpaceID, &document.Collection, &tagsJSON,
+		&document.VectorSpaceID, &document.chunkCount, &document.Collection, &tagsJSON,
 		&document.State, &document.Freshness, &document.LastError,
 	); err != nil {
 		return Document{}, fmt.Errorf("rag: scan managed document: %w", err)

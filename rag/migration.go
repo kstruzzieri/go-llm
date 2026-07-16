@@ -180,6 +180,7 @@ func migrateV6(tx *sql.Tx) error {
 			source_signature TEXT NOT NULL,
 			indexed_at INTEGER NOT NULL DEFAULT 0,
 			vector_space_id TEXT NOT NULL DEFAULT '',
+			chunk_count INTEGER NOT NULL DEFAULT 0,
 			collection TEXT NOT NULL DEFAULT '',
 			tags TEXT NOT NULL DEFAULT '[]',
 			state TEXT NOT NULL CHECK (state IN ('indexing', 'indexed', 'failed')),

@@ -82,6 +82,17 @@ func requireManagedStatus(t *testing.T, store *SQLiteStore, id string, state Doc
 	}
 }
 
+func requireManagedVectorSpaceID(t *testing.T, store *SQLiteStore, id, want string) {
+	t.Helper()
+	var got string
+	if err := store.db.QueryRow(`SELECT vector_space_id FROM managed_documents WHERE id = ?`, id).Scan(&got); err != nil {
+		t.Fatalf("query managed vector space: %v", err)
+	}
+	if got != want {
+		t.Fatalf("registry vector_space_id = %q, want %q", got, want)
+	}
+}
+
 func TestManagedSourcesTextRoundTripAndRepeatCreatesDistinctIDs(t *testing.T) {
 	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
@@ -181,6 +192,36 @@ func TestManagedSourcesEmptyFileRemainsFresh(t *testing.T) {
 	}
 	if reindexed.ID != document.ID || reindexed.State != DocumentStateIndexed || reindexed.Freshness != DocumentFreshnessFresh {
 		t.Fatalf("reindexed empty document = %#v", reindexed)
+	}
+}
+
+func TestManagedSourcesNonEmptyZeroChunkDocumentRemainsFresh(t *testing.T) {
+	managed, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	idx.chunker = chunkerFunc(func(string, string) ([]Chunk, error) { return nil, nil })
+	document, err := managed.IngestText(context.Background(), "filtered.md", "non-empty but intentionally filtered", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 0 {
+		t.Fatalf("zero-chunk document chunks = %#v", chunks)
+	}
+	listed := requireManagedDocument(t, managed, document.ID)
+	if listed.State != DocumentStateIndexed || listed.Freshness != DocumentFreshnessFresh {
+		t.Fatalf("listed zero-chunk document = %#v", listed)
+	}
+	var chunkCount int
+	if err := store.db.QueryRow(`SELECT chunk_count FROM managed_documents WHERE id = ?`, document.ID).Scan(&chunkCount); err != nil {
+		t.Fatalf("query committed chunk count: %v", err)
+	}
+	if chunkCount != 0 {
+		t.Fatalf("committed chunk_count = %d, want 0", chunkCount)
+	}
+	encoded, err := json.Marshal(listed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "chunk_count") {
+		t.Fatalf("public document JSON leaked chunk_count: %s", encoded)
 	}
 }
 
@@ -461,6 +502,70 @@ func TestManagedSourcesVectorSpaceDriftFailsClosed(t *testing.T) {
 	if chunks[0].Chunk.Metadata["managed_state"] != string(DocumentStateFailed) || chunks[0].Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
 		t.Fatalf("chunk metadata after drift = %#v", chunks[0].Chunk.Metadata)
 	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+}
+
+func TestManagedSourcesVectorSpaceDriftAfterLowLevelDeleteFailsClosed(t *testing.T) {
+	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
+	managed, _, store := newManagedTestService(t, embedder)
+	ctx := context.Background()
+	document, err := managed.IngestText(ctx, "runbook.md", "old content", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DeleteBySource(ctx, document.source); err != nil {
+		t.Fatalf("DeleteBySource() error: %v", err)
+	}
+	embedder.vectorSpaceID = "test/new"
+
+	failed, err := managed.ReindexDocument(ctx, document.ID)
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("ReindexDocument() error = %v, want ErrVectorSpaceDrift", err)
+	}
+	if failed.State != DocumentStateFailed || failed.Freshness != DocumentFreshnessStale {
+		t.Fatalf("failed document = %#v", failed)
+	}
+	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 0 {
+		t.Fatalf("chunks after rejected drift = %#v", chunks)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
+}
+
+func TestManagedSourcesVectorSpaceDriftAfterZeroChunkTransitionFailsClosed(t *testing.T) {
+	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
+	managed, idx, store := newManagedTestService(t, embedder)
+	ctx := context.Background()
+	document, err := managed.IngestText(ctx, "runbook.md", "old content", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx.chunker = chunkerFunc(func(string, string) ([]Chunk, error) { return nil, nil })
+	zeroChunk, err := managed.ReindexDocument(ctx, document.ID)
+	if err != nil {
+		t.Fatalf("zero-chunk ReindexDocument() error: %v", err)
+	}
+	if zeroChunk.VectorSpaceID != "test/old" {
+		t.Fatalf("zero-chunk vector space = %q, want retained test/old", zeroChunk.VectorSpaceID)
+	}
+	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
+
+	idx.chunker = chunkerFunc(func(source, content string) ([]Chunk, error) {
+		return []Chunk{makeChunk(source, content, 1, 1, "")}, nil
+	})
+	embedder.vectorSpaceID = "test/new"
+	failed, err := managed.ReindexDocument(ctx, document.ID)
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("ReindexDocument() error = %v, want ErrVectorSpaceDrift", err)
+	}
+	if failed.State != DocumentStateFailed || failed.Freshness != DocumentFreshnessStale {
+		t.Fatalf("failed document = %#v", failed)
+	}
+	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 0 {
+		t.Fatalf("chunks after rejected drift = %#v", chunks)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
 }
 
 func TestManagedSourcesLowLevelDeleteCannotLeaveIndexedRegistryState(t *testing.T) {
