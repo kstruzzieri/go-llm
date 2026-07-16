@@ -150,6 +150,37 @@ func TestWorkflowRecommendation_JSONHandoffRoundTripsAndVerifiesMaterializedCont
 	}
 }
 
+// A recommendation with an empty alternatives list is accepted by
+// parseWorkflowRecommendation, so MarshalJSON must round-trip it too: a nil
+// slice re-serialized to null would be rejected as a missing required field
+// and would fail the durable handoff write after proof state was mutated.
+func TestWorkflowRecommendation_EmptyAlternativesRoundTrips(t *testing.T) {
+	empty := strings.Replace(validRecommendationJSON,
+		`"alternatives":[
+    {"profile":"docs-only","relation":"cheaper","reason":"documentation only"},
+    {"profile":"medium-feature","relation":"safer","reason":"bounded new behavior"}
+  ]`,
+		`"alternatives":[]`, 1)
+	recommendation, err := parseWorkflowRecommendation([]byte(empty))
+	if err != nil {
+		t.Fatalf("parse empty alternatives: %v", err)
+	}
+	b, err := json.Marshal(recommendation)
+	if err != nil {
+		t.Fatalf("marshal empty-alternatives recommendation: %v", err)
+	}
+	if !bytes.Contains(b, []byte(`"alternatives":[]`)) {
+		t.Fatalf("empty alternatives must serialize as [] not null:\n%s", b)
+	}
+	var restored WorkflowRecommendation
+	if err := json.Unmarshal(b, &restored); err != nil {
+		t.Fatalf("re-parse marshaled empty-alternatives handoff: %v", err)
+	}
+	if len(restored.Alternatives) != 0 {
+		t.Fatalf("alternatives = %+v, want empty", restored.Alternatives)
+	}
+}
+
 func TestClient_RecommendWorkflow_RejectsMalformedOrInconsistentSuccess(t *testing.T) {
 	tests := []struct {
 		name string

@@ -148,9 +148,13 @@ func (r WorkflowRecommendation) MarshalJSON() ([]byte, error) {
 		Override                  *WorkflowOverride     `json:"override"`
 		WorkflowContractCandidate json.RawMessage       `json:"workflow_contract_candidate"`
 	}{
+		// Encode empty slices as [] not null: parseWorkflowRecommendation accepts
+		// an empty alternatives list, so the self-revalidation below must too, and
+		// a nil slice would otherwise re-serialize to null and be rejected as a
+		// missing required field.
 		SchemaVersion: r.SchemaVersion, Recommended: r.Recommended, Selected: r.Selected,
-		Signals: append([]string(nil), r.Signals...), Rationale: r.Rationale,
-		Alternatives: append([]WorkflowAlternative(nil), r.Alternatives...), Override: r.Override,
+		Signals: append([]string{}, r.Signals...), Rationale: r.Rationale,
+		Alternatives: append([]WorkflowAlternative{}, r.Alternatives...), Override: r.Override,
 		WorkflowContractCandidate: candidate,
 	}
 	b, err := json.Marshal(payload)
