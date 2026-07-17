@@ -628,6 +628,25 @@ func TestManagedSourcesRejectsOversizeInputBeforeRegistration(t *testing.T) {
 	}
 }
 
+func TestManagedSourcesRejectsRawOversizeTextNameBeforeTrim(t *testing.T) {
+	calls := 0
+	managed, _, store := newManagedTestService(t, EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+		calls++
+		return EmbedResult{Embeddings: make([][]float64, len(inputs)), VectorSpaceID: "test/v1"}, nil
+	}))
+	name := strings.Repeat(" ", MaxManagedMetadataBytes) + "name"
+	if _, err := managed.IngestText(context.Background(), name, "content", DocumentOptions{}); err == nil {
+		t.Fatal("IngestText() accepted raw oversized padded name")
+	}
+	if calls != 0 {
+		t.Fatalf("Embed() calls = %d, want 0", calls)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM managed_documents`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("managed registry count = %d, err = %v, want 0", count, err)
+	}
+}
+
 func TestManagedSourcesReindexRejectsInvalidRetainedTextBeforeEmbedding(t *testing.T) {
 	for _, tc := range []struct {
 		name string

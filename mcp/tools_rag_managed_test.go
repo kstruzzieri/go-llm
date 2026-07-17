@@ -218,6 +218,38 @@ func TestManagedRAGHandlersRejectRawBoundsBeforeLock(t *testing.T) {
 	}
 }
 
+func TestManagedRAGHandlersRejectInvalidUTF8ArgumentsBeforeLock(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	if err := s.managedGate.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.managedGate.unlock()
+
+	invalidString := func(field string) string {
+		return string([]byte(`{"` + field + `":"` + "\xff" + `"}`))
+	}
+	for _, tc := range []struct {
+		name    string
+		handler managedRAGHandler
+		args    string
+	}{
+		{"ingest text", s.handleRAGIngestText, string([]byte(`{"name":"` + "\xff" + `","content":"content"}`))},
+		{"ingest file", s.handleRAGIngestFile, invalidString("path")},
+		{"list", s.handleRAGListDocuments, invalidString("collection")},
+		{"delete", s.handleRAGDeleteDocument, invalidString("id")},
+		{"reindex", s.handleRAGReindexDocument, invalidString("id")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, err := tc.handler(ctx, rawArgs(t, tc.args))
+			if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation: invalid arguments:") {
+				t.Fatalf("result = %#v, err = %v, want malformed-argument validation before managed lock", result, err)
+			}
+		})
+	}
+}
+
 func propertyTypes(t *testing.T, properties map[string]any) map[string]string {
 	t.Helper()
 	types := make(map[string]string, len(properties))

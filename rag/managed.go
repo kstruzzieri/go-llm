@@ -149,18 +149,18 @@ func (m *ManagedSources) IngestText(ctx context.Context, name, content string, o
 	if m.indexer == nil {
 		return Document{}, fmt.Errorf("rag: managed sources: indexer is unavailable")
 	}
+	if !utf8.ValidString(name) || !utf8.ValidString(content) {
+		return Document{}, fmt.Errorf("rag: ingest text: input must be valid UTF-8")
+	}
+	if len(name) > MaxManagedMetadataBytes || len(content) > MaxManagedDocumentBytes {
+		return Document{}, fmt.Errorf("rag: ingest text: input exceeds managed size limit")
+	}
 	name = strings.TrimSpace(name)
 	if name == "" {
 		return Document{}, fmt.Errorf("rag: ingest text: name is required")
 	}
 	if strings.TrimSpace(content) == "" {
 		return Document{}, fmt.Errorf("rag: ingest text %q: content is required", name)
-	}
-	if !utf8.ValidString(name) || !utf8.ValidString(content) {
-		return Document{}, fmt.Errorf("rag: ingest text %q: content must be valid UTF-8", name)
-	}
-	if len(name) > MaxManagedMetadataBytes || len(content) > MaxManagedDocumentBytes {
-		return Document{}, fmt.Errorf("rag: ingest text %q: input exceeds managed size limit", name)
 	}
 	return m.ingestLocked(ctx, name, content, DocumentKindText, "", content, opts)
 }

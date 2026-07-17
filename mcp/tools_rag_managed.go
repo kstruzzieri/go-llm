@@ -61,6 +61,13 @@ func validateManagedRAGTags(tags []string) error {
 	return nil
 }
 
+func decodeManagedRAGArguments(arguments json.RawMessage, target any) error {
+	if !utf8.Valid(arguments) {
+		return fmt.Errorf("arguments must be valid UTF-8")
+	}
+	return json.Unmarshal(arguments, target)
+}
+
 func (s *Server) registerManagedRAGTools() {
 	s.mcpServer.AddTool(&gomcp.Tool{
 		Name:        "rag_ingest_text",
@@ -152,7 +159,7 @@ func (s *Server) handleRAGIngestText(ctx context.Context, req *gomcp.CallToolReq
 		Name    string `json:"name"`
 		Content string `json:"content"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("name", args.Name, rag.MaxManagedMetadataBytes); err != nil {
@@ -193,7 +200,7 @@ func (s *Server) handleRAGIngestFile(ctx context.Context, req *gomcp.CallToolReq
 		managedOptionsArgs
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("path", args.Path, rag.MaxManagedMetadataBytes); err != nil {
@@ -232,7 +239,7 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 		AfterID    string   `json:"after_id,omitempty"`
 		Limit      int      `json:"limit,omitempty"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("collection", args.Collection, rag.MaxManagedMetadataBytes); err != nil {
@@ -284,7 +291,7 @@ func (s *Server) handleRAGDeleteDocument(ctx context.Context, req *gomcp.CallToo
 	var args struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("id", args.ID, rag.MaxManagedMetadataBytes); err != nil {
@@ -316,7 +323,7 @@ func (s *Server) handleRAGReindexDocument(ctx context.Context, req *gomcp.CallTo
 	var args struct {
 		ID string `json:"id"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("id", args.ID, rag.MaxManagedMetadataBytes); err != nil {
