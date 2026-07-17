@@ -45,6 +45,9 @@ func (idx *Indexer) canDoIncremental(chunks []Chunk) bool {
 // On success, the store contains exactly the same chunks that a full
 // IndexFile would produce. The only difference is fewer embedding API calls.
 func (idx *Indexer) IndexFileIncremental(ctx context.Context, path string) error {
+	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("rag: read file %q: %w", path, err)

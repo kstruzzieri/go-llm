@@ -277,7 +277,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 				minVectorSpaceID != document.VectorSpaceID || maxVectorSpaceID != document.VectorSpaceID ||
 				minDocumentID != document.ID || maxDocumentID != document.ID)
 		if chunks != document.ChunkCount || provenanceMismatch {
-			if err := m.persistStatus(ctx, document, DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing or inconsistent"); err != nil {
+			if _, err := m.reconcileDocument(ctx, document); err != nil {
 				return nil, err
 			}
 			continue
@@ -291,7 +291,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 			}
 		}
 		if document.Freshness != desired {
-			if err := m.persistStatus(ctx, document, document.State, desired, document.LastError); err != nil {
+			if _, err := m.reconcileDocument(ctx, document); err != nil {
 				return nil, err
 			}
 		}
@@ -315,6 +315,101 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		filtered = append(filtered, document)
 	}
 	return filtered, nil
+}
+
+// reconcileDocument revalidates a listing snapshot before changing its
+// lifecycle state. A separate ManagedSources instance may finish a reindex
+// between ListDocuments' read and reconciliation write.
+func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Document) (bool, error) {
+	tx, err := m.store.beginWriteTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("rag: reconcile managed document %q: begin transaction: %w", observed.ID, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, err := scanManagedDocument(tx.QueryRowContext(ctx, managedDocumentListSelect+` WHERE id = ?`, observed.ID))
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !sameManagedDocumentRevision(*observed, current) {
+		*observed = current
+		return false, nil
+	}
+
+	var chunks int
+	var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID, minDocumentID, maxDocumentID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
+		       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
+		       COALESCE(MIN(json_extract(metadata, '$.managed_document_id')), ''),
+		       COALESCE(MAX(json_extract(metadata, '$.managed_document_id')), '')
+		  FROM chunks
+		 WHERE source = ?`, current.source).Scan(
+		&chunks, &minSignature, &maxSignature, &minVectorSpaceID, &maxVectorSpaceID,
+		&minDocumentID, &maxDocumentID,
+	); err != nil {
+		return false, fmt.Errorf("rag: count chunks for managed document %q: %w", current.ID, err)
+	}
+	provenanceMismatch := chunks > 0 &&
+		(minSignature != current.SourceSignature || maxSignature != current.SourceSignature ||
+			minVectorSpaceID != current.VectorSpaceID || maxVectorSpaceID != current.VectorSpaceID ||
+			minDocumentID != current.ID || maxDocumentID != current.ID)
+	state, freshness, lastError := current.State, current.Freshness, current.LastError
+	if chunks != current.ChunkCount || provenanceMismatch {
+		state, freshness, lastError = DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing or inconsistent"
+	} else {
+		desired := DocumentFreshnessFresh
+		if current.Kind == DocumentKindFile {
+			data, err := readManagedRegularFile(current.Origin)
+			if err != nil || !utf8.Valid(data) || contentHash(string(data)) != current.ContentHash {
+				desired = DocumentFreshnessStale
+			}
+		}
+		freshness = desired
+	}
+	if state == current.State && freshness == current.Freshness && lastError == current.LastError {
+		return false, tx.Commit()
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE managed_documents
+		   SET state = ?, freshness = ?, last_error = ?, updated_at = ?
+		 WHERE id = ?`, state, freshness, lastError, time.Now().Unix(), current.ID); err != nil {
+		return false, fmt.Errorf("rag: reconcile managed document %q status: %w", current.ID, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE chunks
+		   SET metadata = json_set(metadata,
+		       '$.managed_state', ?, '$.managed_freshness', ?)
+		 WHERE source = ?`, string(state), string(freshness), current.source); err != nil {
+		return false, fmt.Errorf("rag: reconcile chunks for managed document %q status: %w", current.ID, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("rag: reconcile managed document %q status: commit: %w", current.ID, err)
+	}
+	current.State, current.Freshness, current.LastError = state, freshness, lastError
+	*observed = current
+	return true, nil
+}
+
+func sameManagedDocumentRevision(left, right Document) bool {
+	if left.ID != right.ID || left.source != right.source || left.Title != right.Title || left.Kind != right.Kind ||
+		left.Origin != right.Origin || left.MIMEType != right.MIMEType || left.ContentHash != right.ContentHash ||
+		left.SourceSignature != right.SourceSignature || left.IndexedAt != right.IndexedAt ||
+		left.VectorSpaceID != right.VectorSpaceID || left.Collection != right.Collection ||
+		left.State != right.State || left.Freshness != right.Freshness || left.LastError != right.LastError ||
+		left.ChunkCount != right.ChunkCount || len(left.Tags) != len(right.Tags) {
+		return false
+	}
+	for i := range left.Tags {
+		if left.Tags[i] != right.Tags[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // DeleteDocument atomically removes a managed document and its chunks.

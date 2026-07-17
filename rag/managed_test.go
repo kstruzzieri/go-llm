@@ -353,6 +353,79 @@ func TestIndexerManagedPrefixAllowsUnregisteredSource(t *testing.T) {
 	}
 }
 
+func TestIndexerRejectsManagedDocumentSourceBeforeEmbedding(t *testing.T) {
+	managed, idx, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	document, err := managed.IngestText(context.Background(), "runbook.md", "restart safely", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	embedCalls := 0
+	idx.embedder = EmbedderFunc(func(context.Context, string, []string) (EmbedResult, error) {
+		embedCalls++
+		return EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}, nil
+	})
+
+	err = idx.IndexText(context.Background(), document.source, "replacement content")
+	if err == nil || !strings.Contains(err.Error(), "belongs to a managed document") {
+		t.Fatalf("IndexText(managed source) error = %v, want ownership error", err)
+	}
+	if embedCalls != 0 {
+		t.Fatalf("Embed calls = %d, want 0", embedCalls)
+	}
+}
+
+func TestIndexerRejectsManagedDocumentSourceBeforeIncrementalRead(t *testing.T) {
+	managed, idx, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	document, err := managed.IngestText(context.Background(), "runbook.md", "restart safely", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = idx.IndexFileIncremental(context.Background(), document.source)
+	if err == nil || !strings.Contains(err.Error(), "belongs to a managed document") {
+		t.Fatalf("IndexFileIncremental(managed source) error = %v, want ownership error before read", err)
+	}
+}
+
+func TestManagedSourcesReconciliationSkipsStaleSnapshotAfterReindex(t *testing.T) {
+	managed, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	document, err := managed.IngestText(ctx, "runbook.md", "old content", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := requireManagedDocument(t, managed, document.ID)
+	if _, err := store.db.Exec(`UPDATE managed_documents SET stored_text = ? WHERE id = ?`, "new content", document.ID); err != nil {
+		t.Fatalf("update retained text: %v", err)
+	}
+	second, err := NewManagedSources(idx, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := second.ReindexDocument(ctx, document.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.State != DocumentStateIndexed || updated.ContentHash == stale.ContentHash {
+		t.Fatalf("reindexed document = %#v, want updated indexed document", updated)
+	}
+
+	changed, err := managed.reconcileDocument(ctx, &stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if changed {
+		t.Fatal("stale reconciliation mutated reindexed document")
+	}
+	if stale.ContentHash != updated.ContentHash {
+		t.Fatalf("reconciled snapshot = %#v, want reindexed document", stale)
+	}
+	restored := requireManagedDocument(t, managed, document.ID)
+	if restored.State != DocumentStateIndexed || restored.Freshness != DocumentFreshnessFresh || restored.ContentHash != updated.ContentHash {
+		t.Fatalf("document after stale reconciliation = %#v, want reindexed document", restored)
+	}
+}
+
 func TestManagedSourcesListFiltersAndOrdersByID(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()

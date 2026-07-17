@@ -257,6 +257,9 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 // pipeline as IndexFile. Registered managed document sources are rejected;
 // unregistered legacy sources may use the "managed:" prefix.
 func (idx *Indexer) IndexText(ctx context.Context, source, content string) error {
+	if err := idx.rejectManagedDocumentSource(ctx, source); err != nil {
+		return err
+	}
 	prepared, err := idx.prepareSource(ctx, source, content, nil)
 	if err != nil {
 		return err
