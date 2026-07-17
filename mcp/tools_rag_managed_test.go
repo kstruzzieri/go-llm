@@ -168,6 +168,80 @@ func TestManagedRAGListDocumentsRejectsLimitOverMaximum(t *testing.T) {
 	}
 }
 
+func TestRAGHandlersRejectOversizeArgumentsBeforeDecoding(t *testing.T) {
+	s := &Server{}
+	for _, test := range []struct {
+		name    string
+		handler managedRAGHandler
+		max     int
+	}{
+		{"index file", s.handleRAGIndexFile, maxRAGSmallArgumentsBytes},
+		{"index directory", s.handleRAGIndexDirectory, maxRAGSmallArgumentsBytes},
+		{"search", s.handleRAGSearch, maxRAGSearchArgumentsBytes},
+		{"answer", s.handleRAGAnswer, maxRAGSearchArgumentsBytes},
+		{"delete source", s.handleRAGDelete, maxRAGSmallArgumentsBytes},
+		{"ingest file", s.handleRAGIngestFile, maxRAGSmallArgumentsBytes},
+		{"list documents", s.handleRAGListDocuments, maxRAGSmallArgumentsBytes},
+		{"delete document", s.handleRAGDeleteDocument, maxRAGSmallArgumentsBytes},
+		{"reindex document", s.handleRAGReindexDocument, maxRAGSmallArgumentsBytes},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			arguments := make(json.RawMessage, test.max+1)
+			arguments[0] = 0xff // proves the size check runs before UTF-8 and JSON decoding
+			request := &gomcp.CallToolRequest{Params: &gomcp.CallToolParamsRaw{Arguments: arguments}}
+			result, err := test.handler(context.Background(), request)
+			if err != nil || result == nil || !result.IsError {
+				t.Fatalf("result=%#v error=%v, want validation error", result, err)
+			}
+			if text := extractText(result); !strings.Contains(text, fmt.Sprintf("at most %d bytes", test.max)) {
+				t.Fatalf("error=%q, want raw argument size limit", text)
+			}
+		})
+	}
+}
+
+func TestRAGIngestTextUsesLargeArgumentBudget(t *testing.T) {
+	content := strings.Repeat("x", maxRAGSearchArgumentsBytes)
+	result := callManagedRAGHandler(t, (&Server{}).handleRAGIngestText, `{"name":"","content":"`+content+`"}`)
+	if text := extractText(result); !result.IsError || !strings.Contains(text, "name must not be empty") {
+		t.Fatalf("error=%q, want field validation after accepting a search-limit-sized body", text)
+	}
+}
+
+type recordingRAGArgumentsDecoder bool
+
+func (d *recordingRAGArgumentsDecoder) UnmarshalJSON([]byte) error {
+	*d = true
+	return nil
+}
+
+func TestDecodeManagedRAGArgumentsSizeBoundary(t *testing.T) {
+	const maxBytes = 8
+	atLimit := json.RawMessage("0       ")
+	var decoded recordingRAGArgumentsDecoder
+	if err := decodeManagedRAGArguments(atLimit, maxBytes, &decoded); err != nil || !decoded {
+		t.Fatalf("at-limit decode: decoded=%v error=%v", decoded, err)
+	}
+
+	decoded = false
+	overLimit := append(append(json.RawMessage(nil), atLimit...), ' ')
+	if err := decodeManagedRAGArguments(overLimit, maxBytes, &decoded); err == nil || decoded {
+		t.Fatalf("over-limit decode: decoded=%v error=%v", decoded, err)
+	}
+}
+
+func TestRAGArgumentLimitsCoverWorstCaseManagedTextJSON(t *testing.T) {
+	if maxRAGSmallArgumentsBytes != 256<<10 || maxRAGSearchArgumentsBytes != 1<<20 || maxRAGIngestTextArgumentsBytes != 97<<20 {
+		t.Fatalf("argument limits = %d/%d/%d", maxRAGSmallArgumentsBytes, maxRAGSearchArgumentsBytes, maxRAGIngestTextArgumentsBytes)
+	}
+	// encoding/json can render each valid one-byte control character as six
+	// bytes (\\u00xx). Leave another MiB for the object and managed metadata.
+	worstCase := 6*rag.MaxManagedDocumentBytes + 1<<20
+	if maxRAGIngestTextArgumentsBytes < worstCase {
+		t.Fatalf("ingest text argument limit = %d, want at least %d", maxRAGIngestTextArgumentsBytes, worstCase)
+	}
+}
+
 func TestManagedRAGHandlersRejectRawBoundsBeforeLock(t *testing.T) {
 	s := newManagedRAGTestServer(t)
 	if err := s.managedGate.lock(context.Background()); err != nil {

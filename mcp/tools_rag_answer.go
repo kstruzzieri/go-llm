@@ -330,11 +330,14 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 		TopK               int    `json:"top_k,omitempty"`
 		IncludeDiagnostics bool   `json:"include_diagnostics,omitempty"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSearchArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Question == "" {
 		return toolError("validation", "question must not be empty"), nil
+	}
+	if args.TopK > maxRAGTopK {
+		return toolError("validation", "top_k must be at most %d", maxRAGTopK), nil
 	}
 	topK := args.TopK
 	if topK <= 0 {

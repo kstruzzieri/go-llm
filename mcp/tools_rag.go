@@ -73,7 +73,7 @@ func (s *Server) registerRAGTools() {
 			"type": "object",
 			"properties": map[string]any{
 				"query":          map[string]any{"type": "string", "description": "Search query"},
-				"top_k":          map[string]any{"type": "integer", "description": "Number of results (default: 5)"},
+				"top_k":          map[string]any{"type": "integer", "maximum": maxRAGTopK, "description": "Number of results (default: 5)"},
 				"current_file":   map[string]any{"type": "string", "description": "File currently being edited for contextual ranking"},
 				"workspace_root": map[string]any{"type": "string", "description": "Workspace root used to normalize contextual paths"},
 				"open_files":     map[string]any{"type": "array", "description": "Files currently open for contextual ranking", "items": map[string]any{"type": "string"}},
@@ -94,7 +94,7 @@ func (s *Server) registerRAGTools() {
 			"properties": map[string]any{
 				"question":            map[string]any{"type": "string", "description": "The question to answer from indexed context"},
 				"model":               map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
-				"top_k":               map[string]any{"type": "integer", "description": "Number of chunks to retrieve (default: 5)"},
+				"top_k":               map[string]any{"type": "integer", "maximum": maxRAGTopK, "description": "Number of chunks to retrieve (default: 5)"},
 				"include_diagnostics": map[string]any{"type": "boolean", "description": "Include retrieval/verification diagnostics in the response"},
 			},
 			"required": []string{"question"},
@@ -142,7 +142,7 @@ func (s *Server) handleRAGIndexFile(ctx context.Context, req *gomcp.CallToolRequ
 	var args struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Path == "" {
@@ -174,7 +174,7 @@ func (s *Server) handleRAGIndexDirectory(ctx context.Context, req *gomcp.CallToo
 		Extensions  []string `json:"extensions,omitempty"`
 		Concurrency int      `json:"concurrency,omitempty"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Path == "" {
@@ -217,11 +217,14 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		Collection    string   `json:"collection,omitempty"`
 		Tags          []string `json:"tags,omitempty"`
 	}
-	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSearchArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Query == "" {
 		return toolError("validation", "query must not be empty"), nil
+	}
+	if args.TopK > maxRAGTopK {
+		return toolError("validation", "top_k must be at most %d", maxRAGTopK), nil
 	}
 	if err := validateRAGSearchScope(args.Collection, args.Tags); err != nil {
 		return toolError("validation", "%v", err), nil
@@ -327,7 +330,7 @@ func (s *Server) handleRAGDelete(ctx context.Context, req *gomcp.CallToolRequest
 	var args struct {
 		Source string `json:"source"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Source == "" {

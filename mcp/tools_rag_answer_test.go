@@ -362,12 +362,16 @@ func rawArgs(t *testing.T, args string) *gomcp.CallToolRequest {
 }
 
 type answerStore struct {
-	results []rag.SearchResult
+	results     []rag.SearchResult
+	searchCalls int
+	topK        int
 }
 
 func (s *answerStore) Store(context.Context, []rag.Chunk, [][]float64) error { return nil }
 
 func (s *answerStore) Search(_ context.Context, _ []float64, k int) ([]rag.SearchResult, error) {
+	s.searchCalls++
+	s.topK = k
 	if k > 0 && len(s.results) > k {
 		return s.results[:k], nil
 	}

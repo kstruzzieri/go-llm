@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -34,7 +35,7 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 	forged.Metadata["managed_origin"] = filepath.Join(t.TempDir(), "must-not-read")
 	forged.Metadata["managed_content_hash"] = contentHash("forged")
 	forged.Metadata["managed_freshness"] = string(DocumentFreshnessFresh)
-	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, document.source, []Chunk{trusted, forged}, [][]float64{{0.9, 0.1}, {1, 0}}, document.ContentHash, document.VectorSpaceID); err != nil {
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, document.source, []Chunk{trusted, forged}, [][]float64{{0.9, 0.1}, {1, 0}}, document.SourceSignature, document.VectorSpaceID); err != nil {
 		t.Fatal(err)
 	}
 	orphanSource := managedSourcePrefix + strings.Repeat("a", 32) + ".md"
@@ -50,8 +51,8 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 		t.Fatal(err)
 	}
 	scoped, err := r.RetrieveScoped(ctx, "q", 5, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
-	if err != nil || len(scoped) != 1 || scoped[0].Chunk.ID != "trusted" {
-		t.Fatalf("scoped results=%#v error=%v, want only trusted", scoped, err)
+	if err != nil || len(scoped) != 0 {
+		t.Fatalf("scoped results=%#v error=%v, want corrupt source excluded", scoped, err)
 	}
 	unscoped, err := r.Retrieve(ctx, "q", 5)
 	if err != nil {
@@ -61,6 +62,172 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 		if result.Chunk.ID == "forged" && result.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessFresh) {
 			t.Fatalf("forged freshness=%q, want unchanged (arbitrary path must not be read)", result.Chunk.Metadata["managed_freshness"])
 		}
+	}
+}
+
+func TestManagedRegistrySnapshotRejectsCorruptChunkProvenance(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *SQLiteStore, Document, Chunk)
+	}{
+		{
+			name: "wrong source signature",
+			mutate: func(t *testing.T, store *SQLiteStore, document Document, _ Chunk) {
+				if _, err := store.db.Exec(`UPDATE chunks SET source_content_hash = 'wrong' WHERE source = ?`, document.source); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "wrong vector space",
+			mutate: func(t *testing.T, store *SQLiteStore, document Document, _ Chunk) {
+				if _, err := store.db.Exec(`UPDATE chunks SET vector_space_id = 'wrong/v1' WHERE source = ?`, document.source); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "partial chunk set",
+			mutate: func(t *testing.T, store *SQLiteStore, document Document, _ Chunk) {
+				if _, err := store.db.Exec(`UPDATE managed_documents SET chunk_count = chunk_count + 1 WHERE id = ?`, document.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "zero chunks with stale candidate",
+			mutate: func(t *testing.T, store *SQLiteStore, document Document, _ Chunk) {
+				if _, err := store.db.Exec(`DELETE FROM chunks WHERE source = ?`, document.source); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "extra valid-looking chunk",
+			mutate: func(t *testing.T, store *SQLiteStore, _ Document, chunk Chunk) {
+				if _, err := store.db.Exec(`
+					INSERT INTO chunks (
+						id, content, source, start_line, end_line, language, metadata,
+						embedding, indexed_at, stable_key, source_content_hash, vector_space_id
+					)
+					SELECT ?, content, source, start_line, end_line, language, metadata,
+					       embedding, indexed_at, stable_key, source_content_hash, vector_space_id
+					  FROM chunks WHERE id = ?`, "extra-"+chunk.ID, chunk.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "missing managed id with adjusted count",
+			mutate: func(t *testing.T, store *SQLiteStore, document Document, chunk Chunk) {
+				if _, err := store.db.Exec(`
+					INSERT INTO chunks (
+						id, content, source, start_line, end_line, language, metadata,
+						embedding, indexed_at, stable_key, source_content_hash, vector_space_id
+					)
+					SELECT ?, content, source, start_line, end_line, language, '{}',
+					       embedding, indexed_at, stable_key, source_content_hash, vector_space_id
+					  FROM chunks WHERE id = ?`, "missing-id-"+chunk.ID, chunk.ID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.db.Exec(`UPDATE managed_documents SET chunk_count = chunk_count + 1 WHERE id = ?`, document.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "wrong managed id with adjusted count",
+			mutate: func(t *testing.T, store *SQLiteStore, document Document, chunk Chunk) {
+				if _, err := store.db.Exec(`
+					INSERT INTO chunks (
+						id, content, source, start_line, end_line, language, metadata,
+						embedding, indexed_at, stable_key, source_content_hash, vector_space_id
+					)
+					SELECT ?, content, source, start_line, end_line, language,
+					       json_set(metadata, '$.managed_document_id', ?), embedding,
+					       indexed_at, stable_key, source_content_hash, vector_space_id
+					  FROM chunks WHERE id = ?`, "forged-"+chunk.ID, strings.Repeat("f", 32), chunk.ID); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := store.db.Exec(`UPDATE managed_documents SET chunk_count = chunk_count + 1 WHERE id = ?`, document.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+			document, err := managed.IngestText(ctx, "trusted.md", "trusted", DocumentOptions{Collection: "ops"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			candidate := requireManagedChunks(t, store, document.source)[0].Chunk
+			test.mutate(t, store, document, candidate)
+
+			registry, err := managedRegistrySnapshot(ctx, store, []Chunk{candidate})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := registry[document.source]; ok {
+				t.Fatalf("corrupt source %q was authorized", document.source)
+			}
+		})
+	}
+}
+
+func TestManagedRegistrySnapshotBatchesMoreThanOneHundredSources(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	candidates := make([]Chunk, 0, 101)
+	var lastSource string
+	for i := 0; i < 101; i++ {
+		document, err := managed.IngestText(ctx, fmt.Sprintf("doc-%03d.md", i), fmt.Sprintf("content %d", i), DocumentOptions{Collection: "ops"})
+		if err != nil {
+			t.Fatal(err)
+		}
+		candidates = append(candidates, requireManagedChunks(t, store, document.source)[0].Chunk)
+		lastSource = document.source
+	}
+
+	registry, err := managedRegistrySnapshot(ctx, store, candidates)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(registry) != len(candidates) {
+		t.Fatalf("authorized sources = %d, want %d", len(registry), len(candidates))
+	}
+	if _, ok := registry[lastSource]; !ok {
+		t.Fatal("source from second batch was not authorized")
+	}
+}
+
+func TestManagedRegistrySnapshotMalformedMetadataExcludesOnlyCorruptSource(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	good, err := managed.IngestText(ctx, "good.md", "good", DocumentOptions{Collection: "ops"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bad, err := managed.IngestText(ctx, "bad.md", "bad", DocumentOptions{Collection: "ops"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	goodChunk := requireManagedChunks(t, store, good.source)[0].Chunk
+	badChunk := requireManagedChunks(t, store, bad.source)[0].Chunk
+	if _, err := store.db.Exec(`UPDATE chunks SET metadata = '{' WHERE source = ?`, bad.source); err != nil {
+		t.Fatal(err)
+	}
+
+	registry, err := managedRegistrySnapshot(ctx, store, []Chunk{goodChunk, badChunk})
+	if err != nil {
+		t.Fatalf("snapshot failed because one source had malformed metadata: %v", err)
+	}
+	if _, ok := registry[good.source]; !ok {
+		t.Fatal("valid source was not authorized")
+	}
+	if _, ok := registry[bad.source]; ok {
+		t.Fatal("source with malformed chunk metadata was authorized")
 	}
 }
 
@@ -206,7 +373,7 @@ func replaceManagedScopeChunk(t *testing.T, store *SQLiteStore, document Documen
 	t.Helper()
 	chunk := requireManagedChunks(t, store, document.source)[0].Chunk
 	chunk.ID = id
-	if err := store.ReplaceSourceWithHashAndVectorSpaceID(context.Background(), document.source, []Chunk{chunk}, [][]float64{embedding}, document.ContentHash, document.VectorSpaceID); err != nil {
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(context.Background(), document.source, []Chunk{chunk}, [][]float64{embedding}, document.SourceSignature, document.VectorSpaceID); err != nil {
 		t.Fatal(err)
 	}
 	return chunk

@@ -20,6 +20,13 @@ type managedOptionsArgs struct {
 	Tags       []string `json:"tags,omitempty"`
 }
 
+const (
+	maxRAGSmallArgumentsBytes      = 256 << 10
+	maxRAGSearchArgumentsBytes     = 1 << 20
+	maxRAGIngestTextArgumentsBytes = 97 << 20
+	maxRAGTopK                     = 100
+)
+
 func (a managedOptionsArgs) options() rag.DocumentOptions {
 	return rag.DocumentOptions{
 		Title: a.Title, MIMEType: a.MIMEType, Collection: a.Collection, Tags: a.Tags,
@@ -61,7 +68,10 @@ func validateManagedRAGTags(tags []string) error {
 	return nil
 }
 
-func decodeManagedRAGArguments(arguments json.RawMessage, target any) error {
+func decodeManagedRAGArguments(arguments json.RawMessage, maxBytes int, target any) error {
+	if len(arguments) > maxBytes {
+		return fmt.Errorf("arguments must be at most %d bytes", maxBytes)
+	}
 	if !utf8.Valid(arguments) {
 		return fmt.Errorf("arguments must be valid UTF-8")
 	}
@@ -159,7 +169,7 @@ func (s *Server) handleRAGIngestText(ctx context.Context, req *gomcp.CallToolReq
 		Name    string `json:"name"`
 		Content string `json:"content"`
 	}
-	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGIngestTextArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("name", args.Name, rag.MaxManagedMetadataBytes); err != nil {
@@ -168,7 +178,7 @@ func (s *Server) handleRAGIngestText(ctx context.Context, req *gomcp.CallToolReq
 	if err := validateManagedRAGString("content", args.Content, rag.MaxManagedDocumentBytes); err != nil {
 		return toolError("validation", "%v", err), nil
 	}
-	if err := args.managedOptionsArgs.validate(); err != nil {
+	if err := args.validate(); err != nil {
 		return toolError("validation", "%v", err), nil
 	}
 	if strings.TrimSpace(args.Name) == "" {
@@ -200,13 +210,13 @@ func (s *Server) handleRAGIngestFile(ctx context.Context, req *gomcp.CallToolReq
 		managedOptionsArgs
 		Path string `json:"path"`
 	}
-	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("path", args.Path, rag.MaxManagedMetadataBytes); err != nil {
 		return toolError("validation", "%v", err), nil
 	}
-	if err := args.managedOptionsArgs.validate(); err != nil {
+	if err := args.validate(); err != nil {
 		return toolError("validation", "%v", err), nil
 	}
 	if strings.TrimSpace(args.Path) == "" {
@@ -239,7 +249,7 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 		AfterID    string   `json:"after_id,omitempty"`
 		Limit      int      `json:"limit,omitempty"`
 	}
-	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("collection", args.Collection, rag.MaxManagedMetadataBytes); err != nil {
@@ -291,7 +301,7 @@ func (s *Server) handleRAGDeleteDocument(ctx context.Context, req *gomcp.CallToo
 	var args struct {
 		ID string `json:"id"`
 	}
-	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("id", args.ID, rag.MaxManagedMetadataBytes); err != nil {
@@ -323,7 +333,7 @@ func (s *Server) handleRAGReindexDocument(ctx context.Context, req *gomcp.CallTo
 	var args struct {
 		ID string `json:"id"`
 	}
-	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if err := validateManagedRAGString("id", args.ID, rag.MaxManagedMetadataBytes); err != nil {

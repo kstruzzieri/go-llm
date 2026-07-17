@@ -328,8 +328,10 @@ func matchesRetrievalScope(chunk Chunk, document managedRegistryDocument, scope 
 }
 
 type managedRegistryDocument struct {
-	id, source, title, kind, origin, mimeType, contentHash, collection, tagsJSON, state string
-	tags                                                                                []string
+	id, source, title, kind, origin, mimeType, contentHash, sourceSignature string
+	vectorSpaceID, collection, tagsJSON, state                              string
+	chunkCount                                                              int
+	tags                                                                    []string
 }
 
 func matchesManagedRegistry(chunk Chunk, document managedRegistryDocument) bool {
@@ -397,20 +399,73 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 		for i, source := range sources[start:end] {
 			args[i] = source
 		}
-		rows, err := tx.QueryContext(ctx, `SELECT id, source, title, kind, origin, mime_type, content_hash, collection, tags, state FROM managed_documents WHERE source IN (`+placeholders+`)`, args...)
+		rows, err := tx.QueryContext(ctx, `
+			SELECT id, source, title, kind, origin, mime_type, content_hash,
+			       source_signature, vector_space_id, chunk_count, collection, tags, state
+			  FROM managed_documents
+			 WHERE source IN (`+placeholders+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
+		batchRegistry := make(map[string]managedRegistryDocument, end-start)
 		for rows.Next() {
 			var document managedRegistryDocument
-			if err := rows.Scan(&document.id, &document.source, &document.title, &document.kind, &document.origin, &document.mimeType, &document.contentHash, &document.collection, &document.tagsJSON, &document.state); err != nil {
+			if err := rows.Scan(
+				&document.id, &document.source, &document.title, &document.kind,
+				&document.origin, &document.mimeType, &document.contentHash,
+				&document.sourceSignature, &document.vectorSpaceID, &document.chunkCount,
+				&document.collection, &document.tagsJSON, &document.state,
+			); err != nil {
 				_ = rows.Close()
 				return nil, err
 			}
 			if !validManagedRegistryDocument(&document) {
 				continue
 			}
-			registry[document.source] = document
+			batchRegistry[document.source] = document
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+
+		rows, err = tx.QueryContext(ctx, `
+			SELECT source, COUNT(*),
+			       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
+			       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
+			       COALESCE(MIN(CASE WHEN json_valid(metadata)
+			                         THEN COALESCE(CAST(json_extract(metadata, '$.managed_document_id') AS TEXT), '')
+			                         ELSE '' END), ''),
+			       COALESCE(MAX(CASE WHEN json_valid(metadata)
+			                         THEN COALESCE(CAST(json_extract(metadata, '$.managed_document_id') AS TEXT), '')
+			                         ELSE '' END), '')
+			  FROM chunks
+			 WHERE source IN (`+placeholders+`)
+			 GROUP BY source`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var source string
+			var count int
+			var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID, minDocumentID, maxDocumentID string
+			if err := rows.Scan(
+				&source, &count, &minSignature, &maxSignature, &minVectorSpaceID,
+				&maxVectorSpaceID, &minDocumentID, &maxDocumentID,
+			); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			document, ok := batchRegistry[source]
+			if ok && count > 0 && count == document.chunkCount &&
+				minSignature == document.sourceSignature && maxSignature == document.sourceSignature &&
+				minVectorSpaceID == document.vectorSpaceID && maxVectorSpaceID == document.vectorSpaceID &&
+				minDocumentID == document.id && maxDocumentID == document.id {
+				registry[source] = document
+			}
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
