@@ -31,12 +31,12 @@ func (s *Server) registerManagedRAGTools() {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"name":       map[string]any{"type": "string", "description": "Document name"},
-				"content":    map[string]any{"type": "string", "description": "UTF-8 document content"},
-				"title":      map[string]any{"type": "string", "description": "Optional display title"},
-				"mime_type":  map[string]any{"type": "string", "description": "Optional MIME type"},
-				"collection": map[string]any{"type": "string", "description": "Optional collection"},
-				"tags":       map[string]any{"type": "array", "description": "Optional tags", "items": map[string]any{"type": "string"}},
+				"name":       map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Document name"},
+				"content":    map[string]any{"type": "string", "maxLength": rag.MaxManagedDocumentBytes, "description": "UTF-8 document content"},
+				"title":      map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Optional display title"},
+				"mime_type":  map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Optional MIME type"},
+				"collection": map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Optional collection"},
+				"tags":       managedTagsSchema(),
 			},
 			"required": []string{"name", "content"},
 		},
@@ -48,11 +48,11 @@ func (s *Server) registerManagedRAGTools() {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"path":       map[string]any{"type": "string", "description": "Local file path"},
-				"title":      map[string]any{"type": "string", "description": "Optional display title"},
-				"mime_type":  map[string]any{"type": "string", "description": "Optional MIME type"},
-				"collection": map[string]any{"type": "string", "description": "Optional collection"},
-				"tags":       map[string]any{"type": "array", "description": "Optional tags", "items": map[string]any{"type": "string"}},
+				"path":       map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Local file path"},
+				"title":      map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Optional display title"},
+				"mime_type":  map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Optional MIME type"},
+				"collection": map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Optional collection"},
+				"tags":       managedTagsSchema(),
 			},
 			"required": []string{"path"},
 		},
@@ -64,10 +64,12 @@ func (s *Server) registerManagedRAGTools() {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"collection": map[string]any{"type": "string", "description": "Exact collection filter"},
-				"tags":       map[string]any{"type": "array", "description": "Required tags", "items": map[string]any{"type": "string"}},
+				"collection": map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Exact collection filter"},
+				"tags":       managedTagsSchema(),
 				"state":      map[string]any{"type": "string", "enum": []string{"indexing", "indexed", "failed"}, "description": "Exact document state filter"},
 				"freshness":  map[string]any{"type": "string", "enum": []string{"unknown", "fresh", "stale"}, "description": "Exact freshness filter"},
+				"after_id":   map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Exclusive document ID cursor"},
+				"limit":      map[string]any{"type": "integer", "maximum": rag.MaxManagedListLimit, "description": "Maximum documents to return"},
 			},
 		},
 	}, s.handleRAGListDocuments)
@@ -78,7 +80,7 @@ func (s *Server) registerManagedRAGTools() {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id": map[string]any{"type": "string", "description": "Managed document ID"},
+				"id": map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Managed document ID"},
 			},
 			"required": []string{"id"},
 		},
@@ -90,11 +92,18 @@ func (s *Server) registerManagedRAGTools() {
 		InputSchema: map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"id": map[string]any{"type": "string", "description": "Managed document ID"},
+				"id": map[string]any{"type": "string", "maxLength": rag.MaxManagedMetadataBytes, "description": "Managed document ID"},
 			},
 			"required": []string{"id"},
 		},
 	}, s.handleRAGReindexDocument)
+}
+
+func managedTagsSchema() map[string]any {
+	return map[string]any{
+		"type": "array", "maxItems": rag.MaxManagedTags, "description": "Optional tags",
+		"items": map[string]any{"type": "string", "maxLength": rag.MaxManagedTagBytes},
+	}
 }
 
 func (s *Server) handleRAGIngestText(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -168,6 +177,8 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 		Tags       []string `json:"tags,omitempty"`
 		State      string   `json:"state,omitempty"`
 		Freshness  string   `json:"freshness,omitempty"`
+		AfterID    string   `json:"after_id,omitempty"`
+		Limit      int      `json:"limit,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
@@ -193,6 +204,8 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 		Tags:       args.Tags,
 		State:      state,
 		Freshness:  freshness,
+		AfterID:    args.AfterID,
+		Limit:      args.Limit,
 	})
 	if err != nil {
 		return managedRAGError("list documents", err), nil

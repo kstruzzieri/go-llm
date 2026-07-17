@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -76,7 +77,7 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 		"rag_list_documents": {
 			properties: map[string]string{
 				"collection": "string", "tags": "array",
-				"state": "string", "freshness": "string",
+				"state": "string", "freshness": "string", "after_id": "string", "limit": "integer",
 			},
 			arrays: []string{"tags"},
 			enums: map[string][]string{
@@ -121,6 +122,33 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 					t.Fatalf("%s items = %#v, want string schema", field, property["items"])
 				}
 			}
+			for field, wantMaxLength := range map[string]int{
+				"name": rag.MaxManagedMetadataBytes, "content": rag.MaxManagedDocumentBytes,
+				"path": rag.MaxManagedMetadataBytes, "title": rag.MaxManagedMetadataBytes,
+				"mime_type": rag.MaxManagedMetadataBytes, "collection": rag.MaxManagedMetadataBytes,
+				"id": rag.MaxManagedMetadataBytes, "after_id": rag.MaxManagedMetadataBytes,
+			} {
+				if property, ok := properties[field].(map[string]any); ok {
+					if got := property["maxLength"]; got != float64(wantMaxLength) && got != wantMaxLength {
+						t.Fatalf("%s maxLength = %v, want %d", field, got, wantMaxLength)
+					}
+				}
+			}
+			for _, field := range []string{"tags"} {
+				property := properties[field].(map[string]any)
+				if got := property["maxItems"]; got != float64(rag.MaxManagedTags) && got != rag.MaxManagedTags {
+					t.Fatalf("%s maxItems = %v, want %d", field, got, rag.MaxManagedTags)
+				}
+				items := property["items"].(map[string]any)
+				if got := items["maxLength"]; got != float64(rag.MaxManagedTagBytes) && got != rag.MaxManagedTagBytes {
+					t.Fatalf("%s item maxLength = %v, want %d", field, got, rag.MaxManagedTagBytes)
+				}
+			}
+			if property, ok := properties["limit"].(map[string]any); ok {
+				if got := property["maximum"]; got != float64(rag.MaxManagedListLimit) && got != rag.MaxManagedListLimit {
+					t.Fatalf("limit maximum = %v, want %d", got, rag.MaxManagedListLimit)
+				}
+			}
 			for field, wantEnum := range want.enums {
 				property := properties[field].(map[string]any)
 				if got := schemaStringSlice(t, property["enum"]); !reflect.DeepEqual(got, wantEnum) {
@@ -133,6 +161,14 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 				t.Fatalf("required = %#v, want %#v", gotRequired, want.required)
 			}
 		})
+	}
+}
+
+func TestManagedRAGListDocumentsRejectsLimitOverMaximum(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	result := callManagedRAGHandler(t, s.handleRAGListDocuments, fmt.Sprintf(`{"limit":%d}`, rag.MaxManagedListLimit+1))
+	if !result.IsError || !strings.Contains(extractText(result), "limit") {
+		t.Fatalf("result = isError:%v text:%q, want limit validation error", result.IsError, extractText(result))
 	}
 }
 

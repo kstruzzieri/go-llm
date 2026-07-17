@@ -8,8 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
-	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -20,6 +20,11 @@ import (
 const (
 	managedSourcePrefix              = "managed:"
 	managedFailurePersistenceTimeout = 5 * time.Second
+	MaxManagedDocumentBytes          = 16 << 20
+	MaxManagedMetadataBytes          = 4 << 10
+	MaxManagedTags                   = 64
+	MaxManagedTagBytes               = 256
+	MaxManagedListLimit              = 100
 )
 
 // DocumentKind identifies how a managed document's content is retained.
@@ -86,6 +91,8 @@ type DocumentFilter struct {
 	Tags       []string
 	State      DocumentState
 	Freshness  DocumentFreshness
+	AfterID    string
+	Limit      int
 }
 
 // ManagedSources owns managed document registry and indexing lifecycle writes.
@@ -152,6 +159,9 @@ func (m *ManagedSources) IngestText(ctx context.Context, name, content string, o
 	if !utf8.ValidString(name) || !utf8.ValidString(content) {
 		return Document{}, fmt.Errorf("rag: ingest text %q: content must be valid UTF-8", name)
 	}
+	if len(name) > MaxManagedMetadataBytes || len(content) > MaxManagedDocumentBytes {
+		return Document{}, fmt.Errorf("rag: ingest text %q: input exceeds managed size limit", name)
+	}
 	return m.ingestLocked(ctx, name, content, DocumentKindText, "", content, opts)
 }
 
@@ -167,6 +177,9 @@ func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts Docum
 	if strings.TrimSpace(path) == "" {
 		return Document{}, fmt.Errorf("rag: ingest file: path is required")
 	}
+	if !utf8.ValidString(path) || len(path) > MaxManagedMetadataBytes {
+		return Document{}, fmt.Errorf("rag: ingest file: path exceeds managed size limit or is not valid UTF-8")
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return Document{}, fmt.Errorf("rag: ingest file %q: resolve path: %w", path, err)
@@ -175,7 +188,7 @@ func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts Docum
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
-	data, err := readManagedRegularFile(abs)
+	data, err := m.readFile(abs)
 	if err != nil {
 		return Document{}, fmt.Errorf("rag: ingest file %q: %w", abs, err)
 	}
@@ -186,11 +199,16 @@ func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts Docum
 }
 
 func (m *ManagedSources) ingestLocked(ctx context.Context, name, content string, kind DocumentKind, origin, storedText string, opts DocumentOptions) (Document, error) {
+	var err error
+	opts, err = normalizeManagedDocumentOptions(name, opts)
+	if err != nil {
+		return Document{}, err
+	}
 	id, err := newManagedDocumentID()
 	if err != nil {
 		return Document{}, err
 	}
-	title := strings.TrimSpace(opts.Title)
+	title := opts.Title
 	if title == "" {
 		title = name
 	}
@@ -199,11 +217,11 @@ func (m *ManagedSources) ingestLocked(ctx context.Context, name, content string,
 		Title:           title,
 		Kind:            kind,
 		Origin:          origin,
-		MIMEType:        managedMIMEType(name, opts.MIMEType),
+		MIMEType:        opts.MIMEType,
 		ContentHash:     contentHash(content),
 		SourceSignature: m.indexer.currentSourceSignature(content).String(),
 		Collection:      opts.Collection,
-		Tags:            normalizeManagedTags(opts.Tags),
+		Tags:            opts.Tags,
 		State:           DocumentStateIndexing,
 		Freshness:       DocumentFreshnessUnknown,
 		source:          managedSourcePrefix + id + strings.ToLower(filepath.Ext(name)),
@@ -232,88 +250,63 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		return nil, err
 	}
 	defer m.gate.unlock()
-	rows, err := m.store.db.QueryContext(ctx, managedDocumentListSelect+` ORDER BY id`)
+	if filter.Limit <= 0 {
+		filter.Limit = MaxManagedListLimit
+	}
+	if filter.Limit > MaxManagedListLimit {
+		return nil, fmt.Errorf("rag: list managed documents: limit exceeds %d", MaxManagedListLimit)
+	}
+	if !utf8.ValidString(filter.AfterID) || len(filter.AfterID) > MaxManagedMetadataBytes ||
+		!utf8.ValidString(filter.Collection) || len(filter.Collection) > MaxManagedMetadataBytes {
+		return nil, fmt.Errorf("rag: list managed documents: filter exceeds managed size limit or is not valid UTF-8")
+	}
+	wantedTags, err := normalizeManagedTags(filter.Tags)
 	if err != nil {
-		return nil, fmt.Errorf("rag: list managed documents: %w", err)
+		return nil, err
 	}
-	var documents []Document
-	for rows.Next() {
-		document, err := scanManagedDocument(rows)
+	filtered := make([]Document, 0, filter.Limit)
+	afterID := filter.AfterID
+	for len(filtered) < filter.Limit {
+		rows, err := m.store.db.QueryContext(ctx, managedDocumentListSelect+` WHERE id > ? ORDER BY id LIMIT ?`, afterID, MaxManagedListLimit)
 		if err != nil {
+			return nil, fmt.Errorf("rag: list managed documents: %w", err)
+		}
+		count := 0
+		for rows.Next() {
+			document, err := scanManagedDocument(rows)
+			if err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			count++
+			afterID = document.ID
+			if document.State == DocumentStateIndexed {
+				if _, err := m.reconcileDocument(ctx, &document); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+			}
+			if filter.Collection != "" && document.Collection != filter.Collection ||
+				filter.State != "" && document.State != filter.State ||
+				filter.Freshness != "" && document.Freshness != filter.Freshness ||
+				!containsManagedTags(document.Tags, wantedTags) {
+				continue
+			}
+			filtered = append(filtered, document)
+			if len(filtered) == filter.Limit {
+				break
+			}
+		}
+		if err := rows.Err(); err != nil {
 			_ = rows.Close()
-			return nil, err
+			return nil, fmt.Errorf("rag: iterate managed documents: %w", err)
 		}
-		documents = append(documents, document)
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return nil, fmt.Errorf("rag: iterate managed documents: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, fmt.Errorf("rag: close managed documents: %w", err)
-	}
-
-	for i := range documents {
-		document := &documents[i]
-		if document.State != DocumentStateIndexed {
-			continue
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("rag: close managed documents: %w", err)
 		}
-		var chunks int
-		var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID, minDocumentID, maxDocumentID string
-		if err := m.store.db.QueryRowContext(ctx, `
-			SELECT COUNT(*),
-			       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
-			       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
-			       COALESCE(MIN(json_extract(metadata, '$.managed_document_id')), ''),
-			       COALESCE(MAX(json_extract(metadata, '$.managed_document_id')), '')
-			  FROM chunks
-			 WHERE source = ?`, document.source).Scan(
-			&chunks, &minSignature, &maxSignature, &minVectorSpaceID, &maxVectorSpaceID,
-			&minDocumentID, &maxDocumentID,
-		); err != nil {
-			return nil, fmt.Errorf("rag: count chunks for managed document %q: %w", document.ID, err)
+		if count < MaxManagedListLimit {
+			break
 		}
-		provenanceMismatch := chunks > 0 &&
-			(minSignature != document.SourceSignature || maxSignature != document.SourceSignature ||
-				minVectorSpaceID != document.VectorSpaceID || maxVectorSpaceID != document.VectorSpaceID ||
-				minDocumentID != document.ID || maxDocumentID != document.ID)
-		if chunks != document.ChunkCount || provenanceMismatch {
-			if _, err := m.reconcileDocument(ctx, document); err != nil {
-				return nil, err
-			}
-			continue
-		}
-
-		desired := DocumentFreshnessFresh
-		if document.Kind == DocumentKindFile {
-			data, err := readManagedRegularFile(document.Origin)
-			if err != nil || !utf8.Valid(data) || contentHash(string(data)) != document.ContentHash {
-				desired = DocumentFreshnessStale
-			}
-		}
-		if document.Freshness != desired {
-			if _, err := m.reconcileDocument(ctx, document); err != nil {
-				return nil, err
-			}
-		}
-	}
-
-	wantedTags := normalizeManagedTags(filter.Tags)
-	filtered := make([]Document, 0, len(documents))
-	for _, document := range documents {
-		if filter.Collection != "" && document.Collection != filter.Collection {
-			continue
-		}
-		if filter.State != "" && document.State != filter.State {
-			continue
-		}
-		if filter.Freshness != "" && document.Freshness != filter.Freshness {
-			continue
-		}
-		if !containsManagedTags(document.Tags, wantedTags) {
-			continue
-		}
-		filtered = append(filtered, document)
 	}
 	return filtered, nil
 }
@@ -459,7 +452,7 @@ func (m *ManagedSources) ReindexDocument(ctx context.Context, id string) (Docume
 	}
 	content := document.storedText
 	if document.Kind == DocumentKindFile {
-		data, readErr := readManagedRegularFile(document.Origin)
+		data, readErr := m.readFile(document.Origin)
 		if readErr != nil {
 			cause := fmt.Errorf("rag: read managed file %q: %w", document.Origin, readErr)
 			return m.failedDocument(ctx, document, false, cause)
@@ -674,19 +667,27 @@ func managedDocumentMetadata(document Document) map[string]string {
 	}
 }
 
-// readManagedRegularFile reads path after verifying it is a regular file.
-// The Stat-first guard keeps managed operations from blocking forever while
-// holding the managed gates: opening a FIFO (or similar special file) for
-// read blocks until a writer appears, and os.ReadFile cannot be canceled.
 func readManagedRegularFile(path string) ([]byte, error) {
-	info, err := os.Stat(path)
+	f, err := openManagedFile(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
 	}
-	return os.ReadFile(path)
+	data, err := io.ReadAll(io.LimitReader(f, MaxManagedDocumentBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > MaxManagedDocumentBytes {
+		return nil, fmt.Errorf("document exceeds %d-byte limit", MaxManagedDocumentBytes)
+	}
+	return data, nil
 }
 
 func newManagedDocumentID() (string, error) {
@@ -707,10 +708,39 @@ func managedMIMEType(name, explicit string) string {
 	return "application/octet-stream"
 }
 
-func normalizeManagedTags(tags []string) []string {
-	seen := make(map[string]struct{}, len(tags))
+func normalizeManagedDocumentOptions(name string, opts DocumentOptions) (DocumentOptions, error) {
+	opts.Title = strings.TrimSpace(opts.Title)
+	if opts.Title == "" {
+		opts.Title = name
+	}
+	opts.MIMEType = managedMIMEType(name, opts.MIMEType)
+	opts.Collection = strings.TrimSpace(opts.Collection)
+	for _, field := range []string{opts.Title, opts.MIMEType, opts.Collection} {
+		if !utf8.ValidString(field) || len(field) > MaxManagedMetadataBytes {
+			return DocumentOptions{}, fmt.Errorf("rag: managed metadata exceeds %d-byte limit or is not valid UTF-8", MaxManagedMetadataBytes)
+		}
+	}
+	var err error
+	opts.Tags, err = normalizeManagedTags(opts.Tags)
+	if err != nil {
+		return DocumentOptions{}, err
+	}
+	return opts, nil
+}
+
+func normalizeManagedTags(tags []string) ([]string, error) {
+	seen := make(map[string]struct{}, MaxManagedTags)
 	for _, tag := range tags {
+		if !utf8.ValidString(tag) {
+			return nil, fmt.Errorf("rag: managed tag must be valid UTF-8")
+		}
 		if tag = strings.TrimSpace(tag); tag != "" {
+			if len(tag) > MaxManagedTagBytes {
+				return nil, fmt.Errorf("rag: managed tag exceeds %d-byte limit", MaxManagedTagBytes)
+			}
+			if _, ok := seen[tag]; !ok && len(seen) == MaxManagedTags {
+				return nil, fmt.Errorf("rag: managed tags exceed %d-tag limit", MaxManagedTags)
+			}
 			seen[tag] = struct{}{}
 		}
 	}
@@ -719,7 +749,7 @@ func normalizeManagedTags(tags []string) []string {
 		normalized = append(normalized, tag)
 	}
 	sort.Strings(normalized)
-	return normalized
+	return normalized, nil
 }
 
 func containsManagedTags(have, wanted []string) bool {

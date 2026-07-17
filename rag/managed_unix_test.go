@@ -53,3 +53,17 @@ func TestManagedSourcesNonRegularFilesRejectedAndMarkedStale(t *testing.T) {
 		t.Fatalf("ReindexDocument(fifo origin) error = %v, want not-a-regular-file error", err)
 	}
 }
+
+func TestReadManagedRegularFileReadsRegularFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "document.md")
+	if err := os.WriteFile(path, []byte("regular content"), 0o600); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	data, err := readManagedRegularFile(path)
+	if err != nil {
+		t.Fatalf("readManagedRegularFile() error = %v", err)
+	}
+	if string(data) != "regular content" {
+		t.Fatalf("readManagedRegularFile() = %q", data)
+	}
+}

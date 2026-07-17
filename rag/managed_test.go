@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
@@ -551,6 +552,65 @@ func TestManagedSourcesListFiltersAndOrdersByID(t *testing.T) {
 	}
 	if len(documents) != 1 || documents[0].ID != third.ID {
 		t.Fatalf("state/freshness filter = %#v, want third", documents)
+	}
+}
+
+func TestManagedSourcesListPaginatesAfterID(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	for _, name := range []string{"one.md", "two.md", "three.md"} {
+		if _, err := managed.IngestText(ctx, name, name, DocumentOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	first, err := managed.ListDocuments(ctx, DocumentFilter{Limit: 2})
+	if err != nil || len(first) != 2 {
+		t.Fatalf("first page = %#v, err = %v", first, err)
+	}
+	second, err := managed.ListDocuments(ctx, DocumentFilter{AfterID: first[1].ID, Limit: 2})
+	if err != nil || len(second) != 1 || second[0].ID <= first[1].ID {
+		t.Fatalf("second page = %#v, err = %v", second, err)
+	}
+}
+
+func TestManagedSourcesListRejectsLimitOverMaximum(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	if _, err := managed.ListDocuments(context.Background(), DocumentFilter{Limit: MaxManagedListLimit + 1}); err == nil {
+		t.Fatalf("ListDocuments() accepted limit %d", MaxManagedListLimit+1)
+	}
+}
+
+func TestManagedSourcesRejectsOversizeInputBeforeRegistration(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	content := strings.Repeat("x", MaxManagedDocumentBytes+1)
+	if _, err := managed.IngestText(context.Background(), "large.md", content, DocumentOptions{}); err == nil {
+		t.Fatalf("IngestText() accepted %d-byte content", len(content))
+	}
+	if documents, err := managed.ListDocuments(context.Background(), DocumentFilter{}); err != nil || len(documents) != 0 {
+		t.Fatalf("documents after rejected input = %#v, err = %v", documents, err)
+	}
+}
+
+func TestManagedSourcesRejectsOversizeMetadataAndTagsBeforeRegistration(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	tooManyTags := make([]string, MaxManagedTags+1)
+	for i := range tooManyTags {
+		tooManyTags[i] = fmt.Sprintf("tag-%d", i)
+	}
+	for name, opts := range map[string]DocumentOptions{
+		"metadata": {Title: strings.Repeat("t", MaxManagedMetadataBytes+1)},
+		"tags":     {Tags: tooManyTags},
+		"tag":      {Tags: []string{strings.Repeat("t", MaxManagedTagBytes+1)}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := managed.IngestText(context.Background(), "doc.md", "content", opts); err == nil {
+				t.Fatal("IngestText() accepted oversized managed metadata")
+			}
+		})
+	}
+	if documents, err := managed.ListDocuments(context.Background(), DocumentFilter{}); err != nil || len(documents) != 0 {
+		t.Fatalf("documents after rejected metadata = %#v, err = %v", documents, err)
 	}
 }
 
