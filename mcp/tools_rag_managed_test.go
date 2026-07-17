@@ -121,6 +121,12 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 				if !ok || items["type"] != "string" {
 					t.Fatalf("%s items = %#v, want string schema", field, property["items"])
 				}
+				if got := property["maxItems"]; got != float64(rag.MaxManagedTags) && got != rag.MaxManagedTags {
+					t.Fatalf("%s maxItems = %v, want %d", field, got, rag.MaxManagedTags)
+				}
+				if got := items["maxLength"]; got != float64(rag.MaxManagedTagBytes) && got != rag.MaxManagedTagBytes {
+					t.Fatalf("%s item maxLength = %v, want %d", field, got, rag.MaxManagedTagBytes)
+				}
 			}
 			for field, wantMaxLength := range map[string]int{
 				"name": rag.MaxManagedMetadataBytes, "content": rag.MaxManagedDocumentBytes,
@@ -132,16 +138,6 @@ func TestManagedRAGToolSchemas(t *testing.T) {
 					if got := property["maxLength"]; got != float64(wantMaxLength) && got != wantMaxLength {
 						t.Fatalf("%s maxLength = %v, want %d", field, got, wantMaxLength)
 					}
-				}
-			}
-			for _, field := range []string{"tags"} {
-				property := properties[field].(map[string]any)
-				if got := property["maxItems"]; got != float64(rag.MaxManagedTags) && got != rag.MaxManagedTags {
-					t.Fatalf("%s maxItems = %v, want %d", field, got, rag.MaxManagedTags)
-				}
-				items := property["items"].(map[string]any)
-				if got := items["maxLength"]; got != float64(rag.MaxManagedTagBytes) && got != rag.MaxManagedTagBytes {
-					t.Fatalf("%s item maxLength = %v, want %d", field, got, rag.MaxManagedTagBytes)
 				}
 			}
 			if property, ok := properties["limit"].(map[string]any); ok {

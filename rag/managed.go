@@ -271,18 +271,30 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		if err != nil {
 			return nil, fmt.Errorf("rag: list managed documents: %w", err)
 		}
-		count := 0
+		batch := make([]Document, 0, MaxManagedListLimit)
 		for rows.Next() {
 			document, err := scanManagedDocument(rows)
 			if err != nil {
 				_ = rows.Close()
 				return nil, err
 			}
-			count++
-			afterID = document.ID
+			batch = append(batch, document)
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("rag: iterate managed documents: %w", err)
+		}
+		if err := rows.Close(); err != nil {
+			return nil, fmt.Errorf("rag: close managed documents: %w", err)
+		}
+		if len(batch) == 0 {
+			break
+		}
+		afterID = batch[len(batch)-1].ID
+		for i := range batch {
+			document := &batch[i]
 			if document.State == DocumentStateIndexed {
-				if _, err := m.reconcileDocument(ctx, &document); err != nil {
-					_ = rows.Close()
+				if _, err := m.reconcileDocument(ctx, document); err != nil {
 					return nil, err
 				}
 			}
@@ -292,19 +304,12 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 				!containsManagedTags(document.Tags, wantedTags) {
 				continue
 			}
-			filtered = append(filtered, document)
+			filtered = append(filtered, *document)
 			if len(filtered) == filter.Limit {
 				break
 			}
 		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("rag: iterate managed documents: %w", err)
-		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("rag: close managed documents: %w", err)
-		}
-		if count < MaxManagedListLimit {
+		if len(batch) < MaxManagedListLimit {
 			break
 		}
 	}
@@ -467,6 +472,9 @@ func (m *ManagedSources) ReindexDocument(ctx context.Context, id string) (Docume
 }
 
 func (m *ManagedSources) indexDocumentLocked(ctx context.Context, document Document, content string, first bool) (Document, error) {
+	if !utf8.ValidString(content) || len(content) > MaxManagedDocumentBytes {
+		return m.failedDocument(ctx, document, first, fmt.Errorf("rag: managed document content exceeds %d-byte limit or is not valid UTF-8", MaxManagedDocumentBytes))
+	}
 	candidate := document
 	candidate.ContentHash = contentHash(content)
 	metadata := managedDocumentMetadata(candidate)

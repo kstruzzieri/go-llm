@@ -592,6 +592,48 @@ func TestManagedSourcesRejectsOversizeInputBeforeRegistration(t *testing.T) {
 	}
 }
 
+func TestManagedSourcesReindexRejectsInvalidRetainedTextBeforeEmbedding(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{name: "oversize", text: strings.Repeat("x", MaxManagedDocumentBytes+1)},
+		{name: "invalid utf8", text: string([]byte{0xff})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := 0
+			managed, _, store := newManagedTestService(t, EmbedderFunc(func(_ context.Context, _ string, inputs []string) (EmbedResult, error) {
+				calls++
+				embeddings := make([][]float64, len(inputs))
+				for i := range embeddings {
+					embeddings[i] = []float64{1, float64(i + 1)}
+				}
+				return EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/v1"}, nil
+			}))
+			document, err := managed.IngestText(context.Background(), "runbook.md", "valid", DocumentOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			calls = 0
+			if _, err := store.db.Exec(`UPDATE managed_documents SET stored_text = ? WHERE id = ?`, tc.text, document.ID); err != nil {
+				t.Fatalf("tamper retained text: %v", err)
+			}
+
+			got, err := managed.ReindexDocument(context.Background(), document.ID)
+			if err == nil {
+				t.Fatal("ReindexDocument() accepted invalid retained text")
+			}
+			if calls != 0 {
+				t.Fatalf("Embed() calls = %d, want 0", calls)
+			}
+			if got.State != DocumentStateFailed || got.Freshness != DocumentFreshnessStale {
+				t.Fatalf("document = %s/%s, want failed/stale", got.State, got.Freshness)
+			}
+			requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+		})
+	}
+}
+
 func TestManagedSourcesRejectsOversizeMetadataAndTagsBeforeRegistration(t *testing.T) {
 	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	tooManyTags := make([]string, MaxManagedTags+1)
