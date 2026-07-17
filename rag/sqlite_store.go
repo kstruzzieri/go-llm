@@ -287,6 +287,15 @@ func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []C
 	if s.writeEmbeddingErr != nil {
 		return s.writeEmbeddingErr
 	}
+	return s.insertChunksUncheckedTx(ctx, tx, chunks, embeddings, sourceContentHash, vectorSpaceID)
+}
+
+func (s *SQLiteStore) insertMigrationChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
+	// replaceSourceTx calls this only after its full post-delete migration scan.
+	return s.insertChunksUncheckedTx(ctx, tx, chunks, embeddings, sourceContentHash, vectorSpaceID)
+}
+
+func (s *SQLiteStore) insertChunksUncheckedTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
 	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
 	// INSERT OR REPLACE deletes the old row and inserts a new one, but
 	// SQLite does not fire DELETE triggers for rows removed by REPLACE
@@ -503,7 +512,11 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 	}
 
 	if len(chunks) > 0 {
-		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, opts.sourceHash, opts.vectorSpaceID); err != nil {
+		insert := s.insertChunksTx
+		if opts.replaceVectorSpace {
+			insert = s.insertMigrationChunksTx
+		}
+		if err := insert(ctx, tx, chunks, embeddings, opts.sourceHash, opts.vectorSpaceID); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
 	}
@@ -511,9 +524,6 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 }
 
 func (s *SQLiteStore) validateMigrationCorpusEmbeddingDimensionTx(ctx context.Context, tx *sql.Tx, dimension int) error {
-	if s.writeEmbeddingErr != nil {
-		return s.writeEmbeddingErr
-	}
 	rows, err := tx.QueryContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid`)
 	if err != nil {
 		return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)

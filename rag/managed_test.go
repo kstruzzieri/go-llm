@@ -1148,6 +1148,76 @@ func TestManagedSourcesRejectsMigrationWithInteriorRemainingDimensionDrift(t *te
 	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
 }
 
+func TestManagedSourcesReopenMigratesPastStaleEmbeddingCache(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "managed-migration.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEmbedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
+	indexer, err := NewIndexerWithEmbedder(oldEmbedder, store, WithEmbeddingModel("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexer.chunker = chunkerFunc(func(source, content string) ([]Chunk, error) {
+		return []Chunk{makeChunk(source, content, 1, 1, "")}, nil
+	})
+	managed, err := NewManagedSources(indexer, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	document, err := managed.IngestText(ctx, "runbook.md", "old content", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	remainingEmbedding, err := encodeEmbedding([]float64{1, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO chunks
+		(id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+		VALUES ('remaining', 'remaining content', 'remaining.md', 1, 1, '', '{}', ?, 1, '', '', 'test/new')`, remainingEmbedding); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if store.writeEmbeddingErr == nil {
+		t.Fatal("writeEmbeddingErr = nil, want cached mixed-dimension error")
+	}
+	newEmbedder := &managedTestEmbedder{vectorSpaceID: "test/new", dimension: 3}
+	indexer, err = NewIndexerWithEmbedder(newEmbedder, store, WithEmbeddingModel("new"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexer.chunker = chunkerFunc(func(source, content string) ([]Chunk, error) {
+		return []Chunk{makeChunk(source, content, 1, 1, "")}, nil
+	})
+	managed, err = NewManagedSources(indexer, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	migrated, err := managed.ReindexDocument(ctx, document.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.ID != document.ID || migrated.VectorSpaceID != "test/new" {
+		t.Fatalf("migrated = %#v", migrated)
+	}
+	chunks := requireManagedChunks(t, store, migrated.source)
+	if len(chunks) != 1 || len(chunks[0].Embedding) != 3 || chunks[0].VectorSpaceID != "test/new" {
+		t.Fatalf("migrated chunks = %#v", chunks)
+	}
+}
+
 func TestManagedSourcesNewDocumentRejectsCorpusVectorSpaceDrift(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/new"})
 	ctx := context.Background()
