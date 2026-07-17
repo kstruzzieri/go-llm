@@ -65,6 +65,48 @@ func TestRAGSearchSchema_QueryContextAndExplainScores(t *testing.T) {
 	}
 }
 
+func TestRAGSearchSchemaAndHandlerScope(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+	properties := toolSchemaProperties(t, env.session, "rag_search")
+	for _, name := range []string{"collection", "tags"} {
+		property, ok := properties[name].(map[string]any)
+		if !ok {
+			t.Fatalf("property %q = %T, want map", name, properties[name])
+		}
+		if name == "collection" && property["maxLength"] != float64(rag.MaxManagedMetadataBytes) {
+			t.Fatalf("collection maxLength = %v", property["maxLength"])
+		}
+	}
+	tags := properties["tags"].(map[string]any)
+	if tags["maxItems"] != float64(rag.MaxManagedTags) || tags["items"].(map[string]any)["maxLength"] != float64(rag.MaxManagedTagBytes) {
+		t.Fatalf("tags schema = %#v", tags)
+	}
+
+	if _, err := s.managedSources.IngestText(context.Background(), "ops.md", "ops", rag.DocumentOptions{Collection: "ops", Tags: []string{"alpha", "beta"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.managedSources.IngestText(context.Background(), "other.md", "other", rag.DocumentOptions{Collection: "other", Tags: []string{"alpha", "beta"}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","collection":"ops","tags":["alpha","beta"],"explain_scores":true}`))
+	if err != nil || result.IsError {
+		t.Fatalf("scoped search error=%v result=%s", err, extractText(result))
+	}
+	var scored []rag.ScoredResult
+	if err := json.Unmarshal([]byte(extractText(result)), &scored); err != nil {
+		t.Fatal(err)
+	}
+	if len(scored) != 1 || scored[0].Chunk.Metadata["managed_collection"] != "ops" {
+		t.Fatalf("scoped scored response = %#v", scored)
+	}
+	result, err = s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","tags":["`+strings.Repeat("x", rag.MaxManagedTagBytes+1)+`"]}`))
+	if err != nil || !result.IsError {
+		t.Fatalf("oversize scope result=%#v error=%v, want validation error", result, err)
+	}
+}
+
 type recordingMCPMultiStore struct {
 	stubVectorStore
 	results []rag.ScoredResult

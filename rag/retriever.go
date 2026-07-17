@@ -2,8 +2,11 @@ package rag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/ollama"
 )
@@ -14,6 +17,13 @@ type Retriever struct {
 	model      string
 	store      VectorStore
 	vectorOnly bool
+}
+
+// RetrievalScope restricts retrieval to managed documents in a collection and
+// carrying every requested tag. An empty scope preserves legacy retrieval.
+type RetrievalScope struct {
+	Collection string
+	Tags       []string
 }
 
 // Compile-time check: *Retriever satisfies ScoredRetriever.
@@ -103,6 +113,39 @@ func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...Retr
 
 // Retrieve finds the top-k most relevant chunks for a query.
 func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
+	results, err := r.retrieve(ctx, query, k)
+	if err != nil {
+		return nil, err
+	}
+	refreshManagedSearchResults(results)
+	return results, nil
+}
+
+// RetrieveScoped finds top-k relevant managed chunks after applying scope.
+func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, scope RetrievalScope) ([]SearchResult, error) {
+	scope, err := normalizeRetrievalScope(scope)
+	if err != nil {
+		return nil, err
+	}
+	if scope.empty() {
+		return r.Retrieve(ctx, query, k)
+	}
+	if _, ok := r.store.(*SQLiteStore); !ok {
+		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
+	}
+	results, err := r.retrieve(ctx, query, 0)
+	if err != nil {
+		return nil, err
+	}
+	results = filterSearchResults(results, scope)
+	if k > 0 && len(results) > k {
+		results = results[:k]
+	}
+	refreshManagedSearchResults(results)
+	return results, nil
+}
+
+func (r *Retriever) retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
 	res, err := r.embedder.Embed(ctx, r.model, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("%w: embed query: %w", ErrEmbedderFailed, err)
@@ -160,6 +203,39 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 // returns SearchMulti's hybrid results directly; otherwise it falls back to dense
 // vector search wrapped as single-signal ("semantic") scored results.
 func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
+	results, err := r.retrieveScored(ctx, query, k, qCtx)
+	if err != nil {
+		return nil, err
+	}
+	refreshManagedScoredResults(results)
+	return results, nil
+}
+
+// RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
+func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
+	scope, err := normalizeRetrievalScope(scope)
+	if err != nil {
+		return nil, err
+	}
+	if scope.empty() {
+		return r.RetrieveScored(ctx, query, k, qCtx)
+	}
+	if _, ok := r.store.(*SQLiteStore); !ok {
+		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
+	}
+	results, err := r.retrieveScored(ctx, query, 0, qCtx)
+	if err != nil {
+		return nil, err
+	}
+	results = filterScoredResults(results, scope)
+	if k > 0 && len(results) > k {
+		results = results[:k]
+	}
+	refreshManagedScoredResults(results)
+	return results, nil
+}
+
+func (r *Retriever) retrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
 	res, err := r.embedder.Embed(ctx, r.model, []string{query})
 	if err != nil {
 		return nil, fmt.Errorf("%w: embed query: %w", ErrEmbedderFailed, err)
@@ -182,6 +258,124 @@ func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCt
 	}
 
 	return r.denseScored(ctx, embedding, k)
+}
+
+func (scope RetrievalScope) empty() bool {
+	return scope.Collection == "" && len(scope.Tags) == 0
+}
+
+func normalizeRetrievalScope(scope RetrievalScope) (RetrievalScope, error) {
+	if !utf8.ValidString(scope.Collection) || len(scope.Collection) > MaxManagedMetadataBytes {
+		return RetrievalScope{}, fmt.Errorf("rag: retrieval collection exceeds %d-byte limit or is not valid UTF-8", MaxManagedMetadataBytes)
+	}
+	scope.Collection = strings.TrimSpace(scope.Collection)
+	var err error
+	scope.Tags, err = normalizeManagedTags(scope.Tags)
+	if err != nil {
+		return RetrievalScope{}, err
+	}
+	return scope, nil
+}
+
+func filterSearchResults(results []SearchResult, scope RetrievalScope) []SearchResult {
+	filtered := results[:0]
+	for _, result := range results {
+		if matchesRetrievalScope(result.Chunk, scope) {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
+func filterScoredResults(results []ScoredResult, scope RetrievalScope) []ScoredResult {
+	filtered := results[:0]
+	for _, result := range results {
+		if matchesRetrievalScope(result.Chunk, scope) {
+			filtered = append(filtered, result)
+		}
+	}
+	return filtered
+}
+
+func matchesRetrievalScope(chunk Chunk, scope RetrievalScope) bool {
+	collection, tags, ok := managedProvenance(chunk)
+	if !ok {
+		return false
+	}
+	return (scope.Collection == "" || collection == scope.Collection) && containsManagedTags(tags, scope.Tags)
+}
+
+func managedProvenance(chunk Chunk) (string, []string, bool) {
+	meta := chunk.Metadata
+	if !strings.HasPrefix(chunk.Source, managedSourcePrefix) || meta["managed_document_id"] == "" || meta["managed_content_hash"] == "" || meta["managed_state"] != string(DocumentStateIndexed) {
+		return "", nil, false
+	}
+	kind := DocumentKind(meta["managed_kind"])
+	if kind != DocumentKindText && kind != DocumentKindFile || kind == DocumentKindFile && meta["managed_origin"] == "" {
+		return "", nil, false
+	}
+	collection := meta["managed_collection"]
+	if !utf8.ValidString(collection) || len(collection) > MaxManagedMetadataBytes {
+		return "", nil, false
+	}
+	var tags []string
+	if err := json.Unmarshal([]byte(meta["managed_tags"]), &tags); err != nil {
+		return "", nil, false
+	}
+	normalized, err := normalizeManagedTags(tags)
+	if err != nil || !reflect.DeepEqual(tags, normalized) {
+		return "", nil, false
+	}
+	return collection, tags, true
+}
+
+type managedFreshnessCheck struct {
+	hash string
+	err  error
+}
+
+func refreshManagedSearchResults(results []SearchResult) {
+	cache := make(map[string]managedFreshnessCheck)
+	for i := range results {
+		refreshManagedChunk(&results[i].Chunk, cache)
+	}
+}
+
+func refreshManagedScoredResults(results []ScoredResult) {
+	cache := make(map[string]managedFreshnessCheck)
+	for i := range results {
+		refreshManagedChunk(&results[i].Chunk, cache)
+	}
+}
+
+func refreshManagedChunk(chunk *Chunk, cache map[string]managedFreshnessCheck) {
+	meta := chunk.Metadata
+	if meta["managed_kind"] != string(DocumentKindFile) {
+		return
+	}
+	if _, _, ok := managedProvenance(*chunk); !ok {
+		return
+	}
+	origin := meta["managed_origin"]
+	check, ok := cache[origin]
+	if !ok {
+		data, err := readManagedRegularFile(meta["managed_origin"])
+		check = managedFreshnessCheck{err: err}
+		if err == nil {
+			check.hash = contentHash(string(data))
+		}
+		cache[origin] = check
+	}
+	freshness := DocumentFreshnessStale
+	if check.err == nil && check.hash == meta["managed_content_hash"] {
+		freshness = DocumentFreshnessFresh
+	}
+	cloned := make(map[string]string, len(meta))
+	for key, value := range meta {
+		cloned[key] = value
+	}
+	cloned["managed_freshness"] = string(freshness)
+	chunk.Metadata = cloned
 }
 
 // denseScored runs dense vector search and wraps each result as a ScoredResult

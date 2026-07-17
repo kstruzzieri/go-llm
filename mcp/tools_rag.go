@@ -3,7 +3,9 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
+	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -78,6 +80,9 @@ func (s *Server) registerRAGTools() {
 				"workspace_root": map[string]any{"type": "string", "description": "Workspace root used to normalize contextual paths"},
 				"open_files":     map[string]any{"type": "array", "description": "Files currently open for contextual ranking", "items": map[string]any{"type": "string"}},
 				"explain_scores": map[string]any{"type": "boolean", "description": "Return fused rank and per-signal scores"},
+				"collection":     map[string]any{"type": "string", "description": "Managed document collection to search", "maxLength": rag.MaxManagedMetadataBytes},
+				"tags": map[string]any{"type": "array", "description": "Managed document tags; every tag must match", "maxItems": rag.MaxManagedTags,
+					"items": map[string]any{"type": "string", "maxLength": rag.MaxManagedTagBytes}},
 			},
 			"required": []string{"query"},
 		},
@@ -208,15 +213,20 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	var args struct {
 		queryContextArgs
-		Query         string `json:"query"`
-		TopK          int    `json:"top_k,omitempty"`
-		ExplainScores bool   `json:"explain_scores,omitempty"`
+		Query         string   `json:"query"`
+		TopK          int      `json:"top_k,omitempty"`
+		ExplainScores bool     `json:"explain_scores,omitempty"`
+		Collection    string   `json:"collection,omitempty"`
+		Tags          []string `json:"tags,omitempty"`
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Query == "" {
 		return toolError("validation", "query must not be empty"), nil
+	}
+	if err := validateRAGSearchScope(args.Collection, args.Tags); err != nil {
+		return toolError("validation", "%v", err), nil
 	}
 
 	s.mu.RLock()
@@ -234,8 +244,16 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	var results []rag.SearchResult
 	contextual := !args.empty()
+	scope := rag.RetrievalScope{Collection: args.Collection, Tags: args.Tags}
+	scoped := args.Collection != "" || len(args.Tags) != 0
 	if args.ExplainScores || contextual {
-		scored, err := retriever.RetrieveScored(ctx, args.Query, topK, args.queryContext())
+		var scored []rag.ScoredResult
+		var err error
+		if scoped {
+			scored, err = retriever.RetrieveScoredScoped(ctx, args.Query, topK, scope, args.queryContext())
+		} else {
+			scored, err = retriever.RetrieveScored(ctx, args.Query, topK, args.queryContext())
+		}
 		if err != nil {
 			return toolError("rag", "search: %v", err), nil
 		}
@@ -254,7 +272,11 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		}
 	} else {
 		var err error
-		results, err = retriever.Retrieve(ctx, args.Query, topK)
+		if scoped {
+			results, err = retriever.RetrieveScoped(ctx, args.Query, topK, scope)
+		} else {
+			results, err = retriever.Retrieve(ctx, args.Query, topK)
+		}
 		if err != nil {
 			return toolError("rag", "search: %v", err), nil
 		}
@@ -265,6 +287,21 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("rag", "marshal results: %v", err), nil
 	}
 	return toolResult(string(data)), nil
+}
+
+func validateRAGSearchScope(collection string, tags []string) error {
+	if !utf8.ValidString(collection) || len(collection) > rag.MaxManagedMetadataBytes {
+		return fmt.Errorf("collection exceeds %d-byte limit or is not valid UTF-8", rag.MaxManagedMetadataBytes)
+	}
+	if len(tags) > rag.MaxManagedTags {
+		return fmt.Errorf("tags exceed %d-tag limit", rag.MaxManagedTags)
+	}
+	for _, tag := range tags {
+		if !utf8.ValidString(tag) || len(tag) > rag.MaxManagedTagBytes {
+			return fmt.Errorf("tag exceeds %d-byte limit or is not valid UTF-8", rag.MaxManagedTagBytes)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleRAGStats(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
