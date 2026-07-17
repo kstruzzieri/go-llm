@@ -353,6 +353,35 @@ func TestRAGDeleteToolDisabled(t *testing.T) {
 	}
 }
 
+func TestRAGDeleteToolReturnsJSONIdentity(t *testing.T) {
+	s := &Server{
+		store: stubVectorStore{},
+		mcpServer: gomcp.NewServer(&gomcp.Implementation{
+			Name: "test", Version: "0.0.1",
+		}, nil),
+	}
+	s.registerRAGTools()
+
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "rag_delete",
+		Arguments: map[string]any{
+			"source": "test.go",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(result))
+	}
+	if text := extractText(result); text != `{"deleted_source":"test.go"}` {
+		t.Errorf("result = %q, want JSON identity echo", text)
+	}
+}
+
 func TestRAGDeleteToolEmptySource(t *testing.T) {
 	s := &Server{
 		store: stubVectorStore{},

@@ -64,6 +64,22 @@ func TestIndexerIndexTextUsesExistingPipeline(t *testing.T) {
 	}
 }
 
+func TestIndexerIndexTextEmptyContentClearsWithoutProvenanceHash(t *testing.T) {
+	store := newTestStore(t)
+	idx := testManagedIndexer(t, store, "test/v1", nil)
+	ctx := context.Background()
+	if err := idx.IndexText(ctx, "notes.md", "content"); err != nil {
+		t.Fatal(err)
+	}
+	if err := idx.IndexText(ctx, "notes.md", ""); err != nil {
+		t.Fatalf("IndexText(empty) error: %v", err)
+	}
+	chunks, err := store.GetBySource(ctx, "notes.md")
+	if err != nil || len(chunks) != 0 {
+		t.Fatalf("chunks after empty reindex = %d, err = %v; want cleared", len(chunks), err)
+	}
+}
+
 func TestIndexerIndexFile(t *testing.T) {
 	srv := newMockEmbedServer(4)
 	defer srv.Close()

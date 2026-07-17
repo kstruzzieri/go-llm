@@ -120,6 +120,9 @@ func TestManagedSourcesTextRoundTripAndRepeatCreatesDistinctIDs(t *testing.T) {
 	if first.ContentHash != contentHash("restart safely") || first.SourceSignature == "" || first.VectorSpaceID != "test/v1" || first.IndexedAt == 0 {
 		t.Fatalf("first provenance = %#v", first)
 	}
+	if first.ChunkCount != 1 {
+		t.Fatalf("first ChunkCount = %d, want 1", first.ChunkCount)
+	}
 
 	documents, err := managed.ListDocuments(ctx, DocumentFilter{})
 	if err != nil {
@@ -215,6 +218,9 @@ func TestManagedSourcesNonEmptyZeroChunkDocumentRemainsFresh(t *testing.T) {
 	if listed.State != DocumentStateIndexed || listed.Freshness != DocumentFreshnessFresh {
 		t.Fatalf("listed zero-chunk document = %#v", listed)
 	}
+	if listed.ChunkCount != 0 {
+		t.Fatalf("listed ChunkCount = %d, want 0", listed.ChunkCount)
+	}
 	var chunkCount int
 	if err := store.db.QueryRow(`SELECT chunk_count FROM managed_documents WHERE id = ?`, document.ID).Scan(&chunkCount); err != nil {
 		t.Fatalf("query committed chunk count: %v", err)
@@ -222,12 +228,14 @@ func TestManagedSourcesNonEmptyZeroChunkDocumentRemainsFresh(t *testing.T) {
 	if chunkCount != 0 {
 		t.Fatalf("committed chunk_count = %d, want 0", chunkCount)
 	}
+	// chunk_count is part of the public document JSON so consumers can tell
+	// an indexed-empty document from one with content.
 	encoded, err := json.Marshal(listed)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "chunk_count") {
-		t.Fatalf("public document JSON leaked chunk_count: %s", encoded)
+	if !strings.Contains(string(encoded), `"chunk_count":0`) {
+		t.Fatalf("public document JSON missing chunk_count: %s", encoded)
 	}
 }
 

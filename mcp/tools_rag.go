@@ -319,5 +319,8 @@ func (s *Server) handleRAGDelete(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("rag", "delete: %v", err), nil
 	}
 
-	return toolResult("deleted source " + args.Source), nil
+	// JSON identity echo, matching the managed rag_delete_document shape.
+	return managedRAGResult(struct {
+		DeletedSource string `json:"deleted_source"`
+	}{DeletedSource: args.Source}), nil
 }

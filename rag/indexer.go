@@ -243,6 +243,18 @@ func (idx *Indexer) IndexText(ctx context.Context, source, content string) error
 	if err != nil {
 		return err
 	}
+	if len(prepared.chunks) == 0 {
+		// Preserve the pre-refactor clear semantics: no provenance hash is
+		// recorded for a cleared source, and the error messages stay distinct
+		// for empty content versus chunker-filtered content.
+		if err := idx.replaceSource(ctx, source, nil, nil); err != nil {
+			if content == "" {
+				return fmt.Errorf("rag: clear chunks for empty file %q: %w", source, err)
+			}
+			return fmt.Errorf("rag: clear chunks for %q with no chunk output: %w", source, err)
+		}
+		return nil
+	}
 	if err := idx.replaceSourceWithProvenance(ctx, source, prepared.chunks, prepared.embeddings, prepared.sourceHash, prepared.vectorSpaceID); err != nil {
 		return fmt.Errorf("rag: replace chunks for %q: %w", source, err)
 	}

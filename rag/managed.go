@@ -67,9 +67,9 @@ type Document struct {
 	State           DocumentState     `json:"state"`
 	Freshness       DocumentFreshness `json:"freshness"`
 	LastError       string            `json:"last_error,omitempty"`
+	ChunkCount      int               `json:"chunk_count"`
 	source          string
 	storedText      string
-	chunkCount      int
 }
 
 // DocumentOptions supplies optional metadata for a managed document.
@@ -286,7 +286,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 			(minSignature != document.SourceSignature || maxSignature != document.SourceSignature ||
 				minVectorSpaceID != document.VectorSpaceID || maxVectorSpaceID != document.VectorSpaceID ||
 				minDocumentID != document.ID || maxDocumentID != document.ID)
-		if chunks != document.chunkCount || provenanceMismatch {
+		if chunks != document.ChunkCount || provenanceMismatch {
 			if err := m.persistStatus(ctx, document, DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing or inconsistent"); err != nil {
 				return nil, err
 			}
@@ -402,7 +402,7 @@ func (m *ManagedSources) indexDocumentLocked(ctx context.Context, document Docum
 	candidate.SourceSignature = prepared.sourceHash
 	candidate.IndexedAt = indexedAt
 	candidate.VectorSpaceID = vectorSpaceID
-	candidate.chunkCount = len(prepared.chunks)
+	candidate.ChunkCount = len(prepared.chunks)
 	candidate.State = DocumentStateIndexed
 	candidate.Freshness = DocumentFreshnessFresh
 	candidate.LastError = ""
@@ -546,7 +546,7 @@ func scanManagedDocument(scanner managedRowScanner) (Document, error) {
 		&document.ID, &document.source, &document.Title, &document.Kind,
 		&document.Origin, &document.MIMEType, &document.storedText,
 		&document.ContentHash, &document.SourceSignature, &document.IndexedAt,
-		&document.VectorSpaceID, &document.chunkCount, &document.Collection, &tagsJSON,
+		&document.VectorSpaceID, &document.ChunkCount, &document.Collection, &tagsJSON,
 		&document.State, &document.Freshness, &document.LastError,
 	); err != nil {
 		return Document{}, fmt.Errorf("rag: scan managed document: %w", err)
