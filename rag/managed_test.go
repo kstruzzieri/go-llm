@@ -1103,6 +1103,51 @@ func TestManagedSourcesRejectsVectorMigrationWithIncompatibleRemainingCorpus(t *
 	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
 }
 
+func TestManagedSourcesRejectsMigrationWithInteriorRemainingDimensionDrift(t *testing.T) {
+	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
+	managed, _, store := newManagedTestService(t, embedder)
+	ctx := context.Background()
+	document, err := managed.IngestText(ctx, "runbook.md", "old content", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range []struct {
+		id        string
+		dimension int
+	}{
+		{"remaining-first", 3},
+		{"remaining-interior", 2},
+		{"remaining-last", 3},
+	} {
+		embedding, err := encodeEmbedding(make([]float64, row.dimension))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.db.ExecContext(ctx, `INSERT INTO chunks
+			(id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+			VALUES (?, '', ?, 1, 1, '', '{}', ?, 1, '', '', 'test/new')`, row.id, row.id+".md", embedding); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before := requireManagedChunks(t, store, document.source)
+	embedder.vectorSpaceID = "test/new"
+	embedder.dimension = 3
+
+	failed, err := managed.ReindexDocument(ctx, document.ID)
+	if err == nil || !strings.Contains(err.Error(), "dimension") {
+		t.Fatalf("ReindexDocument() error = %v, want remaining-corpus dimension mismatch", err)
+	}
+	if failed.VectorSpaceID != "test/old" {
+		t.Fatalf("failed document = %#v, want retained vector space", failed)
+	}
+	after := requireManagedChunks(t, store, document.source)
+	if len(before) != len(after) || len(after) != 1 || before[0].VectorSpaceID != after[0].VectorSpaceID ||
+		len(before[0].Embedding) != len(after[0].Embedding) || before[0].Chunk.Content != after[0].Chunk.Content {
+		t.Fatalf("managed chunks before=%#v after=%#v", before, after)
+	}
+	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
+}
+
 func TestManagedSourcesNewDocumentRejectsCorpusVectorSpaceDrift(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/new"})
 	ctx := context.Background()

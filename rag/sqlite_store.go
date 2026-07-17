@@ -497,7 +497,7 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 		return fmt.Errorf("rag: replace source %q: delete existing chunks: %w", source, err)
 	}
 	if opts.replaceVectorSpace && len(embeddings) > 0 {
-		if err := s.validateWriteEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
+		if err := s.validateMigrationCorpusEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
 	}
@@ -506,6 +506,41 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, opts.sourceHash, opts.vectorSpaceID); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
+	}
+	return nil
+}
+
+func (s *SQLiteStore) validateMigrationCorpusEmbeddingDimensionTx(ctx context.Context, tx *sql.Tx, dimension int) error {
+	if s.writeEmbeddingErr != nil {
+		return s.writeEmbeddingErr
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid`)
+	if err != nil {
+		return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var chunkID string
+		var encoded []byte
+		if err := rows.Scan(&chunkID, &encoded); err != nil {
+			return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)
+		}
+		format, existingDimension, err := inspectEmbedding(encoded)
+		if err != nil {
+			return fmt.Errorf("rag: write embeddings: inspect existing chunk %q: %w", chunkID, err)
+		}
+		if format != embeddingFormatPackedFloat32 {
+			return fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+		}
+		if dimension != existingDimension {
+			return fmt.Errorf("rag: write embeddings: dimension %d does not match existing corpus dimension %d", dimension, existingDimension)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("rag: write embeddings: close remaining corpus: %w", err)
 	}
 	return nil
 }
