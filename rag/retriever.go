@@ -2,8 +2,11 @@ package rag
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"unicode/utf8"
@@ -13,10 +16,11 @@ import (
 
 // Retriever queries the vector store and builds augmented prompts.
 type Retriever struct {
-	embedder   Embedder
-	model      string
-	store      VectorStore
-	vectorOnly bool
+	embedder        Embedder
+	model           string
+	store           VectorStore
+	vectorOnly      bool
+	readManagedFile func(string) ([]byte, error)
 }
 
 // RetrievalScope restricts retrieval to managed documents in a collection and
@@ -76,9 +80,10 @@ func WithVectorOnly() RetrieverOption {
 // NewRetrieverWithEmbedder route through it.
 func buildRetriever(emb Embedder, store VectorStore, opts ...RetrieverOption) *Retriever {
 	r := &Retriever{
-		embedder: emb,
-		model:    "nomic-embed-text",
-		store:    store,
+		embedder:        emb,
+		model:           "nomic-embed-text",
+		store:           store,
+		readManagedFile: readManagedRegularFile,
 	}
 	for _, opt := range opts {
 		opt(r)
@@ -117,7 +122,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 	if err != nil {
 		return nil, err
 	}
-	if err := refreshManagedSearchResults(ctx, r.store, results); err != nil {
+	if err := refreshManagedSearchResults(ctx, r.store, r.readManagedFile, results); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -148,7 +153,7 @@ func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, sco
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
-	if err := refreshManagedSearchResultsWithRegistry(ctx, results, registry); err != nil {
+	if err := refreshManagedSearchResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -216,7 +221,7 @@ func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCt
 	if err != nil {
 		return nil, err
 	}
-	if err := refreshManagedScoredResults(ctx, r.store, results); err != nil {
+	if err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -247,7 +252,7 @@ func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k in
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
-	if err := refreshManagedScoredResultsWithRegistry(ctx, results, registry); err != nil {
+	if err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
 		return nil, err
 	}
 	return results, nil
@@ -352,6 +357,8 @@ func scoredResultChunks(results []ScoredResult) []Chunk {
 	return chunks
 }
 
+var errManagedDocumentsTableMissing = errors.New("rag: managed_documents table missing")
+
 func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates []Chunk) (map[string]managedRegistryDocument, error) {
 	const batchSize = 100
 	sources := make([]string, 0, len(candidates))
@@ -364,6 +371,21 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 			}
 		}
 	}
+	if len(sources) == 0 {
+		return nil, nil
+	}
+	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'managed_documents')`).Scan(&exists); err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, errManagedDocumentsTableMissing
+	}
 	registry := make(map[string]managedRegistryDocument, len(sources))
 	for start := 0; start < len(sources); start += batchSize {
 		end := start + batchSize
@@ -375,7 +397,7 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 		for i, source := range sources[start:end] {
 			args[i] = source
 		}
-		rows, err := store.db.QueryContext(ctx, `SELECT id, source, title, kind, origin, mime_type, content_hash, collection, tags, state FROM managed_documents WHERE source IN (`+placeholders+`)`, args...)
+		rows, err := tx.QueryContext(ctx, `SELECT id, source, title, kind, origin, mime_type, content_hash, collection, tags, state FROM managed_documents WHERE source IN (`+placeholders+`)`, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -385,14 +407,7 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 				_ = rows.Close()
 				return nil, err
 			}
-			if document.kind != string(DocumentKindText) && document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) {
-				continue
-			}
-			if err := json.Unmarshal([]byte(document.tagsJSON), &document.tags); err != nil {
-				continue
-			}
-			normalized, err := normalizeManagedTags(document.tags)
-			if err != nil || !reflect.DeepEqual(document.tags, normalized) {
+			if !validManagedRegistryDocument(&document) {
 				continue
 			}
 			registry[document.source] = document
@@ -405,6 +420,9 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 			return nil, err
 		}
 	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 	return registry, nil
 }
 
@@ -413,16 +431,63 @@ func looksManagedDocumentSource(source string) bool {
 		return false
 	}
 	rest := strings.TrimPrefix(source, managedSourcePrefix)
-	if len(rest) < 32 {
+	if len(rest) < 32 || !isLowerHex(rest[:32], 32) {
 		return false
 	}
-	for _, char := range rest[:32] {
-		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
+	return true
+}
+
+func validManagedRegistryDocument(document *managedRegistryDocument) bool {
+	if !isLowerHex(document.id, 32) || !validGeneratedManagedSource(document.source, document.id) || !isLowerHex(document.contentHash, 64) {
+		return false
+	}
+	if document.kind != string(DocumentKindText) && document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) {
+		return false
+	}
+	for _, value := range []string{document.title, document.mimeType, document.collection} {
+		if !utf8.ValidString(value) || len(value) > MaxManagedMetadataBytes {
 			return false
 		}
 	}
-	extension := rest[32:]
-	return extension == "" || extension[0] == '.' && extension == strings.ToLower(extension) && !strings.ContainsAny(extension[1:], "/\\.")
+	if !utf8.ValidString(document.tagsJSON) {
+		return false
+	}
+	if document.title == "" || document.mimeType == "" {
+		return false
+	}
+	if document.kind == string(DocumentKindText) {
+		if document.origin != "" {
+			return false
+		}
+	} else if !utf8.ValidString(document.origin) || len(document.origin) > MaxManagedMetadataBytes || !filepath.IsAbs(document.origin) || filepath.Clean(document.origin) != document.origin {
+		return false
+	}
+	if err := json.Unmarshal([]byte(document.tagsJSON), &document.tags); err != nil {
+		return false
+	}
+	normalized, err := normalizeManagedTags(document.tags)
+	return err == nil && reflect.DeepEqual(document.tags, normalized)
+}
+
+func validGeneratedManagedSource(source, id string) bool {
+	prefix := managedSourcePrefix + id
+	if !strings.HasPrefix(source, prefix) {
+		return false
+	}
+	suffix := strings.TrimPrefix(source, prefix)
+	return suffix == strings.ToLower(suffix) && suffix == filepath.Ext("x"+suffix)
+}
+
+func isLowerHex(value string, length int) bool {
+	if len(value) != length {
+		return false
+	}
+	for _, char := range value {
+		if !strings.ContainsRune("0123456789abcdef", char) {
+			return false
+		}
+	}
+	return true
 }
 
 type managedFreshnessCheck struct {
@@ -430,29 +495,26 @@ type managedFreshnessCheck struct {
 	err  error
 }
 
-// readManagedRetrievalFile is a test seam around the bounded descriptor read.
-var readManagedRetrievalFile = readManagedRegularFile
-
-func refreshManagedSearchResults(ctx context.Context, store VectorStore, results []SearchResult) error {
+func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFile func(string) ([]byte, error), results []SearchResult) error {
 	sqlite, ok := store.(*SQLiteStore)
 	if !ok {
 		return nil
 	}
 	registry, err := managedRegistrySnapshot(ctx, sqlite, searchResultChunks(results))
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	if errors.Is(err, errManagedDocumentsTableMissing) {
 		return nil // Legacy read-only stores without managed_documents stay compatible.
 	}
-	return refreshManagedSearchResultsWithRegistry(ctx, results, registry)
+	if err != nil {
+		return err
+	}
+	return refreshManagedSearchResultsWithRegistry(ctx, readFile, results, registry)
 }
 
-func refreshManagedSearchResultsWithRegistry(ctx context.Context, results []SearchResult, registry map[string]managedRegistryDocument) error {
+func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, &results[i].Chunk, document, cache); err != nil {
+			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache); err != nil {
 				return err
 			}
 		}
@@ -460,26 +522,26 @@ func refreshManagedSearchResultsWithRegistry(ctx context.Context, results []Sear
 	return nil
 }
 
-func refreshManagedScoredResults(ctx context.Context, store VectorStore, results []ScoredResult) error {
+func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFile func(string) ([]byte, error), results []ScoredResult) error {
 	sqlite, ok := store.(*SQLiteStore)
 	if !ok {
 		return nil
 	}
 	registry, err := managedRegistrySnapshot(ctx, sqlite, scoredResultChunks(results))
-	if err != nil {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
+	if errors.Is(err, errManagedDocumentsTableMissing) {
 		return nil // Legacy read-only stores without managed_documents stay compatible.
 	}
-	return refreshManagedScoredResultsWithRegistry(ctx, results, registry)
+	if err != nil {
+		return err
+	}
+	return refreshManagedScoredResultsWithRegistry(ctx, readFile, results, registry)
 }
 
-func refreshManagedScoredResultsWithRegistry(ctx context.Context, results []ScoredResult, registry map[string]managedRegistryDocument) error {
+func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, &results[i].Chunk, document, cache); err != nil {
+			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache); err != nil {
 				return err
 			}
 		}
@@ -487,7 +549,7 @@ func refreshManagedScoredResultsWithRegistry(ctx context.Context, results []Scor
 	return nil
 }
 
-func refreshManagedChunk(ctx context.Context, chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck) error {
+func refreshManagedChunk(ctx context.Context, readFile func(string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck) error {
 	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) || !matchesManagedRegistry(*chunk, document) {
 		return nil
 	}
@@ -497,7 +559,7 @@ func refreshManagedChunk(ctx context.Context, chunk *Chunk, document managedRegi
 	origin := document.origin
 	check, ok := cache[origin]
 	if !ok {
-		data, err := readManagedRetrievalFile(origin)
+		data, err := readFile(origin)
 		check = managedFreshnessCheck{err: err}
 		if err == nil {
 			check.hash = contentHash(string(data))

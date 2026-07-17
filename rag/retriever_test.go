@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -74,15 +75,13 @@ func TestRetrieveFreshnessPropagatesCancellationAfterRead(t *testing.T) {
 	if _, err := managed.IngestFile(ctx, path, DocumentOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	previous := readManagedRetrievalFile
-	readManagedRetrievalFile = func(string) ([]byte, error) {
-		cancel()
-		return []byte("content"), nil
-	}
-	t.Cleanup(func() { readManagedRetrievalFile = previous })
 	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}}, store, WithVectorOnly())
 	if err != nil {
 		t.Fatal(err)
+	}
+	r.readManagedFile = func(string) ([]byte, error) {
+		cancel()
+		return []byte("content"), nil
 	}
 	_, err = r.Retrieve(ctx, "q", 1)
 	if !errors.Is(err, context.Canceled) {
@@ -90,12 +89,13 @@ func TestRetrieveFreshnessPropagatesCancellationAfterRead(t *testing.T) {
 	}
 }
 
-func TestRetrieveLegacyStoreWithoutManagedTableSkipsRegistryForOrdinaryResults(t *testing.T) {
+func TestRetrieveLegacyStoreWithoutManagedTableSkipsRegistry(t *testing.T) {
 	store := newTestStore(t)
 	if _, err := store.db.Exec(`DROP TABLE managed_documents`); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Store(context.Background(), []Chunk{{ID: "plain", Source: "plain.go", Metadata: map[string]string{}}}, [][]float64{{1, 0}}); err != nil {
+	source := managedSourcePrefix + strings.Repeat("a", 32) + ".md"
+	if err := store.Store(context.Background(), []Chunk{{ID: "plain", Source: source, Metadata: map[string]string{}}}, [][]float64{{1, 0}}); err != nil {
 		t.Fatal(err)
 	}
 	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}}, store, WithVectorOnly())
@@ -105,6 +105,77 @@ func TestRetrieveLegacyStoreWithoutManagedTableSkipsRegistryForOrdinaryResults(t
 	got, err := r.Retrieve(context.Background(), "q", 1)
 	if err != nil || len(got) != 1 || got[0].Chunk.ID != "plain" {
 		t.Fatalf("legacy retrieval=%#v error=%v, want ordinary result", got, err)
+	}
+}
+
+func TestRetrieveManagedRegistryErrorsForMalformedPresentTable(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.db.Exec(`DROP TABLE managed_documents; CREATE TABLE managed_documents (source TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	source := managedSourcePrefix + strings.Repeat("b", 32) + ".md"
+	if err := store.Store(context.Background(), []Chunk{{ID: "bad", Source: source, Metadata: map[string]string{}}}, [][]float64{{1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}}, store, WithVectorOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.Retrieve(context.Background(), "q", 1); err == nil {
+		t.Fatal("Retrieve succeeded with malformed managed_documents table")
+	}
+}
+
+func TestRetrieveScopedAcceptsUnixBackslashExtension(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("backslash is not a valid Windows filename character")
+	}
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "notes.\\tag")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := managed.IngestFile(ctx, path, DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(document.source, ".\\tag") {
+		t.Fatalf("managed source=%q, want backslash extension", document.source)
+	}
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}}, store, WithVectorOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.RetrieveScoped(ctx, "q", 1, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil || len(got) != 1 || got[0].Chunk.Source != document.source {
+		t.Fatalf("scoped results=%#v error=%v, want backslash-extension document", got, err)
+	}
+}
+
+func TestRetrieveScopedRejectsRegistryRelativeFileOriginWithoutReading(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "notes.md")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := managed.IngestFile(ctx, path, DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`UPDATE managed_documents SET origin = 'relative.txt' WHERE id = ?`, document.ID); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}}, store, WithVectorOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	r.readManagedFile = func(string) ([]byte, error) { called = true; return nil, errors.New("must not read") }
+	got, err := r.RetrieveScoped(ctx, "q", 1, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil || len(got) != 0 || called {
+		t.Fatalf("scoped results=%#v error=%v read=%v, want exclusion without read", got, err, called)
 	}
 }
 
