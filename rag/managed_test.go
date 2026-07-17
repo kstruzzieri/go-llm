@@ -387,6 +387,19 @@ func TestIndexerRejectsManagedDocumentSourceBeforeIncrementalRead(t *testing.T) 
 	}
 }
 
+func TestIndexerRejectsManagedDocumentSourceBeforeFileRead(t *testing.T) {
+	managed, idx, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	document, err := managed.IngestText(context.Background(), "runbook.md", "restart safely", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = idx.IndexFile(context.Background(), document.source)
+	if err == nil || !strings.Contains(err.Error(), "belongs to a managed document") {
+		t.Fatalf("IndexFile(managed source) error = %v, want ownership error before read", err)
+	}
+}
+
 func TestManagedSourcesReconciliationSkipsStaleSnapshotAfterReindex(t *testing.T) {
 	managed, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()

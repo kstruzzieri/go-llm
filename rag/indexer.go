@@ -246,6 +246,9 @@ type preparedSource struct {
 // If the underlying store supports atomic source replacement (SQLiteStore does),
 // re-indexing is transactional across delete + store.
 func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
+	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("rag: read file %q: %w", path, err)
