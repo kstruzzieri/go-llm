@@ -287,39 +287,69 @@ func TestManagedSourcesIngestTextRejectsWhitespaceOnlyContent(t *testing.T) {
 	}
 }
 
-func TestManagedSourcesListMarksInterruptedIndexingFailed(t *testing.T) {
-	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
-	ctx := context.Background()
-
-	document, err := managed.IngestText(ctx, "doc.md", "hello", DocumentOptions{})
+func TestManagedSourcesActiveIndexingVisibleAcrossServices(t *testing.T) {
+	embedStarted := make(chan struct{})
+	releaseEmbed := make(chan struct{})
+	first, idx, store := newManagedTestService(t, EmbedderFunc(func(ctx context.Context, _ string, inputs []string) (EmbedResult, error) {
+		close(embedStarted)
+		select {
+		case <-releaseEmbed:
+		case <-ctx.Done():
+			return EmbedResult{}, ctx.Err()
+		}
+		embeddings := make([][]float64, len(inputs))
+		for i := range embeddings {
+			embeddings[i] = []float64{1, float64(i + 1)}
+		}
+		return EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/v1"}, nil
+	}))
+	second, err := NewManagedSources(idx, store)
 	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		select {
+		case <-releaseEmbed:
+		default:
+			close(releaseEmbed)
+		}
+	})
+
+	ingestDone := make(chan error, 1)
+	go func() {
+		_, err := first.IngestText(context.Background(), "runbook.md", "restart safely", DocumentOptions{})
+		ingestDone <- err
+	}()
+	select {
+	case <-embedStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not reach blocking embedder")
+	}
+
+	documents, err := second.ListDocuments(context.Background(), DocumentFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(documents) != 1 || documents[0].State != DocumentStateIndexing {
+		t.Fatalf("documents = %#v, want active indexing row", documents)
+	}
+
+	close(releaseEmbed)
+	if err := <-ingestDone; err != nil {
 		t.Fatalf("IngestText() error: %v", err)
 	}
-	// Simulate a crash between the registry INSERT and index finalize: the row
-	// is left behind in the transient indexing state.
-	if _, err := store.db.Exec(`UPDATE managed_documents SET state = 'indexing' WHERE id = ?`, document.ID); err != nil {
-		t.Fatalf("force indexing state: %v", err)
-	}
-
-	got := requireManagedDocument(t, managed, document.ID)
-	if got.State != DocumentStateFailed {
-		t.Fatalf("state = %s, want %s", got.State, DocumentStateFailed)
-	}
-	if !strings.Contains(got.LastError, "indexing interrupted") {
-		t.Fatalf("last error = %q, want interrupted-indexing message", got.LastError)
-	}
-	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessFresh)
 }
 
-func TestIndexerRejectsReservedManagedSourcePrefix(t *testing.T) {
+func TestIndexerManagedPrefixAllowsUnregisteredSource(t *testing.T) {
 	_, idx, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
+	source := managedSourcePrefix + "notes.md"
 
-	if err := idx.IndexText(ctx, managedSourcePrefix+"abc.md", "content"); err == nil || !strings.Contains(err.Error(), "reserved managed prefix") {
-		t.Fatalf("IndexText(managed prefix) error = %v, want reserved-prefix error", err)
+	if err := idx.IndexText(ctx, source, "content"); err != nil {
+		t.Fatalf("IndexText(unregistered managed prefix) error = %v", err)
 	}
-	if err := idx.replaceSourceWithProvenanceIfSourceHash(ctx, managedSourcePrefix+"abc.md", nil, nil, "", "", ""); err == nil || !strings.Contains(err.Error(), "reserved managed prefix") {
-		t.Fatalf("replaceSourceWithProvenanceIfSourceHash(managed prefix) error = %v, want reserved-prefix error", err)
+	if err := idx.replaceSourceWithProvenanceIfSourceHash(ctx, source, nil, nil, "", "", idx.currentSourceSignature("content").String()); err != nil {
+		t.Fatalf("replaceSourceWithProvenanceIfSourceHash(unregistered managed prefix) error = %v", err)
 	}
 }
 

@@ -165,7 +165,7 @@ func (idx *Indexer) replaceSourceWithHash(ctx context.Context, path string, chun
 // delete+store fallback. VSID write invariants are enforced by the
 // vsid-capable store implementation, not by this dispatcher.
 func (idx *Indexer) replaceSourceWithProvenance(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
-	if err := rejectReservedManagedSource(path); err != nil {
+	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
 		return err
 	}
 	idx.storeMu.Lock()
@@ -175,7 +175,7 @@ func (idx *Indexer) replaceSourceWithProvenance(ctx context.Context, path string
 }
 
 func (idx *Indexer) replaceSourceWithProvenanceIfSourceHash(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID, expectedSourceHash string) error {
-	if err := rejectReservedManagedSource(path); err != nil {
+	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
 		return err
 	}
 	idx.storeMu.Lock()
@@ -186,6 +186,24 @@ func (idx *Indexer) replaceSourceWithProvenanceIfSourceHash(ctx context.Context,
 	}
 
 	return fmt.Errorf("%w: source-hash CAS unsupported by %T", ErrIncrementalRebuildRequired, idx.store)
+}
+
+func (idx *Indexer) rejectManagedDocumentSource(ctx context.Context, source string) error {
+	if !strings.HasPrefix(source, managedSourcePrefix) {
+		return nil
+	}
+	store, ok := idx.store.(*SQLiteStore)
+	if !ok {
+		return nil
+	}
+	managed, err := store.hasManagedDocumentSource(ctx, source)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return fmt.Errorf("rag: source %q belongs to a managed document; use ManagedSources", source)
+	}
+	return nil
 }
 
 func (idx *Indexer) replaceSourceWithProvenanceLocked(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
@@ -236,8 +254,8 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 }
 
 // IndexText indexes content under source using the same chunk/embed/replace
-// pipeline as IndexFile. Sources with the reserved "managed:" prefix are
-// rejected; managed documents own that namespace (see ManagedSources).
+// pipeline as IndexFile. Registered managed document sources are rejected;
+// unregistered legacy sources may use the "managed:" prefix.
 func (idx *Indexer) IndexText(ctx context.Context, source, content string) error {
 	prepared, err := idx.prepareSource(ctx, source, content, nil)
 	if err != nil {

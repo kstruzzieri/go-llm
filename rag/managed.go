@@ -254,16 +254,6 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 
 	for i := range documents {
 		document := &documents[i]
-		if document.State == DocumentStateIndexing {
-			// The gate serializes every managed write, so a row still marked
-			// indexing was orphaned by an interrupted ingest (crash, or a
-			// failure whose status persist itself failed). Surface it as
-			// failed instead of reporting "indexing" forever.
-			if err := m.persistStatus(ctx, document, DocumentStateFailed, document.Freshness, "indexing interrupted before completion; reindex or delete this document"); err != nil {
-				return nil, err
-			}
-			continue
-		}
 		if document.State != DocumentStateIndexed {
 			continue
 		}
@@ -649,18 +639,6 @@ func containsManagedTags(have, wanted []string) bool {
 		}
 	}
 	return true
-}
-
-// rejectReservedManagedSource fails indexer writes aimed at the managed
-// namespace. Managed chunks carry provenance metadata the plain indexing
-// pipeline does not stamp; letting IndexText/IndexFile write a "managed:"
-// source would silently strip that provenance until the next list-time
-// reconciliation flagged the document failed.
-func rejectReservedManagedSource(source string) error {
-	if strings.HasPrefix(source, managedSourcePrefix) {
-		return fmt.Errorf("rag: source %q uses the reserved managed prefix %q; use ManagedSources to write managed documents", source, managedSourcePrefix)
-	}
-	return nil
 }
 
 func (s *SQLiteStore) hasManagedDocumentSource(ctx context.Context, source string) (bool, error) {

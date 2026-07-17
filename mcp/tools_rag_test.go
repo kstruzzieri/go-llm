@@ -353,7 +353,7 @@ func TestRAGDeleteToolDisabled(t *testing.T) {
 	}
 }
 
-func TestRAGDeleteToolReturnsJSONIdentity(t *testing.T) {
+func TestRAGDeleteToolPreservesLegacySuccessText(t *testing.T) {
 	s := &Server{
 		store: stubVectorStore{},
 		mcpServer: gomcp.NewServer(&gomcp.Implementation{
@@ -377,8 +377,8 @@ func TestRAGDeleteToolReturnsJSONIdentity(t *testing.T) {
 	if result.IsError {
 		t.Fatalf("unexpected tool error: %s", extractText(result))
 	}
-	if text := extractText(result); text != `{"deleted_source":"test.go"}` {
-		t.Errorf("result = %q, want JSON identity echo", text)
+	if text := extractText(result); text != "deleted source test.go" {
+		t.Fatalf("result = %q, want legacy success text", text)
 	}
 }
 
