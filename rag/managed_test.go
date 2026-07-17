@@ -439,6 +439,71 @@ func TestManagedSourcesReconciliationSkipsStaleSnapshotAfterReindex(t *testing.T
 	}
 }
 
+func TestManagedSourcesReconcileReadsFileBeforeWriterTransaction(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "runbook.md")
+	if err := os.WriteFile(path, []byte("restart safely"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := managed.IngestFile(context.Background(), path, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	readStarted := make(chan struct{})
+	releaseRead := make(chan struct{})
+	managed.readFile = func(string) ([]byte, error) {
+		close(readStarted)
+		<-releaseRead
+		return []byte("restart safely"), nil
+	}
+	reconcileDone := make(chan error, 1)
+	go func() {
+		_, err := managed.reconcileDocument(context.Background(), &document)
+		reconcileDone <- err
+	}()
+
+	released := false
+	reconciled := false
+	defer func() {
+		if !released {
+			close(releaseRead)
+		}
+		if !reconciled {
+			select {
+			case err := <-reconcileDone:
+				if err != nil {
+					t.Errorf("reconcileDocument() error = %v", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Error("reconcileDocument() did not finish after file read release")
+			}
+		}
+	}()
+
+	select {
+	case <-readStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("reconcileDocument() did not reach file read")
+	}
+
+	writerCtx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+	defer cancel()
+	tx, err := store.beginWriteTx(writerCtx)
+	if err != nil {
+		t.Fatalf("writer transaction was blocked by file read: %v", err)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	close(releaseRead)
+	released = true
+	if err := <-reconcileDone; err != nil {
+		t.Fatal(err)
+	}
+	reconciled = true
+}
+
 func TestManagedSourcesListFiltersAndOrdersByID(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()

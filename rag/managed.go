@@ -90,9 +90,10 @@ type DocumentFilter struct {
 
 // ManagedSources owns managed document registry and indexing lifecycle writes.
 type ManagedSources struct {
-	indexer *Indexer
-	store   *SQLiteStore
-	gate    managedSourceGate
+	indexer  *Indexer
+	store    *SQLiteStore
+	gate     managedSourceGate
+	readFile func(string) ([]byte, error)
 }
 
 type managedSourceGate chan struct{}
@@ -129,7 +130,7 @@ func NewManagedSources(indexer *Indexer, store *SQLiteStore) (*ManagedSources, e
 	if store == nil {
 		return nil, fmt.Errorf("rag: NewManagedSources: store is required")
 	}
-	return &ManagedSources{indexer: indexer, store: store, gate: newManagedSourceGate()}, nil
+	return &ManagedSources{indexer: indexer, store: store, gate: newManagedSourceGate(), readFile: readManagedRegularFile}, nil
 }
 
 // IngestText saves and indexes a named UTF-8 text document.
@@ -321,6 +322,14 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 // lifecycle state. A separate ManagedSources instance may finish a reindex
 // between ListDocuments' read and reconciliation write.
 func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Document) (bool, error) {
+	desiredFreshness := DocumentFreshnessFresh
+	if observed.Kind == DocumentKindFile {
+		data, err := m.readFile(observed.Origin)
+		if err != nil || !utf8.Valid(data) || contentHash(string(data)) != observed.ContentHash {
+			desiredFreshness = DocumentFreshnessStale
+		}
+	}
+
 	tx, err := m.store.beginWriteTx(ctx)
 	if err != nil {
 		return false, fmt.Errorf("rag: reconcile managed document %q: begin transaction: %w", observed.ID, err)
@@ -362,14 +371,7 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 	if chunks != current.ChunkCount || provenanceMismatch {
 		state, freshness, lastError = DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing or inconsistent"
 	} else {
-		desired := DocumentFreshnessFresh
-		if current.Kind == DocumentKindFile {
-			data, err := readManagedRegularFile(current.Origin)
-			if err != nil || !utf8.Valid(data) || contentHash(string(data)) != current.ContentHash {
-				desired = DocumentFreshnessStale
-			}
-		}
-		freshness = desired
+		freshness = desiredFreshness
 	}
 	if state == current.State && freshness == current.Freshness && lastError == current.LastError {
 		return false, tx.Commit()
