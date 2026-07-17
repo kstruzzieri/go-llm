@@ -475,7 +475,7 @@ func validGeneratedManagedSource(source, id string) bool {
 		return false
 	}
 	suffix := strings.TrimPrefix(source, prefix)
-	return suffix == strings.ToLower(suffix) && suffix == filepath.Ext("x"+suffix)
+	return suffix == "" || strings.HasPrefix(suffix, ".") && suffix == strings.ToLower(suffix) && !strings.Contains(suffix, "/")
 }
 
 func isLowerHex(value string, length int) bool {

@@ -153,6 +153,29 @@ func TestRetrieveScopedAcceptsUnixBackslashExtension(t *testing.T) {
 	}
 }
 
+func TestValidGeneratedManagedSourceIsPlatformIndependent(t *testing.T) {
+	id := strings.Repeat("a", 32)
+	for _, test := range []struct {
+		name, source string
+		want         bool
+	}{
+		{"empty suffix", managedSourcePrefix + id, true},
+		{"normal extension", managedSourcePrefix + id + ".md", true},
+		{"multi-dot suffix", managedSourcePrefix + id + ".foo.bar", true},
+		{"unix backslash extension", managedSourcePrefix + id + ".\\tag", true},
+		{"mismatched id", managedSourcePrefix + strings.Repeat("b", 32) + ".md", false},
+		{"non-dot suffix", managedSourcePrefix + id + "suffix", false},
+		{"uppercase suffix", managedSourcePrefix + id + ".MD", false},
+		{"slash suffix", managedSourcePrefix + id + ".dir/file", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := validGeneratedManagedSource(test.source, id); got != test.want {
+				t.Fatalf("validGeneratedManagedSource(%q) = %v, want %v", test.source, got, test.want)
+			}
+		})
+	}
+}
+
 func TestRetrieveScopedRejectsRegistryRelativeFileOriginWithoutReading(t *testing.T) {
 	ctx := context.Background()
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
