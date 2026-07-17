@@ -207,40 +207,46 @@ func migrateV6(tx *sql.Tx) error {
 //  3. Pre-migration database (has chunks table but no rag_schema_version): marks
 //     version 1 as already applied and runs version 2+.
 func runMigrations(db *sql.DB) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return fmt.Errorf("rag: begin migrations: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	// Ensure the version tracking table exists.
 	const createVersionTable = `CREATE TABLE IF NOT EXISTS rag_schema_version (
 		version     INTEGER PRIMARY KEY,
 		description TEXT NOT NULL,
 		applied_at  INTEGER NOT NULL
 	)`
-	if _, err := db.Exec(createVersionTable); err != nil {
+	if _, err := tx.Exec(createVersionTable); err != nil {
 		return fmt.Errorf("rag: create version table: %w", err)
 	}
 
 	// Detect pre-migration databases: chunks table exists but no version records.
-	currentVersion, err := currentSchemaVersion(db)
+	currentVersion, err := currentSchemaVersion(tx)
 	if err != nil {
 		return err
 	}
 
-	if currentVersion == 0 && tableExists(db, "chunks") {
+	if currentVersion == 0 && tableExists(tx, "chunks") {
 		// Database was created before the migration system. Determine
 		// which version the schema actually represents and record all
 		// applicable versions atomically so a crash cannot leave a
 		// partial version state.
 		detectedVersion := 1
-		if tableExists(db, "chunks_fts") {
+		if tableExists(tx, "chunks_fts") {
 			detectedVersion = 2
 		}
-		if err := recordVersionsUpTo(db, detectedVersion); err != nil {
+		if err := recordVersionsUpTo(tx, detectedVersion); err != nil {
 			return err
 		}
 		currentVersion = detectedVersion
-	} else if currentVersion > 0 && currentVersion < 2 && tableExists(db, "chunks_fts") {
+	} else if currentVersion > 0 && currentVersion < 2 && tableExists(tx, "chunks_fts") {
 		// Schema has v2 artifacts but only version 1 is recorded.
 		// This can happen if a prior repair wrote v1 but crashed
 		// before writing v2. Record v2 to prevent re-running it.
-		if err := recordVersionsUpTo(db, 2); err != nil {
+		if err := recordVersionsUpTo(tx, 2); err != nil {
 			return err
 		}
 		currentVersion = 2
@@ -252,13 +258,7 @@ func runMigrations(db *sql.DB) error {
 			continue
 		}
 
-		tx, err := db.Begin()
-		if err != nil {
-			return fmt.Errorf("rag: begin migration v%d: %w", m.version, err)
-		}
-
 		if err := m.fn(tx); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("rag: migration v%d (%s): %w", m.version, m.description, err)
 		}
 
@@ -271,22 +271,20 @@ func runMigrations(db *sql.DB) error {
 			`INSERT INTO rag_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
 			m.version, m.description, time.Now().Unix(),
 		); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("rag: record version %d: %w", m.version, err)
-		}
-
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("rag: commit migration v%d: %w", m.version, err)
 		}
 	}
 
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rag: commit migrations: %w", err)
+	}
 	return nil
 }
 
 // currentSchemaVersion returns the highest applied migration version, or 0 if none.
-func currentSchemaVersion(db *sql.DB) (int, error) {
+func currentSchemaVersion(tx *sql.Tx) (int, error) {
 	var version int
-	err := db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM rag_schema_version`).Scan(&version)
+	err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM rag_schema_version`).Scan(&version)
 	if err != nil {
 		return 0, fmt.Errorf("rag: query schema version: %w", err)
 	}
@@ -294,34 +292,17 @@ func currentSchemaVersion(db *sql.DB) (int, error) {
 }
 
 // tableExists checks whether a table with the given name exists in the database.
-func tableExists(db *sql.DB, name string) bool {
+func tableExists(tx *sql.Tx, name string) bool {
 	var count int
-	err := db.QueryRow(
+	err := tx.QueryRow(
 		`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, name,
 	).Scan(&count)
 	return err == nil && count > 0
 }
 
-// recordVersion inserts a version record into rag_schema_version.
-func recordVersion(db *sql.DB, version int, description string) error {
-	_, err := db.Exec(
-		`INSERT INTO rag_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
-		version, description, time.Now().Unix(),
-	)
-	if err != nil {
-		return fmt.Errorf("rag: record version %d: %w", version, err)
-	}
-	return nil
-}
-
-// recordVersionsUpTo atomically inserts version records for all migrations
-// up to and including the given version. Used during pre-migration database
-// detection to ensure a crash cannot leave a partial version state.
-func recordVersionsUpTo(db *sql.DB, upTo int) error {
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("rag: begin version recording: %w", err)
-	}
+// recordVersionsUpTo inserts version records for all migrations up to and
+// including the given version in the caller's migration transaction.
+func recordVersionsUpTo(tx *sql.Tx, upTo int) error {
 	now := time.Now().Unix()
 	for _, m := range migrations {
 		if m.version > upTo {
@@ -331,12 +312,8 @@ func recordVersionsUpTo(db *sql.DB, upTo int) error {
 			`INSERT OR IGNORE INTO rag_schema_version (version, description, applied_at) VALUES (?, ?, ?)`,
 			m.version, m.description+" (pre-existing)", now,
 		); err != nil {
-			_ = tx.Rollback()
 			return fmt.Errorf("rag: record version %d: %w", m.version, err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("rag: commit version recording: %w", err)
 	}
 	return nil
 }

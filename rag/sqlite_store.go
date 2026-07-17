@@ -27,10 +27,12 @@ var (
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
 type SQLiteStore struct {
-	db                *sql.DB
-	behavioral        BehavioralWeighter // optional; nil => behavioral signal inert
-	immutable         bool               // set by OpenSQLiteStoreReadOnly; enables the resident snapshot paths
-	writeEmbeddingErr error              // non-nil when existing rows are not a homogeneous packed corpus
+	db                 *sql.DB
+	behavioral         BehavioralWeighter // optional; nil => behavioral signal inert
+	immutable          bool               // set by OpenSQLiteStoreReadOnly; enables the resident snapshot paths
+	writeEmbeddingMu   sync.RWMutex
+	writeEmbeddingErr  error // non-nil when existing rows are not a homogeneous packed corpus
+	writeEmbeddingScan bool  // true when the next normal write must authoritatively rescan the corpus
 
 	// snapshotMu guards resident and snapshotLoad. resident is the published
 	// process-resident snapshot (nil until the first successful load);
@@ -117,9 +119,22 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("rag: inspect embedding storage: %w", err)
 	}
 	if format != EmbeddingFormatEmpty && format != EmbeddingFormatPackedFloat32 {
-		store.writeEmbeddingErr = fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+		store.setWriteEmbeddingState(fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format), false)
 	}
 	return store, nil
+}
+
+func (s *SQLiteStore) writeEmbeddingState() (error, bool) {
+	s.writeEmbeddingMu.RLock()
+	defer s.writeEmbeddingMu.RUnlock()
+	return s.writeEmbeddingErr, s.writeEmbeddingScan
+}
+
+func (s *SQLiteStore) setWriteEmbeddingState(err error, scan bool) {
+	s.writeEmbeddingMu.Lock()
+	s.writeEmbeddingErr = err
+	s.writeEmbeddingScan = scan
+	s.writeEmbeddingMu.Unlock()
 }
 
 // sqliteReadWriteDSN builds the read-write DSN for dbPath. File-backed
@@ -135,21 +150,31 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 // to one connection (the routing-feedback store's alternative) because
 // retrieval reads are in the user-facing latency path and rely on WAL read
 // concurrency.
-// The path is made absolute first: a relative path in url.URL.Path renders
-// as file://<path>, which the URI parser reads as a host name, not a file.
+// Plain paths are made absolute first: a relative path in url.URL.Path
+// renders as file://<path>, which the URI parser reads as a host name, not a
+// file. Existing file: URIs retain their path and query parameters.
 // Windows drive-letter/UNC normalization is deferred with the Windows build
 // work (issue #303); this mirrors OpenSQLiteStoreReadOnly's exposure.
 func sqliteReadWriteDSN(dbPath string) (string, error) {
-	if dbPath == ":memory:" {
+	if dbPath == "" || dbPath == ":memory:" {
 		return dbPath, nil
 	}
-	abs, err := filepath.Abs(dbPath)
-	if err != nil {
-		return "", fmt.Errorf("resolve path %q: %w", dbPath, err)
+	var u *url.URL
+	if strings.HasPrefix(dbPath, "file:") {
+		parsed, err := url.Parse(dbPath)
+		if err != nil {
+			return "", fmt.Errorf("parse URI %q: %w", dbPath, err)
+		}
+		u = parsed
+	} else {
+		abs, err := filepath.Abs(dbPath)
+		if err != nil {
+			return "", fmt.Errorf("resolve path %q: %w", dbPath, err)
+		}
+		u = &url.URL{Scheme: "file", Path: abs}
 	}
-	u := url.URL{Scheme: "file", Path: abs}
 	q := u.Query()
-	q.Set("_pragma", "busy_timeout(5000)")
+	q.Add("_pragma", "busy_timeout(5000)")
 	q.Set("_txlock", "immediate")
 	u.RawQuery = q.Encode()
 	return u.String(), nil
@@ -284,8 +309,8 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 }
 
 func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
-	if s.writeEmbeddingErr != nil {
-		return s.writeEmbeddingErr
+	if cachedErr, _ := s.writeEmbeddingState(); cachedErr != nil {
+		return cachedErr
 	}
 	return s.insertChunksUncheckedTx(ctx, tx, chunks, embeddings, sourceContentHash, vectorSpaceID)
 }
@@ -520,6 +545,12 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
 	}
+	if opts.replaceVectorSpace && len(embeddings) > 0 {
+		// The corpus was valid in this transaction. Clear the stale error now,
+		// but require the next normal write to rescan in case the caller rolls
+		// this transaction back after replaceSourceTx returns.
+		s.setWriteEmbeddingState(nil, true)
+	}
 	return nil
 }
 
@@ -529,6 +560,8 @@ func (s *SQLiteStore) validateMigrationCorpusEmbeddingDimensionTx(ctx context.Co
 		return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
+	var corpusFormat embeddingFormat
+	var corpusDimension int
 	for rows.Next() {
 		var chunkID string
 		var encoded []byte
@@ -539,11 +572,16 @@ func (s *SQLiteStore) validateMigrationCorpusEmbeddingDimensionTx(ctx context.Co
 		if err != nil {
 			return fmt.Errorf("rag: write embeddings: inspect existing chunk %q: %w", chunkID, err)
 		}
-		if format != embeddingFormatPackedFloat32 {
-			return fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+		if corpusFormat == "" {
+			corpusFormat = format
+			corpusDimension = existingDimension
+			continue
 		}
-		if dimension != existingDimension {
-			return fmt.Errorf("rag: write embeddings: dimension %d does not match existing corpus dimension %d", dimension, existingDimension)
+		if format != corpusFormat {
+			return fmt.Errorf("rag: write embeddings: existing store uses mixed embedding formats; rebuild or explicitly migrate it before writing packed vectors")
+		}
+		if existingDimension != corpusDimension {
+			return fmt.Errorf("rag: write embeddings: existing store uses mixed embedding dimensions %d and %d; rebuild or explicitly migrate it before writing packed vectors", corpusDimension, existingDimension)
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -552,12 +590,25 @@ func (s *SQLiteStore) validateMigrationCorpusEmbeddingDimensionTx(ctx context.Co
 	if err := rows.Close(); err != nil {
 		return fmt.Errorf("rag: write embeddings: close remaining corpus: %w", err)
 	}
+	if corpusFormat == "" {
+		return nil
+	}
+	if corpusFormat != embeddingFormatPackedFloat32 {
+		return fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", corpusFormat)
+	}
+	if dimension != corpusDimension {
+		return fmt.Errorf("rag: write embeddings: dimension %d does not match existing corpus dimension %d", dimension, corpusDimension)
+	}
 	return nil
 }
 
 func (s *SQLiteStore) validateWriteEmbeddingDimensionTx(ctx context.Context, tx *sql.Tx, dimension int) error {
-	if s.writeEmbeddingErr != nil {
-		return s.writeEmbeddingErr
+	if cachedErr, scan := s.writeEmbeddingState(); cachedErr != nil || scan {
+		if err := s.validateMigrationCorpusEmbeddingDimensionTx(ctx, tx, dimension); err != nil {
+			s.setWriteEmbeddingState(err, true)
+			return err
+		}
+		s.setWriteEmbeddingState(nil, false)
 	}
 	// Best-effort re-check inside the write transaction: the complete every-row
 	// scan runs once at open, so inspect the corpus's first and last rows here

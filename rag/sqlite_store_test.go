@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
 	"time"
 )
@@ -81,6 +83,91 @@ func TestNewSQLiteStoreAcceptsRelativePath(t *testing.T) {
 	if _, err := os.Stat("rel.db"); err != nil {
 		t.Fatalf("relative database file missing: %v", err)
 	}
+}
+
+func TestNewSQLiteStorePreservesFileURI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "uri.db")
+	uri := (&url.URL{Scheme: "file", Path: path}).String() + "?cache=shared&mode=rwc&_pragma=foreign_keys(1)"
+	dsn, err := sqliteReadWriteDSN(uri)
+	if err != nil {
+		t.Fatalf("sqliteReadWriteDSN(file URI) error: %v", err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	if parsed.Path != path {
+		t.Fatalf("DSN path = %q, want %q", parsed.Path, path)
+	}
+	query := parsed.Query()
+	if query.Get("cache") != "shared" || query.Get("mode") != "rwc" {
+		t.Fatalf("DSN query = %v, want original cache and mode", query)
+	}
+	if !slices.Contains(query["_pragma"], "foreign_keys(1)") || !slices.Contains(query["_pragma"], "busy_timeout(5000)") {
+		t.Fatalf("DSN pragmas = %v, want original foreign_keys and busy_timeout", query["_pragma"])
+	}
+
+	store, err := NewSQLiteStore(uri)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(file URI) error: %v", err)
+	}
+	var foreignKeys int
+	if err := store.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatalf("query foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("foreign_keys = %d, want preserved URI pragma", foreignKeys)
+	}
+	if _, err := store.db.Exec(`CREATE TABLE uri_marker (value TEXT)`); err != nil {
+		t.Fatalf("create marker: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close URI store: %v", err)
+	}
+
+	reopened, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("reopen intended path: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var marker int
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'uri_marker'`).Scan(&marker); err != nil {
+		t.Fatalf("query marker: %v", err)
+	}
+	if marker != 1 {
+		t.Fatal("file URI did not open the intended database")
+	}
+}
+
+func TestSQLiteReadWriteDSNPreservesSpecialDSNs(t *testing.T) {
+	t.Run("shared memory URI", func(t *testing.T) {
+		dsn, err := sqliteReadWriteDSN("file::memory:?cache=shared")
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Scheme != "file" || parsed.Opaque != ":memory:" || parsed.Query().Get("cache") != "shared" {
+			t.Fatalf("DSN = %q, want shared in-memory file URI", dsn)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		dsn, err := sqliteReadWriteDSN("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dsn != "" {
+			t.Fatalf("DSN = %q, want empty DSN preserved", dsn)
+		}
+		store, err := NewSQLiteStore("")
+		if err != nil {
+			t.Fatalf("NewSQLiteStore(empty) error: %v", err)
+		}
+		_ = store.Close()
+	})
 }
 
 func TestSQLiteStoreConcurrentWritersWaitInsteadOfFailingBusy(t *testing.T) {

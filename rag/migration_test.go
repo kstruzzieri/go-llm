@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -52,6 +53,64 @@ func TestMigrationFreshDB(t *testing.T) {
 	}
 	if indexedAt != 12345 {
 		t.Errorf("indexed_at = %d, want 12345", indexedAt)
+	}
+}
+
+func TestNewSQLiteStoreConcurrentFreshMigrations(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "concurrent.db")
+	seed, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		t.Fatalf("seed WAL mode: %v", err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const openers = 32
+	start := make(chan struct{})
+	errs := make(chan error, openers)
+	var wg sync.WaitGroup
+	for range openers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			store, err := NewSQLiteStore(path)
+			if err == nil {
+				err = store.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent NewSQLiteStore() error: %v", err)
+		}
+	}
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	var version int
+	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&version); err != nil {
+		t.Fatalf("query schema version: %v", err)
+	}
+	if version != migrations[len(migrations)-1].version {
+		t.Fatalf("schema version = %d, want %d", version, migrations[len(migrations)-1].version)
+	}
+	var managedTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'managed_documents'`).Scan(&managedTable); err != nil {
+		t.Fatalf("query managed_documents: %v", err)
+	}
+	if managedTable != 1 {
+		t.Fatal("managed_documents table missing after concurrent migration")
 	}
 }
 

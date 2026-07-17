@@ -241,6 +241,75 @@ func TestSQLiteStoreClassifiesMixedPackedDimensionsAcrossAllRows(t *testing.T) {
 	}
 }
 
+func TestSQLiteStorePoisonedHandlesRecoverAfterVectorMigration(t *testing.T) {
+	path := t.TempDir() + "/cache-recovery.db"
+	seed, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Store(context.Background(), []Chunk{{ID: "old", Source: "old.go"}}, [][]float64{{1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	three, err := encodeEmbedding([]float64{1, 0, 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := seed.DB().Exec(`INSERT INTO chunks
+		(id, content, source, start_line, end_line, language, metadata, embedding, indexed_at, stable_key, source_content_hash, vector_space_id)
+		VALUES ('remaining', '', 'remaining.go', 1, 1, '', '{}', ?, 1, '', '', 'test/new')`, three); err != nil {
+		t.Fatal(err)
+	}
+	if err := seed.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	first, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = first.Close() }()
+	second, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = second.Close() }()
+	firstErr, _ := first.writeEmbeddingState()
+	secondErr, _ := second.writeEmbeddingState()
+	if firstErr == nil || secondErr == nil {
+		t.Fatal("mixed corpus did not poison both opened handles")
+	}
+
+	ctx := context.Background()
+	if err := first.replaceSource(ctx, "old.go", []Chunk{{ID: "migrated", Source: "old.go"}}, [][]float64{{0, 1, 0}}, replaceSourceOptions{
+		vectorSpaceID:        "test/new",
+		requireVectorSpaceID: true,
+		replaceVectorSpace:   true,
+	}); err != nil {
+		t.Fatalf("vector migration: %v", err)
+	}
+	firstErr, _ = first.writeEmbeddingState()
+	if firstErr != nil {
+		t.Fatalf("migrating handle cache = %v, want cleared", firstErr)
+	}
+	secondErr, _ = second.writeEmbeddingState()
+	if secondErr == nil {
+		t.Fatal("migration unexpectedly changed the second handle cache")
+	}
+	if err := first.Store(ctx, []Chunk{{ID: "same-handle", Source: "same.go"}}, [][]float64{{0, 0, 1}}); err != nil {
+		t.Fatalf("same-handle Store after repair: %v", err)
+	}
+	if err := second.Store(ctx, []Chunk{{ID: "other-handle", Source: "other.go"}}, [][]float64{{1, 1, 0}}); err != nil {
+		t.Fatalf("pre-opened-handle Store after repair: %v", err)
+	}
+	secondErr, _ = second.writeEmbeddingState()
+	if secondErr != nil {
+		t.Fatalf("pre-opened handle cache = %v, want recomputed", secondErr)
+	}
+	if err := second.Store(ctx, []Chunk{{ID: "wrong-dimension", Source: "wrong.go"}}, [][]float64{{1, 0}}); err == nil || !strings.Contains(err.Error(), "dimension") {
+		t.Fatalf("dimension-drift Store error = %v, want dimension mismatch", err)
+	}
+}
+
 func TestSQLiteStoreRejectsDimensionDriftAcrossWritesWithoutMutation(t *testing.T) {
 	t.Run("Store", func(t *testing.T) {
 		store := newTestStore(t)
