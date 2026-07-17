@@ -15,6 +15,7 @@ import (
 
 type managedTestEmbedder struct {
 	vectorSpaceID string
+	dimension     int
 	err           error
 	cancel        context.CancelFunc
 }
@@ -27,9 +28,17 @@ func (e *managedTestEmbedder) Embed(ctx context.Context, _ string, inputs []stri
 	if e.err != nil {
 		return EmbedResult{}, e.err
 	}
+	dimension := e.dimension
+	if dimension == 0 {
+		dimension = 2
+	}
 	embeddings := make([][]float64, len(inputs))
 	for i := range inputs {
-		embeddings[i] = []float64{1, float64(i + 1)}
+		embeddings[i] = make([]float64, dimension)
+		embeddings[i][0] = 1
+		if dimension > 1 {
+			embeddings[i][1] = float64(i + 1)
+		}
 	}
 	return EmbedResult{Embeddings: embeddings, VectorSpaceID: e.vectorSpaceID}, nil
 }
@@ -1027,7 +1036,7 @@ func TestManagedSourcesFailedReindexPreservesOldChunksAndMarksStale(t *testing.T
 	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
 }
 
-func TestManagedSourcesVectorSpaceDriftFailsClosed(t *testing.T) {
+func TestManagedSourcesAllowsSoleSourceVectorSpaceMigration(t *testing.T) {
 	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
 	managed, _, store := newManagedTestService(t, embedder)
 	ctx := context.Background()
@@ -1036,22 +1045,62 @@ func TestManagedSourcesVectorSpaceDriftFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	embedder.vectorSpaceID = "test/new"
+	embedder.dimension = 3
+
+	migrated, err := managed.ReindexDocument(ctx, document.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if migrated.ID != document.ID || migrated.VectorSpaceID != "test/new" {
+		t.Fatalf("migrated = %#v", migrated)
+	}
+	chunks := requireManagedChunks(t, store, document.source)
+	if len(chunks) != 1 || chunks[0].VectorSpaceID != "test/new" || len(chunks[0].Embedding) != 3 || chunks[0].Chunk.Content != "old content" {
+		t.Fatalf("chunks after migration = %#v", chunks)
+	}
+	requireManagedStatus(t, store, document.ID, DocumentStateIndexed, DocumentFreshnessFresh)
+	requireManagedVectorSpaceID(t, store, document.ID, "test/new")
+}
+
+func TestManagedSourcesRejectsVectorMigrationWithIncompatibleRemainingCorpus(t *testing.T) {
+	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
+	managed, _, store := newManagedTestService(t, embedder)
+	ctx := context.Background()
+	document, err := managed.IngestText(ctx, "runbook.md", "old content", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "remaining.md",
+		[]Chunk{makeChunk("remaining.md", "remaining content", 1, 1, "")},
+		[][]float64{{1, 1}}, "remaining-hash", "test/old"); err != nil {
+		t.Fatal(err)
+	}
+	beforeDocument := requireManagedChunks(t, store, document.source)
+	beforeRemaining := requireManagedChunks(t, store, "remaining.md")
+	embedder.vectorSpaceID = "test/new"
+	embedder.dimension = 3
 
 	failed, err := managed.ReindexDocument(ctx, document.ID)
 	if !errors.Is(err, ErrVectorSpaceDrift) {
 		t.Fatalf("ReindexDocument() error = %v, want ErrVectorSpaceDrift", err)
 	}
-	if failed.State != DocumentStateFailed || failed.Freshness != DocumentFreshnessStale {
-		t.Fatalf("failed document = %#v", failed)
+	if failed.VectorSpaceID != "test/old" {
+		t.Fatalf("failed document = %#v, want retained vector space", failed)
 	}
-	chunks := requireManagedChunks(t, store, document.source)
-	if len(chunks) != 1 || chunks[0].VectorSpaceID != "test/old" || chunks[0].Chunk.Content != "old content" {
-		t.Fatalf("chunks after drift = %#v", chunks)
+	afterDocument := requireManagedChunks(t, store, document.source)
+	afterRemaining := requireManagedChunks(t, store, "remaining.md")
+	for name, beforeAfter := range map[string]struct{ before, after []ChunkWithEmbedding }{
+		"document":  {beforeDocument, afterDocument},
+		"remaining": {beforeRemaining, afterRemaining},
+	} {
+		if len(beforeAfter.before) != len(beforeAfter.after) || len(beforeAfter.after) != 1 ||
+			beforeAfter.before[0].Chunk.Content != beforeAfter.after[0].Chunk.Content ||
+			beforeAfter.before[0].VectorSpaceID != beforeAfter.after[0].VectorSpaceID ||
+			len(beforeAfter.before[0].Embedding) != len(beforeAfter.after[0].Embedding) {
+			t.Fatalf("%s chunks before=%#v after=%#v", name, beforeAfter.before, beforeAfter.after)
+		}
 	}
-	if chunks[0].Chunk.Metadata["managed_state"] != string(DocumentStateFailed) || chunks[0].Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
-		t.Fatalf("chunk metadata after drift = %#v", chunks[0].Chunk.Metadata)
-	}
-	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
+	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
 }
 
 func TestManagedSourcesNewDocumentRejectsCorpusVectorSpaceDrift(t *testing.T) {
@@ -1108,7 +1157,7 @@ func TestManagedSourcesNewDocumentRejectsKnownLegacyVectorSpaceMixture(t *testin
 	}
 }
 
-func TestManagedSourcesVectorSpaceDriftAfterLowLevelDeleteFailsClosed(t *testing.T) {
+func TestManagedSourcesAllowsVectorMigrationAfterLowLevelDelete(t *testing.T) {
 	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
 	managed, _, store := newManagedTestService(t, embedder)
 	ctx := context.Background()
@@ -1120,22 +1169,23 @@ func TestManagedSourcesVectorSpaceDriftAfterLowLevelDeleteFailsClosed(t *testing
 		t.Fatalf("DeleteBySource() error: %v", err)
 	}
 	embedder.vectorSpaceID = "test/new"
+	embedder.dimension = 3
 
-	failed, err := managed.ReindexDocument(ctx, document.ID)
-	if !errors.Is(err, ErrVectorSpaceDrift) {
-		t.Fatalf("ReindexDocument() error = %v, want ErrVectorSpaceDrift", err)
+	migrated, err := managed.ReindexDocument(ctx, document.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if failed.State != DocumentStateFailed || failed.Freshness != DocumentFreshnessStale {
-		t.Fatalf("failed document = %#v", failed)
+	if migrated.ID != document.ID || migrated.VectorSpaceID != "test/new" {
+		t.Fatalf("migrated = %#v", migrated)
 	}
-	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 0 {
-		t.Fatalf("chunks after rejected drift = %#v", chunks)
+	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 1 || len(chunks[0].Embedding) != 3 {
+		t.Fatalf("chunks after migration = %#v", chunks)
 	}
-	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
-	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
+	requireManagedStatus(t, store, document.ID, DocumentStateIndexed, DocumentFreshnessFresh)
+	requireManagedVectorSpaceID(t, store, document.ID, "test/new")
 }
 
-func TestManagedSourcesVectorSpaceDriftAfterZeroChunkTransitionFailsClosed(t *testing.T) {
+func TestManagedSourcesAllowsVectorMigrationAfterZeroChunkTransition(t *testing.T) {
 	embedder := &managedTestEmbedder{vectorSpaceID: "test/old"}
 	managed, idx, store := newManagedTestService(t, embedder)
 	ctx := context.Background()
@@ -1157,18 +1207,19 @@ func TestManagedSourcesVectorSpaceDriftAfterZeroChunkTransitionFailsClosed(t *te
 		return []Chunk{makeChunk(source, content, 1, 1, "")}, nil
 	})
 	embedder.vectorSpaceID = "test/new"
-	failed, err := managed.ReindexDocument(ctx, document.ID)
-	if !errors.Is(err, ErrVectorSpaceDrift) {
-		t.Fatalf("ReindexDocument() error = %v, want ErrVectorSpaceDrift", err)
+	embedder.dimension = 3
+	migrated, err := managed.ReindexDocument(ctx, document.ID)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if failed.State != DocumentStateFailed || failed.Freshness != DocumentFreshnessStale {
-		t.Fatalf("failed document = %#v", failed)
+	if migrated.ID != document.ID || migrated.VectorSpaceID != "test/new" {
+		t.Fatalf("migrated = %#v", migrated)
 	}
-	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 0 {
-		t.Fatalf("chunks after rejected drift = %#v", chunks)
+	if chunks := requireManagedChunks(t, store, document.source); len(chunks) != 1 || len(chunks[0].Embedding) != 3 {
+		t.Fatalf("chunks after migration = %#v", chunks)
 	}
-	requireManagedStatus(t, store, document.ID, DocumentStateFailed, DocumentFreshnessStale)
-	requireManagedVectorSpaceID(t, store, document.ID, "test/old")
+	requireManagedStatus(t, store, document.ID, DocumentStateIndexed, DocumentFreshnessFresh)
+	requireManagedVectorSpaceID(t, store, document.ID, "test/new")
 }
 
 func TestManagedSourcesLowLevelDeleteCannotLeaveIndexedRegistryState(t *testing.T) {

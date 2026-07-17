@@ -275,6 +275,25 @@ func TestSQLiteStoreRejectsDimensionDriftAcrossWritesWithoutMutation(t *testing.
 			t.Fatalf("source after rejected replace = %+v", got)
 		}
 	})
+
+	t.Run("ReplaceSourceWithVectorSpace", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "a.go", []Chunk{{ID: "original", Source: "a.go"}}, [][]float64{{1, 0}}, "old", "test/old"); err != nil {
+			t.Fatal(err)
+		}
+		err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "a.go", []Chunk{{ID: "replacement", Source: "a.go"}}, [][]float64{{1, 0, 0}}, "new", "test/old")
+		if err == nil || !strings.Contains(err.Error(), "dimension") {
+			t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID error = %v, want dimension mismatch", err)
+		}
+		got, err := store.GetBySource(ctx, "a.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(got) != 1 || got[0].Chunk.ID != "original" || got[0].VectorSpaceID != "test/old" || len(got[0].Embedding) != 2 {
+			t.Fatalf("source after rejected replace = %+v", got)
+		}
+	})
 }
 
 func TestSQLiteStoreRejectsDimensionDriftAcrossHandles(t *testing.T) {

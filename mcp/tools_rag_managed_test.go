@@ -523,6 +523,51 @@ func TestManagedRAGToolsLifecycleEndToEnd(t *testing.T) {
 	}
 }
 
+func TestManagedRAGReindexPreservesStableIDAcrossModelChange(t *testing.T) {
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	vectorSpaceID, dimension := "test/old", 2
+	embedder := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		vectors := [][]float64{make([]float64, dimension)}
+		vectors[0][0] = 1
+		return rag.EmbedResult{Embeddings: vectors, VectorSpaceID: vectorSpaceID}, nil
+	})
+	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithEmbeddingModel("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: store, indexer: indexer, managedSources: managed}
+
+	ingestedResult, err := s.handleRAGIngestText(context.Background(), rawArgs(t, `{"name":"runbook.md","content":"restart safely"}`))
+	if err != nil || ingestedResult.IsError {
+		t.Fatalf("ingest result = %#v, err = %v", ingestedResult, err)
+	}
+	var ingested rag.Document
+	if err := json.Unmarshal([]byte(extractText(ingestedResult)), &ingested); err != nil {
+		t.Fatal(err)
+	}
+	vectorSpaceID, dimension = "test/new", 3
+
+	reindexedResult, err := s.handleRAGReindexDocument(context.Background(), rawArgs(t, fmt.Sprintf(`{"id":%q}`, ingested.ID)))
+	if err != nil || reindexedResult.IsError {
+		t.Fatalf("reindex result = %#v, err = %v", reindexedResult, err)
+	}
+	var reindexed rag.Document
+	if err := json.Unmarshal([]byte(extractText(reindexedResult)), &reindexed); err != nil {
+		t.Fatal(err)
+	}
+	if reindexed.ID != ingested.ID || reindexed.VectorSpaceID != "test/new" {
+		t.Fatalf("reindexed = %#v, want stable ID %q in test/new", reindexed, ingested.ID)
+	}
+}
+
 func TestManagedRAGToolsSerializeAcrossRebuild(t *testing.T) {
 	store, err := rag.NewSQLiteStore(":memory:")
 	if err != nil {

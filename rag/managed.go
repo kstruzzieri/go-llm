@@ -502,9 +502,8 @@ func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Docum
 		sourceHash:               prepared.sourceHash,
 		vectorSpaceID:            prepared.vectorSpaceID,
 		requireVectorSpaceID:     true,
-		checkExistingVectorSpace: true,
-		allowMissingExisting:     true,
-		allowLegacyUnknown:       true,
+		checkExistingVectorSpace: false,
+		replaceVectorSpace:       true,
 	}
 	if err := m.store.validateReplaceSource(document.source, prepared.chunks, prepared.embeddings, opts); err != nil {
 		return "", err
@@ -521,16 +520,13 @@ func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Docum
 		}
 		return "", fmt.Errorf("rag: load managed document %q vector space: %w", document.ID, err)
 	}
-	if retainedVectorSpaceID != "" && prepared.vectorSpaceID != "" && retainedVectorSpaceID != prepared.vectorSpaceID {
-		return "", fmt.Errorf("%w: managed document %q retained vector space %q differs from incoming %q", ErrVectorSpaceDrift, document.ID, retainedVectorSpaceID, prepared.vectorSpaceID)
-	}
 	if len(prepared.chunks) > 0 {
 		if err := validateCorpusVectorSpaceTx(ctx, tx, document.source, prepared.vectorSpaceID); err != nil {
 			return "", err
 		}
 	}
 	vectorSpaceID := prepared.vectorSpaceID
-	if vectorSpaceID == "" {
+	if len(prepared.chunks) == 0 {
 		vectorSpaceID = retainedVectorSpaceID
 	}
 	opts.vectorSpaceID = vectorSpaceID

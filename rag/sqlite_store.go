@@ -73,6 +73,7 @@ type replaceSourceOptions struct {
 	expectedSourceHash       string
 	checkExpectedSourceHash  bool
 	checkExistingVectorSpace bool
+	replaceVectorSpace       bool
 	allowMissingExisting     bool
 	allowLegacyUnknown       bool
 }
@@ -471,7 +472,7 @@ func (s *SQLiteStore) validateReplaceSource(source string, chunks []Chunk, embed
 }
 
 func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source string, chunks []Chunk, embeddings [][]float64, opts replaceSourceOptions) error {
-	if len(embeddings) > 0 {
+	if !opts.replaceVectorSpace && len(embeddings) > 0 {
 		if err := s.validateWriteEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
@@ -494,6 +495,11 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: replace source %q: delete existing chunks: %w", source, err)
+	}
+	if opts.replaceVectorSpace && len(embeddings) > 0 {
+		if err := s.validateWriteEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
+			return fmt.Errorf("rag: replace source %q: %w", source, err)
+		}
 	}
 
 	if len(chunks) > 0 {
