@@ -717,6 +717,11 @@ func managedMIMEType(name, explicit string) string {
 }
 
 func normalizeManagedDocumentOptions(name string, opts DocumentOptions) (DocumentOptions, error) {
+	for _, field := range []string{opts.Title, opts.MIMEType, opts.Collection} {
+		if !utf8.ValidString(field) || len(field) > MaxManagedMetadataBytes {
+			return DocumentOptions{}, fmt.Errorf("rag: managed metadata exceeds %d-byte limit or is not valid UTF-8", MaxManagedMetadataBytes)
+		}
+	}
 	opts.Title = strings.TrimSpace(opts.Title)
 	if opts.Title == "" {
 		opts.Title = name
@@ -737,18 +742,18 @@ func normalizeManagedDocumentOptions(name string, opts DocumentOptions) (Documen
 }
 
 func normalizeManagedTags(tags []string) ([]string, error) {
+	if len(tags) > MaxManagedTags {
+		return nil, fmt.Errorf("rag: managed tags exceed %d-tag limit", MaxManagedTags)
+	}
 	seen := make(map[string]struct{}, MaxManagedTags)
 	for _, tag := range tags {
 		if !utf8.ValidString(tag) {
 			return nil, fmt.Errorf("rag: managed tag must be valid UTF-8")
 		}
+		if len(tag) > MaxManagedTagBytes {
+			return nil, fmt.Errorf("rag: managed tag exceeds %d-byte limit", MaxManagedTagBytes)
+		}
 		if tag = strings.TrimSpace(tag); tag != "" {
-			if len(tag) > MaxManagedTagBytes {
-				return nil, fmt.Errorf("rag: managed tag exceeds %d-byte limit", MaxManagedTagBytes)
-			}
-			if _, ok := seen[tag]; !ok && len(seen) == MaxManagedTags {
-				return nil, fmt.Errorf("rag: managed tags exceed %d-tag limit", MaxManagedTags)
-			}
 			seen[tag] = struct{}{}
 		}
 	}

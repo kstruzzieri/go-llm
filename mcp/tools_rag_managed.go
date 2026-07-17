@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -22,6 +24,41 @@ func (a managedOptionsArgs) options() rag.DocumentOptions {
 	return rag.DocumentOptions{
 		Title: a.Title, MIMEType: a.MIMEType, Collection: a.Collection, Tags: a.Tags,
 	}
+}
+
+func (a managedOptionsArgs) validate() error {
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{"title", a.Title},
+		{"mime_type", a.MIMEType},
+		{"collection", a.Collection},
+	} {
+		if err := validateManagedRAGString(field.name, field.value, rag.MaxManagedMetadataBytes); err != nil {
+			return err
+		}
+	}
+	return validateManagedRAGTags(a.Tags)
+}
+
+func validateManagedRAGString(name, value string, max int) error {
+	if !utf8.ValidString(value) || len(value) > max {
+		return fmt.Errorf("%s must be valid UTF-8 and at most %d bytes", name, max)
+	}
+	return nil
+}
+
+func validateManagedRAGTags(tags []string) error {
+	if len(tags) > rag.MaxManagedTags {
+		return fmt.Errorf("tags must contain at most %d items", rag.MaxManagedTags)
+	}
+	for _, tag := range tags {
+		if err := validateManagedRAGString("tag", tag, rag.MaxManagedTagBytes); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) registerManagedRAGTools() {
@@ -118,6 +155,15 @@ func (s *Server) handleRAGIngestText(ctx context.Context, req *gomcp.CallToolReq
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
+	if err := validateManagedRAGString("name", args.Name, rag.MaxManagedMetadataBytes); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
+	if err := validateManagedRAGString("content", args.Content, rag.MaxManagedDocumentBytes); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
+	if err := args.managedOptionsArgs.validate(); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
 	if strings.TrimSpace(args.Name) == "" {
 		return toolError("validation", "name must not be empty"), nil
 	}
@@ -149,6 +195,12 @@ func (s *Server) handleRAGIngestFile(ctx context.Context, req *gomcp.CallToolReq
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if err := validateManagedRAGString("path", args.Path, rag.MaxManagedMetadataBytes); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
+	if err := args.managedOptionsArgs.validate(); err != nil {
+		return toolError("validation", "%v", err), nil
 	}
 	if strings.TrimSpace(args.Path) == "" {
 		return toolError("validation", "path must not be empty"), nil
@@ -182,6 +234,18 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if err := validateManagedRAGString("collection", args.Collection, rag.MaxManagedMetadataBytes); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
+	if err := validateManagedRAGString("after_id", args.AfterID, rag.MaxManagedMetadataBytes); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
+	if err := validateManagedRAGTags(args.Tags); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
+	if args.Limit > rag.MaxManagedListLimit {
+		return toolError("validation", "limit must be at most %d", rag.MaxManagedListLimit), nil
 	}
 	state, ok := parseManagedDocumentState(args.State)
 	if !ok {
@@ -223,6 +287,9 @@ func (s *Server) handleRAGDeleteDocument(ctx context.Context, req *gomcp.CallToo
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
+	if err := validateManagedRAGString("id", args.ID, rag.MaxManagedMetadataBytes); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
 	if strings.TrimSpace(args.ID) == "" {
 		return toolError("validation", "id must not be empty"), nil
 	}
@@ -251,6 +318,9 @@ func (s *Server) handleRAGReindexDocument(ctx context.Context, req *gomcp.CallTo
 	}
 	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if err := validateManagedRAGString("id", args.ID, rag.MaxManagedMetadataBytes); err != nil {
+		return toolError("validation", "%v", err), nil
 	}
 	if strings.TrimSpace(args.ID) == "" {
 		return toolError("validation", "id must not be empty"), nil

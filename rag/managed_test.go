@@ -574,6 +574,42 @@ func TestManagedSourcesListPaginatesAfterID(t *testing.T) {
 	}
 }
 
+func TestManagedSourcesListPaginatesAcrossFilteredBatch(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	for i := 1; i <= 103; i++ {
+		collection := "filtered"
+		if i > MaxManagedListLimit {
+			collection = "wanted"
+		}
+		id := fmt.Sprintf("%03d", i)
+		if _, err := store.db.Exec(`
+			INSERT INTO managed_documents (
+				id, source, title, kind, origin, mime_type, stored_text,
+				content_hash, source_signature, indexed_at, vector_space_id,
+				chunk_count, collection, tags, state, freshness, last_error, created_at, updated_at
+			) VALUES (?, ?, 'title', 'text', '', 'text/plain', 'retained text', 'hash', 'signature', 0, '', 0, ?, '[]', 'indexed', 'fresh', '', 0, 0)`,
+			id, managedSourcePrefix+id, collection); err != nil {
+			t.Fatalf("insert fixture %q: %v", id, err)
+		}
+	}
+
+	first, err := managed.ListDocuments(context.Background(), DocumentFilter{Collection: "wanted", Limit: 2})
+	if err != nil || len(first) != 2 || first[0].ID != "101" || first[1].ID != "102" {
+		t.Fatalf("first page = %#v, err = %v", first, err)
+	}
+	if first[0].storedText != "" || first[1].storedText != "" {
+		t.Fatalf("list hydrated retained text: %#v", first)
+	}
+	second, err := managed.ListDocuments(context.Background(), DocumentFilter{Collection: "wanted", AfterID: first[1].ID, Limit: 2})
+	if err != nil || len(second) != 1 || second[0].ID != "103" {
+		t.Fatalf("second page = %#v, err = %v", second, err)
+	}
+	empty, err := managed.ListDocuments(context.Background(), DocumentFilter{Collection: "missing", Limit: 2})
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("all-filtered page = %#v, err = %v", empty, err)
+	}
+}
+
 func TestManagedSourcesListRejectsLimitOverMaximum(t *testing.T) {
 	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	if _, err := managed.ListDocuments(context.Background(), DocumentFilter{Limit: MaxManagedListLimit + 1}); err == nil {
@@ -653,6 +689,23 @@ func TestManagedSourcesRejectsOversizeMetadataAndTagsBeforeRegistration(t *testi
 	}
 	if documents, err := managed.ListDocuments(context.Background(), DocumentFilter{}); err != nil || len(documents) != 0 {
 		t.Fatalf("documents after rejected metadata = %#v, err = %v", documents, err)
+	}
+}
+
+func TestNormalizeManagedTagsRejectsRawBoundsBeforeNormalization(t *testing.T) {
+	tooMany := make([]string, MaxManagedTags+1)
+	for i := range tooMany {
+		tooMany[i] = " "
+	}
+	for name, tags := range map[string][]string{
+		"raw count": tooMany,
+		"raw bytes": {strings.Repeat(" ", MaxManagedTagBytes+1)},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := normalizeManagedTags(tags); err == nil {
+				t.Fatal("normalizeManagedTags() accepted raw bounds violation")
+			}
+		})
 	}
 }
 

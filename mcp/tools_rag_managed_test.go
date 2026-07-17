@@ -168,6 +168,56 @@ func TestManagedRAGListDocumentsRejectsLimitOverMaximum(t *testing.T) {
 	}
 }
 
+func TestManagedRAGHandlersRejectRawBoundsBeforeLock(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	if err := s.managedGate.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.managedGate.unlock()
+
+	tooManyTags := make([]string, rag.MaxManagedTags+1)
+	for i := range tooManyTags {
+		tooManyTags[i] = " "
+	}
+	tooLongTag := strings.Repeat(" ", rag.MaxManagedTagBytes+1)
+	tooLongMetadata := strings.Repeat("x", rag.MaxManagedMetadataBytes+1)
+	tooLongWhitespace := strings.Repeat(" ", rag.MaxManagedMetadataBytes+1)
+	tooLongContent := strings.Repeat("x", rag.MaxManagedDocumentBytes+1)
+	for _, tc := range []struct {
+		name    string
+		handler managedRAGHandler
+		args    map[string]any
+	}{
+		{"ingest text/name", s.handleRAGIngestText, map[string]any{"name": tooLongMetadata, "content": "content"}},
+		{"ingest text/content", s.handleRAGIngestText, map[string]any{"name": "name", "content": tooLongContent}},
+		{"ingest text/title", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "title": tooLongWhitespace}},
+		{"ingest text/mime type", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "mime_type": tooLongWhitespace}},
+		{"ingest text/collection", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "collection": tooLongWhitespace}},
+		{"ingest text/tags", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "tags": tooManyTags}},
+		{"ingest file/path", s.handleRAGIngestFile, map[string]any{"path": tooLongMetadata}},
+		{"list/collection", s.handleRAGListDocuments, map[string]any{"collection": tooLongMetadata}},
+		{"list/after id", s.handleRAGListDocuments, map[string]any{"after_id": tooLongMetadata}},
+		{"list/limit", s.handleRAGListDocuments, map[string]any{"limit": rag.MaxManagedListLimit + 1}},
+		{"list/raw tag count", s.handleRAGListDocuments, map[string]any{"tags": tooManyTags}},
+		{"list/raw tag bytes", s.handleRAGListDocuments, map[string]any{"tags": []string{tooLongTag}}},
+		{"delete/id", s.handleRAGDeleteDocument, map[string]any{"id": tooLongMetadata}},
+		{"reindex/id", s.handleRAGReindexDocument, map[string]any{"id": tooLongMetadata}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, err := tc.handler(ctx, rawArgs(t, string(data)))
+			if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation:") {
+				t.Fatalf("result = %#v, err = %v, want validation error before managed lock", result, err)
+			}
+		})
+	}
+}
+
 func propertyTypes(t *testing.T, properties map[string]any) map[string]string {
 	t.Helper()
 	types := make(map[string]string, len(properties))
