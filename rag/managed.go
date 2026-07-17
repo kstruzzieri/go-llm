@@ -56,6 +56,9 @@ const (
 // ErrDocumentNotFound indicates that a managed document ID does not exist.
 var ErrDocumentNotFound = errors.New("rag: managed document not found")
 
+// ErrDocumentChanged indicates that a managed document changed while work was in flight.
+var ErrDocumentChanged = errors.New("rag: managed document changed")
+
 // Document is the durable metadata for a managed RAG source.
 type Document struct {
 	ID              string            `json:"id"`
@@ -75,6 +78,7 @@ type Document struct {
 	ChunkCount      int               `json:"chunk_count"`
 	source          string
 	storedText      string
+	revision        int64
 }
 
 // DocumentOptions supplies optional metadata for a managed document.
@@ -100,7 +104,7 @@ type ManagedSources struct {
 	indexer  *Indexer
 	store    *SQLiteStore
 	gate     managedSourceGate
-	readFile func(string) ([]byte, error)
+	readFile func(context.Context, string) ([]byte, error)
 }
 
 type managedSourceGate chan struct{}
@@ -185,10 +189,14 @@ func (m *ManagedSources) IngestFile(ctx context.Context, path string, opts Docum
 		return Document{}, fmt.Errorf("rag: ingest file %q: resolve path: %w", path, err)
 	}
 	abs = filepath.Clean(abs)
+	opts, err = normalizeManagedDocumentOptions(filepath.Base(abs), opts)
+	if err != nil {
+		return Document{}, err
+	}
 	if err := ctx.Err(); err != nil {
 		return Document{}, err
 	}
-	data, err := m.readFile(abs)
+	data, err := m.readFile(ctx, abs)
 	if err != nil {
 		return Document{}, fmt.Errorf("rag: ingest file %q: %w", abs, err)
 	}
@@ -226,6 +234,7 @@ func (m *ManagedSources) ingestLocked(ctx context.Context, name, content string,
 		Freshness:       DocumentFreshnessUnknown,
 		source:          managedSourcePrefix + id + strings.ToLower(filepath.Ext(name)),
 		storedText:      storedText,
+		revision:        1,
 	}
 	now := time.Now().Unix()
 	tags, _ := json.Marshal(document.Tags)
@@ -293,15 +302,17 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		afterID = batch[len(batch)-1].ID
 		for i := range batch {
 			document := &batch[i]
+			if filter.Collection != "" && document.Collection != filter.Collection ||
+				!containsManagedTags(document.Tags, wantedTags) {
+				continue
+			}
 			if document.State == DocumentStateIndexed {
 				if _, err := m.reconcileDocument(ctx, document); err != nil {
 					return nil, err
 				}
 			}
-			if filter.Collection != "" && document.Collection != filter.Collection ||
-				filter.State != "" && document.State != filter.State ||
-				filter.Freshness != "" && document.Freshness != filter.Freshness ||
-				!containsManagedTags(document.Tags, wantedTags) {
+			if filter.State != "" && document.State != filter.State ||
+				filter.Freshness != "" && document.Freshness != filter.Freshness {
 				continue
 			}
 			filtered = append(filtered, *document)
@@ -322,7 +333,7 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Document) (bool, error) {
 	desiredFreshness := DocumentFreshnessFresh
 	if observed.Kind == DocumentKindFile {
-		data, err := m.readFile(observed.Origin)
+		data, err := m.readFile(ctx, observed.Origin)
 		if err != nil || !utf8.Valid(data) || contentHash(string(data)) != observed.ContentHash {
 			desiredFreshness = DocumentFreshnessStale
 		}
@@ -341,7 +352,7 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 	if err != nil {
 		return false, err
 	}
-	if !sameManagedDocumentRevision(*observed, current) {
+	if observed.revision != current.revision {
 		*observed = current
 		return false, nil
 	}
@@ -365,20 +376,26 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 		(minSignature != current.SourceSignature || maxSignature != current.SourceSignature ||
 			minVectorSpaceID != current.VectorSpaceID || maxVectorSpaceID != current.VectorSpaceID ||
 			minDocumentID != current.ID || maxDocumentID != current.ID)
-	state, freshness, lastError := current.State, current.Freshness, current.LastError
+	state, lastError := current.State, current.LastError
+	freshness := desiredFreshness
 	if chunks != current.ChunkCount || provenanceMismatch {
 		state, freshness, lastError = DocumentStateFailed, DocumentFreshnessStale, "managed document chunks are missing or inconsistent"
-	} else {
-		freshness = desiredFreshness
 	}
 	if state == current.State && freshness == current.Freshness && lastError == current.LastError {
 		return false, tx.Commit()
 	}
-	if _, err := tx.ExecContext(ctx, `
+	result, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents
-		   SET state = ?, freshness = ?, last_error = ?, updated_at = ?
-		 WHERE id = ?`, state, freshness, lastError, time.Now().Unix(), current.ID); err != nil {
+		   SET state = ?, freshness = ?, last_error = ?, updated_at = ?, revision = revision + 1
+		 WHERE id = ? AND revision = ?`, state, freshness, lastError, time.Now().Unix(), current.ID, current.revision)
+	if err != nil {
 		return false, fmt.Errorf("rag: reconcile managed document %q status: %w", current.ID, err)
+	}
+	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
+		if err != nil {
+			return false, fmt.Errorf("rag: reconcile managed document %q status: rows affected: %w", current.ID, err)
+		}
+		return false, managedDocumentConflict(ctx, tx, current.ID)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE chunks
@@ -391,25 +408,9 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 		return false, fmt.Errorf("rag: reconcile managed document %q status: commit: %w", current.ID, err)
 	}
 	current.State, current.Freshness, current.LastError = state, freshness, lastError
+	current.revision++
 	*observed = current
 	return true, nil
-}
-
-func sameManagedDocumentRevision(left, right Document) bool {
-	if left.ID != right.ID || left.source != right.source || left.Title != right.Title || left.Kind != right.Kind ||
-		left.Origin != right.Origin || left.MIMEType != right.MIMEType || left.ContentHash != right.ContentHash ||
-		left.SourceSignature != right.SourceSignature || left.IndexedAt != right.IndexedAt ||
-		left.VectorSpaceID != right.VectorSpaceID || left.Collection != right.Collection ||
-		left.State != right.State || left.Freshness != right.Freshness || left.LastError != right.LastError ||
-		left.ChunkCount != right.ChunkCount || len(left.Tags) != len(right.Tags) {
-		return false
-	}
-	for i := range left.Tags {
-		if left.Tags[i] != right.Tags[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // DeleteDocument atomically removes a managed document and its chunks.
@@ -457,7 +458,7 @@ func (m *ManagedSources) ReindexDocument(ctx context.Context, id string) (Docume
 	}
 	content := document.storedText
 	if document.Kind == DocumentKindFile {
-		data, readErr := m.readFile(document.Origin)
+		data, readErr := m.readFile(ctx, document.Origin)
 		if readErr != nil {
 			cause := fmt.Errorf("rag: read managed file %q: %w", document.Origin, readErr)
 			return m.failedDocument(ctx, document, false, cause)
@@ -483,8 +484,11 @@ func (m *ManagedSources) indexDocumentLocked(ctx context.Context, document Docum
 		return m.failedDocument(ctx, document, first, err)
 	}
 	indexedAt := time.Now().Unix()
-	vectorSpaceID, err := m.commitDocumentIndex(ctx, candidate, prepared, indexedAt)
+	vectorSpaceID, revision, err := m.commitDocumentIndex(ctx, candidate, prepared, indexedAt)
 	if err != nil {
+		if errors.Is(err, ErrDocumentChanged) || errors.Is(err, ErrDocumentNotFound) {
+			return document, err
+		}
 		return m.failedDocument(ctx, document, first, err)
 	}
 	candidate.SourceSignature = prepared.sourceHash
@@ -494,10 +498,11 @@ func (m *ManagedSources) indexDocumentLocked(ctx context.Context, document Docum
 	candidate.State = DocumentStateIndexed
 	candidate.Freshness = DocumentFreshnessFresh
 	candidate.LastError = ""
+	candidate.revision = revision
 	return candidate, nil
 }
 
-func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Document, prepared preparedSource, indexedAt int64) (string, error) {
+func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Document, prepared preparedSource, indexedAt int64) (string, int64, error) {
 	opts := replaceSourceOptions{
 		sourceHash:               prepared.sourceHash,
 		vectorSpaceID:            prepared.vectorSpaceID,
@@ -506,23 +511,27 @@ func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Docum
 		replaceVectorSpace:       true,
 	}
 	if err := m.store.validateReplaceSource(document.source, prepared.chunks, prepared.embeddings, opts); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	tx, err := m.store.beginWriteTx(ctx)
 	if err != nil {
-		return "", fmt.Errorf("%w: finalize managed document %q: begin transaction: %w", ErrStoreOperation, document.ID, err)
+		return "", 0, fmt.Errorf("%w: finalize managed document %q: begin transaction: %w", ErrStoreOperation, document.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	var retainedVectorSpaceID string
-	if err := tx.QueryRowContext(ctx, `SELECT vector_space_id FROM managed_documents WHERE id = ?`, document.ID).Scan(&retainedVectorSpaceID); err != nil {
+	var revision int64
+	if err := tx.QueryRowContext(ctx, `SELECT vector_space_id, revision FROM managed_documents WHERE id = ?`, document.ID).Scan(&retainedVectorSpaceID, &revision); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return "", fmt.Errorf("%w: %s", ErrDocumentNotFound, document.ID)
+			return "", 0, fmt.Errorf("%w: %s", ErrDocumentNotFound, document.ID)
 		}
-		return "", fmt.Errorf("rag: load managed document %q vector space: %w", document.ID, err)
+		return "", 0, fmt.Errorf("rag: load managed document %q vector space: %w", document.ID, err)
+	}
+	if revision != document.revision {
+		return "", 0, fmt.Errorf("%w: %s", ErrDocumentChanged, document.ID)
 	}
 	if len(prepared.chunks) > 0 {
 		if err := validateCorpusVectorSpaceTx(ctx, tx, document.source, prepared.vectorSpaceID); err != nil {
-			return "", err
+			return "", 0, err
 		}
 	}
 	vectorSpaceID := prepared.vectorSpaceID
@@ -531,27 +540,27 @@ func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Docum
 	}
 	opts.vectorSpaceID = vectorSpaceID
 	if err := m.store.replaceSourceTx(ctx, tx, document.source, prepared.chunks, prepared.embeddings, opts); err != nil {
-		return "", err
+		return "", 0, err
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents
 		   SET content_hash = ?, source_signature = ?, indexed_at = ?, vector_space_id = ?, chunk_count = ?,
-		       state = 'indexed', freshness = 'fresh', last_error = '', updated_at = ?
-		 WHERE id = ?`, document.ContentHash, prepared.sourceHash, indexedAt,
-		vectorSpaceID, len(prepared.chunks), indexedAt, document.ID)
+		       state = 'indexed', freshness = 'fresh', last_error = '', updated_at = ?, revision = revision + 1
+		 WHERE id = ? AND revision = ?`, document.ContentHash, prepared.sourceHash, indexedAt,
+		vectorSpaceID, len(prepared.chunks), indexedAt, document.ID, document.revision)
 	if err != nil {
-		return "", fmt.Errorf("rag: finalize managed document %q: %w", document.ID, err)
+		return "", 0, fmt.Errorf("rag: finalize managed document %q: %w", document.ID, err)
 	}
 	if affected, err := result.RowsAffected(); err != nil || affected != 1 {
 		if err != nil {
-			return "", fmt.Errorf("rag: finalize managed document %q: rows affected: %w", document.ID, err)
+			return "", 0, fmt.Errorf("rag: finalize managed document %q: rows affected: %w", document.ID, err)
 		}
-		return "", fmt.Errorf("%w: %s", ErrDocumentNotFound, document.ID)
+		return "", 0, managedDocumentConflict(ctx, tx, document.ID)
 	}
 	if err := tx.Commit(); err != nil {
-		return "", fmt.Errorf("rag: finalize managed document %q: commit: %w", document.ID, err)
+		return "", 0, fmt.Errorf("rag: finalize managed document %q: commit: %w", document.ID, err)
 	}
-	return vectorSpaceID, nil
+	return vectorSpaceID, revision + 1, nil
 }
 
 func (m *ManagedSources) failedDocument(ctx context.Context, document Document, first bool, cause error) (Document, error) {
@@ -578,8 +587,8 @@ func (m *ManagedSources) persistStatus(ctx context.Context, document *Document, 
 	defer func() { _ = tx.Rollback() }()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents
-		   SET state = ?, freshness = ?, last_error = ?, updated_at = ?
-		 WHERE id = ?`, state, freshness, lastError, time.Now().Unix(), document.ID)
+		   SET state = ?, freshness = ?, last_error = ?, updated_at = ?, revision = revision + 1
+		 WHERE id = ? AND revision = ?`, state, freshness, lastError, time.Now().Unix(), document.ID, document.revision)
 	if err != nil {
 		return fmt.Errorf("rag: update managed document %q status: %w", document.ID, err)
 	}
@@ -587,7 +596,7 @@ func (m *ManagedSources) persistStatus(ctx context.Context, document *Document, 
 		if err != nil {
 			return fmt.Errorf("rag: update managed document %q status: rows affected: %w", document.ID, err)
 		}
-		return fmt.Errorf("%w: %s", ErrDocumentNotFound, document.ID)
+		return managedDocumentConflict(ctx, tx, document.ID)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE chunks
@@ -602,13 +611,25 @@ func (m *ManagedSources) persistStatus(ctx context.Context, document *Document, 
 	document.State = state
 	document.Freshness = freshness
 	document.LastError = lastError
+	document.revision++
 	return nil
+}
+
+func managedDocumentConflict(ctx context.Context, tx *sql.Tx, id string) error {
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM managed_documents WHERE id = ?)`, id).Scan(&exists); err != nil {
+		return fmt.Errorf("rag: check managed document %q after conflict: %w", id, err)
+	}
+	if !exists {
+		return fmt.Errorf("%w: %s", ErrDocumentNotFound, id)
+	}
+	return fmt.Errorf("%w: %s", ErrDocumentChanged, id)
 }
 
 const managedDocumentSelect = `
 	SELECT id, source, title, kind, origin, mime_type, stored_text,
 	       content_hash, source_signature, indexed_at, vector_space_id,
-	       chunk_count, collection, tags, state, freshness, last_error
+	       chunk_count, collection, tags, state, freshness, last_error, revision
 	  FROM managed_documents`
 
 // managedDocumentListSelect mirrors managedDocumentSelect but skips loading
@@ -616,7 +637,7 @@ const managedDocumentSelect = `
 const managedDocumentListSelect = `
 	SELECT id, source, title, kind, origin, mime_type, '' AS stored_text,
 	       content_hash, source_signature, indexed_at, vector_space_id,
-	       chunk_count, collection, tags, state, freshness, last_error
+	       chunk_count, collection, tags, state, freshness, last_error, revision
 	  FROM managed_documents`
 
 type managedRowScanner interface {
@@ -631,7 +652,7 @@ func scanManagedDocument(scanner managedRowScanner) (Document, error) {
 		&document.Origin, &document.MIMEType, &document.storedText,
 		&document.ContentHash, &document.SourceSignature, &document.IndexedAt,
 		&document.VectorSpaceID, &document.ChunkCount, &document.Collection, &tagsJSON,
-		&document.State, &document.Freshness, &document.LastError,
+		&document.State, &document.Freshness, &document.LastError, &document.revision,
 	); err != nil {
 		return Document{}, fmt.Errorf("rag: scan managed document: %w", err)
 	}
@@ -671,14 +692,33 @@ func managedDocumentMetadata(document Document) map[string]string {
 	}
 }
 
-func readManagedRegularFile(path string) ([]byte, error) {
-	f, err := openManagedFile(path)
-	if err != nil {
+func readManagedRegularFile(ctx context.Context, path string) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	f, err := openManagedFile(path)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	}
+	stopClose := context.AfterFunc(ctx, func() { _ = f.Close() })
+	defer func() {
+		stopClose()
+		_ = f.Close()
+	}()
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	info, err := f.Stat()
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if !info.Mode().IsRegular() {
@@ -686,6 +726,12 @@ func readManagedRegularFile(path string) ([]byte, error) {
 	}
 	data, err := io.ReadAll(io.LimitReader(f, MaxManagedDocumentBytes+1))
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, err
+	}
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 	if len(data) > MaxManagedDocumentBytes {

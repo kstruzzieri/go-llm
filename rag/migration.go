@@ -47,6 +47,11 @@ var migrations = []migration{
 		description: "add managed document registry",
 		fn:          migrateV6,
 	},
+	{
+		version:     7,
+		description: "add managed document revision",
+		fn:          migrateV7,
+	},
 }
 
 // migrateV1 creates the baseline chunks table and indexes.
@@ -195,6 +200,13 @@ func migrateV6(tx *sql.Tx) error {
 		if _, err := tx.Exec(stmt); err != nil {
 			return fmt.Errorf("rag: migrate v6: %w", err)
 		}
+	}
+	return nil
+}
+
+func migrateV7(tx *sql.Tx) error {
+	if _, err := tx.Exec(`ALTER TABLE managed_documents ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`); err != nil {
+		return fmt.Errorf("rag: migrate v7: %w", err)
 	}
 	return nil
 }

@@ -21,8 +21,8 @@ func TestMigrationFreshDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 6 {
-		t.Errorf("max schema version = %d, want 6", maxVersion)
+	if maxVersion != 7 {
+		t.Errorf("max schema version = %d, want 7", maxVersion)
 	}
 
 	// Verify chunks_fts virtual table exists.
@@ -53,6 +53,65 @@ func TestMigrationFreshDB(t *testing.T) {
 	}
 	if indexedAt != 12345 {
 		t.Errorf("indexed_at = %d, want 12345", indexedAt)
+	}
+}
+
+func TestMigrationFreshDBAddsManagedDocumentRevision(t *testing.T) {
+	store := newTestStore(t)
+	var columns int
+	if err := store.db.QueryRow(`
+		SELECT COUNT(*)
+		  FROM pragma_table_info('managed_documents')
+		 WHERE name = 'revision' AND type = 'INTEGER' AND "notnull" = 1 AND dflt_value = '1'`,
+	).Scan(&columns); err != nil {
+		t.Fatalf("query revision column: %v", err)
+	}
+	if columns != 1 {
+		t.Fatalf("managed revision columns = %d, want INTEGER NOT NULL DEFAULT 1", columns)
+	}
+}
+
+func TestMigrationV7BackfillsManagedDocumentRevision(t *testing.T) {
+	db := openV4DB(t)
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV5(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV6(tx); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []int{5, 6} {
+		if _, err := tx.Exec(
+			`INSERT INTO rag_schema_version (version, description, applied_at) VALUES (?, 'fixture', 1000)`,
+			version,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO managed_documents (
+			id, source, title, kind, mime_type, content_hash, source_signature,
+			collection, tags, state, freshness, created_at, updated_at
+		) VALUES ('doc', 'managed:doc', 'title', 'text', 'text/plain', 'hash',
+		          'signature', '', '[]', 'indexed', 'fresh', 1000, 1000)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
+	}
+	var revision int64
+	if err := db.QueryRow(`SELECT revision FROM managed_documents WHERE id = 'doc'`).Scan(&revision); err != nil {
+		t.Fatalf("query migrated revision: %v", err)
+	}
+	if revision != 1 {
+		t.Fatalf("migrated revision = %d, want 1", revision)
 	}
 }
 
@@ -169,8 +228,8 @@ func TestMigrationExistingDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 6 {
-		t.Errorf("max schema version = %d, want 6", maxVersion)
+	if maxVersion != 7 {
+		t.Errorf("max schema version = %d, want 7", maxVersion)
 	}
 
 	// Verify indexed_at was backfilled (should be non-zero).
@@ -459,8 +518,8 @@ func TestMigrationIdempotency(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&count); err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
-	if count != 6 {
-		t.Errorf("expected 6 version records (v1..v6), got %d", count)
+	if count != 7 {
+		t.Errorf("expected 7 version records (v1..v7), got %d", count)
 	}
 }
 
@@ -543,8 +602,8 @@ func TestMigrationV4SourceContentHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 6 {
-		t.Errorf("max schema version = %d, want 6", maxVersion)
+	if maxVersion != 7 {
+		t.Errorf("max schema version = %d, want 7", maxVersion)
 	}
 
 	// Verify source_content_hash column exists by inserting and querying it.
@@ -645,8 +704,8 @@ func TestMigrationV4ExistingDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 6 {
-		t.Errorf("max schema version = %d, want 6", maxVersion)
+	if maxVersion != 7 {
+		t.Errorf("max schema version = %d, want 7", maxVersion)
 	}
 
 	// Verify existing row has empty default hash.
@@ -722,8 +781,8 @@ func TestMigrationHalfAppliedV2(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 6 {
-		t.Errorf("max version = %d, want 6", maxVersion)
+	if maxVersion != 7 {
+		t.Errorf("max version = %d, want 7", maxVersion)
 	}
 }
 
@@ -794,8 +853,8 @@ func TestMigrationHalfAppliedV2WithV1Recorded(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 6 {
-		t.Errorf("max version = %d, want 6", maxVersion)
+	if maxVersion != 7 {
+		t.Errorf("max version = %d, want 7", maxVersion)
 	}
 }
 
@@ -882,8 +941,8 @@ func TestMigration_v4_to_v5_addsColumn(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 6 {
-		t.Errorf("max schema version = %d, want 6", maxVersion)
+	if maxVersion != 7 {
+		t.Errorf("max schema version = %d, want 7", maxVersion)
 	}
 
 	rows, err := db.Query(`PRAGMA table_info(chunks)`)
@@ -1112,8 +1171,8 @@ func TestMigrationV6PreservesChunksAndCreatesManagedRegistry(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 6 {
-		t.Fatalf("schema version = %d, want 6", version)
+	if version != 7 {
+		t.Fatalf("schema version = %d, want 7", version)
 	}
 	chunks, err := store.GetBySource(context.Background(), "legacy.md")
 	if err != nil {
@@ -1148,8 +1207,8 @@ func TestMigration_v5_open_idempotent(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&firstVersion); err != nil {
 		t.Fatalf("query first version: %v", err)
 	}
-	if firstVersion != 6 {
-		t.Fatalf("first run max version = %d, want 6", firstVersion)
+	if firstVersion != 7 {
+		t.Fatalf("first run max version = %d, want 7", firstVersion)
 	}
 
 	var firstRowCount int

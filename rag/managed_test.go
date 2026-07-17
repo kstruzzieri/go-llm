@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -18,6 +19,30 @@ type managedTestEmbedder struct {
 	dimension     int
 	err           error
 	cancel        context.CancelFunc
+}
+
+type blockingManagedTestEmbedder struct {
+	started chan struct{}
+	release chan struct{}
+	err     error
+	once    sync.Once
+}
+
+func (e *blockingManagedTestEmbedder) Embed(ctx context.Context, _ string, inputs []string) (EmbedResult, error) {
+	e.once.Do(func() { close(e.started) })
+	select {
+	case <-e.release:
+	case <-ctx.Done():
+		return EmbedResult{}, ctx.Err()
+	}
+	if e.err != nil {
+		return EmbedResult{}, e.err
+	}
+	embeddings := make([][]float64, len(inputs))
+	for i := range embeddings {
+		embeddings[i] = []float64{1, float64(i + 1)}
+	}
+	return EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/v1"}, nil
 }
 
 func (e *managedTestEmbedder) Embed(ctx context.Context, _ string, inputs []string) (EmbedResult, error) {
@@ -46,6 +71,12 @@ func (e *managedTestEmbedder) Embed(ctx context.Context, _ string, inputs []stri
 func newManagedTestService(t *testing.T, embedder Embedder) (*ManagedSources, *Indexer, *SQLiteStore) {
 	t.Helper()
 	store := newTestStore(t)
+	managed, idx := newManagedTestServiceOnStore(t, embedder, store)
+	return managed, idx, store
+}
+
+func newManagedTestServiceOnStore(t *testing.T, embedder Embedder, store *SQLiteStore) (*ManagedSources, *Indexer) {
+	t.Helper()
 	idx, err := NewIndexerWithEmbedder(embedder, store, WithEmbeddingModel("test"))
 	if err != nil {
 		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
@@ -57,7 +88,7 @@ func newManagedTestService(t *testing.T, embedder Embedder) (*ManagedSources, *I
 	if err != nil {
 		t.Fatalf("NewManagedSources() error: %v", err)
 	}
-	return managed, idx, store
+	return managed, idx
 }
 
 func requireManagedDocument(t *testing.T, managed *ManagedSources, id string) Document {
@@ -109,6 +140,17 @@ func requireManagedVectorSpaceID(t *testing.T, store *SQLiteStore, id, want stri
 	}
 }
 
+func requireManagedRevision(t *testing.T, store *SQLiteStore, id string, want int64) {
+	t.Helper()
+	var got int64
+	if err := store.db.QueryRow(`SELECT revision FROM managed_documents WHERE id = ?`, id).Scan(&got); err != nil {
+		t.Fatalf("query managed revision: %v", err)
+	}
+	if got != want {
+		t.Fatalf("managed revision = %d, want %d", got, want)
+	}
+}
+
 func TestManagedSourcesTextRoundTripAndRepeatCreatesDistinctIDs(t *testing.T) {
 	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
@@ -144,6 +186,52 @@ func TestManagedSourcesTextRoundTripAndRepeatCreatesDistinctIDs(t *testing.T) {
 	if documents[0].ID > documents[1].ID {
 		t.Fatalf("documents not ordered by ID: %#v", documents)
 	}
+}
+
+func TestManagedSourcesAcceptedLifecycleMutationsIncrementRevision(t *testing.T) {
+	embedder := &managedTestEmbedder{vectorSpaceID: "test/v1"}
+	managed, _, store := newManagedTestService(t, embedder)
+	document, err := managed.IngestText(context.Background(), "runbook.md", "initial", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireManagedRevision(t, store, document.ID, 2)
+
+	if _, err := managed.ReindexDocument(context.Background(), document.ID); err != nil {
+		t.Fatal(err)
+	}
+	requireManagedRevision(t, store, document.ID, 3)
+
+	embedder.err = errors.New("embed unavailable")
+	if _, err := managed.ReindexDocument(context.Background(), document.ID); err == nil {
+		t.Fatal("ReindexDocument() succeeded despite embed failure")
+	}
+	requireManagedRevision(t, store, document.ID, 4)
+
+	if err := store.DeleteBySource(context.Background(), document.source); err != nil {
+		t.Fatal(err)
+	}
+	requireManagedRevision(t, store, document.ID, 5)
+}
+
+func TestManagedSourcesReconciliationIncrementsRevision(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "runbook.md")
+	if err := os.WriteFile(path, []byte("initial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := managed.IngestFile(context.Background(), path, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	requireManagedRevision(t, store, document.ID, 2)
+	if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managed.ListDocuments(context.Background(), DocumentFilter{}); err != nil {
+		t.Fatal(err)
+	}
+	requireManagedRevision(t, store, document.ID, 3)
 }
 
 func TestManagedSourcesFileRoundTripAndStableReindexID(t *testing.T) {
@@ -449,6 +537,164 @@ func TestManagedSourcesReconciliationSkipsStaleSnapshotAfterReindex(t *testing.T
 	}
 }
 
+func TestManagedSourcesStaleReindexSuccessDoesNotReplaceNewerIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rag.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	managed, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, store)
+	file := filepath.Join(t.TempDir(), "runbook.md")
+	if err := os.WriteFile(file, []byte("initial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := managed.IngestFile(context.Background(), file, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherStore, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = otherStore.Close() })
+	blocking := &blockingManagedTestEmbedder{started: make(chan struct{}), release: make(chan struct{})}
+	stale, _ := newManagedTestServiceOnStore(t, blocking, store)
+	newer, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, otherStore)
+
+	if err := os.WriteFile(file, []byte("stale content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := stale.ReindexDocument(context.Background(), document.ID)
+		done <- err
+	}()
+	<-blocking.started
+	if err := os.WriteFile(file, []byte("newer content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newerDocument, err := newer.ReindexDocument(context.Background(), document.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(blocking.release)
+	if err := <-done; !errors.Is(err, ErrDocumentChanged) {
+		t.Fatalf("stale ReindexDocument() error = %v, want ErrDocumentChanged", err)
+	}
+
+	got := requireManagedDocument(t, newer, document.ID)
+	if got.ContentHash != newerDocument.ContentHash || got.State != DocumentStateIndexed || got.Freshness != DocumentFreshnessFresh {
+		t.Fatalf("document after stale success = %#v, want newer %#v", got, newerDocument)
+	}
+	chunks := requireManagedChunks(t, otherStore, document.source)
+	if len(chunks) != 1 || chunks[0].Chunk.Content != "newer content" {
+		t.Fatalf("chunks after stale success = %#v, want newer content", chunks)
+	}
+}
+
+func TestManagedSourcesStaleReindexFailureDoesNotMarkNewerIndexFailed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rag.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	managed, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, store)
+	file := filepath.Join(t.TempDir(), "runbook.md")
+	if err := os.WriteFile(file, []byte("initial"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	document, err := managed.IngestFile(context.Background(), file, DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherStore, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = otherStore.Close() })
+	blocking := &blockingManagedTestEmbedder{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		err:     errors.New("stale embed failure"),
+	}
+	stale, _ := newManagedTestServiceOnStore(t, blocking, store)
+	newer, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, otherStore)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := stale.ReindexDocument(context.Background(), document.ID)
+		done <- err
+	}()
+	<-blocking.started
+	if err := os.WriteFile(file, []byte("newer content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	newerDocument, err := newer.ReindexDocument(context.Background(), document.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	close(blocking.release)
+	if err := <-done; !errors.Is(err, ErrDocumentChanged) {
+		t.Fatalf("stale failed ReindexDocument() error = %v, want ErrDocumentChanged", err)
+	}
+
+	got := requireManagedDocument(t, newer, document.ID)
+	if got.ContentHash != newerDocument.ContentHash || got.State != DocumentStateIndexed || got.Freshness != DocumentFreshnessFresh || got.LastError != "" {
+		t.Fatalf("document after stale failure = %#v, want newer %#v", got, newerDocument)
+	}
+	chunks := requireManagedChunks(t, otherStore, document.source)
+	if len(chunks) != 1 || chunks[0].Chunk.Content != "newer content" || chunks[0].Chunk.Metadata["managed_state"] != string(DocumentStateIndexed) {
+		t.Fatalf("chunks after stale failure = %#v, want newer indexed content", chunks)
+	}
+}
+
+func TestManagedSourcesDeleteWinsConcurrentReindex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rag.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	managed, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, store)
+	document, err := managed.IngestText(context.Background(), "runbook.md", "initial", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	otherStore, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = otherStore.Close() })
+	blocking := &blockingManagedTestEmbedder{started: make(chan struct{}), release: make(chan struct{})}
+	stale, _ := newManagedTestServiceOnStore(t, blocking, store)
+	deleter, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, otherStore)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := stale.ReindexDocument(context.Background(), document.ID)
+		done <- err
+	}()
+	<-blocking.started
+	if err := deleter.DeleteDocument(context.Background(), document.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(blocking.release)
+	if err := <-done; !errors.Is(err, ErrDocumentNotFound) {
+		t.Fatalf("stale ReindexDocument() error = %v, want ErrDocumentNotFound", err)
+	}
+	if _, err := deleter.loadDocument(context.Background(), document.ID); !errors.Is(err, ErrDocumentNotFound) {
+		t.Fatalf("deleted registry lookup error = %v, want ErrDocumentNotFound", err)
+	}
+	if chunks := requireManagedChunks(t, otherStore, document.source); len(chunks) != 0 {
+		t.Fatalf("deleted chunks resurrected: %#v", chunks)
+	}
+}
+
 func TestManagedSourcesReconcileReadsFileBeforeWriterTransaction(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	path := filepath.Join(t.TempDir(), "runbook.md")
@@ -462,7 +708,7 @@ func TestManagedSourcesReconcileReadsFileBeforeWriterTransaction(t *testing.T) {
 
 	readStarted := make(chan struct{})
 	releaseRead := make(chan struct{})
-	managed.readFile = func(string) ([]byte, error) {
+	managed.readFile = func(context.Context, string) ([]byte, error) {
 		close(readStarted)
 		<-releaseRead
 		return []byte("restart safely"), nil
@@ -561,6 +807,37 @@ func TestManagedSourcesListFiltersAndOrdersByID(t *testing.T) {
 	}
 	if len(documents) != 1 || documents[0].ID != third.ID {
 		t.Fatalf("state/freshness filter = %#v, want third", documents)
+	}
+}
+
+func TestManagedSourcesListFiltersImmutableMetadataBeforeFileRead(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "runbook.md")
+	if err := os.WriteFile(path, []byte("restart safely"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managed.IngestFile(context.Background(), path, DocumentOptions{Collection: "ops", Tags: []string{"alpha"}}); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	managed.readFile = func(context.Context, string) ([]byte, error) {
+		called = true
+		return nil, errors.New("filtered document must not be read")
+	}
+	for name, filter := range map[string]DocumentFilter{
+		"collection": {Collection: "other", Tags: []string{"alpha"}},
+		"all tags":   {Collection: "ops", Tags: []string{"beta"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			called = false
+			documents, err := managed.ListDocuments(context.Background(), filter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(documents) != 0 || called {
+				t.Fatalf("filtered documents = %#v, file read = %v, want empty without read", documents, called)
+			}
+		})
 	}
 }
 
@@ -717,6 +994,57 @@ func TestManagedSourcesRejectsOversizeMetadataAndTagsBeforeRegistration(t *testi
 	}
 	if documents, err := managed.ListDocuments(context.Background(), DocumentFilter{}); err != nil || len(documents) != 0 {
 		t.Fatalf("documents after rejected metadata = %#v, err = %v", documents, err)
+	}
+}
+
+func TestManagedSourcesIngestFileValidatesOptionsBeforeRead(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	called := false
+	managed.readFile = func(context.Context, string) ([]byte, error) {
+		called = true
+		return []byte("content"), nil
+	}
+	_, err := managed.IngestFile(context.Background(), "document.md", DocumentOptions{
+		Title: strings.Repeat("x", MaxManagedMetadataBytes+1),
+	})
+	if err == nil {
+		t.Fatal("IngestFile() accepted oversized title")
+	}
+	if called {
+		t.Fatal("IngestFile() read file before validating options")
+	}
+}
+
+func TestManagedSourcesIngestFilePropagatesCancellationToRead(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	started := make(chan struct{})
+	managed.readFile = func(ctx context.Context, _ string) ([]byte, error) {
+		close(started)
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := managed.IngestFile(ctx, "document.md", DocumentOptions{})
+		done <- err
+	}()
+	<-started
+	cancel()
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("IngestFile() error = %v, want context.Canceled", err)
+	}
+}
+
+func TestReadManagedRegularFileRejectsCanceledContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "document.md")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := readManagedRegularFile(ctx, path); !errors.Is(err, context.Canceled) {
+		t.Fatalf("readManagedRegularFile() error = %v, want context.Canceled", err)
 	}
 }
 
@@ -1401,9 +1729,8 @@ func TestIndexDirectoryPruneDoesNotReserveManagedSourcePrefix(t *testing.T) {
 	_, idx, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
 	source := managedSourcePrefix + "notes.md"
-	// The indexer rejects the reserved prefix, so a prefix-colliding source
-	// that is NOT registered as a managed document can only arrive via
-	// low-level store writes; prune must still delete it normally.
+	// This malformed legacy source is not a generated managed-document source,
+	// so prune must still delete it normally.
 	chunk := makeChunk(source, "legacy content", 1, 1, "")
 	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, []Chunk{chunk}, [][]float64{{1, 1}}, "sig", "test/v1"); err != nil {
 		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID() error: %v", err)

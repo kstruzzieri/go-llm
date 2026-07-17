@@ -20,7 +20,7 @@ type Retriever struct {
 	model           string
 	store           VectorStore
 	vectorOnly      bool
-	readManagedFile func(string) ([]byte, error)
+	readManagedFile func(context.Context, string) ([]byte, error)
 }
 
 // RetrievalScope restricts retrieval to managed documents in a collection and
@@ -495,7 +495,7 @@ type managedFreshnessCheck struct {
 	err  error
 }
 
-func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFile func(string) ([]byte, error), results []SearchResult) error {
+func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []SearchResult) error {
 	sqlite, ok := store.(*SQLiteStore)
 	if !ok {
 		return nil
@@ -510,7 +510,7 @@ func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFil
 	return refreshManagedSearchResultsWithRegistry(ctx, readFile, results, registry)
 }
 
-func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
+func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
@@ -522,7 +522,7 @@ func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(
 	return nil
 }
 
-func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFile func(string) ([]byte, error), results []ScoredResult) error {
+func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []ScoredResult) error {
 	sqlite, ok := store.(*SQLiteStore)
 	if !ok {
 		return nil
@@ -537,7 +537,7 @@ func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFil
 	return refreshManagedScoredResultsWithRegistry(ctx, readFile, results, registry)
 }
 
-func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
+func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
@@ -549,7 +549,7 @@ func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(
 	return nil
 }
 
-func refreshManagedChunk(ctx context.Context, readFile func(string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck) error {
+func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck) error {
 	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) || !matchesManagedRegistry(*chunk, document) {
 		return nil
 	}
@@ -559,7 +559,7 @@ func refreshManagedChunk(ctx context.Context, readFile func(string) ([]byte, err
 	origin := document.origin
 	check, ok := cache[origin]
 	if !ok {
-		data, err := readFile(origin)
+		data, err := readFile(ctx, origin)
 		check = managedFreshnessCheck{err: err}
 		if err == nil {
 			check.hash = contentHash(string(data))

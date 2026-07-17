@@ -810,7 +810,7 @@ func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents
 		   SET state = 'failed', freshness = 'stale',
-		       last_error = 'chunks deleted by low-level source deletion', updated_at = ?
+		       last_error = 'chunks deleted by low-level source deletion', updated_at = ?, revision = revision + 1
 		 WHERE source = ?`, time.Now().Unix(), source); err != nil {
 		return fmt.Errorf("rag: mark managed source %q deleted: %w", source, err)
 	}

@@ -79,7 +79,7 @@ func TestRetrieveFreshnessPropagatesCancellationAfterRead(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	r.readManagedFile = func(string) ([]byte, error) {
+	r.readManagedFile = func(context.Context, string) ([]byte, error) {
 		cancel()
 		return []byte("content"), nil
 	}
@@ -195,7 +195,7 @@ func TestRetrieveScopedRejectsRegistryRelativeFileOriginWithoutReading(t *testin
 		t.Fatal(err)
 	}
 	called := false
-	r.readManagedFile = func(string) ([]byte, error) { called = true; return nil, errors.New("must not read") }
+	r.readManagedFile = func(context.Context, string) ([]byte, error) { called = true; return nil, errors.New("must not read") }
 	got, err := r.RetrieveScoped(ctx, "q", 1, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
 	if err != nil || len(got) != 0 || called {
 		t.Fatalf("scoped results=%#v error=%v read=%v, want exclusion without read", got, err, called)
