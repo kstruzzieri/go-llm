@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -13,32 +14,129 @@ import (
 	"github.com/kstruzzieri/go-llm/ollama"
 )
 
-func managedScopeMetadata(collection string, tags []string) map[string]string {
-	encoded, _ := json.Marshal(tags)
-	return map[string]string{
-		"managed_document_id":  "document",
-		"managed_collection":   collection,
-		"managed_tags":         string(encoded),
-		"managed_kind":         string(DocumentKindText),
-		"managed_content_hash": "hash",
-		"managed_state":        string(DocumentStateIndexed),
+func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	document, err := managed.IngestText(ctx, "trusted.md", "trusted", DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trusted := requireManagedChunks(t, store, document.source)[0].Chunk
+	trusted.ID = "trusted"
+	forged := trusted
+	forged.ID = "forged"
+	forged.Metadata = make(map[string]string, len(trusted.Metadata))
+	for key, value := range trusted.Metadata {
+		forged.Metadata[key] = value
+	}
+	forged.Metadata["managed_kind"] = string(DocumentKindFile)
+	forged.Metadata["managed_origin"] = filepath.Join(t.TempDir(), "must-not-read")
+	forged.Metadata["managed_content_hash"] = contentHash("forged")
+	forged.Metadata["managed_freshness"] = string(DocumentFreshnessFresh)
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, document.source, []Chunk{trusted, forged}, [][]float64{{0.9, 0.1}, {1, 0}}, document.ContentHash, document.VectorSpaceID); err != nil {
+		t.Fatal(err)
+	}
+	orphanSource := managedSourcePrefix + strings.Repeat("a", 32) + ".md"
+	orphan := forged
+	orphan.ID, orphan.Source = "orphan", orphanSource
+	orphan.Metadata["managed_kind"] = string(DocumentKindText)
+	orphan.Metadata["managed_origin"] = ""
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, orphanSource, []Chunk{orphan}, [][]float64{{0.99, 0.01}}, "orphan", document.VectorSpaceID); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}}, store, WithVectorOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := r.RetrieveScoped(ctx, "q", 5, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil || len(scoped) != 1 || scoped[0].Chunk.ID != "trusted" {
+		t.Fatalf("scoped results=%#v error=%v, want only trusted", scoped, err)
+	}
+	unscoped, err := r.Retrieve(ctx, "q", 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range unscoped {
+		if result.Chunk.ID == "forged" && result.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessFresh) {
+			t.Fatalf("forged freshness=%q, want unchanged (arbitrary path must not be read)", result.Chunk.Metadata["managed_freshness"])
+		}
 	}
 }
 
-func TestRetrieveScopedFiltersBeforeTopKAndRequiresAllTags(t *testing.T) {
-	store := newTestStore(t)
-	ctx := context.Background()
-	chunks := []Chunk{
-		{ID: "outside", Content: "outside", Source: "managed:outside", Metadata: managedScopeMetadata("other", []string{"alpha", "beta"})},
-		{ID: "one-tag", Content: "one-tag", Source: "managed:one-tag", Metadata: managedScopeMetadata("ops", []string{"alpha"})},
-		{ID: "match", Content: "match", Source: "managed:match", Metadata: managedScopeMetadata("ops", []string{"alpha", "beta"})},
-		{ID: "malformed", Content: "malformed", Source: "managed:malformed", Metadata: map[string]string{"managed_collection": "ops", "managed_tags": "{"}},
-		{ID: "unmanaged", Content: "unmanaged", Source: "unmanaged", Metadata: map[string]string{}},
+func TestRetrieveFreshnessPropagatesCancellationAfterRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "managed.md")
+	if err := os.WriteFile(path, []byte("content"), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if err := store.Store(ctx, chunks, [][]float64{{1, 0}, {0.99, 0.01}, {0.98, 0.02}, {0.97, 0.03}, {0.96, 0.04}}); err != nil {
+	if _, err := managed.IngestFile(ctx, path, DocumentOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	previous := readManagedRetrievalFile
+	readManagedRetrievalFile = func(string) ([]byte, error) {
+		cancel()
+		return []byte("content"), nil
+	}
+	t.Cleanup(func() { readManagedRetrievalFile = previous })
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}}, store, WithVectorOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = r.Retrieve(ctx, "q", 1)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Retrieve error=%v, want context.Canceled", err)
+	}
+}
+
+func TestRetrieveLegacyStoreWithoutManagedTableSkipsRegistryForOrdinaryResults(t *testing.T) {
+	store := newTestStore(t)
+	if _, err := store.db.Exec(`DROP TABLE managed_documents`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Store(context.Background(), []Chunk{{ID: "plain", Source: "plain.go", Metadata: map[string]string{}}}, [][]float64{{1, 0}}); err != nil {
 		t.Fatal(err)
 	}
 	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}}, store, WithVectorOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.Retrieve(context.Background(), "q", 1)
+	if err != nil || len(got) != 1 || got[0].Chunk.ID != "plain" {
+		t.Fatalf("legacy retrieval=%#v error=%v, want ordinary result", got, err)
+	}
+}
+
+func replaceManagedScopeChunk(t *testing.T, store *SQLiteStore, document Document, id string, embedding []float64) Chunk {
+	t.Helper()
+	chunk := requireManagedChunks(t, store, document.source)[0].Chunk
+	chunk.ID = id
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(context.Background(), document.source, []Chunk{chunk}, [][]float64{embedding}, document.ContentHash, document.VectorSpaceID); err != nil {
+		t.Fatal(err)
+	}
+	return chunk
+}
+
+func TestRetrieveScopedFiltersBeforeTopKAndRequiresAllTags(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	outside, err := managed.IngestText(ctx, "outside.md", "outside", DocumentOptions{Collection: "other", Tags: []string{"alpha", "beta"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oneTag, err := managed.IngestText(ctx, "one-tag.md", "one-tag", DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	match, err := managed.IngestText(ctx, "match.md", "match", DocumentOptions{Collection: "ops", Tags: []string{"alpha", "beta"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceManagedScopeChunk(t, store, outside, "outside", []float64{1, 0})
+	replaceManagedScopeChunk(t, store, oneTag, "one-tag", []float64{0.99, 0.01})
+	replaceManagedScopeChunk(t, store, match, "match", []float64{0.98, 0.02})
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}}, store, WithVectorOnly())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,18 +150,23 @@ func TestRetrieveScopedFiltersBeforeTopKAndRequiresAllTags(t *testing.T) {
 }
 
 func TestRetrieveScopedTagsDoNotRequireACollection(t *testing.T) {
-	store := newTestStore(t)
-	if err := store.Store(context.Background(), []Chunk{
-		{ID: "match", Source: "managed:match", Metadata: managedScopeMetadata("ops", []string{"alpha"})},
-		{ID: "miss", Source: "managed:miss", Metadata: managedScopeMetadata("other", []string{"beta"})},
-	}, [][]float64{{1, 0}, {0.9, 0.1}}); err != nil {
-		t.Fatal(err)
-	}
-	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}}, store, WithVectorOnly())
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	match, err := managed.IngestText(ctx, "match.md", "match", DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := r.RetrieveScoped(context.Background(), "q", 1, RetrievalScope{Tags: []string{"alpha"}})
+	miss, err := managed.IngestText(ctx, "miss.md", "miss", DocumentOptions{Collection: "other", Tags: []string{"beta"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceManagedScopeChunk(t, store, match, "match", []float64{1, 0})
+	replaceManagedScopeChunk(t, store, miss, "miss", []float64{0.9, 0.1})
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}}, store, WithVectorOnly())
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.RetrieveScoped(ctx, "q", 1, RetrievalScope{Tags: []string{"alpha"}})
 	if err != nil || len(got) != 1 || got[0].Chunk.ID != "match" {
 		t.Fatalf("tag-scoped results=%#v error=%v, want match", got, err)
 	}
@@ -150,20 +253,23 @@ func TestRetrieveFreshnessWithoutListDoesNotWrite(t *testing.T) {
 }
 
 func TestRetrieveScopedScoredPreservesHybridContextAndRanking(t *testing.T) {
-	store := newTestStore(t)
 	ctx := context.Background()
-	chunks := []Chunk{
-		{ID: "outside", Content: "alpha", Source: "managed:outside", Metadata: managedScopeMetadata("other", []string{"alpha"})},
-		{ID: "match", Content: "alpha", Source: "managed:match", Metadata: managedScopeMetadata("ops", []string{"alpha"})},
-	}
-	if err := store.Store(ctx, chunks, [][]float64{{1, 0}, {0.9, 0.1}}); err != nil {
-		t.Fatal(err)
-	}
-	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}}, store)
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	outside, err := managed.IngestText(ctx, "outside.md", "alpha", DocumentOptions{Collection: "other", Tags: []string{"alpha"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := r.RetrieveScoredScoped(ctx, "alpha", 1, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}}, QueryContext{CurrentFile: "match"})
+	match, err := managed.IngestText(ctx, "match.md", "alpha", DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceManagedScopeChunk(t, store, outside, "outside", []float64{1, 0})
+	matchChunk := replaceManagedScopeChunk(t, store, match, "match", []float64{0.9, 0.1})
+	r, err := NewRetrieverWithEmbedder(&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}}, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.RetrieveScoredScoped(ctx, "alpha", 1, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}}, QueryContext{CurrentFile: matchChunk.Source})
 	if err != nil {
 		t.Fatal(err)
 	}

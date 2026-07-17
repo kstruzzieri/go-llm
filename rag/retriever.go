@@ -117,7 +117,9 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 	if err != nil {
 		return nil, err
 	}
-	refreshManagedSearchResults(results)
+	if err := refreshManagedSearchResults(ctx, r.store, results); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -137,11 +139,18 @@ func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, sco
 	if err != nil {
 		return nil, err
 	}
-	results = filterSearchResults(results, scope)
+	store := r.store.(*SQLiteStore)
+	registry, err := managedRegistrySnapshot(ctx, store, searchResultChunks(results))
+	if err != nil {
+		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+	}
+	results = filterSearchResults(results, scope, registry)
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
-	refreshManagedSearchResults(results)
+	if err := refreshManagedSearchResultsWithRegistry(ctx, results, registry); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -207,7 +216,9 @@ func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCt
 	if err != nil {
 		return nil, err
 	}
-	refreshManagedScoredResults(results)
+	if err := refreshManagedScoredResults(ctx, r.store, results); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -227,11 +238,18 @@ func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k in
 	if err != nil {
 		return nil, err
 	}
-	results = filterScoredResults(results, scope)
+	store := r.store.(*SQLiteStore)
+	registry, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
+	if err != nil {
+		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+	}
+	results = filterScoredResults(results, scope, registry)
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
-	refreshManagedScoredResults(results)
+	if err := refreshManagedScoredResultsWithRegistry(ctx, results, registry); err != nil {
+		return nil, err
+	}
 	return results, nil
 }
 
@@ -277,56 +295,134 @@ func normalizeRetrievalScope(scope RetrievalScope) (RetrievalScope, error) {
 	return scope, nil
 }
 
-func filterSearchResults(results []SearchResult, scope RetrievalScope) []SearchResult {
+func filterSearchResults(results []SearchResult, scope RetrievalScope, registry map[string]managedRegistryDocument) []SearchResult {
 	filtered := results[:0]
 	for _, result := range results {
-		if matchesRetrievalScope(result.Chunk, scope) {
+		if document, ok := registry[result.Chunk.Source]; ok && matchesRetrievalScope(result.Chunk, document, scope) {
 			filtered = append(filtered, result)
 		}
 	}
 	return filtered
 }
 
-func filterScoredResults(results []ScoredResult, scope RetrievalScope) []ScoredResult {
+func filterScoredResults(results []ScoredResult, scope RetrievalScope, registry map[string]managedRegistryDocument) []ScoredResult {
 	filtered := results[:0]
 	for _, result := range results {
-		if matchesRetrievalScope(result.Chunk, scope) {
+		if document, ok := registry[result.Chunk.Source]; ok && matchesRetrievalScope(result.Chunk, document, scope) {
 			filtered = append(filtered, result)
 		}
 	}
 	return filtered
 }
 
-func matchesRetrievalScope(chunk Chunk, scope RetrievalScope) bool {
-	collection, tags, ok := managedProvenance(chunk)
-	if !ok {
+func matchesRetrievalScope(chunk Chunk, document managedRegistryDocument, scope RetrievalScope) bool {
+	if !matchesManagedRegistry(chunk, document) {
 		return false
 	}
-	return (scope.Collection == "" || collection == scope.Collection) && containsManagedTags(tags, scope.Tags)
+	return (scope.Collection == "" || document.collection == scope.Collection) && containsManagedTags(document.tags, scope.Tags)
 }
 
-func managedProvenance(chunk Chunk) (string, []string, bool) {
+type managedRegistryDocument struct {
+	id, source, title, kind, origin, mimeType, contentHash, collection, tagsJSON, state string
+	tags                                                                                []string
+}
+
+func matchesManagedRegistry(chunk Chunk, document managedRegistryDocument) bool {
 	meta := chunk.Metadata
-	if !strings.HasPrefix(chunk.Source, managedSourcePrefix) || meta["managed_document_id"] == "" || meta["managed_content_hash"] == "" || meta["managed_state"] != string(DocumentStateIndexed) {
-		return "", nil, false
+	return chunk.Source == document.source && meta["managed_document_id"] == document.id &&
+		meta["managed_title"] == document.title && meta["managed_kind"] == document.kind &&
+		meta["managed_origin"] == document.origin && meta["managed_mime_type"] == document.mimeType &&
+		meta["managed_content_hash"] == document.contentHash && meta["managed_collection"] == document.collection &&
+		meta["managed_tags"] == document.tagsJSON && meta["managed_state"] == document.state
+}
+
+func searchResultChunks(results []SearchResult) []Chunk {
+	chunks := make([]Chunk, len(results))
+	for i := range results {
+		chunks[i] = results[i].Chunk
 	}
-	kind := DocumentKind(meta["managed_kind"])
-	if kind != DocumentKindText && kind != DocumentKindFile || kind == DocumentKindFile && meta["managed_origin"] == "" {
-		return "", nil, false
+	return chunks
+}
+
+func scoredResultChunks(results []ScoredResult) []Chunk {
+	chunks := make([]Chunk, len(results))
+	for i := range results {
+		chunks[i] = results[i].Chunk
 	}
-	collection := meta["managed_collection"]
-	if !utf8.ValidString(collection) || len(collection) > MaxManagedMetadataBytes {
-		return "", nil, false
+	return chunks
+}
+
+func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates []Chunk) (map[string]managedRegistryDocument, error) {
+	const batchSize = 100
+	sources := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, chunk := range candidates {
+		if looksManagedDocumentSource(chunk.Source) {
+			if _, ok := seen[chunk.Source]; !ok {
+				seen[chunk.Source] = struct{}{}
+				sources = append(sources, chunk.Source)
+			}
+		}
 	}
-	var tags []string
-	if err := json.Unmarshal([]byte(meta["managed_tags"]), &tags); err != nil {
-		return "", nil, false
+	registry := make(map[string]managedRegistryDocument, len(sources))
+	for start := 0; start < len(sources); start += batchSize {
+		end := start + batchSize
+		if end > len(sources) {
+			end = len(sources)
+		}
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
+		args := make([]any, end-start)
+		for i, source := range sources[start:end] {
+			args[i] = source
+		}
+		rows, err := store.db.QueryContext(ctx, `SELECT id, source, title, kind, origin, mime_type, content_hash, collection, tags, state FROM managed_documents WHERE source IN (`+placeholders+`)`, args...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var document managedRegistryDocument
+			if err := rows.Scan(&document.id, &document.source, &document.title, &document.kind, &document.origin, &document.mimeType, &document.contentHash, &document.collection, &document.tagsJSON, &document.state); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if document.kind != string(DocumentKindText) && document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) {
+				continue
+			}
+			if err := json.Unmarshal([]byte(document.tagsJSON), &document.tags); err != nil {
+				continue
+			}
+			normalized, err := normalizeManagedTags(document.tags)
+			if err != nil || !reflect.DeepEqual(document.tags, normalized) {
+				continue
+			}
+			registry[document.source] = document
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
 	}
-	normalized, err := normalizeManagedTags(tags)
-	if err != nil || !reflect.DeepEqual(tags, normalized) {
-		return "", nil, false
+	return registry, nil
+}
+
+func looksManagedDocumentSource(source string) bool {
+	if !strings.HasPrefix(source, managedSourcePrefix) {
+		return false
 	}
-	return collection, tags, true
+	rest := strings.TrimPrefix(source, managedSourcePrefix)
+	if len(rest) < 32 {
+		return false
+	}
+	for _, char := range rest[:32] {
+		if !strings.ContainsRune("0123456789abcdefABCDEF", char) {
+			return false
+		}
+	}
+	extension := rest[32:]
+	return extension == "" || extension[0] == '.' && extension == strings.ToLower(extension) && !strings.ContainsAny(extension[1:], "/\\.")
 }
 
 type managedFreshnessCheck struct {
@@ -334,48 +430,95 @@ type managedFreshnessCheck struct {
 	err  error
 }
 
-func refreshManagedSearchResults(results []SearchResult) {
-	cache := make(map[string]managedFreshnessCheck)
-	for i := range results {
-		refreshManagedChunk(&results[i].Chunk, cache)
+// readManagedRetrievalFile is a test seam around the bounded descriptor read.
+var readManagedRetrievalFile = readManagedRegularFile
+
+func refreshManagedSearchResults(ctx context.Context, store VectorStore, results []SearchResult) error {
+	sqlite, ok := store.(*SQLiteStore)
+	if !ok {
+		return nil
 	}
+	registry, err := managedRegistrySnapshot(ctx, sqlite, searchResultChunks(results))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return nil // Legacy read-only stores without managed_documents stay compatible.
+	}
+	return refreshManagedSearchResultsWithRegistry(ctx, results, registry)
 }
 
-func refreshManagedScoredResults(results []ScoredResult) {
+func refreshManagedSearchResultsWithRegistry(ctx context.Context, results []SearchResult, registry map[string]managedRegistryDocument) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
-		refreshManagedChunk(&results[i].Chunk, cache)
+		if document, ok := registry[results[i].Chunk.Source]; ok {
+			if err := refreshManagedChunk(ctx, &results[i].Chunk, document, cache); err != nil {
+				return err
+			}
+		}
 	}
+	return nil
 }
 
-func refreshManagedChunk(chunk *Chunk, cache map[string]managedFreshnessCheck) {
-	meta := chunk.Metadata
-	if meta["managed_kind"] != string(DocumentKindFile) {
-		return
+func refreshManagedScoredResults(ctx context.Context, store VectorStore, results []ScoredResult) error {
+	sqlite, ok := store.(*SQLiteStore)
+	if !ok {
+		return nil
 	}
-	if _, _, ok := managedProvenance(*chunk); !ok {
-		return
+	registry, err := managedRegistrySnapshot(ctx, sqlite, scoredResultChunks(results))
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return nil // Legacy read-only stores without managed_documents stay compatible.
 	}
-	origin := meta["managed_origin"]
+	return refreshManagedScoredResultsWithRegistry(ctx, results, registry)
+}
+
+func refreshManagedScoredResultsWithRegistry(ctx context.Context, results []ScoredResult, registry map[string]managedRegistryDocument) error {
+	cache := make(map[string]managedFreshnessCheck)
+	for i := range results {
+		if document, ok := registry[results[i].Chunk.Source]; ok {
+			if err := refreshManagedChunk(ctx, &results[i].Chunk, document, cache); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func refreshManagedChunk(ctx context.Context, chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck) error {
+	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) || !matchesManagedRegistry(*chunk, document) {
+		return nil
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	origin := document.origin
 	check, ok := cache[origin]
 	if !ok {
-		data, err := readManagedRegularFile(meta["managed_origin"])
+		data, err := readManagedRetrievalFile(origin)
 		check = managedFreshnessCheck{err: err}
 		if err == nil {
 			check.hash = contentHash(string(data))
 		}
 		cache[origin] = check
 	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	freshness := DocumentFreshnessStale
-	if check.err == nil && check.hash == meta["managed_content_hash"] {
+	if check.err == nil && check.hash == document.contentHash {
 		freshness = DocumentFreshnessFresh
 	}
+	meta := chunk.Metadata
 	cloned := make(map[string]string, len(meta))
 	for key, value := range meta {
 		cloned[key] = value
 	}
 	cloned["managed_freshness"] = string(freshness)
 	chunk.Metadata = cloned
+	return nil
 }
 
 // denseScored runs dense vector search and wraps each result as a ScoredResult

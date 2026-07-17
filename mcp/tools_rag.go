@@ -3,9 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"time"
-	"unicode/utf8"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -219,7 +217,7 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		Collection    string   `json:"collection,omitempty"`
 		Tags          []string `json:"tags,omitempty"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Query == "" {
@@ -290,18 +288,10 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 }
 
 func validateRAGSearchScope(collection string, tags []string) error {
-	if !utf8.ValidString(collection) || len(collection) > rag.MaxManagedMetadataBytes {
-		return fmt.Errorf("collection exceeds %d-byte limit or is not valid UTF-8", rag.MaxManagedMetadataBytes)
+	if err := validateManagedRAGString("collection", collection, rag.MaxManagedMetadataBytes); err != nil {
+		return err
 	}
-	if len(tags) > rag.MaxManagedTags {
-		return fmt.Errorf("tags exceed %d-tag limit", rag.MaxManagedTags)
-	}
-	for _, tag := range tags {
-		if !utf8.ValidString(tag) || len(tag) > rag.MaxManagedTagBytes {
-			return fmt.Errorf("tag exceeds %d-byte limit or is not valid UTF-8", rag.MaxManagedTagBytes)
-		}
-	}
-	return nil
+	return validateManagedRAGTags(tags)
 }
 
 func (s *Server) handleRAGStats(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {

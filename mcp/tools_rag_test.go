@@ -107,6 +107,14 @@ func TestRAGSearchSchemaAndHandlerScope(t *testing.T) {
 	}
 }
 
+func TestHandleRAGSearchRejectsRawInvalidUTF8BeforeRetrieval(t *testing.T) {
+	req := &gomcp.CallToolRequest{Params: &gomcp.CallToolParamsRaw{Arguments: json.RawMessage([]byte{'{', '"', 'q', 'u', 'e', 'r', 'y', '"', ':', '"', 0xff, '"', '}'})}}
+	result, err := (&Server{}).handleRAGSearch(context.Background(), req)
+	if err != nil || !result.IsError || !strings.Contains(extractText(result), "valid UTF-8") {
+		t.Fatalf("result=%#v error=%v, want raw UTF-8 validation failure", result, err)
+	}
+}
+
 type recordingMCPMultiStore struct {
 	stubVectorStore
 	results []rag.ScoredResult
