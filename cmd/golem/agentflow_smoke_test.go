@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -113,7 +114,7 @@ type parallelSmokeRunner struct {
 
 func (r *parallelSmokeRunner) Run(ctx context.Context, args []string, stdin []byte) ([]byte, []byte, int, error) {
 	call := parallelSmokeCall{root: r.root, args: append([]string(nil), args...)}
-	if len(args) > 0 && args[0] == "aggregate-ledgers" && hasArg(args, "--input") {
+	if len(args) > 0 && args[0] == "aggregate-ledgers" && slices.Contains(args, "--input") {
 		call.promoted = map[string]string{}
 		for _, name := range []string{"parallel-one.txt", "parallel-two.txt"} {
 			b, err := os.ReadFile(filepath.Join(r.root, "src", name))
@@ -141,9 +142,36 @@ func (r *parallelSmokeRunner) Run(ctx context.Context, args []string, stdin []by
 	return out, errb, exit, err
 }
 
-type parallelSmokeCaller struct{}
+type parallelSmokeBarrier struct {
+	mu       sync.Mutex
+	arrivals int
+	ready    chan struct{}
+}
 
-func (parallelSmokeCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
+func (b *parallelSmokeBarrier) wait(ctx context.Context) error {
+	b.mu.Lock()
+	b.arrivals++
+	if b.arrivals == 2 {
+		close(b.ready)
+	}
+	b.mu.Unlock()
+	select {
+	case <-b.ready:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *parallelSmokeBarrier) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.arrivals
+}
+
+type parallelSmokeCaller struct{ barrier *parallelSmokeBarrier }
+
+func (c parallelSmokeCaller) Chat(ctx context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
 	for _, message := range req.Messages {
 		if message.Role == "tool" {
 			response := provider.ChatResponse{Content: "done"}
@@ -164,14 +192,20 @@ func (parallelSmokeCaller) Chat(_ context.Context, req provider.ChatRequest, onT
 	targets := []struct {
 		path    string
 		content string
+		worker  bool
 	}{
-		{"src/parallel-one.txt", "worker-one\n"},
-		{"src/parallel-two.txt", "worker-two\n"},
-		{"src/parallel-three.txt", "canonical-three\n"},
+		{"src/parallel-one.txt", "worker-one\n", true},
+		{"src/parallel-two.txt", "worker-two\n", true},
+		{"src/parallel-three.txt", "canonical-three\n", false},
 	}
 	for _, target := range targets {
 		if !strings.Contains(goal, target.path) {
 			continue
+		}
+		if target.worker {
+			if err := c.barrier.wait(ctx); err != nil {
+				return agent.ModelResult{}, err
+			}
 		}
 		arguments, err := json.Marshal(map[string]string{"path": target.path, "content": target.content})
 		if err != nil {
@@ -217,7 +251,7 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 		}
 	}
 	gitInit(t, dir)
-	base := gitOutput(t, dir, "rev-parse", "HEAD")
+	base := strings.TrimSpace(runTestGit(t, dir, "rev-parse", "HEAD"))
 
 	// Skip before goroutines start when neither a source checkout nor installed
 	// CLI is available, then create one real runner per production root.
@@ -234,11 +268,12 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 		return &parallelSmokeRunner{root: root, delegate: runner, recorder: recorder}
 	}
 	client := agentflow.NewClient(runnerForRoot(dir), dir)
+	barrier := &parallelSmokeBarrier{ready: make(chan struct{})}
 	newOrchestrator := func() *agent.Orchestrator {
-		return agent.New(parallelSmokeCaller{}, agent.ContextManager{})
+		return agent.New(parallelSmokeCaller{barrier: barrier}, agent.ContextManager{})
 	}
 	sess := &replSession{orch: newOrchestrator(), newOrchestrator: newOrchestrator, maxSteps: 4, clock: time.Now}
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	runStep, err := newTaskStepRunner(dir, &plan, client, sess.orch, sess, true, io.Discard, nil, cancel)
 	if err != nil {
@@ -316,15 +351,18 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 		}
 		switch call.args[0] {
 		case "claim-step":
+			if len(call.args) < 2 {
+				t.Fatalf("claim-step argv = %v, want step id", call.args)
+			}
 			claims[call.args[1]] = call
 		case "next-action":
 			projections[call.root] = call.projectedStep
 		case "aggregate-ledgers":
-			if hasArg(call.args, "--input") {
+			if slices.Contains(call.args, "--input") {
 				aggregates = append(aggregates, call)
 			}
 		case "finish-run":
-			if hasArg(call.args, "--root") {
+			if slices.Contains(call.args, "--root") {
 				finishes = append(finishes, call)
 			}
 		}
@@ -332,7 +370,10 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 	if claims["P1"].root == "" || claims["P1"].root == claims["P2"].root || claims["P1"].root == dir || claims["P2"].root == dir {
 		t.Fatalf("worker claim roots = P1:%q P2:%q canonical:%q", claims["P1"].root, claims["P2"].root, dir)
 	}
-	if len(aggregates) != 2 || !hasArg(aggregates[0].args, "--dry-run") || hasArg(aggregates[1].args, "--dry-run") {
+	if got := barrier.count(); got != 2 {
+		t.Fatalf("parallel worker barrier arrivals = %d, want 2", got)
+	}
+	if len(aggregates) != 2 || !slices.Contains(aggregates[0].args, "--dry-run") || slices.Contains(aggregates[1].args, "--dry-run") {
 		t.Fatalf("aggregate calls = %v", aggregates)
 	}
 	if claims["P3"].root != dir || claims["P3"].seq < aggregates[1].seq {
@@ -357,15 +398,6 @@ func TestAgentflowParallelSmoke(t *testing.T) {
 	if roots := coordinator.preservedRoots(); len(roots) != 0 {
 		t.Fatalf("successful coordinator preserved roots: %v", roots)
 	}
-}
-
-func hasArg(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
 }
 
 // agentflowRunnerOrSkip honors the explicit AGENTFLOW_SRC checkout, otherwise
@@ -407,17 +439,6 @@ func gitInit(t *testing.T, dir string) {
 	run("init")
 	run("add", "-A")
 	run("commit", "-m", "fixture baseline")
-}
-
-func gitOutput(t *testing.T, dir string, args ...string) string {
-	t.Helper()
-	cmd := exec.Command("git", args...)
-	cmd.Dir = dir
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		t.Fatalf("git %v: %v\n%s", args, err, out)
-	}
-	return strings.TrimSpace(string(out))
 }
 
 // copyTree recursively copies the directory tree rooted at src into dst,

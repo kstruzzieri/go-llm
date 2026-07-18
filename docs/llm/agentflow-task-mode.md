@@ -287,15 +287,22 @@ mapping. Criteria intended for semantic review instead declare a
 
 With `-plan-workers` above `1`, task mode may run one initial cohort only from a
 fresh, clean Git root and only when the plan has a dependency edge. Qualifying
-steps have no dependencies and own exact, pairwise-disjoint literal files.
-Each runs as a fresh owned worker in its own detached worktree after an opaque
-copy of the canonical `.agent/` state. Golem validates the worker diffs,
-promotes only those source bytes, and lets AgentFlow perform dry-run then real
-ledger aggregation; AgentFlow does not merge source files. Dependent work then
-continues serially in the canonical root, which calls `finish-run` exactly once.
-After successful proof Golem attempts to remove the worktrees; cleanup failures
-warn without invalidating that proof. Run failures preserve and report
-worktrees for inspection.
+steps have no dependencies, and their exact literal files must equal effective
+scope, exclude `.agent`, `.git`, and blocked paths, and be pairwise disjoint
+under case-insensitive equality and ancestor checks. Existing paths must be
+tracked regular files at the recorded base; new paths must be unignored with
+safe parents. Symlinks, directories, or ambiguous ownership fall back to
+serial. Each worker runs fresh in its own detached worktree after an opaque copy
+of canonical `.agent/` state. Golem validates worker diffs, promotes only those
+source bytes, and lets AgentFlow perform dry-run then real ledger aggregation;
+AgentFlow does not merge source files. Dependent work then continues serially
+in the canonical root, which calls `finish-run` exactly once.
+
+Deterministic promotion, dry-run, or collision failures roll back canonical
+promotion. An ambiguous real aggregation failure preserves promoted bytes;
+later serial or proof failures retain aggregated canonical state. Every failure
+keeps the worker roots. After successful proof Golem attempts cleanup; cleanup
+failures warn without invalidating that proof.
 
 Still deferred:
 
