@@ -15,6 +15,111 @@ func newTestClient(replies map[string]fakeReply) (*Client, *fakeRunner) {
 	return NewClient(f, "/ws"), f
 }
 
+func TestClient_AggregateLedgers_UsesTypedVariantsAndExactArgv(t *testing.T) {
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}, {Root: "/worker-2", SourceID: "w2"}}
+	tests := []struct {
+		name          string
+		dryRun        bool
+		stdout        string
+		exit          int
+		wantCollision bool
+		wantWritten   bool
+	}{
+		{"clean dry-run", true, `{"status":"ok","sources":[{"source_id":"w1"}],"collisions":[],"planned":{"step_runs":[]}}`, 0, false, false},
+		{"dry-run collision", true, `{"status":"collision","sources":[],"collisions":[{"kind":"step_overlap"}],"planned":{}}`, 1, true, false},
+		{"real collision", false, `{"status":"collision","sources":[],"collisions":[{"kind":"step_overlap"}],"planned":{}}`, 1, true, false},
+		{"successful write", false, `{"status":"ok","sources":[{"source_id":"w1"}],"written":{"aggregation":".agent/aggregation.json"}}`, 0, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, f := newTestClient(map[string]fakeReply{
+				"aggregate-ledgers": {stdout: []byte(tt.stdout), exit: tt.exit},
+			})
+			result, err := c.AggregateLedgers(context.Background(), inputs, "abc123", tt.dryRun)
+			var collision *AggregationCollisionError
+			if got := errors.As(err, &collision); got != tt.wantCollision {
+				t.Fatalf("collision=%t err=%v, want %t", got, err, tt.wantCollision)
+			}
+			if !tt.wantCollision && err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantCollision {
+				result = collision.Result
+			}
+			if len(result.Sources) == 0 && tt.name == "clean dry-run" {
+				t.Fatalf("sources = %s", result.Sources)
+			}
+			if (len(result.Written) != 0) != tt.wantWritten {
+				t.Fatalf("written = %s, want written=%t", result.Written, tt.wantWritten)
+			}
+			want := []string{"aggregate-ledgers",
+				"--input", "/worker-1", "--source-id", "w1",
+				"--input", "/worker-2", "--source-id", "w2",
+				"--output", "/ws", "--base", "abc123"}
+			if tt.dryRun {
+				want = append(want, "--dry-run")
+			}
+			want = append(want, "--json")
+			if !reflect.DeepEqual(f.calls[0], want) {
+				t.Fatalf("argv = %v, want %v", f.calls[0], want)
+			}
+		})
+	}
+}
+
+func TestClient_AggregateLedgers_FailsClosed(t *testing.T) {
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}}
+	tests := []struct {
+		name   string
+		dryRun bool
+		stdout string
+		exit   int
+		ce     bool
+	}{
+		{"malformed success", true, `{`, 0, false},
+		{"unparseable nonzero", true, `{`, 1, true},
+		{"exit two", true, `{"status":"ok","sources":[],"collisions":[],"planned":{}}`, 2, true},
+		{"collision exit zero", true, `{"status":"collision","sources":[],"collisions":[],"planned":{}}`, 0, false},
+		{"success exit one", false, `{"status":"ok","sources":[],"written":{}}`, 1, false},
+		{"dry-run write variant", true, `{"status":"ok","sources":[],"written":{}}`, 0, false},
+		{"write analysis variant", false, `{"status":"ok","sources":[],"collisions":[],"planned":{}}`, 0, false},
+		{"collision write field", false, `{"status":"collision","sources":[],"collisions":[],"planned":{},"written":{}}`, 1, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := newTestClient(map[string]fakeReply{
+				"aggregate-ledgers": {stdout: []byte(tt.stdout), stderr: []byte("boom"), exit: tt.exit},
+			})
+			_, err := c.AggregateLedgers(context.Background(), inputs, "abc123", tt.dryRun)
+			if err == nil {
+				t.Fatal("AggregateLedgers unexpectedly succeeded")
+			}
+			var ce *CommandError
+			if got := errors.As(err, &ce); got != tt.ce {
+				t.Fatalf("CommandError=%t err=%v, want %t", got, err, tt.ce)
+			}
+			var collision *AggregationCollisionError
+			if errors.As(err, &collision) {
+				t.Fatalf("invalid aggregation result returned collision: %v", err)
+			}
+		})
+	}
+
+	for _, inputs := range [][]AggregationInput{
+		nil,
+		{{Root: "", SourceID: "w1"}},
+		{{Root: "/worker-1", SourceID: ""}},
+	} {
+		c, f := newTestClient(nil)
+		if _, err := c.AggregateLedgers(context.Background(), inputs, "abc123", true); err == nil {
+			t.Fatalf("inputs=%+v unexpectedly succeeded", inputs)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("inputs=%+v invoked CLI: %v", inputs, f.calls)
+		}
+	}
+}
+
 func TestClient_NextAction_Argv(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{"state":"steps_pending"}`), exit: 0}})
 	st, err := c.NextAction(context.Background())

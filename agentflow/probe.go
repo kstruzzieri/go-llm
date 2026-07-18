@@ -48,6 +48,7 @@ var requiredWorkflowFeatures = []featureProbe{
 
 var requiredParallelFeatures = []featureProbe{
 	{"next-action", []string{"--agent"}},
+	{"aggregate-ledgers", []string{"--input", "--source-id", "--output", "--base", "--dry-run", "--json"}},
 }
 
 // Probe fail-closes unless the CLI is present, new enough, and exposes every
@@ -147,7 +148,15 @@ func (c *Client) ProbeWorkflow(ctx context.Context) error {
 // ProbeParallel checks the optional resumability surface used only by parallel
 // worktree execution. Callers run Probe first, preserving serial compatibility.
 func (c *Client) ProbeParallel(ctx context.Context) error {
+	hout, _, exit, err := c.r.Run(ctx, []string{"--help"}, nil)
+	if err != nil || exit != 0 {
+		return fmt.Errorf("agentflow unavailable (--help failed): %w", errOrExit(err, exit))
+	}
+	help := string(hout)
 	for _, feature := range requiredParallelFeatures {
+		if !strings.Contains(help, feature.subcommand) {
+			return fmt.Errorf("agentflow is missing required parallel subcommand: %s", feature.subcommand)
+		}
 		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
 		if err != nil || exit != 0 {
 			return fmt.Errorf("agentflow %s --help failed: %w", feature.subcommand, errOrExit(err, exit))

@@ -86,6 +86,29 @@ type finishRunResult struct {
 	Diagnostics []string `json:"diagnostics"`
 }
 
+// AggregationInput identifies one worker ledger root with its stable source ID.
+type AggregationInput struct {
+	Root     string
+	SourceID string
+}
+
+// AggregationResult is Agentflow's stable aggregation envelope. Its nested
+// records remain raw because their shapes are intentionally additive.
+type AggregationResult struct {
+	Status     string            `json:"status"`
+	Sources    []json.RawMessage `json:"sources"`
+	Collisions []json.RawMessage `json:"collisions,omitempty"`
+	Planned    json.RawMessage   `json:"planned,omitempty"`
+	Written    json.RawMessage   `json:"written,omitempty"`
+}
+
+// AggregationCollisionError preserves Agentflow's collision report (exit 1).
+type AggregationCollisionError struct{ Result AggregationResult }
+
+func (e *AggregationCollisionError) Error() string {
+	return "agentflow aggregate-ledgers: collision"
+}
+
 // ReviewRun is Agentflow's authoritative record-review --json projection.
 type ReviewRun struct {
 	ReviewRunID    string         `json:"review_run_id"`
@@ -316,6 +339,98 @@ func (c *Client) FinishStep(ctx context.Context, step, attempt string) error {
 	args := append([]string{"finish-step", step}, c.rootArgs("--attempt", attempt, "--agent", c.agentName(), "--json")...)
 	_, err := c.call(ctx, "finish-step", args, true)
 	return err
+}
+
+// AggregateLedgers combines worker ledgers into this client's root. A valid
+// collision report is returned as *AggregationCollisionError rather than being
+// collapsed into CommandError, so callers can roll back promotion safely.
+func (c *Client) AggregateLedgers(ctx context.Context, inputs []AggregationInput, base string, dryRun bool) (AggregationResult, error) {
+	if len(inputs) == 0 {
+		return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: at least one input is required")
+	}
+	if strings.TrimSpace(c.root) == "" || strings.TrimSpace(base) == "" {
+		return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: output root and base are required")
+	}
+	args := []string{"aggregate-ledgers"}
+	for _, input := range inputs {
+		if strings.TrimSpace(input.Root) == "" || strings.TrimSpace(input.SourceID) == "" {
+			return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: input root and source ID are required")
+		}
+		args = append(args, "--input", input.Root, "--source-id", input.SourceID)
+	}
+	args = append(args, "--output", c.root, "--base", base)
+	if dryRun {
+		args = append(args, "--dry-run")
+	}
+	args = append(args, "--json")
+
+	out, errb, exit, err := c.r.Run(ctx, args, nil)
+	if err != nil {
+		return AggregationResult{}, err
+	}
+	result, fields, err := parseAggregationResult(out)
+	if err != nil {
+		if exit != 0 {
+			return AggregationResult{}, &CommandError{Cmd: "aggregate-ledgers", Exit: exit, Stderr: string(errb)}
+		}
+		return AggregationResult{}, err
+	}
+	if exit != 0 && exit != 1 {
+		return AggregationResult{}, &CommandError{Cmd: "aggregate-ledgers", Exit: exit, Stderr: string(errb)}
+	}
+	if err := validateAggregationResult(result, fields, dryRun); err != nil {
+		return AggregationResult{}, err
+	}
+	if result.Status == "collision" {
+		if exit != 1 {
+			return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: collision status with exit %d", exit)
+		}
+		return result, &AggregationCollisionError{Result: result}
+	}
+	if exit != 0 {
+		return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: status %q with exit %d", result.Status, exit)
+	}
+	return result, nil
+}
+
+func parseAggregationResult(out []byte) (AggregationResult, map[string]json.RawMessage, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(out, &fields); err != nil {
+		return AggregationResult{}, nil, fmt.Errorf("agentflow aggregate-ledgers: parse %q: %w", out, err)
+	}
+	var result AggregationResult
+	if err := json.Unmarshal(out, &result); err != nil {
+		return AggregationResult{}, nil, fmt.Errorf("agentflow aggregate-ledgers: parse %q: %w", out, err)
+	}
+	return result, fields, nil
+}
+
+func validateAggregationResult(result AggregationResult, fields map[string]json.RawMessage, dryRun bool) error {
+	analysis := result.Status == "collision" || dryRun
+	if result.Status != "ok" && result.Status != "collision" {
+		return fmt.Errorf("agentflow aggregate-ledgers: invalid status %q", result.Status)
+	}
+	required := []string{"status", "sources"}
+	if analysis {
+		required = append(required, "collisions", "planned")
+		if _, exists := fields["written"]; exists {
+			return fmt.Errorf("agentflow aggregate-ledgers: analysis result includes written")
+		}
+	} else {
+		required = append(required, "written")
+		if _, exists := fields["collisions"]; exists {
+			return fmt.Errorf("agentflow aggregate-ledgers: write result includes collisions")
+		}
+		if _, exists := fields["planned"]; exists {
+			return fmt.Errorf("agentflow aggregate-ledgers: write result includes planned")
+		}
+	}
+	for _, name := range required {
+		if _, exists := fields[name]; !exists {
+			return fmt.Errorf("agentflow aggregate-ledgers: missing required field %s", name)
+		}
+	}
+	return nil
 }
 
 // FinishRun runs the terminal gates. On success it returns the deterministic

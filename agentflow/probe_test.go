@@ -104,6 +104,36 @@ func TestProbeParallel_RequiresNextActionAgentWithoutChangingBaseProbe(t *testin
 	}
 }
 
+func TestProbeParallel_RequiresAggregateLedgersAndEveryUsedFlag(t *testing.T) {
+	help := "usage: agentflow {aggregate-ledgers,next-action}"
+	replies := map[string]fakeReply{
+		"--help":            {stdout: []byte(help)},
+		"next-action":       {stdout: []byte("--root --agent --json")},
+		"aggregate-ledgers": {stdout: []byte("--input --source-id --output --base --dry-run --json")},
+	}
+	if err := NewClient(&fakeRunner{replies: replies}, "/ws").ProbeParallel(context.Background()); err != nil {
+		t.Fatalf("ProbeParallel = %v", err)
+	}
+
+	for _, missing := range []string{"aggregate-ledgers", "--input", "--source-id", "--output", "--base", "--dry-run", "--json"} {
+		t.Run(missing, func(t *testing.T) {
+			copy := map[string]fakeReply{}
+			for key, reply := range replies {
+				copy[key] = reply
+			}
+			if missing == "aggregate-ledgers" {
+				copy["--help"] = fakeReply{stdout: []byte("usage: agentflow {next-action}")}
+			} else {
+				copy["aggregate-ledgers"] = fakeReply{stdout: []byte(strings.ReplaceAll(string(replies["aggregate-ledgers"].stdout), missing, ""))}
+			}
+			err := NewClient(&fakeRunner{replies: copy}, "/ws").ProbeParallel(context.Background())
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("missing %s error = %v", missing, err)
+			}
+		})
+	}
+}
+
 func TestProbeWorkflow_RequiresStableRecommendationAndMaterializationSurface(t *testing.T) {
 	baseHelp := "usage: agentflow {init,workflow-contract}"
 	missing := &fakeRunner{replies: map[string]fakeReply{"--help": {stdout: []byte(baseHelp)}}}
