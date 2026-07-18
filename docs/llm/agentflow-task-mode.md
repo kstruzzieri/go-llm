@@ -3,9 +3,10 @@
 Golem planning mode (`-goal`) authors a traceable AgentFlow plan, previews it,
 and locks it only after explicit human approval, then stops.
 Task mode (`-plan`) separately runs that locked plan step-by-step in a
-proof-carrying, single-writer P0 loop. AgentFlow owns durable proof state on
-disk; Golem owns the model loop and the in-process guards that keep the model
-inside what the plan allows. The two are separate, cooperating processes:
+proof-carrying loop. It is serial by default, with an optional isolated initial
+cohort before dependent work continues serially. AgentFlow owns durable proof
+state on disk; Golem owns the model loop and the in-process guards that keep the
+model inside what the plan allows. The two are separate, cooperating processes:
 AgentFlow never runs a model, and Golem never writes proof state directly.
 
 ## Ownership
@@ -100,6 +101,10 @@ Re-run the spike if the AgentFlow validator contract tightens.
 
 - `-plan <plan.json>` — required; the path to the plan document to lock and
   execute. Passing it turns on task mode.
+- `-plan-workers N` — optional, task-mode-only worker bound. The default is `1`
+  (serial), and `N` must be positive. Values above `1` attempt the bounded
+  initial cohort described below and fall back to the unchanged serial loop
+  when fewer than two safe steps qualify.
 - `-approve-plan-edits` and `-approve-plan-gates` — both required in headless
   task mode. Task mode has no TTY approver, so the run refuses to start
   unless both approval classes are opted in up front: one for step-scoped
@@ -280,13 +285,26 @@ mapping. Criteria intended for semantic review instead declare a
 
 ## Scope and deferrals (P0)
 
-P0 executes a locked plan with a single writer driving one step at a time.
-Deferred to later phases:
+With `-plan-workers` above `1`, task mode may run one initial cohort only from a
+fresh, clean Git root and only when the plan has a dependency edge. Qualifying
+steps have no dependencies and own exact, pairwise-disjoint literal files.
+Each runs as a fresh owned worker in its own detached worktree after an opaque
+copy of the canonical `.agent/` state. Golem validates the worker diffs,
+promotes only those source bytes, and lets AgentFlow perform dry-run then real
+ledger aggregation; AgentFlow does not merge source files. Dependent work then
+continues serially in the canonical root, which calls `finish-run` exactly once.
+After successful proof Golem attempts to remove the worktrees; cleanup failures
+warn without invalidating that proof. Run failures preserve and report
+worktrees for inspection.
+
+Still deferred:
 
 - Semantic verification — P0 gates are mechanical, command-based checks only
   (`kind: command`); there is no model-judged review of a step's output.
 - Resuming an interrupted run.
-- Parallel or multi-writer steps.
+- Dynamic waves, retries or reclaim, shared-tree/process/host writers,
+  glob/directory ownership, and merge or conflict automation. This is not a
+  resume API, scheduler, or general parallel execution mode.
 
 AgentFlow's `next-action` output is surfaced to the operator on a failed run
 for recovery context, but it is advisory only: Golem prints the suggested
