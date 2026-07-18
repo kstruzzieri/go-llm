@@ -456,6 +456,55 @@ func TestParallelCoordinatorAcceptsTrackedAndNewUnignoredFiles(t *testing.T) {
 	}
 }
 
+func TestParallelCoordinatorSkipsTrackedPathsWithHiddenIndexEdits(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			runTestGit(t, root, "update-index", flag, "a.go")
+			writeTestFile(t, filepath.Join(root, "a.go"), "hidden caller edit\n", 0o600)
+			if got := runTestGit(t, root, "status", "--porcelain=v1"); got != "" {
+				t.Fatalf("hidden edit unexpectedly visible to status: %q", got)
+			}
+
+			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 3, nil)
+			selected, err := c.selectWorkers(context.Background())
+			defer func() { _ = c.releaseWorkspaceLock() }()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !selected || !reflect.DeepEqual(workerStepIDs(c.workers), []string{"P2", "P3"}) {
+				t.Fatalf("selected = %v, workers = %v", selected, workerStepIDs(c.workers))
+			}
+			if got := readTestFile(t, filepath.Join(root, "a.go")); got != "hidden caller edit\n" {
+				t.Fatalf("hidden edit changed to %q", got)
+			}
+		})
+	}
+}
+
+func TestParallelCoordinatorExcludesConcurrentWorkspaceOwner(t *testing.T) {
+	root := newParallelTestRepo(t)
+	first := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 2, nil)
+	selected, err := first.selectWorkers(context.Background())
+	if err != nil || !selected {
+		t.Fatalf("first selectWorkers() = %v, %v", selected, err)
+	}
+	defer func() { _ = first.releaseWorkspaceLock() }()
+
+	second := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 2, nil)
+	if _, err := second.selectWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "already locked") {
+		t.Fatalf("second selectWorkers() error = %v", err)
+	}
+	if err := first.releaseWorkspaceLock(); err != nil {
+		t.Fatal(err)
+	}
+	selected, err = second.selectWorkers(context.Background())
+	defer func() { _ = second.releaseWorkspaceLock() }()
+	if err != nil || !selected {
+		t.Fatalf("second selectWorkers() after release = %v, %v", selected, err)
+	}
+}
+
 func TestParallelCoordinatorRejectsNonTopLevelOrDirtyRoot(t *testing.T) {
 	root := newParallelTestRepo(t)
 	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
@@ -1099,12 +1148,132 @@ func TestParallelPromotionFailureRollsBackEarlierWrites(t *testing.T) {
 	c := &parallelCoordinator{root: root, workers: []parallelWorker{
 		{root: w1, paths: []string{"conflict"}, changedPaths: []string{"conflict"}},
 		{root: w2, paths: []string{"conflict/child.go"}, changedPaths: []string{"conflict/child.go"}},
+	}, baseSnapshots: map[string]parallelFileSnapshot{
+		"conflict":          {path: "conflict"},
+		"conflict/child.go": {path: "conflict/child.go"},
 	}}
 	if _, err := c.promoteWorkers(); err == nil || !strings.Contains(err.Error(), "promote") {
 		t.Fatalf("promoteWorkers() error = %v", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "conflict")); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("earlier write not rolled back: %v", err)
+	}
+}
+
+func TestParallelPromotionRefusesCanonicalEditAfterSnapshot(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.go")
+	writeTestFile(t, target, "original\n", 0o600)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion := &parallelPromotion{root: rootFS}
+	defer promotion.close()
+	snapshot, err := parallelSnapshot(rootFS, "target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, target, "caller edit\n", 0o600)
+
+	err = promotion.apply(parallelPromotionChange{
+		path: "target.go", data: []byte("worker edit\n"), mode: 0o600,
+	}, snapshot)
+	if err == nil || !strings.Contains(err.Error(), "changed after snapshot") {
+		t.Fatalf("apply() error = %v", err)
+	}
+	if got := readTestFile(t, target); got != "caller edit\n" {
+		t.Fatalf("canonical target = %q", got)
+	}
+}
+
+func TestParallelPromotionUsesPreWorkerCanonicalSnapshot(t *testing.T) {
+	root := newParallelTestRepo(t)
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 2, nil)
+	selected, err := c.selectWorkers(context.Background())
+	if err != nil || !selected {
+		t.Fatalf("selectWorkers() = %v, %v", selected, err)
+	}
+	defer func() { _ = c.releaseWorkspaceLock() }()
+	if err := c.prepareWorkers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.cleanup(context.Background()) }()
+	writeTestFile(t, filepath.Join(c.workers[0].root, "a.go"), "worker edit\n", 0o600)
+	c.workers[0].changedPaths = []string{"a.go"}
+	writeTestFile(t, filepath.Join(root, "a.go"), "caller edit\n", 0o600)
+
+	if _, err := c.promoteWorkers(); err == nil || !strings.Contains(err.Error(), "changed after snapshot") {
+		t.Fatalf("promoteWorkers() error = %v", err)
+	}
+	if got := readTestFile(t, filepath.Join(root, "a.go")); got != "caller edit\n" {
+		t.Fatalf("canonical target = %q", got)
+	}
+}
+
+func TestParallelRollbackRefusesCanonicalEditAfterPromotion(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target.go")
+	writeTestFile(t, target, "original\n", 0o600)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion := &parallelPromotion{root: rootFS}
+	defer promotion.close()
+	snapshot, err := parallelSnapshot(rootFS, "target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := promotion.apply(parallelPromotionChange{
+		path: "target.go", data: []byte("worker edit\n"), mode: 0o600,
+	}, snapshot); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, target, "caller edit\n", 0o600)
+
+	err = promotion.rollback()
+	if err == nil || !strings.Contains(err.Error(), "refuse to restore changed path") {
+		t.Fatalf("rollback() error = %v", err)
+	}
+	if got := readTestFile(t, target); got != "caller edit\n" {
+		t.Fatalf("canonical target = %q", got)
+	}
+}
+
+func TestParallelPromotionCannotEscapeSwappedParent(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, "owned"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outsideTarget := filepath.Join(outside, "target.go")
+	writeTestFile(t, outsideTarget, "outside\n", 0o600)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	promotion := &parallelPromotion{root: rootFS}
+	defer promotion.close()
+	snapshot, err := parallelSnapshot(rootFS, "owned/target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "owned")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(root, "owned")); err != nil {
+		t.Fatal(err)
+	}
+
+	err = promotion.apply(parallelPromotionChange{
+		path: "owned/target.go", data: []byte("worker edit\n"), mode: 0o600,
+	}, snapshot)
+	if err == nil {
+		t.Fatal("apply() unexpectedly followed swapped parent")
+	}
+	if got := readTestFile(t, outsideTarget); got != "outside\n" {
+		t.Fatalf("outside target = %q", got)
 	}
 }
 
@@ -1133,7 +1302,12 @@ func TestParallelPromotionPreMutationFailureDoesNotTrackOrReplaceTarget(t *testi
 				t.Fatal(err)
 			}
 			defer func() { _ = os.Chmod(root, 0o700) }()
-			promotion := &parallelPromotion{root: root}
+			rootFS, err := os.OpenRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer rootFS.Close()
+			promotion := &parallelPromotion{root: rootFS}
 			err = promotion.apply(tt.change, parallelFileSnapshot{
 				path: "target.go", exists: true, data: []byte("original\n"), mode: tt.mode,
 			})
@@ -1185,7 +1359,12 @@ func TestParallelAtomicCleanupJoinsRemovalFailure(t *testing.T) {
 	}
 	writeTestFile(t, filepath.Join(name, "leftover"), "keep\n", 0o600)
 	primary := errors.New("pre-rename failure")
-	err = parallelAtomicCleanup(primary, temp, name, true)
+	rootFS, err := os.OpenRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rootFS.Close()
+	err = parallelAtomicCleanup(primary, rootFS, temp, filepath.Base(name), true)
 	if !errors.Is(err, primary) || !strings.Contains(err.Error(), "remove promotion temp") {
 		t.Fatalf("parallelAtomicCleanup() error = %v", err)
 	}
@@ -1234,6 +1413,21 @@ func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 			c := &parallelCoordinator{root: root, workers: []parallelWorker{{
 				root: worker, paths: []string{"sentinel.go", tt.file}, changedPaths: []string{"sentinel.go", tt.file},
 			}}}
+			rootFS, err := os.OpenRoot(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sentinel, err := parallelSnapshot(rootFS, "sentinel.go")
+			if closeErr := rootFS.Close(); err == nil {
+				err = closeErr
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			c.baseSnapshots = map[string]parallelFileSnapshot{
+				"sentinel.go": sentinel,
+				tt.file:       {path: tt.file},
+			}
 			writeTestFile(t, filepath.Join(worker, "sentinel.go"), "promoted\n", 0o600)
 			if _, err := c.promoteWorkers(); err == nil {
 				t.Fatal("promoteWorkers() unexpectedly succeeded")

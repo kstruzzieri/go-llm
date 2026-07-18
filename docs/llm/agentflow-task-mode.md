@@ -292,17 +292,22 @@ scope, exclude `.agent`, `.git`, and blocked paths, and be pairwise disjoint
 under case-insensitive equality and ancestor checks. Existing paths must be
 tracked regular files at the recorded base; new paths must be unignored with
 safe parents. Symlinks, directories, or ambiguous ownership fall back to
-serial. Each worker runs fresh in its own detached worktree after an opaque copy
-of canonical `.agent/` state. Golem validates worker diffs, promotes only those
-source bytes, and lets AgentFlow perform dry-run then real ledger aggregation;
-AgentFlow does not merge source files. Dependent work then continues serially
-in the canonical root, which calls `finish-run` exactly once.
+serial. Tracked candidates marked `assume-unchanged` or `skip-worktree` are not
+eligible. Each worker runs fresh in its own detached worktree after an opaque
+copy of canonical `.agent/` state. Golem validates worker diffs, promotes only
+those source bytes, and lets AgentFlow perform dry-run then real ledger
+aggregation; AgentFlow does not merge source files. Dependent work then
+continues serially in the canonical root, which calls `finish-run` exactly
+once.
 
 Deterministic promotion, dry-run, or collision failures roll back canonical
-promotion. An ambiguous real aggregation failure preserves promoted bytes;
-later serial or proof failures retain aggregated canonical state. Every failure
-keeps the worker roots. After successful proof Golem attempts cleanup; cleanup
-failures warn without invalidating that proof.
+promotion. During integration Golem holds an exclusive Git-dir lock, anchors
+file operations to the opened canonical root, and compares path bytes, mode,
+and identity before both promotion and rollback. Canonical drift is therefore
+reported instead of overwritten. An ambiguous real aggregation failure
+preserves promoted bytes; later serial or proof failures retain aggregated
+canonical state. Every failure keeps the worker roots. After successful proof
+Golem attempts cleanup; cleanup failures warn without invalidating that proof.
 
 Still deferred:
 

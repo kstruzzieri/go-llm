@@ -1,7 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -39,11 +41,13 @@ type parallelCoordinator struct {
 	aggregate  parallelAggregateFunc
 	interrupts <-chan struct{}
 
-	topLevel   string
-	head       string
-	tempParent string
-	prepared   bool
-	workers    []parallelWorker
+	topLevel      string
+	head          string
+	tempParent    string
+	lockFile      *os.File
+	prepared      bool
+	workers       []parallelWorker
+	baseSnapshots map[string]parallelFileSnapshot
 }
 
 type synchronizedWriter struct {
@@ -62,6 +66,7 @@ type parallelFileSnapshot struct {
 	exists bool
 	data   []byte
 	mode   fs.FileMode
+	info   fs.FileInfo
 }
 
 type parallelPromotionChange struct {
@@ -72,9 +77,14 @@ type parallelPromotionChange struct {
 }
 
 type parallelPromotion struct {
-	root        string
-	applied     []parallelFileSnapshot
+	root        *os.Root
+	applied     []parallelAppliedChange
 	createdDirs []string
+}
+
+type parallelAppliedChange struct {
+	before parallelFileSnapshot
+	after  parallelFileSnapshot
 }
 
 func newParallelCoordinator(root string, plan *agentflow.Plan, maxWorkers int, worker parallelWorkerFunc) *parallelCoordinator {
@@ -130,7 +140,7 @@ func newAssignedParallelWorker(plan *agentflow.Plan, sess *replSession, approveE
 	}
 }
 
-func (c *parallelCoordinator) runCohort(ctx context.Context) (bool, error) {
+func (c *parallelCoordinator) runCohort(ctx context.Context) (ran bool, err error) {
 	waveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan struct{})
@@ -153,6 +163,11 @@ func (c *parallelCoordinator) runCohort(ctx context.Context) (bool, error) {
 	if err != nil || !selected {
 		return false, err
 	}
+	defer func() {
+		if releaseErr := c.releaseWorkspaceLock(); releaseErr != nil {
+			err = errors.Join(err, releaseErr)
+		}
+	}()
 	if err := c.prepareWorkers(waveCtx); err != nil {
 		return true, fmt.Errorf("prepare parallel cohort: %w", err)
 	}
@@ -162,165 +177,149 @@ func (c *parallelCoordinator) runCohort(ctx context.Context) (bool, error) {
 	if err := c.recheckRoot(waveCtx); err != nil {
 		return true, fmt.Errorf("recheck canonical root before promotion: %w", err)
 	}
-	rollback, err := c.promoteWorkers()
+	promotion, err := c.promoteWorkers()
 	if err != nil {
 		return true, err
 	}
+	defer func() {
+		if closeErr := promotion.close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close parallel promotion root: %w", closeErr))
+		}
+	}()
 	if c.aggregate == nil {
-		return true, parallelRollbackError(errors.New("parallel aggregate function is nil"), rollback)
+		return true, parallelRollbackError(errors.New("parallel aggregate function is nil"), promotion.rollback)
 	}
 	inputs := make([]agentflow.AggregationInput, len(c.workers))
 	for i, worker := range c.workers {
 		inputs[i] = agentflow.AggregationInput{Root: worker.root, SourceID: worker.sourceID}
 	}
 	if _, err := c.aggregate(waveCtx, inputs, c.root, c.head, true); err != nil {
-		return true, parallelRollbackError(fmt.Errorf("dry-run aggregate ledgers: %w", err), rollback)
+		return true, parallelRollbackError(fmt.Errorf("dry-run aggregate ledgers: %w", err), promotion.rollback)
 	}
 	if _, err := c.aggregate(waveCtx, inputs, c.root, c.head, false); err != nil {
 		var collision *agentflow.AggregationCollisionError
 		if errors.As(err, &collision) {
-			return true, parallelRollbackError(fmt.Errorf("aggregate ledgers collision: %w", err), rollback)
+			return true, parallelRollbackError(fmt.Errorf("aggregate ledgers collision: %w", err), promotion.rollback)
 		}
 		return true, fmt.Errorf("aggregate ledgers real-write outcome is ambiguous; promoted source preserved: %w", err)
 	}
 	return true, nil
 }
 
-func (c *parallelCoordinator) promoteWorkers() (func() error, error) {
+func (c *parallelCoordinator) promoteWorkers() (*parallelPromotion, error) {
+	root, err := os.OpenRoot(c.root)
+	if err != nil {
+		return nil, fmt.Errorf("open canonical promotion root: %w", err)
+	}
+	promotion := &parallelPromotion{root: root}
 	changes, snapshots, err := c.parallelPromotionChanges()
 	if err != nil {
-		return nil, fmt.Errorf("snapshot parallel promotion: %w", err)
+		return nil, errors.Join(fmt.Errorf("snapshot parallel promotion: %w", err), promotion.close())
 	}
-	promotion := &parallelPromotion{root: c.root}
-	rollback := promotion.rollback
 	for i, change := range changes {
 		if err := promotion.apply(change, snapshots[i]); err != nil {
-			return nil, parallelRollbackError(fmt.Errorf("promote %s: %w", change.path, err), rollback)
+			return nil, errors.Join(
+				parallelRollbackError(fmt.Errorf("promote %s: %w", change.path, err), promotion.rollback),
+				promotion.close(),
+			)
 		}
 	}
-	return rollback, nil
+	return promotion, nil
 }
 
 func (c *parallelCoordinator) parallelPromotionChanges() ([]parallelPromotionChange, []parallelFileSnapshot, error) {
 	var changes []parallelPromotionChange
 	var snapshots []parallelFileSnapshot
 	for _, worker := range c.workers {
+		workerRoot, err := os.OpenRoot(worker.root)
+		if err != nil {
+			return nil, nil, fmt.Errorf("open worker %s promotion root: %w", worker.sourceID, err)
+		}
 		assigned := make(map[string]struct{}, len(worker.paths))
 		for _, file := range worker.paths {
 			assigned[file] = struct{}{}
 		}
 		for _, file := range worker.changedPaths {
 			if _, ok := assigned[file]; !ok {
+				_ = workerRoot.Close()
 				return nil, nil, fmt.Errorf("worker %s changed unvalidated path %q", worker.sourceID, file)
 			}
-			canonical, err := parallelPromotionPath(c.root, file)
+			source, err := parallelSnapshot(workerRoot, file)
 			if err != nil {
-				return nil, nil, err
-			}
-			source, err := parallelPromotionPath(worker.root, file)
-			if err != nil {
-				return nil, nil, err
-			}
-			change := parallelPromotionChange{path: file}
-			sourceExists, err := parallelSafePath(worker.root, file)
-			if err != nil {
+				_ = workerRoot.Close()
 				return nil, nil, fmt.Errorf("inspect worker %s path %q: %w", worker.sourceID, file, err)
 			}
-			if sourceExists {
-				info, err := os.Lstat(source)
-				if err != nil {
-					return nil, nil, err
-				}
-				change.data, err = os.ReadFile(source)
-				if err != nil {
-					return nil, nil, err
-				}
-				change.mode = parallelCopiedMode(info.Mode())
-			} else {
-				change.delete = true
+			change := parallelPromotionChange{path: file, data: source.data, mode: source.mode, delete: !source.exists}
+			snapshot, ok := c.baseSnapshots[file]
+			if !ok {
+				_ = workerRoot.Close()
+				return nil, nil, fmt.Errorf("canonical path %q has no pre-worker snapshot", file)
 			}
-			snapshot := parallelFileSnapshot{path: file}
-			snapshot.exists, err = parallelSafePath(c.root, file)
-			if err != nil {
-				return nil, nil, fmt.Errorf("inspect canonical path %q: %w", file, err)
-			}
-			if !sourceExists && !snapshot.exists {
+			if !source.exists && !snapshot.exists {
+				_ = workerRoot.Close()
 				return nil, nil, fmt.Errorf("worker %s deletion target %q does not exist", worker.sourceID, file)
-			}
-			if snapshot.exists {
-				info, err := os.Lstat(canonical)
-				if err != nil {
-					return nil, nil, err
-				}
-				snapshot.data, err = os.ReadFile(canonical)
-				if err != nil {
-					return nil, nil, err
-				}
-				snapshot.mode = parallelCopiedMode(info.Mode())
 			}
 			changes = append(changes, change)
 			snapshots = append(snapshots, snapshot)
+		}
+		if err := workerRoot.Close(); err != nil {
+			return nil, nil, fmt.Errorf("close worker %s promotion root: %w", worker.sourceID, err)
 		}
 	}
 	return changes, snapshots, nil
 }
 
 func (p *parallelPromotion) apply(change parallelPromotionChange, snapshot parallelFileSnapshot) error {
-	target, err := parallelPromotionPath(p.root, change.path)
-	if err != nil {
+	if err := parallelRequireSnapshot(p.root, snapshot); err != nil {
 		return err
 	}
 	if change.delete {
-		info, err := os.Lstat(target)
-		if err != nil {
+		if err := p.root.Remove(filepath.FromSlash(change.path)); err != nil {
 			return err
 		}
-		if !info.Mode().IsRegular() {
-			return errors.New("canonical deletion target is not a regular file")
-		}
-		if err := os.Remove(target); err != nil {
-			return err
-		}
-		p.applied = append(p.applied, snapshot)
+		p.applied = append(p.applied, parallelAppliedChange{
+			before: snapshot,
+			after:  parallelFileSnapshot{path: change.path},
+		})
 		return nil
 	}
-	created, err := parallelEnsureParents(p.root, target)
+	created, err := parallelEnsureParents(p.root, change.path)
 	p.createdDirs = append(p.createdDirs, created...)
 	if err != nil {
 		return err
 	}
-	info, err := os.Lstat(target)
-	if snapshot.exists {
-		if err != nil {
-			return fmt.Errorf("canonical target disappeared: %w", err)
-		}
-		if !info.Mode().IsRegular() {
-			return errors.New("canonical target is not a regular file")
-		}
-	} else {
-		if err == nil {
-			return errors.New("canonical target appeared after snapshot")
-		}
-		if !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
-	}
-	if err := parallelAtomicWrite(target, change.data, change.mode); err != nil {
+	if err := parallelRequireSnapshot(p.root, snapshot); err != nil {
 		return err
 	}
-	p.applied = append(p.applied, snapshot)
+	if err := parallelAtomicWrite(p.root, change.path, change.data, change.mode); err != nil {
+		return err
+	}
+	p.applied = append(p.applied, parallelAppliedChange{
+		before: snapshot,
+		after:  parallelFileSnapshot{path: change.path, exists: true, data: change.data, mode: change.mode},
+	})
+	after, err := parallelSnapshot(p.root, change.path)
+	if err != nil {
+		return fmt.Errorf("verify promoted path: %w", err)
+	}
+	if after.mode != change.mode || !bytes.Equal(after.data, change.data) {
+		return errors.New("promoted path does not match worker source")
+	}
+	p.applied[len(p.applied)-1].after = after
 	return nil
 }
 
-func parallelAtomicWrite(target string, data []byte, mode fs.FileMode) (err error) {
-	temp, err := os.CreateTemp(filepath.Dir(target), ".golem-promote-*")
+func parallelAtomicWrite(root *os.Root, target string, data []byte, mode fs.FileMode) (err error) {
+	tempName := path.Join(path.Dir(target), ".golem-promote-"+rand.Text())
+	temp, err := root.OpenFile(filepath.FromSlash(tempName), os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return err
 	}
-	name := temp.Name()
 	closed := false
 	defer func() {
-		err = parallelAtomicCleanup(err, temp, name, closed)
+		if err != nil {
+			err = parallelAtomicCleanup(err, root, temp, tempName, closed)
+		}
 	}()
 	if _, err := temp.Write(data); err != nil {
 		return err
@@ -333,17 +332,17 @@ func parallelAtomicWrite(target string, data []byte, mode fs.FileMode) (err erro
 		return closeErr
 	}
 	closed = true
-	return os.Rename(name, target)
+	return root.Rename(filepath.FromSlash(tempName), filepath.FromSlash(target))
 }
 
-func parallelAtomicCleanup(primary error, temp *os.File, name string, closed bool) error {
+func parallelAtomicCleanup(primary error, root *os.Root, temp *os.File, name string, closed bool) error {
 	errs := []error{primary}
 	if !closed {
 		if err := temp.Close(); err != nil {
 			errs = append(errs, fmt.Errorf("close promotion temp %s: %w", name, err))
 		}
 	}
-	if err := os.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+	if err := root.Remove(filepath.FromSlash(name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		errs = append(errs, fmt.Errorf("remove promotion temp %s: %w", name, err))
 	}
 	return errors.Join(errs...)
@@ -352,33 +351,90 @@ func parallelAtomicCleanup(primary error, temp *os.File, name string, closed boo
 func (p *parallelPromotion) rollback() error {
 	var errs []error
 	for i := len(p.applied) - 1; i >= 0; i-- {
-		snapshot := p.applied[i]
-		target, err := parallelPromotionPath(p.root, snapshot.path)
-		if err != nil {
-			errs = append(errs, err)
+		applied := p.applied[i]
+		if err := parallelRequireSnapshot(p.root, applied.after); err != nil {
+			errs = append(errs, fmt.Errorf("refuse to restore changed path %s: %w", applied.after.path, err))
 			continue
 		}
-		if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			errs = append(errs, fmt.Errorf("restore %s: %w", snapshot.path, err))
+		if !applied.before.exists {
+			if err := p.root.Remove(filepath.FromSlash(applied.after.path)); err != nil {
+				errs = append(errs, fmt.Errorf("restore %s: %w", applied.after.path, err))
+			}
 			continue
 		}
-		if !snapshot.exists {
+		if err := parallelRequireParents(p.root, applied.before.path); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", applied.before.path, err))
 			continue
 		}
-		if err := os.WriteFile(target, snapshot.data, snapshot.mode.Perm()); err != nil {
-			errs = append(errs, fmt.Errorf("restore %s: %w", snapshot.path, err))
-			continue
-		}
-		if err := os.Chmod(target, snapshot.mode); err != nil {
-			errs = append(errs, fmt.Errorf("restore mode %s: %w", snapshot.path, err))
+		if err := parallelAtomicWrite(p.root, applied.before.path, applied.before.data, applied.before.mode); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", applied.before.path, err))
 		}
 	}
 	for i := len(p.createdDirs) - 1; i >= 0; i-- {
-		if err := os.Remove(p.createdDirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := p.root.Remove(filepath.FromSlash(p.createdDirs[i])); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			errs = append(errs, fmt.Errorf("remove created parent %s: %w", p.createdDirs[i], err))
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (p *parallelPromotion) close() error {
+	if p == nil || p.root == nil {
+		return nil
+	}
+	err := p.root.Close()
+	p.root = nil
+	return err
+}
+
+func parallelSnapshot(root *os.Root, file string) (parallelFileSnapshot, error) {
+	if _, err := parallelPromotionPath(root.Name(), file); err != nil {
+		return parallelFileSnapshot{}, err
+	}
+	snapshot := parallelFileSnapshot{path: file}
+	rootPath := filepath.FromSlash(file)
+	info, err := root.Lstat(rootPath)
+	if errors.Is(err, fs.ErrNotExist) {
+		return snapshot, nil
+	}
+	if err != nil {
+		return snapshot, err
+	}
+	if !info.Mode().IsRegular() {
+		return snapshot, errors.New("path is not a regular file")
+	}
+	fileHandle, err := root.Open(rootPath)
+	if err != nil {
+		return snapshot, err
+	}
+	defer fileHandle.Close()
+	openedInfo, err := fileHandle.Stat()
+	if err != nil {
+		return snapshot, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return snapshot, errors.New("path changed while opening snapshot")
+	}
+	snapshot.data, err = io.ReadAll(fileHandle)
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.exists = true
+	snapshot.mode = parallelCopiedMode(openedInfo.Mode())
+	snapshot.info = openedInfo
+	return snapshot, nil
+}
+
+func parallelRequireSnapshot(root *os.Root, want parallelFileSnapshot) error {
+	got, err := parallelSnapshot(root, want.path)
+	if err != nil {
+		return err
+	}
+	if got.exists != want.exists || got.mode != want.mode || !bytes.Equal(got.data, want.data) ||
+		(want.exists && want.info != nil && !os.SameFile(want.info, got.info)) {
+		return errors.New("canonical path changed after snapshot")
+	}
+	return nil
 }
 
 func parallelRollbackError(primary error, rollback func() error) error {
@@ -408,21 +464,30 @@ func parallelPromotionPath(root, file string) (string, error) {
 	return target, nil
 }
 
-func parallelEnsureParents(root, target string) ([]string, error) {
-	rel, err := filepath.Rel(root, filepath.Dir(target))
-	if err != nil {
-		return nil, err
-	}
-	if rel == "." {
+func parallelEnsureParents(root *os.Root, file string) ([]string, error) {
+	return parallelParents(root, file, true)
+}
+
+func parallelRequireParents(root *os.Root, file string) error {
+	_, err := parallelParents(root, file, false)
+	return err
+}
+
+func parallelParents(root *os.Root, file string, create bool) ([]string, error) {
+	dir := path.Dir(file)
+	if dir == "." {
 		return nil, nil
 	}
 	var created []string
-	current := root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
+	current := ""
+	for _, part := range strings.Split(dir, "/") {
+		current = path.Join(current, part)
+		info, err := root.Lstat(filepath.FromSlash(current))
 		if errors.Is(err, fs.ErrNotExist) {
-			if err := os.Mkdir(current, 0o755); err != nil {
+			if !create {
+				return created, errors.New("promotion parent disappeared")
+			}
+			if err := root.Mkdir(filepath.FromSlash(current), 0o755); err != nil {
 				return created, err
 			}
 			created = append(created, current)
@@ -530,6 +595,7 @@ func parallelPathPrefix(pathname, prefix string) bool {
 
 func (c *parallelCoordinator) selectWorkers(ctx context.Context) (bool, error) {
 	c.prepared = false
+	c.baseSnapshots = nil
 	if c.maxWorkers < 2 || !parallelGraphHasEdge(c.plan) {
 		c.workers = nil
 		return false, nil
@@ -562,7 +628,42 @@ func (c *parallelCoordinator) selectWorkers(ctx context.Context) (bool, error) {
 			step: step, paths: paths, ownerID: "golem-w" + id, sourceID: "w" + id,
 		})
 	}
-	return len(c.workers) >= 2, nil
+	if len(c.workers) < 2 {
+		return false, nil
+	}
+	if err := c.acquireWorkspaceLock(ctx); err != nil {
+		return false, err
+	}
+	if err := c.recheckRoot(ctx); err != nil {
+		return false, errors.Join(err, c.releaseWorkspaceLock())
+	}
+	if err := c.captureBaseSnapshots(); err != nil {
+		return false, errors.Join(err, c.releaseWorkspaceLock())
+	}
+	if err := c.recheckRoot(ctx); err != nil {
+		return false, errors.Join(err, c.releaseWorkspaceLock())
+	}
+	return true, nil
+}
+
+func (c *parallelCoordinator) captureBaseSnapshots() (err error) {
+	root, err := os.OpenRoot(c.root)
+	if err != nil {
+		return fmt.Errorf("open canonical snapshot root: %w", err)
+	}
+	defer func() { err = errors.Join(err, root.Close()) }()
+	snapshots := make(map[string]parallelFileSnapshot)
+	for _, worker := range c.workers {
+		for _, file := range worker.paths {
+			snapshot, err := parallelSnapshot(root, file)
+			if err != nil {
+				return fmt.Errorf("snapshot canonical path %q: %w", file, err)
+			}
+			snapshots[file] = snapshot
+		}
+	}
+	c.baseSnapshots = snapshots
+	return nil
 }
 
 func (c *parallelCoordinator) prepareWorkers(ctx context.Context) error {
@@ -706,6 +807,54 @@ func (c *parallelCoordinator) validateWorkerGitState(ctx context.Context, worker
 	return nil
 }
 
+func (c *parallelCoordinator) acquireWorkspaceLock(ctx context.Context) error {
+	if c.lockFile != nil {
+		return errors.New("parallel workspace lock is already held")
+	}
+	out, err := runParallelGit(ctx, c.root, "rev-parse", "--path-format=absolute", "--git-path", "golem-parallel.lock")
+	if err != nil {
+		return fmt.Errorf("resolve parallel workspace lock: %w", err)
+	}
+	lockPath := filepath.Clean(strings.TrimSpace(string(out)))
+	if !filepath.IsAbs(lockPath) {
+		lockPath = filepath.Join(c.root, lockPath)
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return fmt.Errorf("parallel workspace is already locked: %s", lockPath)
+		}
+		return fmt.Errorf("acquire parallel workspace lock: %w", err)
+	}
+	c.lockFile = file
+	return nil
+}
+
+func (c *parallelCoordinator) releaseWorkspaceLock() error {
+	if c.lockFile == nil {
+		return nil
+	}
+	file, lockPath := c.lockFile, c.lockFile.Name()
+	c.lockFile = nil
+	heldInfo, statErr := file.Stat()
+	closeErr := file.Close()
+	if statErr != nil {
+		return errors.Join(closeErr, fmt.Errorf("inspect held parallel workspace lock: %w", statErr))
+	}
+	pathInfo, pathErr := os.Lstat(lockPath)
+	if pathErr == nil && !os.SameFile(heldInfo, pathInfo) {
+		return errors.Join(closeErr, errors.New("parallel workspace lock path changed while held"))
+	}
+	if pathErr != nil && !errors.Is(pathErr, fs.ErrNotExist) {
+		return errors.Join(closeErr, fmt.Errorf("inspect parallel workspace lock during release: %w", pathErr))
+	}
+	var removeErr error
+	if pathErr == nil {
+		removeErr = os.Remove(lockPath)
+	}
+	return errors.Join(closeErr, removeErr)
+}
+
 func (c *parallelCoordinator) recordBase(ctx context.Context) error {
 	abs, err := filepath.Abs(c.root)
 	if err != nil {
@@ -775,6 +924,13 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 		return false, nil
 	}
 	if exists {
+		index, err := runParallelGit(ctx, c.root, "ls-files", "-v", "-z", "--", ":(literal)"+file)
+		if err != nil {
+			return false, fmt.Errorf("inspect index flags for %s: %w", file, err)
+		}
+		if string(index) != "H "+file+"\x00" {
+			return false, nil
+		}
 		out, err := runParallelGit(ctx, c.root, "ls-tree", "-z", "--full-tree", "--name-only", c.head, "--", ":(literal)"+file)
 		if err != nil {
 			return false, fmt.Errorf("check whether %s is tracked at %s: %w", file, c.head, err)

@@ -146,7 +146,8 @@ aggregates ledgers. All later work and finalization reuse the current driver.
   orchestrator run exactly one step without init, selection, review,
   aggregation, or finalization.
 - [ ] Run focused tests and confirm red failures.
-- [ ] Implement snapshot-backed promotion of only validated changed paths.
+- [ ] Implement root-anchored, lock-protected, snapshot-backed promotion of only
+  validated changed paths, with compare-before-write and compare-before-rollback.
 - [ ] Wire dry-run and real aggregation with the exact base SHA; distinguish
   guaranteed no-write collisions from ambiguous real-write failures.
 - [ ] Factor root-specific step-runner construction so each worker owns its

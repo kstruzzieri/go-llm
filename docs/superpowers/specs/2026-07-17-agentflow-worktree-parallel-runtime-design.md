@@ -100,10 +100,11 @@ and still clean before promotion. This prevents parallel mode from overwriting
 caller changes. Golem records the exact `HEAD` and Git toplevel and revalidates
 both immediately before promotion, so a clean checkout or commit during the
 wave cannot be mistaken for the original base. An existing selected path must
-be tracked at that base; a new selected path must not be ignored. Each worker's
-final Git status, including ignored entries outside `.agent/`, must be a subset
-of its assigned literal paths. That catches model drift and gate-generated
-shared artifacts before canonical source or proof state changes.
+be tracked at that base and have neither `assume-unchanged` nor `skip-worktree`
+set; a new selected path must not be ignored. Each worker's final Git status,
+including ignored entries outside `.agent/`, must be a subset of its assigned
+literal paths. That catches model drift and gate-generated shared artifacts
+before canonical source or proof state changes.
 
 ## Lifecycle and ownership
 
@@ -141,9 +142,14 @@ Agentflow's execution contract directly to simulate that future mode.
 
 ## Canonical integration and proof
 
-Workers are quiescent before integration. The coordinator snapshots each
-affected canonical file, promotes only the validated worker diff, and rolls the
-files back if promotion or dry-run aggregation fails.
+Before workers start, the coordinator snapshots every assigned canonical path.
+Workers are quiescent before integration. The coordinator promotes only the
+validated worker diff and rolls the files back if promotion or dry-run
+aggregation fails. It holds one exclusive Git-dir lock across snapshot,
+promotion, and aggregation; opens a root-anchored filesystem handle so a
+swapped parent cannot escape the invocation root; and compares bytes, mode, and
+file identity immediately before both replacement and rollback. Any canonical
+drift is a hard stop that preserves the newer caller bytes.
 
 It then calls:
 
