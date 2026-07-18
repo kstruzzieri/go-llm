@@ -514,6 +514,392 @@ func TestParallelSetupFailurePreservesCreatedWorktree(t *testing.T) {
 	_ = c.cleanup(context.Background())
 }
 
+func TestParallelRunCohortPromotesFilesAndAggregatesInOrder(t *testing.T) {
+	root := newParallelTestRepo(t)
+	plan := &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{
+		{ID: "P1", Files: []string{"nested/created.go", "a.go"}},
+		{ID: "P2", Files: []string{"z.go", "b.go"}},
+		{ID: "PD", Files: []string{"dependent.go"}, DependsOn: []string{"P1", "P2"}},
+	}}
+	var active atomic.Int32
+	worker := func(_ context.Context, w parallelWorker) error {
+		active.Add(1)
+		defer active.Add(-1)
+		switch w.sourceID {
+		case "w1":
+			if err := os.MkdirAll(filepath.Join(w.root, "nested"), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(w.root, "nested", "created.go"), []byte("created\n"), 0o700); err != nil {
+				return err
+			}
+			if err := os.WriteFile(filepath.Join(w.root, "a.go"), []byte("modified\n"), 0o600); err != nil {
+				return err
+			}
+			return os.Chmod(filepath.Join(w.root, "a.go"), 0o750)
+		case "w2":
+			if err := os.WriteFile(filepath.Join(w.root, "z.go"), []byte("z\n"), 0o640); err != nil {
+				return err
+			}
+			return os.Remove(filepath.Join(w.root, "b.go"))
+		default:
+			return fmt.Errorf("unexpected worker %s", w.sourceID)
+		}
+	}
+	type aggregateCall struct {
+		inputs []agentflow.AggregationInput
+		output string
+		base   string
+		dryRun bool
+	}
+	var calls []aggregateCall
+	c := newParallelCoordinator(root, plan, 2, worker)
+	c.aggregate = func(_ context.Context, inputs []agentflow.AggregationInput, output, base string, dryRun bool) (agentflow.AggregationResult, error) {
+		if got := active.Load(); got != 0 {
+			return agentflow.AggregationResult{}, fmt.Errorf("aggregate called with %d active workers", got)
+		}
+		calls = append(calls, aggregateCall{inputs: append([]agentflow.AggregationInput(nil), inputs...), output: output, base: base, dryRun: dryRun})
+		if got := readTestFile(t, filepath.Join(root, "a.go")); got != "modified\n" {
+			t.Fatalf("canonical a.go = %q during aggregation", got)
+		}
+		return agentflow.AggregationResult{Status: "ok"}, nil
+	}
+
+	ran, err := c.runCohort(context.Background())
+	if err != nil || !ran {
+		t.Fatalf("runCohort() = %v, %v", ran, err)
+	}
+	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+	if roots := c.preservedRoots(); len(roots) != 2 {
+		t.Fatalf("preserved roots = %v", roots)
+	}
+	for _, preserved := range c.preservedRoots() {
+		if _, err := os.Stat(preserved); err != nil {
+			t.Fatalf("runCohort cleaned worker root %s: %v", preserved, err)
+		}
+	}
+	if want := []aggregateCall{
+		{inputs: []agentflow.AggregationInput{{Root: c.workers[0].root, SourceID: "w1"}, {Root: c.workers[1].root, SourceID: "w2"}}, output: c.root, base: c.head, dryRun: true},
+		{inputs: []agentflow.AggregationInput{{Root: c.workers[0].root, SourceID: "w1"}, {Root: c.workers[1].root, SourceID: "w2"}}, output: c.root, base: c.head, dryRun: false},
+	}; !reflect.DeepEqual(calls, want) {
+		t.Fatalf("aggregate calls = %#v, want %#v", calls, want)
+	}
+	if want := []string{"nested/created.go", "a.go"}; !reflect.DeepEqual(c.workers[0].changedPaths, want) {
+		t.Fatalf("w1 changed paths = %v, want %v", c.workers[0].changedPaths, want)
+	}
+	if want := []string{"z.go", "b.go"}; !reflect.DeepEqual(c.workers[1].changedPaths, want) {
+		t.Fatalf("w2 changed paths = %v, want %v", c.workers[1].changedPaths, want)
+	}
+	if got := readTestFile(t, filepath.Join(root, "nested", "created.go")); got != "created\n" {
+		t.Fatalf("created file = %q", got)
+	}
+	if info, err := os.Stat(filepath.Join(root, "nested", "created.go")); err != nil || info.Mode().Perm() != 0o700 {
+		t.Fatalf("created mode = %v, %v", info, err)
+	}
+	if info, err := os.Stat(filepath.Join(root, "a.go")); err != nil || info.Mode().Perm() != 0o750 {
+		t.Fatalf("modified mode = %v, %v", info, err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "b.go")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("deleted b.go still exists: %v", err)
+	}
+}
+
+func TestParallelRunCohortRollbackBoundaries(t *testing.T) {
+	for _, tt := range []struct {
+		name          string
+		aggregate     func(bool) error
+		wantPromoted  bool
+		wantAmbiguous bool
+	}{
+		{name: "dry failure", aggregate: func(dry bool) error {
+			if dry {
+				return errors.New("dry failed")
+			}
+			return nil
+		}},
+		{name: "dry collision", aggregate: func(dry bool) error {
+			if dry {
+				return &agentflow.AggregationCollisionError{Result: agentflow.AggregationResult{Status: "collision"}}
+			}
+			return nil
+		}},
+		{name: "real collision", aggregate: func(dry bool) error {
+			if !dry {
+				return &agentflow.AggregationCollisionError{Result: agentflow.AggregationResult{Status: "collision"}}
+			}
+			return nil
+		}},
+		{name: "ambiguous real failure", wantPromoted: true, wantAmbiguous: true, aggregate: func(dry bool) error {
+			if !dry {
+				return errors.New("transport failed")
+			}
+			return nil
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			worker := func(_ context.Context, w parallelWorker) error {
+				if w.sourceID == "w1" {
+					if err := os.MkdirAll(filepath.Join(w.root, "new", "parent"), 0o700); err != nil {
+						return err
+					}
+					return os.WriteFile(filepath.Join(w.root, "new", "parent", "created.go"), []byte("created\n"), 0o640)
+				}
+				if err := os.WriteFile(filepath.Join(w.root, "a.go"), []byte("promoted\n"), 0o600); err != nil {
+					return err
+				}
+				if err := os.Chmod(filepath.Join(w.root, "a.go"), 0o750); err != nil {
+					return err
+				}
+				return os.Remove(filepath.Join(w.root, "b.go"))
+			}
+			plan := &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{
+				{ID: "P1", Files: []string{"new/parent/created.go"}},
+				{ID: "P2", Files: []string{"a.go", "b.go"}},
+				{ID: "PD", Files: []string{"dependent.go"}, DependsOn: []string{"P1", "P2"}},
+			}}
+			c := newParallelCoordinator(root, plan, 2, worker)
+			var dryRuns []bool
+			c.aggregate = func(_ context.Context, _ []agentflow.AggregationInput, _, _ string, dry bool) (agentflow.AggregationResult, error) {
+				dryRuns = append(dryRuns, dry)
+				return agentflow.AggregationResult{Status: "ok"}, tt.aggregate(dry)
+			}
+			ran, err := c.runCohort(context.Background())
+			if err == nil || !ran {
+				t.Fatalf("runCohort() = %v, %v", ran, err)
+			}
+			t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+			if tt.wantAmbiguous != strings.Contains(err.Error(), "ambiguous") {
+				t.Fatalf("runCohort() error = %v, ambiguous=%v", err, tt.wantAmbiguous)
+			}
+			if tt.wantPromoted {
+				if got := readTestFile(t, filepath.Join(root, "a.go")); got != "promoted\n" {
+					t.Fatalf("promoted a.go = %q", got)
+				}
+				if _, err := os.Stat(filepath.Join(root, "new", "parent", "created.go")); err != nil {
+					t.Fatalf("promoted new file: %v", err)
+				}
+				if _, err := os.Lstat(filepath.Join(root, "b.go")); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("promoted deletion: %v", err)
+				}
+			} else {
+				if got := readTestFile(t, filepath.Join(root, "a.go")); got != "a\n" {
+					t.Fatalf("rolled back a.go = %q", got)
+				}
+				if _, err := os.Lstat(filepath.Join(root, "new")); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("created parent not removed: %v", err)
+				}
+				if got := readTestFile(t, filepath.Join(root, "b.go")); got != "b\n" {
+					t.Fatalf("rolled back b.go = %q", got)
+				}
+				if info, err := os.Stat(filepath.Join(root, "a.go")); err != nil || info.Mode().Perm() != 0o600 {
+					t.Fatalf("rolled back mode = %v, %v", info, err)
+				}
+			}
+			if tt.name == "real collision" || tt.wantAmbiguous {
+				if !reflect.DeepEqual(dryRuns, []bool{true, false}) {
+					t.Fatalf("aggregate order = %v", dryRuns)
+				}
+			} else if !reflect.DeepEqual(dryRuns, []bool{true}) {
+				t.Fatalf("aggregate order = %v", dryRuns)
+			}
+		})
+	}
+}
+
+func TestParallelPromotionFailureRollsBackEarlierWrites(t *testing.T) {
+	root := t.TempDir()
+	w1 := t.TempDir()
+	w2 := t.TempDir()
+	writeTestFile(t, filepath.Join(w1, "conflict"), "first\n", 0o600)
+	if err := os.Mkdir(filepath.Join(w2, "conflict"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(w2, "conflict", "child.go"), "second\n", 0o600)
+	c := &parallelCoordinator{root: root, workers: []parallelWorker{
+		{root: w1, paths: []string{"conflict"}, changedPaths: []string{"conflict"}},
+		{root: w2, paths: []string{"conflict/child.go"}, changedPaths: []string{"conflict/child.go"}},
+	}}
+	if _, err := c.promoteWorkers(); err == nil || !strings.Contains(err.Error(), "promote") {
+		t.Fatalf("promoteWorkers() error = %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "conflict")); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("earlier write not rolled back: %v", err)
+	}
+}
+
+func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		file  string
+		setup func(*testing.T, string, string)
+	}{
+		{name: "escaping path", file: "../escape.go"},
+		{name: "worker symlink", file: "unsafe.go", setup: func(t *testing.T, _, worker string) {
+			if err := os.Symlink("target", filepath.Join(worker, "unsafe.go")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "worker directory", file: "unsafe.go", setup: func(t *testing.T, _, worker string) {
+			if err := os.Mkdir(filepath.Join(worker, "unsafe.go"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "canonical symlink parent", file: "unsafe/file.go", setup: func(t *testing.T, root, worker string) {
+			if err := os.Mkdir(filepath.Join(worker, "unsafe"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			writeTestFile(t, filepath.Join(worker, "unsafe", "file.go"), "worker\n", 0o600)
+			if err := os.Symlink("elsewhere", filepath.Join(root, "unsafe")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "canonical symlink", file: "unsafe.go", setup: func(t *testing.T, root, worker string) {
+			writeTestFile(t, filepath.Join(worker, "unsafe.go"), "worker\n", 0o600)
+			if err := os.Symlink("sentinel.go", filepath.Join(root, "unsafe.go")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			worker := t.TempDir()
+			writeTestFile(t, filepath.Join(root, "sentinel.go"), "original\n", 0o600)
+			if tt.setup != nil {
+				tt.setup(t, root, worker)
+			}
+			c := &parallelCoordinator{root: root, workers: []parallelWorker{{
+				root: worker, paths: []string{"sentinel.go", tt.file}, changedPaths: []string{"sentinel.go", tt.file},
+			}}}
+			writeTestFile(t, filepath.Join(worker, "sentinel.go"), "promoted\n", 0o600)
+			if _, err := c.promoteWorkers(); err == nil {
+				t.Fatal("promoteWorkers() unexpectedly succeeded")
+			}
+			if got := readTestFile(t, filepath.Join(root, "sentinel.go")); got != "original\n" {
+				t.Fatalf("promotion wrote before validating every path: %q", got)
+			}
+		})
+	}
+}
+
+func TestParallelPromotionRejectsSpecialFile(t *testing.T) {
+	mkfifo, err := exec.LookPath("mkfifo")
+	if err != nil {
+		t.Skip("mkfifo unavailable")
+	}
+	root := t.TempDir()
+	worker := t.TempDir()
+	cmd := exec.Command(mkfifo, filepath.Join(worker, "unsafe.go"))
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("mkfifo: %v: %s", err, out)
+	}
+	c := &parallelCoordinator{root: root, workers: []parallelWorker{{
+		root: worker, paths: []string{"unsafe.go"}, changedPaths: []string{"unsafe.go"},
+	}}}
+	if _, err := c.promoteWorkers(); err == nil || !strings.Contains(err.Error(), "regular") {
+		t.Fatalf("promoteWorkers() error = %v", err)
+	}
+}
+
+func TestParallelRunCohortReportsRollbackFailure(t *testing.T) {
+	root := newParallelTestRepo(t)
+	worker := func(_ context.Context, w parallelWorker) error {
+		return os.WriteFile(filepath.Join(w.root, filepath.FromSlash(w.paths[0])), []byte("promoted\n"), 0o600)
+	}
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
+	c.aggregate = func(_ context.Context, _ []agentflow.AggregationInput, _, _ string, dry bool) (agentflow.AggregationResult, error) {
+		if dry {
+			if err := os.Remove(filepath.Join(root, "a.go")); err != nil {
+				return agentflow.AggregationResult{}, err
+			}
+			if err := os.Mkdir(filepath.Join(root, "a.go"), 0o700); err != nil {
+				return agentflow.AggregationResult{}, err
+			}
+			if err := os.WriteFile(filepath.Join(root, "a.go", "external"), []byte("keep\n"), 0o600); err != nil {
+				return agentflow.AggregationResult{}, err
+			}
+			return agentflow.AggregationResult{}, errors.New("dry failed")
+		}
+		return agentflow.AggregationResult{Status: "ok"}, nil
+	}
+	_, err := c.runCohort(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "dry failed") || !strings.Contains(err.Error(), "rollback") {
+		t.Fatalf("runCohort() error = %v", err)
+	}
+	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+}
+
+func TestParallelRunCohortRechecksCanonicalBeforePromotion(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		want   string
+		mutate func(*parallelCoordinator, string) error
+	}{
+		{name: "dirty", want: "clean", mutate: func(_ *parallelCoordinator, root string) error {
+			return os.WriteFile(filepath.Join(root, "drift.go"), []byte("drift\n"), 0o600)
+		}},
+		{name: "head", want: "HEAD", mutate: func(_ *parallelCoordinator, root string) error {
+			return runParallelTestGit(root, "commit", "--allow-empty", "-m", "canonical drift")
+		}},
+		{name: "toplevel", want: "toplevel", mutate: func(c *parallelCoordinator, _ string) error {
+			c.topLevel = filepath.Join(c.topLevel, "changed")
+			return nil
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			var c *parallelCoordinator
+			var mutated atomic.Bool
+			worker := func(_ context.Context, w parallelWorker) error {
+				if w.sourceID == "w1" && mutated.CompareAndSwap(false, true) {
+					if err := tt.mutate(c, root); err != nil {
+						return err
+					}
+				}
+				return os.WriteFile(filepath.Join(w.root, filepath.FromSlash(w.paths[0])), []byte("worker\n"), 0o600)
+			}
+			c = newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
+			var aggregateCalls atomic.Int32
+			c.aggregate = func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error) {
+				aggregateCalls.Add(1)
+				return agentflow.AggregationResult{Status: "ok"}, nil
+			}
+			ran, err := c.runCohort(context.Background())
+			if err == nil || !ran || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("runCohort() = %v, %v; want %q", ran, err, tt.want)
+			}
+			if aggregateCalls.Load() != 0 {
+				t.Fatalf("aggregate calls = %d", aggregateCalls.Load())
+			}
+			if got := readTestFile(t, filepath.Join(root, "a.go")); got != "a\n" {
+				t.Fatalf("canonical promoted before recheck: %q", got)
+			}
+			t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+		})
+	}
+}
+
+func TestParallelRunCohortSerialFallbackDoesNothing(t *testing.T) {
+	var workerCalls, aggregateCalls atomic.Int32
+	c := newParallelCoordinator(t.TempDir(), &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{
+		{ID: "P1", Files: []string{"a.go"}}, {ID: "P2", Files: []string{"b.go"}},
+	}}, 2, func(context.Context, parallelWorker) error {
+		workerCalls.Add(1)
+		return nil
+	})
+	c.aggregate = func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error) {
+		aggregateCalls.Add(1)
+		return agentflow.AggregationResult{}, nil
+	}
+	ran, err := c.runCohort(context.Background())
+	if err != nil || ran {
+		t.Fatalf("runCohort() = %v, %v", ran, err)
+	}
+	if workerCalls.Load() != 0 || aggregateCalls.Load() != 0 || len(c.preservedRoots()) != 0 {
+		t.Fatalf("fallback side effects: worker=%d aggregate=%d roots=%v", workerCalls.Load(), aggregateCalls.Load(), c.preservedRoots())
+	}
+}
+
 func newParallelTestRepo(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()

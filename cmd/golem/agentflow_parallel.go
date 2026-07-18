@@ -18,6 +18,8 @@ import (
 
 type parallelWorkerFunc func(context.Context, parallelWorker) error
 
+type parallelAggregateFunc func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error)
+
 type parallelWorker struct {
 	step         agentflow.Step
 	paths        []string
@@ -32,6 +34,7 @@ type parallelCoordinator struct {
 	plan       *agentflow.Plan
 	maxWorkers int
 	worker     parallelWorkerFunc
+	aggregate  parallelAggregateFunc
 
 	topLevel   string
 	head       string
@@ -40,8 +43,280 @@ type parallelCoordinator struct {
 	workers    []parallelWorker
 }
 
+type parallelFileSnapshot struct {
+	path   string
+	exists bool
+	data   []byte
+	mode   fs.FileMode
+}
+
+type parallelPromotionChange struct {
+	path            string
+	data            []byte
+	mode            fs.FileMode
+	delete          bool
+	canonicalExists bool
+}
+
+type parallelPromotion struct {
+	root        string
+	applied     []parallelFileSnapshot
+	createdDirs []string
+}
+
 func newParallelCoordinator(root string, plan *agentflow.Plan, maxWorkers int, worker parallelWorkerFunc) *parallelCoordinator {
 	return &parallelCoordinator{root: root, plan: plan, maxWorkers: maxWorkers, worker: worker}
+}
+
+func (c *parallelCoordinator) runCohort(ctx context.Context) (bool, error) {
+	selected, err := c.selectWorkers(ctx)
+	if err != nil || !selected {
+		return false, err
+	}
+	if err := c.prepareWorkers(ctx); err != nil {
+		return true, fmt.Errorf("prepare parallel cohort: %w", err)
+	}
+	if err := c.runWorkers(ctx); err != nil {
+		return true, fmt.Errorf("run parallel cohort: %w", err)
+	}
+	if err := c.recheckRoot(ctx); err != nil {
+		return true, fmt.Errorf("recheck canonical root before promotion: %w", err)
+	}
+	rollback, err := c.promoteWorkers()
+	if err != nil {
+		return true, err
+	}
+	if c.aggregate == nil {
+		return true, parallelRollbackError(errors.New("parallel aggregate function is nil"), rollback)
+	}
+	inputs := make([]agentflow.AggregationInput, len(c.workers))
+	for i, worker := range c.workers {
+		inputs[i] = agentflow.AggregationInput{Root: worker.root, SourceID: worker.sourceID}
+	}
+	if _, err := c.aggregate(ctx, inputs, c.root, c.head, true); err != nil {
+		return true, parallelRollbackError(fmt.Errorf("dry-run aggregate ledgers: %w", err), rollback)
+	}
+	if _, err := c.aggregate(ctx, inputs, c.root, c.head, false); err != nil {
+		var collision *agentflow.AggregationCollisionError
+		if errors.As(err, &collision) {
+			return true, parallelRollbackError(fmt.Errorf("aggregate ledgers collision: %w", err), rollback)
+		}
+		return true, fmt.Errorf("aggregate ledgers real-write outcome is ambiguous; promoted source preserved: %w", err)
+	}
+	return true, nil
+}
+
+func (c *parallelCoordinator) promoteWorkers() (func() error, error) {
+	changes, snapshots, err := c.parallelPromotionChanges()
+	if err != nil {
+		return nil, fmt.Errorf("snapshot parallel promotion: %w", err)
+	}
+	promotion := &parallelPromotion{root: c.root}
+	rollback := promotion.rollback
+	for i, change := range changes {
+		if err := promotion.apply(change, snapshots[i]); err != nil {
+			return nil, parallelRollbackError(fmt.Errorf("promote %s: %w", change.path, err), rollback)
+		}
+	}
+	return rollback, nil
+}
+
+func (c *parallelCoordinator) parallelPromotionChanges() ([]parallelPromotionChange, []parallelFileSnapshot, error) {
+	var changes []parallelPromotionChange
+	var snapshots []parallelFileSnapshot
+	for _, worker := range c.workers {
+		assigned := make(map[string]struct{}, len(worker.paths))
+		for _, file := range worker.paths {
+			assigned[file] = struct{}{}
+		}
+		for _, file := range worker.changedPaths {
+			if _, ok := assigned[file]; !ok {
+				return nil, nil, fmt.Errorf("worker %s changed unvalidated path %q", worker.sourceID, file)
+			}
+			canonical, err := parallelPromotionPath(c.root, file)
+			if err != nil {
+				return nil, nil, err
+			}
+			source, err := parallelPromotionPath(worker.root, file)
+			if err != nil {
+				return nil, nil, err
+			}
+			change := parallelPromotionChange{path: file}
+			sourceExists, err := parallelSafePath(worker.root, file)
+			if err != nil {
+				return nil, nil, fmt.Errorf("inspect worker %s path %q: %w", worker.sourceID, file, err)
+			}
+			if sourceExists {
+				info, err := os.Lstat(source)
+				if err != nil {
+					return nil, nil, err
+				}
+				change.data, err = os.ReadFile(source)
+				if err != nil {
+					return nil, nil, err
+				}
+				change.mode = parallelCopiedMode(info.Mode())
+			} else {
+				change.delete = true
+			}
+			snapshot := parallelFileSnapshot{path: file}
+			snapshot.exists, err = parallelSafePath(c.root, file)
+			if err != nil {
+				return nil, nil, fmt.Errorf("inspect canonical path %q: %w", file, err)
+			}
+			if !sourceExists && !snapshot.exists {
+				return nil, nil, fmt.Errorf("worker %s deletion target %q does not exist", worker.sourceID, file)
+			}
+			if snapshot.exists {
+				info, err := os.Lstat(canonical)
+				if err != nil {
+					return nil, nil, err
+				}
+				snapshot.data, err = os.ReadFile(canonical)
+				if err != nil {
+					return nil, nil, err
+				}
+				snapshot.mode = parallelCopiedMode(info.Mode())
+			}
+			change.canonicalExists = snapshot.exists
+			changes = append(changes, change)
+			snapshots = append(snapshots, snapshot)
+		}
+	}
+	return changes, snapshots, nil
+}
+
+func (p *parallelPromotion) apply(change parallelPromotionChange, snapshot parallelFileSnapshot) error {
+	target, err := parallelPromotionPath(p.root, change.path)
+	if err != nil {
+		return err
+	}
+	if change.delete {
+		info, err := os.Lstat(target)
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("canonical deletion target is not a regular file")
+		}
+		p.applied = append(p.applied, snapshot)
+		return os.Remove(target)
+	}
+	created, err := parallelEnsureParents(p.root, target)
+	p.createdDirs = append(p.createdDirs, created...)
+	if err != nil {
+		return err
+	}
+	info, err := os.Lstat(target)
+	if change.canonicalExists {
+		if err != nil {
+			return fmt.Errorf("canonical target disappeared: %w", err)
+		}
+		if !info.Mode().IsRegular() {
+			return errors.New("canonical target is not a regular file")
+		}
+	} else {
+		if err == nil {
+			return errors.New("canonical target appeared after snapshot")
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	p.applied = append(p.applied, snapshot)
+	if err := os.WriteFile(target, change.data, change.mode.Perm()); err != nil {
+		return err
+	}
+	return os.Chmod(target, change.mode)
+}
+
+func (p *parallelPromotion) rollback() error {
+	var errs []error
+	for i := len(p.applied) - 1; i >= 0; i-- {
+		snapshot := p.applied[i]
+		target, err := parallelPromotionPath(p.root, snapshot.path)
+		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := os.Remove(target); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("restore %s: %w", snapshot.path, err))
+			continue
+		}
+		if !snapshot.exists {
+			continue
+		}
+		if err := os.WriteFile(target, snapshot.data, snapshot.mode.Perm()); err != nil {
+			errs = append(errs, fmt.Errorf("restore %s: %w", snapshot.path, err))
+			continue
+		}
+		if err := os.Chmod(target, snapshot.mode); err != nil {
+			errs = append(errs, fmt.Errorf("restore mode %s: %w", snapshot.path, err))
+		}
+	}
+	for i := len(p.createdDirs) - 1; i >= 0; i-- {
+		if err := os.Remove(p.createdDirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			errs = append(errs, fmt.Errorf("remove created parent %s: %w", p.createdDirs[i], err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+func parallelRollbackError(primary error, rollback func() error) error {
+	if rollback == nil {
+		return primary
+	}
+	if err := rollback(); err != nil {
+		return errors.Join(primary, fmt.Errorf("rollback promoted source: %w", err))
+	}
+	return primary
+}
+
+func parallelPromotionPath(root, file string) (string, error) {
+	if file == "" || file != strings.TrimSpace(file) || strings.ContainsAny(file, "\\*?[\x00") ||
+		strings.HasSuffix(file, "/") || path.IsAbs(file) || path.Clean(file) != file || file == "." {
+		return "", fmt.Errorf("unsafe promotion path %q", file)
+	}
+	first := strings.ToLower(strings.SplitN(file, "/", 2)[0])
+	if first == ".agent" || first == ".git" {
+		return "", fmt.Errorf("unsafe promotion path %q", file)
+	}
+	target := filepath.Join(root, filepath.FromSlash(file))
+	rel, err := filepath.Rel(root, target)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("promotion path %q escapes root", file)
+	}
+	return target, nil
+}
+
+func parallelEnsureParents(root, target string) ([]string, error) {
+	rel, err := filepath.Rel(root, filepath.Dir(target))
+	if err != nil {
+		return nil, err
+	}
+	if rel == "." {
+		return nil, nil
+	}
+	var created []string
+	current := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if errors.Is(err, fs.ErrNotExist) {
+			if err := os.Mkdir(current, 0o755); err != nil {
+				return created, err
+			}
+			created = append(created, current)
+			continue
+		}
+		if err != nil {
+			return created, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return created, errors.New("promotion parent is not a real directory")
+		}
+	}
+	return created, nil
 }
 
 func selectParallelSteps(plan *agentflow.Plan, maxWorkers int, eligible func(agentflow.Step, []string) bool) []agentflow.Step {
@@ -414,8 +689,7 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 	for _, file := range worker.paths {
 		assigned[file] = struct{}{}
 	}
-	var changed []string
-	seen := make(map[string]struct{}, len(worker.paths))
+	changedSet := make(map[string]struct{}, len(worker.paths))
 	for _, file := range parallelStatusPaths(out) {
 		if isParallelAgentPath(file) {
 			continue
@@ -423,14 +697,19 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 		if _, ok := assigned[file]; !ok {
 			return nil, fmt.Errorf("worker %s produced unexpected changed path %q", worker.sourceID, file)
 		}
-		if _, ok := seen[file]; ok {
+		if _, ok := changedSet[file]; ok {
 			continue
 		}
 		if _, err := parallelSafePath(worker.root, file); err != nil {
 			return nil, fmt.Errorf("worker %s changed unsafe path %q: %w", worker.sourceID, file, err)
 		}
-		seen[file] = struct{}{}
-		changed = append(changed, file)
+		changedSet[file] = struct{}{}
+	}
+	changed := make([]string, 0, len(changedSet))
+	for _, file := range worker.paths {
+		if _, ok := changedSet[file]; ok {
+			changed = append(changed, file)
+		}
 	}
 	return changed, nil
 }
