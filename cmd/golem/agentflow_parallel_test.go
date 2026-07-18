@@ -728,6 +728,65 @@ func TestParallelPromotionFailureRollsBackEarlierWrites(t *testing.T) {
 	}
 }
 
+func TestParallelPromotionPreMutationFailureDoesNotTrackOrReplaceTarget(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		mode   fs.FileMode
+		change parallelPromotionChange
+	}{
+		{name: "write", mode: 0o400, change: parallelPromotionChange{path: "target.go", data: []byte("replacement\n"), mode: 0o600}},
+		{name: "delete", mode: 0o640, change: parallelPromotionChange{path: "target.go", delete: true}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			target := filepath.Join(root, "target.go")
+			alias := filepath.Join(root, "alias.go")
+			writeTestFile(t, target, "original\n", tt.mode)
+			if err := os.Link(target, alias); err != nil {
+				t.Skipf("hard links unavailable: %v", err)
+			}
+			before, err := os.Stat(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(root, 0o500); err != nil {
+				t.Fatal(err)
+			}
+			defer func() { _ = os.Chmod(root, 0o700) }()
+			promotion := &parallelPromotion{root: root}
+			err = promotion.apply(tt.change, parallelFileSnapshot{
+				path: "target.go", exists: true, data: []byte("original\n"), mode: tt.mode,
+			})
+			if chmodErr := os.Chmod(root, 0o700); chmodErr != nil {
+				t.Fatal(chmodErr)
+			}
+			if err == nil {
+				t.Skipf("filesystem permissions did not induce a pre-mutation %s failure", tt.name)
+			}
+			if len(promotion.applied) != 0 {
+				t.Fatalf("applied snapshots = %d, want 0", len(promotion.applied))
+			}
+			after, statErr := os.Stat(target)
+			if statErr != nil {
+				t.Fatal(statErr)
+			}
+			aliasInfo, statErr := os.Stat(alias)
+			if statErr != nil {
+				t.Fatal(statErr)
+			}
+			if !os.SameFile(before, after) || !os.SameFile(after, aliasInfo) {
+				t.Fatalf("pre-mutation %s failure replaced or severed the original inode", tt.name)
+			}
+			if got := readTestFile(t, target); got != "original\n" {
+				t.Fatalf("target bytes = %q", got)
+			}
+			if after.Mode().Perm() != tt.mode.Perm() {
+				t.Fatalf("target mode = %o", after.Mode().Perm())
+			}
+		})
+	}
+}
+
 func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

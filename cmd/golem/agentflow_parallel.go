@@ -51,11 +51,10 @@ type parallelFileSnapshot struct {
 }
 
 type parallelPromotionChange struct {
-	path            string
-	data            []byte
-	mode            fs.FileMode
-	delete          bool
-	canonicalExists bool
+	path   string
+	data   []byte
+	mode   fs.FileMode
+	delete bool
 }
 
 type parallelPromotion struct {
@@ -178,7 +177,6 @@ func (c *parallelCoordinator) parallelPromotionChanges() ([]parallelPromotionCha
 				}
 				snapshot.mode = parallelCopiedMode(info.Mode())
 			}
-			change.canonicalExists = snapshot.exists
 			changes = append(changes, change)
 			snapshots = append(snapshots, snapshot)
 		}
@@ -199,8 +197,11 @@ func (p *parallelPromotion) apply(change parallelPromotionChange, snapshot paral
 		if !info.Mode().IsRegular() {
 			return errors.New("canonical deletion target is not a regular file")
 		}
+		if err := os.Remove(target); err != nil {
+			return err
+		}
 		p.applied = append(p.applied, snapshot)
-		return os.Remove(target)
+		return nil
 	}
 	created, err := parallelEnsureParents(p.root, target)
 	p.createdDirs = append(p.createdDirs, created...)
@@ -208,7 +209,7 @@ func (p *parallelPromotion) apply(change parallelPromotionChange, snapshot paral
 		return err
 	}
 	info, err := os.Lstat(target)
-	if change.canonicalExists {
+	if snapshot.exists {
 		if err != nil {
 			return fmt.Errorf("canonical target disappeared: %w", err)
 		}
@@ -223,11 +224,33 @@ func (p *parallelPromotion) apply(change parallelPromotionChange, snapshot paral
 			return err
 		}
 	}
-	p.applied = append(p.applied, snapshot)
-	if err := os.WriteFile(target, change.data, change.mode.Perm()); err != nil {
+	if err := parallelAtomicWrite(target, change.data, change.mode); err != nil {
 		return err
 	}
-	return os.Chmod(target, change.mode)
+	p.applied = append(p.applied, snapshot)
+	return nil
+}
+
+func parallelAtomicWrite(target string, data []byte, mode fs.FileMode) error {
+	temp, err := os.CreateTemp(filepath.Dir(target), ".golem-promote-*")
+	if err != nil {
+		return err
+	}
+	name := temp.Name()
+	defer func() {
+		_ = temp.Close()
+		_ = os.Remove(name)
+	}()
+	if _, err := temp.Write(data); err != nil {
+		return err
+	}
+	if err := temp.Chmod(mode); err != nil {
+		return err
+	}
+	if err := temp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(name, target)
 }
 
 func (p *parallelPromotion) rollback() error {
