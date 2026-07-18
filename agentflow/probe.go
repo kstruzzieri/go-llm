@@ -96,66 +96,31 @@ func (c *Client) Probe(ctx context.Context) error {
 // the base Probe first, so ordinary task mode remains compatible with its
 // existing Agentflow contract.
 func (c *Client) ProbeReview(ctx context.Context) error {
-	hout, _, exit, err := c.r.Run(ctx, []string{"--help"}, nil)
-	if err != nil || exit != 0 {
-		return fmt.Errorf("agentflow unavailable (--help failed): %w", errOrExit(err, exit))
-	}
-	help := string(hout)
-	for _, feature := range requiredReviewFeatures {
-		if !strings.Contains(help, feature.subcommand) {
-			return fmt.Errorf("agentflow is missing required subcommand: %s", feature.subcommand)
-		}
-		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
-		if err != nil || exit != 0 {
-			return fmt.Errorf("agentflow %s --help failed: %w", feature.subcommand, errOrExit(err, exit))
-		}
-		usage := string(sout)
-		for _, needle := range feature.needles {
-			if !strings.Contains(usage, needle) {
-				return fmt.Errorf("agentflow %s %s unavailable", feature.subcommand, needle)
-			}
-		}
-	}
-	return nil
+	return c.probeOptionalFeatures(ctx, requiredReviewFeatures, "", "", "")
 }
 
 // ProbeWorkflow checks Agentflow's stable recommendation and contract-writing
 // commands before Golem does model work or mutates proof state.
 func (c *Client) ProbeWorkflow(ctx context.Context) error {
-	hout, _, exit, err := c.r.Run(ctx, []string{"--help"}, nil)
-	if err != nil || exit != 0 {
-		return fmt.Errorf("agentflow unavailable (--help failed): %w", errOrExit(err, exit))
-	}
-	help := string(hout)
-	for _, feature := range requiredWorkflowFeatures {
-		if !strings.Contains(help, feature.subcommand) {
-			return fmt.Errorf("agentflow is missing required workflow subcommand: %s (upgrade Agentflow)", feature.subcommand)
-		}
-		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
-		if err != nil || exit != 0 {
-			return fmt.Errorf("agentflow %s --help failed: %w", feature.subcommand, errOrExit(err, exit))
-		}
-		usage := string(sout)
-		for _, needle := range feature.needles {
-			if !strings.Contains(usage, needle) {
-				return fmt.Errorf("agentflow %s %s unavailable (upgrade Agentflow)", feature.subcommand, needle)
-			}
-		}
-	}
-	return nil
+	return c.probeOptionalFeatures(ctx, requiredWorkflowFeatures, "workflow ", " (upgrade Agentflow)", " (upgrade Agentflow)")
 }
 
 // ProbeParallel checks the optional resumability surface used only by parallel
 // worktree execution. Callers run Probe first, preserving serial compatibility.
 func (c *Client) ProbeParallel(ctx context.Context) error {
+	return c.probeOptionalFeatures(ctx, requiredParallelFeatures, "parallel ", "",
+		" (requires Agentflow #22; version 0.4.0 is not sufficient)")
+}
+
+func (c *Client) probeOptionalFeatures(ctx context.Context, features []featureProbe, kind, missingSuffix, unavailableSuffix string) error {
 	hout, _, exit, err := c.r.Run(ctx, []string{"--help"}, nil)
 	if err != nil || exit != 0 {
 		return fmt.Errorf("agentflow unavailable (--help failed): %w", errOrExit(err, exit))
 	}
 	help := string(hout)
-	for _, feature := range requiredParallelFeatures {
+	for _, feature := range features {
 		if !strings.Contains(help, feature.subcommand) {
-			return fmt.Errorf("agentflow is missing required parallel subcommand: %s", feature.subcommand)
+			return fmt.Errorf("agentflow is missing required %ssubcommand: %s%s", kind, feature.subcommand, missingSuffix)
 		}
 		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
 		if err != nil || exit != 0 {
@@ -163,7 +128,7 @@ func (c *Client) ProbeParallel(ctx context.Context) error {
 		}
 		for _, needle := range feature.needles {
 			if !strings.Contains(string(sout), needle) {
-				return fmt.Errorf("agentflow %s %s unavailable (requires Agentflow #22; version 0.4.0 is not sufficient)", feature.subcommand, needle)
+				return fmt.Errorf("agentflow %s %s unavailable%s", feature.subcommand, needle, unavailableSuffix)
 			}
 		}
 	}
