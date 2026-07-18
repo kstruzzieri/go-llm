@@ -760,6 +760,88 @@ func TestManagedSourcesReconcileReadsFileBeforeWriterTransaction(t *testing.T) {
 	reconciled = true
 }
 
+func TestManagedSteadyStateCommitSkipsMigrationScan(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+
+	document, err := managed.IngestText(ctx, "doc.md", "hello", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+	if cachedErr, scan := store.writeEmbeddingState(); cachedErr != nil || scan {
+		t.Fatalf("writeEmbeddingState after first ingest = (%v, %v), want clean (no migration scan scheduled)", cachedErr, scan)
+	}
+	if _, err := managed.ReindexDocument(ctx, document.ID); err != nil {
+		t.Fatalf("ReindexDocument() error: %v", err)
+	}
+	if cachedErr, scan := store.writeEmbeddingState(); cachedErr != nil || scan {
+		t.Fatalf("writeEmbeddingState after same-space reindex = (%v, %v), want clean (no migration scan scheduled)", cachedErr, scan)
+	}
+}
+
+func TestManagedListDocumentsWorksOnReadOnlyStore(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "rag.db")
+	store, err := NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	idx, err := NewIndexerWithEmbedder(&managedTestEmbedder{vectorSpaceID: "test/v1"}, store, WithEmbeddingModel("test"))
+	if err != nil {
+		t.Fatalf("NewIndexerWithEmbedder() error: %v", err)
+	}
+	idx.chunker = chunkerFunc(func(source, content string) ([]Chunk, error) {
+		return []Chunk{makeChunk(source, content, 1, 1, "")}, nil
+	})
+	managed, err := NewManagedSources(idx, store)
+	if err != nil {
+		t.Fatalf("NewManagedSources() error: %v", err)
+	}
+	document, err := managed.IngestText(ctx, "doc.md", "hello", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close() error: %v", err)
+	}
+
+	readOnly, err := OpenSQLiteStoreReadOnly(dbPath)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStoreReadOnly() error: %v", err)
+	}
+	t.Cleanup(func() { _ = readOnly.Close() })
+	readOnlyManaged, err := NewManagedSources(nil, readOnly)
+	if err != nil {
+		t.Fatalf("NewManagedSources(read-only) error: %v", err)
+	}
+	// A consistent registry must list without needing the write transaction
+	// the reconcile path takes only when something actually changed.
+	documents, err := readOnlyManaged.ListDocuments(ctx, DocumentFilter{})
+	if err != nil {
+		t.Fatalf("ListDocuments(read-only) error: %v", err)
+	}
+	if len(documents) != 1 || documents[0].ID != document.ID || documents[0].State != DocumentStateIndexed {
+		t.Fatalf("read-only documents = %#v, want the ingested indexed document", documents)
+	}
+}
+
+func TestManagedListDocumentsTrimsCollectionFilter(t *testing.T) {
+	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	if _, err := managed.IngestText(ctx, "doc.md", "hello", DocumentOptions{Collection: "ops"}); err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+	// Scoped retrieval trims the collection before matching; listing must
+	// agree on the same filter value.
+	documents, err := managed.ListDocuments(ctx, DocumentFilter{Collection: " ops "})
+	if err != nil {
+		t.Fatalf("ListDocuments() error: %v", err)
+	}
+	if len(documents) != 1 || documents[0].Collection != "ops" {
+		t.Fatalf("documents = %#v, want the ops-collection document", documents)
+	}
+}
+
 func TestManagedSourcesListFiltersAndOrdersByID(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()

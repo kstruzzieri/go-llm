@@ -50,6 +50,11 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	var reads []string
+	r.readManagedFile = func(ctx context.Context, path string) ([]byte, error) {
+		reads = append(reads, path)
+		return readManagedRegularFile(ctx, path)
+	}
 	scoped, err := r.RetrieveScoped(ctx, "q", 5, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
 	if err != nil || len(scoped) != 0 {
 		t.Fatalf("scoped results=%#v error=%v, want corrupt source excluded", scoped, err)
@@ -58,10 +63,65 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Chunks of a corrupt or unknown registry source are stamped stale
+	// (never served with their baked freshness), and the forged origin path
+	// must never be read.
 	for _, result := range unscoped {
-		if result.Chunk.ID == "forged" && result.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessFresh) {
-			t.Fatalf("forged freshness=%q, want unchanged (arbitrary path must not be read)", result.Chunk.Metadata["managed_freshness"])
+		if result.Chunk.ID == "forged" && result.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
+			t.Fatalf("forged freshness=%q, want stamped stale", result.Chunk.Metadata["managed_freshness"])
 		}
+	}
+	if len(reads) != 0 {
+		t.Fatalf("managed file reads = %v, want none (arbitrary path must not be read)", reads)
+	}
+}
+
+func TestScopedFreshnessRefreshBoundsFileReads(t *testing.T) {
+	ctx := context.Background()
+	registry := make(map[string]managedRegistryDocument, maxManagedFreshnessReads+1)
+	results := make([]SearchResult, 0, maxManagedFreshnessReads+1)
+	for i := 0; i <= maxManagedFreshnessReads; i++ {
+		id := fmt.Sprintf("%032x", i)
+		source := managedSourcePrefix + id + ".md"
+		document := managedRegistryDocument{
+			id:          id,
+			source:      source,
+			kind:        string(DocumentKindFile),
+			state:       string(DocumentStateIndexed),
+			origin:      fmt.Sprintf("/nonexistent/origin-%d", i),
+			contentHash: "hash",
+		}
+		registry[source] = document
+		results = append(results, SearchResult{Chunk: Chunk{
+			ID:     id,
+			Source: source,
+			Metadata: map[string]string{
+				"managed_document_id":  document.id,
+				"managed_title":        document.title,
+				"managed_kind":         document.kind,
+				"managed_origin":       document.origin,
+				"managed_mime_type":    document.mimeType,
+				"managed_content_hash": document.contentHash,
+				"managed_collection":   document.collection,
+				"managed_tags":         document.tagsJSON,
+				"managed_state":        document.state,
+			},
+		}})
+	}
+	reads := 0
+	readFile := func(context.Context, string) ([]byte, error) {
+		reads++
+		return []byte("x"), nil
+	}
+	// The scoped refresh wrappers must apply the same bound as the unscoped
+	// path so library callers with large or zero k cannot trigger unbounded
+	// file I/O.
+	err := refreshManagedSearchResultsWithRegistry(ctx, readFile, results, registry)
+	if err == nil || !strings.Contains(err.Error(), "read limit exceeded") {
+		t.Fatalf("refresh error = %v, want read-limit error", err)
+	}
+	if reads != maxManagedFreshnessReads {
+		t.Fatalf("file reads = %d, want exactly %d before the bound trips", reads, maxManagedFreshnessReads)
 	}
 }
 

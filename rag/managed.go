@@ -290,6 +290,10 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 		!utf8.ValidString(filter.Collection) || len(filter.Collection) > MaxManagedMetadataBytes {
 		return nil, fmt.Errorf("rag: list managed documents: filter exceeds managed size limit or is not valid UTF-8")
 	}
+	// Ingest stores collections trimmed and scoped retrieval trims before
+	// matching (normalizeRetrievalScope); trim here so the two scoping
+	// surfaces agree on the same filter value.
+	filter.Collection = strings.TrimSpace(filter.Collection)
 	wantedTags, err := normalizeManagedTags(filter.Tags)
 	if err != nil {
 		return nil, err
@@ -348,6 +352,38 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 	return filtered, nil
 }
 
+// managedRowQuerier abstracts *sql.DB and *sql.Tx for the shared chunk
+// provenance query.
+type managedRowQuerier interface {
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// managedChunkProvenance reports the chunk count for a managed document's
+// source and whether any stored chunk disagrees with the registry row's
+// signature, vector space, or document identity.
+func managedChunkProvenance(ctx context.Context, q managedRowQuerier, document Document) (int, bool, error) {
+	var chunks int
+	var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID, minDocumentID, maxDocumentID string
+	if err := q.QueryRowContext(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
+		       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
+		       COALESCE(MIN(json_extract(metadata, '$.managed_document_id')), ''),
+		       COALESCE(MAX(json_extract(metadata, '$.managed_document_id')), '')
+		  FROM chunks
+		 WHERE source = ?`, document.source).Scan(
+		&chunks, &minSignature, &maxSignature, &minVectorSpaceID, &maxVectorSpaceID,
+		&minDocumentID, &maxDocumentID,
+	); err != nil {
+		return 0, false, fmt.Errorf("rag: count chunks for managed document %q: %w", document.ID, err)
+	}
+	mismatch := chunks > 0 &&
+		(minSignature != document.SourceSignature || maxSignature != document.SourceSignature ||
+			minVectorSpaceID != document.VectorSpaceID || maxVectorSpaceID != document.VectorSpaceID ||
+			minDocumentID != document.ID || maxDocumentID != document.ID)
+	return chunks, mismatch, nil
+}
+
 // reconcileDocument revalidates a listing snapshot before changing its
 // lifecycle state. A separate ManagedSources instance may finish a reindex
 // between ListDocuments' read and reconciliation write.
@@ -358,6 +394,19 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 		if err != nil || !utf8.Valid(data) || contentHash(string(data)) != observed.ContentHash {
 			desiredFreshness = DocumentFreshnessStale
 		}
+	}
+
+	// Fast read-only pass: most listings find the registry and chunks already
+	// consistent. Skipping the write transaction in that case keeps read-only
+	// stores listable and avoids taking the write lock once per listed
+	// document. A change that lands right after this read is caught by the
+	// next listing, exactly like one landing right after a reconcile commit.
+	chunks, provenanceMismatch, err := managedChunkProvenance(ctx, m.store.db, *observed)
+	if err != nil {
+		return false, err
+	}
+	if !provenanceMismatch && chunks == observed.ChunkCount && desiredFreshness == observed.Freshness {
+		return false, nil
 	}
 
 	tx, err := m.store.beginWriteTx(ctx)
@@ -378,25 +427,10 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 		return false, nil
 	}
 
-	var chunks int
-	var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID, minDocumentID, maxDocumentID string
-	if err := tx.QueryRowContext(ctx, `
-		SELECT COUNT(*),
-		       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
-		       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
-		       COALESCE(MIN(json_extract(metadata, '$.managed_document_id')), ''),
-		       COALESCE(MAX(json_extract(metadata, '$.managed_document_id')), '')
-		  FROM chunks
-		 WHERE source = ?`, current.source).Scan(
-		&chunks, &minSignature, &maxSignature, &minVectorSpaceID, &maxVectorSpaceID,
-		&minDocumentID, &maxDocumentID,
-	); err != nil {
-		return false, fmt.Errorf("rag: count chunks for managed document %q: %w", current.ID, err)
+	chunks, provenanceMismatch, err = managedChunkProvenance(ctx, tx, current)
+	if err != nil {
+		return false, err
 	}
-	provenanceMismatch := chunks > 0 &&
-		(minSignature != current.SourceSignature || maxSignature != current.SourceSignature ||
-			minVectorSpaceID != current.VectorSpaceID || maxVectorSpaceID != current.VectorSpaceID ||
-			minDocumentID != current.ID || maxDocumentID != current.ID)
 	state, lastError := current.State, current.LastError
 	freshness := desiredFreshness
 	if chunks != current.ChunkCount || provenanceMismatch {
@@ -550,6 +584,13 @@ func (m *ManagedSources) commitDocumentIndex(ctx context.Context, document Docum
 	if revision != document.revision {
 		return "", 0, fmt.Errorf("%w: %s", ErrDocumentChanged, document.ID)
 	}
+	// Full-corpus migration validation (and its rollback-conservative rescan
+	// flag) is only needed when this commit actually changes the document's
+	// established vector space. First commits (no retained space) and
+	// steady-state reindexes keep the cheap first/last-row dimension check
+	// plus validateCorpusVectorSpaceTx instead of scanning every embedding
+	// blob under the write lock.
+	opts.replaceVectorSpace = retainedVectorSpaceID != "" && prepared.vectorSpaceID != retainedVectorSpaceID
 	if len(prepared.chunks) > 0 {
 		if err := validateCorpusVectorSpaceTx(ctx, tx, document.source, prepared.vectorSpaceID); err != nil {
 			return "", 0, err

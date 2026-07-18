@@ -701,7 +701,10 @@ func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFil
 }
 
 func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
-	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, 0)
+	// Scoped results are bounded by the caller's k, but library callers may
+	// pass large or zero k; apply the same freshness read bound as the
+	// unscoped path so file I/O per retrieval stays bounded everywhere.
+	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
 }
 
 func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument, maxReads int) error {
@@ -711,6 +714,11 @@ func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile 
 			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
+		} else if looksManagedDocumentSource(results[i].Chunk.Source) {
+			// The registry no longer knows this managed-looking source: the
+			// document was deleted (or forged) between the chunk read and the
+			// registry snapshot. Never serve its baked metadata as fresh.
+			stampManagedChunkStale(&results[i].Chunk)
 		}
 	}
 	return nil
@@ -732,7 +740,9 @@ func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFil
 }
 
 func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
-	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, 0)
+	// Same freshness read bound as the unscoped path; see
+	// refreshManagedSearchResultsWithRegistry.
+	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
 }
 
 func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, maxReads int) error {
@@ -742,13 +752,36 @@ func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile 
 			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
+		} else if looksManagedDocumentSource(results[i].Chunk.Source) {
+			// See refreshManagedSearchResultsWithRegistryLimit: registry-miss
+			// managed chunks must not claim their baked freshness.
+			stampManagedChunkStale(&results[i].Chunk)
 		}
 	}
 	return nil
 }
 
+// stampManagedChunkStale clones the chunk metadata and marks it stale: the
+// chunk no longer corresponds to a live, matching registry document (deleted
+// or reindexed between the chunk read and the registry snapshot). Cloning
+// keeps shared resident-snapshot maps unmutated.
+func stampManagedChunkStale(chunk *Chunk) {
+	cloned := make(map[string]string, len(chunk.Metadata)+1)
+	for key, value := range chunk.Metadata {
+		cloned[key] = value
+	}
+	cloned["managed_freshness"] = string(DocumentFreshnessStale)
+	chunk.Metadata = cloned
+}
+
 func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck, maxReads int) error {
-	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) || !matchesManagedRegistry(*chunk, document) {
+	if !matchesManagedRegistry(*chunk, document) {
+		// Provenance drift: the registry row moved on (reindex) while this
+		// chunk still carries the old content. Its baked freshness is a lie.
+		stampManagedChunkStale(chunk)
+		return nil
+	}
+	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) {
 		return nil
 	}
 	if err := ctx.Err(); err != nil {
