@@ -26,6 +26,7 @@ var errAgentflowTaskFailed = errors.New("agentflow task failed")
 // afClient is the driver's view of agentflow (satisfied by *agentflow.Client).
 type afClient interface {
 	Probe(context.Context) error
+	ProbeParallel(context.Context) error
 	ProbeWorkflow(context.Context) error
 	RecommendWorkflow(context.Context, agentflow.TaskBrief, string, string) (agentflow.WorkflowRecommendation, error)
 	ProbeReview(context.Context) error
@@ -66,6 +67,7 @@ type driver struct {
 	approvedRecommendation *agentflow.WorkflowRecommendation
 	evidence               []agentflow.EvidenceEntry
 	runStep                runStepFunc
+	parallelCohort         func(context.Context) error
 	out                    io.Writer
 }
 
@@ -108,6 +110,11 @@ func validateFreshWorkerProjection(state agentflow.NextActionState, agentID stri
 func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.Probe(ctx); err != nil {
 		return "", fmt.Errorf("agentflow unavailable: %w", err)
+	}
+	if d.parallelCohort != nil {
+		if err := d.af.ProbeParallel(ctx); err != nil {
+			return "", fmt.Errorf("agentflow parallel runtime unavailable: %w", err)
+		}
 	}
 	if err := d.af.ProbeWorkflow(ctx); err != nil {
 		return "", fmt.Errorf("agentflow workflow routing unavailable: %w", err)
@@ -153,6 +160,11 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	}
 	if err := d.af.Doctor(ctx); err != nil {
 		return "", err
+	}
+	if d.parallelCohort != nil {
+		if err := d.parallelCohort(ctx); err != nil {
+			return "", fmt.Errorf("run parallel cohort: %w", err)
+		}
 	}
 	for {
 		id, err := d.af.NextStep(ctx)

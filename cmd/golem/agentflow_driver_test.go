@@ -39,6 +39,10 @@ func (f *fakeAF) failure(name string) error {
 }
 
 func (f *fakeAF) Probe(context.Context) error { f.seq = append(f.seq, "probe"); return nil }
+func (f *fakeAF) ProbeParallel(context.Context) error {
+	f.seq = append(f.seq, "probe-parallel")
+	return f.failure("probe-parallel")
+}
 func (f *fakeAF) ProbeWorkflow(context.Context) error {
 	f.seq = append(f.seq, "probe-workflow")
 	return f.failure("probe-workflow")
@@ -154,6 +158,66 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 	}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
+	}
+}
+
+func TestDriver_ParallelCohortRunsBeforeSerialWork(t *testing.T) {
+	af := &fakeAF{nextSteps: []string{"P1"}}
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
+		parallelCohort: func(context.Context) error {
+			af.seq = append(af.seq, "parallel-cohort")
+			return nil
+		},
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	if _, err := d.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"probe", "probe-parallel", "probe-workflow", "recommend", "init", "lock:plan.json", "materialize", "init-exec", "doctor", "parallel-cohort",
+		"next-step", "claim:P1", "gate:P1:test one", "finish-step:P1:A-P1", "next-step", "finish-run",
+	}
+	if !equalSeq(af.seq, want) {
+		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
+	}
+}
+
+func TestDriver_ParallelCohortFailuresAbortBeforeSerialWork(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		af      *fakeAF
+		cohort  func(context.Context) error
+		wantSeq []string
+	}{
+		{
+			name:    "parallel probe",
+			af:      &fakeAF{failAt: map[string]error{"probe-parallel": errors.New("unavailable")}},
+			cohort:  func(context.Context) error { return nil },
+			wantSeq: []string{"probe", "probe-parallel"},
+		},
+		{
+			name: "cohort",
+			af:   &fakeAF{},
+			cohort: func(context.Context) error {
+				return errors.New("cohort failed")
+			},
+			wantSeq: []string{"probe", "probe-parallel", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize", "init-exec", "doctor"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &driver{
+				af: tt.af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+				parallelCohort: tt.cohort,
+				runStep:        func(context.Context, agentflow.Step, string, string) error { return nil },
+			}
+			if _, err := d.run(context.Background()); err == nil {
+				t.Fatal("expected error")
+			}
+			if !equalSeq(tt.af.seq, tt.wantSeq) {
+				t.Fatalf("seq = %v, want %v", tt.af.seq, tt.wantSeq)
+			}
+		})
 	}
 }
 
