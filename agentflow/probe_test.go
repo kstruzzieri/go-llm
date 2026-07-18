@@ -89,6 +89,21 @@ func TestProbeReview_RequiresReviewCommandsWithoutChangingBaseProbe(t *testing.T
 	}
 }
 
+func TestProbeParallel_RequiresNextActionAgentWithoutChangingBaseProbe(t *testing.T) {
+	help := "usage: agentflow {init,init-execution,lock-plan,record-file-change,run,finish-step,finish-run,next-step,next-action,doctor,status}"
+	replies := probeReplies(help)
+	replies["next-action"] = fakeReply{stdout: []byte("--root --json")}
+	c := NewClient(&fakeRunner{replies: replies}, "/ws")
+	if err := c.Probe(context.Background()); err != nil {
+		t.Fatalf("base Probe = %v", err)
+	}
+	if err := c.ProbeParallel(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "next-action --agent") || !strings.Contains(err.Error(), "#22") ||
+		!strings.Contains(err.Error(), "0.4.0") {
+		t.Fatalf("pre-#22 diagnostic = %v", err)
+	}
+}
+
 func TestProbeWorkflow_RequiresStableRecommendationAndMaterializationSurface(t *testing.T) {
 	baseHelp := "usage: agentflow {init,workflow-contract}"
 	missing := &fakeRunner{replies: map[string]fakeReply{"--help": {stdout: []byte(baseHelp)}}}

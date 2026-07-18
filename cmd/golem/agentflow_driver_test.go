@@ -724,6 +724,36 @@ func TestDriver_BlockingReviewRequiresAuthoritativeRereview(t *testing.T) {
 	}
 }
 
+func TestValidateFreshWorkerProjection(t *testing.T) {
+	fresh := agentflow.NextActionState{Resumability: &agentflow.ResumabilityProjection{
+		Contract: &agentflow.ResumabilityContract{
+			PlanSHA256:              "plan",
+			ExecutionContractSHA256: "execution",
+			Locked:                  true,
+		},
+		AgentID: "golem-w1",
+	}}
+	if err := validateFreshWorkerProjection(fresh, "golem-w1"); err != nil {
+		t.Fatalf("fresh projection = %v", err)
+	}
+	for name, state := range map[string]agentflow.NextActionState{
+		"missing projection":       {},
+		"missing contract":         {Resumability: &agentflow.ResumabilityProjection{AgentID: "golem-w1"}},
+		"unlocked":                 {Resumability: &agentflow.ResumabilityProjection{Contract: &agentflow.ResumabilityContract{PlanSHA256: "plan", ExecutionContractSHA256: "execution"}, AgentID: "golem-w1"}},
+		"missing plan digest":      {Resumability: &agentflow.ResumabilityProjection{Contract: &agentflow.ResumabilityContract{Locked: true, ExecutionContractSHA256: "execution"}, AgentID: "golem-w1"}},
+		"missing execution digest": {Resumability: &agentflow.ResumabilityProjection{Contract: &agentflow.ResumabilityContract{Locked: true, PlanSHA256: "plan"}, AgentID: "golem-w1"}},
+		"other agent":              {Resumability: &agentflow.ResumabilityProjection{Contract: fresh.Resumability.Contract, AgentID: "golem-w2"}},
+		"present attempt":          {Resumability: &agentflow.ResumabilityProjection{Contract: fresh.Resumability.Contract, AgentID: "golem-w1", Attempt: &agentflow.ResumabilityAttempt{ID: "A1", Open: false}}},
+		"diagnostic":               {Resumability: &agentflow.ResumabilityProjection{Contract: fresh.Resumability.Contract, AgentID: "golem-w1", Diagnostics: []agentflow.ResumabilityDiagnostic{{Code: "state_invalid"}}}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateFreshWorkerProjection(state, "golem-w1"); err == nil {
+				t.Fatal("expected non-fresh projection rejection")
+			}
+		})
+	}
+}
+
 func TestValidateTraceability_RejectsInvalidReferences(t *testing.T) {
 	tests := []struct {
 		name     string

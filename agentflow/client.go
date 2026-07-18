@@ -17,13 +17,26 @@ var attemptIDPattern = regexp.MustCompile(`^(WT[a-z0-9]{1,16}-)?A[0-9]+$`)
 
 // Client is a host-owned typed wrapper over the agentflow CLI.
 type Client struct {
-	r    Runner
-	root string
+	r     Runner
+	root  string
+	agent string
 }
 
 // NewClient returns a Client that drives agentflow via r, with --root set to the
 // workspace root for the subcommands that take it.
 func NewClient(r Runner, root string) *Client { return &Client{r: r, root: root} }
+
+// NewOwnedClient returns a Client whose actor-bearing commands use agent.
+func NewOwnedClient(r Runner, root, agent string) *Client {
+	return &Client{r: r, root: root, agent: agent}
+}
+
+func (c *Client) agentName() string {
+	if c.agent != "" {
+		return c.agent
+	}
+	return agentName
+}
 
 // call runs a subcommand and returns stdout, mapping exit!=0 (or a --json
 // invalid envelope) to *CommandError. Pass wantJSON=true for --json commands.
@@ -194,7 +207,7 @@ func (c *Client) NextStep(ctx context.Context) (string, error) {
 
 // ClaimStep claims step for the golem agent and returns the new attempt id.
 func (c *Client) ClaimStep(ctx context.Context, step string) (string, error) {
-	args := append([]string{"claim-step", step}, c.rootArgs("--agent", agentName, "--json")...)
+	args := append([]string{"claim-step", step}, c.rootArgs("--agent", c.agentName(), "--json")...)
 	out, err := c.call(ctx, "claim-step", args, true)
 	if err != nil {
 		return "", err
@@ -258,7 +271,7 @@ func (c *Client) RecordReview(ctx context.Context, manifestPath string) (ReviewR
 func (c *Client) AmendStep(ctx context.Context, step string, findingRefs []string) (string, error) {
 	reason := "address review findings " + strings.Join(findingRefs, ", ")
 	args := append([]string{"amend-step", step}, c.rootArgs(
-		"--agent", agentName, "--reason", reason, "--reason-code", "review_feedback")...)
+		"--agent", c.agentName(), "--reason", reason, "--reason-code", "review_feedback")...)
 	for _, ref := range findingRefs {
 		args = append(args, "--finding", ref)
 	}
@@ -282,7 +295,7 @@ func (c *Client) AmendStep(ctx context.Context, step string, findingRefs []strin
 // journal can later reconcile it; this is the receipt golem cannot forge.
 func (c *Client) RecordFileChange(ctx context.Context, step, attempt, path string) error {
 	args := append([]string{"record-file-change"},
-		c.rootArgs("--step", step, "--attempt", attempt, "--path", path, "--agent", agentName, "--json")...)
+		c.rootArgs("--step", step, "--attempt", attempt, "--path", path, "--agent", c.agentName(), "--json")...)
 	_, err := c.call(ctx, "record-file-change", args, true)
 	return err
 }
@@ -291,7 +304,7 @@ func (c *Client) RecordFileChange(ctx context.Context, step, attempt, path strin
 // under agentflow's proof harness for (step, attempt), recording the result.
 func (c *Client) RunGate(ctx context.Context, step, attempt, gate string, argv []string) error {
 	args := append([]string{"run"},
-		c.rootArgs("--step", step, "--attempt", attempt, "--gate", gate, "--agent", agentName, "--confirm-risk", "--")...)
+		c.rootArgs("--step", step, "--attempt", attempt, "--gate", gate, "--agent", c.agentName(), "--confirm-risk", "--")...)
 	args = append(args, argv...)
 	_, err := c.call(ctx, "run", args, false)
 	return err
@@ -300,7 +313,7 @@ func (c *Client) RunGate(ctx context.Context, step, attempt, gate string, argv [
 // FinishStep closes the attempt, verifying its gates and file-change receipts;
 // a *CommandError surfaces the diagnostics when the step is not yet complete.
 func (c *Client) FinishStep(ctx context.Context, step, attempt string) error {
-	args := append([]string{"finish-step", step}, c.rootArgs("--attempt", attempt, "--agent", agentName, "--json")...)
+	args := append([]string{"finish-step", step}, c.rootArgs("--attempt", attempt, "--agent", c.agentName(), "--json")...)
 	_, err := c.call(ctx, "finish-step", args, true)
 	return err
 }
@@ -368,16 +381,47 @@ func (c *Client) failedProofCheckDiagnostics() []string {
 // NextActionState is the advisory recovery hint agentflow's next-action reports.
 // It is printed, never executed: proof state stays adapter-driven.
 type NextActionState struct {
-	State       string   `json:"state"`
-	Reason      string   `json:"reason"`
-	Command     string   `json:"command"`
-	Args        []string `json:"args"`
-	Diagnostics []string `json:"diagnostics"`
+	State        string                  `json:"state"`
+	Reason       string                  `json:"reason"`
+	Command      string                  `json:"command"`
+	Args         []string                `json:"args"`
+	Diagnostics  []string                `json:"diagnostics"`
+	Resumability *ResumabilityProjection `json:"resumability"`
+}
+
+// ResumabilityProjection is the subset of next-action state required to prove
+// an owned worktree has not started execution.
+type ResumabilityProjection struct {
+	Contract    *ResumabilityContract    `json:"contract"`
+	AgentID     string                   `json:"agent_id"`
+	Attempt     *ResumabilityAttempt     `json:"attempt"`
+	Diagnostics []ResumabilityDiagnostic `json:"diagnostics"`
+}
+
+type ResumabilityContract struct {
+	PlanSHA256              string `json:"plan_sha256"`
+	Locked                  bool   `json:"locked"`
+	ExecutionContractSHA256 string `json:"execution_contract_sha256"`
+}
+
+type ResumabilityAttempt struct {
+	ID   string `json:"id"`
+	Open bool   `json:"open"`
+}
+
+type ResumabilityDiagnostic struct {
+	Code     string `json:"code"`
+	Message  string `json:"message"`
+	Artifact string `json:"artifact"`
 }
 
 // NextAction returns agentflow's advisory next-action state (recovery hint).
 func (c *Client) NextAction(ctx context.Context) (NextActionState, error) {
-	out, err := c.call(ctx, "next-action", append([]string{"next-action"}, c.rootArgs("--json")...), true)
+	args := append([]string{"next-action"}, c.rootArgs("--json")...)
+	if c.agent != "" {
+		args = append(args, "--agent", c.agent)
+	}
+	out, err := c.call(ctx, "next-action", args, true)
 	if err != nil {
 		return NextActionState{}, err
 	}

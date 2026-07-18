@@ -27,6 +27,65 @@ func TestClient_NextAction_Argv(t *testing.T) {
 	}
 }
 
+func TestClient_OwnedAgent_ArgvAndResumabilityProjection(t *testing.T) {
+	f := &fakeRunner{replies: map[string]fakeReply{
+		"claim-step":         {stdout: []byte(`{"attempt_id":"A1"}`), exit: 0},
+		"amend-step":         {stdout: []byte(`{"event":"amendment_started","step_id":"P1","attempt_id":"A2"}`), exit: 0},
+		"record-file-change": {exit: 0},
+		"run":                {exit: 0},
+		"finish-step":        {exit: 0},
+		"next-action": {stdout: []byte(`{
+			"state":"steps_pending",
+			"resumability":{
+				"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},
+				"agent_id":"golem-w1",
+				"attempt":null,
+				"diagnostics":[],
+				"step":{"id":"P1","state":"pending","completed":false},
+				"lease":{"state":"not_applicable"}
+			}
+		}`), exit: 0},
+	}}
+	c := NewOwnedClient(f, "/ws", "golem-w1")
+	if _, err := c.ClaimStep(context.Background(), "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AmendStep(context.Background(), "P1", []string{"RR#RF-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RecordFileChange(context.Background(), "P1", "A2", "a.go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RunGate(context.Background(), "P1", "A2", "go test", []string{"go", "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.FinishStep(context.Background(), "P1", "A2"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := c.NextAction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Resumability == nil || state.Resumability.Contract == nil ||
+		state.Resumability.Contract.PlanSHA256 != "plan" ||
+		state.Resumability.Contract.ExecutionContractSHA256 != "execution" ||
+		!state.Resumability.Contract.Locked || state.Resumability.AgentID != "golem-w1" ||
+		state.Resumability.Attempt != nil || len(state.Resumability.Diagnostics) != 0 {
+		t.Fatalf("resumability = %+v", state.Resumability)
+	}
+	want := [][]string{
+		{"claim-step", "P1", "--root", "/ws", "--agent", "golem-w1", "--json"},
+		{"amend-step", "P1", "--root", "/ws", "--agent", "golem-w1", "--reason", "address review findings RR#RF-1", "--reason-code", "review_feedback", "--finding", "RR#RF-1", "--json"},
+		{"record-file-change", "--root", "/ws", "--step", "P1", "--attempt", "A2", "--path", "a.go", "--agent", "golem-w1", "--json"},
+		{"run", "--root", "/ws", "--step", "P1", "--attempt", "A2", "--gate", "go test", "--agent", "golem-w1", "--confirm-risk", "--", "go", "test"},
+		{"finish-step", "P1", "--root", "/ws", "--attempt", "A2", "--agent", "golem-w1", "--json"},
+		{"next-action", "--root", "/ws", "--json", "--agent", "golem-w1"},
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("argv = %v, want %v", f.calls, want)
+	}
+}
+
 func TestClient_LockPlan_ArgvAndInvalid(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{
 		"lock-plan": {stdout: []byte(`{"status":"invalid","errors":[{"code":"x","message":"m"}]}`), exit: 1},

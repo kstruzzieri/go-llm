@@ -69,6 +69,35 @@ type driver struct {
 	out                    io.Writer
 }
 
+// validateFreshWorkerProjection rejects copied worktrees that have begun or
+// cannot authoritatively prove execution is still fresh.
+func validateFreshWorkerProjection(state agentflow.NextActionState, agentID string) error {
+	projection := state.Resumability
+	if projection == nil {
+		return errors.New("agentflow resumability projection is missing")
+	}
+	if projection.Contract == nil {
+		return errors.New("agentflow resumability contract is missing")
+	}
+	if !projection.Contract.Locked {
+		return errors.New("agentflow resumability contract is not locked")
+	}
+	if strings.TrimSpace(projection.Contract.PlanSHA256) == "" ||
+		strings.TrimSpace(projection.Contract.ExecutionContractSHA256) == "" {
+		return errors.New("agentflow resumability contract is missing digests")
+	}
+	if projection.AgentID != agentID {
+		return fmt.Errorf("agentflow resumability agent is %q, want %q", projection.AgentID, agentID)
+	}
+	if projection.Attempt != nil {
+		return fmt.Errorf("agentflow resumability reports present attempt %q", projection.Attempt.ID)
+	}
+	if len(projection.Diagnostics) != 0 {
+		return errors.New("agentflow resumability reports diagnostics")
+	}
+	return nil
+}
+
 // run drives the P0 sequence and returns the proof-pack path on success.
 func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.Probe(ctx); err != nil {

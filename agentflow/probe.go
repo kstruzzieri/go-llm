@@ -46,6 +46,10 @@ var requiredWorkflowFeatures = []featureProbe{
 	{"workflow-contract", []string{"--root", "--from-json"}},
 }
 
+var requiredParallelFeatures = []featureProbe{
+	{"next-action", []string{"--agent"}},
+}
+
 // Probe fail-closes unless the CLI is present, new enough, and exposes every
 // required subcommand and per-subcommand flag. Version alone is not trusted.
 func (c *Client) Probe(ctx context.Context) error {
@@ -134,6 +138,23 @@ func (c *Client) ProbeWorkflow(ctx context.Context) error {
 		for _, needle := range feature.needles {
 			if !strings.Contains(usage, needle) {
 				return fmt.Errorf("agentflow %s %s unavailable (upgrade Agentflow)", feature.subcommand, needle)
+			}
+		}
+	}
+	return nil
+}
+
+// ProbeParallel checks the optional resumability surface used only by parallel
+// worktree execution. Callers run Probe first, preserving serial compatibility.
+func (c *Client) ProbeParallel(ctx context.Context) error {
+	for _, feature := range requiredParallelFeatures {
+		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
+		if err != nil || exit != 0 {
+			return fmt.Errorf("agentflow %s --help failed: %w", feature.subcommand, errOrExit(err, exit))
+		}
+		for _, needle := range feature.needles {
+			if !strings.Contains(string(sout), needle) {
+				return fmt.Errorf("agentflow %s %s unavailable (requires Agentflow #22; version 0.4.0 is not sufficient)", feature.subcommand, needle)
 			}
 		}
 	}
