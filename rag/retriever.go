@@ -160,7 +160,7 @@ func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, sco
 	if err != nil {
 		return nil, err
 	}
-	registry, err := managedRegistrySnapshot(ctx, store, searchResultChunks(results))
+	registry, _, err := managedRegistrySnapshot(ctx, store, searchResultChunks(results))
 	if err != nil {
 		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
 	}
@@ -301,7 +301,7 @@ func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k in
 	if err != nil {
 		return nil, err
 	}
-	registry, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
+	registry, _, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
 	if err != nil {
 		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
 	}
@@ -429,7 +429,7 @@ func scoredResultChunks(results []ScoredResult) []Chunk {
 
 var errManagedDocumentsTableMissing = errors.New("rag: managed_documents table missing")
 
-func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates []Chunk) (map[string]managedRegistryDocument, error) {
+func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates []Chunk) (map[string]managedRegistryDocument, map[string]struct{}, error) {
 	sources := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
 	for _, chunk := range candidates {
@@ -441,16 +441,18 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 		}
 	}
 	if len(sources) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	return managedRegistrySnapshotRead(ctx, store, sources, nil)
+	registeredSources := make(map[string]struct{}, len(sources))
+	registry, err := managedRegistrySnapshotRead(ctx, store, sources, nil, registeredSources)
+	return registry, registeredSources, err
 }
 
 func managedRegistrySnapshotForScope(ctx context.Context, store *SQLiteStore, scope RetrievalScope) (map[string]managedRegistryDocument, error) {
-	return managedRegistrySnapshotRead(ctx, store, nil, &scope)
+	return managedRegistrySnapshotRead(ctx, store, nil, &scope, nil)
 }
 
-func managedRegistrySnapshotRead(ctx context.Context, store *SQLiteStore, sources []string, scope *RetrievalScope) (map[string]managedRegistryDocument, error) {
+func managedRegistrySnapshotRead(ctx context.Context, store *SQLiteStore, sources []string, scope *RetrievalScope, registeredSources map[string]struct{}) (map[string]managedRegistryDocument, error) {
 	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
@@ -524,6 +526,9 @@ func managedRegistrySnapshotRead(ctx context.Context, store *SQLiteStore, source
 				if err := scanManagedRegistryDocument(rows, &document); err != nil {
 					_ = rows.Close()
 					return nil, err
+				}
+				if registeredSources != nil {
+					registeredSources[document.source] = struct{}{}
 				}
 				if validManagedRegistryDocument(&document) {
 					batchRegistry[document.source] = document
@@ -701,31 +706,31 @@ func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFil
 	if !ok {
 		return nil
 	}
-	registry, err := managedRegistrySnapshot(ctx, sqlite, searchResultChunks(results))
+	registry, registeredSources, err := managedRegistrySnapshot(ctx, sqlite, searchResultChunks(results))
 	if errors.Is(err, errManagedDocumentsTableMissing) {
 		return nil // Legacy read-only stores without managed_documents stay compatible.
 	}
 	if err != nil {
 		return err
 	}
-	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
+	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, registeredSources, maxManagedFreshnessReads)
 }
 
 func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
 	// Scoped results are bounded by the caller's k, but library callers may
 	// pass large or zero k; apply the same freshness read bound as the
 	// unscoped path so file I/O per retrieval stays bounded everywhere.
-	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
+	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, nil, maxManagedFreshnessReads)
 }
 
-func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument, maxReads int) error {
+func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
 			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
-		} else if chunkClaimsManagedDocument(results[i].Chunk) {
+		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered || chunkClaimsManagedDocument(results[i].Chunk) {
 			// The registry no longer knows this source claiming managed
 			// provenance: the document was deleted (or forged) between the
 			// chunk read and registry snapshot. Never serve it as fresh.
@@ -740,30 +745,30 @@ func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFil
 	if !ok {
 		return nil
 	}
-	registry, err := managedRegistrySnapshot(ctx, sqlite, scoredResultChunks(results))
+	registry, registeredSources, err := managedRegistrySnapshot(ctx, sqlite, scoredResultChunks(results))
 	if errors.Is(err, errManagedDocumentsTableMissing) {
 		return nil // Legacy read-only stores without managed_documents stay compatible.
 	}
 	if err != nil {
 		return err
 	}
-	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
+	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, registeredSources, maxManagedFreshnessReads)
 }
 
 func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
 	// Same freshness read bound as the unscoped path; see
 	// refreshManagedSearchResultsWithRegistry.
-	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
+	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, nil, maxManagedFreshnessReads)
 }
 
-func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, maxReads int) error {
+func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
 			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
-		} else if chunkClaimsManagedDocument(results[i].Chunk) {
+		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered || chunkClaimsManagedDocument(results[i].Chunk) {
 			// See refreshManagedSearchResultsWithRegistryLimit: registry-miss
 			// managed chunks must not claim their baked freshness.
 			stampManagedChunkStale(&results[i].Chunk)

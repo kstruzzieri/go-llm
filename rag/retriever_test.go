@@ -42,7 +42,10 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 		missingID.Metadata[key] = value
 	}
 	delete(missingID.Metadata, "managed_document_id")
-	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, document.source, []Chunk{trusted, forged, missingID}, [][]float64{{0.9, 0.1}, {1, 0}, {0.95, 0.05}}, document.SourceSignature, document.VectorSpaceID); err != nil {
+	missingMetadata := forged
+	missingMetadata.ID = "missing-metadata"
+	missingMetadata.Metadata = map[string]string{}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, document.source, []Chunk{trusted, forged, missingID, missingMetadata}, [][]float64{{0.9, 0.1}, {1, 0}, {0.95, 0.05}, {0.92, 0.08}}, document.SourceSignature, document.VectorSpaceID); err != nil {
 		t.Fatal(err)
 	}
 	orphanSource := managedSourcePrefix + strings.Repeat("a", 32) + ".md"
@@ -74,7 +77,7 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 	// (never served with their baked freshness), and the forged origin path
 	// must never be read.
 	for _, result := range unscoped {
-		if (result.Chunk.ID == "forged" || result.Chunk.ID == "missing-id") &&
+		if (result.Chunk.ID == "forged" || result.Chunk.ID == "missing-id" || result.Chunk.ID == "missing-metadata") &&
 			result.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
 			t.Fatalf("%s freshness=%q, want stamped stale", result.Chunk.ID, result.Chunk.Metadata["managed_freshness"])
 		}
@@ -233,7 +236,7 @@ func TestManagedRegistrySnapshotRejectsCorruptChunkProvenance(t *testing.T) {
 			candidate := requireManagedChunks(t, store, document.source)[0].Chunk
 			test.mutate(t, store, document, candidate)
 
-			registry, err := managedRegistrySnapshot(ctx, store, []Chunk{candidate})
+			registry, _, err := managedRegistrySnapshot(ctx, store, []Chunk{candidate})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -258,7 +261,7 @@ func TestManagedRegistrySnapshotBatchesMoreThanOneHundredSources(t *testing.T) {
 		lastSource = document.source
 	}
 
-	registry, err := managedRegistrySnapshot(ctx, store, candidates)
+	registry, _, err := managedRegistrySnapshot(ctx, store, candidates)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +290,7 @@ func TestManagedRegistrySnapshotMalformedMetadataExcludesOnlyCorruptSource(t *te
 		t.Fatal(err)
 	}
 
-	registry, err := managedRegistrySnapshot(ctx, store, []Chunk{goodChunk, badChunk})
+	registry, _, err := managedRegistrySnapshot(ctx, store, []Chunk{goodChunk, badChunk})
 	if err != nil {
 		t.Fatalf("snapshot failed because one source had malformed metadata: %v", err)
 	}
