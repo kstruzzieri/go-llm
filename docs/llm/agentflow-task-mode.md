@@ -295,6 +295,10 @@ safe parents. Symlinks, directories, or ambiguous ownership fall back to
 serial. Tracked candidates marked `assume-unchanged` or `skip-worktree` are not
 eligible; either flag anywhere in the tracked canonical tree disables the
 optional cohort so gates cannot verify different bytes in a fresh worktree.
+Sparse checkouts carry those flags pervasively, so parallel mode always runs
+serially there. A dirty or non-toplevel canonical root is not a fallback case:
+task mode refuses to start and names the offending path, because promotion
+must never race uncommitted work.
 Each worker runs fresh in its own detached worktree after an opaque
 copy of canonical `.agent/` state. Golem validates worker diffs, promotes only
 those source bytes, and lets AgentFlow perform dry-run then real ledger
@@ -303,7 +307,11 @@ continues serially in the canonical root, which calls `finish-run` exactly
 once.
 
 Deterministic promotion, dry-run, or collision failures roll back canonical
-promotion. During integration Golem holds an exclusive Git-dir lock, anchors
+promotion; collision errors name each reported collision kind. During
+integration Golem holds an exclusive OS-level file lock under the Git dir —
+the kernel releases it if the process dies, so a crash cannot leave the
+workspace permanently locked, and the lock file itself persists between runs
+by design. Golem anchors
 file operations to the opened canonical root, and compares path bytes, mode,
 and identity before both promotion and rollback. Canonical drift is therefore
 reported instead of overwritten. An ambiguous real aggregation failure

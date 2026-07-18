@@ -764,6 +764,87 @@ func TestParallelWorkersRejectHiddenUnassignedEdits(t *testing.T) {
 	}
 }
 
+func TestParallelWorkersRejectStagedRenameOfSpacedTrackedFile(t *testing.T) {
+	root := newParallelTestRepo(t)
+	writeTestFile(t, filepath.Join(root, "zz .agent"), "renamed source\n", 0o600)
+	runTestGit(t, root, "add", "--", "zz .agent")
+	runTestGit(t, root, "commit", "-m", "track spaced file")
+
+	// A staged rename would emit the old path as a bare -z token ("zz .agent"),
+	// which prefix-stripping used to misread as ".agent" and silently skip.
+	worker := func(_ context.Context, w parallelWorker) error {
+		if w.sourceID != "w1" {
+			return nil
+		}
+		return runParallelTestGit(w.root, "mv", "--", "zz .agent", "new.go")
+	}
+	c := newParallelCoordinator(root, parallelTestPlan("new.go", "b.go"), 2, worker)
+	selected, err := c.selectWorkers(context.Background())
+	if err != nil || !selected {
+		t.Fatalf("selectWorkers() = %v, %v", selected, err)
+	}
+	if err := c.prepareWorkers(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+
+	err = c.runWorkers(context.Background())
+	if err == nil || !strings.Contains(err.Error(), `unexpected changed path "zz .agent"`) {
+		t.Fatalf("runWorkers() error = %v", err)
+	}
+}
+
+func TestParallelWorkspaceLockRecoversAfterCrashLeftoverFile(t *testing.T) {
+	root := newParallelTestRepo(t)
+	writeTestFile(t, filepath.Join(root, ".git", "golem-parallel.lock"), "", 0o600)
+
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+	selected, err := c.selectWorkers(context.Background())
+	defer func() { _ = c.releaseWorkspaceLock() }()
+	if err != nil || !selected {
+		t.Fatalf("selectWorkers() with crash-leftover lock file = %v, %v", selected, err)
+	}
+}
+
+func TestParallelGitIgnoresInheritedRepoLocationEnv(t *testing.T) {
+	root := newParallelTestRepo(t)
+	t.Setenv("GIT_DIR", filepath.Join(root, "nonexistent-git-dir"))
+	t.Setenv("GIT_INDEX_FILE", filepath.Join(root, "nonexistent-index"))
+	t.Setenv("GIT_WORK_TREE", filepath.Join(root, "nonexistent-tree"))
+
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+	selected, err := c.selectWorkers(context.Background())
+	defer func() { _ = c.releaseWorkspaceLock() }()
+	if err != nil || !selected {
+		t.Fatalf("selectWorkers() under inherited GIT_* overrides = %v, %v", selected, err)
+	}
+}
+
+func TestParallelPrepareFailureReportsOnlyCreatedWorktrees(t *testing.T) {
+	root := newParallelTestRepo(t)
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+	selected, err := c.selectWorkers(context.Background())
+	defer func() { _ = c.releaseWorkspaceLock() }()
+	if err != nil || !selected {
+		t.Fatalf("selectWorkers() = %v, %v", selected, err)
+	}
+
+	// Force the second worktree add to fail: an empty sourceID resolves to the
+	// temp parent, which already holds w1's worktree by then.
+	c.workers[1].sourceID = ""
+	if err := c.prepareWorkers(context.Background()); err == nil {
+		t.Fatal("prepareWorkers() with colliding worktree target succeeded")
+	}
+	t.Cleanup(func() {
+		_ = c.cleanup(context.Background())
+		_ = os.RemoveAll(c.tempParent)
+	})
+	roots := c.preservedRoots()
+	if len(roots) != 1 || filepath.Base(roots[0]) != "w1" {
+		t.Fatalf("preservedRoots() after failed second add = %v", roots)
+	}
+}
+
 func TestParallelWaveInterruptCancelsEveryWorker(t *testing.T) {
 	root := newParallelTestRepo(t)
 	started := make(chan struct{}, 2)

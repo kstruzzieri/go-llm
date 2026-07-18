@@ -107,7 +107,21 @@ type AggregationResult struct {
 type AggregationCollisionError struct{ Result AggregationResult }
 
 func (e *AggregationCollisionError) Error() string {
-	return "agentflow aggregate-ledgers: collision"
+	kinds := make([]string, 0, len(e.Result.Collisions))
+	for _, raw := range e.Result.Collisions {
+		var record struct {
+			Kind string `json:"kind"`
+		}
+		if err := json.Unmarshal(raw, &record); err != nil || strings.TrimSpace(record.Kind) == "" {
+			kinds = append(kinds, "unknown")
+			continue
+		}
+		kinds = append(kinds, record.Kind)
+	}
+	if len(kinds) == 0 {
+		return "agentflow aggregate-ledgers: collision"
+	}
+	return "agentflow aggregate-ledgers: collision (" + strings.Join(kinds, ", ") + ")"
 }
 
 // ReviewRun is Agentflow's authoritative record-review --json projection.
@@ -367,7 +381,7 @@ func (c *Client) AggregateLedgers(ctx context.Context, inputs []AggregationInput
 
 	out, errb, exit, err := c.r.Run(ctx, args, nil)
 	if err != nil {
-		return AggregationResult{}, err
+		return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: %w", err)
 	}
 	result, fields, err := parseAggregationResult(out)
 	if err != nil {
@@ -389,6 +403,10 @@ func (c *Client) AggregateLedgers(ctx context.Context, inputs []AggregationInput
 		return result, &AggregationCollisionError{Result: result}
 	}
 	if exit != 0 {
+		if detail := strings.TrimSpace(string(errb)); detail != "" {
+			return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: status %q with exit %d: %s",
+				result.Status, exit, detail)
+		}
 		return AggregationResult{}, fmt.Errorf("agentflow aggregate-ledgers: status %q with exit %d", result.Status, exit)
 	}
 	return result, nil
@@ -564,23 +582,29 @@ func (p *ResumabilityProjection) HasDiagnosticsField() bool {
 	return p != nil && p.diagnosticsPresent
 }
 
+// ResumabilityContract is the locked plan/execution contract pairing a
+// projection proves its state against.
 type ResumabilityContract struct {
 	PlanSHA256              string `json:"plan_sha256"`
 	Locked                  bool   `json:"locked"`
 	ExecutionContractSHA256 string `json:"execution_contract_sha256"`
 }
 
+// ResumabilityStep is the projected execution state of one plan step.
+// Completed is a pointer so an omitted field is distinguishable from false.
 type ResumabilityStep struct {
 	ID        string `json:"id"`
 	State     string `json:"state"`
 	Completed *bool  `json:"completed"`
 }
 
+// ResumabilityAttempt is a projected open or closed step attempt.
 type ResumabilityAttempt struct {
 	ID   string `json:"id"`
 	Open bool   `json:"open"`
 }
 
+// ResumabilityDiagnostic is one projected execution diagnostic record.
 type ResumabilityDiagnostic struct {
 	Code     string `json:"code"`
 	Message  string `json:"message"`

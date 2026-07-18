@@ -194,7 +194,7 @@ const indexLeaseRetryInterval = 500 * time.Millisecond
 
 // awaitIndexWriterLease polls for the workspace writer lease until it is
 // acquired, a non-contention error occurs, or ctx is cancelled.
-func awaitIndexWriterLease(ctx context.Context, dbPath string) (*indexWriterLease, error) {
+func awaitIndexWriterLease(ctx context.Context, dbPath string) (*flockLease, error) {
 	ticker := time.NewTicker(indexLeaseRetryInterval)
 	defer ticker.Stop()
 	for {

@@ -130,6 +130,35 @@ func TestClient_AggregateLedgers_FailsClosed(t *testing.T) {
 	}
 }
 
+func TestClient_AggregateLedgers_WrapsTransportError(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"aggregate-ledgers": {err: errors.New("exec format error")},
+	})
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}}
+	_, err := c.AggregateLedgers(context.Background(), inputs, "abc123", true)
+	if err == nil || !strings.Contains(err.Error(), "agentflow aggregate-ledgers:") ||
+		!strings.Contains(err.Error(), "exec format error") {
+		t.Fatalf("AggregateLedgers() transport error = %v", err)
+	}
+}
+
+func TestClient_AggregationCollisionError_NamesCollisionKinds(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"aggregate-ledgers": {stdout: []byte(`{"status":"collision","sources":[],` +
+			`"collisions":[{"kind":"step_overlap"},{"kind":"base_commit_unresolved"},{}],"planned":{}}`), exit: 1},
+	})
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}}
+	_, err := c.AggregateLedgers(context.Background(), inputs, "abc123", true)
+	var collision *AggregationCollisionError
+	if !errors.As(err, &collision) {
+		t.Fatalf("AggregateLedgers() error = %v", err)
+	}
+	want := "agentflow aggregate-ledgers: collision (step_overlap, base_commit_unresolved, unknown)"
+	if got := collision.Error(); got != want {
+		t.Fatalf("collision error = %q, want %q", got, want)
+	}
+}
+
 func TestClient_NextAction_Argv(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{"state":"steps_pending"}`), exit: 0}})
 	st, err := c.NextAction(context.Background())

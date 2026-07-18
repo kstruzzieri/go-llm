@@ -46,7 +46,7 @@ type parallelCoordinator struct {
 	topLevel      string
 	head          string
 	tempParent    string
-	lockFile      *os.File
+	lock          *flockLease
 	prepared      bool
 	workers       []parallelWorker
 	baseSnapshots map[string]parallelFileSnapshot
@@ -693,10 +693,12 @@ func (c *parallelCoordinator) prepareWorkers(ctx context.Context) error {
 	c.tempParent = parent
 	for i := range c.workers {
 		workerRoot := filepath.Join(parent, c.workers[i].sourceID)
-		c.workers[i].root = workerRoot
 		if _, err := runParallelGit(ctx, c.root, "worktree", "add", "--detach", workerRoot, c.head); err != nil {
 			return fmt.Errorf("create worktree %s: %w", c.workers[i].sourceID, err)
 		}
+		// Record the root only once the worktree exists, so failure paths never
+		// report a never-created directory as preserved.
+		c.workers[i].root = workerRoot
 		if err := copyParallelAgentTree(filepath.Join(c.root, ".agent"), filepath.Join(workerRoot, ".agent")); err != nil {
 			return fmt.Errorf("copy .agent to %s: %w", c.workers[i].sourceID, err)
 		}
@@ -808,6 +810,7 @@ func (c *parallelCoordinator) validateWorkerGitState(ctx context.Context, worker
 	}
 	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "HEAD")
 	cmd.Dir = worker.root
+	cmd.Env = parallelGitEnv()
 	if out, err := cmd.CombinedOutput(); err == nil {
 		return fmt.Errorf("worker %s is attached to branch %s; want detached HEAD", worker.sourceID, strings.TrimSpace(string(out)))
 	} else {
@@ -820,7 +823,7 @@ func (c *parallelCoordinator) validateWorkerGitState(ctx context.Context, worker
 }
 
 func (c *parallelCoordinator) acquireWorkspaceLock(ctx context.Context) error {
-	if c.lockFile != nil {
+	if c.lock != nil {
 		return errors.New("parallel workspace lock is already held")
 	}
 	out, err := runParallelGit(ctx, c.root, "rev-parse", "--path-format=absolute", "--git-path", "golem-parallel.lock")
@@ -831,40 +834,32 @@ func (c *parallelCoordinator) acquireWorkspaceLock(ctx context.Context) error {
 	if !filepath.IsAbs(lockPath) {
 		lockPath = filepath.Join(c.root, lockPath)
 	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	// OS-level lock, not an existence sentinel: the kernel releases it when the
+	// process dies, so a crash mid-cohort never leaves the workspace
+	// permanently locked. The lock file itself persists across runs by design
+	// (unlinking a lock path that another process may already hold open would
+	// let two owners lock different inodes at once).
+	lease, err := acquireFlockLease(lockPath)
 	if err != nil {
-		if errors.Is(err, fs.ErrExist) {
+		if errors.Is(err, errIndexWriterLeaseHeld) {
 			return fmt.Errorf("parallel workspace is already locked: %s", lockPath)
 		}
 		return fmt.Errorf("acquire parallel workspace lock: %w", err)
 	}
-	c.lockFile = file
+	c.lock = lease
 	return nil
 }
 
 func (c *parallelCoordinator) releaseWorkspaceLock() error {
-	if c.lockFile == nil {
+	if c.lock == nil {
 		return nil
 	}
-	file, lockPath := c.lockFile, c.lockFile.Name()
-	c.lockFile = nil
-	heldInfo, statErr := file.Stat()
-	closeErr := file.Close()
-	if statErr != nil {
-		return errors.Join(closeErr, fmt.Errorf("inspect held parallel workspace lock: %w", statErr))
+	lock := c.lock
+	c.lock = nil
+	if err := lock.Close(); err != nil {
+		return fmt.Errorf("release parallel workspace lock: %w", err)
 	}
-	pathInfo, pathErr := os.Lstat(lockPath)
-	if pathErr == nil && !os.SameFile(heldInfo, pathInfo) {
-		return errors.Join(closeErr, errors.New("parallel workspace lock path changed while held"))
-	}
-	if pathErr != nil && !errors.Is(pathErr, fs.ErrNotExist) {
-		return errors.Join(closeErr, fmt.Errorf("inspect parallel workspace lock during release: %w", pathErr))
-	}
-	var removeErr error
-	if pathErr == nil {
-		removeErr = os.Remove(lockPath)
-	}
-	return errors.Join(closeErr, removeErr)
+	return nil
 }
 
 func (c *parallelCoordinator) recordBase(ctx context.Context) error {
@@ -932,7 +927,7 @@ func (c *parallelCoordinator) recheckRoot(ctx context.Context) error {
 }
 
 func (c *parallelCoordinator) requireCleanRoot(ctx context.Context) error {
-	out, err := runParallelGit(ctx, c.root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+	out, err := runParallelGit(ctx, c.root, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all")
 	if err != nil {
 		return fmt.Errorf("inspect parallel root: %w", err)
 	}
@@ -978,6 +973,7 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 	}
 	cmd := exec.CommandContext(ctx, "git", "check-ignore", "-q", "--", file)
 	cmd.Dir = c.root
+	cmd.Env = parallelGitEnv()
 	err = cmd.Run()
 	if err == nil {
 		return false, nil
@@ -1009,7 +1005,9 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 			return nil, fmt.Errorf("worker %s produced unsafe assigned path %q: %w", worker.sourceID, file, err)
 		}
 	}
-	out, err := runParallelGit(ctx, worker.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
+	// --no-renames keeps every -z entry in "XY path" form; rename records would
+	// emit the old path as a bare second token that defeats prefix parsing.
+	out, err := runParallelGit(ctx, worker.root, "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all", "--ignored=matching")
 	if err != nil {
 		return nil, fmt.Errorf("inspect worker %s changes: %w", worker.sourceID, err)
 	}
@@ -1041,12 +1039,37 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 func runParallelGit(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = parallelGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+// parallelGitEnv strips inherited repo-location overrides so every git call
+// resolves the repository from cmd.Dir. GIT_INDEX_FILE alone would silently
+// point the clean/index-flag validation at a different index (git exports it
+// to hooks) while the toplevel identity checks still pass.
+func parallelGitEnv() []string {
+	blocked := []string{
+		"GIT_DIR=", "GIT_WORK_TREE=", "GIT_INDEX_FILE=", "GIT_OBJECT_DIRECTORY=",
+		"GIT_COMMON_DIR=", "GIT_NAMESPACE=", "GIT_ALTERNATE_OBJECT_DIRECTORIES=", "GIT_PREFIX=",
+	}
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, kv := range os.Environ() {
+		drop := false
+		for _, prefix := range blocked {
+			if strings.HasPrefix(kv, prefix) {
+				drop = true
+				break
+			}
+		}
+		if !drop {
+			env = append(env, kv)
+		}
+	}
+	return append(env, "GIT_TERMINAL_PROMPT=0")
 }
 
 func parallelUnexpectedIndexPath(ctx context.Context, root string) (string, error) {
