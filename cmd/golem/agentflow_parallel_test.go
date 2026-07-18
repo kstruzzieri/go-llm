@@ -1169,7 +1169,7 @@ func TestParallelPromotionRefusesCanonicalEditAfterSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	promotion := &parallelPromotion{root: rootFS}
-	defer promotion.close()
+	defer func() { _ = promotion.close() }()
 	snapshot, err := parallelSnapshot(rootFS, "target.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1220,7 +1220,7 @@ func TestParallelRollbackRefusesCanonicalEditAfterPromotion(t *testing.T) {
 		t.Fatal(err)
 	}
 	promotion := &parallelPromotion{root: rootFS}
-	defer promotion.close()
+	defer func() { _ = promotion.close() }()
 	snapshot, err := parallelSnapshot(rootFS, "target.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1254,7 +1254,7 @@ func TestParallelPromotionCannotEscapeSwappedParent(t *testing.T) {
 		t.Fatal(err)
 	}
 	promotion := &parallelPromotion{root: rootFS}
-	defer promotion.close()
+	defer func() { _ = promotion.close() }()
 	snapshot, err := parallelSnapshot(rootFS, "owned/target.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1306,7 +1306,7 @@ func TestParallelPromotionPreMutationFailureDoesNotTrackOrReplaceTarget(t *testi
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer rootFS.Close()
+			defer func() { _ = rootFS.Close() }()
 			promotion := &parallelPromotion{root: rootFS}
 			err = promotion.apply(tt.change, parallelFileSnapshot{
 				path: "target.go", exists: true, data: []byte("original\n"), mode: tt.mode,
@@ -1363,7 +1363,7 @@ func TestParallelAtomicCleanupJoinsRemovalFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rootFS.Close()
+	defer func() { _ = rootFS.Close() }()
 	err = parallelAtomicCleanup(primary, rootFS, temp, filepath.Base(name), true)
 	if !errors.Is(err, primary) || !strings.Contains(err.Error(), "remove promotion temp") {
 		t.Fatalf("parallelAtomicCleanup() error = %v", err)

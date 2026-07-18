@@ -407,7 +407,7 @@ func parallelSnapshot(root *os.Root, file string) (parallelFileSnapshot, error) 
 	if err != nil {
 		return snapshot, err
 	}
-	defer fileHandle.Close()
+	defer func() { _ = fileHandle.Close() }()
 	openedInfo, err := fileHandle.Stat()
 	if err != nil {
 		return snapshot, err
@@ -893,14 +893,14 @@ func (c *parallelCoordinator) recheckRoot(ctx context.Context) error {
 		return fmt.Errorf("resolve rechecked Git toplevel symlinks: %w", err)
 	}
 	if got != c.topLevel || got != c.root {
-		return fmt.Errorf("Git toplevel changed from %s to %s", c.topLevel, got)
+		return fmt.Errorf("git toplevel changed from %s to %s", c.topLevel, got)
 	}
 	head, err := runParallelGit(ctx, c.root, "rev-parse", "--verify", "HEAD")
 	if err != nil {
 		return fmt.Errorf("recheck Git HEAD: %w", err)
 	}
 	if got := strings.TrimSpace(string(head)); got != c.head {
-		return fmt.Errorf("Git HEAD changed from %s to %s", c.head, got)
+		return fmt.Errorf("git HEAD changed from %s to %s", c.head, got)
 	}
 	return c.requireCleanRoot(ctx)
 }
