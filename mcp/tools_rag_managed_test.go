@@ -1,0 +1,1170 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"path/filepath"
+	"reflect"
+	"sort"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/rag"
+)
+
+func TestManagedRAGToolSchemas(t *testing.T) {
+	s := &Server{
+		mcpServer: gomcp.NewServer(&gomcp.Implementation{
+			Name: "test", Version: "0.0.1",
+		}, nil),
+	}
+	s.registerRAGTools()
+
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+
+	listed, err := env.session.ListTools(context.Background(), &gomcp.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("ListTools() error = %v", err)
+	}
+	tools := make(map[string]*gomcp.Tool, len(listed.Tools))
+	for _, tool := range listed.Tools {
+		tools[tool.Name] = tool
+	}
+
+	for _, name := range []string{
+		"rag_index_file",
+		"rag_index_directory",
+		"rag_search",
+		"rag_answer",
+		"rag_stats",
+		"rag_delete",
+	} {
+		if tools[name] == nil {
+			t.Errorf("legacy tool %q is not registered", name)
+		}
+	}
+
+	expected := map[string]struct {
+		properties map[string]string
+		arrays     []string
+		required   []string
+		enums      map[string][]string
+	}{
+		"rag_ingest_text": {
+			properties: map[string]string{
+				"name": "string", "content": "string", "title": "string",
+				"mime_type": "string", "collection": "string", "tags": "array",
+			},
+			arrays:   []string{"tags"},
+			required: []string{"content", "name"},
+		},
+		"rag_ingest_file": {
+			properties: map[string]string{
+				"path": "string", "title": "string", "mime_type": "string",
+				"collection": "string", "tags": "array",
+			},
+			arrays:   []string{"tags"},
+			required: []string{"path"},
+		},
+		"rag_list_documents": {
+			properties: map[string]string{
+				"collection": "string", "tags": "array",
+				"state": "string", "freshness": "string", "after_id": "string", "limit": "integer",
+			},
+			arrays: []string{"tags"},
+			enums: map[string][]string{
+				"state":     {"indexing", "indexed", "failed"},
+				"freshness": {"unknown", "fresh", "stale"},
+			},
+		},
+		"rag_delete_document": {
+			properties: map[string]string{"id": "string"},
+			required:   []string{"id"},
+		},
+		"rag_reindex_document": {
+			properties: map[string]string{"id": "string"},
+			required:   []string{"id"},
+		},
+	}
+
+	for name, want := range expected {
+		t.Run(name, func(t *testing.T) {
+			tool := tools[name]
+			if tool == nil {
+				t.Fatalf("managed tool %q is not registered", name)
+			}
+			schema, ok := tool.InputSchema.(map[string]any)
+			if !ok {
+				t.Fatalf("InputSchema = %T, want map[string]any", tool.InputSchema)
+			}
+			if got := schema["type"]; got != "object" {
+				t.Fatalf("schema type = %v, want object", got)
+			}
+			properties, ok := schema["properties"].(map[string]any)
+			if !ok {
+				t.Fatalf("properties = %T, want map[string]any", schema["properties"])
+			}
+			if got := propertyTypes(t, properties); !reflect.DeepEqual(got, want.properties) {
+				t.Fatalf("property types = %#v, want %#v", got, want.properties)
+			}
+			for _, field := range want.arrays {
+				property := properties[field].(map[string]any)
+				items, ok := property["items"].(map[string]any)
+				if !ok || items["type"] != "string" {
+					t.Fatalf("%s items = %#v, want string schema", field, property["items"])
+				}
+				if got := property["maxItems"]; got != float64(rag.MaxManagedTags) && got != rag.MaxManagedTags {
+					t.Fatalf("%s maxItems = %v, want %d", field, got, rag.MaxManagedTags)
+				}
+				if got := items["maxLength"]; got != float64(rag.MaxManagedTagBytes) && got != rag.MaxManagedTagBytes {
+					t.Fatalf("%s item maxLength = %v, want %d", field, got, rag.MaxManagedTagBytes)
+				}
+			}
+			for field, wantMaxLength := range map[string]int{
+				"name": rag.MaxManagedMetadataBytes, "content": rag.MaxManagedDocumentBytes,
+				"path": rag.MaxManagedMetadataBytes, "title": rag.MaxManagedMetadataBytes,
+				"mime_type": rag.MaxManagedMetadataBytes, "collection": rag.MaxManagedMetadataBytes,
+				"id": rag.MaxManagedMetadataBytes, "after_id": rag.MaxManagedMetadataBytes,
+			} {
+				if property, ok := properties[field].(map[string]any); ok {
+					if got := property["maxLength"]; got != float64(wantMaxLength) && got != wantMaxLength {
+						t.Fatalf("%s maxLength = %v, want %d", field, got, wantMaxLength)
+					}
+				}
+			}
+			if property, ok := properties["limit"].(map[string]any); ok {
+				if got := property["maximum"]; got != float64(rag.MaxManagedListLimit) && got != rag.MaxManagedListLimit {
+					t.Fatalf("limit maximum = %v, want %d", got, rag.MaxManagedListLimit)
+				}
+			}
+			for field, wantEnum := range want.enums {
+				property := properties[field].(map[string]any)
+				if got := schemaStringSlice(t, property["enum"]); !reflect.DeepEqual(got, wantEnum) {
+					t.Fatalf("%s enum = %#v, want %#v", field, got, wantEnum)
+				}
+			}
+			gotRequired := schemaStringSlice(t, schema["required"])
+			sort.Strings(gotRequired)
+			if !reflect.DeepEqual(gotRequired, want.required) {
+				t.Fatalf("required = %#v, want %#v", gotRequired, want.required)
+			}
+		})
+	}
+}
+
+func TestManagedRAGListDocumentsRejectsLimitOverMaximum(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	result := callManagedRAGHandler(t, s.handleRAGListDocuments, fmt.Sprintf(`{"limit":%d}`, rag.MaxManagedListLimit+1))
+	if !result.IsError || !strings.Contains(extractText(result), "limit") {
+		t.Fatalf("result = isError:%v text:%q, want limit validation error", result.IsError, extractText(result))
+	}
+}
+
+func TestManagedRAGListDocumentsPreservesScanLimitProgress(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	tagged := make(map[string]bool, 2)
+	ids := make([]string, 0, rag.MaxManagedListLimit+1)
+	for i := 0; i <= rag.MaxManagedListLimit; i++ {
+		opts := rag.DocumentOptions{}
+		if i < 2 {
+			opts.Tags = []string{"wanted"}
+		}
+		document, err := s.managedSources.IngestText(
+			context.Background(), fmt.Sprintf("document-%03d.md", i), "content", opts,
+		)
+		if err != nil {
+			t.Fatalf("IngestText(%d) error = %v", i, err)
+		}
+		ids = append(ids, document.ID)
+		if i < 2 {
+			tagged[document.ID] = true
+		}
+	}
+	sort.Strings(ids)
+
+	result := callManagedRAGHandler(t, s.handleRAGListDocuments, `{"tags":["wanted"],"limit":3}`)
+	if !result.IsError {
+		t.Fatalf("result IsError = false, want scan-limit error")
+	}
+	type scanLimitPayload struct {
+		Error       string         `json:"error"`
+		Documents   []rag.Document `json:"documents"`
+		NextAfterID string         `json:"next_after_id"`
+		Scanned     int            `json:"scanned"`
+		Incomplete  bool           `json:"incomplete"`
+	}
+	decode := func(data []byte) scanLimitPayload {
+		t.Helper()
+		var payload scanLimitPayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatalf("decode scan-limit payload: %v (%s)", err, data)
+		}
+		return payload
+	}
+	wire := decode([]byte(extractText(result)))
+	structuredJSON, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structured scan-limit payload: %v", err)
+	}
+	structured := decode(structuredJSON)
+	if !reflect.DeepEqual(structured, wire) {
+		t.Fatalf("structured payload = %#v, want %#v", structured, wire)
+	}
+
+	wantIDs := make([]string, 0, 2)
+	for _, id := range ids[:rag.MaxManagedListLimit] {
+		if tagged[id] {
+			wantIDs = append(wantIDs, id)
+		}
+	}
+	gotIDs := make([]string, len(wire.Documents))
+	for i := range wire.Documents {
+		gotIDs[i] = wire.Documents[i].ID
+	}
+	if wire.Error != "scan_limit" || !wire.Incomplete ||
+		wire.NextAfterID != ids[rag.MaxManagedListLimit-1] || wire.Scanned != rag.MaxManagedListLimit ||
+		!reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("scan-limit payload = %#v, document IDs = %#v, want cursor %q, scanned %d, IDs %#v", wire, gotIDs, ids[rag.MaxManagedListLimit-1], rag.MaxManagedListLimit, wantIDs)
+	}
+}
+
+func TestRAGHandlersRejectOversizeArgumentsBeforeDecoding(t *testing.T) {
+	s := &Server{}
+	for _, test := range []struct {
+		name    string
+		handler managedRAGHandler
+		max     int
+	}{
+		{"index file", s.handleRAGIndexFile, maxRAGSmallArgumentsBytes},
+		{"index directory", s.handleRAGIndexDirectory, maxRAGSmallArgumentsBytes},
+		{"search", s.handleRAGSearch, maxRAGSearchArgumentsBytes},
+		{"answer", s.handleRAGAnswer, maxRAGSearchArgumentsBytes},
+		{"delete source", s.handleRAGDelete, maxRAGSmallArgumentsBytes},
+		{"ingest file", s.handleRAGIngestFile, maxRAGSmallArgumentsBytes},
+		{"list documents", s.handleRAGListDocuments, maxRAGSmallArgumentsBytes},
+		{"delete document", s.handleRAGDeleteDocument, maxRAGSmallArgumentsBytes},
+		{"reindex document", s.handleRAGReindexDocument, maxRAGSmallArgumentsBytes},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			arguments := make(json.RawMessage, test.max+1)
+			arguments[0] = 0xff // proves the size check runs before UTF-8 and JSON decoding
+			request := &gomcp.CallToolRequest{Params: &gomcp.CallToolParamsRaw{Arguments: arguments}}
+			result, err := test.handler(context.Background(), request)
+			if err != nil || result == nil || !result.IsError {
+				t.Fatalf("result=%#v error=%v, want validation error", result, err)
+			}
+			if text := extractText(result); !strings.Contains(text, fmt.Sprintf("at most %d bytes", test.max)) {
+				t.Fatalf("error=%q, want raw argument size limit", text)
+			}
+		})
+	}
+}
+
+func TestRAGIngestTextUsesLargeArgumentBudget(t *testing.T) {
+	content := strings.Repeat("x", maxRAGSearchArgumentsBytes)
+	result := callManagedRAGHandler(t, (&Server{}).handleRAGIngestText, `{"name":"","content":"`+content+`"}`)
+	if text := extractText(result); !result.IsError || !strings.Contains(text, "name must not be empty") {
+		t.Fatalf("error=%q, want field validation after accepting a search-limit-sized body", text)
+	}
+}
+
+type recordingRAGArgumentsDecoder bool
+
+func (d *recordingRAGArgumentsDecoder) UnmarshalJSON([]byte) error {
+	*d = true
+	return nil
+}
+
+func TestDecodeManagedRAGArgumentsSizeBoundary(t *testing.T) {
+	const maxBytes = 8
+	atLimit := json.RawMessage("0       ")
+	var decoded recordingRAGArgumentsDecoder
+	if err := decodeManagedRAGArguments(atLimit, maxBytes, &decoded); err != nil || !decoded {
+		t.Fatalf("at-limit decode: decoded=%v error=%v", decoded, err)
+	}
+
+	decoded = false
+	overLimit := append(append(json.RawMessage(nil), atLimit...), ' ')
+	if err := decodeManagedRAGArguments(overLimit, maxBytes, &decoded); err == nil || decoded {
+		t.Fatalf("over-limit decode: decoded=%v error=%v", decoded, err)
+	}
+}
+
+func TestManagedTagsUnmarshalPreservesNullEmptyAndValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		input   string
+		want    []string
+		wantNil bool
+	}{
+		{name: "null", input: `null`, wantNil: true},
+		{name: "empty", input: `[]`, want: []string{}},
+		{name: "values", input: `["alpha","beta"]`, want: []string{"alpha", "beta"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tags := managedTags{"stale"}
+			if err := json.Unmarshal([]byte(tc.input), &tags); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+			if tc.wantNil {
+				if tags != nil {
+					t.Fatalf("tags = %#v, want nil", tags)
+				}
+				return
+			}
+			if !reflect.DeepEqual([]string(tags), tc.want) {
+				t.Fatalf("tags = %#v, want %#v", tags, tc.want)
+			}
+		})
+	}
+}
+
+func TestManagedTagsUnmarshalRejectsSixtyFifthItem(t *testing.T) {
+	input := `[` + strings.TrimSuffix(strings.Repeat(`"",`, rag.MaxManagedTags+1), ",") + `]`
+	var tags managedTags
+	err := json.Unmarshal([]byte(input), &tags)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d items", rag.MaxManagedTags)) {
+		t.Fatalf("Unmarshal() error = %v, want tag-count limit", err)
+	}
+	if tags != nil {
+		t.Fatalf("tags = %#v, want receiver unchanged on error", tags)
+	}
+}
+
+func TestManagedTagsUnmarshalRejectsOversizeEscapedItem(t *testing.T) {
+	input := `[` + `"` + strings.Repeat(`\u0061`, rag.MaxManagedTagBytes+1) + `"` + `]`
+	var tags managedTags
+	err := json.Unmarshal([]byte(input), &tags)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d bytes", rag.MaxManagedTagBytes)) {
+		t.Fatalf("Unmarshal() error = %v, want tag-size limit", err)
+	}
+}
+
+func TestManagedTagArgumentsRejectBeforeManagedGateOrRetrieval(t *testing.T) {
+	tags := `[` + strings.TrimSuffix(strings.Repeat(`"",`, rag.MaxManagedTags+1), ",") + `]`
+	managed := newManagedRAGTestServer(t)
+	if err := managed.managedGate.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer managed.managedGate.unlock()
+
+	for _, tc := range []struct {
+		name    string
+		handler managedRAGHandler
+		args    string
+	}{
+		{name: "ingest", handler: managed.handleRAGIngestText, args: `{"name":"n","content":"c","tags":` + tags + `}`},
+		{name: "list", handler: managed.handleRAGListDocuments, args: `{"tags":` + tags + `}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, err := tc.handler(ctx, rawArgs(t, tc.args))
+			if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation:") {
+				t.Fatalf("result=%#v error=%v, want validation before managed gate", result, err)
+			}
+		})
+	}
+
+	store := &recordingMCPMultiStore{}
+	search := &Server{retriever: mcpTestRetriever(t, store)}
+	result, err := search.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","tags":`+tags+`}`))
+	if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation:") {
+		t.Fatalf("search result=%#v error=%v, want validation before retrieval", result, err)
+	}
+	if store.calls != 0 {
+		t.Fatalf("search calls = %d, want zero", store.calls)
+	}
+}
+
+func TestRAGArgumentLimitsCoverWorstCaseManagedTextJSON(t *testing.T) {
+	if maxRAGSmallArgumentsBytes != 256<<10 || maxRAGSearchArgumentsBytes != 1<<20 || maxRAGIngestTextArgumentsBytes != 97<<20 {
+		t.Fatalf("argument limits = %d/%d/%d", maxRAGSmallArgumentsBytes, maxRAGSearchArgumentsBytes, maxRAGIngestTextArgumentsBytes)
+	}
+	// encoding/json can render each valid one-byte control character as six
+	// bytes (\\u00xx). Leave another MiB for the object and managed metadata.
+	worstCase := 6*rag.MaxManagedDocumentBytes + 1<<20
+	if maxRAGIngestTextArgumentsBytes < worstCase {
+		t.Fatalf("ingest text argument limit = %d, want at least %d", maxRAGIngestTextArgumentsBytes, worstCase)
+	}
+}
+
+func TestManagedRAGHandlersRejectRawBoundsBeforeLock(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	if err := s.managedGate.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.managedGate.unlock()
+
+	tooManyTags := make([]string, rag.MaxManagedTags+1)
+	for i := range tooManyTags {
+		tooManyTags[i] = " "
+	}
+	tooLongTag := strings.Repeat(" ", rag.MaxManagedTagBytes+1)
+	tooLongMetadata := strings.Repeat("x", rag.MaxManagedMetadataBytes+1)
+	tooLongWhitespace := strings.Repeat(" ", rag.MaxManagedMetadataBytes+1)
+	tooLongContent := strings.Repeat("x", rag.MaxManagedDocumentBytes+1)
+	for _, tc := range []struct {
+		name    string
+		handler managedRAGHandler
+		args    map[string]any
+	}{
+		{"ingest text/name", s.handleRAGIngestText, map[string]any{"name": tooLongMetadata, "content": "content"}},
+		{"ingest text/content", s.handleRAGIngestText, map[string]any{"name": "name", "content": tooLongContent}},
+		{"ingest text/title", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "title": tooLongWhitespace}},
+		{"ingest text/mime type", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "mime_type": tooLongWhitespace}},
+		{"ingest text/collection", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "collection": tooLongWhitespace}},
+		{"ingest text/tags", s.handleRAGIngestText, map[string]any{"name": "name", "content": "content", "tags": tooManyTags}},
+		{"ingest file/path", s.handleRAGIngestFile, map[string]any{"path": tooLongMetadata}},
+		{"list/collection", s.handleRAGListDocuments, map[string]any{"collection": tooLongMetadata}},
+		{"list/after id", s.handleRAGListDocuments, map[string]any{"after_id": tooLongMetadata}},
+		{"list/limit", s.handleRAGListDocuments, map[string]any{"limit": rag.MaxManagedListLimit + 1}},
+		{"list/raw tag count", s.handleRAGListDocuments, map[string]any{"tags": tooManyTags}},
+		{"list/raw tag bytes", s.handleRAGListDocuments, map[string]any{"tags": []string{tooLongTag}}},
+		{"delete/id", s.handleRAGDeleteDocument, map[string]any{"id": tooLongMetadata}},
+		{"reindex/id", s.handleRAGReindexDocument, map[string]any{"id": tooLongMetadata}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			data, err := json.Marshal(tc.args)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, err := tc.handler(ctx, rawArgs(t, string(data)))
+			if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation:") {
+				t.Fatalf("result = %#v, err = %v, want validation error before managed lock", result, err)
+			}
+		})
+	}
+}
+
+func TestManagedRAGHandlersRejectInvalidUTF8ArgumentsBeforeLock(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	if err := s.managedGate.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer s.managedGate.unlock()
+
+	invalidString := func(field string) string {
+		return string([]byte(`{"` + field + `":"` + "\xff" + `"}`))
+	}
+	for _, tc := range []struct {
+		name    string
+		handler managedRAGHandler
+		args    string
+	}{
+		{"ingest text", s.handleRAGIngestText, string([]byte(`{"name":"` + "\xff" + `","content":"content"}`))},
+		{"ingest file", s.handleRAGIngestFile, invalidString("path")},
+		{"list", s.handleRAGListDocuments, invalidString("collection")},
+		{"delete", s.handleRAGDeleteDocument, invalidString("id")},
+		{"reindex", s.handleRAGReindexDocument, invalidString("id")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, err := tc.handler(ctx, rawArgs(t, tc.args))
+			if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation: invalid arguments:") {
+				t.Fatalf("result = %#v, err = %v, want malformed-argument validation before managed lock", result, err)
+			}
+		})
+	}
+}
+
+func propertyTypes(t *testing.T, properties map[string]any) map[string]string {
+	t.Helper()
+	types := make(map[string]string, len(properties))
+	for name, raw := range properties {
+		property, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("property %q = %T, want map[string]any", name, raw)
+		}
+		propertyType, ok := property["type"].(string)
+		if !ok {
+			t.Fatalf("property %q type = %T, want string", name, property["type"])
+		}
+		types[name] = propertyType
+	}
+	return types
+}
+
+func schemaStringSlice(t *testing.T, value any) []string {
+	t.Helper()
+	if value == nil {
+		return nil
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		t.Fatalf("marshal schema string slice: %v", err)
+	}
+	var values []string
+	if err := json.Unmarshal(data, &values); err != nil {
+		t.Fatalf("decode schema string slice: %v", err)
+	}
+	return values
+}
+
+type managedRAGHandler func(context.Context, *gomcp.CallToolRequest) (*gomcp.CallToolResult, error)
+
+func managedRAGHandlers(s *Server) map[string]managedRAGHandler {
+	return map[string]managedRAGHandler{
+		"rag_ingest_text":      s.handleRAGIngestText,
+		"rag_ingest_file":      s.handleRAGIngestFile,
+		"rag_list_documents":   s.handleRAGListDocuments,
+		"rag_delete_document":  s.handleRAGDeleteDocument,
+		"rag_reindex_document": s.handleRAGReindexDocument,
+	}
+}
+
+func callManagedRAGHandler(t *testing.T, handler managedRAGHandler, arguments string) *gomcp.CallToolResult {
+	t.Helper()
+	result, err := handler(context.Background(), rawArgs(t, arguments))
+	if err != nil {
+		t.Fatalf("handler error = %v", err)
+	}
+	if result == nil {
+		t.Fatal("handler result = nil")
+	}
+	return result
+}
+
+func TestManagedRAGToolValidation(t *testing.T) {
+	s := &Server{}
+	for name, handler := range managedRAGHandlers(s) {
+		t.Run(name+"/malformed_json", func(t *testing.T) {
+			result := callManagedRAGHandler(t, handler, `{`)
+			if text := extractText(result); !result.IsError || !strings.HasPrefix(text, "validation: invalid arguments:") {
+				t.Fatalf("result = isError:%v text:%q, want validation error", result.IsError, text)
+			}
+		})
+	}
+
+	for _, tc := range []struct {
+		name      string
+		handler   managedRAGHandler
+		arguments string
+		field     string
+	}{
+		{"ingest_text/name", s.handleRAGIngestText, `{"name":" \t ","content":"content"}`, "name"},
+		{"ingest_text/content", s.handleRAGIngestText, `{"name":"notes","content":" \n\t"}`, "content"},
+		{"ingest_file/path", s.handleRAGIngestFile, `{"path":" \t "}`, "path"},
+		{"delete/id", s.handleRAGDeleteDocument, `{"id":" \n "}`, "id"},
+		{"reindex/id", s.handleRAGReindexDocument, `{"id":" \t "}`, "id"},
+		{"list/state", s.handleRAGListDocuments, `{"state":"bogus"}`, "state"},
+		{"list/freshness", s.handleRAGListDocuments, `{"freshness":"Fresh"}`, "freshness"},
+	} {
+		t.Run(tc.name+"/blank", func(t *testing.T) {
+			result := callManagedRAGHandler(t, tc.handler, tc.arguments)
+			text := extractText(result)
+			if !result.IsError || !strings.HasPrefix(text, "validation:") || !strings.Contains(text, tc.field) {
+				t.Fatalf("result = isError:%v text:%q, want %s validation error", result.IsError, text, tc.field)
+			}
+		})
+	}
+}
+
+func TestManagedRAGToolsDisabledOrUnavailable(t *testing.T) {
+	validArguments := map[string]string{
+		"rag_ingest_text":      `{"name":"notes","content":"content"}`,
+		"rag_ingest_file":      `{"path":"notes.md"}`,
+		"rag_list_documents":   `{}`,
+		"rag_delete_document":  `{"id":"missing"}`,
+		"rag_reindex_document": `{"id":"missing"}`,
+	}
+
+	t.Run("disabled", func(t *testing.T) {
+		s := &Server{ragDisabled: true}
+		for name, handler := range managedRAGHandlers(s) {
+			t.Run(name, func(t *testing.T) {
+				result := callManagedRAGHandler(t, handler, validArguments[name])
+				if text := extractText(result); !result.IsError || text != "rag: RAG is disabled on this server" {
+					t.Fatalf("result = isError:%v text:%q, want disabled RAG error", result.IsError, text)
+				}
+			})
+		}
+	})
+
+	t.Run("unavailable", func(t *testing.T) {
+		s := &Server{}
+		for name, handler := range managedRAGHandlers(s) {
+			t.Run(name, func(t *testing.T) {
+				result := callManagedRAGHandler(t, handler, validArguments[name])
+				if text := extractText(result); !result.IsError || text != "rag: managed sources unavailable" {
+					t.Fatalf("result = isError:%v text:%q, want unavailable managed sources error", result.IsError, text)
+				}
+			})
+		}
+	})
+
+	t.Run("sqlite_store_without_indexer", func(t *testing.T) {
+		store, err := rag.NewSQLiteStore(":memory:")
+		if err != nil {
+			t.Fatalf("NewSQLiteStore() error = %v", err)
+		}
+		s := &Server{store: store}
+		t.Cleanup(func() { _ = s.Close() })
+
+		s.rebuildDerivedClients(context.Background())
+		if s.managedSources == nil {
+			t.Fatal("managedSources = nil for SQLite store without indexer")
+		}
+		if s.indexer != nil {
+			t.Fatal("indexer != nil without a resolved embedding model")
+		}
+
+		list := callManagedRAGHandler(t, s.handleRAGListDocuments, `{}`)
+		if list.IsError || extractText(list) != "[]" {
+			t.Fatalf("list result = isError:%v text:%q, want empty JSON array", list.IsError, extractText(list))
+		}
+
+		ingest := callManagedRAGHandler(t, s.handleRAGIngestText, validArguments["rag_ingest_text"])
+		if text := extractText(ingest); !ingest.IsError || !strings.HasPrefix(text, "rag:") || !strings.Contains(text, "indexer is unavailable") {
+			t.Fatalf("ingest result = isError:%v text:%q, want managed RAG error", ingest.IsError, text)
+		}
+
+		if err := s.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+		if s.managedSources != nil {
+			t.Fatal("managedSources != nil after Close()")
+		}
+	})
+}
+
+func TestManagedRAGToolsNotFound(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	for _, tc := range []struct {
+		name    string
+		handler managedRAGHandler
+	}{
+		{"delete", s.handleRAGDeleteDocument},
+		{"reindex", s.handleRAGReindexDocument},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := callManagedRAGHandler(t, tc.handler, `{"id":"missing"}`)
+			if text := extractText(result); !result.IsError || !strings.HasPrefix(text, "not_found:") || !strings.Contains(text, "missing") {
+				t.Fatalf("result = isError:%v text:%q, want not_found error", result.IsError, text)
+			}
+		})
+	}
+}
+
+func TestManagedRAGToolsLifecycleEndToEnd(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+
+	text, isError := callTool(t, env.session, "rag_ingest_text", map[string]any{
+		"name":       "runbook.md",
+		"content":    "restart safely",
+		"title":      "Restart Runbook",
+		"mime_type":  "text/markdown",
+		"collection": "ops",
+		"tags":       []string{"restart", "safe"},
+	})
+	if isError {
+		t.Fatalf("rag_ingest_text returned tool error: %s", text)
+	}
+	var ingested rag.Document
+	if err := json.Unmarshal([]byte(text), &ingested); err != nil {
+		t.Fatalf("decode ingested document: %v (%s)", err, text)
+	}
+	if ingested.ID == "" || ingested.Title != "Restart Runbook" || ingested.Collection != "ops" ||
+		!reflect.DeepEqual(ingested.Tags, []string{"restart", "safe"}) ||
+		ingested.State != rag.DocumentStateIndexed || ingested.Freshness != rag.DocumentFreshnessFresh {
+		t.Fatalf("ingested document = %#v", ingested)
+	}
+
+	text, isError = callTool(t, env.session, "rag_search", map[string]any{
+		"query": "restart safely",
+		"top_k": 1,
+	})
+	if isError {
+		t.Fatalf("rag_search returned tool error: %s", text)
+	}
+	var results []rag.SearchResult
+	if err := json.Unmarshal([]byte(text), &results); err != nil {
+		t.Fatalf("decode search results: %v (%s)", err, text)
+	}
+	if len(results) != 1 || results[0].Chunk.Content != "restart safely" ||
+		results[0].Chunk.Metadata["managed_document_id"] != ingested.ID {
+		t.Fatalf("search results = %#v, want managed document %q", results, ingested.ID)
+	}
+
+	text, isError = callTool(t, env.session, "rag_list_documents", map[string]any{
+		"collection": "ops",
+		"tags":       []string{"safe"},
+		"state":      "indexed",
+		"freshness":  "fresh",
+	})
+	if isError {
+		t.Fatalf("rag_list_documents returned tool error: %s", text)
+	}
+	var documents []rag.Document
+	if err := json.Unmarshal([]byte(text), &documents); err != nil {
+		t.Fatalf("decode document list: %v (%s)", err, text)
+	}
+	if len(documents) != 1 || documents[0].ID != ingested.ID {
+		t.Fatalf("documents = %#v, want one document with ID %q", documents, ingested.ID)
+	}
+
+	text, isError = callTool(t, env.session, "rag_reindex_document", map[string]any{"id": ingested.ID})
+	if isError {
+		t.Fatalf("rag_reindex_document returned tool error: %s", text)
+	}
+	var reindexed rag.Document
+	if err := json.Unmarshal([]byte(text), &reindexed); err != nil {
+		t.Fatalf("decode reindexed document: %v (%s)", err, text)
+	}
+	if reindexed.ID != ingested.ID {
+		t.Fatalf("reindexed ID = %q, want stable ID %q", reindexed.ID, ingested.ID)
+	}
+
+	text, isError = callTool(t, env.session, "rag_delete_document", map[string]any{"id": ingested.ID})
+	if isError {
+		t.Fatalf("rag_delete_document returned tool error: %s", text)
+	}
+	var deleted map[string]string
+	if err := json.Unmarshal([]byte(text), &deleted); err != nil {
+		t.Fatalf("decode delete result: %v (%s)", err, text)
+	}
+	if !reflect.DeepEqual(deleted, map[string]string{"deleted_id": ingested.ID}) {
+		t.Fatalf("delete result = %#v, want only deleted_id %q", deleted, ingested.ID)
+	}
+
+	text, isError = callTool(t, env.session, "rag_list_documents", map[string]any{})
+	if isError {
+		t.Fatalf("final rag_list_documents returned tool error: %s", text)
+	}
+	if err := json.Unmarshal([]byte(text), &documents); err != nil {
+		t.Fatalf("decode final document list: %v (%s)", err, text)
+	}
+	if len(documents) != 0 {
+		t.Fatalf("final documents = %#v, want empty list", documents)
+	}
+}
+
+func TestManagedRAGReindexPreservesStableIDAcrossModelChange(t *testing.T) {
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	vectorSpaceID, dimension := "test/old", 2
+	embedder := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+		vectors := [][]float64{make([]float64, dimension)}
+		vectors[0][0] = 1
+		return rag.EmbedResult{Embeddings: vectors, VectorSpaceID: vectorSpaceID}, nil
+	})
+	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithEmbeddingModel("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{store: store, indexer: indexer, managedSources: managed}
+
+	ingestedResult, err := s.handleRAGIngestText(context.Background(), rawArgs(t, `{"name":"runbook.md","content":"restart safely"}`))
+	if err != nil || ingestedResult.IsError {
+		t.Fatalf("ingest result = %#v, err = %v", ingestedResult, err)
+	}
+	var ingested rag.Document
+	if err := json.Unmarshal([]byte(extractText(ingestedResult)), &ingested); err != nil {
+		t.Fatal(err)
+	}
+	vectorSpaceID, dimension = "test/new", 3
+
+	reindexedResult, err := s.handleRAGReindexDocument(context.Background(), rawArgs(t, fmt.Sprintf(`{"id":%q}`, ingested.ID)))
+	if err != nil || reindexedResult.IsError {
+		t.Fatalf("reindex result = %#v, err = %v", reindexedResult, err)
+	}
+	var reindexed rag.Document
+	if err := json.Unmarshal([]byte(extractText(reindexedResult)), &reindexed); err != nil {
+		t.Fatal(err)
+	}
+	if reindexed.ID != ingested.ID || reindexed.VectorSpaceID != "test/new" {
+		t.Fatalf("reindexed = %#v, want stable ID %q in test/new", reindexed, ingested.ID)
+	}
+}
+
+func TestManagedRAGToolsSerializeAcrossRebuild(t *testing.T) {
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	embedStarted := make(chan struct{})
+	releaseEmbed := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEmbed) }) }
+	indexer, err := rag.NewIndexerWithEmbedder(rag.EmbedderFunc(
+		func(ctx context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+			close(embedStarted)
+			select {
+			case <-releaseEmbed:
+			case <-ctx.Done():
+				return rag.EmbedResult{}, ctx.Err()
+			}
+			embeddings := make([][]float64, len(inputs))
+			for i := range embeddings {
+				embeddings[i] = []float64{1, float64(i + 1)}
+			}
+			return rag.EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/old"}, nil
+		},
+	), store, rag.WithEmbeddingModel("old"))
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewIndexerWithEmbedder() error = %v", err)
+	}
+	managedSources, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewManagedSources() error = %v", err)
+	}
+	s := &Server{
+		store:          store,
+		indexer:        indexer,
+		managedSources: managedSources,
+		resolved: map[string]config.ResolvedModel{
+			"embedding": {Name: "new"},
+		},
+		router: newRecordingRouteEngine(""),
+	}
+	t.Cleanup(func() {
+		release()
+		_ = s.Close()
+	})
+
+	type outcome struct {
+		result *gomcp.CallToolResult
+		err    error
+	}
+	ingestDone := make(chan outcome, 1)
+	go func() {
+		result, err := s.handleRAGIngestText(
+			context.Background(),
+			rawArgs(t, `{"name":"runbook.md","content":"restart safely"}`),
+		)
+		ingestDone <- outcome{result: result, err: err}
+	}()
+
+	select {
+	case <-embedStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("old-generation ingest did not reach the blocking embedder")
+	}
+
+	oldManagedSources := s.managedSources
+	s.rebuildDerivedClients(context.Background())
+	if s.managedSources == nil || s.managedSources == oldManagedSources {
+		t.Fatal("rebuild did not publish a new managed source service")
+	}
+
+	listStarted := make(chan struct{})
+	listDone := make(chan outcome, 1)
+	go func() {
+		close(listStarted)
+		result, err := s.handleRAGListDocuments(context.Background(), rawArgs(t, `{}`))
+		listDone <- outcome{result: result, err: err}
+	}()
+	<-listStarted
+
+	select {
+	case result := <-listDone:
+		t.Fatalf("new-generation list completed during old-generation ingest: result=%v err=%v", result.result, result.err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	for name, done := range map[string]<-chan outcome{"ingest": ingestDone, "list": listDone} {
+		select {
+		case result := <-done:
+			if result.err != nil || result.result == nil || result.result.IsError {
+				t.Fatalf("%s result = %#v, err = %v", name, result.result, result.err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s handler did not finish", name)
+		}
+	}
+}
+
+func TestManagedRAGToolsCloseWaitsForInFlightOperation(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "rag.db")
+	store, err := rag.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	embedStarted := make(chan struct{})
+	releaseEmbed := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEmbed) }) }
+	indexer, err := rag.NewIndexerWithEmbedder(rag.EmbedderFunc(
+		func(ctx context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+			close(embedStarted)
+			select {
+			case <-releaseEmbed:
+			case <-ctx.Done():
+				return rag.EmbedResult{}, ctx.Err()
+			}
+			embeddings := make([][]float64, len(inputs))
+			for i := range embeddings {
+				embeddings[i] = []float64{1, float64(i + 1)}
+			}
+			return rag.EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/close"}, nil
+		},
+	), store, rag.WithEmbeddingModel("test"))
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewIndexerWithEmbedder() error = %v", err)
+	}
+	managedSources, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewManagedSources() error = %v", err)
+	}
+	s := &Server{store: store, indexer: indexer, managedSources: managedSources}
+	t.Cleanup(func() {
+		release()
+		_ = s.Close()
+	})
+
+	type outcome struct {
+		result *gomcp.CallToolResult
+		err    error
+	}
+	ingestDone := make(chan outcome, 1)
+	go func() {
+		result, err := s.handleRAGIngestText(
+			context.Background(),
+			rawArgs(t, `{"name":"runbook.md","content":"restart safely"}`),
+		)
+		ingestDone <- outcome{result: result, err: err}
+	}()
+
+	select {
+	case <-embedStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not reach the blocking embedder")
+	}
+
+	closeStarted := make(chan struct{})
+	closeDone := make(chan error, 1)
+	go func() {
+		close(closeStarted)
+		closeDone <- s.Close()
+	}()
+	<-closeStarted
+
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close() returned during managed ingest: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	release()
+	select {
+	case result := <-ingestDone:
+		if result.err != nil || result.result == nil || result.result.IsError {
+			t.Fatalf("ingest result = %#v, err = %v", result.result, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not finish")
+	}
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not finish")
+	}
+
+	reopened, err := rag.NewSQLiteStore(dbPath)
+	if err != nil {
+		t.Fatalf("reopen SQLite store: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	managed, err := rag.NewManagedSources(nil, reopened)
+	if err != nil {
+		t.Fatalf("NewManagedSources() after reopen error = %v", err)
+	}
+	documents, err := managed.ListDocuments(context.Background(), rag.DocumentFilter{})
+	if err != nil {
+		t.Fatalf("ListDocuments() after reopen error = %v", err)
+	}
+	if len(documents) != 1 || documents[0].State != rag.DocumentStateIndexed {
+		t.Fatalf("documents after Close() = %#v, want one indexed document", documents)
+	}
+}
+
+func TestManagedRAGToolsShutdownExpiredContextClosesWhenIdle(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := s.Shutdown(ctx); err != nil {
+		t.Fatalf("Shutdown() error = %v, want nil with idle managed gate", err)
+	}
+	s.mu.RLock()
+	closed := s.closed
+	store := s.store
+	managed := s.managedSources
+	s.mu.RUnlock()
+	if !closed || store != nil || managed != nil {
+		t.Fatalf("server after Shutdown() = closed:%v store:%v managed:%v", closed, store, managed)
+	}
+}
+
+func TestManagedRAGToolsQueuedCancellationAndShutdownDeadline(t *testing.T) {
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	embedStarted := make(chan struct{})
+	releaseEmbed := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseEmbed) }) }
+	indexer, err := rag.NewIndexerWithEmbedder(rag.EmbedderFunc(
+		func(ctx context.Context, _ string, inputs []string) (rag.EmbedResult, error) {
+			close(embedStarted)
+			select {
+			case <-releaseEmbed:
+			case <-ctx.Done():
+				return rag.EmbedResult{}, ctx.Err()
+			}
+			embeddings := make([][]float64, len(inputs))
+			for i := range embeddings {
+				embeddings[i] = []float64{1, float64(i + 1)}
+			}
+			return rag.EmbedResult{Embeddings: embeddings, VectorSpaceID: "test/cancel"}, nil
+		},
+	), store, rag.WithEmbeddingModel("test"))
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewIndexerWithEmbedder() error = %v", err)
+	}
+	managedSources, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewManagedSources() error = %v", err)
+	}
+	s := &Server{store: store, indexer: indexer, managedSources: managedSources}
+	t.Cleanup(func() {
+		release()
+		_ = s.Close()
+	})
+
+	type outcome struct {
+		result *gomcp.CallToolResult
+		err    error
+	}
+	ingestDone := make(chan outcome, 1)
+	go func() {
+		result, err := s.handleRAGIngestText(
+			context.Background(),
+			rawArgs(t, `{"name":"runbook.md","content":"restart safely"}`),
+		)
+		ingestDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case <-embedStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not reach blocking embedder")
+	}
+
+	queuedCtx, cancelQueued := context.WithCancel(context.Background())
+	cancelQueued()
+	listDone := make(chan outcome, 1)
+	go func() {
+		result, err := s.handleRAGListDocuments(queuedCtx, rawArgs(t, `{}`))
+		listDone <- outcome{result: result, err: err}
+	}()
+	select {
+	case result := <-listDone:
+		if result.err != nil || result.result == nil || !result.result.IsError ||
+			!strings.Contains(extractText(result.result), context.Canceled.Error()) {
+			t.Fatalf("canceled list result = %#v, err = %v", result.result, result.err)
+		}
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("canceled list remained queued behind ingest")
+	}
+
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancelShutdown()
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- s.Shutdown(shutdownCtx) }()
+	select {
+	case err := <-shutdownDone:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("Shutdown() error = %v, want context.DeadlineExceeded", err)
+		}
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Shutdown() exceeded its context deadline")
+	}
+
+	release()
+	select {
+	case result := <-ingestDone:
+		if result.err != nil || result.result == nil || result.result.IsError {
+			t.Fatalf("ingest result = %#v, err = %v", result.result, result.err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest did not finish")
+	}
+}
+
+func newManagedRAGTestServer(t *testing.T) *Server {
+	t.Helper()
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error = %v", err)
+	}
+	embedder := rag.EmbedderFunc(func(ctx context.Context, model string, inputs []string) (rag.EmbedResult, error) {
+		if err := ctx.Err(); err != nil {
+			return rag.EmbedResult{}, err
+		}
+		embeddings := make([][]float64, len(inputs))
+		for i := range inputs {
+			embeddings[i] = []float64{1, float64(i + 1)}
+		}
+		return rag.EmbedResult{
+			Embeddings: embeddings, Model: model, Provider: "test", VectorSpaceID: "test/v1",
+		}, nil
+	})
+	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithEmbeddingModel("test"))
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewIndexerWithEmbedder() error = %v", err)
+	}
+	retriever, err := rag.NewRetrieverWithEmbedder(embedder, store, rag.WithRetrieverModel("test"))
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewRetrieverWithEmbedder() error = %v", err)
+	}
+	managedSources, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		_ = store.Close()
+		t.Fatalf("NewManagedSources() error = %v", err)
+	}
+	s := &Server{
+		store:          store,
+		indexer:        indexer,
+		retriever:      retriever,
+		managedSources: managedSources,
+		mcpServer: gomcp.NewServer(&gomcp.Implementation{
+			Name: "test", Version: "0.0.1",
+		}, nil),
+	}
+	s.registerRAGTools()
+	t.Cleanup(func() { _ = s.Close() })
+	return s
+}

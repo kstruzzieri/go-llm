@@ -48,6 +48,33 @@ type routeEngine interface {
 	StickyRoutes() map[string]provider.StickyRouteInfo
 }
 
+type contextGate struct {
+	once  sync.Once
+	token chan struct{}
+}
+
+func (g *contextGate) lock(ctx context.Context) error {
+	g.once.Do(func() {
+		g.token = make(chan struct{}, 1)
+		g.token <- struct{}{}
+	})
+	select {
+	case <-g.token:
+		return nil
+	default:
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-g.token:
+		return nil
+	}
+}
+
+func (g *contextGate) unlock() {
+	g.token <- struct{}{}
+}
+
 type Server struct {
 	ollamaURL         string
 	ollamaURLExplicit bool
@@ -69,6 +96,7 @@ type Server struct {
 	store            rag.VectorStore
 	indexer          *rag.Indexer
 	retriever        *rag.Retriever
+	managedSources   *rag.ManagedSources
 	completer        *completion.Provider
 	modelRegistry    *provider.ModelRegistry
 	providerRegistry *provider.Registry
@@ -84,8 +112,9 @@ type Server struct {
 	fimPriorityCfg      provider.Priority
 	fimPriorityExplicit bool
 
-	mu       sync.RWMutex
-	resolved map[string]config.ResolvedModel
+	managedGate contextGate // serializes managed lifecycle calls across rebuilt service instances
+	mu          sync.RWMutex
+	resolved    map[string]config.ResolvedModel
 
 	httpServer *http.Server
 	mcpServer  *gomcp.Server
@@ -509,6 +538,11 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 		}
 	}
 
+	var managedSources *rag.ManagedSources
+	if sqliteStore, ok := store.(*rag.SQLiteStore); ok {
+		managedSources, _ = rag.NewManagedSources(indexer, sqliteStore)
+	}
+
 	s.mu.Lock()
 	if s.closed || s.stateVersion != stateVersion {
 		s.mu.Unlock()
@@ -517,6 +551,7 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 	s.completer = completer
 	s.indexer = indexer
 	s.retriever = retriever
+	s.managedSources = managedSources
 	s.mu.Unlock()
 }
 
@@ -809,13 +844,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 		}
 	}
 
-	closeErr := s.Close()
+	closeErr := s.close(ctx)
 	return errors.Join(httpErr, closeErr)
 }
 
 // Close releases all resources held by the server.
 // Safe to call multiple times; serialized with handler reads via s.mu.
 func (s *Server) Close() error {
+	return s.close(context.Background())
+}
+
+func (s *Server) close(ctx context.Context) error {
+	if err := s.managedGate.lock(ctx); err != nil {
+		return err
+	}
+	defer s.managedGate.unlock()
+
 	s.mu.Lock()
 	if s.closed {
 		s.mu.Unlock()
@@ -832,6 +876,7 @@ func (s *Server) Close() error {
 	s.store = nil
 	s.indexer = nil
 	s.retriever = nil
+	s.managedSources = nil
 	s.completer = nil
 	s.router = nil
 	s.warmthSource = nil

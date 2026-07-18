@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -62,6 +63,171 @@ func TestRAGSearchSchema_QueryContextAndExplainScores(t *testing.T) {
 	items, ok := openFiles["items"].(map[string]any)
 	if !ok || items["type"] != "string" {
 		t.Errorf("open_files items = %v, want string schema", openFiles["items"])
+	}
+}
+
+func TestRAGRetrievalSchemasPreserveLegacyUnboundedTopK(t *testing.T) {
+	s := &Server{mcpServer: gomcp.NewServer(&gomcp.Implementation{Name: "test", Version: "0.0.1"}, nil)}
+	s.registerRAGTools()
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+
+	for _, tool := range []string{"rag_search", "rag_answer"} {
+		t.Run(tool, func(t *testing.T) {
+			topK := toolSchemaProperties(t, env.session, tool)["top_k"].(map[string]any)
+			if maximum, ok := topK["maximum"]; ok {
+				t.Fatalf("top_k maximum = %v, want no global cap", maximum)
+			}
+		})
+	}
+}
+
+func TestRAGSearchRejectsTopKOverMaximumOnlyWhenScoped(t *testing.T) {
+	t.Run("scoped", func(t *testing.T) {
+		store := &recordingMCPMultiStore{}
+		embedCalls := 0
+		retriever, err := rag.NewRetrieverWithEmbedder(rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+			embedCalls++
+			return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+		}), store)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := (&Server{retriever: retriever}).handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","top_k":101,"collection":"managed"}`))
+		if err != nil || result == nil || !result.IsError || !strings.Contains(extractText(result), "top_k") {
+			t.Fatalf("result=%#v error=%v, want scoped top_k validation", result, err)
+		}
+		if embedCalls != 0 || store.calls != 0 {
+			t.Fatalf("work after invalid top_k: embeds=%d searches=%d", embedCalls, store.calls)
+		}
+	})
+
+	t.Run("legacy unscoped search", func(t *testing.T) {
+		store := &recordingMCPMultiStore{}
+		result, err := (&Server{retriever: mcpTestRetriever(t, store)}).handleRAGSearch(
+			context.Background(), rawArgs(t, `{"query":"q","top_k":101}`),
+		)
+		if err != nil || result == nil || result.IsError {
+			t.Fatalf("result=%#v error=%v, want success", result, err)
+		}
+		if store.calls != 1 || store.topK != 101 {
+			t.Fatalf("search calls=%d top_k=%d, want 1/101", store.calls, store.topK)
+		}
+	})
+
+	for name, scope := range map[string]string{
+		"whitespace collection": `"collection":"   "`,
+		"whitespace tags":       `"tags":[" "]`,
+	} {
+		t.Run("legacy unscoped search/"+name, func(t *testing.T) {
+			store := &recordingMCPMultiStore{}
+			result, err := (&Server{retriever: mcpTestRetriever(t, store)}).handleRAGSearch(
+				context.Background(), rawArgs(t, `{"query":"q","top_k":101,`+scope+`}`),
+			)
+			if err != nil || result == nil || result.IsError {
+				t.Fatalf("result=%#v error=%v, want legacy unscoped success", result, err)
+			}
+			if store.calls != 1 || store.topK != 101 {
+				t.Fatalf("search calls=%d top_k=%d, want 1/101", store.calls, store.topK)
+			}
+		})
+	}
+
+	t.Run("legacy answer", func(t *testing.T) {
+		store := &answerStore{}
+		engine := &queuedRouteEngine{}
+		s := answerEnvWithStore(t, engine, store)
+		result, err := s.handleRAGAnswer(context.Background(), rawArgs(t, `{"question":"q","top_k":101}`))
+		if err != nil || result == nil || result.IsError {
+			t.Fatalf("result=%#v error=%v, want success", result, err)
+		}
+		if store.searchCalls != 1 || store.topK != 101 || engine.calls != 0 {
+			t.Fatalf("answer work: searches=%d top_k=%d model=%d, want 1/101/0", store.searchCalls, store.topK, engine.calls)
+		}
+	})
+}
+
+func TestRAGRetrievalHandlersAcceptTopKMaximumAndDefaultNonPositive(t *testing.T) {
+	for _, topK := range []struct {
+		input, want int
+	}{{maxRAGTopK, maxRAGTopK}, {0, 5}, {-1, 5}} {
+		t.Run(fmt.Sprintf("search/%d", topK.input), func(t *testing.T) {
+			store := &recordingMCPMultiStore{}
+			result, err := (&Server{retriever: mcpTestRetriever(t, store)}).handleRAGSearch(
+				context.Background(), rawArgs(t, fmt.Sprintf(`{"query":"q","top_k":%d}`, topK.input)),
+			)
+			if err != nil || result == nil || result.IsError {
+				t.Fatalf("result=%#v error=%v, want success", result, err)
+			}
+			if store.calls != 1 || store.topK != topK.want {
+				t.Fatalf("search calls=%d top_k=%d, want 1/%d", store.calls, store.topK, topK.want)
+			}
+		})
+
+		t.Run(fmt.Sprintf("answer/%d", topK.input), func(t *testing.T) {
+			store := &answerStore{}
+			engine := &queuedRouteEngine{}
+			s := answerEnvWithStore(t, engine, store)
+			result, err := s.handleRAGAnswer(
+				context.Background(), rawArgs(t, fmt.Sprintf(`{"question":"q","top_k":%d}`, topK.input)),
+			)
+			if err != nil || result == nil || result.IsError {
+				t.Fatalf("result=%#v error=%v, want success", result, err)
+			}
+			if store.searchCalls != 1 || store.topK != topK.want || engine.calls != 0 {
+				t.Fatalf("answer work: searches=%d top_k=%d model=%d, want 1/%d/0", store.searchCalls, store.topK, engine.calls, topK.want)
+			}
+		})
+	}
+}
+
+func TestRAGSearchSchemaAndHandlerScope(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+	properties := toolSchemaProperties(t, env.session, "rag_search")
+	for _, name := range []string{"collection", "tags"} {
+		property, ok := properties[name].(map[string]any)
+		if !ok {
+			t.Fatalf("property %q = %T, want map", name, properties[name])
+		}
+		if name == "collection" && property["maxLength"] != float64(rag.MaxManagedMetadataBytes) {
+			t.Fatalf("collection maxLength = %v", property["maxLength"])
+		}
+	}
+	tags := properties["tags"].(map[string]any)
+	if tags["maxItems"] != float64(rag.MaxManagedTags) || tags["items"].(map[string]any)["maxLength"] != float64(rag.MaxManagedTagBytes) {
+		t.Fatalf("tags schema = %#v", tags)
+	}
+
+	if _, err := s.managedSources.IngestText(context.Background(), "ops.md", "ops", rag.DocumentOptions{Collection: "ops", Tags: []string{"alpha", "beta"}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.managedSources.IngestText(context.Background(), "other.md", "other", rag.DocumentOptions{Collection: "other", Tags: []string{"alpha", "beta"}}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","collection":"ops","tags":["alpha","beta"],"explain_scores":true}`))
+	if err != nil || result.IsError {
+		t.Fatalf("scoped search error=%v result=%s", err, extractText(result))
+	}
+	var scored []rag.ScoredResult
+	if err := json.Unmarshal([]byte(extractText(result)), &scored); err != nil {
+		t.Fatal(err)
+	}
+	if len(scored) != 1 || scored[0].Chunk.Metadata["managed_collection"] != "ops" {
+		t.Fatalf("scoped scored response = %#v", scored)
+	}
+	result, err = s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","tags":["`+strings.Repeat("x", rag.MaxManagedTagBytes+1)+`"]}`))
+	if err != nil || !result.IsError {
+		t.Fatalf("oversize scope result=%#v error=%v, want validation error", result, err)
+	}
+}
+
+func TestHandleRAGSearchRejectsRawInvalidUTF8BeforeRetrieval(t *testing.T) {
+	req := &gomcp.CallToolRequest{Params: &gomcp.CallToolParamsRaw{Arguments: json.RawMessage([]byte{'{', '"', 'q', 'u', 'e', 'r', 'y', '"', ':', '"', 0xff, '"', '}'})}}
+	result, err := (&Server{}).handleRAGSearch(context.Background(), req)
+	if err != nil || !result.IsError || !strings.Contains(extractText(result), "valid UTF-8") {
+		t.Fatalf("result=%#v error=%v, want raw UTF-8 validation failure", result, err)
 	}
 }
 
@@ -350,6 +516,35 @@ func TestRAGDeleteToolDisabled(t *testing.T) {
 	}
 	if !result.IsError {
 		t.Fatal("expected isError = true when RAG disabled")
+	}
+}
+
+func TestRAGDeleteToolPreservesLegacySuccessText(t *testing.T) {
+	s := &Server{
+		store: stubVectorStore{},
+		mcpServer: gomcp.NewServer(&gomcp.Implementation{
+			Name: "test", Version: "0.0.1",
+		}, nil),
+	}
+	s.registerRAGTools()
+
+	env := connectTestServer(t, s)
+	defer env.cleanup()
+
+	result, err := env.session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "rag_delete",
+		Arguments: map[string]any{
+			"source": "test.go",
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool() error = %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("unexpected tool error: %s", extractText(result))
+	}
+	if text := extractText(result); text != "deleted source test.go" {
+		t.Fatalf("result = %q, want legacy success text", text)
 	}
 }
 

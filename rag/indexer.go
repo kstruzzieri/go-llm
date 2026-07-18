@@ -165,6 +165,9 @@ func (idx *Indexer) replaceSourceWithHash(ctx context.Context, path string, chun
 // delete+store fallback. VSID write invariants are enforced by the
 // vsid-capable store implementation, not by this dispatcher.
 func (idx *Indexer) replaceSourceWithProvenance(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
+	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
+		return err
+	}
 	idx.storeMu.Lock()
 	defer idx.storeMu.Unlock()
 
@@ -172,6 +175,9 @@ func (idx *Indexer) replaceSourceWithProvenance(ctx context.Context, path string
 }
 
 func (idx *Indexer) replaceSourceWithProvenanceIfSourceHash(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID, expectedSourceHash string) error {
+	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
+		return err
+	}
 	idx.storeMu.Lock()
 	defer idx.storeMu.Unlock()
 
@@ -180,6 +186,24 @@ func (idx *Indexer) replaceSourceWithProvenanceIfSourceHash(ctx context.Context,
 	}
 
 	return fmt.Errorf("%w: source-hash CAS unsupported by %T", ErrIncrementalRebuildRequired, idx.store)
+}
+
+func (idx *Indexer) rejectManagedDocumentSource(ctx context.Context, source string) error {
+	if !strings.HasPrefix(source, managedSourcePrefix) {
+		return nil
+	}
+	store, ok := idx.store.(*SQLiteStore)
+	if !ok {
+		return nil
+	}
+	managed, err := store.hasManagedDocumentSource(ctx, source)
+	if err != nil {
+		return err
+	}
+	if managed {
+		return fmt.Errorf("rag: source %q belongs to a managed document; use ManagedSources", source)
+	}
+	return nil
 }
 
 func (idx *Indexer) replaceSourceWithProvenanceLocked(ctx context.Context, path string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
@@ -210,34 +234,82 @@ func (idx *Indexer) replaceSourceWithProvenanceLocked(ctx context.Context, path 
 	return nil
 }
 
+type preparedSource struct {
+	chunks        []Chunk
+	embeddings    [][]float64
+	sourceHash    string
+	vectorSpaceID string
+}
+
 // IndexFile indexes a single file: reads, chunks, embeds, and stores it.
 // Existing data is preserved if chunking or embedding fails.
 // If the underlying store supports atomic source replacement (SQLiteStore does),
 // re-indexing is transactional across delete + store.
 func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
+	if err := idx.rejectManagedDocumentSource(ctx, path); err != nil {
+		return err
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("rag: read file %q: %w", path, err)
 	}
+	return idx.indexText(ctx, path, string(data))
+}
 
-	content := string(data)
-	if content == "" {
-		if err := idx.replaceSource(ctx, path, nil, nil); err != nil {
-			return fmt.Errorf("rag: clear chunks for empty file %q: %w", path, err)
+// indexText indexes content under source using the same chunk/embed/replace
+// pipeline as IndexFile. Registered managed document sources are rejected;
+// unregistered legacy sources may use the "managed:" prefix.
+func (idx *Indexer) indexText(ctx context.Context, source, content string) error {
+	if err := idx.rejectManagedDocumentSource(ctx, source); err != nil {
+		return err
+	}
+	prepared, err := idx.prepareSource(ctx, source, content, nil)
+	if err != nil {
+		return err
+	}
+	if len(prepared.chunks) == 0 {
+		// Preserve the pre-refactor clear semantics: no provenance hash is
+		// recorded for a cleared source, and the error messages stay distinct
+		// for empty content versus chunker-filtered content.
+		if err := idx.replaceSource(ctx, source, nil, nil); err != nil {
+			if content == "" {
+				return fmt.Errorf("rag: clear chunks for empty file %q: %w", source, err)
+			}
+			return fmt.Errorf("rag: clear chunks for %q with no chunk output: %w", source, err)
 		}
 		return nil
+	}
+	if err := idx.replaceSourceWithProvenance(ctx, source, prepared.chunks, prepared.embeddings, prepared.sourceHash, prepared.vectorSpaceID); err != nil {
+		return fmt.Errorf("rag: replace chunks for %q: %w", source, err)
+	}
+	return nil
+}
+
+func (idx *Indexer) prepareSource(ctx context.Context, source, content string, metadata map[string]string) (preparedSource, error) {
+	prepared := preparedSource{sourceHash: idx.currentSourceSignature(content).String()}
+	if content == "" {
+		return prepared, nil
 	}
 
 	// Step 1: Chunk the file
-	chunks, err := idx.chunker.Chunk(path, content)
+	chunks, err := idx.chunker.Chunk(source, content)
 	if err != nil {
-		return fmt.Errorf("rag: chunk %q: %w", path, err)
+		return preparedSource{}, fmt.Errorf("rag: chunk %q: %w", source, err)
 	}
 	if len(chunks) == 0 {
-		if err := idx.replaceSource(ctx, path, nil, nil); err != nil {
-			return fmt.Errorf("rag: clear chunks for %q with no chunk output: %w", path, err)
+		return prepared, nil
+	}
+	if len(metadata) > 0 {
+		for i := range chunks {
+			merged := make(map[string]string, len(chunks[i].Metadata)+len(metadata))
+			for key, value := range chunks[i].Metadata {
+				merged[key] = value
+			}
+			for key, value := range metadata {
+				merged[key] = value
+			}
+			chunks[i].Metadata = merged
 		}
-		return nil
 	}
 
 	// Step 1.5: Compute stable keys if workspace root is set.
@@ -261,24 +333,15 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	res, err := idx.embedder.Embed(ctx, idx.model, texts)
 	if err != nil {
 		// Embedding failed — preserve existing indexed data for this file
-		return fmt.Errorf("%w: embed chunks for %q: %w", ErrEmbedderFailed, path, err)
+		return preparedSource{}, fmt.Errorf("%w: embed chunks for %q: %w", ErrEmbedderFailed, source, err)
 	}
 	if len(res.Embeddings) != len(texts) {
-		return fmt.Errorf("%w: embed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, path, len(res.Embeddings), len(texts))
+		return preparedSource{}, fmt.Errorf("%w: embed chunks for %q: got %d for %d chunks", ErrEmbeddingCountMismatch, source, len(res.Embeddings), len(texts))
 	}
-	embeddings := res.Embeddings
-
-	// Step 3: Replace old chunks with new ones. Store the source signature so
-	// subsequent IndexFileIncremental calls can safely use the fast path.
-	// Persist the resolved vector-space identity so retrieval-time drift
-	// detection can fail closed across cross-run embedding-model changes.
-	vsid := resolveVectorSpaceID(res)
-	sourceHash := idx.currentSourceSignature(content).String()
-	if err := idx.replaceSourceWithProvenance(ctx, path, chunks, embeddings, sourceHash, vsid); err != nil {
-		return fmt.Errorf("rag: replace chunks for %q: %w", path, err)
-	}
-
-	return nil
+	prepared.chunks = chunks
+	prepared.embeddings = res.Embeddings
+	prepared.vectorSpaceID = resolveVectorSpaceID(res)
+	return prepared, nil
 }
 
 // resolveVectorSpaceID picks the vsid the indexer will persist for a batch.
@@ -590,6 +653,18 @@ func (idx *Indexer) pruneDeletedSources(ctx context.Context, files []string) []s
 	rootPrefix := idx.workspaceRoot + string(filepath.Separator)
 	var errs []string
 	for _, src := range sources {
+		if strings.HasPrefix(src, managedSourcePrefix) {
+			if store, ok := idx.store.(*SQLiteStore); ok {
+				managed, err := store.hasManagedDocumentSource(ctx, src)
+				if err != nil {
+					errs = append(errs, fmt.Sprintf("check managed source %q for prune: %v", src, err))
+					continue
+				}
+				if managed {
+					continue
+				}
+			}
+		}
 		abs, err := filepath.Abs(src)
 		if err != nil || !strings.HasPrefix(abs, rootPrefix) {
 			continue

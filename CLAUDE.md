@@ -16,7 +16,7 @@ go-llm/
 ├── config/          # Model configuration loader (models.json, resolve, fallback)
 ├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, sticky routing, scoring, fallback chains
 │   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
-├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
+├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval, managed document registry (stable IDs, lifecycle, freshness)
 ├── rag/ast/         # Scoped structural symbol graph: Extractor + SymbolStore interfaces (skeleton)
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
 ├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)

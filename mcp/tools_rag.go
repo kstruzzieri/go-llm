@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -73,11 +74,14 @@ func (s *Server) registerRAGTools() {
 			"type": "object",
 			"properties": map[string]any{
 				"query":          map[string]any{"type": "string", "description": "Search query"},
-				"top_k":          map[string]any{"type": "integer", "description": "Number of results (default: 5)"},
+				"top_k":          map[string]any{"type": "integer", "description": "Number of results (default: 5; managed scope maximum: 100)"},
 				"current_file":   map[string]any{"type": "string", "description": "File currently being edited for contextual ranking"},
 				"workspace_root": map[string]any{"type": "string", "description": "Workspace root used to normalize contextual paths"},
 				"open_files":     map[string]any{"type": "array", "description": "Files currently open for contextual ranking", "items": map[string]any{"type": "string"}},
 				"explain_scores": map[string]any{"type": "boolean", "description": "Return fused rank and per-signal scores"},
+				"collection":     map[string]any{"type": "string", "description": "Managed document collection to search", "maxLength": rag.MaxManagedMetadataBytes},
+				"tags": map[string]any{"type": "array", "description": "Managed document tags; every tag must match", "maxItems": rag.MaxManagedTags,
+					"items": map[string]any{"type": "string", "maxLength": rag.MaxManagedTagBytes}},
 			},
 			"required": []string{"query"},
 		},
@@ -118,6 +122,8 @@ func (s *Server) registerRAGTools() {
 			"required": []string{"source"},
 		},
 	}, s.handleRAGDelete)
+
+	s.registerManagedRAGTools()
 }
 
 // requireRAG checks that RAG is enabled and the relevant component is available.
@@ -137,7 +143,7 @@ func (s *Server) handleRAGIndexFile(ctx context.Context, req *gomcp.CallToolRequ
 	var args struct {
 		Path string `json:"path"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Path == "" {
@@ -169,7 +175,7 @@ func (s *Server) handleRAGIndexDirectory(ctx context.Context, req *gomcp.CallToo
 		Extensions  []string `json:"extensions,omitempty"`
 		Concurrency int      `json:"concurrency,omitempty"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Path == "" {
@@ -206,15 +212,24 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	var args struct {
 		queryContextArgs
-		Query         string `json:"query"`
-		TopK          int    `json:"top_k,omitempty"`
-		ExplainScores bool   `json:"explain_scores,omitempty"`
+		Query         string      `json:"query"`
+		TopK          int         `json:"top_k,omitempty"`
+		ExplainScores bool        `json:"explain_scores,omitempty"`
+		Collection    string      `json:"collection,omitempty"`
+		Tags          managedTags `json:"tags,omitempty"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSearchArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Query == "" {
 		return toolError("validation", "query must not be empty"), nil
+	}
+	if err := validateRAGSearchScope(args.Collection, []string(args.Tags)); err != nil {
+		return toolError("validation", "%v", err), nil
+	}
+	scoped := managedRAGScopeRequested(args.Collection, args.Tags)
+	if scoped && args.TopK > maxRAGTopK {
+		return toolError("validation", "top_k must be at most %d for managed scope", maxRAGTopK), nil
 	}
 
 	s.mu.RLock()
@@ -232,8 +247,15 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	var results []rag.SearchResult
 	contextual := !args.empty()
+	scope := rag.RetrievalScope{Collection: args.Collection, Tags: []string(args.Tags)}
 	if args.ExplainScores || contextual {
-		scored, err := retriever.RetrieveScored(ctx, args.Query, topK, args.queryContext())
+		var scored []rag.ScoredResult
+		var err error
+		if scoped {
+			scored, err = retriever.RetrieveScoredScoped(ctx, args.Query, topK, scope, args.queryContext())
+		} else {
+			scored, err = retriever.RetrieveScored(ctx, args.Query, topK, args.queryContext())
+		}
 		if err != nil {
 			return toolError("rag", "search: %v", err), nil
 		}
@@ -252,7 +274,11 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		}
 	} else {
 		var err error
-		results, err = retriever.Retrieve(ctx, args.Query, topK)
+		if scoped {
+			results, err = retriever.RetrieveScoped(ctx, args.Query, topK, scope)
+		} else {
+			results, err = retriever.Retrieve(ctx, args.Query, topK)
+		}
 		if err != nil {
 			return toolError("rag", "search: %v", err), nil
 		}
@@ -263,6 +289,25 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("rag", "marshal results: %v", err), nil
 	}
 	return toolResult(string(data)), nil
+}
+
+func managedRAGScopeRequested(collection string, tags []string) bool {
+	if strings.TrimSpace(collection) != "" {
+		return true
+	}
+	for _, tag := range tags {
+		if strings.TrimSpace(tag) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func validateRAGSearchScope(collection string, tags []string) error {
+	if err := validateManagedRAGString("collection", collection, rag.MaxManagedMetadataBytes); err != nil {
+		return err
+	}
+	return validateManagedRAGTags(tags)
 }
 
 func (s *Server) handleRAGStats(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
@@ -298,7 +343,7 @@ func (s *Server) handleRAGDelete(ctx context.Context, req *gomcp.CallToolRequest
 	var args struct {
 		Source string `json:"source"`
 	}
-	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
 	}
 	if args.Source == "" {

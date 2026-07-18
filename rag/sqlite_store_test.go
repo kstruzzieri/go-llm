@@ -5,10 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"testing"
+	"time"
 )
 
 func newTestStore(t *testing.T) *SQLiteStore {
@@ -53,6 +56,152 @@ func TestSQLiteStoreStoreAndSearch(t *testing.T) {
 	}
 	if math.Abs(results[0].Score-1.0) > 0.001 {
 		t.Errorf("top result score = %f, want ~1.0", results[0].Score)
+	}
+}
+
+func TestNewSQLiteStoreAcceptsRelativePath(t *testing.T) {
+	t.Chdir(t.TempDir())
+	store, err := NewSQLiteStore("rel.db")
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(relative) error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	// The DSN must resolve to a real file: URI, not treat the relative path
+	// as a URI host, and the per-connection pragmas must take effect.
+	var timeout int
+	if err := store.db.QueryRow("PRAGMA busy_timeout").Scan(&timeout); err != nil {
+		t.Fatalf("query busy_timeout: %v", err)
+	}
+	if timeout != 5000 {
+		t.Fatalf("busy_timeout = %d, want 5000", timeout)
+	}
+	chunk := Chunk{ID: "c", Content: "x", Source: "s", StartLine: 1, EndLine: 1, Metadata: map[string]string{}}
+	if err := store.Store(context.Background(), []Chunk{chunk}, [][]float64{{1}}); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+	if _, err := os.Stat("rel.db"); err != nil {
+		t.Fatalf("relative database file missing: %v", err)
+	}
+}
+
+func TestNewSQLiteStorePreservesFileURI(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "uri.db")
+	uri := (&url.URL{Scheme: "file", Path: path}).String() + "?cache=shared&mode=rwc&_pragma=foreign_keys(1)"
+	dsn, err := sqliteReadWriteDSN(uri)
+	if err != nil {
+		t.Fatalf("sqliteReadWriteDSN(file URI) error: %v", err)
+	}
+	parsed, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("parse DSN: %v", err)
+	}
+	if parsed.Path != path {
+		t.Fatalf("DSN path = %q, want %q", parsed.Path, path)
+	}
+	query := parsed.Query()
+	if query.Get("cache") != "shared" || query.Get("mode") != "rwc" {
+		t.Fatalf("DSN query = %v, want original cache and mode", query)
+	}
+	if !slices.Contains(query["_pragma"], "foreign_keys(1)") || !slices.Contains(query["_pragma"], "busy_timeout(5000)") {
+		t.Fatalf("DSN pragmas = %v, want original foreign_keys and busy_timeout", query["_pragma"])
+	}
+
+	store, err := NewSQLiteStore(uri)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore(file URI) error: %v", err)
+	}
+	var foreignKeys int
+	if err := store.db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		t.Fatalf("query foreign_keys: %v", err)
+	}
+	if foreignKeys != 1 {
+		t.Fatalf("foreign_keys = %d, want preserved URI pragma", foreignKeys)
+	}
+	if _, err := store.db.Exec(`CREATE TABLE uri_marker (value TEXT)`); err != nil {
+		t.Fatalf("create marker: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close URI store: %v", err)
+	}
+
+	reopened, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("reopen intended path: %v", err)
+	}
+	t.Cleanup(func() { _ = reopened.Close() })
+	var marker int
+	if err := reopened.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'uri_marker'`).Scan(&marker); err != nil {
+		t.Fatalf("query marker: %v", err)
+	}
+	if marker != 1 {
+		t.Fatal("file URI did not open the intended database")
+	}
+}
+
+func TestSQLiteReadWriteDSNPreservesSpecialDSNs(t *testing.T) {
+	t.Run("shared memory URI", func(t *testing.T) {
+		dsn, err := sqliteReadWriteDSN("file::memory:?cache=shared")
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := url.Parse(dsn)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if parsed.Scheme != "file" || parsed.Opaque != ":memory:" || parsed.Query().Get("cache") != "shared" {
+			t.Fatalf("DSN = %q, want shared in-memory file URI", dsn)
+		}
+	})
+
+	t.Run("empty", func(t *testing.T) {
+		dsn, err := sqliteReadWriteDSN("")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dsn != "" {
+			t.Fatalf("DSN = %q, want empty DSN preserved", dsn)
+		}
+		store, err := NewSQLiteStore("")
+		if err != nil {
+			t.Fatalf("NewSQLiteStore(empty) error: %v", err)
+		}
+		_ = store.Close()
+	})
+}
+
+func TestSQLiteStoreConcurrentWritersWaitInsteadOfFailingBusy(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "rag.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("NewSQLiteStore() error: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+
+	tx, err := store.beginWriteTx(ctx)
+	if err != nil {
+		t.Fatalf("beginWriteTx() error: %v", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = 'none'`); err != nil {
+		t.Fatalf("write inside held transaction: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		time.Sleep(250 * time.Millisecond)
+		done <- tx.Commit()
+	}()
+
+	// Without the pool-wide busy_timeout DSN pragma this fails in
+	// microseconds with SQLITE_BUSY instead of waiting for the held lock:
+	// modernc.org/sqlite applies PRAGMAs per connection, and this write runs
+	// on a different pooled connection than the one holding the lock.
+	if err := store.DeleteBySource(ctx, "other"); err != nil {
+		t.Fatalf("concurrent DeleteBySource() error: %v", err)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("commit held transaction: %v", err)
 	}
 }
 

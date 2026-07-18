@@ -396,7 +396,7 @@ func (s *Server) Shutdown(ctx context.Context) error
 func (s *Server) Close() error
 ```
 
-**19 tools** organized by domain:
+**29 tools** organized by domain:
 
 | Domain | Tools |
 |--------|-------|
@@ -405,7 +405,10 @@ func (s *Server) Close() error
 | Completion | `complete_code` (FIM) |
 | Embeddings | `embed`, `embed_batch` |
 | Models | `list_models`, `show_model`, `pull_model` |
-| RAG | `rag_index_file`, `rag_index_directory`, `rag_search`, `rag_stats`, `rag_delete` |
+| RAG | `rag_index_file`, `rag_index_directory`, `rag_search`, `rag_answer`, `rag_stats`, `rag_delete` |
+| Managed RAG | `rag_ingest_text`, `rag_ingest_file`, `rag_list_documents`, `rag_delete_document`, `rag_reindex_document` |
+| Memory | `agent_memory_search`, `agent_memory_create`, `agent_memory_promote` |
+| Grounding | `verify_support` |
 | Analysis | `code_review`, `explain_code`, `analyze_training`, `explain_anomaly`, `analyze_strategy`, `compare_strategies` |
 
 **4 prompt templates:** `code-review`, `explain`, `rag-query`, `refactor`

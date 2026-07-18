@@ -8,6 +8,7 @@ import (
 	"iter"
 	"math"
 	"net/url"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -26,10 +27,12 @@ var (
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
 type SQLiteStore struct {
-	db                *sql.DB
-	behavioral        BehavioralWeighter // optional; nil => behavioral signal inert
-	immutable         bool               // set by OpenSQLiteStoreReadOnly; enables the resident snapshot paths
-	writeEmbeddingErr error              // non-nil when existing rows are not a homogeneous packed corpus
+	db                 *sql.DB
+	behavioral         BehavioralWeighter // optional; nil => behavioral signal inert
+	immutable          bool               // set by OpenSQLiteStoreReadOnly; enables the resident snapshot paths
+	writeEmbeddingMu   sync.RWMutex
+	writeEmbeddingErr  error // non-nil when existing rows are not a homogeneous packed corpus
+	writeEmbeddingScan bool  // true when the next normal write must authoritatively rescan the corpus
 
 	// snapshotMu guards resident and snapshotLoad. resident is the published
 	// process-resident snapshot (nil until the first successful load);
@@ -72,6 +75,7 @@ type replaceSourceOptions struct {
 	expectedSourceHash       string
 	checkExpectedSourceHash  bool
 	checkExistingVectorSpace bool
+	replaceVectorSpace       bool
 	allowMissingExisting     bool
 	allowLegacyUnknown       bool
 }
@@ -79,7 +83,11 @@ type replaceSourceOptions struct {
 // NewSQLiteStore creates a vector store backed by SQLite.
 // Use ":memory:" for dbPath to create an in-memory database (for testing).
 func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+	dsn, err := sqliteReadWriteDSN(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("rag: open sqlite: %w", err)
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("rag: open sqlite: %w", err)
 	}
@@ -91,7 +99,9 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		db.SetMaxOpenConns(1)
 	} else {
 		// File-backed databases: enable WAL mode for better concurrent read performance.
-		// WAL is not meaningful for :memory: databases.
+		// WAL is not meaningful for :memory: databases. journal_mode persists in
+		// the database file, so one Exec suffices; busy_timeout is per-connection
+		// and therefore set via the DSN in sqliteReadWriteDSN.
 		if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("rag: set WAL mode: %w", err)
@@ -109,9 +119,65 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("rag: inspect embedding storage: %w", err)
 	}
 	if format != EmbeddingFormatEmpty && format != EmbeddingFormatPackedFloat32 {
-		store.writeEmbeddingErr = fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format)
+		store.setWriteEmbeddingState(fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", format), false)
 	}
 	return store, nil
+}
+
+func (s *SQLiteStore) writeEmbeddingState() (error, bool) {
+	s.writeEmbeddingMu.RLock()
+	defer s.writeEmbeddingMu.RUnlock()
+	return s.writeEmbeddingErr, s.writeEmbeddingScan
+}
+
+func (s *SQLiteStore) setWriteEmbeddingState(err error, scan bool) {
+	s.writeEmbeddingMu.Lock()
+	s.writeEmbeddingErr = err
+	s.writeEmbeddingScan = scan
+	s.writeEmbeddingMu.Unlock()
+}
+
+// sqliteReadWriteDSN builds the read-write DSN for dbPath. File-backed
+// databases get busy_timeout via a file: URI _pragma so it applies to every
+// pooled connection: modernc.org/sqlite applies PRAGMAs per-connection, so a
+// plain Exec would configure only whichever connection served it and
+// concurrent writers on the other connections would fail immediately with
+// SQLITE_BUSY instead of waiting. _txlock=immediate makes BeginTx issue
+// BEGIN IMMEDIATE: with the default deferred BEGIN, the first write inside
+// the transaction upgrades a read lock, and SQLite skips the busy handler on
+// that upgrade path (deadlock avoidance), so contended writers would still
+// fail instantly despite the timeout. The pool is deliberately NOT clamped
+// to one connection (the routing-feedback store's alternative) because
+// retrieval reads are in the user-facing latency path and rely on WAL read
+// concurrency.
+// Plain paths are made absolute first: a relative path in url.URL.Path
+// renders as file://<path>, which the URI parser reads as a host name, not a
+// file. Existing file: URIs retain their path and query parameters.
+// Windows drive-letter/UNC normalization is deferred with the Windows build
+// work (issue #303); this mirrors OpenSQLiteStoreReadOnly's exposure.
+func sqliteReadWriteDSN(dbPath string) (string, error) {
+	if dbPath == "" || dbPath == ":memory:" {
+		return dbPath, nil
+	}
+	var u *url.URL
+	if strings.HasPrefix(dbPath, "file:") {
+		parsed, err := url.Parse(dbPath)
+		if err != nil {
+			return "", fmt.Errorf("parse URI %q: %w", dbPath, err)
+		}
+		u = parsed
+	} else {
+		abs, err := filepath.Abs(dbPath)
+		if err != nil {
+			return "", fmt.Errorf("resolve path %q: %w", dbPath, err)
+		}
+		u = &url.URL{Scheme: "file", Path: abs}
+	}
+	q := u.Query()
+	q.Add("_pragma", "busy_timeout(5000)")
+	q.Set("_txlock", "immediate")
+	u.RawQuery = q.Encode()
+	return u.String(), nil
 }
 
 // OpenSQLiteStoreReadOnly opens an existing SQLite vector store as an immutable
@@ -243,9 +309,18 @@ func validateStoreInputs(chunks []Chunk, embeddings [][]float64) error {
 }
 
 func (s *SQLiteStore) insertChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
-	if s.writeEmbeddingErr != nil {
-		return s.writeEmbeddingErr
+	if cachedErr, _ := s.writeEmbeddingState(); cachedErr != nil {
+		return cachedErr
 	}
+	return s.insertChunksUncheckedTx(ctx, tx, chunks, embeddings, sourceContentHash, vectorSpaceID)
+}
+
+func (s *SQLiteStore) insertMigrationChunksTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
+	// replaceSourceTx calls this only after its full post-delete migration scan.
+	return s.insertChunksUncheckedTx(ctx, tx, chunks, embeddings, sourceContentHash, vectorSpaceID)
+}
+
+func (s *SQLiteStore) insertChunksUncheckedTx(ctx context.Context, tx *sql.Tx, chunks []Chunk, embeddings [][]float64, sourceContentHash, vectorSpaceID string) error {
 	// Use ON CONFLICT ... DO UPDATE instead of INSERT OR REPLACE.
 	// INSERT OR REPLACE deletes the old row and inserts a new one, but
 	// SQLite does not fire DELETE triggers for rows removed by REPLACE
@@ -398,6 +473,24 @@ func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx cont
 }
 
 func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, opts replaceSourceOptions) error {
+	if err := s.validateReplaceSource(source, chunks, embeddings, opts); err != nil {
+		return err
+	}
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: replace source %q: begin transaction: %w", ErrStoreOperation, source, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := s.replaceSourceTx(ctx, tx, source, chunks, embeddings, opts); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rag: replace source %q: commit: %w", source, err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) validateReplaceSource(source string, chunks []Chunk, embeddings [][]float64, opts replaceSourceOptions) error {
 	if err := validateStoreInputs(chunks, embeddings); err != nil {
 		return fmt.Errorf("rag: replace source %q: %w", source, err)
 	}
@@ -409,12 +502,11 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 	if opts.requireVectorSpaceID && len(chunks) > 0 && opts.vectorSpaceID == "" {
 		return fmt.Errorf("%w: replace source %q with non-empty chunks", ErrMissingVectorSpaceID, source)
 	}
-	tx, err := s.beginWriteTx(ctx)
-	if err != nil {
-		return fmt.Errorf("%w: replace source %q: begin transaction: %w", ErrStoreOperation, source, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if len(embeddings) > 0 {
+	return nil
+}
+
+func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source string, chunks []Chunk, embeddings [][]float64, opts replaceSourceOptions) error {
+	if !opts.replaceVectorSpace && len(embeddings) > 0 {
 		if err := s.validateWriteEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
@@ -438,22 +530,85 @@ func (s *SQLiteStore) replaceSource(ctx context.Context, source string, chunks [
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: replace source %q: delete existing chunks: %w", source, err)
 	}
-
-	if len(chunks) > 0 {
-		if err := s.insertChunksTx(ctx, tx, chunks, embeddings, opts.sourceHash, opts.vectorSpaceID); err != nil {
+	if opts.replaceVectorSpace && len(embeddings) > 0 {
+		if err := s.validateMigrationCorpusEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
 		}
 	}
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("rag: replace source %q: commit: %w", source, err)
+	if len(chunks) > 0 {
+		insert := s.insertChunksTx
+		if opts.replaceVectorSpace {
+			insert = s.insertMigrationChunksTx
+		}
+		if err := insert(ctx, tx, chunks, embeddings, opts.sourceHash, opts.vectorSpaceID); err != nil {
+			return fmt.Errorf("rag: replace source %q: %w", source, err)
+		}
+	}
+	if opts.replaceVectorSpace && len(embeddings) > 0 {
+		// The corpus was valid in this transaction. Clear the stale error now,
+		// but require the next normal write to rescan in case the caller rolls
+		// this transaction back after replaceSourceTx returns.
+		s.setWriteEmbeddingState(nil, true)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) validateMigrationCorpusEmbeddingDimensionTx(ctx context.Context, tx *sql.Tx, dimension int) error {
+	rows, err := tx.QueryContext(ctx, `SELECT id, embedding FROM chunks ORDER BY rowid`)
+	if err != nil {
+		return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var corpusFormat embeddingFormat
+	var corpusDimension int
+	for rows.Next() {
+		var chunkID string
+		var encoded []byte
+		if err := rows.Scan(&chunkID, &encoded); err != nil {
+			return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)
+		}
+		format, existingDimension, err := inspectEmbedding(encoded)
+		if err != nil {
+			return fmt.Errorf("rag: write embeddings: inspect existing chunk %q: %w", chunkID, err)
+		}
+		if corpusFormat == "" {
+			corpusFormat = format
+			corpusDimension = existingDimension
+			continue
+		}
+		if format != corpusFormat {
+			return fmt.Errorf("rag: write embeddings: existing store uses mixed embedding formats; rebuild or explicitly migrate it before writing packed vectors")
+		}
+		if existingDimension != corpusDimension {
+			return fmt.Errorf("rag: write embeddings: existing store uses mixed embedding dimensions %d and %d; rebuild or explicitly migrate it before writing packed vectors", corpusDimension, existingDimension)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rag: write embeddings: inspect remaining corpus: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("rag: write embeddings: close remaining corpus: %w", err)
+	}
+	if corpusFormat == "" {
+		return nil
+	}
+	if corpusFormat != embeddingFormatPackedFloat32 {
+		return fmt.Errorf("rag: write embeddings: existing store uses %s; rebuild or explicitly migrate it before writing packed vectors", corpusFormat)
+	}
+	if dimension != corpusDimension {
+		return fmt.Errorf("rag: write embeddings: dimension %d does not match existing corpus dimension %d", dimension, corpusDimension)
 	}
 	return nil
 }
 
 func (s *SQLiteStore) validateWriteEmbeddingDimensionTx(ctx context.Context, tx *sql.Tx, dimension int) error {
-	if s.writeEmbeddingErr != nil {
-		return s.writeEmbeddingErr
+	if cachedErr, scan := s.writeEmbeddingState(); cachedErr != nil || scan {
+		if err := s.validateMigrationCorpusEmbeddingDimensionTx(ctx, tx, dimension); err != nil {
+			s.setWriteEmbeddingState(err, true)
+			return err
+		}
+		s.setWriteEmbeddingState(nil, false)
 	}
 	// Best-effort re-check inside the write transaction: the complete every-row
 	// scan runs once at open, so inspect the corpus's first and last rows here
@@ -494,9 +649,12 @@ func (s *SQLiteStore) validateWriteEmbeddingDimensionTx(ctx context.Context, tx 
 }
 
 func (s *SQLiteStore) beginWriteTx(ctx context.Context) (*sql.Tx, error) {
-	// Passing explicit non-read-only options asks modernc.org/sqlite to acquire
-	// the write lock at BEGIN time, which keeps CAS reads and writes in one
-	// write transaction instead of upgrading after the validation SELECT.
+	// TxOptions{ReadOnly: false} alone still issues a deferred BEGIN in
+	// modernc.org/sqlite; the write lock at BEGIN time comes from the
+	// _txlock=immediate DSN option set in sqliteReadWriteDSN, which keeps CAS
+	// reads and writes in one write transaction instead of upgrading after
+	// the validation SELECT (an upgrade SQLite fails with SQLITE_BUSY without
+	// consulting the busy handler).
 	return s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: false})
 }
 
@@ -546,6 +704,32 @@ func validateExistingSourceVectorSpaceTx(ctx context.Context, tx *sql.Tx, source
 	}
 	if hasKnown && minID != vectorSpaceID {
 		return fmt.Errorf("%w: replace source %q existing vector space %q differs from incoming %q", ErrVectorSpaceDrift, source, minID, vectorSpaceID)
+	}
+	return nil
+}
+
+func validateCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, excludedSource, vectorSpaceID string) error {
+	var minID, maxID string
+	var hasUnknown bool
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE(MIN(NULLIF(vector_space_id, '')), ''),
+		       COALESCE(MAX(NULLIF(vector_space_id, '')), ''),
+		       EXISTS(SELECT 1 FROM chunks WHERE source <> ? AND vector_space_id = '')
+		  FROM chunks
+		 WHERE source <> ?`, excludedSource, excludedSource).Scan(&minID, &maxID, &hasUnknown); err != nil {
+		return fmt.Errorf("%w: validate corpus vector space: %w", ErrStoreOperation, err)
+	}
+	if minID != maxID {
+		return fmt.Errorf("%w: existing corpus mixes vector spaces %q and %q; reindex existing sources into one embedding space before managed ingest", ErrCorpusMixedVectorSpaces, minID, maxID)
+	}
+	if hasUnknown && minID != "" {
+		return fmt.Errorf("%w: existing corpus mixes vector space %q with legacy chunks missing vector-space identity; reindex legacy sources before managed ingest", ErrCorpusMixedVectorSpaces, minID)
+	}
+	if hasUnknown {
+		return fmt.Errorf("%w: incoming vector space %q would mix with legacy chunks missing vector-space identity; reindex legacy sources before managed ingest", ErrCorpusMixedVectorSpaces, vectorSpaceID)
+	}
+	if minID != "" && minID != vectorSpaceID {
+		return fmt.Errorf("%w: incoming vector space %q differs from corpus vector space %q", ErrVectorSpaceDrift, vectorSpaceID, minID)
 	}
 	return nil
 }
@@ -615,8 +799,23 @@ func (s *SQLiteStore) Search(ctx context.Context, queryEmbedding []float64, k in
 
 // DeleteBySource removes all chunks with the given source path.
 func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
-	if _, err := s.db.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return fmt.Errorf("rag: delete by source %q: begin transaction: %w", source, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: delete by source %q: %w", source, err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE managed_documents
+		   SET state = 'failed', freshness = 'stale',
+		       last_error = 'chunks deleted by low-level source deletion', updated_at = ?, revision = revision + 1
+		 WHERE source = ?`, time.Now().Unix(), source); err != nil {
+		return fmt.Errorf("rag: mark managed source %q deleted: %w", source, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("rag: delete by source %q: commit: %w", source, err)
 	}
 	return nil
 }
