@@ -97,9 +97,14 @@ type Document struct {
 	Freshness       DocumentFreshness `json:"freshness"`
 	LastError       string            `json:"last_error,omitempty"`
 	ChunkCount      int               `json:"chunk_count"`
-	source          string
-	storedText      string
-	revision        int64
+	// UpdatedAt is the Unix time of the last lifecycle write. It is the age
+	// signal for transient states: an "indexing" document whose UpdatedAt is
+	// old was likely orphaned by a crash and needs a manual reindex/delete
+	// (automatic reclaim needs an owner lease; see the follow-up issue).
+	UpdatedAt int64 `json:"updated_at"`
+	source    string
+	storedText string
+	revision  int64
 }
 
 // DocumentOptions supplies optional metadata for a managed document.
@@ -258,6 +263,7 @@ func (m *ManagedSources) ingestLocked(ctx context.Context, name, content string,
 		revision:        1,
 	}
 	now := time.Now().Unix()
+	document.UpdatedAt = now
 	tags, _ := json.Marshal(document.Tags)
 	_, err = m.store.db.ExecContext(ctx, `
 		INSERT INTO managed_documents (
@@ -439,10 +445,11 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 	if state == current.State && freshness == current.Freshness && lastError == current.LastError {
 		return false, tx.Commit()
 	}
+	updatedAt := time.Now().Unix()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents
 		   SET state = ?, freshness = ?, last_error = ?, updated_at = ?, revision = revision + 1
-		 WHERE id = ? AND revision = ?`, state, freshness, lastError, time.Now().Unix(), current.ID, current.revision)
+		 WHERE id = ? AND revision = ?`, state, freshness, lastError, updatedAt, current.ID, current.revision)
 	if err != nil {
 		return false, fmt.Errorf("rag: reconcile managed document %q status: %w", current.ID, err)
 	}
@@ -463,6 +470,7 @@ func (m *ManagedSources) reconcileDocument(ctx context.Context, observed *Docume
 		return false, fmt.Errorf("rag: reconcile managed document %q status: commit: %w", current.ID, err)
 	}
 	current.State, current.Freshness, current.LastError = state, freshness, lastError
+	current.UpdatedAt = updatedAt
 	current.revision++
 	*observed = current
 	return true, nil
@@ -553,6 +561,7 @@ func (m *ManagedSources) indexDocumentLocked(ctx context.Context, document Docum
 	candidate.State = DocumentStateIndexed
 	candidate.Freshness = DocumentFreshnessFresh
 	candidate.LastError = ""
+	candidate.UpdatedAt = indexedAt
 	candidate.revision = revision
 	return candidate, nil
 }
@@ -647,10 +656,11 @@ func (m *ManagedSources) persistStatus(ctx context.Context, document *Document, 
 		return fmt.Errorf("rag: update managed document %q status: begin transaction: %w", document.ID, err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	updatedAt := time.Now().Unix()
 	result, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents
 		   SET state = ?, freshness = ?, last_error = ?, updated_at = ?, revision = revision + 1
-		 WHERE id = ? AND revision = ?`, state, freshness, lastError, time.Now().Unix(), document.ID, document.revision)
+		 WHERE id = ? AND revision = ?`, state, freshness, lastError, updatedAt, document.ID, document.revision)
 	if err != nil {
 		return fmt.Errorf("rag: update managed document %q status: %w", document.ID, err)
 	}
@@ -673,6 +683,7 @@ func (m *ManagedSources) persistStatus(ctx context.Context, document *Document, 
 	document.State = state
 	document.Freshness = freshness
 	document.LastError = lastError
+	document.UpdatedAt = updatedAt
 	document.revision++
 	return nil
 }
@@ -691,7 +702,7 @@ func managedDocumentConflict(ctx context.Context, tx *sql.Tx, id string) error {
 const managedDocumentSelect = `
 	SELECT id, source, title, kind, origin, mime_type, stored_text,
 	       content_hash, source_signature, indexed_at, vector_space_id,
-	       chunk_count, collection, tags, state, freshness, last_error, revision
+	       chunk_count, collection, tags, state, freshness, last_error, revision, updated_at
 	  FROM managed_documents`
 
 // managedDocumentListSelect mirrors managedDocumentSelect but skips loading
@@ -699,7 +710,7 @@ const managedDocumentSelect = `
 const managedDocumentListSelect = `
 	SELECT id, source, title, kind, origin, mime_type, '' AS stored_text,
 	       content_hash, source_signature, indexed_at, vector_space_id,
-	       chunk_count, collection, tags, state, freshness, last_error, revision
+	       chunk_count, collection, tags, state, freshness, last_error, revision, updated_at
 	  FROM managed_documents`
 
 type managedRowScanner interface {
@@ -715,6 +726,7 @@ func scanManagedDocument(scanner managedRowScanner) (Document, error) {
 		&document.ContentHash, &document.SourceSignature, &document.IndexedAt,
 		&document.VectorSpaceID, &document.ChunkCount, &document.Collection, &tagsJSON,
 		&document.State, &document.Freshness, &document.LastError, &document.revision,
+		&document.UpdatedAt,
 	); err != nil {
 		return Document{}, fmt.Errorf("rag: scan managed document: %w", err)
 	}

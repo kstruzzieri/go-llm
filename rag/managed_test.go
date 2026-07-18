@@ -825,6 +825,36 @@ func TestManagedListDocumentsWorksOnReadOnlyStore(t *testing.T) {
 	}
 }
 
+func TestManagedListExposesUpdatedAtForOrphanedIndexing(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	ctx := context.Background()
+	document, err := managed.IngestText(ctx, "doc.md", "hello", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("IngestText() error: %v", err)
+	}
+	if document.UpdatedAt == 0 {
+		t.Fatal("ingested document UpdatedAt = 0, want lifecycle timestamp")
+	}
+	// Crash orphans stay in the indexing state deliberately (automatic
+	// reclaim needs an owner lease); the age signal is how an operator tells
+	// "in progress" from "died": surface updated_at everywhere.
+	const orphanedAt = 1700000000
+	if _, err := store.db.Exec(`UPDATE managed_documents SET state = 'indexing', updated_at = ? WHERE id = ?`, orphanedAt, document.ID); err != nil {
+		t.Fatalf("force orphaned indexing state: %v", err)
+	}
+	got := requireManagedDocument(t, managed, document.ID)
+	if got.State != DocumentStateIndexing || got.UpdatedAt != orphanedAt {
+		t.Fatalf("orphan = %s updated_at=%d, want indexing updated_at=%d", got.State, got.UpdatedAt, orphanedAt)
+	}
+	encoded, err := json.Marshal(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"updated_at":1700000000`) {
+		t.Fatalf("document JSON missing updated_at: %s", encoded)
+	}
+}
+
 func TestManagedListDocumentsTrimsCollectionFilter(t *testing.T) {
 	managed, _, _ := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
 	ctx := context.Background()
