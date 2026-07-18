@@ -36,6 +36,7 @@ type parallelCoordinator struct {
 	topLevel   string
 	head       string
 	tempParent string
+	prepared   bool
 	workers    []parallelWorker
 }
 
@@ -134,6 +135,7 @@ func parallelPathPrefix(pathname, prefix string) bool {
 }
 
 func (c *parallelCoordinator) selectWorkers(ctx context.Context) (bool, error) {
+	c.prepared = false
 	if c.maxWorkers < 2 || !parallelGraphHasEdge(c.plan) {
 		c.workers = nil
 		return false, nil
@@ -170,6 +172,7 @@ func (c *parallelCoordinator) selectWorkers(ctx context.Context) (bool, error) {
 }
 
 func (c *parallelCoordinator) prepareWorkers(ctx context.Context) error {
+	c.prepared = false
 	if len(c.workers) < 2 {
 		return errors.New("parallel cohort has fewer than two selected workers")
 	}
@@ -191,10 +194,26 @@ func (c *parallelCoordinator) prepareWorkers(ctx context.Context) error {
 			return fmt.Errorf("copy .agent to %s: %w", c.workers[i].sourceID, err)
 		}
 	}
+	c.prepared = true
 	return nil
 }
 
 func (c *parallelCoordinator) runWorkers(ctx context.Context) error {
+	if !c.prepared || len(c.workers) < 2 {
+		return errors.New("parallel cohort does not have at least two successfully prepared workers")
+	}
+	for _, worker := range c.workers {
+		if worker.root == "" {
+			return fmt.Errorf("worker %s has no prepared worktree root", worker.sourceID)
+		}
+		info, err := os.Stat(worker.root)
+		if err != nil {
+			return fmt.Errorf("worker %s prepared worktree root is unavailable: %w", worker.sourceID, err)
+		}
+		if !info.IsDir() {
+			return fmt.Errorf("worker %s prepared worktree root is not a directory", worker.sourceID)
+		}
+	}
 	if c.worker == nil {
 		return errors.New("parallel worker function is nil")
 	}
@@ -212,6 +231,9 @@ func (c *parallelCoordinator) runWorkers(ctx context.Context) error {
 		return err
 	}
 	for i := range c.workers {
+		if err := c.validateWorkerGitState(ctx, c.workers[i]); err != nil {
+			return err
+		}
 		changed, err := c.validateWorkerDiff(ctx, c.workers[i])
 		if err != nil {
 			return err
@@ -232,6 +254,7 @@ func (c *parallelCoordinator) preservedRoots() []string {
 }
 
 func (c *parallelCoordinator) cleanup(ctx context.Context) error {
+	c.prepared = false
 	var errs []error
 	for i := range c.workers {
 		if c.workers[i].root == "" {
@@ -251,6 +274,42 @@ func (c *parallelCoordinator) cleanup(ctx context.Context) error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+func (c *parallelCoordinator) validateWorkerGitState(ctx context.Context, worker parallelWorker) error {
+	top, err := runParallelGit(ctx, worker.root, "rev-parse", "--show-toplevel")
+	if err != nil {
+		return fmt.Errorf("recheck worker %s Git toplevel: %w", worker.sourceID, err)
+	}
+	gotTop, err := filepath.EvalSymlinks(filepath.Clean(strings.TrimSpace(string(top))))
+	if err != nil {
+		return fmt.Errorf("resolve worker %s Git toplevel: %w", worker.sourceID, err)
+	}
+	wantTop, err := filepath.EvalSymlinks(worker.root)
+	if err != nil {
+		return fmt.Errorf("resolve worker %s prepared root: %w", worker.sourceID, err)
+	}
+	if gotTop != wantTop {
+		return fmt.Errorf("worker %s Git toplevel is %s, want %s", worker.sourceID, gotTop, wantTop)
+	}
+	head, err := runParallelGit(ctx, worker.root, "rev-parse", "--verify", "HEAD")
+	if err != nil {
+		return fmt.Errorf("recheck worker %s HEAD: %w", worker.sourceID, err)
+	}
+	if got := strings.TrimSpace(string(head)); got != c.head {
+		return fmt.Errorf("worker %s HEAD changed from %s to %s", worker.sourceID, c.head, got)
+	}
+	cmd := exec.CommandContext(ctx, "git", "symbolic-ref", "--quiet", "HEAD")
+	cmd.Dir = worker.root
+	if out, err := cmd.CombinedOutput(); err == nil {
+		return fmt.Errorf("worker %s is attached to branch %s; want detached HEAD", worker.sourceID, strings.TrimSpace(string(out)))
+	} else {
+		var exitErr *exec.ExitError
+		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+			return fmt.Errorf("check worker %s detached HEAD: %w: %s", worker.sourceID, err, strings.TrimSpace(string(out)))
+		}
+	}
+	return nil
 }
 
 func (c *parallelCoordinator) recordBase(ctx context.Context) error {

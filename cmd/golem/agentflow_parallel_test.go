@@ -3,12 +3,14 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -304,6 +306,118 @@ func TestParallelWorkersRunConcurrentlyAndValidateExactDiff(t *testing.T) {
 	}
 }
 
+func TestParallelWorkersRejectUnpreparedCohortBeforeCallbacks(t *testing.T) {
+	t.Run("zero workers", func(t *testing.T) {
+		var calls atomic.Int32
+		c := newParallelCoordinator(t.TempDir(), &agentflow.Plan{}, 2, func(context.Context, parallelWorker) error {
+			calls.Add(1)
+			return nil
+		})
+		if err := c.runWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "prepared") {
+			t.Fatalf("runWorkers() error = %v", err)
+		}
+		if calls.Load() != 0 {
+			t.Fatalf("worker callback calls = %d", calls.Load())
+		}
+	})
+
+	t.Run("selected but not prepared", func(t *testing.T) {
+		root := newParallelTestRepo(t)
+		var calls atomic.Int32
+		c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, func(context.Context, parallelWorker) error {
+			calls.Add(1)
+			return nil
+		})
+		selected, err := c.selectWorkers(context.Background())
+		if err != nil || !selected {
+			t.Fatalf("selectWorkers() = %v, %v", selected, err)
+		}
+		if err := c.runWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "prepared") {
+			t.Fatalf("runWorkers() error = %v", err)
+		}
+		if calls.Load() != 0 {
+			t.Fatalf("worker callback calls = %d", calls.Load())
+		}
+	})
+
+	t.Run("missing prepared root", func(t *testing.T) {
+		root := newParallelTestRepo(t)
+		var calls atomic.Int32
+		c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, func(context.Context, parallelWorker) error {
+			calls.Add(1)
+			return nil
+		})
+		selected, err := c.selectWorkers(context.Background())
+		if err != nil || !selected {
+			t.Fatalf("selectWorkers() = %v, %v", selected, err)
+		}
+		if err := c.prepareWorkers(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+		root1 := c.workers[1].root
+		c.workers[1].root = filepath.Join(c.tempParent, "missing")
+		if err := c.runWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "prepared") {
+			t.Fatalf("runWorkers() error = %v", err)
+		}
+		c.workers[1].root = root1
+		if calls.Load() != 0 {
+			t.Fatalf("worker callback calls = %d", calls.Load())
+		}
+	})
+}
+
+func TestParallelWorkersRejectChangedHeadOrAttachedBranch(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		want   string
+		mutate func(parallelWorker) error
+	}{
+		{
+			name: "changed HEAD",
+			want: "HEAD",
+			mutate: func(w parallelWorker) error {
+				if err := os.WriteFile(filepath.Join(w.root, filepath.FromSlash(w.paths[0])), []byte("committed\n"), 0o600); err != nil {
+					return err
+				}
+				if err := runParallelTestGit(w.root, "add", "--", w.paths[0]); err != nil {
+					return err
+				}
+				return runParallelTestGit(w.root, "commit", "-m", "worker commit")
+			},
+		},
+		{
+			name: "attached branch",
+			want: "detached",
+			mutate: func(w parallelWorker) error {
+				return runParallelTestGit(w.root, "switch", "-c", "worker-branch")
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			worker := func(_ context.Context, w parallelWorker) error {
+				if w.sourceID == "w1" {
+					return tt.mutate(w)
+				}
+				return nil
+			}
+			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
+			selected, err := c.selectWorkers(context.Background())
+			if err != nil || !selected {
+				t.Fatalf("selectWorkers() = %v, %v", selected, err)
+			}
+			if err := c.prepareWorkers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+			if err := c.runWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("runWorkers() error = %v, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
 func TestParallelWorkerFailuresAndDriftPreserveCanonicalAndWorktrees(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
@@ -445,6 +559,20 @@ func runTestGit(t *testing.T, root string, args ...string) string {
 		t.Fatalf("git %v: %v\n%s", args, err, out)
 	}
 	return string(out)
+}
+
+func runParallelTestGit(root string, args ...string) error {
+	cmd := exec.Command("git", args...)
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=golem-test", "GIT_AUTHOR_EMAIL=golem-test@example.com",
+		"GIT_COMMITTER_NAME=golem-test", "GIT_COMMITTER_EMAIL=golem-test@example.com",
+	)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git %v: %w: %s", args, err, out)
+	}
+	return nil
 }
 
 func writeTestFile(t *testing.T, path, contents string, mode fs.FileMode) {
