@@ -625,6 +625,17 @@ func looksManagedDocumentSource(source string) bool {
 	return true
 }
 
+// Source shape alone is not ownership: legacy indexer callers may use the
+// managed prefix and arbitrary metadata. Managed chunks carry lifecycle keys.
+func chunkClaimsManagedDocument(chunk Chunk) bool {
+	if !looksManagedDocumentSource(chunk.Source) {
+		return false
+	}
+	_, hasDocumentID := chunk.Metadata["managed_document_id"]
+	_, hasFreshness := chunk.Metadata["managed_freshness"]
+	return hasDocumentID || hasFreshness
+}
+
 func validManagedRegistryDocument(document *managedRegistryDocument) bool {
 	if !isLowerHex(document.id, 32) || !validGeneratedManagedSource(document.source, document.id) || !isLowerHex(document.contentHash, 64) {
 		return false
@@ -714,10 +725,10 @@ func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile 
 			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
-		} else if looksManagedDocumentSource(results[i].Chunk.Source) {
-			// The registry no longer knows this managed-looking source: the
-			// document was deleted (or forged) between the chunk read and the
-			// registry snapshot. Never serve its baked metadata as fresh.
+		} else if chunkClaimsManagedDocument(results[i].Chunk) {
+			// The registry no longer knows this source claiming managed
+			// provenance: the document was deleted (or forged) between the
+			// chunk read and registry snapshot. Never serve it as fresh.
 			stampManagedChunkStale(&results[i].Chunk)
 		}
 	}
@@ -752,7 +763,7 @@ func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile 
 			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
-		} else if looksManagedDocumentSource(results[i].Chunk.Source) {
+		} else if chunkClaimsManagedDocument(results[i].Chunk) {
 			// See refreshManagedSearchResultsWithRegistryLimit: registry-miss
 			// managed chunks must not claim their baked freshness.
 			stampManagedChunkStale(&results[i].Chunk)

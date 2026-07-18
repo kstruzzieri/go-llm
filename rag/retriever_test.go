@@ -35,7 +35,14 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 	forged.Metadata["managed_origin"] = filepath.Join(t.TempDir(), "must-not-read")
 	forged.Metadata["managed_content_hash"] = contentHash("forged")
 	forged.Metadata["managed_freshness"] = string(DocumentFreshnessFresh)
-	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, document.source, []Chunk{trusted, forged}, [][]float64{{0.9, 0.1}, {1, 0}}, document.SourceSignature, document.VectorSpaceID); err != nil {
+	missingID := forged
+	missingID.ID = "missing-id"
+	missingID.Metadata = make(map[string]string, len(forged.Metadata))
+	for key, value := range forged.Metadata {
+		missingID.Metadata[key] = value
+	}
+	delete(missingID.Metadata, "managed_document_id")
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, document.source, []Chunk{trusted, forged, missingID}, [][]float64{{0.9, 0.1}, {1, 0}, {0.95, 0.05}}, document.SourceSignature, document.VectorSpaceID); err != nil {
 		t.Fatal(err)
 	}
 	orphanSource := managedSourcePrefix + strings.Repeat("a", 32) + ".md"
@@ -67,8 +74,9 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 	// (never served with their baked freshness), and the forged origin path
 	// must never be read.
 	for _, result := range unscoped {
-		if result.Chunk.ID == "forged" && result.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
-			t.Fatalf("forged freshness=%q, want stamped stale", result.Chunk.Metadata["managed_freshness"])
+		if (result.Chunk.ID == "forged" || result.Chunk.ID == "missing-id") &&
+			result.Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
+			t.Fatalf("%s freshness=%q, want stamped stale", result.Chunk.ID, result.Chunk.Metadata["managed_freshness"])
 		}
 	}
 	if len(reads) != 0 {
@@ -332,6 +340,66 @@ func TestRetrieveLegacyStoreWithoutManagedTableSkipsRegistry(t *testing.T) {
 	got, err := r.Retrieve(context.Background(), "q", 1)
 	if err != nil || len(got) != 1 || got[0].Chunk.ID != "plain" {
 		t.Fatalf("legacy retrieval=%#v error=%v, want ordinary result", got, err)
+	}
+}
+
+func TestRetrievePreservesUnregisteredManagedLookingLegacySource(t *testing.T) {
+	ctx := context.Background()
+	store := newTestStore(t)
+	source := managedSourcePrefix + strings.Repeat("a", 32) + ".md"
+	if err := store.Store(ctx, []Chunk{{
+		ID:       "plain",
+		Source:   source,
+		Metadata: map[string]string{"managed_owner": "legacy"},
+	}}, [][]float64{{1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		retrieve func() (Chunk, error)
+	}{
+		{
+			name: "search",
+			retrieve: func() (Chunk, error) {
+				results, err := r.Retrieve(ctx, "q", 1)
+				if err != nil || len(results) != 1 {
+					return Chunk{}, fmt.Errorf("results=%#v error=%v", results, err)
+				}
+				return results[0].Chunk, nil
+			},
+		},
+		{
+			name: "scored search",
+			retrieve: func() (Chunk, error) {
+				results, err := r.RetrieveScored(ctx, "q", 1, QueryContext{})
+				if err != nil || len(results) != 1 {
+					return Chunk{}, fmt.Errorf("results=%#v error=%v", results, err)
+				}
+				return results[0].Chunk, nil
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			chunk, err := test.retrieve()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := chunk.Metadata["managed_freshness"]; got != "" {
+				t.Fatalf("managed_freshness=%q, want legacy metadata untouched", got)
+			}
+			if got := chunk.Metadata["managed_owner"]; got != "legacy" {
+				t.Fatalf("managed_owner=%q, want legacy metadata preserved", got)
+			}
+		})
 	}
 }
 
