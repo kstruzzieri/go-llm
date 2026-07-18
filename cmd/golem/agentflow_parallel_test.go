@@ -787,6 +787,30 @@ func TestParallelPromotionPreMutationFailureDoesNotTrackOrReplaceTarget(t *testi
 	}
 }
 
+func TestParallelAtomicCleanupJoinsRemovalFailure(t *testing.T) {
+	root := t.TempDir()
+	temp, err := os.CreateTemp(root, ".golem-promote-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := temp.Name()
+	if err := temp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(name); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(name, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, filepath.Join(name, "leftover"), "keep\n", 0o600)
+	primary := errors.New("pre-rename failure")
+	err = parallelAtomicCleanup(primary, temp, name, true)
+	if !errors.Is(err, primary) || !strings.Contains(err.Error(), "remove promotion temp") {
+		t.Fatalf("parallelAtomicCleanup() error = %v", err)
+	}
+}
+
 func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 	for _, tt := range []struct {
 		name  string

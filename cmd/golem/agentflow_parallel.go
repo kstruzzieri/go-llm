@@ -231,15 +231,15 @@ func (p *parallelPromotion) apply(change parallelPromotionChange, snapshot paral
 	return nil
 }
 
-func parallelAtomicWrite(target string, data []byte, mode fs.FileMode) error {
+func parallelAtomicWrite(target string, data []byte, mode fs.FileMode) (err error) {
 	temp, err := os.CreateTemp(filepath.Dir(target), ".golem-promote-*")
 	if err != nil {
 		return err
 	}
 	name := temp.Name()
+	closed := false
 	defer func() {
-		_ = temp.Close()
-		_ = os.Remove(name)
+		err = parallelAtomicCleanup(err, temp, name, closed)
 	}()
 	if _, err := temp.Write(data); err != nil {
 		return err
@@ -247,10 +247,25 @@ func parallelAtomicWrite(target string, data []byte, mode fs.FileMode) error {
 	if err := temp.Chmod(mode); err != nil {
 		return err
 	}
-	if err := temp.Close(); err != nil {
-		return err
+	if closeErr := temp.Close(); closeErr != nil {
+		closed = true
+		return closeErr
 	}
+	closed = true
 	return os.Rename(name, target)
+}
+
+func parallelAtomicCleanup(primary error, temp *os.File, name string, closed bool) error {
+	errs := []error{primary}
+	if !closed {
+		if err := temp.Close(); err != nil {
+			errs = append(errs, fmt.Errorf("close promotion temp %s: %w", name, err))
+		}
+	}
+	if err := os.Remove(name); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		errs = append(errs, fmt.Errorf("remove promotion temp %s: %w", name, err))
+	}
+	return errors.Join(errs...)
 }
 
 func (p *parallelPromotion) rollback() error {
