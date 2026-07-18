@@ -410,6 +410,153 @@ func TestRetrieveScopedFiltersBeforeTopKAndRequiresAllTags(t *testing.T) {
 	}
 }
 
+func newReadOnlyManagedScopeStore(t *testing.T) (*SQLiteStore, string) {
+	return newReadOnlyManagedScopeStoreWithCorruption(t, "wrong-type managed title")
+}
+
+func newReadOnlyManagedScopeStoreWithCorruption(t *testing.T, corruption string) (*SQLiteStore, string) {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "index.db")
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, _ := newManagedTestServiceOnStore(t, &managedTestEmbedder{vectorSpaceID: "test/v1"}, store)
+	outside, err := managed.IngestText(ctx, "outside.md", "alpha outside", DocumentOptions{Collection: "other", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	match, err := managed.IngestText(ctx, "match.md", "alpha match", DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lower, err := managed.IngestText(ctx, "lower.md", "alpha lower", DocumentOptions{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceManagedScopeChunk(t, store, outside, "outside", []float64{1, 0})
+	replaceManagedScopeChunk(t, store, match, "match", []float64{0.9, 0.1})
+	// The corrupt in-scope row ranks above the healthy match. Scoped snapshot
+	// admission must reject it before it can consume the sole finalist slot.
+	replaceManagedScopeChunk(t, store, lower, "lower", []float64{1, 0})
+	if _, err := store.db.Exec(`UPDATE chunks SET metadata = '{' WHERE source = ?`, outside.source); err != nil {
+		t.Fatal(err)
+	}
+	corruptMetadata := `json_set(metadata, '$.managed_title', 1)`
+	switch corruption {
+	case "duplicate managed title":
+		// SQLite's json_extract reads the first duplicate key while encoding/json
+		// keeps the last. Admission must reject the ambiguity before top-k.
+		corruptMetadata = `substr(metadata, 1, length(metadata) - 1) || ',"managed_title":"tampered"}'`
+	case "extra non-string":
+		// Hydration decodes the complete object into map[string]string, so every
+		// top-level value must be compatible before the row can enter top-k.
+		corruptMetadata = `substr(metadata, 1, length(metadata) - 1) || ',"extra":1}'`
+	}
+	if _, err := store.db.Exec(`UPDATE chunks SET metadata = `+corruptMetadata+` WHERE source = ?`, lower.source); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	readOnly, err := OpenSQLiteStoreReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = readOnly.Close() })
+	return readOnly, match.source
+}
+
+func TestRetrieveScopedReadOnlyRejectsIncompatibleManagedMetadataBeforeTopK(t *testing.T) {
+	for _, corruption := range []string{"duplicate managed title", "extra non-string"} {
+		t.Run(corruption, func(t *testing.T) {
+			t.Run("dense", func(t *testing.T) {
+				store, matchSource := newReadOnlyManagedScopeStoreWithCorruption(t, corruption)
+				r, err := NewRetrieverWithEmbedder(
+					&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+					store,
+					WithVectorOnly(),
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := r.RetrieveScoped(context.Background(), "alpha", 1, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
+				if err != nil || len(got) != 1 || got[0].Chunk.Source != matchSource {
+					t.Fatalf("RetrieveScoped() = %#v, error = %v, want source %q", got, err, matchSource)
+				}
+			})
+
+			t.Run("hybrid", func(t *testing.T) {
+				store, matchSource := newReadOnlyManagedScopeStoreWithCorruption(t, corruption)
+				r, err := NewRetrieverWithEmbedder(
+					&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+					store,
+				)
+				if err != nil {
+					t.Fatal(err)
+				}
+				got, err := r.RetrieveScoredScoped(
+					context.Background(), "alpha", 1,
+					RetrievalScope{Collection: "ops", Tags: []string{"alpha"}}, QueryContext{},
+				)
+				if err != nil || len(got) != 1 || got[0].Chunk.Source != matchSource {
+					t.Fatalf("RetrieveScoredScoped() = %#v, error = %v, want source %q", got, err, matchSource)
+				}
+			})
+		})
+	}
+}
+
+func TestRetrieveScopedReadOnlySkipsOutOfScopeHydration(t *testing.T) {
+	store, matchSource := newReadOnlyManagedScopeStore(t)
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.RetrieveScoped(context.Background(), "alpha", 1, RetrievalScope{Collection: "ops", Tags: []string{"alpha"}})
+	if err != nil {
+		t.Fatalf("RetrieveScoped() error = %v; out-of-scope malformed metadata must not be hydrated", err)
+	}
+	if len(got) != 1 || got[0].Chunk.Source != matchSource {
+		t.Fatalf("RetrieveScoped() = %#v, want lower-ranked in-scope source %q", got, matchSource)
+	}
+}
+
+func TestRetrieveScoredScopedReadOnlySkipsOutOfScopeHydration(t *testing.T) {
+	store, matchSource := newReadOnlyManagedScopeStore(t)
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+		store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := r.RetrieveScoredScoped(
+		context.Background(),
+		"alpha",
+		1,
+		RetrievalScope{Collection: "ops", Tags: []string{"alpha"}},
+		QueryContext{},
+	)
+	if err != nil {
+		t.Fatalf("RetrieveScoredScoped() error = %v; out-of-scope malformed metadata must not be hydrated", err)
+	}
+	if len(got) != 1 || got[0].Chunk.Source != matchSource {
+		t.Fatalf("RetrieveScoredScoped() = %#v, want lower-ranked in-scope source %q", got, matchSource)
+	}
+}
+
 func TestRetrieveScopedTagsDoNotRequireACollection(t *testing.T) {
 	ctx := context.Background()
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
@@ -510,6 +657,54 @@ func TestRetrieveFreshnessWithoutListDoesNotWrite(t *testing.T) {
 	results, err = r.Retrieve(context.Background(), "q", 5)
 	if err != nil || len(results) != 1 || results[0].Chunk.Metadata["managed_freshness"] != string(DocumentFreshnessStale) {
 		t.Fatalf("deleted file results=%#v error=%v, want stale", results, err)
+	}
+}
+
+func TestRetrieveUnscopedBoundsManagedFileFreshnessReads(t *testing.T) {
+	const maxReads = 100
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	dir := t.TempDir()
+	for i := 0; i <= maxReads; i++ {
+		name := fmt.Sprintf("doc-%03d.md", i)
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := managed.IngestFile(ctx, path, DocumentOptions{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name     string
+		retrieve func() error
+	}{
+		{"search", func() error { _, err := r.Retrieve(ctx, "q", 0); return err }},
+		{"scored search", func() error { _, err := r.RetrieveScored(ctx, "q", 0, QueryContext{}); return err }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			reads := 0
+			r.readManagedFile = func(ctx context.Context, path string) ([]byte, error) {
+				reads++
+				return readManagedRegularFile(ctx, path)
+			}
+			err := test.retrieve()
+			if err == nil || !strings.Contains(err.Error(), "managed file freshness read limit") {
+				t.Fatalf("retrieval error = %v, want managed freshness read-limit error", err)
+			}
+			if reads != maxReads {
+				t.Fatalf("managed file reads = %d, want %d", reads, maxReads)
+			}
+		})
 	}
 }
 

@@ -25,6 +25,7 @@ const (
 	MaxManagedTags                   = 64
 	MaxManagedTagBytes               = 256
 	MaxManagedListLimit              = 100
+	maxManagedListScan               = MaxManagedListLimit
 )
 
 // DocumentKind identifies how a managed document's content is retained.
@@ -58,6 +59,26 @@ var ErrDocumentNotFound = errors.New("rag: managed document not found")
 
 // ErrDocumentChanged indicates that a managed document changed while work was in flight.
 var ErrDocumentChanged = errors.New("rag: managed document changed")
+
+// ErrManagedListScanLimit indicates that ListDocuments reached its bounded
+// scan before filling the requested page.
+var ErrManagedListScanLimit = errors.New("rag: managed document list scan limit")
+
+// ManagedListScanLimitError reports how to resume a bounded ListDocuments
+// scan. Documents returned alongside this error are valid and must be consumed
+// before resuming with AfterID as the exclusive cursor.
+type ManagedListScanLimitError struct {
+	AfterID string
+	Scanned int
+}
+
+func (e *ManagedListScanLimitError) Error() string {
+	return fmt.Sprintf("%s after %d rows; resume after %q", ErrManagedListScanLimit, e.Scanned, e.AfterID)
+}
+
+func (e *ManagedListScanLimitError) Unwrap() error {
+	return ErrManagedListScanLimit
+}
 
 // Document is the durable metadata for a managed RAG source.
 type Document struct {
@@ -273,56 +294,56 @@ func (m *ManagedSources) ListDocuments(ctx context.Context, filter DocumentFilte
 	if err != nil {
 		return nil, err
 	}
-	filtered := make([]Document, 0, filter.Limit)
-	afterID := filter.AfterID
-	for len(filtered) < filter.Limit {
-		rows, err := m.store.db.QueryContext(ctx, managedDocumentListSelect+` WHERE id > ? ORDER BY id LIMIT ?`, afterID, MaxManagedListLimit)
+	var rows *sql.Rows
+	if filter.Collection != "" {
+		rows, err = m.store.db.QueryContext(ctx, managedDocumentListSelect+` WHERE collection = ? AND id > ? ORDER BY id LIMIT ?`, filter.Collection, filter.AfterID, maxManagedListScan+1)
+	} else {
+		rows, err = m.store.db.QueryContext(ctx, managedDocumentListSelect+` WHERE id > ? ORDER BY id LIMIT ?`, filter.AfterID, maxManagedListScan+1)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("rag: list managed documents: %w", err)
+	}
+	batch := make([]Document, 0, maxManagedListScan)
+	for len(batch) < maxManagedListScan && rows.Next() {
+		document, err := scanManagedDocument(rows)
 		if err != nil {
-			return nil, fmt.Errorf("rag: list managed documents: %w", err)
+			_ = rows.Close()
+			return nil, err
 		}
-		batch := make([]Document, 0, MaxManagedListLimit)
-		for rows.Next() {
-			document, err := scanManagedDocument(rows)
-			if err != nil {
-				_ = rows.Close()
+		batch = append(batch, document)
+	}
+	lookahead := len(batch) == maxManagedListScan && rows.Next()
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return nil, fmt.Errorf("rag: iterate managed documents: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("rag: close managed documents: %w", err)
+	}
+
+	filtered := make([]Document, 0, filter.Limit)
+	for i := range batch {
+		document := &batch[i]
+		if filter.Collection != "" && document.Collection != filter.Collection ||
+			!containsManagedTags(document.Tags, wantedTags) {
+			continue
+		}
+		if document.State == DocumentStateIndexed {
+			if _, err := m.reconcileDocument(ctx, document); err != nil {
 				return nil, err
 			}
-			batch = append(batch, document)
 		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
-			return nil, fmt.Errorf("rag: iterate managed documents: %w", err)
+		if filter.State != "" && document.State != filter.State ||
+			filter.Freshness != "" && document.Freshness != filter.Freshness {
+			continue
 		}
-		if err := rows.Close(); err != nil {
-			return nil, fmt.Errorf("rag: close managed documents: %w", err)
+		filtered = append(filtered, *document)
+		if len(filtered) == filter.Limit {
+			return filtered, nil
 		}
-		if len(batch) == 0 {
-			break
-		}
-		afterID = batch[len(batch)-1].ID
-		for i := range batch {
-			document := &batch[i]
-			if filter.Collection != "" && document.Collection != filter.Collection ||
-				!containsManagedTags(document.Tags, wantedTags) {
-				continue
-			}
-			if document.State == DocumentStateIndexed {
-				if _, err := m.reconcileDocument(ctx, document); err != nil {
-					return nil, err
-				}
-			}
-			if filter.State != "" && document.State != filter.State ||
-				filter.Freshness != "" && document.Freshness != filter.Freshness {
-				continue
-			}
-			filtered = append(filtered, *document)
-			if len(filtered) == filter.Limit {
-				break
-			}
-		}
-		if len(batch) < MaxManagedListLimit {
-			break
-		}
+	}
+	if lookahead {
+		return filtered, &ManagedListScanLimitError{AfterID: batch[len(batch)-1].ID, Scanned: len(batch)}
 	}
 	return filtered, nil
 }

@@ -66,7 +66,7 @@ func TestRAGSearchSchema_QueryContextAndExplainScores(t *testing.T) {
 	}
 }
 
-func TestRAGRetrievalSchemasCapTopK(t *testing.T) {
+func TestRAGRetrievalSchemasPreserveLegacyUnboundedTopK(t *testing.T) {
 	s := &Server{mcpServer: gomcp.NewServer(&gomcp.Implementation{Name: "test", Version: "0.0.1"}, nil)}
 	s.registerRAGTools()
 	env := connectTestServer(t, s)
@@ -75,15 +75,15 @@ func TestRAGRetrievalSchemasCapTopK(t *testing.T) {
 	for _, tool := range []string{"rag_search", "rag_answer"} {
 		t.Run(tool, func(t *testing.T) {
 			topK := toolSchemaProperties(t, env.session, tool)["top_k"].(map[string]any)
-			if got := topK["maximum"]; got != float64(maxRAGTopK) && got != maxRAGTopK {
-				t.Fatalf("top_k maximum = %v, want %d", got, maxRAGTopK)
+			if maximum, ok := topK["maximum"]; ok {
+				t.Fatalf("top_k maximum = %v, want no global cap", maximum)
 			}
 		})
 	}
 }
 
-func TestRAGRetrievalHandlersRejectTopKOverMaximumBeforeWork(t *testing.T) {
-	t.Run("search", func(t *testing.T) {
+func TestRAGSearchRejectsTopKOverMaximumOnlyWhenScoped(t *testing.T) {
+	t.Run("scoped", func(t *testing.T) {
 		store := &recordingMCPMultiStore{}
 		embedCalls := 0
 		retriever, err := rag.NewRetrieverWithEmbedder(rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
@@ -93,34 +93,56 @@ func TestRAGRetrievalHandlersRejectTopKOverMaximumBeforeWork(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		result, err := (&Server{retriever: retriever}).handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","top_k":101}`))
+		result, err := (&Server{retriever: retriever}).handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","top_k":101,"collection":"managed"}`))
 		if err != nil || result == nil || !result.IsError || !strings.Contains(extractText(result), "top_k") {
-			t.Fatalf("result=%#v error=%v, want top_k validation", result, err)
+			t.Fatalf("result=%#v error=%v, want scoped top_k validation", result, err)
 		}
 		if embedCalls != 0 || store.calls != 0 {
 			t.Fatalf("work after invalid top_k: embeds=%d searches=%d", embedCalls, store.calls)
 		}
 	})
 
-	t.Run("answer", func(t *testing.T) {
+	t.Run("legacy unscoped search", func(t *testing.T) {
+		store := &recordingMCPMultiStore{}
+		result, err := (&Server{retriever: mcpTestRetriever(t, store)}).handleRAGSearch(
+			context.Background(), rawArgs(t, `{"query":"q","top_k":101}`),
+		)
+		if err != nil || result == nil || result.IsError {
+			t.Fatalf("result=%#v error=%v, want success", result, err)
+		}
+		if store.calls != 1 || store.topK != 101 {
+			t.Fatalf("search calls=%d top_k=%d, want 1/101", store.calls, store.topK)
+		}
+	})
+
+	for name, scope := range map[string]string{
+		"whitespace collection": `"collection":"   "`,
+		"whitespace tags":       `"tags":[" "]`,
+	} {
+		t.Run("legacy unscoped search/"+name, func(t *testing.T) {
+			store := &recordingMCPMultiStore{}
+			result, err := (&Server{retriever: mcpTestRetriever(t, store)}).handleRAGSearch(
+				context.Background(), rawArgs(t, `{"query":"q","top_k":101,`+scope+`}`),
+			)
+			if err != nil || result == nil || result.IsError {
+				t.Fatalf("result=%#v error=%v, want legacy unscoped success", result, err)
+			}
+			if store.calls != 1 || store.topK != 101 {
+				t.Fatalf("search calls=%d top_k=%d, want 1/101", store.calls, store.topK)
+			}
+		})
+	}
+
+	t.Run("legacy answer", func(t *testing.T) {
 		store := &answerStore{}
-		embedCalls := 0
-		retriever, err := rag.NewRetrieverWithEmbedder(rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
-			embedCalls++
-			return rag.EmbedResult{Embeddings: [][]float64{{1}}}, nil
-		}), store)
-		if err != nil {
-			t.Fatal(err)
-		}
-		engine := &queuedRouteEngine{responses: []string{`{"answer":"x","evidence":[]}`}}
-		s := newAnswerTestServer(t, engine)
-		s.store, s.retriever = store, retriever
+		engine := &queuedRouteEngine{}
+		s := answerEnvWithStore(t, engine, store)
 		result, err := s.handleRAGAnswer(context.Background(), rawArgs(t, `{"question":"q","top_k":101}`))
-		if err != nil || result == nil || !result.IsError || !strings.Contains(extractText(result), "top_k") {
-			t.Fatalf("result=%#v error=%v, want top_k validation", result, err)
+		if err != nil || result == nil || result.IsError {
+			t.Fatalf("result=%#v error=%v, want success", result, err)
 		}
-		if embedCalls != 0 || store.searchCalls != 0 || engine.calls != 0 {
-			t.Fatalf("work after invalid top_k: embeds=%d searches=%d model=%d", embedCalls, store.searchCalls, engine.calls)
+		if store.searchCalls != 1 || store.topK != 101 || engine.calls != 0 {
+			t.Fatalf("answer work: searches=%d top_k=%d model=%d, want 1/101/0", store.searchCalls, store.topK, engine.calls)
 		}
 	})
 }

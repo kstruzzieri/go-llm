@@ -52,7 +52,7 @@ func testManagedIndexer(t *testing.T, store *SQLiteStore, vectorSpaceID string, 
 func TestIndexerIndexTextUsesExistingPipeline(t *testing.T) {
 	store := newTestStore(t)
 	idx := testManagedIndexer(t, store, "test/v1", nil)
-	if err := idx.IndexText(context.Background(), "notes.md", "# Runbook\nrestart safely"); err != nil {
+	if err := idx.indexText(context.Background(), "notes.md", "# Runbook\nrestart safely"); err != nil {
 		t.Fatal(err)
 	}
 	chunks, err := store.GetBySource(context.Background(), "notes.md")
@@ -68,10 +68,10 @@ func TestIndexerIndexTextEmptyContentClearsWithoutProvenanceHash(t *testing.T) {
 	store := newTestStore(t)
 	idx := testManagedIndexer(t, store, "test/v1", nil)
 	ctx := context.Background()
-	if err := idx.IndexText(ctx, "notes.md", "content"); err != nil {
+	if err := idx.indexText(ctx, "notes.md", "content"); err != nil {
 		t.Fatal(err)
 	}
-	if err := idx.IndexText(ctx, "notes.md", ""); err != nil {
+	if err := idx.indexText(ctx, "notes.md", ""); err != nil {
 		t.Fatalf("IndexText(empty) error: %v", err)
 	}
 	chunks, err := store.GetBySource(ctx, "notes.md")

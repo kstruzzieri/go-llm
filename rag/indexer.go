@@ -253,13 +253,13 @@ func (idx *Indexer) IndexFile(ctx context.Context, path string) error {
 	if err != nil {
 		return fmt.Errorf("rag: read file %q: %w", path, err)
 	}
-	return idx.IndexText(ctx, path, string(data))
+	return idx.indexText(ctx, path, string(data))
 }
 
-// IndexText indexes content under source using the same chunk/embed/replace
+// indexText indexes content under source using the same chunk/embed/replace
 // pipeline as IndexFile. Registered managed document sources are rejected;
 // unregistered legacy sources may use the "managed:" prefix.
-func (idx *Indexer) IndexText(ctx context.Context, source, content string) error {
+func (idx *Indexer) indexText(ctx context.Context, source, content string) error {
 	if err := idx.rejectManagedDocumentSource(ctx, source); err != nil {
 		return err
 	}

@@ -443,7 +443,7 @@ func TestIndexerManagedPrefixAllowsUnregisteredSource(t *testing.T) {
 	ctx := context.Background()
 	source := managedSourcePrefix + "notes.md"
 
-	if err := idx.IndexText(ctx, source, "content"); err != nil {
+	if err := idx.indexText(ctx, source, "content"); err != nil {
 		t.Fatalf("IndexText(unregistered managed prefix) error = %v", err)
 	}
 	if err := idx.replaceSourceWithProvenanceIfSourceHash(ctx, source, nil, nil, "", "", idx.currentSourceSignature("content").String()); err != nil {
@@ -463,7 +463,7 @@ func TestIndexerRejectsManagedDocumentSourceBeforeEmbedding(t *testing.T) {
 		return EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}, nil
 	})
 
-	err = idx.IndexText(context.Background(), document.source, "replacement content")
+	err = idx.indexText(context.Background(), document.source, "replacement content")
 	if err == nil || !strings.Contains(err.Error(), "belongs to a managed document") {
 		t.Fatalf("IndexText(managed source) error = %v, want ownership error", err)
 	}
@@ -860,11 +860,113 @@ func TestManagedSourcesListPaginatesAfterID(t *testing.T) {
 	}
 }
 
+func TestManagedSourcesListReturnsResumeCursorAtScanLimit(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	for i := 1; i <= maxManagedListScan+1; i++ {
+		state := DocumentStateIndexed
+		if i == 50 || i == maxManagedListScan+1 {
+			state = DocumentStateFailed
+		}
+		id := fmt.Sprintf("%03d", i)
+		if _, err := store.db.Exec(`
+			INSERT INTO managed_documents (
+				id, source, title, kind, origin, mime_type, stored_text,
+				content_hash, source_signature, indexed_at, vector_space_id,
+				chunk_count, collection, tags, state, freshness, last_error, created_at, updated_at
+			) VALUES (?, ?, 'title', 'file', ?, 'text/plain', '', ?, 'signature', 0, '', 0, '', '[]', ?, 'fresh', '', 0, 0)`,
+			id, managedSourcePrefix+id, "/fixture/"+id, contentHash("content"), state); err != nil {
+			t.Fatalf("insert fixture %q: %v", id, err)
+		}
+	}
+	readCalls := 0
+	managed.readFile = func(context.Context, string) ([]byte, error) {
+		readCalls++
+		return []byte("content"), nil
+	}
+
+	first, err := managed.ListDocuments(context.Background(), DocumentFilter{State: DocumentStateFailed, Limit: 3})
+	if !errors.Is(err, ErrManagedListScanLimit) {
+		t.Fatalf("first page error = %v, want ErrManagedListScanLimit", err)
+	}
+	var limitErr *ManagedListScanLimitError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("first page error type = %T, want *ManagedListScanLimitError", err)
+	}
+	if len(first) != 1 || first[0].ID != "050" {
+		t.Fatalf("first page = %#v, want partial document 050", first)
+	}
+	if limitErr.AfterID != "100" || limitErr.Scanned != maxManagedListScan {
+		t.Fatalf("scan limit error = %#v, want cursor 100 after %d rows", limitErr, maxManagedListScan)
+	}
+	if readCalls > maxManagedListScan {
+		t.Fatalf("file reads = %d, want at most %d", readCalls, maxManagedListScan)
+	}
+
+	second, err := managed.ListDocuments(context.Background(), DocumentFilter{
+		State:   DocumentStateFailed,
+		AfterID: limitErr.AfterID,
+		Limit:   3,
+	})
+	if err != nil || len(second) != 1 || second[0].ID != "101" {
+		t.Fatalf("resumed page = %#v, err = %v, want document 101", second, err)
+	}
+	if first[0].ID == second[0].ID {
+		t.Fatalf("resumed page duplicated %q", second[0].ID)
+	}
+}
+
+func TestManagedSourcesListExactlyAtScanLimitDoesNotReturnResumeError(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	for i := 1; i <= maxManagedListScan; i++ {
+		id := fmt.Sprintf("%03d", i)
+		if _, err := store.db.Exec(`
+			INSERT INTO managed_documents (
+				id, source, title, kind, origin, mime_type, stored_text,
+				content_hash, source_signature, indexed_at, vector_space_id,
+				chunk_count, collection, tags, state, freshness, last_error, created_at, updated_at
+			) VALUES (?, ?, 'title', 'text', '', 'text/plain', '', 'hash', 'signature', 0, '', 0, '', '[]', 'failed', 'stale', '', 0, 0)`,
+			id, managedSourcePrefix+id); err != nil {
+			t.Fatalf("insert fixture %q: %v", id, err)
+		}
+	}
+
+	documents, err := managed.ListDocuments(context.Background(), DocumentFilter{State: DocumentStateIndexed, Limit: 1})
+	if err != nil || len(documents) != 0 {
+		t.Fatalf("exact scan-limit page = %#v, err = %v, want empty success", documents, err)
+	}
+}
+
+func TestManagedSourcesListDoesNotDecodeLookaheadDocument(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	for i := 1; i <= maxManagedListScan+1; i++ {
+		id := fmt.Sprintf("%03d", i)
+		tags := "[]"
+		if i == maxManagedListScan+1 {
+			tags = "{"
+		}
+		if _, err := store.db.Exec(`
+			INSERT INTO managed_documents (
+				id, source, title, kind, origin, mime_type, stored_text,
+				content_hash, source_signature, indexed_at, vector_space_id,
+				chunk_count, collection, tags, state, freshness, last_error, created_at, updated_at
+			) VALUES (?, ?, 'title', 'text', '', 'text/plain', '', 'hash', 'signature', 0, '', 0, '', ?, 'failed', 'stale', '', 0, 0)`,
+			id, managedSourcePrefix+id, tags); err != nil {
+			t.Fatalf("insert fixture %q: %v", id, err)
+		}
+	}
+
+	documents, err := managed.ListDocuments(context.Background(), DocumentFilter{State: DocumentStateIndexed, Limit: 1})
+	if len(documents) != 0 || !errors.Is(err, ErrManagedListScanLimit) {
+		t.Fatalf("documents = %#v, err = %v, want bounded empty partial result", documents, err)
+	}
+}
+
 func TestManagedSourcesListPaginatesAcrossFilteredBatch(t *testing.T) {
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
-	for i := 1; i <= 103; i++ {
+	const filteredCount = maxManagedListScan + 4
+	for i := 1; i <= filteredCount+3; i++ {
 		collection := "filtered"
-		if i > MaxManagedListLimit {
+		if i > filteredCount {
 			collection = "wanted"
 		}
 		id := fmt.Sprintf("%03d", i)
@@ -880,14 +982,14 @@ func TestManagedSourcesListPaginatesAcrossFilteredBatch(t *testing.T) {
 	}
 
 	first, err := managed.ListDocuments(context.Background(), DocumentFilter{Collection: "wanted", Limit: 2})
-	if err != nil || len(first) != 2 || first[0].ID != "101" || first[1].ID != "102" {
+	if err != nil || len(first) != 2 || first[0].ID != "105" || first[1].ID != "106" {
 		t.Fatalf("first page = %#v, err = %v", first, err)
 	}
 	if first[0].storedText != "" || first[1].storedText != "" {
 		t.Fatalf("list hydrated retained text: %#v", first)
 	}
 	second, err := managed.ListDocuments(context.Background(), DocumentFilter{Collection: "wanted", AfterID: first[1].ID, Limit: 2})
-	if err != nil || len(second) != 1 || second[0].ID != "103" {
+	if err != nil || len(second) != 1 || second[0].ID != "107" {
 		t.Fatalf("second page = %#v, err = %v", second, err)
 	}
 	empty, err := managed.ListDocuments(context.Background(), DocumentFilter{Collection: "missing", Limit: 2})

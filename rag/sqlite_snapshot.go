@@ -196,6 +196,10 @@ func candidateBetter(a, b snapshotCandidate) bool {
 }
 
 func selectSnapshotTopK(ctx context.Context, scores []float64, k int) ([]snapshotCandidate, error) {
+	return selectSnapshotTopKScoped(ctx, scores, k, nil, nil)
+}
+
+func selectSnapshotTopKScoped(ctx context.Context, scores []float64, k int, chunks []Chunk, registry map[string]managedRegistryDocument) ([]snapshotCandidate, error) {
 	if len(scores) == 0 {
 		return nil, nil
 	}
@@ -206,6 +210,11 @@ func selectSnapshotTopK(ctx context.Context, scores []float64, k int) ([]snapsho
 	for index, score := range scores {
 		if err := ctx.Err(); err != nil {
 			return nil, err
+		}
+		if registry != nil {
+			if _, ok := registry[chunks[index].Source]; !ok {
+				continue
+			}
 		}
 		offerSnapshotCandidate(&candidates, snapshotCandidate{index: index, score: score}, k)
 	}
@@ -256,6 +265,10 @@ func (snapshot *sqliteSnapshot) semanticTopK(ctx context.Context, queryEmbedding
 }
 
 func (snapshot *sqliteSnapshot) semanticCandidateHeap(ctx context.Context, queryEmbedding []float64, k int) (snapshotCandidateHeap, error) {
+	return snapshot.semanticCandidateHeapScoped(ctx, queryEmbedding, k, nil)
+}
+
+func (snapshot *sqliteSnapshot) semanticCandidateHeapScoped(ctx context.Context, queryEmbedding []float64, k int, registry map[string]managedRegistryDocument) (snapshotCandidateHeap, error) {
 	if len(snapshot.chunks) == 0 {
 		return nil, nil
 	}
@@ -271,7 +284,13 @@ func (snapshot *sqliteSnapshot) semanticCandidateHeap(ctx context.Context, query
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		offerSnapshotCandidate(&candidates, snapshotCandidate{index: i, score: snapshot.semanticScore(i, query)}, k)
+		score := snapshot.semanticScore(i, query)
+		if registry != nil {
+			if _, ok := registry[snapshot.chunks[i].Source]; !ok {
+				continue
+			}
+		}
+		offerSnapshotCandidate(&candidates, snapshotCandidate{index: i, score: score}, k)
 	}
 	return candidates, nil
 }
@@ -331,6 +350,11 @@ func (snapshot *sqliteSnapshot) temporalScores(ctx context.Context, qCtx QueryCo
 
 func (s *SQLiteStore) searchMultiSnapshot(ctx context.Context, queryEmbedding []float64, query string,
 	k int, qCtx QueryContext) ([]ScoredResult, error) {
+	return s.searchMultiSnapshotScoped(ctx, queryEmbedding, query, k, qCtx, nil)
+}
+
+func (s *SQLiteStore) searchMultiSnapshotScoped(ctx context.Context, queryEmbedding []float64, query string,
+	k int, qCtx QueryContext, registry map[string]managedRegistryDocument) ([]ScoredResult, error) {
 	snapshot, err := s.sqliteSnapshot(ctx)
 	if err != nil {
 		return nil, err
@@ -406,7 +430,7 @@ func (s *SQLiteStore) searchMultiSnapshot(ctx context.Context, queryEmbedding []
 		fusedScores[i] += defaultTemporalWeight*safeIndex(temporalScores, i) +
 			defaultStructuralWeight*safeIndex(structuralScores, i)
 	}
-	candidates, err := selectSnapshotTopK(ctx, fusedScores, k)
+	candidates, err := selectSnapshotTopKScoped(ctx, fusedScores, k, chunks, registry)
 	if err != nil {
 		return nil, err
 	}
@@ -446,6 +470,10 @@ func (s *SQLiteStore) searchMultiSnapshot(ctx context.Context, queryEmbedding []
 }
 
 func (s *SQLiteStore) searchSnapshot(ctx context.Context, queryEmbedding []float64, k int) ([]SearchResult, error) {
+	return s.searchSnapshotScoped(ctx, queryEmbedding, k, nil)
+}
+
+func (s *SQLiteStore) searchSnapshotScoped(ctx context.Context, queryEmbedding []float64, k int, registry map[string]managedRegistryDocument) ([]SearchResult, error) {
 	snapshot, err := s.sqliteSnapshot(ctx)
 	if err != nil {
 		return nil, err
@@ -455,7 +483,7 @@ func (s *SQLiteStore) searchSnapshot(ctx context.Context, queryEmbedding []float
 	}
 
 	stopSemantic := s.stageTimer("semantic_scoring")
-	candidates, err := snapshot.semanticCandidateHeap(ctx, queryEmbedding, k)
+	candidates, err := snapshot.semanticCandidateHeapScoped(ctx, queryEmbedding, k, registry)
 	if err != nil {
 		return nil, err
 	}

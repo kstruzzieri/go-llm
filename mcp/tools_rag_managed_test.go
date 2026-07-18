@@ -168,6 +168,74 @@ func TestManagedRAGListDocumentsRejectsLimitOverMaximum(t *testing.T) {
 	}
 }
 
+func TestManagedRAGListDocumentsPreservesScanLimitProgress(t *testing.T) {
+	s := newManagedRAGTestServer(t)
+	tagged := make(map[string]bool, 2)
+	ids := make([]string, 0, rag.MaxManagedListLimit+1)
+	for i := 0; i <= rag.MaxManagedListLimit; i++ {
+		opts := rag.DocumentOptions{}
+		if i < 2 {
+			opts.Tags = []string{"wanted"}
+		}
+		document, err := s.managedSources.IngestText(
+			context.Background(), fmt.Sprintf("document-%03d.md", i), "content", opts,
+		)
+		if err != nil {
+			t.Fatalf("IngestText(%d) error = %v", i, err)
+		}
+		ids = append(ids, document.ID)
+		if i < 2 {
+			tagged[document.ID] = true
+		}
+	}
+	sort.Strings(ids)
+
+	result := callManagedRAGHandler(t, s.handleRAGListDocuments, `{"tags":["wanted"],"limit":3}`)
+	if !result.IsError {
+		t.Fatalf("result IsError = false, want scan-limit error")
+	}
+	type scanLimitPayload struct {
+		Error       string         `json:"error"`
+		Documents   []rag.Document `json:"documents"`
+		NextAfterID string         `json:"next_after_id"`
+		Scanned     int            `json:"scanned"`
+		Incomplete  bool           `json:"incomplete"`
+	}
+	decode := func(data []byte) scanLimitPayload {
+		t.Helper()
+		var payload scanLimitPayload
+		if err := json.Unmarshal(data, &payload); err != nil {
+			t.Fatalf("decode scan-limit payload: %v (%s)", err, data)
+		}
+		return payload
+	}
+	wire := decode([]byte(extractText(result)))
+	structuredJSON, err := json.Marshal(result.StructuredContent)
+	if err != nil {
+		t.Fatalf("marshal structured scan-limit payload: %v", err)
+	}
+	structured := decode(structuredJSON)
+	if !reflect.DeepEqual(structured, wire) {
+		t.Fatalf("structured payload = %#v, want %#v", structured, wire)
+	}
+
+	wantIDs := make([]string, 0, 2)
+	for _, id := range ids[:rag.MaxManagedListLimit] {
+		if tagged[id] {
+			wantIDs = append(wantIDs, id)
+		}
+	}
+	gotIDs := make([]string, len(wire.Documents))
+	for i := range wire.Documents {
+		gotIDs[i] = wire.Documents[i].ID
+	}
+	if wire.Error != "scan_limit" || !wire.Incomplete ||
+		wire.NextAfterID != ids[rag.MaxManagedListLimit-1] || wire.Scanned != rag.MaxManagedListLimit ||
+		!reflect.DeepEqual(gotIDs, wantIDs) {
+		t.Fatalf("scan-limit payload = %#v, document IDs = %#v, want cursor %q, scanned %d, IDs %#v", wire, gotIDs, ids[rag.MaxManagedListLimit-1], rag.MaxManagedListLimit, wantIDs)
+	}
+}
+
 func TestRAGHandlersRejectOversizeArgumentsBeforeDecoding(t *testing.T) {
 	s := &Server{}
 	for _, test := range []struct {
@@ -227,6 +295,93 @@ func TestDecodeManagedRAGArgumentsSizeBoundary(t *testing.T) {
 	overLimit := append(append(json.RawMessage(nil), atLimit...), ' ')
 	if err := decodeManagedRAGArguments(overLimit, maxBytes, &decoded); err == nil || decoded {
 		t.Fatalf("over-limit decode: decoded=%v error=%v", decoded, err)
+	}
+}
+
+func TestManagedTagsUnmarshalPreservesNullEmptyAndValues(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		input   string
+		want    []string
+		wantNil bool
+	}{
+		{name: "null", input: `null`, wantNil: true},
+		{name: "empty", input: `[]`, want: []string{}},
+		{name: "values", input: `["alpha","beta"]`, want: []string{"alpha", "beta"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tags := managedTags{"stale"}
+			if err := json.Unmarshal([]byte(tc.input), &tags); err != nil {
+				t.Fatalf("Unmarshal() error = %v", err)
+			}
+			if tc.wantNil {
+				if tags != nil {
+					t.Fatalf("tags = %#v, want nil", tags)
+				}
+				return
+			}
+			if !reflect.DeepEqual([]string(tags), tc.want) {
+				t.Fatalf("tags = %#v, want %#v", tags, tc.want)
+			}
+		})
+	}
+}
+
+func TestManagedTagsUnmarshalRejectsSixtyFifthItem(t *testing.T) {
+	input := `[` + strings.TrimSuffix(strings.Repeat(`"",`, rag.MaxManagedTags+1), ",") + `]`
+	var tags managedTags
+	err := json.Unmarshal([]byte(input), &tags)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d items", rag.MaxManagedTags)) {
+		t.Fatalf("Unmarshal() error = %v, want tag-count limit", err)
+	}
+	if tags != nil {
+		t.Fatalf("tags = %#v, want receiver unchanged on error", tags)
+	}
+}
+
+func TestManagedTagsUnmarshalRejectsOversizeEscapedItem(t *testing.T) {
+	input := `[` + `"` + strings.Repeat(`\u0061`, rag.MaxManagedTagBytes+1) + `"` + `]`
+	var tags managedTags
+	err := json.Unmarshal([]byte(input), &tags)
+	if err == nil || !strings.Contains(err.Error(), fmt.Sprintf("at most %d bytes", rag.MaxManagedTagBytes)) {
+		t.Fatalf("Unmarshal() error = %v, want tag-size limit", err)
+	}
+}
+
+func TestManagedTagArgumentsRejectBeforeManagedGateOrRetrieval(t *testing.T) {
+	tags := `[` + strings.TrimSuffix(strings.Repeat(`"",`, rag.MaxManagedTags+1), ",") + `]`
+	managed := newManagedRAGTestServer(t)
+	if err := managed.managedGate.lock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer managed.managedGate.unlock()
+
+	for _, tc := range []struct {
+		name    string
+		handler managedRAGHandler
+		args    string
+	}{
+		{name: "ingest", handler: managed.handleRAGIngestText, args: `{"name":"n","content":"c","tags":` + tags + `}`},
+		{name: "list", handler: managed.handleRAGListDocuments, args: `{"tags":` + tags + `}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, err := tc.handler(ctx, rawArgs(t, tc.args))
+			if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation:") {
+				t.Fatalf("result=%#v error=%v, want validation before managed gate", result, err)
+			}
+		})
+	}
+
+	store := &recordingMCPMultiStore{}
+	search := &Server{retriever: mcpTestRetriever(t, store)}
+	result, err := search.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","tags":`+tags+`}`))
+	if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "validation:") {
+		t.Fatalf("search result=%#v error=%v, want validation before retrieval", result, err)
+	}
+	if store.calls != 0 {
+		t.Fatalf("search calls = %d, want zero", store.calls)
 	}
 }
 

@@ -336,9 +336,6 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 	if args.Question == "" {
 		return toolError("validation", "question must not be empty"), nil
 	}
-	if args.TopK > maxRAGTopK {
-		return toolError("validation", "top_k must be at most %d", maxRAGTopK), nil
-	}
 	topK := args.TopK
 	if topK <= 0 {
 		topK = 5

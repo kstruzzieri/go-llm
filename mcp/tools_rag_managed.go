@@ -14,10 +14,98 @@ import (
 )
 
 type managedOptionsArgs struct {
-	Title      string   `json:"title,omitempty"`
-	MIMEType   string   `json:"mime_type,omitempty"`
-	Collection string   `json:"collection,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
+	Title      string      `json:"title,omitempty"`
+	MIMEType   string      `json:"mime_type,omitempty"`
+	Collection string      `json:"collection,omitempty"`
+	Tags       managedTags `json:"tags,omitempty"`
+}
+
+// managedTags bounds arrays while decoding so hostile JSON cannot allocate an
+// unbounded []string before post-decode validation runs.
+type managedTags []string
+
+func (tags *managedTags) UnmarshalJSON(data []byte) error {
+	i := skipJSONSpace(data, 0)
+	if len(data)-i >= len("null") && string(data[i:i+len("null")]) == "null" {
+		if skipJSONSpace(data, i+len("null")) != len(data) {
+			return fmt.Errorf("invalid tags")
+		}
+		*tags = nil
+		return nil
+	}
+	if i >= len(data) || data[i] != '[' {
+		return fmt.Errorf("tags must be an array or null")
+	}
+	i++
+	decoded := make(managedTags, 0)
+	for {
+		i = skipJSONSpace(data, i)
+		if i < len(data) && data[i] == ']' {
+			i = skipJSONSpace(data, i+1)
+			if i != len(data) {
+				return fmt.Errorf("invalid tags")
+			}
+			*tags = decoded
+			return nil
+		}
+		if len(decoded) == rag.MaxManagedTags {
+			return fmt.Errorf("tags must contain at most %d items", rag.MaxManagedTags)
+		}
+		raw, next, err := nextManagedTag(data, i)
+		if err != nil {
+			return err
+		}
+		var tag string
+		if err := json.Unmarshal(raw, &tag); err != nil {
+			return err
+		}
+		if err := validateManagedRAGString("tag", tag, rag.MaxManagedTagBytes); err != nil {
+			return err
+		}
+		decoded = append(decoded, tag)
+		i = skipJSONSpace(data, next)
+		if i >= len(data) || data[i] != ',' {
+			if i < len(data) && data[i] == ']' {
+				continue
+			}
+			return fmt.Errorf("invalid tags")
+		}
+		i++
+	}
+}
+
+func nextManagedTag(data []byte, start int) ([]byte, int, error) {
+	if start >= len(data) || data[start] != '"' {
+		return nil, 0, fmt.Errorf("tags must contain only strings")
+	}
+	const maxRawTagBytes = 6*rag.MaxManagedTagBytes + 2
+	for i := start + 1; i < len(data); i++ {
+		if i-start+1 > maxRawTagBytes {
+			return nil, 0, fmt.Errorf("tag must be valid UTF-8 and at most %d bytes", rag.MaxManagedTagBytes)
+		}
+		switch data[i] {
+		case '\\':
+			i++
+			if i >= len(data) {
+				return nil, 0, fmt.Errorf("invalid tag string")
+			}
+		case '"':
+			return data[start : i+1], i + 1, nil
+		}
+	}
+	return nil, 0, fmt.Errorf("invalid tag string")
+}
+
+func skipJSONSpace(data []byte, i int) int {
+	for i < len(data) {
+		switch data[i] {
+		case ' ', '\t', '\n', '\r':
+			i++
+		default:
+			return i
+		}
+	}
+	return i
 }
 
 const (
@@ -29,7 +117,7 @@ const (
 
 func (a managedOptionsArgs) options() rag.DocumentOptions {
 	return rag.DocumentOptions{
-		Title: a.Title, MIMEType: a.MIMEType, Collection: a.Collection, Tags: a.Tags,
+		Title: a.Title, MIMEType: a.MIMEType, Collection: a.Collection, Tags: []string(a.Tags),
 	}
 }
 
@@ -46,7 +134,7 @@ func (a managedOptionsArgs) validate() error {
 			return err
 		}
 	}
-	return validateManagedRAGTags(a.Tags)
+	return validateManagedRAGTags([]string(a.Tags))
 }
 
 func validateManagedRAGString(name, value string, max int) error {
@@ -242,12 +330,12 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 		return result, nil
 	}
 	var args struct {
-		Collection string   `json:"collection,omitempty"`
-		Tags       []string `json:"tags,omitempty"`
-		State      string   `json:"state,omitempty"`
-		Freshness  string   `json:"freshness,omitempty"`
-		AfterID    string   `json:"after_id,omitempty"`
-		Limit      int      `json:"limit,omitempty"`
+		Collection string      `json:"collection,omitempty"`
+		Tags       managedTags `json:"tags,omitempty"`
+		State      string      `json:"state,omitempty"`
+		Freshness  string      `json:"freshness,omitempty"`
+		AfterID    string      `json:"after_id,omitempty"`
+		Limit      int         `json:"limit,omitempty"`
 	}
 	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSmallArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
@@ -258,7 +346,7 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 	if err := validateManagedRAGString("after_id", args.AfterID, rag.MaxManagedMetadataBytes); err != nil {
 		return toolError("validation", "%v", err), nil
 	}
-	if err := validateManagedRAGTags(args.Tags); err != nil {
+	if err := validateManagedRAGTags([]string(args.Tags)); err != nil {
 		return toolError("validation", "%v", err), nil
 	}
 	if args.Limit > rag.MaxManagedListLimit {
@@ -282,13 +370,27 @@ func (s *Server) handleRAGListDocuments(ctx context.Context, req *gomcp.CallTool
 	}
 	documents, err := managed.ListDocuments(ctx, rag.DocumentFilter{
 		Collection: args.Collection,
-		Tags:       args.Tags,
+		Tags:       []string(args.Tags),
 		State:      state,
 		Freshness:  freshness,
 		AfterID:    args.AfterID,
 		Limit:      args.Limit,
 	})
 	if err != nil {
+		var scanLimit *rag.ManagedListScanLimitError
+		if errors.As(err, &scanLimit) {
+			payload := struct {
+				Error       string         `json:"error"`
+				Documents   []rag.Document `json:"documents"`
+				NextAfterID string         `json:"next_after_id"`
+				Scanned     int            `json:"scanned"`
+				Incomplete  bool           `json:"incomplete"`
+			}{"scan_limit", documents, scanLimit.AfterID, scanLimit.Scanned, true}
+			result := managedRAGResult(payload)
+			result.StructuredContent = payload
+			result.IsError = true
+			return result, nil
+		}
 		return managedRAGError("list documents", err), nil
 	}
 	return managedRAGResult(documents), nil

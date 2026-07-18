@@ -137,14 +137,29 @@ func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, sco
 	if scope.empty() {
 		return r.Retrieve(ctx, query, k)
 	}
-	if _, ok := r.store.(*SQLiteStore); !ok {
+	store, ok := r.store.(*SQLiteStore)
+	if !ok {
 		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
+	}
+	if store.immutable {
+		registry, err := managedRegistrySnapshotForScope(ctx, store, scope)
+		if err != nil {
+			return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+		}
+		results, err := r.retrieveImmutableScoped(ctx, query, k, store, registry)
+		if err != nil {
+			return nil, err
+		}
+		results = filterSearchResults(results, scope, registry)
+		if err := refreshManagedSearchResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
+			return nil, err
+		}
+		return results, nil
 	}
 	results, err := r.retrieve(ctx, query, 0)
 	if err != nil {
 		return nil, err
 	}
-	store := r.store.(*SQLiteStore)
 	registry, err := managedRegistrySnapshot(ctx, store, searchResultChunks(results))
 	if err != nil {
 		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
@@ -160,16 +175,8 @@ func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, sco
 }
 
 func (r *Retriever) retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
-	res, err := r.embedder.Embed(ctx, r.model, []string{query})
+	embedding, err := r.embedQuery(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("%w: embed query: %w", ErrEmbedderFailed, err)
-	}
-	if len(res.Embeddings) != 1 {
-		return nil, fmt.Errorf("%w: embed query: expected 1 embedding, got %d", ErrEmbeddingCountMismatch, len(res.Embeddings))
-	}
-	embedding := res.Embeddings[0]
-
-	if err := r.validateVectorSpace(ctx, res); err != nil {
 		return nil, err
 	}
 
@@ -185,21 +192,7 @@ func (r *Retriever) retrieve(ctx context.Context, query string, k int) ([]Search
 		if err != nil {
 			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
 		}
-		if len(scored) == 0 {
-			return nil, nil
-		}
-		// Normalize Score to semantic similarity so the SearchResult contract
-		// (Score == 1 - Distance, in [0,1]) holds identically on both retrieval
-		// paths. Hybrid ranking is preserved in result order, not in Score:
-		// downstream BuildContext renders Score as "similarity", and callers
-		// surface it as a 0..1 value, so it must not carry raw RRF magnitudes.
-		results := make([]SearchResult, len(scored))
-		for i, s := range scored {
-			sr := s.SearchResult
-			sr.Score = 1 - sr.Distance
-			results[i] = sr
-		}
-		return results, nil
+		return semanticSearchResults(scored), nil
 	}
 
 	results, err := r.store.Search(ctx, embedding, k)
@@ -207,6 +200,55 @@ func (r *Retriever) retrieve(ctx context.Context, query string, k int) ([]Search
 		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
 	}
 
+	return results, nil
+}
+
+func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, error) {
+	res, err := r.embedder.Embed(ctx, r.model, []string{query})
+	if err != nil {
+		return nil, fmt.Errorf("%w: embed query: %w", ErrEmbedderFailed, err)
+	}
+	if len(res.Embeddings) != 1 {
+		return nil, fmt.Errorf("%w: embed query: expected 1 embedding, got %d", ErrEmbeddingCountMismatch, len(res.Embeddings))
+	}
+	embedding := res.Embeddings[0]
+
+	if err := r.validateVectorSpace(ctx, res); err != nil {
+		return nil, err
+	}
+	return embedding, nil
+}
+
+func semanticSearchResults(scored []ScoredResult) []SearchResult {
+	if len(scored) == 0 {
+		return nil
+	}
+	// Hybrid ranking remains in result order, while SearchResult.Score retains
+	// its semantic-similarity contract for context rendering and callers.
+	results := make([]SearchResult, len(scored))
+	for i, result := range scored {
+		results[i] = result.SearchResult
+		results[i].Score = 1 - results[i].Distance
+	}
+	return results
+}
+
+func (r *Retriever) retrieveImmutableScoped(ctx context.Context, query string, k int, store *SQLiteStore, registry map[string]managedRegistryDocument) ([]SearchResult, error) {
+	embedding, err := r.embedQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if !r.vectorOnly {
+		scored, err := store.searchMultiSnapshotScoped(ctx, embedding, query, k, QueryContext{}, registry)
+		if err != nil {
+			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
+		}
+		return semanticSearchResults(scored), nil
+	}
+	results, err := store.searchSnapshotScoped(ctx, embedding, k, registry)
+	if err != nil {
+		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
+	}
 	return results, nil
 }
 
@@ -236,14 +278,29 @@ func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k in
 	if scope.empty() {
 		return r.RetrieveScored(ctx, query, k, qCtx)
 	}
-	if _, ok := r.store.(*SQLiteStore); !ok {
+	store, ok := r.store.(*SQLiteStore)
+	if !ok {
 		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
+	}
+	if store.immutable {
+		registry, err := managedRegistrySnapshotForScope(ctx, store, scope)
+		if err != nil {
+			return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+		}
+		results, err := r.retrieveScoredImmutableScoped(ctx, query, k, qCtx, store, registry)
+		if err != nil {
+			return nil, err
+		}
+		results = filterScoredResults(results, scope, registry)
+		if err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
+			return nil, err
+		}
+		return results, nil
 	}
 	results, err := r.retrieveScored(ctx, query, 0, qCtx)
 	if err != nil {
 		return nil, err
 	}
-	store := r.store.(*SQLiteStore)
 	registry, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
 	if err != nil {
 		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
@@ -259,16 +316,8 @@ func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k in
 }
 
 func (r *Retriever) retrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
-	res, err := r.embedder.Embed(ctx, r.model, []string{query})
+	embedding, err := r.embedQuery(ctx, query)
 	if err != nil {
-		return nil, fmt.Errorf("%w: embed query: %w", ErrEmbedderFailed, err)
-	}
-	if len(res.Embeddings) != 1 {
-		return nil, fmt.Errorf("%w: embed query: expected 1 embedding, got %d", ErrEmbeddingCountMismatch, len(res.Embeddings))
-	}
-	embedding := res.Embeddings[0]
-
-	if err := r.validateVectorSpace(ctx, res); err != nil {
 		return nil, err
 	}
 
@@ -281,6 +330,25 @@ func (r *Retriever) retrieveScored(ctx context.Context, query string, k int, qCt
 	}
 
 	return r.denseScored(ctx, embedding, k)
+}
+
+func (r *Retriever) retrieveScoredImmutableScoped(ctx context.Context, query string, k int, qCtx QueryContext, store *SQLiteStore, registry map[string]managedRegistryDocument) ([]ScoredResult, error) {
+	embedding, err := r.embedQuery(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	if !r.vectorOnly {
+		results, err := store.searchMultiSnapshotScoped(ctx, embedding, query, k, qCtx, registry)
+		if err != nil {
+			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
+		}
+		return results, nil
+	}
+	results, err := store.searchSnapshotScoped(ctx, embedding, k, registry)
+	if err != nil {
+		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
+	}
+	return searchResultsToScored(results), nil
 }
 
 func (scope RetrievalScope) empty() bool {
@@ -362,7 +430,6 @@ func scoredResultChunks(results []ScoredResult) []Chunk {
 var errManagedDocumentsTableMissing = errors.New("rag: managed_documents table missing")
 
 func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates []Chunk) (map[string]managedRegistryDocument, error) {
-	const batchSize = 100
 	sources := make([]string, 0, len(candidates))
 	seen := make(map[string]struct{}, len(candidates))
 	for _, chunk := range candidates {
@@ -376,6 +443,14 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 	if len(sources) == 0 {
 		return nil, nil
 	}
+	return managedRegistrySnapshotRead(ctx, store, sources, nil)
+}
+
+func managedRegistrySnapshotForScope(ctx context.Context, store *SQLiteStore, scope RetrievalScope) (map[string]managedRegistryDocument, error) {
+	return managedRegistrySnapshotRead(ctx, store, nil, &scope)
+}
+
+func managedRegistrySnapshotRead(ctx context.Context, store *SQLiteStore, sources []string, scope *RetrievalScope) (map[string]managedRegistryDocument, error) {
 	tx, err := store.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
 	if err != nil {
 		return nil, err
@@ -388,41 +463,33 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 	if !exists {
 		return nil, errManagedDocumentsTableMissing
 	}
-	registry := make(map[string]managedRegistryDocument, len(sources))
-	for start := 0; start < len(sources); start += batchSize {
-		end := start + batchSize
-		if end > len(sources) {
-			end = len(sources)
-		}
-		placeholders := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
-		args := make([]any, end-start)
-		for i, source := range sources[start:end] {
-			args[i] = source
-		}
-		rows, err := tx.QueryContext(ctx, `
+
+	scopedDocuments := make(map[string]managedRegistryDocument)
+	if scope != nil {
+		query := `
 			SELECT id, source, title, kind, origin, mime_type, content_hash,
 			       source_signature, vector_space_id, chunk_count, collection, tags, state
 			  FROM managed_documents
-			 WHERE source IN (`+placeholders+`)`, args...)
+			 WHERE state = ?`
+		args := []any{string(DocumentStateIndexed)}
+		if scope.Collection != "" {
+			query += ` AND collection = ?`
+			args = append(args, scope.Collection)
+		}
+		rows, err := tx.QueryContext(ctx, query, args...)
 		if err != nil {
 			return nil, err
 		}
-		batchRegistry := make(map[string]managedRegistryDocument, end-start)
 		for rows.Next() {
 			var document managedRegistryDocument
-			if err := rows.Scan(
-				&document.id, &document.source, &document.title, &document.kind,
-				&document.origin, &document.mimeType, &document.contentHash,
-				&document.sourceSignature, &document.vectorSpaceID, &document.chunkCount,
-				&document.collection, &document.tagsJSON, &document.state,
-			); err != nil {
+			if err := scanManagedRegistryDocument(rows, &document); err != nil {
 				_ = rows.Close()
 				return nil, err
 			}
-			if !validManagedRegistryDocument(&document) {
-				continue
+			if validManagedRegistryDocument(&document) && containsManagedTags(document.tags, scope.Tags) {
+				sources = append(sources, document.source)
+				scopedDocuments[document.source] = document
 			}
-			batchRegistry[document.source] = document
 		}
 		if err := rows.Err(); err != nil {
 			_ = rows.Close()
@@ -431,30 +498,87 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 		if err := rows.Close(); err != nil {
 			return nil, err
 		}
+	}
 
-		rows, err = tx.QueryContext(ctx, `
-			SELECT source, COUNT(*),
-			       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
-			       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
-			       COALESCE(MIN(CASE WHEN json_valid(metadata)
-			                         THEN COALESCE(CAST(json_extract(metadata, '$.managed_document_id') AS TEXT), '')
-			                         ELSE '' END), ''),
-			       COALESCE(MAX(CASE WHEN json_valid(metadata)
-			                         THEN COALESCE(CAST(json_extract(metadata, '$.managed_document_id') AS TEXT), '')
-			                         ELSE '' END), '')
-			  FROM chunks
-			 WHERE source IN (`+placeholders+`)
-			 GROUP BY source`, args...)
+	registry := make(map[string]managedRegistryDocument, len(sources))
+	const batchSize = 100
+	for start := 0; start < len(sources); start += batchSize {
+		end := min(start+batchSize, len(sources))
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", end-start), ",")
+		args := make([]any, end-start)
+		for i, source := range sources[start:end] {
+			args[i] = source
+		}
+		batchRegistry := make(map[string]managedRegistryDocument, end-start)
+		if scope == nil {
+			rows, err := tx.QueryContext(ctx, `
+				SELECT id, source, title, kind, origin, mime_type, content_hash,
+				       source_signature, vector_space_id, chunk_count, collection, tags, state
+				  FROM managed_documents
+				 WHERE source IN (`+placeholders+`)`, args...)
+			if err != nil {
+				return nil, err
+			}
+			for rows.Next() {
+				var document managedRegistryDocument
+				if err := scanManagedRegistryDocument(rows, &document); err != nil {
+					_ = rows.Close()
+					return nil, err
+				}
+				if validManagedRegistryDocument(&document) {
+					batchRegistry[document.source] = document
+				}
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return nil, err
+			}
+			if err := rows.Close(); err != nil {
+				return nil, err
+			}
+		} else {
+			for _, source := range sources[start:end] {
+				batchRegistry[source] = scopedDocuments[source]
+			}
+		}
+
+		rows, err := tx.QueryContext(ctx, `
+			SELECT c.source, COUNT(*),
+			       COALESCE(MIN(c.source_content_hash), ''), COALESCE(MAX(c.source_content_hash), ''),
+			       COALESCE(MIN(c.vector_space_id), ''), COALESCE(MAX(c.vector_space_id), ''),
+			       MIN(CASE WHEN json_valid(c.metadata) THEN
+			           CASE WHEN
+			             json_type(c.metadata, '$.managed_document_id') = 'text' AND json_extract(c.metadata, '$.managed_document_id') = d.id AND
+			             json_type(c.metadata, '$.managed_title') = 'text' AND json_extract(c.metadata, '$.managed_title') = d.title AND
+			             json_type(c.metadata, '$.managed_kind') = 'text' AND json_extract(c.metadata, '$.managed_kind') = d.kind AND
+			             json_type(c.metadata, '$.managed_origin') = 'text' AND json_extract(c.metadata, '$.managed_origin') = d.origin AND
+			             json_type(c.metadata, '$.managed_mime_type') = 'text' AND json_extract(c.metadata, '$.managed_mime_type') = d.mime_type AND
+			             json_type(c.metadata, '$.managed_content_hash') = 'text' AND json_extract(c.metadata, '$.managed_content_hash') = d.content_hash AND
+			             json_type(c.metadata, '$.managed_collection') = 'text' AND json_extract(c.metadata, '$.managed_collection') = d.collection AND
+			             json_type(c.metadata, '$.managed_tags') = 'text' AND json_extract(c.metadata, '$.managed_tags') = d.tags AND
+			             json_type(c.metadata, '$.managed_state') = 'text' AND json_extract(c.metadata, '$.managed_state') = d.state AND
+			             NOT EXISTS (
+			               SELECT 1 FROM json_each(c.metadata) AS metadata_entry
+			                GROUP BY metadata_entry.key
+			               HAVING COUNT(*) > 1 OR MIN(metadata_entry.type) <> 'text'
+			             )
+			           THEN 1 ELSE 0 END
+			         ELSE 0 END)
+			  FROM chunks AS c
+			  JOIN managed_documents AS d ON d.source = c.source
+			 WHERE c.source IN (`+placeholders+`)
+			 GROUP BY c.source`, args...)
 		if err != nil {
 			return nil, err
 		}
 		for rows.Next() {
 			var source string
 			var count int
-			var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID, minDocumentID, maxDocumentID string
+			var minSignature, maxSignature, minVectorSpaceID, maxVectorSpaceID string
+			var metadataMatches int
 			if err := rows.Scan(
 				&source, &count, &minSignature, &maxSignature, &minVectorSpaceID,
-				&maxVectorSpaceID, &minDocumentID, &maxDocumentID,
+				&maxVectorSpaceID, &metadataMatches,
 			); err != nil {
 				_ = rows.Close()
 				return nil, err
@@ -463,7 +587,7 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 			if ok && count > 0 && count == document.chunkCount &&
 				minSignature == document.sourceSignature && maxSignature == document.sourceSignature &&
 				minVectorSpaceID == document.vectorSpaceID && maxVectorSpaceID == document.vectorSpaceID &&
-				minDocumentID == document.id && maxDocumentID == document.id {
+				metadataMatches == 1 {
 				registry[source] = document
 			}
 		}
@@ -479,6 +603,15 @@ func managedRegistrySnapshot(ctx context.Context, store *SQLiteStore, candidates
 		return nil, err
 	}
 	return registry, nil
+}
+
+func scanManagedRegistryDocument(scanner interface{ Scan(...any) error }, document *managedRegistryDocument) error {
+	return scanner.Scan(
+		&document.id, &document.source, &document.title, &document.kind,
+		&document.origin, &document.mimeType, &document.contentHash,
+		&document.sourceSignature, &document.vectorSpaceID, &document.chunkCount,
+		&document.collection, &document.tagsJSON, &document.state,
+	)
 }
 
 func looksManagedDocumentSource(source string) bool {
@@ -550,6 +683,8 @@ type managedFreshnessCheck struct {
 	err  error
 }
 
+const maxManagedFreshnessReads = 100
+
 func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []SearchResult) error {
 	sqlite, ok := store.(*SQLiteStore)
 	if !ok {
@@ -562,14 +697,18 @@ func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFil
 	if err != nil {
 		return err
 	}
-	return refreshManagedSearchResultsWithRegistry(ctx, readFile, results, registry)
+	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
 }
 
 func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
+	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, 0)
+}
+
+func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument, maxReads int) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache); err != nil {
+			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
 		}
@@ -589,14 +728,18 @@ func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFil
 	if err != nil {
 		return err
 	}
-	return refreshManagedScoredResultsWithRegistry(ctx, readFile, results, registry)
+	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, maxManagedFreshnessReads)
 }
 
 func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
+	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, 0)
+}
+
+func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, maxReads int) error {
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache); err != nil {
+			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
 				return err
 			}
 		}
@@ -604,7 +747,7 @@ func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(
 	return nil
 }
 
-func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck) error {
+func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck, maxReads int) error {
 	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) || !matchesManagedRegistry(*chunk, document) {
 		return nil
 	}
@@ -614,6 +757,9 @@ func refreshManagedChunk(ctx context.Context, readFile func(context.Context, str
 	origin := document.origin
 	check, ok := cache[origin]
 	if !ok {
+		if maxReads > 0 && len(cache) >= maxReads {
+			return fmt.Errorf("rag: managed file freshness read limit exceeded (%d); reduce results or use scoped retrieval", maxReads)
+		}
 		data, err := readFile(ctx, origin)
 		check = managedFreshnessCheck{err: err}
 		if err == nil {
@@ -647,6 +793,10 @@ func (r *Retriever) denseScored(ctx context.Context, embedding []float64, k int)
 	if err != nil {
 		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
 	}
+	return searchResultsToScored(results), nil
+}
+
+func searchResultsToScored(results []SearchResult) []ScoredResult {
 	scored := make([]ScoredResult, len(results))
 	for i, sr := range results {
 		scored[i] = ScoredResult{
@@ -655,7 +805,7 @@ func (r *Retriever) denseScored(ctx context.Context, embedding []float64, k int)
 			Signals:      map[string]float64{"semantic": sr.Score},
 		}
 	}
-	return scored, nil
+	return scored
 }
 
 func (r *Retriever) validateVectorSpace(ctx context.Context, res EmbedResult) error {

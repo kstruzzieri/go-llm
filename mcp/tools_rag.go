@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -73,7 +74,7 @@ func (s *Server) registerRAGTools() {
 			"type": "object",
 			"properties": map[string]any{
 				"query":          map[string]any{"type": "string", "description": "Search query"},
-				"top_k":          map[string]any{"type": "integer", "maximum": maxRAGTopK, "description": "Number of results (default: 5)"},
+				"top_k":          map[string]any{"type": "integer", "description": "Number of results (default: 5; managed scope maximum: 100)"},
 				"current_file":   map[string]any{"type": "string", "description": "File currently being edited for contextual ranking"},
 				"workspace_root": map[string]any{"type": "string", "description": "Workspace root used to normalize contextual paths"},
 				"open_files":     map[string]any{"type": "array", "description": "Files currently open for contextual ranking", "items": map[string]any{"type": "string"}},
@@ -94,7 +95,7 @@ func (s *Server) registerRAGTools() {
 			"properties": map[string]any{
 				"question":            map[string]any{"type": "string", "description": "The question to answer from indexed context"},
 				"model":               map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
-				"top_k":               map[string]any{"type": "integer", "maximum": maxRAGTopK, "description": "Number of chunks to retrieve (default: 5)"},
+				"top_k":               map[string]any{"type": "integer", "description": "Number of chunks to retrieve (default: 5)"},
 				"include_diagnostics": map[string]any{"type": "boolean", "description": "Include retrieval/verification diagnostics in the response"},
 			},
 			"required": []string{"question"},
@@ -211,11 +212,11 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	var args struct {
 		queryContextArgs
-		Query         string   `json:"query"`
-		TopK          int      `json:"top_k,omitempty"`
-		ExplainScores bool     `json:"explain_scores,omitempty"`
-		Collection    string   `json:"collection,omitempty"`
-		Tags          []string `json:"tags,omitempty"`
+		Query         string      `json:"query"`
+		TopK          int         `json:"top_k,omitempty"`
+		ExplainScores bool        `json:"explain_scores,omitempty"`
+		Collection    string      `json:"collection,omitempty"`
+		Tags          managedTags `json:"tags,omitempty"`
 	}
 	if err := decodeManagedRAGArguments(req.Params.Arguments, maxRAGSearchArgumentsBytes, &args); err != nil {
 		return toolError("validation", "invalid arguments: %v", err), nil
@@ -223,11 +224,12 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 	if args.Query == "" {
 		return toolError("validation", "query must not be empty"), nil
 	}
-	if args.TopK > maxRAGTopK {
-		return toolError("validation", "top_k must be at most %d", maxRAGTopK), nil
-	}
-	if err := validateRAGSearchScope(args.Collection, args.Tags); err != nil {
+	if err := validateRAGSearchScope(args.Collection, []string(args.Tags)); err != nil {
 		return toolError("validation", "%v", err), nil
+	}
+	scoped := managedRAGScopeRequested(args.Collection, args.Tags)
+	if scoped && args.TopK > maxRAGTopK {
+		return toolError("validation", "top_k must be at most %d for managed scope", maxRAGTopK), nil
 	}
 
 	s.mu.RLock()
@@ -245,8 +247,7 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	var results []rag.SearchResult
 	contextual := !args.empty()
-	scope := rag.RetrievalScope{Collection: args.Collection, Tags: args.Tags}
-	scoped := args.Collection != "" || len(args.Tags) != 0
+	scope := rag.RetrievalScope{Collection: args.Collection, Tags: []string(args.Tags)}
 	if args.ExplainScores || contextual {
 		var scored []rag.ScoredResult
 		var err error
@@ -288,6 +289,18 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("rag", "marshal results: %v", err), nil
 	}
 	return toolResult(string(data)), nil
+}
+
+func managedRAGScopeRequested(collection string, tags []string) bool {
+	if strings.TrimSpace(collection) != "" {
+		return true
+	}
+	for _, tag := range tags {
+		if strings.TrimSpace(tag) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func validateRAGSearchScope(collection string, tags []string) error {
