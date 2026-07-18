@@ -2,20 +2,260 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
+	"github.com/kstruzzieri/go-llm/provider"
 )
+
+type assignedWorkerRunner struct {
+	calls      [][]string
+	nextAction string
+}
+
+type aggregationRootRunner struct{ calls [][]string }
+
+func (r *aggregationRootRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if len(args) == 0 || args[0] != "aggregate-ledgers" {
+		return nil, nil, 0, fmt.Errorf("unexpected Agentflow command %v", args)
+	}
+	return []byte(`{"status":"ok","sources":[],"collisions":[],"planned":{}}`), nil, 0, nil
+}
+
+type concurrentWriteDetector struct {
+	active     atomic.Int32
+	overlapped atomic.Bool
+}
+
+func (w *concurrentWriteDetector) Write(p []byte) (int, error) {
+	if w.active.Add(1) != 1 {
+		w.overlapped.Store(true)
+	}
+	time.Sleep(time.Millisecond)
+	w.active.Add(-1)
+	return len(p), nil
+}
+
+func (r *assignedWorkerRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
+	r.calls = append(r.calls, append([]string(nil), args...))
+	if len(args) == 0 {
+		return nil, nil, 0, errors.New("unexpected empty Agentflow command")
+	}
+	switch args[0] {
+	case "next-action":
+		return []byte(r.nextAction), nil, 0, nil
+	case "claim-step":
+		return []byte(`{"attempt_id":"A1"}`), nil, 0, nil
+	case "record-file-change", "run", "finish-step":
+		return []byte(`{}`), nil, 0, nil
+	default:
+		return nil, nil, 0, fmt.Errorf("unexpected Agentflow command %q", args[0])
+	}
+}
+
+func TestAssignedParallelWorkerRunsOnlyItsOwnedFreshStep(t *testing.T) {
+	root := t.TempDir()
+	plan := &agentflow.Plan{AllowedFiles: []string{"worker.go"}, Steps: []agentflow.Step{{
+		ID: "P2", Files: []string{"worker.go"}, Validation: []string{"unit"},
+		Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./worker"}}},
+	}}}
+	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","attempt":null,"diagnostics":[]}}`}
+	factoryCalls := 0
+	sess := &replSession{maxSteps: 2, newOrchestrator: func() *agent.Orchestrator {
+		factoryCalls++
+		return agent.New(&scriptCaller{responses: []agent.ModelResult{{Response: provider.ChatResponse{Content: "done"}}}}, agent.ContextManager{})
+	}}
+	var runnerRoot string
+	run := newAssignedParallelWorker(plan, sess, true, io.Discard, func(root string) agentflow.Runner {
+		runnerRoot = root
+		return runner
+	})
+	worker := parallelWorker{step: plan.Steps[0], root: root, ownerID: "golem-w2", sourceID: "w2"}
+	if err := run(context.Background(), worker); err != nil {
+		t.Fatal(err)
+	}
+	if factoryCalls != 1 || runnerRoot != root {
+		t.Fatalf("runtime factories = orchestrator:%d runner-root:%q", factoryCalls, runnerRoot)
+	}
+	var commands []string
+	for _, call := range runner.calls {
+		commands = append(commands, call[0])
+		if !strings.Contains(strings.Join(call, " "), "--agent golem-w2") {
+			t.Fatalf("owned call missing worker agent: %v", call)
+		}
+	}
+	if want := []string{"next-action", "claim-step", "run", "finish-step"}; !reflect.DeepEqual(commands, want) {
+		t.Fatalf("Agentflow commands = %v, want %v", commands, want)
+	}
+	if got := strings.Join(runner.calls[1], " "); !strings.Contains(got, "claim-step P2") {
+		t.Fatalf("assigned claim = %q", got)
+	}
+}
+
+func TestAssignedParallelWorkerRejectsNonFreshProjectionBeforeClaim(t *testing.T) {
+	plan := &agentflow.Plan{Steps: []agentflow.Step{{ID: "P1"}}}
+	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"other","attempt":null,"diagnostics":[]}}`}
+	sess := &replSession{newOrchestrator: func() *agent.Orchestrator {
+		return agent.New(&scriptCaller{}, agent.ContextManager{})
+	}}
+	run := newAssignedParallelWorker(plan, sess, true, io.Discard, func(string) agentflow.Runner { return runner })
+	err := run(context.Background(), parallelWorker{step: plan.Steps[0], root: t.TempDir(), ownerID: "golem-w1", sourceID: "w1"})
+	if err == nil || !strings.Contains(err.Error(), "resumability agent") {
+		t.Fatalf("freshness error = %v", err)
+	}
+	if len(runner.calls) != 1 || runner.calls[0][0] != "next-action" {
+		t.Fatalf("non-fresh worker advanced: %v", runner.calls)
+	}
+}
+
+func TestAssignedParallelWorkersIsolateRuntimeRootAndJournal(t *testing.T) {
+	roots := []string{t.TempDir(), t.TempDir()}
+	plan := &agentflow.Plan{AllowedFiles: []string{"a.go", "b.go"}, Steps: []agentflow.Step{
+		{ID: "P1", Files: []string{"a.go"}},
+		{ID: "P2", Files: []string{"b.go"}},
+	}}
+	runners := []*assignedWorkerRunner{
+		{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`},
+		{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","attempt":null,"diagnostics":[]}}`},
+	}
+	writes := []provider.ChatResponse{
+		{ToolCalls: []provider.ToolCall{{ID: "w1", Type: "function", Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"a.go","content":"one\n"}`)}}}},
+		{ToolCalls: []provider.ToolCall{{ID: "w2", Type: "function", Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"b.go","content":"two\n"}`)}}}},
+	}
+	factoryCalls := 0
+	sess := &replSession{maxSteps: 4, newOrchestrator: func() *agent.Orchestrator {
+		response := writes[factoryCalls]
+		factoryCalls++
+		return agent.New(&scriptCaller{responses: []agent.ModelResult{
+			{Response: response}, {Response: provider.ChatResponse{Content: "done"}},
+		}}, agent.ContextManager{})
+	}}
+	var runnerRoots []string
+	run := newAssignedParallelWorker(plan, sess, true, io.Discard, func(root string) agentflow.Runner {
+		runnerRoots = append(runnerRoots, root)
+		if root == roots[0] {
+			return runners[0]
+		}
+		return runners[1]
+	})
+	for i := range 2 {
+		worker := parallelWorker{step: plan.Steps[i], root: roots[i], ownerID: fmt.Sprintf("golem-w%d", i+1), sourceID: fmt.Sprintf("w%d", i+1)}
+		if err := run(context.Background(), worker); err != nil {
+			t.Fatalf("worker %d: %v", i+1, err)
+		}
+	}
+	if factoryCalls != 2 || !reflect.DeepEqual(runnerRoots, roots) {
+		t.Fatalf("isolated factories = orchestrators:%d roots:%v", factoryCalls, runnerRoots)
+	}
+	for i, file := range []string{"a.go", "b.go"} {
+		if _, err := os.Stat(filepath.Join(roots[i], file)); err != nil {
+			t.Fatalf("worker %d output: %v", i+1, err)
+		}
+		other := []string{"b.go", "a.go"}[i]
+		if _, err := os.Stat(filepath.Join(roots[i], other)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("worker %d leaked %s into its root: %v", i+1, other, err)
+		}
+		var recorded bool
+		for _, call := range runners[i].calls {
+			if call[0] == "record-file-change" {
+				recorded = strings.Contains(strings.Join(call, " "), "--path "+file+" --agent golem-w"+fmt.Sprint(i+1))
+			}
+		}
+		if !recorded {
+			t.Fatalf("worker %d journal calls = %v", i+1, runners[i].calls)
+		}
+	}
+}
+
+func TestAssignedParallelWorkerFailsClosedWithoutFreshOrchestrator(t *testing.T) {
+	plan := &agentflow.Plan{Steps: []agentflow.Step{{ID: "P1"}}}
+	for _, tt := range []struct {
+		name string
+		sess *replSession
+		want string
+	}{
+		{name: "missing factory", sess: &replSession{}, want: "factory is nil"},
+		{name: "nil result", sess: &replSession{newOrchestrator: func() *agent.Orchestrator { return nil }}, want: "factory returned nil"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runnerCalls := 0
+			run := newAssignedParallelWorker(plan, tt.sess, true, io.Discard, func(string) agentflow.Runner {
+				runnerCalls++
+				return &assignedWorkerRunner{}
+			})
+			var err error
+			func() {
+				defer func() {
+					if recovered := recover(); recovered != nil {
+						t.Errorf("worker panicked instead of failing closed: %v", recovered)
+					}
+				}()
+				err = run(context.Background(), parallelWorker{step: plan.Steps[0], root: t.TempDir(), ownerID: "golem-w1"})
+			}()
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("factory error = %v, want %q", err, tt.want)
+			}
+			if runnerCalls != 0 {
+				t.Fatalf("Agentflow runner created after factory failure: %d", runnerCalls)
+			}
+		})
+	}
+}
+
+func TestParallelAggregateUsesSuppliedCanonicalOutputRoot(t *testing.T) {
+	runner := &aggregationRootRunner{}
+	var runnerRoots []string
+	aggregate := newParallelAggregate(func(root string) agentflow.Runner {
+		runnerRoots = append(runnerRoots, root)
+		return runner
+	})
+	output := filepath.Join(t.TempDir(), "canonical")
+	inputs := []agentflow.AggregationInput{{Root: "/worker-1", SourceID: "w1"}}
+	if _, err := aggregate(context.Background(), inputs, output, "abc123", true); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(runnerRoots, []string{output}) {
+		t.Fatalf("aggregation runner roots = %v, want %q", runnerRoots, output)
+	}
+	if got := strings.Join(runner.calls[0], " "); !strings.Contains(got, "--output "+output) {
+		t.Fatalf("aggregation argv = %q", got)
+	}
+}
+
+func TestSynchronizedWriterSerializesWorkerRendering(t *testing.T) {
+	detector := &concurrentWriteDetector{}
+	writer := &synchronizedWriter{out: detector}
+	start := make(chan struct{})
+	var workers sync.WaitGroup
+	for range 32 {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			<-start
+			_, _ = writer.Write([]byte("worker output\n"))
+		}()
+	}
+	close(start)
+	workers.Wait()
+	if detector.overlapped.Load() {
+		t.Fatal("underlying renderer writer received concurrent Write calls")
+	}
+}
 
 func TestParallelSelectionUsesPlanOrderAndWorkerBound(t *testing.T) {
 	plan := &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{
@@ -304,6 +544,146 @@ func TestParallelWorkersRunConcurrentlyAndValidateExactDiff(t *testing.T) {
 	if got := readTestFile(t, filepath.Join(root, "a.go")); got != "a\n" {
 		t.Fatalf("canonical a.go changed to %q", got)
 	}
+}
+
+func TestParallelWaveInterruptCancelsEveryWorker(t *testing.T) {
+	root := newParallelTestRepo(t)
+	started := make(chan struct{}, 2)
+	var canceled, aggregateCalls atomic.Int32
+	worker := func(ctx context.Context, _ parallelWorker) error {
+		started <- struct{}{}
+		<-ctx.Done()
+		canceled.Add(1)
+		return ctx.Err()
+	}
+	interrupts := make(chan struct{}, 1)
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
+	c.interrupts = interrupts
+	c.aggregate = func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error) {
+		aggregateCalls.Add(1)
+		return agentflow.AggregationResult{Status: "ok"}, nil
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, err := c.runCohort(context.Background())
+		done <- err
+	}()
+	for range 2 {
+		select {
+		case <-started:
+		case <-time.After(2 * time.Second):
+			t.Fatal("parallel workers did not start")
+		}
+	}
+	interrupts <- struct{}{}
+	if err := <-done; err == nil || !errors.Is(err, context.Canceled) {
+		t.Fatalf("wave interrupt error = %v", err)
+	}
+	if canceled.Load() != 2 || aggregateCalls.Load() != 0 {
+		t.Fatalf("wave cancellation = workers:%d aggregate:%d", canceled.Load(), aggregateCalls.Load())
+	}
+	if len(c.preservedRoots()) != 2 {
+		t.Fatalf("interrupted roots = %v", c.preservedRoots())
+	}
+	if err := c.cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParallelWaveDrainsOneStaleInterrupt(t *testing.T) {
+	root := newParallelTestRepo(t)
+	interrupts := make(chan struct{}, 1)
+	interrupts <- struct{}{}
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, func(context.Context, parallelWorker) error { return nil })
+	c.interrupts = interrupts
+	c.aggregate = func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error) {
+		return agentflow.AggregationResult{Status: "ok"}, nil
+	}
+	ran, err := c.runCohort(context.Background())
+	if err != nil || !ran {
+		t.Fatalf("stale interrupt canceled wave: ran=%v err=%v", ran, err)
+	}
+	if err := c.cleanup(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunTaskDriverProofGatesParallelCleanup(t *testing.T) {
+	prepare := func(t *testing.T) (*parallelCoordinator, []string) {
+		t.Helper()
+		root := newParallelTestRepo(t)
+		c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+		selected, err := c.selectWorkers(context.Background())
+		if err != nil || !selected {
+			t.Fatalf("select workers = %v, %v", selected, err)
+		}
+		if err := c.prepareWorkers(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+		return c, append([]string(nil), c.preservedRoots()...)
+	}
+	newDriver := func(proofErr error) *driver {
+		return &driver{
+			af: &fakeAF{proofError: proofErr}, plan: &agentflow.Plan{}, planPath: "plan.json", out: io.Discard,
+			runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+		}
+	}
+
+	t.Run("failure preserves and reports every root", func(t *testing.T) {
+		c, roots := prepare(t)
+		var out strings.Builder
+		if _, err := runTaskDriver(context.Background(), newDriver(errors.New("proof failed")), c, &out); err == nil {
+			t.Fatal("expected proof failure")
+		}
+		for _, root := range roots {
+			if _, err := os.Stat(root); err != nil {
+				t.Fatalf("root %s was cleaned: %v", root, err)
+			}
+			if !strings.Contains(out.String(), root) {
+				t.Fatalf("preserved root %s not reported: %q", root, out.String())
+			}
+		}
+		if err := c.cleanup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Run("verified proof cleans roots", func(t *testing.T) {
+		c, roots := prepare(t)
+		proof, err := runTaskDriver(context.Background(), newDriver(nil), c, io.Discard)
+		if err != nil || proof != "proof-pack.md" {
+			t.Fatalf("proof = %q, %v", proof, err)
+		}
+		for _, root := range roots {
+			if _, err := os.Stat(root); !errors.Is(err, fs.ErrNotExist) {
+				t.Fatalf("proved root %s still exists: %v", root, err)
+			}
+		}
+	})
+
+	t.Run("cleanup warning does not invalidate proof", func(t *testing.T) {
+		c, roots := prepare(t)
+		canonicalRoot := c.root
+		c.root = filepath.Join(canonicalRoot, "missing")
+		var out strings.Builder
+		proof, err := runTaskDriver(context.Background(), newDriver(nil), c, &out)
+		if err != nil || proof != "proof-pack.md" {
+			t.Fatalf("proof = %q, %v", proof, err)
+		}
+		if !strings.Contains(out.String(), "warning") {
+			t.Fatalf("cleanup warning missing: %q", out.String())
+		}
+		for _, root := range roots {
+			if _, err := os.Stat(root); err != nil {
+				t.Fatalf("failed-cleanup root %s missing: %v", root, err)
+			}
+		}
+		c.root = canonicalRoot
+		if err := c.cleanup(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	})
 }
 
 func TestParallelWorkersRejectUnpreparedCohortBeforeCallbacks(t *testing.T) {

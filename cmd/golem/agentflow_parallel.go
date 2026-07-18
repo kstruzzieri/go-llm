@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -11,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
 	"golang.org/x/sync/errgroup"
@@ -35,12 +37,24 @@ type parallelCoordinator struct {
 	maxWorkers int
 	worker     parallelWorkerFunc
 	aggregate  parallelAggregateFunc
+	interrupts <-chan struct{}
 
 	topLevel   string
 	head       string
 	tempParent string
 	prepared   bool
 	workers    []parallelWorker
+}
+
+type synchronizedWriter struct {
+	mu  sync.Mutex
+	out io.Writer
+}
+
+func (w *synchronizedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.out.Write(p)
 }
 
 type parallelFileSnapshot struct {
@@ -67,18 +81,85 @@ func newParallelCoordinator(root string, plan *agentflow.Plan, maxWorkers int, w
 	return &parallelCoordinator{root: root, plan: plan, maxWorkers: maxWorkers, worker: worker}
 }
 
+func newParallelAggregate(runnerForRoot func(string) agentflow.Runner) parallelAggregateFunc {
+	return func(ctx context.Context, inputs []agentflow.AggregationInput, output, base string, dryRun bool) (agentflow.AggregationResult, error) {
+		if runnerForRoot == nil {
+			return agentflow.AggregationResult{}, errors.New("parallel Agentflow runner factory is nil")
+		}
+		runner := runnerForRoot(output)
+		if runner == nil {
+			return agentflow.AggregationResult{}, errors.New("parallel Agentflow runner factory returned nil")
+		}
+		return agentflow.NewClient(runner, output).AggregateLedgers(ctx, inputs, base, dryRun)
+	}
+}
+
+func newAssignedParallelWorker(plan *agentflow.Plan, sess *replSession, approveEdits bool, out io.Writer, runnerForRoot func(string) agentflow.Runner) parallelWorkerFunc {
+	return func(ctx context.Context, worker parallelWorker) error {
+		if sess == nil || sess.newOrchestrator == nil {
+			return errors.New("parallel orchestrator factory is nil")
+		}
+		orch := sess.newOrchestrator()
+		if orch == nil {
+			return errors.New("parallel orchestrator factory returned nil")
+		}
+		if runnerForRoot == nil {
+			return errors.New("parallel Agentflow runner factory is nil")
+		}
+		runner := runnerForRoot(worker.root)
+		if runner == nil {
+			return errors.New("parallel Agentflow runner factory returned nil")
+		}
+		client := agentflow.NewOwnedClient(runner, worker.root, worker.ownerID)
+		state, err := client.NextAction(ctx)
+		if err != nil {
+			return fmt.Errorf("validate worker resumability: %w", err)
+		}
+		if err := validateFreshWorkerProjection(state, worker.ownerID); err != nil {
+			return err
+		}
+
+		runCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		runStep, err := newTaskStepRunner(worker.root, plan, client, orch, sess, approveEdits, out, nil, cancel)
+		if err != nil {
+			return err
+		}
+		d := &driver{af: client, plan: plan, runStep: runStep}
+		return d.runOneStep(runCtx, worker.step.ID)
+	}
+}
+
 func (c *parallelCoordinator) runCohort(ctx context.Context) (bool, error) {
-	selected, err := c.selectWorkers(ctx)
+	waveCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	done := make(chan struct{})
+	defer close(done)
+	if c.interrupts != nil {
+		select {
+		case <-c.interrupts:
+		default:
+		}
+		go func() {
+			select {
+			case <-c.interrupts:
+				cancel()
+			case <-done:
+			}
+		}()
+	}
+
+	selected, err := c.selectWorkers(waveCtx)
 	if err != nil || !selected {
 		return false, err
 	}
-	if err := c.prepareWorkers(ctx); err != nil {
+	if err := c.prepareWorkers(waveCtx); err != nil {
 		return true, fmt.Errorf("prepare parallel cohort: %w", err)
 	}
-	if err := c.runWorkers(ctx); err != nil {
+	if err := c.runWorkers(waveCtx); err != nil {
 		return true, fmt.Errorf("run parallel cohort: %w", err)
 	}
-	if err := c.recheckRoot(ctx); err != nil {
+	if err := c.recheckRoot(waveCtx); err != nil {
 		return true, fmt.Errorf("recheck canonical root before promotion: %w", err)
 	}
 	rollback, err := c.promoteWorkers()
@@ -92,10 +173,10 @@ func (c *parallelCoordinator) runCohort(ctx context.Context) (bool, error) {
 	for i, worker := range c.workers {
 		inputs[i] = agentflow.AggregationInput{Root: worker.root, SourceID: worker.sourceID}
 	}
-	if _, err := c.aggregate(ctx, inputs, c.root, c.head, true); err != nil {
+	if _, err := c.aggregate(waveCtx, inputs, c.root, c.head, true); err != nil {
 		return true, parallelRollbackError(fmt.Errorf("dry-run aggregate ledgers: %w", err), rollback)
 	}
-	if _, err := c.aggregate(ctx, inputs, c.root, c.head, false); err != nil {
+	if _, err := c.aggregate(waveCtx, inputs, c.root, c.head, false); err != nil {
 		var collision *agentflow.AggregationCollisionError
 		if errors.As(err, &collision) {
 			return true, parallelRollbackError(fmt.Errorf("aggregate ledgers collision: %w", err), rollback)

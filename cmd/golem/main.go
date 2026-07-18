@@ -766,6 +766,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	caller := newRouterChainCaller(bundle.Router, plan.chain)
+	newOrchestrator := func() *agent.Orchestrator {
+		return agent.New(caller, agent.ContextManager{})
+	}
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
 	if err != nil {
@@ -779,7 +782,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
 	sess := &replSession{
-		orch:                agent.New(caller, agent.ContextManager{}),
+		orch:                newOrchestrator(),
+		newOrchestrator:     newOrchestrator,
 		tools:               tools,
 		baseSystem:          baseSystem,
 		projectContextBlock: projectContextBlock,
