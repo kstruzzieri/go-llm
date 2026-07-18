@@ -430,6 +430,23 @@ func validateAggregationResult(result AggregationResult, fields map[string]json.
 			return fmt.Errorf("agentflow aggregate-ledgers: missing required field %s", name)
 		}
 	}
+	if err := requireAggregationJSONKind(fields, "sources", '['); err != nil {
+		return err
+	}
+	if analysis {
+		if err := requireAggregationJSONKind(fields, "collisions", '['); err != nil {
+			return err
+		}
+		return requireAggregationJSONKind(fields, "planned", '{')
+	}
+	return requireAggregationJSONKind(fields, "written", '{')
+}
+
+func requireAggregationJSONKind(fields map[string]json.RawMessage, name string, kind byte) error {
+	value := strings.TrimSpace(string(fields[name]))
+	if len(value) == 0 || value[0] != kind {
+		return fmt.Errorf("agentflow aggregate-ledgers: field %s must be a JSON %s", name, map[byte]string{'[': "array", '{': "object"}[kind])
+	}
 	return nil
 }
 

@@ -84,6 +84,16 @@ func TestClient_AggregateLedgers_FailsClosed(t *testing.T) {
 		{"dry-run write variant", true, `{"status":"ok","sources":[],"written":{}}`, 0, false},
 		{"write analysis variant", false, `{"status":"ok","sources":[],"collisions":[],"planned":{}}`, 0, false},
 		{"collision write field", false, `{"status":"collision","sources":[],"collisions":[],"planned":{},"written":{}}`, 1, false},
+		{"analysis null sources", true, `{"status":"ok","sources":null,"collisions":[],"planned":{}}`, 0, false},
+		{"analysis null collisions", true, `{"status":"ok","sources":[],"collisions":null,"planned":{}}`, 0, false},
+		{"analysis null planned", true, `{"status":"ok","sources":[],"collisions":[],"planned":null}`, 0, false},
+		{"analysis object sources", true, `{"status":"ok","sources":{},"collisions":[],"planned":{}}`, 0, false},
+		{"analysis object collisions", true, `{"status":"ok","sources":[],"collisions":{},"planned":{}}`, 0, false},
+		{"analysis array planned", true, `{"status":"ok","sources":[],"collisions":[],"planned":[]}`, 0, false},
+		{"write null sources", false, `{"status":"ok","sources":null,"written":{}}`, 0, false},
+		{"write null written", false, `{"status":"ok","sources":[],"written":null}`, 0, false},
+		{"write object sources", false, `{"status":"ok","sources":{},"written":{}}`, 0, false},
+		{"write array written", false, `{"status":"ok","sources":[],"written":[]}`, 0, false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
