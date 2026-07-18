@@ -3,9 +3,10 @@
 Golem planning mode (`-goal`) authors a traceable AgentFlow plan, previews it,
 and locks it only after explicit human approval, then stops.
 Task mode (`-plan`) separately runs that locked plan step-by-step in a
-proof-carrying, single-writer P0 loop. AgentFlow owns durable proof state on
-disk; Golem owns the model loop and the in-process guards that keep the model
-inside what the plan allows. The two are separate, cooperating processes:
+proof-carrying loop. It is serial by default, with an optional isolated initial
+cohort before dependent work continues serially. AgentFlow owns durable proof
+state on disk; Golem owns the model loop and the in-process guards that keep the
+model inside what the plan allows. The two are separate, cooperating processes:
 AgentFlow never runs a model, and Golem never writes proof state directly.
 
 ## Ownership
@@ -100,6 +101,10 @@ Re-run the spike if the AgentFlow validator contract tightens.
 
 - `-plan <plan.json>` — required; the path to the plan document to lock and
   execute. Passing it turns on task mode.
+- `-plan-workers N` — optional, task-mode-only worker bound. The default is `1`
+  (serial), and `N` must be positive. Values above `1` attempt the bounded
+  initial cohort described below and fall back to the unchanged serial loop
+  when fewer than two safe steps qualify.
 - `-approve-plan-edits` and `-approve-plan-gates` — both required in headless
   task mode. Task mode has no TTY approver, so the run refuses to start
   unless both approval classes are opted in up front: one for step-scoped
@@ -280,13 +285,48 @@ mapping. Criteria intended for semantic review instead declare a
 
 ## Scope and deferrals (P0)
 
-P0 executes a locked plan with a single writer driving one step at a time.
-Deferred to later phases:
+With `-plan-workers` above `1`, task mode may run one initial cohort only from a
+fresh, clean Git root and only when the plan has a dependency edge. Qualifying
+steps have no dependencies, and their exact literal files must equal effective
+scope, exclude `.agent`, `.git`, and blocked paths, and be pairwise disjoint
+under case-insensitive equality and ancestor checks. Existing paths must be
+tracked regular files at the recorded base; new paths must be unignored with
+safe parents. Symlinks, directories, or ambiguous ownership fall back to
+serial. Tracked candidates marked `assume-unchanged` or `skip-worktree` are not
+eligible; either flag anywhere in the tracked canonical tree disables the
+optional cohort so gates cannot verify different bytes in a fresh worktree.
+Sparse checkouts carry those flags pervasively, so parallel mode always runs
+serially there. A dirty or non-toplevel canonical root is not a fallback case:
+task mode refuses to start and names the offending path, because promotion
+must never race uncommitted work.
+Each worker runs fresh in its own detached worktree after an opaque
+copy of canonical `.agent/` state. Golem validates worker diffs, promotes only
+those source bytes, and lets AgentFlow perform dry-run then real ledger
+aggregation; AgentFlow does not merge source files. Dependent work then
+continues serially in the canonical root, which calls `finish-run` exactly
+once.
+
+Deterministic promotion, dry-run, or collision failures roll back canonical
+promotion; collision errors name each reported collision kind. During
+integration Golem holds an exclusive OS-level file lock under the Git dir —
+the kernel releases it if the process dies, so a crash cannot leave the
+workspace permanently locked, and the lock file itself persists between runs
+by design. Golem anchors
+file operations to the opened canonical root, and compares path bytes, mode,
+and identity before both promotion and rollback. Canonical drift is therefore
+reported instead of overwritten. An ambiguous real aggregation failure
+preserves promoted bytes; later serial or proof failures retain aggregated
+canonical state. Every failure keeps the worker roots. After successful proof
+Golem attempts cleanup; cleanup failures warn without invalidating that proof.
+
+Still deferred:
 
 - Semantic verification — P0 gates are mechanical, command-based checks only
   (`kind: command`); there is no model-judged review of a step's output.
 - Resuming an interrupted run.
-- Parallel or multi-writer steps.
+- Dynamic waves, retries or reclaim, shared-tree/process/host writers,
+  glob/directory ownership, and merge or conflict automation. This is not a
+  resume API, scheduler, or general parallel execution mode.
 
 AgentFlow's `next-action` output is surfaced to the operator on a failed run
 for recovery context, but it is advisory only: Golem prints the suggested

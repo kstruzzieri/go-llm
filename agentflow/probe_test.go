@@ -89,6 +89,82 @@ func TestProbeReview_RequiresReviewCommandsWithoutChangingBaseProbe(t *testing.T
 	}
 }
 
+func TestProbeParallel_RequiresNextActionAgentWithoutChangingBaseProbe(t *testing.T) {
+	help := "usage: agentflow {init,init-execution,lock-plan,record-file-change,run,finish-step,finish-run,next-step,next-action,doctor,status}"
+	replies := probeReplies(help)
+	replies["next-action"] = fakeReply{stdout: []byte("--root --json")}
+	c := NewClient(&fakeRunner{replies: replies}, "/ws")
+	if err := c.Probe(context.Background()); err != nil {
+		t.Fatalf("base Probe = %v", err)
+	}
+	if err := c.ProbeParallel(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "next-action --agent") || !strings.Contains(err.Error(), "#22") ||
+		!strings.Contains(err.Error(), "0.4.0") {
+		t.Fatalf("pre-#22 diagnostic = %v", err)
+	}
+}
+
+func TestProbeParallel_RequiresAggregateLedgersAndEveryUsedFlag(t *testing.T) {
+	help := "usage: agentflow {aggregate-ledgers,next-action}"
+	replies := map[string]fakeReply{
+		"--help":            {stdout: []byte(help)},
+		"next-action":       {stdout: []byte("--root --agent --json")},
+		"aggregate-ledgers": {stdout: []byte("--input --source-id --output --base --dry-run --json")},
+	}
+	if err := NewClient(&fakeRunner{replies: replies}, "/ws").ProbeParallel(context.Background()); err != nil {
+		t.Fatalf("ProbeParallel = %v", err)
+	}
+
+	for _, missing := range []string{"aggregate-ledgers", "--input", "--source-id", "--output", "--base", "--dry-run", "--json"} {
+		t.Run(missing, func(t *testing.T) {
+			copy := map[string]fakeReply{}
+			for key, reply := range replies {
+				copy[key] = reply
+			}
+			if missing == "aggregate-ledgers" {
+				copy["--help"] = fakeReply{stdout: []byte("usage: agentflow {next-action}")}
+			} else {
+				copy["aggregate-ledgers"] = fakeReply{stdout: []byte(strings.ReplaceAll(string(replies["aggregate-ledgers"].stdout), missing, ""))}
+			}
+			err := NewClient(&fakeRunner{replies: copy}, "/ws").ProbeParallel(context.Background())
+			if err == nil || !strings.Contains(err.Error(), missing) {
+				t.Fatalf("missing %s error = %v", missing, err)
+			}
+		})
+	}
+}
+
+func TestProbeParallel_RejectsLookalikeHelpTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		topHelp string
+		next    string
+	}{
+		{
+			name:    "subcommand prefix",
+			topHelp: "usage: agentflow {aggregate-ledgers-preview,next-action}",
+			next:    "--root --agent --json",
+		},
+		{
+			name:    "flag suffix",
+			topHelp: "usage: agentflow {aggregate-ledgers,next-action}",
+			next:    "--root --agent-id --json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			replies := map[string]fakeReply{
+				"--help":            {stdout: []byte(tt.topHelp)},
+				"next-action":       {stdout: []byte(tt.next)},
+				"aggregate-ledgers": {stdout: []byte("--input --source-id --output --base --dry-run --json")},
+			}
+			if err := NewClient(&fakeRunner{replies: replies}, "/ws").ProbeParallel(context.Background()); err == nil {
+				t.Fatal("ProbeParallel unexpectedly accepted lookalike help token")
+			}
+		})
+	}
+}
+
 func TestProbeWorkflow_RequiresStableRecommendationAndMaterializationSurface(t *testing.T) {
 	baseHelp := "usage: agentflow {init,workflow-contract}"
 	missing := &fakeRunner{replies: map[string]fakeReply{"--help": {stdout: []byte(baseHelp)}}}

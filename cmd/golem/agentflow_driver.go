@@ -26,6 +26,7 @@ var errAgentflowTaskFailed = errors.New("agentflow task failed")
 // afClient is the driver's view of agentflow (satisfied by *agentflow.Client).
 type afClient interface {
 	Probe(context.Context) error
+	ProbeParallel(context.Context) error
 	ProbeWorkflow(context.Context) error
 	RecommendWorkflow(context.Context, agentflow.TaskBrief, string, string) (agentflow.WorkflowRecommendation, error)
 	ProbeReview(context.Context) error
@@ -66,13 +67,63 @@ type driver struct {
 	approvedRecommendation *agentflow.WorkflowRecommendation
 	evidence               []agentflow.EvidenceEntry
 	runStep                runStepFunc
+	parallelCohort         func(context.Context) error
 	out                    io.Writer
+}
+
+// validateFreshWorkerProjection rejects copied worktrees that have begun or
+// cannot authoritatively prove execution is still fresh.
+func validateFreshWorkerProjection(state agentflow.NextActionState, agentID string) error {
+	projection := state.Resumability
+	if projection == nil {
+		return errors.New("agentflow resumability projection is missing")
+	}
+	if projection.Contract == nil {
+		return errors.New("agentflow resumability contract is missing")
+	}
+	if !projection.Contract.Locked {
+		return errors.New("agentflow resumability contract is not locked")
+	}
+	if strings.TrimSpace(projection.Contract.PlanSHA256) == "" ||
+		strings.TrimSpace(projection.Contract.ExecutionContractSHA256) == "" {
+		return errors.New("agentflow resumability contract is missing digests")
+	}
+	if projection.AgentID != agentID {
+		return fmt.Errorf("agentflow resumability agent is %q, want %q", projection.AgentID, agentID)
+	}
+	if projection.Step == nil || strings.TrimSpace(projection.Step.ID) == "" {
+		return errors.New("agentflow resumability step is missing")
+	}
+	if projection.Step.Completed == nil {
+		return errors.New("agentflow resumability step completed state is missing")
+	}
+	if projection.Step.State != "pending" || *projection.Step.Completed {
+		return fmt.Errorf("agentflow resumability step %q has prior execution state %q", projection.Step.ID, projection.Step.State)
+	}
+	if !projection.HasAttemptField() {
+		return errors.New("agentflow resumability attempt is missing")
+	}
+	if projection.Attempt != nil {
+		return fmt.Errorf("agentflow resumability reports present attempt %q", projection.Attempt.ID)
+	}
+	if !projection.HasDiagnosticsField() {
+		return errors.New("agentflow resumability diagnostics are missing")
+	}
+	if len(projection.Diagnostics) != 0 {
+		return errors.New("agentflow resumability reports diagnostics")
+	}
+	return nil
 }
 
 // run drives the P0 sequence and returns the proof-pack path on success.
 func (d *driver) run(ctx context.Context) (string, error) {
 	if err := d.af.Probe(ctx); err != nil {
 		return "", fmt.Errorf("agentflow unavailable: %w", err)
+	}
+	if d.parallelCohort != nil {
+		if err := d.af.ProbeParallel(ctx); err != nil {
+			return "", fmt.Errorf("agentflow parallel runtime unavailable: %w", err)
+		}
 	}
 	if err := d.af.ProbeWorkflow(ctx); err != nil {
 		return "", fmt.Errorf("agentflow workflow routing unavailable: %w", err)
@@ -118,6 +169,11 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	}
 	if err := d.af.Doctor(ctx); err != nil {
 		return "", err
+	}
+	if d.parallelCohort != nil {
+		if err := d.parallelCohort(ctx); err != nil {
+			return "", fmt.Errorf("run parallel cohort: %w", err)
+		}
 	}
 	for {
 		id, err := d.af.NextStep(ctx)
@@ -327,6 +383,86 @@ func findStep(p *agentflow.Plan, id string) (agentflow.Step, bool) {
 	return agentflow.Step{}, false
 }
 
+// newTaskStepRunner builds the model/tool runtime bound to one workspace root.
+func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *agent.Orchestrator, sess *replSession, approveEdits bool, out io.Writer, interrupts <-chan struct{}, cancel context.CancelFunc) (runStepFunc, error) {
+	if orch == nil {
+		return nil, errors.New("task orchestrator is nil")
+	}
+	if sess == nil {
+		return nil, errors.New("task session is nil")
+	}
+	if cancel == nil {
+		return nil, errors.New("task cancel function is nil")
+	}
+	ws, err := agenttools.NewWorkspace(root)
+	if err != nil {
+		return nil, err
+	}
+	undo := newMutationJournal(ws)
+	afJournal := newAgentflowJournal(af.RecordFileChange, cancel)
+	journal := compositeJournal{sinks: []agenttools.Journal{undo, afJournal}}
+
+	return func(sctx context.Context, step agentflow.Step, attempt, goal string) error {
+		stepCtx, stepCancel := context.WithCancel(sctx)
+		defer stepCancel()
+		done := make(chan struct{})
+		defer close(done)
+		if interrupts != nil {
+			select {
+			case <-interrupts:
+			default:
+			}
+			go func() {
+				select {
+				case <-interrupts:
+					stepCancel()
+				case <-done:
+				}
+			}()
+		}
+
+		ws.SetScopeGuard(stepScopeGuard(plan, step.ID))
+		defer ws.SetScopeGuard(nil)
+		afJournal.setStep(step.ID, attempt)
+
+		readTools := agenttools.NewFileToolsForWorkspace(ws)
+		writeTools := agenttools.NewMutatingTools(ws, journal)
+		tools := append(readTools, writeTools...)
+		req := agent.Request{
+			Goal:     goal,
+			System:   sess.baseSystem,
+			Tools:    tools,
+			MaxSteps: sess.maxSteps,
+			Budget:   sess.budget,
+			Approver: taskApprover(approveEdits),
+			Options:  sess.modelOptions,
+		}
+		_, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock)))
+		if fatal := afJournal.fatalErr(); fatal != nil {
+			return fmt.Errorf("unreceipted edit aborted the run: %w", fatal)
+		}
+		return runErr
+	}, nil
+}
+
+func runTaskDriver(ctx context.Context, d *driver, coordinator *parallelCoordinator, stderr io.Writer) (string, error) {
+	proof, err := d.run(ctx)
+	if err != nil {
+		if coordinator != nil && stderr != nil {
+			for _, root := range coordinator.preservedRoots() {
+				_, _ = fmt.Fprintf(stderr, "parallel worktree preserved: %s\n", root)
+			}
+		}
+		return "", err
+	}
+	if coordinator != nil {
+		if err := coordinator.cleanup(ctx); err != nil && stderr != nil {
+			_, _ = fmt.Fprintf(stderr, "warning: clean up parallel worktrees: %v\n", err)
+		}
+	}
+	return proof, nil
+}
+
 // runAgentflowTask assembles the real pieces (plan, evidence, agentflow client,
 // composite journal, step-scoped tools) and drives the P0 sequence. Task mode is
 // always headless: both approval classes must be opted in up front.
@@ -380,84 +516,58 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if err != nil {
 		return err
 	}
-
-	// 3. Build the agentflow client (binary or python-src).
-	var runner agentflow.Runner
-	if f.agentflowSrc != "" {
-		runner = agentflow.NewSrcExecRunner(root, f.agentflowSrc)
-	} else {
-		runner = agentflow.NewExecRunner(root)
+	if f.planWorkers > 1 && (sess == nil || sess.newOrchestrator == nil) {
+		return errors.New("parallel orchestrator factory is nil")
 	}
-	client := agentflow.NewClient(runner, root)
+	agentflowSrc, err := resolveTaskAgentflowSource(root, f.agentflowSrc)
+	if err != nil {
+		return fmt.Errorf("resolve Agentflow source: %w", err)
+	}
+
+	// 3. Build root-specific Agentflow runners for the canonical and optional
+	// worker roots.
+	runnerForRoot := func(root string) agentflow.Runner {
+		if agentflowSrc != "" {
+			return agentflow.NewSrcExecRunner(root, agentflowSrc)
+		}
+		return agentflow.NewExecRunner(root)
+	}
+	client := agentflow.NewClient(runnerForRoot(root), root)
 
 	// 4. Run context we can cancel on a fatal record failure.
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	// 5. Workspace + composite journal (undo + agentflow, fatal-on-failure).
-	ws, err := agenttools.NewWorkspace(root)
+	// 5. Canonical root step runtime. Serial rendering and interrupt behavior
+	// remain unchanged.
+	runStep, err := newTaskStepRunner(root, &plan, client, sess.orch, sess, f.approveEdits, stderr, interrupts, cancel)
 	if err != nil {
 		return err
 	}
-	undo := newMutationJournal(ws)
-	afJournal := newAgentflowJournal(client.RecordFileChange, cancel)
-	journal := compositeJournal{sinks: []agenttools.Journal{undo, afJournal}}
 
-	// 6. runStep: set scope guard + step, build a step-scoped Request, run the loop.
-	runStep := func(sctx context.Context, step agentflow.Step, attempt, goal string) error {
-		stepCtx, stepCancel := context.WithCancel(sctx)
-		defer stepCancel()
-		done := make(chan struct{})
-		defer close(done)
-		if interrupts != nil {
-			// Drain a stale interrupt buffered between steps so it does not
-			// spuriously cancel this one (mirrors runOnce in repl.go).
-			select {
-			case <-interrupts:
-			default:
-			}
-			go func() {
-				select {
-				case <-interrupts:
-					stepCancel()
-				case <-done:
-				}
-			}()
-		}
-
-		ws.SetScopeGuard(stepScopeGuard(&plan, step.ID))
-		defer ws.SetScopeGuard(nil)
-		afJournal.setStep(step.ID, attempt)
-
-		readTools := agenttools.NewFileToolsForWorkspace(ws)
-		writeTools := agenttools.NewMutatingTools(ws, journal) // no run_command in proof mode
-		tools := append(readTools, writeTools...)
-
-		approver := taskApprover(f.approveEdits) // auto-approve scoped edits only
-		req := agent.Request{
-			Goal:     goal,
-			System:   sess.baseSystem,
-			Tools:    tools,
-			MaxSteps: sess.maxSteps,
-			Budget:   sess.budget,
-			Approver: approver,
-			Options:  sess.modelOptions,
-		}
-		_, runErr := sess.orch.Run(stepCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock)))
-		if fe := afJournal.fatalErr(); fe != nil {
-			return fmt.Errorf("unreceipted edit aborted the run: %w", fe)
-		}
-		return runErr
-	}
-
-	// 7. Drive.
+	// 6. Drive.
 	d := &driver{
 		af: client, plan: &plan, planPath: planPath, reviewManifest: reviewManifest,
 		taskBrief: taskBrief, workflowProfile: f.workflowProfile, workflowReason: f.workflowReason,
 		approvedRecommendation: approvedRecommendation,
 		evidence:               evidence, runStep: runStep, out: stdout,
 	}
-	proof, err := d.run(runCtx)
+	var coordinator *parallelCoordinator
+	if f.planWorkers > 1 {
+		workerOut := &synchronizedWriter{out: stderr}
+		coordinator = newParallelCoordinator(root, &plan, f.planWorkers,
+			newAssignedParallelWorker(&plan, sess, f.approveEdits, workerOut, runnerForRoot))
+		coordinator.interrupts = interrupts
+		coordinator.aggregate = newParallelAggregate(runnerForRoot)
+		d.parallelCohort = func(ctx context.Context) error {
+			ran, err := coordinator.runCohort(ctx)
+			if err == nil && !ran {
+				_, _ = fmt.Fprintln(stdout, "no safe parallel cohort; continuing serially")
+			}
+			return err
+		}
+	}
+	proof, err := runTaskDriver(runCtx, d, coordinator, stderr)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %v\n", err)
 		reportAgentflowRecovery(ctx, stderr, client)
@@ -642,6 +752,16 @@ func resolveTaskPlanPath(path string) (string, error) {
 		return path, nil
 	}
 	return filepath.Abs(path)
+}
+
+func resolveTaskAgentflowSource(root, source string) (string, error) {
+	if source == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(source) {
+		source = filepath.Join(root, source)
+	}
+	return filepath.Abs(source)
 }
 
 // resolveReviewManifest absolutizes an optional review manifest against the

@@ -58,6 +58,8 @@ type flags struct {
 	feedbackDB          string
 	think               string
 	planPath            string
+	planWorkers         int
+	planWorkersSet      bool
 	approveEdits        bool
 	approveGates        bool
 	agentflowSrc        string
@@ -115,6 +117,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.StringVar(&f.feedbackDB, "feedback-db", "", "override the behavioral feedback DB path (default: per-workspace under the data dir)")
 	fs.StringVar(&f.think, "think", "", "reasoning control for the agent model: off, on, low, medium, high (default: model decides); no-op with a notice when the model does not support thinking")
 	fs.StringVar(&f.planPath, "plan", "", "AgentFlow task mode: path to a plan document (JSON) to lock and execute; requires both -approve-plan-edits and -approve-plan-gates; mutually exclusive with -p, -allow-write/-allow-exec, -rag-db, -delegate, and -mcp-*")
+	fs.IntVar(&f.planWorkers, "plan-workers", 1, "AgentFlow task mode: maximum workers for the initial parallel plan cohort (positive; requires -plan)")
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
@@ -139,6 +142,8 @@ func parseFlags(args []string) (flags, error) {
 		switch fl.Name {
 		case "p":
 			f.promptSet = true
+		case "plan-workers":
+			f.planWorkersSet = true
 		case "base-url":
 			f.baseURLSet = true
 		case "goal":
@@ -189,6 +194,12 @@ func validateFlags(f flags) error {
 	}
 	if f.feedbackDB != "" && !f.feedback {
 		return fmt.Errorf("golem: -feedback-db requires -feedback")
+	}
+	if f.planWorkers < 0 || (f.planWorkersSet && f.planWorkers < 1) {
+		return fmt.Errorf("golem: -plan-workers must be positive")
+	}
+	if f.planPath == "" && (f.planWorkersSet || f.planWorkers > 1) {
+		return fmt.Errorf("golem: -plan-workers is valid only with -plan (task mode)")
 	}
 	if f.reviewManifest != "" && f.planPath == "" {
 		return fmt.Errorf("golem: -review-manifest is valid only with -plan (task mode)")
@@ -755,6 +766,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	caller := newRouterChainCaller(bundle.Router, plan.chain)
+	newOrchestrator := func() *agent.Orchestrator {
+		return agent.New(caller, agent.ContextManager{})
+	}
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
 	if err != nil {
@@ -768,7 +782,8 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
 	sess := &replSession{
-		orch:                agent.New(caller, agent.ContextManager{}),
+		orch:                newOrchestrator(),
+		newOrchestrator:     newOrchestrator,
 		tools:               tools,
 		baseSystem:          baseSystem,
 		projectContextBlock: projectContextBlock,

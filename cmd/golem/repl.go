@@ -18,6 +18,7 @@ import (
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
 	orch                *agent.Orchestrator
+	newOrchestrator     func() *agent.Orchestrator
 	tools               []agent.Tool
 	baseSystem          string
 	projectContextBlock string // raw fenced project-context block; reused by the planner (-goal)

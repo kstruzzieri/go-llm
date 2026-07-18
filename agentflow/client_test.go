@@ -15,6 +15,150 @@ func newTestClient(replies map[string]fakeReply) (*Client, *fakeRunner) {
 	return NewClient(f, "/ws"), f
 }
 
+func TestClient_AggregateLedgers_UsesTypedVariantsAndExactArgv(t *testing.T) {
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}, {Root: "/worker-2", SourceID: "w2"}}
+	tests := []struct {
+		name          string
+		dryRun        bool
+		stdout        string
+		exit          int
+		wantCollision bool
+		wantWritten   bool
+	}{
+		{"clean dry-run", true, `{"status":"ok","sources":[{"source_id":"w1"}],"collisions":[],"planned":{"step_runs":[]}}`, 0, false, false},
+		{"dry-run collision", true, `{"status":"collision","sources":[],"collisions":[{"kind":"step_overlap"}],"planned":{}}`, 1, true, false},
+		{"real collision", false, `{"status":"collision","sources":[],"collisions":[{"kind":"step_overlap"}],"planned":{}}`, 1, true, false},
+		{"successful write", false, `{"status":"ok","sources":[{"source_id":"w1"}],"written":{"aggregation":".agent/aggregation.json"}}`, 0, false, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, f := newTestClient(map[string]fakeReply{
+				"aggregate-ledgers": {stdout: []byte(tt.stdout), exit: tt.exit},
+			})
+			result, err := c.AggregateLedgers(context.Background(), inputs, "abc123", tt.dryRun)
+			var collision *AggregationCollisionError
+			if got := errors.As(err, &collision); got != tt.wantCollision {
+				t.Fatalf("collision=%t err=%v, want %t", got, err, tt.wantCollision)
+			}
+			if !tt.wantCollision && err != nil {
+				t.Fatal(err)
+			}
+			if tt.wantCollision {
+				result = collision.Result
+			}
+			if len(result.Sources) == 0 && tt.name == "clean dry-run" {
+				t.Fatalf("sources = %s", result.Sources)
+			}
+			if (len(result.Written) != 0) != tt.wantWritten {
+				t.Fatalf("written = %s, want written=%t", result.Written, tt.wantWritten)
+			}
+			want := []string{"aggregate-ledgers",
+				"--input", "/worker-1", "--source-id", "w1",
+				"--input", "/worker-2", "--source-id", "w2",
+				"--output", "/ws", "--base", "abc123"}
+			if tt.dryRun {
+				want = append(want, "--dry-run")
+			}
+			want = append(want, "--json")
+			if !reflect.DeepEqual(f.calls[0], want) {
+				t.Fatalf("argv = %v, want %v", f.calls[0], want)
+			}
+		})
+	}
+}
+
+func TestClient_AggregateLedgers_FailsClosed(t *testing.T) {
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}}
+	tests := []struct {
+		name   string
+		dryRun bool
+		stdout string
+		exit   int
+		ce     bool
+	}{
+		{"malformed success", true, `{`, 0, false},
+		{"unparseable nonzero", true, `{`, 1, true},
+		{"exit two", true, `{"status":"ok","sources":[],"collisions":[],"planned":{}}`, 2, true},
+		{"collision exit zero", true, `{"status":"collision","sources":[],"collisions":[],"planned":{}}`, 0, false},
+		{"success exit one", false, `{"status":"ok","sources":[],"written":{}}`, 1, false},
+		{"dry-run write variant", true, `{"status":"ok","sources":[],"written":{}}`, 0, false},
+		{"write analysis variant", false, `{"status":"ok","sources":[],"collisions":[],"planned":{}}`, 0, false},
+		{"collision write field", false, `{"status":"collision","sources":[],"collisions":[],"planned":{},"written":{}}`, 1, false},
+		{"analysis null sources", true, `{"status":"ok","sources":null,"collisions":[],"planned":{}}`, 0, false},
+		{"analysis null collisions", true, `{"status":"ok","sources":[],"collisions":null,"planned":{}}`, 0, false},
+		{"analysis null planned", true, `{"status":"ok","sources":[],"collisions":[],"planned":null}`, 0, false},
+		{"analysis object sources", true, `{"status":"ok","sources":{},"collisions":[],"planned":{}}`, 0, false},
+		{"analysis object collisions", true, `{"status":"ok","sources":[],"collisions":{},"planned":{}}`, 0, false},
+		{"analysis array planned", true, `{"status":"ok","sources":[],"collisions":[],"planned":[]}`, 0, false},
+		{"write null sources", false, `{"status":"ok","sources":null,"written":{}}`, 0, false},
+		{"write null written", false, `{"status":"ok","sources":[],"written":null}`, 0, false},
+		{"write object sources", false, `{"status":"ok","sources":{},"written":{}}`, 0, false},
+		{"write array written", false, `{"status":"ok","sources":[],"written":[]}`, 0, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _ := newTestClient(map[string]fakeReply{
+				"aggregate-ledgers": {stdout: []byte(tt.stdout), stderr: []byte("boom"), exit: tt.exit},
+			})
+			_, err := c.AggregateLedgers(context.Background(), inputs, "abc123", tt.dryRun)
+			if err == nil {
+				t.Fatal("AggregateLedgers unexpectedly succeeded")
+			}
+			var ce *CommandError
+			if got := errors.As(err, &ce); got != tt.ce {
+				t.Fatalf("CommandError=%t err=%v, want %t", got, err, tt.ce)
+			}
+			var collision *AggregationCollisionError
+			if errors.As(err, &collision) {
+				t.Fatalf("invalid aggregation result returned collision: %v", err)
+			}
+		})
+	}
+
+	for _, inputs := range [][]AggregationInput{
+		nil,
+		{{Root: "", SourceID: "w1"}},
+		{{Root: "/worker-1", SourceID: ""}},
+	} {
+		c, f := newTestClient(nil)
+		if _, err := c.AggregateLedgers(context.Background(), inputs, "abc123", true); err == nil {
+			t.Fatalf("inputs=%+v unexpectedly succeeded", inputs)
+		}
+		if len(f.calls) != 0 {
+			t.Fatalf("inputs=%+v invoked CLI: %v", inputs, f.calls)
+		}
+	}
+}
+
+func TestClient_AggregateLedgers_WrapsTransportError(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"aggregate-ledgers": {err: errors.New("exec format error")},
+	})
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}}
+	_, err := c.AggregateLedgers(context.Background(), inputs, "abc123", true)
+	if err == nil || !strings.Contains(err.Error(), "agentflow aggregate-ledgers:") ||
+		!strings.Contains(err.Error(), "exec format error") {
+		t.Fatalf("AggregateLedgers() transport error = %v", err)
+	}
+}
+
+func TestClient_AggregationCollisionError_NamesCollisionKinds(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{
+		"aggregate-ledgers": {stdout: []byte(`{"status":"collision","sources":[],` +
+			`"collisions":[{"kind":"step_overlap"},{"kind":"base_commit_unresolved"},{}],"planned":{}}`), exit: 1},
+	})
+	inputs := []AggregationInput{{Root: "/worker-1", SourceID: "w1"}}
+	_, err := c.AggregateLedgers(context.Background(), inputs, "abc123", true)
+	var collision *AggregationCollisionError
+	if !errors.As(err, &collision) {
+		t.Fatalf("AggregateLedgers() error = %v", err)
+	}
+	want := "agentflow aggregate-ledgers: collision (step_overlap, base_commit_unresolved, unknown)"
+	if got := collision.Error(); got != want {
+		t.Fatalf("collision error = %q, want %q", got, want)
+	}
+}
+
 func TestClient_NextAction_Argv(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{"state":"steps_pending"}`), exit: 0}})
 	st, err := c.NextAction(context.Background())
@@ -24,6 +168,102 @@ func TestClient_NextAction_Argv(t *testing.T) {
 	want := []string{"next-action", "--root", "/ws", "--json"}
 	if !reflect.DeepEqual(f.calls[0], want) {
 		t.Fatalf("argv=%v", f.calls[0])
+	}
+}
+
+func TestClient_OwnedAgent_ArgvAndResumabilityProjection(t *testing.T) {
+	f := &fakeRunner{replies: map[string]fakeReply{
+		"claim-step":         {stdout: []byte(`{"attempt_id":"A1"}`), exit: 0},
+		"amend-step":         {stdout: []byte(`{"event":"amendment_started","step_id":"P1","attempt_id":"A2"}`), exit: 0},
+		"record-file-change": {exit: 0},
+		"run":                {exit: 0},
+		"finish-step":        {exit: 0},
+		"next-action": {stdout: []byte(`{
+			"state":"steps_pending",
+			"resumability":{
+				"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},
+				"agent_id":"golem-w1",
+				"attempt":null,
+				"diagnostics":[],
+				"step":{"id":"P1","state":"pending","completed":false},
+				"lease":{"state":"not_applicable"}
+			}
+		}`), exit: 0},
+	}}
+	c := NewOwnedClient(f, "/ws", "golem-w1")
+	if _, err := c.ClaimStep(context.Background(), "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.AmendStep(context.Background(), "P1", []string{"RR#RF-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RecordFileChange(context.Background(), "P1", "A2", "a.go"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.RunGate(context.Background(), "P1", "A2", "go test", []string{"go", "test"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.FinishStep(context.Background(), "P1", "A2"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := c.NextAction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Resumability == nil || state.Resumability.Contract == nil ||
+		state.Resumability.Contract.PlanSHA256 != "plan" ||
+		state.Resumability.Contract.ExecutionContractSHA256 != "execution" ||
+		!state.Resumability.Contract.Locked || state.Resumability.AgentID != "golem-w1" ||
+		state.Resumability.Attempt != nil || len(state.Resumability.Diagnostics) != 0 {
+		t.Fatalf("resumability = %+v", state.Resumability)
+	}
+	want := [][]string{
+		{"claim-step", "P1", "--root", "/ws", "--agent", "golem-w1", "--json"},
+		{"amend-step", "P1", "--root", "/ws", "--agent", "golem-w1", "--reason", "address review findings RR#RF-1", "--reason-code", "review_feedback", "--finding", "RR#RF-1", "--json"},
+		{"record-file-change", "--root", "/ws", "--step", "P1", "--attempt", "A2", "--path", "a.go", "--agent", "golem-w1", "--json"},
+		{"run", "--root", "/ws", "--step", "P1", "--attempt", "A2", "--gate", "go test", "--agent", "golem-w1", "--confirm-risk", "--", "go", "test"},
+		{"finish-step", "P1", "--root", "/ws", "--attempt", "A2", "--agent", "golem-w1", "--json"},
+		{"next-action", "--root", "/ws", "--json", "--agent", "golem-w1"},
+	}
+	if !reflect.DeepEqual(f.calls, want) {
+		t.Fatalf("argv = %v, want %v", f.calls, want)
+	}
+}
+
+func TestClient_NextAction_ParsesAttemptAndNestedDiagnostics(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{
+		"resumability": {
+			"contract": {"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},
+			"agent_id":"golem-w1",
+			"attempt":{"id":"A1","open":true},
+			"diagnostics":[{"code":"state_invalid","message":"bad ledger","artifact":".agent/step-runs.jsonl"}]
+		}
+	}`), exit: 0}})
+	state, err := c.NextAction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := state.Resumability
+	if projection == nil || projection.Attempt == nil || projection.Attempt.ID != "A1" || !projection.Attempt.Open ||
+		len(projection.Diagnostics) != 1 || projection.Diagnostics[0] != (ResumabilityDiagnostic{
+		Code: "state_invalid", Message: "bad ledger", Artifact: ".agent/step-runs.jsonl",
+	}) {
+		t.Fatalf("resumability = %+v", projection)
+	}
+}
+
+func TestClient_NextAction_RejectsNullResumabilityDiagnostics(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{
+		"resumability": {
+			"contract": {"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},
+			"agent_id":"golem-w1",
+			"step":{"id":"P1","state":"pending","completed":false},
+			"attempt":null,
+			"diagnostics":null
+		}
+	}`), exit: 0}})
+	if _, err := c.NextAction(context.Background()); err == nil || !strings.Contains(err.Error(), "diagnostics must be an array") {
+		t.Fatalf("NextAction() error = %v", err)
 	}
 }
 

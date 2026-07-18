@@ -418,6 +418,47 @@ func TestParseFlags_TaskMode(t *testing.T) {
 	}
 }
 
+func TestPlanWorkers(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.planWorkers != 1 || f.planWorkersSet {
+		t.Fatalf("default plan workers = %d, set=%t; want 1, false", f.planWorkers, f.planWorkersSet)
+	}
+
+	for _, workers := range []string{"1", "2"} {
+		f, err = parseFlags([]string{"-plan", "plan.json", "-plan-workers", workers, "-approve-plan-edits", "-approve-plan-gates"})
+		if err != nil {
+			t.Fatalf("parse task workers=%s: %v", workers, err)
+		}
+		if err := validateFlags(f); err != nil {
+			t.Fatalf("validate task workers=%s: %v", workers, err)
+		}
+	}
+
+	for _, args := range [][]string{
+		{"-plan-workers", "0"},
+		{"-plan-workers", "-1"},
+		{"-plan-workers", "1"},
+		{"-plan-workers", "2"},
+	} {
+		f, err = parseFlags(args)
+		if err != nil {
+			t.Fatalf("parse %v: %v", args, err)
+		}
+		if err := validateFlags(f); err == nil {
+			t.Fatalf("validateFlags(%v) unexpectedly succeeded", args)
+		}
+	}
+
+	for _, f := range []flags{{planWorkers: -1}, {planWorkers: 2}} {
+		if err := validateFlags(f); err == nil {
+			t.Fatalf("direct flags %+v unexpectedly succeeded", f)
+		}
+	}
+}
+
 func TestParseFlags_TaskModeReviewManifest(t *testing.T) {
 	f, err := parseFlags([]string{"-plan", "plan.json", "-review-manifest", "review.json", "-approve-plan-edits", "-approve-plan-gates"})
 	if err != nil {

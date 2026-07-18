@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agentflow"
 	"github.com/kstruzzieri/go-llm/provider"
 )
@@ -39,6 +40,10 @@ func (f *fakeAF) failure(name string) error {
 }
 
 func (f *fakeAF) Probe(context.Context) error { f.seq = append(f.seq, "probe"); return nil }
+func (f *fakeAF) ProbeParallel(context.Context) error {
+	f.seq = append(f.seq, "probe-parallel")
+	return f.failure("probe-parallel")
+}
 func (f *fakeAF) ProbeWorkflow(context.Context) error {
 	f.seq = append(f.seq, "probe-workflow")
 	return f.failure("probe-workflow")
@@ -108,7 +113,10 @@ func (f *fakeAF) FinishRun(context.Context) (string, error) {
 	}
 	return "proof-pack.md", nil
 }
-func (f *fakeAF) RecordFileChange(context.Context, string, string, string) error { return nil }
+func (f *fakeAF) RecordFileChange(_ context.Context, step, attempt, path string) error {
+	f.seq = append(f.seq, "record-file-change:"+step+":"+attempt+":"+path)
+	return nil
+}
 func (f *fakeAF) RecordEvidence(_ context.Context, e agentflow.EvidenceEntry) error {
 	f.seq = append(f.seq, "evidence:"+e.ID)
 	return nil
@@ -154,6 +162,103 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 	}
 	if !equalSeq(af.seq, want) {
 		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
+	}
+}
+
+func TestTaskStepRunnerUsesItsRootAndAgentflowJournal(t *testing.T) {
+	root := t.TempDir()
+	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{
+		ID: "P1", Files: []string{"out.txt"},
+	}}}
+	write := provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+		ID: "write-1", Type: "function",
+		Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"out.txt","content":"worker\n"}`)},
+	}}}
+	orch := agent.New(&scriptCaller{responses: []agent.ModelResult{
+		{Response: write},
+		{Response: provider.ChatResponse{Content: "done"}},
+	}}, agent.ContextManager{})
+	af := &fakeAF{}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	runStep, err := newTaskStepRunner(root, plan, af, orch, &replSession{maxSteps: 4}, true, io.Discard, nil, cancel)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := &driver{af: af, plan: plan, runStep: runStep}
+	if err := d.runOneStep(runCtx, "P1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(filepath.Join(root, "out.txt")); err != nil || string(got) != "worker\n" {
+		t.Fatalf("root output = %q, %v", got, err)
+	}
+	want := []string{
+		"claim:P1",
+		"record-file-change:P1:A-P1:out.txt",
+		"finish-step:P1:A-P1",
+	}
+	if !equalSeq(af.seq, want) {
+		t.Fatalf("agentflow calls = %v, want %v", af.seq, want)
+	}
+}
+
+func TestDriver_ParallelCohortRunsBeforeSerialWork(t *testing.T) {
+	af := &fakeAF{nextSteps: []string{"P1"}}
+	d := &driver{
+		af: af, plan: reviewPlan(), planPath: "plan.json", out: io.Discard,
+		parallelCohort: func(context.Context) error {
+			af.seq = append(af.seq, "parallel-cohort")
+			return nil
+		},
+		runStep: func(context.Context, agentflow.Step, string, string) error { return nil },
+	}
+	if _, err := d.run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"probe", "probe-parallel", "probe-workflow", "recommend", "init", "lock:plan.json", "materialize", "init-exec", "doctor", "parallel-cohort",
+		"next-step", "claim:P1", "gate:P1:test one", "finish-step:P1:A-P1", "next-step", "finish-run",
+	}
+	if !equalSeq(af.seq, want) {
+		t.Fatalf("seq =\n%v\nwant\n%v", af.seq, want)
+	}
+}
+
+func TestDriver_ParallelCohortFailuresAbortBeforeSerialWork(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		af      *fakeAF
+		cohort  func(context.Context) error
+		wantSeq []string
+	}{
+		{
+			name:    "parallel probe",
+			af:      &fakeAF{failAt: map[string]error{"probe-parallel": errors.New("unavailable")}},
+			cohort:  func(context.Context) error { return nil },
+			wantSeq: []string{"probe", "probe-parallel"},
+		},
+		{
+			name: "cohort",
+			af:   &fakeAF{},
+			cohort: func(context.Context) error {
+				return errors.New("cohort failed")
+			},
+			wantSeq: []string{"probe", "probe-parallel", "probe-workflow", "recommend", "probe-review", "init", "lock:plan.json", "materialize", "init-exec", "doctor"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := &driver{
+				af: tt.af, plan: reviewPlan(), planPath: "plan.json", reviewManifest: "review.json", out: io.Discard,
+				parallelCohort: tt.cohort,
+				runStep:        func(context.Context, agentflow.Step, string, string) error { return nil },
+			}
+			if _, err := d.run(context.Background()); err == nil {
+				t.Fatal("expected error")
+			}
+			if !equalSeq(tt.af.seq, tt.wantSeq) {
+				t.Fatalf("seq = %v, want %v", tt.af.seq, tt.wantSeq)
+			}
+		})
 	}
 }
 
@@ -440,6 +545,31 @@ func TestRunAgentflowTask_RejectsStaleWorkflowHandoffBeforeClientUse(t *testing.
 	}
 }
 
+func TestRunAgentflowTask_ParallelRequiresOrchestratorFactoryBeforeAgentflow(t *testing.T) {
+	root := t.TempDir()
+	plan := agentflow.Compile(validTraceableIR())
+	planBytes, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(root, "plan.json")
+	if err := os.WriteFile(planPath, planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sess := &replSession{orch: agent.New(&scriptCaller{}, agent.ContextManager{})}
+	var stdout, stderr bytes.Buffer
+	err = runAgentflowTask(context.Background(), &stdout, &stderr, nil, sess, flags{
+		planPath: planPath, planWorkers: 2, approveEdits: true, approveGates: true,
+		agentflowSrc: filepath.Join(t.TempDir(), "must-not-run"),
+	}, root)
+	if err == nil || !strings.Contains(err.Error(), "parallel orchestrator factory is nil") {
+		t.Fatalf("factory preflight error = %v", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("factory preflight reached Agentflow output: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestDriver_RouteIsReadOnlyBeforeMutationAndShownBeforeReview(t *testing.T) {
 	rec := defaultWorkflowRecommendation()
 	rec.Selected.Profile = "high-risk"
@@ -721,6 +851,46 @@ func TestDriver_BlockingReviewRequiresAuthoritativeRereview(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(af.seq, "\n"), "finish-step:P1:AM-P1") {
 		t.Fatalf("amendment did not complete before authoritative re-review block: %v", af.seq)
+	}
+}
+
+func TestValidateFreshWorkerProjection(t *testing.T) {
+	decode := func(t *testing.T, payload string) agentflow.NextActionState {
+		t.Helper()
+		var state agentflow.NextActionState
+		if err := json.Unmarshal([]byte(payload), &state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	freshJSON := `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`
+	fresh := decode(t, freshJSON)
+	if err := validateFreshWorkerProjection(fresh, "golem-w1"); err != nil {
+		t.Fatalf("fresh projection = %v", err)
+	}
+	for name, payload := range map[string]string{
+		"missing projection":       `{}`,
+		"missing contract":         `{"resumability":{"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"unlocked":                 `{"resumability":{"contract":{"plan_sha256":"plan","execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"missing plan digest":      `{"resumability":{"contract":{"locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"missing execution digest": `{"resumability":{"contract":{"locked":true,"plan_sha256":"plan"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"other agent":              `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","attempt":null,"diagnostics":[]}}`,
+		"present attempt":          `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":{"id":"A1","open":false},"diagnostics":[]}}`,
+		"missing step":             `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"failed step":              `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"failed","completed":false},"attempt":null,"diagnostics":[]}}`,
+		"blocked step":             `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"blocked","completed":false},"attempt":null,"diagnostics":[]}}`,
+		"missing step completed":   `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending"},"attempt":null,"diagnostics":[]}}`,
+		"null step completed":      `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending","completed":null},"attempt":null,"diagnostics":[]}}`,
+		"completed step":           `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending","completed":true},"attempt":null,"diagnostics":[]}}`,
+		"diagnostic":               `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[{"code":"state_invalid","message":"bad ledger","artifact":".agent/step-runs.jsonl"}]}}`,
+		"missing attempt":          `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","diagnostics":[]}}`,
+		"missing diagnostics":      `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if err := validateFreshWorkerProjection(decode(t, payload), "golem-w1"); err == nil {
+				t.Fatal("expected non-fresh projection rejection")
+			}
+		})
 	}
 }
 
@@ -1055,6 +1225,31 @@ func TestResolveTaskPlanPath(t *testing.T) {
 	}
 	if got != abs {
 		t.Fatalf("absolute path = %q, want unchanged %q", got, abs)
+	}
+}
+
+func TestResolveTaskAgentflowSourcePinsRelativeCheckoutToCanonicalRoot(t *testing.T) {
+	root := t.TempDir()
+	relative := filepath.Join("tools", "agentflow")
+	got, err := resolveTaskAgentflowSource(root, relative)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, relative)
+	if got != want || !filepath.IsAbs(got) {
+		t.Fatalf("relative source = %q, want absolute %q", got, want)
+	}
+	workerRoot := t.TempDir()
+	if got == filepath.Join(workerRoot, relative) {
+		t.Fatalf("source checkout moved with worker root: %q", got)
+	}
+
+	absolute := filepath.Join(t.TempDir(), "agentflow")
+	if got, err := resolveTaskAgentflowSource(root, absolute); err != nil || got != absolute {
+		t.Fatalf("absolute source = %q, %v; want %q", got, err, absolute)
+	}
+	if got, err := resolveTaskAgentflowSource(root, ""); err != nil || got != "" {
+		t.Fatalf("binary mode source = %q, %v", got, err)
 	}
 }
 
