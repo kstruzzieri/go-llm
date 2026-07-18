@@ -725,29 +725,33 @@ func TestDriver_BlockingReviewRequiresAuthoritativeRereview(t *testing.T) {
 }
 
 func TestValidateFreshWorkerProjection(t *testing.T) {
-	fresh := agentflow.NextActionState{Resumability: &agentflow.ResumabilityProjection{
-		Contract: &agentflow.ResumabilityContract{
-			PlanSHA256:              "plan",
-			ExecutionContractSHA256: "execution",
-			Locked:                  true,
-		},
-		AgentID: "golem-w1",
-	}}
+	decode := func(t *testing.T, payload string) agentflow.NextActionState {
+		t.Helper()
+		var state agentflow.NextActionState
+		if err := json.Unmarshal([]byte(payload), &state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	freshJSON := `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`
+	fresh := decode(t, freshJSON)
 	if err := validateFreshWorkerProjection(fresh, "golem-w1"); err != nil {
 		t.Fatalf("fresh projection = %v", err)
 	}
-	for name, state := range map[string]agentflow.NextActionState{
-		"missing projection":       {},
-		"missing contract":         {Resumability: &agentflow.ResumabilityProjection{AgentID: "golem-w1"}},
-		"unlocked":                 {Resumability: &agentflow.ResumabilityProjection{Contract: &agentflow.ResumabilityContract{PlanSHA256: "plan", ExecutionContractSHA256: "execution"}, AgentID: "golem-w1"}},
-		"missing plan digest":      {Resumability: &agentflow.ResumabilityProjection{Contract: &agentflow.ResumabilityContract{Locked: true, ExecutionContractSHA256: "execution"}, AgentID: "golem-w1"}},
-		"missing execution digest": {Resumability: &agentflow.ResumabilityProjection{Contract: &agentflow.ResumabilityContract{Locked: true, PlanSHA256: "plan"}, AgentID: "golem-w1"}},
-		"other agent":              {Resumability: &agentflow.ResumabilityProjection{Contract: fresh.Resumability.Contract, AgentID: "golem-w2"}},
-		"present attempt":          {Resumability: &agentflow.ResumabilityProjection{Contract: fresh.Resumability.Contract, AgentID: "golem-w1", Attempt: &agentflow.ResumabilityAttempt{ID: "A1", Open: false}}},
-		"diagnostic":               {Resumability: &agentflow.ResumabilityProjection{Contract: fresh.Resumability.Contract, AgentID: "golem-w1", Diagnostics: []agentflow.ResumabilityDiagnostic{{Code: "state_invalid"}}}},
+	for name, payload := range map[string]string{
+		"missing projection":       `{}`,
+		"missing contract":         `{"resumability":{"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"unlocked":                 `{"resumability":{"contract":{"plan_sha256":"plan","execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"missing plan digest":      `{"resumability":{"contract":{"locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"missing execution digest": `{"resumability":{"contract":{"locked":true,"plan_sha256":"plan"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"other agent":              `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","attempt":null,"diagnostics":[]}}`,
+		"present attempt":          `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":{"id":"A1","open":false},"diagnostics":[]}}`,
+		"diagnostic":               `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[{"code":"state_invalid","message":"bad ledger","artifact":".agent/step-runs.jsonl"}]}}`,
+		"missing attempt":          `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","diagnostics":[]}}`,
+		"missing diagnostics":      `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null}}`,
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateFreshWorkerProjection(state, "golem-w1"); err == nil {
+			if err := validateFreshWorkerProjection(decode(t, payload), "golem-w1"); err == nil {
 				t.Fatal("expected non-fresh projection rejection")
 			}
 		})

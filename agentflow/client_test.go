@@ -86,6 +86,28 @@ func TestClient_OwnedAgent_ArgvAndResumabilityProjection(t *testing.T) {
 	}
 }
 
+func TestClient_NextAction_ParsesAttemptAndNestedDiagnostics(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{
+		"resumability": {
+			"contract": {"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},
+			"agent_id":"golem-w1",
+			"attempt":{"id":"A1","open":true},
+			"diagnostics":[{"code":"state_invalid","message":"bad ledger","artifact":".agent/step-runs.jsonl"}]
+		}
+	}`), exit: 0}})
+	state, err := c.NextAction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := state.Resumability
+	if projection == nil || projection.Attempt == nil || projection.Attempt.ID != "A1" || !projection.Attempt.Open ||
+		len(projection.Diagnostics) != 1 || projection.Diagnostics[0] != (ResumabilityDiagnostic{
+		Code: "state_invalid", Message: "bad ledger", Artifact: ".agent/step-runs.jsonl",
+	}) {
+		t.Fatalf("resumability = %+v", projection)
+	}
+}
+
 func TestClient_LockPlan_ArgvAndInvalid(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{
 		"lock-plan": {stdout: []byte(`{"status":"invalid","errors":[{"code":"x","message":"m"}]}`), exit: 1},

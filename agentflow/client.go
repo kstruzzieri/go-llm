@@ -205,7 +205,7 @@ func (c *Client) NextStep(ctx context.Context) (string, error) {
 	return r.ID, nil
 }
 
-// ClaimStep claims step for the golem agent and returns the new attempt id.
+// ClaimStep claims step for this client's agent and returns the new attempt id.
 func (c *Client) ClaimStep(ctx context.Context, step string) (string, error) {
 	args := append([]string{"claim-step", step}, c.rootArgs("--agent", c.agentName(), "--json")...)
 	out, err := c.call(ctx, "claim-step", args, true)
@@ -396,6 +396,35 @@ type ResumabilityProjection struct {
 	AgentID     string                   `json:"agent_id"`
 	Attempt     *ResumabilityAttempt     `json:"attempt"`
 	Diagnostics []ResumabilityDiagnostic `json:"diagnostics"`
+
+	attemptPresent     bool
+	diagnosticsPresent bool
+}
+
+// UnmarshalJSON preserves whether fields required for fresh-worker validation
+// were present, since JSON null and an omitted field otherwise decode alike.
+func (p *ResumabilityProjection) UnmarshalJSON(data []byte) error {
+	type projection ResumabilityProjection
+	var decoded projection
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	*p = ResumabilityProjection(decoded)
+	_, p.attemptPresent = fields["attempt"]
+	_, p.diagnosticsPresent = fields["diagnostics"]
+	return nil
+}
+
+// HasAttemptField reports whether Agentflow explicitly projected attempt state.
+func (p *ResumabilityProjection) HasAttemptField() bool { return p != nil && p.attemptPresent }
+
+// HasDiagnosticsField reports whether Agentflow explicitly projected diagnostics.
+func (p *ResumabilityProjection) HasDiagnosticsField() bool {
+	return p != nil && p.diagnosticsPresent
 }
 
 type ResumabilityContract struct {

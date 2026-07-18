@@ -89,8 +89,14 @@ func validateFreshWorkerProjection(state agentflow.NextActionState, agentID stri
 	if projection.AgentID != agentID {
 		return fmt.Errorf("agentflow resumability agent is %q, want %q", projection.AgentID, agentID)
 	}
+	if !projection.HasAttemptField() {
+		return errors.New("agentflow resumability attempt is missing")
+	}
 	if projection.Attempt != nil {
 		return fmt.Errorf("agentflow resumability reports present attempt %q", projection.Attempt.ID)
+	}
+	if !projection.HasDiagnosticsField() {
+		return errors.New("agentflow resumability diagnostics are missing")
 	}
 	if len(projection.Diagnostics) != 0 {
 		return errors.New("agentflow resumability reports diagnostics")
