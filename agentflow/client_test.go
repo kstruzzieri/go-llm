@@ -223,6 +223,21 @@ func TestClient_NextAction_ParsesAttemptAndNestedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestClient_NextAction_RejectsNullResumabilityDiagnostics(t *testing.T) {
+	c, _ := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{
+		"resumability": {
+			"contract": {"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},
+			"agent_id":"golem-w1",
+			"step":{"id":"P1","state":"pending","completed":false},
+			"attempt":null,
+			"diagnostics":null
+		}
+	}`), exit: 0}})
+	if _, err := c.NextAction(context.Background()); err == nil || !strings.Contains(err.Error(), "diagnostics must be an array") {
+		t.Fatalf("NextAction() error = %v", err)
+	}
+}
+
 func TestClient_LockPlan_ArgvAndInvalid(t *testing.T) {
 	c, f := newTestClient(map[string]fakeReply{
 		"lock-plan": {stdout: []byte(`{"status":"invalid","errors":[{"code":"x","message":"m"}]}`), exit: 1},

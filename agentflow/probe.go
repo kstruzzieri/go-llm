@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // minVersion is the AgentFlow baseline this adapter is validated against.
@@ -68,7 +69,7 @@ func (c *Client) Probe(ctx context.Context) error {
 	help := string(hout)
 	var missing []string
 	for _, s := range requiredSubcommands {
-		if !strings.Contains(help, s) {
+		if !helpHasToken(help, s) {
 			missing = append(missing, s)
 		}
 	}
@@ -83,7 +84,7 @@ func (c *Client) Probe(ctx context.Context) error {
 		}
 		usage := string(sout)
 		for _, needle := range feature.needles {
-			if !strings.Contains(usage, needle) {
+			if !helpHasToken(usage, needle) {
 				return fmt.Errorf("agentflow %s %s unavailable (upgrade to >= %d.%d)",
 					feature.subcommand, needle, minVersion[0], minVersion[1])
 			}
@@ -119,7 +120,7 @@ func (c *Client) probeOptionalFeatures(ctx context.Context, features []featurePr
 	}
 	help := string(hout)
 	for _, feature := range features {
-		if !strings.Contains(help, feature.subcommand) {
+		if !helpHasToken(help, feature.subcommand) {
 			return fmt.Errorf("agentflow is missing required %ssubcommand: %s%s", kind, feature.subcommand, missingSuffix)
 		}
 		sout, _, exit, err := c.r.Run(ctx, []string{feature.subcommand, "--help"}, nil)
@@ -127,12 +128,23 @@ func (c *Client) probeOptionalFeatures(ctx context.Context, features []featurePr
 			return fmt.Errorf("agentflow %s --help failed: %w", feature.subcommand, errOrExit(err, exit))
 		}
 		for _, needle := range feature.needles {
-			if !strings.Contains(string(sout), needle) {
+			if !helpHasToken(string(sout), needle) {
 				return fmt.Errorf("agentflow %s %s unavailable%s", feature.subcommand, needle, unavailableSuffix)
 			}
 		}
 	}
 	return nil
+}
+
+func helpHasToken(help, want string) bool {
+	for _, token := range strings.FieldsFunc(help, func(r rune) bool {
+		return r != '-' && r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		if token == want {
+			return true
+		}
+	}
+	return false
 }
 
 func errOrExit(err error, exit int) error {

@@ -3,6 +3,7 @@ package agentflow
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -526,6 +527,7 @@ type NextActionState struct {
 type ResumabilityProjection struct {
 	Contract    *ResumabilityContract    `json:"contract"`
 	AgentID     string                   `json:"agent_id"`
+	Step        *ResumabilityStep        `json:"step"`
 	Attempt     *ResumabilityAttempt     `json:"attempt"`
 	Diagnostics []ResumabilityDiagnostic `json:"diagnostics"`
 
@@ -548,6 +550,9 @@ func (p *ResumabilityProjection) UnmarshalJSON(data []byte) error {
 	*p = ResumabilityProjection(decoded)
 	_, p.attemptPresent = fields["attempt"]
 	_, p.diagnosticsPresent = fields["diagnostics"]
+	if raw, ok := fields["diagnostics"]; ok && strings.TrimSpace(string(raw)) == "null" {
+		return errors.New("resumability diagnostics must be an array")
+	}
 	return nil
 }
 
@@ -563,6 +568,12 @@ type ResumabilityContract struct {
 	PlanSHA256              string `json:"plan_sha256"`
 	Locked                  bool   `json:"locked"`
 	ExecutionContractSHA256 string `json:"execution_contract_sha256"`
+}
+
+type ResumabilityStep struct {
+	ID        string `json:"id"`
+	State     string `json:"state"`
+	Completed *bool  `json:"completed"`
 }
 
 type ResumabilityAttempt struct {

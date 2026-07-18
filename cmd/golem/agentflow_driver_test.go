@@ -863,7 +863,7 @@ func TestValidateFreshWorkerProjection(t *testing.T) {
 		}
 		return state
 	}
-	freshJSON := `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`
+	freshJSON := `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`
 	fresh := decode(t, freshJSON)
 	if err := validateFreshWorkerProjection(fresh, "golem-w1"); err != nil {
 		t.Fatalf("fresh projection = %v", err)
@@ -876,6 +876,12 @@ func TestValidateFreshWorkerProjection(t *testing.T) {
 		"missing execution digest": `{"resumability":{"contract":{"locked":true,"plan_sha256":"plan"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
 		"other agent":              `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","attempt":null,"diagnostics":[]}}`,
 		"present attempt":          `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":{"id":"A1","open":false},"diagnostics":[]}}`,
+		"missing step":             `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`,
+		"failed step":              `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"failed","completed":false},"attempt":null,"diagnostics":[]}}`,
+		"blocked step":             `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"blocked","completed":false},"attempt":null,"diagnostics":[]}}`,
+		"missing step completed":   `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending"},"attempt":null,"diagnostics":[]}}`,
+		"null step completed":      `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending","completed":null},"attempt":null,"diagnostics":[]}}`,
+		"completed step":           `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending","completed":true},"attempt":null,"diagnostics":[]}}`,
 		"diagnostic":               `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[{"code":"state_invalid","message":"bad ledger","artifact":".agent/step-runs.jsonl"}]}}`,
 		"missing attempt":          `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","diagnostics":[]}}`,
 		"missing diagnostics":      `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null}}`,

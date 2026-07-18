@@ -106,6 +106,10 @@ including ignored entries outside `.agent/`, must be a subset of its assigned
 literal paths. That catches model drift and gate-generated shared artifacts
 before canonical source or proof state changes.
 
+Any `assume-unchanged` or `skip-worktree` entry anywhere in the canonical tree
+disables the optional cohort because worker gates run against fresh `HEAD`
+trees. The same index-flag drift after selection is a hard stop.
+
 ## Lifecycle and ownership
 
 The existing driver keeps ownership of workflow routing, initialization,

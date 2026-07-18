@@ -91,6 +91,15 @@ func validateFreshWorkerProjection(state agentflow.NextActionState, agentID stri
 	if projection.AgentID != agentID {
 		return fmt.Errorf("agentflow resumability agent is %q, want %q", projection.AgentID, agentID)
 	}
+	if projection.Step == nil || strings.TrimSpace(projection.Step.ID) == "" {
+		return errors.New("agentflow resumability step is missing")
+	}
+	if projection.Step.Completed == nil {
+		return errors.New("agentflow resumability step completed state is missing")
+	}
+	if projection.Step.State != "pending" || *projection.Step.Completed {
+		return fmt.Errorf("agentflow resumability step %q has prior execution state %q", projection.Step.ID, projection.Step.State)
+	}
 	if !projection.HasAttemptField() {
 		return errors.New("agentflow resumability attempt is missing")
 	}

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -74,7 +75,7 @@ func TestAssignedParallelWorkerRunsOnlyItsOwnedFreshStep(t *testing.T) {
 		ID: "P2", Files: []string{"worker.go"}, Validation: []string{"unit"},
 		Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./worker"}}},
 	}}}
-	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","attempt":null,"diagnostics":[]}}`}
+	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`}
 	factoryCalls := 0
 	sess := &replSession{maxSteps: 2, newOrchestrator: func() *agent.Orchestrator {
 		factoryCalls++
@@ -130,8 +131,8 @@ func TestAssignedParallelWorkersIsolateRuntimeRootAndJournal(t *testing.T) {
 		{ID: "P2", Files: []string{"b.go"}},
 	}}
 	runners := []*assignedWorkerRunner{
-		{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","attempt":null,"diagnostics":[]}}`},
-		{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","attempt":null,"diagnostics":[]}}`},
+		{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w1","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`},
+		{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem-w2","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"diagnostics":[]}}`},
 	}
 	writes := []provider.ChatResponse{
 		{ToolCalls: []provider.ToolCall{{ID: "w1", Type: "function", Function: provider.ToolCallFunction{Name: "write_file", Arguments: json.RawMessage(`{"path":"a.go","content":"one\n"}`)}}}},
@@ -456,7 +457,7 @@ func TestParallelCoordinatorAcceptsTrackedAndNewUnignoredFiles(t *testing.T) {
 	}
 }
 
-func TestParallelCoordinatorSkipsTrackedPathsWithHiddenIndexEdits(t *testing.T) {
+func TestParallelCoordinatorFallsBackForTrackedPathsWithHiddenIndexEdits(t *testing.T) {
 	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
 		t.Run(flag, func(t *testing.T) {
 			root := newParallelTestRepo(t)
@@ -472,11 +473,81 @@ func TestParallelCoordinatorSkipsTrackedPathsWithHiddenIndexEdits(t *testing.T) 
 			if err != nil {
 				t.Fatal(err)
 			}
-			if !selected || !reflect.DeepEqual(workerStepIDs(c.workers), []string{"P2", "P3"}) {
+			if selected || len(c.workers) != 0 {
 				t.Fatalf("selected = %v, workers = %v", selected, workerStepIDs(c.workers))
 			}
 			if got := readTestFile(t, filepath.Join(root, "a.go")); got != "hidden caller edit\n" {
 				t.Fatalf("hidden edit changed to %q", got)
+			}
+		})
+	}
+}
+
+func TestParallelCoordinatorFallsBackForMissingTrackedPathsWithHiddenIndexFlags(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			runTestGit(t, root, "update-index", flag, "a.go")
+			if err := os.Remove(filepath.Join(root, "a.go")); err != nil {
+				t.Fatal(err)
+			}
+			if got := runTestGit(t, root, "status", "--porcelain=v1"); got != "" {
+				t.Fatalf("hidden deletion unexpectedly visible to status: %q", got)
+			}
+
+			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 3, nil)
+			selected, err := c.selectWorkers(context.Background())
+			defer func() { _ = c.releaseWorkspaceLock() }()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if selected || len(c.workers) != 0 {
+				t.Fatalf("selected = %v, workers = %v", selected, workerStepIDs(c.workers))
+			}
+		})
+	}
+}
+
+func TestParallelCoordinatorRecheckRejectsCandidateIndexFlagDrift(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+			selected, err := c.selectWorkers(context.Background())
+			defer func() { _ = c.releaseWorkspaceLock() }()
+			if err != nil || !selected {
+				t.Fatalf("selectWorkers() = %v, %v", selected, err)
+			}
+
+			runTestGit(t, root, "update-index", flag, "a.go")
+			if got := runTestGit(t, root, "status", "--porcelain=v1"); got != "" {
+				t.Fatalf("index drift unexpectedly visible to status: %q", got)
+			}
+			if err := c.recheckRoot(context.Background()); err == nil || !strings.Contains(err.Error(), "unexpected index flags") {
+				t.Fatalf("recheckRoot() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParallelCoordinatorFallsBackForHiddenUnassignedCanonicalEdit(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			writeTestFile(t, filepath.Join(root, "c.go"), "c\n", 0o600)
+			runTestGit(t, root, "add", "c.go")
+			runTestGit(t, root, "commit", "-m", "add unassigned file")
+			runTestGit(t, root, "update-index", flag, "c.go")
+			writeTestFile(t, filepath.Join(root, "c.go"), "hidden caller edit\n", 0o600)
+			if got := runTestGit(t, root, "status", "--porcelain=v1"); got != "" {
+				t.Fatalf("hidden edit unexpectedly visible to status: %q", got)
+			}
+
+			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+			selected, err := c.selectWorkers(context.Background())
+			defer func() { _ = c.releaseWorkspaceLock() }()
+			if err != nil || selected || len(c.workers) != 0 {
+				t.Fatalf("selectWorkers() = %v, %v", selected, err)
 			}
 		})
 	}
@@ -517,6 +588,37 @@ func TestParallelCoordinatorRejectsNonTopLevelOrDirtyRoot(t *testing.T) {
 	writeTestFile(t, filepath.Join(root, "drift.go"), "dirty\n", 0o600)
 	if _, err := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 2, nil).selectWorkers(context.Background()); err == nil || !strings.Contains(err.Error(), "clean") {
 		t.Fatalf("dirty root error = %v", err)
+	}
+}
+
+func TestParallelCoordinatorRejectsUnmergedRootInsteadOfFallingBack(t *testing.T) {
+	root := newParallelTestRepo(t)
+	baseBranch := strings.TrimSpace(runTestGit(t, root, "branch", "--show-current"))
+	runTestGit(t, root, "checkout", "-b", "parallel-conflict")
+	writeTestFile(t, filepath.Join(root, "a.go"), "branch edit\n", 0o600)
+	runTestGit(t, root, "add", "a.go")
+	runTestGit(t, root, "commit", "-m", "branch edit")
+	runTestGit(t, root, "checkout", baseBranch)
+	writeTestFile(t, filepath.Join(root, "a.go"), "root edit\n", 0o600)
+	runTestGit(t, root, "add", "a.go")
+	runTestGit(t, root, "commit", "-m", "root edit")
+	cmd := exec.Command("git", "merge", "parallel-conflict")
+	cmd.Dir = root
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=golem-test", "GIT_AUTHOR_EMAIL=golem-test@example.com",
+		"GIT_COMMITTER_NAME=golem-test", "GIT_COMMITTER_EMAIL=golem-test@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("git merge unexpectedly succeeded: %s", out)
+	} else if unmerged := runTestGit(t, root, "ls-files", "-u", "--", "a.go"); strings.TrimSpace(unmerged) == "" {
+		t.Fatalf("git merge did not create an unmerged index: %v\n%s", err, out)
+	}
+
+	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
+	selected, err := c.selectWorkers(context.Background())
+	defer func() { _ = c.releaseWorkspaceLock() }()
+	if err == nil || selected || !strings.Contains(err.Error(), "clean") {
+		t.Fatalf("selectWorkers() = %v, %v", selected, err)
 	}
 }
 
@@ -592,6 +694,73 @@ func TestParallelWorkersRunConcurrentlyAndValidateExactDiff(t *testing.T) {
 	}
 	if got := readTestFile(t, filepath.Join(root, "a.go")); got != "a\n" {
 		t.Fatalf("canonical a.go changed to %q", got)
+	}
+}
+
+func TestParallelWorkersRejectHiddenAssignedEdits(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			worker := func(ctx context.Context, w parallelWorker) error {
+				if w.sourceID != "w1" {
+					return nil
+				}
+				if err := os.WriteFile(filepath.Join(w.root, filepath.FromSlash(w.paths[0])), []byte("hidden worker edit\n"), 0o600); err != nil {
+					return err
+				}
+				_, err := runParallelGit(ctx, w.root, "update-index", flag, "--", w.paths[0])
+				return err
+			}
+			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
+			selected, err := c.selectWorkers(context.Background())
+			if err != nil || !selected {
+				t.Fatalf("selectWorkers() = %v, %v", selected, err)
+			}
+			if err := c.prepareWorkers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+
+			err = c.runWorkers(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "worker w1 assigned path \"a.go\" has unexpected index flags") {
+				t.Fatalf("runWorkers() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestParallelWorkersRejectHiddenUnassignedEdits(t *testing.T) {
+	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
+		t.Run(flag, func(t *testing.T) {
+			root := newParallelTestRepo(t)
+			writeTestFile(t, filepath.Join(root, "c.go"), "c\n", 0o600)
+			runTestGit(t, root, "add", "c.go")
+			runTestGit(t, root, "commit", "-m", "add unassigned file")
+			worker := func(ctx context.Context, w parallelWorker) error {
+				if w.sourceID != "w1" {
+					return nil
+				}
+				if err := os.WriteFile(filepath.Join(w.root, "c.go"), []byte("hidden gate edit\n"), 0o600); err != nil {
+					return err
+				}
+				_, err := runParallelGit(ctx, w.root, "update-index", flag, "--", "c.go")
+				return err
+			}
+			c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, worker)
+			selected, err := c.selectWorkers(context.Background())
+			if err != nil || !selected {
+				t.Fatalf("selectWorkers() = %v, %v", selected, err)
+			}
+			if err := c.prepareWorkers(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = c.cleanup(context.Background()) })
+
+			err = c.runWorkers(context.Background())
+			if err == nil || !strings.Contains(err.Error(), "worker w1 tracked path \"c.go\" has unexpected index flags") {
+				t.Fatalf("runWorkers() error = %v", err)
+			}
+		})
 	}
 }
 
@@ -1554,6 +1723,31 @@ func TestParallelRunCohortSerialFallbackDoesNothing(t *testing.T) {
 	}
 	if workerCalls.Load() != 0 || aggregateCalls.Load() != 0 || len(c.preservedRoots()) != 0 {
 		t.Fatalf("fallback side effects: worker=%d aggregate=%d roots=%v", workerCalls.Load(), aggregateCalls.Load(), c.preservedRoots())
+	}
+}
+
+func TestParallelSerialFallbackLeavesNextInterruptForSerialLoop(t *testing.T) {
+	previous := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previous)
+
+	for range 100 {
+		interrupts := make(chan struct{}, 1)
+		c := newParallelCoordinator(t.TempDir(), &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{
+			{ID: "P1", Files: []string{"a.go"}}, {ID: "P2", Files: []string{"b.go"}},
+		}}, 2, func(context.Context, parallelWorker) error { return nil })
+		c.interrupts = interrupts
+		ran, err := c.runCohort(context.Background())
+		if err != nil || ran {
+			t.Fatalf("runCohort() = %v, %v", ran, err)
+		}
+
+		interrupts <- struct{}{}
+		runtime.Gosched()
+		select {
+		case <-interrupts:
+		default:
+			t.Fatal("completed parallel watcher consumed the serial loop interrupt")
+		}
 	}
 }
 

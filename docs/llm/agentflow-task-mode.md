@@ -293,7 +293,9 @@ under case-insensitive equality and ancestor checks. Existing paths must be
 tracked regular files at the recorded base; new paths must be unignored with
 safe parents. Symlinks, directories, or ambiguous ownership fall back to
 serial. Tracked candidates marked `assume-unchanged` or `skip-worktree` are not
-eligible. Each worker runs fresh in its own detached worktree after an opaque
+eligible; either flag anywhere in the tracked canonical tree disables the
+optional cohort so gates cannot verify different bytes in a fresh worktree.
+Each worker runs fresh in its own detached worktree after an opaque
 copy of canonical `.agent/` state. Golem validates worker diffs, promotes only
 those source bytes, and lets AgentFlow perform dry-run then real ledger
 aggregation; AgentFlow does not merge source files. Dependent work then

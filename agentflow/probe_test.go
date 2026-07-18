@@ -134,6 +134,37 @@ func TestProbeParallel_RequiresAggregateLedgersAndEveryUsedFlag(t *testing.T) {
 	}
 }
 
+func TestProbeParallel_RejectsLookalikeHelpTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		topHelp string
+		next    string
+	}{
+		{
+			name:    "subcommand prefix",
+			topHelp: "usage: agentflow {aggregate-ledgers-preview,next-action}",
+			next:    "--root --agent --json",
+		},
+		{
+			name:    "flag suffix",
+			topHelp: "usage: agentflow {aggregate-ledgers,next-action}",
+			next:    "--root --agent-id --json",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			replies := map[string]fakeReply{
+				"--help":            {stdout: []byte(tt.topHelp)},
+				"next-action":       {stdout: []byte(tt.next)},
+				"aggregate-ledgers": {stdout: []byte("--input --source-id --output --base --dry-run --json")},
+			}
+			if err := NewClient(&fakeRunner{replies: replies}, "/ws").ProbeParallel(context.Background()); err == nil {
+				t.Fatal("ProbeParallel unexpectedly accepted lookalike help token")
+			}
+		})
+	}
+}
+
 func TestProbeWorkflow_RequiresStableRecommendationAndMaterializationSurface(t *testing.T) {
 	baseHelp := "usage: agentflow {init,workflow-contract}"
 	missing := &fakeRunner{replies: map[string]fakeReply{"--help": {stdout: []byte(baseHelp)}}}

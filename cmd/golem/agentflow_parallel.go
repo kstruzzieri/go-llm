@@ -24,6 +24,8 @@ type parallelWorkerFunc func(context.Context, parallelWorker) error
 
 type parallelAggregateFunc func(context.Context, []agentflow.AggregationInput, string, string, bool) (agentflow.AggregationResult, error)
 
+var errParallelIndexFlags = errors.New("parallel root has unexpected index flags")
+
 type parallelWorker struct {
 	step         agentflow.Step
 	paths        []string
@@ -144,13 +146,19 @@ func (c *parallelCoordinator) runCohort(ctx context.Context) (ran bool, err erro
 	waveCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	done := make(chan struct{})
-	defer close(done)
+	var interruptWatcher sync.WaitGroup
+	defer func() {
+		close(done)
+		interruptWatcher.Wait()
+	}()
 	if c.interrupts != nil {
 		select {
 		case <-c.interrupts:
 		default:
 		}
+		interruptWatcher.Add(1)
 		go func() {
+			defer interruptWatcher.Done()
 			select {
 			case <-c.interrupts:
 				cancel()
@@ -601,6 +609,10 @@ func (c *parallelCoordinator) selectWorkers(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if err := c.recordBase(ctx); err != nil {
+		if errors.Is(err, errParallelIndexFlags) {
+			c.workers = nil
+			return false, nil
+		}
 		return false, err
 	}
 	var eligibilityErr error
@@ -902,7 +914,21 @@ func (c *parallelCoordinator) recheckRoot(ctx context.Context) error {
 	if got := strings.TrimSpace(string(head)); got != c.head {
 		return fmt.Errorf("git HEAD changed from %s to %s", c.head, got)
 	}
-	return c.requireCleanRoot(ctx)
+	if err := c.requireCleanRoot(ctx); err != nil {
+		return err
+	}
+	for _, worker := range c.workers {
+		for _, file := range worker.paths {
+			eligible, err := c.gitEligiblePath(ctx, file)
+			if err != nil {
+				return fmt.Errorf("recheck parallel candidate %s: %w", file, err)
+			}
+			if !eligible {
+				return fmt.Errorf("parallel candidate changed after selection: %s", file)
+			}
+		}
+	}
+	return nil
 }
 
 func (c *parallelCoordinator) requireCleanRoot(ctx context.Context) error {
@@ -915,6 +941,13 @@ func (c *parallelCoordinator) requireCleanRoot(ctx context.Context) error {
 			return fmt.Errorf("parallel root must be clean outside .agent: %s", file)
 		}
 	}
+	unexpected, err := parallelUnexpectedIndexPath(ctx, c.root)
+	if err != nil {
+		return fmt.Errorf("inspect parallel root index flags: %w", err)
+	}
+	if unexpected != "" {
+		return fmt.Errorf("%w: tracked path %q", errParallelIndexFlags, unexpected)
+	}
 	return nil
 }
 
@@ -923,12 +956,15 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 	if err != nil {
 		return false, nil
 	}
-	if exists {
-		index, err := runParallelGit(ctx, c.root, "ls-files", "-v", "-z", "--", ":(literal)"+file)
-		if err != nil {
-			return false, fmt.Errorf("inspect index flags for %s: %w", file, err)
-		}
+	index, err := runParallelGit(ctx, c.root, "ls-files", "-v", "-z", "--", ":(literal)"+file)
+	if err != nil {
+		return false, fmt.Errorf("inspect index flags for %s: %w", file, err)
+	}
+	if len(index) > 0 {
 		if string(index) != "H "+file+"\x00" {
+			return false, nil
+		}
+		if !exists {
 			return false, nil
 		}
 		out, err := runParallelGit(ctx, c.root, "ls-tree", "-z", "--full-tree", "--name-only", c.head, "--", ":(literal)"+file)
@@ -936,6 +972,9 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 			return false, fmt.Errorf("check whether %s is tracked at %s: %w", file, c.head, err)
 		}
 		return string(out) == file+"\x00", nil
+	}
+	if exists {
+		return false, nil
 	}
 	cmd := exec.CommandContext(ctx, "git", "check-ignore", "-q", "--", file)
 	cmd.Dir = c.root
@@ -951,6 +990,20 @@ func (c *parallelCoordinator) gitEligiblePath(ctx context.Context, file string) 
 }
 
 func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker parallelWorker) ([]string, error) {
+	assigned := make(map[string]struct{}, len(worker.paths))
+	for _, file := range worker.paths {
+		assigned[file] = struct{}{}
+	}
+	unexpected, err := parallelUnexpectedIndexPath(ctx, worker.root)
+	if err != nil {
+		return nil, fmt.Errorf("inspect worker %s index flags: %w", worker.sourceID, err)
+	}
+	if unexpected != "" {
+		if _, ok := assigned[unexpected]; ok {
+			return nil, fmt.Errorf("worker %s assigned path %q has unexpected index flags", worker.sourceID, unexpected)
+		}
+		return nil, fmt.Errorf("worker %s tracked path %q has unexpected index flags", worker.sourceID, unexpected)
+	}
 	for _, file := range worker.paths {
 		if _, err := parallelSafePath(worker.root, file); err != nil {
 			return nil, fmt.Errorf("worker %s produced unsafe assigned path %q: %w", worker.sourceID, file, err)
@@ -959,10 +1012,6 @@ func (c *parallelCoordinator) validateWorkerDiff(ctx context.Context, worker par
 	out, err := runParallelGit(ctx, worker.root, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignored=matching")
 	if err != nil {
 		return nil, fmt.Errorf("inspect worker %s changes: %w", worker.sourceID, err)
-	}
-	assigned := make(map[string]struct{}, len(worker.paths))
-	for _, file := range worker.paths {
-		assigned[file] = struct{}{}
 	}
 	changedSet := make(map[string]struct{}, len(worker.paths))
 	for _, file := range parallelStatusPaths(out) {
@@ -998,6 +1047,23 @@ func runParallelGit(ctx context.Context, dir string, args ...string) ([]byte, er
 		return nil, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
 	}
 	return out, nil
+}
+
+func parallelUnexpectedIndexPath(ctx context.Context, root string) (string, error) {
+	index, err := runParallelGit(ctx, root, "ls-files", "-v", "-z")
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range bytes.Split(index, []byte{'\x00'}) {
+		if len(entry) == 0 || (len(entry) >= 3 && entry[0] == 'H' && entry[1] == ' ') {
+			continue
+		}
+		if len(entry) < 3 || entry[1] != ' ' {
+			return "", fmt.Errorf("malformed index entry %q", entry)
+		}
+		return string(entry[2:]), nil
+	}
+	return "", nil
 }
 
 func parallelStatusPaths(status []byte) []string {
