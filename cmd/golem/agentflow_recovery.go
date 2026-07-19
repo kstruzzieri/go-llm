@@ -87,6 +87,11 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 		return err
 	}
 	disposition := resumeDisposition(state.State)
+	if disposition.action != failClosed {
+		if err := validateStatusRecovery(root, state); err != nil {
+			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
+		}
+	}
 	if jsonOutput {
 		if _, err := out.Write(state.RawJSON); err != nil {
 			return fmt.Errorf("write Agentflow status: %w", err)
@@ -98,11 +103,16 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 	if disposition.action == reportComplete {
 		summary, err := client.ProofSummary()
 		if err != nil {
-			return err
+			state.Diagnostics = append(state.Diagnostics, "proof summary is inconsistent with complete state: "+err.Error())
+			disposition = recoveryDisposition{failClosed, 3, "blocked by inconsistent proof summary"}
+		} else if summary.Failed != 0 {
+			state.Diagnostics = append(state.Diagnostics, "proof summary contains failed checks despite complete state")
+			disposition = recoveryDisposition{failClosed, 3, "blocked by inconsistent proof summary"}
+		} else {
+			proof = &summary
 		}
-		proof = &summary
 	}
-	renderAgentflowStatus(out, state, proof)
+	renderAgentflowStatus(out, state, proof, disposition)
 	return statusExit(disposition.exitCode)
 }
 
@@ -113,7 +123,10 @@ func statusExit(code int) error {
 	return &agentflowStatusExit{code: code}
 }
 
-func validateResumeProjection(root string, planJSON []byte, state agentflow.NextActionState, approved *agentflow.WorkflowRecommendation) error {
+// validateRecoveryProjection checks only authoritative next-action fields. It
+// is read-only and shared by status and resume; resume adds local digest and
+// materialized-workflow checks before any mutation.
+func validateRecoveryProjection(state agentflow.NextActionState) error {
 	projection := state.Resumability
 	if projection == nil {
 		return fmt.Errorf("agentflow resumability projection is missing")
@@ -124,6 +137,172 @@ func validateResumeProjection(root string, planJSON []byte, state agentflow.Next
 	if !projection.Contract.Locked {
 		return fmt.Errorf("agentflow resumability contract is not locked")
 	}
+	if projection.Contract.PlanSHA256 == "" || projection.Contract.ExecutionContractSHA256 == "" {
+		return fmt.Errorf("agentflow resumability contract digests are incomplete")
+	}
+	if projection.AgentID != "golem" {
+		return fmt.Errorf("agentflow resumability agent is %q, want %q", projection.AgentID, "golem")
+	}
+	if !projection.HasAttemptField() {
+		return fmt.Errorf("agentflow resumability attempt is missing")
+	}
+	if !projection.HasLeaseField() || projection.Lease == nil {
+		return fmt.Errorf("agentflow resumability lease is missing")
+	}
+	if !projection.HasGatesField() {
+		return fmt.Errorf("agentflow resumability gates are missing")
+	}
+	if !projection.HasRecoveryActionsField() {
+		return fmt.Errorf("agentflow resumability recovery actions are missing")
+	}
+	if !projection.HasDiagnosticsField() {
+		return fmt.Errorf("agentflow resumability diagnostics are missing")
+	}
+	if len(projection.Diagnostics) != 0 {
+		return fmt.Errorf("agentflow resumability reports diagnostics")
+	}
+	if projection.Step != nil {
+		if strings.TrimSpace(projection.Step.ID) == "" || strings.TrimSpace(projection.Step.State) == "" || projection.Step.Completed == nil {
+			return fmt.Errorf("agentflow resumability step is incomplete")
+		}
+		if state.StepID != nil && *state.StepID != projection.Step.ID {
+			return fmt.Errorf("agentflow next-action step %q does not match resumability step %q", *state.StepID, projection.Step.ID)
+		}
+	}
+
+	lease := projection.Lease
+	if lease.Policy == nil || (*lease.Policy != "advisory" && *lease.Policy != "enforce") {
+		return fmt.Errorf("agentflow resumability lease policy is missing or unknown")
+	}
+	if lease.TTLMinutes == nil || *lease.TTLMinutes <= 0 || lease.GraceSeconds == nil || *lease.GraceSeconds < 0 {
+		return fmt.Errorf("agentflow resumability lease settings are missing or invalid")
+	}
+	if lease.Exclusive != (*lease.Policy == "enforce") {
+		return fmt.Errorf("agentflow resumability lease exclusivity is inconsistent")
+	}
+
+	attempt := projection.Attempt
+	if attempt == nil {
+		switch state.State {
+		case "file_receipts_missing", "validation_missing", "step_unverified", "step_uncompleted":
+			return fmt.Errorf("agentflow state %q requires an open attempt", state.State)
+		case "step_unclaimed":
+			if projection.Step == nil || *projection.Step.Completed || !isEligibleUnclaimedStepState(projection.Step.State) {
+				return fmt.Errorf("agentflow step_unclaimed projection has ineligible step state")
+			}
+			if err := validateAutomaticRecoveryAction(projection, "claim"); err != nil {
+				return err
+			}
+		case "run_unverified", "proof_missing", "complete":
+			if projection.Step != nil {
+				return fmt.Errorf("agentflow state %q unexpectedly projects a step", state.State)
+			}
+		}
+		if lease.State != "not_applicable" || lease.ExpiresAt != nil {
+			return fmt.Errorf("agentflow resumability lease is inconsistent without an attempt")
+		}
+		return nil
+	}
+	if projection.Step == nil {
+		return fmt.Errorf("agentflow resumability attempt has no step")
+	}
+	switch state.State {
+	case "validation_missing", "step_unverified", "step_uncompleted":
+		// These are the only resumable states backed by an existing attempt.
+	default:
+		return fmt.Errorf("agentflow state %q unexpectedly projects an open attempt", state.State)
+	}
+	if *projection.Step.Completed {
+		return fmt.Errorf("agentflow resumability open attempt belongs to a completed step")
+	}
+	if strings.TrimSpace(attempt.ID) == "" || strings.TrimSpace(attempt.State) == "" {
+		return fmt.Errorf("agentflow resumability attempt identity is incomplete")
+	}
+	if projection.Step.State != attempt.State {
+		return fmt.Errorf("agentflow resumability step state %q does not match attempt state %q", projection.Step.State, attempt.State)
+	}
+	switch state.State {
+	case "step_uncompleted":
+		if attempt.State != "verified" {
+			return fmt.Errorf("agentflow step_uncompleted attempt has state %q, want verified", attempt.State)
+		}
+	case "validation_missing", "step_unverified":
+		if attempt.State != "claimed" && attempt.State != "amendment_started" && attempt.State != "in_progress" {
+			return fmt.Errorf("agentflow %s attempt has state %q", state.State, attempt.State)
+		}
+	}
+	if !attempt.Open {
+		return fmt.Errorf("agentflow resumability attempt %q is not open", attempt.ID)
+	}
+	if attempt.Owner != "golem" {
+		return fmt.Errorf("agentflow resumability attempt %q is owned by %q, want %q", attempt.ID, attempt.Owner, "golem")
+	}
+	switch lease.State {
+	case "live":
+		if lease.ExpiresAt == nil || strings.TrimSpace(*lease.ExpiresAt) == "" {
+			return fmt.Errorf("agentflow live lease has no deadline")
+		}
+	case "no_deadline":
+		if lease.ExpiresAt != nil {
+			return fmt.Errorf("agentflow no-deadline lease has a deadline")
+		}
+	default:
+		return fmt.Errorf("agentflow resumability lease state %q is not recoverable", lease.State)
+	}
+	return validateAutomaticRecoveryAction(projection, "continue")
+}
+
+func validateAutomaticRecoveryAction(projection *agentflow.ResumabilityProjection, action string) error {
+	var matched *agentflow.ResumabilityRecoveryAction
+	for i := range projection.RecoveryActions {
+		if projection.RecoveryActions[i].Action != action {
+			continue
+		}
+		if matched != nil {
+			return fmt.Errorf("agentflow resumability has duplicate %s actions", action)
+		}
+		matched = &projection.RecoveryActions[i]
+	}
+	if matched == nil || !matched.Allowed || !matched.Automatic || matched.BreakGlass {
+		return fmt.Errorf("agentflow resumability does not allow automatic non-break-glass %s", action)
+	}
+	return nil
+}
+
+func isEligibleUnclaimedStepState(state string) bool {
+	switch state {
+	case "pending", "blocked", "failed", "abandoned":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateStatusRecovery(root string, state agentflow.NextActionState) error {
+	if err := validateRecoveryProjection(state); err != nil {
+		return err
+	}
+	if state.State == "validation_missing" {
+		planBytes, err := os.ReadFile(filepath.Join(root, ".agent", "plan.lock.json"))
+		if err != nil {
+			return fmt.Errorf("read Agentflow locked plan for recovery status: %w", err)
+		}
+		var plan agentflow.Plan
+		if err := decodeAgentflowPlanJSON(planBytes, &plan); err != nil {
+			return fmt.Errorf("parse Agentflow locked plan for recovery status: %w", err)
+		}
+		if _, _, err := projectedCommandGates(&plan, state); err != nil {
+			return err
+		}
+	}
+	return validateRecoveryMutationSafety(state)
+}
+
+func validateResumeProjection(root string, planJSON []byte, state agentflow.NextActionState, approved *agentflow.WorkflowRecommendation) error {
+	if err := validateRecoveryProjection(state); err != nil {
+		return err
+	}
+	projection := state.Resumability
 	planDigest, err := canonicalPlanJSONSHA256(planJSON)
 	if err != nil {
 		return fmt.Errorf("digest task plan for Agentflow resume: %w", err)
@@ -151,94 +330,65 @@ func validateResumeProjection(root string, planJSON []byte, state agentflow.Next
 			return fmt.Errorf("verify approved workflow handoff for resume: %w", err)
 		}
 	}
-	if projection.AgentID != "golem" {
-		return fmt.Errorf("agentflow resumability agent is %q, want %q", projection.AgentID, "golem")
-	}
-	if !projection.HasAttemptField() {
-		return fmt.Errorf("agentflow resumability attempt is missing")
-	}
-	if !projection.HasLeaseField() || projection.Lease == nil {
-		return fmt.Errorf("agentflow resumability lease is missing")
-	}
-	if !projection.HasGatesField() {
-		return fmt.Errorf("agentflow resumability gates are missing")
-	}
-	if !projection.HasRecoveryActionsField() {
-		return fmt.Errorf("agentflow resumability recovery actions are missing")
-	}
-	if !projection.HasDiagnosticsField() {
-		return fmt.Errorf("agentflow resumability diagnostics are missing")
-	}
-	if len(projection.Diagnostics) != 0 {
-		return fmt.Errorf("agentflow resumability reports diagnostics")
-	}
-	if projection.Step != nil {
-		if strings.TrimSpace(projection.Step.ID) == "" || projection.Step.Completed == nil {
-			return fmt.Errorf("agentflow resumability step is incomplete")
-		}
-		if state.StepID != nil && *state.StepID != projection.Step.ID {
-			return fmt.Errorf("agentflow next-action step %q does not match resumability step %q", *state.StepID, projection.Step.ID)
-		}
-	}
+	return nil
+}
 
-	lease := projection.Lease
-	if lease.Policy == nil || (*lease.Policy != "advisory" && *lease.Policy != "enforce") {
-		return fmt.Errorf("agentflow resumability lease policy is missing or unknown")
+func projectedCommandGates(plan *agentflow.Plan, state agentflow.NextActionState) ([]agentflow.CommandGate, []agentflow.ResumabilityGate, error) {
+	if state.Resumability == nil || state.Resumability.Step == nil {
+		return nil, nil, fmt.Errorf("agentflow command-gate recovery requires a projected step")
 	}
-	if lease.TTLMinutes == nil || *lease.TTLMinutes <= 0 || lease.GraceSeconds == nil || *lease.GraceSeconds < 0 {
-		return fmt.Errorf("agentflow resumability lease settings are missing or invalid")
+	step, ok := findStep(plan, state.Resumability.Step.ID)
+	if !ok {
+		return nil, nil, fmt.Errorf("agentflow returned unknown step %q", state.Resumability.Step.ID)
 	}
-	if lease.Exclusive != (*lease.Policy == "enforce") {
-		return fmt.Errorf("agentflow resumability lease exclusivity is inconsistent")
+	commands, err := agentflow.ExtractCommandGates(step)
+	if err != nil {
+		return nil, nil, err
 	}
+	projected := make([]agentflow.ResumabilityGate, 0, len(state.Resumability.Gates))
+	for _, gate := range state.Resumability.Gates {
+		if gate.Status != "missing" && gate.Status != "satisfied" {
+			return nil, nil, fmt.Errorf("agentflow gate %q has unknown status %q", gate.Label, gate.Status)
+		}
+		switch gate.Kind {
+		case "command":
+			projected = append(projected, gate)
+		case "inspection", "legacy":
+			// Known non-command projections do not participate in argv pairing.
+		default:
+			return nil, nil, fmt.Errorf("agentflow gate %q has unknown kind %q", gate.Label, gate.Kind)
+		}
+	}
+	if len(projected) != len(commands) {
+		return nil, nil, fmt.Errorf("agentflow projected %d command gates for %d plan gates", len(projected), len(commands))
+	}
+	for i, command := range commands {
+		if projected[i].Label != strings.Join(command.Argv, " ") {
+			return nil, nil, fmt.Errorf("agentflow command gate %d label %q does not match plan argv", i, projected[i].Label)
+		}
+	}
+	return commands, projected, nil
+}
 
-	attempt := projection.Attempt
-	if attempt == nil {
-		switch state.State {
-		case "file_receipts_missing", "validation_missing", "step_unverified", "step_uncompleted":
-			return fmt.Errorf("agentflow state %q requires an open attempt", state.State)
-		}
-		if lease.State != "not_applicable" || lease.ExpiresAt != nil {
-			return fmt.Errorf("agentflow resumability lease is inconsistent without an attempt")
-		}
+// validateRecoveryMutationSafety rejects finite enforced recovery when the
+// fixed Agentflow operation is not atomic with its final lease check. A time
+// estimate cannot prove safety: run may append lease_renewed after a pause, and
+// finish-step records verification before rechecking expiry. Advisory and
+// no-deadline attempts do not have either race. CompleteStep is a single close
+// after its lease check and remains safe for step_uncompleted.
+func validateRecoveryMutationSafety(state agentflow.NextActionState) error {
+	projection := state.Resumability
+	if projection == nil || projection.Lease == nil || projection.Lease.Policy == nil || *projection.Lease.Policy != "enforce" {
 		return nil
 	}
-	if projection.Step == nil {
-		return fmt.Errorf("agentflow resumability attempt has no step")
+	if state.State == "step_unclaimed" {
+		return fmt.Errorf("agentflow resume blocks step_unclaimed under a finite enforced lease because claiming would enter non-atomic gate recovery")
 	}
-	if strings.TrimSpace(attempt.ID) == "" || strings.TrimSpace(attempt.State) == "" {
-		return fmt.Errorf("agentflow resumability attempt identity is incomplete")
-	}
-	if !attempt.Open {
-		return fmt.Errorf("agentflow resumability attempt %q is not open", attempt.ID)
-	}
-	if attempt.Owner != "golem" {
-		return fmt.Errorf("agentflow resumability attempt %q is owned by %q, want %q", attempt.ID, attempt.Owner, "golem")
-	}
-	switch lease.State {
-	case "live":
-		if lease.ExpiresAt == nil || strings.TrimSpace(*lease.ExpiresAt) == "" {
-			return fmt.Errorf("agentflow live lease has no deadline")
+	if projection.Lease.State == "live" && projection.Lease.ExpiresAt != nil {
+		switch state.State {
+		case "validation_missing", "step_unverified":
+			return fmt.Errorf("agentflow resume blocks %s under a finite enforced lease because Agentflow cannot guarantee duplicate-free, no-renew recovery", state.State)
 		}
-	case "no_deadline":
-		if lease.ExpiresAt != nil {
-			return fmt.Errorf("agentflow no-deadline lease has a deadline")
-		}
-	default:
-		return fmt.Errorf("agentflow resumability lease state %q is not recoverable", lease.State)
-	}
-	var continueAction *agentflow.ResumabilityRecoveryAction
-	for i := range projection.RecoveryActions {
-		if projection.RecoveryActions[i].Action != "continue" {
-			continue
-		}
-		if continueAction != nil {
-			return fmt.Errorf("agentflow resumability has duplicate continue actions")
-		}
-		continueAction = &projection.RecoveryActions[i]
-	}
-	if continueAction == nil || !continueAction.Allowed || !continueAction.Automatic || continueAction.BreakGlass {
-		return fmt.Errorf("agentflow resumability does not allow automatic non-break-glass continue")
 	}
 	return nil
 }
@@ -271,35 +421,9 @@ func settleAgentflowAttempt(ctx context.Context, client afClient, plan *agentflo
 			return true, err
 		}
 	case "validation_missing":
-		step, ok := findStep(plan, stepID)
-		if !ok {
-			return false, fmt.Errorf("agentflow returned unknown step %q", stepID)
-		}
-		commands, err := agentflow.ExtractCommandGates(step)
+		commands, projected, err := projectedCommandGates(plan, state)
 		if err != nil {
 			return false, err
-		}
-		projected := make([]agentflow.ResumabilityGate, 0, len(state.Resumability.Gates))
-		for _, gate := range state.Resumability.Gates {
-			if gate.Status != "missing" && gate.Status != "satisfied" {
-				return false, fmt.Errorf("agentflow gate %q has unknown status %q", gate.Label, gate.Status)
-			}
-			switch gate.Kind {
-			case "command":
-				projected = append(projected, gate)
-			case "inspection", "legacy":
-				// Known non-command projections do not participate in argv pairing.
-			default:
-				return false, fmt.Errorf("agentflow gate %q has unknown kind %q", gate.Label, gate.Kind)
-			}
-		}
-		if len(projected) != len(commands) {
-			return false, fmt.Errorf("agentflow projected %d command gates for %d plan gates", len(projected), len(commands))
-		}
-		for i, command := range commands {
-			if projected[i].Label != strings.Join(command.Argv, " ") {
-				return false, fmt.Errorf("agentflow command gate %d label %q does not match plan argv", i, projected[i].Label)
-			}
 		}
 		for i, command := range commands {
 			if projected[i].Status != "missing" {
@@ -328,6 +452,9 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	if err := validateResumeProjection(root, planJSON, state, approved); err != nil {
 		return agentflow.NextActionState{}, err
 	}
+	if err := validateRecoveryMutationSafety(state); err != nil {
+		return agentflow.NextActionState{}, err
+	}
 	if disposition.action == reportComplete {
 		return state, nil
 	}
@@ -347,6 +474,9 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		if err := validateResumeProjection(root, planJSON, progressed, approved); err != nil {
 			return agentflow.NextActionState{}, err
 		}
+		if err := validateRecoveryMutationSafety(progressed); err != nil {
+			return agentflow.NextActionState{}, err
+		}
 		state = progressed
 		disposition = resumeDisposition(state.State)
 		if disposition.action == failClosed {
@@ -362,6 +492,34 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 		}
 	}
 
+	previousBeforeGates := d.beforeGates
+	d.beforeGates = func(ctx context.Context, step agentflow.Step, attempt string) error {
+		projected, err := d.af.NextAction(ctx)
+		if err != nil {
+			return err
+		}
+		if projected.State != "validation_missing" {
+			return fmt.Errorf("agentflow resumed step %q reached state %q before gates, want validation_missing", step.ID, projected.State)
+		}
+		if err := validateResumeProjection(root, planJSON, projected, approved); err != nil {
+			return err
+		}
+		if projected.Resumability.Step.ID != step.ID || projected.Resumability.Attempt.ID != attempt {
+			return fmt.Errorf("agentflow resumed gate projection identifies step %q attempt %q, want step %q attempt %q",
+				projected.Resumability.Step.ID, projected.Resumability.Attempt.ID, step.ID, attempt)
+		}
+		_, gates, err := projectedCommandGates(d.plan, projected)
+		if err != nil {
+			return err
+		}
+		for _, gate := range gates {
+			if gate.Status != "missing" {
+				return fmt.Errorf("agentflow resumed step %q already has satisfied command gate %q; refusing duplicate execution", step.ID, gate.Label)
+			}
+		}
+		return validateRecoveryMutationSafety(projected)
+	}
+	defer func() { d.beforeGates = previousBeforeGates }()
 	if err := d.runSerialSteps(ctx); err != nil {
 		return agentflow.NextActionState{}, err
 	}
@@ -381,7 +539,7 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 	return final, nil
 }
 
-func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof *agentflow.ProofSummary) {
+func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof *agentflow.ProofSummary, disposition recoveryDisposition) {
 	fmt.Fprintf(out, "state: %s\nreason: %s\nblocking: %t\n", state.State, state.Reason, state.Blocking)
 	if state.StepID != nil {
 		fmt.Fprintf(out, "step: %s\n", *state.StepID)
@@ -424,7 +582,7 @@ func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof
 	if state.Command != "" || len(state.Args) > 0 {
 		fmt.Fprintf(out, "advisory (display only): command=%q args=%q\n", state.Command, state.Args)
 	}
-	fmt.Fprintf(out, "resume: %s\n", resumeDisposition(state.State).description)
+	fmt.Fprintf(out, "resume: %s\n", disposition.description)
 	if proof != nil {
 		fmt.Fprintf(out, "proof: verified\nartifact: %s\nchecks: passed=%d warning=%d failed=%d not_run=%d skipped=%d not_applicable=%d total=%d\n",
 			proof.Path, proof.Passed, proof.Warning, proof.Failed, proof.NotRun, proof.Skipped, proof.NotApplicable, proof.Total)

@@ -86,7 +86,6 @@ func TestAgentflowSmoke(t *testing.T) {
 func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
-	gitInit(t, dir)
 	runner := agentflowRunnerOrSkip(t, dir)
 	client := agentflow.NewOwnedClient(runner, dir, "golem")
 	ctx := context.Background()
@@ -98,6 +97,24 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	if err := json.Unmarshal(planBytes, &plan); err != nil {
 		t.Fatal(err)
 	}
+	plan.Objective = "resume café <>& 😀"
+	planBytes, err = json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var extendedPlan map[string]any
+	if err := json.Unmarshal(planBytes, &extendedPlan); err != nil {
+		t.Fatal(err)
+	}
+	extendedPlan["future_numeric"] = json.RawMessage(`1e400`)
+	planBytes, err = json.Marshal(extendedPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "plan.json"), planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitInit(t, dir)
 	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
 	if err != nil {
 		t.Fatal(err)
@@ -202,6 +219,108 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	}
 	if claims != 1 {
 		t.Fatalf("claim events = %d, want exactly one", claims)
+	}
+}
+
+func TestAgentflowResumeRefusesFiniteEnforcedRecovery_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	ctx := context.Background()
+	planBytes, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockPlan(ctx, filepath.Join(dir, "plan.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitExecution(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	contractPath := filepath.Join(dir, ".agent", "execution.contract.json")
+	contractBytes, err := os.ReadFile(contractPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var contract map[string]any
+	if err := json.Unmarshal(contractBytes, &contract); err != nil {
+		t.Fatal(err)
+	}
+	concurrency := contract["concurrency"].(map[string]any)
+	concurrency["lease_policy"] = "enforce"
+	concurrency["lease_ttl_minutes"] = 1
+	concurrency["lease_grace_seconds"] = 0
+	contractBytes, err = json.MarshalIndent(contract, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(contractPath, append(contractBytes, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("expected\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RecordFileChange(ctx, "P1", attempt, "src/answer.txt"); err != nil {
+		t.Fatal(err)
+	}
+	state, err := client.NextAction(ctx)
+	if err != nil || state.State != "validation_missing" || state.Resumability == nil || state.Resumability.Lease == nil {
+		t.Fatalf("state=%q projection=%+v err=%v", state.State, state.Resumability, err)
+	}
+	if state.Resumability.Lease.Policy == nil || *state.Resumability.Lease.Policy != "enforce" || state.Resumability.Lease.State != "live" {
+		t.Fatalf("lease = %+v, want finite enforced live lease", state.Resumability.Lease)
+	}
+
+	beforeRuns, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeReceipts, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var statusExit *agentflowStatusExit
+	if !errors.As(statusErr, &statusExit) || statusExit.ExitCode() != 3 || !strings.Contains(status.String(), "resume: blocked") {
+		t.Fatalf("short enforced lease status = %v\n%s", statusErr, status.String())
+	}
+	d := &driver{af: client, plan: &plan}
+	if _, err := d.resume(ctx, dir, planBytes, nil); err == nil || !strings.Contains(err.Error(), "finite enforced lease") {
+		t.Fatalf("resume error = %v, want finite enforced lease refusal", err)
+	}
+	afterRuns, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterReceipts, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(afterRuns, beforeRuns) || !bytes.Equal(afterReceipts, beforeReceipts) || bytes.Contains(afterRuns, []byte(`"event": "lease_renewed"`)) {
+		t.Fatalf("resume mutated enforced short-lease state\nstep runs before=%s\nafter=%s\nreceipts before=%s\nafter=%s", beforeRuns, afterRuns, beforeReceipts, afterReceipts)
 	}
 }
 

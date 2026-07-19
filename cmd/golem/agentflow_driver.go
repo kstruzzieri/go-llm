@@ -53,6 +53,11 @@ type afClient interface {
 // builds the step-scoped Request and calls sess.orch.Run.
 type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal string) error
 
+// beforeGatesFunc is a resume-only, read-only safety check invoked after the
+// model has recorded file receipts and immediately before any command gate.
+// Fresh execution leaves it nil and preserves the existing driver sequence.
+type beforeGatesFunc func(ctx context.Context, step agentflow.Step, attempt string) error
+
 type driver struct {
 	af              afClient
 	plan            *agentflow.Plan
@@ -68,6 +73,7 @@ type driver struct {
 	approvedRecommendation *agentflow.WorkflowRecommendation
 	evidence               []agentflow.EvidenceEntry
 	runStep                runStepFunc
+	beforeGates            beforeGatesFunc
 	parallelCohort         func(context.Context) error
 	out                    io.Writer
 }
@@ -221,6 +227,11 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
 	if err := d.runStep(ctx, step, attempt, goal); err != nil {
 		return err // includes a fatal record-file-change failure surfaced via ctx cancel
+	}
+	if d.beforeGates != nil {
+		if err := d.beforeGates(ctx, step, attempt); err != nil {
+			return err
+		}
 	}
 	gates, err := agentflow.ExtractCommandGates(step)
 	if err != nil {
@@ -484,7 +495,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		return fmt.Errorf("read plan: %w", err)
 	}
 	var plan agentflow.Plan
-	if err := json.Unmarshal(planBytes, &plan); err != nil {
+	if err := decodeAgentflowPlanJSON(planBytes, &plan); err != nil {
 		return fmt.Errorf("parse plan: %w", err)
 	}
 	if err := agentflow.PreflightP0(&plan); err != nil {
@@ -575,7 +586,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 			_, _ = fmt.Fprintf(stderr, "agentflow resume failed: %v\n", err)
 			return errAgentflowTaskFailed
 		}
-		renderAgentflowStatus(stdout, final, &summary)
+		renderAgentflowStatus(stdout, final, &summary, resumeDisposition(final.State))
 		return nil
 	}
 	var coordinator *parallelCoordinator

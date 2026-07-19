@@ -561,6 +561,12 @@ func TestAgentflowStatusExitCodesDoNotPrintGenericErrors(t *testing.T) {
 	} {
 		t.Run(test.state, func(t *testing.T) {
 			payload := fmt.Sprintf("{\"state\":%q}\n", test.state)
+			switch test.state {
+			case "complete":
+				payload = `{"state":"complete","resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem","step":null,"attempt":null,"lease":{"policy":"advisory","ttl_minutes":30,"grace_seconds":0,"expires_at":null,"state":"not_applicable","exclusive":false},"gates":[],"recovery_actions":[],"diagnostics":[]}}` + "\n"
+			case "step_unclaimed":
+				payload = `{"state":"step_unclaimed","step_id":"P1","resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem","step":{"id":"P1","state":"pending","completed":false},"attempt":null,"lease":{"policy":"advisory","ttl_minutes":30,"grace_seconds":0,"expires_at":null,"state":"not_applicable","exclusive":false},"gates":[],"recovery_actions":[{"action":"claim","allowed":true,"automatic":true,"break_glass":false,"reason":"eligible"}],"diagnostics":[]}}` + "\n"
+			}
 			cmd := exec.Command(os.Args[0], "-test.run=^TestAgentflowStatusExitHelper$")
 			cmd.Env = append(os.Environ(),
 				"GOLEM_AGENTFLOW_STATUS_EXIT_HELPER=1",

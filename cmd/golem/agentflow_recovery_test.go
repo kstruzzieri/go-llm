@@ -54,18 +54,29 @@ func TestAgentflowStatus_HumanIsReadOnlyAndOwned(t *testing.T) {
 	if err := os.WriteFile(statePath, before, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	payload := []byte(`{"state":"validation_missing","reason":"gate missing","blocking":true,"command":"sh","args":["-c","touch /tmp/owned"],"step_id":"P1","gate":"unit-tests","diagnostics":["missing gate"],"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem","step":{"id":"P1","state":"in_progress","completed":false},"attempt":{"id":"A1","state":"claimed","owner":"golem","open":true},"lease":{"policy":"enforce","state":"live","exclusive":true},"gates":[{"kind":"command","label":"go test ./...","status":"missing","receipt_id":null,"evidence_id":null}],"recovery_actions":[{"action":"continue","allowed":true,"automatic":true,"break_glass":false,"reason":"owner holds lease"}],"diagnostics":[]}}`)
+	planBytes, err := json.Marshal(agentflow.Plan{Steps: []agentflow.Step{{
+		ID: "P1", Validation: []string{"unit-tests"},
+		Gates: []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./..."}}},
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	planBytes = append(planBytes[:len(planBytes)-1], []byte(`,"future_numeric":Infinity}`)...)
+	if err := os.WriteFile(filepath.Join(agentDir, "plan.lock.json"), planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	payload := []byte(`{"state":"validation_missing","reason":"gate missing","blocking":true,"command":"sh","args":["-c","touch /tmp/owned"],"step_id":"P1","gate":"unit-tests","diagnostics":["missing gate"],"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem","step":{"id":"P1","state":"claimed","completed":false},"attempt":{"id":"A1","state":"claimed","owner":"golem","open":true},"lease":{"policy":"advisory","ttl_minutes":30,"grace_seconds":0,"expires_at":null,"state":"no_deadline","exclusive":false},"gates":[{"kind":"command","label":"go test ./...","status":"missing","receipt_id":null,"evidence_id":null}],"recovery_actions":[{"action":"continue","allowed":true,"automatic":true,"break_glass":false,"reason":"owner holds lease"}],"diagnostics":[]}}`)
 	runner := &recoveryRunner{payload: payload}
 	var out bytes.Buffer
 
-	err := runAgentflowStatusWithRunner(context.Background(), &out, root, false, runner)
+	err = runAgentflowStatusWithRunner(context.Background(), &out, root, false, runner)
 	var statusErr *agentflowStatusExit
 	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 2 {
 		t.Fatalf("err = %v", err)
 	}
 	for _, want := range []string{
 		"state: validation_missing", "reason: gate missing", "step: P1", "attempt: A1 owner=golem",
-		"lease: policy=enforce state=live", "gate: command go test ./... (missing)",
+		"lease: policy=advisory state=no_deadline", "gate: command go test ./... (missing)",
 		"diagnostic: missing gate", "advisory (display only):", "resume:",
 	} {
 		if !strings.Contains(out.String(), want) {
@@ -83,29 +94,36 @@ func TestAgentflowStatus_HumanIsReadOnlyAndOwned(t *testing.T) {
 }
 
 func TestAgentflowStatus_JSONRelaysRawProjection(t *testing.T) {
-	payload := []byte("{\"state\":\"uninitialized\",\"unknown\":{\"kept\":true}}\n")
-	runner := &recoveryRunner{payload: payload}
-	var out bytes.Buffer
-	err := runAgentflowStatusWithRunner(context.Background(), &out, t.TempDir(), true, runner)
-	var statusErr *agentflowStatusExit
-	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
-		t.Fatalf("err = %v", err)
-	}
-	if !bytes.Equal(out.Bytes(), payload) {
-		t.Fatalf("output = %q, want %q", out.Bytes(), payload)
+	for _, payload := range [][]byte{
+		[]byte("{\"state\":\"uninitialized\",\"unknown\":{\"kept\":true}}\n"),
+		[]byte("{\"state\":\"complete\",\"resumability\":null,\"unknown\":[1]}\n"),
+	} {
+		runner := &recoveryRunner{payload: payload}
+		var out bytes.Buffer
+		err := runAgentflowStatusWithRunner(context.Background(), &out, t.TempDir(), true, runner)
+		var statusErr *agentflowStatusExit
+		if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+			t.Fatalf("err = %v", err)
+		}
+		if !bytes.Equal(out.Bytes(), payload) {
+			t.Fatalf("output = %q, want %q", out.Bytes(), payload)
+		}
 	}
 }
 
 func TestAgentflowStatus_CompleteRequiresAndSummarizesProof(t *testing.T) {
-	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
-		t.Fatal(err)
-	}
+	fixture := newResumeFixture(t)
+	root := fixture.root
 	proof := `{"checks":[{"status":"passed"},{"status":"warning"},{"status":"passed"}]}`
 	if err := os.WriteFile(filepath.Join(root, ".agent", "proof-pack.json"), []byte(proof), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runner := &recoveryRunner{payload: []byte(`{"state":"complete","reason":"run complete and proof verified","blocking":false}`)}
+	state := fixture.noAttemptState(t, "complete", false)
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner := &recoveryRunner{payload: payload}
 	var out bytes.Buffer
 	if err := runAgentflowStatusWithRunner(context.Background(), &out, root, false, runner); err != nil {
 		t.Fatal(err)
@@ -137,6 +155,128 @@ func TestAgentflowStatus_NonCompleteNeverReadsPresentProof(t *testing.T) {
 	}
 }
 
+func TestAgentflowStatus_UnsafeActionableProjectionExitsBlocked(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(projection map[string]any)
+	}{
+		{name: "foreign advisory owner", mutate: func(projection map[string]any) {
+			projection["attempt"].(map[string]any)["owner"] = "other"
+			lease := projection["lease"].(map[string]any)
+			lease["policy"], lease["exclusive"] = "advisory", false
+		}},
+		{name: "expired lease", mutate: func(projection map[string]any) {
+			projection["lease"].(map[string]any)["state"] = "expired"
+		}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			test.mutate(fixture.projection())
+			payload, err := json.Marshal(fixture.payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+			var statusErr *agentflowStatusExit
+			if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+				t.Fatalf("err = %v, want status exit 3", err)
+			}
+			if !strings.Contains(out.String(), "resume: blocked") {
+				t.Fatalf("unsafe projection rendered as resumable:\n%s", out.String())
+			}
+		})
+	}
+}
+
+func TestAgentflowStatus_FiniteEnforcedRecoveryIsBlocked(t *testing.T) {
+	fixture := newResumeFixture(t)
+	state := fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "satisfied"},
+	})
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+	var statusErr *agentflowStatusExit
+	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 || !strings.Contains(out.String(), "resume: blocked") {
+		t.Fatalf("err = %v, want blocked status exit 3\n%s", err, out.String())
+	}
+}
+
+func TestAgentflowStatus_RejectsUnknownGateStatusForAdvisoryLease(t *testing.T) {
+	fixture := newResumeFixture(t)
+	lease := fixture.projection()["lease"].(map[string]any)
+	lease["policy"], lease["state"], lease["expires_at"], lease["exclusive"] = "advisory", "no_deadline", nil, false
+	state := fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "failed"},
+		{Kind: "command", Label: "go vet ./...", Status: "satisfied"},
+	})
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+	var statusErr *agentflowStatusExit
+	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 || !strings.Contains(out.String(), "resume: blocked") {
+		t.Fatalf("unknown advisory gate status was not blocked: err=%v\n%s", err, out.String())
+	}
+}
+
+func TestAgentflowStatus_CompleteRequiresResumabilityProjection(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.payload["state"] = "complete"
+	delete(fixture.payload, "resumability")
+	payload, err := json.Marshal(fixture.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, ".agent", "proof-pack.json"), []byte(`{"checks":[{"status":"passed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+	var statusErr *agentflowStatusExit
+	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+		t.Fatalf("err = %v, want status exit 3", err)
+	}
+	if strings.Contains(out.String(), "proof: verified") {
+		t.Fatalf("malformed complete projection reported verified proof:\n%s", out.String())
+	}
+}
+
+func TestAgentflowStatus_ProofSummaryFailureUsesBlockedExit(t *testing.T) {
+	for name, proof := range map[string]string{
+		"malformed":    `{`,
+		"failed check": `{"checks":[{"status":"failed"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			state := fixture.noAttemptState(t, "complete", false)
+			payload, err := json.Marshal(state)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(fixture.root, ".agent", "proof-pack.json"), []byte(proof), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var out bytes.Buffer
+			err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+			var statusErr *agentflowStatusExit
+			if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+				t.Fatalf("err = %v, want status exit 3", err)
+			}
+			if strings.Contains(out.String(), "proof: verified") || !strings.Contains(out.String(), "resume: blocked") {
+				t.Fatalf("proof inconsistency was not rendered blocked:\n%s", out.String())
+			}
+		})
+	}
+}
+
 var _ agentflow.Runner = (*recoveryRunner)(nil)
 
 type resumeFixture struct {
@@ -160,7 +300,10 @@ func newResumeFixture(t *testing.T) resumeFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
-	execution := []byte(`{"schema_version":"0.4.0","plan":".agent/plan.lock.json"}`)
+	if err := os.WriteFile(filepath.Join(agentDir, "plan.lock.json"), planJSON, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	execution := []byte(`{"schema_version":"0.4.0","plan":".agent/plan.lock.json","command_policy":{"command_timeout_seconds":600}}`)
 	if err := os.WriteFile(filepath.Join(agentDir, "execution.contract.json"), execution, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -179,11 +322,11 @@ func newResumeFixture(t *testing.T) resumeFixture {
 			"resumability": map[string]any{
 				"contract": map[string]any{"plan_sha256": planDigest, "locked": true, "execution_contract_sha256": executionDigest},
 				"agent_id": "golem",
-				"step":     map[string]any{"id": "P1", "state": "in_progress", "completed": false},
+				"step":     map[string]any{"id": "P1", "state": "claimed", "completed": false},
 				"attempt":  map[string]any{"id": "A1", "state": "claimed", "owner": "golem", "open": true},
 				"lease": map[string]any{
 					"policy": "enforce", "ttl_minutes": 30, "grace_seconds": 0,
-					"expires_at": "2026-07-19T20:00:00Z", "state": "live", "exclusive": true,
+					"expires_at": "2099-07-19T20:00:00Z", "state": "live", "exclusive": true,
 				},
 				"gates": []any{},
 				"recovery_actions": []any{
@@ -210,6 +353,11 @@ func (f resumeFixture) state(t *testing.T) agentflow.NextActionState {
 
 func (f resumeFixture) projection() map[string]any {
 	return f.payload["resumability"].(map[string]any)
+}
+
+func (f *resumeFixture) useAdvisoryLease() {
+	lease := f.projection()["lease"].(map[string]any)
+	lease["policy"], lease["state"], lease["expires_at"], lease["exclusive"] = "advisory", "no_deadline", nil, false
 }
 
 func TestValidateResumeProjection(t *testing.T) {
@@ -319,14 +467,37 @@ func TestValidateResumeProjection_RejectsOptionalHandoffMismatch(t *testing.T) {
 	}
 }
 
+func TestValidateRecoveryProjectionAcceptsEligibleRetryStates(t *testing.T) {
+	for _, stepState := range []string{"pending", "blocked", "failed", "abandoned"} {
+		t.Run(stepState, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			state := fixture.noAttemptState(t, "step_unclaimed", true)
+			state.Resumability.Step.State = stepState
+			if err := validateRecoveryProjection(state); err != nil {
+				t.Fatalf("eligible retry state rejected: %v", err)
+			}
+		})
+	}
+	fixture := newResumeFixture(t)
+	state := fixture.noAttemptState(t, "step_unclaimed", true)
+	state.Resumability.RecoveryActions = nil
+	if err := validateRecoveryProjection(state); err == nil {
+		t.Fatal("step_unclaimed projection without an allowed claim action was accepted")
+	}
+}
+
 func recoveryAttemptState(state string, gates []agentflow.ResumabilityGate) agentflow.NextActionState {
 	stepID := "P1"
 	completed := false
+	attemptState := "claimed"
+	if state == "step_uncompleted" {
+		attemptState = "verified"
+	}
 	return agentflow.NextActionState{
 		State: state, StepID: &stepID, Command: "sh", Args: []string{"-c", "touch /tmp/advisory-must-not-run"},
 		Resumability: &agentflow.ResumabilityProjection{
-			Step:    &agentflow.ResumabilityStep{ID: stepID, State: "in_progress", Completed: &completed},
-			Attempt: &agentflow.ResumabilityAttempt{ID: "A1", State: "claimed", Owner: "golem", Open: true},
+			Step:    &agentflow.ResumabilityStep{ID: stepID, State: attemptState, Completed: &completed},
+			Attempt: &agentflow.ResumabilityAttempt{ID: "A1", State: attemptState, Owner: "golem", Open: true},
 			Gates:   gates,
 		},
 	}
@@ -468,6 +639,9 @@ func (f *resumeFixture) noAttemptState(t *testing.T, state string, step bool) ag
 	lease["state"], lease["expires_at"] = "not_applicable", nil
 	if step {
 		projection["step"] = map[string]any{"id": "P1", "state": "pending", "completed": false}
+		projection["recovery_actions"] = []any{
+			map[string]any{"action": "claim", "allowed": true, "automatic": true, "break_glass": false, "reason": "eligible"},
+		}
 		f.payload["step_id"] = "P1"
 	} else {
 		projection["step"] = nil
@@ -485,15 +659,30 @@ func (f *resumeFixture) attemptState(t *testing.T, state string, gates []agentfl
 	f.payload["reason"] = state
 	f.payload["command"] = "sh"
 	f.payload["args"] = []string{"-c", "touch /tmp/advisory-must-not-run"}
-	f.projection()["gates"] = gates
+	projection := f.projection()
+	attemptState := "claimed"
+	if state == "step_uncompleted" {
+		attemptState = "verified"
+	}
+	projection["step"].(map[string]any)["state"] = attemptState
+	projection["attempt"].(map[string]any)["state"] = attemptState
+	projection["gates"] = gates
 	return f.state(t)
 }
 
 func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
 	initial := fixture.noAttemptState(t, "step_unclaimed", true)
 	complete := fixture.noAttemptState(t, "complete", false)
-	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, complete}}
+	inFlightFixture := newResumeFixture(t)
+	inFlightFixture.useAdvisoryLease()
+	inFlight := inFlightFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	inFlight.Resumability.Attempt.ID = "A-P1"
+	af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{initial, inFlight, complete}}
 	d := &driver{af: af, plan: recoveryPlan()}
 	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
 		af.seq = append(af.seq, "model:"+step.ID)
@@ -506,6 +695,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 	}
 	want := []string{
 		"next-action", "next-step", "claim:P1", "model:P1",
+		"next-action",
 		"gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
 		"next-step", "finish-run", "next-action",
 	}
@@ -514,9 +704,68 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 	}
 }
 
+func TestResumeRejectsFiniteEnforcedRecoveryBeforeMutation(t *testing.T) {
+	for _, stateName := range []string{"step_unclaimed", "validation_missing", "step_unverified"} {
+		t.Run(stateName, func(t *testing.T) {
+			fixture := newResumeFixture(t)
+			var state agentflow.NextActionState
+			if stateName == "step_unclaimed" {
+				state = fixture.noAttemptState(t, stateName, true)
+			} else {
+				state = fixture.attemptState(t, stateName, []agentflow.ResumabilityGate{
+					{Kind: "command", Label: "go test ./...", Status: "missing"},
+					{Kind: "command", Label: "go vet ./...", Status: "satisfied"},
+				})
+			}
+			af := &fakeAF{nextSteps: []string{"P1"}, nextActions: []agentflow.NextActionState{state}}
+			d := &driver{af: af, plan: recoveryPlan(), runStep: func(context.Context, agentflow.Step, string, string) error { return nil }}
+
+			if _, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "finite enforced lease") {
+				t.Fatalf("resume error = %v, want finite enforced lease refusal", err)
+			}
+			if want := []string{"next-action"}; !reflect.DeepEqual(af.seq, want) {
+				t.Fatalf("mutations before lease refusal = %v, want %v", af.seq, want)
+			}
+		})
+	}
+}
+
+func TestResumeReentryRefusesAlreadySatisfiedGateInsteadOfDuplicatingIt(t *testing.T) {
+	initialFixture := newResumeFixture(t)
+	initialFixture.useAdvisoryLease()
+	initial := initialFixture.noAttemptState(t, "step_unclaimed", true)
+
+	inFlightFixture := newResumeFixture(t)
+	inFlightFixture.useAdvisoryLease()
+	inFlight := inFlightFixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "satisfied"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	inFlight.Resumability.Attempt.ID = "A-P1"
+
+	af := &fakeAF{
+		nextSteps:   []string{"P1"},
+		nextActions: []agentflow.NextActionState{initial, inFlight},
+	}
+	d := &driver{af: af, plan: recoveryPlan()}
+	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
+		af.seq = append(af.seq, "model:"+step.ID)
+		return nil
+	}
+
+	if _, err := d.resume(context.Background(), initialFixture.root, initialFixture.planJSON, nil); err == nil || !strings.Contains(err.Error(), "refusing duplicate execution") {
+		t.Fatalf("resume error = %v, want duplicate gate refusal", err)
+	}
+	want := []string{"next-action", "next-step", "claim:P1", "model:P1", "next-action"}
+	if !reflect.DeepEqual(af.seq, want) || len(af.gateArgv) != 0 {
+		t.Fatalf("calls before duplicate refusal = %v argv=%v, want %v and no gate argv", af.seq, af.gateArgv, want)
+	}
+}
+
 func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 	t.Run("settlement rereads and rejects unchanged state", func(t *testing.T) {
 		fixture := newResumeFixture(t)
+		fixture.useAdvisoryLease()
 		initial := fixture.attemptState(t, "step_unverified", []agentflow.ResumabilityGate{
 			{Kind: "command", Label: "go test ./...", Status: "satisfied"},
 			{Kind: "command", Label: "go vet ./...", Status: "satisfied"},
@@ -576,6 +825,7 @@ func TestResumeSettlementContinuesSeriallyWithoutRepeatingMutation(t *testing.T)
 	for _, test := range tests {
 		t.Run(test.state, func(t *testing.T) {
 			fixture := newResumeFixture(t)
+			fixture.useAdvisoryLease()
 			initial := fixture.attemptState(t, test.state, test.gates)
 			progressed := fixture.noAttemptState(t, "run_unverified", false)
 			complete := fixture.noAttemptState(t, "complete", false)

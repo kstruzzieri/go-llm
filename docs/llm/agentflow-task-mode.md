@@ -161,10 +161,15 @@ step/gate, attempt owner and lease, typed gate statuses, diagnostics, and the
 serial resume disposition. Any suggested command is labeled display-only and
 is never executed. JSON mode relays AgentFlow's exact `next-action --json`
 bytes. Both forms use actor `golem` and make only that read-only AgentFlow call.
+Before returning exit `0` or `2`, status validates the typed projection's
+contract fields, actor, attempt owner, lease, and recovery permissions. A
+foreign, expired, malformed, or otherwise unsafe projection is displayed as
+blocked and exits `3`; JSON mode still relays AgentFlow's exact bytes.
 When the state is `complete`, human status reads the proof pack only after
 `next-action` has verified it, then shows the absolute artifact path and counts
 for `passed`, `warning`, `failed`, `not_run`, `skipped`, and `not_applicable`
-checks. A merely present proof file is never reported as verified.
+checks. A missing or malformed summary is an unsafe exit `3`. A merely present
+proof file is never reported as verified.
 
 Status exit codes are stable for scripts:
 
@@ -193,7 +198,8 @@ Before the first mutation, Golem requires the projection to have no diagnostics
 and checks all of these bindings:
 
 - the locked plan digest equals the canonical supplied-plan digest after
-  excluding only `locked` and `locked_at`;
+  excluding only `locked` and `locked_at`, using AgentFlow's Python JSON
+  escaping and number encoding exactly;
 - the execution-contract digest equals SHA-256 of the exact materialized file
   bytes;
 - the existing workflow contract passes the closed-schema validator, plus the
@@ -208,6 +214,14 @@ plan order, not by the human validation label. Each projected label must equal
 the joined plan argv; Golem runs only `missing` gates with plan-owned argv and
 never repeats a `satisfied` receipt. Known inspection/legacy projections do not
 participate in command pairing, and unknown kinds or statuses fail closed.
+Finite enforced leases fail closed for `step_unclaimed`, `validation_missing`,
+and `step_unverified`, regardless of the displayed remaining time. AgentFlow's
+gate adapter may append `lease_renewed`, and `finish-step` records verification
+before its final expiry check; a time estimate therefore cannot prove no-renew,
+duplicate-free recovery. An operator must resolve that lease explicitly outside
+Golem. A live finite `step_uncompleted` attempt remains resumable through the
+single `complete-step` close operation; advisory and no-deadline attempts retain
+the normal serial recovery path.
 After any attempt settlement, Golem performs one read-only progress check and
 refuses to repeat a mutation when the state did not change. No-settle states go
 directly into the existing serial step/tail driver.
