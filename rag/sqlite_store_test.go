@@ -980,6 +980,223 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_rejectsExistingVector
 	}
 }
 
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_migratesLegacyCorpusOneSourceAtATime(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, source := range []string{"a.go", "b.go"} {
+		chunk := makeChunk(source, "legacy "+source, 1, 1, "go")
+		if err := store.ReplaceSourceWithHash(ctx, source, []Chunk{chunk}, [][]float64{{1}}, "legacy-"+source); err != nil {
+			t.Fatalf("seed legacy source %q: %v", source, err)
+		}
+	}
+
+	a := makeChunk("a.go", "migrated a", 1, 1, "go")
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "a.go", []Chunk{a}, [][]float64{{1}}, "a-v2", "X"); err != nil {
+		t.Fatalf("migrate first source from all-unknown corpus: %v", err)
+	}
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (VectorSpaceProbe{KnownIDs: []string{"X"}, HasUnknown: true}); !reflect.DeepEqual(probe, want) {
+		t.Fatalf("probe after first migration = %#v, want %#v", probe, want)
+	}
+
+	y := makeChunk("y.go", "new y", 1, 1, "go")
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "y.go", []Chunk{y}, [][]float64{{1}}, "y-v1", "Y"); !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("add Y alongside known X and legacy unknown rows: error = %v, want ErrVectorSpaceDrift", err)
+	}
+	if chunks, err := store.GetBySource(ctx, "y.go"); err != nil || len(chunks) != 0 {
+		t.Fatalf("rejected Y source chunks = %#v, err = %v, want none", chunks, err)
+	}
+
+	c := makeChunk("c.go", "new c", 1, 1, "go")
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "c.go", []Chunk{c}, [][]float64{{1}}, "c-v1", "X"); err != nil {
+		t.Fatalf("add source alongside known X and legacy unknown rows: %v", err)
+	}
+
+	b := makeChunk("b.go", "migrated b", 1, 1, "go")
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "b.go", []Chunk{b}, [][]float64{{1}}, "b-v2", "X"); err != nil {
+		t.Fatalf("migrate remaining legacy source: %v", err)
+	}
+	probe, err = store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := (VectorSpaceProbe{KnownIDs: []string{"X"}}); !reflect.DeepEqual(probe, want) {
+		t.Fatalf("probe after migration = %#v, want %#v", probe, want)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_rejectsCorpusVectorSpaceDrift(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	a := makeChunk("a.go", "a", 1, 1, "go")
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "a.go", []Chunk{a}, [][]float64{{1}}, "a-hash", "X"); err != nil {
+		t.Fatalf("seed X: %v", err)
+	}
+	b := makeChunk("b.go", "b", 1, 1, "go")
+	err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "b.go", []Chunk{b}, [][]float64{{1}}, "b-hash", "Y")
+	if !errors.Is(err, ErrVectorSpaceDrift) {
+		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID error = %v, want ErrVectorSpaceDrift", err)
+	}
+	if chunks, err := store.GetBySource(ctx, "b.go"); err != nil || len(chunks) != 0 {
+		t.Fatalf("rejected source chunks = %#v, err = %v, want none", chunks, err)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_rejectsMixedCorpusWithoutReplacingSource(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	for _, seed := range []struct {
+		source, content, hash, vectorSpaceID string
+	}{
+		{source: "target.go", content: "original", hash: "target-old", vectorSpaceID: "X"},
+		{source: "other-x.go", content: "other X", hash: "other-x", vectorSpaceID: "X"},
+		{source: "other-y.go", content: "other Y", hash: "other-y", vectorSpaceID: "Y"},
+	} {
+		chunk := makeChunk(seed.source, seed.content, 1, 1, "go")
+		if err := store.ForceReplaceSourceWithHashAndVectorSpaceID(ctx, seed.source, []Chunk{chunk}, [][]float64{{1}}, seed.hash, seed.vectorSpaceID); err != nil {
+			t.Fatalf("seed %q: %v", seed.source, err)
+		}
+	}
+	before, err := store.GetBySource(ctx, "target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHash, err := store.GetSourceHash(ctx, "target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	replacement := makeChunk("target.go", "replacement", 1, 1, "go")
+	err = store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "target.go", []Chunk{replacement}, [][]float64{{2}}, "target-new", "X")
+	if !errors.Is(err, ErrCorpusMixedVectorSpaces) {
+		t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID error = %v, want ErrCorpusMixedVectorSpaces", err)
+	}
+	after, err := store.GetBySource(ctx, "target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterHash, err := store.GetSourceHash(ctx, "target.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(after, before) || afterHash != beforeHash {
+		t.Fatalf("source changed after rejected replace: chunks before=%#v after=%#v, hash before=%q after=%q", before, after, beforeHash, afterHash)
+	}
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash_checksCorpusVectorSpace(t *testing.T) {
+	t.Run("allows legacy unknown rows with matching known space", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		legacy := makeChunk("legacy.go", "legacy", 1, 1, "go")
+		if err := store.ReplaceSourceWithHash(ctx, "legacy.go", []Chunk{legacy}, [][]float64{{1}}, "legacy-hash"); err != nil {
+			t.Fatal(err)
+		}
+		remaining := makeChunk("remaining.go", "remaining", 1, 1, "go")
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "remaining.go", []Chunk{remaining}, [][]float64{{1}}, "remaining-hash", "X"); err != nil {
+			t.Fatal(err)
+		}
+		target := makeChunk("target.go", "old", 1, 1, "go")
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, "target.go", []Chunk{target}, [][]float64{{1}}, "old-hash", "X"); err != nil {
+			t.Fatal(err)
+		}
+
+		replacement := makeChunk("target.go", "new", 1, 1, "go")
+		if err := store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "target.go", []Chunk{replacement}, [][]float64{{2}}, "new-hash", "X", "old-hash"); err != nil {
+			t.Fatalf("CAS replace alongside legacy unknown rows: %v", err)
+		}
+	})
+
+	t.Run("rejects different remaining known space", func(t *testing.T) {
+		store := newTestStore(t)
+		ctx := context.Background()
+
+		for _, seed := range []struct {
+			source, vectorSpaceID string
+		}{
+			{source: "remaining.go", vectorSpaceID: "X"},
+			{source: "target.go", vectorSpaceID: "Y"},
+		} {
+			chunk := makeChunk(seed.source, "old "+seed.source, 1, 1, "go")
+			if err := store.ForceReplaceSourceWithHashAndVectorSpaceID(ctx, seed.source, []Chunk{chunk}, [][]float64{{1}}, "old-hash", seed.vectorSpaceID); err != nil {
+				t.Fatal(err)
+			}
+		}
+		before, err := store.GetBySource(ctx, "target.go")
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		replacement := makeChunk("target.go", "new", 1, 1, "go")
+		err = store.ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx, "target.go", []Chunk{replacement}, [][]float64{{2}}, "new-hash", "Y", "old-hash")
+		if !errors.Is(err, ErrVectorSpaceDrift) {
+			t.Fatalf("CAS replace error = %v, want ErrVectorSpaceDrift", err)
+		}
+		after, getErr := store.GetBySource(ctx, "target.go")
+		if getErr != nil {
+			t.Fatal(getErr)
+		}
+		if !reflect.DeepEqual(after, before) {
+			t.Fatalf("target changed after rejected CAS: before=%#v after=%#v", before, after)
+		}
+	})
+}
+
+func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_serializesCorpusVectorSpaceCheck(t *testing.T) {
+	store, err := NewSQLiteStore(filepath.Join(t.TempDir(), "rag.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	start := make(chan struct{})
+	results := make(chan error, 2)
+
+	for _, write := range []struct {
+		source, vectorSpaceID string
+	}{
+		{source: "x.go", vectorSpaceID: "X"},
+		{source: "y.go", vectorSpaceID: "Y"},
+	} {
+		go func(source, vectorSpaceID string) {
+			<-start
+			chunk := makeChunk(source, source, 1, 1, "go")
+			results <- store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, []Chunk{chunk}, [][]float64{{1}}, source+"-hash", vectorSpaceID)
+		}(write.source, write.vectorSpaceID)
+	}
+	close(start)
+
+	var succeeded, drifted int
+	for range 2 {
+		err := <-results
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, ErrVectorSpaceDrift):
+			drifted++
+		default:
+			t.Fatalf("concurrent replace error = %v", err)
+		}
+	}
+	if succeeded != 1 || drifted != 1 {
+		t.Fatalf("concurrent replaces: succeeded=%d drifted=%d, want 1/1", succeeded, drifted)
+	}
+	probe, err := store.ProbeVectorSpaces(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(probe.KnownIDs) != 1 || probe.HasUnknown {
+		t.Fatalf("probe after concurrent replaces = %#v, want one known vector space", probe)
+	}
+}
+
 func TestSQLiteStore_ForceReplaceSourceWithHashAndVectorSpaceID_allowsExistingVectorSpaceDrift(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()

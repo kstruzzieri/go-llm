@@ -431,8 +431,9 @@ func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, 
 // to the chunks.vector_space_id column AND mirrored into the per-chunk
 // metadata JSON under the "vector_space_id" key. Non-empty chunk batches
 // require a non-empty vectorSpaceID; use ReplaceSourceWithHash for legacy
-// replacement that intentionally leaves vector_space_id empty. If this source
-// already has known vector-space rows, their id must match vectorSpaceID.
+// replacement that intentionally leaves vector_space_id empty. All known rows
+// in the corpus must share vectorSpaceID; legacy unknown rows may remain while
+// sources are migrated one at a time.
 func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
 		sourceHash:               sourceHash,
@@ -458,9 +459,9 @@ func (s *SQLiteStore) ForceReplaceSourceWithHashAndVectorSpaceID(ctx context.Con
 
 // ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash atomically replaces all
 // chunks for source only if the stored source hash still matches
-// expectedSourceHash. The existing per-source vector-space ids are checked in
-// the same transaction so incremental writers cannot reuse stale embeddings
-// after another writer has changed the source.
+// expectedSourceHash. The source and corpus vector-space ids are checked in the
+// same transaction so incremental writers cannot reuse stale embeddings or
+// introduce a second known vector space.
 func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID, expectedSourceHash string) error {
 	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
 		sourceHash:               sourceHash,
@@ -523,6 +524,9 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 	}
 	if opts.checkExistingVectorSpace && len(chunks) > 0 {
 		if err := validateExistingSourceVectorSpaceTx(ctx, tx, source, opts.vectorSpaceID, opts.allowMissingExisting, opts.allowLegacyUnknown); err != nil {
+			return err
+		}
+		if err := validateNormalCorpusVectorSpaceTx(ctx, tx, source, opts.vectorSpaceID); err != nil {
 			return err
 		}
 	}
@@ -730,6 +734,29 @@ func validateCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, excludedSource
 	}
 	if minID != "" && minID != vectorSpaceID {
 		return fmt.Errorf("%w: incoming vector space %q differs from corpus vector space %q", ErrVectorSpaceDrift, vectorSpaceID, minID)
+	}
+	return nil
+}
+
+func validateNormalCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, source, vectorSpaceID string) error {
+	// Unknown legacy rows are intentionally ignored. The ordered bookends use
+	// the non-empty VSID partial index instead of scanning the corpus per source.
+	var minID, maxID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT vector_space_id FROM chunks
+		                  WHERE source <> ? AND vector_space_id <> ''
+		                  ORDER BY vector_space_id ASC LIMIT 1), ''),
+		       COALESCE((SELECT vector_space_id FROM chunks
+		                  WHERE source <> ? AND vector_space_id <> ''
+		                  ORDER BY vector_space_id DESC LIMIT 1), '')
+		`, source, source).Scan(&minID, &maxID); err != nil {
+		return fmt.Errorf("%w: replace source %q: check corpus vector space: %w", ErrStoreOperation, source, err)
+	}
+	if minID != maxID {
+		return fmt.Errorf("%w: replace source %q: corpus has mixed vector spaces %q and %q", ErrCorpusMixedVectorSpaces, source, minID, maxID)
+	}
+	if minID != "" && minID != vectorSpaceID {
+		return fmt.Errorf("%w: replace source %q: corpus vector space %q differs from incoming %q", ErrVectorSpaceDrift, source, minID, vectorSpaceID)
 	}
 	return nil
 }
