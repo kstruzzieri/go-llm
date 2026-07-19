@@ -110,7 +110,7 @@ func TestAgentflowStatus_CompleteRequiresAndSummarizesProof(t *testing.T) {
 	if err := runAgentflowStatusWithRunner(context.Background(), &out, root, false, runner); err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"proof: verified", filepath.Join(root, ".agent", "proof-pack.json"), "checks: passed=2 warning=1 failed=0 total=3"} {
+	for _, want := range []string{"proof: verified", filepath.Join(root, ".agent", "proof-pack.json"), "checks: passed=2 warning=1 failed=0 not_run=0 skipped=0 not_applicable=0 total=3"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("output missing %q:\n%s", want, out.String())
 		}

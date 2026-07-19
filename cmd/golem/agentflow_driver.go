@@ -207,11 +207,11 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 	if !ok {
 		return fmt.Errorf("agentflow returned unknown step %q", id)
 	}
-	attempt, err := d.af.ClaimStep(ctx, id)
+	goal, err := stepGoal(d.plan, step)
 	if err != nil {
 		return err
 	}
-	goal, err := stepGoal(d.plan, step)
+	attempt, err := d.af.ClaimStep(ctx, id)
 	if err != nil {
 		return err
 	}

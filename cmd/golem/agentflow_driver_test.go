@@ -179,6 +179,23 @@ func TestDriver_HappyPathOrdering(t *testing.T) {
 	}
 }
 
+func TestDriver_RunOneStepValidatesGoalBeforeClaim(t *testing.T) {
+	af := &fakeAF{}
+	d := &driver{
+		af: af,
+		plan: &agentflow.Plan{
+			Requirements: []agentflow.Requirement{{ID: "REQ-1"}},
+			Steps:        []agentflow.Step{{ID: "P1", Gates: []agentflow.Gate{{Kind: "command"}}}},
+		},
+	}
+	if err := d.runOneStep(context.Background(), "P1"); err == nil {
+		t.Fatal("runOneStep() unexpectedly succeeded")
+	}
+	if len(af.seq) != 0 {
+		t.Fatalf("claimed before pure goal validation: %v", af.seq)
+	}
+}
+
 func TestTaskStepRunnerUsesItsRootAndAgentflowJournal(t *testing.T) {
 	root := t.TempDir()
 	plan := &agentflow.Plan{AllowedFiles: []string{"out.txt"}, Steps: []agentflow.Step{{

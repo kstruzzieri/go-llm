@@ -310,7 +310,7 @@ func TestClient_ProofSummary(t *testing.T) {
 	if err := os.Mkdir(filepath.Join(dir, ".agent"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	proof := `{"checks":[{"id":"a","status":"passed"},{"id":"b","status":"warning"},{"id":"c","status":"failed"},{"id":"d","status":"passed"}]}`
+	proof := `{"checks":[{"id":"a","status":"passed"},{"id":"b","status":"warning"},{"id":"c","status":"failed"},{"id":"d","status":"passed"},{"id":"e","status":"not_run"},{"id":"f","status":"skipped"},{"id":"g","status":"not_applicable"}]}`
 	if err := os.WriteFile(filepath.Join(dir, ".agent", "proof-pack.json"), []byte(proof), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -319,8 +319,9 @@ func TestClient_ProofSummary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.Path != filepath.Join(dir, ".agent", "proof-pack.json") || summary.Total != 4 ||
-		summary.Passed != 2 || summary.Warning != 1 || summary.Failed != 1 {
+	if summary.Path != filepath.Join(dir, ".agent", "proof-pack.json") || summary.Total != 7 ||
+		summary.Passed != 2 || summary.Warning != 1 || summary.Failed != 1 ||
+		summary.NotRun != 1 || summary.Skipped != 1 || summary.NotApplicable != 1 {
 		t.Fatalf("summary = %+v", summary)
 	}
 }

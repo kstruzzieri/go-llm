@@ -541,11 +541,14 @@ func (c *Client) failedProofCheckDiagnostics() []string {
 // It does not itself establish verification; callers must first obtain an
 // authoritative complete next-action state or a successful verify-proof.
 type ProofSummary struct {
-	Path    string
-	Total   int
-	Passed  int
-	Warning int
-	Failed  int
+	Path          string
+	Total         int
+	Passed        int
+	Warning       int
+	Failed        int
+	NotRun        int
+	Skipped       int
+	NotApplicable int
 }
 
 // ProofSummary reads the generated proof pack and counts its known check
@@ -576,6 +579,12 @@ func (c *Client) ProofSummary() (ProofSummary, error) {
 			summary.Warning++
 		case "failed":
 			summary.Failed++
+		case "not_run":
+			summary.NotRun++
+		case "skipped":
+			summary.Skipped++
+		case "not_applicable":
+			summary.NotApplicable++
 		default:
 			return ProofSummary{}, fmt.Errorf("parse Agentflow proof summary: unknown check status %q", check.Status)
 		}

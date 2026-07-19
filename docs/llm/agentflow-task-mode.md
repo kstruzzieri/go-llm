@@ -147,6 +147,98 @@ mode builds its toolset from the locked plan alone, so it refuses to start
 if any of those are also passed — it is a constrained proof surface, not a
 general-purpose agent session with a plan bolted on.
 
+## Inspecting and resuming an existing run
+
+Inspect a workspace without changing AgentFlow state:
+
+```text
+golem -root <workspace> -agentflow-status
+golem -root <workspace> -agentflow-status -json
+```
+
+Human status shows the authoritative `next-action` state and reason, current
+step/gate, attempt owner and lease, typed gate statuses, diagnostics, and the
+serial resume disposition. Any suggested command is labeled display-only and
+is never executed. JSON mode relays AgentFlow's exact `next-action --json`
+bytes. Both forms use actor `golem` and make only that read-only AgentFlow call.
+When the state is `complete`, human status reads the proof pack only after
+`next-action` has verified it, then shows the absolute artifact path and counts
+for `passed`, `warning`, `failed`, `not_run`, `skipped`, and `not_applicable`
+checks. A merely present proof file is never reported as verified.
+
+Status exit codes are stable for scripts:
+
+| Exit | Meaning |
+|---:|---|
+| `0` | Run is complete and proof is verified. |
+| `2` | A safe serial resume disposition exists. |
+| `3` | Setup is required, or recovery is blocked, invalid, or unsafe. |
+
+Resume an existing run with the original plan and the ordinary headless task
+approvals:
+
+```text
+golem -root <workspace> -agentflow-resume -plan <plan.json> \
+  -plan-workers=1 -approve-plan-edits -approve-plan-gates
+```
+
+Resume is serial-only. It rejects evidence ingestion, review manifests,
+workflow overrides, planning, one-shot, RAG, delegation, MCP, general
+write/exec, and every worker count other than one. `-task-brief` and
+`-workflow-handoff` remain optional: self-materialized task runs are resumable
+without a handoff, while a supplied planning handoff adds its existing exact
+plan/brief digest and workflow-candidate binding.
+
+Before the first mutation, Golem requires the projection to have no diagnostics
+and checks all of these bindings:
+
+- the locked plan digest equals the canonical supplied-plan digest after
+  excluding only `locked` and `locked_at`;
+- the execution-contract digest equals SHA-256 of the exact materialized file
+  bytes;
+- the existing workflow contract passes the closed-schema validator, plus the
+  handoff candidate check when a handoff is supplied;
+- an open attempt has a non-empty id, is owned exactly by `golem`, has a live
+  or no-deadline lease, and exposes one allowed automatic non-break-glass
+  `continue` action. The independent owner check also applies under advisory
+  lease policy.
+
+For `validation_missing`, projected command gates are paired by their filtered
+plan order, not by the human validation label. Each projected label must equal
+the joined plan argv; Golem runs only `missing` gates with plan-owned argv and
+never repeats a `satisfied` receipt. Known inspection/legacy projections do not
+participate in command pairing, and unknown kinds or statuses fail closed.
+After any attempt settlement, Golem performs one read-only progress check and
+refuses to repeat a mutation when the state did not change. No-settle states go
+directly into the existing serial step/tail driver.
+
+The complete disposition table is:
+
+| AgentFlow state | Exit | Resume behavior |
+|---|---:|---|
+| `uninitialized` | 3 | Setup required; never call `init`. |
+| `plan_unlocked` | 3 | Setup required; never relock. |
+| `execution_uninitialized` | 3 | Setup required; never call `init-execution`. |
+| `state_invalid` | 3 | Fail closed with diagnostics. |
+| `step_unclaimed` | 2 | Enter the existing serial step loop; claim only immediately before model work. |
+| `file_receipts_missing` | 3 | Fail closed; edits cannot be reconstructed safely. |
+| `validation_missing` | 2 | Run only typed missing command gates, then finish the owned attempt. |
+| `step_unverified` | 2 | Call the fixed `FinishStep` adapter for the owned attempt. |
+| `step_uncompleted` | 2 | Call the fixed `CompleteStep` adapter without re-verifying. |
+| `drift_failing` | 3 | Fail closed for operator inspection. |
+| `run_unverified` | 2 | Enter the serial tail and call `FinishRun` once. |
+| `proof_missing` | 2 | Call `FinishRun` once to generate and verify the first proof. |
+| `proof_stale` | 3 | Fail closed; do not overwrite proof after changed inputs. |
+| `proof_failing` | 3 | Fail closed; preserve the failing proof. |
+| `complete` | 0 | Report verified proof and perform no mutation. |
+
+Unknown future states fail closed. Resume never initializes, locks, records
+evidence or reviews, renews/reclaims leases, re-runs a model for an open
+attempt, executes advisory command strings, rebuilds stale/failing proof, or
+starts parallel recovery. Normal interactive startup only detects a
+case-insensitive `.agent` directory and prints the status/resume commands; it
+does not inspect or mutate the ledgers.
+
 ## Workflow routing in task mode
 
 An external plan without `-task-brief` remains backward-compatible through a
@@ -323,10 +415,9 @@ Still deferred:
 
 - Semantic verification — P0 gates are mechanical, command-based checks only
   (`kind: command`); there is no model-judged review of a step's output.
-- Resuming an interrupted run.
-- Dynamic waves, retries or reclaim, shared-tree/process/host writers,
+- Parallel resume, dynamic waves, retries or reclaim, shared-tree/process/host writers,
   glob/directory ownership, and merge or conflict automation. This is not a
-  resume API, scheduler, or general parallel execution mode.
+  scheduler or general parallel execution mode.
 
 AgentFlow's `next-action` output is surfaced to the operator on a failed run
 for recovery context, but it is advisory only: Golem prints the suggested

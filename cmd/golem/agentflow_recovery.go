@@ -426,7 +426,7 @@ func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof
 	}
 	fmt.Fprintf(out, "resume: %s\n", resumeDisposition(state.State).description)
 	if proof != nil {
-		fmt.Fprintf(out, "proof: verified\nartifact: %s\nchecks: passed=%d warning=%d failed=%d total=%d\n",
-			proof.Path, proof.Passed, proof.Warning, proof.Failed, proof.Total)
+		fmt.Fprintf(out, "proof: verified\nartifact: %s\nchecks: passed=%d warning=%d failed=%d not_run=%d skipped=%d not_applicable=%d total=%d\n",
+			proof.Path, proof.Passed, proof.Warning, proof.Failed, proof.NotRun, proof.Skipped, proof.NotApplicable, proof.Total)
 	}
 }

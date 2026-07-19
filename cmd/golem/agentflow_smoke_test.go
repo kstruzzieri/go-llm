@@ -5,13 +5,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -78,6 +81,159 @@ func TestAgentflowSmoke(t *testing.T) {
 	if string(got) != "expected\n" {
 		t.Fatalf("src/answer.txt = %q, want %q", got, "expected\n")
 	}
+}
+
+func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
+	dir := t.TempDir()
+	copyTree(t, "../../testdata/agentflow", dir)
+	gitInit(t, dir)
+	runner := agentflowRunnerOrSkip(t, dir)
+	client := agentflow.NewOwnedClient(runner, dir, "golem")
+	ctx := context.Background()
+	planBytes, err := os.ReadFile(filepath.Join(dir, "plan.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var plan agentflow.Plan
+	if err := json.Unmarshal(planBytes, &plan); err != nil {
+		t.Fatal(err)
+	}
+	recommendation, err := client.RecommendWorkflow(ctx, agentflow.TaskBriefFromPlan(plan, "feature"), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.LockPlan(ctx, filepath.Join(dir, "plan.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.MaterializeWorkflowContract(ctx, recommendation); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.InitExecution(ctx); err != nil {
+		t.Fatal(err)
+	}
+	attempt, err := client.ClaimStep(ctx, "P1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "src", "answer.txt"), []byte("expected\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := client.RecordFileChange(ctx, "P1", attempt, "src/answer.txt"); err != nil {
+		t.Fatal(err)
+	}
+
+	state, err := client.NextAction(ctx)
+	if err != nil || state.State != "validation_missing" {
+		t.Fatalf("state=%q err=%v", state.State, err)
+	}
+	wantPlanDigest, err := canonicalPlanJSONSHA256(planBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Resumability == nil || state.Resumability.Contract == nil || state.Resumability.Contract.PlanSHA256 != wantPlanDigest {
+		t.Fatalf("plan binding = %+v, want %s", state.Resumability, wantPlanDigest)
+	}
+	executionBytes, err := os.ReadFile(filepath.Join(dir, ".agent", "execution.contract.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := fmt.Sprintf("%x", sha256.Sum256(executionBytes)); state.Resumability.Contract.ExecutionContractSHA256 != want {
+		t.Fatalf("execution binding = %s, want %s", state.Resumability.Contract.ExecutionContractSHA256, want)
+	}
+
+	before := snapshotSmokeAgentTree(t, dir)
+	var status bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(ctx, &status, dir, false, runner)
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 2 {
+		t.Fatalf("status error = %v", statusErr)
+	}
+	if after := snapshotSmokeAgentTree(t, dir); !reflect.DeepEqual(after, before) {
+		t.Fatal("read-only status mutated .agent")
+	}
+	if !strings.Contains(status.String(), "state: validation_missing") || !strings.Contains(status.String(), "advisory (display only):") {
+		t.Fatalf("status output = %s", status.String())
+	}
+
+	d := &driver{
+		af: client, plan: &plan,
+		runStep: func(context.Context, agentflow.Step, string, string) error {
+			return errors.New("resume reran an already-started model step")
+		},
+	}
+	final, err := d.resume(ctx, dir, planBytes, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("resume state=%q err=%v", final.State, err)
+	}
+	summary, err := client.ProofSummary()
+	if err != nil || summary.Total == 0 || summary.Failed != 0 {
+		t.Fatalf("proof summary = %+v, err=%v", summary, err)
+	}
+	out, errOut, exitCode, runErr := runner.Run(ctx, []string{"verify-proof", "--root", dir}, nil)
+	if runErr != nil || exitCode != 0 {
+		t.Fatalf("verify-proof: exit=%d err=%v stdout=%s stderr=%s", exitCode, runErr, out, errOut)
+	}
+
+	receipts, err := os.ReadFile(filepath.Join(dir, ".agent", "command-receipts.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lines := strings.Split(strings.TrimSpace(string(receipts)), "\n"); len(lines) != 1 {
+		t.Fatalf("command receipts = %d, want exactly one: %s", len(lines), receipts)
+	}
+	stepRuns, err := os.ReadFile(filepath.Join(dir, ".agent", "step-runs.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(stepRuns)), "\n") {
+		var event struct {
+			Event string `json:"event"`
+		}
+		if err := json.Unmarshal([]byte(line), &event); err != nil {
+			t.Fatal(err)
+		}
+		if event.Event == "claimed" {
+			claims++
+		}
+	}
+	if claims != 1 {
+		t.Fatalf("claim events = %d, want exactly one", claims)
+	}
+}
+
+func snapshotSmokeAgentTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snapshot := map[string]string{}
+	err := filepath.WalkDir(filepath.Join(root, ".agent"), func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			return nil
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		snapshot[rel] = fmt.Sprintf("%04o:%x", info.Mode().Perm(), sha256.Sum256(data))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 type parallelSmokeCall struct {
