@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 )
@@ -1194,6 +1195,41 @@ func TestSQLiteStore_ReplaceSourceWithHashAndVectorSpaceID_serializesCorpusVecto
 	}
 	if len(probe.KnownIDs) != 1 || probe.HasUnknown {
 		t.Fatalf("probe after concurrent replaces = %#v, want one known vector space", probe)
+	}
+}
+
+func TestSQLiteStore_NormalCorpusVectorSpaceBookendsUseCoveringIndex(t *testing.T) {
+	store := newTestStore(t)
+	rows, err := store.db.Query(`EXPLAIN QUERY PLAN ` + normalCorpusVectorSpaceBookendsSQL)
+	if err != nil {
+		t.Fatalf("explain normal corpus vector-space bookends: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	const coveringIndex = "USING COVERING INDEX idx_chunks_vector_space_id_nonempty"
+	var coveringBookends int
+	for rows.Next() {
+		var (
+			id     int
+			parent int
+			notUsd int
+			detail string
+		)
+		if err := rows.Scan(&id, &parent, &notUsd, &detail); err != nil {
+			t.Fatalf("scan normal corpus vector-space plan: %v", err)
+		}
+		if strings.Contains(detail, "USE TEMP B-TREE") {
+			t.Fatalf("normal corpus vector-space bookends require a temporary sort:\n%s", detail)
+		}
+		if strings.Contains(detail, coveringIndex) {
+			coveringBookends++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("normal corpus vector-space plan rows: %v", err)
+	}
+	if coveringBookends != 2 {
+		t.Fatalf("normal corpus vector-space plan has %d covering-index bookends, want 2", coveringBookends)
 	}
 }
 

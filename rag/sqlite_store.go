@@ -738,10 +738,34 @@ func validateCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, excludedSource
 	return nil
 }
 
+const normalCorpusVectorSpaceBookendsSQL = `
+	SELECT COALESCE((SELECT vector_space_id FROM chunks
+	                  WHERE vector_space_id <> ''
+	                  ORDER BY vector_space_id ASC LIMIT 1), ''),
+	       COALESCE((SELECT vector_space_id FROM chunks
+	                  WHERE vector_space_id <> ''
+	                  ORDER BY vector_space_id DESC LIMIT 1), '')`
+
 func validateNormalCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, source, vectorSpaceID string) error {
-	// Unknown legacy rows are intentionally ignored. The ordered bookends use
-	// the non-empty VSID partial index instead of scanning the corpus per source.
+	// Unknown legacy rows are intentionally ignored. Probe the whole corpus
+	// first so successful writes need only two covering-index bookend reads.
+	// The preceding per-source validation guarantees any known rows belonging
+	// to source already match vectorSpaceID.
 	var minID, maxID string
+	if err := tx.QueryRowContext(ctx, normalCorpusVectorSpaceBookendsSQL).Scan(&minID, &maxID); err != nil {
+		return fmt.Errorf("%w: replace source %q: check corpus vector space: %w", ErrStoreOperation, source, err)
+	}
+	if minID == maxID {
+		if minID == "" || minID == vectorSpaceID {
+			return nil
+		}
+		return fmt.Errorf("%w: replace source %q: corpus vector space %q differs from incoming %q", ErrVectorSpaceDrift, source, minID, vectorSpaceID)
+	}
+
+	// A mismatch is already a rejected write. Exclude the target source only
+	// on this diagnostic path to distinguish a uniformly different remainder
+	// (drift) from a remainder that is itself mixed.
+	var remainingMinID, remainingMaxID string
 	if err := tx.QueryRowContext(ctx, `
 		SELECT COALESCE((SELECT vector_space_id FROM chunks
 		                  WHERE source <> ? AND vector_space_id <> ''
@@ -749,16 +773,13 @@ func validateNormalCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, source, 
 		       COALESCE((SELECT vector_space_id FROM chunks
 		                  WHERE source <> ? AND vector_space_id <> ''
 		                  ORDER BY vector_space_id DESC LIMIT 1), '')
-		`, source, source).Scan(&minID, &maxID); err != nil {
-		return fmt.Errorf("%w: replace source %q: check corpus vector space: %w", ErrStoreOperation, source, err)
+		`, source, source).Scan(&remainingMinID, &remainingMaxID); err != nil {
+		return fmt.Errorf("%w: replace source %q: diagnose corpus vector space: %w", ErrStoreOperation, source, err)
 	}
-	if minID != maxID {
-		return fmt.Errorf("%w: replace source %q: corpus has mixed vector spaces %q and %q", ErrCorpusMixedVectorSpaces, source, minID, maxID)
+	if remainingMinID == remainingMaxID && remainingMinID != "" && remainingMinID != vectorSpaceID {
+		return fmt.Errorf("%w: replace source %q: corpus vector space %q differs from incoming %q", ErrVectorSpaceDrift, source, remainingMinID, vectorSpaceID)
 	}
-	if minID != "" && minID != vectorSpaceID {
-		return fmt.Errorf("%w: replace source %q: corpus vector space %q differs from incoming %q", ErrVectorSpaceDrift, source, minID, vectorSpaceID)
-	}
-	return nil
+	return fmt.Errorf("%w: replace source %q: corpus has mixed vector spaces %q and %q", ErrCorpusMixedVectorSpaces, source, minID, maxID)
 }
 
 // Search finds the top-k most similar chunks using brute-force cosine similarity.
