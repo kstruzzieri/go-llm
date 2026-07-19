@@ -448,7 +448,9 @@ func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context,
 // ForceReplaceSourceWithHashAndVectorSpaceID is the explicit full-reindex path:
 // it preserves the atomic replace and non-empty-vsid requirements, but it does
 // not reject an existing source whose stored vector space differs from the
-// incoming vectorSpaceID. Use this for deliberate full-corpus migrations.
+// incoming vectorSpaceID, and it skips the corpus-wide single-vector-space
+// guard, so the corpus may stay mixed until every source is force-replaced.
+// Use this for deliberate full-corpus migrations.
 func (s *SQLiteStore) ForceReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
 		sourceHash:           sourceHash,
