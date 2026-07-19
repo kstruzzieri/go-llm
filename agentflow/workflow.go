@@ -191,6 +191,13 @@ func (r WorkflowRecommendation) VerifyMaterializedWorkflowContract(data []byte) 
 	return nil
 }
 
+// ValidateMaterializedWorkflowContract applies the same closed-schema checks
+// used for a recommended candidate when no planning handoff is available.
+func ValidateMaterializedWorkflowContract(data []byte) error {
+	_, err := parseWorkflowContract(data)
+	return err
+}
+
 type recommendationProjection struct {
 	SchemaVersion             *string                `json:"schema_version"`
 	Recommended               *WorkflowSelection     `json:"recommended"`

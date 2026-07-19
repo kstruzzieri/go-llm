@@ -356,6 +356,14 @@ func (c *Client) FinishStep(ctx context.Context, step, attempt string) error {
 	return err
 }
 
+// CompleteStep closes an already-verified attempt without recording another
+// verification run.
+func (c *Client) CompleteStep(ctx context.Context, step, attempt string) error {
+	args := append([]string{"complete-step", step}, c.rootArgs("--attempt", attempt, "--agent", c.agentName(), "--json")...)
+	_, err := c.call(ctx, "complete-step", args, true)
+	return err
+}
+
 // AggregateLedgers combines worker ledgers into this client's root. A valid
 // collision report is returned as *AggregationCollisionError rather than being
 // collapsed into CommandError, so callers can roll back promotion safely.
@@ -529,28 +537,84 @@ func (c *Client) failedProofCheckDiagnostics() []string {
 	return diagnostics
 }
 
+// ProofSummary is a compact projection of Agentflow's generated proof checks.
+// It does not itself establish verification; callers must first obtain an
+// authoritative complete next-action state or a successful verify-proof.
+type ProofSummary struct {
+	Path    string
+	Total   int
+	Passed  int
+	Warning int
+	Failed  int
+}
+
+// ProofSummary reads the generated proof pack and counts its known check
+// statuses. Unknown or absent check data fails closed.
+func (c *Client) ProofSummary() (ProofSummary, error) {
+	path := filepath.Join(c.root, ".agent", "proof-pack.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ProofSummary{}, fmt.Errorf("read Agentflow proof summary: %w", err)
+	}
+	var proof struct {
+		Checks *[]struct {
+			Status string `json:"status"`
+		} `json:"checks"`
+	}
+	if err := json.Unmarshal(b, &proof); err != nil {
+		return ProofSummary{}, fmt.Errorf("parse Agentflow proof summary: %w", err)
+	}
+	if proof.Checks == nil {
+		return ProofSummary{}, errors.New("parse Agentflow proof summary: checks must be an array")
+	}
+	summary := ProofSummary{Path: path, Total: len(*proof.Checks)}
+	for _, check := range *proof.Checks {
+		switch check.Status {
+		case "passed":
+			summary.Passed++
+		case "warning":
+			summary.Warning++
+		case "failed":
+			summary.Failed++
+		default:
+			return ProofSummary{}, fmt.Errorf("parse Agentflow proof summary: unknown check status %q", check.Status)
+		}
+	}
+	return summary, nil
+}
+
 // NextActionState is the advisory recovery hint agentflow's next-action reports.
 // It is printed, never executed: proof state stays adapter-driven.
 type NextActionState struct {
 	State        string                  `json:"state"`
 	Reason       string                  `json:"reason"`
+	Blocking     bool                    `json:"blocking"`
 	Command      string                  `json:"command"`
 	Args         []string                `json:"args"`
+	StepID       *string                 `json:"step_id"`
+	Gate         *string                 `json:"gate"`
 	Diagnostics  []string                `json:"diagnostics"`
 	Resumability *ResumabilityProjection `json:"resumability"`
+	RawJSON      []byte                  `json:"-"`
 }
 
 // ResumabilityProjection is the subset of next-action state required to prove
 // an owned worktree has not started execution.
 type ResumabilityProjection struct {
-	Contract    *ResumabilityContract    `json:"contract"`
-	AgentID     string                   `json:"agent_id"`
-	Step        *ResumabilityStep        `json:"step"`
-	Attempt     *ResumabilityAttempt     `json:"attempt"`
-	Diagnostics []ResumabilityDiagnostic `json:"diagnostics"`
+	Contract        *ResumabilityContract        `json:"contract"`
+	AgentID         string                       `json:"agent_id"`
+	Step            *ResumabilityStep            `json:"step"`
+	Attempt         *ResumabilityAttempt         `json:"attempt"`
+	Lease           *ResumabilityLease           `json:"lease"`
+	Gates           []ResumabilityGate           `json:"gates"`
+	RecoveryActions []ResumabilityRecoveryAction `json:"recovery_actions"`
+	Diagnostics     []ResumabilityDiagnostic     `json:"diagnostics"`
 
-	attemptPresent     bool
-	diagnosticsPresent bool
+	attemptPresent         bool
+	leasePresent           bool
+	gatesPresent           bool
+	recoveryActionsPresent bool
+	diagnosticsPresent     bool
 }
 
 // UnmarshalJSON preserves whether fields required for fresh-worker validation
@@ -567,15 +631,32 @@ func (p *ResumabilityProjection) UnmarshalJSON(data []byte) error {
 	}
 	*p = ResumabilityProjection(decoded)
 	_, p.attemptPresent = fields["attempt"]
+	_, p.leasePresent = fields["lease"]
+	_, p.gatesPresent = fields["gates"]
+	_, p.recoveryActionsPresent = fields["recovery_actions"]
 	_, p.diagnosticsPresent = fields["diagnostics"]
-	if raw, ok := fields["diagnostics"]; ok && strings.TrimSpace(string(raw)) == "null" {
-		return errors.New("resumability diagnostics must be an array")
+	for _, name := range []string{"gates", "recovery_actions", "diagnostics"} {
+		if raw, ok := fields[name]; ok && strings.TrimSpace(string(raw)) == "null" {
+			return fmt.Errorf("resumability %s must be an array", name)
+		}
 	}
 	return nil
 }
 
 // HasAttemptField reports whether Agentflow explicitly projected attempt state.
 func (p *ResumabilityProjection) HasAttemptField() bool { return p != nil && p.attemptPresent }
+
+// HasLeaseField reports whether Agentflow explicitly projected lease state.
+func (p *ResumabilityProjection) HasLeaseField() bool { return p != nil && p.leasePresent }
+
+// HasGatesField reports whether Agentflow explicitly projected gate state.
+func (p *ResumabilityProjection) HasGatesField() bool { return p != nil && p.gatesPresent }
+
+// HasRecoveryActionsField reports whether Agentflow explicitly projected
+// actor-specific recovery permissions.
+func (p *ResumabilityProjection) HasRecoveryActionsField() bool {
+	return p != nil && p.recoveryActionsPresent
+}
 
 // HasDiagnosticsField reports whether Agentflow explicitly projected diagnostics.
 func (p *ResumabilityProjection) HasDiagnosticsField() bool {
@@ -600,8 +681,40 @@ type ResumabilityStep struct {
 
 // ResumabilityAttempt is a projected open or closed step attempt.
 type ResumabilityAttempt struct {
-	ID   string `json:"id"`
-	Open bool   `json:"open"`
+	ID    string `json:"id"`
+	State string `json:"state"`
+	Owner string `json:"owner"`
+	Open  bool   `json:"open"`
+}
+
+// ResumabilityLease is Agentflow's evaluated lease state for the projected
+// attempt.
+type ResumabilityLease struct {
+	Policy       *string `json:"policy"`
+	TTLMinutes   *int    `json:"ttl_minutes"`
+	GraceSeconds *int    `json:"grace_seconds"`
+	ExpiresAt    *string `json:"expires_at"`
+	State        string  `json:"state"`
+	Exclusive    bool    `json:"exclusive"`
+}
+
+// ResumabilityGate is one typed gate status for the projected attempt.
+type ResumabilityGate struct {
+	Kind       string  `json:"kind"`
+	Label      string  `json:"label"`
+	Status     string  `json:"status"`
+	ReceiptID  *string `json:"receipt_id"`
+	EvidenceID *string `json:"evidence_id"`
+}
+
+// ResumabilityRecoveryAction is one actor-specific operation Agentflow allows
+// or denies. Golem maps the action name to its own fixed adapter calls.
+type ResumabilityRecoveryAction struct {
+	Action     string `json:"action"`
+	Allowed    bool   `json:"allowed"`
+	Automatic  bool   `json:"automatic"`
+	BreakGlass bool   `json:"break_glass"`
+	Reason     string `json:"reason"`
 }
 
 // ResumabilityDiagnostic is one projected execution diagnostic record.
@@ -625,6 +738,7 @@ func (c *Client) NextAction(ctx context.Context) (NextActionState, error) {
 	if err := json.Unmarshal(out, &st); err != nil {
 		return NextActionState{}, fmt.Errorf("agentflow next-action: parse %q: %w", out, err)
 	}
+	st.RawJSON = append([]byte(nil), out...)
 	return st, nil
 }
 
