@@ -30,6 +30,9 @@ type fakeAF struct {
 	selectedProfiles   []string
 	reasons            []string
 	materializedRoutes []string
+	gateArgv           [][]string
+	nextActions        []agentflow.NextActionState
+	nextActionIndex    int
 }
 
 func (f *fakeAF) failure(name string) error {
@@ -100,11 +103,16 @@ func (f *fakeAF) AmendStep(_ context.Context, id string, refs []string) (string,
 }
 func (f *fakeAF) RunGate(_ context.Context, step, attempt, gate string, argv []string) error {
 	f.seq = append(f.seq, "gate:"+step+":"+gate)
+	f.gateArgv = append(f.gateArgv, append([]string(nil), argv...))
 	return f.failure("gate")
 }
 func (f *fakeAF) FinishStep(_ context.Context, id, attempt string) error {
 	f.seq = append(f.seq, "finish-step:"+id+":"+attempt)
 	return f.failure("finish-step")
+}
+func (f *fakeAF) CompleteStep(_ context.Context, id, attempt string) error {
+	f.seq = append(f.seq, "complete-step:"+id+":"+attempt)
+	return f.failure("complete-step")
 }
 func (f *fakeAF) FinishRun(context.Context) (string, error) {
 	f.seq = append(f.seq, "finish-run")
@@ -122,6 +130,12 @@ func (f *fakeAF) RecordEvidence(_ context.Context, e agentflow.EvidenceEntry) er
 	return nil
 }
 func (f *fakeAF) NextAction(context.Context) (agentflow.NextActionState, error) {
+	f.seq = append(f.seq, "next-action")
+	if f.nextActionIndex < len(f.nextActions) {
+		state := f.nextActions[f.nextActionIndex]
+		f.nextActionIndex++
+		return state, f.failure("next-action")
+	}
 	return agentflow.NextActionState{}, nil
 }
 

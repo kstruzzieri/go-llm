@@ -41,6 +41,7 @@ type afClient interface {
 	AmendStep(context.Context, string, []string) (string, error)
 	RunGate(context.Context, string, string, string, []string) error
 	FinishStep(context.Context, string, string) error
+	CompleteStep(context.Context, string, string) error
 	FinishRun(context.Context) (string, error)
 	RecordFileChange(context.Context, string, string, string) error
 	RecordEvidence(context.Context, agentflow.EvidenceEntry) error
@@ -175,17 +176,8 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("run parallel cohort: %w", err)
 		}
 	}
-	for {
-		id, err := d.af.NextStep(ctx)
-		if err != nil {
-			return "", err
-		}
-		if id == "" {
-			break // no eligible step remains
-		}
-		if err := d.runOneStep(ctx, id); err != nil {
-			return "", err
-		}
+	if err := d.runSerialSteps(ctx); err != nil {
+		return "", err
 	}
 	if d.reviewManifest != "" {
 		if err := d.runReviewAmendments(ctx); err != nil {
@@ -193,6 +185,21 @@ func (d *driver) run(ctx context.Context) (string, error) {
 		}
 	}
 	return d.af.FinishRun(ctx)
+}
+
+func (d *driver) runSerialSteps(ctx context.Context) error {
+	for {
+		id, err := d.af.NextStep(ctx)
+		if err != nil {
+			return err
+		}
+		if id == "" {
+			return nil
+		}
+		if err := d.runOneStep(ctx, id); err != nil {
+			return err
+		}
+	}
 }
 
 func (d *driver) runOneStep(ctx context.Context, id string) error {
