@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
@@ -415,6 +420,201 @@ func TestParseFlags_TaskMode(t *testing.T) {
 	}
 	if f.planPath != "plan.json" || !f.approveEdits || !f.approveGates {
 		t.Fatalf("flags = %+v", f)
+	}
+}
+
+func TestParseFlags_AgentflowStatus(t *testing.T) {
+	f, err := parseFlags([]string{"-agentflow-status", "-json", "-root", "/work", "-agentflow-src", "/src"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.agentflowStatus || !f.jsonOutput || f.agentflowResume {
+		t.Fatalf("flags = %+v", f)
+	}
+	if err := validateFlags(f); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestParseFlags_AgentflowResume(t *testing.T) {
+	args := []string{
+		"-agentflow-resume", "-plan", "plan.json", "-plan-workers", "1",
+		"-approve-plan-edits", "-approve-plan-gates", "-task-brief", "brief.json", "-workflow-handoff", "route.json",
+	}
+	f, err := parseFlags(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.agentflowResume || f.agentflowStatus || f.planWorkers != 1 {
+		t.Fatalf("flags = %+v", f)
+	}
+	if err := validateFlags(f); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestValidateFlags_AgentflowRecovery(t *testing.T) {
+	validResume := []string{"-agentflow-resume", "-plan", "plan.json", "-approve-plan-edits", "-approve-plan-gates"}
+	tests := [][]string{
+		{"-agentflow-status", "-agentflow-resume"},
+		{"-json"},
+		{"-agentflow-resume"},
+		{"-agentflow-resume", "-plan", "plan.json", "-plan-workers", "2", "-approve-plan-edits", "-approve-plan-gates"},
+	}
+	conflicts := [][]string{
+		{"-p", "do it"},
+		{"-goal", "plan it"},
+		{"-review-manifest", "review.json"},
+		{"-evidence", "evidence.json"},
+		{"-workflow-profile", "high-risk", "-workflow-reason", "override"},
+		{"-rag-db", "rag.db"},
+		{"-delegate"},
+		{"-mcp-stdio", "server"},
+		{"-allow-write"},
+		{"-allow-exec"},
+		{"-approve-plan-lock"},
+	}
+	for _, conflict := range conflicts {
+		tests = append(tests, append([]string{"-agentflow-status"}, conflict...))
+		tests = append(tests, append(append([]string(nil), validResume...), conflict...))
+	}
+	for _, args := range tests {
+		f, err := parseFlags(args)
+		if err != nil {
+			t.Fatalf("parseFlags(%v): %v", args, err)
+		}
+		if err := validateFlags(f); err == nil {
+			t.Errorf("validateFlags(%v) unexpectedly succeeded", args)
+		}
+	}
+}
+
+func writeFakeAgentflow(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agentflow")
+	script := "#!/bin/sh\nprintf '%s' \"$GOLEM_AGENTFLOW_STATUS_PAYLOAD\"\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestRun_AgentflowStatusDispatchesBeforeConfig(t *testing.T) {
+	root := t.TempDir()
+	payload := []byte("{\"state\":\"uninitialized\"}\n")
+	t.Setenv("PATH", writeFakeAgentflow(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("GOLEM_AGENTFLOW_STATUS_PAYLOAD", string(payload))
+	out, err := os.CreateTemp(t.TempDir(), "stdout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer out.Close()
+	errOut, err := os.CreateTemp(t.TempDir(), "stderr")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer errOut.Close()
+
+	err = run([]string{
+		"-agentflow-status", "-json", "-root", root,
+		"-config", filepath.Join(root, "missing-models.json"),
+	}, os.Stdin, out, errOut)
+	var statusErr *agentflowStatusExit
+	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+		t.Fatalf("run error = %v", err)
+	}
+	if _, err := out.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(out.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatalf("stdout = %q, want %q", got, payload)
+	}
+}
+
+func TestAgentflowStatusExitHelper(t *testing.T) {
+	if os.Getenv("GOLEM_AGENTFLOW_STATUS_EXIT_HELPER") != "1" {
+		return
+	}
+	os.Args = []string{
+		"golem", "-agentflow-status", "-json", "-root", os.Getenv("GOLEM_AGENTFLOW_STATUS_ROOT"),
+		"-config", filepath.Join(os.Getenv("GOLEM_AGENTFLOW_STATUS_ROOT"), "missing-models.json"),
+	}
+	main()
+	os.Exit(0)
+}
+
+func TestAgentflowStatusExitCodesDoNotPrintGenericErrors(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("PATH", writeFakeAgentflow(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
+	for _, test := range []struct {
+		state string
+		exit  int
+	}{
+		{state: "complete", exit: 0},
+		{state: "step_unclaimed", exit: 2},
+		{state: "uninitialized", exit: 3},
+	} {
+		t.Run(test.state, func(t *testing.T) {
+			payload := fmt.Sprintf("{\"state\":%q}\n", test.state)
+			cmd := exec.Command(os.Args[0], "-test.run=^TestAgentflowStatusExitHelper$")
+			cmd.Env = append(os.Environ(),
+				"GOLEM_AGENTFLOW_STATUS_EXIT_HELPER=1",
+				"GOLEM_AGENTFLOW_STATUS_ROOT="+root,
+				"GOLEM_AGENTFLOW_STATUS_PAYLOAD="+payload,
+			)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			gotExit := 0
+			if err != nil {
+				var exitErr *exec.ExitError
+				if !errors.As(err, &exitErr) {
+					t.Fatal(err)
+				}
+				gotExit = exitErr.ExitCode()
+			}
+			if gotExit != test.exit {
+				t.Fatalf("exit = %d, want %d; stderr=%q", gotExit, test.exit, stderr.String())
+			}
+			if strings.Contains(stderr.String(), "golem:") {
+				t.Fatalf("generic error leaked to stderr: %q", stderr.String())
+			}
+			if stdout.String() != payload {
+				t.Fatalf("stdout = %q, want %q", stdout.String(), payload)
+			}
+		})
+	}
+}
+
+func TestAgentflowStartupHintOnlyInOrdinaryInteractiveMode(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		f    flags
+		want bool
+	}{
+		{name: "interactive", want: true},
+		{name: "one shot", f: flags{promptSet: true}},
+		{name: "task", f: flags{planPath: "plan.json"}},
+		{name: "planning", f: flags{goalSet: true}},
+		{name: "status", f: flags{agentflowStatus: true}},
+		{name: "resume", f: flags{agentflowResume: true, planPath: "plan.json"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := shouldShowAgentflowHint(test.f); got != test.want {
+				t.Fatalf("shouldShowAgentflowHint() = %t, want %t", got, test.want)
+			}
+		})
+	}
+
+	lines := startupNotices(startupInfo{workspace: "/work", agentflowState: true})
+	want := "agentflow state detected: inspect with -agentflow-status; resume with -agentflow-resume -plan <plan>"
+	if !strings.Contains(strings.Join(lines, "\n"), want) {
+		t.Fatalf("startup notices missing %q: %v", want, lines)
 	}
 }
 

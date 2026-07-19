@@ -539,7 +539,11 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		}
 		return agentflow.NewExecRunner(root)
 	}
-	client := agentflow.NewClient(runnerForRoot(root), root)
+	rootRunner := runnerForRoot(root)
+	client := agentflow.NewClient(rootRunner, root)
+	if f.agentflowResume {
+		client = agentflow.NewOwnedClient(rootRunner, root, "golem")
+	}
 
 	// 4. Run context we can cancel on a fatal record failure.
 	runCtx, cancel := context.WithCancel(ctx)
@@ -558,6 +562,21 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		taskBrief: taskBrief, workflowProfile: f.workflowProfile, workflowReason: f.workflowReason,
 		approvedRecommendation: approvedRecommendation,
 		evidence:               evidence, runStep: runStep, out: stdout,
+	}
+	if f.agentflowResume {
+		final, err := d.resume(runCtx, root, planBytes, approvedRecommendation)
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "agentflow resume failed: %v\n", err)
+			reportAgentflowRecovery(ctx, stderr, client)
+			return errAgentflowTaskFailed
+		}
+		summary, err := client.ProofSummary()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "agentflow resume failed: %v\n", err)
+			return errAgentflowTaskFailed
+		}
+		renderAgentflowStatus(stdout, final, &summary)
+		return nil
 	}
 	var coordinator *parallelCoordinator
 	if f.planWorkers > 1 {
