@@ -431,8 +431,9 @@ func (s *SQLiteStore) ReplaceSourceWithHash(ctx context.Context, source string, 
 // to the chunks.vector_space_id column AND mirrored into the per-chunk
 // metadata JSON under the "vector_space_id" key. Non-empty chunk batches
 // require a non-empty vectorSpaceID; use ReplaceSourceWithHash for legacy
-// replacement that intentionally leaves vector_space_id empty. If this source
-// already has known vector-space rows, their id must match vectorSpaceID.
+// replacement that intentionally leaves vector_space_id empty. All known rows
+// in the corpus must share vectorSpaceID; legacy unknown rows may remain while
+// sources are migrated one at a time.
 func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
 		sourceHash:               sourceHash,
@@ -447,7 +448,9 @@ func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceID(ctx context.Context,
 // ForceReplaceSourceWithHashAndVectorSpaceID is the explicit full-reindex path:
 // it preserves the atomic replace and non-empty-vsid requirements, but it does
 // not reject an existing source whose stored vector space differs from the
-// incoming vectorSpaceID. Use this for deliberate full-corpus migrations.
+// incoming vectorSpaceID, and it skips the corpus-wide single-vector-space
+// guard, so the corpus may stay mixed until every source is force-replaced.
+// Use this for deliberate full-corpus migrations.
 func (s *SQLiteStore) ForceReplaceSourceWithHashAndVectorSpaceID(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID string) error {
 	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
 		sourceHash:           sourceHash,
@@ -458,9 +461,9 @@ func (s *SQLiteStore) ForceReplaceSourceWithHashAndVectorSpaceID(ctx context.Con
 
 // ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash atomically replaces all
 // chunks for source only if the stored source hash still matches
-// expectedSourceHash. The existing per-source vector-space ids are checked in
-// the same transaction so incremental writers cannot reuse stale embeddings
-// after another writer has changed the source.
+// expectedSourceHash. The source and corpus vector-space ids are checked in the
+// same transaction so incremental writers cannot reuse stale embeddings or
+// introduce a second known vector space.
 func (s *SQLiteStore) ReplaceSourceWithHashAndVectorSpaceIDIfSourceHash(ctx context.Context, source string, chunks []Chunk, embeddings [][]float64, sourceHash, vectorSpaceID, expectedSourceHash string) error {
 	return s.replaceSource(ctx, source, chunks, embeddings, replaceSourceOptions{
 		sourceHash:               sourceHash,
@@ -523,6 +526,9 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 	}
 	if opts.checkExistingVectorSpace && len(chunks) > 0 {
 		if err := validateExistingSourceVectorSpaceTx(ctx, tx, source, opts.vectorSpaceID, opts.allowMissingExisting, opts.allowLegacyUnknown); err != nil {
+			return err
+		}
+		if err := validateNormalCorpusVectorSpaceTx(ctx, tx, source, opts.vectorSpaceID); err != nil {
 			return err
 		}
 	}
@@ -732,6 +738,50 @@ func validateCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, excludedSource
 		return fmt.Errorf("%w: incoming vector space %q differs from corpus vector space %q", ErrVectorSpaceDrift, vectorSpaceID, minID)
 	}
 	return nil
+}
+
+const normalCorpusVectorSpaceBookendsSQL = `
+	SELECT COALESCE((SELECT vector_space_id FROM chunks
+	                  WHERE vector_space_id <> ''
+	                  ORDER BY vector_space_id ASC LIMIT 1), ''),
+	       COALESCE((SELECT vector_space_id FROM chunks
+	                  WHERE vector_space_id <> ''
+	                  ORDER BY vector_space_id DESC LIMIT 1), '')`
+
+func validateNormalCorpusVectorSpaceTx(ctx context.Context, tx *sql.Tx, source, vectorSpaceID string) error {
+	// Unknown legacy rows are intentionally ignored. Probe the whole corpus
+	// first so successful writes need only two covering-index bookend reads.
+	// The preceding per-source validation guarantees any known rows belonging
+	// to source already match vectorSpaceID.
+	var minID, maxID string
+	if err := tx.QueryRowContext(ctx, normalCorpusVectorSpaceBookendsSQL).Scan(&minID, &maxID); err != nil {
+		return fmt.Errorf("%w: replace source %q: check corpus vector space: %w", ErrStoreOperation, source, err)
+	}
+	if minID == maxID {
+		if minID == "" || minID == vectorSpaceID {
+			return nil
+		}
+		return fmt.Errorf("%w: replace source %q: corpus vector space %q differs from incoming %q", ErrVectorSpaceDrift, source, minID, vectorSpaceID)
+	}
+
+	// A mismatch is already a rejected write. Exclude the target source only
+	// on this diagnostic path to distinguish a uniformly different remainder
+	// (drift) from a remainder that is itself mixed.
+	var remainingMinID, remainingMaxID string
+	if err := tx.QueryRowContext(ctx, `
+		SELECT COALESCE((SELECT vector_space_id FROM chunks
+		                  WHERE source <> ? AND vector_space_id <> ''
+		                  ORDER BY vector_space_id ASC LIMIT 1), ''),
+		       COALESCE((SELECT vector_space_id FROM chunks
+		                  WHERE source <> ? AND vector_space_id <> ''
+		                  ORDER BY vector_space_id DESC LIMIT 1), '')
+		`, source, source).Scan(&remainingMinID, &remainingMaxID); err != nil {
+		return fmt.Errorf("%w: replace source %q: diagnose corpus vector space: %w", ErrStoreOperation, source, err)
+	}
+	if remainingMinID == remainingMaxID && remainingMinID != "" && remainingMinID != vectorSpaceID {
+		return fmt.Errorf("%w: replace source %q: corpus vector space %q differs from incoming %q", ErrVectorSpaceDrift, source, remainingMinID, vectorSpaceID)
+	}
+	return fmt.Errorf("%w: replace source %q: corpus has mixed vector spaces %q and %q", ErrCorpusMixedVectorSpaces, source, minID, maxID)
 }
 
 // Search finds the top-k most similar chunks using brute-force cosine similarity.
