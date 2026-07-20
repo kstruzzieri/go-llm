@@ -106,6 +106,22 @@ func TestCanonicalPlanJSONSHA256RejectsMalformedInput(t *testing.T) {
 	}
 }
 
+func TestDecodeAgentflowPlanJSONRejectsUnexecutableLoneSurrogate(t *testing.T) {
+	data := []byte(`{"steps":[{"id":"P1","gates":[{"kind":"command","run":["echo","\ud800"]}]}]}`)
+	var plan agentflow.Plan
+	if err := decodeAgentflowPlanJSON(data, &plan); err == nil || !strings.Contains(err.Error(), "lone UTF-16 surrogate") {
+		t.Fatalf("decodeAgentflowPlanJSON() error = %v, want lone-surrogate refusal", err)
+	}
+
+	paired := []byte(`{"steps":[{"id":"P1","gates":[{"kind":"command","run":["echo","\ud83d\ude00"]}]}]}`)
+	if err := decodeAgentflowPlanJSON(paired, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Steps[0].Gates[0].Run[1]; got != "😀" {
+		t.Fatalf("paired surrogate decoded as %q, want emoji", got)
+	}
+}
+
 // stubLocker satisfies afLocker; LockPlan returns a scripted error per call.
 type stubLocker struct {
 	probeErr         error

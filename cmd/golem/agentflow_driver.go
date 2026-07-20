@@ -577,13 +577,13 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	if f.agentflowResume {
 		final, err := d.resume(runCtx, root, planBytes, approvedRecommendation)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "agentflow resume failed: %v\n", err)
+			reportAgentflowResumeError(stderr, err)
 			reportAgentflowRecovery(ctx, stderr, client)
 			return errAgentflowTaskFailed
 		}
-		summary, err := client.ProofSummary()
+		summary, err := verifiedAgentflowProofSummary(runCtx, client)
 		if err != nil {
-			_, _ = fmt.Fprintf(stderr, "agentflow resume failed: %v\n", err)
+			reportAgentflowResumeError(stderr, err)
 			return errAgentflowTaskFailed
 		}
 		renderAgentflowStatus(stdout, final, &summary, resumeDisposition(final.State))
@@ -612,6 +612,10 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	}
 	_, _ = fmt.Fprintf(stdout, "proof pack: %s\n", proof)
 	return nil
+}
+
+func reportAgentflowResumeError(out io.Writer, err error) {
+	_, _ = fmt.Fprintf(out, "agentflow resume failed: %s\n", recoveryDisplayText(err.Error()))
 }
 
 // readApprovedWorkflowHandoff verifies that the durable route report still
@@ -922,24 +926,20 @@ func writeStepGoalList(b *strings.Builder, values []string) {
 // executed, so proof state stays adapter-driven.
 func reportAgentflowRecovery(ctx context.Context, out io.Writer, client *agentflow.Client) {
 	if st, err := client.NextAction(ctx); err == nil {
-		_, _ = fmt.Fprintf(out, "agentflow next-action: %s", st.State)
+		_, _ = fmt.Fprintf(out, "agentflow next-action: %s", recoveryDisplayText(st.State))
 		if st.Reason != "" {
-			_, _ = fmt.Fprintf(out, " (%s)", st.Reason)
+			_, _ = fmt.Fprintf(out, " (%s)", recoveryDisplayText(st.Reason))
 		}
 		_, _ = fmt.Fprintln(out)
-		if st.Command != "" {
-			cmd := st.Command
-			if len(st.Args) > 0 {
-				cmd = strings.Join(append([]string{st.Command}, st.Args...), " ")
-			}
-			_, _ = fmt.Fprintf(out, "agentflow suggested command: %s\n", cmd)
+		if st.Command != "" || len(st.Args) > 0 {
+			_, _ = fmt.Fprintf(out, "agentflow advisory (display only): command=%q args=%q\n", st.Command, st.Args)
 		}
 		for _, d := range st.Diagnostics {
-			_, _ = fmt.Fprintf(out, "  %s\n", d)
+			_, _ = fmt.Fprintf(out, "  %s\n", recoveryDisplayText(d))
 		}
 	}
 	if b, err := client.Status(ctx); err == nil && len(bytes.TrimSpace(b)) > 0 {
-		_, _ = fmt.Fprintln(out, strings.TrimSpace(string(b)))
+		_, _ = fmt.Fprintf(out, "agentflow status (display only): %s\n", recoveryDisplayText(strings.TrimSpace(string(b))))
 	}
 }
 

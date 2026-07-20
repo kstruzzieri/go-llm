@@ -550,6 +550,17 @@ func TestAgentflowStatusExitHelper(t *testing.T) {
 
 func TestAgentflowStatusExitCodesDoNotPrintGenericErrors(t *testing.T) {
 	root := t.TempDir()
+	agentDir := filepath.Join(root, ".agent")
+	if err := os.Mkdir(agentDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	plan := `{"steps":[{"id":"P1","gates":[{"kind":"command","run":["true"]}]}]}`
+	if err := os.WriteFile(filepath.Join(agentDir, "plan.lock.json"), []byte(plan), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(agentDir, "proof-pack.json"), []byte(`{"checks":[{"status":"passed"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("PATH", writeFakeAgentflow(t)+string(os.PathListSeparator)+os.Getenv("PATH"))
 	for _, test := range []struct {
 		state string

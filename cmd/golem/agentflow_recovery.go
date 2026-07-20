@@ -84,12 +84,34 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 	client := agentflow.NewOwnedClient(runner, root, "golem")
 	state, err := client.NextAction(ctx)
 	if err != nil {
-		return err
+		if state.RawJSON != nil {
+			if jsonOutput {
+				if _, writeErr := out.Write(state.RawJSON); writeErr != nil {
+					return fmt.Errorf("write Agentflow status: %w", writeErr)
+				}
+				return statusExit(3)
+			}
+			state.Diagnostics = append(state.Diagnostics, "next-action projection is malformed: "+err.Error())
+			disposition := recoveryDisposition{failClosed, 3, "blocked by malformed Agentflow projection"}
+			renderAgentflowStatus(out, state, nil, disposition)
+			return statusExit(3)
+		}
+		return fmt.Errorf("agentflow status unavailable: %s", recoveryDisplayText(err.Error()))
 	}
 	disposition := resumeDisposition(state.State)
 	if disposition.action != failClosed {
 		if err := validateStatusRecovery(root, state); err != nil {
 			disposition = recoveryDisposition{failClosed, 3, "blocked by unsafe or malformed projection: " + err.Error()}
+		}
+	}
+	var proof *agentflow.ProofSummary
+	if disposition.action == reportComplete {
+		summary, err := verifiedAgentflowProofSummary(ctx, client)
+		if err != nil {
+			state.Diagnostics = append(state.Diagnostics, "proof summary is inconsistent with complete state: "+err.Error())
+			disposition = recoveryDisposition{failClosed, 3, "blocked by inconsistent proof summary"}
+		} else {
+			proof = &summary
 		}
 	}
 	if jsonOutput {
@@ -98,22 +120,19 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 		}
 		return statusExit(disposition.exitCode)
 	}
-
-	var proof *agentflow.ProofSummary
-	if disposition.action == reportComplete {
-		summary, err := client.ProofSummary()
-		if err != nil {
-			state.Diagnostics = append(state.Diagnostics, "proof summary is inconsistent with complete state: "+err.Error())
-			disposition = recoveryDisposition{failClosed, 3, "blocked by inconsistent proof summary"}
-		} else if summary.Failed != 0 {
-			state.Diagnostics = append(state.Diagnostics, "proof summary contains failed checks despite complete state")
-			disposition = recoveryDisposition{failClosed, 3, "blocked by inconsistent proof summary"}
-		} else {
-			proof = &summary
-		}
-	}
 	renderAgentflowStatus(out, state, proof, disposition)
 	return statusExit(disposition.exitCode)
+}
+
+func verifiedAgentflowProofSummary(ctx context.Context, client *agentflow.Client) (agentflow.ProofSummary, error) {
+	summary, err := client.ProofSummary(ctx)
+	if err != nil {
+		return agentflow.ProofSummary{}, err
+	}
+	if summary.Failed != 0 {
+		return agentflow.ProofSummary{}, fmt.Errorf("proof summary contains %d failed checks", summary.Failed)
+	}
+	return summary, nil
 }
 
 func statusExit(code int) error {
@@ -263,7 +282,7 @@ func validateAutomaticRecoveryAction(projection *agentflow.ResumabilityProjectio
 		}
 		matched = &projection.RecoveryActions[i]
 	}
-	if matched == nil || !matched.Allowed || !matched.Automatic || matched.BreakGlass {
+	if matched == nil || !matched.Allowed || !matched.Automatic || matched.BreakGlass == nil || *matched.BreakGlass {
 		return fmt.Errorf("agentflow resumability does not allow automatic non-break-glass %s", action)
 	}
 	return nil
@@ -282,7 +301,7 @@ func validateStatusRecovery(root string, state agentflow.NextActionState) error 
 	if err := validateRecoveryProjection(state); err != nil {
 		return err
 	}
-	if state.State == "validation_missing" {
+	if resumeDisposition(state.State).action == resumeSerial {
 		planBytes, err := os.ReadFile(filepath.Join(root, ".agent", "plan.lock.json"))
 		if err != nil {
 			return fmt.Errorf("read Agentflow locked plan for recovery status: %w", err)
@@ -291,8 +310,16 @@ func validateStatusRecovery(root string, state agentflow.NextActionState) error 
 		if err := decodeAgentflowPlanJSON(planBytes, &plan); err != nil {
 			return fmt.Errorf("parse Agentflow locked plan for recovery status: %w", err)
 		}
-		if _, _, err := projectedCommandGates(&plan, state); err != nil {
+		if err := agentflow.PreflightP0(&plan); err != nil {
+			return fmt.Errorf("preflight Agentflow locked plan for recovery status: %w", err)
+		}
+		if err := validateTraceability(plan); err != nil {
 			return err
+		}
+		if state.State == "validation_missing" {
+			if _, _, err := projectedCommandGates(&plan, state); err != nil {
+				return err
+			}
 		}
 	}
 	return validateRecoveryMutationSafety(state)
@@ -372,10 +399,10 @@ func projectedCommandGates(plan *agentflow.Plan, state agentflow.NextActionState
 
 // validateRecoveryMutationSafety rejects finite enforced recovery when the
 // fixed Agentflow operation is not atomic with its final lease check. A time
-// estimate cannot prove safety: run may append lease_renewed after a pause, and
-// finish-step records verification before rechecking expiry. Advisory and
-// no-deadline attempts do not have either race. CompleteStep is a single close
-// after its lease check and remains safe for step_uncompleted.
+// estimate cannot prove safety: run may append lease_renewed after a pause,
+// finish-step records verification before rechecking expiry, and complete-step
+// checks expiry before taking the separate close lock. Advisory and no-deadline
+// attempts do not have these races.
 func validateRecoveryMutationSafety(state agentflow.NextActionState) error {
 	projection := state.Resumability
 	if projection == nil || projection.Lease == nil || projection.Lease.Policy == nil || *projection.Lease.Policy != "enforce" {
@@ -386,7 +413,7 @@ func validateRecoveryMutationSafety(state agentflow.NextActionState) error {
 	}
 	if projection.Lease.State == "live" && projection.Lease.ExpiresAt != nil {
 		switch state.State {
-		case "validation_missing", "step_unverified":
+		case "validation_missing", "step_unverified", "step_uncompleted":
 			return fmt.Errorf("agentflow resume blocks %s under a finite enforced lease because Agentflow cannot guarantee duplicate-free, no-renew recovery", state.State)
 		}
 	}
@@ -540,51 +567,57 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 }
 
 func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof *agentflow.ProofSummary, disposition recoveryDisposition) {
-	fmt.Fprintf(out, "state: %s\nreason: %s\nblocking: %t\n", state.State, state.Reason, state.Blocking)
+	blocking := state.Blocking || disposition.action == failClosed
+	fmt.Fprintf(out, "state: %s\nreason: %s\nblocking: %t\n", recoveryDisplayText(state.State), recoveryDisplayText(state.Reason), blocking)
 	if state.StepID != nil {
-		fmt.Fprintf(out, "step: %s\n", *state.StepID)
+		fmt.Fprintf(out, "step: %s\n", recoveryDisplayText(*state.StepID))
 	}
 	if state.Gate != nil {
-		fmt.Fprintf(out, "current gate: %s\n", *state.Gate)
+		fmt.Fprintf(out, "current gate: %s\n", recoveryDisplayText(*state.Gate))
 	}
 	if projection := state.Resumability; projection != nil {
 		if state.StepID == nil && projection.Step != nil {
-			fmt.Fprintf(out, "step: %s\n", projection.Step.ID)
+			fmt.Fprintf(out, "step: %s\n", recoveryDisplayText(projection.Step.ID))
 		}
 		if projection.Attempt != nil {
-			fmt.Fprintf(out, "attempt: %s owner=%s open=%t\n", projection.Attempt.ID, projection.Attempt.Owner, projection.Attempt.Open)
+			fmt.Fprintf(out, "attempt: %s owner=%s open=%t\n", recoveryDisplayText(projection.Attempt.ID), recoveryDisplayText(projection.Attempt.Owner), projection.Attempt.Open)
 		}
 		if projection.Lease != nil {
 			policy := "unknown"
 			if projection.Lease.Policy != nil {
 				policy = *projection.Lease.Policy
 			}
-			fmt.Fprintf(out, "lease: policy=%s state=%s", policy, projection.Lease.State)
+			fmt.Fprintf(out, "lease: policy=%s state=%s", recoveryDisplayText(policy), recoveryDisplayText(projection.Lease.State))
 			if projection.Lease.ExpiresAt != nil {
-				fmt.Fprintf(out, " expires=%s", *projection.Lease.ExpiresAt)
+				fmt.Fprintf(out, " expires=%s", recoveryDisplayText(*projection.Lease.ExpiresAt))
 			}
 			fmt.Fprintln(out)
 		}
 		for _, gate := range projection.Gates {
-			fmt.Fprintf(out, "gate: %s %s (%s)\n", gate.Kind, gate.Label, gate.Status)
+			fmt.Fprintf(out, "gate: %s %s (%s)\n", recoveryDisplayText(gate.Kind), recoveryDisplayText(gate.Label), recoveryDisplayText(gate.Status))
 		}
 		for _, diagnostic := range projection.Diagnostics {
-			fmt.Fprintf(out, "diagnostic: [%s] %s", diagnostic.Code, diagnostic.Message)
+			fmt.Fprintf(out, "diagnostic: [%s] %s", recoveryDisplayText(diagnostic.Code), recoveryDisplayText(diagnostic.Message))
 			if diagnostic.Artifact != "" {
-				fmt.Fprintf(out, " (%s)", diagnostic.Artifact)
+				fmt.Fprintf(out, " (%s)", recoveryDisplayText(diagnostic.Artifact))
 			}
 			fmt.Fprintln(out)
 		}
 	}
 	for _, diagnostic := range state.Diagnostics {
-		fmt.Fprintf(out, "diagnostic: %s\n", diagnostic)
+		fmt.Fprintf(out, "diagnostic: %s\n", recoveryDisplayText(diagnostic))
 	}
 	if state.Command != "" || len(state.Args) > 0 {
 		fmt.Fprintf(out, "advisory (display only): command=%q args=%q\n", state.Command, state.Args)
 	}
-	fmt.Fprintf(out, "resume: %s\n", disposition.description)
+	fmt.Fprintf(out, "resume: %s\n", recoveryDisplayText(disposition.description))
 	if proof != nil {
 		fmt.Fprintf(out, "proof: verified\nartifact: %s\nchecks: passed=%d warning=%d failed=%d not_run=%d skipped=%d not_applicable=%d total=%d\n",
-			proof.Path, proof.Passed, proof.Warning, proof.Failed, proof.NotRun, proof.Skipped, proof.NotApplicable, proof.Total)
+			recoveryDisplayText(proof.Path), proof.Passed, proof.Warning, proof.Failed, proof.NotRun, proof.Skipped, proof.NotApplicable, proof.Total)
 	}
+}
+
+func recoveryDisplayText(value string) string {
+	quoted := previewText(value)
+	return quoted[1 : len(quoted)-1]
 }

@@ -1116,7 +1116,9 @@ func writeAgentflowPlanProjectionJSON(dst *strings.Builder, value any) error {
 	case bool:
 		dst.WriteString(strconv.FormatBool(value))
 	case agentflowJSONString:
-		writeAgentflowJSONRunes(dst, value)
+		if err := writeAgentflowPlanJSONString(dst, value); err != nil {
+			return err
+		}
 	case json.Number:
 		dst.WriteString(value.String())
 	case agentflowJSONConstant:
@@ -1138,7 +1140,9 @@ func writeAgentflowPlanProjectionJSON(dst *strings.Builder, value any) error {
 			if i > 0 {
 				dst.WriteByte(',')
 			}
-			writeAgentflowJSONRunes(dst, member.key)
+			if err := writeAgentflowPlanJSONString(dst, member.key); err != nil {
+				return err
+			}
 			dst.WriteByte(':')
 			if err := writeAgentflowPlanProjectionJSON(dst, member.value); err != nil {
 				return err
@@ -1148,6 +1152,20 @@ func writeAgentflowPlanProjectionJSON(dst *strings.Builder, value any) error {
 	default:
 		return fmt.Errorf("unsupported Agentflow plan projection JSON value %T", value)
 	}
+	return nil
+}
+
+// writeAgentflowPlanJSONString rejects lone UTF-16 surrogates before the typed
+// projection reaches encoding/json, which would silently replace them with
+// U+FFFD. Canonical hashing still preserves them exactly, but Golem must never
+// execute argv different from the locked Agentflow plan.
+func writeAgentflowPlanJSONString(dst *strings.Builder, value agentflowJSONString) error {
+	for _, r := range value {
+		if r >= 0xd800 && r <= 0xdfff {
+			return errors.New("Agentflow plan contains a lone UTF-16 surrogate that cannot be executed faithfully")
+		}
+	}
+	writeAgentflowJSONRunes(dst, value)
 	return nil
 }
 

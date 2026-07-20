@@ -553,10 +553,16 @@ type ProofSummary struct {
 
 // ProofSummary reads the generated proof pack and counts its known check
 // statuses. Unknown or absent check data fails closed.
-func (c *Client) ProofSummary() (ProofSummary, error) {
+func (c *Client) ProofSummary(ctx context.Context) (ProofSummary, error) {
+	if err := ctx.Err(); err != nil {
+		return ProofSummary{}, fmt.Errorf("read Agentflow proof summary: %w", err)
+	}
 	path := filepath.Join(c.root, ".agent", "proof-pack.json")
 	b, err := os.ReadFile(path)
 	if err != nil {
+		return ProofSummary{}, fmt.Errorf("read Agentflow proof summary: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
 		return ProofSummary{}, fmt.Errorf("read Agentflow proof summary: %w", err)
 	}
 	var proof struct {
@@ -722,7 +728,7 @@ type ResumabilityRecoveryAction struct {
 	Action     string `json:"action"`
 	Allowed    bool   `json:"allowed"`
 	Automatic  bool   `json:"automatic"`
-	BreakGlass bool   `json:"break_glass"`
+	BreakGlass *bool  `json:"break_glass"`
 	Reason     string `json:"reason"`
 }
 
@@ -744,10 +750,10 @@ func (c *Client) NextAction(ctx context.Context) (NextActionState, error) {
 		return NextActionState{}, err
 	}
 	var st NextActionState
+	st.RawJSON = append([]byte{}, out...)
 	if err := json.Unmarshal(out, &st); err != nil {
-		return NextActionState{}, fmt.Errorf("agentflow next-action: parse %q: %w", out, err)
+		return st, fmt.Errorf("agentflow next-action: parse %q: %w", out, err)
 	}
-	st.RawJSON = append([]byte(nil), out...)
 	return st, nil
 }
 

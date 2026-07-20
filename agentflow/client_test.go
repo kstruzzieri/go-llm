@@ -269,7 +269,7 @@ func TestClient_NextAction_PreservesTypedRecoveryProjectionAndRawJSON(t *testing
 		projection.Attempt == nil || projection.Attempt.Owner != "golem" || projection.Attempt.State != "claimed" ||
 		len(projection.Gates) != 2 || projection.Gates[0].Label != "go test ./..." ||
 		len(projection.RecoveryActions) != 1 || !projection.RecoveryActions[0].Allowed ||
-		!projection.RecoveryActions[0].Automatic || projection.RecoveryActions[0].BreakGlass {
+		!projection.RecoveryActions[0].Automatic || projection.RecoveryActions[0].BreakGlass == nil || *projection.RecoveryActions[0].BreakGlass {
 		t.Fatalf("state = %+v", state)
 	}
 	want := []string{"next-action", "--root", "/ws", "--json", "--agent", "golem"}
@@ -315,7 +315,7 @@ func TestClient_ProofSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := NewClient(&fakeRunner{}, dir)
-	summary, err := c.ProofSummary()
+	summary, err := c.ProofSummary(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestClient_ProofSummary_RejectsInvalidChecks(t *testing.T) {
 			if err := os.WriteFile(filepath.Join(dir, ".agent", "proof-pack.json"), []byte(body), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			if _, err := NewClient(&fakeRunner{}, dir).ProofSummary(); err == nil {
+			if _, err := NewClient(&fakeRunner{}, dir).ProofSummary(context.Background()); err == nil {
 				t.Fatal("expected invalid proof summary")
 			}
 		})

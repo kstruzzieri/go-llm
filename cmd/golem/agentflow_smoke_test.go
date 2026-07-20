@@ -185,7 +185,7 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	if err != nil || final.State != "complete" {
 		t.Fatalf("resume state=%q err=%v", final.State, err)
 	}
-	summary, err := client.ProofSummary()
+	summary, err := client.ProofSummary(ctx)
 	if err != nil || summary.Total == 0 || summary.Failed != 0 {
 		t.Fatalf("proof summary = %+v, err=%v", summary, err)
 	}

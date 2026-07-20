@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -19,6 +20,12 @@ import (
 type recoveryRunner struct {
 	payload []byte
 	calls   [][]string
+}
+
+type failingRecoveryRunner struct{ stderr []byte }
+
+func (r *failingRecoveryRunner) Run(_ context.Context, _ []string, _ []byte) ([]byte, []byte, int, error) {
+	return nil, append([]byte(nil), r.stderr...), 1, nil
 }
 
 func (r *recoveryRunner) Run(_ context.Context, args []string, _ []byte) ([]byte, []byte, int, error) {
@@ -254,26 +261,158 @@ func TestAgentflowStatus_ProofSummaryFailureUsesBlockedExit(t *testing.T) {
 		"malformed":    `{`,
 		"failed check": `{"checks":[{"status":"failed"}]}`,
 	} {
-		t.Run(name, func(t *testing.T) {
-			fixture := newResumeFixture(t)
-			state := fixture.noAttemptState(t, "complete", false)
-			payload, err := json.Marshal(state)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if err := os.WriteFile(filepath.Join(fixture.root, ".agent", "proof-pack.json"), []byte(proof), 0o600); err != nil {
-				t.Fatal(err)
-			}
+		for _, jsonOutput := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/json=%t", name, jsonOutput), func(t *testing.T) {
+				fixture := newResumeFixture(t)
+				state := fixture.noAttemptState(t, "complete", false)
+				payload, err := json.Marshal(state)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(fixture.root, ".agent", "proof-pack.json"), []byte(proof), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				var out bytes.Buffer
+				err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, jsonOutput, &recoveryRunner{payload: payload})
+				var statusErr *agentflowStatusExit
+				if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+					t.Fatalf("err = %v, want status exit 3", err)
+				}
+				if jsonOutput {
+					if !bytes.Equal(out.Bytes(), payload) {
+						t.Fatalf("JSON output = %q, want exact payload %q", out.Bytes(), payload)
+					}
+				} else if strings.Contains(out.String(), "proof: verified") ||
+					!strings.Contains(out.String(), "resume: blocked") || !strings.Contains(out.String(), "blocking: true") {
+					t.Fatalf("proof inconsistency was not rendered blocked:\n%s", out.String())
+				}
+			})
+		}
+	}
+}
+
+func TestAgentflowStatus_JSONRelaysMalformedProjectionAndFailsClosed(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	_ = fixture.noAttemptState(t, "step_unclaimed", true)
+	fixture.projection()["gates"] = nil
+	payload, err := json.Marshal(fixture.payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, true, &recoveryRunner{payload: payload})
+	var statusErr *agentflowStatusExit
+	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
+		t.Fatalf("err = %v, want status exit 3", err)
+	}
+	if !bytes.Equal(out.Bytes(), payload) {
+		t.Fatalf("JSON output = %q, want exact payload %q", out.Bytes(), payload)
+	}
+}
+
+func TestAgentflowStatus_EmptySuccessfulOutputFailsClosed(t *testing.T) {
+	for _, jsonOutput := range []bool{false, true} {
+		t.Run(fmt.Sprintf("json=%t", jsonOutput), func(t *testing.T) {
 			var out bytes.Buffer
-			err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+			err := runAgentflowStatusWithRunner(context.Background(), &out, t.TempDir(), jsonOutput, &recoveryRunner{})
 			var statusErr *agentflowStatusExit
 			if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 {
 				t.Fatalf("err = %v, want status exit 3", err)
 			}
-			if strings.Contains(out.String(), "proof: verified") || !strings.Contains(out.String(), "resume: blocked") {
-				t.Fatalf("proof inconsistency was not rendered blocked:\n%s", out.String())
+			if jsonOutput && out.Len() != 0 {
+				t.Fatalf("JSON output = %q, want exact empty output", out.Bytes())
+			}
+			if !jsonOutput && (!strings.Contains(out.String(), "blocking: true") || !strings.Contains(out.String(), "resume: blocked")) {
+				t.Fatalf("empty output was not rendered blocked:\n%s", out.String())
 			}
 		})
+	}
+}
+
+func TestValidateAutomaticRecoveryActionRequiresExplicitNonBreakGlass(t *testing.T) {
+	explicitFalse := false
+	for _, action := range []string{"claim", "continue"} {
+		t.Run(action, func(t *testing.T) {
+			projection := &agentflow.ResumabilityProjection{RecoveryActions: []agentflow.ResumabilityRecoveryAction{{
+				Action: action, Allowed: true, Automatic: true,
+			}}}
+			if err := validateAutomaticRecoveryAction(projection, action); err == nil {
+				t.Fatal("missing break_glass unexpectedly authorized recovery")
+			}
+			projection.RecoveryActions[0].BreakGlass = &explicitFalse
+			if err := validateAutomaticRecoveryAction(projection, action); err != nil {
+				t.Fatalf("explicit non-break-glass action rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestAgentflowStatus_ResumeDispositionRequiresGolemPlanPreflight(t *testing.T) {
+	fixture := newResumeFixture(t)
+	fixture.useAdvisoryLease()
+	plan := recoveryPlan()
+	plan.Steps[0].Gates[0].Kind = "inspection"
+	planBytes, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(fixture.root, ".agent", "plan.lock.json"), planBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	state := fixture.noAttemptState(t, "step_unclaimed", true)
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out bytes.Buffer
+	err = runAgentflowStatusWithRunner(context.Background(), &out, fixture.root, false, &recoveryRunner{payload: payload})
+	var statusErr *agentflowStatusExit
+	if !errors.As(err, &statusErr) || statusErr.ExitCode() != 3 || !strings.Contains(out.String(), "resume: blocked") {
+		t.Fatalf("status did not block a plan resume would reject: err=%v\n%s", err, out.String())
+	}
+}
+
+func TestAgentflowRecoveryOutputEscapesTerminalControls(t *testing.T) {
+	evil := "P1\nproof: verified\x1b[2J\u0085"
+	state := agentflow.NextActionState{
+		State: "future\x1b[2J", Reason: evil, Command: evil, Args: []string{evil}, Diagnostics: []string{evil},
+		Resumability: &agentflow.ResumabilityProjection{
+			Attempt: &agentflow.ResumabilityAttempt{ID: evil, Owner: evil, Open: true},
+			Lease:   &agentflow.ResumabilityLease{State: evil, ExpiresAt: &evil},
+			Gates:   []agentflow.ResumabilityGate{{Kind: evil, Label: evil, Status: evil}},
+		},
+	}
+	var rendered bytes.Buffer
+	renderAgentflowStatus(&rendered, state, nil, recoveryDisposition{failClosed, 3, evil})
+	for _, control := range []string{"\x1b", "\u0085", "\nproof: verified\n"} {
+		if strings.Contains(rendered.String(), control) {
+			t.Fatalf("raw terminal control or forged line reached status output: %q", rendered.String())
+		}
+	}
+
+	payload, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report bytes.Buffer
+	reportAgentflowRecovery(context.Background(), &report, agentflow.NewOwnedClient(&recoveryRunner{payload: payload}, t.TempDir(), "golem"))
+	if strings.Contains(report.String(), "\x1b") || strings.Contains(report.String(), "\u0085") || strings.Contains(report.String(), "\nproof: verified\n") {
+		t.Fatalf("raw terminal control or forged line reached recovery report: %q", report.String())
+	}
+	if !strings.Contains(report.String(), "display only") {
+		t.Fatalf("advisory command was not labeled display-only: %q", report.String())
+	}
+
+	var resumeError bytes.Buffer
+	reportAgentflowResumeError(&resumeError, errors.New(evil))
+	if strings.Contains(resumeError.String(), "\x1b") || strings.Contains(resumeError.String(), "\u0085") || strings.Contains(resumeError.String(), "\nproof: verified\n") {
+		t.Fatalf("raw terminal control or forged line reached resume error: %q", resumeError.String())
+	}
+
+	statusErr := runAgentflowStatusWithRunner(context.Background(), io.Discard, t.TempDir(), false, &failingRecoveryRunner{stderr: []byte(evil)})
+	if statusErr == nil || strings.Contains(statusErr.Error(), "\x1b") || strings.Contains(statusErr.Error(), "\u0085") || strings.Contains(statusErr.Error(), "\nproof: verified\n") {
+		t.Fatalf("raw terminal control or forged line reached status error: %q", statusErr)
 	}
 }
 
@@ -705,7 +844,7 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 }
 
 func TestResumeRejectsFiniteEnforcedRecoveryBeforeMutation(t *testing.T) {
-	for _, stateName := range []string{"step_unclaimed", "validation_missing", "step_unverified"} {
+	for _, stateName := range []string{"step_unclaimed", "validation_missing", "step_unverified", "step_uncompleted"} {
 		t.Run(stateName, func(t *testing.T) {
 			fixture := newResumeFixture(t)
 			var state agentflow.NextActionState

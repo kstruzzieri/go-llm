@@ -165,11 +165,14 @@ Before returning exit `0` or `2`, status validates the typed projection's
 contract fields, actor, attempt owner, lease, and recovery permissions. A
 foreign, expired, malformed, or otherwise unsafe projection is displayed as
 blocked and exits `3`; JSON mode still relays AgentFlow's exact bytes.
+Before exit `2`, status also applies the same P0 and traceability preflight to
+the locked plan that resume applies to the supplied matching plan.
 When the state is `complete`, human status reads the proof pack only after
 `next-action` has verified it, then shows the absolute artifact path and counts
 for `passed`, `warning`, `failed`, `not_run`, `skipped`, and `not_applicable`
 checks. A missing or malformed summary is an unsafe exit `3`. A merely present
-proof file is never reported as verified.
+proof file is never reported as verified. JSON output remains byte-exact but
+uses the same proof-consistency exit decision.
 
 Status exit codes are stable for scripts:
 
@@ -215,13 +218,13 @@ the joined plan argv; Golem runs only `missing` gates with plan-owned argv and
 never repeats a `satisfied` receipt. Known inspection/legacy projections do not
 participate in command pairing, and unknown kinds or statuses fail closed.
 Finite enforced leases fail closed for `step_unclaimed`, `validation_missing`,
-and `step_unverified`, regardless of the displayed remaining time. AgentFlow's
-gate adapter may append `lease_renewed`, and `finish-step` records verification
-before its final expiry check; a time estimate therefore cannot prove no-renew,
-duplicate-free recovery. An operator must resolve that lease explicitly outside
-Golem. A live finite `step_uncompleted` attempt remains resumable through the
-single `complete-step` close operation; advisory and no-deadline attempts retain
-the normal serial recovery path.
+`step_unverified`, and `step_uncompleted`, regardless of the displayed remaining
+time. AgentFlow's gate adapter may append `lease_renewed`, `finish-step` records
+verification before its final expiry check, and `complete-step` checks expiry
+before taking its separate close lock. A time estimate therefore cannot prove
+no-renew, duplicate-free recovery. An operator must resolve that lease
+explicitly outside Golem. Advisory and no-deadline attempts retain the normal
+serial recovery path.
 After any attempt settlement, Golem performs one read-only progress check and
 refuses to repeat a mutation when the state did not change. No-settle states go
 directly into the existing serial step/tail driver.
