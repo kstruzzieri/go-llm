@@ -138,6 +138,9 @@ func parseFlags(args []string) (flags, error) {
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
 	}
+	if fs.NArg() > 0 {
+		return flags{}, fmt.Errorf("golem: unexpected positional arguments %q; every option must be a -flag", fs.Args())
+	}
 	f.think = strings.ToLower(f.think)
 	switch f.think {
 	case "", "off", "on", "low", "medium", "high":

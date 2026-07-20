@@ -426,12 +426,17 @@ type resumeFixture struct {
 
 func newResumeFixture(t *testing.T) resumeFixture {
 	t.Helper()
+	return newResumeFixtureWithPlan(t, recoveryPlan())
+}
+
+func newResumeFixtureWithPlan(t *testing.T, plan *agentflow.Plan) resumeFixture {
+	t.Helper()
 	root := t.TempDir()
 	agentDir := filepath.Join(root, ".agent")
 	if err := os.Mkdir(agentDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	planJSON, err := json.Marshal(recoveryPlan())
+	planJSON, err := json.Marshal(plan)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -708,6 +713,40 @@ func TestResumeCrashWindows(t *testing.T) {
 	}
 }
 
+func recoveryPlanTwoSteps() *agentflow.Plan {
+	plan := recoveryPlan()
+	plan.Steps = append(plan.Steps, agentflow.Step{
+		ID:         "P2",
+		Validation: []string{"unit-tests-2"},
+		Gates: []agentflow.Gate{
+			{Kind: "command", Run: []string{"go", "test", "./second/..."}},
+		},
+	})
+	return plan
+}
+
+func TestProjectedCommandGatesRejectsDuplicateArgv(t *testing.T) {
+	plan := &agentflow.Plan{Steps: []agentflow.Step{{
+		ID:         "P1",
+		Validation: []string{"unit A", "unit B"},
+		Gates: []agentflow.Gate{
+			{Kind: "command", Run: []string{"make", "check"}},
+			{Kind: "command", Run: []string{"make", "check"}},
+		},
+	}}}
+	state := recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "make check", Status: "satisfied"},
+		{Kind: "command", Label: "make check", Status: "missing"},
+	})
+	af := &fakeAF{}
+	if _, err := settleAgentflowAttempt(context.Background(), af, plan, state); err == nil || !strings.Contains(err.Error(), "duplicate command-gate argv") {
+		t.Fatalf("err = %v, want duplicate command-gate argv rejection", err)
+	}
+	if len(af.seq) != 0 {
+		t.Fatalf("mutated before rejecting duplicate argv: %v", af.seq)
+	}
+}
+
 func TestResumeGatePairingUsesFilteredPositionAndPlanArgv(t *testing.T) {
 	state := recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
 		{Kind: "command", Label: "go test ./...", Status: "satisfied"},
@@ -840,6 +879,60 @@ func TestResumeReentersExistingSerialStepLoop(t *testing.T) {
 	}
 	if !reflect.DeepEqual(af.seq, want) {
 		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+}
+
+func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
+	fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	fixture.useAdvisoryLease()
+	initial := fixture.noAttemptState(t, "step_unclaimed", true)
+	complete := fixture.noAttemptState(t, "complete", false)
+
+	inFlightP1Fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	inFlightP1Fixture.useAdvisoryLease()
+	inFlightP1 := inFlightP1Fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./...", Status: "missing"},
+		{Kind: "command", Label: "go vet ./...", Status: "missing"},
+	})
+	inFlightP1.Resumability.Attempt.ID = "A-P1"
+
+	inFlightP2Fixture := newResumeFixtureWithPlan(t, recoveryPlanTwoSteps())
+	inFlightP2Fixture.useAdvisoryLease()
+	inFlightP2 := inFlightP2Fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
+		{Kind: "command", Label: "go test ./second/...", Status: "missing"},
+	})
+	stepID2 := "P2"
+	inFlightP2.StepID = &stepID2
+	inFlightP2.Resumability.Step.ID = "P2"
+	inFlightP2.Resumability.Attempt.ID = "A-P2"
+
+	af := &fakeAF{
+		nextSteps:   []string{"P1", "P2"},
+		nextActions: []agentflow.NextActionState{initial, inFlightP1, inFlightP2, complete},
+	}
+	d := &driver{af: af, plan: recoveryPlanTwoSteps()}
+	d.runStep = func(_ context.Context, step agentflow.Step, _, _ string) error {
+		af.seq = append(af.seq, "model:"+step.ID)
+		return nil
+	}
+
+	final, err := d.resume(context.Background(), fixture.root, fixture.planJSON, nil)
+	if err != nil || final.State != "complete" {
+		t.Fatalf("state=%q err=%v", final.State, err)
+	}
+	want := []string{
+		"next-action", "next-step", "claim:P1", "model:P1",
+		"next-action", "gate:P1:unit-tests", "gate:P1:lint", "finish-step:P1:A-P1",
+		"next-step", "claim:P2", "model:P2",
+		"next-action", "gate:P2:unit-tests-2", "finish-step:P2:A-P2",
+		"next-step", "finish-run", "next-action",
+	}
+	if !reflect.DeepEqual(af.seq, want) {
+		t.Fatalf("seq = %v, want %v", af.seq, want)
+	}
+	wantArgv := [][]string{{"go", "test", "./..."}, {"go", "vet", "./..."}, {"go", "test", "./second/..."}}
+	if !reflect.DeepEqual(af.gateArgv, wantArgv) {
+		t.Fatalf("gate argv = %v, want %v", af.gateArgv, wantArgv)
 	}
 }
 

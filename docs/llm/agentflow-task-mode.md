@@ -179,6 +179,7 @@ Status exit codes are stable for scripts:
 | Exit | Meaning |
 |---:|---|
 | `0` | Run is complete and proof is verified. |
+| `1` | Golem-level failure before status could be read: the AgentFlow CLI is unavailable or crashed. Nothing is relayed in `-json` mode. |
 | `2` | A safe serial resume disposition exists. |
 | `3` | Setup is required, or recovery is blocked, invalid, or unsafe. |
 
@@ -212,14 +213,23 @@ and checks all of these bindings:
   `continue` action. The independent owner check also applies under advisory
   lease policy.
 
+The plan digest now uses AgentFlow's exact Python JSON encoding. Workflow
+handoffs saved by earlier Golem versions recorded a Go-canonicalized digest, so
+a pre-existing handoff for a plan containing `<`, `>`, `&`, non-ASCII text, or
+float literals fails the handoff digest check after upgrading even though the
+plan is unchanged; re-run planning to refresh the handoff.
+
 For `validation_missing`, projected command gates are paired by their filtered
 plan order, not by the human validation label. Each projected label must equal
 the joined plan argv; Golem runs only `missing` gates with plan-owned argv and
 never repeats a `satisfied` receipt. Known inspection/legacy projections do not
 participate in command pairing, and unknown kinds or statuses fail closed.
-Finite enforced leases fail closed for `step_unclaimed`, `validation_missing`,
-`step_unverified`, and `step_uncompleted`, regardless of the displayed remaining
-time. AgentFlow's gate adapter may append `lease_renewed`, `finish-step` records
+The `enforce` lease policy fails closed for `step_unclaimed` even before any
+lease exists, because claiming would enter a new finite enforced lease
+mid-recovery; enforce-policy runs are therefore only ever settled up to their
+interrupted attempt, never advanced to new steps. A live finite enforced lease
+also fails closed for `validation_missing`, `step_unverified`, and
+`step_uncompleted`, regardless of the displayed remaining time. AgentFlow's gate adapter may append `lease_renewed`, `finish-step` records
 verification before its final expiry check, and `complete-step` checks expiry
 before taking its separate close lock. A time estimate therefore cannot prove
 no-renew, duplicate-free recovery. An operator must resolve that lease
@@ -248,6 +258,10 @@ The complete disposition table is:
 | `proof_stale` | 3 | Fail closed; do not overwrite proof after changed inputs. |
 | `proof_failing` | 3 | Fail closed; preserve the failing proof. |
 | `complete` | 0 | Report verified proof and perform no mutation. |
+
+The lease-safety rule above overrides this table: `step_unclaimed` under an
+`enforce` lease policy, and `validation_missing`/`step_unverified`/
+`step_uncompleted` under a live finite enforced lease, exit `3` instead of `2`.
 
 Unknown future states fail closed. Resume never initializes, locks, records
 evidence or reviews, renews/reclaims leases, re-runs a model for an open

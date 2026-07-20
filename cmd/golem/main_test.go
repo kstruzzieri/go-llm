@@ -64,6 +64,15 @@ func TestStartupNotices_RequestedRetrieveSuppressesGenericLine(t *testing.T) {
 	}
 }
 
+func TestParseFlags_RejectsPositionalArguments(t *testing.T) {
+	// A stray positional stops flag.Parse, silently dropping every later flag
+	// (`golem -agentflow-status status -json` would emit human output with
+	// machine exit codes), so leftovers are an error rather than ignored.
+	if _, err := parseFlags([]string{"-agentflow-status", "status", "-json"}); err == nil || !strings.Contains(err.Error(), "positional") {
+		t.Fatalf("parseFlags = %v, want positional-argument rejection", err)
+	}
+}
+
 func TestParseFlags_Defaults(t *testing.T) {
 	f, err := parseFlags([]string{})
 	if err != nil {

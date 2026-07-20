@@ -216,6 +216,11 @@ func validateRecoveryProjection(state agentflow.NextActionState) error {
 			if projection.Step != nil {
 				return fmt.Errorf("agentflow state %q unexpectedly projects a step", state.State)
 			}
+			// No recovery-action requirement here: Agentflow's action
+			// vocabulary (claim/continue/renew/reclaim/fail) covers attempt
+			// lifecycle only and projects every action as not allowed in these
+			// terminal phases. FinishRun re-enters Agentflow's own terminal
+			// gates, which enforce their own policy.
 		}
 		if lease.State != "not_applicable" || lease.ExpiresAt != nil {
 			return fmt.Errorf("agentflow resumability lease is inconsistent without an attempt")
@@ -371,6 +376,18 @@ func projectedCommandGates(plan *agentflow.Plan, state agentflow.NextActionState
 	commands, err := agentflow.ExtractCommandGates(step)
 	if err != nil {
 		return nil, nil, err
+	}
+	// Positional pairing is proven by the joined-argv label check below, which
+	// cannot distinguish two gates with identical argv. If Agentflow ever
+	// reordered such twins with mixed satisfied/missing statuses, recovery
+	// could re-run a satisfied receipt, so ambiguous duplicates fail closed.
+	joined := make(map[string]struct{}, len(commands))
+	for _, command := range commands {
+		key := strings.Join(command.Argv, " ")
+		if _, dup := joined[key]; dup {
+			return nil, nil, fmt.Errorf("agentflow step %q has duplicate command-gate argv %q; positional recovery pairing would be ambiguous", step.ID, key)
+		}
+		joined[key] = struct{}{}
 	}
 	projected := make([]agentflow.ResumabilityGate, 0, len(state.Resumability.Gates))
 	for _, gate := range state.Resumability.Gates {

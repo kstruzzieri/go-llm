@@ -606,7 +606,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	}
 	proof, err := runTaskDriver(runCtx, d, coordinator, stderr)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %s\n", recoveryDisplayText(err.Error()))
 		reportAgentflowRecovery(ctx, stderr, client)
 		return errAgentflowTaskFailed
 	}
