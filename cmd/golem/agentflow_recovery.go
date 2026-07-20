@@ -96,7 +96,10 @@ func runAgentflowStatusWithRunner(ctx context.Context, out io.Writer, root strin
 			renderAgentflowStatus(out, state, nil, disposition)
 			return statusExit(3)
 		}
-		return fmt.Errorf("agentflow status unavailable: %s", recoveryDisplayText(err.Error()))
+		if !jsonOutput {
+			_, _ = fmt.Fprintf(out, "agentflow status unavailable: %s\n", recoveryDisplayText(err.Error()))
+		}
+		return statusExit(3)
 	}
 	disposition := resumeDisposition(state.State)
 	if disposition.action != failClosed {

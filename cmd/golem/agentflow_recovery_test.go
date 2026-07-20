@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -410,9 +409,17 @@ func TestAgentflowRecoveryOutputEscapesTerminalControls(t *testing.T) {
 		t.Fatalf("raw terminal control or forged line reached resume error: %q", resumeError.String())
 	}
 
-	statusErr := runAgentflowStatusWithRunner(context.Background(), io.Discard, t.TempDir(), false, &failingRecoveryRunner{stderr: []byte(evil)})
-	if statusErr == nil || strings.Contains(statusErr.Error(), "\x1b") || strings.Contains(statusErr.Error(), "\u0085") || strings.Contains(statusErr.Error(), "\nproof: verified\n") {
-		t.Fatalf("raw terminal control or forged line reached status error: %q", statusErr)
+	var unavailable bytes.Buffer
+	statusErr := runAgentflowStatusWithRunner(context.Background(), &unavailable, t.TempDir(), false, &failingRecoveryRunner{stderr: []byte(evil)})
+	var exit *agentflowStatusExit
+	if !errors.As(statusErr, &exit) || exit.ExitCode() != 3 {
+		t.Fatalf("status error = %v, want exit 3", statusErr)
+	}
+	if strings.Contains(unavailable.String(), "\x1b") || strings.Contains(unavailable.String(), "\u0085") || strings.Contains(unavailable.String(), "\nproof: verified\n") {
+		t.Fatalf("raw terminal control or forged line reached status output: %q", unavailable.String())
+	}
+	if !strings.Contains(unavailable.String(), "agentflow status unavailable") {
+		t.Fatalf("status output = %q, want unavailable diagnostic", unavailable.String())
 	}
 }
 

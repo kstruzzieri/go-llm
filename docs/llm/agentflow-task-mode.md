@@ -172,14 +172,15 @@ When the state is `complete`, human status reads the proof pack only after
 for `passed`, `warning`, `failed`, `not_run`, `skipped`, and `not_applicable`
 checks. A missing or malformed summary is an unsafe exit `3`. A merely present
 proof file is never reported as verified. JSON output remains byte-exact but
-uses the same proof-consistency exit decision.
+uses the same proof-consistency exit decision. If `next-action` cannot be read,
+human mode reports the sanitized failure, JSON mode emits no bytes, and status
+exits `3`.
 
 Status exit codes are stable for scripts:
 
 | Exit | Meaning |
 |---:|---|
 | `0` | Run is complete and proof is verified. |
-| `1` | Golem-level failure before status could be read: the AgentFlow CLI is unavailable or crashed. Nothing is relayed in `-json` mode. |
 | `2` | A safe serial resume disposition exists. |
 | `3` | Setup is required, or recovery is blocked, invalid, or unsafe. |
 
