@@ -509,12 +509,12 @@ func TestRun_AgentflowStatusDispatchesBeforeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer out.Close()
+	defer func() { _ = out.Close() }()
 	errOut, err := os.CreateTemp(t.TempDir(), "stderr")
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer errOut.Close()
+	defer func() { _ = errOut.Close() }()
 
 	err = run([]string{
 		"-agentflow-status", "-json", "-root", root,

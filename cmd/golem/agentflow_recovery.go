@@ -343,7 +343,7 @@ func validateResumeProjection(root string, planJSON []byte, state agentflow.Next
 	}
 	executionDigest := fmt.Sprintf("%x", sha256.Sum256(execution))
 	if projection.Contract.ExecutionContractSHA256 == "" || projection.Contract.ExecutionContractSHA256 != executionDigest {
-		return fmt.Errorf("Agentflow execution contract digest does not match resumability projection")
+		return fmt.Errorf("agentflow execution contract digest does not match resumability projection")
 	}
 	workflow, err := os.ReadFile(filepath.Join(root, ".agent", "workflow.contract.json"))
 	if err != nil {
@@ -568,51 +568,51 @@ func (d *driver) resume(ctx context.Context, root string, planJSON []byte, appro
 
 func renderAgentflowStatus(out io.Writer, state agentflow.NextActionState, proof *agentflow.ProofSummary, disposition recoveryDisposition) {
 	blocking := state.Blocking || disposition.action == failClosed
-	fmt.Fprintf(out, "state: %s\nreason: %s\nblocking: %t\n", recoveryDisplayText(state.State), recoveryDisplayText(state.Reason), blocking)
+	_, _ = fmt.Fprintf(out, "state: %s\nreason: %s\nblocking: %t\n", recoveryDisplayText(state.State), recoveryDisplayText(state.Reason), blocking)
 	if state.StepID != nil {
-		fmt.Fprintf(out, "step: %s\n", recoveryDisplayText(*state.StepID))
+		_, _ = fmt.Fprintf(out, "step: %s\n", recoveryDisplayText(*state.StepID))
 	}
 	if state.Gate != nil {
-		fmt.Fprintf(out, "current gate: %s\n", recoveryDisplayText(*state.Gate))
+		_, _ = fmt.Fprintf(out, "current gate: %s\n", recoveryDisplayText(*state.Gate))
 	}
 	if projection := state.Resumability; projection != nil {
 		if state.StepID == nil && projection.Step != nil {
-			fmt.Fprintf(out, "step: %s\n", recoveryDisplayText(projection.Step.ID))
+			_, _ = fmt.Fprintf(out, "step: %s\n", recoveryDisplayText(projection.Step.ID))
 		}
 		if projection.Attempt != nil {
-			fmt.Fprintf(out, "attempt: %s owner=%s open=%t\n", recoveryDisplayText(projection.Attempt.ID), recoveryDisplayText(projection.Attempt.Owner), projection.Attempt.Open)
+			_, _ = fmt.Fprintf(out, "attempt: %s owner=%s open=%t\n", recoveryDisplayText(projection.Attempt.ID), recoveryDisplayText(projection.Attempt.Owner), projection.Attempt.Open)
 		}
 		if projection.Lease != nil {
 			policy := "unknown"
 			if projection.Lease.Policy != nil {
 				policy = *projection.Lease.Policy
 			}
-			fmt.Fprintf(out, "lease: policy=%s state=%s", recoveryDisplayText(policy), recoveryDisplayText(projection.Lease.State))
+			_, _ = fmt.Fprintf(out, "lease: policy=%s state=%s", recoveryDisplayText(policy), recoveryDisplayText(projection.Lease.State))
 			if projection.Lease.ExpiresAt != nil {
-				fmt.Fprintf(out, " expires=%s", recoveryDisplayText(*projection.Lease.ExpiresAt))
+				_, _ = fmt.Fprintf(out, " expires=%s", recoveryDisplayText(*projection.Lease.ExpiresAt))
 			}
-			fmt.Fprintln(out)
+			_, _ = fmt.Fprintln(out)
 		}
 		for _, gate := range projection.Gates {
-			fmt.Fprintf(out, "gate: %s %s (%s)\n", recoveryDisplayText(gate.Kind), recoveryDisplayText(gate.Label), recoveryDisplayText(gate.Status))
+			_, _ = fmt.Fprintf(out, "gate: %s %s (%s)\n", recoveryDisplayText(gate.Kind), recoveryDisplayText(gate.Label), recoveryDisplayText(gate.Status))
 		}
 		for _, diagnostic := range projection.Diagnostics {
-			fmt.Fprintf(out, "diagnostic: [%s] %s", recoveryDisplayText(diagnostic.Code), recoveryDisplayText(diagnostic.Message))
+			_, _ = fmt.Fprintf(out, "diagnostic: [%s] %s", recoveryDisplayText(diagnostic.Code), recoveryDisplayText(diagnostic.Message))
 			if diagnostic.Artifact != "" {
-				fmt.Fprintf(out, " (%s)", recoveryDisplayText(diagnostic.Artifact))
+				_, _ = fmt.Fprintf(out, " (%s)", recoveryDisplayText(diagnostic.Artifact))
 			}
-			fmt.Fprintln(out)
+			_, _ = fmt.Fprintln(out)
 		}
 	}
 	for _, diagnostic := range state.Diagnostics {
-		fmt.Fprintf(out, "diagnostic: %s\n", recoveryDisplayText(diagnostic))
+		_, _ = fmt.Fprintf(out, "diagnostic: %s\n", recoveryDisplayText(diagnostic))
 	}
 	if state.Command != "" || len(state.Args) > 0 {
-		fmt.Fprintf(out, "advisory (display only): command=%q args=%q\n", state.Command, state.Args)
+		_, _ = fmt.Fprintf(out, "advisory (display only): command=%q args=%q\n", state.Command, state.Args)
 	}
-	fmt.Fprintf(out, "resume: %s\n", recoveryDisplayText(disposition.description))
+	_, _ = fmt.Fprintf(out, "resume: %s\n", recoveryDisplayText(disposition.description))
 	if proof != nil {
-		fmt.Fprintf(out, "proof: verified\nartifact: %s\nchecks: passed=%d warning=%d failed=%d not_run=%d skipped=%d not_applicable=%d total=%d\n",
+		_, _ = fmt.Fprintf(out, "proof: verified\nartifact: %s\nchecks: passed=%d warning=%d failed=%d not_run=%d skipped=%d not_applicable=%d total=%d\n",
 			recoveryDisplayText(proof.Path), proof.Passed, proof.Warning, proof.Failed, proof.NotRun, proof.Skipped, proof.NotApplicable, proof.Total)
 	}
 }

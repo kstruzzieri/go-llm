@@ -1162,7 +1162,7 @@ func writeAgentflowPlanProjectionJSON(dst *strings.Builder, value any) error {
 func writeAgentflowPlanJSONString(dst *strings.Builder, value agentflowJSONString) error {
 	for _, r := range value {
 		if r >= 0xd800 && r <= 0xdfff {
-			return errors.New("Agentflow plan contains a lone UTF-16 surrogate that cannot be executed faithfully")
+			return errors.New("agentflow plan contains a lone UTF-16 surrogate that cannot be executed faithfully")
 		}
 	}
 	writeAgentflowJSONRunes(dst, value)
