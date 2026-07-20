@@ -223,7 +223,10 @@ For `validation_missing`, projected command gates are paired by their filtered
 plan order, not by the human validation label. Each projected label must equal
 the joined plan argv; Golem runs only `missing` gates with plan-owned argv and
 never repeats a `satisfied` receipt. Known inspection/legacy projections do not
-participate in command pairing, and unknown kinds or statuses fail closed.
+participate in command pairing, and unknown kinds or statuses fail closed. A
+step whose plan declares two command gates with identical argv also fails
+closed during recovery, because positional pairing could not be proven
+unambiguous under reordering.
 The `enforce` lease policy fails closed for `step_unclaimed` even before any
 lease exists, because claiming would enter a new finite enforced lease
 mid-recovery; enforce-policy runs are therefore only ever settled up to their
