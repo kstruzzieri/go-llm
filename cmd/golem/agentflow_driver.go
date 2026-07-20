@@ -41,6 +41,7 @@ type afClient interface {
 	AmendStep(context.Context, string, []string) (string, error)
 	RunGate(context.Context, string, string, string, []string) error
 	FinishStep(context.Context, string, string) error
+	CompleteStep(context.Context, string, string) error
 	FinishRun(context.Context) (string, error)
 	RecordFileChange(context.Context, string, string, string) error
 	RecordEvidence(context.Context, agentflow.EvidenceEntry) error
@@ -51,6 +52,11 @@ type afClient interface {
 // machine is testable without a model; production wiring (runAgentflowTask)
 // builds the step-scoped Request and calls sess.orch.Run.
 type runStepFunc func(ctx context.Context, step agentflow.Step, attempt, goal string) error
+
+// beforeGatesFunc is a resume-only, read-only safety check invoked after the
+// model has recorded file receipts and immediately before any command gate.
+// Fresh execution leaves it nil and preserves the existing driver sequence.
+type beforeGatesFunc func(ctx context.Context, step agentflow.Step, attempt string) error
 
 type driver struct {
 	af              afClient
@@ -67,6 +73,7 @@ type driver struct {
 	approvedRecommendation *agentflow.WorkflowRecommendation
 	evidence               []agentflow.EvidenceEntry
 	runStep                runStepFunc
+	beforeGates            beforeGatesFunc
 	parallelCohort         func(context.Context) error
 	out                    io.Writer
 }
@@ -175,17 +182,8 @@ func (d *driver) run(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("run parallel cohort: %w", err)
 		}
 	}
-	for {
-		id, err := d.af.NextStep(ctx)
-		if err != nil {
-			return "", err
-		}
-		if id == "" {
-			break // no eligible step remains
-		}
-		if err := d.runOneStep(ctx, id); err != nil {
-			return "", err
-		}
+	if err := d.runSerialSteps(ctx); err != nil {
+		return "", err
 	}
 	if d.reviewManifest != "" {
 		if err := d.runReviewAmendments(ctx); err != nil {
@@ -195,16 +193,31 @@ func (d *driver) run(ctx context.Context) (string, error) {
 	return d.af.FinishRun(ctx)
 }
 
+func (d *driver) runSerialSteps(ctx context.Context) error {
+	for {
+		id, err := d.af.NextStep(ctx)
+		if err != nil {
+			return err
+		}
+		if id == "" {
+			return nil
+		}
+		if err := d.runOneStep(ctx, id); err != nil {
+			return err
+		}
+	}
+}
+
 func (d *driver) runOneStep(ctx context.Context, id string) error {
 	step, ok := findStep(d.plan, id)
 	if !ok {
 		return fmt.Errorf("agentflow returned unknown step %q", id)
 	}
-	attempt, err := d.af.ClaimStep(ctx, id)
+	goal, err := stepGoal(d.plan, step)
 	if err != nil {
 		return err
 	}
-	goal, err := stepGoal(d.plan, step)
+	attempt, err := d.af.ClaimStep(ctx, id)
 	if err != nil {
 		return err
 	}
@@ -214,6 +227,11 @@ func (d *driver) runOneStep(ctx context.Context, id string) error {
 func (d *driver) runAttempt(ctx context.Context, step agentflow.Step, attempt, goal string) error {
 	if err := d.runStep(ctx, step, attempt, goal); err != nil {
 		return err // includes a fatal record-file-change failure surfaced via ctx cancel
+	}
+	if d.beforeGates != nil {
+		if err := d.beforeGates(ctx, step, attempt); err != nil {
+			return err
+		}
 	}
 	gates, err := agentflow.ExtractCommandGates(step)
 	if err != nil {
@@ -477,7 +495,7 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		return fmt.Errorf("read plan: %w", err)
 	}
 	var plan agentflow.Plan
-	if err := json.Unmarshal(planBytes, &plan); err != nil {
+	if err := decodeAgentflowPlanJSON(planBytes, &plan); err != nil {
 		return fmt.Errorf("parse plan: %w", err)
 	}
 	if err := agentflow.PreflightP0(&plan); err != nil {
@@ -532,7 +550,11 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		}
 		return agentflow.NewExecRunner(root)
 	}
-	client := agentflow.NewClient(runnerForRoot(root), root)
+	rootRunner := runnerForRoot(root)
+	client := agentflow.NewClient(rootRunner, root)
+	if f.agentflowResume {
+		client = agentflow.NewOwnedClient(rootRunner, root, "golem")
+	}
 
 	// 4. Run context we can cancel on a fatal record failure.
 	runCtx, cancel := context.WithCancel(ctx)
@@ -552,6 +574,21 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 		approvedRecommendation: approvedRecommendation,
 		evidence:               evidence, runStep: runStep, out: stdout,
 	}
+	if f.agentflowResume {
+		final, err := d.resume(runCtx, root, planBytes, approvedRecommendation)
+		if err != nil {
+			reportAgentflowResumeError(stderr, err)
+			reportAgentflowRecovery(ctx, stderr, client)
+			return errAgentflowTaskFailed
+		}
+		summary, err := verifiedAgentflowProofSummary(runCtx, client)
+		if err != nil {
+			reportAgentflowResumeError(stderr, err)
+			return errAgentflowTaskFailed
+		}
+		renderAgentflowStatus(stdout, final, &summary, resumeDisposition(final.State))
+		return nil
+	}
 	var coordinator *parallelCoordinator
 	if f.planWorkers > 1 {
 		workerOut := &synchronizedWriter{out: stderr}
@@ -569,12 +606,16 @@ func runAgentflowTask(ctx context.Context, stdout, stderr io.Writer, interrupts 
 	}
 	proof, err := runTaskDriver(runCtx, d, coordinator, stderr)
 	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "agentflow task failed: %s\n", recoveryDisplayText(err.Error()))
 		reportAgentflowRecovery(ctx, stderr, client)
 		return errAgentflowTaskFailed
 	}
 	_, _ = fmt.Fprintf(stdout, "proof pack: %s\n", proof)
 	return nil
+}
+
+func reportAgentflowResumeError(out io.Writer, err error) {
+	_, _ = fmt.Fprintf(out, "agentflow resume failed: %s\n", recoveryDisplayText(err.Error()))
 }
 
 // readApprovedWorkflowHandoff verifies that the durable route report still
@@ -885,24 +926,20 @@ func writeStepGoalList(b *strings.Builder, values []string) {
 // executed, so proof state stays adapter-driven.
 func reportAgentflowRecovery(ctx context.Context, out io.Writer, client *agentflow.Client) {
 	if st, err := client.NextAction(ctx); err == nil {
-		_, _ = fmt.Fprintf(out, "agentflow next-action: %s", st.State)
+		_, _ = fmt.Fprintf(out, "agentflow next-action: %s", recoveryDisplayText(st.State))
 		if st.Reason != "" {
-			_, _ = fmt.Fprintf(out, " (%s)", st.Reason)
+			_, _ = fmt.Fprintf(out, " (%s)", recoveryDisplayText(st.Reason))
 		}
 		_, _ = fmt.Fprintln(out)
-		if st.Command != "" {
-			cmd := st.Command
-			if len(st.Args) > 0 {
-				cmd = strings.Join(append([]string{st.Command}, st.Args...), " ")
-			}
-			_, _ = fmt.Fprintf(out, "agentflow suggested command: %s\n", cmd)
+		if st.Command != "" || len(st.Args) > 0 {
+			_, _ = fmt.Fprintf(out, "agentflow advisory (display only): command=%q args=%q\n", st.Command, st.Args)
 		}
 		for _, d := range st.Diagnostics {
-			_, _ = fmt.Fprintf(out, "  %s\n", d)
+			_, _ = fmt.Fprintf(out, "  %s\n", recoveryDisplayText(d))
 		}
 	}
 	if b, err := client.Status(ctx); err == nil && len(bytes.TrimSpace(b)) > 0 {
-		_, _ = fmt.Fprintln(out, strings.TrimSpace(string(b)))
+		_, _ = fmt.Fprintf(out, "agentflow status (display only): %s\n", recoveryDisplayText(strings.TrimSpace(string(b))))
 	}
 }
 

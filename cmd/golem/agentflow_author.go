@@ -8,10 +8,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
@@ -519,26 +524,649 @@ func canonicalJSONSHA256(value any) (string, error) {
 	return fmt.Sprintf("%x", sum), nil
 }
 
-// canonicalPlanJSONSHA256 binds every semantic Agentflow plan field while
-// excluding only lock-plan's restamped bookkeeping, matching Agentflow's plan
-// binding contract. Decoding through any preserves fields outside Golem's
-// narrow execution projection instead of silently dropping them.
-func canonicalPlanJSONSHA256(data []byte) (string, error) {
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	var plan map[string]any
-	if err := dec.Decode(&plan); err != nil {
+// agentflowCanonicalJSONSHA256 matches Python's json.dumps defaults used by
+// Agentflow's plan_binding_sha256: sorted keys, compact separators, and
+// ensure_ascii=true. It is intentionally separate from Golem's own canonical
+// JSON contract above.
+func agentflowCanonicalJSONSHA256(value any) (string, error) {
+	var encoded strings.Builder
+	if err := writeAgentflowCanonicalJSON(&encoded, value); err != nil {
 		return "", err
 	}
-	if plan == nil {
+	sum := sha256.Sum256([]byte(encoded.String()))
+	return fmt.Sprintf("%x", sum), nil
+}
+
+func writeAgentflowCanonicalJSON(dst *strings.Builder, value any) error {
+	switch value := value.(type) {
+	case nil:
+		dst.WriteString("null")
+	case bool:
+		dst.WriteString(strconv.FormatBool(value))
+	case string:
+		writeAgentflowJSONString(dst, value)
+	case agentflowJSONString:
+		writeAgentflowJSONRunes(dst, value)
+	case json.Number:
+		number, err := agentflowJSONNumber(value)
+		if err != nil {
+			return err
+		}
+		dst.WriteString(number)
+	case agentflowJSONConstant:
+		dst.WriteString(string(value))
+	case []any:
+		dst.WriteByte('[')
+		for i, item := range value {
+			if i > 0 {
+				dst.WriteByte(',')
+			}
+			if err := writeAgentflowCanonicalJSON(dst, item); err != nil {
+				return err
+			}
+		}
+		dst.WriteByte(']')
+	case map[string]any:
+		keys := make([]string, 0, len(value))
+		for key := range value {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		dst.WriteByte('{')
+		for i, key := range keys {
+			if i > 0 {
+				dst.WriteByte(',')
+			}
+			writeAgentflowJSONString(dst, key)
+			dst.WriteByte(':')
+			if err := writeAgentflowCanonicalJSON(dst, value[key]); err != nil {
+				return err
+			}
+		}
+		dst.WriteByte('}')
+	case agentflowJSONObject:
+		members := append(agentflowJSONObject(nil), value...)
+		sort.Slice(members, func(i, j int) bool {
+			return compareAgentflowJSONStrings(members[i].key, members[j].key) < 0
+		})
+		dst.WriteByte('{')
+		for i, member := range members {
+			if i > 0 {
+				dst.WriteByte(',')
+			}
+			writeAgentflowJSONRunes(dst, member.key)
+			dst.WriteByte(':')
+			if err := writeAgentflowCanonicalJSON(dst, member.value); err != nil {
+				return err
+			}
+		}
+		dst.WriteByte('}')
+	default:
+		return fmt.Errorf("unsupported Agentflow canonical JSON value %T", value)
+	}
+	return nil
+}
+
+func writeAgentflowJSONString(dst *strings.Builder, value string) {
+	writeAgentflowJSONRunes(dst, []rune(value))
+}
+
+func writeAgentflowJSONRunes(dst *strings.Builder, value []rune) {
+	dst.WriteByte('"')
+	for _, r := range value {
+		switch r {
+		case '"', '\\':
+			dst.WriteByte('\\')
+			dst.WriteRune(r)
+		case '\b':
+			dst.WriteString(`\b`)
+		case '\f':
+			dst.WriteString(`\f`)
+		case '\n':
+			dst.WriteString(`\n`)
+		case '\r':
+			dst.WriteString(`\r`)
+		case '\t':
+			dst.WriteString(`\t`)
+		default:
+			switch {
+			case r < 0x20 || r == 0x7f:
+				_, _ = fmt.Fprintf(dst, `\u%04x`, r)
+			case r < utf8RuneSelf:
+				dst.WriteRune(r)
+			case r <= 0xffff:
+				_, _ = fmt.Fprintf(dst, `\u%04x`, r)
+			default:
+				high, low := utf16.EncodeRune(r)
+				_, _ = fmt.Fprintf(dst, `\u%04x\u%04x`, high, low)
+			}
+		}
+	}
+	dst.WriteByte('"')
+}
+
+type agentflowJSONString []rune
+
+type agentflowJSONConstant string
+
+type agentflowJSONMember struct {
+	key   agentflowJSONString
+	value any
+}
+
+type agentflowJSONObject []agentflowJSONMember
+
+func compareAgentflowJSONStrings(left, right agentflowJSONString) int {
+	for i := 0; i < len(left) && i < len(right); i++ {
+		if left[i] < right[i] {
+			return -1
+		}
+		if left[i] > right[i] {
+			return 1
+		}
+	}
+	switch {
+	case len(left) < len(right):
+		return -1
+	case len(left) > len(right):
+		return 1
+	default:
+		return 0
+	}
+}
+
+const utf8RuneSelf = 0x80
+
+func agentflowJSONNumber(value json.Number) (string, error) {
+	raw := value.String()
+	if !strings.ContainsAny(raw, ".eE") {
+		integer, ok := new(big.Int).SetString(raw, 10)
+		if !ok {
+			return "", fmt.Errorf("invalid Agentflow JSON integer %q", raw)
+		}
+		return integer.String(), nil
+	}
+	parsed, err := strconv.ParseFloat(raw, 64)
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
+		return "", fmt.Errorf("invalid Agentflow JSON float %q", raw)
+	}
+	if math.IsInf(parsed, 1) {
+		return "Infinity", nil
+	}
+	if math.IsInf(parsed, -1) {
+		return "-Infinity", nil
+	}
+	if math.IsNaN(parsed) {
+		return "NaN", nil
+	}
+	if parsed == 0 {
+		if math.Signbit(parsed) {
+			return "-0.0", nil
+		}
+		return "0.0", nil
+	}
+
+	scientific := strconv.FormatFloat(parsed, 'e', -1, 64)
+	mantissa, exponentText, ok := strings.Cut(scientific, "e")
+	if !ok {
+		return "", fmt.Errorf("format Agentflow JSON float %q", raw)
+	}
+	exponent, err := strconv.Atoi(exponentText)
+	if err != nil {
+		return "", fmt.Errorf("format Agentflow JSON float %q: %w", raw, err)
+	}
+	if exponent < -4 || exponent >= 16 {
+		sign := "+"
+		if exponent < 0 {
+			sign = "-"
+			exponent = -exponent
+		}
+		return fmt.Sprintf("%se%s%02d", mantissa, sign, exponent), nil
+	}
+
+	negative := strings.HasPrefix(mantissa, "-")
+	digits := strings.ReplaceAll(strings.TrimPrefix(mantissa, "-"), ".", "")
+	point := exponent + 1
+	var fixed strings.Builder
+	if negative {
+		fixed.WriteByte('-')
+	}
+	switch {
+	case point <= 0:
+		fixed.WriteString("0.")
+		fixed.WriteString(strings.Repeat("0", -point))
+		fixed.WriteString(digits)
+	case point >= len(digits):
+		fixed.WriteString(digits)
+		fixed.WriteString(strings.Repeat("0", point-len(digits)))
+		fixed.WriteString(".0")
+	default:
+		fixed.WriteString(digits[:point])
+		fixed.WriteByte('.')
+		fixed.WriteString(digits[point:])
+	}
+	return fixed.String(), nil
+}
+
+// canonicalPlanJSONSHA256 binds every semantic Agentflow plan field while
+// excluding only lock-plan's restamped bookkeeping, matching Agentflow's plan
+// binding contract. The narrow parser preserves lone UTF-16 surrogate escapes:
+// Python's json module retains them, while encoding/json replaces them with
+// U+FFFD before a canonical encoder can see them.
+func canonicalPlanJSONSHA256(data []byte) (string, error) {
+	value, err := parseAgentflowJSON(data)
+	if err != nil {
+		return "", err
+	}
+	plan, ok := value.(agentflowJSONObject)
+	if !ok {
 		return "", errors.New("plan must be a JSON object")
 	}
-	if err := dec.Decode(&struct{}{}); err != io.EOF {
-		return "", errors.New("trailing JSON")
+	filtered := make(agentflowJSONObject, 0, len(plan))
+	for _, member := range plan {
+		if agentflowJSONStringEqualASCII(member.key, "locked") || agentflowJSONStringEqualASCII(member.key, "locked_at") {
+			continue
+		}
+		filtered = append(filtered, member)
 	}
-	delete(plan, "locked")
-	delete(plan, "locked_at")
-	return canonicalJSONSHA256(plan)
+	return agentflowCanonicalJSONSHA256(filtered)
+}
+
+func agentflowJSONStringEqualASCII(value agentflowJSONString, want string) bool {
+	if len(value) != len(want) {
+		return false
+	}
+	for i, r := range value {
+		if r != rune(want[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+type agentflowJSONParser struct {
+	data   []byte
+	offset int
+}
+
+func parseAgentflowJSON(data []byte) (any, error) {
+	parser := agentflowJSONParser{data: data}
+	value, err := parser.value()
+	if err != nil {
+		return nil, err
+	}
+	parser.skipSpace()
+	if parser.offset != len(parser.data) {
+		return nil, parser.errorf("trailing JSON")
+	}
+	return value, nil
+}
+
+func (p *agentflowJSONParser) value() (any, error) {
+	p.skipSpace()
+	if p.offset >= len(p.data) {
+		return nil, p.errorf("unexpected end of JSON")
+	}
+	switch p.data[p.offset] {
+	case '{':
+		return p.object()
+	case '[':
+		return p.array()
+	case '"':
+		return p.string()
+	case 't':
+		return p.literal("true", true)
+	case 'f':
+		return p.literal("false", false)
+	case 'n':
+		return p.literal("null", nil)
+	case 'N':
+		return p.constant("NaN")
+	case 'I':
+		return p.constant("Infinity")
+	default:
+		if p.data[p.offset] == '-' && len(p.data)-p.offset >= len("-Infinity") && string(p.data[p.offset:p.offset+len("-Infinity")]) == "-Infinity" {
+			return p.constant("-Infinity")
+		}
+		return p.number()
+	}
+}
+
+func (p *agentflowJSONParser) object() (agentflowJSONObject, error) {
+	p.offset++
+	p.skipSpace()
+	if p.take('}') {
+		return agentflowJSONObject{}, nil
+	}
+	members := agentflowJSONObject{}
+	indexes := map[string]int{}
+	for {
+		p.skipSpace()
+		if p.offset >= len(p.data) || p.data[p.offset] != '"' {
+			return nil, p.errorf("object key must be a string")
+		}
+		key, err := p.string()
+		if err != nil {
+			return nil, err
+		}
+		p.skipSpace()
+		if !p.take(':') {
+			return nil, p.errorf("expected colon after object key")
+		}
+		value, err := p.value()
+		if err != nil {
+			return nil, err
+		}
+		identity := agentflowJSONStringIdentity(key)
+		if index, exists := indexes[identity]; exists {
+			members[index].value = value
+		} else {
+			indexes[identity] = len(members)
+			members = append(members, agentflowJSONMember{key: key, value: value})
+		}
+		p.skipSpace()
+		if p.take('}') {
+			return members, nil
+		}
+		if !p.take(',') {
+			return nil, p.errorf("expected comma or closing brace")
+		}
+	}
+}
+
+func (p *agentflowJSONParser) array() ([]any, error) {
+	p.offset++
+	p.skipSpace()
+	if p.take(']') {
+		return []any{}, nil
+	}
+	values := []any{}
+	for {
+		value, err := p.value()
+		if err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+		p.skipSpace()
+		if p.take(']') {
+			return values, nil
+		}
+		if !p.take(',') {
+			return nil, p.errorf("expected comma or closing bracket")
+		}
+	}
+}
+
+func (p *agentflowJSONParser) string() (agentflowJSONString, error) {
+	p.offset++
+	value := agentflowJSONString{}
+	for p.offset < len(p.data) {
+		current := p.data[p.offset]
+		switch {
+		case current == '"':
+			p.offset++
+			return value, nil
+		case current == '\\':
+			p.offset++
+			escaped, err := p.escape()
+			if err != nil {
+				return nil, err
+			}
+			value = append(value, escaped...)
+		case current < 0x20:
+			return nil, p.errorf("unescaped control character in string")
+		case current < utf8.RuneSelf:
+			value = append(value, rune(current))
+			p.offset++
+		default:
+			r, size := utf8.DecodeRune(p.data[p.offset:])
+			if r == utf8.RuneError && size == 1 {
+				return nil, p.errorf("invalid UTF-8 in string")
+			}
+			value = append(value, r)
+			p.offset += size
+		}
+	}
+	return nil, p.errorf("unterminated string")
+}
+
+func (p *agentflowJSONParser) escape() ([]rune, error) {
+	if p.offset >= len(p.data) {
+		return nil, p.errorf("unterminated string escape")
+	}
+	escape := p.data[p.offset]
+	p.offset++
+	switch escape {
+	case '"', '\\', '/':
+		return []rune{rune(escape)}, nil
+	case 'b':
+		return []rune{'\b'}, nil
+	case 'f':
+		return []rune{'\f'}, nil
+	case 'n':
+		return []rune{'\n'}, nil
+	case 'r':
+		return []rune{'\r'}, nil
+	case 't':
+		return []rune{'\t'}, nil
+	case 'u':
+		first, err := p.hexRune()
+		if err != nil {
+			return nil, err
+		}
+		if first >= 0xd800 && first <= 0xdbff && p.offset+6 <= len(p.data) && p.data[p.offset] == '\\' && p.data[p.offset+1] == 'u' {
+			second, ok := decodeAgentflowHexRune(p.data[p.offset+2 : p.offset+6])
+			if ok && second >= 0xdc00 && second <= 0xdfff {
+				p.offset += 6
+				return []rune{utf16.DecodeRune(first, second)}, nil
+			}
+		}
+		return []rune{first}, nil
+	default:
+		return nil, p.errorf("invalid string escape")
+	}
+}
+
+func (p *agentflowJSONParser) hexRune() (rune, error) {
+	if p.offset+4 > len(p.data) {
+		return 0, p.errorf("short Unicode escape")
+	}
+	r, ok := decodeAgentflowHexRune(p.data[p.offset : p.offset+4])
+	if !ok {
+		return 0, p.errorf("invalid Unicode escape")
+	}
+	p.offset += 4
+	return r, nil
+}
+
+func decodeAgentflowHexRune(data []byte) (rune, bool) {
+	if len(data) != 4 {
+		return 0, false
+	}
+	var value rune
+	for _, digit := range data {
+		value <<= 4
+		switch {
+		case digit >= '0' && digit <= '9':
+			value += rune(digit - '0')
+		case digit >= 'a' && digit <= 'f':
+			value += rune(digit-'a') + 10
+		case digit >= 'A' && digit <= 'F':
+			value += rune(digit-'A') + 10
+		default:
+			return 0, false
+		}
+	}
+	return value, true
+}
+
+func (p *agentflowJSONParser) number() (json.Number, error) {
+	start := p.offset
+	p.take('-')
+	if p.offset >= len(p.data) {
+		return "", p.errorf("invalid JSON number")
+	}
+	if p.take('0') {
+		if p.offset < len(p.data) && p.data[p.offset] >= '0' && p.data[p.offset] <= '9' {
+			return "", p.errorf("leading zero in JSON number")
+		}
+	} else {
+		if p.data[p.offset] < '1' || p.data[p.offset] > '9' {
+			return "", p.errorf("invalid JSON value")
+		}
+		for p.offset < len(p.data) && p.data[p.offset] >= '0' && p.data[p.offset] <= '9' {
+			p.offset++
+		}
+	}
+	if p.take('.') {
+		fraction := p.offset
+		for p.offset < len(p.data) && p.data[p.offset] >= '0' && p.data[p.offset] <= '9' {
+			p.offset++
+		}
+		if p.offset == fraction {
+			return "", p.errorf("JSON fraction has no digits")
+		}
+	}
+	if p.offset < len(p.data) && (p.data[p.offset] == 'e' || p.data[p.offset] == 'E') {
+		p.offset++
+		if p.offset < len(p.data) && (p.data[p.offset] == '+' || p.data[p.offset] == '-') {
+			p.offset++
+		}
+		exponent := p.offset
+		for p.offset < len(p.data) && p.data[p.offset] >= '0' && p.data[p.offset] <= '9' {
+			p.offset++
+		}
+		if p.offset == exponent {
+			return "", p.errorf("JSON exponent has no digits")
+		}
+	}
+	return json.Number(string(p.data[start:p.offset])), nil
+}
+
+func (p *agentflowJSONParser) literal(text string, value any) (any, error) {
+	if p.offset+len(text) > len(p.data) || string(p.data[p.offset:p.offset+len(text)]) != text {
+		return nil, p.errorf("invalid JSON value")
+	}
+	p.offset += len(text)
+	return value, nil
+}
+
+func (p *agentflowJSONParser) constant(text string) (agentflowJSONConstant, error) {
+	if p.offset+len(text) > len(p.data) || string(p.data[p.offset:p.offset+len(text)]) != text {
+		return "", p.errorf("invalid JSON value")
+	}
+	p.offset += len(text)
+	return agentflowJSONConstant(text), nil
+}
+
+func (p *agentflowJSONParser) skipSpace() {
+	for p.offset < len(p.data) {
+		switch p.data[p.offset] {
+		case ' ', '\t', '\n', '\r':
+			p.offset++
+		default:
+			return
+		}
+	}
+}
+
+func (p *agentflowJSONParser) take(want byte) bool {
+	if p.offset >= len(p.data) || p.data[p.offset] != want {
+		return false
+	}
+	p.offset++
+	return true
+}
+
+func (p *agentflowJSONParser) errorf(format string, args ...any) error {
+	return fmt.Errorf("parse Agentflow canonical JSON at byte %d: %s", p.offset, fmt.Sprintf(format, args...))
+}
+
+func agentflowJSONStringIdentity(value agentflowJSONString) string {
+	var identity strings.Builder
+	for _, r := range value {
+		_, _ = fmt.Fprintf(&identity, "%08x", r)
+	}
+	return identity.String()
+}
+
+// decodeAgentflowPlanJSON projects the Python JSON dialect into Golem's typed
+// plan. Python may persist unknown non-finite future fields as NaN/Infinity;
+// they are replaced with null only for this narrow typed projection while the
+// canonical digest above still binds their exact Python value.
+func decodeAgentflowPlanJSON(data []byte, plan *agentflow.Plan) error {
+	value, err := parseAgentflowJSON(data)
+	if err != nil {
+		return err
+	}
+	if _, ok := value.(agentflowJSONObject); !ok {
+		return errors.New("plan must be a JSON object")
+	}
+	var projected strings.Builder
+	if err := writeAgentflowPlanProjectionJSON(&projected, value); err != nil {
+		return err
+	}
+	return json.Unmarshal([]byte(projected.String()), plan)
+}
+
+func writeAgentflowPlanProjectionJSON(dst *strings.Builder, value any) error {
+	switch value := value.(type) {
+	case nil:
+		dst.WriteString("null")
+	case bool:
+		dst.WriteString(strconv.FormatBool(value))
+	case agentflowJSONString:
+		if err := writeAgentflowPlanJSONString(dst, value); err != nil {
+			return err
+		}
+	case json.Number:
+		dst.WriteString(value.String())
+	case agentflowJSONConstant:
+		dst.WriteString("null")
+	case []any:
+		dst.WriteByte('[')
+		for i, item := range value {
+			if i > 0 {
+				dst.WriteByte(',')
+			}
+			if err := writeAgentflowPlanProjectionJSON(dst, item); err != nil {
+				return err
+			}
+		}
+		dst.WriteByte(']')
+	case agentflowJSONObject:
+		dst.WriteByte('{')
+		for i, member := range value {
+			if i > 0 {
+				dst.WriteByte(',')
+			}
+			if err := writeAgentflowPlanJSONString(dst, member.key); err != nil {
+				return err
+			}
+			dst.WriteByte(':')
+			if err := writeAgentflowPlanProjectionJSON(dst, member.value); err != nil {
+				return err
+			}
+		}
+		dst.WriteByte('}')
+	default:
+		return fmt.Errorf("unsupported Agentflow plan projection JSON value %T", value)
+	}
+	return nil
+}
+
+// writeAgentflowPlanJSONString rejects lone UTF-16 surrogates before the typed
+// projection reaches encoding/json, which would silently replace them with
+// U+FFFD. Canonical hashing still preserves them exactly, but Golem must never
+// execute argv different from the locked Agentflow plan.
+func writeAgentflowPlanJSONString(dst *strings.Builder, value agentflowJSONString) error {
+	for _, r := range value {
+		if r >= 0xd800 && r <= 0xdfff {
+			return errors.New("agentflow plan contains a lone UTF-16 surrogate that cannot be executed faithfully")
+		}
+	}
+	writeAgentflowJSONRunes(dst, value)
+	return nil
 }
 
 // terminalError marks a fail-fast condition that no model repair can fix.

@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/agent/tools"
@@ -31,6 +32,19 @@ func denyProofState(rel string) error {
 		return errProofState
 	}
 	return nil
+}
+
+func agentflowStateDetected(root string) bool {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.IsDir() && denyProofState(entry.Name()) != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // stepScopeGuard builds the proof-mode scope guard for one claimed step:

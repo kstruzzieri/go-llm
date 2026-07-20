@@ -17,6 +17,111 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+func TestCanonicalPlanJSONSHA256MatchesAgentflowPythonEncoding(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		plan string
+		want string
+	}{
+		{
+			name: "unicode html and float",
+			plan: `{"objective":"café <tag> & 😀","locked":true,"locked_at":"ignored","n":1.0}`,
+			want: "e314e84c943429c75d26fff4b97bb835d526e040d218af93d8fc484ec0abce8a",
+		},
+		{
+			name: "delete snow exponent and negative zero integer",
+			plan: `{"z":"\u007f雪","a":"</script>","integer":-0,"float":1e-7}`,
+			want: "790c58daab38bbcf8a408877a64bf2b85a59130cda8969b75fa5622761575c5d",
+		},
+		{
+			name: "python float overflow",
+			plan: `{"future_numeric":1e400}`,
+			want: "d2b8da6145542a53502f44c2bc63e3f19439a239bd9cbc948a640f4e15492e83",
+		},
+		{
+			name: "python signed overflow and underflow",
+			plan: `{"negative":-1e400,"underflow":1e-4000}`,
+			want: "7b0d08326326bb0f3ee375ae981d580b8b64d044fc6b60573650c4a03cae6e48",
+		},
+		{
+			name: "python preserves lone high surrogate",
+			plan: `{"s":"\ud800"}`,
+			want: "d06a70a1ca4d3ac4099cd5f35ecbb551be652247e0950c05790e8f0c58010851",
+		},
+		{
+			name: "python preserves lone low surrogate",
+			plan: `{"s":"\udc00"}`,
+			want: "674779badd6e5aec127408f2a0672761c55e78095912ab422b570492277b592c",
+		},
+		{
+			name: "python sorts a lone surrogate key by code point",
+			plan: `{"\ud800":1,"x":2}`,
+			want: "3cffeb91007ccbb7994a12c098d304a16a6b4ee319a08d42579c86b9f4d1b1f2",
+		},
+		{
+			name: "python accepts nonfinite constants",
+			plan: `{"infinity":Infinity,"negative":-Infinity,"not_a_number":NaN}`,
+			want: "1f1b4b16529dd96825f8191bba4027096c80c12d6b41333b9bad1e0f8f2c1803",
+		},
+		{
+			name: "escaped lock keys are excluded",
+			plan: `{"\u006cocked":true,"locked_at":"ignored","s":"\ud800"}`,
+			want: "d06a70a1ca4d3ac4099cd5f35ecbb551be652247e0950c05790e8f0c58010851",
+		},
+		{
+			name: "decoded duplicate keys keep the last value",
+			plan: `{"\ud83d\ude00":1,"😀":2}`,
+			want: "da025370ab29ccb58a430a14f6a23fa2fc02abe81f1db81624adb73506fe238c",
+		},
+		{
+			name: "keys sort by decoded Python code points",
+			plan: `{"\ud800":1,"\ue000":2,"😀":3,"x":4}`,
+			want: "d2f69b93836ae0544cf2bbfb7cf89e2b8299cd8b4c7f88d234585eff55ed9571",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := canonicalPlanJSONSHA256([]byte(test.plan))
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Python: json.dumps(content, sort_keys=True, separators=(",", ":"))
+			if got != test.want {
+				t.Fatalf("digest = %s, want Agentflow digest %s", got, test.want)
+			}
+		})
+	}
+}
+
+func TestCanonicalPlanJSONSHA256RejectsMalformedInput(t *testing.T) {
+	for _, plan := range [][]byte{
+		[]byte(`[]`),
+		[]byte(`{"x":1} trailing`),
+		[]byte(`{"x":"\q"}`),
+		[]byte(`{"x":01}`),
+		{'{', '"', 'x', '"', ':', '"', 0xff, '"', '}'},
+	} {
+		if digest, err := canonicalPlanJSONSHA256(plan); err == nil {
+			t.Fatalf("canonicalPlanJSONSHA256(%q) = %s, want error", plan, digest)
+		}
+	}
+}
+
+func TestDecodeAgentflowPlanJSONRejectsUnexecutableLoneSurrogate(t *testing.T) {
+	data := []byte(`{"steps":[{"id":"P1","gates":[{"kind":"command","run":["echo","\ud800"]}]}]}`)
+	var plan agentflow.Plan
+	if err := decodeAgentflowPlanJSON(data, &plan); err == nil || !strings.Contains(err.Error(), "lone UTF-16 surrogate") {
+		t.Fatalf("decodeAgentflowPlanJSON() error = %v, want lone-surrogate refusal", err)
+	}
+
+	paired := []byte(`{"steps":[{"id":"P1","gates":[{"kind":"command","run":["echo","\ud83d\ude00"]}]}]}`)
+	if err := decodeAgentflowPlanJSON(paired, &plan); err != nil {
+		t.Fatal(err)
+	}
+	if got := plan.Steps[0].Gates[0].Run[1]; got != "😀" {
+		t.Fatalf("paired surrogate decoded as %q, want emoji", got)
+	}
+}
+
 // stubLocker satisfies afLocker; LockPlan returns a scripted error per call.
 type stubLocker struct {
 	probeErr         error

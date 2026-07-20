@@ -1,6 +1,7 @@
 package agentflow
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -252,6 +253,31 @@ func TestClient_NextAction_ParsesAttemptAndNestedDiagnostics(t *testing.T) {
 	}
 }
 
+func TestClient_NextAction_PreservesTypedRecoveryProjectionAndRawJSON(t *testing.T) {
+	payload := []byte(`{"state":"validation_missing","reason":"gate missing","blocking":true,"command":"sh","args":["-c","touch /tmp/owned"],"step_id":"P1","gate":"unit-tests","diagnostics":[],"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"golem","step":{"id":"P1","state":"in_progress","completed":false},"attempt":{"id":"A1","state":"claimed","owner":"golem","open":true},"lease":{"policy":"enforce","ttl_minutes":30,"grace_seconds":5,"expires_at":"2026-07-19T12:00:00Z","state":"live","exclusive":true},"gates":[{"kind":"command","label":"go test ./...","status":"missing","receipt_id":null,"evidence_id":null},{"kind":"inspection","label":"review","status":"satisfied","receipt_id":null,"evidence_id":"E1"}],"recovery_actions":[{"action":"continue","allowed":true,"automatic":true,"break_glass":false,"reason":"owner holds lease"}],"diagnostics":[]}}`)
+	f := &fakeRunner{replies: map[string]fakeReply{"next-action": {stdout: payload}}}
+	c := NewOwnedClient(f, "/ws", "golem")
+
+	state, err := c.NextAction(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection := state.Resumability
+	if !bytes.Equal(state.RawJSON, payload) || !state.Blocking || state.StepID == nil || *state.StepID != "P1" ||
+		state.Gate == nil || *state.Gate != "unit-tests" || projection == nil || projection.Lease == nil ||
+		projection.Lease.State != "live" || projection.Lease.TTLMinutes == nil || *projection.Lease.TTLMinutes != 30 ||
+		projection.Attempt == nil || projection.Attempt.Owner != "golem" || projection.Attempt.State != "claimed" ||
+		len(projection.Gates) != 2 || projection.Gates[0].Label != "go test ./..." ||
+		len(projection.RecoveryActions) != 1 || !projection.RecoveryActions[0].Allowed ||
+		!projection.RecoveryActions[0].Automatic || projection.RecoveryActions[0].BreakGlass == nil || *projection.RecoveryActions[0].BreakGlass {
+		t.Fatalf("state = %+v", state)
+	}
+	want := []string{"next-action", "--root", "/ws", "--json", "--agent", "golem"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+}
+
 func TestClient_NextAction_RejectsNullResumabilityDiagnostics(t *testing.T) {
 	c, _ := newTestClient(map[string]fakeReply{"next-action": {stdout: []byte(`{
 		"resumability": {
@@ -264,6 +290,61 @@ func TestClient_NextAction_RejectsNullResumabilityDiagnostics(t *testing.T) {
 	}`), exit: 0}})
 	if _, err := c.NextAction(context.Background()); err == nil || !strings.Contains(err.Error(), "diagnostics must be an array") {
 		t.Fatalf("NextAction() error = %v", err)
+	}
+}
+
+func TestClient_CompleteStep_Argv(t *testing.T) {
+	f := &fakeRunner{replies: map[string]fakeReply{"complete-step": {stdout: []byte(`{}`)}}}
+	c := NewOwnedClient(f, "/ws", "golem")
+	if err := c.CompleteStep(context.Background(), "P1", "A1"); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"complete-step", "P1", "--root", "/ws", "--attempt", "A1", "--agent", "golem", "--json"}
+	if !reflect.DeepEqual(f.calls[0], want) {
+		t.Fatalf("argv = %v, want %v", f.calls[0], want)
+	}
+}
+
+func TestClient_ProofSummary(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(dir, ".agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	proof := `{"checks":[{"id":"a","status":"passed"},{"id":"b","status":"warning"},{"id":"c","status":"failed"},{"id":"d","status":"passed"},{"id":"e","status":"not_run"},{"id":"f","status":"skipped"},{"id":"g","status":"not_applicable"}]}`
+	if err := os.WriteFile(filepath.Join(dir, ".agent", "proof-pack.json"), []byte(proof), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := NewClient(&fakeRunner{}, dir)
+	summary, err := c.ProofSummary(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.Path != filepath.Join(dir, ".agent", "proof-pack.json") || summary.Total != 7 ||
+		summary.Passed != 2 || summary.Warning != 1 || summary.Failed != 1 ||
+		summary.NotRun != 1 || summary.Skipped != 1 || summary.NotApplicable != 1 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}
+
+func TestClient_ProofSummary_RejectsInvalidChecks(t *testing.T) {
+	for name, body := range map[string]string{
+		"missing":  `{}`,
+		"null":     `{"checks":null}`,
+		"unknown":  `{"checks":[{"status":"future"}]}`,
+		"bad json": `{`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.Mkdir(filepath.Join(dir, ".agent"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".agent", "proof-pack.json"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := NewClient(&fakeRunner{}, dir).ProofSummary(context.Background()); err == nil {
+				t.Fatal("expected invalid proof summary")
+			}
+		})
 	}
 }
 

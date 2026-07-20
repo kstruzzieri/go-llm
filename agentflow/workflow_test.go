@@ -48,6 +48,19 @@ func validOverrideRecommendationJSON() string {
 		`"selection_reason":"Override: small-bugfix -> medium-feature. shared API"`, 1)
 }
 
+func TestValidateMaterializedWorkflowContract(t *testing.T) {
+	var recommendation WorkflowRecommendation
+	if err := json.Unmarshal([]byte(validRecommendationJSON), &recommendation); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateMaterializedWorkflowContract(recommendation.CandidateJSON()); err != nil {
+		t.Fatalf("valid contract: %v", err)
+	}
+	if err := ValidateMaterializedWorkflowContract([]byte(`{}`)); err == nil {
+		t.Fatal("expected invalid contract")
+	}
+}
+
 func TestClient_RecommendWorkflow_UsesStdinJSONAndParsesTypedProjection(t *testing.T) {
 	c, runner := newTestClient(map[string]fakeReply{
 		"recommend-workflow": {stdout: []byte(validRecommendationJSON)},

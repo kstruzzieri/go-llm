@@ -63,6 +63,9 @@ type flags struct {
 	approveEdits        bool
 	approveGates        bool
 	agentflowSrc        string
+	agentflowStatus     bool
+	agentflowResume     bool
+	jsonOutput          bool
 	evidencePath        string
 	reviewManifest      string
 	taskBriefPath       string // -task-brief: explicit Agentflow task brief for external -plan input
@@ -121,6 +124,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approveEdits, "approve-plan-edits", false, "required in task mode: auto-approve step-scoped write/edit (still bounded by the step-scope and .agent guards)")
 	fs.BoolVar(&f.approveGates, "approve-plan-gates", false, "required in task mode: auto-run plan-declared validation gates")
 	fs.StringVar(&f.agentflowSrc, "agentflow-src", "", "run 'python3 -m agentflow' with PYTHONPATH=<checkout>/src instead of the agentflow binary")
+	fs.BoolVar(&f.agentflowStatus, "agentflow-status", false, "inspect the current Agentflow next action without mutation")
+	fs.BoolVar(&f.agentflowResume, "agentflow-resume", false, "resume an existing Agentflow run serially; requires -plan and both plan approvals")
+	fs.BoolVar(&f.jsonOutput, "json", false, "with -agentflow-status, relay Agentflow next-action JSON verbatim")
 	fs.StringVar(&f.evidencePath, "evidence", "", "optional evidence sidecar JSON object/array recorded before lock in task mode")
 	fs.StringVar(&f.reviewManifest, "review-manifest", "", "task mode: Agentflow review manifest to record and execute as finding-linked amendments; requires -plan")
 	fs.StringVar(&f.taskBriefPath, "task-brief", "", "task mode: explicit Agentflow task brief JSON for an externally supplied plan (default: conservative exact-fact projection)")
@@ -131,6 +137,9 @@ func parseFlags(args []string) (flags, error) {
 	fs.BoolVar(&f.approvePlanLock, "approve-plan-lock", false, "planning mode: print the plan preview and approve the lock without prompting (non-interactive -goal)")
 	if err := fs.Parse(args); err != nil {
 		return flags{}, err
+	}
+	if fs.NArg() > 0 {
+		return flags{}, fmt.Errorf("golem: unexpected positional arguments %q; every option must be a -flag", fs.Args())
 	}
 	f.think = strings.ToLower(f.think)
 	switch f.think {
@@ -177,6 +186,33 @@ func autoIndexEnabled(f flags, autoErr, embChainErr error) bool {
 
 // validateFlags rejects flag values flag.Parse cannot police.
 func validateFlags(f flags) error {
+	if f.agentflowStatus && f.agentflowResume {
+		return fmt.Errorf("golem: -agentflow-status and -agentflow-resume are mutually exclusive")
+	}
+	if f.jsonOutput && !f.agentflowStatus {
+		return fmt.Errorf("golem: -json is valid only with -agentflow-status")
+	}
+	if f.agentflowStatus || f.agentflowResume {
+		mode := "-agentflow-status"
+		if f.agentflowResume {
+			mode = "-agentflow-resume"
+		}
+		if f.agentflowStatus && (f.planPath != "" || f.planWorkersSet || f.approveEdits || f.approveGates || f.taskBriefPath != "" || f.workflowHandoffPath != "") {
+			return fmt.Errorf("golem: %s is read-only and does not accept task execution flags", mode)
+		}
+		if f.agentflowResume && f.planPath == "" {
+			return fmt.Errorf("golem: %s requires -plan", mode)
+		}
+		if f.agentflowResume && f.planWorkers != 1 {
+			return fmt.Errorf("golem: %s requires -plan-workers=1", mode)
+		}
+		if f.promptSet || f.goalSet || f.reviewManifest != "" || f.evidencePath != "" ||
+			f.wfProfileSet || f.wfReasonSet || f.workflowProfile != "" || f.workflowReason != "" ||
+			f.ragDB != "" || f.delegate || len(f.mcpStdio) > 0 || len(f.mcpHTTP) > 0 ||
+			f.allowWrite || f.allowExec || f.approvePlanLock {
+			return fmt.Errorf("golem: %s cannot be combined with planning, setup, review, or ambient tool flags", mode)
+		}
+	}
 	if f.promptSet && strings.TrimSpace(f.prompt) == "" {
 		return fmt.Errorf("golem: -p requires a non-empty prompt")
 	}
@@ -359,6 +395,7 @@ func applyOneShotMode(f flags) (flags, []string) {
 
 type startupInfo struct {
 	workspace          string
+	agentflowState     bool
 	backendLine        string
 	useRecommend       bool
 	bootstrapWarns     []error
@@ -379,6 +416,9 @@ type startupInfo struct {
 func startupNotices(info startupInfo) []string {
 	var out []string
 	out = append(out, "workspace: "+info.workspace)
+	if info.agentflowState {
+		out = append(out, "agentflow state detected: inspect with -agentflow-status; resume with -agentflow-resume -plan <plan>")
+	}
 	if info.backendLine != "" {
 		out = append(out, info.backendLine)
 	}
@@ -424,12 +464,20 @@ func startupNotices(info startupInfo) []string {
 	return out
 }
 
+func shouldShowAgentflowHint(f flags) bool {
+	return !f.promptSet && f.planPath == "" && !f.goalSet && !f.agentflowStatus && !f.agentflowResume
+}
+
 func main() {
 	if err := run(os.Args[1:], os.Stdin, os.Stdout, os.Stderr); err != nil {
 		// -h / -help: the flag package already printed usage to stderr; help
 		// is not a failure, so exit cleanly without a spurious "golem:" line.
 		if errors.Is(err, flag.ErrHelp) {
 			return
+		}
+		var statusErr *agentflowStatusExit
+		if errors.As(err, &statusErr) {
+			os.Exit(statusErr.ExitCode())
 		}
 		// runIndex/runOneShot already rendered their own output; just exit non-zero.
 		if errors.Is(err, errIndexFailed) || errors.Is(err, errOneShotFailed) || errors.Is(err, errAgentflowTaskFailed) {
@@ -474,6 +522,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 
 	ctx := context.Background()
+	if f.agentflowStatus {
+		return runAgentflowStatus(ctx, stdout, root, f.agentflowSrc, f.jsonOutput)
+	}
 
 	cfg, err := loadConfig(f.configPath)
 	if err != nil {
@@ -737,6 +788,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	agentMemoryLine := agentMemoryNotice(agentMemoryEnabled, sessn != nil)
 	for _, line := range startupNotices(startupInfo{
 		workspace:          root,
+		agentflowState:     shouldShowAgentflowHint(f) && agentflowStateDetected(root),
 		backendLine:        backendRes.notice,
 		useRecommend:       plan.useRecommend,
 		bootstrapWarns:     bundle.Warnings,

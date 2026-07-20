@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agentflow"
@@ -72,5 +74,36 @@ func TestDenyProofState(t *testing.T) {
 		if err := denyProofState(rel); err != nil {
 			t.Errorf("denyProofState(%q) = %v, want nil", rel, err)
 		}
+	}
+}
+
+func TestAgentflowStateDetectedUsesCaseFoldedDirectoryPredicate(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		want bool
+		file bool
+	}{
+		{name: ".agent", want: true},
+		{name: ".AGENT", want: true},
+		{name: ".Agent", want: true},
+		{name: ".agentfoo", want: false},
+		{name: ".agent", file: true, want: false},
+	} {
+		t.Run(test.name+map[bool]string{true: " file", false: " directory"}[test.file], func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, test.name)
+			var err error
+			if test.file {
+				err = os.WriteFile(path, []byte("not state"), 0o600)
+			} else {
+				err = os.Mkdir(path, 0o700)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := agentflowStateDetected(root); got != test.want {
+				t.Fatalf("agentflowStateDetected(%q) = %t, want %t", test.name, got, test.want)
+			}
+		})
 	}
 }
