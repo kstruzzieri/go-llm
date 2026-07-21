@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"sync"
 
@@ -109,8 +110,11 @@ type Server struct {
 	closed          bool
 	stateVersion    uint64
 
-	fimPriorityCfg      provider.Priority
-	fimPriorityExplicit bool
+	fimPriorityCfg             provider.Priority
+	fimPriorityExplicit        bool
+	retrievalPolicyEvaluator   rag.RetrievalPolicyEvaluator
+	retrievalPolicyObserver    rag.RetrievalPolicyObserver
+	retrievalPrincipalResolver RetrievalPrincipalResolver
 
 	managedGate contextGate // serializes managed lifecycle calls across rebuilt service instances
 	mu          sync.RWMutex
@@ -122,6 +126,50 @@ type Server struct {
 
 // Option configures a Server.
 type Option func(*Server)
+
+// RetrievalPrincipalResolver resolves the trusted principal for an MCP
+// request. Its result is authoritative, including an empty principal; errors
+// abort policy identity binding.
+type RetrievalPrincipalResolver func(context.Context, gomcp.Request) (string, error)
+
+// WithRetrievalPrincipalResolver installs the immutable MCP trust-boundary
+// resolver used to bind retrieval policy principals.
+func WithRetrievalPrincipalResolver(resolver RetrievalPrincipalResolver) Option {
+	return func(s *Server) { s.retrievalPrincipalResolver = resolver }
+}
+
+// WithRetrievalPolicyEvaluator installs the immutable retrieval policy
+// evaluator retained by rebuilt RAG retrievers. Nil and typed-nil evaluators
+// disable policy evaluation.
+func WithRetrievalPolicyEvaluator(evaluator rag.RetrievalPolicyEvaluator) Option {
+	return func(s *Server) {
+		if isNilRetrievalPolicyEvaluator(evaluator) {
+			s.retrievalPolicyEvaluator = nil
+			return
+		}
+		s.retrievalPolicyEvaluator = evaluator
+	}
+}
+
+// WithRetrievalPolicyObserver installs the immutable synchronous observer
+// retained by rebuilt RAG retrievers. An observer alone does not activate
+// policy or identity binding.
+func WithRetrievalPolicyObserver(observer rag.RetrievalPolicyObserver) Option {
+	return func(s *Server) { s.retrievalPolicyObserver = observer }
+}
+
+func isNilRetrievalPolicyEvaluator(evaluator rag.RetrievalPolicyEvaluator) bool {
+	if evaluator == nil {
+		return true
+	}
+	v := reflect.ValueOf(evaluator)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
 
 // WithOllamaURL sets the Ollama server URL (default: http://localhost:11434).
 func WithOllamaURL(url string) Option {
@@ -498,6 +546,8 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 		resolved[k] = v
 	}
 	store := s.store
+	evaluator := s.retrievalPolicyEvaluator
+	observer := s.retrievalPolicyObserver
 	stateVersion := s.stateVersion
 	s.mu.RUnlock()
 
@@ -529,10 +579,17 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 			indexer = idx
 		}
 		// Retrieval is in the user-facing latency path.
+		retrieverOptions := []rag.RetrieverOption{rag.WithRetrieverModel(embeddingModel)}
+		if !isNilRetrievalPolicyEvaluator(evaluator) {
+			retrieverOptions = append(retrieverOptions, rag.WithRetrievalPolicyEvaluator(evaluator))
+		}
+		if observer != nil {
+			retrieverOptions = append(retrieverOptions, rag.WithRetrievalPolicyObserver(observer))
+		}
 		if ret, err := rag.NewRetrieverWithEmbedder(
 			s.ragEmbedder(provider.PriorityNormal),
 			store,
-			rag.WithRetrieverModel(embeddingModel),
+			retrieverOptions...,
 		); err == nil {
 			retriever = ret
 		}

@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,38 @@ const (
 	maxRetrievalAuditBytes      = 256
 	maxRetrievalWireCost        = int64(1 << 53)
 )
+
+var errRetrievalPolicyIdentity = errors.New("mcp: retrieval policy identity resolution failed")
+
+func (s *Server) retrievalPolicyRequest(ctx context.Context, req gomcp.Request) (rag.RetrievalPolicyRequest, bool, error) {
+	policy, present, err := decodeRetrievalPolicyMeta(gomcp.Meta(req.GetParams().GetMeta()))
+	if err != nil {
+		return rag.RetrievalPolicyRequest{}, present, err
+	}
+	if !present && isNilRetrievalPolicyEvaluator(s.retrievalPolicyEvaluator) {
+		return policy, false, nil
+	}
+
+	extra := req.GetExtra()
+	if s.retrievalPrincipalResolver != nil {
+		principal, err := s.retrievalPrincipalResolver(ctx, req)
+		if err != nil {
+			return rag.RetrievalPolicyRequest{}, present, fmt.Errorf("%w: %w", errRetrievalPolicyIdentity, err)
+		}
+		policy.PrincipalID = principal
+	} else if extra != nil && extra.TokenInfo != nil {
+		policy.PrincipalID = extra.TokenInfo.UserID
+	} else if extra != nil {
+		policy.PrincipalID = ""
+	}
+	session, _ := req.GetSession().(*gomcp.ServerSession)
+	if session != nil && session.ID() != "" {
+		policy.SessionID = session.ID()
+	} else if extra != nil {
+		policy.SessionID = ""
+	}
+	return policy, present, nil
+}
 
 type retrievalPolicyScopeWire struct {
 	Collection string      `json:"collection,omitempty"`

@@ -1,17 +1,236 @@
 package mcp
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
+	"net/http/httptest"
 	"reflect"
 	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/rag"
+	"github.com/modelcontextprotocol/go-sdk/auth"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
+
+type mcpPolicyEvaluatorSpy struct {
+	evaluateCalls int
+	resultCalls   int
+	last          rag.RetrievalRequest
+	decision      rag.RetrievalPolicyDecision
+}
+
+func (s *mcpPolicyEvaluatorSpy) Evaluate(_ context.Context, req rag.RetrievalRequest) (rag.RetrievalPolicyDecision, error) {
+	s.evaluateCalls++
+	s.last = req
+	return s.decision, nil
+}
+
+func (s *mcpPolicyEvaluatorSpy) EvaluateResults(_ context.Context, _ rag.RetrievalRequest, _ []rag.Chunk) ([]rag.RetrievalResultDecision, error) {
+	s.resultCalls++
+	return nil, nil
+}
+
+type mcpPolicyObserverSpy struct {
+	calls int
+	last  rag.RetrievalPolicyEvent
+}
+
+func (s *mcpPolicyObserverSpy) OnRetrievalPolicy(_ context.Context, event rag.RetrievalPolicyEvent) error {
+	s.calls++
+	s.last = event
+	return nil
+}
+
+func TestRetrievalPolicyIdentityPrecedence(t *testing.T) {
+	policyRequest := func(t *testing.T, s *Server, extra *gomcp.RequestExtra) (rag.RetrievalPolicyRequest, bool) {
+		t.Helper()
+		req := rawArgs(t, `{"query":"q"}`)
+		req.Params.Meta = gomcp.Meta{RetrievalPolicyMetaKey: map[string]any{
+			"principal_id": "claimed-user", "session_id": "claimed-session",
+		}}
+		req.Extra = extra
+		policy, present, err := s.retrievalPolicyRequest(context.Background(), req)
+		if err != nil {
+			t.Fatalf("retrievalPolicyRequest() error = %v", err)
+		}
+		return policy, present
+	}
+
+	t.Run("resolver overrides token and local claim", func(t *testing.T) {
+		s := &Server{}
+		WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+			return "resolver-user", nil
+		})(s)
+		policy, present := policyRequest(t, s, &gomcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "token-user"}})
+		if !present || policy.PrincipalID != "resolver-user" {
+			t.Fatalf("policy/present = %#v/%v", policy, present)
+		}
+	})
+
+	t.Run("empty resolver result remains authoritative", func(t *testing.T) {
+		s := &Server{}
+		WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) { return "", nil })(s)
+		policy, _ := policyRequest(t, s, &gomcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "token-user"}})
+		if policy.PrincipalID != "" {
+			t.Fatalf("principal = %q, want authoritative empty", policy.PrincipalID)
+		}
+	})
+
+	t.Run("token overrides claim", func(t *testing.T) {
+		policy, _ := policyRequest(t, &Server{}, &gomcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "token-user"}})
+		if policy.PrincipalID != "token-user" {
+			t.Fatalf("principal = %q, want token-user", policy.PrincipalID)
+		}
+	})
+
+	t.Run("local request accepts claims", func(t *testing.T) {
+		policy, _ := policyRequest(t, &Server{}, nil)
+		if policy.PrincipalID != "claimed-user" || policy.SessionID != "claimed-session" {
+			t.Fatalf("policy = %#v", policy)
+		}
+	})
+
+	t.Run("remote request without token strips claims", func(t *testing.T) {
+		policy, _ := policyRequest(t, &Server{}, &gomcp.RequestExtra{})
+		if policy.PrincipalID != "" || policy.SessionID != "" {
+			t.Fatalf("policy = %#v, want stripped identity", policy)
+		}
+	})
+
+	t.Run("empty authenticated user remains empty", func(t *testing.T) {
+		policy, _ := policyRequest(t, &Server{}, &gomcp.RequestExtra{TokenInfo: &auth.TokenInfo{}})
+		if policy.PrincipalID != "" {
+			t.Fatalf("principal = %q, want authenticated empty", policy.PrincipalID)
+		}
+	})
+
+	t.Run("resolver only without metadata remains legacy", func(t *testing.T) {
+		calls := 0
+		s := &Server{}
+		WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+			calls++
+			return "ambient-user", nil
+		})(s)
+		req := rawArgs(t, `{"query":"q"}`)
+		req.Extra = &gomcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "token-user"}}
+		policy, present, err := s.retrievalPolicyRequest(context.Background(), req)
+		if err != nil || present || calls != 0 || !reflect.DeepEqual(policy, rag.RetrievalPolicyRequest{}) {
+			t.Fatalf("policy/present/error/resolver calls = %#v/%v/%v/%d", policy, present, err, calls)
+		}
+	})
+
+	t.Run("observer only without metadata remains legacy", func(t *testing.T) {
+		s := &Server{}
+		WithRetrievalPolicyObserver(&mcpPolicyObserverSpy{})(s)
+		req := rawArgs(t, `{"query":"q"}`)
+		req.Extra = &gomcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "token-user"}}
+		policy, present, err := s.retrievalPolicyRequest(context.Background(), req)
+		if err != nil || present || !reflect.DeepEqual(policy, rag.RetrievalPolicyRequest{}) {
+			t.Fatalf("policy/present/error = %#v/%v/%v", policy, present, err)
+		}
+	})
+
+	t.Run("typed nil evaluator without metadata remains legacy", func(t *testing.T) {
+		var evaluator *mcpPolicyEvaluatorSpy
+		calls := 0
+		s := &Server{}
+		WithRetrievalPolicyEvaluator(evaluator)(s)
+		WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+			calls++
+			return "ambient-user", nil
+		})(s)
+		req := rawArgs(t, `{"query":"q"}`)
+		req.Extra = &gomcp.RequestExtra{TokenInfo: &auth.TokenInfo{UserID: "token-user"}}
+		policy, present, err := s.retrievalPolicyRequest(context.Background(), req)
+		if err != nil || present || calls != 0 || s.retrievalPolicyEvaluator != nil || !reflect.DeepEqual(policy, rag.RetrievalPolicyRequest{}) {
+			t.Fatalf("policy/present/error/resolver calls/evaluator = %#v/%v/%v/%d/%#v", policy, present, err, calls, s.retrievalPolicyEvaluator)
+		}
+	})
+}
+
+func TestRetrievalPolicyTransportSessionOverridesClaim(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+	s := &Server{retrievalPolicyEvaluator: evaluator}
+	s.mcpServer = gomcp.NewServer(&gomcp.Implementation{Name: "test", Version: "0"}, nil)
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name: "policy-session", InputSchema: map[string]any{"type": "object"},
+	}, func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+		policy, _, err := s.retrievalPolicyRequest(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		_, err = evaluator.Evaluate(ctx, rag.RetrievalRequest{Query: "q", Policy: policy})
+		return &gomcp.CallToolResult{Content: []gomcp.Content{&gomcp.TextContent{Text: "ok"}}}, err
+	})
+
+	httpServer := httptest.NewServer(streamableHTTPHandler(s))
+	defer httpServer.Close()
+	client := gomcp.NewClient(&gomcp.Implementation{Name: "test-client", Version: "0"}, nil)
+	session, err := client.Connect(context.Background(), &gomcp.StreamableClientTransport{Endpoint: httpServer.URL}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = session.Close() }()
+	if session.ID() == "" {
+		t.Fatal("streamable transport session ID is empty")
+	}
+	_, err = session.CallTool(context.Background(), &gomcp.CallToolParams{
+		Name: "policy-session",
+		Meta: gomcp.Meta{RetrievalPolicyMetaKey: map[string]any{
+			"principal_id": "claimed-user", "session_id": "claimed-session",
+		}},
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := evaluator.last.Policy.SessionID; got != session.ID() || got == "claimed-session" {
+		t.Fatalf("evaluator session = %q, want transport session %q", got, session.ID())
+	}
+}
+
+func TestRetrievalPolicyIdentityFailureIsSanitized(t *testing.T) {
+	cause := errors.New("IDENTITY_SECRET")
+	evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+	observer := &mcpPolicyObserverSpy{}
+	embedCalls := 0
+	store := &answerStore{}
+	retriever, err := rag.NewRetrieverWithEmbedder(
+		rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+			embedCalls++
+			return rag.EmbedResult{}, nil
+		}),
+		store,
+		rag.WithRetrievalPolicyEvaluator(evaluator),
+		rag.WithRetrievalPolicyObserver(observer),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{retrievalPolicyEvaluator: evaluator, retrievalPolicyObserver: observer, retriever: retriever}
+	WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+		return "", cause
+	})(s)
+	req := rawArgs(t, `{"query":"q"}`)
+	req.Params.Meta = policyMetaFromJSON(t, `{"principal_id":"claimed-user","session_id":"claimed-session"}`)
+
+	policy, present, err := s.retrievalPolicyRequest(context.Background(), req)
+	if !present || !errors.Is(err, errRetrievalPolicyIdentity) || !errors.Is(err, cause) {
+		t.Fatalf("policy/present/error = %#v/%v/%v", policy, present, err)
+	}
+	if !reflect.DeepEqual(policy, rag.RetrievalPolicyRequest{}) {
+		t.Fatalf("failed identity policy = %#v, want zero", policy)
+	}
+	if evaluator.evaluateCalls != 0 || evaluator.resultCalls != 0 || embedCalls != 0 || store.searchCalls != 0 || observer.calls != 0 {
+		t.Fatalf("work after identity failure = evaluator:%d/%d embed:%d store:%d observer:%d",
+			evaluator.evaluateCalls, evaluator.resultCalls, embedCalls, store.searchCalls, observer.calls)
+	}
+}
 
 func TestDecodeRetrievalPolicyMetaAbsentAndValid(t *testing.T) {
 	policy, present, err := decodeRetrievalPolicyMeta(nil)
