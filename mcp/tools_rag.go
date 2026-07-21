@@ -275,7 +275,7 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 			results = make([]rag.SearchResult, len(response.Results))
 			for i := range response.Results {
 				results[i] = response.Results[i].SearchResult
-				if !contextual {
+				if !contextual || scoped || policyScoped {
 					results[i].Score = 1 - results[i].Distance
 				}
 			}
@@ -284,6 +284,9 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 	}
 	data, err := json.Marshal(output)
 	if err != nil {
+		if result := retrievalPolicyToolError(response.Policy, err); result != nil {
+			return result, nil
+		}
 		return toolError("rag", "marshal results: %v", err), nil
 	}
 	return withRetrievalPolicyMeta(toolResult(string(data)), response.Policy), nil
