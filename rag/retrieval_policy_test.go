@@ -1,7 +1,9 @@
 package rag
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -29,6 +31,12 @@ func (s policyEvaluatorSpy) EvaluateResults(ctx context.Context, req RetrievalRe
 type policyObserverSpy struct {
 	events []RetrievalPolicyEvent
 	err    error
+}
+
+type policyObserverFunc func(context.Context, RetrievalPolicyEvent) error
+
+func (f policyObserverFunc) OnRetrievalPolicy(ctx context.Context, event RetrievalPolicyEvent) error {
+	return f(ctx, event)
 }
 
 type retrievalPolicyMultiStore struct {
@@ -66,6 +74,238 @@ func newPolicyRetriever(t *testing.T, results []ScoredResult, opts ...RetrieverO
 		t.Fatal(err)
 	}
 	return r, embedder, store
+}
+
+func TestRetrievalPolicyObserverAlonePreservesLegacyResults(t *testing.T) {
+	observer := &policyObserverSpy{}
+	want := []ScoredResult{policyScored("c1", "s1")}
+	legacy, _, _ := newPolicyRetriever(t, want)
+	observed, _, _ := newPolicyRetriever(t, want, WithRetrievalPolicyObserver(observer))
+	legacyResponse, legacyErr := legacy.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	observedResponse, observedErr := observed.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	if legacyErr != nil || observedErr != nil || !reflect.DeepEqual(legacyResponse.Results, observedResponse.Results) {
+		t.Fatalf("legacy=%#v/%v observed=%#v/%v", legacyResponse, legacyErr, observedResponse, observedErr)
+	}
+	legacyJSON, err := json.Marshal(legacyResponse.Results)
+	if err != nil {
+		t.Fatal(err)
+	}
+	observedJSON, err := json.Marshal(observedResponse.Results)
+	if err != nil || !bytes.Equal(legacyJSON, observedJSON) {
+		t.Fatalf("legacy JSON=%s observed JSON=%s error=%v", legacyJSON, observedJSON, err)
+	}
+	if observedResponse.Policy.Applied || len(observer.events) != 1 || observer.events[0].Outcome.ReasonCode != "default_allow" {
+		t.Fatalf("response/events=%#v/%#v", observedResponse, observer.events)
+	}
+}
+
+func TestRetrievalPolicyObserverEmitsOneTerminalEvent(t *testing.T) {
+	cases := []struct {
+		name        string
+		disposition RetrievalPolicyDisposition
+		reasonCode  string
+		run         func(*policyObserverSpy) (RetrievalResponse, error)
+	}{
+		{
+			name: "observer-only/default allow", disposition: RetrievalPolicyAllowed, reasonCode: "default_allow",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+			},
+		},
+		{
+			name: "evaluator allow", disposition: RetrievalPolicyAllowed, reasonCode: "allowed",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(allowPolicySpy()), WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+			},
+		},
+		{
+			name: "deny", disposition: RetrievalPolicyDenied, reasonCode: "denied",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				evaluator := allowPolicySpy()
+				evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+					return RetrievalPolicyDecision{}, nil
+				}
+				r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+			},
+		},
+		{
+			name: "evaluator error", disposition: RetrievalPolicyFailed, reasonCode: "evaluator_failed",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				evaluator := allowPolicySpy()
+				evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+					return RetrievalPolicyDecision{}, errors.New("private evaluator detail")
+				}
+				r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+			},
+		},
+		{
+			name: "invalid caller policy request", disposition: RetrievalPolicyFailed, reasonCode: "request_invalid",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", Policy: RetrievalPolicyRequest{MaxResults: -1}})
+			},
+		},
+		{
+			name: "invalid decision", disposition: RetrievalPolicyFailed, reasonCode: "decision_invalid",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				evaluator := allowPolicySpy()
+				evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+					return RetrievalPolicyDecision{Allow: true, MaxResults: -1}, nil
+				}
+				r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+			},
+		},
+		{
+			name: "retrieval error", disposition: RetrievalPolicyFailed, reasonCode: "retrieval_failed",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				r, _, store := newPolicyRetriever(t, nil, WithRetrievalPolicyObserver(observer))
+				store.multiErr = errors.New("private retrieval detail")
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+			},
+		},
+		{
+			name: "unknown freshness", disposition: RetrievalPolicyFailed, reasonCode: "freshness_unknown",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", Policy: RetrievalPolicyRequest{RequireFresh: true}})
+			},
+		},
+		{
+			name: "filtered/redacted success", disposition: RetrievalPolicyAllowed, reasonCode: "allowed",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				redacted := "safe"
+				evaluator := allowPolicySpy()
+				evaluator.evaluateResults = func(context.Context, RetrievalRequest, []Chunk) ([]RetrievalResultDecision, error) {
+					return []RetrievalResultDecision{{Keep: true, RedactedContent: &redacted}}, nil
+				}
+				r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+			},
+		},
+		{
+			name: "result evaluator error", disposition: RetrievalPolicyFailed, reasonCode: "evaluator_failed",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				evaluator := allowPolicySpy()
+				evaluator.evaluateResults = func(context.Context, RetrievalRequest, []Chunk) ([]RetrievalResultDecision, error) {
+					return nil, errors.New("private result evaluator detail")
+				}
+				r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+			},
+		},
+		{
+			name: "collection conflict", disposition: RetrievalPolicyAllowed, reasonCode: "default_allow",
+			run: func(observer *policyObserverSpy) (RetrievalResponse, error) {
+				r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyObserver(observer))
+				return r.RetrieveRequest(context.Background(), RetrievalRequest{
+					Query: "q", Scope: RetrievalScope{Collection: "caller"},
+					Policy: RetrievalPolicyRequest{Scope: RetrievalScope{Collection: "policy"}},
+				})
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			observer := &policyObserverSpy{}
+			response, _ := tc.run(observer)
+			if len(observer.events) != 1 {
+				t.Fatalf("events = %#v, want exactly one", observer.events)
+			}
+			event := observer.events[0]
+			if event.Outcome.Disposition != tc.disposition || event.Outcome.ReasonCode != tc.reasonCode {
+				t.Fatalf("event = %#v, want %s/%s", event, tc.disposition, tc.reasonCode)
+			}
+			if !reflect.DeepEqual(event.Outcome, response.Policy) {
+				t.Fatalf("event outcome = %#v, response outcome = %#v", event.Outcome, response.Policy)
+			}
+			typ := reflect.TypeOf(event)
+			if typ.NumField() != 1 || typ.Field(0).Name != "Outcome" {
+				t.Fatalf("event fields = %#v, want only Outcome", typ)
+			}
+		})
+	}
+}
+
+func TestRetrievalPolicyObserverFailureFailsClosed(t *testing.T) {
+	observerErr := errors.New("observer failed")
+	observer := &policyObserverSpy{err: observerErr}
+	r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyObserver(observer))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	if !errors.Is(err, observerErr) || response.Results != nil || len(observer.events) != 1 {
+		t.Fatalf("response/error/events = %#v/%v/%#v", response, err, observer.events)
+	}
+}
+
+func TestRetrievalPolicyObserverErrorJoinsPrimaryError(t *testing.T) {
+	observerErr := errors.New("observer failed")
+	observer := &policyObserverSpy{err: observerErr}
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+		return RetrievalPolicyDecision{}, nil
+	}
+	r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyObserver(observer))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+	if !errors.Is(err, ErrPolicyDenied) || !errors.Is(err, observerErr) || response.Results != nil || len(observer.events) != 1 {
+		t.Fatalf("response/error/events = %#v/%v/%#v", response, err, observer.events)
+	}
+}
+
+func TestRetrievalPolicyEventContainsOnlySafeOutcome(t *testing.T) {
+	typ := reflect.TypeOf(RetrievalPolicyEvent{})
+	if typ.NumField() != 1 || typ.Field(0).Name != "Outcome" {
+		t.Fatalf("event fields = %#v, want only Outcome", typ)
+	}
+	observer := &policyObserverSpy{}
+	result := policyScored("c1", "secret-source")
+	result.Chunk.Content = "secret-content"
+	r, _, _ := newPolicyRetriever(t, []ScoredResult{result}, WithRetrievalPolicyObserver(observer))
+	_, err := r.RetrieveRequest(context.Background(), RetrievalRequest{
+		Query: "secret-query", K: 1,
+		Policy: RetrievalPolicyRequest{
+			PrincipalID: "secret-principal", SessionID: "secret-session",
+			AuditLabels: map[string]string{"secret-audit-label": "secret-audit-value"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+		return RetrievalPolicyDecision{}, errors.New("secret-raw-error")
+	}
+	r, _, _ = newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyObserver(observer))
+	_, _ = r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+	payload, err := json.Marshal(observer.events)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{
+		"secret-query", "secret-content", "secret-source", "secret-principal", "secret-session",
+		"secret-audit-label", "secret-audit-value", "secret-raw-error",
+	} {
+		if bytes.Contains(payload, []byte(secret)) {
+			t.Fatalf("event payload leaks %q: %s", secret, payload)
+		}
+	}
+}
+
+func TestRetrievalPolicyObserverReceivesValueOwnedOutcome(t *testing.T) {
+	observer := policyObserverFunc(func(_ context.Context, event RetrievalPolicyEvent) error {
+		event.Outcome.ReasonCode = "observer-mutated"
+		event.Outcome.ReturnedCount = 999
+		return nil
+	})
+	r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyObserver(observer))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	if err != nil || len(response.Results) != 1 || response.Policy.ReasonCode != "default_allow" || response.Policy.ReturnedCount != 1 {
+		t.Fatalf("response/error = %#v/%v", response, err)
+	}
 }
 
 func TestRetrieveRequestDeniedBeforeEmbeddingOrSearch(t *testing.T) {

@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -326,7 +327,8 @@ func enforceRequiredFreshness(results []ScoredResult, freshness []retrievalFresh
 
 // RetrieveRequest is the canonical scored retrieval surface.
 func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (RetrievalResponse, error) {
-	if !policyRequestPresent(req.Policy) && r.policyEvaluator == nil {
+	policyRequested := policyRequestPresent(req.Policy)
+	if !policyRequested && r.policyEvaluator == nil && r.policyObserver == nil {
 		results, _, err := r.retrieveScoredBase(ctx, req, false)
 		if err != nil {
 			return RetrievalResponse{}, err
@@ -334,36 +336,37 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 		return RetrievalResponse{Results: results}, nil
 	}
 
-	failedOutcome := RetrievalPolicyOutcome{Applied: true, Disposition: RetrievalPolicyFailed, ReasonCode: "request_invalid"}
+	policyApplied := policyRequested || r.policyEvaluator != nil
+	failedOutcome := RetrievalPolicyOutcome{Applied: policyApplied, Disposition: RetrievalPolicyFailed, ReasonCode: "request_invalid"}
 	normalized, err := normalizePolicyRequest(req)
 	if err != nil {
-		return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid)
+		return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid))
 	}
 	decision := RetrievalPolicyDecision{Allow: true}
 	if r.policyEvaluator != nil {
 		decision, err = r.policyEvaluator.Evaluate(ctx, cloneRetrievalRequest(normalized))
 		if err != nil {
 			failedOutcome.ReasonCode = "evaluator_failed"
-			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, err)
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, err))
 		}
 		if !decision.Allow {
-			return RetrievalResponse{Policy: RetrievalPolicyOutcome{
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: RetrievalPolicyOutcome{
 				Applied:         true,
 				Disposition:     RetrievalPolicyDenied,
 				ReasonCode:      "denied",
 				AuditLabelCount: len(req.Policy.AuditLabels),
-			}}, ErrPolicyDenied
+			}}, ErrPolicyDenied)
 		}
 	}
 	policy, err := composeNormalizedPolicy(normalized, RetrievalPolicyDecision{Allow: true})
 	if err != nil {
-		return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid)
+		return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid))
 	}
 	if r.policyEvaluator != nil {
 		policy, err = composeNormalizedPolicy(normalized, decision)
 		if err != nil {
 			failedOutcome.ReasonCode = "decision_invalid"
-			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy decision", ErrPolicyDecisionInvalid)
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy decision", ErrPolicyDecisionInvalid))
 		}
 	}
 
@@ -372,7 +375,9 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 	if !policy.emptyScope {
 		results, freshness, err = r.retrieveScoredBase(ctx, policy.request, true)
 		if err != nil {
-			return RetrievalResponse{}, err
+			failedOutcome.ReasonCode = "retrieval_failed"
+			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, err)
 		}
 		if policy.limit > 0 && len(results) > policy.limit {
 			results = results[:policy.limit]
@@ -390,7 +395,7 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			failedOutcome.CandidateSourceCount = candidateSourceCount
 			failedOutcome.StaleDroppedCount = staleDroppedCount
 			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
-			return RetrievalResponse{Policy: failedOutcome}, err
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, err)
 		}
 	}
 	filteredCount, redactedCount := 0, 0
@@ -402,7 +407,7 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			failedOutcome.CandidateSourceCount = candidateSourceCount
 			failedOutcome.StaleDroppedCount = staleDroppedCount
 			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
-			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, evaluateErr)
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, evaluateErr))
 		}
 		results, filteredCount, redactedCount, err = applyResultDecisions(results, decisions)
 		if err != nil {
@@ -411,7 +416,7 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			failedOutcome.CandidateSourceCount = candidateSourceCount
 			failedOutcome.StaleDroppedCount = staleDroppedCount
 			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
-			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval result decision", ErrPolicyDecisionInvalid)
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval result decision", ErrPolicyDecisionInvalid))
 		}
 	}
 	if policy.limit > 0 && len(results) > policy.limit {
@@ -422,10 +427,10 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 	if r.policyEvaluator != nil {
 		reasonCode = "allowed"
 	}
-	return RetrievalResponse{
+	return r.finalizePolicy(ctx, RetrievalResponse{
 		Results: results,
 		Policy: RetrievalPolicyOutcome{
-			Applied:              true,
+			Applied:              policyApplied,
 			Disposition:          RetrievalPolicyAllowed,
 			ReasonCode:           reasonCode,
 			CandidateCount:       candidateCount,
@@ -437,7 +442,22 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			StaleDroppedCount:    staleDroppedCount,
 			AuditLabelCount:      len(normalized.Policy.AuditLabels),
 		},
-	}, nil
+	}, nil)
+}
+
+func (r *Retriever) finalizePolicy(ctx context.Context, response RetrievalResponse, primary error) (RetrievalResponse, error) {
+	if r.policyObserver == nil {
+		return response, primary
+	}
+	observerErr := r.policyObserver.OnRetrievalPolicy(ctx, RetrievalPolicyEvent{Outcome: response.Policy})
+	if observerErr == nil {
+		return response, primary
+	}
+	response.Results = nil
+	if primary != nil {
+		return response, errors.Join(primary, observerErr)
+	}
+	return response, observerErr
 }
 
 // RetrievalPolicyObserver receives synchronous, consumer-owned policy
