@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
@@ -10,6 +11,7 @@ import (
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kstruzzieri/go-llm/analysis"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 // analysisOllamaMock returns a handler that responds to /api/chat with a
@@ -410,5 +412,187 @@ func TestVerifySupportToolHappyPath(t *testing.T) {
 	}
 	if !strings.Contains(extractText(result), `"missing_evidence_queries"`) {
 		t.Fatalf("JSON should use lower_snake_case field names: %s", extractText(result))
+	}
+}
+
+func TestVerifySupportTool_PolicyRedactionNeverReachesJudge(t *testing.T) {
+	replacement := "REDACTED"
+	evaluator := &mcpPolicyEvaluatorSpy{
+		decision: rag.RetrievalPolicyDecision{Allow: true},
+		resultDecision: []rag.RetrievalResultDecision{
+			{Keep: false},
+			{Keep: true, RedactedContent: &replacement},
+		},
+	}
+	store := &answerStore{results: []rag.SearchResult{
+		{Chunk: rag.Chunk{ID: "denied", Source: "DENIED_SECRET.go", Content: "DENIED_SECRET"}, Distance: 0.1},
+		{Chunk: rag.Chunk{ID: "original", Source: "safe.go", StartLine: 1, EndLine: 1, Content: "ORIGINAL_SECRET"}, Distance: 0.2},
+	}}
+	engine := &queuedRouteEngine{responses: []string{
+		`{"claims":["answer claim"]}`,
+		`{"verdicts":[{"claim_id":"C1","status":"supported","evidence_ids":["E1"],"reason":"ok"}]}`,
+	}}
+	s := newAnswerTestServer(t, engine)
+	s.retriever = mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))
+	s.retrievalPolicyEvaluator = evaluator
+	req := rawArgs(t, `{"answer":"answer claim","question":"question","top_k":2}`)
+	req.Params.Meta = policyMetaFromJSON(t, `{"max_results":2,"audit_labels":{"purpose":"support"}}`)
+
+	result, err := s.handleVerifySupport(context.Background(), req)
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("result=%#v error=%v text=%q", result, err, extractText(result))
+	}
+	if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 1 || store.searchCalls != 1 || engine.calls != 2 {
+		t.Fatalf("calls evaluator=%d/%d search=%d judge=%d, want 1/1/1/2", evaluator.evaluateCalls, evaluator.resultCalls, store.searchCalls, engine.calls)
+	}
+	if evaluator.last.Policy.MaxResults != 2 || evaluator.last.Policy.AuditLabels["purpose"] != "support" {
+		t.Fatalf("evaluator policy = %#v", evaluator.last.Policy)
+	}
+	var modelInput strings.Builder
+	for _, request := range engine.requests {
+		for _, message := range request.Messages {
+			modelInput.WriteString(message.Content)
+		}
+	}
+	if !strings.Contains(modelInput.String(), "REDACTED") || strings.Contains(modelInput.String(), "DENIED_SECRET") || strings.Contains(modelInput.String(), "ORIGINAL_SECRET") {
+		t.Fatalf("judge input leaked policy content: %s", modelInput.String())
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Meta == nil || strings.Contains(string(data), "DENIED_SECRET") || strings.Contains(string(data), "ORIGINAL_SECRET") || strings.Contains(string(data), "purpose") {
+		t.Fatalf("unsafe result: %s", data)
+	}
+}
+
+func TestVerifySupportTool_PolicyFailureIsSanitized(t *testing.T) {
+	t.Run("evaluator", func(t *testing.T) {
+		evaluator := &mcpPolicyEvaluatorSpy{evaluateErr: errors.New("ERROR_SECRET")}
+		store := &answerStore{}
+		engine := &queuedRouteEngine{}
+		s := newAnswerTestServer(t, engine)
+		s.retriever = mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))
+		s.retrievalPolicyEvaluator = evaluator
+
+		result, err := s.handleVerifySupport(context.Background(), rawArgs(t, `{"answer":"answer","question":"question"}`))
+		if err != nil || result == nil || !result.IsError || extractText(result) != "policy_evaluator_failed: retrieval policy evaluation failed" {
+			t.Fatalf("result=%#v error=%v text=%q", result, err, extractText(result))
+		}
+		data, err := json.Marshal(result)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Meta == nil || strings.Contains(string(data), "ERROR_SECRET") {
+			t.Fatalf("policy failure leaked detail or omitted metadata: %s", data)
+		}
+		if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 0 || store.searchCalls != 0 || engine.calls != 0 {
+			t.Fatalf("work after policy failure evaluator=%d/%d search=%d judge=%d", evaluator.evaluateCalls, evaluator.resultCalls, store.searchCalls, engine.calls)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		meta gomcp.Meta
+		bind func(*Server)
+		want string
+	}{
+		{
+			name: "invalid metadata", meta: policyMetaFromJSON(t, `{"UNKNOWN_SECRET":true}`),
+			want: "validation: invalid retrieval policy metadata",
+		},
+		{
+			name: "identity", meta: policyMetaFromJSON(t, `{"principal_id":"CLAIMED_SECRET"}`),
+			bind: func(s *Server) {
+				WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+					return "", errors.New("ERROR_SECRET")
+				})(s)
+			},
+			want: "policy_identity_failed: retrieval identity resolution failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+			store := &answerStore{}
+			engine := &queuedRouteEngine{}
+			s := newAnswerTestServer(t, engine)
+			s.retriever = mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))
+			s.retrievalPolicyEvaluator = evaluator
+			if tc.bind != nil {
+				tc.bind(s)
+			}
+			req := rawArgs(t, `{"answer":"answer","question":"question"}`)
+			req.Params.Meta = tc.meta
+
+			result, err := s.handleVerifySupport(context.Background(), req)
+			if err != nil || result == nil || !result.IsError || extractText(result) != tc.want {
+				t.Fatalf("result=%#v error=%v text=%q, want %q", result, err, extractText(result), tc.want)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Meta != nil || strings.Contains(string(data), "SECRET") {
+				t.Fatalf("request failure leaked detail or metadata: %s", data)
+			}
+			if evaluator.evaluateCalls != 0 || evaluator.resultCalls != 0 || store.searchCalls != 0 || engine.calls != 0 {
+				t.Fatalf("work after request failure evaluator=%d/%d search=%d judge=%d", evaluator.evaluateCalls, evaluator.resultCalls, store.searchCalls, engine.calls)
+			}
+		})
+	}
+}
+
+func TestVerifySupportTool_PolicyMetaSurvivesJudgeError(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{
+		decision:       rag.RetrievalPolicyDecision{Allow: true},
+		resultDecision: []rag.RetrievalResultDecision{{Keep: true}},
+	}
+	store := &answerStore{results: []rag.SearchResult{{
+		Chunk: rag.Chunk{ID: "allowed", Source: "safe.go", Content: "allowed"}, Distance: 0.1,
+	}}}
+	router := newRecordingRouteEngine("")
+	router.routeErr = errors.New("JUDGE_ERROR")
+	s := newAnswerTestServer(t, router)
+	s.retriever = mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))
+	s.retrievalPolicyEvaluator = evaluator
+
+	result, err := s.handleVerifySupport(context.Background(), rawArgs(t, `{"answer":"answer","question":"question"}`))
+	if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), "analysis:") {
+		t.Fatalf("result=%#v error=%v text=%q", result, err, extractText(result))
+	}
+	if result.Meta == nil {
+		t.Fatal("judge error omitted safe applied metadata")
+	}
+}
+
+func TestCodeReviewTool_PolicyRedactionNeverReachesPrompt(t *testing.T) {
+	replacement := "REDACTED"
+	evaluator := &mcpPolicyEvaluatorSpy{
+		decision: rag.RetrievalPolicyDecision{Allow: true},
+		resultDecision: []rag.RetrievalResultDecision{
+			{Keep: false},
+			{Keep: true, RedactedContent: &replacement},
+		},
+	}
+	store := &answerStore{results: []rag.SearchResult{
+		{Chunk: rag.Chunk{ID: "denied", Source: "DENIED_SECRET.go", Content: "DENIED_SECRET"}, Distance: 0.1},
+		{Chunk: rag.Chunk{ID: "original", Source: "safe.go", Content: "ORIGINAL_SECRET"}, Distance: 0.2},
+	}}
+	router := newRecordingRouteEngine("review")
+	s := &Server{router: router, retriever: mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))}
+
+	result, err := s.handleCodeReview(context.Background(), rawArgs(t, `{"code":"func safe() {}","model":"test"}`))
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("result=%#v error=%v text=%q", result, err, extractText(result))
+	}
+	if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 1 || store.searchCalls != 1 || !router.called {
+		t.Fatalf("calls evaluator=%d/%d search=%d router=%v, want 1/1/1/true", evaluator.evaluateCalls, evaluator.resultCalls, store.searchCalls, router.called)
+	}
+	var prompt strings.Builder
+	for _, message := range router.last.Messages {
+		prompt.WriteString(message.Content)
+	}
+	if !strings.Contains(prompt.String(), "REDACTED") || strings.Contains(prompt.String(), "DENIED_SECRET") || strings.Contains(prompt.String(), "ORIGINAL_SECRET") {
+		t.Fatalf("code-review prompt leaked policy content: %s", prompt.String())
 	}
 }
