@@ -329,7 +329,7 @@ func enforceRequiredFreshness(results []ScoredResult, freshness []retrievalFresh
 func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (RetrievalResponse, error) {
 	policyRequested := policyRequestPresent(req.Policy)
 	if !policyRequested && r.policyEvaluator == nil && r.policyObserver == nil {
-		results, _, err := r.retrieveScoredBase(ctx, req, false)
+		results, _, err := r.retrieveScoredBase(ctx, req, false, false)
 		if err != nil {
 			return RetrievalResponse{}, err
 		}
@@ -373,13 +373,13 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 	var results []ScoredResult
 	var freshness []retrievalFreshness
 	if !policy.emptyScope {
-		results, freshness, err = r.retrieveScoredBase(ctx, policy.request, true)
+		results, freshness, err = r.retrieveScoredBase(ctx, policy.request, true, policyApplied)
 		if err != nil {
 			failedOutcome.ReasonCode = "retrieval_failed"
 			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
 			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, err)
 		}
-		if policy.limit > 0 && len(results) > policy.limit {
+		if policyApplied && policy.limit > 0 && len(results) > policy.limit {
 			results = results[:policy.limit]
 			freshness = freshness[:policy.limit]
 		}
@@ -419,7 +419,7 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval result decision", ErrPolicyDecisionInvalid))
 		}
 	}
-	if policy.limit > 0 && len(results) > policy.limit {
+	if policyApplied && policy.limit > 0 && len(results) > policy.limit {
 		results = results[:policy.limit]
 	}
 	count := sourceCount(results)
@@ -454,8 +454,11 @@ func (r *Retriever) finalizePolicy(ctx context.Context, response RetrievalRespon
 		return response, primary
 	}
 	response.Results = nil
-	response.Policy.Disposition = RetrievalPolicyFailed
-	response.Policy.ReasonCode = "observer_failed"
+	if !errors.Is(primary, ErrPolicyDenied) && !errors.Is(primary, ErrPolicyEvaluatorFailed) &&
+		!errors.Is(primary, ErrPolicyDecisionInvalid) && !errors.Is(primary, ErrFreshnessUnknown) {
+		response.Policy.Disposition = RetrievalPolicyFailed
+		response.Policy.ReasonCode = "observer_failed"
+	}
 	if primary != nil {
 		return response, errors.Join(primary, observerErr)
 	}

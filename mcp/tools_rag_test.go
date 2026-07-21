@@ -310,6 +310,68 @@ func TestHandleRAGSearch_ObserverFailureIsSanitized(t *testing.T) {
 	}
 }
 
+func TestHandleRAGSearch_ObserverFailureSanitizesRetrievalError(t *testing.T) {
+	observer := &mcpPolicyObserverSpy{err: errors.New("OBSERVER_SECRET")}
+	store := &recordingMCPMultiStore{err: errors.New("RETRIEVAL_SECRET")}
+	s := &Server{retriever: mcpTestRetriever(t, store, rag.WithRetrievalPolicyObserver(observer))}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extractText(result) != "policy_failed: retrieval policy enforcement failed" ||
+		strings.Contains(string(data), "OBSERVER_SECRET") || strings.Contains(string(data), "RETRIEVAL_SECRET") || result.Meta != nil {
+		t.Fatalf("combined retrieval/observer failure leaked detail or metadata: %s", data)
+	}
+}
+
+func TestHandleRAGSearch_PrimaryPolicyOutcomeSurvivesObserverFailure(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{}
+	observer := &mcpPolicyObserverSpy{err: errors.New("OBSERVER_SECRET")}
+	store := &recordingMCPMultiStore{}
+	s := &Server{
+		retriever:                mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator), rag.WithRetrievalPolicyObserver(observer)),
+		retrievalPolicyEvaluator: evaluator,
+	}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); got != "policy_denied: retrieval denied" {
+		t.Fatalf("error text = %q, want fixed denial", got)
+	}
+	meta, ok := result.Meta[RetrievalPolicyMetaKey].(retrievalPolicyResultWire)
+	if !ok || meta.Disposition != rag.RetrievalPolicyDenied || meta.ReasonCode != "denied" {
+		t.Fatalf("policy metadata = %#v, want denied/denied", result.Meta)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "OBSERVER_SECRET") {
+		t.Fatalf("observer failure leaked detail: %s", data)
+	}
+}
+
+func TestHandleRAGSearch_ExplainScoresPreservesScopedNil(t *testing.T) {
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	s := &Server{retriever: mcpTestRetriever(t, store)}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","collection":"missing","explain_scores":true}`))
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); got != "null" {
+		t.Fatalf("scoped nil scored response = %s, want null", got)
+	}
+}
+
 func TestHandleRAGSearch_PolicyRequestFailureIsSanitized(t *testing.T) {
 	for _, tc := range []struct {
 		name string

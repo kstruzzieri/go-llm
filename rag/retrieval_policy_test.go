@@ -108,6 +108,31 @@ func TestRetrievalPolicyObserverAlonePreservesLegacyResults(t *testing.T) {
 	}
 }
 
+func TestRetrieveLegacyOverReturnPreservedWithoutActivePolicy(t *testing.T) {
+	want := []ScoredResult{policyScored("c1", "s1"), policyScored("c2", "s2")}
+	for _, tc := range []struct {
+		name string
+		opts []RetrieverOption
+	}{
+		{name: "legacy"},
+		{name: "observer only", opts: []RetrieverOption{WithRetrievalPolicyObserver(&policyObserverSpy{})}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _, _ := newPolicyRetriever(t, want, tc.opts...)
+			results, err := r.Retrieve(context.Background(), "q", 1)
+			if err != nil || len(results) != 2 {
+				t.Fatalf("Retrieve() = %#v, %v; want both store results", results, err)
+			}
+
+			r, _, _ = newPolicyRetriever(t, want, tc.opts...)
+			scored, err := r.RetrieveScored(context.Background(), "q", 1, QueryContext{})
+			if err != nil || !reflect.DeepEqual(scored, want) {
+				t.Fatalf("RetrieveScored() = %#v, %v; want %#v", scored, err, want)
+			}
+		})
+	}
+}
+
 func TestRetrievalPolicyObserverEmitsOneTerminalEvent(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -274,6 +299,44 @@ func TestRetrievalPolicyObserverErrorJoinsPrimaryError(t *testing.T) {
 	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
 	if !errors.Is(err, ErrPolicyDenied) || !errors.Is(err, observerErr) || response.Results != nil || len(observer.events) != 1 {
 		t.Fatalf("response/error/events = %#v/%v/%#v", response, err, observer.events)
+	}
+}
+
+func TestRetrievalPolicyObserverFailurePreservesPrimaryPolicyOutcome(t *testing.T) {
+	observerErr := errors.New("observer failed")
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+		return RetrievalPolicyDecision{}, nil
+	}
+	r, _, _ := newPolicyRetriever(t, nil,
+		WithRetrievalPolicyEvaluator(evaluator),
+		WithRetrievalPolicyObserver(&policyObserverSpy{err: observerErr}),
+	)
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+	if !errors.Is(err, ErrPolicyDenied) || !errors.Is(err, observerErr) {
+		t.Fatalf("error = %v, want policy denial joined with observer failure", err)
+	}
+	if response.Policy.Disposition != RetrievalPolicyDenied || response.Policy.ReasonCode != "denied" {
+		t.Fatalf("policy outcome = %#v, want denied/denied", response.Policy)
+	}
+}
+
+func TestRetrieveScoredScopedPreservesNilResults(t *testing.T) {
+	store, err := NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}},
+		store,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := r.RetrieveScoredScoped(context.Background(), "q", 1, RetrievalScope{Collection: "missing"}, QueryContext{})
+	if err != nil || results != nil {
+		t.Fatalf("RetrieveScoredScoped() = %#v, %v; want nil, nil", results, err)
 	}
 }
 

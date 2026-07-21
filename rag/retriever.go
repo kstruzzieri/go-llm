@@ -219,7 +219,7 @@ func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCt
 	return response.Results, err
 }
 
-func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
+func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest, owned, policyActive bool) ([]ScoredResult, []retrievalFreshness, error) {
 	scope, err := normalizeRetrievalScope(req.Scope)
 	if err != nil {
 		return nil, nil, err
@@ -229,13 +229,17 @@ func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest
 		if err != nil {
 			return nil, nil, err
 		}
-		results, freshness, err := r.prepareUnscopedScoredResults(ctx, results, req.K, owned)
+		limit := 0
+		if policyActive {
+			limit = req.K
+		}
+		results, freshness, err := r.prepareUnscopedScoredResults(ctx, results, limit, owned)
 		if err != nil {
 			return nil, nil, err
 		}
 		return results, freshness, nil
 	}
-	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext, owned)
+	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext, owned, policyActive)
 }
 
 func (r *Retriever) prepareUnscopedScoredResults(ctx context.Context, results []ScoredResult, k int, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
@@ -247,7 +251,7 @@ func (r *Retriever) prepareUnscopedScoredResults(ctx context.Context, results []
 	return results, freshness, err
 }
 
-func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
+func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext, owned, policyActive bool) ([]ScoredResult, []retrievalFreshness, error) {
 	store, ok := r.store.(*SQLiteStore)
 	if !ok {
 		return nil, nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
@@ -261,7 +265,11 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 		if err != nil {
 			return nil, nil, err
 		}
-		results = filterScoredResults(results, scope, registry, k)
+		limit := 0
+		if policyActive {
+			limit = k
+		}
+		results = filterScoredResults(results, scope, registry, limit)
 		results = ownScoredResults(results, owned)
 		freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
 		if err != nil {
@@ -346,6 +354,9 @@ func normalizeRetrievalScope(scope RetrievalScope) (RetrievalScope, error) {
 }
 
 func filterScoredResults(results []ScoredResult, scope RetrievalScope, registry map[string]managedRegistryDocument, k int) []ScoredResult {
+	if results == nil {
+		return nil
+	}
 	capacity := len(results)
 	if k > 0 && k < capacity {
 		capacity = k
