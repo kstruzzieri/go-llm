@@ -143,7 +143,7 @@ func WithRetrievalPrincipalResolver(resolver RetrievalPrincipalResolver) Option 
 // disable policy evaluation.
 func WithRetrievalPolicyEvaluator(evaluator rag.RetrievalPolicyEvaluator) Option {
 	return func(s *Server) {
-		if isNilRetrievalPolicyEvaluator(evaluator) {
+		if isNilRetrievalPolicyValue(evaluator) {
 			s.retrievalPolicyEvaluator = nil
 			return
 		}
@@ -155,14 +155,20 @@ func WithRetrievalPolicyEvaluator(evaluator rag.RetrievalPolicyEvaluator) Option
 // retained by rebuilt RAG retrievers. An observer alone does not activate
 // policy or identity binding.
 func WithRetrievalPolicyObserver(observer rag.RetrievalPolicyObserver) Option {
-	return func(s *Server) { s.retrievalPolicyObserver = observer }
+	return func(s *Server) {
+		if isNilRetrievalPolicyValue(observer) {
+			s.retrievalPolicyObserver = nil
+			return
+		}
+		s.retrievalPolicyObserver = observer
+	}
 }
 
-func isNilRetrievalPolicyEvaluator(evaluator rag.RetrievalPolicyEvaluator) bool {
-	if evaluator == nil {
+func isNilRetrievalPolicyValue(value any) bool {
+	if value == nil {
 		return true
 	}
-	v := reflect.ValueOf(evaluator)
+	v := reflect.ValueOf(value)
 	switch v.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return v.IsNil()
@@ -580,10 +586,10 @@ func (s *Server) rebuildDerivedClients(ctx context.Context) {
 		}
 		// Retrieval is in the user-facing latency path.
 		retrieverOptions := []rag.RetrieverOption{rag.WithRetrieverModel(embeddingModel)}
-		if !isNilRetrievalPolicyEvaluator(evaluator) {
+		if !isNilRetrievalPolicyValue(evaluator) {
 			retrieverOptions = append(retrieverOptions, rag.WithRetrievalPolicyEvaluator(evaluator))
 		}
-		if observer != nil {
+		if !isNilRetrievalPolicyValue(observer) {
 			retrieverOptions = append(retrieverOptions, rag.WithRetrievalPolicyObserver(observer))
 		}
 		if ret, err := rag.NewRetrieverWithEmbedder(

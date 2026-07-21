@@ -39,6 +39,15 @@ func (f policyObserverFunc) OnRetrievalPolicy(ctx context.Context, event Retriev
 	return f(ctx, event)
 }
 
+type panicPolicyObserver struct{}
+
+func (o *panicPolicyObserver) OnRetrievalPolicy(context.Context, RetrievalPolicyEvent) error {
+	if o == nil {
+		panic("typed-nil observer invoked")
+	}
+	return nil
+}
+
 type retrievalPolicyMultiStore struct {
 	retrieverMultiStore
 	gotQueryContext QueryContext
@@ -239,6 +248,18 @@ func TestRetrievalPolicyObserverFailureFailsClosed(t *testing.T) {
 	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
 	if !errors.Is(err, observerErr) || response.Results != nil || len(observer.events) != 1 {
 		t.Fatalf("response/error/events = %#v/%v/%#v", response, err, observer.events)
+	}
+	if response.Policy.Applied || response.Policy.Disposition != RetrievalPolicyFailed || response.Policy.ReasonCode != "observer_failed" {
+		t.Fatalf("policy outcome = %#v, want unapplied observer failure", response.Policy)
+	}
+}
+
+func TestRetrievalPolicyTypedNilObserverIsIgnored(t *testing.T) {
+	var observer *panicPolicyObserver
+	r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyObserver(observer))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	if err != nil || len(response.Results) != 1 || response.Policy.Applied {
+		t.Fatalf("response/error = %#v/%v", response, err)
 	}
 }
 
@@ -929,6 +950,36 @@ func TestRetrieveRequestRequireFreshDropsKnownStale(t *testing.T) {
 	}
 	if len(response.Results) != 0 || response.Policy.CandidateCount != 1 || response.Policy.StaleDroppedCount != 1 || response.Policy.ReturnedCount != 0 {
 		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestRetrieveRequestCapsOverReturnedCandidatesBeforeFreshness(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	paths := []string{filepath.Join(t.TempDir(), "first.md"), filepath.Join(t.TempDir(), "outside.md")}
+	results := make([]ScoredResult, 0, len(paths))
+	for _, path := range paths {
+		if err := os.WriteFile(path, []byte(path), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		document, err := managed.IngestFile(ctx, path, DocumentOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		results = append(results, ScoredResult{SearchResult: SearchResult{Chunk: requireManagedChunks(t, store, document.source)[0].Chunk}})
+	}
+
+	var reads []string
+	r := &Retriever{store: store, readManagedFile: func(_ context.Context, path string) ([]byte, error) {
+		reads = append(reads, path)
+		return os.ReadFile(path)
+	}}
+	got, freshness, err := r.prepareUnscopedScoredResults(ctx, results, 1, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || len(freshness) != 1 || !slices.Equal(reads, paths[:1]) {
+		t.Fatalf("results/freshness/reads = %d/%d/%v, want 1/1/%v", len(got), len(freshness), reads, paths[:1])
 	}
 }
 

@@ -80,7 +80,7 @@ func WithVectorOnly() RetrieverOption {
 // WithRetrievalPolicyEvaluator installs the evaluator used for retrieval policy.
 func WithRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) RetrieverOption {
 	return func(r *Retriever) {
-		if isNilRetrievalPolicyEvaluator(evaluator) {
+		if isNilRetrievalPolicyValue(evaluator) {
 			r.policyEvaluator = nil
 			return
 		}
@@ -88,11 +88,11 @@ func WithRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) RetrieverO
 	}
 }
 
-func isNilRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) bool {
-	if evaluator == nil {
+func isNilRetrievalPolicyValue(value any) bool {
+	if value == nil {
 		return true
 	}
-	v := reflect.ValueOf(evaluator)
+	v := reflect.ValueOf(value)
 	switch v.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return v.IsNil()
@@ -104,7 +104,13 @@ func isNilRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) bool {
 // WithRetrievalPolicyObserver installs the synchronous, consumer-owned policy
 // observer.
 func WithRetrievalPolicyObserver(observer RetrievalPolicyObserver) RetrieverOption {
-	return func(r *Retriever) { r.policyObserver = observer }
+	return func(r *Retriever) {
+		if isNilRetrievalPolicyValue(observer) {
+			r.policyObserver = nil
+			return
+		}
+		r.policyObserver = observer
+	}
 }
 
 // PolicyActive reports whether an evaluator is installed; an observer alone
@@ -223,14 +229,22 @@ func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest
 		if err != nil {
 			return nil, nil, err
 		}
-		results = ownScoredResults(results, owned)
-		freshness, err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results)
+		results, freshness, err := r.prepareUnscopedScoredResults(ctx, results, req.K, owned)
 		if err != nil {
 			return nil, nil, err
 		}
 		return results, freshness, nil
 	}
 	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext, owned)
+}
+
+func (r *Retriever) prepareUnscopedScoredResults(ctx context.Context, results []ScoredResult, k int, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
+	if k > 0 && len(results) > k {
+		results = results[:k]
+	}
+	results = ownScoredResults(results, owned)
+	freshness, err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results)
+	return results, freshness, err
 }
 
 func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
@@ -247,8 +261,8 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 		if err != nil {
 			return nil, nil, err
 		}
+		results = filterScoredResults(results, scope, registry, k)
 		results = ownScoredResults(results, owned)
-		results = filterScoredResults(results, scope, registry)
 		freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
 		if err != nil {
 			return nil, nil, err
@@ -259,15 +273,12 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 	if err != nil {
 		return nil, nil, err
 	}
-	results = ownScoredResults(results, owned)
 	registry, _, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
 	if err != nil {
 		return nil, nil, fmt.Errorf("rag: scoped managed registry: %w", err)
 	}
-	results = filterScoredResults(results, scope, registry)
-	if k > 0 && len(results) > k {
-		results = results[:k]
-	}
+	results = filterScoredResults(results, scope, registry, k)
+	results = ownScoredResults(results, owned)
 	freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
 	if err != nil {
 		return nil, nil, err
@@ -334,11 +345,18 @@ func normalizeRetrievalScope(scope RetrievalScope) (RetrievalScope, error) {
 	return scope, nil
 }
 
-func filterScoredResults(results []ScoredResult, scope RetrievalScope, registry map[string]managedRegistryDocument) []ScoredResult {
-	filtered := results[:0]
+func filterScoredResults(results []ScoredResult, scope RetrievalScope, registry map[string]managedRegistryDocument, k int) []ScoredResult {
+	capacity := len(results)
+	if k > 0 && k < capacity {
+		capacity = k
+	}
+	filtered := make([]ScoredResult, 0, capacity)
 	for _, result := range results {
 		if document, ok := registry[result.Chunk.Source]; ok && matchesRetrievalScope(result.Chunk, document, scope) {
 			filtered = append(filtered, result)
+			if k > 0 && len(filtered) == k {
+				break
+			}
 		}
 	}
 	return filtered

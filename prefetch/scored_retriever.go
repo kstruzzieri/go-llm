@@ -27,6 +27,7 @@ func NewScoredRetriever(client *ollama.Client, store rag.VectorStore, embedModel
 	}
 }
 
+// PolicyActive reports whether the wrapped RAG retriever has a policy evaluator.
 func (r *ScoredRetriever) PolicyActive() bool {
 	return r != nil && r.retriever != nil && r.retriever.PolicyActive()
 }

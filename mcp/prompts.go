@@ -163,20 +163,11 @@ func (s *Server) handleRAGQueryPrompt(ctx context.Context, req *gomcp.GetPromptR
 }
 
 func retrievalPolicyPromptError(outcome rag.RetrievalPolicyOutcome, err error) error {
-	switch {
-	case errors.Is(err, rag.ErrPolicyDenied):
-		return errors.New("policy_denied: retrieval denied")
-	case errors.Is(err, rag.ErrPolicyEvaluatorFailed):
-		return errors.New("policy_evaluator_failed: retrieval policy evaluation failed")
-	case errors.Is(err, rag.ErrPolicyDecisionInvalid):
-		return errors.New("policy_decision_invalid: retrieval policy decision invalid")
-	case errors.Is(err, rag.ErrFreshnessUnknown):
-		return errors.New("freshness_unknown: required retrieval freshness could not be verified")
-	case outcome.Applied:
-		return errors.New("policy_failed: retrieval policy enforcement failed")
-	default:
+	code, message, ok := retrievalPolicyError(outcome, err)
+	if !ok {
 		return nil
 	}
+	return fmt.Errorf("%s: %s", code, message)
 }
 
 func (s *Server) handleRefactorPrompt(_ context.Context, req *gomcp.GetPromptRequest) (*gomcp.GetPromptResult, error) {

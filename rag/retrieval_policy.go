@@ -454,6 +454,8 @@ func (r *Retriever) finalizePolicy(ctx context.Context, response RetrievalRespon
 		return response, primary
 	}
 	response.Results = nil
+	response.Policy.Disposition = RetrievalPolicyFailed
+	response.Policy.ReasonCode = "observer_failed"
 	if primary != nil {
 		return response, errors.Join(primary, observerErr)
 	}

@@ -285,6 +285,31 @@ func TestHandleRAGSearch_PolicyFailureIsSanitized(t *testing.T) {
 	}
 }
 
+func TestHandleRAGSearch_ObserverFailureIsSanitized(t *testing.T) {
+	observer := &mcpPolicyObserverSpy{err: errors.New("ERROR_SECRET")}
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "id", Content: "CONTENT_SECRET"}},
+	}}}
+	s := &Server{retriever: mcpTestRetriever(t, store, rag.WithRetrievalPolicyObserver(observer))}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); got != "policy_failed: retrieval policy enforcement failed" {
+		t.Fatalf("error text = %q", got)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "ERROR_SECRET") || strings.Contains(string(data), "CONTENT_SECRET") || result.Meta != nil {
+		t.Fatalf("observer failure leaked detail, content, or metadata: %s", data)
+	}
+	if observer.calls != 1 {
+		t.Fatalf("observer calls = %d, want 1", observer.calls)
+	}
+}
+
 func TestHandleRAGSearch_PolicyRequestFailureIsSanitized(t *testing.T) {
 	for _, tc := range []struct {
 		name string

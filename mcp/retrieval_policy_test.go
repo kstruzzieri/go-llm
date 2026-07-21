@@ -41,11 +41,21 @@ func (s *mcpPolicyEvaluatorSpy) EvaluateResults(_ context.Context, _ rag.Retriev
 type mcpPolicyObserverSpy struct {
 	calls int
 	last  rag.RetrievalPolicyEvent
+	err   error
 }
 
 func (s *mcpPolicyObserverSpy) OnRetrievalPolicy(_ context.Context, event rag.RetrievalPolicyEvent) error {
 	s.calls++
 	s.last = event
+	return s.err
+}
+
+type mcpPanicPolicyObserver struct{}
+
+func (o *mcpPanicPolicyObserver) OnRetrievalPolicy(context.Context, rag.RetrievalPolicyEvent) error {
+	if o == nil {
+		panic("typed-nil observer invoked")
+	}
 	return nil
 }
 
@@ -133,6 +143,14 @@ func TestRetrievalPolicyErrorMappingIsFixedAndSafe(t *testing.T) {
 	}
 	if result := retrievalPolicyToolError(rag.RetrievalPolicyOutcome{}, errors.New("ordinary")); result != nil {
 		t.Fatalf("unapplied ordinary error = %#v, want nil", result)
+	}
+	observerFailure := rag.RetrievalPolicyOutcome{Disposition: rag.RetrievalPolicyFailed, ReasonCode: "observer_failed"}
+	result := retrievalPolicyToolError(observerFailure, errors.New("ERROR_SECRET"))
+	if result == nil || extractText(result) != "policy_failed: retrieval policy enforcement failed" || result.Meta != nil {
+		t.Fatalf("observer failure result = %#v text = %q", result, extractText(result))
+	}
+	if got := retrievalPolicyPromptError(observerFailure, errors.New("ERROR_SECRET")); got == nil || got.Error() != "policy_failed: retrieval policy enforcement failed" {
+		t.Fatalf("observer prompt error = %v", got)
 	}
 }
 
@@ -222,6 +240,15 @@ func TestRetrievalPolicyIdentityPrecedence(t *testing.T) {
 		policy, present, err := s.retrievalPolicyRequest(context.Background(), req)
 		if err != nil || present || !reflect.DeepEqual(policy, rag.RetrievalPolicyRequest{}) {
 			t.Fatalf("policy/present/error = %#v/%v/%v", policy, present, err)
+		}
+	})
+
+	t.Run("typed nil observer remains legacy", func(t *testing.T) {
+		var observer *mcpPanicPolicyObserver
+		s := &Server{}
+		WithRetrievalPolicyObserver(observer)(s)
+		if s.retrievalPolicyObserver != nil {
+			t.Fatalf("typed-nil observer retained as %#v", s.retrievalPolicyObserver)
 		}
 	})
 

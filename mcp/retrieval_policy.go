@@ -60,22 +60,28 @@ func withRetrievalPolicyMeta(result *gomcp.CallToolResult, outcome rag.Retrieval
 }
 
 func retrievalPolicyToolError(outcome rag.RetrievalPolicyOutcome, err error) *gomcp.CallToolResult {
-	var result *gomcp.CallToolResult
-	switch {
-	case errors.Is(err, rag.ErrPolicyDenied):
-		result = toolError("policy_denied", "retrieval denied")
-	case errors.Is(err, rag.ErrPolicyEvaluatorFailed):
-		result = toolError("policy_evaluator_failed", "retrieval policy evaluation failed")
-	case errors.Is(err, rag.ErrPolicyDecisionInvalid):
-		result = toolError("policy_decision_invalid", "retrieval policy decision invalid")
-	case errors.Is(err, rag.ErrFreshnessUnknown):
-		result = toolError("freshness_unknown", "required retrieval freshness could not be verified")
-	case outcome.Applied:
-		result = toolError("policy_failed", "retrieval policy enforcement failed")
-	default:
+	code, message, ok := retrievalPolicyError(outcome, err)
+	if !ok {
 		return nil
 	}
-	return withRetrievalPolicyMeta(result, outcome)
+	return withRetrievalPolicyMeta(toolError(code, "%s", message), outcome)
+}
+
+func retrievalPolicyError(outcome rag.RetrievalPolicyOutcome, err error) (string, string, bool) {
+	switch {
+	case errors.Is(err, rag.ErrPolicyDenied):
+		return "policy_denied", "retrieval denied", true
+	case errors.Is(err, rag.ErrPolicyEvaluatorFailed):
+		return "policy_evaluator_failed", "retrieval policy evaluation failed", true
+	case errors.Is(err, rag.ErrPolicyDecisionInvalid):
+		return "policy_decision_invalid", "retrieval policy decision invalid", true
+	case errors.Is(err, rag.ErrFreshnessUnknown):
+		return "freshness_unknown", "required retrieval freshness could not be verified", true
+	case outcome.Applied || outcome.ReasonCode == "observer_failed":
+		return "policy_failed", "retrieval policy enforcement failed", true
+	default:
+		return "", "", false
+	}
 }
 
 func retrievalIdentityToolError() *gomcp.CallToolResult {
@@ -94,7 +100,7 @@ func (s *Server) retrievalPolicyRequest(ctx context.Context, req gomcp.Request) 
 	if err != nil {
 		return rag.RetrievalPolicyRequest{}, present, err
 	}
-	if !present && isNilRetrievalPolicyEvaluator(s.retrievalPolicyEvaluator) {
+	if !present && isNilRetrievalPolicyValue(s.retrievalPolicyEvaluator) {
 		return policy, false, nil
 	}
 
