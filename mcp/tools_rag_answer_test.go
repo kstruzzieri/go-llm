@@ -184,10 +184,12 @@ func TestBuildEvidenceBlocks(t *testing.T) {
 // recordingRouteEngine / fakeRouteProvider in mcp/router_seam_test.go.
 type queuedRouteEngine struct {
 	responses []string
+	requests  []provider.RoutingRequest
 	calls     int
 }
 
 func (e *queuedRouteEngine) Route(ctx context.Context, req provider.RoutingRequest) (*provider.RoutePlan, error) {
+	e.requests = append(e.requests, req)
 	content := ""
 	if e.calls < len(e.responses) {
 		content = e.responses[e.calls]
@@ -336,6 +338,173 @@ func TestHandleRAGAnswer(t *testing.T) {
 			t.Fatalf("expected validation error result, got out=%v err=%v", out, err)
 		}
 	})
+}
+
+func TestHandleRAGAnswer_ForwardsPolicyMetaAndRedactsBeforePrompt(t *testing.T) {
+	redacted := "REDACTED"
+	evaluator := &mcpPolicyEvaluatorSpy{
+		decision: rag.RetrievalPolicyDecision{Allow: true},
+		resultDecision: []rag.RetrievalResultDecision{
+			{Keep: false},
+			{Keep: true, RedactedContent: &redacted},
+		},
+	}
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{
+		{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "denied-id", Source: "denied.go", Content: "DENIED_SECRET"}, Distance: 0.1}},
+		{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "redacted-id", Source: "allowed.go", Content: "ORIGINAL_SECRET"}, Distance: 0.2}},
+	}}
+	engine := &queuedRouteEngine{responses: []string{`{"answer":"safe","evidence":[{"id":"E1","quote":"REDACTED"}]}`}}
+	s := newAnswerTestServer(t, engine)
+	s.store = store
+	s.retriever = mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))
+	s.retrievalPolicyEvaluator = evaluator
+	WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+		return "resolved-principal", nil
+	})(s)
+	req := rawArgs(t, `{"question":"question","include_diagnostics":true}`)
+	req.Params.Meta = policyMetaFromJSON(t, `{
+		"principal_id":"claimed-principal","session_id":"claimed-session",
+		"max_results":2,"audit_labels":{"purpose":"support"}
+	}`)
+
+	out, err := s.handleRAGAnswer(context.Background(), req)
+	if err != nil || out.IsError {
+		t.Fatalf("result = %#v, error = %v", out, err)
+	}
+	var decodedResult ragAnswerResult
+	if err := json.Unmarshal([]byte(extractText(out)), &decodedResult); err != nil {
+		t.Fatal(err)
+	}
+	if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 1 || store.calls != 1 || engine.calls != 1 {
+		t.Fatalf("calls evaluator=%d/%d retrieval=%d model=%d, want 1/1/1/1",
+			evaluator.evaluateCalls, evaluator.resultCalls, store.calls, engine.calls)
+	}
+	if evaluator.last.Policy.PrincipalID != "resolved-principal" ||
+		evaluator.last.Policy.SessionID != "claimed-session" ||
+		evaluator.last.Policy.MaxResults != 2 ||
+		evaluator.last.Policy.AuditLabels["purpose"] != "support" {
+		t.Fatalf("evaluator policy = %#v", evaluator.last.Policy)
+	}
+	if out.Meta == nil {
+		t.Fatal("successful governed answer omitted safe applied metadata")
+	}
+	if len(engine.requests) != 1 || !strings.Contains(string(engine.requests[0].Messages[1].Content), "REDACTED") {
+		t.Fatalf("model requests = %#v, want one request containing replacement", engine.requests)
+	}
+	if decodedResult.Status != statusAnswerFound || len(decodedResult.Sources) != 1 || decodedResult.Sources[0].Source != "allowed.go" ||
+		len(decodedResult.Quotes) != 1 || decodedResult.Quotes[0].Text != "REDACTED" ||
+		decodedResult.Diagnostics == nil || len(decodedResult.Diagnostics.RetrievedChunkIDs) != 1 || decodedResult.Diagnostics.RetrievedChunkIDs[0] != "redacted-id" {
+		t.Fatalf("answer result = %#v", decodedResult)
+	}
+	payloads := []any{engine.requests, decodedResult.Sources, decodedResult.Quotes, decodedResult.Diagnostics}
+	encoded, err := json.Marshal(payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "DENIED_SECRET") || strings.Contains(string(encoded), "ORIGINAL_SECRET") {
+		t.Fatalf("answer path leaked policy content: %s", encoded)
+	}
+	if strings.Contains(string(encoded), "denied-id") || strings.Contains(string(encoded), "denied.go") {
+		t.Fatalf("answer path leaked denied chunk identity: %s", encoded)
+	}
+	meta, err := json.Marshal(out.Meta)
+	if err != nil || strings.Contains(string(meta), "principal") || strings.Contains(string(meta), "purpose") {
+		t.Fatalf("unsafe result meta: %s, %v", meta, err)
+	}
+}
+
+func TestHandleRAGAnswer_PolicySkipsCorpusRefinement(t *testing.T) {
+	assertSkipped := func(t *testing.T, out *gomcp.CallToolResult, engine *queuedRouteEngine, corpus *corpusOnlyStore) {
+		t.Helper()
+		var result ragAnswerResult
+		if err := json.Unmarshal([]byte(extractText(out)), &result); err != nil {
+			t.Fatal(err)
+		}
+		if result.Status != statusNotInRetrievedContext || engine.calls != 0 || corpus.gotQuestion != "" {
+			t.Fatalf("status=%s model calls=%d corpus question=%q", result.Status, engine.calls, corpus.gotQuestion)
+		}
+		if out.IsError || out.Meta == nil {
+			t.Fatalf("result = %#v, want successful governed result with metadata", out)
+		}
+		if result.Diagnostics == nil || len(result.Diagnostics.KeywordTerms) != 0 ||
+			result.Diagnostics.CorpusMatchCount != nil || result.Diagnostics.CorpusOutsideMatchCount != nil {
+			t.Fatalf("diagnostics = %#v, want unset corpus fields", result.Diagnostics)
+		}
+	}
+
+	t.Run("evaluator active without metadata", func(t *testing.T) {
+		evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+		corpus := &corpusOnlyStore{
+			answerStore: &answerStore{},
+			presence:    rag.CorpusPresence{Terms: []string{"question"}, TotalMatches: 1, OutsideMatches: 1},
+		}
+		engine := &queuedRouteEngine{}
+		s := newAnswerTestServer(t, engine)
+		s.store = corpus
+		s.retriever = mcpTestRetriever(t, corpus, rag.WithRetrievalPolicyEvaluator(evaluator))
+		s.retrievalPolicyEvaluator = evaluator
+		out, err := s.handleRAGAnswer(context.Background(), rawArgs(t, `{"question":"question","include_diagnostics":true}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSkipped(t, out, engine, corpus)
+	})
+
+	t.Run("metadata policy scope without evaluator", func(t *testing.T) {
+		corpus := &corpusOnlyStore{
+			answerStore: &answerStore{},
+			presence:    rag.CorpusPresence{Terms: []string{"question"}, TotalMatches: 1, OutsideMatches: 1},
+		}
+		engine := &queuedRouteEngine{responses: []string{`{"answer":"","evidence":[]}`}}
+		s := managedScopedScoreServer(t, nil)
+		s.cfg = newAnswerTestServer(t, engine).cfg
+		s.router = engine
+		s.store = corpus
+		req := rawArgs(t, `{"question":"question","include_diagnostics":true}`)
+		req.Params.Meta = policyMetaFromJSON(t, `{"scope":{"collection":"missing"}}`)
+		out, err := s.handleRAGAnswer(context.Background(), req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		assertSkipped(t, out, engine, corpus)
+	})
+}
+
+func TestHandleRAGAnswer_PolicyFilteredToZeroKeepsNotInRetrievedContext(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{
+		decision:       rag.RetrievalPolicyDecision{Allow: true},
+		resultDecision: []rag.RetrievalResultDecision{{Keep: false}, {Keep: false}},
+	}
+	corpus := &corpusOnlyStore{
+		answerStore: &answerStore{results: []rag.SearchResult{
+			{Chunk: rag.Chunk{ID: "denied-1", Content: "DENIED_SECRET_1"}, Distance: 0.1},
+			{Chunk: rag.Chunk{ID: "denied-2", Content: "DENIED_SECRET_2"}, Distance: 0.2},
+		}},
+		presence: rag.CorpusPresence{Terms: []string{"question"}, TotalMatches: 1, OutsideMatches: 1},
+	}
+	engine := &queuedRouteEngine{}
+	s := newAnswerTestServer(t, engine)
+	s.store = corpus
+	s.retriever = mcpTestRetriever(t, corpus, rag.WithRetrievalPolicyEvaluator(evaluator))
+	s.retrievalPolicyEvaluator = evaluator
+	out, err := s.handleRAGAnswer(context.Background(), rawArgs(t, `{"question":"question","include_diagnostics":true}`))
+	if err != nil || out.IsError {
+		t.Fatalf("result = %#v, error = %v", out, err)
+	}
+	var result ragAnswerResult
+	if err := json.Unmarshal([]byte(extractText(out)), &result); err != nil {
+		t.Fatal(err)
+	}
+	if result.Status != statusNotInRetrievedContext || engine.calls != 0 || corpus.gotQuestion != "" {
+		t.Fatalf("status=%s model calls=%d corpus question=%q", result.Status, engine.calls, corpus.gotQuestion)
+	}
+	if out.Meta == nil {
+		t.Fatal("successful governed result omitted safe applied metadata")
+	}
+	if result.Diagnostics == nil || len(result.Diagnostics.RetrievedChunkIDs) != 0 ||
+		result.Diagnostics.CorpusMatchCount != nil || result.Diagnostics.CorpusOutsideMatchCount != nil {
+		t.Fatalf("diagnostics = %#v, want no denied IDs or corpus counts", result.Diagnostics)
+	}
 }
 
 // callAnswer invokes the handler and unmarshals the JSON tool result.
