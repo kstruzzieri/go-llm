@@ -60,8 +60,12 @@ func decodeRetrievalPolicyMeta(meta gomcp.Meta) (rag.RetrievalPolicyRequest, boo
 	if len(data) > maxRetrievalPolicyMetaBytes {
 		return rag.RetrievalPolicyRequest{}, true, fmt.Errorf("policy metadata exceeds %d-byte limit", maxRetrievalPolicyMetaBytes)
 	}
-	if bytes.Equal(data, []byte("null")) {
-		return rag.RetrievalPolicyRequest{}, true, fmt.Errorf("policy metadata must be an object")
+	var canonical any
+	if err := json.Unmarshal(data, &canonical); err != nil {
+		return rag.RetrievalPolicyRequest{}, true, fmt.Errorf("decode policy metadata: invalid JSON")
+	}
+	if retrievalPolicyMetaContainsNull(canonical) {
+		return rag.RetrievalPolicyRequest{}, true, fmt.Errorf("policy metadata must not contain null")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -150,6 +154,27 @@ func retrievalPolicyMetaUTF8Valid(value any) bool {
 		}
 	}
 	return true
+}
+
+func retrievalPolicyMetaContainsNull(value any) bool {
+	if value == nil {
+		return true
+	}
+	switch value := value.(type) {
+	case []any:
+		for _, item := range value {
+			if retrievalPolicyMetaContainsNull(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for _, item := range value {
+			if retrievalPolicyMetaContainsNull(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func retrievalPolicyDecodeError(err error) error {

@@ -74,6 +74,17 @@ func TestDecodeRetrievalPolicyMetaRejectsInvalid(t *testing.T) {
 		forbidden string
 	}{
 		{name: "null", meta: policyMetaFromJSON(t, `null`), category: "object"},
+		{name: "null principal_id", meta: policyMetaFromJSON(t, `{"principal_id":null}`), category: "null"},
+		{name: "null session_id", meta: policyMetaFromJSON(t, `{"session_id":null}`), category: "null"},
+		{name: "null scope", meta: policyMetaFromJSON(t, `{"scope":null}`), category: "null"},
+		{name: "null require_fresh", meta: policyMetaFromJSON(t, `{"require_fresh":null}`), category: "null"},
+		{name: "null max_results", meta: policyMetaFromJSON(t, `{"max_results":null}`), category: "null"},
+		{name: "null max_cost", meta: policyMetaFromJSON(t, `{"max_cost":null}`), category: "null"},
+		{name: "null audit_labels", meta: policyMetaFromJSON(t, `{"audit_labels":null}`), category: "null"},
+		{name: "null scope collection", meta: policyMetaFromJSON(t, `{"scope":{"collection":null}}`), category: "null"},
+		{name: "null scope tags", meta: policyMetaFromJSON(t, `{"scope":{"tags":null}}`), category: "null"},
+		{name: "null tag element", meta: policyMetaFromJSON(t, `{"scope":{"tags":[null]}}`), category: "null"},
+		{name: "null audit label value", meta: policyMetaFromJSON(t, `{"audit_labels":{"purpose":null}}`), category: "null"},
 		{name: "non-object", meta: policyMetaFromJSON(t, `"claim"`), category: "decode", forbidden: "claim"},
 		{name: "unknown top-level", meta: policyMetaFromJSON(t, `{"unknown":true}`), category: "unknown"},
 		{name: "unknown nested scope", meta: policyMetaFromJSON(t, `{"scope":{"unknown":true}}`), category: "unknown"},
