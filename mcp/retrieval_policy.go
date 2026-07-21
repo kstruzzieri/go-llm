@@ -28,6 +28,67 @@ const (
 
 var errRetrievalPolicyIdentity = errors.New("mcp: retrieval policy identity resolution failed")
 
+type retrievalPolicyResultWire struct {
+	Disposition          rag.RetrievalPolicyDisposition `json:"disposition"`
+	ReasonCode           string                         `json:"reason_code"`
+	CandidateCount       int                            `json:"candidate_count"`
+	CandidateSourceCount int                            `json:"candidate_source_count"`
+	ReturnedCount        int                            `json:"returned_count"`
+	ReturnedSourceCount  int                            `json:"returned_source_count"`
+	FilteredCount        int                            `json:"filtered_count"`
+	RedactedCount        int                            `json:"redacted_count"`
+	StaleDroppedCount    int                            `json:"stale_dropped_count"`
+	AuditLabelCount      int                            `json:"audit_label_count"`
+}
+
+func retrievalPolicyMeta(outcome rag.RetrievalPolicyOutcome) gomcp.Meta {
+	if !outcome.Applied {
+		return nil
+	}
+	return gomcp.Meta{RetrievalPolicyMetaKey: retrievalPolicyResultWire{
+		Disposition: outcome.Disposition, ReasonCode: outcome.ReasonCode,
+		CandidateCount: outcome.CandidateCount, CandidateSourceCount: outcome.CandidateSourceCount,
+		ReturnedCount: outcome.ReturnedCount, ReturnedSourceCount: outcome.ReturnedSourceCount,
+		FilteredCount: outcome.FilteredCount, RedactedCount: outcome.RedactedCount,
+		StaleDroppedCount: outcome.StaleDroppedCount, AuditLabelCount: outcome.AuditLabelCount,
+	}}
+}
+
+func withRetrievalPolicyMeta(result *gomcp.CallToolResult, outcome rag.RetrievalPolicyOutcome) *gomcp.CallToolResult {
+	result.Meta = retrievalPolicyMeta(outcome)
+	return result
+}
+
+func retrievalPolicyToolError(outcome rag.RetrievalPolicyOutcome, err error) *gomcp.CallToolResult {
+	var result *gomcp.CallToolResult
+	switch {
+	case errors.Is(err, rag.ErrPolicyDenied):
+		result = toolError("policy_denied", "retrieval denied")
+	case errors.Is(err, rag.ErrPolicyEvaluatorFailed):
+		result = toolError("policy_evaluator_failed", "retrieval policy evaluation failed")
+	case errors.Is(err, rag.ErrPolicyDecisionInvalid):
+		result = toolError("policy_decision_invalid", "retrieval policy decision invalid")
+	case errors.Is(err, rag.ErrFreshnessUnknown):
+		result = toolError("freshness_unknown", "required retrieval freshness could not be verified")
+	case outcome.Applied:
+		result = toolError("policy_failed", "retrieval policy enforcement failed")
+	default:
+		return nil
+	}
+	return withRetrievalPolicyMeta(result, outcome)
+}
+
+func retrievalIdentityToolError() *gomcp.CallToolResult {
+	return toolError("policy_identity_failed", "retrieval identity resolution failed")
+}
+
+func retrievalPolicyRequestError(err error) *gomcp.CallToolResult {
+	if errors.Is(err, errRetrievalPolicyIdentity) {
+		return retrievalIdentityToolError()
+	}
+	return toolError("validation", "invalid retrieval policy metadata")
+}
+
 func (s *Server) retrievalPolicyRequest(ctx context.Context, req gomcp.Request) (rag.RetrievalPolicyRequest, bool, error) {
 	policy, present, err := decodeRetrievalPolicyMeta(gomcp.Meta(req.GetParams().GetMeta()))
 	if err != nil {

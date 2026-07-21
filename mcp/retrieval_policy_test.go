@@ -18,21 +18,24 @@ import (
 )
 
 type mcpPolicyEvaluatorSpy struct {
-	evaluateCalls int
-	resultCalls   int
-	last          rag.RetrievalRequest
-	decision      rag.RetrievalPolicyDecision
+	evaluateCalls  int
+	resultCalls    int
+	last           rag.RetrievalRequest
+	decision       rag.RetrievalPolicyDecision
+	evaluateErr    error
+	resultDecision []rag.RetrievalResultDecision
+	resultErr      error
 }
 
 func (s *mcpPolicyEvaluatorSpy) Evaluate(_ context.Context, req rag.RetrievalRequest) (rag.RetrievalPolicyDecision, error) {
 	s.evaluateCalls++
 	s.last = req
-	return s.decision, nil
+	return s.decision, s.evaluateErr
 }
 
 func (s *mcpPolicyEvaluatorSpy) EvaluateResults(_ context.Context, _ rag.RetrievalRequest, _ []rag.Chunk) ([]rag.RetrievalResultDecision, error) {
 	s.resultCalls++
-	return nil, nil
+	return s.resultDecision, s.resultErr
 }
 
 type mcpPolicyObserverSpy struct {
@@ -44,6 +47,93 @@ func (s *mcpPolicyObserverSpy) OnRetrievalPolicy(_ context.Context, event rag.Re
 	s.calls++
 	s.last = event
 	return nil
+}
+
+func TestRetrievalPolicyResultMetaIsContentSafe(t *testing.T) {
+	outcome := rag.RetrievalPolicyOutcome{
+		Applied: true, Disposition: rag.RetrievalPolicyAllowed, ReasonCode: "allowed",
+		CandidateCount: 1, CandidateSourceCount: 2, ReturnedCount: 3, ReturnedSourceCount: 4,
+		FilteredCount: 5, RedactedCount: 6, StaleDroppedCount: 7, AuditLabelCount: 8,
+	}
+	result := withRetrievalPolicyMeta(toolResult("CONTENT_SECRET"), outcome)
+	data, err := json.Marshal(result.Meta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	for _, want := range []string{
+		`"disposition":"allowed"`, `"reason_code":"allowed"`,
+		`"candidate_count":1`, `"candidate_source_count":2`,
+		`"returned_count":3`, `"returned_source_count":4`,
+		`"filtered_count":5`, `"redacted_count":6`,
+		`"stale_dropped_count":7`, `"audit_label_count":8`,
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("metadata = %s, want %s", text, want)
+		}
+	}
+	for _, forbidden := range []string{
+		"QUERY_SECRET", "CONTENT_SECRET", "SOURCE_SECRET", "ID_SECRET",
+		"PRINCIPAL_SECRET", "SESSION_SECRET", "LABEL_SECRET", "VALUE_SECRET", "ERROR_SECRET",
+	} {
+		if strings.Contains(text, forbidden) {
+			t.Errorf("metadata leaked %q: %s", forbidden, text)
+		}
+	}
+	if got := withRetrievalPolicyMeta(toolResult("legacy"), rag.RetrievalPolicyOutcome{}); got.Meta != nil {
+		t.Fatalf("unapplied metadata = %#v, want nil", got.Meta)
+	}
+}
+
+func TestRetrievalPolicyErrorMappingIsFixedAndSafe(t *testing.T) {
+	outcome := rag.RetrievalPolicyOutcome{
+		Applied: true, Disposition: rag.RetrievalPolicyFailed, ReasonCode: "evaluator_failed",
+		CandidateCount: 1, CandidateSourceCount: 2, ReturnedCount: 3, ReturnedSourceCount: 4,
+		FilteredCount: 5, RedactedCount: 6, StaleDroppedCount: 7, AuditLabelCount: 8,
+	}
+	for _, tc := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"denied", fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDenied), "policy_denied: retrieval denied"},
+		{"evaluator", fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyEvaluatorFailed), "policy_evaluator_failed: retrieval policy evaluation failed"},
+		{"decision", fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDecisionInvalid), "policy_decision_invalid: retrieval policy decision invalid"},
+		{"freshness", fmt.Errorf("%w: ERROR_SECRET", rag.ErrFreshnessUnknown), "freshness_unknown: required retrieval freshness could not be verified"},
+		{"unknown applied", errors.New("ERROR_SECRET"), "policy_failed: retrieval policy enforcement failed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := retrievalPolicyToolError(outcome, tc.err)
+			if result == nil || !result.IsError || !strings.HasPrefix(extractText(result), tc.want) {
+				t.Fatalf("result = %#v text = %q, want prefix %q", result, extractText(result), tc.want)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "ERROR_SECRET") {
+				t.Fatalf("result leaked raw error: %s", data)
+			}
+			if result.Meta == nil {
+				t.Fatal("policy error omitted safe applied metadata")
+			}
+		})
+	}
+
+	identity := retrievalPolicyRequestError(fmt.Errorf("%w: ERROR_SECRET", errRetrievalPolicyIdentity))
+	if identity == nil || !identity.IsError || !strings.HasPrefix(extractText(identity), "policy_identity_failed: retrieval identity resolution failed") {
+		t.Fatalf("identity result = %#v text = %q", identity, extractText(identity))
+	}
+	data, err := json.Marshal(identity)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "ERROR_SECRET") || identity.Meta != nil {
+		t.Fatalf("identity result leaked detail or policy metadata: %s", data)
+	}
+	if result := retrievalPolicyToolError(rag.RetrievalPolicyOutcome{}, errors.New("ordinary")); result != nil {
+		t.Fatalf("unapplied ordinary error = %#v, want nil", result)
+	}
 }
 
 func TestRetrievalPolicyIdentityPrecedence(t *testing.T) {

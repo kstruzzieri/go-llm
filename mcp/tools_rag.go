@@ -227,8 +227,13 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 	if err := validateRAGSearchScope(args.Collection, []string(args.Tags)); err != nil {
 		return toolError("validation", "%v", err), nil
 	}
+	policy, _, err := s.retrievalPolicyRequest(ctx, req)
+	if err != nil {
+		return retrievalPolicyRequestError(err), nil
+	}
 	scoped := managedRAGScopeRequested(args.Collection, args.Tags)
-	if scoped && args.TopK > maxRAGTopK {
+	policyScoped := managedRAGScopeRequested(policy.Scope.Collection, policy.Scope.Tags)
+	if (scoped || policyScoped) && args.TopK > maxRAGTopK {
 		return toolError("validation", "top_k must be at most %d for managed scope", maxRAGTopK), nil
 	}
 
@@ -245,50 +250,43 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		topK = 5
 	}
 
-	var results []rag.SearchResult
 	contextual := !args.empty()
-	scope := rag.RetrievalScope{Collection: args.Collection, Tags: []string(args.Tags)}
-	if args.ExplainScores || contextual {
-		var scored []rag.ScoredResult
-		var err error
-		if scoped {
-			scored, err = retriever.RetrieveScoredScoped(ctx, args.Query, topK, scope, args.queryContext())
-		} else {
-			scored, err = retriever.RetrieveScored(ctx, args.Query, topK, args.queryContext())
+	qctx := rag.QueryContext{}
+	if contextual {
+		qctx = args.queryContext()
+	}
+	response, err := retriever.RetrieveRequest(ctx, rag.RetrievalRequest{
+		Query: args.Query, K: topK,
+		Scope:        rag.RetrievalScope{Collection: args.Collection, Tags: []string(args.Tags)},
+		QueryContext: qctx,
+		Policy:       policy,
+	})
+	if err != nil {
+		if result := retrievalPolicyToolError(response.Policy, err); result != nil {
+			return result, nil
 		}
-		if err != nil {
-			return toolError("rag", "search: %v", err), nil
-		}
-		if args.ExplainScores {
-			data, err := json.Marshal(scored)
-			if err != nil {
-				return toolError("rag", "marshal results: %v", err), nil
-			}
-			return toolResult(string(data)), nil
-		}
-		if scored != nil {
-			results = make([]rag.SearchResult, len(scored))
-			for i := range scored {
-				results[i] = scored[i].SearchResult
-			}
-		}
-	} else {
-		var err error
-		if scoped {
-			results, err = retriever.RetrieveScoped(ctx, args.Query, topK, scope)
-		} else {
-			results, err = retriever.Retrieve(ctx, args.Query, topK)
-		}
-		if err != nil {
-			return toolError("rag", "search: %v", err), nil
-		}
+		return toolError("rag", "search: %v", err), nil
 	}
 
-	data, err := json.Marshal(results)
+	output := any(response.Results)
+	if !args.ExplainScores {
+		var results []rag.SearchResult
+		if response.Results != nil && (contextual || len(response.Results) > 0) {
+			results = make([]rag.SearchResult, len(response.Results))
+			for i := range response.Results {
+				results[i] = response.Results[i].SearchResult
+				if !contextual {
+					results[i].Score = 1 - results[i].Distance
+				}
+			}
+		}
+		output = results
+	}
+	data, err := json.Marshal(output)
 	if err != nil {
 		return toolError("rag", "marshal results: %v", err), nil
 	}
-	return toolResult(string(data)), nil
+	return withRetrievalPolicyMeta(toolResult(string(data)), response.Policy), nil
 }
 
 func managedRAGScopeRequested(collection string, tags []string) bool {
