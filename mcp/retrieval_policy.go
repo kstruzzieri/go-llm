@@ -68,6 +68,22 @@ func retrievalPolicyToolError(outcome rag.RetrievalPolicyOutcome, err error) *go
 }
 
 func retrievalPolicyError(outcome rag.RetrievalPolicyOutcome, err error) (string, string, bool) {
+	switch outcome.ReasonCode {
+	case "denied":
+		return "policy_denied", "retrieval denied", true
+	case "evaluator_failed":
+		return "policy_evaluator_failed", "retrieval policy evaluation failed", true
+	case "request_invalid", "decision_invalid":
+		return "policy_decision_invalid", "retrieval policy decision invalid", true
+	case "freshness_unknown":
+		return "freshness_unknown", "required retrieval freshness could not be verified", true
+	case "observer_failed":
+		return "policy_failed", "retrieval policy enforcement failed", true
+	}
+	if outcome.Applied {
+		return "policy_failed", "retrieval policy enforcement failed", true
+	}
+
 	switch {
 	case errors.Is(err, rag.ErrPolicyDenied):
 		return "policy_denied", "retrieval denied", true
@@ -77,8 +93,6 @@ func retrievalPolicyError(outcome rag.RetrievalPolicyOutcome, err error) (string
 		return "policy_decision_invalid", "retrieval policy decision invalid", true
 	case errors.Is(err, rag.ErrFreshnessUnknown):
 		return "freshness_unknown", "required retrieval freshness could not be verified", true
-	case outcome.Applied || outcome.ReasonCode == "observer_failed":
-		return "policy_failed", "retrieval policy enforcement failed", true
 	default:
 		return "", "", false
 	}

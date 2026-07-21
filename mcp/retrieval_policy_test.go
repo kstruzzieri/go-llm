@@ -96,24 +96,26 @@ func TestRetrievalPolicyResultMetaIsContentSafe(t *testing.T) {
 }
 
 func TestRetrievalPolicyErrorMappingIsFixedAndSafe(t *testing.T) {
-	outcome := rag.RetrievalPolicyOutcome{
+	evaluatorOutcome := rag.RetrievalPolicyOutcome{
 		Applied: true, Disposition: rag.RetrievalPolicyFailed, ReasonCode: "evaluator_failed",
 		CandidateCount: 1, CandidateSourceCount: 2, ReturnedCount: 3, ReturnedSourceCount: 4,
 		FilteredCount: 5, RedactedCount: 6, StaleDroppedCount: 7, AuditLabelCount: 8,
 	}
 	for _, tc := range []struct {
-		name string
-		err  error
-		want string
+		name    string
+		outcome rag.RetrievalPolicyOutcome
+		err     error
+		want    string
 	}{
-		{"denied", fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDenied), "policy_denied: retrieval denied"},
-		{"evaluator", fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyEvaluatorFailed), "policy_evaluator_failed: retrieval policy evaluation failed"},
-		{"decision", fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDecisionInvalid), "policy_decision_invalid: retrieval policy decision invalid"},
-		{"freshness", fmt.Errorf("%w: ERROR_SECRET", rag.ErrFreshnessUnknown), "freshness_unknown: required retrieval freshness could not be verified"},
-		{"unknown applied", errors.New("ERROR_SECRET"), "policy_failed: retrieval policy enforcement failed"},
+		{"denied", rag.RetrievalPolicyOutcome{Applied: true, Disposition: rag.RetrievalPolicyDenied, ReasonCode: "denied"}, fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyEvaluatorFailed), "policy_denied: retrieval denied"},
+		{"evaluator", evaluatorOutcome, fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDenied), "policy_evaluator_failed: retrieval policy evaluation failed"},
+		{"request", rag.RetrievalPolicyOutcome{Applied: true, Disposition: rag.RetrievalPolicyFailed, ReasonCode: "request_invalid"}, fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDenied), "policy_decision_invalid: retrieval policy decision invalid"},
+		{"decision", rag.RetrievalPolicyOutcome{Applied: true, Disposition: rag.RetrievalPolicyFailed, ReasonCode: "decision_invalid"}, fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDenied), "policy_decision_invalid: retrieval policy decision invalid"},
+		{"freshness", rag.RetrievalPolicyOutcome{Applied: true, Disposition: rag.RetrievalPolicyFailed, ReasonCode: "freshness_unknown"}, fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDenied), "freshness_unknown: required retrieval freshness could not be verified"},
+		{"unknown applied", rag.RetrievalPolicyOutcome{Applied: true, Disposition: rag.RetrievalPolicyFailed, ReasonCode: "retrieval_failed"}, fmt.Errorf("%w: ERROR_SECRET", rag.ErrPolicyDenied), "policy_failed: retrieval policy enforcement failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			result := retrievalPolicyToolError(outcome, tc.err)
+			result := retrievalPolicyToolError(tc.outcome, tc.err)
 			if result == nil || !result.IsError || !strings.HasPrefix(extractText(result), tc.want) {
 				t.Fatalf("result = %#v text = %q, want prefix %q", result, extractText(result), tc.want)
 			}
@@ -151,6 +153,65 @@ func TestRetrievalPolicyErrorMappingIsFixedAndSafe(t *testing.T) {
 	}
 	if got := retrievalPolicyPromptError(observerFailure, errors.New("ERROR_SECRET")); got == nil || got.Error() != "policy_failed: retrieval policy enforcement failed" {
 		t.Fatalf("observer prompt error = %v", got)
+	}
+}
+
+func TestRetrievalPolicyObserverSentinelCannotOverrideObserverFailureOutcome(t *testing.T) {
+	observer := &mcpPolicyObserverSpy{err: rag.ErrPolicyDenied}
+	retriever := mcpTestRetriever(t, &recordingMCPMultiStore{}, rag.WithRetrievalPolicyObserver(observer))
+	response, err := retriever.RetrieveRequest(context.Background(), rag.RetrievalRequest{Query: "q"})
+	if !errors.Is(err, rag.ErrPolicyDenied) {
+		t.Fatalf("error = %v, want observer sentinel", err)
+	}
+	if response.Policy.Applied || response.Policy.ReasonCode != "observer_failed" {
+		t.Fatalf("outcome = %#v, want unapplied observer_failed", response.Policy)
+	}
+	result := retrievalPolicyToolError(response.Policy, err)
+	if result == nil || extractText(result) != "policy_failed: retrieval policy enforcement failed" || result.Meta != nil {
+		t.Fatalf("tool result = %#v text = %q", result, extractText(result))
+	}
+	if got := retrievalPolicyPromptError(response.Policy, err); got == nil || got.Error() != "policy_failed: retrieval policy enforcement failed" {
+		t.Fatalf("prompt error = %v", got)
+	}
+}
+
+func TestRetrievalPolicyObserverSentinelCannotOverrideEvaluatorOutcome(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{evaluateErr: errors.New("EVALUATOR_SECRET")}
+	retriever := mcpTestRetriever(t, &recordingMCPMultiStore{},
+		rag.WithRetrievalPolicyEvaluator(evaluator),
+		rag.WithRetrievalPolicyObserver(&mcpPolicyObserverSpy{err: rag.ErrPolicyDenied}),
+	)
+	response, err := retriever.RetrieveRequest(context.Background(), rag.RetrievalRequest{Query: "q"})
+	if !errors.Is(err, rag.ErrPolicyEvaluatorFailed) || !errors.Is(err, rag.ErrPolicyDenied) {
+		t.Fatalf("error = %v, want evaluator and observer sentinels", err)
+	}
+	result := retrievalPolicyToolError(response.Policy, err)
+	if result == nil || extractText(result) != "policy_evaluator_failed: retrieval policy evaluation failed" {
+		t.Fatalf("tool result = %#v text = %q", result, extractText(result))
+	}
+	meta, ok := result.Meta[RetrievalPolicyMetaKey].(retrievalPolicyResultWire)
+	if !ok || meta.ReasonCode != "evaluator_failed" {
+		t.Fatalf("metadata = %#v, want evaluator_failed", result.Meta)
+	}
+	if got := retrievalPolicyPromptError(response.Policy, err); got == nil || got.Error() != "policy_evaluator_failed: retrieval policy evaluation failed" {
+		t.Fatalf("prompt error = %v", got)
+	}
+}
+
+func TestRetrievalPolicyErrorMappingFallsBackToSentinelWithoutOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{rag.ErrPolicyDenied, "policy_denied: retrieval denied"},
+		{rag.ErrPolicyEvaluatorFailed, "policy_evaluator_failed: retrieval policy evaluation failed"},
+		{rag.ErrPolicyDecisionInvalid, "policy_decision_invalid: retrieval policy decision invalid"},
+		{rag.ErrFreshnessUnknown, "freshness_unknown: required retrieval freshness could not be verified"},
+	} {
+		result := retrievalPolicyToolError(rag.RetrievalPolicyOutcome{}, fmt.Errorf("%w: ERROR_SECRET", tc.err))
+		if result == nil || extractText(result) != tc.want || result.Meta != nil {
+			t.Fatalf("result = %#v text = %q, want %q", result, extractText(result), tc.want)
+		}
 	}
 }
 
