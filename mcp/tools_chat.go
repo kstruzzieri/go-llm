@@ -82,6 +82,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	}
 
 	messages := args.Messages
+	var outcome rag.RetrievalPolicyOutcome
 
 	// RAG orchestration: retrieve context and prepend as a system message.
 	if args.UseRAG {
@@ -109,26 +110,30 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 			return toolError("validation", "use_rag requires at least one user message"), nil
 		}
 
-		var results []rag.SearchResult
-		if args.empty() {
-			var rerr error
-			results, rerr = retriever.Retrieve(ctx, query, topK)
-			if rerr != nil {
-				return toolError("rag", "retrieve: %v", rerr), nil
-			}
-		} else {
-			scored, rerr := retriever.RetrieveScored(ctx, query, topK, args.queryContext())
-			if rerr != nil {
-				return toolError("rag", "retrieve: %v", rerr), nil
-			}
-			if scored != nil {
-				results = make([]rag.SearchResult, len(scored))
-				for i := range scored {
-					results[i] = scored[i].SearchResult
-				}
-			}
+		policy, _, err := s.retrievalPolicyRequest(ctx, req)
+		if err != nil {
+			return retrievalPolicyRequestError(err), nil
 		}
+		contextual := !args.empty()
+		qctx := rag.QueryContext{}
+		if contextual {
+			qctx = args.queryContext()
+		}
+		response, rerr := retriever.RetrieveRequest(ctx, rag.RetrievalRequest{
+			Query: query, K: topK, QueryContext: qctx, Policy: policy,
+		})
+		outcome = response.Policy
+		if rerr != nil {
+			if result := retrievalPolicyToolError(outcome, rerr); result != nil {
+				return result, nil
+			}
+			return toolError("rag", "retrieve: %v", rerr), nil
+		}
+		results := flattenRetrievalResults(response.Results, !contextual)
 		if len(results) == 0 {
+			if outcome.Applied {
+				return withRetrievalPolicyMeta(toolError("policy_no_context", "no permitted RAG context"), outcome), nil
+			}
 			return toolError("rag", "RAG index is empty; run rag_index_file or rag_index_directory first"), nil
 		}
 
@@ -148,7 +153,7 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	}
 	model, err := s.routeModelSelector(ctx, args.Model, "chat")
 	if err != nil {
-		return toolError("config", "%v", err), nil
+		return withRetrievalPolicyMeta(toolError("config", "%v", err), outcome), nil
 	}
 
 	rr := provider.RoutingRequest{
@@ -163,21 +168,35 @@ func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*g
 	if rr.Model == "" {
 		chain, err := s.chainFor("chat")
 		if err != nil {
-			return toolError("config", "%v", err), nil
+			return withRetrievalPolicyMeta(toolError("config", "%v", err), outcome), nil
 		}
 		rr.PreferredChain = chain
 	}
 
 	plan, err := router.Route(ctx, rr)
 	if err != nil {
-		return toolError("router", "%v", err), nil
+		return withRetrievalPolicyMeta(toolError("router", "%v", err), outcome), nil
 	}
 	resp, err := plan.ExecuteChat(ctx)
 	if err != nil {
-		return toolError("ollama", "%v", err), nil
+		return withRetrievalPolicyMeta(toolError("ollama", "%v", err), outcome), nil
 	}
 	s.persistTranscript(ctx, req, args, messages, resp)
-	return toolResult(resp.Content), nil
+	return withRetrievalPolicyMeta(toolResult(resp.Content), outcome), nil
+}
+
+func flattenRetrievalResults(scored []rag.ScoredResult, resetScore bool) []rag.SearchResult {
+	if scored == nil {
+		return nil
+	}
+	results := make([]rag.SearchResult, len(scored))
+	for i := range scored {
+		results[i] = scored[i].SearchResult
+		if resetScore {
+			results[i].Score = 1 - results[i].Distance
+		}
+	}
+	return results
 }
 
 // chatMessagesEqual reports whether two chat-message slices are equivalent for
