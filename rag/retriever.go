@@ -21,6 +21,8 @@ type Retriever struct {
 	store           VectorStore
 	vectorOnly      bool
 	readManagedFile func(context.Context, string) ([]byte, error)
+	policyEvaluator RetrievalPolicyEvaluator
+	policyObserver  RetrievalPolicyObserver
 }
 
 // RetrievalScope restricts retrieval to managed documents in a collection and
@@ -73,6 +75,23 @@ func WithVectorOnly() RetrieverOption {
 	return func(r *Retriever) {
 		r.vectorOnly = true
 	}
+}
+
+// WithRetrievalPolicyEvaluator installs the evaluator used for retrieval policy.
+func WithRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) RetrieverOption {
+	return func(r *Retriever) { r.policyEvaluator = evaluator }
+}
+
+// WithRetrievalPolicyObserver installs the synchronous, consumer-owned policy
+// observer.
+func WithRetrievalPolicyObserver(observer RetrievalPolicyObserver) RetrieverOption {
+	return func(r *Retriever) { r.policyObserver = observer }
+}
+
+// PolicyActive reports whether an evaluator is installed; an observer alone
+// does not make retrieval policy active.
+func (r *Retriever) PolicyActive() bool {
+	return r != nil && r.policyEvaluator != nil
 }
 
 // buildRetriever is the single private path constructing a Retriever; both

@@ -14,6 +14,18 @@ package rag
 import "errors"
 
 var (
+	// ErrPolicyDenied indicates that retrieval policy denied a request.
+	ErrPolicyDenied = errors.New("rag: retrieval policy denied")
+
+	// ErrPolicyEvaluatorFailed indicates that retrieval policy evaluation failed.
+	ErrPolicyEvaluatorFailed = errors.New("rag: retrieval policy evaluator failed")
+
+	// ErrPolicyDecisionInvalid indicates an invalid retrieval policy decision.
+	ErrPolicyDecisionInvalid = errors.New("rag: retrieval policy decision invalid")
+
+	// ErrFreshnessUnknown indicates that retrieval freshness could not be determined.
+	ErrFreshnessUnknown = errors.New("rag: retrieval freshness unknown")
+
 	// ErrVectorSpaceMismatch indicates the query embedding's vector-space
 	// identifier does not match the (single) vector space found in the
 	// corpus, or the query embedder did not produce a VectorSpaceID at all.
