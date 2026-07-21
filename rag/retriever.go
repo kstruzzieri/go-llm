@@ -79,7 +79,24 @@ func WithVectorOnly() RetrieverOption {
 
 // WithRetrievalPolicyEvaluator installs the evaluator used for retrieval policy.
 func WithRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) RetrieverOption {
-	return func(r *Retriever) { r.policyEvaluator = evaluator }
+	return func(r *Retriever) {
+		if !isNilRetrievalPolicyEvaluator(evaluator) {
+			r.policyEvaluator = evaluator
+		}
+	}
+}
+
+func isNilRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) bool {
+	if evaluator == nil {
+		return true
+	}
+	v := reflect.ValueOf(evaluator)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
 }
 
 // WithRetrievalPolicyObserver installs the synchronous, consumer-owned policy
