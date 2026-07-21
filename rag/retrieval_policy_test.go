@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"os"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -441,6 +443,103 @@ func policyScored(id, source string) ScoredResult {
 	return ScoredResult{
 		SearchResult: SearchResult{Chunk: Chunk{ID: id, Source: source, Metadata: map[string]string{}}},
 		Signals:      map[string]float64{},
+	}
+}
+
+func TestRetrieveRequestRequireFreshKeepsRegistryVerifiedText(t *testing.T) {
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	document, err := managed.IngestText(context.Background(), "runbook", "trusted text", DocumentOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 5, Policy: RetrievalPolicyRequest{RequireFresh: true}})
+	if err != nil || len(response.Results) != 1 || response.Results[0].Chunk.Source != document.source {
+		t.Fatalf("response=%#v error=%v", response, err)
+	}
+	if response.Policy.StaleDroppedCount != 0 {
+		t.Fatalf("outcome=%#v", response.Policy)
+	}
+}
+
+func TestRetrieveRequestRequireFreshRejectsUnknown(t *testing.T) {
+	result := policyScored("c1", "custom")
+	result.Chunk.Metadata["managed_freshness"] = string(DocumentFreshnessFresh)
+	r, _, _ := newPolicyRetriever(t, []ScoredResult{result})
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", Policy: RetrievalPolicyRequest{RequireFresh: true}})
+	if !errors.Is(err, ErrFreshnessUnknown) {
+		t.Fatalf("error=%v", err)
+	}
+	if response.Results != nil || response.Policy.ReasonCode != "freshness_unknown" {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestRetrieveRequestRequireFreshDropsKnownStale(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "runbook.md")
+	if err := os.WriteFile(path, []byte("indexed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managed.IngestFile(ctx, path, DocumentOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 1}}, VectorSpaceID: "test/v1"}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: "q", K: 5, Policy: RetrievalPolicyRequest{RequireFresh: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(response.Results) != 0 || response.Policy.CandidateCount != 1 || response.Policy.StaleDroppedCount != 1 || response.Policy.ReturnedCount != 0 {
+		t.Fatalf("response=%#v", response)
+	}
+}
+
+func TestRetrieveRequestRequireFreshIgnoresForgedMetadata(t *testing.T) {
+	result := policyScored("c1", "custom")
+	result.Chunk.Metadata["managed_freshness"] = string(DocumentFreshnessFresh)
+	r, _, _ := newPolicyRetriever(t, []ScoredResult{result})
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", Policy: RetrievalPolicyRequest{RequireFresh: true}})
+	if !errors.Is(err, ErrFreshnessUnknown) || response.Results != nil || response.Policy.ReasonCode != "freshness_unknown" {
+		t.Fatalf("response=%#v error=%v", response, err)
+	}
+}
+
+func TestRetrieveRequestFreshnessDoesNotMutateStoredMetadata(t *testing.T) {
+	result := policyScored("c1", "custom")
+	result.Chunk.Metadata["managed_freshness"] = "original"
+	stored := result.Chunk.Metadata
+	r, _, store := newPolicyRetriever(t, []ScoredResult{result})
+	for i := 0; i < 2; i++ {
+		response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", Policy: RetrievalPolicyRequest{RequireFresh: true}})
+		if !errors.Is(err, ErrFreshnessUnknown) || response.Results != nil {
+			t.Fatalf("retrieve %d: response=%#v error=%v", i+1, response, err)
+		}
+		if got := store.multiResults[0].Chunk.Metadata["managed_freshness"]; got != "original" {
+			t.Fatalf("retrieve %d mutated stored freshness to %q", i+1, got)
+		}
+		stored["map_identity"] = "preserved"
+		if got := store.multiResults[0].Chunk.Metadata["map_identity"]; got != "preserved" {
+			t.Fatalf("retrieve %d replaced the stored metadata map", i+1)
+		}
+		delete(stored, "map_identity")
 	}
 }
 

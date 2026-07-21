@@ -254,10 +254,29 @@ func sourceCount(results []ScoredResult) int {
 	return len(sources)
 }
 
+func enforceRequiredFreshness(results []ScoredResult, freshness []retrievalFreshness) ([]ScoredResult, int, error) {
+	kept := make([]ScoredResult, 0, len(results))
+	stale := 0
+	for i, result := range results {
+		if i >= len(freshness) || !freshness[i].known {
+			return nil, stale, ErrFreshnessUnknown
+		}
+		if freshness[i].value == DocumentFreshnessStale {
+			stale++
+			continue
+		}
+		if freshness[i].value != DocumentFreshnessFresh {
+			return nil, stale, ErrFreshnessUnknown
+		}
+		kept = append(kept, result)
+	}
+	return kept, stale, nil
+}
+
 // RetrieveRequest is the canonical scored retrieval surface.
 func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (RetrievalResponse, error) {
 	if !policyRequestPresent(req.Policy) && r.policyEvaluator == nil {
-		results, err := r.retrieveScoredBase(ctx, req)
+		results, _, err := r.retrieveScoredBase(ctx, req)
 		if err != nil {
 			return RetrievalResponse{}, err
 		}
@@ -298,13 +317,29 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 	}
 
 	var results []ScoredResult
+	var freshness []retrievalFreshness
 	if !policy.emptyScope {
-		results, err = r.retrieveScoredBase(ctx, policy.request)
+		results, freshness, err = r.retrieveScoredBase(ctx, policy.request)
 		if err != nil {
 			return RetrievalResponse{}, err
 		}
 		if policy.limit > 0 && len(results) > policy.limit {
 			results = results[:policy.limit]
+			freshness = freshness[:policy.limit]
+		}
+	}
+	candidateCount := len(results)
+	candidateSourceCount := sourceCount(results)
+	staleDroppedCount := 0
+	if policy.requireFresh {
+		results, staleDroppedCount, err = enforceRequiredFreshness(results, freshness)
+		if err != nil {
+			failedOutcome.ReasonCode = "freshness_unknown"
+			failedOutcome.CandidateCount = candidateCount
+			failedOutcome.CandidateSourceCount = candidateSourceCount
+			failedOutcome.StaleDroppedCount = staleDroppedCount
+			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
+			return RetrievalResponse{Policy: failedOutcome}, err
 		}
 	}
 	if r.policyEvaluator != nil {
@@ -324,10 +359,11 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			Applied:              true,
 			Disposition:          RetrievalPolicyAllowed,
 			ReasonCode:           reasonCode,
-			CandidateCount:       len(results),
-			CandidateSourceCount: count,
+			CandidateCount:       candidateCount,
+			CandidateSourceCount: candidateSourceCount,
 			ReturnedCount:        len(results),
 			ReturnedSourceCount:  count,
+			StaleDroppedCount:    staleDroppedCount,
 			AuditLabelCount:      len(normalized.Policy.AuditLabels),
 		},
 	}, nil

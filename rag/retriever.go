@@ -213,60 +213,63 @@ func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCt
 	return response.Results, err
 }
 
-func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest) ([]ScoredResult, error) {
+func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest) ([]ScoredResult, []retrievalFreshness, error) {
 	scope, err := normalizeRetrievalScope(req.Scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if scope.empty() {
 		results, err := r.retrieveScored(ctx, req.Query, req.K, req.QueryContext)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		if err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results); err != nil {
-			return nil, err
+		freshness, err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results)
+		if err != nil {
+			return nil, nil, err
 		}
-		return results, nil
+		return results, freshness, nil
 	}
 	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext)
 }
 
-func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
+func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, []retrievalFreshness, error) {
 	store, ok := r.store.(*SQLiteStore)
 	if !ok {
-		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
+		return nil, nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
 	}
 	if store.immutable {
 		registry, err := managedRegistrySnapshotForScope(ctx, store, scope)
 		if err != nil {
-			return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+			return nil, nil, fmt.Errorf("rag: scoped managed registry: %w", err)
 		}
 		results, err := r.retrieveScoredImmutableScoped(ctx, query, k, qCtx, store, registry)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		results = filterScoredResults(results, scope, registry)
-		if err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-			return nil, err
+		freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
+		if err != nil {
+			return nil, nil, err
 		}
-		return results, nil
+		return results, freshness, nil
 	}
 	results, err := r.retrieveScored(ctx, query, 0, qCtx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	registry, _, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
 	if err != nil {
-		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+		return nil, nil, fmt.Errorf("rag: scoped managed registry: %w", err)
 	}
 	results = filterScoredResults(results, scope, registry)
 	if k > 0 && len(results) > k {
 		results = results[:k]
 	}
-	if err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-		return nil, err
+	freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
+	if err != nil {
+		return nil, nil, err
 	}
-	return results, nil
+	return results, freshness, nil
 }
 
 // RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
@@ -359,14 +362,6 @@ func matchesManagedRegistry(chunk Chunk, document managedRegistryDocument) bool 
 		meta["managed_origin"] == document.origin && meta["managed_mime_type"] == document.mimeType &&
 		meta["managed_content_hash"] == document.contentHash && meta["managed_collection"] == document.collection &&
 		meta["managed_tags"] == document.tagsJSON && meta["managed_state"] == document.state
-}
-
-func searchResultChunks(results []SearchResult) []Chunk {
-	chunks := make([]Chunk, len(results))
-	for i := range results {
-		chunks[i] = results[i].Chunk
-	}
-	return chunks
 }
 
 func scoredResultChunks(results []ScoredResult) []Chunk {
@@ -649,82 +644,68 @@ type managedFreshnessCheck struct {
 	err  error
 }
 
+type retrievalFreshness struct {
+	known bool
+	value DocumentFreshness
+}
+
+func unknownFreshness(count int) []retrievalFreshness {
+	return make([]retrievalFreshness, count)
+}
+
+func trustedManagedFreshness(document managedRegistryDocument, live DocumentFreshness) retrievalFreshness {
+	if document.state != string(DocumentStateIndexed) {
+		return retrievalFreshness{known: true, value: DocumentFreshnessStale}
+	}
+	if document.kind == string(DocumentKindText) {
+		return retrievalFreshness{known: true, value: DocumentFreshnessFresh}
+	}
+	if document.kind == string(DocumentKindFile) {
+		return retrievalFreshness{known: true, value: live}
+	}
+	return retrievalFreshness{known: true, value: DocumentFreshnessStale}
+}
+
 const maxManagedFreshnessReads = 100
 
-func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []SearchResult) error {
+func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []ScoredResult) ([]retrievalFreshness, error) {
 	sqlite, ok := store.(*SQLiteStore)
 	if !ok {
-		return nil
-	}
-	registry, registeredSources, err := managedRegistrySnapshot(ctx, sqlite, searchResultChunks(results))
-	if errors.Is(err, errManagedDocumentsTableMissing) {
-		return nil // Legacy read-only stores without managed_documents stay compatible.
-	}
-	if err != nil {
-		return err
-	}
-	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, registeredSources, maxManagedFreshnessReads)
-}
-
-func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
-	// Scoped results are bounded by the caller's k, but library callers may
-	// pass large or zero k; apply the same freshness read bound as the
-	// unscoped path so file I/O per retrieval stays bounded everywhere.
-	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, nil, maxManagedFreshnessReads)
-}
-
-func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) error {
-	cache := make(map[string]managedFreshnessCheck)
-	for i := range results {
-		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
-				return err
-			}
-		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered || chunkClaimsManagedDocument(results[i].Chunk) {
-			// The registry no longer knows this source claiming managed
-			// provenance: the document was deleted (or forged) between the
-			// chunk read and registry snapshot. Never serve it as fresh.
-			stampManagedChunkStale(&results[i].Chunk)
-		}
-	}
-	return nil
-}
-
-func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []ScoredResult) error {
-	sqlite, ok := store.(*SQLiteStore)
-	if !ok {
-		return nil
+		return unknownFreshness(len(results)), nil
 	}
 	registry, registeredSources, err := managedRegistrySnapshot(ctx, sqlite, scoredResultChunks(results))
 	if errors.Is(err, errManagedDocumentsTableMissing) {
-		return nil // Legacy read-only stores without managed_documents stay compatible.
+		return unknownFreshness(len(results)), nil // Legacy read-only stores without managed_documents stay compatible.
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, registeredSources, maxManagedFreshnessReads)
 }
 
-func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
-	// Same freshness read bound as the unscoped path; see
-	// refreshManagedSearchResultsWithRegistry.
+func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) ([]retrievalFreshness, error) {
+	// Apply the same bound to scoped paths so large or zero k cannot trigger
+	// unbounded file I/O.
 	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, nil, maxManagedFreshnessReads)
 }
 
-func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) error {
+func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) ([]retrievalFreshness, error) {
+	freshness := unknownFreshness(len(results))
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
-				return err
+			trusted, err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads)
+			if err != nil {
+				return nil, err
 			}
+			freshness[i] = trusted
 		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered || chunkClaimsManagedDocument(results[i].Chunk) {
-			// See refreshManagedSearchResultsWithRegistryLimit: registry-miss
-			// managed chunks must not claim their baked freshness.
+			// Registry-miss managed chunks must not claim their baked freshness.
 			stampManagedChunkStale(&results[i].Chunk)
+			freshness[i] = retrievalFreshness{known: true, value: DocumentFreshnessStale}
 		}
 	}
-	return nil
+	return freshness, nil
 }
 
 // stampManagedChunkStale clones the chunk metadata and marks it stale: the
@@ -740,24 +721,24 @@ func stampManagedChunkStale(chunk *Chunk) {
 	chunk.Metadata = cloned
 }
 
-func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck, maxReads int) error {
+func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck, maxReads int) (retrievalFreshness, error) {
 	if !matchesManagedRegistry(*chunk, document) {
 		// Provenance drift: the registry row moved on (reindex) while this
 		// chunk still carries the old content. Its baked freshness is a lie.
 		stampManagedChunkStale(chunk)
-		return nil
+		return retrievalFreshness{known: true, value: DocumentFreshnessStale}, nil
 	}
 	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) {
-		return nil
+		return trustedManagedFreshness(document, ""), nil
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return retrievalFreshness{}, err
 	}
 	origin := document.origin
 	check, ok := cache[origin]
 	if !ok {
 		if maxReads > 0 && len(cache) >= maxReads {
-			return fmt.Errorf("rag: managed file freshness read limit exceeded (%d); reduce results or use scoped retrieval", maxReads)
+			return retrievalFreshness{}, fmt.Errorf("rag: managed file freshness read limit exceeded (%d); reduce results or use scoped retrieval", maxReads)
 		}
 		data, err := readFile(ctx, origin)
 		check = managedFreshnessCheck{err: err}
@@ -767,7 +748,7 @@ func refreshManagedChunk(ctx context.Context, readFile func(context.Context, str
 		cache[origin] = check
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return retrievalFreshness{}, err
 	}
 	freshness := DocumentFreshnessStale
 	if check.err == nil && check.hash == document.contentHash {
@@ -780,7 +761,7 @@ func refreshManagedChunk(ctx context.Context, readFile func(context.Context, str
 	}
 	cloned["managed_freshness"] = string(freshness)
 	chunk.Metadata = cloned
-	return nil
+	return trustedManagedFreshness(document, freshness), nil
 }
 
 // denseScored runs dense vector search and wraps each result as a ScoredResult
