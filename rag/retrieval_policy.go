@@ -157,6 +157,23 @@ func validatePolicyRequest(policy RetrievalPolicyRequest) error {
 	return nil
 }
 
+func normalizePolicyRequest(req RetrievalRequest) (RetrievalRequest, error) {
+	req = cloneRetrievalRequest(req)
+	if err := validatePolicyRequest(req.Policy); err != nil {
+		return RetrievalRequest{}, err
+	}
+	var err error
+	req.Scope, err = normalizeRetrievalScope(req.Scope)
+	if err != nil {
+		return RetrievalRequest{}, err
+	}
+	req.Policy.Scope, err = normalizeRetrievalScope(req.Policy.Scope)
+	if err != nil {
+		return RetrievalRequest{}, err
+	}
+	return req, nil
+}
+
 func intersectCollection(values ...string) (string, bool) {
 	result := ""
 	for _, value := range values {
@@ -171,18 +188,22 @@ func intersectCollection(values ...string) (string, bool) {
 	return result, false
 }
 
-func composePolicyRequest(req RetrievalRequest) (composedPolicy, error) {
-	callerScope, err := normalizeRetrievalScope(req.Scope)
+func composeNormalizedPolicy(req RetrievalRequest, decision RetrievalPolicyDecision) (composedPolicy, error) {
+	if decision.MaxResults < 0 || decision.MaxCost < 0 {
+		return composedPolicy{}, ErrPolicyDecisionInvalid
+	}
+	decisionScope, err := normalizeRetrievalScope(decision.Scope)
 	if err != nil {
 		return composedPolicy{}, err
 	}
-	policyScope, err := normalizeRetrievalScope(req.Policy.Scope)
-	if err != nil {
-		return composedPolicy{}, err
+	collection, emptyScope := intersectCollection(req.Scope.Collection, req.Policy.Scope.Collection, decisionScope.Collection)
+	tags := slices.Clone(req.Scope.Tags)
+	for _, tag := range req.Policy.Scope.Tags {
+		if !slices.Contains(tags, tag) {
+			tags = append(tags, tag)
+		}
 	}
-	collection, emptyScope := intersectCollection(callerScope.Collection, policyScope.Collection)
-	tags := slices.Clone(callerScope.Tags)
-	for _, tag := range policyScope.Tags {
+	for _, tag := range decisionScope.Tags {
 		if !slices.Contains(tags, tag) {
 			tags = append(tags, tag)
 		}
@@ -191,17 +212,38 @@ func composePolicyRequest(req RetrievalRequest) (composedPolicy, error) {
 	if err != nil {
 		return composedPolicy{}, err
 	}
+	req = cloneRetrievalRequest(req)
 	req.Scope = RetrievalScope{Collection: collection, Tags: tags}
-	req.Policy.Scope = policyScope
+	req.Policy.Scope = req.Scope
+	req.Policy.RequireFresh = req.Policy.RequireFresh || decision.RequireFresh
+	req.Policy.MaxResults = minPositive(req.K, req.Policy.MaxResults, decision.MaxResults)
+	req.K = req.Policy.MaxResults
+	req.Policy.MaxCost = minPositive64(req.Policy.MaxCost, decision.MaxCost)
 	result := composedPolicy{
 		request:      req,
-		limit:        minPositive(req.K, req.Policy.MaxResults),
-		maxCost:      minPositive64(req.Policy.MaxCost),
+		limit:        req.Policy.MaxResults,
+		maxCost:      req.Policy.MaxCost,
 		requireFresh: req.Policy.RequireFresh,
 		emptyScope:   emptyScope,
 	}
-	result.request.K = result.limit
 	return result, nil
+}
+
+func composePolicyRequest(req RetrievalRequest) (composedPolicy, error) {
+	normalized, err := normalizePolicyRequest(req)
+	if err != nil {
+		return composedPolicy{}, err
+	}
+	return composeNormalizedPolicy(normalized, RetrievalPolicyDecision{Allow: true})
+}
+
+func clonePolicyChunks(results []ScoredResult) []Chunk {
+	chunks := make([]Chunk, len(results))
+	for i := range results {
+		chunks[i] = results[i].Chunk
+		chunks[i].Metadata = maps.Clone(chunks[i].Metadata)
+	}
+	return chunks
 }
 
 func sourceCount(results []ScoredResult) int {
@@ -214,7 +256,7 @@ func sourceCount(results []ScoredResult) int {
 
 // RetrieveRequest is the canonical scored retrieval surface.
 func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (RetrievalResponse, error) {
-	if !policyRequestPresent(req.Policy) {
+	if !policyRequestPresent(req.Policy) && r.policyEvaluator == nil {
 		results, err := r.retrieveScoredBase(ctx, req)
 		if err != nil {
 			return RetrievalResponse{}, err
@@ -222,43 +264,71 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 		return RetrievalResponse{Results: results}, nil
 	}
 
-	req = cloneRetrievalRequest(req)
 	failedOutcome := RetrievalPolicyOutcome{Applied: true, Disposition: RetrievalPolicyFailed, ReasonCode: "request_invalid"}
-	if err := validatePolicyRequest(req.Policy); err != nil {
-		return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid)
-	}
-	policy, err := composePolicyRequest(req)
+	normalized, err := normalizePolicyRequest(req)
 	if err != nil {
 		return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid)
 	}
-	if policy.emptyScope {
-		return RetrievalResponse{Policy: RetrievalPolicyOutcome{
-			Applied:         true,
-			Disposition:     RetrievalPolicyAllowed,
-			ReasonCode:      "default_allow",
-			AuditLabelCount: len(req.Policy.AuditLabels),
-		}}, nil
+	decision := RetrievalPolicyDecision{Allow: true}
+	if r.policyEvaluator != nil {
+		decision, err = r.policyEvaluator.Evaluate(ctx, cloneRetrievalRequest(normalized))
+		if err != nil {
+			failedOutcome.ReasonCode = "evaluator_failed"
+			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, err)
+		}
+		if !decision.Allow {
+			return RetrievalResponse{Policy: RetrievalPolicyOutcome{
+				Applied:         true,
+				Disposition:     RetrievalPolicyDenied,
+				ReasonCode:      "denied",
+				AuditLabelCount: len(req.Policy.AuditLabels),
+			}}, ErrPolicyDenied
+		}
+	}
+	policy, err := composeNormalizedPolicy(normalized, RetrievalPolicyDecision{Allow: true})
+	if err != nil {
+		return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid)
+	}
+	if r.policyEvaluator != nil {
+		policy, err = composeNormalizedPolicy(normalized, decision)
+		if err != nil {
+			failedOutcome.ReasonCode = "decision_invalid"
+			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy decision", ErrPolicyDecisionInvalid)
+		}
 	}
 
-	results, err := r.retrieveScoredBase(ctx, policy.request)
-	if err != nil {
-		return RetrievalResponse{}, err
+	var results []ScoredResult
+	if !policy.emptyScope {
+		results, err = r.retrieveScoredBase(ctx, policy.request)
+		if err != nil {
+			return RetrievalResponse{}, err
+		}
+		if policy.limit > 0 && len(results) > policy.limit {
+			results = results[:policy.limit]
+		}
 	}
-	if policy.limit > 0 && len(results) > policy.limit {
-		results = results[:policy.limit]
+	if r.policyEvaluator != nil {
+		if _, err := r.policyEvaluator.EvaluateResults(ctx, cloneRetrievalRequest(policy.request), clonePolicyChunks(results)); err != nil {
+			failedOutcome.ReasonCode = "evaluator_failed"
+			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, err)
+		}
 	}
 	count := sourceCount(results)
+	reasonCode := "default_allow"
+	if r.policyEvaluator != nil {
+		reasonCode = "allowed"
+	}
 	return RetrievalResponse{
 		Results: results,
 		Policy: RetrievalPolicyOutcome{
 			Applied:              true,
 			Disposition:          RetrievalPolicyAllowed,
-			ReasonCode:           "default_allow",
+			ReasonCode:           reasonCode,
 			CandidateCount:       len(results),
 			CandidateSourceCount: count,
 			ReturnedCount:        len(results),
 			ReturnedSourceCount:  count,
-			AuditLabelCount:      len(req.Policy.AuditLabels),
+			AuditLabelCount:      len(normalized.Policy.AuditLabels),
 		},
 	}, nil
 }

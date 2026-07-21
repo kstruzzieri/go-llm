@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -54,15 +55,386 @@ func allowPolicySpy() policyEvaluatorSpy {
 	}
 }
 
-func newPolicyRetriever(t *testing.T, results []ScoredResult) (*Retriever, *recordingEmbedder, *retrieverMultiStore) {
+func newPolicyRetriever(t *testing.T, results []ScoredResult, opts ...RetrieverOption) (*Retriever, *recordingEmbedder, *retrieverMultiStore) {
 	t.Helper()
 	embedder := &recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}}
 	store := &retrieverMultiStore{multiResults: results}
-	r, err := NewRetrieverWithEmbedder(embedder, store)
+	r, err := NewRetrieverWithEmbedder(embedder, store, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
 	return r, embedder, store
+}
+
+func TestRetrieveRequestDeniedBeforeEmbeddingOrSearch(t *testing.T) {
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+		return RetrievalPolicyDecision{}, nil
+	}
+	r, embedder, store := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyEvaluator(evaluator))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "secret", K: 1})
+	if !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("error = %v", err)
+	}
+	if response.Results != nil || response.Policy.Disposition != RetrievalPolicyDenied || response.Policy.ReasonCode != "denied" {
+		t.Fatalf("response = %#v", response)
+	}
+	if embedder.calls != 0 || store.searchMultiCalls != 0 {
+		t.Fatalf("work after deny: embed=%d search=%d", embedder.calls, store.searchMultiCalls)
+	}
+}
+
+func TestRetrieveRequestDenialPrecedesConstraintComposition(t *testing.T) {
+	callerTags := make([]string, MaxManagedTags)
+	for i := range callerTags {
+		callerTags[i] = fmt.Sprintf("tag-%02d", i)
+	}
+	evaluateCalls := 0
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+		evaluateCalls++
+		return RetrievalPolicyDecision{}, nil
+	}
+	r, embedder, store := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{
+		Query:  "q",
+		Scope:  RetrievalScope{Tags: callerTags},
+		Policy: RetrievalPolicyRequest{Scope: RetrievalScope{Tags: []string{"request-only"}}},
+	})
+	if !errors.Is(err, ErrPolicyDenied) || response.Policy.ReasonCode != "denied" {
+		t.Fatalf("response/error = %#v/%v", response, err)
+	}
+	if evaluateCalls != 1 || embedder.calls != 0 || store.searchMultiCalls != 0 {
+		t.Fatalf("calls/work = %d/%d/%d", evaluateCalls, embedder.calls, store.searchMultiCalls)
+	}
+}
+
+func TestRetrieveRequestEvaluatorFailureWrapsCause(t *testing.T) {
+	cause := errors.New("trusted evaluator detail")
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+		return RetrievalPolicyDecision{}, cause
+	}
+	r, embedder, store := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+	if !errors.Is(err, ErrPolicyEvaluatorFailed) || !errors.Is(err, cause) {
+		t.Fatalf("error = %v", err)
+	}
+	if response.Policy.ReasonCode != "evaluator_failed" || embedder.calls != 0 || store.searchMultiCalls != 0 {
+		t.Fatalf("response/work = %#v/%d/%d", response, embedder.calls, store.searchMultiCalls)
+	}
+}
+
+func TestRetrieveRequestResultEvaluatorFailureWrapsCause(t *testing.T) {
+	cause := errors.New("trusted result evaluator detail")
+	evaluator := allowPolicySpy()
+	evaluator.evaluateResults = func(context.Context, RetrievalRequest, []Chunk) ([]RetrievalResultDecision, error) {
+		return nil, cause
+	}
+	r, embedder, store := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyEvaluator(evaluator))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	if !errors.Is(err, ErrPolicyEvaluatorFailed) || !errors.Is(err, cause) {
+		t.Fatalf("error = %v", err)
+	}
+	if response.Results != nil || response.Policy.ReasonCode != "evaluator_failed" || embedder.calls != 1 || store.searchMultiCalls != 1 {
+		t.Fatalf("response/work = %#v/%d/%d", response, embedder.calls, store.searchMultiCalls)
+	}
+}
+
+func TestRetrieveRequestEvaluatorReceivesNormalizedClone(t *testing.T) {
+	request := RetrievalRequest{
+		Query: "q",
+		K:     1,
+		Scope: RetrievalScope{Collection: " docs ", Tags: []string{" caller ", "caller"}},
+		QueryContext: QueryContext{
+			OpenFiles: []string{"before.go"},
+			Metadata:  map[string]string{"phase": "before"},
+		},
+		Policy: RetrievalPolicyRequest{
+			Scope:       RetrievalScope{Collection: " other ", Tags: []string{" request "}},
+			AuditLabels: map[string]string{"purpose": "support"},
+		},
+	}
+	var evaluated, evaluatedResults RetrievalRequest
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(_ context.Context, req RetrievalRequest) (RetrievalPolicyDecision, error) {
+		evaluated = cloneRetrievalRequest(req)
+		req.Scope.Tags[0] = "mutated"
+		req.Policy.Scope.Tags[0] = "mutated"
+		req.QueryContext.OpenFiles[0] = "mutated.go"
+		req.QueryContext.Metadata["phase"] = "mutated"
+		req.Policy.AuditLabels["purpose"] = "mutated"
+		return RetrievalPolicyDecision{Allow: true}, nil
+	}
+	evaluator.evaluateResults = func(_ context.Context, req RetrievalRequest, _ []Chunk) ([]RetrievalResultDecision, error) {
+		evaluatedResults = cloneRetrievalRequest(req)
+		req.Scope.Tags[0] = "mutated-results"
+		req.Policy.Scope.Tags[0] = "mutated-results"
+		return nil, nil
+	}
+	r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyEvaluator(evaluator))
+	if _, err := r.RetrieveRequest(context.Background(), request); err != nil {
+		t.Fatal(err)
+	}
+	wantEvaluated := cloneRetrievalRequest(request)
+	wantEvaluated.Scope = RetrievalScope{Collection: "docs", Tags: []string{"caller"}}
+	wantEvaluated.Policy.Scope = RetrievalScope{Collection: "other", Tags: []string{"request"}}
+	if !reflect.DeepEqual(evaluated, wantEvaluated) {
+		t.Fatalf("Evaluate request = %#v, want %#v", evaluated, wantEvaluated)
+	}
+	if !slices.Equal(evaluatedResults.Scope.Tags, []string{"caller", "request"}) ||
+		!slices.Equal(evaluatedResults.Policy.Scope.Tags, []string{"caller", "request"}) {
+		t.Fatalf("EvaluateResults request = %#v", evaluatedResults)
+	}
+	if request.Scope.Collection != " docs " || !slices.Equal(request.Scope.Tags, []string{" caller ", "caller"}) ||
+		request.Policy.Scope.Collection != " other " || !slices.Equal(request.Policy.Scope.Tags, []string{" request "}) ||
+		!slices.Equal(request.QueryContext.OpenFiles, []string{"before.go"}) ||
+		!maps.Equal(request.QueryContext.Metadata, map[string]string{"phase": "before"}) ||
+		!maps.Equal(request.Policy.AuditLabels, map[string]string{"purpose": "support"}) {
+		t.Fatalf("caller request mutated: %#v", request)
+	}
+}
+
+func TestRetrieveRequestInvalidDecisionFailsClosed(t *testing.T) {
+	invalidUTF8 := string([]byte{0xff})
+	cases := []struct {
+		name     string
+		decision RetrievalPolicyDecision
+	}{
+		{name: "negative max results", decision: RetrievalPolicyDecision{Allow: true, MaxResults: -1}},
+		{name: "negative max cost", decision: RetrievalPolicyDecision{Allow: true, MaxCost: -1}},
+		{name: "invalid collection", decision: RetrievalPolicyDecision{Allow: true, Scope: RetrievalScope{Collection: invalidUTF8}}},
+		{name: "too many tags", decision: RetrievalPolicyDecision{Allow: true, Scope: RetrievalScope{Tags: slices.Repeat([]string{"tag"}, MaxManagedTags+1)}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			resultCalls := 0
+			evaluator := allowPolicySpy()
+			evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+				return tc.decision, nil
+			}
+			evaluator.evaluateResults = func(context.Context, RetrievalRequest, []Chunk) ([]RetrievalResultDecision, error) {
+				resultCalls++
+				return nil, nil
+			}
+			r, embedder, store := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator))
+			response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q"})
+			if !errors.Is(err, ErrPolicyDecisionInvalid) {
+				t.Fatalf("error = %v", err)
+			}
+			if response.Policy.Disposition != RetrievalPolicyFailed || response.Policy.ReasonCode != "decision_invalid" {
+				t.Fatalf("response = %#v", response)
+			}
+			if embedder.calls != 0 || store.searchMultiCalls != 0 || resultCalls != 0 {
+				t.Fatalf("work after invalid decision: embed=%d search=%d results=%d", embedder.calls, store.searchMultiCalls, resultCalls)
+			}
+		})
+	}
+}
+
+func TestRetrieveRequestComposesScopeLimitsCostAndFreshness(t *testing.T) {
+	t.Run("tightens all constraints", func(t *testing.T) {
+		ctx := context.Background()
+		managed, _, sqliteStore := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+		for i := 1; i <= 3; i++ {
+			document, err := managed.IngestText(ctx, fmt.Sprintf("source-%d.md", i), fmt.Sprintf("content-%d", i), DocumentOptions{
+				Collection: "docs",
+				Tags:       []string{"caller", "decision", "request"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			replaceManagedScopeChunk(t, sqliteStore, document, fmt.Sprintf("c%d", i), []float64{1 - float64(i-1)/10, float64(i-1) / 10})
+		}
+		var evaluated, evaluatedResults RetrievalRequest
+		var resultChunks []Chunk
+		evaluator := allowPolicySpy()
+		evaluator.evaluate = func(_ context.Context, req RetrievalRequest) (RetrievalPolicyDecision, error) {
+			evaluated = cloneRetrievalRequest(req)
+			return RetrievalPolicyDecision{
+				Allow:        true,
+				Scope:        RetrievalScope{Collection: "docs", Tags: []string{"decision"}},
+				RequireFresh: true,
+				MaxResults:   2,
+				MaxCost:      3,
+			}, nil
+		}
+		evaluator.evaluateResults = func(_ context.Context, req RetrievalRequest, chunks []Chunk) ([]RetrievalResultDecision, error) {
+			evaluatedResults = cloneRetrievalRequest(req)
+			resultChunks = slices.Clone(chunks)
+			chunks[0].Content = "mutated by evaluator"
+			chunks[0].Metadata["mutated"] = "true"
+			return nil, nil
+		}
+		r, err := NewRetrieverWithEmbedder(
+			&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+			sqliteStore,
+			WithVectorOnly(),
+			WithRetrievalPolicyEvaluator(evaluator),
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := RetrievalRequest{
+			Query: "q",
+			K:     4,
+			Scope: RetrievalScope{Collection: " docs ", Tags: []string{"caller"}},
+			Policy: RetrievalPolicyRequest{
+				PrincipalID: "p", SessionID: "s",
+				Scope:       RetrievalScope{Collection: "docs", Tags: []string{"request"}},
+				MaxResults:  3,
+				MaxCost:     9,
+				AuditLabels: map[string]string{"purpose": "support"},
+			},
+		}
+		response, err := r.RetrieveRequest(ctx, request)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantEvaluated := cloneRetrievalRequest(request)
+		wantEvaluated.Scope.Collection = "docs"
+		if !reflect.DeepEqual(evaluated, wantEvaluated) {
+			t.Fatalf("Evaluate request = %#v, want %#v", evaluated, wantEvaluated)
+		}
+		want := RetrievalRequest{
+			Query: "q",
+			K:     2,
+			Scope: RetrievalScope{Collection: "docs", Tags: []string{"caller", "decision", "request"}},
+			Policy: RetrievalPolicyRequest{
+				PrincipalID: "p", SessionID: "s",
+				Scope:        RetrievalScope{Collection: "docs", Tags: []string{"caller", "decision", "request"}},
+				RequireFresh: true,
+				MaxResults:   2,
+				MaxCost:      3,
+				AuditLabels:  map[string]string{"purpose": "support"},
+			},
+		}
+		if !reflect.DeepEqual(evaluatedResults, want) {
+			t.Fatalf("EvaluateResults request = %#v, want %#v", evaluatedResults, want)
+		}
+		if len(resultChunks) != 2 || len(response.Results) != 2 {
+			t.Fatalf("candidates/returned = %d/%d", len(resultChunks), len(response.Results))
+		}
+		if response.Results[0].Chunk.Content == "mutated by evaluator" || response.Results[0].Chunk.Metadata["mutated"] != "" {
+			t.Fatalf("evaluator mutated response results: %#v", response.Results[0])
+		}
+	})
+
+	t.Run("larger decision ceiling does not widen", func(t *testing.T) {
+		evaluator := allowPolicySpy()
+		evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+			return RetrievalPolicyDecision{Allow: true, MaxResults: 9, MaxCost: 9}, nil
+		}
+		var effective RetrievalRequest
+		evaluator.evaluateResults = func(_ context.Context, req RetrievalRequest, _ []Chunk) ([]RetrievalResultDecision, error) {
+			effective = cloneRetrievalRequest(req)
+			return nil, nil
+		}
+		r, _, store := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1"), policyScored("c2", "s2"), policyScored("c3", "s3")}, WithRetrievalPolicyEvaluator(evaluator))
+		response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{
+			Query: "q", K: 4,
+			Policy: RetrievalPolicyRequest{MaxResults: 2, MaxCost: 3},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if effective.K != 2 || effective.Policy.MaxResults != 2 || effective.Policy.MaxCost != 3 || store.gotK != 2 || len(response.Results) != 2 {
+			t.Fatalf("effective/search/results = %#v/%d/%d", effective, store.gotK, len(response.Results))
+		}
+	})
+}
+
+func TestRetrieveRequestConflictingCollectionsSkipSearch(t *testing.T) {
+	resultCalls := 0
+	resultChunks := -1
+	evaluator := allowPolicySpy()
+	evaluator.evaluateResults = func(_ context.Context, _ RetrievalRequest, chunks []Chunk) ([]RetrievalResultDecision, error) {
+		resultCalls++
+		resultChunks = len(chunks)
+		return nil, nil
+	}
+	r, embedder, store := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{
+		Query:  "q",
+		Scope:  RetrievalScope{Collection: "caller"},
+		Policy: RetrievalPolicyRequest{Scope: RetrievalScope{Collection: "request"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resultCalls != 1 || resultChunks != 0 || embedder.calls != 0 || store.searchMultiCalls != 0 {
+		t.Fatalf("calls/chunks/work = %d/%d/%d/%d", resultCalls, resultChunks, embedder.calls, store.searchMultiCalls)
+	}
+	if response.Results != nil || !response.Policy.Applied || response.Policy.Disposition != RetrievalPolicyAllowed ||
+		response.Policy.ReasonCode != "allowed" || response.Policy.CandidateCount != 0 || response.Policy.ReturnedCount != 0 {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
+func TestRetrieveRequestDecisionTagsDeduplicateBeforeUnionLimit(t *testing.T) {
+	tags := make([]string, MaxManagedTags)
+	for i := range tags {
+		tags[i] = fmt.Sprintf("tag-%02d", i)
+	}
+	evaluator := allowPolicySpy()
+	evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+		return RetrievalPolicyDecision{Allow: true, Scope: RetrievalScope{Tags: []string{tags[0]}}}, nil
+	}
+	var effective RetrievalRequest
+	evaluator.evaluateResults = func(_ context.Context, req RetrievalRequest, _ []Chunk) ([]RetrievalResultDecision, error) {
+		effective = cloneRetrievalRequest(req)
+		return nil, nil
+	}
+	r, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{
+		Query:  "q",
+		Scope:  RetrievalScope{Collection: "caller", Tags: tags},
+		Policy: RetrievalPolicyRequest{Scope: RetrievalScope{Collection: "request"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if response.Policy.Disposition != RetrievalPolicyAllowed || !slices.Equal(effective.Scope.Tags, tags) {
+		t.Fatalf("response/effective = %#v/%#v", response, effective)
+	}
+}
+
+func TestLegacyRetrievalMethodsEnforceConfiguredEvaluator(t *testing.T) {
+	cases := []struct {
+		name string
+		run  func(*Retriever) error
+	}{
+		{name: "Retrieve", run: func(r *Retriever) error { _, err := r.Retrieve(context.Background(), "q", 1); return err }},
+		{name: "RetrieveScoped", run: func(r *Retriever) error {
+			_, err := r.RetrieveScoped(context.Background(), "q", 1, RetrievalScope{})
+			return err
+		}},
+		{name: "RetrieveScored", run: func(r *Retriever) error {
+			_, err := r.RetrieveScored(context.Background(), "q", 1, QueryContext{})
+			return err
+		}},
+		{name: "RetrieveScoredScoped", run: func(r *Retriever) error {
+			_, err := r.RetrieveScoredScoped(context.Background(), "q", 1, RetrievalScope{}, QueryContext{})
+			return err
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluateCalls := 0
+			evaluator := allowPolicySpy()
+			evaluator.evaluate = func(context.Context, RetrievalRequest) (RetrievalPolicyDecision, error) {
+				evaluateCalls++
+				return RetrievalPolicyDecision{}, nil
+			}
+			r, embedder, store := newPolicyRetriever(t, nil, WithRetrievalPolicyEvaluator(evaluator))
+			if err := tc.run(r); !errors.Is(err, ErrPolicyDenied) {
+				t.Fatalf("error = %v", err)
+			}
+			if evaluateCalls != 1 || embedder.calls != 0 || store.searchMultiCalls != 0 {
+				t.Fatalf("calls/work = %d/%d/%d", evaluateCalls, embedder.calls, store.searchMultiCalls)
+			}
+		})
+	}
 }
 
 func policyScored(id, source string) ScoredResult {
