@@ -83,6 +83,15 @@ type RetrievalResponse struct {
 	Policy  RetrievalPolicyOutcome
 }
 
+// RetrieveRequest is the canonical scored retrieval surface.
+func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (RetrievalResponse, error) {
+	results, err := r.retrieveScoredBase(ctx, req)
+	if err != nil {
+		return RetrievalResponse{}, err
+	}
+	return RetrievalResponse{Results: results}, nil
+}
+
 // RetrievalPolicyObserver receives synchronous, consumer-owned policy
 // callbacks.
 type RetrievalPolicyObserver interface {

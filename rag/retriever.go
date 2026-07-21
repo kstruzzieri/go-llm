@@ -156,89 +156,20 @@ func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...Retr
 
 // Retrieve finds the top-k most relevant chunks for a query.
 func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
-	results, err := r.retrieve(ctx, query, k)
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k})
 	if err != nil {
 		return nil, err
 	}
-	if err := refreshManagedSearchResults(ctx, r.store, r.readManagedFile, results); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return semanticSearchResults(response.Results), nil
 }
 
 // RetrieveScoped finds top-k relevant managed chunks after applying scope.
 func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, scope RetrievalScope) ([]SearchResult, error) {
-	scope, err := normalizeRetrievalScope(scope)
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, Scope: scope})
 	if err != nil {
 		return nil, err
 	}
-	if scope.empty() {
-		return r.Retrieve(ctx, query, k)
-	}
-	store, ok := r.store.(*SQLiteStore)
-	if !ok {
-		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
-	}
-	if store.immutable {
-		registry, err := managedRegistrySnapshotForScope(ctx, store, scope)
-		if err != nil {
-			return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
-		}
-		results, err := r.retrieveImmutableScoped(ctx, query, k, store, registry)
-		if err != nil {
-			return nil, err
-		}
-		results = filterSearchResults(results, scope, registry)
-		if err := refreshManagedSearchResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-			return nil, err
-		}
-		return results, nil
-	}
-	results, err := r.retrieve(ctx, query, 0)
-	if err != nil {
-		return nil, err
-	}
-	registry, _, err := managedRegistrySnapshot(ctx, store, searchResultChunks(results))
-	if err != nil {
-		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
-	}
-	results = filterSearchResults(results, scope, registry)
-	if k > 0 && len(results) > k {
-		results = results[:k]
-	}
-	if err := refreshManagedSearchResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-
-func (r *Retriever) retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
-	embedding, err := r.embedQuery(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prefer multi-signal (hybrid) retrieval when the store supports it and the
-	// caller has not opted out: semantic, keyword, and temporal signals
-	// participate in ranking. Retrieve's signature carries no editor context, so
-	// the structural scorer stays inert (empty QueryContext); the temporal scorer
-	// still works, dating chunks against the newest indexed row. Behavioral does
-	// NOT depend on QueryContext: when a weighter is installed (SetBehavioralWeighter)
-	// it is active here too, keyed by each chunk's StableKey.
-	if ms, ok := r.store.(MultiSignalSearcher); ok && !r.vectorOnly {
-		scored, err := ms.SearchMulti(ctx, embedding, query, k, QueryContext{})
-		if err != nil {
-			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
-		}
-		return semanticSearchResults(scored), nil
-	}
-
-	results, err := r.store.Search(ctx, embedding, k)
-	if err != nil {
-		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
-	}
-
-	return results, nil
+	return semanticSearchResults(response.Results), nil
 }
 
 func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, error) {
@@ -271,25 +202,6 @@ func semanticSearchResults(scored []ScoredResult) []SearchResult {
 	return results
 }
 
-func (r *Retriever) retrieveImmutableScoped(ctx context.Context, query string, k int, store *SQLiteStore, registry map[string]managedRegistryDocument) ([]SearchResult, error) {
-	embedding, err := r.embedQuery(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	if !r.vectorOnly {
-		scored, err := store.searchMultiSnapshotScoped(ctx, embedding, query, k, QueryContext{}, registry)
-		if err != nil {
-			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
-		}
-		return semanticSearchResults(scored), nil
-	}
-	results, err := store.searchSnapshotScoped(ctx, embedding, k, registry)
-	if err != nil {
-		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
-	}
-	return results, nil
-}
-
 // RetrieveScored is the signal-scored retrieval surface. Like Retrieve it embeds
 // the query and validates the vector space, but it returns ScoredResult with the
 // per-signal breakdown preserved instead of flattening to SearchResult. On stores
@@ -297,25 +209,29 @@ func (r *Retriever) retrieveImmutableScoped(ctx context.Context, query string, k
 // returns SearchMulti's hybrid results directly; otherwise it falls back to dense
 // vector search wrapped as single-signal ("semantic") scored results.
 func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
-	results, err := r.retrieveScored(ctx, query, k, qCtx)
-	if err != nil {
-		return nil, err
-	}
-	if err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results); err != nil {
-		return nil, err
-	}
-	return results, nil
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, QueryContext: qCtx})
+	return response.Results, err
 }
 
-// RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
-func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
-	scope, err := normalizeRetrievalScope(scope)
+func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest) ([]ScoredResult, error) {
+	scope, err := normalizeRetrievalScope(req.Scope)
 	if err != nil {
 		return nil, err
 	}
 	if scope.empty() {
-		return r.RetrieveScored(ctx, query, k, qCtx)
+		results, err := r.retrieveScored(ctx, req.Query, req.K, req.QueryContext)
+		if err != nil {
+			return nil, err
+		}
+		if err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results); err != nil {
+			return nil, err
+		}
+		return results, nil
 	}
+	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext)
+}
+
+func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
 	store, ok := r.store.(*SQLiteStore)
 	if !ok {
 		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
@@ -351,6 +267,12 @@ func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k in
 		return nil, err
 	}
 	return results, nil
+}
+
+// RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
+func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, Scope: scope, QueryContext: qCtx})
+	return response.Results, err
 }
 
 func (r *Retriever) retrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
@@ -404,16 +326,6 @@ func normalizeRetrievalScope(scope RetrievalScope) (RetrievalScope, error) {
 		return RetrievalScope{}, err
 	}
 	return scope, nil
-}
-
-func filterSearchResults(results []SearchResult, scope RetrievalScope, registry map[string]managedRegistryDocument) []SearchResult {
-	filtered := results[:0]
-	for _, result := range results {
-		if document, ok := registry[result.Chunk.Source]; ok && matchesRetrievalScope(result.Chunk, document, scope) {
-			filtered = append(filtered, result)
-		}
-	}
-	return filtered
 }
 
 func filterScoredResults(results []ScoredResult, scope RetrievalScope, registry map[string]managedRegistryDocument) []ScoredResult {
