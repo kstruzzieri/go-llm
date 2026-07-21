@@ -206,6 +206,24 @@ func TestRetrieveRequestPolicyMetadataIsCloned(t *testing.T) {
 	}
 }
 
+func TestComposePolicyRequestDeduplicatesTagsBeforeUnionLimit(t *testing.T) {
+	callerTags := make([]string, MaxManagedTags)
+	for i := range callerTags {
+		callerTags[i] = fmt.Sprintf("tag-%02d", i)
+	}
+
+	policy, err := composePolicyRequest(RetrievalRequest{
+		Scope:  RetrievalScope{Tags: callerTags},
+		Policy: RetrievalPolicyRequest{Scope: RetrievalScope{Tags: []string{callerTags[0]}}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := policy.request.Scope.Tags; !slices.Equal(got, callerTags) {
+		t.Fatalf("composed tags = %v, want %v", got, callerTags)
+	}
+}
+
 func TestRetrieveRequestPolicyScopeComposesWithCallerScope(t *testing.T) {
 	ctx := context.Background()
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})

@@ -181,7 +181,13 @@ func composePolicyRequest(req RetrievalRequest) (composedPolicy, error) {
 		return composedPolicy{}, err
 	}
 	collection, emptyScope := intersectCollection(callerScope.Collection, policyScope.Collection)
-	tags, err := normalizeManagedTags(append(callerScope.Tags, policyScope.Tags...))
+	tags := slices.Clone(callerScope.Tags)
+	for _, tag := range policyScope.Tags {
+		if !slices.Contains(tags, tag) {
+			tags = append(tags, tag)
+		}
+	}
+	tags, err = normalizeManagedTags(tags)
 	if err != nil {
 		return composedPolicy{}, err
 	}
