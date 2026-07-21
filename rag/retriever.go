@@ -80,9 +80,11 @@ func WithVectorOnly() RetrieverOption {
 // WithRetrievalPolicyEvaluator installs the evaluator used for retrieval policy.
 func WithRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) RetrieverOption {
 	return func(r *Retriever) {
-		if !isNilRetrievalPolicyEvaluator(evaluator) {
-			r.policyEvaluator = evaluator
+		if isNilRetrievalPolicyEvaluator(evaluator) {
+			r.policyEvaluator = nil
+			return
 		}
+		r.policyEvaluator = evaluator
 	}
 }
 

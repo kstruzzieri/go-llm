@@ -56,6 +56,10 @@ func TestRetrievalPolicyContractAndOptions(t *testing.T) {
 	if inactive.PolicyActive() {
 		t.Fatal("typed-nil evaluator is policy-active")
 	}
+	cleared := NewRetriever(nil, nil, WithRetrievalPolicyEvaluator(evaluator), WithRetrievalPolicyEvaluator(typedNil))
+	if cleared.PolicyActive() {
+		t.Fatal("typed-nil evaluator did not clear earlier policy")
+	}
 
 	redacted := "replacement"
 	_ = RetrievalRequest{Policy: RetrievalPolicyRequest{MaxCost: 1}}
