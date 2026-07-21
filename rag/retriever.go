@@ -213,7 +213,7 @@ func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCt
 	return response.Results, err
 }
 
-func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest) ([]ScoredResult, []retrievalFreshness, error) {
+func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
 	scope, err := normalizeRetrievalScope(req.Scope)
 	if err != nil {
 		return nil, nil, err
@@ -223,16 +223,17 @@ func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest
 		if err != nil {
 			return nil, nil, err
 		}
+		results = ownScoredResults(results, owned)
 		freshness, err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results)
 		if err != nil {
 			return nil, nil, err
 		}
 		return results, freshness, nil
 	}
-	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext)
+	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext, owned)
 }
 
-func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, []retrievalFreshness, error) {
+func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
 	store, ok := r.store.(*SQLiteStore)
 	if !ok {
 		return nil, nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
@@ -246,6 +247,7 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 		if err != nil {
 			return nil, nil, err
 		}
+		results = ownScoredResults(results, owned)
 		results = filterScoredResults(results, scope, registry)
 		freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
 		if err != nil {
@@ -257,6 +259,7 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 	if err != nil {
 		return nil, nil, err
 	}
+	results = ownScoredResults(results, owned)
 	registry, _, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
 	if err != nil {
 		return nil, nil, fmt.Errorf("rag: scoped managed registry: %w", err)

@@ -255,6 +255,13 @@ func cloneScoredResults(results []ScoredResult) []ScoredResult {
 	return cloned
 }
 
+func ownScoredResults(results []ScoredResult, owned bool) []ScoredResult {
+	if owned {
+		return cloneScoredResults(results)
+	}
+	return results
+}
+
 func cloneChunks(results []ScoredResult) []Chunk {
 	chunks := make([]Chunk, len(results))
 	for i := range results {
@@ -320,7 +327,7 @@ func enforceRequiredFreshness(results []ScoredResult, freshness []retrievalFresh
 // RetrieveRequest is the canonical scored retrieval surface.
 func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (RetrievalResponse, error) {
 	if !policyRequestPresent(req.Policy) && r.policyEvaluator == nil {
-		results, _, err := r.retrieveScoredBase(ctx, req)
+		results, _, err := r.retrieveScoredBase(ctx, req, false)
 		if err != nil {
 			return RetrievalResponse{}, err
 		}
@@ -363,11 +370,10 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 	var results []ScoredResult
 	var freshness []retrievalFreshness
 	if !policy.emptyScope {
-		results, freshness, err = r.retrieveScoredBase(ctx, policy.request)
+		results, freshness, err = r.retrieveScoredBase(ctx, policy.request, true)
 		if err != nil {
 			return RetrievalResponse{}, err
 		}
-		results = cloneScoredResults(results)
 		if policy.limit > 0 && len(results) > policy.limit {
 			results = results[:policy.limit]
 			freshness = freshness[:policy.limit]

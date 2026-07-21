@@ -297,6 +297,32 @@ func TestRetrieveRequestPolicyResultsDoNotAliasStore(t *testing.T) {
 	}
 }
 
+func TestPolicyOwnedResultsCloneBeforeFreshnessStamp(t *testing.T) {
+	stored := []ScoredResult{{
+		SearchResult: SearchResult{Chunk: Chunk{
+			ID: "c1", Content: "original", Source: "managed://document/source", StartLine: 10, EndLine: 20,
+			Language: "go", Metadata: map[string]string{"managed_freshness": "original"}, StableKey: "stable-c1",
+		}, Score: 0.9, Distance: 0.1},
+		RankScore: 0.75,
+		Signals:   map[string]float64{"semantic": 0.9},
+	}}
+	wantStored := cloneScoredResults(stored)
+	owned := ownScoredResults(stored, true)
+
+	stampManagedChunkStale(&owned[0].Chunk)
+	owned[0].Chunk.Content = "policy mutation"
+	owned[0].Signals["semantic"] = 0
+	if got := owned[0].Chunk.Metadata["managed_freshness"]; got != string(DocumentFreshnessStale) {
+		t.Fatalf("owned freshness=%q, want stale", got)
+	}
+	if !reflect.DeepEqual(stored, wantStored) {
+		t.Fatalf("freshness mutated store result: got=%#v want=%#v", stored, wantStored)
+	}
+	if legacy := ownScoredResults(stored, false); &legacy[0] != &stored[0] {
+		t.Fatal("legacy result backing slice was cloned")
+	}
+}
+
 func TestRetrieveRequestEvaluatorReceivesNormalizedClone(t *testing.T) {
 	request := RetrievalRequest{
 		Query: "q",
