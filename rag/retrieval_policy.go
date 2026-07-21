@@ -237,13 +237,57 @@ func composePolicyRequest(req RetrievalRequest) (composedPolicy, error) {
 	return composeNormalizedPolicy(normalized, RetrievalPolicyDecision{Allow: true})
 }
 
-func clonePolicyChunks(results []ScoredResult) []Chunk {
+func cloneChunk(chunk Chunk) Chunk {
+	chunk.Metadata = maps.Clone(chunk.Metadata)
+	return chunk
+}
+
+func cloneScoredResults(results []ScoredResult) []ScoredResult {
+	if results == nil {
+		return nil
+	}
+	cloned := make([]ScoredResult, len(results))
+	for i, result := range results {
+		cloned[i] = result
+		cloned[i].Chunk = cloneChunk(result.Chunk)
+		cloned[i].Signals = maps.Clone(result.Signals)
+	}
+	return cloned
+}
+
+func cloneChunks(results []ScoredResult) []Chunk {
 	chunks := make([]Chunk, len(results))
 	for i := range results {
-		chunks[i] = results[i].Chunk
-		chunks[i].Metadata = maps.Clone(chunks[i].Metadata)
+		chunks[i] = cloneChunk(results[i].Chunk)
 	}
 	return chunks
+}
+
+func applyResultDecisions(results []ScoredResult, decisions []RetrievalResultDecision) ([]ScoredResult, int, int, error) {
+	if decisions == nil {
+		return cloneScoredResults(results), 0, 0, nil
+	}
+	if len(decisions) != len(results) {
+		return nil, 0, 0, ErrPolicyDecisionInvalid
+	}
+	kept := make([]ScoredResult, 0, len(results))
+	filtered, redacted := 0, 0
+	for i, decision := range decisions {
+		if !decision.Keep {
+			if decision.RedactedContent != nil {
+				return nil, 0, 0, ErrPolicyDecisionInvalid
+			}
+			filtered++
+			continue
+		}
+		result := cloneScoredResults(results[i : i+1])[0]
+		if decision.RedactedContent != nil {
+			result.Chunk.Content = *decision.RedactedContent
+			redacted++
+		}
+		kept = append(kept, result)
+	}
+	return kept, filtered, redacted, nil
 }
 
 func sourceCount(results []ScoredResult) int {
@@ -323,6 +367,7 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 		if err != nil {
 			return RetrievalResponse{}, err
 		}
+		results = cloneScoredResults(results)
 		if policy.limit > 0 && len(results) > policy.limit {
 			results = results[:policy.limit]
 			freshness = freshness[:policy.limit]
@@ -342,11 +387,29 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			return RetrievalResponse{Policy: failedOutcome}, err
 		}
 	}
+	filteredCount, redactedCount := 0, 0
 	if r.policyEvaluator != nil {
-		if _, err := r.policyEvaluator.EvaluateResults(ctx, cloneRetrievalRequest(policy.request), clonePolicyChunks(results)); err != nil {
+		decisions, evaluateErr := r.policyEvaluator.EvaluateResults(ctx, cloneRetrievalRequest(policy.request), cloneChunks(results))
+		if evaluateErr != nil {
 			failedOutcome.ReasonCode = "evaluator_failed"
-			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, err)
+			failedOutcome.CandidateCount = candidateCount
+			failedOutcome.CandidateSourceCount = candidateSourceCount
+			failedOutcome.StaleDroppedCount = staleDroppedCount
+			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
+			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: %w", ErrPolicyEvaluatorFailed, evaluateErr)
 		}
+		results, filteredCount, redactedCount, err = applyResultDecisions(results, decisions)
+		if err != nil {
+			failedOutcome.ReasonCode = "decision_invalid"
+			failedOutcome.CandidateCount = candidateCount
+			failedOutcome.CandidateSourceCount = candidateSourceCount
+			failedOutcome.StaleDroppedCount = staleDroppedCount
+			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
+			return RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval result decision", ErrPolicyDecisionInvalid)
+		}
+	}
+	if policy.limit > 0 && len(results) > policy.limit {
+		results = results[:policy.limit]
 	}
 	count := sourceCount(results)
 	reasonCode := "default_allow"
@@ -363,6 +426,8 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			CandidateSourceCount: candidateSourceCount,
 			ReturnedCount:        len(results),
 			ReturnedSourceCount:  count,
+			FilteredCount:        filteredCount,
+			RedactedCount:        redactedCount,
 			StaleDroppedCount:    staleDroppedCount,
 			AuditLabelCount:      len(normalized.Policy.AuditLabels),
 		},

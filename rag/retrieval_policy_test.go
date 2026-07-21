@@ -143,6 +143,160 @@ func TestRetrieveRequestResultEvaluatorFailureWrapsCause(t *testing.T) {
 	}
 }
 
+func TestRetrieveRequestNilResultDecisionsKeepAll(t *testing.T) {
+	evaluator := allowPolicySpy()
+	r, _, _ := newPolicyRetriever(t,
+		[]ScoredResult{policyScored("c1", "s1"), policyScored("c2", "s2")},
+		WithRetrievalPolicyEvaluator(evaluator),
+	)
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 2})
+	if err != nil || !slices.Equal(scoredIDs(response.Results), []string{"c1", "c2"}) {
+		t.Fatalf("response=%#v error=%v", response, err)
+	}
+}
+
+func TestRetrieveRequestFiltersAndRedactsPositionally(t *testing.T) {
+	replacement := "REDACTED"
+	evaluator := allowPolicySpy()
+	evaluator.evaluateResults = func(_ context.Context, _ RetrievalRequest, chunks []Chunk) ([]RetrievalResultDecision, error) {
+		if len(chunks) != 3 {
+			t.Fatalf("evaluator candidates=%d, want capped 3", len(chunks))
+		}
+		chunks[0].Content = "evaluator mutation"
+		chunks[1].Metadata["mutated"] = "yes"
+		return []RetrievalResultDecision{
+			{Keep: false},
+			{Keep: true, RedactedContent: &replacement},
+			{Keep: true},
+		}, nil
+	}
+	redacted := ScoredResult{
+		SearchResult: SearchResult{Chunk: Chunk{
+			ID: "c2", Content: "secret", Source: "s1", StartLine: 2, EndLine: 4,
+			Language: "go", Metadata: map[string]string{"owner": "docs"}, StableKey: "stable-c2",
+		}, Score: 0.8, Distance: 0.2},
+		RankScore: 0.7,
+		Signals:   map[string]float64{"semantic": 0.8, "keyword": 0.6},
+	}
+	results := []ScoredResult{policyScored("c1", "s1"), redacted, policyScored("c3", "s2"), policyScored("c4", "s3")}
+	r, _, _ := newPolicyRetriever(t, results, WithRetrievalPolicyEvaluator(evaluator))
+	response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(scoredIDs(response.Results), []string{"c2", "c3"}) || response.Results[0].Chunk.Content != replacement {
+		t.Fatalf("results=%#v", response.Results)
+	}
+	wantRedacted := redacted
+	wantRedacted.Chunk.Content = replacement
+	if !reflect.DeepEqual(response.Results[0], wantRedacted) {
+		t.Fatalf("redacted result=%#v, want only content changed from %#v", response.Results[0], redacted)
+	}
+	if response.Policy.CandidateCount != 3 || response.Policy.CandidateSourceCount != 2 ||
+		response.Policy.FilteredCount != 1 || response.Policy.RedactedCount != 1 ||
+		response.Policy.ReturnedCount != 2 || response.Policy.ReturnedSourceCount != 2 {
+		t.Fatalf("outcome=%#v", response.Policy)
+	}
+	if _, ok := response.Results[0].Chunk.Metadata["mutated"]; ok {
+		t.Fatalf("evaluator input aliased output: %#v", response.Results[0].Chunk.Metadata)
+	}
+}
+
+func TestRetrieveRequestRejectsInvalidResultDecisionList(t *testing.T) {
+	replacement := "must not be accepted"
+	cases := []struct {
+		name      string
+		decisions []RetrievalResultDecision
+	}{
+		{name: "wrong length", decisions: []RetrievalResultDecision{}},
+		{name: "dropped result has redaction", decisions: []RetrievalResultDecision{{Keep: false, RedactedContent: &replacement}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluator := allowPolicySpy()
+			evaluator.evaluateResults = func(context.Context, RetrievalRequest, []Chunk) ([]RetrievalResultDecision, error) {
+				return tc.decisions, nil
+			}
+			r, _, _ := newPolicyRetriever(t, []ScoredResult{policyScored("c1", "s1")}, WithRetrievalPolicyEvaluator(evaluator))
+			response, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+			if !errors.Is(err, ErrPolicyDecisionInvalid) {
+				t.Fatalf("error=%v", err)
+			}
+			if response.Results != nil || response.Policy.Disposition != RetrievalPolicyFailed || response.Policy.ReasonCode != "decision_invalid" {
+				t.Fatalf("response=%#v", response)
+			}
+		})
+	}
+}
+
+func TestRetrieveRequestPolicyResultsDoNotAliasStore(t *testing.T) {
+	replacement := "REDACTED"
+	results := []ScoredResult{{
+		SearchResult: SearchResult{Chunk: Chunk{
+			ID: "c1", Content: "original", Source: "source.go", StartLine: 10, EndLine: 20,
+			Language: "go", Metadata: map[string]string{"owner": "store"}, StableKey: "stable-c1",
+		}, Score: 0.9, Distance: 0.1},
+		RankScore: 0.75,
+		Signals:   map[string]float64{"semantic": 0.9, "structural": 0.4},
+	}}
+	wantOriginal := results[0]
+	wantOriginal.Chunk.Metadata = maps.Clone(results[0].Chunk.Metadata)
+	wantOriginal.Signals = maps.Clone(results[0].Signals)
+
+	calls := 0
+	var evaluatorChunks []Chunk
+	evaluator := allowPolicySpy()
+	evaluator.evaluateResults = func(_ context.Context, _ RetrievalRequest, chunks []Chunk) ([]RetrievalResultDecision, error) {
+		calls++
+		evaluatorChunks = chunks
+		chunks[0].ID = "evaluator-id"
+		chunks[0].Content = "evaluator-content"
+		chunks[0].Source = "evaluator-source"
+		chunks[0].StartLine = -1
+		chunks[0].EndLine = -1
+		chunks[0].Language = "evaluator-language"
+		chunks[0].Metadata["owner"] = "evaluator"
+		chunks[0].StableKey = "evaluator-stable-key"
+		if calls == 1 {
+			return []RetrievalResultDecision{{Keep: true, RedactedContent: &replacement}}, nil
+		}
+		return nil, nil
+	}
+	r, _, store := newPolicyRetriever(t, results, WithRetrievalPolicyEvaluator(evaluator))
+
+	first, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRedacted := wantOriginal
+	wantRedacted.Chunk.Metadata = maps.Clone(wantOriginal.Chunk.Metadata)
+	wantRedacted.Signals = maps.Clone(wantOriginal.Signals)
+	wantRedacted.Chunk.Content = replacement
+	if len(first.Results) != 1 || !reflect.DeepEqual(first.Results[0], wantRedacted) {
+		t.Fatalf("first=%#v, want=%#v", first.Results, wantRedacted)
+	}
+	evaluatorChunks[0].Metadata["after"] = "evaluation"
+	if _, ok := first.Results[0].Chunk.Metadata["after"]; ok {
+		t.Fatalf("output aliases evaluator input: %#v", first.Results[0])
+	}
+	first.Results[0] = policyScored("returned-mutation", "returned-source")
+	first.Results[0].Chunk.Metadata["returned"] = "mutation"
+	first.Results[0].Signals["returned"] = 1
+
+	second, err := r.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", K: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Results) != 1 || !reflect.DeepEqual(second.Results[0], wantOriginal) {
+		t.Fatalf("second=%#v, want=%#v", second.Results, wantOriginal)
+	}
+	second.Results[0].Chunk.Metadata["second"] = "mutation"
+	second.Results[0].Signals["second"] = 1
+	if len(store.multiResults) != 1 || !reflect.DeepEqual(store.multiResults[0], wantOriginal) {
+		t.Fatalf("store mutated=%#v, want=%#v", store.multiResults, wantOriginal)
+	}
+}
+
 func TestRetrieveRequestEvaluatorReceivesNormalizedClone(t *testing.T) {
 	request := RetrievalRequest{
 		Query: "q",
