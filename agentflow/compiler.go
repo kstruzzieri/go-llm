@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // PlanIR is the ergonomic authoring shape the planner model submits via the
@@ -427,10 +428,10 @@ func designDecisionDiagnostics(p Plan) []Diagnostic {
 			} else {
 				decisionIDs[decision.ID] = true
 			}
-			if strings.TrimSpace(decision.Text) == "" {
+			if designStringIsBlank(decision.Text) {
 				ds = append(ds, Diagnostic{"missing_design_decision_text", "design decision " + decision.ID + " has empty text"})
 			}
-			if decision.References != nil && !allNonBlank(*decision.References) {
+			if decision.References != nil && slices.ContainsFunc(*decision.References, designStringIsBlank) {
 				ds = append(ds, Diagnostic{"blank_design_decision_reference", "design decision " + decision.ID + " references must contain only non-blank strings"})
 			}
 		}
@@ -443,7 +444,7 @@ func designDecisionDiagnostics(p Plan) []Diagnostic {
 			ds = append(ds, Diagnostic{"empty_step_design_decisions", "step " + step.ID + " design_decision_ids must contain at least one design decision id"})
 			continue
 		}
-		if !allNonBlank(*step.DesignDecisionIDs) {
+		if slices.ContainsFunc(*step.DesignDecisionIDs, designStringIsBlank) {
 			ds = append(ds, Diagnostic{"blank_step_design_decision", "step " + step.ID + " design_decision_ids must contain only non-blank strings"})
 			continue
 		}
@@ -459,6 +460,15 @@ func designDecisionDiagnostics(p Plan) []Diagnostic {
 		}
 	}
 	return ds
+}
+
+func designStringIsBlank(value string) bool {
+	for _, r := range value {
+		if !unicode.IsSpace(r) && (r < '\u001c' || r > '\u001f') {
+			return false
+		}
+	}
+	return true
 }
 
 func schemaVersionAtLeast(value string, wantMajor, wantMinor, wantPatch int) bool {
