@@ -82,11 +82,13 @@ use,
 prompting. `-goal` never executes the plan or edits source files, and it refuses
 to replace a locked plan, a non-empty draft, or an unrecognized plan file.
 
-The AgentFlow v0.4 runtime still uses plan schema `0.3.0`. Plans that omit
-`requirements` remain valid for existing `-plan` users and do not gain criterion
-coverage. A review-backed criterion may declare `spec_quality` or `deep`; Golem
-authors that floor into the lock, while AgentFlow remains responsible for later
-review evidence and proof projection.
+Golem planning mode still compiles plan schema `0.3.0` because it does not author
+design decisions. Externally supplied plans may use schema `0.4.0` for AgentFlow's
+optional `design_decisions` and per-step `design_decision_ids` fields. Plans that
+omit `requirements` remain valid for existing `-plan` users and do not gain
+criterion coverage. A review-backed criterion may declare `spec_quality` or
+`deep`; Golem authors that floor into the lock, while AgentFlow remains
+responsible for later review evidence and proof projection.
 
 The #277 local-model spike locked 48/48 toy plans against AgentFlow 0.3.0 on the
 first try with both a 9B dense model and a 35B-A3B MoE model. The load-bearing
@@ -318,26 +320,31 @@ Golem fails closed and surfaces AgentFlow's failed
 
 ## Locked step instructions
 
-For a plan with `requirements`, each model run is instructed from a
-deterministic projection of the locked plan: the objective, invariants,
-non-goals, current step preconditions/action/files/expected diff, validation
-labels and structured command argv, plus only the acceptance criteria named by
-that step and their parent requirement text. Requirement text appears once even
-when several selected criteria share it. A traced step with no `criterion_ids`
-still receives the enriched plan/step header and an explicit empty criteria
-section. Unrelated requirements and criteria are excluded.
+For a plan with `requirements` or design-decision fields, each model run is
+instructed from a deterministic projection of the locked plan: the objective,
+invariants, non-goals, current step preconditions/action/files/expected diff,
+validation labels and structured command argv, plus only the traceability rows
+selected by that step. Requirement text appears once even when several selected
+criteria share it. Design decisions are selected only from the current step's
+`design_decision_ids`, then emitted in plan declaration order; each selected
+decision's optional references retain their declaration order. Unselected
+decisions are excluded. A traced step with no selection still receives the
+enriched plan/step header and an explicit empty section for the family the plan
+uses.
 
-Requirement-free plans retain the previous minimal instruction bytes exactly.
-Before AgentFlow is probed or initialized, evidence is recorded, or a step is
-claimed, task mode rejects malformed or dangling traceability, gate criteria
-outside their parent step, and criteria without an implementing step or a
-proving gate/review floor. The proving-gate/review-floor requirement is an
-intentional Golem strictness: AgentFlow v0.4 currently locks a criterion that is
-step-mapped but has neither verification mapping.
+Legacy plans with neither traceability family retain the previous minimal
+instruction bytes exactly. Requirement-only plans with no design fields also
+retain their existing expanded instruction bytes exactly. Before AgentFlow is
+probed or initialized, evidence is recorded, or a step is claimed, task mode
+rejects malformed, schema-incompatible, duplicate, blank, or dangling design
+traceability alongside the existing requirement checks. The
+proving-gate/review-floor requirement remains an intentional Golem strictness:
+AgentFlow currently locks a criterion that is step-mapped but has neither
+verification mapping.
 
-AgentFlow v0.4 has no canonical design-decision or design-reference fields.
-Task mode therefore does not invent a sidecar or proof field for them; projecting
-applicable design references remains blocked on an upstream contract extension.
+AgentFlow owns design-decision proof coverage and independent verification.
+Golem consumes the locked fields for step instructions and never creates or
+patches a sidecar, coverage row, check, or other proof metadata.
 
 ## Review amendments
 

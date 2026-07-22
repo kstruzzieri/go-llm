@@ -300,6 +300,118 @@ func TestCheckPlan_CleanPlanHasNoDiagnostics(t *testing.T) {
 	}
 }
 
+func TestTraceabilityDiagnostics_DesignDecisionSchemaGatePrecedesFieldDiagnostics(t *testing.T) {
+	emptyDecisions := []DesignDecision{}
+	emptySelections := []string{}
+	for _, plan := range []Plan{
+		{SchemaVersion: "0.3.0", DesignDecisions: &emptyDecisions},
+		{SchemaVersion: "0.3.0", Steps: []Step{{ID: "P1", DesignDecisionIDs: &emptySelections}}},
+		{SchemaVersion: "not-a-version", DesignDecisions: &emptyDecisions},
+	} {
+		ds := TraceabilityDiagnostics(plan)
+		if len(ds) != 1 || ds[0].Code != "design_decision_schema" {
+			t.Fatalf("diagnostics = %+v, want schema gate only", ds)
+		}
+	}
+}
+
+func TestTraceabilityDiagnostics_RejectsInvalidDesignDecisionDeclarations(t *testing.T) {
+	valid := DesignDecision{ID: "DD-1", Text: "keep the existing ledger"}
+	blankReferences := []string{"ADR-1", "   "}
+	tests := []struct {
+		name      string
+		decisions []DesignDecision
+		wantCode  string
+	}{
+		{name: "empty list", decisions: []DesignDecision{}, wantCode: "missing_design_decisions"},
+		{name: "empty id", decisions: []DesignDecision{{Text: "x"}}, wantCode: "invalid_design_decision_id"},
+		{name: "invalid id", decisions: []DesignDecision{{ID: "1DD", Text: "x"}}, wantCode: "invalid_design_decision_id"},
+		{name: "duplicate id", decisions: []DesignDecision{valid, valid}, wantCode: "duplicate_design_decision_id"},
+		{name: "blank text", decisions: []DesignDecision{{ID: "DD-1", Text: "  "}}, wantCode: "missing_design_decision_text"},
+		{name: "blank reference", decisions: []DesignDecision{{ID: "DD-1", Text: "x", References: &blankReferences}}, wantCode: "blank_design_decision_reference"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := Plan{SchemaVersion: "0.4.0", DesignDecisions: &tt.decisions}
+			if ds := TraceabilityDiagnostics(plan); !hasCode(ds, tt.wantCode) {
+				t.Fatalf("diagnostics = %+v, want %s", ds, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestTraceabilityDiagnostics_RejectsInvalidStepDesignDecisionIDs(t *testing.T) {
+	decisions := []DesignDecision{{ID: "DD-1", Text: "keep the existing ledger"}}
+	tests := []struct {
+		name     string
+		ids      []string
+		wantCode string
+	}{
+		{name: "empty", ids: []string{}, wantCode: "empty_step_design_decisions"},
+		{name: "blank", ids: []string{"  "}, wantCode: "blank_step_design_decision"},
+		{name: "duplicate", ids: []string{"DD-1", "DD-1"}, wantCode: "duplicate_step_design_decision"},
+		{name: "dangling", ids: []string{"DD-MISSING"}, wantCode: "dangling_step_design_decision"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			plan := Plan{
+				SchemaVersion: "0.4.0", DesignDecisions: &decisions,
+				Steps: []Step{{ID: "P1", DesignDecisionIDs: &tt.ids}},
+			}
+			if ds := TraceabilityDiagnostics(plan); !hasCode(ds, tt.wantCode) {
+				t.Fatalf("diagnostics = %+v, want %s", ds, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestTraceabilityDiagnostics_RejectsPythonOnlyWhitespaceInDesignFields(t *testing.T) {
+	tests := []struct {
+		name       string
+		text       string
+		references []string
+		ids        []string
+		wantCode   string
+	}{
+		{name: "text file separator", text: "\u001c", ids: []string{"DD-1"}, wantCode: "missing_design_decision_text"},
+		{name: "reference group separator", text: "valid", references: []string{"\u001d"}, ids: []string{"DD-1"}, wantCode: "blank_design_decision_reference"},
+		{name: "selection record separator", text: "valid", ids: []string{"\u001e"}, wantCode: "blank_step_design_decision"},
+		{name: "text unit separator", text: "\u001f", ids: []string{"DD-1"}, wantCode: "missing_design_decision_text"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			decision := DesignDecision{ID: "DD-1", Text: tt.text}
+			if tt.references != nil {
+				decision.References = &tt.references
+			}
+			decisions := []DesignDecision{decision}
+			plan := Plan{
+				SchemaVersion: "0.4.0", DesignDecisions: &decisions,
+				Steps: []Step{{ID: "P1", DesignDecisionIDs: &tt.ids}},
+			}
+			if ds := TraceabilityDiagnostics(plan); !hasCode(ds, tt.wantCode) {
+				t.Fatalf("diagnostics = %+v, want %s", ds, tt.wantCode)
+			}
+		})
+	}
+}
+
+func TestTraceabilityDiagnostics_AllowsUnselectedDecisionsAndDuplicateOpaqueReferences(t *testing.T) {
+	references := []string{"ADR-1", "ADR-1"}
+	decisions := []DesignDecision{
+		{ID: "DD-1", Text: "selected", References: &references},
+		{ID: "DD-UNSELECTED", Text: "may remain unselected"},
+	}
+	ids := []string{"DD-1"}
+	plan := Plan{
+		SchemaVersion: "0.4.0", DesignDecisions: &decisions,
+		Steps: []Step{{ID: "P1", DesignDecisionIDs: &ids}},
+	}
+	if ds := TraceabilityDiagnostics(plan); len(ds) != 0 {
+		t.Fatalf("valid design traceability produced diagnostics: %+v", ds)
+	}
+}
+
 func TestCheckPlan_EmptySteps(t *testing.T) {
 	ir := sampleIR()
 	ir.Steps = nil

@@ -1,6 +1,8 @@
 package agentflow
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -9,20 +11,44 @@ import (
 // It is now the full lockable document: every field agentflow's validate_plan
 // requires is present. Unknown agentflow fields are still ignored on unmarshal.
 type Plan struct {
-	SchemaVersion   string        `json:"schema_version"`
-	Objective       string        `json:"objective"`
-	Scope           []string      `json:"scope"`
-	NonGoals        []string      `json:"non_goals"`
-	Invariants      []string      `json:"invariants"`
-	RiskLevel       string        `json:"risk_level"`
-	DriftBudget     DriftBudget   `json:"drift_budget"`
-	AllowedFiles    []string      `json:"allowed_files"`
-	BlockedFiles    []string      `json:"blocked_files"`
-	ValidationGates []string      `json:"validation_gates"`
-	RollbackPlan    string        `json:"rollback_plan"`
-	EvidenceIDs     []string      `json:"evidence_ids"`
-	Requirements    []Requirement `json:"requirements,omitempty"`
-	Steps           []Step        `json:"steps"`
+	SchemaVersion   string            `json:"schema_version"`
+	Objective       string            `json:"objective"`
+	Scope           []string          `json:"scope"`
+	NonGoals        []string          `json:"non_goals"`
+	Invariants      []string          `json:"invariants"`
+	RiskLevel       string            `json:"risk_level"`
+	DriftBudget     DriftBudget       `json:"drift_budget"`
+	AllowedFiles    []string          `json:"allowed_files"`
+	BlockedFiles    []string          `json:"blocked_files"`
+	ValidationGates []string          `json:"validation_gates"`
+	RollbackPlan    string            `json:"rollback_plan"`
+	EvidenceIDs     []string          `json:"evidence_ids"`
+	Requirements    []Requirement     `json:"requirements,omitempty"`
+	DesignDecisions *[]DesignDecision `json:"design_decisions,omitempty"`
+	Steps           []Step            `json:"steps"`
+}
+
+// DesignDecision is an optional locked-plan decision selected by step ID.
+type DesignDecision struct {
+	ID         string    `json:"id"`
+	Text       string    `json:"text"`
+	References *[]string `json:"references,omitempty"`
+}
+
+// UsesDesignDecisions reports whether a plan opts into the optional
+// design-decision traceability family, via plan-level design_decisions or any
+// step's design_decision_ids. Local validation and step-goal projection share
+// it so the two can never disagree on whether the family is present.
+func UsesDesignDecisions(p Plan) bool {
+	if p.DesignDecisions != nil {
+		return true
+	}
+	for _, step := range p.Steps {
+		if step.DesignDecisionIDs != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // Requirement is an Agentflow requirement in the lockable plan contract.
@@ -45,16 +71,104 @@ type CriterionReview struct {
 }
 
 type Step struct {
-	ID            string   `json:"id"`
-	Action        string   `json:"action"`
-	Files         []string `json:"files"`
-	Preconditions []string `json:"preconditions"`
-	ExpectedDiff  []string `json:"expected_diff"`
-	Validation    []string `json:"validation"`
-	EvidenceIDs   []string `json:"evidence_ids"`
-	CriterionIDs  []string `json:"criterion_ids,omitempty"`
-	DependsOn     []string `json:"depends_on,omitempty"`
-	Gates         []Gate   `json:"gates,omitempty"`
+	ID                string    `json:"id"`
+	Action            string    `json:"action"`
+	Files             []string  `json:"files"`
+	Preconditions     []string  `json:"preconditions"`
+	ExpectedDiff      []string  `json:"expected_diff"`
+	Validation        []string  `json:"validation"`
+	EvidenceIDs       []string  `json:"evidence_ids"`
+	CriterionIDs      []string  `json:"criterion_ids,omitempty"`
+	DesignDecisionIDs *[]string `json:"design_decision_ids,omitempty"`
+	DependsOn         []string  `json:"depends_on,omitempty"`
+	Gates             []Gate    `json:"gates,omitempty"`
+}
+
+// UnmarshalJSON preserves optional-list presence and rejects null lists.
+func (p *Plan) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = withoutCaseVariants(data, "design_decisions")
+	if err != nil {
+		return err
+	}
+	if err := rejectNullList(data, "design_decisions"); err != nil {
+		return err
+	}
+	type plain Plan
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*p = Plan(decoded)
+	return nil
+}
+
+// UnmarshalJSON preserves optional-list presence and rejects null lists.
+func (d *DesignDecision) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = withoutCaseVariants(data, "id", "text", "references")
+	if err != nil {
+		return err
+	}
+	if err := rejectNullList(data, "references"); err != nil {
+		return err
+	}
+	type plain DesignDecision
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*d = DesignDecision(decoded)
+	return nil
+}
+
+// UnmarshalJSON preserves optional-list presence and rejects null lists.
+func (s *Step) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = withoutCaseVariants(data, "design_decision_ids")
+	if err != nil {
+		return err
+	}
+	if err := rejectNullList(data, "design_decision_ids"); err != nil {
+		return err
+	}
+	type plain Step
+	var decoded plain
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	*s = Step(decoded)
+	return nil
+}
+
+// withoutCaseVariants prevents encoding/json's case-insensitive struct-field
+// matching from consuming keys that Agentflow's Python contract treats as
+// unknown. Exact canonical keys remain authoritative when both forms appear.
+func withoutCaseVariants(data []byte, canonicalFields ...string) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for key := range fields {
+		for _, canonical := range canonicalFields {
+			if key != canonical && strings.EqualFold(key, canonical) {
+				delete(fields, key)
+				break
+			}
+		}
+	}
+	return json.Marshal(fields)
+}
+
+func rejectNullList(data []byte, field string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return err
+	}
+	if raw, ok := fields[field]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return fmt.Errorf("%s must be a list", field)
+	}
+	return nil
 }
 
 // DriftBudget is agentflow's drift allowance. validate_plan only checks the four
