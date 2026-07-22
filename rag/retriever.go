@@ -236,18 +236,24 @@ func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCt
 	return response.Results, err
 }
 
-func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest, owned, policyActive bool) ([]ScoredResult, []retrievalFreshness, error) {
+func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest, owned, policyActive bool, candidateLimit int) ([]ScoredResult, []retrievalFreshness, error) {
 	scope, err := normalizeRetrievalScope(req.Scope)
 	if err != nil {
 		return nil, nil, err
 	}
+	searchLimit := req.K
+	if candidateLimit > 0 {
+		searchLimit = candidateLimit
+	}
 	if scope.empty() {
-		results, err := r.retrieveScored(ctx, req.Query, req.K, req.QueryContext)
+		results, err := r.retrieveScored(ctx, req.Query, searchLimit, req.QueryContext)
 		if err != nil {
 			return nil, nil, err
 		}
 		limit := 0
-		if policyActive {
+		if candidateLimit > 0 {
+			limit = candidateLimit
+		} else if policyActive {
 			limit = req.K
 		}
 		results, freshness, err := r.prepareUnscopedScoredResults(ctx, results, limit, owned)
@@ -256,7 +262,7 @@ func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest
 		}
 		return results, freshness, nil
 	}
-	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext, owned, policyActive)
+	return r.retrieveScoredScopedBase(ctx, req.Query, searchLimit, scope, req.QueryContext, owned, policyActive, candidateLimit)
 }
 
 func (r *Retriever) prepareUnscopedScoredResults(ctx context.Context, results []ScoredResult, k int, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
@@ -268,7 +274,7 @@ func (r *Retriever) prepareUnscopedScoredResults(ctx context.Context, results []
 	return results, freshness, err
 }
 
-func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext, owned, policyActive bool) ([]ScoredResult, []retrievalFreshness, error) {
+func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext, owned, policyActive bool, candidateLimit int) ([]ScoredResult, []retrievalFreshness, error) {
 	store, ok := r.store.(*SQLiteStore)
 	if !ok {
 		return nil, nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
@@ -283,7 +289,9 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 			return nil, nil, err
 		}
 		limit := 0
-		if policyActive {
+		if candidateLimit > 0 {
+			limit = candidateLimit
+		} else if policyActive {
 			limit = k
 		}
 		results = filterScoredResults(results, scope, registry, limit)
@@ -725,8 +733,10 @@ type managedFreshnessCheck struct {
 }
 
 type retrievalFreshness struct {
-	known bool
-	value DocumentFreshness
+	known    bool
+	value    DocumentFreshness
+	managed  bool
+	document managedRegistryDocument
 }
 
 func unknownFreshness(count int) []retrievalFreshness {
@@ -735,15 +745,15 @@ func unknownFreshness(count int) []retrievalFreshness {
 
 func trustedManagedFreshness(document managedRegistryDocument, live DocumentFreshness) retrievalFreshness {
 	if document.state != string(DocumentStateIndexed) {
-		return retrievalFreshness{known: true, value: DocumentFreshnessStale}
+		return retrievalFreshness{known: true, value: DocumentFreshnessStale, managed: true, document: document}
 	}
 	if document.kind == string(DocumentKindText) {
-		return retrievalFreshness{known: true, value: DocumentFreshnessFresh}
+		return retrievalFreshness{known: true, value: DocumentFreshnessFresh, managed: true, document: document}
 	}
 	if document.kind == string(DocumentKindFile) {
-		return retrievalFreshness{known: true, value: live}
+		return retrievalFreshness{known: true, value: live, managed: true, document: document}
 	}
-	return retrievalFreshness{known: true, value: DocumentFreshnessStale}
+	return retrievalFreshness{known: true, value: DocumentFreshnessStale, managed: true, document: document}
 }
 
 const maxManagedFreshnessReads = 100
@@ -835,7 +845,7 @@ func refreshManagedChunk(ctx context.Context, readFile func(context.Context, str
 	}
 	if check.err != nil {
 		stampManagedChunkStale(chunk)
-		return retrievalFreshness{}, nil
+		return retrievalFreshness{managed: true, document: document}, nil
 	}
 	freshness := DocumentFreshnessStale
 	if check.hash == document.contentHash {

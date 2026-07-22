@@ -96,6 +96,33 @@ type RetrievalResponse struct {
 	Policy  RetrievalPolicyOutcome
 }
 
+type retrievalCandidate struct {
+	result    ScoredResult
+	freshness retrievalFreshness
+}
+
+type retrievalChunkKey struct {
+	source, id, stableKey string
+	startLine, endLine    int
+}
+
+func makeRetrievalChunkKey(result ScoredResult) retrievalChunkKey {
+	chunk := result.Chunk
+	return retrievalChunkKey{
+		source: chunk.Source, id: chunk.ID, stableKey: chunk.StableKey,
+		startLine: chunk.StartLine, endLine: chunk.EndLine,
+	}
+}
+
+type retrievalSelectionInput struct {
+	candidates        []retrievalCandidate
+	finalLimit        int
+	filteredCount     int
+	staleDroppedCount int
+}
+
+type retrievalSelector func(context.Context, retrievalSelectionInput) ([]ScoredResult, error)
+
 type composedPolicy struct {
 	request      RetrievalRequest
 	limit        int
@@ -327,9 +354,13 @@ func enforceRequiredFreshness(results []ScoredResult, freshness []retrievalFresh
 
 // RetrieveRequest is the canonical scored retrieval surface.
 func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (RetrievalResponse, error) {
+	return r.retrieveRequest(ctx, req, 0, nil)
+}
+
+func (r *Retriever) retrieveRequest(ctx context.Context, req RetrievalRequest, candidateLimit int, selector retrievalSelector) (RetrievalResponse, error) {
 	policyRequested := policyRequestPresent(req.Policy)
-	if !policyRequested && r.policyEvaluator == nil && r.policyObserver == nil {
-		results, _, err := r.retrieveScoredBase(ctx, req, false, false)
+	if selector == nil && !policyRequested && r.policyEvaluator == nil && r.policyObserver == nil {
+		results, _, err := r.retrieveScoredBase(ctx, req, false, false, 0)
 		if err != nil {
 			return RetrievalResponse{}, err
 		}
@@ -381,19 +412,26 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 	var results []ScoredResult
 	var freshness []retrievalFreshness
 	if !policy.emptyScope {
-		results, freshness, err = r.retrieveScoredBase(ctx, policy.request, true, policyApplied)
+		results, freshness, err = r.retrieveScoredBase(ctx, policy.request, true, policyApplied, candidateLimit)
 		if err != nil {
 			failedOutcome.ReasonCode = "retrieval_failed"
 			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
 			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, err)
 		}
-		if policyApplied && policy.limit > 0 && len(results) > policy.limit {
+		if selector == nil && policyApplied && policy.limit > 0 && len(results) > policy.limit {
 			results = results[:policy.limit]
 			freshness = freshness[:policy.limit]
 		}
 	}
 	candidateCount := len(results)
 	candidateSourceCount := sourceCount(results)
+	var freshnessByChunk map[retrievalChunkKey]retrievalFreshness
+	if selector != nil {
+		freshnessByChunk = make(map[retrievalChunkKey]retrievalFreshness, len(results))
+		for i := range results {
+			freshnessByChunk[makeRetrievalChunkKey(results[i])] = freshness[i]
+		}
+	}
 	staleDroppedCount := 0
 	if policy.requireFresh {
 		results, staleDroppedCount, err = enforceRequiredFreshness(results, freshness)
@@ -425,6 +463,31 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 			failedOutcome.StaleDroppedCount = staleDroppedCount
 			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
 			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval result decision", ErrPolicyDecisionInvalid))
+		}
+	}
+	if selector != nil {
+		candidates := make([]retrievalCandidate, len(results))
+		for i := range results {
+			candidates[i] = retrievalCandidate{
+				result:    results[i],
+				freshness: freshnessByChunk[makeRetrievalChunkKey(results[i])],
+			}
+		}
+		results, err = selector(ctx, retrievalSelectionInput{
+			candidates:        candidates,
+			finalLimit:        policy.limit,
+			filteredCount:     filteredCount,
+			staleDroppedCount: staleDroppedCount,
+		})
+		if err != nil {
+			failedOutcome.ReasonCode = "selection_failed"
+			failedOutcome.CandidateCount = candidateCount
+			failedOutcome.CandidateSourceCount = candidateSourceCount
+			failedOutcome.FilteredCount = filteredCount
+			failedOutcome.RedactedCount = redactedCount
+			failedOutcome.StaleDroppedCount = staleDroppedCount
+			failedOutcome.AuditLabelCount = len(normalized.Policy.AuditLabels)
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, err)
 		}
 	}
 	if policyApplied && policy.limit > 0 && len(results) > policy.limit {
