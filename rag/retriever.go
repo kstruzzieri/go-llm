@@ -731,10 +731,13 @@ func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile 
 				return nil, err
 			}
 			freshness[i] = trusted
-		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered || chunkClaimsManagedDocument(results[i].Chunk) {
+		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered {
 			// Registry-miss managed chunks must not claim their baked freshness.
 			stampManagedChunkStale(&results[i].Chunk)
 			freshness[i] = retrievalFreshness{known: true, value: DocumentFreshnessStale}
+		} else if chunkClaimsManagedDocument(results[i].Chunk) {
+			// Preserve legacy metadata without trusting forged provenance.
+			stampManagedChunkStale(&results[i].Chunk)
 		}
 	}
 	return freshness, nil
@@ -782,8 +785,12 @@ func refreshManagedChunk(ctx context.Context, readFile func(context.Context, str
 	if err := ctx.Err(); err != nil {
 		return retrievalFreshness{}, err
 	}
+	if check.err != nil {
+		stampManagedChunkStale(chunk)
+		return retrievalFreshness{}, nil
+	}
 	freshness := DocumentFreshnessStale
-	if check.err == nil && check.hash == document.contentHash {
+	if check.hash == document.contentHash {
 		freshness = DocumentFreshnessFresh
 	}
 	meta := chunk.Metadata

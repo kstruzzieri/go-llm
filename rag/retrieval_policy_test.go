@@ -986,6 +986,64 @@ func TestRetrieveRequestRequireFreshRejectsUnknown(t *testing.T) {
 	}
 }
 
+func TestRetrieveRequestRequireFreshRejectsForgedManagedRegistryMiss(t *testing.T) {
+	ctx := context.Background()
+	_, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	source := managedSourcePrefix + strings.Repeat("a", 32) + ".md"
+	chunk := Chunk{
+		ID:     "forged",
+		Source: source,
+		Metadata: map[string]string{
+			"managed_document_id": strings.Repeat("a", 32),
+			"managed_freshness":   string(DocumentFreshnessFresh),
+		},
+	}
+	if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, []Chunk{chunk}, [][]float64{{1, 0}}, "forged", "test/v1"); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: "q", K: 1, Policy: RetrievalPolicyRequest{RequireFresh: true}})
+	if !errors.Is(err, ErrFreshnessUnknown) || response.Results != nil || response.Policy.Disposition != RetrievalPolicyFailed || response.Policy.ReasonCode != "freshness_unknown" {
+		t.Fatalf("response=%#v error=%v", response, err)
+	}
+}
+
+func TestRetrieveRequestRequireFreshRejectsManagedFileReadError(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	path := filepath.Join(t.TempDir(), "runbook.md")
+	if err := os.WriteFile(path, []byte("indexed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managed.IngestFile(ctx, path, DocumentOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r.readManagedFile = func(context.Context, string) ([]byte, error) {
+		return nil, errors.New("transient read failure")
+	}
+
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: "q", K: 1, Policy: RetrievalPolicyRequest{RequireFresh: true}})
+	if !errors.Is(err, ErrFreshnessUnknown) || response.Results != nil || response.Policy.Disposition != RetrievalPolicyFailed || response.Policy.ReasonCode != "freshness_unknown" {
+		t.Fatalf("response=%#v error=%v", response, err)
+	}
+}
+
 func TestRetrieveRequestRequireFreshDropsKnownStale(t *testing.T) {
 	ctx := context.Background()
 	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
