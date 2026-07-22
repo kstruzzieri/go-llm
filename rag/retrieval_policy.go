@@ -338,6 +338,14 @@ func (r *Retriever) RetrieveRequest(ctx context.Context, req RetrievalRequest) (
 
 	policyApplied := policyRequested || r.policyEvaluator != nil
 	failedOutcome := RetrievalPolicyOutcome{Applied: policyApplied, Disposition: RetrievalPolicyFailed, ReasonCode: "request_invalid"}
+	if !policyApplied {
+		// Observer-only: the request carries no policy, so an invalid legacy
+		// scope must keep its legacy error identity — an observer must not
+		// change retrieval semantics, only observe them.
+		if _, scopeErr := normalizeRetrievalScope(req.Scope); scopeErr != nil {
+			return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, scopeErr)
+		}
+	}
 	normalized, err := normalizePolicyRequest(req)
 	if err != nil {
 		return r.finalizePolicy(ctx, RetrievalResponse{Policy: failedOutcome}, fmt.Errorf("%w: invalid retrieval policy request", ErrPolicyDecisionInvalid))
@@ -454,6 +462,11 @@ func (r *Retriever) finalizePolicy(ctx context.Context, response RetrievalRespon
 		return response, primary
 	}
 	response.Results = nil
+	// The returned counts describe the caller-visible result set, which was
+	// just erased; zero them so the outcome cannot claim results that were
+	// never delivered. Process counts (filtered/redacted/stale) stand.
+	response.Policy.ReturnedCount = 0
+	response.Policy.ReturnedSourceCount = 0
 	if !errors.Is(primary, ErrPolicyDenied) && !errors.Is(primary, ErrPolicyEvaluatorFailed) &&
 		!errors.Is(primary, ErrPolicyDecisionInvalid) && !errors.Is(primary, ErrFreshnessUnknown) {
 		response.Policy.Disposition = RetrievalPolicyFailed

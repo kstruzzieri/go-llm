@@ -166,7 +166,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 	if err != nil {
 		return nil, err
 	}
-	return semanticSearchResults(response.Results, r.usesDenseSearch()), nil
+	return semanticSearchResults(response.Results, r.usesDenseSearch(), true), nil
 }
 
 // RetrieveScoped finds top-k relevant managed chunks after applying scope.
@@ -179,7 +179,7 @@ func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, sco
 	if err != nil {
 		return nil, err
 	}
-	return semanticSearchResults(response.Results, !normalized.empty() || r.usesDenseSearch()), nil
+	return semanticSearchResults(response.Results, r.usesDenseSearch(), normalized.empty()), nil
 }
 
 func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, error) {
@@ -198,19 +198,26 @@ func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, er
 	return embedding, nil
 }
 
-func semanticSearchResults(scored []ScoredResult, preserveEmpty bool) []SearchResult {
-	if len(scored) == 0 {
-		if scored != nil && preserveEmpty {
-			return []SearchResult{}
-		}
+func semanticSearchResults(scored []ScoredResult, dense, collapseEmpty bool) []SearchResult {
+	if scored == nil {
 		return nil
 	}
-	// Hybrid ranking remains in result order, while SearchResult.Score retains
-	// its semantic-similarity contract for context rendering and callers.
+	// Dense results pass through verbatim: the legacy dense path returned the
+	// store's Score and shape untouched. Only hybrid ranking rewrites Score
+	// back to its semantic-similarity contract (1 - Distance). Hybrid empty
+	// shapes follow the legacy flatten: the unscoped path collapsed every
+	// empty slice to nil (collapseEmpty), while the scoped path collapsed only
+	// empty-at-source — post-filter results here — where a surviving non-nil
+	// empty slice means filtered-to-empty and stays non-nil.
+	if !dense && collapseEmpty && len(scored) == 0 {
+		return nil
+	}
 	results := make([]SearchResult, len(scored))
 	for i, result := range scored {
 		results[i] = result.SearchResult
-		results[i].Score = 1 - results[i].Distance
+		if !dense {
+			results[i].Score = 1 - results[i].Distance
+		}
 	}
 	return results
 }
@@ -307,10 +314,25 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 // RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
 func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
 	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, Scope: scope, QueryContext: qCtx})
-	if err == nil && response.Results == nil && r.usesDenseSearch() {
-		response.Results = []ScoredResult{}
+	// The immutable snapshot's zero-candidate hybrid search returned a non-nil
+	// empty slice on the legacy scored surface (the canonical pipeline
+	// collapses it to nil internally); dense empties keep their legacy
+	// restored shape as on RetrieveScored. Mutable hybrid emptiness stays nil,
+	// matching SearchMulti's legacy passthrough.
+	if err == nil && response.Results == nil {
+		if s, ok := r.store.(*SQLiteStore); r.usesDenseSearch() || (ok && s.immutable && !scopeEmptyForRestore(scope)) {
+			response.Results = []ScoredResult{}
+		}
 	}
 	return response.Results, err
+}
+
+// scopeEmptyForRestore reports whether the caller's scope normalizes to empty,
+// treating an invalid scope as empty; it exists only to pick the legacy empty
+// shape and never affects errors or filtering.
+func scopeEmptyForRestore(scope RetrievalScope) bool {
+	normalized, err := normalizeRetrievalScope(scope)
+	return err != nil || normalized.empty()
 }
 
 func (r *Retriever) usesDenseSearch() bool {
@@ -344,6 +366,14 @@ func (r *Retriever) retrieveScoredImmutableScoped(ctx context.Context, query str
 		results, err := store.searchMultiSnapshotScoped(ctx, embedding, query, k, qCtx, registry)
 		if err != nil {
 			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
+		}
+		// The snapshot search allocates even for zero candidates — the only
+		// hybrid source that produces a non-nil empty slice. Collapse it to
+		// nil here (as the legacy pre-filter flatten did) so scope filtering,
+		// which preserves nil-ness via results[:0], keeps empty-at-source
+		// distinguishable from filtered-to-empty downstream.
+		if len(results) == 0 {
+			return nil, nil
 		}
 		return results, nil
 	}

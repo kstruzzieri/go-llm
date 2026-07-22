@@ -108,6 +108,26 @@ func TestRetrievalPolicyObserverAlonePreservesLegacyResults(t *testing.T) {
 	}
 }
 
+func TestRetrievalPolicyObserverAlonePreservesLegacyScopeError(t *testing.T) {
+	// An observer must observe, not change semantics: an invalid legacy scope
+	// on an observer-only retriever keeps its descriptive validation error and
+	// does not become the fixed ErrPolicyDecisionInvalid sentinel.
+	bad := RetrievalScope{Collection: strings.Repeat("x", MaxManagedMetadataBytes+1)}
+	legacy, _, _ := newPolicyRetriever(t, nil)
+	observed, _, _ := newPolicyRetriever(t, nil, WithRetrievalPolicyObserver(&policyObserverSpy{}))
+	_, legacyErr := legacy.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", Scope: bad})
+	_, observedErr := observed.RetrieveRequest(context.Background(), RetrievalRequest{Query: "q", Scope: bad})
+	if legacyErr == nil || observedErr == nil {
+		t.Fatalf("legacy=%v observed=%v, want both non-nil", legacyErr, observedErr)
+	}
+	if errors.Is(observedErr, ErrPolicyDecisionInvalid) {
+		t.Fatalf("observer-only scope error = %v, want legacy validation error not policy sentinel", observedErr)
+	}
+	if observedErr.Error() != legacyErr.Error() {
+		t.Fatalf("observed error = %q, want legacy identity %q", observedErr, legacyErr)
+	}
+}
+
 func TestRetrieveLegacyOverReturnPreservedWithoutActivePolicy(t *testing.T) {
 	want := []ScoredResult{policyScored("c1", "s1"), policyScored("c2", "s2")}
 	for _, tc := range []struct {
@@ -276,6 +296,10 @@ func TestRetrievalPolicyObserverFailureFailsClosed(t *testing.T) {
 	}
 	if response.Policy.Applied || response.Policy.Disposition != RetrievalPolicyFailed || response.Policy.ReasonCode != "observer_failed" {
 		t.Fatalf("policy outcome = %#v, want unapplied observer failure", response.Policy)
+	}
+	// The results were erased; returned counts must not claim delivered rows.
+	if response.Policy.ReturnedCount != 0 || response.Policy.ReturnedSourceCount != 0 {
+		t.Fatalf("returned counts = %d/%d, want 0/0 after result erasure", response.Policy.ReturnedCount, response.Policy.ReturnedSourceCount)
 	}
 }
 
@@ -1481,9 +1505,11 @@ func TestRetrieverLegacyMethodsUseCanonicalResults(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// Dense retrieval passes the store's Score through verbatim: the
+		// legacy dense path never rewrote Score to 1 - Distance.
 		got, err = r.Retrieve(context.Background(), "q", 1)
-		if err != nil || len(got) != 1 || got[0].Score != 0.9 {
-			t.Fatalf("dense Retrieve = %#v, %v", got, err)
+		if err != nil || len(got) != 1 || got[0].Score != 0.0163 {
+			t.Fatalf("dense Retrieve = %#v, %v; want verbatim store Score 0.0163", got, err)
 		}
 
 		for _, results := range [][]ScoredResult{nil, {}} {
@@ -1663,5 +1689,24 @@ func TestRetrieveScopedPreservesFilteredEmptySlice(t *testing.T) {
 	scored, err := r.RetrieveScoredScoped(ctx, "q", 1, RetrievalScope{Collection: "missing"}, QueryContext{})
 	if err != nil || scored == nil || len(scored) != 0 {
 		t.Fatalf("RetrieveScoredScoped() = %#v, %v; want existing non-nil empty", scored, err)
+	}
+}
+
+func TestRetrieveScopedImmutableHybridEmptyAtSourceIsNil(t *testing.T) {
+	// Immutable + hybrid scoped retrieval that matches zero candidates at
+	// source collapsed to nil in the legacy flatten (empty-at-source, not
+	// filtered-to-empty). The vectorOnly/mutable filtered-to-empty case keeps
+	// its non-nil empty shape in TestRetrieveScopedPreservesFilteredEmptySlice.
+	readOnly, _ := newReadOnlyManagedScopeStore(t)
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+		readOnly,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.RetrieveScoped(context.Background(), "alpha", 1, RetrievalScope{Collection: "nonexistent"})
+	if err != nil || got != nil {
+		t.Fatalf("immutable hybrid empty-at-source RetrieveScoped = %#v, %v; want nil", got, err)
 	}
 }

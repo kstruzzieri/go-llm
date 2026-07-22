@@ -183,7 +183,7 @@ func TestHandleRAGSearch_FiltersRedactsAndReturnsSafeMeta(t *testing.T) {
 	}
 }
 
-func TestHandleRAGSearch_ScopedContextualResetsScore(t *testing.T) {
+func TestHandleRAGSearch_ScopedContextualKeepsVerbatimScore(t *testing.T) {
 	for _, tc := range []struct {
 		name       string
 		args       string
@@ -216,8 +216,14 @@ func TestHandleRAGSearch_ScopedContextualResetsScore(t *testing.T) {
 			if len(results) != 1 {
 				t.Fatalf("results = %#v, want one", results)
 			}
-			if want := 1 - results[0].Distance; results[0].Score != want {
-				t.Fatalf("scoped contextual Score = %.20g, want 1-Distance = %.20g", results[0].Score, want)
+			// Legacy contextual retrieval (scoped or not) copied the embedded
+			// SearchResult verbatim from the scored surface; only the
+			// non-contextual hybrid flatten rewrote Score to 1 - Distance.
+			// The fixture's tiny cosine (~1e-17) makes Distance round to
+			// exactly 1.0, so a reset would yield Score == 0 while the
+			// verbatim store Score stays positive.
+			if results[0].Score <= 0 {
+				t.Fatalf("scoped contextual Score = %.20g; want verbatim positive store Score, not 1-Distance reset", results[0].Score)
 			}
 		})
 	}
@@ -769,6 +775,28 @@ func TestHandleRAGSearch_ForwardsQueryContextWithoutChangingResponseContract(t *
 	want, _ := json.Marshal([]rag.SearchResult{scored.SearchResult})
 	if got := extractText(result); got != string(want) {
 		t.Fatalf("contextual response = %s, want flattened SearchResult JSON %s", got, want)
+	}
+}
+
+func TestHandleRAGSearch_ExplainScoresSetsWallClockTimestamp(t *testing.T) {
+	// explain_scores with no contextual args still anchors the temporal
+	// scorer at request wall-clock time, as the legacy handler did; a zero
+	// Timestamp would silently shift temporal signals to max(indexed_at).
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "c1"}, Score: 0.9, Distance: 0.1},
+		RankScore:    0.41,
+		Signals:      map[string]float64{"semantic": 0.9},
+	}}}
+	s := &Server{retriever: mcpTestRetriever(t, store)}
+
+	before := time.Now()
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","explain_scores":true}`))
+	after := time.Now()
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if store.qCtx.Timestamp.Before(before) || store.qCtx.Timestamp.After(after) {
+		t.Fatalf("QueryContext.Timestamp = %v, want request time in [%v, %v]", store.qCtx.Timestamp, before, after)
 	}
 }
 

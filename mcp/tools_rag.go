@@ -253,7 +253,10 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	contextual := !args.empty()
 	qctx := rag.QueryContext{}
-	if contextual {
+	if contextual || args.ExplainScores {
+		// Legacy explain_scores-only requests also built a full QueryContext,
+		// whose wall-clock Timestamp anchors the temporal scorer; dropping it
+		// would silently shift temporal signals to max(indexed_at).
 		qctx = args.queryContext()
 	}
 	response, err := retriever.RetrieveRequest(ctx, rag.RetrievalRequest{
@@ -275,6 +278,11 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 	if outputResults == nil && dense && (args.ExplainScores || contextual) {
 		outputResults = []rag.ScoredResult{}
 	}
+	if outputResults == nil && response.Policy.Applied {
+		// Governed empty results always marshal as [], whether the evaluator
+		// filtered everything or the scope intersection short-circuited.
+		outputResults = []rag.ScoredResult{}
+	}
 	output := any(outputResults)
 	if !args.ExplainScores {
 		var results []rag.SearchResult
@@ -282,7 +290,11 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 			results = make([]rag.SearchResult, len(outputResults))
 			for i := range outputResults {
 				results[i] = outputResults[i].SearchResult
-				if !contextual || scoped || policyScoped {
+				// Legacy score contract: only the non-contextual hybrid path
+				// (Retrieve/RetrieveScoped flatten) rewrote Score back to
+				// 1 - Distance; contextual copies and dense results were
+				// passed through verbatim.
+				if !contextual && !dense {
 					results[i].Score = 1 - results[i].Distance
 				}
 			}
