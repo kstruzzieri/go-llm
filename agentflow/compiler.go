@@ -6,6 +6,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -300,11 +301,14 @@ func CheckPlan(p Plan) []Diagnostic {
 	return ds
 }
 
-var traceIDPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,127}$`)
+var (
+	traceIDPattern       = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9._-]{0,127}$`)
+	schemaVersionPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$`)
+)
 
-// TraceabilityDiagnostics validates the optional requirement/criterion mapping
-// family without applying CheckPlan's authoring-only plan-shape policy. It is a
-// no-op for legacy plans that omit requirements and criterion mappings.
+// TraceabilityDiagnostics validates optional locked-plan traceability without
+// applying CheckPlan's authoring-only plan-shape policy. It is a no-op for
+// legacy plans that omit both traceability families.
 func TraceabilityDiagnostics(p Plan) []Diagnostic {
 	var ds []Diagnostic
 	requirementIDs := map[string]bool{}
@@ -390,7 +394,93 @@ func TraceabilityDiagnostics(p Plan) []Diagnostic {
 			ds = append(ds, Diagnostic{"unmapped_criterion_verification", "acceptance criterion " + criterionID + " has no proving gate or review floor"})
 		}
 	}
+	ds = append(ds, designDecisionDiagnostics(p)...)
 	return ds
+}
+
+func designDecisionDiagnostics(p Plan) []Diagnostic {
+	usesDesignDecisions := p.DesignDecisions != nil
+	for _, step := range p.Steps {
+		usesDesignDecisions = usesDesignDecisions || step.DesignDecisionIDs != nil
+	}
+	if !usesDesignDecisions {
+		return nil
+	}
+	if !schemaVersionAtLeast(p.SchemaVersion, 0, 4, 0) {
+		return []Diagnostic{{
+			"design_decision_schema",
+			"design decision fields require plan-lock schema_version 0.4.0 or newer",
+		}}
+	}
+
+	var ds []Diagnostic
+	decisionIDs := map[string]bool{}
+	if p.DesignDecisions != nil {
+		if len(*p.DesignDecisions) == 0 {
+			ds = append(ds, Diagnostic{"missing_design_decisions", "design_decisions must contain at least one design decision"})
+		}
+		for _, decision := range *p.DesignDecisions {
+			if !traceIDPattern.MatchString(decision.ID) {
+				ds = append(ds, Diagnostic{"invalid_design_decision_id", "design decision id is not stable: " + decision.ID})
+			} else if decisionIDs[decision.ID] {
+				ds = append(ds, Diagnostic{"duplicate_design_decision_id", "duplicate design decision id: " + decision.ID})
+			} else {
+				decisionIDs[decision.ID] = true
+			}
+			if strings.TrimSpace(decision.Text) == "" {
+				ds = append(ds, Diagnostic{"missing_design_decision_text", "design decision " + decision.ID + " has empty text"})
+			}
+			if decision.References != nil && !allNonBlank(*decision.References) {
+				ds = append(ds, Diagnostic{"blank_design_decision_reference", "design decision " + decision.ID + " references must contain only non-blank strings"})
+			}
+		}
+	}
+	for _, step := range p.Steps {
+		if step.DesignDecisionIDs == nil {
+			continue
+		}
+		if len(*step.DesignDecisionIDs) == 0 {
+			ds = append(ds, Diagnostic{"empty_step_design_decisions", "step " + step.ID + " design_decision_ids must contain at least one design decision id"})
+			continue
+		}
+		if !allNonBlank(*step.DesignDecisionIDs) {
+			ds = append(ds, Diagnostic{"blank_step_design_decision", "step " + step.ID + " design_decision_ids must contain only non-blank strings"})
+			continue
+		}
+		seen := map[string]bool{}
+		for _, decisionID := range *step.DesignDecisionIDs {
+			if seen[decisionID] {
+				ds = append(ds, Diagnostic{"duplicate_step_design_decision", "step " + step.ID + " repeats design decision " + decisionID})
+			}
+			seen[decisionID] = true
+			if !decisionIDs[decisionID] {
+				ds = append(ds, Diagnostic{"dangling_step_design_decision", "step " + step.ID + " references unknown design decision " + decisionID})
+			}
+		}
+	}
+	return ds
+}
+
+func schemaVersionAtLeast(value string, wantMajor, wantMinor, wantPatch int) bool {
+	parts := schemaVersionPattern.FindStringSubmatch(value)
+	if parts == nil {
+		return false
+	}
+	var got [3]int
+	for i := range got {
+		part, err := strconv.Atoi(parts[i+1])
+		if err != nil {
+			return false
+		}
+		got[i] = part
+	}
+	if got[0] != wantMajor {
+		return got[0] > wantMajor
+	}
+	if got[1] != wantMinor {
+		return got[1] > wantMinor
+	}
+	return got[2] >= wantPatch
 }
 
 func hasWorkspaceAllowance(xs []string) bool {

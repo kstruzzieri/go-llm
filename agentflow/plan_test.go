@@ -3,6 +3,7 @@ package agentflow
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"testing"
 )
 
@@ -138,6 +139,74 @@ func TestPlan_RequirementTraceabilityRoundTrip(t *testing.T) {
 	}
 	if got.Requirements[0].AcceptanceCriteria[0].ID != "AC-1" || got.Steps[0].Gates[0].CriterionIDs[0] != "AC-1" {
 		t.Fatalf("round trip lost traceability: %+v", got)
+	}
+}
+
+func TestPlan_DesignDecisionTraceabilityRoundTrip(t *testing.T) {
+	var plan Plan
+	if err := json.Unmarshal([]byte(`{
+		"schema_version":"0.4.0",
+		"design_decisions":[
+			{"id":"DD-2","text":"second","references":["ADR-2","ADR-1"]},
+			{"id":"DD-1","text":"first"},
+			{"id":"DD-3","text":"third","references":[]}
+		],
+		"steps":[{"id":"P1","design_decision_ids":["DD-1","DD-2"]}]
+	}`), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.DesignDecisions == nil || len(*plan.DesignDecisions) != 3 {
+		t.Fatalf("design decisions = %#v", plan.DesignDecisions)
+	}
+	decisions := *plan.DesignDecisions
+	if decisions[0].ID != "DD-2" || decisions[1].ID != "DD-1" || decisions[2].ID != "DD-3" {
+		t.Fatalf("declaration order changed: %+v", decisions)
+	}
+	if decisions[0].References == nil || !slices.Equal(*decisions[0].References, []string{"ADR-2", "ADR-1"}) {
+		t.Fatalf("reference order changed: %#v", decisions[0].References)
+	}
+	if decisions[1].References != nil {
+		t.Fatalf("omitted references became present: %#v", decisions[1].References)
+	}
+	if decisions[2].References == nil || len(*decisions[2].References) != 0 {
+		t.Fatalf("explicit empty references were not preserved: %#v", decisions[2].References)
+	}
+	if plan.Steps[0].DesignDecisionIDs == nil || !slices.Equal(*plan.Steps[0].DesignDecisionIDs, []string{"DD-1", "DD-2"}) {
+		t.Fatalf("step selection order changed: %#v", plan.Steps[0].DesignDecisionIDs)
+	}
+
+	b, err := json.Marshal(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var encoded struct {
+		DesignDecisions []struct {
+			References json.RawMessage `json:"references"`
+		} `json:"design_decisions"`
+	}
+	if err := json.Unmarshal(b, &encoded); err != nil {
+		t.Fatal(err)
+	}
+	if encoded.DesignDecisions[1].References != nil || string(encoded.DesignDecisions[2].References) != "[]" {
+		t.Fatalf("round trip lost omitted/empty references distinction: %s", b)
+	}
+}
+
+func TestPlan_RejectsMalformedDesignDecisionLists(t *testing.T) {
+	for name, input := range map[string]string{
+		"null declarations":   `{"design_decisions":null}`,
+		"object declarations": `{"design_decisions":{}}`,
+		"null references":     `{"design_decisions":[{"id":"DD-1","text":"x","references":null}]}`,
+		"object references":   `{"design_decisions":[{"id":"DD-1","text":"x","references":{}}]}`,
+		"null selections":     `{"steps":[{"design_decision_ids":null}]}`,
+		"object selections":   `{"steps":[{"design_decision_ids":{}}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var plan Plan
+			if err := json.Unmarshal([]byte(input), &plan); err == nil {
+				t.Fatal("expected malformed design list rejection")
+			}
+		})
 	}
 }
 

@@ -987,6 +987,44 @@ func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T
 	}
 }
 
+func TestRunAgentflowTask_RejectsInvalidDesignTraceabilityBeforeClientUse(t *testing.T) {
+	planJSON := `{
+		"schema_version":"0.4.0",
+		"design_decisions":[],
+		"steps":[{"id":"P1","files":["a.go"],"design_decision_ids":["DD-MISSING"],"validation":["true"],"gates":[{"kind":"command","run":["true"]}]}]
+	}`
+	planPath := filepath.Join(t.TempDir(), "invalid-design-traceability.json")
+	if err := os.WriteFile(planPath, []byte(planJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	err := runAgentflowTask(context.Background(), &stdout, &stderr, nil, &replSession{}, flags{
+		planPath: planPath, approveEdits: true, approveGates: true,
+		agentflowSrc: filepath.Join(t.TempDir(), "must-not-run"),
+	}, t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "missing_design_decisions") {
+		t.Fatalf("err = %v, want missing_design_decisions", err)
+	}
+	if stdout.Len() != 0 || stderr.Len() != 0 {
+		t.Fatalf("preflight rejection used task output or recovery: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestDecodeAgentflowPlanJSON_RejectsMalformedDesignLists(t *testing.T) {
+	for name, input := range map[string]string{
+		"null declarations": `{"design_decisions":null}`,
+		"null references":   `{"design_decisions":[{"id":"DD-1","text":"x","references":null}]}`,
+		"null selections":   `{"steps":[{"design_decision_ids":null}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			var plan agentflow.Plan
+			if err := decodeAgentflowPlanJSON([]byte(input), &plan); err == nil {
+				t.Fatal("expected malformed design list rejection")
+			}
+		})
+	}
+}
+
 func TestStepGoal_ProjectsOnlyTheLockedStepSpecificationSlice(t *testing.T) {
 	plan := &agentflow.Plan{
 		Objective:  "ship the requested behavior",
@@ -1085,6 +1123,80 @@ func TestStepGoal_TraceableStepWithoutCriteriaHasExplicitEmptySlice(t *testing.T
 	}
 	if !strings.HasSuffix(got, "Requirements and acceptance criteria:\n(none)") {
 		t.Fatalf("criteria-less traced step omitted explicit empty slice:\n%s", got)
+	}
+}
+
+func TestStepGoal_ProjectsSelectedDesignDecisionsInDeclarationOrder(t *testing.T) {
+	references := []string{"ADR-2", "ADR-1"}
+	decisions := []agentflow.DesignDecision{
+		{ID: "DD-2", Text: "second decision", References: &references},
+		{ID: "DD-1", Text: "first decision"},
+		{ID: "DD-3", Text: "unselected decision"},
+	}
+	selected := []string{"DD-1", "DD-2"}
+	plan := &agentflow.Plan{
+		Objective: "ship the requested behavior", Invariants: []string{"stay compatible"},
+		DesignDecisions: &decisions,
+	}
+	step := agentflow.Step{
+		ID: "P1", Action: "implement the focused behavior", Files: []string{"src/a.go"},
+		ExpectedDiff: []string{"add focused implementation"}, DesignDecisionIDs: &selected,
+		Validation: []string{"focused tests"},
+		Gates:      []agentflow.Gate{{Kind: "command", Run: []string{"go", "test", "./src"}}},
+	}
+
+	want := `Locked specification slice
+
+Objective:
+ship the requested behavior
+
+Invariants:
+- stay compatible
+
+Non-goals:
+(none)
+
+Step P1
+Preconditions:
+(none)
+Action:
+implement the focused behavior
+Target files:
+- src/a.go
+Expected diff:
+- add focused implementation
+Validation intent:
+- focused tests
+Structured gates:
+- focused tests: ["go", "test", "./src"]
+Requirements and acceptance criteria:
+(none)
+Design decisions:
+- DD-2: second decision
+  - reference: ADR-2
+  - reference: ADR-1
+- DD-1: first decision`
+	got, err := stepGoal(plan, step)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("design instruction mismatch\n--- got ---\n%s\n--- want ---\n%s", got, want)
+	}
+	if retry, err := stepGoal(plan, step); err != nil || retry != got {
+		t.Fatalf("retry rendering changed\nfirst: %q\nretry: %q", got, retry)
+	}
+}
+
+func TestStepGoal_DesignFamilyWithoutStepSelectionHasExplicitEmptySlice(t *testing.T) {
+	decisions := []agentflow.DesignDecision{{ID: "DD-1", Text: "used by a later step"}}
+	plan := &agentflow.Plan{DesignDecisions: &decisions}
+	got, err := stepGoal(plan, agentflow.Step{ID: "P0", Action: "prepare scaffolding"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "Design decisions:\n(none)") || !strings.Contains(got, "Locked specification slice") {
+		t.Fatalf("design-only step omitted expanded explicit empty slice:\n%s", got)
 	}
 }
 

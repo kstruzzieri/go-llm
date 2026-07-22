@@ -110,6 +110,48 @@ func TestLockPlan_RealCLI(t *testing.T) {
 	}
 }
 
+func TestLockPlan_RealCLI_AcceptsTypedDesignDecisionTraceability(t *testing.T) {
+	dir := t.TempDir()
+	c := NewClient(agentflowRunnerForTest(t, dir), dir)
+	ctx := context.Background()
+	if err := c.Init(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	plan := Compile(PlanIR{
+		Objective: "lock typed design decisions", Scope: []string{"src"}, Invariants: []string{"no mutation"},
+		RiskLevel: "low", RollbackPlan: "git checkout -- .", AllowedFiles: []string{"src/*"},
+		Steps: []StepIR{{
+			ID: "P1", Action: "implement the selected design", Files: []string{"src/a.go"},
+			ExpectedDiff: []string{"selected design is implemented"},
+			Validations:  []GateIR{{Label: "unit", Argv: []string{"true"}}},
+		}},
+	})
+	references := []string{"docs/agent-workflow.md", "docs/golem-integration.md"}
+	decisions := []DesignDecision{
+		{ID: "DD-1", Text: "Use the existing receipt ledger.", References: &references},
+		{ID: "DD-UNSELECTED", Text: "An optional unselected declaration."},
+	}
+	selected := []string{"DD-1"}
+	plan.SchemaVersion = "0.4.0"
+	plan.DesignDecisions = &decisions
+	plan.Steps[0].DesignDecisionIDs = &selected
+	if ds := TraceabilityDiagnostics(plan); len(ds) != 0 {
+		t.Fatalf("typed design plan failed local pre-check: %+v", ds)
+	}
+	b, err := json.MarshalIndent(plan, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	planPath := filepath.Join(dir, "design-plan.json")
+	if err := os.WriteFile(planPath, b, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.LockPlan(ctx, planPath); err != nil {
+		t.Fatalf("real lock-plan rejected typed design traceability: %v", err)
+	}
+}
+
 func TestLockPlan_RealCLI_AllowsCriterionWithoutVerificationMapping(t *testing.T) {
 	dir := t.TempDir()
 	r := agentflowRunnerForTest(t, dir)

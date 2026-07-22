@@ -825,7 +825,11 @@ func resolveReviewManifest(path string) (string, error) {
 }
 
 func stepGoal(p *agentflow.Plan, s agentflow.Step) (string, error) {
-	if len(p.Requirements) == 0 {
+	usesDesignDecisions := p.DesignDecisions != nil || s.DesignDecisionIDs != nil
+	for _, step := range p.Steps {
+		usesDesignDecisions = usesDesignDecisions || step.DesignDecisionIDs != nil
+	}
+	if len(p.Requirements) == 0 && !usesDesignDecisions {
 		return fmt.Sprintf("Make exactly the change described. Action: %s\nTarget files: %s\nExpected diff:\n%s",
 			s.Action, strings.Join(s.Files, ", "), strings.Join(s.ExpectedDiff, "\n")), nil
 	}
@@ -903,6 +907,36 @@ func stepGoal(p *agentflow.Plan, s agentflow.Step) (string, error) {
 	}
 	if !emitted {
 		b.WriteString("(none)")
+	}
+	if usesDesignDecisions {
+		b.WriteString("\nDesign decisions:\n")
+		selectedDecisions := map[string]bool{}
+		if s.DesignDecisionIDs != nil {
+			for _, id := range *s.DesignDecisionIDs {
+				selectedDecisions[id] = true
+			}
+		}
+		emitted = false
+		if p.DesignDecisions != nil {
+			for _, decision := range *p.DesignDecisions {
+				if !selectedDecisions[decision.ID] {
+					continue
+				}
+				if emitted {
+					b.WriteByte('\n')
+				}
+				emitted = true
+				fmt.Fprintf(&b, "- %s: %s", decision.ID, decision.Text)
+				if decision.References != nil {
+					for _, reference := range *decision.References {
+						fmt.Fprintf(&b, "\n  - reference: %s", reference)
+					}
+				}
+			}
+		}
+		if !emitted {
+			b.WriteString("(none)")
+		}
 	}
 	return b.String(), nil
 }
