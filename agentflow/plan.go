@@ -70,6 +70,11 @@ type Step struct {
 
 // UnmarshalJSON preserves optional-list presence and rejects null lists.
 func (p *Plan) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = withoutCaseVariants(data, "design_decisions")
+	if err != nil {
+		return err
+	}
 	if err := rejectNullList(data, "design_decisions"); err != nil {
 		return err
 	}
@@ -84,6 +89,11 @@ func (p *Plan) UnmarshalJSON(data []byte) error {
 
 // UnmarshalJSON preserves optional-list presence and rejects null lists.
 func (d *DesignDecision) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = withoutCaseVariants(data, "id", "text", "references")
+	if err != nil {
+		return err
+	}
 	if err := rejectNullList(data, "references"); err != nil {
 		return err
 	}
@@ -98,6 +108,11 @@ func (d *DesignDecision) UnmarshalJSON(data []byte) error {
 
 // UnmarshalJSON preserves optional-list presence and rejects null lists.
 func (s *Step) UnmarshalJSON(data []byte) error {
+	var err error
+	data, err = withoutCaseVariants(data, "design_decision_ids")
+	if err != nil {
+		return err
+	}
 	if err := rejectNullList(data, "design_decision_ids"); err != nil {
 		return err
 	}
@@ -108,6 +123,25 @@ func (s *Step) UnmarshalJSON(data []byte) error {
 	}
 	*s = Step(decoded)
 	return nil
+}
+
+// withoutCaseVariants prevents encoding/json's case-insensitive struct-field
+// matching from consuming keys that Agentflow's Python contract treats as
+// unknown. Exact canonical keys remain authoritative when both forms appear.
+func withoutCaseVariants(data []byte, canonicalFields ...string) ([]byte, error) {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(data, &fields); err != nil {
+		return nil, err
+	}
+	for key := range fields {
+		for _, canonical := range canonicalFields {
+			if key != canonical && strings.EqualFold(key, canonical) {
+				delete(fields, key)
+				break
+			}
+		}
+	}
+	return json.Marshal(fields)
 }
 
 func rejectNullList(data []byte, field string) error {

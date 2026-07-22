@@ -210,6 +210,56 @@ func TestPlan_RejectsMalformedDesignDecisionLists(t *testing.T) {
 	}
 }
 
+func TestPlan_DesignDecisionKeysAreCaseSensitive(t *testing.T) {
+	var plan Plan
+	if err := json.Unmarshal([]byte(`{
+		"schema_version":"0.4.0",
+		"design_decisions":[{
+			"id":"DD-1","text":"canonical","references":["ADR-CANONICAL"],
+			"ID":"DD-SHADOW","TEXT":"shadow","REFERENCES":["ADR-SHADOW"]
+		}],
+		"DESIGN_DECISIONS":[{"id":"DD-SHADOW","text":"shadow"}],
+		"steps":[{
+			"id":"P1","design_decision_ids":["DD-1"],
+			"DESIGN_DECISION_IDS":["DD-SHADOW"]
+		}]
+	}`), &plan); err != nil {
+		t.Fatal(err)
+	}
+	if plan.DesignDecisions == nil || len(*plan.DesignDecisions) != 1 {
+		t.Fatalf("design decisions = %#v", plan.DesignDecisions)
+	}
+	decision := (*plan.DesignDecisions)[0]
+	if decision.ID != "DD-1" || decision.Text != "canonical" ||
+		decision.References == nil || !slices.Equal(*decision.References, []string{"ADR-CANONICAL"}) {
+		t.Fatalf("case-variant keys overrode canonical decision: %+v", decision)
+	}
+	if plan.Steps[0].DesignDecisionIDs == nil || !slices.Equal(*plan.Steps[0].DesignDecisionIDs, []string{"DD-1"}) {
+		t.Fatalf("case-variant key overrode canonical selection: %#v", plan.Steps[0].DesignDecisionIDs)
+	}
+}
+
+func TestPlan_IgnoresNoncanonicalDesignDecisionKeyVariants(t *testing.T) {
+	var plan Plan
+	if err := json.Unmarshal([]byte(`{
+		"DESIGN_DECISIONS":{},
+		"steps":[{"DESIGN_DECISION_IDS":null}]
+	}`), &plan); err != nil {
+		t.Fatalf("case-variant plan keys should remain unknown: %v", err)
+	}
+	if plan.DesignDecisions != nil || plan.Steps[0].DesignDecisionIDs != nil {
+		t.Fatalf("case-variant plan keys were consumed: %+v", plan)
+	}
+
+	var decision DesignDecision
+	if err := json.Unmarshal([]byte(`{"ID":"DD-SHADOW","TEXT":"shadow","REFERENCES":null}`), &decision); err != nil {
+		t.Fatalf("case-variant decision keys should remain unknown: %v", err)
+	}
+	if decision.ID != "" || decision.Text != "" || decision.References != nil {
+		t.Fatalf("case-variant decision keys were consumed: %+v", decision)
+	}
+}
+
 func TestPreflightP0_RejectsNonCommandGate(t *testing.T) {
 	p := Plan{Steps: []Step{{
 		ID: "P1", Validation: []string{"manual"},
