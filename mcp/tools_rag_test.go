@@ -833,6 +833,29 @@ func TestHandleRAGSearch_ExplainScoresDenseFallback(t *testing.T) {
 	}
 }
 
+func TestHandleRAGSearch_PreservesNilJSONByRetrievalPath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		args  string
+		store rag.VectorStore
+		want  string
+	}{
+		{name: "dense explain", args: `{"query":"q","explain_scores":true}`, store: &recordingMCPDenseStore{}, want: "[]"},
+		{name: "hybrid explain", args: `{"query":"q","explain_scores":true}`, store: &recordingMCPMultiStore{}, want: "null"},
+		{name: "dense contextual", args: `{"query":"q","current_file":"file.go"}`, store: &recordingMCPDenseStore{}, want: "[]"},
+		{name: "hybrid contextual", args: `{"query":"q","current_file":"file.go"}`, store: &recordingMCPMultiStore{}, want: "null"},
+		{name: "dense plain", args: `{"query":"q"}`, store: &recordingMCPDenseStore{}, want: "null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{store: tc.store, retriever: mcpTestRetriever(t, tc.store)}
+			result, err := s.handleRAGSearch(context.Background(), rawArgs(t, tc.args))
+			if err != nil || result == nil || result.IsError || extractText(result) != tc.want {
+				t.Fatalf("result=%#v text=%q error=%v, want %s", result, extractText(result), err, tc.want)
+			}
+		})
+	}
+}
+
 func TestHandleRAGSearch_PreservesLegacyEmptyJSON(t *testing.T) {
 	t.Run("dense", func(t *testing.T) {
 		store := &recordingMCPDenseStore{results: []rag.SearchResult{}}

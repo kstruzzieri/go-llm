@@ -269,15 +269,19 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("rag", "search: %v", err), nil
 	}
 
-	output := any(response.Results)
+	_, hybrid := store.(rag.MultiSignalSearcher)
+	dense := store != nil && !hybrid
+	outputResults := response.Results
+	if outputResults == nil && dense && (args.ExplainScores || contextual) {
+		outputResults = []rag.ScoredResult{}
+	}
+	output := any(outputResults)
 	if !args.ExplainScores {
 		var results []rag.SearchResult
-		_, hybrid := store.(rag.MultiSignalSearcher)
-		dense := store != nil && !hybrid
-		if response.Results != nil && (contextual || scoped || policyScoped || response.Policy.Applied || dense || len(response.Results) > 0) {
-			results = make([]rag.SearchResult, len(response.Results))
-			for i := range response.Results {
-				results[i] = response.Results[i].SearchResult
+		if outputResults != nil && (contextual || scoped || policyScoped || response.Policy.Applied || dense || len(outputResults) > 0) {
+			results = make([]rag.SearchResult, len(outputResults))
+			for i := range outputResults {
+				results[i] = outputResults[i].SearchResult
 				if !contextual || scoped || policyScoped {
 					results[i].Score = 1 - results[i].Distance
 				}
