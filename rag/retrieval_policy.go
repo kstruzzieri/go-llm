@@ -270,15 +270,21 @@ func cloneChunk(chunk Chunk) Chunk {
 	return chunk
 }
 
+// cloneScoredResult deep-copies a single result so the copy shares no mutable
+// Chunk.Metadata or Signals state with the original.
+func cloneScoredResult(result ScoredResult) ScoredResult {
+	result.Chunk = cloneChunk(result.Chunk)
+	result.Signals = maps.Clone(result.Signals)
+	return result
+}
+
 func cloneScoredResults(results []ScoredResult) []ScoredResult {
 	if results == nil {
 		return nil
 	}
 	cloned := make([]ScoredResult, len(results))
 	for i, result := range results {
-		cloned[i] = result
-		cloned[i].Chunk = cloneChunk(result.Chunk)
-		cloned[i].Signals = maps.Clone(result.Signals)
+		cloned[i] = cloneScoredResult(result)
 	}
 	return cloned
 }

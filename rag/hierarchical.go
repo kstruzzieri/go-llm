@@ -272,6 +272,10 @@ func selectHierarchical(ctx context.Context, req HierarchicalRetrievalRequest, i
 	returned := make([]ScoredResult, 0, len(eligible))
 	returnedTokens := 0
 	tokenSkipped := 0
+	// MaxTokens is a hard bound: the greedy fill stops at the first chunk that
+	// does not fit and skips the rest. There is no guaranteed-minimum result —
+	// if the top-ranked chunk alone exceeds MaxTokens this returns zero chunks
+	// (with a token_limit skip). Callers set MaxTokens with that in mind.
 	for i, index := range eligible {
 		tokens := estimatedChunkTokens(candidates[index].result.Chunk.Content)
 		if tokens > req.MaxTokens-returnedTokens {
@@ -279,10 +283,10 @@ func selectHierarchical(ctx context.Context, req HierarchicalRetrievalRequest, i
 			break
 		}
 		returnedTokens += tokens
-		result := cloneScoredResults([]ScoredResult{candidates[index].result})[0]
+		result := cloneScoredResult(candidates[index].result)
 		returned = append(returned, result)
 		trace.FinalChunks = append(trace.FinalChunks, HierarchicalChunkTrace{
-			Result:         cloneScoredResults([]ScoredResult{result})[0],
+			Result:         cloneScoredResult(result),
 			FreshnessKnown: candidates[index].freshness.known,
 			Freshness:      candidates[index].freshness.value,
 		})
@@ -340,6 +344,10 @@ func codeHierarchyPath(chunk Chunk, workspaceRoot string) []hierarchyLevel {
 	return path
 }
 
+// estimatedChunkTokens approximates a chunk's token cost at ~4 bytes/token.
+// It is a deliberate over-estimate (byte length, not rune or true BPE count)
+// so the MaxTokens budget is never exceeded; the safe cost is that multibyte
+// text (e.g. CJK) under-fills relative to a real tokenizer.
 func estimatedChunkTokens(content string) int {
 	if content == "" {
 		return 0
