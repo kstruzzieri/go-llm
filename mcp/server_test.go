@@ -690,6 +690,54 @@ func TestRebuildDerivedClientsRequiresResolvedEmbedding(t *testing.T) {
 	}
 }
 
+func TestRetrievalPolicyOptionsSurviveRetrieverRebuild(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{}
+	observer := &mcpPolicyObserverSpy{}
+	resolver := RetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+		return "resolver-user", nil
+	})
+	router := newRecordingRouteEngine("")
+	s := &Server{
+		store:  stubVectorStore{},
+		router: router,
+		resolved: map[string]config.ResolvedModel{
+			"embedding": {Name: "embed-model", Provider: "fake", Role: "embedding"},
+		},
+	}
+	WithRetrievalPolicyEvaluator(evaluator)(s)
+	WithRetrievalPolicyObserver(observer)(s)
+	WithRetrievalPrincipalResolver(resolver)(s)
+
+	s.rebuildDerivedClients(context.Background())
+	retriever := s.Retriever()
+	if retriever == nil || !retriever.PolicyActive() {
+		t.Fatal("rebuilt retriever is not policy-active")
+	}
+	response, err := retriever.RetrieveRequest(context.Background(), rag.RetrievalRequest{Query: "q"})
+	if !errors.Is(err, rag.ErrPolicyDenied) {
+		t.Fatalf("RetrieveRequest() error = %v, want policy denial", err)
+	}
+	if !response.Policy.Applied || response.Policy.Disposition != rag.RetrievalPolicyDenied {
+		t.Fatalf("policy outcome = %#v", response.Policy)
+	}
+	if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 0 {
+		t.Fatalf("evaluator calls = request:%d results:%d", evaluator.evaluateCalls, evaluator.resultCalls)
+	}
+	if router.called {
+		t.Fatal("embedding ran before policy denial")
+	}
+	if observer.calls != 1 || observer.last.Outcome.Disposition != rag.RetrievalPolicyDenied {
+		t.Fatalf("observer calls/event = %d/%#v", observer.calls, observer.last)
+	}
+	if s.retrievalPrincipalResolver == nil {
+		t.Fatal("resolver option was not retained")
+	}
+	principal, err := s.retrievalPrincipalResolver(context.Background(), rawArgs(t, `{}`))
+	if err != nil || principal != "resolver-user" {
+		t.Fatalf("retained resolver = %q/%v", principal, err)
+	}
+}
+
 func TestRebuildDerivedClientsDoesNotRepublishAfterClose(t *testing.T) {
 	tagsStarted := make(chan struct{}, 1)
 	releaseTags := make(chan struct{})

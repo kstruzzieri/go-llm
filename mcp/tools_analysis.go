@@ -12,6 +12,7 @@ import (
 	"github.com/kstruzzieri/go-llm/analysis"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 // useCaseToConfigRole maps router use-case names back to config Defaults keys.
@@ -369,24 +370,34 @@ func (s *Server) handleVerifySupport(ctx context.Context, req *gomcp.CallToolReq
 	if topK <= 0 {
 		topK = 5
 	}
-	evidence, err := retriever.Retrieve(ctx, args.Question, topK)
+	policy, _, err := s.retrievalPolicyRequest(ctx, req)
 	if err != nil {
+		return retrievalPolicyRequestError(err), nil
+	}
+	response, err := retriever.RetrieveRequest(ctx, rag.RetrievalRequest{
+		Query: args.Question, K: topK, Policy: policy,
+	})
+	if err != nil {
+		if result := retrievalPolicyToolError(response.Policy, err); result != nil {
+			return result, nil
+		}
 		return toolError("rag", "retrieve: %v", err), nil
 	}
+	evidence := flattenRetrievalResults(response.Results, true)
 
 	judge, err := analysis.NewSupportJudgeWithChat(s.analysisChatFunc(), args.Model)
 	if err != nil {
-		return toolError("config", "%v", err), nil
+		return withRetrievalPolicyMeta(toolError("config", "%v", err), response.Policy), nil
 	}
 	report, err := judge.Judge(ctx, args.Answer, evidence)
 	if err != nil {
-		return toolError("analysis", "%v", err), nil
+		return withRetrievalPolicyMeta(toolError("analysis", "%v", err), response.Policy), nil
 	}
 	data, err := json.Marshal(report)
 	if err != nil {
-		return toolError("analysis", "marshal report: %v", err), nil
+		return withRetrievalPolicyMeta(toolError("analysis", "marshal report: %v", err), response.Policy), nil
 	}
-	return toolResult(string(data)), nil
+	return withRetrievalPolicyMeta(toolResult(string(data)), response.Policy), nil
 }
 
 func decodeTrainingMetrics(raw json.RawMessage) (analysis.TrainingMetrics, error) {

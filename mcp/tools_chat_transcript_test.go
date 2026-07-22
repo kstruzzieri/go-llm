@@ -14,10 +14,110 @@ import (
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/ollama"
 	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
 	"github.com/kstruzzieri/go-llm/transcript"
 
 	_ "modernc.org/sqlite"
 )
+
+func TestHandleChat_PolicyFilteredToZeroStopsBeforeRouter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	ts, err := transcript.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	evaluator := &mcpPolicyEvaluatorSpy{
+		decision:       rag.RetrievalPolicyDecision{Allow: true},
+		resultDecision: []rag.RetrievalResultDecision{{Keep: false}},
+	}
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "denied", Source: "denied.go", Content: "DENIED_SECRET"}, Score: 0.8, Distance: 0.2},
+	}}}
+	router := newRecordingRouteEngine("answer")
+	s := &Server{
+		router: router, transcriptStore: ts,
+		retriever:                mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator)),
+		retrievalPolicyEvaluator: evaluator,
+	}
+
+	result, err := s.handleChat(context.Background(), rawArgs(t, `{"model":"ollama/test","use_rag":true,"messages":[{"role":"user","content":"question"}]}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	if got := extractText(result); got != "policy_no_context: no permitted RAG context" {
+		t.Fatalf("error text = %q", got)
+	}
+	if result.Meta == nil {
+		t.Fatal("governed empty result omitted safe applied metadata")
+	}
+	if router.called {
+		t.Fatal("router called after policy filtered all context")
+	}
+	_ = ts.Close()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open read handle: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM raw_chat_calls`).Scan(&count); err != nil {
+		t.Fatalf("count transcript records: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("transcript records = %d, want 0", count)
+	}
+}
+
+func TestHandleChat_PolicyContentNeverReachesRenderedTranscript(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "conv.db")
+	ts, err := transcript.Open(context.Background(), path)
+	if err != nil {
+		t.Fatalf("open transcript: %v", err)
+	}
+	evaluator := &policyMetadataEvaluator{}
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{
+		{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "denied", Source: "denied.go", Content: "DENIED_SECRET"}, Score: 0.9, Distance: 0.1}},
+		{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "redacted", Source: "allowed.go", Content: "ORIGINAL_SECRET"}, Score: 0.8, Distance: 0.2}},
+	}}
+	s := &Server{
+		router: newRecordingRouteEngine("answer"), transcriptStore: ts,
+		retriever:                mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator)),
+		retrievalPolicyEvaluator: evaluator,
+	}
+
+	req := rawArgs(t, `{"model":"ollama/test","use_rag":true,"conversation_id":"policy-transcript","messages":[{"role":"user","content":"question"}]}`)
+	req.Params.Meta = policyMetaFromJSON(t, `{"audit_labels":{"purpose":"support"}}`)
+	result, err := s.handleChat(context.Background(), req)
+	if err != nil || result.IsError {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	_ = ts.Close()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("open read handle: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var renderedJSON string
+	if err := db.QueryRow(`SELECT rendered_messages FROM conversations WHERE id = ?`, "policy-transcript").Scan(&renderedJSON); err != nil {
+		t.Fatalf("read rendered request: %v", err)
+	}
+	var record struct {
+		RenderedRequest []conversation.Message `json:"rendered_request"`
+	}
+	if err := json.Unmarshal([]byte(`{"rendered_request":`+renderedJSON+`}`), &record); err != nil {
+		t.Fatalf("decode rendered request: %v", err)
+	}
+	encoded, err := json.Marshal(record.RenderedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if strings.Contains(text, "DENIED_SECRET") || strings.Contains(text, "ORIGINAL_SECRET") || !strings.Contains(text, "REDACTED") {
+		t.Fatalf("rendered transcript leaked policy content: %s", text)
+	}
+}
 
 func TestChatArgs_ParsesConversationID(t *testing.T) {
 	var args chatArgs

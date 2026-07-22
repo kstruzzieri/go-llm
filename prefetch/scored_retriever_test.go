@@ -96,6 +96,24 @@ func (m *mockProbingStore) ProbeVectorSpaces(context.Context) (rag.VectorSpacePr
 	return rag.VectorSpaceProbe{KnownIDs: m.knownIDs}, nil
 }
 
+type prefetchAllowEvaluator struct{}
+
+func (prefetchAllowEvaluator) Evaluate(context.Context, rag.RetrievalRequest) (rag.RetrievalPolicyDecision, error) {
+	return rag.RetrievalPolicyDecision{Allow: true}, nil
+}
+
+func (prefetchAllowEvaluator) EvaluateResults(context.Context, rag.RetrievalRequest, []rag.Chunk) ([]rag.RetrievalResultDecision, error) {
+	return nil, nil
+}
+
+func TestScoredRetriever_PolicyActiveForwards(t *testing.T) {
+	inactive := &ScoredRetriever{retriever: rag.NewRetriever(nil, nil)}
+	active := &ScoredRetriever{retriever: rag.NewRetriever(nil, nil, rag.WithRetrievalPolicyEvaluator(prefetchAllowEvaluator{}))}
+	if inactive.PolicyActive() || !active.PolicyActive() {
+		t.Fatalf("inactive=%v active=%v", inactive.PolicyActive(), active.PolicyActive())
+	}
+}
+
 func TestScoredRetriever_vsidMismatch_errors(t *testing.T) {
 	embedding := []float64{0.1, 0.2, 0.3}
 	server := newMockEmbedServer(embedding)

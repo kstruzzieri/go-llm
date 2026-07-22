@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"reflect"
 	"strings"
@@ -16,6 +17,247 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
+
+func TestHandleChat_ForwardsPolicyMetaAndRedactsBeforeRouter(t *testing.T) {
+	redacted := "REDACTED"
+	evaluator := &mcpPolicyEvaluatorSpy{
+		decision: rag.RetrievalPolicyDecision{Allow: true},
+		resultDecision: []rag.RetrievalResultDecision{
+			{Keep: false},
+			{Keep: true, RedactedContent: &redacted},
+		},
+	}
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{
+		{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "denied", Source: "denied.go", Content: "DENIED_SECRET"}, Score: 0.9, Distance: 0.1}},
+		{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "redacted", Source: "allowed.go", Content: "ORIGINAL_SECRET"}, Score: 0.8, Distance: 0.2}},
+	}}
+	router := newRecordingRouteEngine("answer")
+	s := &Server{
+		router:                   router,
+		retriever:                mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator)),
+		retrievalPolicyEvaluator: evaluator,
+	}
+	WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+		return "resolved-principal", nil
+	})(s)
+	req := rawArgs(t, `{"model":"ollama/test","use_rag":true,"messages":[{"role":"user","content":"question"}]}`)
+	req.Params.Meta = policyMetaFromJSON(t, `{
+		"principal_id":"claimed-principal","session_id":"claimed-session",
+		"max_results":2,"audit_labels":{"purpose":"support"}
+	}`)
+
+	result, err := s.handleChat(context.Background(), req)
+	if err != nil || result.IsError {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	if result.Meta == nil {
+		t.Fatal("successful governed chat omitted safe applied metadata")
+	}
+	if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 1 {
+		t.Fatalf("evaluator calls = %d/%d, want 1/1", evaluator.evaluateCalls, evaluator.resultCalls)
+	}
+	if store.calls != 1 {
+		t.Fatalf("retrieval calls = %d, want 1", store.calls)
+	}
+	if evaluator.last.Policy.PrincipalID != "resolved-principal" ||
+		evaluator.last.Policy.SessionID != "claimed-session" ||
+		evaluator.last.Policy.MaxResults != 2 ||
+		evaluator.last.Policy.AuditLabels["purpose"] != "support" {
+		t.Fatalf("evaluator policy = %#v", evaluator.last.Policy)
+	}
+	if !reflect.DeepEqual(evaluator.last.QueryContext, rag.QueryContext{}) || evaluator.last.QueryContext.Metadata != nil {
+		t.Fatalf("evaluator QueryContext = %#v, want exact zero value", evaluator.last.QueryContext)
+	}
+	rendered := fmt.Sprint(router.last.Messages)
+	if strings.Contains(rendered, "DENIED_SECRET") || strings.Contains(rendered, "ORIGINAL_SECRET") || !strings.Contains(rendered, "REDACTED") {
+		t.Fatalf("model-visible messages leaked policy content: %s", rendered)
+	}
+	metaJSON, err := json.Marshal(result.Meta)
+	if err != nil || strings.Contains(string(metaJSON), "principal") || strings.Contains(string(metaJSON), "purpose") {
+		t.Fatalf("unsafe result meta: %s, %v", metaJSON, err)
+	}
+}
+
+func TestHandleChat_PolicyFailureIsSanitized(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{evaluateErr: errors.New("ERROR_SECRET")}
+	store := &recordingMCPMultiStore{}
+	embedCalls := 0
+	retriever, err := rag.NewRetrieverWithEmbedder(
+		rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+			embedCalls++
+			return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+		}),
+		store,
+		rag.WithRetrievalPolicyEvaluator(evaluator),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	router := newRecordingRouteEngine("answer")
+	s := &Server{router: router, retriever: retriever, retrievalPolicyEvaluator: evaluator}
+
+	result, err := s.handleChat(context.Background(), rawArgs(t, `{"model":"ollama/test","use_rag":true,"messages":[{"role":"user","content":"question"}]}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result = %#v, error = %v", result, err)
+	}
+	if got := extractText(result); got != "policy_evaluator_failed: retrieval policy evaluation failed" || strings.Contains(got, "ERROR_SECRET") {
+		t.Fatalf("error text = %q", got)
+	}
+	if result.Meta == nil {
+		t.Fatal("policy failure omitted safe applied metadata")
+	}
+	if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 0 || embedCalls != 0 || store.calls != 0 || router.called {
+		t.Fatalf("work after policy failure evaluator=%d/%d embed=%d search=%d router=%v",
+			evaluator.evaluateCalls, evaluator.resultCalls, embedCalls, store.calls, router.called)
+	}
+}
+
+func TestHandleChat_PolicyRequestFailureIsSanitized(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta gomcp.Meta
+		bind func(*Server)
+		want string
+	}{
+		{
+			name: "invalid metadata", meta: policyMetaFromJSON(t, `{"UNKNOWN_SECRET":true}`),
+			want: "validation: invalid retrieval policy metadata",
+		},
+		{
+			name: "identity", meta: policyMetaFromJSON(t, `{"principal_id":"claimed"}`),
+			bind: func(s *Server) {
+				WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+					return "", errors.New("ERROR_SECRET")
+				})(s)
+			},
+			want: "policy_identity_failed: retrieval identity resolution failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+			store := &recordingMCPMultiStore{}
+			embedCalls := 0
+			retriever, err := rag.NewRetrieverWithEmbedder(
+				rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+					embedCalls++
+					return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+				}), store, rag.WithRetrievalPolicyEvaluator(evaluator),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			router := newRecordingRouteEngine("answer")
+			s := &Server{router: router, retriever: retriever, retrievalPolicyEvaluator: evaluator}
+			if tc.bind != nil {
+				tc.bind(s)
+			}
+			req := rawArgs(t, `{"model":"ollama/test","use_rag":true,"messages":[{"role":"user","content":"question"}]}`)
+			req.Params.Meta = tc.meta
+
+			result, err := s.handleChat(context.Background(), req)
+			if err != nil || result == nil || !result.IsError || extractText(result) != tc.want {
+				t.Fatalf("result = %#v, text = %q, error = %v, want %q", result, extractText(result), err, tc.want)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "SECRET") || result.Meta != nil {
+				t.Fatalf("request error leaked detail or metadata: %s", data)
+			}
+			if evaluator.evaluateCalls != 0 || evaluator.resultCalls != 0 || embedCalls != 0 || store.calls != 0 || router.called {
+				t.Fatalf("work after request failure evaluator=%d/%d embed=%d search=%d router=%v",
+					evaluator.evaluateCalls, evaluator.resultCalls, embedCalls, store.calls, router.called)
+			}
+		})
+	}
+}
+
+func TestHandleChat_PolicyMetaSurvivesPostRetrievalErrors(t *testing.T) {
+	newServer := func(t *testing.T, router routeEngine) *Server {
+		t.Helper()
+		evaluator := &mcpPolicyEvaluatorSpy{
+			decision:       rag.RetrievalPolicyDecision{Allow: true},
+			resultDecision: []rag.RetrievalResultDecision{{Keep: true}},
+		}
+		store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+			SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "allowed", Source: "allowed.go", Content: "allowed"}, Score: 0.8, Distance: 0.2},
+		}}}
+		return &Server{
+			router: router, retriever: mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator)),
+			retrievalPolicyEvaluator: evaluator,
+		}
+	}
+
+	for _, tc := range []struct {
+		name   string
+		server func(*testing.T) *Server
+		model  string
+		want   string
+	}{
+		{
+			name: "config", server: func(t *testing.T) *Server { return newServer(t, newRecordingRouteEngine("answer")) },
+			want: "config:",
+		},
+		{
+			name: "router", server: func(t *testing.T) *Server {
+				router := newRecordingRouteEngine("answer")
+				router.routeErr = errors.New("route failed")
+				return newServer(t, router)
+			}, model: "ollama/test", want: "router: route failed",
+		},
+		{
+			name: "model", server: func(t *testing.T) *Server {
+				return newServer(t, &chatErrorRouteEngine{recordingRouteEngine: newRecordingRouteEngine("answer")})
+			}, model: "ollama/test", want: "ollama: model failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			args := fmt.Sprintf(`{"model":%q,"use_rag":true,"messages":[{"role":"user","content":"question"}]}`, tc.model)
+			result, err := tc.server(t).handleChat(context.Background(), rawArgs(t, args))
+			if err != nil || result == nil || !result.IsError || !strings.HasPrefix(extractText(result), tc.want) {
+				t.Fatalf("result = %#v, text = %q, error = %v, want prefix %q", result, extractText(result), err, tc.want)
+			}
+			if result.Meta == nil {
+				t.Fatal("post-retrieval error omitted safe applied metadata")
+			}
+		})
+	}
+}
+
+type chatErrorRouteEngine struct {
+	*recordingRouteEngine
+}
+
+func (e *chatErrorRouteEngine) Route(ctx context.Context, req provider.RoutingRequest) (*provider.RoutePlan, error) {
+	plan, err := e.recordingRouteEngine.Route(ctx, req)
+	if err == nil {
+		plan.Provider = &chatErrorProvider{fakeRouteProvider: plan.Provider.(*fakeRouteProvider)}
+	}
+	return plan, err
+}
+
+type chatErrorProvider struct {
+	*fakeRouteProvider
+}
+
+func (*chatErrorProvider) Chat(context.Context, provider.ChatRequest) (*provider.ChatResponse, error) {
+	return nil, errors.New("model failed")
+}
+
+type policyMetadataEvaluator struct{}
+
+func (*policyMetadataEvaluator) Evaluate(context.Context, rag.RetrievalRequest) (rag.RetrievalPolicyDecision, error) {
+	return rag.RetrievalPolicyDecision{Allow: true}, nil
+}
+
+func (*policyMetadataEvaluator) EvaluateResults(_ context.Context, req rag.RetrievalRequest, _ []rag.Chunk) ([]rag.RetrievalResultDecision, error) {
+	if req.Policy.AuditLabels["purpose"] != "support" {
+		return nil, nil
+	}
+	redacted := "REDACTED"
+	return []rag.RetrievalResultDecision{{Keep: false}, {Keep: true, RedactedContent: &redacted}}, nil
+}
 
 func TestChatSchema_QueryContext(t *testing.T) {
 	env := newTestEnv(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -83,7 +325,7 @@ func TestHandleChat_RAGForwardsQueryContextAndKeepsPromptCompact(t *testing.T) {
 		{
 			SearchResult: rag.SearchResult{
 				Chunk: rag.Chunk{ID: "c1", Source: "context.go", StartLine: 7, EndLine: 7, Content: "context line"},
-				Score: 0.8, Distance: 0.2,
+				Score: 0.61, Distance: 0.2,
 			},
 			RankScore: 0.047,
 			Signals:   map[string]float64{"semantic": 0.8, "keyword": 0.4, "structural": 1},
@@ -121,6 +363,9 @@ func TestHandleChat_RAGForwardsQueryContextAndKeepsPromptCompact(t *testing.T) {
 		t.Fatalf("model messages = %d, want injected context plus three original messages", len(router.last.Messages))
 	}
 	contextMessage := router.last.Messages[0].Content
+	if !strings.Contains(contextMessage, "similarity: 0.61") {
+		t.Fatalf("contextual prompt did not preserve embedded SearchResult score: %s", contextMessage)
+	}
 	for _, unwanted := range []string{"RankScore", "Signals", "keyword", "structural", "0.047", "too-large.go"} {
 		if strings.Contains(contextMessage, unwanted) {
 			t.Errorf("ordinary chat context contains %q: %s", unwanted, contextMessage)
@@ -208,7 +453,7 @@ func TestHandleChat_ContextualRAGErrors(t *testing.T) {
 		if err != nil {
 			t.Fatalf("handleChat: %v", err)
 		}
-		if !result.IsError || !strings.Contains(extractText(result), "RAG index is empty") {
+		if !result.IsError || extractText(result) != "rag: RAG index is empty; run rag_index_file or rag_index_directory first" || result.Meta != nil {
 			t.Fatalf("result = isError:%v text:%q, want established empty-index error", result.IsError, extractText(result))
 		}
 	})

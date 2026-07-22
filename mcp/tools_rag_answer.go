@@ -349,10 +349,20 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 		return toolError("rag", "retriever unavailable; embedding model may not be resolved"), nil
 	}
 
-	results, err := retriever.Retrieve(ctx, args.Question, topK)
+	policy, _, err := s.retrievalPolicyRequest(ctx, req)
 	if err != nil {
+		return retrievalPolicyRequestError(err), nil
+	}
+	response, err := retriever.RetrieveRequest(ctx, rag.RetrievalRequest{
+		Query: args.Question, K: topK, Policy: policy,
+	})
+	if err != nil {
+		if result := retrievalPolicyToolError(response.Policy, err); result != nil {
+			return result, nil
+		}
 		return toolError("rag", "retrieve: %v", err), nil
 	}
+	results := flattenRetrievalResults(response.Results, true)
 
 	var (
 		ma     modelAnswer
@@ -369,12 +379,12 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 
 		router := s.routerSnapshot()
 		if router == nil {
-			return toolError("config", "router unavailable"), nil
+			return withRetrievalPolicyMeta(toolError("config", "router unavailable"), response.Policy), nil
 		}
 		var parsed bool
 		ma, parsed, err = s.callForAnswer(ctx, router, args.Model, args.Question, evidenceText)
 		if err != nil {
-			return toolError("router", "%v", err), nil
+			return withRetrievalPolicyMeta(toolError("router", "%v", err), response.Policy), nil
 		}
 		if !parsed {
 			result = ragAnswerResult{Status: statusMalformedOutput, Sources: []answerSource{}, Quotes: []answerQuote{}, VerificationErrors: []string{}}
@@ -387,7 +397,7 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 		cp        rag.CorpusPresence
 		corpusRan bool
 	)
-	if result.Status == statusNotInRetrievedContext && store != nil {
+	if result.Status == statusNotInRetrievedContext && store != nil && !response.Policy.Applied {
 		retrievedIDs := make([]string, 0, len(results))
 		for _, r := range results {
 			retrievedIDs = append(retrievedIDs, r.Chunk.ID)
@@ -407,9 +417,9 @@ func (s *Server) handleRAGAnswer(ctx context.Context, req *gomcp.CallToolRequest
 
 	data, err := json.Marshal(result)
 	if err != nil {
-		return toolError("rag", "marshal result: %v", err), nil
+		return withRetrievalPolicyMeta(toolError("rag", "marshal result: %v", err), response.Policy), nil
 	}
-	return toolResult(string(data)), nil
+	return withRetrievalPolicyMeta(toolResult(string(data)), response.Policy), nil
 }
 
 // corpusKeywordSearcher is the subset of the vector store the corpus-absence

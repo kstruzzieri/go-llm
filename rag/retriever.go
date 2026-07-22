@@ -21,6 +21,8 @@ type Retriever struct {
 	store           VectorStore
 	vectorOnly      bool
 	readManagedFile func(context.Context, string) ([]byte, error)
+	policyEvaluator RetrievalPolicyEvaluator
+	policyObserver  RetrievalPolicyObserver
 }
 
 // RetrievalScope restricts retrieval to managed documents in a collection and
@@ -75,6 +77,48 @@ func WithVectorOnly() RetrieverOption {
 	}
 }
 
+// WithRetrievalPolicyEvaluator installs the evaluator used for retrieval policy.
+func WithRetrievalPolicyEvaluator(evaluator RetrievalPolicyEvaluator) RetrieverOption {
+	return func(r *Retriever) {
+		if isNilRetrievalPolicyValue(evaluator) {
+			r.policyEvaluator = nil
+			return
+		}
+		r.policyEvaluator = evaluator
+	}
+}
+
+func isNilRetrievalPolicyValue(value any) bool {
+	if value == nil {
+		return true
+	}
+	v := reflect.ValueOf(value)
+	switch v.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return v.IsNil()
+	default:
+		return false
+	}
+}
+
+// WithRetrievalPolicyObserver installs the synchronous, consumer-owned policy
+// observer.
+func WithRetrievalPolicyObserver(observer RetrievalPolicyObserver) RetrieverOption {
+	return func(r *Retriever) {
+		if isNilRetrievalPolicyValue(observer) {
+			r.policyObserver = nil
+			return
+		}
+		r.policyObserver = observer
+	}
+}
+
+// PolicyActive reports whether an evaluator is installed; an observer alone
+// does not make retrieval policy active.
+func (r *Retriever) PolicyActive() bool {
+	return r != nil && r.policyEvaluator != nil
+}
+
 // buildRetriever is the single private path constructing a Retriever; both
 // the legacy ollama-backed shim NewRetriever and the new
 // NewRetrieverWithEmbedder route through it.
@@ -118,89 +162,24 @@ func NewRetrieverWithEmbedder(embedder Embedder, store VectorStore, opts ...Retr
 
 // Retrieve finds the top-k most relevant chunks for a query.
 func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
-	results, err := r.retrieve(ctx, query, k)
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k})
 	if err != nil {
 		return nil, err
 	}
-	if err := refreshManagedSearchResults(ctx, r.store, r.readManagedFile, results); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return semanticSearchResults(response.Results, r.usesDenseSearch(), true), nil
 }
 
 // RetrieveScoped finds top-k relevant managed chunks after applying scope.
 func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, scope RetrievalScope) ([]SearchResult, error) {
-	scope, err := normalizeRetrievalScope(scope)
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, Scope: scope})
 	if err != nil {
 		return nil, err
 	}
-	if scope.empty() {
-		return r.Retrieve(ctx, query, k)
-	}
-	store, ok := r.store.(*SQLiteStore)
-	if !ok {
-		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
-	}
-	if store.immutable {
-		registry, err := managedRegistrySnapshotForScope(ctx, store, scope)
-		if err != nil {
-			return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
-		}
-		results, err := r.retrieveImmutableScoped(ctx, query, k, store, registry)
-		if err != nil {
-			return nil, err
-		}
-		results = filterSearchResults(results, scope, registry)
-		if err := refreshManagedSearchResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-			return nil, err
-		}
-		return results, nil
-	}
-	results, err := r.retrieve(ctx, query, 0)
+	normalized, err := normalizeRetrievalScope(scope)
 	if err != nil {
 		return nil, err
 	}
-	registry, _, err := managedRegistrySnapshot(ctx, store, searchResultChunks(results))
-	if err != nil {
-		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
-	}
-	results = filterSearchResults(results, scope, registry)
-	if k > 0 && len(results) > k {
-		results = results[:k]
-	}
-	if err := refreshManagedSearchResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-		return nil, err
-	}
-	return results, nil
-}
-
-func (r *Retriever) retrieve(ctx context.Context, query string, k int) ([]SearchResult, error) {
-	embedding, err := r.embedQuery(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prefer multi-signal (hybrid) retrieval when the store supports it and the
-	// caller has not opted out: semantic, keyword, and temporal signals
-	// participate in ranking. Retrieve's signature carries no editor context, so
-	// the structural scorer stays inert (empty QueryContext); the temporal scorer
-	// still works, dating chunks against the newest indexed row. Behavioral does
-	// NOT depend on QueryContext: when a weighter is installed (SetBehavioralWeighter)
-	// it is active here too, keyed by each chunk's StableKey.
-	if ms, ok := r.store.(MultiSignalSearcher); ok && !r.vectorOnly {
-		scored, err := ms.SearchMulti(ctx, embedding, query, k, QueryContext{})
-		if err != nil {
-			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
-		}
-		return semanticSearchResults(scored), nil
-	}
-
-	results, err := r.store.Search(ctx, embedding, k)
-	if err != nil {
-		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
-	}
-
-	return results, nil
+	return semanticSearchResults(response.Results, r.usesDenseSearch(), normalized.empty()), nil
 }
 
 func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, error) {
@@ -219,37 +198,28 @@ func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, er
 	return embedding, nil
 }
 
-func semanticSearchResults(scored []ScoredResult) []SearchResult {
-	if len(scored) == 0 {
+func semanticSearchResults(scored []ScoredResult, dense, collapseEmpty bool) []SearchResult {
+	if scored == nil {
 		return nil
 	}
-	// Hybrid ranking remains in result order, while SearchResult.Score retains
-	// its semantic-similarity contract for context rendering and callers.
+	// Dense results pass through verbatim: the legacy dense path returned the
+	// store's Score and shape untouched. Only hybrid ranking rewrites Score
+	// back to its semantic-similarity contract (1 - Distance). Hybrid empty
+	// shapes follow the legacy flatten: the unscoped path collapsed every
+	// empty slice to nil (collapseEmpty), while the scoped path collapsed only
+	// empty-at-source — post-filter results here — where a surviving non-nil
+	// empty slice means filtered-to-empty and stays non-nil.
+	if !dense && collapseEmpty && len(scored) == 0 {
+		return nil
+	}
 	results := make([]SearchResult, len(scored))
 	for i, result := range scored {
 		results[i] = result.SearchResult
-		results[i].Score = 1 - results[i].Distance
+		if !dense {
+			results[i].Score = 1 - results[i].Distance
+		}
 	}
 	return results
-}
-
-func (r *Retriever) retrieveImmutableScoped(ctx context.Context, query string, k int, store *SQLiteStore, registry map[string]managedRegistryDocument) ([]SearchResult, error) {
-	embedding, err := r.embedQuery(ctx, query)
-	if err != nil {
-		return nil, err
-	}
-	if !r.vectorOnly {
-		scored, err := store.searchMultiSnapshotScoped(ctx, embedding, query, k, QueryContext{}, registry)
-		if err != nil {
-			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
-		}
-		return semanticSearchResults(scored), nil
-	}
-	results, err := store.searchSnapshotScoped(ctx, embedding, k, registry)
-	if err != nil {
-		return nil, fmt.Errorf("rag: search: %w: %w", ErrStoreOperation, err)
-	}
-	return results, nil
 }
 
 // RetrieveScored is the signal-scored retrieval surface. Like Retrieve it embeds
@@ -259,60 +229,115 @@ func (r *Retriever) retrieveImmutableScoped(ctx context.Context, query string, k
 // returns SearchMulti's hybrid results directly; otherwise it falls back to dense
 // vector search wrapped as single-signal ("semantic") scored results.
 func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
-	results, err := r.retrieveScored(ctx, query, k, qCtx)
-	if err != nil {
-		return nil, err
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, QueryContext: qCtx})
+	if err == nil && response.Results == nil && r.usesDenseSearch() {
+		response.Results = []ScoredResult{}
 	}
-	if err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results); err != nil {
-		return nil, err
-	}
-	return results, nil
+	return response.Results, err
 }
 
-// RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
-func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
-	scope, err := normalizeRetrievalScope(scope)
+func (r *Retriever) retrieveScoredBase(ctx context.Context, req RetrievalRequest, owned, policyActive bool) ([]ScoredResult, []retrievalFreshness, error) {
+	scope, err := normalizeRetrievalScope(req.Scope)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if scope.empty() {
-		return r.RetrieveScored(ctx, query, k, qCtx)
+		results, err := r.retrieveScored(ctx, req.Query, req.K, req.QueryContext)
+		if err != nil {
+			return nil, nil, err
+		}
+		limit := 0
+		if policyActive {
+			limit = req.K
+		}
+		results, freshness, err := r.prepareUnscopedScoredResults(ctx, results, limit, owned)
+		if err != nil {
+			return nil, nil, err
+		}
+		return results, freshness, nil
 	}
+	return r.retrieveScoredScopedBase(ctx, req.Query, req.K, scope, req.QueryContext, owned, policyActive)
+}
+
+func (r *Retriever) prepareUnscopedScoredResults(ctx context.Context, results []ScoredResult, k int, owned bool) ([]ScoredResult, []retrievalFreshness, error) {
+	if k > 0 && len(results) > k {
+		results = results[:k]
+	}
+	results = ownScoredResults(results, owned)
+	freshness, err := refreshManagedScoredResults(ctx, r.store, r.readManagedFile, results)
+	return results, freshness, err
+}
+
+func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext, owned, policyActive bool) ([]ScoredResult, []retrievalFreshness, error) {
 	store, ok := r.store.(*SQLiteStore)
 	if !ok {
-		return nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
+		return nil, nil, fmt.Errorf("rag: scoped retrieval requires SQLiteStore")
 	}
 	if store.immutable {
 		registry, err := managedRegistrySnapshotForScope(ctx, store, scope)
 		if err != nil {
-			return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+			return nil, nil, fmt.Errorf("rag: scoped managed registry: %w", err)
 		}
 		results, err := r.retrieveScoredImmutableScoped(ctx, query, k, qCtx, store, registry)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
-		results = filterScoredResults(results, scope, registry)
-		if err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-			return nil, err
+		limit := 0
+		if policyActive {
+			limit = k
 		}
-		return results, nil
+		results = filterScoredResults(results, scope, registry, limit)
+		results = ownScoredResults(results, owned)
+		freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
+		if err != nil {
+			return nil, nil, err
+		}
+		return results, freshness, nil
 	}
 	results, err := r.retrieveScored(ctx, query, 0, qCtx)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	registry, _, err := managedRegistrySnapshot(ctx, store, scoredResultChunks(results))
 	if err != nil {
-		return nil, fmt.Errorf("rag: scoped managed registry: %w", err)
+		return nil, nil, fmt.Errorf("rag: scoped managed registry: %w", err)
 	}
-	results = filterScoredResults(results, scope, registry)
-	if k > 0 && len(results) > k {
-		results = results[:k]
+	results = filterScoredResults(results, scope, registry, k)
+	results = ownScoredResults(results, owned)
+	freshness, err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry)
+	if err != nil {
+		return nil, nil, err
 	}
-	if err := refreshManagedScoredResultsWithRegistry(ctx, r.readManagedFile, results, registry); err != nil {
-		return nil, err
+	return results, freshness, nil
+}
+
+// RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
+func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
+	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, Scope: scope, QueryContext: qCtx})
+	// The immutable snapshot's zero-candidate hybrid search returned a non-nil
+	// empty slice on the legacy scored surface (the canonical pipeline
+	// collapses it to nil internally); dense empties keep their legacy
+	// restored shape as on RetrieveScored. Mutable hybrid emptiness stays nil,
+	// matching SearchMulti's legacy passthrough.
+	if err == nil && response.Results == nil {
+		if s, ok := r.store.(*SQLiteStore); r.usesDenseSearch() || (ok && s.immutable && !scopeEmptyForRestore(scope)) {
+			response.Results = []ScoredResult{}
+		}
 	}
-	return results, nil
+	return response.Results, err
+}
+
+// scopeEmptyForRestore reports whether the caller's scope normalizes to empty,
+// treating an invalid scope as empty; it exists only to pick the legacy empty
+// shape and never affects errors or filtering.
+func scopeEmptyForRestore(scope RetrievalScope) bool {
+	normalized, err := normalizeRetrievalScope(scope)
+	return err != nil || normalized.empty()
+}
+
+func (r *Retriever) usesDenseSearch() bool {
+	_, hybrid := r.store.(MultiSignalSearcher)
+	return r.vectorOnly || !hybrid
 }
 
 func (r *Retriever) retrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
@@ -342,6 +367,14 @@ func (r *Retriever) retrieveScoredImmutableScoped(ctx context.Context, query str
 		if err != nil {
 			return nil, fmt.Errorf("rag: hybrid search: %w: %w", ErrStoreOperation, err)
 		}
+		// The snapshot search allocates even for zero candidates — the only
+		// hybrid source that produces a non-nil empty slice. Collapse it to
+		// nil here (as the legacy pre-filter flatten did) so scope filtering,
+		// which preserves nil-ness via results[:0], keeps empty-at-source
+		// distinguishable from filtered-to-empty downstream.
+		if len(results) == 0 {
+			return nil, nil
+		}
 		return results, nil
 	}
 	results, err := store.searchSnapshotScoped(ctx, embedding, k, registry)
@@ -368,21 +401,21 @@ func normalizeRetrievalScope(scope RetrievalScope) (RetrievalScope, error) {
 	return scope, nil
 }
 
-func filterSearchResults(results []SearchResult, scope RetrievalScope, registry map[string]managedRegistryDocument) []SearchResult {
-	filtered := results[:0]
-	for _, result := range results {
-		if document, ok := registry[result.Chunk.Source]; ok && matchesRetrievalScope(result.Chunk, document, scope) {
-			filtered = append(filtered, result)
-		}
+func filterScoredResults(results []ScoredResult, scope RetrievalScope, registry map[string]managedRegistryDocument, k int) []ScoredResult {
+	if results == nil {
+		return nil
 	}
-	return filtered
-}
-
-func filterScoredResults(results []ScoredResult, scope RetrievalScope, registry map[string]managedRegistryDocument) []ScoredResult {
-	filtered := results[:0]
+	capacity := len(results)
+	if k > 0 && k < capacity {
+		capacity = k
+	}
+	filtered := make([]ScoredResult, 0, capacity)
 	for _, result := range results {
 		if document, ok := registry[result.Chunk.Source]; ok && matchesRetrievalScope(result.Chunk, document, scope) {
 			filtered = append(filtered, result)
+			if k > 0 && len(filtered) == k {
+				break
+			}
 		}
 	}
 	return filtered
@@ -409,14 +442,6 @@ func matchesManagedRegistry(chunk Chunk, document managedRegistryDocument) bool 
 		meta["managed_origin"] == document.origin && meta["managed_mime_type"] == document.mimeType &&
 		meta["managed_content_hash"] == document.contentHash && meta["managed_collection"] == document.collection &&
 		meta["managed_tags"] == document.tagsJSON && meta["managed_state"] == document.state
-}
-
-func searchResultChunks(results []SearchResult) []Chunk {
-	chunks := make([]Chunk, len(results))
-	for i := range results {
-		chunks[i] = results[i].Chunk
-	}
-	return chunks
 }
 
 func scoredResultChunks(results []ScoredResult) []Chunk {
@@ -699,82 +724,71 @@ type managedFreshnessCheck struct {
 	err  error
 }
 
+type retrievalFreshness struct {
+	known bool
+	value DocumentFreshness
+}
+
+func unknownFreshness(count int) []retrievalFreshness {
+	return make([]retrievalFreshness, count)
+}
+
+func trustedManagedFreshness(document managedRegistryDocument, live DocumentFreshness) retrievalFreshness {
+	if document.state != string(DocumentStateIndexed) {
+		return retrievalFreshness{known: true, value: DocumentFreshnessStale}
+	}
+	if document.kind == string(DocumentKindText) {
+		return retrievalFreshness{known: true, value: DocumentFreshnessFresh}
+	}
+	if document.kind == string(DocumentKindFile) {
+		return retrievalFreshness{known: true, value: live}
+	}
+	return retrievalFreshness{known: true, value: DocumentFreshnessStale}
+}
+
 const maxManagedFreshnessReads = 100
 
-func refreshManagedSearchResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []SearchResult) error {
+func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []ScoredResult) ([]retrievalFreshness, error) {
 	sqlite, ok := store.(*SQLiteStore)
 	if !ok {
-		return nil
-	}
-	registry, registeredSources, err := managedRegistrySnapshot(ctx, sqlite, searchResultChunks(results))
-	if errors.Is(err, errManagedDocumentsTableMissing) {
-		return nil // Legacy read-only stores without managed_documents stay compatible.
-	}
-	if err != nil {
-		return err
-	}
-	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, registeredSources, maxManagedFreshnessReads)
-}
-
-func refreshManagedSearchResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument) error {
-	// Scoped results are bounded by the caller's k, but library callers may
-	// pass large or zero k; apply the same freshness read bound as the
-	// unscoped path so file I/O per retrieval stays bounded everywhere.
-	return refreshManagedSearchResultsWithRegistryLimit(ctx, readFile, results, registry, nil, maxManagedFreshnessReads)
-}
-
-func refreshManagedSearchResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []SearchResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) error {
-	cache := make(map[string]managedFreshnessCheck)
-	for i := range results {
-		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
-				return err
-			}
-		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered || chunkClaimsManagedDocument(results[i].Chunk) {
-			// The registry no longer knows this source claiming managed
-			// provenance: the document was deleted (or forged) between the
-			// chunk read and registry snapshot. Never serve it as fresh.
-			stampManagedChunkStale(&results[i].Chunk)
-		}
-	}
-	return nil
-}
-
-func refreshManagedScoredResults(ctx context.Context, store VectorStore, readFile func(context.Context, string) ([]byte, error), results []ScoredResult) error {
-	sqlite, ok := store.(*SQLiteStore)
-	if !ok {
-		return nil
+		return unknownFreshness(len(results)), nil
 	}
 	registry, registeredSources, err := managedRegistrySnapshot(ctx, sqlite, scoredResultChunks(results))
 	if errors.Is(err, errManagedDocumentsTableMissing) {
-		return nil // Legacy read-only stores without managed_documents stay compatible.
+		return unknownFreshness(len(results)), nil // Legacy read-only stores without managed_documents stay compatible.
 	}
 	if err != nil {
-		return err
+		return nil, err
 	}
 	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, registeredSources, maxManagedFreshnessReads)
 }
 
-func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) error {
-	// Same freshness read bound as the unscoped path; see
-	// refreshManagedSearchResultsWithRegistry.
+func refreshManagedScoredResultsWithRegistry(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument) ([]retrievalFreshness, error) {
+	// Apply the same bound to scoped paths so large or zero k cannot trigger
+	// unbounded file I/O.
 	return refreshManagedScoredResultsWithRegistryLimit(ctx, readFile, results, registry, nil, maxManagedFreshnessReads)
 }
 
-func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) error {
+func refreshManagedScoredResultsWithRegistryLimit(ctx context.Context, readFile func(context.Context, string) ([]byte, error), results []ScoredResult, registry map[string]managedRegistryDocument, registeredSources map[string]struct{}, maxReads int) ([]retrievalFreshness, error) {
+	freshness := unknownFreshness(len(results))
 	cache := make(map[string]managedFreshnessCheck)
 	for i := range results {
 		if document, ok := registry[results[i].Chunk.Source]; ok {
-			if err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads); err != nil {
-				return err
+			trusted, err := refreshManagedChunk(ctx, readFile, &results[i].Chunk, document, cache, maxReads)
+			if err != nil {
+				return nil, err
 			}
-		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered || chunkClaimsManagedDocument(results[i].Chunk) {
-			// See refreshManagedSearchResultsWithRegistryLimit: registry-miss
-			// managed chunks must not claim their baked freshness.
+			freshness[i] = trusted
+		} else if _, registered := registeredSources[results[i].Chunk.Source]; registered {
+			// Registry-miss managed chunks must not claim their baked freshness.
+			stampManagedChunkStale(&results[i].Chunk)
+			freshness[i] = retrievalFreshness{known: true, value: DocumentFreshnessStale}
+		} else if chunkClaimsManagedDocument(results[i].Chunk) {
+			// Preserve legacy metadata without trusting forged provenance.
 			stampManagedChunkStale(&results[i].Chunk)
 		}
 	}
-	return nil
+	return freshness, nil
 }
 
 // stampManagedChunkStale clones the chunk metadata and marks it stale: the
@@ -790,24 +804,24 @@ func stampManagedChunkStale(chunk *Chunk) {
 	chunk.Metadata = cloned
 }
 
-func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck, maxReads int) error {
+func refreshManagedChunk(ctx context.Context, readFile func(context.Context, string) ([]byte, error), chunk *Chunk, document managedRegistryDocument, cache map[string]managedFreshnessCheck, maxReads int) (retrievalFreshness, error) {
 	if !matchesManagedRegistry(*chunk, document) {
 		// Provenance drift: the registry row moved on (reindex) while this
 		// chunk still carries the old content. Its baked freshness is a lie.
 		stampManagedChunkStale(chunk)
-		return nil
+		return retrievalFreshness{known: true, value: DocumentFreshnessStale}, nil
 	}
 	if document.kind != string(DocumentKindFile) || document.state != string(DocumentStateIndexed) {
-		return nil
+		return trustedManagedFreshness(document, ""), nil
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return retrievalFreshness{}, err
 	}
 	origin := document.origin
 	check, ok := cache[origin]
 	if !ok {
 		if maxReads > 0 && len(cache) >= maxReads {
-			return fmt.Errorf("rag: managed file freshness read limit exceeded (%d); reduce results or use scoped retrieval", maxReads)
+			return retrievalFreshness{}, fmt.Errorf("rag: managed file freshness read limit exceeded (%d); reduce results or use scoped retrieval", maxReads)
 		}
 		data, err := readFile(ctx, origin)
 		check = managedFreshnessCheck{err: err}
@@ -817,10 +831,14 @@ func refreshManagedChunk(ctx context.Context, readFile func(context.Context, str
 		cache[origin] = check
 	}
 	if err := ctx.Err(); err != nil {
-		return err
+		return retrievalFreshness{}, err
+	}
+	if check.err != nil {
+		stampManagedChunkStale(chunk)
+		return retrievalFreshness{}, nil
 	}
 	freshness := DocumentFreshnessStale
-	if check.err == nil && check.hash == document.contentHash {
+	if check.hash == document.contentHash {
 		freshness = DocumentFreshnessFresh
 	}
 	meta := chunk.Metadata
@@ -830,7 +848,7 @@ func refreshManagedChunk(ctx context.Context, readFile func(context.Context, str
 	}
 	cloned["managed_freshness"] = string(freshness)
 	chunk.Metadata = cloned
-	return nil
+	return trustedManagedFreshness(document, freshness), nil
 }
 
 // denseScored runs dense vector search and wraps each result as a ScoredResult
@@ -846,6 +864,9 @@ func (r *Retriever) denseScored(ctx context.Context, embedding []float64, k int)
 }
 
 func searchResultsToScored(results []SearchResult) []ScoredResult {
+	if results == nil {
+		return nil
+	}
 	scored := make([]ScoredResult, len(results))
 	for i, sr := range results {
 		scored[i] = ScoredResult{

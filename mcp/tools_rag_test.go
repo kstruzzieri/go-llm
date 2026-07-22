@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"reflect"
 	"strings"
@@ -63,6 +64,408 @@ func TestRAGSearchSchema_QueryContextAndExplainScores(t *testing.T) {
 	items, ok := openFiles["items"].(map[string]any)
 	if !ok || items["type"] != "string" {
 		t.Errorf("open_files items = %v, want string schema", openFiles["items"])
+	}
+	for _, name := range []string{"principal_id", "session_id", "require_fresh", "max_results", "max_cost", "audit_labels"} {
+		if _, ok := properties[name]; ok {
+			t.Errorf("rag_search schema unexpectedly exposes policy property %q", name)
+		}
+	}
+}
+
+func TestHandleRAGSearch_ForwardsPolicyMeta(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	retriever := mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))
+	s := &Server{retriever: retriever, retrievalPolicyEvaluator: evaluator}
+	WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+		return "resolved-principal", nil
+	})(s)
+	req := rawArgs(t, `{"query":"q","top_k":7,"collection":" managed ","tags":["z"," a ","a"]}`)
+	req.Params.Meta = policyMetaFromJSON(t, `{
+		"principal_id":"claimed-principal","session_id":"claimed-session",
+		"scope":{"collection":" managed ","tags":[" beta ","alpha","alpha"]},
+		"require_fresh":true,"max_results":7,"max_cost":42,
+		"audit_labels":{"purpose":"support"}
+	}`)
+
+	result, err := s.handleRAGSearch(context.Background(), req)
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if evaluator.evaluateCalls != 1 || evaluator.resultCalls != 1 {
+		t.Fatalf("evaluator calls=%d/%d, want 1/1", evaluator.evaluateCalls, evaluator.resultCalls)
+	}
+	want := rag.RetrievalRequest{
+		Query: "q", K: 7,
+		Scope: rag.RetrievalScope{Collection: "managed", Tags: []string{"a", "z"}},
+		Policy: rag.RetrievalPolicyRequest{
+			PrincipalID: "resolved-principal", SessionID: "claimed-session",
+			Scope:        rag.RetrievalScope{Collection: "managed", Tags: []string{"alpha", "beta"}},
+			RequireFresh: true, MaxResults: 7, MaxCost: 42,
+			AuditLabels: map[string]string{"purpose": "support"},
+		},
+	}
+	if !reflect.DeepEqual(evaluator.last, want) {
+		t.Fatalf("evaluator request = %#v, want %#v", evaluator.last, want)
+	}
+	if evaluator.last.QueryContext.Metadata != nil || !reflect.DeepEqual(evaluator.last.QueryContext, rag.QueryContext{}) {
+		t.Fatalf("QueryContext = %#v, want exact zero value", evaluator.last.QueryContext)
+	}
+}
+
+func TestHandleRAGSearch_FiltersRedactsAndReturnsSafeMeta(t *testing.T) {
+	redacted := "REDACTED"
+	for _, tc := range []struct {
+		name string
+		args string
+	}{
+		{"normal contextual", `{"query":"q","current_file":"file.go"}`},
+		{"explain scores", `{"query":"q","explain_scores":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluator := &mcpPolicyEvaluatorSpy{
+				decision: rag.RetrievalPolicyDecision{Allow: true},
+				resultDecision: []rag.RetrievalResultDecision{
+					{Keep: false}, {Keep: true, RedactedContent: &redacted}, {Keep: true},
+				},
+			}
+			store := &recordingMCPMultiStore{results: []rag.ScoredResult{
+				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "ID_SECRET", Content: "DENIED_SECRET", Source: "SOURCE_SECRET", Metadata: map[string]string{"LABEL_SECRET": "VALUE_SECRET"}}, Score: 0.91, Distance: 0.09}, RankScore: 0.51},
+				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "redacted", Content: "ORIGINAL_SECRET", Source: "allowed-source"}, Score: 0.77, Distance: 0.23}, RankScore: 0.41},
+				{SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "allowed", Content: "ALLOWED", Source: "allowed-source"}, Score: 0.66, Distance: 0.34}, RankScore: 0.31},
+			}}
+			retriever := mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator))
+			s := &Server{retriever: retriever, retrievalPolicyEvaluator: evaluator}
+			req := rawArgs(t, tc.args)
+			req.Params.Meta = policyMetaFromJSON(t, `{"audit_labels":{"LABEL_SECRET":"VALUE_SECRET"}}`)
+
+			result, err := s.handleRAGSearch(context.Background(), req)
+			if err != nil || result == nil || result.IsError {
+				t.Fatalf("result=%#v error=%v", result, err)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := string(data)
+			for _, forbidden := range []string{"DENIED_SECRET", "ORIGINAL_SECRET", "SOURCE_SECRET", "ID_SECRET", "LABEL_SECRET", "VALUE_SECRET", "ERROR_SECRET"} {
+				if strings.Contains(text, forbidden) {
+					t.Errorf("response leaked %q: %s", forbidden, text)
+				}
+			}
+			for _, want := range []string{"REDACTED", "ALLOWED", RetrievalPolicyMetaKey} {
+				if !strings.Contains(text, want) {
+					t.Errorf("response = %s, want %q", text, want)
+				}
+			}
+			if tc.name == "normal contextual" {
+				var results []rag.SearchResult
+				if err := json.Unmarshal([]byte(extractText(result)), &results); err != nil {
+					t.Fatal(err)
+				}
+				if len(results) != 2 || results[0].Score != 0.77 {
+					t.Fatalf("normal results = %#v, want filtered results with embedded score", results)
+				}
+			} else {
+				var results []rag.ScoredResult
+				if err := json.Unmarshal([]byte(extractText(result)), &results); err != nil {
+					t.Fatal(err)
+				}
+				if len(results) != 2 || results[0].RankScore != 0.41 {
+					t.Fatalf("explain results = %#v, want filtered scored results", results)
+				}
+			}
+		})
+	}
+}
+
+func TestHandleRAGSearch_ScopedContextualKeepsVerbatimScore(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       string
+		policyMeta string
+		evaluator  *mcpPolicyEvaluatorSpy
+	}{
+		{
+			name: "caller scope", args: `{"query":"q","current_file":"file.go","collection":"managed"}`,
+		},
+		{
+			name: "policy scope", args: `{"query":"q","current_file":"file.go"}`,
+			policyMeta: `{"scope":{"collection":"managed"}}`,
+			evaluator:  &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := managedScopedScoreServer(t, tc.evaluator)
+			req := rawArgs(t, tc.args)
+			if tc.policyMeta != "" {
+				req.Params.Meta = policyMetaFromJSON(t, tc.policyMeta)
+			}
+			result, err := s.handleRAGSearch(context.Background(), req)
+			if err != nil || result == nil || result.IsError {
+				t.Fatalf("result=%#v error=%v", result, err)
+			}
+			var results []rag.SearchResult
+			if err := json.Unmarshal([]byte(extractText(result)), &results); err != nil {
+				t.Fatal(err)
+			}
+			if len(results) != 1 {
+				t.Fatalf("results = %#v, want one", results)
+			}
+			// Legacy contextual retrieval (scoped or not) copied the embedded
+			// SearchResult verbatim from the scored surface; only the
+			// non-contextual hybrid flatten rewrote Score to 1 - Distance.
+			// The fixture's tiny cosine (~1e-17) makes Distance round to
+			// exactly 1.0, so a reset would yield Score == 0 while the
+			// verbatim store Score stays positive.
+			if results[0].Score <= 0 {
+				t.Fatalf("scoped contextual Score = %.20g; want verbatim positive store Score, not 1-Distance reset", results[0].Score)
+			}
+		})
+	}
+}
+
+func TestHandleRAGSearch_AppliedMarshalFailureIsSanitized(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "allowed"}, Score: 0.8, Distance: 0.2},
+		RankScore:    math.NaN(),
+	}}}
+	s := &Server{
+		retriever:                mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator)),
+		retrievalPolicyEvaluator: evaluator,
+	}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","explain_scores":true}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); got != "policy_failed: retrieval policy enforcement failed" {
+		t.Fatalf("error text = %q, want fixed policy failure", got)
+	}
+	if result.Meta == nil {
+		t.Fatal("applied marshal failure omitted safe metadata")
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{"NaN", "unsupported", "marshal results"} {
+		if strings.Contains(string(data), forbidden) {
+			t.Fatalf("marshal failure leaked %q: %s", forbidden, data)
+		}
+	}
+}
+
+func TestHandleRAGSearch_PolicyFailureIsSanitized(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{evaluateErr: errors.New("ERROR_SECRET")}
+	store := &recordingMCPMultiStore{}
+	embedCalls := 0
+	retriever, err := rag.NewRetrieverWithEmbedder(
+		rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+			embedCalls++
+			return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+		}),
+		store,
+		rag.WithRetrievalPolicyEvaluator(evaluator),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{retriever: retriever, retrievalPolicyEvaluator: evaluator}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); !strings.HasPrefix(got, "policy_evaluator_failed: retrieval policy evaluation failed") || strings.Contains(got, "ERROR_SECRET") {
+		t.Fatalf("error text = %q", got)
+	}
+	if result.Meta == nil {
+		t.Fatal("policy failure omitted safe applied metadata")
+	}
+	if evaluator.evaluateCalls != 1 || embedCalls != 0 || store.calls != 0 {
+		t.Fatalf("work after policy failure evaluator=%d embed=%d search=%d", evaluator.evaluateCalls, embedCalls, store.calls)
+	}
+}
+
+func TestHandleRAGSearch_ObserverFailureIsSanitized(t *testing.T) {
+	observer := &mcpPolicyObserverSpy{err: errors.New("ERROR_SECRET")}
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "id", Content: "CONTENT_SECRET"}},
+	}}}
+	s := &Server{retriever: mcpTestRetriever(t, store, rag.WithRetrievalPolicyObserver(observer))}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); got != "policy_failed: retrieval policy enforcement failed" {
+		t.Fatalf("error text = %q", got)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "ERROR_SECRET") || strings.Contains(string(data), "CONTENT_SECRET") || result.Meta != nil {
+		t.Fatalf("observer failure leaked detail, content, or metadata: %s", data)
+	}
+	if observer.calls != 1 {
+		t.Fatalf("observer calls = %d, want 1", observer.calls)
+	}
+}
+
+func TestHandleRAGSearch_ObserverFailureSanitizesRetrievalError(t *testing.T) {
+	observer := &mcpPolicyObserverSpy{err: errors.New("OBSERVER_SECRET")}
+	store := &recordingMCPMultiStore{err: errors.New("RETRIEVAL_SECRET")}
+	s := &Server{retriever: mcpTestRetriever(t, store, rag.WithRetrievalPolicyObserver(observer))}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if extractText(result) != "policy_failed: retrieval policy enforcement failed" ||
+		strings.Contains(string(data), "OBSERVER_SECRET") || strings.Contains(string(data), "RETRIEVAL_SECRET") || result.Meta != nil {
+		t.Fatalf("combined retrieval/observer failure leaked detail or metadata: %s", data)
+	}
+}
+
+func TestHandleRAGSearch_PrimaryPolicyOutcomeSurvivesObserverFailure(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{}
+	observer := &mcpPolicyObserverSpy{err: errors.New("OBSERVER_SECRET")}
+	store := &recordingMCPMultiStore{}
+	s := &Server{
+		retriever:                mcpTestRetriever(t, store, rag.WithRetrievalPolicyEvaluator(evaluator), rag.WithRetrievalPolicyObserver(observer)),
+		retrievalPolicyEvaluator: evaluator,
+	}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+	if err != nil || result == nil || !result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); got != "policy_denied: retrieval denied" {
+		t.Fatalf("error text = %q, want fixed denial", got)
+	}
+	meta, ok := result.Meta[RetrievalPolicyMetaKey].(retrievalPolicyResultWire)
+	if !ok || meta.Disposition != rag.RetrievalPolicyDenied || meta.ReasonCode != "denied" {
+		t.Fatalf("policy metadata = %#v, want denied/denied", result.Meta)
+	}
+	data, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "OBSERVER_SECRET") {
+		t.Fatalf("observer failure leaked detail: %s", data)
+	}
+}
+
+func TestHandleRAGSearch_ExplainScoresPreservesScopedNil(t *testing.T) {
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	s := &Server{retriever: mcpTestRetriever(t, store)}
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","collection":"missing","explain_scores":true}`))
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if got := extractText(result); got != "null" {
+		t.Fatalf("scoped nil scored response = %s, want null", got)
+	}
+}
+
+func TestHandleRAGSearch_PolicyRequestFailureIsSanitized(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta gomcp.Meta
+		bind func(*Server)
+		want string
+	}{
+		{
+			name: "invalid metadata", meta: policyMetaFromJSON(t, `{"UNKNOWN_SECRET":true}`),
+			want: "validation: invalid retrieval policy metadata",
+		},
+		{
+			name: "identity", meta: policyMetaFromJSON(t, `{"principal_id":"claimed"}`),
+			bind: func(s *Server) {
+				WithRetrievalPrincipalResolver(func(context.Context, gomcp.Request) (string, error) {
+					return "", errors.New("ERROR_SECRET")
+				})(s)
+			},
+			want: "policy_identity_failed: retrieval identity resolution failed",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+			store := &recordingMCPMultiStore{}
+			embedCalls := 0
+			retriever, err := rag.NewRetrieverWithEmbedder(
+				rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+					embedCalls++
+					return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+				}), store, rag.WithRetrievalPolicyEvaluator(evaluator),
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			s := &Server{retriever: retriever, retrievalPolicyEvaluator: evaluator}
+			if tc.bind != nil {
+				tc.bind(s)
+			}
+			req := rawArgs(t, `{"query":"q"}`)
+			req.Params.Meta = tc.meta
+			result, err := s.handleRAGSearch(context.Background(), req)
+			if err != nil || result == nil || !result.IsError || extractText(result) != tc.want {
+				t.Fatalf("result=%#v text=%q error=%v, want %q", result, extractText(result), err, tc.want)
+			}
+			data, err := json.Marshal(result)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "SECRET") || result.Meta != nil {
+				t.Fatalf("request error leaked detail or metadata: %s", data)
+			}
+			if evaluator.evaluateCalls != 0 || embedCalls != 0 || store.calls != 0 {
+				t.Fatalf("work after request failure evaluator=%d embed=%d search=%d", evaluator.evaluateCalls, embedCalls, store.calls)
+			}
+		})
+	}
+}
+
+func TestHandleRAGSearch_PolicyScopeUsesManagedTopKLimit(t *testing.T) {
+	evaluator := &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}}
+	store := &recordingMCPMultiStore{}
+	embedCalls := 0
+	retriever, err := rag.NewRetrieverWithEmbedder(
+		rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
+			embedCalls++
+			return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
+		}), store, rag.WithRetrievalPolicyEvaluator(evaluator),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{retriever: retriever, retrievalPolicyEvaluator: evaluator}
+	managed := rawArgs(t, `{"query":"q","top_k":101}`)
+	managed.Params.Meta = policyMetaFromJSON(t, `{"scope":{"collection":"managed"}}`)
+	result, err := s.handleRAGSearch(context.Background(), managed)
+	if err != nil || result == nil || !result.IsError || !strings.Contains(extractText(result), "top_k") {
+		t.Fatalf("managed result=%#v error=%v", result, err)
+	}
+	if evaluator.evaluateCalls != 0 || embedCalls != 0 || store.calls != 0 {
+		t.Fatalf("work after invalid managed top_k evaluator=%d embed=%d search=%d", evaluator.evaluateCalls, embedCalls, store.calls)
+	}
+
+	result, err = s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","top_k":101}`))
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("legacy result=%#v error=%v", result, err)
+	}
+	if evaluator.evaluateCalls != 1 || embedCalls != 1 || store.calls != 1 || store.topK != 101 {
+		t.Fatalf("legacy work evaluator=%d embed=%d search=%d top_k=%d", evaluator.evaluateCalls, embedCalls, store.calls, store.topK)
 	}
 }
 
@@ -265,15 +668,54 @@ func (s *recordingMCPDenseStore) Search(ctx context.Context, _ []float64, _ int)
 	return s.results, nil
 }
 
-func mcpTestRetriever(t *testing.T, store rag.VectorStore) *rag.Retriever {
+func mcpTestRetriever(t *testing.T, store rag.VectorStore, opts ...rag.RetrieverOption) *rag.Retriever {
 	t.Helper()
 	retriever, err := rag.NewRetrieverWithEmbedder(rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
 		return rag.EmbedResult{Embeddings: [][]float64{{1, 0}}}, nil
-	}), store)
+	}), store, opts...)
 	if err != nil {
 		t.Fatalf("NewRetrieverWithEmbedder: %v", err)
 	}
 	return retriever
+}
+
+func managedScopedScoreServer(t *testing.T, evaluator rag.RetrievalPolicyEvaluator) *Server {
+	t.Helper()
+	store, err := rag.NewSQLiteStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	embedder := rag.EmbedderFunc(func(_ context.Context, model string, inputs []string) (rag.EmbedResult, error) {
+		embeddings := make([][]float64, len(inputs))
+		for i, input := range inputs {
+			embeddings[i] = []float64{1, 0}
+			if input == "q" {
+				embeddings[i] = []float64{1e-17, 1}
+			}
+		}
+		return rag.EmbedResult{Embeddings: embeddings, Model: model, Provider: "test", VectorSpaceID: "test/v1"}, nil
+	})
+	indexer, err := rag.NewIndexerWithEmbedder(embedder, store, rag.WithEmbeddingModel("test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := []rag.RetrieverOption{rag.WithRetrieverModel("test")}
+	if evaluator != nil {
+		opts = append(opts, rag.WithRetrievalPolicyEvaluator(evaluator))
+	}
+	retriever, err := rag.NewRetrieverWithEmbedder(embedder, store, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	managed, err := rag.NewManagedSources(indexer, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := managed.IngestText(context.Background(), "doc.md", "document", rag.DocumentOptions{Collection: "managed"}); err != nil {
+		t.Fatal(err)
+	}
+	return &Server{store: store, retriever: retriever, retrievalPolicyEvaluator: evaluator}
 }
 
 func TestHandleRAGSearch_DefaultResponseRemainsSearchResultJSON(t *testing.T) {
@@ -291,6 +733,9 @@ func TestHandleRAGSearch_DefaultResponseRemainsSearchResultJSON(t *testing.T) {
 	want, _ := json.Marshal([]rag.SearchResult{{Chunk: rag.Chunk{ID: "c1"}, Score: 0.9, Distance: 0.1}})
 	if got := extractText(result); got != string(want) {
 		t.Fatalf("default response = %s, want byte-compatible SearchResult JSON %s", got, want)
+	}
+	if result.Meta != nil {
+		t.Fatalf("legacy metadata = %#v, want nil", result.Meta)
 	}
 	if store.calls != 1 || store.query != "question" || store.topK != 3 {
 		t.Fatalf("SearchMulti calls=%d query=%q topK=%d, want 1/question/3", store.calls, store.query, store.topK)
@@ -333,6 +778,28 @@ func TestHandleRAGSearch_ForwardsQueryContextWithoutChangingResponseContract(t *
 	}
 }
 
+func TestHandleRAGSearch_ExplainScoresSetsWallClockTimestamp(t *testing.T) {
+	// explain_scores with no contextual args still anchors the temporal
+	// scorer at request wall-clock time, as the legacy handler did; a zero
+	// Timestamp would silently shift temporal signals to max(indexed_at).
+	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
+		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "c1"}, Score: 0.9, Distance: 0.1},
+		RankScore:    0.41,
+		Signals:      map[string]float64{"semantic": 0.9},
+	}}}
+	s := &Server{retriever: mcpTestRetriever(t, store)}
+
+	before := time.Now()
+	result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","explain_scores":true}`))
+	after := time.Now()
+	if err != nil || result == nil || result.IsError {
+		t.Fatalf("result=%#v error=%v", result, err)
+	}
+	if store.qCtx.Timestamp.Before(before) || store.qCtx.Timestamp.After(after) {
+		t.Fatalf("QueryContext.Timestamp = %v, want request time in [%v, %v]", store.qCtx.Timestamp, before, after)
+	}
+}
+
 func TestHandleRAGSearch_DropsEmptyOpenFilesBeforeForwarding(t *testing.T) {
 	store := &recordingMCPMultiStore{results: []rag.ScoredResult{{
 		SearchResult: rag.SearchResult{Chunk: rag.Chunk{ID: "c1"}, Score: 0.75, Distance: 0.25},
@@ -370,6 +837,9 @@ func TestHandleRAGSearch_ExplainScoresPreservesRankAndSignals(t *testing.T) {
 	if !reflect.DeepEqual(got, []rag.ScoredResult{scored}) {
 		t.Fatalf("scored response = %+v, want %+v", got, []rag.ScoredResult{scored})
 	}
+	if result.Meta != nil {
+		t.Fatalf("legacy metadata = %#v, want nil", result.Meta)
+	}
 }
 
 func TestHandleRAGSearch_ExplainScoresDenseFallback(t *testing.T) {
@@ -388,6 +858,91 @@ func TestHandleRAGSearch_ExplainScoresDenseFallback(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].RankScore != 0.7 || !reflect.DeepEqual(got[0].Signals, map[string]float64{"semantic": 0.7}) {
 		t.Fatalf("dense scored response = %+v, want RankScore=Score and semantic-only signal", got)
+	}
+}
+
+func TestHandleRAGSearch_PreservesNilJSONByRetrievalPath(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		args  string
+		store rag.VectorStore
+		want  string
+	}{
+		{name: "dense explain", args: `{"query":"q","explain_scores":true}`, store: &recordingMCPDenseStore{}, want: "[]"},
+		{name: "hybrid explain", args: `{"query":"q","explain_scores":true}`, store: &recordingMCPMultiStore{}, want: "null"},
+		{name: "dense contextual", args: `{"query":"q","current_file":"file.go"}`, store: &recordingMCPDenseStore{}, want: "[]"},
+		{name: "hybrid contextual", args: `{"query":"q","current_file":"file.go"}`, store: &recordingMCPMultiStore{}, want: "null"},
+		{name: "dense plain", args: `{"query":"q"}`, store: &recordingMCPDenseStore{}, want: "null"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := &Server{store: tc.store, retriever: mcpTestRetriever(t, tc.store)}
+			result, err := s.handleRAGSearch(context.Background(), rawArgs(t, tc.args))
+			if err != nil || result == nil || result.IsError || extractText(result) != tc.want {
+				t.Fatalf("result=%#v text=%q error=%v, want %s", result, extractText(result), err, tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleRAGSearch_PreservesLegacyEmptyJSON(t *testing.T) {
+	t.Run("dense", func(t *testing.T) {
+		store := &recordingMCPDenseStore{results: []rag.SearchResult{}}
+		s := &Server{store: store, retriever: mcpTestRetriever(t, store)}
+		result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+		if err != nil || result == nil || result.IsError || extractText(result) != "[]" {
+			t.Fatalf("result=%#v text=%q error=%v, want []", result, extractText(result), err)
+		}
+	})
+
+	t.Run("hybrid", func(t *testing.T) {
+		store := &recordingMCPMultiStore{results: []rag.ScoredResult{}}
+		s := &Server{store: store, retriever: mcpTestRetriever(t, store)}
+		result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+		if err != nil || result == nil || result.IsError || extractText(result) != "null" {
+			t.Fatalf("result=%#v text=%q error=%v, want null", result, extractText(result), err)
+		}
+	})
+
+	t.Run("contextual hybrid", func(t *testing.T) {
+		store := &recordingMCPMultiStore{results: []rag.ScoredResult{}}
+		s := &Server{store: store, retriever: mcpTestRetriever(t, store)}
+		result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","current_file":"file.go"}`))
+		if err != nil || result == nil || result.IsError || extractText(result) != "[]" {
+			t.Fatalf("result=%#v text=%q error=%v, want []", result, extractText(result), err)
+		}
+	})
+}
+
+func TestHandleRAGSearch_PreservesScopedFilteredEmptyJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       string
+		policyMeta string
+		evaluator  *mcpPolicyEvaluatorSpy
+	}{
+		{name: "caller scope", args: `{"query":"q","collection":"missing"}`},
+		{
+			name: "policy scope", args: `{"query":"q"}`,
+			policyMeta: `{"scope":{"collection":"missing"}}`,
+			evaluator:  &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}},
+		},
+		{
+			name:      "evaluator scope",
+			args:      `{"query":"q"}`,
+			evaluator: &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true, Scope: rag.RetrievalScope{Collection: "missing"}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := managedScopedScoreServer(t, tc.evaluator)
+			req := rawArgs(t, tc.args)
+			if tc.policyMeta != "" {
+				req.Params.Meta = policyMetaFromJSON(t, tc.policyMeta)
+			}
+			result, err := s.handleRAGSearch(context.Background(), req)
+			if err != nil || result == nil || result.IsError || extractText(result) != "[]" {
+				t.Fatalf("result=%#v text=%q error=%v, want []", result, extractText(result), err)
+			}
+		})
 	}
 }
 

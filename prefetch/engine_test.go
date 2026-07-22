@@ -39,6 +39,13 @@ func (m *mockRetriever) calls() int {
 	return m.callCount
 }
 
+type policyAwareMockRetriever struct {
+	*mockRetriever
+	active bool
+}
+
+func (r *policyAwareMockRetriever) PolicyActive() bool { return r.active }
+
 // mockStateProvider implements StateProvider for testing.
 type mockStateProvider struct {
 	mu            sync.Mutex
@@ -156,6 +163,32 @@ func TestEngine_CacheHit(t *testing.T) {
 	}
 	if retriever.calls() != 1 {
 		t.Errorf("expected 1 retriever call (cached), got %d", retriever.calls())
+	}
+}
+
+func TestEngine_PolicyActiveBypassesWarmCache(t *testing.T) {
+	cold := &mockRetriever{results: defaultTestResults()}
+	aware := &policyAwareMockRetriever{mockRetriever: cold}
+	engine := NewEngine(aware, &mockVectorStore{}, &mockStateProvider{},
+		WithResources(fingerprint.ResourceProfile{TotalMemoryMB: 65536}),
+	)
+	ctx := context.Background()
+	if _, err := engine.Retrieve(ctx, "a", 5, rag.QueryContext{}, RetrieveOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.cache.Len() != 1 || cold.calls() != 1 {
+		t.Fatalf("warm state: cache=%d calls=%d", engine.cache.Len(), cold.calls())
+	}
+	aware.active = true
+	result, err := engine.Retrieve(ctx, "a", 5, rag.QueryContext{}, RetrieveOptions{})
+	if err != nil || result.CacheHit || cold.calls() != 2 {
+		t.Fatalf("governed hit: result=%#v error=%v calls=%d", result, err, cold.calls())
+	}
+	if _, err := engine.Retrieve(ctx, "b", 5, rag.QueryContext{}, RetrieveOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if cold.calls() != 3 || engine.cache.Len() != 1 {
+		t.Fatalf("governed write: calls=%d cache=%d", cold.calls(), engine.cache.Len())
 	}
 }
 
@@ -326,6 +359,35 @@ func TestEngine_WatchDisabledForLowResources(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Watch did not return for disabled engine")
+	}
+}
+
+func TestEngine_WatchSkipsPrefetchWhenPolicyActive(t *testing.T) {
+	cold := &mockRetriever{results: defaultTestResults()}
+	aware := &policyAwareMockRetriever{mockRetriever: cold, active: true}
+	engine := NewEngine(aware, &mockVectorStore{}, &mockStateProvider{activeFile: "main.go"},
+		WithDebounce(10*time.Millisecond),
+		WithResources(fingerprint.ResourceProfile{TotalMemoryMB: 65536}),
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- engine.Watch(ctx) }()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Errorf("expected context.Canceled, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Watch did not return after context cancellation")
+	}
+
+	if cold.calls() != 0 || engine.cache.Len() != 0 {
+		t.Fatalf("governed prefetch: calls=%d cache=%d", cold.calls(), engine.cache.Len())
 	}
 }
 

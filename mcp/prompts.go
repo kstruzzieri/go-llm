@@ -2,8 +2,10 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
+	"github.com/kstruzzieri/go-llm/rag"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -127,10 +129,23 @@ func (s *Server) handleRAGQueryPrompt(ctx context.Context, req *gomcp.GetPromptR
 		}
 	}
 
-	results, err := retriever.Retrieve(ctx, question, topK)
+	policy, _, err := s.retrievalPolicyRequest(ctx, req)
 	if err != nil {
+		if errors.Is(err, errRetrievalPolicyIdentity) {
+			return nil, errors.New("policy_identity_failed: retrieval identity resolution failed")
+		}
+		return nil, errors.New("validation: invalid retrieval policy metadata")
+	}
+	response, err := retriever.RetrieveRequest(ctx, rag.RetrievalRequest{
+		Query: question, K: topK, Policy: policy,
+	})
+	if err != nil {
+		if safe := retrievalPolicyPromptError(response.Policy, err); safe != nil {
+			return nil, safe
+		}
 		return nil, fmt.Errorf("rag: retrieve: %w", err)
 	}
+	results := flattenRetrievalResults(response.Results, true)
 
 	contextText := "No relevant context found in the codebase."
 	if len(results) > 0 {
@@ -138,12 +153,21 @@ func (s *Server) handleRAGQueryPrompt(ctx context.Context, req *gomcp.GetPromptR
 	}
 
 	return &gomcp.GetPromptResult{
+		Meta:        retrievalPolicyMeta(response.Policy),
 		Description: "Question with RAG context",
 		Messages: []*gomcp.PromptMessage{
 			{Role: "assistant", Content: &gomcp.TextContent{Text: fmt.Sprintf("Use the following context from the codebase to answer the question. If the context is not relevant, say so.\n\n%s", contextText)}},
 			{Role: "user", Content: &gomcp.TextContent{Text: question}},
 		},
 	}, nil
+}
+
+func retrievalPolicyPromptError(outcome rag.RetrievalPolicyOutcome, err error) error {
+	code, message, ok := retrievalPolicyError(outcome, err)
+	if !ok {
+		return nil
+	}
+	return fmt.Errorf("%s: %s", code, message)
 }
 
 func (s *Server) handleRefactorPrompt(_ context.Context, req *gomcp.GetPromptRequest) (*gomcp.GetPromptResult, error) {

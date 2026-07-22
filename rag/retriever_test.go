@@ -90,7 +90,7 @@ func TestRetrieveManagedRegistryRejectsForgedOrphanAndMismatchedMetadata(t *test
 func TestScopedFreshnessRefreshBoundsFileReads(t *testing.T) {
 	ctx := context.Background()
 	registry := make(map[string]managedRegistryDocument, maxManagedFreshnessReads+1)
-	results := make([]SearchResult, 0, maxManagedFreshnessReads+1)
+	results := make([]ScoredResult, 0, maxManagedFreshnessReads+1)
 	for i := 0; i <= maxManagedFreshnessReads; i++ {
 		id := fmt.Sprintf("%032x", i)
 		source := managedSourcePrefix + id + ".md"
@@ -103,7 +103,7 @@ func TestScopedFreshnessRefreshBoundsFileReads(t *testing.T) {
 			contentHash: "hash",
 		}
 		registry[source] = document
-		results = append(results, SearchResult{Chunk: Chunk{
+		results = append(results, ScoredResult{SearchResult: SearchResult{Chunk: Chunk{
 			ID:     id,
 			Source: source,
 			Metadata: map[string]string{
@@ -117,7 +117,7 @@ func TestScopedFreshnessRefreshBoundsFileReads(t *testing.T) {
 				"managed_tags":         document.tagsJSON,
 				"managed_state":        document.state,
 			},
-		}})
+		}}})
 	}
 	reads := 0
 	readFile := func(context.Context, string) ([]byte, error) {
@@ -127,7 +127,7 @@ func TestScopedFreshnessRefreshBoundsFileReads(t *testing.T) {
 	// The scoped refresh wrappers must apply the same bound as the unscoped
 	// path so library callers with large or zero k cannot trigger unbounded
 	// file I/O.
-	err := refreshManagedSearchResultsWithRegistry(ctx, readFile, results, registry)
+	_, err := refreshManagedScoredResultsWithRegistry(ctx, readFile, results, registry)
 	if err == nil || !strings.Contains(err.Error(), "read limit exceeded") {
 		t.Fatalf("refresh error = %v, want read-limit error", err)
 	}

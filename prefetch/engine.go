@@ -46,6 +46,10 @@ func configForResources(r fingerprint.ResourceProfile) resourceConfig {
 // EngineOption configures an Engine.
 type EngineOption func(*Engine)
 
+type policyActiveRetriever interface {
+	PolicyActive() bool
+}
+
 // WithDebounce sets the debounce interval for the Watch loop.
 // Default is 2 seconds.
 func WithDebounce(d time.Duration) EngineOption {
@@ -130,9 +134,10 @@ func (e *Engine) Retrieve(ctx context.Context, query string, k int,
 	// Cancel any in-flight prefetch so the cold retriever is not contended.
 	e.cancelPrefetch()
 
+	policyActive := e.policyActive()
 	key := newCacheKey(query, k, qCtx).String()
 
-	if !opts.SkipCache && e.cache != nil {
+	if !policyActive && !opts.SkipCache && e.cache != nil {
 		if results, ok := e.cache.Get(key); ok {
 			return &RetrieveResult{
 				Chunks:   results,
@@ -147,11 +152,16 @@ func (e *Engine) Retrieve(ctx context.Context, query string, k int,
 	}
 
 	// Warm the cache with this result for future hits.
-	if e.cache != nil {
+	if !policyActive && e.cache != nil {
 		e.cache.Put(key, result.Chunks)
 	}
 
 	return result, nil
+}
+
+func (e *Engine) policyActive() bool {
+	retriever, ok := e.retriever.(policyActiveRetriever)
+	return ok && retriever.PolicyActive()
 }
 
 // Watch is a blocking loop that polls the StateProvider at the configured
@@ -160,7 +170,9 @@ func (e *Engine) Retrieve(ctx context.Context, query string, k int,
 //
 // Watch is a no-op if the resource profile disables prefetching.
 func (e *Engine) Watch(ctx context.Context) error {
-	if e.config.triggerPolicy == "disabled" {
+	// The evaluator is fixed by constructor options on *rag.Retriever, and this
+	// engine's retriever is immutable, so PolicyActive cannot change mid-run.
+	if e.config.triggerPolicy == "disabled" || e.policyActive() {
 		<-ctx.Done()
 		return ctx.Err()
 	}

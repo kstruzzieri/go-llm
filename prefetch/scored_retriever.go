@@ -27,6 +27,11 @@ func NewScoredRetriever(client *ollama.Client, store rag.VectorStore, embedModel
 	}
 }
 
+// PolicyActive reports whether the wrapped RAG retriever has a policy evaluator.
+func (r *ScoredRetriever) PolicyActive() bool {
+	return r != nil && r.retriever != nil && r.retriever.PolicyActive()
+}
+
 // Retrieve embeds the query, searches the store, and returns scored results.
 // The opts.SkipCache flag is ignored since ScoredRetriever has no cache.
 func (r *ScoredRetriever) Retrieve(ctx context.Context, query string, k int,
