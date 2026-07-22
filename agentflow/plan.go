@@ -35,6 +35,22 @@ type DesignDecision struct {
 	References *[]string `json:"references,omitempty"`
 }
 
+// UsesDesignDecisions reports whether a plan opts into the optional
+// design-decision traceability family, via plan-level design_decisions or any
+// step's design_decision_ids. Local validation and step-goal projection share
+// it so the two can never disagree on whether the family is present.
+func UsesDesignDecisions(p Plan) bool {
+	if p.DesignDecisions != nil {
+		return true
+	}
+	for _, step := range p.Steps {
+		if step.DesignDecisionIDs != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // Requirement is an Agentflow requirement in the lockable plan contract.
 type Requirement struct {
 	ID                 string      `json:"id"`

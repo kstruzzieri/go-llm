@@ -400,11 +400,7 @@ func TraceabilityDiagnostics(p Plan) []Diagnostic {
 }
 
 func designDecisionDiagnostics(p Plan) []Diagnostic {
-	usesDesignDecisions := p.DesignDecisions != nil
-	for _, step := range p.Steps {
-		usesDesignDecisions = usesDesignDecisions || step.DesignDecisionIDs != nil
-	}
-	if !usesDesignDecisions {
+	if !UsesDesignDecisions(p) {
 		return nil
 	}
 	if !schemaVersionAtLeast(p.SchemaVersion, 0, 4, 0) {
@@ -462,6 +458,11 @@ func designDecisionDiagnostics(p Plan) []Diagnostic {
 	return ds
 }
 
+// designStringIsBlank reports whether value is empty or all-whitespace under
+// Python's str.strip() definition, which Agentflow uses to reject blank design
+// text and references. Go's unicode.IsSpace omits the C0 information separators
+// U+001C-U+001F (FS/GS/RS/US) that Python counts as whitespace, so they are
+// treated as blank here to keep this local pre-check byte-compatible with the CLI.
 func designStringIsBlank(value string) bool {
 	for _, r := range value {
 		if !unicode.IsSpace(r) && (r < '\u001c' || r > '\u001f') {

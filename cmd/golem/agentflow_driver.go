@@ -825,10 +825,7 @@ func resolveReviewManifest(path string) (string, error) {
 }
 
 func stepGoal(p *agentflow.Plan, s agentflow.Step) (string, error) {
-	usesDesignDecisions := p.DesignDecisions != nil || s.DesignDecisionIDs != nil
-	for _, step := range p.Steps {
-		usesDesignDecisions = usesDesignDecisions || step.DesignDecisionIDs != nil
-	}
+	usesDesignDecisions := agentflow.UsesDesignDecisions(*p) || s.DesignDecisionIDs != nil
 	if len(p.Requirements) == 0 && !usesDesignDecisions {
 		return fmt.Sprintf("Make exactly the change described. Action: %s\nTarget files: %s\nExpected diff:\n%s",
 			s.Action, strings.Join(s.Files, ", "), strings.Join(s.ExpectedDiff, "\n")), nil
