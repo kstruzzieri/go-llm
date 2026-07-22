@@ -166,7 +166,7 @@ func (r *Retriever) Retrieve(ctx context.Context, query string, k int) ([]Search
 	if err != nil {
 		return nil, err
 	}
-	return semanticSearchResults(response.Results), nil
+	return semanticSearchResults(response.Results, r.usesDenseSearch()), nil
 }
 
 // RetrieveScoped finds top-k relevant managed chunks after applying scope.
@@ -175,7 +175,11 @@ func (r *Retriever) RetrieveScoped(ctx context.Context, query string, k int, sco
 	if err != nil {
 		return nil, err
 	}
-	return semanticSearchResults(response.Results), nil
+	normalized, err := normalizeRetrievalScope(scope)
+	if err != nil {
+		return nil, err
+	}
+	return semanticSearchResults(response.Results, !normalized.empty() || r.usesDenseSearch()), nil
 }
 
 func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, error) {
@@ -194,8 +198,11 @@ func (r *Retriever) embedQuery(ctx context.Context, query string) ([]float64, er
 	return embedding, nil
 }
 
-func semanticSearchResults(scored []ScoredResult) []SearchResult {
+func semanticSearchResults(scored []ScoredResult, preserveEmpty bool) []SearchResult {
 	if len(scored) == 0 {
+		if scored != nil && preserveEmpty {
+			return []SearchResult{}
+		}
 		return nil
 	}
 	// Hybrid ranking remains in result order, while SearchResult.Score retains
@@ -216,6 +223,9 @@ func semanticSearchResults(scored []ScoredResult) []SearchResult {
 // vector search wrapped as single-signal ("semantic") scored results.
 func (r *Retriever) RetrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
 	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, QueryContext: qCtx})
+	if err == nil && response.Results == nil && r.usesDenseSearch() {
+		response.Results = []ScoredResult{}
+	}
 	return response.Results, err
 }
 
@@ -297,7 +307,15 @@ func (r *Retriever) retrieveScoredScopedBase(ctx context.Context, query string, 
 // RetrieveScoredScoped is RetrieveScored with managed collection/tag filtering.
 func (r *Retriever) RetrieveScoredScoped(ctx context.Context, query string, k int, scope RetrievalScope, qCtx QueryContext) ([]ScoredResult, error) {
 	response, err := r.RetrieveRequest(ctx, RetrievalRequest{Query: query, K: k, Scope: scope, QueryContext: qCtx})
+	if err == nil && response.Results == nil && r.usesDenseSearch() {
+		response.Results = []ScoredResult{}
+	}
 	return response.Results, err
+}
+
+func (r *Retriever) usesDenseSearch() bool {
+	_, hybrid := r.store.(MultiSignalSearcher)
+	return r.vectorOnly || !hybrid
 }
 
 func (r *Retriever) retrieveScored(ctx context.Context, query string, k int, qCtx QueryContext) ([]ScoredResult, error) {
@@ -816,6 +834,9 @@ func (r *Retriever) denseScored(ctx context.Context, embedding []float64, k int)
 }
 
 func searchResultsToScored(results []SearchResult) []ScoredResult {
+	if results == nil {
+		return nil
+	}
 	scored := make([]ScoredResult, len(results))
 	for i, sr := range results {
 		scored[i] = ScoredResult{

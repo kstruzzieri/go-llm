@@ -709,7 +709,7 @@ func managedScopedScoreServer(t *testing.T, evaluator rag.RetrievalPolicyEvaluat
 	if _, err := managed.IngestText(context.Background(), "doc.md", "document", rag.DocumentOptions{Collection: "managed"}); err != nil {
 		t.Fatal(err)
 	}
-	return &Server{retriever: retriever, retrievalPolicyEvaluator: evaluator}
+	return &Server{store: store, retriever: retriever, retrievalPolicyEvaluator: evaluator}
 }
 
 func TestHandleRAGSearch_DefaultResponseRemainsSearchResultJSON(t *testing.T) {
@@ -830,6 +830,68 @@ func TestHandleRAGSearch_ExplainScoresDenseFallback(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].RankScore != 0.7 || !reflect.DeepEqual(got[0].Signals, map[string]float64{"semantic": 0.7}) {
 		t.Fatalf("dense scored response = %+v, want RankScore=Score and semantic-only signal", got)
+	}
+}
+
+func TestHandleRAGSearch_PreservesLegacyEmptyJSON(t *testing.T) {
+	t.Run("dense", func(t *testing.T) {
+		store := &recordingMCPDenseStore{results: []rag.SearchResult{}}
+		s := &Server{store: store, retriever: mcpTestRetriever(t, store)}
+		result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+		if err != nil || result == nil || result.IsError || extractText(result) != "[]" {
+			t.Fatalf("result=%#v text=%q error=%v, want []", result, extractText(result), err)
+		}
+	})
+
+	t.Run("hybrid", func(t *testing.T) {
+		store := &recordingMCPMultiStore{results: []rag.ScoredResult{}}
+		s := &Server{store: store, retriever: mcpTestRetriever(t, store)}
+		result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q"}`))
+		if err != nil || result == nil || result.IsError || extractText(result) != "null" {
+			t.Fatalf("result=%#v text=%q error=%v, want null", result, extractText(result), err)
+		}
+	})
+
+	t.Run("contextual hybrid", func(t *testing.T) {
+		store := &recordingMCPMultiStore{results: []rag.ScoredResult{}}
+		s := &Server{store: store, retriever: mcpTestRetriever(t, store)}
+		result, err := s.handleRAGSearch(context.Background(), rawArgs(t, `{"query":"q","current_file":"file.go"}`))
+		if err != nil || result == nil || result.IsError || extractText(result) != "[]" {
+			t.Fatalf("result=%#v text=%q error=%v, want []", result, extractText(result), err)
+		}
+	})
+}
+
+func TestHandleRAGSearch_PreservesScopedFilteredEmptyJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       string
+		policyMeta string
+		evaluator  *mcpPolicyEvaluatorSpy
+	}{
+		{name: "caller scope", args: `{"query":"q","collection":"missing"}`},
+		{
+			name: "policy scope", args: `{"query":"q"}`,
+			policyMeta: `{"scope":{"collection":"missing"}}`,
+			evaluator:  &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true}},
+		},
+		{
+			name:      "evaluator scope",
+			args:      `{"query":"q"}`,
+			evaluator: &mcpPolicyEvaluatorSpy{decision: rag.RetrievalPolicyDecision{Allow: true, Scope: rag.RetrievalScope{Collection: "missing"}}},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := managedScopedScoreServer(t, tc.evaluator)
+			req := rawArgs(t, tc.args)
+			if tc.policyMeta != "" {
+				req.Params.Meta = policyMetaFromJSON(t, tc.policyMeta)
+			}
+			result, err := s.handleRAGSearch(context.Background(), req)
+			if err != nil || result == nil || result.IsError || extractText(result) != "[]" {
+				t.Fatalf("result=%#v text=%q error=%v, want []", result, extractText(result), err)
+			}
+		})
 	}
 }
 

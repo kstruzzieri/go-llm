@@ -1610,3 +1610,58 @@ func TestRetrieverLegacyMethodsUseCanonicalResults(t *testing.T) {
 		}
 	})
 }
+
+func TestRetrievePreservesDenseEmptySlice(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		results []SearchResult
+		wantNil bool
+	}{
+		{name: "nil", wantNil: true},
+		{name: "non-nil empty", results: []SearchResult{}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r, err := NewRetrieverWithEmbedder(
+				&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}}},
+				&retrieverPlainStore{searchResults: tc.results},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := r.Retrieve(context.Background(), "q", 1)
+			if err != nil || (got == nil) != tc.wantNil {
+				t.Fatalf("Retrieve() = %#v, %v; wantNil %v", got, err, tc.wantNil)
+			}
+			scored, err := r.RetrieveScored(context.Background(), "q", 1, QueryContext{})
+			if err != nil || scored == nil {
+				t.Fatalf("RetrieveScored() = %#v, %v; want existing non-nil empty", scored, err)
+			}
+		})
+	}
+}
+
+func TestRetrieveScopedPreservesFilteredEmptySlice(t *testing.T) {
+	ctx := context.Background()
+	managed, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+	outside, err := managed.IngestText(ctx, "outside.md", "outside", DocumentOptions{Collection: "other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaceManagedScopeChunk(t, store, outside, "outside", []float64{1, 0})
+	r, err := NewRetrieverWithEmbedder(
+		&recordingEmbedder{result: EmbedResult{Embeddings: [][]float64{{1, 0}}, VectorSpaceID: "test/v1"}},
+		store,
+		WithVectorOnly(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := r.RetrieveScoped(ctx, "q", 1, RetrievalScope{Collection: "missing"})
+	if err != nil || got == nil || len(got) != 0 {
+		t.Fatalf("RetrieveScoped() = %#v, %v; want non-nil empty", got, err)
+	}
+	scored, err := r.RetrieveScoredScoped(ctx, "q", 1, RetrievalScope{Collection: "missing"}, QueryContext{})
+	if err != nil || scored == nil || len(scored) != 0 {
+		t.Fatalf("RetrieveScoredScoped() = %#v, %v; want existing non-nil empty", scored, err)
+	}
+}

@@ -239,6 +239,7 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 
 	s.mu.RLock()
 	retriever := s.retriever
+	store := s.store
 	s.mu.RUnlock()
 
 	if retriever == nil {
@@ -271,7 +272,9 @@ func (s *Server) handleRAGSearch(ctx context.Context, req *gomcp.CallToolRequest
 	output := any(response.Results)
 	if !args.ExplainScores {
 		var results []rag.SearchResult
-		if response.Results != nil && (contextual || len(response.Results) > 0) {
+		_, hybrid := store.(rag.MultiSignalSearcher)
+		dense := store != nil && !hybrid
+		if response.Results != nil && (contextual || scoped || policyScoped || response.Policy.Applied || dense || len(response.Results) > 0) {
 			results = make([]rag.SearchResult, len(response.Results))
 			for i := range response.Results {
 				results[i] = response.Results[i].SearchResult
