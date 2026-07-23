@@ -1,0 +1,46 @@
+{
+  "providers": {
+    "ollama": {
+      "base_url": "http://localhost:11434",
+      "timeout": "5m"
+    },
+    "remote-llamacpp": {
+      "base_url": "http://localhost:8080",
+      "timeout": "30s",
+      "api_format": "openai-compat",
+      "api_key": "REPLACE_ME"
+    }
+  },
+  "models": {
+    "general": {
+      "name": "gemma4:31b",
+      "provider": "ollama",
+      "type": "dense",
+      "context_window": 256000
+    },
+    "carved-down": {
+      "name": "qwen2.5-coder-14b",
+      "provider": "remote-llamacpp",
+      "description": "Example: this llama.cpp build exposes chat + stream but not /v1/completions; carve down explicitly.",
+      "type": "dense",
+      "capabilities": ["chat", "stream"]
+    },
+    "with-tools": {
+      "name": "qwen3.5:27b",
+      "provider": "ollama",
+      "description": "Example: declare tool_call explicitly (never derived from type).",
+      "type": "dense",
+      "capabilities": ["chat", "generate", "stream", "tool_call"]
+    },
+    "embedding": {
+      "name": "qwen3-embedding:8b",
+      "provider": "ollama",
+      "type": "embedding",
+      "dimensions": 4096
+    }
+  },
+  "defaults": {
+    "chat": "general",
+    "embedding": "embedding"
+  }
+}

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+tmp="$(cd "$(mktemp -d)" && pwd -P)"
+trap 'rm -rf "$tmp"' EXIT
+
+module="$tmp/module"
+mkdir -p "$module/scripts" "$tmp/bin" "$tmp/outside"
+cp "$script_dir/ci-local" "$module/scripts/ci-local"
+printf 'module github.com/kstruzzieri/go-llm\n' >"$module/go.mod"
+touch "$module/docker-compose.ci.yml"
+printf 'gitdir: /unmounted/main/.git/worktrees/test\n' >"$module/.git"
+
+cat >"$tmp/bin/golangci-lint" <<'STUB'
+#!/usr/bin/env sh
+printf '%s|%s\n' "$PWD" "$*" >>"$CI_LOCAL_TEST_LOG"
+STUB
+chmod +x "$tmp/bin/golangci-lint"
+ln -s golangci-lint "$tmp/bin/go"
+
+if ! (cd "$tmp/outside" && PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/actual-full" "$module/scripts/ci-local" --mode full); then
+  printf 'absolute-path invocation failed\n' >&2
+  exit 1
+fi
+
+cat >"$tmp/expected-full" <<EOF
+$module|run
+$module|test -race ./...
+$module|test -run ^$ ./...
+EOF
+diff -u "$tmp/expected-full" "$tmp/actual-full"
+
+# Relative invocation with a hostile CDPATH: the decoy is a valid layout, so an
+# unhardened `cd` inside ci-local would run the gate against the wrong checkout.
+mkdir -p "$tmp/decoy/scripts"
+printf 'module github.com/kstruzzieri/go-llm\n' >"$tmp/decoy/go.mod"
+touch "$tmp/decoy/docker-compose.ci.yml"
+if ! (cd "$module" && CDPATH="$tmp/decoy" PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/actual-pre-push" scripts/ci-local --mode pre-push); then
+  printf 'relative pre-push invocation failed\n' >&2
+  exit 1
+fi
+
+cat >"$tmp/expected-pre-push" <<EOF
+$module|run
+$module|test -race ./...
+EOF
+diff -u "$tmp/expected-pre-push" "$tmp/actual-pre-push"
+
+mkdir -p "$tmp/misplaced/scripts"
+cp "$script_dir/ci-local" "$tmp/misplaced/scripts/ci-local"
+if PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/misplaced-log" "$tmp/misplaced/scripts/ci-local" --mode pre-push >"$tmp/misplaced-error" 2>&1; then
+  printf 'misplaced script unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F "invalid local CI layout: expected go.mod and docker-compose.ci.yml in $tmp/misplaced" "$tmp/misplaced-error" >/dev/null
+
+mkdir -p "$tmp/wrong-module/scripts"
+cp "$script_dir/ci-local" "$tmp/wrong-module/scripts/ci-local"
+printf 'module example.com/other\n' >"$tmp/wrong-module/go.mod"
+touch "$tmp/wrong-module/docker-compose.ci.yml"
+if PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/wrong-module-log" "$tmp/wrong-module/scripts/ci-local" --mode pre-push >"$tmp/wrong-module-error" 2>&1; then
+  printf 'wrong-module script unexpectedly succeeded\n' >&2
+  exit 1
+fi
+grep -F "go.mod does not declare module github.com/kstruzzieri/go-llm" "$tmp/wrong-module-error" >/dev/null

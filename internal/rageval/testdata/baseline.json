@@ -1,0 +1,1878 @@
+{
+  "schema_version": "rag-eval-baseline/v1",
+  "corpus": {
+    "chunks": 12,
+    "queries": 20,
+    "categories": {
+      "architecture": 4,
+      "code_review": 4,
+      "compare": 4,
+      "cross_file_trace": 4,
+      "single_hop": 4
+    },
+    "top_k": [
+      5,
+      10
+    ],
+    "vector_space_id": "fixture/rag-eval-v1",
+    "notes": [
+      "fixtures use deterministic synthetic embeddings; no live Ollama dependency",
+      "thresholds ratified for v1 regression detection; see runner.buildThresholds for posture rationale",
+      "hybrid_search_multi regresses MRR@5 vs static (~0.825 vs 1.0) on this synthetic corpus — captured for #94 scorer-weight discussion, not flagged as a blocker",
+      "latency thresholds intentionally null: N=20 cold samples on a 12-chunk in-memory SQLite corpus is statistically unstable; defer to #95 against realistic workload"
+    ]
+  },
+  "thresholds": {
+    "owner": "Keith",
+    "status": "thresholds_ratified",
+    "minimum_static_recall_at_5": 0.95,
+    "minimum_hybrid_recall_at_5_improvement": 0,
+    "maximum_duplicate_rate": 0.05,
+    "minimum_context_precision_proxy": 0.5,
+    "maximum_opt_in_hybrid_p95_latency_ms": null,
+    "maximum_future_default_p95_latency_ms": null,
+    "maximum_average_context_token_growth": 0.1
+  },
+  "modes": [
+    {
+      "name": "static",
+      "summary": {
+        "recall_at_5": 0.9583333333333334,
+        "recall_at_10": 1,
+        "mrr_at_5": 1,
+        "mrr_at_10": 1,
+        "duplicate_rate_at_10": 0,
+        "context_precision_at_5": 0.51,
+        "context_precision_at_10": 0.27,
+        "average_context_tokens_at_5": 732.4,
+        "average_context_tokens_at_10": 1477.65,
+        "cold_latency_ms": {
+          "count": 20,
+          "p50": 0,
+          "p95": 0
+        },
+        "warm_latency_ms": {
+          "count": 60,
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "queries": [
+        {
+          "id": "single_login_handler",
+          "category": "single_hop",
+          "expected_ids": [
+            "auth_handler_login"
+          ],
+          "result_ids": [
+            "auth_handler_login",
+            "middleware_require_auth",
+            "auth_service_login",
+            "users_repository_find",
+            "api_router_new",
+            "errors_app_error",
+            "config_loader_load",
+            "orders_service_place",
+            "orders_repository_save",
+            "inventory_service_reserve"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1508
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "single_find_by_email",
+          "category": "single_hop",
+          "expected_ids": [
+            "users_repository_find"
+          ],
+          "result_ids": [
+            "users_repository_find",
+            "auth_service_login",
+            "auth_handler_login",
+            "orders_repository_save",
+            "middleware_require_auth",
+            "orders_service_place",
+            "api_router_new",
+            "inventory_service_reserve",
+            "errors_app_error",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 743
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1524
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "single_require_auth",
+          "category": "single_hop",
+          "expected_ids": [
+            "middleware_require_auth"
+          ],
+          "result_ids": [
+            "middleware_require_auth",
+            "auth_handler_login",
+            "auth_service_login",
+            "api_router_new",
+            "users_repository_find",
+            "errors_app_error",
+            "config_loader_load",
+            "shipping_service_create",
+            "orders_service_place",
+            "inventory_service_reserve"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1507
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "single_payment_charge",
+          "category": "single_hop",
+          "expected_ids": [
+            "payments_client_charge"
+          ],
+          "result_ids": [
+            "payments_client_charge",
+            "shipping_service_create",
+            "config_loader_load",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "errors_app_error",
+            "orders_repository_save",
+            "api_router_new",
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 739
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_login_flow",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "auth_handler_login",
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "result_ids": [
+            "auth_service_login",
+            "auth_handler_login",
+            "users_repository_find",
+            "middleware_require_auth",
+            "api_router_new",
+            "errors_app_error",
+            "orders_repository_save",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "config_loader_load"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1508
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_order_checkout_flow",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "shipping_service_create"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "config_loader_load",
+            "errors_app_error",
+            "api_router_new",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 1,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.5,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_protected_route",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "orders_service_place"
+          ],
+          "result_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "shipping_service_create",
+            "auth_service_login",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "users_repository_find",
+            "config_loader_load",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 0.6666666666666666,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 733
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1493
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_config_to_runtime",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "config_loader_load",
+            "api_router_new",
+            "payments_client_charge"
+          ],
+          "result_ids": [
+            "config_loader_load",
+            "payments_client_charge",
+            "shipping_service_create",
+            "api_router_new",
+            "errors_app_error",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "middleware_require_auth",
+            "orders_repository_save",
+            "auth_handler_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 654
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1434
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_auth_service_repository",
+          "category": "compare",
+          "expected_ids": [
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "result_ids": [
+            "users_repository_find",
+            "auth_service_login",
+            "auth_handler_login",
+            "middleware_require_auth",
+            "orders_repository_save",
+            "api_router_new",
+            "errors_app_error",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 743
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1524
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_payment_inventory",
+          "category": "compare",
+          "expected_ids": [
+            "payments_client_charge",
+            "inventory_service_reserve"
+          ],
+          "result_ids": [
+            "payments_client_charge",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "orders_service_place",
+            "orders_repository_save",
+            "config_loader_load",
+            "errors_app_error",
+            "api_router_new",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_handler_middleware",
+          "category": "compare",
+          "expected_ids": [
+            "auth_handler_login",
+            "middleware_require_auth"
+          ],
+          "result_ids": [
+            "middleware_require_auth",
+            "auth_handler_login",
+            "auth_service_login",
+            "users_repository_find",
+            "api_router_new",
+            "errors_app_error",
+            "config_loader_load",
+            "shipping_service_create",
+            "orders_service_place",
+            "inventory_service_reserve"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1507
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_order_service_repository",
+          "category": "compare",
+          "expected_ids": [
+            "orders_service_place",
+            "orders_repository_save"
+          ],
+          "result_ids": [
+            "orders_repository_save",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "shipping_service_create",
+            "payments_client_charge",
+            "users_repository_find",
+            "errors_app_error",
+            "api_router_new",
+            "auth_service_login",
+            "config_loader_load"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_routes",
+          "category": "architecture",
+          "expected_ids": [
+            "api_router_new",
+            "auth_handler_login",
+            "middleware_require_auth",
+            "orders_service_place"
+          ],
+          "result_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "shipping_service_create",
+            "auth_service_login",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "config_loader_load",
+            "users_repository_find",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 0.75,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 733
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 1493
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_order_coordination",
+          "category": "architecture",
+          "expected_ids": [
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "shipping_service_create"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "config_loader_load",
+            "api_router_new",
+            "errors_app_error",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 1,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.5,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_auth_sessions",
+          "category": "architecture",
+          "expected_ids": [
+            "auth_service_login",
+            "middleware_require_auth",
+            "auth_handler_login"
+          ],
+          "result_ids": [
+            "auth_handler_login",
+            "middleware_require_auth",
+            "auth_service_login",
+            "users_repository_find",
+            "api_router_new",
+            "errors_app_error",
+            "config_loader_load",
+            "orders_service_place",
+            "shipping_service_create",
+            "orders_repository_save"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1471
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_error_model",
+          "category": "architecture",
+          "expected_ids": [
+            "errors_app_error",
+            "auth_handler_login",
+            "inventory_service_reserve",
+            "config_loader_load"
+          ],
+          "result_ids": [
+            "errors_app_error",
+            "payments_client_charge",
+            "inventory_service_reserve",
+            "config_loader_load",
+            "orders_service_place",
+            "shipping_service_create",
+            "auth_service_login",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "api_router_new"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 0.75,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 796
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 1523
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_validate_password",
+          "category": "code_review",
+          "expected_ids": [
+            "auth_service_login",
+            "auth_handler_login",
+            "errors_app_error"
+          ],
+          "result_ids": [
+            "auth_service_login",
+            "auth_handler_login",
+            "middleware_require_auth",
+            "users_repository_find",
+            "errors_app_error",
+            "api_router_new",
+            "inventory_service_reserve",
+            "orders_service_place",
+            "config_loader_load",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 798
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1550
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_place_order",
+          "category": "code_review",
+          "expected_ids": [
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "shipping_service_create"
+          ],
+          "result_ids": [
+            "inventory_service_reserve",
+            "orders_service_place",
+            "payments_client_charge",
+            "shipping_service_create",
+            "orders_repository_save",
+            "errors_app_error",
+            "config_loader_load",
+            "api_router_new",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 1,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.5,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_load_config",
+          "category": "code_review",
+          "expected_ids": [
+            "config_loader_load",
+            "errors_app_error"
+          ],
+          "result_ids": [
+            "config_loader_load",
+            "payments_client_charge",
+            "errors_app_error",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "orders_service_place",
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_service_login",
+            "orders_repository_save"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 672
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1466
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_payment_charge",
+          "category": "code_review",
+          "expected_ids": [
+            "payments_client_charge",
+            "errors_app_error"
+          ],
+          "result_ids": [
+            "payments_client_charge",
+            "shipping_service_create",
+            "config_loader_load",
+            "errors_app_error",
+            "inventory_service_reserve",
+            "orders_service_place",
+            "orders_repository_save",
+            "api_router_new",
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 672
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        }
+      ]
+    },
+    {
+      "name": "hybrid_search_multi",
+      "summary": {
+        "recall_at_5": 0.9583333333333334,
+        "recall_at_10": 1,
+        "mrr_at_5": 0.825,
+        "mrr_at_10": 0.825,
+        "duplicate_rate_at_10": 0,
+        "context_precision_at_5": 0.51,
+        "context_precision_at_10": 0.27,
+        "average_context_tokens_at_5": 734.9,
+        "average_context_tokens_at_10": 1477.65,
+        "cold_latency_ms": {
+          "count": 20,
+          "p50": 0,
+          "p95": 0
+        },
+        "warm_latency_ms": {
+          "count": 60,
+          "p50": 0,
+          "p95": 0
+        }
+      },
+      "queries": [
+        {
+          "id": "single_login_handler",
+          "category": "single_hop",
+          "expected_ids": [
+            "auth_handler_login"
+          ],
+          "result_ids": [
+            "api_router_new",
+            "auth_handler_login",
+            "middleware_require_auth",
+            "auth_service_login",
+            "users_repository_find",
+            "errors_app_error",
+            "config_loader_load",
+            "orders_service_place",
+            "orders_repository_save",
+            "inventory_service_reserve"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 0.5,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 0.5,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1508
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "single_find_by_email",
+          "category": "single_hop",
+          "expected_ids": [
+            "users_repository_find"
+          ],
+          "result_ids": [
+            "auth_service_login",
+            "auth_handler_login",
+            "users_repository_find",
+            "orders_repository_save",
+            "middleware_require_auth",
+            "orders_service_place",
+            "api_router_new",
+            "inventory_service_reserve",
+            "errors_app_error",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 0.3333333333333333,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 743
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 0.3333333333333333,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1524
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "single_require_auth",
+          "category": "single_hop",
+          "expected_ids": [
+            "middleware_require_auth"
+          ],
+          "result_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "auth_service_login",
+            "users_repository_find",
+            "errors_app_error",
+            "config_loader_load",
+            "shipping_service_create",
+            "orders_service_place",
+            "inventory_service_reserve"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 0.5,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 0.5,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1507
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "single_payment_charge",
+          "category": "single_hop",
+          "expected_ids": [
+            "payments_client_charge"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "orders_repository_save",
+            "payments_client_charge",
+            "shipping_service_create",
+            "config_loader_load",
+            "inventory_service_reserve",
+            "errors_app_error",
+            "api_router_new",
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 0.3333333333333333,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 703
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 0.3333333333333333,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.1,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_login_flow",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "auth_handler_login",
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "result_ids": [
+            "auth_handler_login",
+            "auth_service_login",
+            "users_repository_find",
+            "middleware_require_auth",
+            "api_router_new",
+            "errors_app_error",
+            "orders_repository_save",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "config_loader_load"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1508
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_order_checkout_flow",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "shipping_service_create"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "orders_repository_save",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "config_loader_load",
+            "errors_app_error",
+            "api_router_new",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 1,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.5,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_protected_route",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "orders_service_place"
+          ],
+          "result_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "shipping_service_create",
+            "auth_service_login",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "users_repository_find",
+            "config_loader_load",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 0.6666666666666666,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 733
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1493
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "trace_config_to_runtime",
+          "category": "cross_file_trace",
+          "expected_ids": [
+            "config_loader_load",
+            "api_router_new",
+            "payments_client_charge"
+          ],
+          "result_ids": [
+            "config_loader_load",
+            "payments_client_charge",
+            "shipping_service_create",
+            "api_router_new",
+            "errors_app_error",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "middleware_require_auth",
+            "orders_repository_save",
+            "auth_handler_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 654
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1434
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_auth_service_repository",
+          "category": "compare",
+          "expected_ids": [
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "result_ids": [
+            "auth_service_login",
+            "auth_handler_login",
+            "users_repository_find",
+            "middleware_require_auth",
+            "orders_repository_save",
+            "api_router_new",
+            "errors_app_error",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 743
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1524
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_payment_inventory",
+          "category": "compare",
+          "expected_ids": [
+            "payments_client_charge",
+            "inventory_service_reserve"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "orders_repository_save",
+            "payments_client_charge",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "config_loader_load",
+            "errors_app_error",
+            "api_router_new",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 0.3333333333333333,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 0.3333333333333333,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_handler_middleware",
+          "category": "compare",
+          "expected_ids": [
+            "auth_handler_login",
+            "middleware_require_auth"
+          ],
+          "result_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "auth_service_login",
+            "users_repository_find",
+            "errors_app_error",
+            "config_loader_load",
+            "shipping_service_create",
+            "orders_service_place",
+            "inventory_service_reserve"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 0.5,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 0.5,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1507
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "compare_order_service_repository",
+          "category": "compare",
+          "expected_ids": [
+            "orders_service_place",
+            "orders_repository_save"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "orders_repository_save",
+            "inventory_service_reserve",
+            "shipping_service_create",
+            "payments_client_charge",
+            "users_repository_find",
+            "errors_app_error",
+            "api_router_new",
+            "auth_service_login",
+            "config_loader_load"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_routes",
+          "category": "architecture",
+          "expected_ids": [
+            "api_router_new",
+            "auth_handler_login",
+            "middleware_require_auth",
+            "orders_service_place"
+          ],
+          "result_ids": [
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "shipping_service_create",
+            "auth_service_login",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "config_loader_load",
+            "users_repository_find",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 0.75,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 733
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 1493
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_order_coordination",
+          "category": "architecture",
+          "expected_ids": [
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "shipping_service_create"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "orders_repository_save",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "config_loader_load",
+            "api_router_new",
+            "errors_app_error",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 1,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.5,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_auth_sessions",
+          "category": "architecture",
+          "expected_ids": [
+            "auth_service_login",
+            "middleware_require_auth",
+            "auth_handler_login"
+          ],
+          "result_ids": [
+            "middleware_require_auth",
+            "auth_handler_login",
+            "auth_service_login",
+            "users_repository_find",
+            "api_router_new",
+            "errors_app_error",
+            "config_loader_load",
+            "orders_service_place",
+            "shipping_service_create",
+            "orders_repository_save"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 761
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1471
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "architecture_error_model",
+          "category": "architecture",
+          "expected_ids": [
+            "errors_app_error",
+            "auth_handler_login",
+            "inventory_service_reserve",
+            "config_loader_load"
+          ],
+          "result_ids": [
+            "errors_app_error",
+            "payments_client_charge",
+            "inventory_service_reserve",
+            "config_loader_load",
+            "orders_service_place",
+            "shipping_service_create",
+            "auth_service_login",
+            "middleware_require_auth",
+            "auth_handler_login",
+            "api_router_new"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 0.75,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 796
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 1523
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_validate_password",
+          "category": "code_review",
+          "expected_ids": [
+            "auth_service_login",
+            "auth_handler_login",
+            "errors_app_error"
+          ],
+          "result_ids": [
+            "auth_service_login",
+            "auth_handler_login",
+            "middleware_require_auth",
+            "users_repository_find",
+            "errors_app_error",
+            "api_router_new",
+            "inventory_service_reserve",
+            "orders_service_place",
+            "config_loader_load",
+            "payments_client_charge"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.6,
+              "context_tokens": 798
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.3,
+              "context_tokens": 1550
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_place_order",
+          "category": "code_review",
+          "expected_ids": [
+            "orders_service_place",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "orders_repository_save",
+            "shipping_service_create"
+          ],
+          "result_ids": [
+            "orders_service_place",
+            "orders_repository_save",
+            "inventory_service_reserve",
+            "payments_client_charge",
+            "shipping_service_create",
+            "errors_app_error",
+            "config_loader_load",
+            "api_router_new",
+            "users_repository_find",
+            "auth_service_login"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 1,
+              "context_tokens": 712
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.5,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_load_config",
+          "category": "code_review",
+          "expected_ids": [
+            "config_loader_load",
+            "errors_app_error"
+          ],
+          "result_ids": [
+            "config_loader_load",
+            "payments_client_charge",
+            "errors_app_error",
+            "shipping_service_create",
+            "inventory_service_reserve",
+            "orders_service_place",
+            "api_router_new",
+            "middleware_require_auth",
+            "auth_service_login",
+            "orders_repository_save"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 672
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1466
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        },
+        {
+          "id": "review_payment_charge",
+          "category": "code_review",
+          "expected_ids": [
+            "payments_client_charge",
+            "errors_app_error"
+          ],
+          "result_ids": [
+            "payments_client_charge",
+            "shipping_service_create",
+            "config_loader_load",
+            "errors_app_error",
+            "orders_service_place",
+            "inventory_service_reserve",
+            "orders_repository_save",
+            "api_router_new",
+            "auth_service_login",
+            "users_repository_find"
+          ],
+          "metrics": [
+            {
+              "k": 5,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.4,
+              "context_tokens": 758
+            },
+            {
+              "k": 10,
+              "recall": 1,
+              "mrr": 1,
+              "duplicate_rate": 0,
+              "context_precision_proxy": 0.2,
+              "context_tokens": 1435
+            }
+          ],
+          "cold_latency_ms": 0,
+          "warm_latency_ms": {
+            "count": 3,
+            "p50": 0,
+            "p95": 0
+          }
+        }
+      ]
+    }
+  ]
+}

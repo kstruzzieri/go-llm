@@ -34,7 +34,9 @@ func TestChat(t *testing.T) {
 			Message: ChatMessage{Role: "assistant", Content: "Hello!"},
 			Done:    true,
 		}
-		json.NewEncoder(w).Encode(resp)
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
 	}))
 	defer srv.Close()
 
@@ -54,6 +56,34 @@ func TestChat(t *testing.T) {
 	}
 }
 
+func TestChatSendsMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if got := req.Messages[0].Thinking; got != "private reasoning" {
+			t.Fatalf("request message thinking = %q; want preserved thinking history", got)
+		}
+
+		_ = json.NewEncoder(w).Encode(ChatResponse{
+			Model:   "test-model",
+			Message: ChatMessage{Role: "assistant", Content: "ok"},
+			Done:    true,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	_, err := c.Chat(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "assistant", Content: "answer", Thinking: "private reasoning"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+}
+
 func TestChatStream(t *testing.T) {
 	chunks := []ChatResponse{
 		{Model: "test-model", Message: ChatMessage{Role: "assistant", Content: "Hel"}, Done: false},
@@ -63,14 +93,20 @@ func TestChatStream(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req ChatRequest
-		json.NewDecoder(r.Body).Decode(&req)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
 		if !req.Stream {
 			t.Error("expected stream=true for streaming chat")
 		}
 
 		for _, chunk := range chunks {
-			data, _ := json.Marshal(chunk)
-			fmt.Fprintf(w, "%s\n", data)
+			data, err := json.Marshal(chunk)
+			if err != nil {
+				t.Errorf("marshal chunk: %v", err)
+				return
+			}
+			_, _ = fmt.Fprintf(w, "%s\n", data)
 		}
 	}))
 	defer srv.Close()
@@ -98,6 +134,97 @@ func TestChatStream(t *testing.T) {
 	}
 }
 
+func TestChatStreamSendsMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if got := req.Messages[0].Thinking; got != "private reasoning" {
+			t.Fatalf("stream request message thinking = %q; want preserved thinking history", got)
+		}
+
+		_, _ = fmt.Fprint(w, `{"model":"test-model","message":{"role":"assistant","content":"ok"},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"test-model","message":{"role":"assistant"},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "assistant", Content: "answer", Thinking: "private reasoning"}},
+	}, func(ChatResponse) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error: %v", err)
+	}
+}
+
+// TestChatPopulatesMessageThinking verifies the raw client maps Ollama's
+// separate message.thinking field (emitted by reasoning models in thinking
+// mode) onto ChatMessage.Thinking, keeping it distinct from the final answer
+// in Content. Before this field existed the reasoning text was silently
+// dropped by the JSON decoder.
+func TestChatPopulatesMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{
+			"model":"test-model",
+			"message":{"role":"assistant","content":"The answer is 42.","thinking":"Let me reason about this."},
+			"done":true
+		}`))
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	resp, err := c.Chat(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "user", Content: "Hi"}},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if resp.Message.Thinking != "Let me reason about this." {
+		t.Errorf("Message.Thinking = %q, want %q", resp.Message.Thinking, "Let me reason about this.")
+	}
+	if resp.Message.Content != "The answer is 42." {
+		t.Errorf("Message.Content = %q, want %q", resp.Message.Content, "The answer is 42.")
+	}
+}
+
+// TestChatStreamPopulatesMessageThinking verifies thinking deltas stream
+// incrementally on message.thinking, separate from content deltas. Ollama
+// emits reasoning first, then the answer.
+func TestChatStreamPopulatesMessageThinking(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","thinking":"Let me "},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","thinking":"think."},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","content":"Done."},"done":false}`+"\n")
+		_, _ = fmt.Fprint(w, `{"model":"m","message":{"role":"assistant","content":""},"done":true}`+"\n")
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	var thinking, content string
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Model:    "m",
+		Messages: []ChatMessage{{Role: "user", Content: "Hi"}},
+	}, func(resp ChatResponse) error {
+		thinking += resp.Message.Thinking
+		content += resp.Message.Content
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error: %v", err)
+	}
+	if thinking != "Let me think." {
+		t.Errorf("accumulated thinking = %q, want %q", thinking, "Let me think.")
+	}
+	if content != "Done." {
+		t.Errorf("accumulated content = %q, want %q", content, "Done.")
+	}
+}
+
 func TestChatStreamCallbackError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		chunk := ChatResponse{
@@ -105,8 +232,12 @@ func TestChatStreamCallbackError(t *testing.T) {
 			Message: ChatMessage{Role: "assistant", Content: "test"},
 			Done:    false,
 		}
-		data, _ := json.Marshal(chunk)
-		fmt.Fprintf(w, "%s\n", data)
+		data, err := json.Marshal(chunk)
+		if err != nil {
+			t.Errorf("marshal chunk: %v", err)
+			return
+		}
+		_, _ = fmt.Fprintf(w, "%s\n", data)
 	}))
 	defer srv.Close()
 
@@ -126,7 +257,7 @@ func TestChatStreamCallbackError(t *testing.T) {
 func TestChatServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
-		w.Write([]byte("model not found"))
+		_, _ = w.Write([]byte("model not found"))
 	}))
 	defer srv.Close()
 
@@ -137,5 +268,148 @@ func TestChatServerError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected error for 500 response")
+	}
+}
+
+func TestChatWithTools(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		if len(req.Tools) != 1 {
+			t.Errorf("expected 1 tool, got %d", len(req.Tools))
+		}
+		if req.Tools[0].Function.Name != "get_weather" {
+			t.Errorf("tool name = %q, want %q", req.Tools[0].Function.Name, "get_weather")
+		}
+
+		resp := ChatResponse{
+			Model: "test-model",
+			Message: ChatMessage{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: []ToolCall{
+					{
+						Type: "function",
+						Function: ToolCallFunction{
+							Index:     0,
+							Name:      "get_weather",
+							Arguments: map[string]any{"city": "Tokyo"},
+						},
+					},
+				},
+			},
+			Done: true,
+		}
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("encode response: %v", err)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	resp, err := c.Chat(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "user", Content: "Weather in Tokyo?"}},
+		Tools: []Tool{
+			MustNewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object","properties":{"city":{"type":"string"}}}`)),
+		},
+	})
+	if err != nil {
+		t.Fatalf("Chat() error: %v", err)
+	}
+	if len(resp.Message.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool call, got %d", len(resp.Message.ToolCalls))
+	}
+	tc := resp.Message.ToolCalls[0]
+	if tc.Function.Name != "get_weather" {
+		t.Errorf("tool call name = %q, want %q", tc.Function.Name, "get_weather")
+	}
+	if tc.Function.Arguments["city"] != "Tokyo" {
+		t.Errorf("arguments[city] = %v, want %q", tc.Function.Arguments["city"], "Tokyo")
+	}
+}
+
+func TestChatStreamWithTools(t *testing.T) {
+	chunks := []ChatResponse{
+		{
+			Model: "test-model",
+			Message: ChatMessage{
+				Role:    "assistant",
+				Content: "",
+				ToolCalls: []ToolCall{
+					{
+						Type: "function",
+						Function: ToolCallFunction{
+							Index:     0,
+							Name:      "get_weather",
+							Arguments: map[string]any{"city": "Tokyo"},
+						},
+					},
+				},
+			},
+			Done: false,
+		},
+		{
+			Model:     "test-model",
+			Message:   ChatMessage{Role: "assistant", Content: ""},
+			Done:      true,
+			EvalCount: 5,
+		},
+	}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req ChatRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if !req.Stream {
+			t.Error("expected stream=true for streaming chat with tools")
+		}
+		if len(req.Tools) != 1 {
+			t.Errorf("expected 1 tool, got %d", len(req.Tools))
+		}
+		if req.Tools[0].Function.Name != "get_weather" {
+			t.Errorf("tool name = %q, want %q", req.Tools[0].Function.Name, "get_weather")
+		}
+
+		for _, chunk := range chunks {
+			data, err := json.Marshal(chunk)
+			if err != nil {
+				t.Errorf("marshal chunk: %v", err)
+				return
+			}
+			_, _ = fmt.Fprintf(w, "%s\n", data)
+		}
+	}))
+	defer srv.Close()
+
+	c := NewClient(WithBaseURL(srv.URL))
+	var toolCallChunks []ChatResponse
+	err := c.ChatStream(context.Background(), ChatRequest{
+		Model:    "test-model",
+		Messages: []ChatMessage{{Role: "user", Content: "Weather?"}},
+		Tools: []Tool{
+			MustNewToolRaw("get_weather", "Get weather", json.RawMessage(`{"type":"object"}`)),
+		},
+	}, func(resp ChatResponse) error {
+		if len(resp.Message.ToolCalls) > 0 {
+			toolCallChunks = append(toolCallChunks, resp)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("ChatStream() error: %v", err)
+	}
+	if len(toolCallChunks) != 1 {
+		t.Fatalf("expected 1 chunk with tool calls, got %d", len(toolCallChunks))
+	}
+	if toolCallChunks[0].Done {
+		t.Error("tool call chunk should have done=false")
+	}
+	if toolCallChunks[0].Message.ToolCalls[0].Function.Name != "get_weather" {
+		t.Error("tool call name mismatch in stream")
 	}
 }

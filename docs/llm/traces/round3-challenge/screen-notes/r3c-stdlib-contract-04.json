@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-stdlib-contract-04",
+  "oracles": [
+    "append can reuse backing storage when the input slice has spare capacity.",
+    "The contract requires no alias with caller-owned backing storage, so the input must be cloned before append."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to test backing-array reasoning rather than only visible slice length."
+}

@@ -1,0 +1,18 @@
+{
+  "id": "r3c-concurrency-lifetime-02",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `Snapshot` returns an independent point-in-time copy of the cache that callers may read or mutate without coordinating with the cache's lock. The cache is updated by background goroutines through `Set`. The code is:\n\n```go\ntype Cache struct {\n    mu    sync.RWMutex\n    items map[string]int\n}\n\nfunc (c *Cache) Set(k string, v int) {\n    c.mu.Lock()\n    defer c.mu.Unlock()\n    c.items[k] = v\n}\n\nfunc (c *Cache) Snapshot() map[string]int {\n    c.mu.RLock()\n    defer c.mu.RUnlock()\n    return c.items\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `Snapshot` returns the same map object held by the cache, not an independent snapshot. After the read lock is released, callers can race with `Set`, observe later mutations, or mutate the cache without holding the lock. The answer must give the minimal fix of copying the map while holding the read lock and returning the copy. 0.5 iff it correctly identifies the map aliasing/race but gives a partial fix, such as holding the lock while returning the map, switching to `Lock` instead of `RLock` without copying, or telling callers not to mutate the result. 0.0 iff it declares the implementation correct, claims maps are copied on return, blames pointer receivers, or proposes returning the internal map plus the mutex to callers. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the public return type, replaces the cache with a different storage system, drops concurrency support, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

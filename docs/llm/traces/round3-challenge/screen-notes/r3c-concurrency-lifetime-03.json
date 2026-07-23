@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-concurrency-lifetime-03",
+  "oracles": [
+    "Each worker defers close(out), so multiple goroutines own the same close operation.",
+    "The correct close owner is a single goroutine that waits for all workers, then closes out."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch partial fixes such as sync.Once that close the output before all senders finish."
+}

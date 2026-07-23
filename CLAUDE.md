@@ -2,18 +2,38 @@
 
 ## Project Overview
 
-`go-llm` is a shared Go module providing Ollama LLM integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage.
+`go-llm` is a shared Go module providing local LLM integration (chat, completions, embeddings) and a lightweight RAG layer with SQLite-backed vector storage.
 
-**Consumers:** Arc IDE (custom Wails IDE), Flux ML (Wails ML dev environment), Quantum Trader (Go+Python trading platform)
+**Local backends:** models are reached per-provider via `models.json` `api_format`. **llama.cpp (via its OpenAI-compatible `llama-server`, `api_format: openai-compat`) is the primary/recommended backend** — best local performance. Ollama (native REST, `api_format: ollama`, the default when omitted) is fully supported. The `ollama/` package is the native Ollama client; `provider/openaicompat` + `provider.Router` reach any OpenAI `/v1` server (llama.cpp, vLLM, LM Studio). Local benchmarking and the `cmd/llm-bench` harness run against llama.cpp.
+
+**Consumers:** Firn IDE (custom Wails IDE), Flux ML (Wails ML dev environment), Quantum Trader (Go+Python trading platform)
 
 ## Architecture
 
 ```
 go-llm/
 ├── ollama/          # Ollama REST API client (chat, generate, embeddings, models)
-├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval
+├── config/          # Model configuration loader (models.json, resolve, fallback)
+├── provider/        # Use-case-aware Router (chat/fim/embedding/reasoning/analysis/code-review/agent profiles), circuit breakers, warmth, sticky routing, scoring, fallback chains
+│   └── openaicompat/ # OpenAI /v1 client — reaches llama.cpp (primary), vLLM, LM Studio via api_format: openai-compat
+├── rag/             # RAG: chunking, SQLite vector store, indexing, retrieval, managed document registry (stable IDs, lifecycle, freshness)
+├── rag/ast/         # Scoped structural symbol graph: Extractor + SymbolStore interfaces (skeleton)
 ├── completion/      # IDE inline completion (Fill-in-the-Middle)
-├── analysis/        # Domain-specific analysis helpers
+├── analysis/        # Domain-specific analysis helpers (code review, ML metrics, trading)
+├── mcp/             # MCP server: tools, prompts, resources over stdio/HTTP/2 — wired through provider.Router
+├── mcpclient/       # MCP client: adapts external MCP servers' tools into agent.Tool (stdio/streamable-HTTP); consumed by cmd/golem
+├── conversation/    # Persistent conversation storage with SQLite
+├── memory/          # Explicit user-controlled local memories + agent-memory records (SQLite, scope-filtered FTS5/bm25 search); shared hardened-open primitives (open.go); separate from conversation + RAG; backs Golem /remember + memory_search AND MCP agent_memory_* tools
+├── projectcontext/  # AGENTS.md-style project-context loader (discovery, safe read, ordering; consumed by cmd/golem)
+├── feedback/        # Implicit user behavioral signal collection
+├── fingerprint/     # Model profiling (latency benchmarks, capability detection)
+├── prefetch/        # Predictive cache-warming engine for RAG retrieval
+├── compat/          # OpenAI-compatible endpoint shim (chat, completions, model aliases, concurrency limiter)
+├── cmd/
+│   ├── go-llm-mcp/  # Standalone MCP server binary (stdio + HTTP/2)
+│   ├── fim-smoke/   # FIM smoke-test harness
+│   └── llm-bench/   # Model evaluation harness (AnswerQuality, tool-use, tool-restraint, latency, tokens; paired Δ + bootstrap CIs; llama.cpp via openai-compat)
+├── docs/            # Reference documentation (BYO models, design notes)
 └── testdata/        # Test fixtures
 ```
 
@@ -25,8 +45,13 @@ module github.com/kstruzzieri/go-llm
 
 ## Dependencies
 
-Keep minimal. Only allowed external dependency:
+Keep minimal. Allowed external dependencies:
 - `modernc.org/sqlite` — pure Go SQLite driver (no CGo)
+- `golang.org/x/sync` — concurrency primitives (errgroup for bounded worker pools)
+- `golang.org/x/net` — h2c HTTP/2 cleartext transport (only imported by `mcp/`)
+- `github.com/modelcontextprotocol/go-sdk` — official MCP Go SDK (imported by `mcp/` server side, `mcpclient/` client side, and `cmd/llm-bench/`)
+- `github.com/parquet-go/parquet-go` — Parquet file writer (only imported by `rag/parquet/`)
+- `github.com/santhosh-tekuri/jsonschema/v6` — JSON Schema validator (only imported by `cmd/llm-bench/`)
 
 Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc.)
 
@@ -40,6 +65,8 @@ Everything else uses stdlib (`net/http`, `encoding/json`, `math`, `context`, etc
 6. **Tests use mock HTTP servers** — no Ollama dependency for unit tests; integration tests behind build tag
 
 ## Ollama API Reference
+
+This is the native `ollama/` client's wire API (the `ollama` provider format). The **llama.cpp / `openai-compat`** path instead speaks the OpenAI `/v1` API (`/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/models`) — handled by `provider/openaicompat`; pass the server root as base URL (go-llm appends `/v1`).
 
 Base URL: `http://localhost:11434`
 
@@ -55,7 +82,7 @@ Base URL: `http://localhost:11434`
 ### Chat Request
 ```json
 {
-  "model": "qwen2.5:72b",
+  "model": "gemma4:31b",
   "messages": [{"role": "user", "content": "hello"}],
   "stream": true,
   "options": {
@@ -66,10 +93,14 @@ Base URL: `http://localhost:11434`
 }
 ```
 
+Model names in examples reflect the current `models.json` defaults but are
+not required by `go-llm` — any model the configured provider can load
+works. See `docs/llm/` for the reference lineup and BYO guidance.
+
 ### Embed Request
 ```json
 {
-  "model": "nomic-embed-text",
+  "model": "qwen3-embedding:8b",
   "input": "text to embed"
 }
 ```

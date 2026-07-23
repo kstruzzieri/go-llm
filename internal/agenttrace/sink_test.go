@@ -1,0 +1,299 @@
+package agenttrace
+
+import (
+	"bufio"
+	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/provider"
+)
+
+func readSpans(t *testing.T, path string) []map[string]any {
+	t.Helper()
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer func() { _ = f.Close() }()
+	var spans []map[string]any
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if strings.TrimSpace(sc.Text()) == "" {
+			continue
+		}
+		var m map[string]any
+		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
+			t.Fatalf("bad span line %q: %v", sc.Text(), err)
+		}
+		spans = append(spans, m)
+	}
+	return spans
+}
+
+func TestOnToolResult_RecordsDelegatedModel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.jsonl")
+	s, err := NewTelemetrySink(path, "run1", time.Unix(0, 0), func() time.Time { return time.Unix(0, 0) })
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	ro := &provider.RouteOutcome{
+		ActualModel:   provider.ModelKey{Provider: "local", Model: "coder"},
+		PlannedModel:  provider.ModelKey{Provider: "local", Model: "coder"},
+		FallbacksUsed: 0,
+	}
+	err = s.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step:    0,
+		Call:    provider.ToolCall{Function: provider.ToolCallFunction{Name: "delegate_code"}},
+		Effect:  agent.Effect{Class: agent.Read | agent.Network},
+		Invoked: true,
+		Result:  agent.ToolResult{Content: "code", RouteOutcome: ro},
+	})
+	if err != nil {
+		t.Fatalf("OnToolResult: %v", err)
+	}
+	_ = s.Close()
+
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), `"delegated_model":"local/coder"`) {
+		t.Fatalf("span missing delegated_model: %s", data)
+	}
+}
+
+func TestOnToolResult_OmitsDelegatedModelWhenNil(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "trace.jsonl")
+	s, _ := NewTelemetrySink(path, "run1", time.Unix(0, 0), func() time.Time { return time.Unix(0, 0) })
+	_ = s.OnToolResult(context.Background(), agent.ToolResultEvent{
+		Step:    0,
+		Call:    provider.ToolCall{Function: provider.ToolCallFunction{Name: "read_file"}},
+		Effect:  agent.Effect{Class: agent.Read},
+		Invoked: true,
+		Result:  agent.ToolResult{Content: "x"},
+	})
+	_ = s.Close()
+	data, _ := os.ReadFile(path)
+	if strings.Contains(string(data), "delegated_model") {
+		t.Fatalf("nil RouteOutcome must omit delegated_model: %s", data)
+	}
+}
+
+func TestTelemetrySink_SpansAndContentLight(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telemetry.jsonl")
+	clk := time.Unix(0, 0)
+	sink, err := NewTelemetrySink(path, "run7", clk, func() time.Time { return clk.Add(3 * time.Second) })
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+
+	ctx := context.Background()
+	// A model step that carries a SECRET in assistant content + usage/route.
+	_ = sink.OnStep(ctx, agent.StepEvent{
+		Index:    0,
+		Response: provider.ChatResponse{Content: "SECRET-assistant", Usage: provider.Usage{PromptTokens: 9, CompletionTokens: 1, TotalTokens: 10}},
+		RouteOutcome: &provider.RouteOutcome{
+			ActualModel: provider.ModelKey{Provider: "llamacpp", Model: "qwen3:8b"},
+			WasSticky:   true,
+		},
+		Pressure: agent.Pressure{UsedPct: 0.5},
+		Latency:  2 * time.Second,
+	})
+	// A tool result that carries SECRET args + output.
+	_ = sink.OnToolResult(ctx, agent.ToolResultEvent{
+		Step:    0,
+		Call:    provider.ToolCall{Function: provider.ToolCallFunction{Name: "read_file", Arguments: json.RawMessage(`{"path":"SECRET-arg"}`)}},
+		Effect:  agent.Effect{Class: agent.Read},
+		Result:  agent.ToolResult{Content: "SECRET-output", Truncated: true},
+		Invoked: true,
+		Latency: 4 * time.Millisecond,
+	})
+	res := agent.Result{Steps: []agent.StepRecord{{Index: 0}}, StopReason: agent.Completed}
+	if err := sink.Finish(res, "completed"); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	spans := readSpans(t, path)
+	kinds := map[string]int{}
+	for _, s := range spans {
+		kinds[s["kind"].(string)]++
+	}
+	if kinds["model_step"] != 1 || kinds["tool_call"] != 1 || kinds["run"] != 1 {
+		t.Fatalf("span kinds = %v, want one each", kinds)
+	}
+
+	raw, _ := os.ReadFile(path)
+	for _, secret := range []string{"SECRET-assistant", "SECRET-arg", "SECRET-output"} {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("telemetry leaked %q:\n%s", secret, raw)
+		}
+	}
+	// Sanity: content-light fields ARE present.
+	if !strings.Contains(string(raw), "qwen3:8b") || !strings.Contains(string(raw), `"content_bytes":13`) {
+		t.Fatalf("missing content-light fields:\n%s", raw)
+	}
+}
+
+func TestTelemetrySink_OmitsStopReasonForNonCompletedStatus(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telemetry.jsonl")
+	sink, err := NewTelemetrySink(path, "run-error", time.Unix(0, 0), time.Now)
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+
+	if err := sink.Finish(agent.Result{}, "error"); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if err := sink.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	spans := readSpans(t, path)
+	if len(spans) != 1 || spans[0]["kind"] != "run" {
+		t.Fatalf("spans = %+v, want one run span", spans)
+	}
+	if _, ok := spans[0]["stop_reason"]; ok {
+		t.Fatalf("error span has stop_reason = %v", spans[0]["stop_reason"])
+	}
+}
+
+// TestTelemetrySink_SwallowsWriteErrors proves the sink never aborts a run.
+func TestTelemetrySink_SwallowsWriteErrors(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telemetry.jsonl")
+	sink, err := NewTelemetrySink(path, "run1", time.Unix(0, 0), time.Now)
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	// Close the underlying file early so subsequent writes fail.
+	_ = sink.Close()
+	if err := sink.OnStep(context.Background(), agent.StepEvent{Index: 0}); err != nil {
+		t.Fatalf("OnStep returned %v, want nil (best-effort)", err)
+	}
+	if err := sink.OnToolResult(context.Background(), agent.ToolResultEvent{Step: 0}); err != nil {
+		t.Fatalf("OnToolResult returned %v, want nil", err)
+	}
+}
+
+func TestTelemetrySinkOnPressureSpan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "telemetry.jsonl")
+	started := time.Unix(0, 0)
+	sink, err := NewTelemetrySink(path, "run1", started, func() time.Time { return started })
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	p1 := agent.Pressure{UsedPct: 0.50, InputTokens: 50, InputBudget: 100, Level: agent.LevelOK, Cause: agent.CauseHistory, Mitigation: agent.MitigationNone}
+	p2 := agent.Pressure{UsedPct: 0.80, InputTokens: 80, InputBudget: 100, Level: agent.LevelWarn, Cause: agent.CauseHistory, Mitigation: agent.MitigationWarn}
+	if err := sink.OnPressure(context.Background(), agent.PressureEvent{Step: 0, Pressure: p1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.OnPressure(context.Background(), agent.PressureEvent{Step: 1, Pressure: p2}); err != nil {
+		t.Fatal(err)
+	}
+	if err := sink.Finish(agent.Result{}, "completed"); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	_ = sink.Close()
+
+	spans := readSpans(t, path)
+	var stage0, stage1, run map[string]any
+	for _, s := range spans {
+		switch s["kind"] {
+		case "runtime_stage":
+			if s["span_id"] == "run1-stage-assemble-0" {
+				stage0 = s
+			}
+			if s["span_id"] == "run1-stage-assemble-1" {
+				stage1 = s
+			}
+		case "run":
+			run = s
+		}
+	}
+	if stage0 == nil || stage1 == nil || run == nil {
+		t.Fatalf("missing spans: stage0=%v stage1=%v run=%v", stage0 != nil, stage1 != nil, run != nil)
+	}
+	if stage0["stage"] != "assemble" || stage0["parent_id"] != "run1-run" {
+		t.Fatalf("stage0 fields wrong: %+v", stage0)
+	}
+	if stage0["used_pct_delta"].(float64) != 0 {
+		t.Fatalf("first delta should be 0, got %v", stage0["used_pct_delta"])
+	}
+	if d := stage1["used_pct_delta"].(float64); d < 0.29 || d > 0.31 {
+		t.Fatalf("second delta should be ~0.30, got %v", d)
+	}
+	if stage1["level"] != "warn" || stage1["mitigation"] != "warn" || stage1["cause"] != "history" {
+		t.Fatalf("stage1 labels wrong: %+v", stage1)
+	}
+	if mp := run["max_used_pct"].(float64); mp < 0.79 || mp > 0.81 {
+		t.Fatalf("run max_used_pct should be ~0.80, got %v", mp)
+	}
+	if run["max_pressure_level"] != "warn" {
+		t.Fatalf("run max_pressure_level should be warn, got %v", run["max_pressure_level"])
+	}
+	if int(stage0["schema_version"].(float64)) != SchemaVersion || SchemaVersion != 2 {
+		t.Fatalf("schema version: span=%v const=%d want 2", stage0["schema_version"], SchemaVersion)
+	}
+}
+
+func TestTelemetrySinkExhaustedOutcome(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, _ := NewTelemetrySink(path, "runX", started, func() time.Time { return started })
+	p := agent.Pressure{UsedPct: 1.2, InputTokens: 120, InputBudget: 100, Level: agent.LevelCritical, Cause: agent.CausePinned, Mitigation: agent.MitigationHalt}
+	_ = sink.OnPressure(context.Background(), agent.PressureEvent{Step: 0, Pressure: p})
+	_ = sink.Close()
+	for _, s := range readSpans(t, path) {
+		if s["kind"] == "runtime_stage" {
+			if s["outcome"] != "exhausted" {
+				t.Fatalf("halt mitigation should yield outcome=exhausted, got %v", s["outcome"])
+			}
+			return
+		}
+	}
+	t.Fatal("no runtime_stage span written")
+}
+
+// TestTelemetrySinkStepSpanEnrichedPressure guards the model_step pressureLite
+// enrichment (level/cause/mitigation/input_budget) added in schema v2, which the
+// other tests exercise only via the runtime_stage span.
+func TestTelemetrySinkStepSpanEnrichedPressure(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, _ := NewTelemetrySink(path, "runE", started, func() time.Time { return started })
+	_ = sink.OnStep(context.Background(), agent.StepEvent{
+		Index:    0,
+		Pressure: agent.Pressure{UsedPct: 0.8, InputTokens: 80, InputBudget: 100, Level: agent.LevelWarn, Cause: agent.CauseHistory, Mitigation: agent.MitigationWarn},
+	})
+	_ = sink.Close()
+	for _, s := range readSpans(t, path) {
+		if s["kind"] != "model_step" {
+			continue
+		}
+		pr, ok := s["pressure"].(map[string]any)
+		if !ok {
+			t.Fatalf("model_step missing pressure object: %+v", s)
+		}
+		if pr["level"] != "warn" || pr["cause"] != "history" || pr["mitigation"] != "warn" {
+			t.Fatalf("model_step pressure not enriched: %+v", pr)
+		}
+		if int(pr["input_budget"].(float64)) != 100 || int(pr["input_tokens"].(float64)) != 80 {
+			t.Fatalf("model_step pressure tokens missing: %+v", pr)
+		}
+		return
+	}
+	t.Fatal("no model_step span written")
+}

@@ -1,0 +1,25 @@
+#!/usr/bin/env sh
+set -eu
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    printf 'missing required command: %s\n' "$1" >&2
+    exit 127
+  fi
+}
+
+require_cmd git
+
+script_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+repo_root="$(git -C "$script_dir/.." rev-parse --show-toplevel)"
+hook_path="$repo_root/.githooks/pre-push"
+
+if [ ! -x "$hook_path" ]; then
+  printf 'missing executable pre-push hook: %s\n' "$hook_path" >&2
+  exit 1
+fi
+
+git -C "$repo_root" config core.hooksPath .githooks
+
+printf 'Configured core.hooksPath=.githooks for %s\n' "$repo_root"
+printf 'Pre-push local CI will run the Docker-backed full suite before pushes.\n'

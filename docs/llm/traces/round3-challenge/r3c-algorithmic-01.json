@@ -1,0 +1,18 @@
+{
+  "id": "r3c-algorithmic-01",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `TruncateLabel` returns a string with at most `maxRunes` Unicode code points and must never return invalid UTF-8. The implementation is:\n\n```go\nfunc TruncateLabel(s string, maxRunes int) string {\n    if len(s) <= maxRunes {\n        return s\n    }\n    return s[:maxRunes]\n}\n```\n\nCallers pass `maxRunes >= 0`. Does this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `len(s)` and `s[:maxRunes]` operate on bytes, not Unicode code points, so the function can truncate too early for multibyte characters and can cut through a UTF-8 sequence, returning invalid UTF-8. The answer must give a minimal rune-aware fix, such as ranging over the string until `maxRunes` runes have been seen and slicing only at a rune boundary, or converting to `[]rune` when acceptable. 0.5 iff it correctly identifies byte-vs-rune confusion but gives a partial fix, such as checking `utf8.ValidString` after slicing without preventing invalid output, or converting to runes but mishandling `maxRunes == 0`. 0.0 iff it declares the implementation correct, claims Go string indexes are rune indexes, treats ASCII-only behavior as sufficient despite the contract, or suggests dropping invalid bytes after slicing as the primary fix. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the API, normalizes or transliterates text despite no such contract, counts grapheme clusters instead of the stated code points as the only answer, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

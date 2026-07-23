@@ -1,0 +1,17 @@
+{
+  "providers": {
+    "ollama": {
+      "base_url": "http://localhost:11434",
+      "timeout": "30s"
+    }
+  },
+  "models": {
+    "default": {
+      "name": "qwen3:8b",
+      "type": "dense"
+    }
+  },
+  "defaults": {
+    "chat": "default"
+  }
+}

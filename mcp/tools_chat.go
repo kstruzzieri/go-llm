@@ -1,0 +1,365 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/ollama"
+	"github.com/kstruzzieri/go-llm/provider"
+	"github.com/kstruzzieri/go-llm/rag"
+	"github.com/kstruzzieri/go-llm/transcript"
+)
+
+// chatArgs are the parameters for the chat tool.
+type chatArgs struct {
+	queryContextArgs
+	Messages       []ollama.ChatMessage `json:"messages"`
+	Model          string               `json:"model,omitempty"`
+	UseRAG         bool                 `json:"use_rag,omitempty"`
+	RAGTopK        int                  `json:"rag_top_k,omitempty"`
+	Temperature    *float64             `json:"temperature,omitempty"`
+	ConversationID string               `json:"conversation_id,omitempty"`
+}
+
+func (s *Server) registerChatTools() {
+	s.mcpServer.AddTool(&gomcp.Tool{
+		Name:        "chat",
+		Description: "Chat completion with optional RAG context. Returns the assistant's response.",
+		InputSchema: map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"messages": map[string]any{
+					"type":        "array",
+					"description": "Chat messages (each with role and content)",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"role":         map[string]any{"type": "string", "enum": []string{"system", "user", "assistant", "tool"}},
+							"content":      map[string]any{"type": "string"},
+							"tool_calls":   map[string]any{"type": "array"},
+							"tool_name":    map[string]any{"type": "string"},
+							"tool_call_id": map[string]any{"type": "string"},
+						},
+						"required": []string{"role", "content"},
+					},
+				},
+				"model":           map[string]any{"type": "string", "description": "Model name (uses configured default if omitted)"},
+				"use_rag":         map[string]any{"type": "boolean", "description": "Prepend RAG context from the vector store"},
+				"rag_top_k":       map[string]any{"type": "integer", "description": "Number of RAG results (default: 5)"},
+				"current_file":    map[string]any{"type": "string", "description": "File currently being edited for contextual RAG ranking"},
+				"workspace_root":  map[string]any{"type": "string", "description": "Workspace root used to normalize contextual paths"},
+				"open_files":      map[string]any{"type": "array", "description": "Files currently open for contextual RAG ranking", "items": map[string]any{"type": "string"}},
+				"temperature":     map[string]any{"type": "number", "description": "Sampling temperature"},
+				"conversation_id": map[string]any{"type": "string", "description": "Optional stable id to group calls of one conversation; omit to derive identity from message content"},
+			},
+			"required": []string{"messages"},
+		},
+	}, s.handleChat)
+}
+
+func (s *Server) handleChat(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
+	var args chatArgs
+	if err := json.Unmarshal(req.Params.Arguments, &args); err != nil {
+		return toolError("validation", "invalid arguments: %v", err), nil
+	}
+	if len(args.Messages) == 0 {
+		return toolError("validation", "messages must not be empty"), nil
+	}
+	if !args.UseRAG && !args.empty() {
+		return toolError("validation", "current_file, workspace_root, and open_files require use_rag=true"), nil
+	}
+
+	router := s.routerSnapshot()
+	if router == nil {
+		return toolError("config", "router unavailable"), nil
+	}
+
+	messages := args.Messages
+	var outcome rag.RetrievalPolicyOutcome
+
+	// RAG orchestration: retrieve context and prepend as a system message.
+	if args.UseRAG {
+		// ragDisabled is immutable after NewServer; no lock needed.
+		if s.ragDisabled {
+			return toolError("rag", "RAG is disabled on this server"), nil
+		}
+
+		s.mu.RLock()
+		retriever := s.retriever
+		s.mu.RUnlock()
+
+		if retriever == nil {
+			return toolError("rag", "RAG index is empty; run rag_index_file or rag_index_directory first"), nil
+		}
+
+		topK := args.RAGTopK
+		if topK <= 0 {
+			topK = 5
+		}
+
+		// Extract query from last user message.
+		query := lastUserMessage(messages)
+		if query == "" {
+			return toolError("validation", "use_rag requires at least one user message"), nil
+		}
+
+		policy, _, err := s.retrievalPolicyRequest(ctx, req)
+		if err != nil {
+			return retrievalPolicyRequestError(err), nil
+		}
+		contextual := !args.empty()
+		qctx := rag.QueryContext{}
+		if contextual {
+			qctx = args.queryContext()
+		}
+		response, rerr := retriever.RetrieveRequest(ctx, rag.RetrievalRequest{
+			Query: query, K: topK, QueryContext: qctx, Policy: policy,
+		})
+		outcome = response.Policy
+		if rerr != nil {
+			if result := retrievalPolicyToolError(outcome, rerr); result != nil {
+				return result, nil
+			}
+			return toolError("rag", "retrieve: %v", rerr), nil
+		}
+		results := flattenRetrievalResults(response.Results, !contextual)
+		if len(results) == 0 {
+			if outcome.Applied {
+				return withRetrievalPolicyMeta(toolError("policy_no_context", "no permitted RAG context"), outcome), nil
+			}
+			return toolError("rag", "RAG index is empty; run rag_index_file or rag_index_directory first"), nil
+		}
+
+		ragContext := retriever.BuildContext(results, ragContextMaxTokens)
+		systemMsg := ollama.ChatMessage{
+			Role:    "system",
+			Content: fmt.Sprintf("Relevant context from the codebase:\n\n%s", ragContext),
+		}
+		messages = append([]ollama.ChatMessage{systemMsg}, messages...)
+	}
+
+	pmsgs := toProviderChatMessages(messages)
+
+	opts := provider.ModelOptions{}
+	if args.Temperature != nil {
+		opts.Temperature = args.Temperature
+	}
+	model, err := s.routeModelSelector(ctx, args.Model, "chat")
+	if err != nil {
+		return withRetrievalPolicyMeta(toolError("config", "%v", err), outcome), nil
+	}
+
+	rr := provider.RoutingRequest{
+		Model:          model,
+		UseCase:        "chat",
+		RequiredCaps:   provider.CapChat,
+		Messages:       pmsgs,
+		Options:        opts,
+		ExpectedOutput: provider.DefaultExpectedOutput("chat"),
+		Priority:       provider.PriorityNormal,
+	}
+	if rr.Model == "" {
+		chain, err := s.chainFor("chat")
+		if err != nil {
+			return withRetrievalPolicyMeta(toolError("config", "%v", err), outcome), nil
+		}
+		rr.PreferredChain = chain
+	}
+
+	plan, err := router.Route(ctx, rr)
+	if err != nil {
+		return withRetrievalPolicyMeta(toolError("router", "%v", err), outcome), nil
+	}
+	resp, err := plan.ExecuteChat(ctx)
+	if err != nil {
+		return withRetrievalPolicyMeta(toolError("ollama", "%v", err), outcome), nil
+	}
+	s.persistTranscript(ctx, req, args, messages, resp)
+	return withRetrievalPolicyMeta(toolResult(resp.Content), outcome), nil
+}
+
+func flattenRetrievalResults(scored []rag.ScoredResult, resetScore bool) []rag.SearchResult {
+	if scored == nil {
+		return nil
+	}
+	results := make([]rag.SearchResult, len(scored))
+	for i := range scored {
+		results[i] = scored[i].SearchResult
+		if resetScore {
+			results[i].Score = 1 - results[i].Distance
+		}
+	}
+	return results
+}
+
+// chatMessagesEqual reports whether two chat-message slices are equivalent for
+// transcript purposes (role, text, and tool linkage). Used to decide whether an
+// effective request differs from the canonical history enough to record it as a
+// distinct RenderedRequest.
+func chatMessagesEqual(a, b []ollama.ChatMessage) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].Role != b[i].Role ||
+			a[i].Content != b[i].Content ||
+			a[i].ToolName != b[i].ToolName ||
+			a[i].ToolCallID != b[i].ToolCallID ||
+			len(a[i].ToolCalls) != len(b[i].ToolCalls) {
+			return false
+		}
+	}
+	return true
+}
+
+// lastUserMessage returns the content of the last message with role "user".
+func lastUserMessage(msgs []ollama.ChatMessage) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+func toProviderChatMessages(in []ollama.ChatMessage) []provider.ChatMessage {
+	out := make([]provider.ChatMessage, len(in))
+	for i, m := range in {
+		out[i] = provider.ChatMessage{
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCalls:  toProviderToolCalls(m.ToolCalls),
+			ToolName:   m.ToolName,
+			ToolCallID: m.ToolCallID,
+		}
+	}
+	return out
+}
+
+func toProviderToolCalls(in []ollama.ToolCall) []provider.ToolCall {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make([]provider.ToolCall, len(in))
+	for i, c := range in {
+		var args json.RawMessage
+		if c.Function.Arguments != nil {
+			args, _ = json.Marshal(c.Function.Arguments)
+		}
+		out[i] = provider.ToolCall{
+			ID:   c.ID,
+			Type: c.Type,
+			Function: provider.ToolCallFunction{
+				Index:     c.Function.Index,
+				Name:      c.Function.Name,
+				Arguments: args,
+			},
+		}
+	}
+	return out
+}
+
+// persistTranscript records a successful chat call to the transcript store when
+// one is configured. Best-effort: any failure is logged and never surfaces to
+// the caller. requestMessages is the exact model-visible request used for the
+// successful response (e.g. with RAG context prepended).
+//
+// The canonical Request is the pre-RAG caller history (args.Messages): it alone
+// drives conversation identity and stitching, so it must stay stable across the
+// turns of one session — recording a per-turn RAG system message there would
+// fork the session. The effective request (requestMessages), when it differs,
+// is recorded separately as RenderedRequest so replay still measures the prompt
+// the model actually saw. The transcript DB is local and unredacted by design
+// (see WithTranscriptStore) and must not be committed or shared; redaction
+// happens at capture export, not here.
+func (s *Server) persistTranscript(ctx context.Context, req *gomcp.CallToolRequest, args chatArgs, requestMessages []ollama.ChatMessage, resp *provider.ChatResponse) {
+	store := s.transcriptStoreSnapshot()
+	if store == nil {
+		return
+	}
+
+	reqMsgs, err := conversation.FromChatMessages(args.Messages)
+	if err != nil {
+		log.Printf("mcp: transcript skip (convert request): %v", err)
+		return
+	}
+	// Only carry a distinct rendered request when retrieval (or similar) changed
+	// the effective prompt; otherwise it is identical to the canonical history.
+	var rendered []conversation.Message
+	if len(requestMessages) > 0 && !chatMessagesEqual(requestMessages, args.Messages) {
+		rendered, err = conversation.FromChatMessages(requestMessages)
+		if err != nil {
+			log.Printf("mcp: transcript skip (convert rendered request): %v", err)
+			return
+		}
+	}
+
+	var toolCalls json.RawMessage
+	if len(resp.ToolCalls) > 0 {
+		if raw, merr := json.Marshal(resp.ToolCalls); merr == nil {
+			toolCalls = raw
+		} else {
+			log.Printf("mcp: transcript marshal tool calls: %v", merr)
+		}
+	}
+	var routeOutcome json.RawMessage
+	if resp.RouteOutcome != nil {
+		if raw, merr := json.Marshal(resp.RouteOutcome); merr == nil {
+			routeOutcome = raw
+		} else {
+			log.Printf("mcp: transcript marshal route outcome: %v", merr)
+		}
+	}
+
+	in := transcript.RecordInput{
+		ConversationID:  strings.TrimSpace(args.ConversationID),
+		Request:         reqMsgs,
+		RenderedRequest: rendered,
+		Response: conversation.Message{
+			Role:      "assistant",
+			Content:   resp.Content,
+			ToolCalls: toolCalls,
+		},
+		Model:        resp.Model,
+		Provider:     resp.Provider,
+		RouteOutcome: routeOutcome,
+		SessionHint:  sessionHintFromRequest(req),
+	}
+	// Persistence is best-effort work that runs after the response is produced.
+	// Detach from the request context so a client that cancels immediately after
+	// receiving the answer (IDE clients cancel constantly) doesn't drop the
+	// trace. Bound it so a stuck write can't block the handler return.
+	recordCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	if rerr := store.Record(recordCtx, in); rerr != nil {
+		log.Printf("mcp: transcript record: %v", rerr)
+	}
+}
+
+// sessionHintFromRequest returns a stable MCP session identifier when the
+// transport provides one (streamable HTTP), or "" otherwise (stdio/in-memory).
+// "" is a safe fallback: conversationKey then derives identity from message
+// content (transcript §5).
+//
+// GetSession returns the concrete *ServerSession boxed in the Session
+// interface, so a request created without a session (stdio/in-memory, tests) is
+// a typed nil: the interface is non-nil but the pointer is nil. Comparing the
+// interface to nil would spuriously pass and ID() would then panic on the nil
+// receiver. Assert to the concrete type and nil-check the pointer instead.
+func sessionHintFromRequest(req *gomcp.CallToolRequest) string {
+	if req == nil {
+		return ""
+	}
+	if sess, ok := req.GetSession().(*gomcp.ServerSession); ok && sess != nil {
+		return sess.ID()
+	}
+	return ""
+}

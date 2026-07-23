@@ -1,0 +1,18 @@
+{
+  "id": "conversation-fa-l02",
+  "source": "first-accepted-run",
+  "captured_at": "2026-05-30T20:17:44.305Z",
+  "system": "You are a helpful coding assistant.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Write a one-line Go doc comment for an exported function `Open(ctx context.Context, path string) (*Store, error)` that opens a SQLite transcript store."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "Assistant answer should satisfy the captured final assistant response.",
+    "final_answer_substring": "```go\n// Open opens a SQLite transcript store at the given path.\nfunc Open(ctx context.Context, path string) (*Store, error) {\n    // ...\n}\n```"
+  }
+}

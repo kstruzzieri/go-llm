@@ -1,0 +1,286 @@
+# Judge Calibration Workflow
+
+The `cmd/llm-bench` LLM-judge scorer needs periodic calibration against
+human-labeled ground truth before its agreement numbers can be trusted in
+[recommendation.md](recommendation.md). This doc describes the two-phase
+workflow.
+
+## Storage layout
+
+| Path | Checked in? | Purpose |
+|---|---|---|
+| `docs/llm/CALIBRATION.md` | ✅ this file | Format spec + workflow |
+| `docs/llm/calibration/artifacts.jsonl` | ❌ gitignored | Frozen candidate outputs (Phase 1 output) |
+| `docs/llm/calibration/labels.jsonl` | ❌ gitignored | Human labels (you hand-edit) |
+| `docs/llm/calibration/reports/*.md` | ❌ gitignored | Per-run calibration reports |
+
+## Phase 1 — Capture frozen artifacts
+
+Run this when you change the set of candidate models you care about.
+
+```
+llm-bench -calibrate-capture \
+  -traces 'docs/llm/traces/*.json' \
+  -models 'ollama/qwen3-coder-next:latest,ollama/gemma4:31b' \
+  -labels-out docs/llm/calibration/artifacts.jsonl
+```
+
+Writes one JSON object per line to `artifacts.jsonl`:
+
+```json
+{
+  "trace_id": "fim-go-handler-001",
+  "candidate_model": "ollama/qwen3-coder-next:latest",
+  "artifact_hash": "sha256:...",
+  "trace": {
+    "id": "fim-go-handler-001",
+    "system": "...",
+    "turns": [{"role": "user", "content": "..."}],
+    "golden": {"final_answer_criteria": "...", "tool_calls": ["read_file"]}
+  },
+  "actual_final_answer": "...",
+  "actual_tool_calls": ["read_file", "search_code"],
+  "actual_transcript": [{"role": "...", "content": "..."}],
+  "captured_at": "2026-05-25T14:00:00Z"
+}
+```
+
+## Phase 2 — Label the artifacts
+
+Open `artifacts.jsonl` and create a parallel `labels.jsonl` where each line
+adds `expected_answer_quality` exactly equal to one of `{0.0, 0.5, 1.0}`:
+
+```json
+{
+  "trace_id": "fim-go-handler-001",
+  "candidate_model": "ollama/qwen3-coder-next:latest",
+  "artifact_hash": "sha256:...",
+  "expected_answer_quality": 0.5,
+  "label_notes": "correct high-level answer, missed required caveat",
+  "labeled_at": "2026-05-25T14:30:00Z",
+  "labeler": "manual"
+}
+```
+
+The `artifact_hash` MUST match the corresponding artifact's hash — that's
+how the calibration loop knows the label is still valid for the frozen
+output. Each current artifact hash may appear only once in `labels.jsonl`;
+duplicate matched labels are rejected so one artifact cannot be double-counted.
+Labels with `expected_answer_quality` outside `{0.0, 0.5, 1.0}` are rejected.
+
+### How to label
+
+- **1.0** — fully satisfies the rubric with no material technical error.
+- **0.5** — partially correct but missing important requirements, or
+  contains a contained technical flaw.
+- **0.0** — wrong, fabricated, absent, or materially misleading.
+
+Round 2 uses `label_notes` tokens for calibration-report stratification
+without changing the label schema:
+
+- `r1-anchor` marks the labels carried from Round 1.
+- `judge-validation-fixture` marks curated P1 adversarial fixtures that
+  validate the judge and stay out of the P2 accepted-run corpus unless they
+  are real captured artifacts.
+
+Round 2A adds (and the calibration report stratifies on these):
+
+- `r2-anchor` marks `natural`-partition labels (all freshly captured this
+  round — the Round-1 labels are historical context only; nothing is
+  carried over).
+- `r2-challenge` marks challenge-partition labels.
+- `judge-validation-fixture` marks the tool canary (never model evidence).
+
+Round 3 adds source-stratified labels for the harder discriminating corpus:
+
+- `r3-fresh` marks the 24 fresh correctness-depth challenge traces from
+  `docs/llm/traces/round3-challenge/` with `source=round3-challenge`.
+- `r3-anchor` marks the selected Round-2 regression anchors with
+  `source=round2-challenge`; these are known-difficulty checks, not the
+  primary frontier-vs-local claim.
+- `r3-natural` marks the same-epoch natural re-anchor traces with
+  `source=first-accepted-run`.
+
+Round 3 scoring still uses the same `{0.0, 0.5, 1.0}` manual labels, but the
+fresh challenge rubrics pre-register bounded partial-credit patterns per
+trace. The intended shape is: `1.0` for correct diagnosis plus minimal fix
+without a concrete restraint/provenance failure; `0.5` only for the trace's
+listed partial patterns; `0.0` for wrong root cause, fabricated mechanisms,
+unsafe fixes, or the trace's enumerated hard-fail cases. Candidate capture
+must happen after the Round-3 trace/rubric/screen-note commit barrier.
+
+### Blind labeling (Round 2A)
+
+Do not edit `labels.jsonl` by hand. Render a blind worksheet (model
+identity hidden) that shows each prompt, committed rubric, candidate
+output, and artifact hash. Score against the rubric, then ingest:
+
+```
+llm-bench -blind-render -artifacts docs/llm/calibration/artifacts.round2.jsonl -report worksheet.txt
+# fill each block's `score:` (0 | 0.5 | 1) and optional `notes:`
+llm-bench -blind-ingest -worksheet worksheet.txt \
+  -artifacts docs/llm/calibration/artifacts.round2.jsonl \
+  -labels-out docs/llm/calibration/labels.round2.jsonl -labeler manual
+```
+
+Ingest rejoins the true `trace_id` + `candidate_model` from the untouched
+artifacts file on `artifact_hash`, so the labeler never sees the model
+and never authors JSON. Unscored blocks are skipped and reported. Labels
+are stamped with `labeled_at`. Note: `-blind-ingest` requires an explicit
+`-labels-out` that differs from `-artifacts` (its default points at
+`artifacts.jsonl` and would overwrite the artifacts file). The rendered
+worksheet is a gitignored working file, not an artifact — discard it after
+ingest.
+
+### Partition-separated accepted run (Round 2A)
+
+The offline scorers honor `-corpus-manifest`, `-corpus-partitions`, and
+`-corpus-only-evidence`. Run each scorer once per partition for the two
+separate model-evidence views; the canary (the `judge-validation`
+partition, non-evidence) drops from both.
+
+```
+llm-bench -manual-report -labels ... -artifacts ... \
+  -corpus-manifest docs/llm/traces/round2-challenge/corpus-manifest.jsonl \
+  -corpus-partitions challenge -corpus-only-evidence -report challenge-quality.md
+```
+
+### Round-3 discrimination workflow
+
+Round 3 reports by manifest `source`, not just by partition. Use
+`-corpus-sources round3-challenge` for the fresh challenge stratum,
+`-corpus-sources round2-challenge` for the R2-anchor regression view, and
+`-corpus-sources first-accepted-run` for the natural re-anchor view.
+
+After blind manual labeling, run the discrimination report before citing a
+frontier-vs-local conclusion:
+
+```
+llm-bench -discrimination-report \
+  -labels docs/llm/calibration/labels.round3.jsonl \
+  -artifacts docs/llm/calibration/artifacts.round3.jsonl \
+  -corpus-manifest docs/llm/traces/round3-challenge/corpus-manifest.jsonl \
+  -top-models ollama/gemma4:31b,ollama/qwen3-coder-next:latest,ollama/qwen3.6:35b-a3b,openai-compat/glm-5.1 \
+  -floor-model ollama/qwen3:8b \
+  -discriminator-manifest-out docs/llm/calibration/round3-valid-discriminators.jsonl \
+  -report docs/llm/calibration/round3-discrimination.md
+```
+
+The report classifies each trace as `valid-discriminator`, `saturated`,
+`unsolved`, `floor-only`, `no-signal`, or `unpaired/missing`, then prints the
+per-source funnel and the Round-3 K-gate. The derived discriminator manifest
+is gitignored and is the only allowed selector for the primary
+valid-discriminator paired-delta view; do not hand-filter a spreadsheet.
+
+## Phase 3 — Calibrate
+
+Run this when you change the judge model (or after material judge prompt
+changes).
+
+```
+llm-bench -calibrate \
+  -labels docs/llm/calibration/labels.jsonl \
+  -artifacts docs/llm/calibration/artifacts.jsonl \
+  -judge-model ollama/gemma4:31b \
+  -calibrate-agreement exact
+```
+
+For a frontier judge, keep the same labels/artifacts and switch only the judge
+transport:
+
+```
+LLM_BENCH_JUDGE_API_KEY=... llm-bench -calibrate \
+  -labels docs/llm/calibration/labels.jsonl \
+  -artifacts docs/llm/calibration/artifacts.jsonl \
+  -judge-transport openai-compat \
+  -judge-base-url https://api.openai.com \
+  -judge-model <model-listed-by-/v1/models> \
+  -calibrate-agreement exact
+```
+
+`openai-compat` reports provider provenance as `openai-compat:<endpoint-id>`;
+the endpoint id is derived from the base URL so two compatible endpoints with
+the same model id do not share cached digest-less verdicts.
+
+For subscription-backed Claude Code diagnostics:
+
+```
+llm-bench -calibrate \
+  -labels docs/llm/calibration/labels.jsonl \
+  -artifacts docs/llm/calibration/artifacts.jsonl \
+  -judge-transport claude-cli \
+  -judge-model opus \
+  -calibrate-agreement exact
+```
+
+`claude-cli` reports provider provenance as `claude-cli` and caches against
+the Claude CLI version when available. It is not a raw API transport and cannot
+pin temperature, so run stability diagnostics before citing a pass.
+
+Writes a markdown report to
+`docs/llm/calibration/reports/YYYY-MM-DDTHHMMSSZ-<slug>.md`. If a report
+already exists for the same timestamp and judge model, a numeric suffix is
+added so prior reports are not overwritten. Verdict is one of:
+
+- **PASS** — exact categorical agreement ≥85% on ≥50 matched non-stale
+  labels, borderline/fail agreement ≥80% when that subset is present, and
+  no known subtle-bug fixture judged as `1.0`.
+- **FAIL** — enough labels exist, but overall exact agreement, the
+  borderline/fail gate, or a known subtle-bug fixture gate failed.
+- **INSUFFICIENT_LABELS** — fewer than 50 matched non-stale labels.
+  Never claims PASS. Label more artifacts and rerun.
+
+Primary agreement is `judge == expected`. The report also prints the retired
+tolerance diagnostic, `|judge - expected| <= 0.25`, so historical comparisons
+remain visible without gating the verdict. `-calibrate-agreement tolerance`
+is retained for historical comparison runs and must not be used for Round 2
+acceptance.
+
+The report includes overall exact agreement, R1-anchor agreement,
+borderline/fail agreement (`expected_answer_quality` of `0.0` or `0.5`),
+clear-1.0 agreement, harsh and lenient disagreement counts, stratified gate
+failures, and a roll-call for the known subtle-bug fixtures (`fa-f03`,
+`fa-c05`, `fa-g04`).
+
+A label is "stale" iff its `artifact_hash` doesn't match the current
+`artifacts.jsonl`. Stale labels are listed in the report and excluded from
+agreement. Usual cause: candidate model upgraded silently (floating tag).
+Mitigation: pin candidates to non-floating tags or digests.
+Labels whose candidate model is the same selector as the judge model are also
+skipped and reported separately; they are excluded from agreement and label
+sufficiency math.
+
+### Stability runs (diagnostic)
+
+```
+llm-bench -calibrate ... -judge-stability-runs 3
+```
+
+Runs the judge exactly `M=3` times per artifact (cache bypassed, results
+NOT persisted) and reports `max - min` spread across those samples. The
+first sample is also the score used for agreement. Does not affect the
+PASS/FAIL verdict — it's a separate "is the judge stable?" check.
+
+## Floating-tag caution
+
+Two distinct floating-tag risks:
+
+1. **Judge model drift** — `ollama pull gemma4:31b` may resolve to a
+   different digest. Mitigation: the judge cache key includes the model
+   digest when `/api/show` exposes one, so cached judgments from a
+   different digest miss instead of being reused incorrectly.
+2. **Candidate model drift** — `ollama pull qwen3-coder-next:latest` may
+   resolve to a different digest, producing different artifacts that no
+   longer match your old labels. Mitigation: `artifact_hash` mismatch
+   surfaces as "stale labels" in the report.
+
+For trustworthy accepted-run calibrations, pin both judge and candidate
+to non-floating tags or digests.
+
+## Active labeling loop (deferred)
+
+`-calibrate-suggest` (an "active learning" subcommand that highlights
+artifacts most worth labeling) is a planned follow-up. For now, label
+incrementally — start with 20 artifacts, run `-calibrate`, then label
+artifacts where the judge disagreed with your label or where exact labels
+are hardest to assign, especially borderline/fail cases (`0.0` or `0.5`).

@@ -1,0 +1,18 @@
+{
+  "id": "r2c-compile-completeness-01",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a senior Go engineer. When asked for code, return a complete, self-contained file that compiles as-is: include the package clause and every import the code uses. Do not abbreviate with comments like // ... imports.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "In package `metrics`, write a function `WriteCSV(path string, rows [][]string) error` that creates the file at `path`, writes every row with encoding/csv, flushes, and returns any error (including a flush error). Give me the whole file so I can drop it in."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer is a complete compilable Go file: has `package metrics`, imports everything it uses (at minimum `encoding/csv` and `os`; additional imports are fine if actually used), creates and closes the file, writes rows, and surfaces both a write error and the csv Writer flush error. 0.5 if logic is correct but one import is missing or the package clause is absent (would not compile as pasted). 0.0 if it references an undeclared symbol, omits both package and imports (pure snippet), or ignores the flush error.",
+    "final_answer_substring": ""
+  }
+}

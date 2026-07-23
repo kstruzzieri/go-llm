@@ -1,0 +1,31 @@
+{
+  "schema_version": "0.3.0",
+  "objective": "smoke: prove the agentflow task spine",
+  "scope": ["src"],
+  "non_goals": [],
+  "invariants": ["only src/answer.txt changes"],
+  "risk_level": "low",
+  "drift_budget": {
+    "unrelated_edits": 0,
+    "new_dependencies": 0,
+    "formatting_drift": "minimal",
+    "architecture_drift": "requires_approval"
+  },
+  "evidence_ids": [],
+  "allowed_files": ["src/*", ".agent/"],
+  "blocked_files": [],
+  "validation_gates": ["unit-tests"],
+  "rollback_plan": "git checkout -- .",
+  "steps": [
+    {
+      "id": "P1",
+      "action": "ensure src/answer.txt contains the expected token",
+      "files": ["src/answer.txt"],
+      "preconditions": [],
+      "expected_diff": ["src/answer.txt changes pending to expected"],
+      "validation": ["unit-tests"],
+      "evidence_ids": [],
+      "gates": [{ "kind": "command", "run": ["grep", "-q", "expected", "src/answer.txt"] }]
+    }
+  ]
+}

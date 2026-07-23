@@ -1,0 +1,21 @@
+# Fixed project name so linked worktrees share the image and cache volumes
+# instead of rebuilding cold per checkout directory.
+name: go-llm
+
+services:
+  ci:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    working_dir: /workspace
+    command: ["./scripts/ci-local", "--mode", "pre-push"]
+    volumes:
+      - .:/workspace
+      - go-build-cache:/root/.cache/go-build
+      - go-mod-cache:/go/pkg/mod
+      - golangci-lint-cache:/root/.cache/golangci-lint
+
+volumes:
+  go-build-cache:
+  go-mod-cache:
+  golangci-lint-cache:

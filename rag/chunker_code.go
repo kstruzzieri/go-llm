@@ -15,6 +15,17 @@ type codeChunker struct {
 	language string
 }
 
+// codeChunkerBehaviorVersion identifies the chunk-output behavior of
+// codeChunker. Bump it whenever the chunks produced for some input change, so
+// cached embeddings with the old signature are treated as incompatible and
+// re-embedded. 1 = pre-markdown; 2 = markdown heading-aware sectioning.
+const codeChunkerBehaviorVersion = 2
+
+func (c *codeChunker) sourceSignature() string {
+	return fmt.Sprintf("%T:v=%d:max=%d:overlap=%d:language=%s",
+		c, codeChunkerBehaviorVersion, c.maxSize, c.overlap, c.language)
+}
+
 // NewCodeChunker returns a chunker that respects code boundaries.
 // It splits on function/method/class boundaries rather than arbitrary line counts.
 // Falls back to sliding window for non-code files.
@@ -29,7 +40,8 @@ func NewCodeChunker(opts ...ChunkerOption) Chunker {
 	return c
 }
 
-// Chunk splits content respecting code structure when possible.
+// Chunk splits content respecting code structure when possible. Markdown files
+// are split on heading sections; unknown file types fall back to sliding window.
 func (c *codeChunker) Chunk(source string, content string) ([]Chunk, error) {
 	if content == "" {
 		return nil, nil
@@ -41,25 +53,45 @@ func (c *codeChunker) Chunk(source string, content string) ([]Chunk, error) {
 	}
 
 	if lang == "" {
-		// Fall back to sliding window for unknown file types
-		sw, err := NewSlidingWindowChunker(c.maxSize, c.overlap)
-		if err != nil {
-			return nil, fmt.Errorf("rag: create fallback chunker for %q: %w", source, err)
+		// Not a recognized code language. Try markdown heading-aware splitting
+		// before the generic sliding-window fallback.
+		if isMarkdown(source) {
+			chunks, err := splitByHeadings(source, content, c.maxSize, c.overlap)
+			if err != nil {
+				return nil, err
+			}
+			if len(chunks) > 0 {
+				return chunks, nil
+			}
+			// Headingless markdown falls through to sliding window below.
 		}
-		return sw.Chunk(source, content)
+		return c.slidingFallback(source, content)
 	}
 
 	chunks := c.splitByBoundaries(source, content, lang)
 	if len(chunks) == 0 {
-		// No boundaries found, fall back to sliding window
-		sw, err := NewSlidingWindowChunker(c.maxSize, c.overlap)
-		if err != nil {
-			return nil, fmt.Errorf("rag: create fallback chunker for %q: %w", source, err)
-		}
-		return sw.Chunk(source, content)
+		// No boundaries found, fall back to sliding window.
+		return c.slidingFallback(source, content)
 	}
 
+	populateCodeChunkMetadata(chunks, lang)
 	return chunks, nil
+}
+
+// slidingFallback chunks content with a sliding window using this chunker's
+// max/overlap config. Used for unknown file types, headingless markdown, and
+// code files with no detectable boundaries.
+func (c *codeChunker) slidingFallback(source, content string) ([]Chunk, error) {
+	sw, err := NewSlidingWindowChunker(c.maxSize, c.overlap)
+	if err != nil {
+		return nil, fmt.Errorf("rag: create fallback chunker for %q: %w", source, err)
+	}
+	swChunks, err := sw.Chunk(source, content)
+	if err != nil {
+		return nil, err
+	}
+	populateSlidingWindowMetadata(swChunks)
+	return swChunks, nil
 }
 
 // detectLanguage infers the programming language from a file path.

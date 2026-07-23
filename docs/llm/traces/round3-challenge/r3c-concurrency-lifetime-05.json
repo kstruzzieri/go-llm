@@ -1,0 +1,18 @@
+{
+  "id": "r3c-concurrency-lifetime-05",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `RunAll` starts every job concurrently and returns only after every job has finished. The code is:\n\n```go\nfunc RunAll(jobs []func()) {\n    var wg sync.WaitGroup\n    for _, job := range jobs {\n        job := job\n        go func() {\n            wg.Add(1)\n            defer wg.Done()\n            job()\n        }()\n    }\n    wg.Wait()\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that calling `wg.Add(1)` inside the launched goroutine races with the main goroutine's `wg.Wait()`: `Wait` can observe a zero counter and return before one or more goroutines have called Add or finished their jobs. The minimal fix is to call `wg.Add(1)` before starting each goroutine, then defer `wg.Done()` inside the goroutine. 0.5 iff it identifies the Add/Wait ordering bug but gives a noisy or partial fix, such as `wg.Add(len(jobs))` outside the loop without also removing the per-goroutine Add, or serializing jobs instead of preserving concurrency. 0.0 iff it declares the implementation correct, focuses only on loop-variable capture in Go 1.22, claims WaitGroup is safe with Add after Wait starts in this pattern, or suggests sleeping before Wait. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the job type or public API, drops the requirement to run all jobs, adds arbitrary timing delays, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

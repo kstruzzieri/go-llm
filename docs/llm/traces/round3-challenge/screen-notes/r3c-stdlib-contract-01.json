@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-stdlib-contract-01",
+  "oracles": [
+    "bufio.Scanner has a default token limit around 64 KiB unless Buffer is configured.",
+    "The prompt explicitly requires records up to 1 MiB, so the default scanner violates the contract."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to catch models that treat Scanner as an unbounded line reader."
+}

@@ -11,8 +11,8 @@ func (c *Client) Generate(ctx context.Context, req GenerateRequest) (*GenerateRe
 	if req.Model == "" {
 		return nil, fmt.Errorf("ollama: generate: model name is required")
 	}
-	if req.Prompt == "" {
-		return nil, fmt.Errorf("ollama: generate: prompt is required")
+	if req.Prompt == "" && req.Suffix == "" {
+		return nil, fmt.Errorf("ollama: generate: prompt or suffix is required")
 	}
 	req.Stream = false
 	var resp GenerateResponse
@@ -29,8 +29,8 @@ func (c *Client) GenerateStream(ctx context.Context, req GenerateRequest, fn fun
 	if req.Model == "" {
 		return fmt.Errorf("ollama: generate stream: model name is required")
 	}
-	if req.Prompt == "" {
-		return fmt.Errorf("ollama: generate stream: prompt is required")
+	if req.Prompt == "" && req.Suffix == "" {
+		return fmt.Errorf("ollama: generate stream: prompt or suffix is required")
 	}
 	if fn == nil {
 		return fmt.Errorf("ollama: generate stream: callback function is required")

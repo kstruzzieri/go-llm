@@ -1,0 +1,18 @@
+{
+  "id": "r2c-compile-completeness-02",
+  "source": "round2-challenge",
+  "captured_at": "2026-06-09T00:00:00Z",
+  "system": "You are a senior Go engineer. When asked for a complete file, return code that compiles as-is: include the package clause and every import the code actually uses, and do not elide any import block with comments like // ... other imports.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "In package `httpx`, write a complete file with a function `GetJSON(ctx context.Context, url string, out any) error` that issues a context-aware GET with the default client, decodes the JSON body into out, and returns any error including a non-2xx status (as a formatted error). I'm going to paste the whole file directly into my project, so it must build with no edits."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer is a complete compilable Go file: has `package httpx`, declares and uses every import it references (at minimum `context`, `encoding/json`, `fmt`, `net/http`), builds the request with http.NewRequestWithContext, closes the response body, decodes into out, and returns a formatted error on non-2xx status. 0.5 if the logic is correct but at least one used import is missing from the import block (would not compile as pasted). 0.0 if it elides imports with a placeholder comment such as // ... other imports, omits the package clause, or references an undeclared identifier.",
+    "final_answer_substring": ""
+  }
+}

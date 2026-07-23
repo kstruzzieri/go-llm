@@ -1,0 +1,18 @@
+{
+  "id": "r3c-stdlib-contract-02",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: callers must be able to detect a missing row with `errors.Is(err, ErrNotFound)`. The implementation is:\n\n```go\nvar ErrNotFound = errors.New(\"not found\")\n\nfunc LoadRow(id string) error {\n    if !exists(id) {\n        return fmt.Errorf(\"load %s: %v\", id, ErrNotFound)\n    }\n    return nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies that `%v` formats `ErrNotFound` as text and does not wrap it, so `errors.Is(err, ErrNotFound)` will be false. The answer must give the minimal fix of using `%w` for the sentinel error, for example `fmt.Errorf(\"load %s: %w\", id, ErrNotFound)`. 0.5 iff it correctly identifies missing error wrapping but gives a partial fix, such as returning `ErrNotFound` directly and losing the row context, or adding a string comparison fallback while still not wrapping. 0.0 iff it declares the implementation correct, claims `%v` wraps errors, suggests comparing `err.Error()` to detect the sentinel, or invents a custom `Is` method when `%w` suffices. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the sentinel value, changes the exported contract away from `errors.Is`, replaces errors with status codes, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

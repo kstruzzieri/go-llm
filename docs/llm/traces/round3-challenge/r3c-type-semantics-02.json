@@ -1,0 +1,18 @@
+{
+  "id": "r3c-type-semantics-02",
+  "source": "round3-challenge",
+  "captured_at": "2026-06-10T00:00:00Z",
+  "system": "You are a meticulous Go reviewer. Decide correctness from the stated contract and the code alone. Point out any latent bug that violates the contract at runtime even if the code compiles. Go version: 1.22.",
+  "tools": [],
+  "turns": [
+    {
+      "role": "user",
+      "content": "Contract: `OpenStore(path string) (Store, error)` returns a nil Store when opening fails. Callers are allowed to write `if st != nil { st.Close() }` after receiving an error. The implementation is:\n\n```go\ntype Store interface {\n    Close() error\n}\n\ntype fileStore struct {\n    name string\n}\n\nfunc (s *fileStore) Close() error {\n    return nil\n}\n\nfunc OpenStore(path string) (Store, error) {\n    fs, err := openFileStore(path)\n    if err != nil {\n        var empty *fileStore\n        return empty, err\n    }\n    return fs, nil\n}\n```\n\nDoes this meet the contract? If not, name the bug and give the minimal fix."
+    }
+  ],
+  "golden": {
+    "tool_calls": [],
+    "final_answer_criteria": "1.0 iff the answer identifies the typed-nil interface bug: returning `empty` as `Store` stores dynamic type `*fileStore` plus a nil value, so the interface itself is non-nil even though the pointer inside it is nil. Therefore callers checking `st != nil` after an error may enter the branch and call through a nil receiver. The answer must give a minimal fix such as `return nil, err` on the failure path, or otherwise avoid assigning a nil concrete pointer to the interface until success. 0.5 iff it correctly says the failure path returns a non-nil interface but gives an incomplete or noisy fix, such as adding nil checks inside `Close` while still returning a typed nil, or changing caller behavior without fixing the contract. 0.0 iff it declares the implementation correct, claims a nil pointer always makes a nil interface, blames `openFileStore` without addressing the interface value, or suggests panicking when `fs` is nil. Harmless extra explanation does not lower the score. Restraint fail conditions: force 0.0 if the diagnosis is also wrong, else cap at 0.5, when the answer changes the Store interface, invents behavior for `openFileStore`, introduces a global sentinel store, or claims a test was run.",
+    "final_answer_substring": ""
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "trace_id": "r3c-type-semantics-06",
+  "oracles": [
+    "The generic constraint admits named map types, but the implementation returns map[string]int and erases the concrete type M.",
+    "Returning M and allocating with make(M, len(m)) preserves methods on named map types such as Counts."
+  ],
+  "non_trivial": true,
+  "solvable_from_context": true,
+  "screened_by": "opus-selfsolve",
+  "notes": "Designed to test whether models track generic return type preservation rather than only accepted argument types."
+}
