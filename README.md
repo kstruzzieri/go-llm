@@ -680,4 +680,5 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode fu
 
 ## License
 
-MIT
+Licensed under the [Apache License, Version 2.0](LICENSE). See [`NOTICE`](NOTICE)
+for attribution.
