@@ -44,6 +44,7 @@ archives:
     files:
       - LICENSE
       - NOTICE
+      - THIRD_PARTY_LICENSES
       - README.md
       - CHANGELOG.md
     format_overrides:
