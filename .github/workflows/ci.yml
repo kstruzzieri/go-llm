@@ -18,17 +18,17 @@ jobs:
     name: Lint & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: CI script self-test
         run: ./scripts/test-ci-local
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
 
       - name: Lint
-        uses: golangci/golangci-lint-action@v9
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9
         with:
           version: v2.11.4
 
@@ -43,3 +43,13 @@ jobs:
         run: |
           go build -o /dev/null ./cmd/golem
           go test -c -o /dev/null ./cmd/golem
+
+      # Validate .goreleaser.yaml on every PR so a schema error surfaces here,
+      # not at tag-push time when it would fail the actual release.
+      - name: GoReleaser config check
+        uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+        with:
+          distribution: goreleaser
+          # Keep in exact lockstep with .github/workflows/release.yml.
+          version: 2.17.0
+          args: check

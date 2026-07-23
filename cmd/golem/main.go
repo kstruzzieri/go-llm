@@ -22,6 +22,7 @@ import (
 )
 
 type flags struct {
+	version             bool // -version: print build identity and exit
 	configPath          string
 	root                string
 	prompt              string
@@ -84,6 +85,7 @@ type flags struct {
 func parseFlags(args []string) (flags, error) {
 	var f flags
 	fs := flag.NewFlagSet("golem", flag.ContinueOnError)
+	fs.BoolVar(&f.version, "version", false, "print golem build version and exit")
 	fs.StringVar(&f.configPath, "config", "", "path to models.json (default: auto-discover)")
 	fs.StringVar(&f.root, "root", ".", "workspace root the tools are scoped to")
 	fs.StringVar(&f.ollamaURL, "ollama-url", "", "override Ollama base URL")
@@ -503,6 +505,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	f, err := parseFlags(args)
 	if err != nil {
 		return err
+	}
+	if f.version {
+		_, _ = fmt.Fprintln(stdout, versionString())
+		return nil
 	}
 	if err := validateFlags(f); err != nil {
 		return err

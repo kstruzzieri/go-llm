@@ -25,6 +25,9 @@ docs/llm/traces/first-accepted-run/*
 /.worktrees/
 /golem
 
+# GoReleaser build output
+/dist/
+
 # llm-bench harness — local artifacts
 /llm-bench
 docs/llm/calibration/*.jsonl

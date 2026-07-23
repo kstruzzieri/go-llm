@@ -1,0 +1,10 @@
+go-llm
+Copyright 2026 Keith Struzzieri
+
+This product includes software developed by Keith Struzzieri.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file
+for the full license text.
+
+The distributed binaries (golem, go-llm-mcp) statically link third-party Go
+modules. Their license notices are reproduced in THIRD_PARTY_LICENSES.

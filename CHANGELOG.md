@@ -4,7 +4,45 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 (Firn IDE, Flux ML, Quantum Trader) should consult this before any
 `go get -u github.com/kstruzzieri/go-llm`.
 
-## Unreleased
+## [Unreleased]
+
+## [0.1.0] - 2026-07-22
+
+First tagged release of `go-llm`. Prior to this tag, downstream consumers
+(Firn IDE, Flux ML, Quantum Trader) tracked `develop` via pseudo-versions;
+`v0.1.0` is the first stable ref to pin. Semantic versioning applies from
+here — `0.x` means the public API may still change between minor versions.
+
+### Initial surface
+
+- **Local LLM backends** — llama.cpp via its OpenAI-compatible server
+  (`provider/openaicompat`, the primary/recommended backend) and native
+  Ollama (`ollama/`), selected per-provider by `models.json` `api_format`.
+- **Use-case-aware routing** (`provider/`) — chat/FIM/embedding/reasoning/
+  analysis/code-review/agent profiles, circuit breakers, warmth, sticky
+  routing, scoring, and fallback chains.
+- **RAG** (`rag/`) — chunking, SQLite-backed vector store, indexing,
+  scored/hybrid retrieval, and a managed document registry with stable IDs
+  and freshness tracking.
+- **Golem CLI** (`cmd/golem`) — local-first terminal coding agent: read/
+  write/exec tools, RAG retrieval, project-context (`AGENTS.md`) loading,
+  persistent sessions, conversation compression, explicit and agent-authored
+  memory, MCP client attachment, and AgentFlow plan/task execution.
+- **MCP** — server (`mcp/`, `cmd/go-llm-mcp`) exposing tools/prompts/
+  resources over stdio and HTTP/2, and a client (`mcpclient/`) adapting
+  external MCP servers' tools for the agent.
+- **Memory** (`memory/`) and **conversation** (`conversation/`) — SQLite
+  persistence with scope-filtered FTS5/bm25 search.
+- **Supporting packages** — `completion/` (FIM), `analysis/`, `feedback/`,
+  `fingerprint/`, `prefetch/`, `compat/` (OpenAI-compatible shim),
+  `projectcontext/`, and the `cmd/llm-bench` evaluation harness.
+- **Distribution** — `go install github.com/kstruzzieri/go-llm/cmd/golem@v0.1.0`,
+  or prebuilt `golem` / `go-llm-mcp` binaries (darwin/linux/windows,
+  amd64/arm64) attached to the GitHub release. `golem -version` reports the
+  build identity.
+
+The consumer-facing notes below describe the state of the `models.json`
+defaults and the router API as shipped in this release.
 
 ### Breaking for consumers of `models.json` defaults
 
