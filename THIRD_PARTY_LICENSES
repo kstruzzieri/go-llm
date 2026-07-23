@@ -2,16 +2,15 @@ THIRD-PARTY LICENSES
 ====================
 
 The go-llm binaries (golem, go-llm-mcp) statically link the Go modules listed
-below. Their license texts are reproduced here to satisfy the notice
-requirements of their BSD / MIT / Apache-2.0 / ISC terms.
+below. Their license texts are reproduced here to satisfy the
+binary-distribution notice requirements of their BSD, MIT, and Apache-2.0 terms.
 
 go-llm's own license is in LICENSE; attribution in NOTICE.
 
-Regenerate after any change to the cmd/golem or cmd/go-llm-mcp dependency
-graph:
+This file is generated. Audit the module set that must be covered with:
     go list -deps ./cmd/golem ./cmd/go-llm-mcp
-
-Generated 2026-07-22.
+Regenerate the file itself with:
+    scripts/gen-third-party-licenses.sh
 
 
 ================================================================================
