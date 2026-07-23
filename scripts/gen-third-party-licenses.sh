@@ -20,7 +20,11 @@ set -euo pipefail
 ROOT=$(git rev-parse --show-toplevel)
 cd "$ROOT"
 OUT=THIRD_PARTY_LICENSES
-tmp=$(mktemp)
+# Create the temp file beside the destination (same filesystem) so the final
+# replacement is an atomic rename. A cross-filesystem mv (e.g. TMPDIR on another
+# volume) falls back to copy-then-delete, which could partially overwrite OUT on
+# an interrupted copy and defeat the fail-closed guarantee.
+tmp=$(mktemp "$ROOT/THIRD_PARTY_LICENSES.tmp.XXXXXX")
 trap 'rm -f "$tmp"' EXIT
 
 # Discover the modules linked into the two binaries. Under `set -e` a failed

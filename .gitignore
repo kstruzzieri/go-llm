@@ -28,6 +28,9 @@ docs/llm/traces/first-accepted-run/*
 # GoReleaser build output
 /dist/
 
+# Temp file written by scripts/gen-third-party-licenses.sh
+/THIRD_PARTY_LICENSES.tmp.*
+
 # llm-bench harness — local artifacts
 /llm-bench
 docs/llm/calibration/*.jsonl
