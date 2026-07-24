@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/rag"
@@ -175,8 +176,10 @@ func TestEvalCandidateRankingMatchesSearchMultiForWholeCorpus(t *testing.T) {
 		{ID: "target", Source: "pkg/target.go", StartLine: 1, EndLine: 2, Language: "go", StableKey: "pkg/target.go::TargetSymbol#0", Content: "func TargetSymbol() {}", Metadata: map[string]string{"symbol": "TargetSymbol"}},
 		{ID: "near", Source: "pkg/near.go", StartLine: 1, EndLine: 2, Language: "go", StableKey: "pkg/near.go::Near#0", Content: "func Near() {}", Metadata: map[string]string{"symbol": "Near"}},
 		{ID: "far", Source: "other/far.go", StartLine: 1, EndLine: 2, Language: "go", StableKey: "other/far.go::Far#0", Content: "func Far() {}", Metadata: map[string]string{"symbol": "Far"}},
+		{ID: "tie-a", Source: "tie/a.go", StartLine: 1, EndLine: 2, Language: "go", StableKey: "tie/a.go::TieA#0", Content: "func TieA() {}", Metadata: map[string]string{"symbol": "TieA"}},
+		{ID: "tie-b", Source: "tie/b.go", StartLine: 1, EndLine: 2, Language: "go", StableKey: "tie/b.go::TieB#0", Content: "func TieB() {}", Metadata: map[string]string{"symbol": "TieB"}},
 	}
-	embeddings := [][]float64{{1, 0}, {0.8, 0.2}, {0, 1}}
+	embeddings := [][]float64{{1, 0}, {0.8, 0.2}, {0, 1}, {-1, 0}, {-1, 0}}
 	for i := range chunks {
 		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, chunks[i].Source, chunks[i:i+1], embeddings[i:i+1], "fixture:"+chunks[i].Source, vectorSpaceID); err != nil {
 			t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID: %v", err)
@@ -203,6 +206,7 @@ func TestEvalCandidateRankingMatchesSearchMultiForWholeCorpus(t *testing.T) {
 	if len(got) != len(want) {
 		t.Fatalf("results = %d, want %d", len(got), len(want))
 	}
+	var tieScores []float64
 	for i := range want {
 		if got[i].Chunk.ID != want[i].Chunk.ID ||
 			got[i].Score != want[i].Score ||
@@ -211,15 +215,22 @@ func TestEvalCandidateRankingMatchesSearchMultiForWholeCorpus(t *testing.T) {
 			!reflect.DeepEqual(got[i].Signals, want[i].Signals) {
 			t.Fatalf("result[%d] = %#v, want %#v", i, got[i], want[i])
 		}
+		if want[i].Chunk.ID == "tie-a" || want[i].Chunk.ID == "tie-b" {
+			tieScores = append(tieScores, want[i].RankScore)
+		}
+	}
+	if len(tieScores) != 2 || tieScores[0] != tieScores[1] {
+		t.Fatalf("production tie scores = %v, want two equal final-rank scores", tieScores)
 	}
 }
 
 func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
-	report, err := RunOutlineExperiment(context.Background(), OutlineOptions{
+	opts := OutlineOptions{
 		Dimensions:     128,
 		Samples:        1,
 		CandidateLimit: 50,
-	})
+	}
+	report, err := RunOutlineExperiment(context.Background(), opts)
 	if err != nil {
 		t.Fatalf("RunOutlineExperiment: %v", err)
 	}
@@ -233,6 +244,13 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 		"outline_then_content",
 		"hierarchical",
 	}
+	wantHydrated := map[string]float64{
+		"full_corpus_search_multi":       1401,
+		"resident_exact":                 10,
+		"bounded_semantic_keyword_union": 10,
+		"outline_then_content":           10,
+		"hierarchical":                   float64(opts.CandidateLimit),
+	}
 	gotModes := make([]string, len(report.Modes))
 	for i, mode := range report.Modes {
 		gotModes[i] = mode.Name
@@ -242,6 +260,12 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 		if mode.Summary.RankedCandidates == 0 || mode.Summary.HydratedContentChunks == 0 {
 			t.Fatalf("mode %q candidate/hydration metrics = (%v, %v), want non-zero", mode.Name, mode.Summary.RankedCandidates, mode.Summary.HydratedContentChunks)
 		}
+		if mode.Summary.CandidatesInspected != 1401 {
+			t.Fatalf("mode %q candidates inspected = %v, want 1401", mode.Name, mode.Summary.CandidatesInspected)
+		}
+		if mode.Summary.HydratedContentChunks != wantHydrated[mode.Name] {
+			t.Fatalf("mode %q hydrated chunks = %v, want %v", mode.Name, mode.Summary.HydratedContentChunks, wantHydrated[mode.Name])
+		}
 		if mode.Summary.PlanningTokens != nil {
 			t.Fatalf("mode %q planning tokens = %v, want nil", mode.Name, *mode.Summary.PlanningTokens)
 		}
@@ -249,6 +273,12 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 			t.Fatalf("mode %q ordering is not deterministic", mode.Name)
 		}
 		for _, query := range mode.Queries {
+			if query.CandidatesInspected != 1401 {
+				t.Fatalf("mode %q query %q candidates inspected = %v, want 1401", mode.Name, query.ID, query.CandidatesInspected)
+			}
+			if query.HydratedContentChunks != wantHydrated[mode.Name] {
+				t.Fatalf("mode %q query %q hydrated chunks = %v, want %v", mode.Name, query.ID, query.HydratedContentChunks, wantHydrated[mode.Name])
+			}
 			if query.PlanningTokens != nil {
 				t.Fatalf("mode %q query %q planning tokens = %v, want nil", mode.Name, query.ID, *query.PlanningTokens)
 			}
@@ -259,5 +289,92 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotModes, wantModes) {
 		t.Fatalf("modes = %v, want %v", gotModes, wantModes)
+	}
+
+	second, err := RunOutlineExperiment(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("second RunOutlineExperiment: %v", err)
+	}
+	for i := range report.Modes {
+		if report.Modes[i].Name != second.Modes[i].Name {
+			t.Fatalf("fresh run mode[%d] = %q, want %q", i, second.Modes[i].Name, report.Modes[i].Name)
+		}
+		for j := range report.Modes[i].Queries {
+			if !reflect.DeepEqual(report.Modes[i].Queries[j].ResultIDs, second.Modes[i].Queries[j].ResultIDs) {
+				t.Fatalf("mode %q query %q fresh ordering = %v, want %v",
+					report.Modes[i].Name,
+					report.Modes[i].Queries[j].ID,
+					second.Modes[i].Queries[j].ResultIDs,
+					report.Modes[i].Queries[j].ResultIDs,
+				)
+			}
+		}
+	}
+}
+
+func TestRunOutlineModeWarmsBeforeMeasurements(t *testing.T) {
+	calls := 0
+	mode := outlineMode{
+		name: "warmup",
+		retrieve: func(context.Context, outlineQuery) (outlineRetrieval, error) {
+			calls++
+			return outlineRetrieval{}, nil
+		},
+	}
+	if _, err := runOutlineMode(context.Background(), []outlineQuery{{ID: "query"}}, 1, mode); err != nil {
+		t.Fatalf("runOutlineMode: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("retrieve calls = %d, want 3 (warmup, measured sample, ordering check)", calls)
+	}
+}
+
+func TestRunOutlineExperimentRejectsCandidateLimitAtFinalK(t *testing.T) {
+	_, err := RunOutlineExperiment(context.Background(), OutlineOptions{
+		Dimensions:     2,
+		Samples:        1,
+		CandidateLimit: 10,
+	})
+	if err == nil || !strings.Contains(err.Error(), "candidate limit must be greater than 10") {
+		t.Fatalf("error = %v, want candidate limit > final K validation", err)
+	}
+}
+
+func TestOutlineConclusionParetoComparison(t *testing.T) {
+	summary := func(quality, cost float64, deterministic bool) OutlineModeSummary {
+		return OutlineModeSummary{
+			RecallAt5: quality, RecallAt10: quality,
+			MRRAt5: quality, MRRAt10: quality,
+			ExpectedSupportCoverageAt5: quality, ExpectedSupportCoverageAt10: quality,
+			CitationSourceAccuracyAt5: quality, CitationSourceAccuracyAt10: quality,
+			FinalContextTokensAt5: cost, FinalContextTokensAt10: cost,
+			LatencyMS:      LatencySummary{P50: cost, P95: cost},
+			AllocatedBytes: cost, AllocationCount: cost,
+			CandidatesInspected: cost, RankedCandidates: cost, HydratedContentChunks: cost,
+			DeterministicOrdering: deterministic,
+		}
+	}
+	tests := []struct {
+		name              string
+		outline, resident OutlineModeSummary
+		want              string
+	}{
+		{name: "outline strictly dominates", outline: summary(1, 9, true), resident: summary(1, 10, true), want: "keep"},
+		{name: "resident strictly dominates", outline: summary(1, 10, true), resident: summary(1, 9, true), want: "abandon"},
+		{name: "quality cost tradeoff", outline: summary(1, 10, true), resident: summary(0.5, 9, true), want: "iterate"},
+		{name: "equal", outline: summary(1, 10, true), resident: summary(1, 10, true), want: "iterate"},
+		{name: "outline nondeterministic", outline: summary(1, 9, false), resident: summary(1, 10, true), want: "iterate"},
+		{name: "zero recall is not keep", outline: summary(0, 9, true), resident: summary(0, 10, true), want: "iterate"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			modes := []OutlineModeReport{
+				{Name: "resident_exact", Summary: test.resident},
+				{Name: "outline_then_content", Summary: test.outline},
+			}
+			if got := outlineConclusion(modes); got != test.want {
+				t.Fatalf("outlineConclusion = %q, want %q", got, test.want)
+			}
+		})
 	}
 }

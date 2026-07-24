@@ -28,6 +28,8 @@ var outlineModeNames = []string{
 }
 
 // OutlineOptions controls the eval-only outline retrieval experiment.
+// A positive CandidateLimit must be greater than the fixed final K of 10
+// because production hierarchical retrieval requires CandidateLimit > K.
 type OutlineOptions struct {
 	Dimensions     int
 	Samples        int
@@ -80,27 +82,38 @@ type OutlineModeSummary struct {
 	LatencyMS                   LatencySummary `json:"latency_ms"`
 	AllocatedBytes              float64        `json:"allocated_bytes"`
 	AllocationCount             float64        `json:"allocation_count"`
-	RankedCandidates            float64        `json:"ranked_candidates"`
-	HydratedContentChunks       float64        `json:"hydrated_content_chunks"`
-	DeterministicOrdering       bool           `json:"deterministic_ordering"`
+	// CandidatesInspected is the average number of unique lean chunk records
+	// consulted before any full-content hydration.
+	CandidatesInspected float64 `json:"candidates_inspected"`
+	// RankedCandidates is the average final scoring or selection set size.
+	RankedCandidates float64 `json:"ranked_candidates"`
+	// HydratedContentChunks is the average number of full-content chunks loaded
+	// by the adapter, including candidates loaded before later selection.
+	HydratedContentChunks float64 `json:"hydrated_content_chunks"`
+	DeterministicOrdering bool    `json:"deterministic_ordering"`
 }
 
 type OutlineQueryReport struct {
-	ID                    string            `json:"id"`
-	Category              string            `json:"category"`
-	Query                 string            `json:"query"`
-	ExpectedIDs           []string          `json:"expected_ids"`
-	ExpectedSources       []string          `json:"expected_sources"`
-	ResultIDs             []string          `json:"result_ids"`
-	ResultSources         []string          `json:"result_sources"`
-	Metrics               []OutlineKMetrics `json:"metrics"`
-	PlanningTokens        *int              `json:"planning_tokens"`
-	LatencyMS             LatencySummary    `json:"latency_ms"`
-	AllocatedBytes        float64           `json:"allocated_bytes"`
-	AllocationCount       float64           `json:"allocation_count"`
-	RankedCandidates      float64           `json:"ranked_candidates"`
-	HydratedContentChunks float64           `json:"hydrated_content_chunks"`
-	DeterministicOrdering bool              `json:"deterministic_ordering"`
+	ID              string            `json:"id"`
+	Category        string            `json:"category"`
+	Query           string            `json:"query"`
+	ExpectedIDs     []string          `json:"expected_ids"`
+	ExpectedSources []string          `json:"expected_sources"`
+	ResultIDs       []string          `json:"result_ids"`
+	ResultSources   []string          `json:"result_sources"`
+	Metrics         []OutlineKMetrics `json:"metrics"`
+	PlanningTokens  *int              `json:"planning_tokens"`
+	LatencyMS       LatencySummary    `json:"latency_ms"`
+	AllocatedBytes  float64           `json:"allocated_bytes"`
+	AllocationCount float64           `json:"allocation_count"`
+	// CandidatesInspected counts unique lean chunk records consulted before
+	// full-content hydration for this query.
+	CandidatesInspected float64 `json:"candidates_inspected"`
+	// RankedCandidates counts the mode's final scoring or selection set.
+	RankedCandidates float64 `json:"ranked_candidates"`
+	// HydratedContentChunks counts full-content chunks loaded by the adapter.
+	HydratedContentChunks float64 `json:"hydrated_content_chunks"`
+	DeterministicOrdering bool    `json:"deterministic_ordering"`
 }
 
 type OutlineKMetrics struct {
@@ -118,8 +131,12 @@ type outlineCandidate struct {
 }
 
 type outlineRetrieval struct {
-	Results               []rag.SearchResult
-	RankedCandidates      int
+	Results []rag.SearchResult
+	// CandidatesInspected counts unique lean records consulted before hydration.
+	CandidatesInspected int
+	// RankedCandidates counts the mode's final scoring or selection set.
+	RankedCandidates int
+	// HydratedContentChunks counts all full-content chunks loaded by the adapter.
 	HydratedContentChunks int
 }
 
@@ -176,10 +193,6 @@ func RunOutlineExperiment(ctx context.Context, opts OutlineOptions) (*OutlineRep
 	if err != nil {
 		return nil, err
 	}
-	first := fixture.queries[0]
-	if _, err := resident.SearchMulti(ctx, first.Embedding, first.Query, 10, outlineQueryContext(first)); err != nil {
-		return nil, fmt.Errorf("rag eval: warm resident snapshot: %w", err)
-	}
 	retriever, err := rag.NewRetrieverWithEmbedder(newOutlineEmbedder(fixture), resident, rag.WithRetrieverModel("outline-fixture"))
 	if err != nil {
 		return nil, fmt.Errorf("rag eval: create hierarchical retriever: %w", err)
@@ -188,11 +201,11 @@ func RunOutlineExperiment(ctx context.Context, opts OutlineOptions) (*OutlineRep
 	modes := []outlineMode{
 		{name: outlineModeNames[0], retrieve: func(ctx context.Context, query outlineQuery) (outlineRetrieval, error) {
 			results, err := full.SearchMulti(ctx, query.Embedding, query.Query, 10, outlineQueryContext(query))
-			return outlineRetrieval{Results: outlineSearchResults(results), RankedCandidates: len(fixture.chunks), HydratedContentChunks: len(fixture.chunks)}, err
+			return outlineRetrieval{Results: outlineSearchResults(results), CandidatesInspected: len(fixture.chunks), RankedCandidates: len(fixture.chunks), HydratedContentChunks: len(fixture.chunks)}, err
 		}},
 		{name: outlineModeNames[1], retrieve: func(ctx context.Context, query outlineQuery) (outlineRetrieval, error) {
 			results, err := resident.SearchMulti(ctx, query.Embedding, query.Query, 10, outlineQueryContext(query))
-			return outlineRetrieval{Results: outlineSearchResults(results), RankedCandidates: len(fixture.chunks), HydratedContentChunks: len(results)}, err
+			return outlineRetrieval{Results: outlineSearchResults(results), CandidatesInspected: len(candidates), RankedCandidates: len(fixture.chunks), HydratedContentChunks: len(results)}, err
 		}},
 		{name: outlineModeNames[2], retrieve: func(ctx context.Context, query outlineQuery) (outlineRetrieval, error) {
 			semantic, err := topSemanticCandidates(ctx, candidates, query.Embedding, opts.CandidateLimit)
@@ -205,12 +218,12 @@ func RunOutlineExperiment(ctx context.Context, opts OutlineOptions) (*OutlineRep
 			}
 			union := boundedUnion(semantic, keyword)
 			results, err := rankOutlineCandidates(ctx, resident, union, query.Query, query.Embedding, outlineQueryContext(query), 10)
-			return outlineRetrieval{Results: outlineSearchResults(results), RankedCandidates: len(union), HydratedContentChunks: len(results)}, err
+			return outlineRetrieval{Results: outlineSearchResults(results), CandidatesInspected: len(candidates), RankedCandidates: len(union), HydratedContentChunks: len(results)}, err
 		}},
 		{name: outlineModeNames[3], retrieve: func(ctx context.Context, query outlineQuery) (outlineRetrieval, error) {
 			selected := selectOutlineCandidates(candidates, query.Query, opts.CandidateLimit)
 			results, err := rankOutlineCandidates(ctx, resident, selected, query.Query, query.Embedding, outlineQueryContext(query), 10)
-			return outlineRetrieval{Results: outlineSearchResults(results), RankedCandidates: len(selected), HydratedContentChunks: len(results)}, err
+			return outlineRetrieval{Results: outlineSearchResults(results), CandidatesInspected: len(candidates), RankedCandidates: len(selected), HydratedContentChunks: len(results)}, err
 		}},
 		{name: outlineModeNames[4], retrieve: func(ctx context.Context, query outlineQuery) (outlineRetrieval, error) {
 			response, err := retriever.RetrieveHierarchical(ctx, rag.HierarchicalRetrievalRequest{
@@ -227,8 +240,9 @@ func RunOutlineExperiment(ctx context.Context, opts OutlineOptions) (*OutlineRep
 			})
 			return outlineRetrieval{
 				Results:               outlineSearchResults(response.Results),
+				CandidatesInspected:   len(candidates),
 				RankedCandidates:      response.Trace.Budget.InspectedCandidates,
-				HydratedContentChunks: response.Trace.Budget.ReturnedResults,
+				HydratedContentChunks: response.Policy.CandidateCount,
 			}, err
 		}},
 	}
@@ -400,7 +414,8 @@ func outlineTokens(text string) map[string]struct{} {
 func loadOutlineCandidates(ctx context.Context, store *rag.SQLiteStore) ([]outlineCandidate, error) {
 	rows, err := store.DB().QueryContext(ctx, `
 		SELECT id, source, start_line, end_line, language, metadata, embedding, stable_key
-		  FROM chunks`)
+		  FROM chunks
+		 ORDER BY rowid`)
 	if err != nil {
 		return nil, fmt.Errorf("rag eval: load outline candidates: %w", err)
 	}
@@ -646,11 +661,16 @@ func runOutlineMode(ctx context.Context, queries []outlineQuery, samples int, mo
 		Name:    mode.name,
 		Queries: make([]OutlineQueryReport, 0, len(queries)),
 	}
+	if len(queries) > 0 {
+		if _, err := mode.retrieve(ctx, queries[0]); err != nil {
+			return OutlineModeReport{}, fmt.Errorf("warm mode: %w", err)
+		}
+	}
 	var latencies []float64
-	var allocatedBytes, allocationCounts, rankedCandidates, hydratedChunks []float64
+	var allocatedBytes, allocationCounts, candidatesInspected, rankedCandidates, hydratedChunks []float64
 	for _, query := range queries {
 		var first outlineRetrieval
-		var queryLatencies, queryBytes, queryAllocations, queryRanked, queryHydrated []float64
+		var queryLatencies, queryBytes, queryAllocations, queryInspected, queryRanked, queryHydrated []float64
 		deterministic := true
 		for sample := 0; sample < samples; sample++ {
 			var before, after runtime.MemStats
@@ -670,6 +690,7 @@ func runOutlineMode(ctx context.Context, queries []outlineQuery, samples int, mo
 			queryLatencies = append(queryLatencies, elapsed)
 			queryBytes = append(queryBytes, float64(after.TotalAlloc-before.TotalAlloc))
 			queryAllocations = append(queryAllocations, float64(after.Mallocs-before.Mallocs))
+			queryInspected = append(queryInspected, float64(result.CandidatesInspected))
 			queryRanked = append(queryRanked, float64(result.RankedCandidates))
 			queryHydrated = append(queryHydrated, float64(result.HydratedContentChunks))
 		}
@@ -690,6 +711,7 @@ func runOutlineMode(ctx context.Context, queries []outlineQuery, samples int, mo
 			LatencyMS:             summarizeLatencies(queryLatencies),
 			AllocatedBytes:        averageFloat64(queryBytes),
 			AllocationCount:       averageFloat64(queryAllocations),
+			CandidatesInspected:   averageFloat64(queryInspected),
 			RankedCandidates:      averageFloat64(queryRanked),
 			HydratedContentChunks: averageFloat64(queryHydrated),
 			DeterministicOrdering: deterministic,
@@ -698,10 +720,11 @@ func runOutlineMode(ctx context.Context, queries []outlineQuery, samples int, mo
 		latencies = append(latencies, queryLatencies...)
 		allocatedBytes = append(allocatedBytes, queryBytes...)
 		allocationCounts = append(allocationCounts, queryAllocations...)
+		candidatesInspected = append(candidatesInspected, queryInspected...)
 		rankedCandidates = append(rankedCandidates, queryRanked...)
 		hydratedChunks = append(hydratedChunks, queryHydrated...)
 	}
-	report.Summary = summarizeOutlineMode(report.Queries, latencies, allocatedBytes, allocationCounts, rankedCandidates, hydratedChunks)
+	report.Summary = summarizeOutlineMode(report.Queries, latencies, allocatedBytes, allocationCounts, candidatesInspected, rankedCandidates, hydratedChunks)
 	return report, nil
 }
 
@@ -773,12 +796,13 @@ func equalResultOrdering(left, right []rag.SearchResult) bool {
 
 func summarizeOutlineMode(
 	queries []OutlineQueryReport,
-	latencies, allocatedBytes, allocationCounts, rankedCandidates, hydratedChunks []float64,
+	latencies, allocatedBytes, allocationCounts, candidatesInspected, rankedCandidates, hydratedChunks []float64,
 ) OutlineModeSummary {
 	summary := OutlineModeSummary{
 		LatencyMS:             summarizeLatencies(latencies),
 		AllocatedBytes:        averageFloat64(allocatedBytes),
 		AllocationCount:       averageFloat64(allocationCounts),
+		CandidatesInspected:   averageFloat64(candidatesInspected),
 		RankedCandidates:      averageFloat64(rankedCandidates),
 		HydratedContentChunks: averageFloat64(hydratedChunks),
 		DeterministicOrdering: true,
@@ -830,35 +854,67 @@ func averageFloat64(values []float64) float64 {
 }
 
 func outlineConclusion(modes []OutlineModeReport) string {
-	var full *OutlineModeSummary
+	var outline, resident *OutlineModeSummary
 	for i := range modes {
-		if modes[i].Name == "full_corpus_search_multi" {
-			full = &modes[i].Summary
-			break
+		switch modes[i].Name {
+		case "outline_then_content":
+			outline = &modes[i].Summary
+		case "resident_exact":
+			resident = &modes[i].Summary
 		}
 	}
-	if full == nil {
-		return "abandon"
-	}
-	reducedWithRecall := false
-	for i := range modes {
-		mode := modes[i]
-		if mode.Name == "full_corpus_search_multi" || mode.Name == "resident_exact" {
-			continue
-		}
-		if mode.Summary.DeterministicOrdering &&
-			mode.Summary.RankedCandidates < full.RankedCandidates &&
-			mode.Summary.RecallAt10 >= full.RecallAt10 {
-			return "keep"
-		}
-		if mode.Summary.DeterministicOrdering &&
-			mode.Summary.RankedCandidates < full.RankedCandidates &&
-			mode.Summary.RecallAt10 > 0 {
-			reducedWithRecall = true
-		}
-	}
-	if reducedWithRecall {
+	if outline == nil || resident == nil {
 		return "iterate"
 	}
-	return "abandon"
+	if outlineDominates(*outline, *resident) && (outline.RecallAt5 > 0 || outline.RecallAt10 > 0) {
+		return "keep"
+	}
+	if outlineDominates(*resident, *outline) {
+		return "abandon"
+	}
+	return "iterate"
+}
+
+func outlineDominates(candidate, baseline OutlineModeSummary) bool {
+	strict := false
+	if !candidate.DeterministicOrdering && baseline.DeterministicOrdering {
+		return false
+	}
+	if candidate.DeterministicOrdering && !baseline.DeterministicOrdering {
+		strict = true
+	}
+	higherIsBetter := [8][2]float64{
+		{candidate.RecallAt5, baseline.RecallAt5},
+		{candidate.RecallAt10, baseline.RecallAt10},
+		{candidate.MRRAt5, baseline.MRRAt5},
+		{candidate.MRRAt10, baseline.MRRAt10},
+		{candidate.ExpectedSupportCoverageAt5, baseline.ExpectedSupportCoverageAt5},
+		{candidate.ExpectedSupportCoverageAt10, baseline.ExpectedSupportCoverageAt10},
+		{candidate.CitationSourceAccuracyAt5, baseline.CitationSourceAccuracyAt5},
+		{candidate.CitationSourceAccuracyAt10, baseline.CitationSourceAccuracyAt10},
+	}
+	for _, values := range higherIsBetter {
+		if values[0] < values[1] {
+			return false
+		}
+		strict = strict || values[0] > values[1]
+	}
+	lowerIsBetter := [9][2]float64{
+		{candidate.FinalContextTokensAt5, baseline.FinalContextTokensAt5},
+		{candidate.FinalContextTokensAt10, baseline.FinalContextTokensAt10},
+		{candidate.LatencyMS.P50, baseline.LatencyMS.P50},
+		{candidate.LatencyMS.P95, baseline.LatencyMS.P95},
+		{candidate.AllocatedBytes, baseline.AllocatedBytes},
+		{candidate.AllocationCount, baseline.AllocationCount},
+		{candidate.CandidatesInspected, baseline.CandidatesInspected},
+		{candidate.RankedCandidates, baseline.RankedCandidates},
+		{candidate.HydratedContentChunks, baseline.HydratedContentChunks},
+	}
+	for _, values := range lowerIsBetter {
+		if values[0] > values[1] {
+			return false
+		}
+		strict = strict || values[0] < values[1]
+	}
+	return strict
 }
