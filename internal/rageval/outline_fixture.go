@@ -11,6 +11,33 @@ import (
 const outlineIndexedAt = int64(1_700_000_000)
 const outlineNeutralCurrentFile = "workspace/neutral.go"
 
+// Corpus shape is defined once here and derived everywhere else so the fixture
+// and its source pool cannot drift apart. TestBuildOutlineFixtureContract locks
+// the resulting totals (chunks, sources, queries, per-category counts).
+const (
+	// outlineSupportsPerQuery is the number of expected support chunks per query.
+	outlineSupportsPerQuery = 2
+	// outlineQueriesPerCategory is the number of golden queries per category.
+	outlineQueriesPerCategory = 4
+	// outlineCorpusChunks is the fixed total chunk count (supports + filler).
+	outlineCorpusChunks = 1401
+	// outlineCorpusSources is the fixed total distinct source-path count.
+	outlineCorpusSources = 138
+)
+
+// outlineCategories are the golden-query categories, in fixed order. Each maps
+// to a distinct support-source naming scheme in outlineSources.
+var outlineCategories = []string{
+	"direct_symbol",
+	"path_and_pairing",
+	"outline_summary",
+	"content_only",
+	"distributed_support",
+}
+
+// outlineTotalQueries is the derived golden-query count.
+func outlineTotalQueries() int { return len(outlineCategories) * outlineQueriesPerCategory }
+
 type outlineFixture struct {
 	chunks     []rag.Chunk
 	embeddings map[string][]float64
@@ -32,15 +59,21 @@ func buildOutlineFixture(dim int) (outlineFixture, error) {
 		return outlineFixture{}, fmt.Errorf("rag eval: outline fixture dimension must be positive")
 	}
 
-	fixture := outlineFixture{embeddings: make(map[string][]float64, 1401)}
+	fixture := outlineFixture{embeddings: make(map[string][]float64, outlineCorpusChunks)}
 	sources := outlineSources()
-	categories := []string{"direct_symbol", "path_and_pairing", "outline_summary", "content_only", "distributed_support"}
-	for categoryIndex, category := range categories {
-		for n := 0; n < 4; n++ {
-			queryIndex := categoryIndex*4 + n
-			supports := [2]rag.Chunk{
-				outlineSupport(queryIndex, 0, category, sources[queryIndex*2]),
-				outlineSupport(queryIndex, 1, category, sources[queryIndex*2+1]),
+	totalQueries := outlineTotalQueries()
+	if need := totalQueries * outlineSupportsPerQuery; len(sources) < need {
+		return outlineFixture{}, fmt.Errorf("rag eval: outline source pool %d < required %d support sources", len(sources), need)
+	}
+	if need := totalQueries * outlineSupportsPerQuery; outlineCorpusChunks < need {
+		return outlineFixture{}, fmt.Errorf("rag eval: outline corpus target %d < required %d support chunks", outlineCorpusChunks, need)
+	}
+	for categoryIndex, category := range outlineCategories {
+		for n := 0; n < outlineQueriesPerCategory; n++ {
+			queryIndex := categoryIndex*outlineQueriesPerCategory + n
+			supports := [outlineSupportsPerQuery]rag.Chunk{
+				outlineSupport(queryIndex, 0, category, sources[queryIndex*outlineSupportsPerQuery]),
+				outlineSupport(queryIndex, 1, category, sources[queryIndex*outlineSupportsPerQuery+1]),
 			}
 			vector := xorshiftVector(uint64(queryIndex+1), dim)
 			currentFile := supports[0].Source
@@ -64,7 +97,7 @@ func buildOutlineFixture(dim int) (outlineFixture, error) {
 		}
 	}
 
-	for i := len(fixture.chunks); i < 1401; i++ {
+	for i := len(fixture.chunks); i < outlineCorpusChunks; i++ {
 		chunk := rag.Chunk{
 			ID:        fmt.Sprintf("outline-filler-%04d", i),
 			Source:    sources[i%len(sources)],
@@ -82,22 +115,25 @@ func buildOutlineFixture(dim int) (outlineFixture, error) {
 }
 
 func outlineSources() []string {
-	sources := make([]string, 0, 138)
-	for queryIndex := 0; queryIndex < 20; queryIndex++ {
-		switch {
-		case queryIndex < 4:
+	sources := make([]string, 0, outlineCorpusSources)
+	// Each query gets outlineSupportsPerQuery named sources whose naming scheme
+	// is chosen by its category (queryIndex / outlineQueriesPerCategory), in the
+	// fixed outlineCategories order.
+	for queryIndex := 0; queryIndex < outlineTotalQueries(); queryIndex++ {
+		switch queryIndex / outlineQueriesPerCategory {
+		case 0: // direct_symbol
 			sources = append(sources, fmt.Sprintf("internal/direct%02d/resolver.go", queryIndex), fmt.Sprintf("internal/direct%02d/types.go", queryIndex))
-		case queryIndex < 8:
+		case 1: // path_and_pairing
 			sources = append(sources, fmt.Sprintf("internal/pairing%02d/handler.go", queryIndex), fmt.Sprintf("internal/pairing%02d/handler_test.go", queryIndex))
-		case queryIndex < 12:
+		case 2: // outline_summary
 			sources = append(sources, fmt.Sprintf("internal/summary%02d/service.go", queryIndex), fmt.Sprintf("internal/summary%02d/model.go", queryIndex))
-		case queryIndex < 16:
+		case 3: // content_only
 			sources = append(sources, fmt.Sprintf("internal/content%02d/service.go", queryIndex), fmt.Sprintf("internal/content%02d/model.go", queryIndex))
-		default:
+		default: // distributed_support
 			sources = append(sources, fmt.Sprintf("cmd/distributed%02d/main.go", queryIndex), fmt.Sprintf("pkg/distributed%02d/support.go", queryIndex))
 		}
 	}
-	for i := len(sources); i < 138; i++ {
+	for i := len(sources); i < outlineCorpusSources; i++ {
 		sources = append(sources, fmt.Sprintf("internal/filler%03d/file.go", i))
 	}
 	return sources

@@ -83,14 +83,43 @@ func TestRunOutlineRequiresExplicitOutput(t *testing.T) {
 		"-experiment", "outline",
 		"-dimensions", "128",
 		"-candidate-m", "20",
-		"-warm-runs", "1",
+		"-samples", "1",
 	})
-	if err == nil || !strings.Contains(err.Error(), "outline experiment requires explicit -out") {
+	if err == nil || !strings.Contains(err.Error(), "requires an explicit -out") {
 		t.Fatalf("error = %v, want explicit output requirement", err)
 	}
 }
 
-func TestRunOutlineHonorsExplicitSamples(t *testing.T) {
+func TestRunBaselineRequiresExplicitOutput(t *testing.T) {
+	err := run([]string{
+		"-fixtures", "../../internal/rageval/testdata/fixtures.json",
+		"-no-latency",
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires an explicit -out") {
+		t.Fatalf("error = %v, want explicit output requirement", err)
+	}
+}
+
+func TestRunOutlineHonorsSamplesFlag(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "outline.json")
+	if err := run([]string{
+		"-experiment", "outline",
+		"-dimensions", "16",
+		"-candidate-m", "20",
+		"-samples", "1",
+		"-out", out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := readOutlineSamples(t, out); got != 1 {
+		t.Fatalf("samples = %d, want explicit 1", got)
+	}
+}
+
+// TestRunOutlineWarmRunsAliasesSamples locks the deprecated -warm-runs alias:
+// in outline mode it still selects the measured sample count when -samples is
+// absent, so pre-split invocations keep reproducing.
+func TestRunOutlineWarmRunsAliasesSamples(t *testing.T) {
 	out := filepath.Join(t.TempDir(), "outline.json")
 	if err := run([]string{
 		"-experiment", "outline",
@@ -101,7 +130,14 @@ func TestRunOutlineHonorsExplicitSamples(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	data, err := os.ReadFile(out)
+	if got := readOutlineSamples(t, out); got != 1 {
+		t.Fatalf("samples = %d, want alias 1", got)
+	}
+}
+
+func readOutlineSamples(t *testing.T, path string) int {
+	t.Helper()
+	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,9 +145,7 @@ func TestRunOutlineHonorsExplicitSamples(t *testing.T) {
 	if err := json.Unmarshal(data, &report); err != nil {
 		t.Fatal(err)
 	}
-	if report.Corpus.Samples != 1 {
-		t.Fatalf("samples = %d, want explicit 1", report.Corpus.Samples)
-	}
+	return report.Corpus.Samples
 }
 
 func TestRunHelpSucceeds(t *testing.T) {

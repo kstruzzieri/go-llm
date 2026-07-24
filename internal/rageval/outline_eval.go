@@ -460,6 +460,17 @@ func loadOutlineCandidates(ctx context.Context, store *rag.SQLiteStore) ([]outli
 	return candidates, nil
 }
 
+// decodeOutlineEmbedding decodes the rag packed-float32 on-disk envelope
+// (magic "GLLV", version/element/byte-order bytes all 1, little-endian). It
+// deliberately reads the stored blob rather than the in-memory fixture vectors
+// so the eval observes the same float32-narrowed values production reads back,
+// keeping candidate scoring identical to rag.SearchMulti.
+//
+// This mirrors rag's unexported decodeEmbedding, so it must track that
+// envelope: it rejects any other version and enforces the same finiteness
+// invariant rag guarantees on write. The rag legacy-JSON format is intentionally
+// unsupported here because this eval only ever seeds packed embeddings; a format
+// change surfaces loudly as a decode error rather than silently mis-scoring.
 func decodeOutlineEmbedding(encoded []byte) ([]float64, error) {
 	if len(encoded) < 16 || string(encoded[:4]) != "GLLV" || encoded[4] != 1 || encoded[5] != 1 || encoded[6] != 1 {
 		return nil, fmt.Errorf("unsupported packed embedding")
@@ -471,7 +482,11 @@ func decodeOutlineEmbedding(encoded []byte) ([]float64, error) {
 	}
 	vector := make([]float64, dimension)
 	for i := range vector {
-		vector[i] = float64(math.Float32frombits(binary.LittleEndian.Uint32(encoded[16+4*i:])))
+		value := float64(math.Float32frombits(binary.LittleEndian.Uint32(encoded[16+4*i:])))
+		if math.IsNaN(value) || math.IsInf(value, 0) {
+			return nil, fmt.Errorf("packed embedding component %d is not finite", i)
+		}
+		vector[i] = value
 	}
 	return vector, nil
 }

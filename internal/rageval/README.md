@@ -157,15 +157,15 @@ rtk go run ./cmd/rag-eval \
   -experiment outline \
   -dimensions 768 \
   -candidate-m 50 \
-  -warm-runs 5 \
+  -samples 5 \
   -out /private/tmp/go-llm-246-outline-report.json
 ```
 
-`-warm-runs` is the measured sample count in outline mode; it retains its
-baseline warm-run meaning when `-experiment baseline` (the default) is used.
-Omitting it selects five outline samples while preserving the baseline default
-of three warm runs. Outline mode requires an explicit `-out` path so it cannot
-overwrite the committed baseline through the baseline default.
+`-samples` sets the outline measured-sample count (default 5); `-warm-runs` sets
+the baseline warm-run count (default 3). For back-compatibility `-warm-runs` is
+still accepted as a deprecated alias for `-samples` in outline mode when
+`-samples` is not given. Every experiment requires an explicit `-out` path, so
+no invocation can overwrite the committed baseline.
 The outline report compares:
 
 - `full_corpus_search_multi`: mutable `SearchMulti` over all corpus chunks.

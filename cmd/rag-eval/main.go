@@ -23,8 +23,9 @@ func run(args []string) error {
 	flags := flag.NewFlagSet("rag-eval", flag.ContinueOnError)
 	experiment := flags.String("experiment", "baseline", "Experiment to run: baseline or outline")
 	fixturePath := flags.String("fixtures", "internal/rageval/testdata/fixtures.json", "Path to baseline fixture JSON")
-	outPath := flags.String("out", "internal/rageval/testdata/baseline.json", "Path to write report JSON")
-	warmRuns := flags.Int("warm-runs", 0, "Baseline warm runs or outline measured samples per query (default: baseline 3, outline 5)")
+	outPath := flags.String("out", "", "Path to write report JSON (required)")
+	warmRuns := flags.Int("warm-runs", 3, "Baseline warm retrieval runs per query")
+	samples := flags.Int("samples", 5, "Outline measured samples per query")
 	noLatency := flags.Bool("no-latency", false, "Disable baseline wall-clock latency measurement")
 	dimensions := flags.Int("dimensions", 768, "Outline embedding dimensions")
 	candidateLimit := flags.Int("candidate-m", 50, "Outline candidate limit")
@@ -34,24 +35,34 @@ func run(args []string) error {
 		}
 		return err
 	}
-	warmRunsSet, outSet := false, false
+	var warmRunsSet, samplesSet, outSet bool
 	flags.Visit(func(f *flag.Flag) {
-		warmRunsSet = warmRunsSet || f.Name == "warm-runs"
-		outSet = outSet || f.Name == "out"
+		switch f.Name {
+		case "warm-runs":
+			warmRunsSet = true
+		case "samples":
+			samplesSet = true
+		case "out":
+			outSet = true
+		}
 	})
+	// An explicit -out is required for every experiment so no invocation can
+	// silently overwrite the committed baseline or any other tracked report.
+	if !outSet {
+		return fmt.Errorf("rag-eval requires an explicit -out path")
+	}
 
 	switch *experiment {
 	case "outline":
-		if !outSet {
-			return fmt.Errorf("outline experiment requires explicit -out")
-		}
-		samples := 5
-		if warmRunsSet {
-			samples = *warmRuns
+		measured := *samples
+		// -warm-runs is accepted as a deprecated alias for -samples in outline
+		// mode so pre-split invocations keep working; -samples wins if both set.
+		if !samplesSet && warmRunsSet {
+			measured = *warmRuns
 		}
 		report, err := rageval.RunOutlineExperiment(context.Background(), rageval.OutlineOptions{
 			Dimensions:     *dimensions,
-			Samples:        samples,
+			Samples:        measured,
 			CandidateLimit: *candidateLimit,
 		})
 		if err != nil {
@@ -59,16 +70,12 @@ func run(args []string) error {
 		}
 		return rageval.WriteOutlineReport(*outPath, report)
 	case "baseline":
-		baselineWarmRuns := 3
-		if warmRunsSet {
-			baselineWarmRuns = *warmRuns
-		}
 		fixture, err := rageval.LoadFixture(*fixturePath)
 		if err != nil {
 			return err
 		}
 		report, err := rageval.Run(context.Background(), fixture, rageval.RunOptions{
-			WarmRuns:       baselineWarmRuns,
+			WarmRuns:       *warmRuns,
 			MeasureLatency: !*noLatency,
 		})
 		if err != nil {

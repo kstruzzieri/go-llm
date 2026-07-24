@@ -26,8 +26,10 @@ therefore references #246 rather than closing its acceptance gap.
 
 ## Reproduction
 
-The CLI and evaluator state used for the measured run is preserved in commit
-`76e53ffadfaac9d03256776f988bf9b62d21f0db`.
+The evaluator and fixture logic used for the measured run is preserved in commit
+`76e53ffadfaac9d03256776f988bf9b62d21f0db`; later commits only renamed the
+outline sample-count flag from `-warm-runs` to `-samples` and refactored fixture
+constants without changing fixture output, so the numbers below still reproduce.
 
 Environment:
 
@@ -48,7 +50,7 @@ rtk go run ./cmd/rag-eval \
   -experiment outline \
   -dimensions 768 \
   -candidate-m 50 \
-  -warm-runs 5 \
+  -samples 5 \
   -out /private/tmp/go-llm-246-outline-report.json
 ```
 
@@ -106,7 +108,12 @@ hierarchy. Bounded and outline reduce downstream work but still inspect all
 ### Exact summary JSON
 
 This committed excerpt preserves exact aggregate values so the temporary raw
-artifact is not required for review:
+artifact is not required for review. The quality and work counters (`recall`,
+`mrr`, coverage, `source_path_precision`, `*candidates*`, `hydrated_content_chunks`)
+are deterministic and reproduce exactly. `latency_ms`, `allocated_bytes`, and
+`allocation_count` are machine-specific single-run measurements: the digits below
+are the exact captured values, not reproducible targets, and will differ on other
+hosts (see Limits).
 
 ```json
 {
