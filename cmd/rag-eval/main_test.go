@@ -135,6 +135,28 @@ func TestRunOutlineWarmRunsAliasesSamples(t *testing.T) {
 	}
 }
 
+// TestRunOutlineRejectsNonPositiveSamples locks the fix for the P2 review: an
+// explicit non-positive outline sample count (via -samples or the -warm-runs
+// alias) must error, not be silently replaced with the default.
+func TestRunOutlineRejectsNonPositiveSamples(t *testing.T) {
+	for _, flagName := range []string{"-samples", "-warm-runs"} {
+		out := filepath.Join(t.TempDir(), "outline.json")
+		err := run([]string{
+			"-experiment", "outline",
+			"-dimensions", "16",
+			"-candidate-m", "20",
+			flagName, "0",
+			"-out", out,
+		})
+		if err == nil || !strings.Contains(err.Error(), "sample count must be positive") {
+			t.Fatalf("%s 0: error = %v, want positive-sample requirement", flagName, err)
+		}
+		if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+			t.Fatalf("%s 0: output exists after rejected run: %v", flagName, statErr)
+		}
+	}
+}
+
 func readOutlineSamples(t *testing.T, path string) int {
 	t.Helper()
 	data, err := os.ReadFile(path)

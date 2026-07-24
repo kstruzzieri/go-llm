@@ -60,6 +60,13 @@ func run(args []string) error {
 		if !samplesSet && warmRunsSet {
 			measured = *warmRuns
 		}
+		// The flag default is positive, so measured is non-positive only when the
+		// user explicitly typed it. Unlike baseline warm-runs (0 = valid cold-only
+		// run), zero outline samples means nothing is measured, so reject it
+		// rather than letting RunOutlineExperiment silently substitute its default.
+		if measured <= 0 {
+			return fmt.Errorf("outline sample count must be positive (got %d)", measured)
+		}
 		report, err := rageval.RunOutlineExperiment(context.Background(), rageval.OutlineOptions{
 			Dimensions:     *dimensions,
 			Samples:        measured,
