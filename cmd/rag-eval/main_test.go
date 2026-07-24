@@ -1,0 +1,91 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/kstruzzieri/go-llm/internal/rageval"
+)
+
+func TestRunDefaultsToBaseline(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "baseline.json")
+	if err := run([]string{
+		"-fixtures", "../../internal/rageval/testdata/fixtures.json",
+		"-out", out,
+		"-no-latency",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := os.ReadFile("../../internal/rageval/testdata/baseline.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("default baseline output differs from committed baseline")
+	}
+}
+
+func TestRunOutlineExperiment(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "outline.json")
+	if err := run([]string{
+		"-experiment", "outline",
+		"-dimensions", "128",
+		"-candidate-m", "20",
+		"-warm-runs", "1",
+		"-out", out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report rageval.OutlineReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != rageval.OutlineSchemaVersion {
+		t.Fatalf("schema_version = %q", report.SchemaVersion)
+	}
+	if report.Corpus.Dimensions != 128 || report.Corpus.CandidateLimit != 20 || report.Corpus.Samples != 1 || report.Corpus.Queries != 20 {
+		t.Fatalf("corpus options = %+v", report.Corpus)
+	}
+	wantModes := []string{
+		"full_corpus_search_multi",
+		"resident_exact",
+		"bounded_semantic_keyword_union",
+		"outline_then_content",
+		"hierarchical",
+	}
+	if len(report.Modes) != len(wantModes) {
+		t.Fatalf("mode count = %d, want %d", len(report.Modes), len(wantModes))
+	}
+	for i, want := range wantModes {
+		if report.Modes[i].Name != want {
+			t.Fatalf("mode[%d] = %q, want %q", i, report.Modes[i].Name, want)
+		}
+		if len(report.Modes[i].Queries) != 20 {
+			t.Fatalf("%s query count = %d, want 20", want, len(report.Modes[i].Queries))
+		}
+	}
+}
+
+func TestRunRejectsUnknownExperiment(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "unknown.json")
+	err := run([]string{"-experiment", "unknown", "-out", out})
+	if err == nil || !strings.Contains(err.Error(), `unknown experiment "unknown"`) {
+		t.Fatalf("error = %v", err)
+	}
+	if _, statErr := os.Stat(out); !os.IsNotExist(statErr) {
+		t.Fatalf("output exists after rejected experiment: %v", statErr)
+	}
+}

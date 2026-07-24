@@ -106,6 +106,15 @@ func buildThresholds() ThresholdSummary {
 
 // WriteReport writes a stable, pretty JSON report.
 func WriteReport(path string, report *Report) error {
+	return writeJSONReport(path, report)
+}
+
+// WriteOutlineReport writes a stable, pretty JSON outline experiment report.
+func WriteOutlineReport(path string, report *OutlineReport) error {
+	return writeJSONReport(path, report)
+}
+
+func writeJSONReport(path string, report any) error {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
 		return fmt.Errorf("rag eval: marshal report: %w", err)

@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
+	"os"
 
 	"github.com/kstruzzieri/go-llm/internal/rageval"
 )
@@ -11,25 +13,49 @@ import (
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("rag-eval: ")
-
-	fixturePath := flag.String("fixtures", "internal/rageval/testdata/fixtures.json", "Path to RAG evaluation fixture JSON")
-	outPath := flag.String("out", "internal/rageval/testdata/baseline.json", "Path to write baseline report JSON")
-	warmRuns := flag.Int("warm-runs", 3, "Warm retrieval runs per query")
-	noLatency := flag.Bool("no-latency", false, "Disable wall-clock latency measurement")
-	flag.Parse()
-
-	fixture, err := rageval.LoadFixture(*fixturePath)
-	if err != nil {
+	if err := run(os.Args[1:]); err != nil {
 		log.Fatal(err)
 	}
-	report, err := rageval.Run(context.Background(), fixture, rageval.RunOptions{
-		WarmRuns:       *warmRuns,
-		MeasureLatency: !*noLatency,
-	})
-	if err != nil {
-		log.Fatal(err)
+}
+
+func run(args []string) error {
+	flags := flag.NewFlagSet("rag-eval", flag.ContinueOnError)
+	experiment := flags.String("experiment", "baseline", "Experiment to run: baseline or outline")
+	fixturePath := flags.String("fixtures", "internal/rageval/testdata/fixtures.json", "Path to baseline fixture JSON")
+	outPath := flags.String("out", "internal/rageval/testdata/baseline.json", "Path to write report JSON")
+	warmRuns := flags.Int("warm-runs", 3, "Baseline warm runs or outline measured samples per query")
+	noLatency := flags.Bool("no-latency", false, "Disable baseline wall-clock latency measurement")
+	dimensions := flags.Int("dimensions", 768, "Outline embedding dimensions")
+	candidateLimit := flags.Int("candidate-m", 50, "Outline candidate limit")
+	if err := flags.Parse(args); err != nil {
+		return err
 	}
-	if err := rageval.WriteReport(*outPath, report); err != nil {
-		log.Fatal(err)
+
+	switch *experiment {
+	case "outline":
+		report, err := rageval.RunOutlineExperiment(context.Background(), rageval.OutlineOptions{
+			Dimensions:     *dimensions,
+			Samples:        *warmRuns,
+			CandidateLimit: *candidateLimit,
+		})
+		if err != nil {
+			return err
+		}
+		return rageval.WriteOutlineReport(*outPath, report)
+	case "baseline":
+		fixture, err := rageval.LoadFixture(*fixturePath)
+		if err != nil {
+			return err
+		}
+		report, err := rageval.Run(context.Background(), fixture, rageval.RunOptions{
+			WarmRuns:       *warmRuns,
+			MeasureLatency: !*noLatency,
+		})
+		if err != nil {
+			return err
+		}
+		return rageval.WriteReport(*outPath, report)
+	default:
+		return fmt.Errorf("unknown experiment %q (want baseline or outline)", *experiment)
 	}
 }

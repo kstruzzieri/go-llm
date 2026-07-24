@@ -147,3 +147,46 @@ Notable invariants:
   hand). Latency fields are deliberately excluded — they vary run-to-run.
   On a drift failure, run `go generate ./internal/rageval` if the change
   was intentional.
+
+## Outline retrieval experiment (#246)
+
+Run the production-scale comparison with:
+
+```sh
+rtk go run ./cmd/rag-eval \
+  -experiment outline \
+  -dimensions 768 \
+  -candidate-m 50 \
+  -warm-runs 5 \
+  -out /private/tmp/go-llm-246-outline-report.json
+```
+
+`-warm-runs` is the measured sample count in outline mode; it retains its
+baseline warm-run meaning when `-experiment baseline` (the default) is used.
+The outline report compares:
+
+- `full_corpus_search_multi`: mutable `SearchMulti` over all corpus chunks.
+- `resident_exact`: the #291 resident snapshot, exact scoring over all chunks
+  with only the final results hydrated.
+- `bounded_semantic_keyword_union`: semantic top-M plus non-zero FTS5 keyword
+  top-M, stable-identity deduplication, then final scoring.
+- `outline_then_content`: deterministic metadata-only top-M selection, final
+  scoring, then content hydration.
+- `hierarchical`: resident-exact retrieval of M hydrated candidates followed
+  by the existing hierarchical post-retrieval policy.
+
+Quality fields are recall, reciprocal rank (MRR), expected-source coverage,
+citation/source accuracy, and final formatted-context tokens at K=5 and K=10.
+Cost fields are P50/P95 latency, bytes and allocations, and three distinct work
+counters: `candidates_inspected` is the unique candidate records consulted
+before final hydration (lean rows in the snapshot/planning adapters, full rows
+in the full-corpus mode); `ranked_candidates` is the final scoring or selection
+set; `hydrated_content_chunks` is every full-content row loaded by the adapter.
+`deterministic_ordering` checks repeated result-ID order. `planning_tokens` is
+`null` because all selectors are deterministic and model-free.
+
+This is a generated 1,401-chunk, 138-source corpus persisted to a temporary
+SQLite file. Its embeddings and queries are deterministic, so it isolates
+retrieval behavior without representing live-repository relevance, production
+concurrency, or model answer quality. See the measured
+[issue #246 report](../../docs/rag/outline-retrieval-eval-246.md).
