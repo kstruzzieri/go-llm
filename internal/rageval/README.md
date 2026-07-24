@@ -163,6 +163,9 @@ rtk go run ./cmd/rag-eval \
 
 `-warm-runs` is the measured sample count in outline mode; it retains its
 baseline warm-run meaning when `-experiment baseline` (the default) is used.
+Omitting it selects five outline samples while preserving the baseline default
+of three warm runs. Outline mode requires an explicit `-out` path so it cannot
+overwrite the committed baseline through the baseline default.
 The outline report compares:
 
 - `full_corpus_search_multi`: mutable `SearchMulti` over all corpus chunks.
@@ -176,17 +179,27 @@ The outline report compares:
   by the existing hierarchical post-retrieval policy.
 
 Quality fields are recall, reciprocal rank (MRR), expected-source coverage,
-citation/source accuracy, and final formatted-context tokens at K=5 and K=10.
-Cost fields are P50/P95 latency, bytes and allocations, and three distinct work
+`source_path_precision`, and final formatted-context tokens at K=5 and K=10.
+`source_path_precision` is only the fraction of returned chunks whose source
+path is one of the expected support paths. It is a retrieval proxy; no
+generated citation or answer quality is measured.
+
+Cost fields are P50/P95 latency, bytes and allocations, and four distinct work
 counters: `candidates_inspected` is the unique candidate records consulted
 before final hydration (lean rows in the snapshot/planning adapters, full rows
-in the full-corpus mode); `ranked_candidates` is the final scoring or selection
-set; `hydrated_content_chunks` is every full-content row loaded by the adapter.
+in the full-corpus mode); `ranked_candidates` is the upstream final scoring
+set; `hydrated_content_chunks` is every full-content row loaded by the adapter;
+and `post_retrieval_candidates_inspected` counts a separate downstream
+selection stage. Hierarchical retrieval ranks all 1,401 chunks upstream, then
+post-inspects and hydrates 50. Modes without a post-retrieval stage report zero.
 `deterministic_ordering` checks repeated result-ID order. `planning_tokens` is
 `null` because all selectors are deterministic and model-free.
 
 This is a generated 1,401-chunk, 138-source corpus persisted to a temporary
 SQLite file. Its embeddings and queries are deterministic, so it isolates
 retrieval behavior without representing live-repository relevance, production
-concurrency, or model answer quality. See the measured
+concurrency, or model answer quality. Allowed outline token sets are precomputed
+once before measurements; their build cost and retained memory, like
+long-lived persistent-memory pressure, are excluded. The raw JSON contains
+measurements only and no recommendation or conclusion. See the measured
 [issue #246 report](../../docs/rag/outline-retrieval-eval-246.md).

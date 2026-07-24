@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -28,14 +29,29 @@ func run(args []string) error {
 	dimensions := flags.Int("dimensions", 768, "Outline embedding dimensions")
 	candidateLimit := flags.Int("candidate-m", 50, "Outline candidate limit")
 	if err := flags.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
+	warmRunsSet, outSet := false, false
+	flags.Visit(func(f *flag.Flag) {
+		warmRunsSet = warmRunsSet || f.Name == "warm-runs"
+		outSet = outSet || f.Name == "out"
+	})
 
 	switch *experiment {
 	case "outline":
+		if !outSet {
+			return fmt.Errorf("outline experiment requires explicit -out")
+		}
+		samples := 5
+		if warmRunsSet {
+			samples = *warmRuns
+		}
 		report, err := rageval.RunOutlineExperiment(context.Background(), rageval.OutlineOptions{
 			Dimensions:     *dimensions,
-			Samples:        *warmRuns,
+			Samples:        samples,
 			CandidateLimit: *candidateLimit,
 		})
 		if err != nil {

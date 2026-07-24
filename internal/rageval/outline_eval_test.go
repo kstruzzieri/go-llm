@@ -2,6 +2,7 @@ package rageval
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -75,7 +76,16 @@ func TestBuildOutlineFixtureContract(t *testing.T) {
 				t.Fatalf("query %q source for %q = %q, want %q", query.Query, id, query.ExpectedSources[i], chunk.Source)
 			}
 		}
-		if query.CurrentFile != query.ExpectedSources[0] {
+		if query.Category == "distributed_support" {
+			if _, exists := sources[query.CurrentFile]; exists {
+				t.Fatalf("distributed query %q current file %q exists in corpus, want neutral path", query.Query, query.CurrentFile)
+			}
+			for _, source := range query.ExpectedSources {
+				if query.CurrentFile == source {
+					t.Fatalf("distributed query %q current file = support source %q, want neutral path", query.Query, source)
+				}
+			}
+		} else if query.CurrentFile != query.ExpectedSources[0] {
 			t.Fatalf("query %q current file = %q, want %q", query.Query, query.CurrentFile, query.ExpectedSources[0])
 		}
 	}
@@ -147,10 +157,13 @@ func TestBoundedUnionDeduplicatesByStableIdentity(t *testing.T) {
 }
 
 func TestOutlineSelectionUsesMetadataNotContent(t *testing.T) {
+	contentOnly := rag.Chunk{ID: "content-only", StableKey: "z", Content: "contentmagic"}
+	noCue := rag.Chunk{ID: "no-cue", StableKey: "m"}
+	metadataCue := rag.Chunk{ID: "metadata-cue", StableKey: "a", Metadata: map[string]string{"doc": "metadatamagic"}}
 	candidates := []outlineCandidate{
-		{Chunk: rag.Chunk{ID: "content-only", StableKey: "z", Content: "contentmagic"}},
-		{Chunk: rag.Chunk{ID: "no-cue", StableKey: "m"}},
-		{Chunk: rag.Chunk{ID: "metadata-cue", StableKey: "a", Metadata: map[string]string{"doc": "metadatamagic"}}},
+		{Chunk: contentOnly, OutlineTokens: outlineCandidateTokens(contentOnly)},
+		{Chunk: noCue, OutlineTokens: outlineCandidateTokens(noCue)},
+		{Chunk: metadataCue, OutlineTokens: outlineCandidateTokens(metadataCue)},
 	}
 
 	got := selectOutlineCandidates(candidates, "contentmagic metadatamagic", len(candidates))
@@ -161,6 +174,22 @@ func TestOutlineSelectionUsesMetadataNotContent(t *testing.T) {
 	want := []string{"metadata-cue", "no-cue", "content-only"}
 	if !reflect.DeepEqual(gotIDs, want) {
 		t.Fatalf("outline selection IDs = %v, want %v", gotIDs, want)
+	}
+}
+
+func TestOutlineSelectionUsesPrecomputedCandidateTokens(t *testing.T) {
+	storedCue := rag.Chunk{ID: "stored-cue", StableKey: "z", Metadata: map[string]string{"doc": "storedmagic"}}
+	noCue := rag.Chunk{ID: "no-cue", StableKey: "a"}
+	candidates := []outlineCandidate{
+		{Chunk: storedCue, OutlineTokens: outlineCandidateTokens(storedCue)},
+		{Chunk: noCue, OutlineTokens: outlineCandidateTokens(noCue)},
+	}
+	candidates[0].Chunk.Metadata = map[string]string{"doc": "changed"}
+	candidates[0].Chunk.Content = "changed"
+
+	got := selectOutlineCandidates(candidates, "storedmagic", len(candidates))
+	if got[0].Chunk.ID != "stored-cue" {
+		t.Fatalf("first candidate = %q, want stored-cue from precomputed outline", got[0].Chunk.ID)
 	}
 }
 
@@ -251,6 +280,9 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 		"outline_then_content":           10,
 		"hierarchical":                   float64(opts.CandidateLimit),
 	}
+	wantPostRetrieval := map[string]float64{
+		"hierarchical": float64(opts.CandidateLimit),
+	}
 	gotModes := make([]string, len(report.Modes))
 	for i, mode := range report.Modes {
 		gotModes[i] = mode.Name
@@ -266,6 +298,12 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 		if mode.Summary.HydratedContentChunks != wantHydrated[mode.Name] {
 			t.Fatalf("mode %q hydrated chunks = %v, want %v", mode.Name, mode.Summary.HydratedContentChunks, wantHydrated[mode.Name])
 		}
+		if mode.Summary.PostRetrievalCandidatesInspected != wantPostRetrieval[mode.Name] {
+			t.Fatalf("mode %q post-retrieval candidates = %v, want %v", mode.Name, mode.Summary.PostRetrievalCandidatesInspected, wantPostRetrieval[mode.Name])
+		}
+		if mode.Name == "hierarchical" && mode.Summary.RankedCandidates != 1401 {
+			t.Fatalf("hierarchical ranked candidates = %v, want 1401", mode.Summary.RankedCandidates)
+		}
 		if mode.Summary.PlanningTokens != nil {
 			t.Fatalf("mode %q planning tokens = %v, want nil", mode.Name, *mode.Summary.PlanningTokens)
 		}
@@ -279,6 +317,9 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 			if query.HydratedContentChunks != wantHydrated[mode.Name] {
 				t.Fatalf("mode %q query %q hydrated chunks = %v, want %v", mode.Name, query.ID, query.HydratedContentChunks, wantHydrated[mode.Name])
 			}
+			if query.PostRetrievalCandidatesInspected != wantPostRetrieval[mode.Name] {
+				t.Fatalf("mode %q query %q post-retrieval candidates = %v, want %v", mode.Name, query.ID, query.PostRetrievalCandidatesInspected, wantPostRetrieval[mode.Name])
+			}
 			if query.PlanningTokens != nil {
 				t.Fatalf("mode %q query %q planning tokens = %v, want nil", mode.Name, query.ID, *query.PlanningTokens)
 			}
@@ -289,6 +330,33 @@ func TestRunOutlineExperimentModesAndDeterminism(t *testing.T) {
 	}
 	if !reflect.DeepEqual(gotModes, wantModes) {
 		t.Fatalf("modes = %v, want %v", gotModes, wantModes)
+	}
+	data, err := json.Marshal(report)
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	if strings.Contains(string(data), `"conclusion"`) || strings.Contains(string(data), `"citation`) {
+		t.Fatalf("report contains removed policy or citation fields: %s", data)
+	}
+	if !strings.Contains(string(data), `"source_path_precision_at_10"`) {
+		t.Fatalf("report missing source_path_precision metric: %s", data)
+	}
+
+	residentDistributed := outlineQueriesByCategory(report.Modes[1], "distributed_support")
+	hierarchicalDistributed := outlineQueriesByCategory(report.Modes[4], "distributed_support")
+	for id, resident := range residentDistributed {
+		hierarchical := hierarchicalDistributed[id]
+		residentMetrics := outlineMetricsAtK(resident, 10)
+		hierarchicalMetrics := outlineMetricsAtK(hierarchical, 10)
+		if residentMetrics.Recall != 1 || residentMetrics.ExpectedSupportCoverage != 1 {
+			t.Fatalf("resident distributed query %q metrics = %+v, want recall/coverage 1", id, residentMetrics)
+		}
+		if hierarchicalMetrics.Recall != 0.5 || hierarchicalMetrics.ExpectedSupportCoverage != 0.5 {
+			t.Fatalf("hierarchical distributed query %q metrics = %+v, want recall/coverage .5", id, hierarchicalMetrics)
+		}
+		if reflect.DeepEqual(resident.ResultIDs, hierarchical.ResultIDs) {
+			t.Fatalf("distributed query %q resident and hierarchy ordering unexpectedly match", id)
+		}
 	}
 
 	second, err := RunOutlineExperiment(context.Background(), opts)
@@ -340,41 +408,21 @@ func TestRunOutlineExperimentRejectsCandidateLimitAtFinalK(t *testing.T) {
 	}
 }
 
-func TestOutlineConclusionParetoComparison(t *testing.T) {
-	summary := func(quality, cost float64, deterministic bool) OutlineModeSummary {
-		return OutlineModeSummary{
-			RecallAt5: quality, RecallAt10: quality,
-			MRRAt5: quality, MRRAt10: quality,
-			ExpectedSupportCoverageAt5: quality, ExpectedSupportCoverageAt10: quality,
-			CitationSourceAccuracyAt5: quality, CitationSourceAccuracyAt10: quality,
-			FinalContextTokensAt5: cost, FinalContextTokensAt10: cost,
-			LatencyMS:      LatencySummary{P50: cost, P95: cost},
-			AllocatedBytes: cost, AllocationCount: cost,
-			CandidatesInspected: cost, RankedCandidates: cost, HydratedContentChunks: cost,
-			DeterministicOrdering: deterministic,
+func outlineQueriesByCategory(mode OutlineModeReport, category string) map[string]OutlineQueryReport {
+	queries := make(map[string]OutlineQueryReport)
+	for _, query := range mode.Queries {
+		if query.Category == category {
+			queries[query.ID] = query
 		}
 	}
-	tests := []struct {
-		name              string
-		outline, resident OutlineModeSummary
-		want              string
-	}{
-		{name: "outline strictly dominates", outline: summary(1, 9, true), resident: summary(1, 10, true), want: "keep"},
-		{name: "resident strictly dominates", outline: summary(1, 10, true), resident: summary(1, 9, true), want: "abandon"},
-		{name: "quality cost tradeoff", outline: summary(1, 10, true), resident: summary(0.5, 9, true), want: "iterate"},
-		{name: "equal", outline: summary(1, 10, true), resident: summary(1, 10, true), want: "iterate"},
-		{name: "outline nondeterministic", outline: summary(1, 9, false), resident: summary(1, 10, true), want: "iterate"},
-		{name: "zero recall is not keep", outline: summary(0, 9, true), resident: summary(0, 10, true), want: "iterate"},
+	return queries
+}
+
+func outlineMetricsAtK(query OutlineQueryReport, k int) OutlineKMetrics {
+	for _, metrics := range query.Metrics {
+		if metrics.K == k {
+			return metrics
+		}
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			modes := []OutlineModeReport{
-				{Name: "resident_exact", Summary: test.resident},
-				{Name: "outline_then_content", Summary: test.outline},
-			}
-			if got := outlineConclusion(modes); got != test.want {
-				t.Fatalf("outlineConclusion = %q, want %q", got, test.want)
-			}
-		})
-	}
+	return OutlineKMetrics{}
 }

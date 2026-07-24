@@ -39,7 +39,6 @@ func TestRunOutlineExperiment(t *testing.T) {
 		"-experiment", "outline",
 		"-dimensions", "128",
 		"-candidate-m", "20",
-		"-warm-runs", "1",
 		"-out", out,
 	}); err != nil {
 		t.Fatal(err)
@@ -56,7 +55,7 @@ func TestRunOutlineExperiment(t *testing.T) {
 	if report.SchemaVersion != rageval.OutlineSchemaVersion {
 		t.Fatalf("schema_version = %q", report.SchemaVersion)
 	}
-	if report.Corpus.Dimensions != 128 || report.Corpus.CandidateLimit != 20 || report.Corpus.Samples != 1 || report.Corpus.Queries != 20 {
+	if report.Corpus.Dimensions != 128 || report.Corpus.CandidateLimit != 20 || report.Corpus.Samples != 5 || report.Corpus.Queries != 20 {
 		t.Fatalf("corpus options = %+v", report.Corpus)
 	}
 	wantModes := []string{
@@ -76,6 +75,48 @@ func TestRunOutlineExperiment(t *testing.T) {
 		if len(report.Modes[i].Queries) != 20 {
 			t.Fatalf("%s query count = %d, want 20", want, len(report.Modes[i].Queries))
 		}
+	}
+}
+
+func TestRunOutlineRequiresExplicitOutput(t *testing.T) {
+	err := run([]string{
+		"-experiment", "outline",
+		"-dimensions", "128",
+		"-candidate-m", "20",
+		"-warm-runs", "1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "outline experiment requires explicit -out") {
+		t.Fatalf("error = %v, want explicit output requirement", err)
+	}
+}
+
+func TestRunOutlineHonorsExplicitSamples(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "outline.json")
+	if err := run([]string{
+		"-experiment", "outline",
+		"-dimensions", "16",
+		"-candidate-m", "20",
+		"-warm-runs", "1",
+		"-out", out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var report rageval.OutlineReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.Corpus.Samples != 1 {
+		t.Fatalf("samples = %d, want explicit 1", report.Corpus.Samples)
+	}
+}
+
+func TestRunHelpSucceeds(t *testing.T) {
+	if err := run([]string{"-h"}); err != nil {
+		t.Fatalf("run -h: %v", err)
 	}
 }
 

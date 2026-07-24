@@ -9,6 +9,7 @@ import (
 )
 
 const outlineIndexedAt = int64(1_700_000_000)
+const outlineNeutralCurrentFile = "workspace/neutral.go"
 
 type outlineFixture struct {
 	chunks     []rag.Chunk
@@ -42,11 +43,15 @@ func buildOutlineFixture(dim int) (outlineFixture, error) {
 				outlineSupport(queryIndex, 1, category, sources[queryIndex*2+1]),
 			}
 			vector := xorshiftVector(uint64(queryIndex+1), dim)
+			currentFile := supports[0].Source
+			if category == "distributed_support" {
+				currentFile = outlineNeutralCurrentFile
+			}
 			query := outlineQuery{
 				ID:              fmt.Sprintf("outline-query-%02d", queryIndex),
 				Category:        category,
 				Query:           outlineQueryText(queryIndex, category),
-				CurrentFile:     supports[0].Source,
+				CurrentFile:     currentFile,
 				Embedding:       append([]float64(nil), vector...),
 				ExpectedIDs:     []string{supports[0].ID, supports[1].ID},
 				ExpectedSources: []string{supports[0].Source, supports[1].Source},
