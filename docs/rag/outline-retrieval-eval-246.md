@@ -26,23 +26,24 @@ therefore references #246 rather than closing its acceptance gap.
 
 ## Reproduction
 
-The run started from base commit
-`774ac08f8bf14687a46b58c7b5ecc3f3f944ab01`. The exact staged implementation
-tree used by the CLI and evaluator was
-`46121e27e9ccd252ce6410cdd058c5854d51bbee`.
+The CLI and evaluator state used for the measured run is preserved in commit
+`76e53ffadfaac9d03256776f988bf9b62d21f0db`.
 
 Environment:
 
 ```text
 go version go1.26.1 darwin/arm64
-Darwin 25.5.0 arm64
+macOS 26.5.2 (25F84); Darwin 25.5.0 arm64
+Apple M3 Max (16 cores); 128 GB RAM
 ```
 
 Commands:
 
 ```sh
 rtk go version
+rtk sw_vers
 rtk uname -mrs
+rtk system_profiler SPHardwareDataType
 rtk go run ./cmd/rag-eval \
   -experiment outline \
   -dimensions 768 \
