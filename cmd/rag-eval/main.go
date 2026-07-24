@@ -24,7 +24,7 @@ func run(args []string) error {
 	experiment := flags.String("experiment", "baseline", "Experiment to run: baseline or outline")
 	fixturePath := flags.String("fixtures", "internal/rageval/testdata/fixtures.json", "Path to baseline fixture JSON")
 	outPath := flags.String("out", "internal/rageval/testdata/baseline.json", "Path to write report JSON")
-	warmRuns := flags.Int("warm-runs", 3, "Baseline warm runs or outline measured samples per query")
+	warmRuns := flags.Int("warm-runs", 0, "Baseline warm runs or outline measured samples per query (default: baseline 3, outline 5)")
 	noLatency := flags.Bool("no-latency", false, "Disable baseline wall-clock latency measurement")
 	dimensions := flags.Int("dimensions", 768, "Outline embedding dimensions")
 	candidateLimit := flags.Int("candidate-m", 50, "Outline candidate limit")
@@ -59,12 +59,16 @@ func run(args []string) error {
 		}
 		return rageval.WriteOutlineReport(*outPath, report)
 	case "baseline":
+		baselineWarmRuns := 3
+		if warmRunsSet {
+			baselineWarmRuns = *warmRuns
+		}
 		fixture, err := rageval.LoadFixture(*fixturePath)
 		if err != nil {
 			return err
 		}
 		report, err := rageval.Run(context.Background(), fixture, rageval.RunOptions{
-			WarmRuns:       *warmRuns,
+			WarmRuns:       baselineWarmRuns,
 			MeasureLatency: !*noLatency,
 		})
 		if err != nil {
