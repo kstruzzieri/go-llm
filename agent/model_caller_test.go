@@ -9,6 +9,8 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
+var _ func(*provider.Router) ModelCaller = NewRouterModelCaller
+
 // fakePlan emits two content deltas then a Done chunk carrying RouteOutcome.
 type fakePlan struct {
 	outcome *provider.RouteOutcome
@@ -69,6 +71,13 @@ func TestRouterModelCallerAddsToolCapWhenToolsPresent(t *testing.T) {
 	if gotReq.RequiredCaps&provider.CapToolCall == 0 {
 		t.Fatal("CapToolCall must be required when tools are present")
 	}
+	// A chainless caller must keep the original routing semantics.
+	if gotReq.StrictChain {
+		t.Fatal("StrictChain = true, want false without a preferred chain")
+	}
+	if gotReq.PreferredChain != nil {
+		t.Fatalf("PreferredChain = %v, want nil without a preferred chain", gotReq.PreferredChain)
+	}
 }
 
 func TestRouterModelCallerUsesNumPredictAsExpectedOutput(t *testing.T) {
@@ -86,6 +95,26 @@ func TestRouterModelCallerUsesNumPredictAsExpectedOutput(t *testing.T) {
 	}
 	if gotReq.ExpectedOutput != 256 {
 		t.Fatalf("ExpectedOutput = %d, want 256", gotReq.ExpectedOutput)
+	}
+}
+
+func TestRouterModelCallerUsesStrictPreferredChain(t *testing.T) {
+	var gotReq provider.RoutingRequest
+	mc := &routerModelCaller{
+		chain: []string{"local/coder", "hosted/fallback"},
+		route: func(_ context.Context, rr provider.RoutingRequest) (planExecutor, error) {
+			gotReq = rr
+			return fakePlan{}, nil
+		},
+	}
+	if _, err := mc.Chat(context.Background(), provider.ChatRequest{}, nil); err != nil {
+		t.Fatalf("Chat: %v", err)
+	}
+	if !gotReq.StrictChain {
+		t.Fatal("StrictChain = false, want true")
+	}
+	if got := gotReq.PreferredChain; len(got) != 2 || got[0] != "local/coder" || got[1] != "hosted/fallback" {
+		t.Fatalf("PreferredChain = %v", got)
 	}
 }
 

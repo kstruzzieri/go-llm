@@ -151,6 +151,23 @@ func TestSessionDBPathForWorkspaceRejectsRepoLocalPath(t *testing.T) {
 	}
 }
 
+func TestSessionDBPathForWorkspaceRejectsSymlinkIntoWorkspace(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(t.TempDir(), "data")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatalf("symlink data directory: %v", err)
+	}
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return link
+		}
+		return ""
+	}
+	if _, err := sessionDBPathForWorkspace(getenv, root); err == nil {
+		t.Fatal("want symlinked session DB inside workspace to be rejected")
+	}
+}
+
 func TestValidateSessionDBOutsideWorkspaceAllowsSiblingPrefix(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "repo")
@@ -379,56 +396,6 @@ func TestSession_HistoryNilSafe(t *testing.T) {
 	var s *session
 	if got := s.history(); got != nil {
 		t.Errorf("nil session history = %+v, want nil", got)
-	}
-}
-
-func TestSession_ApplyCompactedPersistsAndUpdatesState(t *testing.T) {
-	ctx := context.Background()
-	s, _ := openTempSession(t, "workspace:compact")
-	if err := s.record(ctx, "q1", "a1"); err != nil {
-		t.Fatal(err)
-	}
-	if err := s.record(ctx, "q2", "a2"); err != nil {
-		t.Fatal(err)
-	}
-
-	compacted := conversation.Conversation{
-		ID:             s.id,
-		Messages:       []conversation.Message{{Role: "user", Content: "q2"}, {Role: "assistant", Content: "a2"}},
-		DurableSummary: &conversation.DurableSummary{Content: "summary of q1/a1", MessageCount: 2},
-	}
-	if err := s.applyCompacted(ctx, compacted); err != nil {
-		t.Fatalf("applyCompacted: %v", err)
-	}
-
-	// In-memory state replaced.
-	if len(s.msgs) != 2 || s.historySummary() != "summary of q1/a1" {
-		t.Fatalf("in-memory state not updated: msgs=%d summary=%q", len(s.msgs), s.historySummary())
-	}
-	// Persisted.
-	loaded, err := s.store.Load(ctx, s.id)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if loaded.DurableSummary == nil || loaded.DurableSummary.Content != "summary of q1/a1" || len(loaded.Messages) != 2 {
-		t.Fatalf("not persisted: %+v", loaded)
-	}
-}
-
-func TestSession_CurrentConversationSnapshotsState(t *testing.T) {
-	ctx := context.Background()
-	s, _ := openTempSession(t, "workspace:snap")
-	if err := s.record(ctx, "q", "a"); err != nil {
-		t.Fatal(err)
-	}
-	conv := s.currentConversation()
-	if conv.ID != s.id || len(conv.Messages) != 2 {
-		t.Fatalf("snapshot mismatch: id=%q msgs=%d", conv.ID, len(conv.Messages))
-	}
-	// Mutating the snapshot must not affect the session buffer.
-	conv.Messages[0].Content = "MUTATED"
-	if s.msgs[0].Content == "MUTATED" {
-		t.Fatal("currentConversation must return a copy of Messages")
 	}
 }
 

@@ -13,8 +13,8 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
-	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -663,9 +663,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieveLine = rr.line
 		retrieveRequested = retrieveRequested || rr.suppressNotice
 	}
-	tools, err := buildTools(root, retrieve)
+	tools, err := buildTools(root, nil)
 	if err != nil {
 		return err
+	}
+	readToolCount := len(tools)
+	if retrieve != nil {
+		tools = append(tools, retrieve)
 	}
 	retrieveOmitted := retrieve == nil
 
@@ -813,11 +817,6 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		_, _ = fmt.Fprintln(stderr, line)
 	}
 
-	maxHistoryTokens := f.inputCeiling
-	if maxHistoryTokens <= 0 {
-		maxHistoryTokens = agent.DefaultInputCeiling
-	}
-	maxHistoryTokens /= 2
 	summarizeChain, err := resolveSummarizeChain(bundle.Config)
 	if err != nil {
 		return err
@@ -827,6 +826,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	newOrchestrator := func() *agent.Orchestrator {
 		return agent.New(caller, agent.ContextManager{})
 	}
+	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
 	if err != nil {
@@ -839,8 +839,34 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		// monotonic clamp + defaults); golem only supplies the warn fraction.
 		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
+	summarizer := agent.NewRouterSummarizer(bundle.Router, summarizeChain)
+	runtime, err := golemruntime.New(ctx, golemruntime.Options{
+		Root:     root,
+		System:   baseSystem,
+		Tools:    tools[readToolCount:],
+		MaxSteps: f.maxSteps,
+		Budget:   budget,
+		// The REPL line reader accepts lines up to 1 MiB; keep the runtime's
+		// message bound in lockstep so a pasted log or diff is not rejected.
+		MaxMessageBytes: 1024 * 1024,
+		ModelOptions:    thinkOpts,
+		Summarizer:      summarizer,
+		// The CLI is the trusted host: -trace records include model reasoning.
+		RetainReasoning:    true,
+		DisableCompression: f.noCompress,
+		OnWarning: func(err error) {
+			_, _ = fmt.Fprintf(stderr, "warning: %v\n", err)
+		},
+		Orchestrator: orch,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = runtime.Close() }()
+
 	sess := &replSession{
-		orch:                newOrchestrator(),
+		orch:                orch,
+		runtime:             runtime,
 		newOrchestrator:     newOrchestrator,
 		tools:               tools,
 		baseSystem:          baseSystem,
@@ -850,24 +876,17 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		color:               !f.noColor,
 		retrieveOmitted:     retrieveOmitted,
 		session:             sessn,
-		compress: compressPolicy{
-			summarize:          agent.NewRouterSummarizer(bundle.Router, summarizeChain),
-			estimate:           conversation.CharRatioEstimator(4.0),
-			maxHistoryTokens:   maxHistoryTokens,
-			minRecentExchanges: 4,
-			enabled:            !f.noCompress,
-		},
-		journal:      journal,
-		allowWrite:   f.allowWrite,
-		allowExec:    f.allowExec,
-		mcpAttached:  mcpAttached,
-		memory:       mrt.user,
-		memoryDBPath: mrt.dbPath,
-		records:      mrt.records,
-		workspaceID:  workspaceID(root),
-		obs:          obsv,
-		pressureWarn: f.pressureWarn > 0,
-		modelOptions: thinkOpts,
+		journal:             journal,
+		allowWrite:          f.allowWrite,
+		allowExec:           f.allowExec,
+		mcpAttached:         mcpAttached,
+		memory:              mrt.user,
+		memoryDBPath:        mrt.dbPath,
+		records:             mrt.records,
+		workspaceID:         workspaceID(root),
+		obs:                 obsv,
+		pressureWarn:        f.pressureWarn > 0,
+		modelOptions:        thinkOpts,
 	}
 	if sess.maxSteps == 0 {
 		sess.maxSteps = 16 // mirror agent defaultMaxSteps so the footer's k/max is accurate
