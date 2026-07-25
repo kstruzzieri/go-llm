@@ -32,8 +32,6 @@ type replSession struct {
 
 	session *session // nil => --no-session (no history, no persistence)
 
-	compress compressPolicy // post-turn history compression policy
-
 	memory       *memory.SQLiteStore // nil => memory disabled (-no-memory or open failed)
 	memoryDBPath string              // used to re-secure SQLite sidecars after writes
 	workspaceID  string              // stable id used to scope memory create/list/search

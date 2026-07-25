@@ -3,18 +3,15 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
 
-	"github.com/kstruzzieri/go-llm/agent"
-	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/datadir"
 	"github.com/kstruzzieri/go-llm/internal/pathguard"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -63,39 +60,16 @@ func resolveSessionID(o sessionIDOpts) (string, error) {
 	return workspaceID(o.root), nil
 }
 
-// dataDirBase resolves the per-user data dir base ($XDG_DATA_HOME if absolute,
-// else $HOME/.local/share). A relative XDG_DATA_HOME is ignored; a relative or
-// missing HOME with no usable XDG is an error.
+// dataDirBase resolves the per-user data dir base. Delegates to the shared
+// resolver so the CLI and the embeddable runtime agree on the same paths.
 func dataDirBase(getenv func(string) string) (string, error) {
-	dir := getenv("XDG_DATA_HOME")
-	relativeXDG := dir != "" && !filepath.IsAbs(dir)
-	if relativeXDG {
-		dir = ""
-	}
-	if dir == "" {
-		home := getenv("HOME")
-		if home == "" {
-			if relativeXDG {
-				return "", fmt.Errorf("golem: cannot locate session data dir (XDG_DATA_HOME is relative and HOME unset)")
-			}
-			return "", fmt.Errorf("golem: cannot locate session data dir (HOME and XDG_DATA_HOME unset)")
-		}
-		if !filepath.IsAbs(home) {
-			return "", fmt.Errorf("golem: cannot locate session data dir (HOME is relative)")
-		}
-		dir = filepath.Join(home, ".local", "share")
-	}
-	return dir, nil
+	return datadir.Base(getenv)
 }
 
 // sessionDBPath locates the session DB OUTSIDE the repo, under the per-user data
 // dir ($XDG_DATA_HOME/golem/sessions.db, else ~/.local/share/golem/sessions.db).
 func sessionDBPath(getenv func(string) string) (string, error) {
-	base, err := dataDirBase(getenv)
-	if err != nil {
-		return "", err
-	}
-	return filepath.Join(base, "golem", "sessions.db"), nil
+	return datadir.SessionDBPath(getenv)
 }
 
 func sessionDBPathForWorkspace(getenv func(string) string, root string) (string, error) {
@@ -214,14 +188,6 @@ func (s *session) record(ctx context.Context, userLine, answer string) error {
 	})
 }
 
-func (s *session) recordResult(ctx context.Context, userLine string, res agent.Result) error {
-	msgs, err := resultConversationMessages(userLine, res)
-	if err != nil {
-		return err
-	}
-	return s.recordMessages(ctx, msgs)
-}
-
 func (s *session) recordMessages(ctx context.Context, msgs []conversation.Message) error {
 	next := append(append([]conversation.Message{}, s.msgs...), msgs...)
 	if err := s.store.Save(ctx, conversation.Conversation{
@@ -237,67 +203,6 @@ func (s *session) recordMessages(ctx context.Context, msgs []conversation.Messag
 	// this write; re-secure them (the WAL can hold un-checkpointed message text).
 	_ = chmodDBFiles(s.dbPath)
 	return nil
-}
-
-// currentConversation snapshots the session's in-memory state for compression.
-// Messages are copied so the caller cannot mutate the session buffer.
-func (s *session) currentConversation() conversation.Conversation {
-	return conversation.Conversation{
-		ID:             s.id,
-		Messages:       append([]conversation.Message(nil), s.msgs...),
-		DurableSummary: cloneDurableSummary(s.summary),
-	}
-}
-
-// applyCompacted replaces history with a compressed conversation (recent raw
-// messages + durable summary) and persists it. Persistence only — it does not
-// construct the router or summarizer. Mirrors recordMessages' save-then-mutate
-// ordering so a failed save cannot leak partial state.
-func (s *session) applyCompacted(ctx context.Context, conv conversation.Conversation) error {
-	if err := s.store.Save(ctx, conversation.Conversation{
-		ID:             s.id,
-		Title:          sessionTitle(conv.Messages),
-		Messages:       conv.Messages,
-		DurableSummary: cloneDurableSummary(conv.DurableSummary),
-	}); err != nil {
-		return err
-	}
-	s.msgs = conv.Messages
-	s.summary = cloneDurableSummary(conv.DurableSummary)
-	_ = chmodDBFiles(s.dbPath)
-	return nil
-}
-
-func resultConversationMessages(userLine string, res agent.Result) ([]conversation.Message, error) {
-	if len(res.Messages) == 0 {
-		return []conversation.Message{
-			{Role: "user", Content: userLine},
-			{Role: "assistant", Content: res.Answer},
-		}, nil
-	}
-	out := make([]conversation.Message, len(res.Messages))
-	for i, m := range res.Messages {
-		cm := conversation.Message{
-			Role:       m.Role,
-			Content:    m.Content,
-			ToolName:   m.ToolName,
-			ToolCallID: m.ToolCallID,
-		}
-		if m.Role == "tool" && m.ToolName == agenttools.MemorySearchToolName {
-			cm.Content = memorySearchRedactedMarker
-		} else if m.Role == "tool" && isAgentMemoryTool(m.ToolName) {
-			cm.Content = agentMemoryResultRedactedMarker
-		}
-		if len(m.ToolCalls) > 0 {
-			raw, err := json.Marshal(redactAgentMemoryToolCalls(m.ToolCalls))
-			if err != nil {
-				return nil, fmt.Errorf("golem: marshal tool calls at message %d: %w", i, err)
-			}
-			cm.ToolCalls = raw
-		}
-		out[i] = cm
-	}
-	return out, nil
 }
 
 // history maps the persisted conversation to real-role chat messages for the

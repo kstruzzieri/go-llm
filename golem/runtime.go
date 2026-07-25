@@ -34,7 +34,7 @@ var errDuplicateRunID = errors.New("golem: duplicate active run ID")
 const ProtocolVersion = 1
 
 const (
-	maxMessageBytes            = 64 * 1024
+	defaultMaxMessageBytes     = 64 * 1024
 	maxContextDescriptionBytes = 256
 	maxContextValueBytes       = 64 * 1024
 	maxContextBytes            = 256 * 1024
@@ -43,18 +43,31 @@ const (
 
 // Options configures a Runtime.
 type Options struct {
-	Root               string
-	System             string
-	Tools              []agent.Tool
-	ConfigPath         string
-	MaxSteps           int
-	Budget             agent.Budget
-	ModelOptions       provider.ModelOptions
+	Root       string
+	System     string
+	Tools      []agent.Tool
+	ConfigPath string
+	MaxSteps   int
+	Budget     agent.Budget
+	// MaxMessageBytes bounds Turn.Message; zero or negative selects the
+	// 64 KiB default. Trusted hosts (like the CLI) may raise it.
+	MaxMessageBytes int
+	ModelOptions    provider.ModelOptions
+	// Summarizer enables history compression for stateful turns. When
+	// Orchestrator is supplied without a Summarizer, threads persist
+	// uncompressed and grow without bound.
 	Summarizer         conversation.Summarizer
 	DisableCompression bool
-	// OnWarning receives bootstrap/compression warnings. Concurrent runs may
-	// call it concurrently; it must not call Runtime.Close synchronously.
-	OnWarning    func(error)
+	// RetainReasoning preserves model reasoning in returned Results. Leave
+	// false for untrusted embedders; reasoning never reaches events or the
+	// session database either way.
+	RetainReasoning bool
+	// OnWarning receives bootstrap/compression/hardening warnings. Concurrent
+	// runs may call it concurrently; it must not call Runtime.Close
+	// synchronously.
+	OnWarning func(error)
+	// Orchestrator overrides the config-driven bootstrap. The caller retains
+	// ownership: Close never releases it or its providers.
 	Orchestrator *agent.Orchestrator
 }
 
@@ -75,7 +88,10 @@ type Turn struct {
 	Observer     agent.Observer
 }
 
-// Event is the versioned consumer event envelope.
+// Event is the versioned consumer event envelope. A run that stops early
+// (cancellation, sink failure, or the orchestrator's tool-error cap ending a
+// parallel batch) may leave tool.started events without a matching
+// tool.finished; consumers must not assume pairing.
 type Event struct {
 	Protocol int             `json:"protocol"`
 	ThreadID string          `json:"threadId,omitempty"`
@@ -85,8 +101,10 @@ type Event struct {
 	Payload  json.RawMessage `json:"payload"`
 }
 
-// EventSink consumes ordered events from one run. It must not call
-// Runtime.Close synchronously; Cancel is safe.
+// EventSink consumes ordered events from one run. It must return promptly —
+// delivery buffering and timeouts are the consumer's job; a blocking sink
+// stalls the run, wedges its thread reservation, and hangs Close. It must not
+// call Runtime.Close synchronously; Cancel is safe.
 type EventSink func(Event) error
 
 type activeRun struct {
@@ -96,27 +114,29 @@ type activeRun struct {
 
 // Runtime is a concrete facade over agent.Orchestrator.
 type Runtime struct {
-	orchestrator  *agent.Orchestrator
-	root          string
-	system        string
-	tools         []agent.Tool
-	maxSteps      int
-	budget        agent.Budget
-	modelOptions  provider.ModelOptions
-	summarizer    conversation.Summarizer
-	compress      bool
-	onWarning     func(error)
-	mu            sync.Mutex
-	active        map[string]*activeRun
-	activeThreads map[string]*activeRun
-	wg            sync.WaitGroup
-	closed        bool
-	closeDone     chan struct{}
-	closeErr      error
-	sessionMu     sync.Mutex
-	sessions      *threadStore
-	bundle        *providerbootstrap.Bundle
-	closeOwned    func() error
+	orchestrator    *agent.Orchestrator
+	root            string
+	system          string
+	tools           []agent.Tool
+	maxSteps        int
+	budget          agent.Budget
+	maxMessageBytes int
+	modelOptions    provider.ModelOptions
+	summarizer      conversation.Summarizer
+	compress        bool
+	retainReasoning bool
+	onWarning       func(error)
+	mu              sync.Mutex
+	active          map[string]*activeRun
+	activeThreads   map[string]*activeRun
+	wg              sync.WaitGroup
+	closed          bool
+	closeDone       chan struct{}
+	closeErr        error
+	sessionMu       sync.Mutex
+	sessions        *threadStore
+	bundle          *providerbootstrap.Bundle
+	closeOwned      func() error
 }
 
 // New constructs a Runtime.
@@ -156,21 +176,27 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		_ = bundle.Close()
 		return nil, fmt.Errorf("golem: initialize runtime: %w", err)
 	}
+	maxMessage := opts.MaxMessageBytes
+	if maxMessage <= 0 {
+		maxMessage = defaultMaxMessageBytes
+	}
 	return &Runtime{
-		orchestrator:  orchestrator,
-		root:          root,
-		system:        opts.System,
-		tools:         tools,
-		maxSteps:      opts.MaxSteps,
-		budget:        opts.Budget,
-		modelOptions:  opts.ModelOptions,
-		summarizer:    summarizer,
-		compress:      !opts.DisableCompression && summarizer != nil,
-		onWarning:     opts.OnWarning,
-		active:        make(map[string]*activeRun),
-		activeThreads: make(map[string]*activeRun),
-		closeDone:     make(chan struct{}),
-		bundle:        bundle,
+		orchestrator:    orchestrator,
+		root:            root,
+		system:          opts.System,
+		tools:           tools,
+		maxSteps:        opts.MaxSteps,
+		budget:          opts.Budget,
+		maxMessageBytes: maxMessage,
+		modelOptions:    opts.ModelOptions,
+		summarizer:      summarizer,
+		compress:        !opts.DisableCompression && summarizer != nil,
+		retainReasoning: opts.RetainReasoning,
+		onWarning:       opts.OnWarning,
+		active:          make(map[string]*activeRun),
+		activeThreads:   make(map[string]*activeRun),
+		closeDone:       make(chan struct{}),
+		bundle:          bundle,
 	}, nil
 }
 
@@ -197,7 +223,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 	if sink == nil {
 		return agent.Result{}, fmt.Errorf("%w: event sink is required", ErrInvalidRequest)
 	}
-	if err := validateTurn(turn); err != nil {
+	if err := r.validateTurn(turn); err != nil {
 		return agent.Result{}, err
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -359,7 +385,9 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		request.HistorySummary = thread.summary()
 	}
 	result, err := r.orchestrator.Run(runCtx, request, observer)
-	scrubReasoning(&result)
+	if !r.retainReasoning {
+		scrubReasoning(&result)
+	}
 	if sinkErr != nil {
 		return result, sinkErr
 	}
@@ -423,6 +451,8 @@ func failureCode(err error) string {
 	switch {
 	case errors.As(err, &observerErr):
 		return "observer_failed"
+	case errors.Is(err, ErrClosed):
+		return "runtime_closed"
 	case errors.Is(err, ErrInvalidRequest),
 		errors.Is(err, agent.ErrContextExhausted),
 		errors.Is(err, provider.ErrBudgetExceeded),
@@ -468,7 +498,7 @@ func turnGoal(turn Turn) (string, error) {
 	return turn.Message + contextDelimiter + string(raw), nil
 }
 
-func validateTurn(turn Turn) error {
+func (r *Runtime) validateTurn(turn Turn) error {
 	if turn.RunID == "" {
 		return fmt.Errorf("%w: run ID is required", ErrInvalidRequest)
 	}
@@ -481,8 +511,8 @@ func validateTurn(turn Turn) error {
 	if turn.Message == "" {
 		return fmt.Errorf("%w: message is required", ErrInvalidRequest)
 	}
-	if len(turn.Message) > maxMessageBytes {
-		return fmt.Errorf("%w: message exceeds %d bytes", ErrInvalidRequest, maxMessageBytes)
+	if len(turn.Message) > r.maxMessageBytes {
+		return fmt.Errorf("%w: message exceeds %d bytes", ErrInvalidRequest, r.maxMessageBytes)
 	}
 	contextBytes := 0
 	for i, item := range turn.Context {

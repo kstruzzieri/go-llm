@@ -13,6 +13,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/datadir"
 	"github.com/kstruzzieri/go-llm/internal/pathguard"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -97,18 +98,6 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 	candidate.Messages = append(append([]conversation.Message(nil), candidate.Messages...), messages...)
 	candidate.Title = threadTitle(candidate.Messages)
 
-	if r.compress {
-		compacted, changed, err := r.compressConversation(ctx, candidate)
-		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				return err
-			}
-			r.reportCompressionWarning(candidate.ID, err)
-		} else if changed {
-			candidate = compacted
-		}
-	}
-
 	if r.commitTerminal(active, ctx, "run.finished") == "run.canceled" {
 		return ctx.Err()
 	}
@@ -122,18 +111,45 @@ func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *thre
 	if err := store.store.Save(persistCtx, candidate); err != nil {
 		return fmt.Errorf("golem: save thread %q: %w", candidate.ID, err)
 	}
-	if err := memory.SecureDBFiles(store.path); err != nil {
-		return fmt.Errorf("golem: secure session database: %w", err)
-	}
 	state.conversation = candidate
+	// The turn is durable from here. Hardening and compression failures are
+	// warnings, not run failures: reporting a failure for a committed turn
+	// invites a consumer retry that would duplicate it.
+	r.secureThreadStore(store)
+	if !r.compress {
+		return nil
+	}
+	compacted, changed, err := r.compressConversation(ctx, candidate)
+	if err != nil {
+		r.reportCompressionWarning(candidate.ID, err)
+		return nil
+	}
+	if !changed {
+		return nil
+	}
+	if err := store.store.Save(persistCtx, compacted); err != nil {
+		r.reportCompressionWarning(candidate.ID, fmt.Errorf("save compressed conversation: %w", err))
+		return nil
+	}
+	state.conversation = compacted
+	r.secureThreadStore(store)
 	return nil
 }
 
-func (r *Runtime) reportCompressionWarning(threadID string, err error) {
-	warning := fmt.Errorf("golem: compress thread %q: %w", threadID, err)
-	if r.onWarning != nil {
-		r.onWarning(warning)
+func (r *Runtime) secureThreadStore(store *threadStore) {
+	if err := memory.SecureDBFiles(store.path); err != nil {
+		r.reportWarning(fmt.Errorf("golem: secure session database: %w", err))
 	}
+}
+
+func (r *Runtime) reportWarning(err error) {
+	if r.onWarning != nil {
+		r.onWarning(err)
+	}
+}
+
+func (r *Runtime) reportCompressionWarning(threadID string, err error) {
+	r.reportWarning(fmt.Errorf("golem: compress thread %q: %w", threadID, err))
 }
 
 func (r *Runtime) compressConversation(ctx context.Context, current conversation.Conversation) (conversation.Conversation, bool, error) {
@@ -265,6 +281,8 @@ func (r *Runtime) threadStore(ctx context.Context) (*threadStore, error) {
 	store, err := conversation.NewStore(ctx, db)
 	if err != nil {
 		_ = db.Close()
+		// Best-effort: migrations may have created loose sidecars before failing.
+		_ = memory.SecureDBFiles(path)
 		return nil, fmt.Errorf("golem: init session store: %w", err)
 	}
 	if err := memory.SecureDBFiles(path); err != nil {
@@ -287,25 +305,10 @@ func (r *Runtime) closeThreadStore() error {
 }
 
 func defaultSessionDBPath(root string) (string, error) {
-	base := os.Getenv("XDG_DATA_HOME")
-	relativeXDG := base != "" && !filepath.IsAbs(base)
-	if relativeXDG {
-		base = ""
+	path, err := datadir.SessionDBPath(os.Getenv)
+	if err != nil {
+		return "", err
 	}
-	if base == "" {
-		home := os.Getenv("HOME")
-		if home == "" {
-			if relativeXDG {
-				return "", fmt.Errorf("golem: cannot locate session data dir (XDG_DATA_HOME is relative and HOME unset)")
-			}
-			return "", fmt.Errorf("golem: cannot locate session data dir (HOME and XDG_DATA_HOME unset)")
-		}
-		if !filepath.IsAbs(home) {
-			return "", fmt.Errorf("golem: cannot locate session data dir (HOME is relative)")
-		}
-		base = filepath.Join(home, ".local", "share")
-	}
-	path := filepath.Join(base, "golem", "sessions.db")
 	if err := pathguard.ValidateOutside(path, root); err != nil {
 		return "", fmt.Errorf("golem: validate session database: %w", err)
 	}

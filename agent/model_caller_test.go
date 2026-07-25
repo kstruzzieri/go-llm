@@ -71,6 +71,13 @@ func TestRouterModelCallerAddsToolCapWhenToolsPresent(t *testing.T) {
 	if gotReq.RequiredCaps&provider.CapToolCall == 0 {
 		t.Fatal("CapToolCall must be required when tools are present")
 	}
+	// A chainless caller must keep the original routing semantics.
+	if gotReq.StrictChain {
+		t.Fatal("StrictChain = true, want false without a preferred chain")
+	}
+	if gotReq.PreferredChain != nil {
+		t.Fatalf("PreferredChain = %v, want nil without a preferred chain", gotReq.PreferredChain)
+	}
 }
 
 func TestRouterModelCallerUsesNumPredictAsExpectedOutput(t *testing.T) {

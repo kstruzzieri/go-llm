@@ -103,6 +103,20 @@ func (largePreviewTool) Invoke(context.Context, json.RawMessage) (agent.ToolResu
 	}, nil
 }
 
+type failingTool struct{}
+
+func (failingTool) Spec() agent.ToolSpec {
+	return agent.ToolSpec{Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}
+}
+
+func (failingTool) Effect() agent.Effect {
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+}
+
+func (failingTool) Invoke(context.Context, json.RawMessage) (agent.ToolResult, error) {
+	return agent.ToolResult{Content: "lookup failed", Preview: "lookup failed", IsError: true}, nil
+}
+
 type namedTool string
 
 func (n namedTool) Spec() agent.ToolSpec {
@@ -355,6 +369,122 @@ func TestRunEmitsToolEventsFromDisplayPreviews(t *testing.T) {
 	}
 	if finished.ToolCallID != "call-1" || finished.Name != "lookup" || finished.Preview != "1 match" || finished.IsError {
 		t.Fatalf("tool.finished = %#v", finished)
+	}
+}
+
+func TestRunReportsToolErrorInToolFinished(t *testing.T) {
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:         t.TempDir(),
+		Orchestrator: agent.New(&toolCaller{}, agent.ContextManager{}),
+		Tools:        []agent.Tool{failingTool{}},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := runtime.Close(); err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	})
+
+	var events []golem.Event
+	_, err = runtime.Run(context.Background(), golem.Turn{
+		RunID:   "run-tool-error",
+		Message: "look it up",
+	}, func(event golem.Event) error {
+		events = append(events, event)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var finished *struct {
+		IsError bool   `json:"isError"`
+		Preview string `json:"preview"`
+	}
+	for _, event := range events {
+		if event.Type != "tool.finished" {
+			continue
+		}
+		finished = &struct {
+			IsError bool   `json:"isError"`
+			Preview string `json:"preview"`
+		}{}
+		if err := json.Unmarshal(event.Payload, finished); err != nil {
+			t.Fatalf("decode tool.finished: %v", err)
+		}
+	}
+	if finished == nil || !finished.IsError {
+		t.Fatalf("tool.finished = %+v, want isError true", finished)
+	}
+}
+
+func TestMaxMessageBytesOptionRaisesTurnBound(t *testing.T) {
+	message := strings.Repeat("m", 100*1024)
+	defaultRuntime, err := golem.New(context.Background(), golem.Options{
+		Root:         t.TempDir(),
+		Orchestrator: agent.New(scriptedCaller{result: agent.ModelResult{Response: provider.ChatResponse{Content: "ok", Done: true}}}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = defaultRuntime.Close() })
+	if _, err := defaultRuntime.Run(context.Background(), golem.Turn{RunID: "run-default-cap", Message: message},
+		func(golem.Event) error { return nil }); !errors.Is(err, golem.ErrInvalidRequest) {
+		t.Fatalf("default cap error = %v, want ErrInvalidRequest", err)
+	}
+
+	raised, err := golem.New(context.Background(), golem.Options{
+		Root:            t.TempDir(),
+		MaxMessageBytes: 1024 * 1024,
+		Budget:          agent.Budget{InputCeiling: 256 * 1024},
+		Orchestrator:    agent.New(scriptedCaller{result: agent.ModelResult{Response: provider.ChatResponse{Content: "ok", Done: true}}}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = raised.Close() })
+	if _, err := raised.Run(context.Background(), golem.Turn{RunID: "run-raised-cap", Message: message},
+		func(golem.Event) error { return nil }); err != nil {
+		t.Fatalf("raised cap Run: %v", err)
+	}
+}
+
+func TestRetainReasoningControlsThinkingScrub(t *testing.T) {
+	caller := scriptedCaller{result: agent.ModelResult{Response: provider.ChatResponse{Content: "ok", Thinking: "chain of thought", Done: true}}}
+	for _, tc := range []struct {
+		name   string
+		retain bool
+	}{
+		{name: "default scrubs", retain: false},
+		{name: "trusted host retains", retain: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runtime, err := golem.New(context.Background(), golem.Options{
+				Root:            t.TempDir(),
+				RetainReasoning: tc.retain,
+				Orchestrator:    agent.New(caller, agent.ContextManager{}),
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = runtime.Close() })
+			result, err := runtime.Run(context.Background(), golem.Turn{RunID: "run-reasoning", Message: "q"},
+				func(golem.Event) error { return nil })
+			if err != nil {
+				t.Fatalf("Run: %v", err)
+			}
+			if len(result.Steps) == 0 {
+				t.Fatal("no steps recorded")
+			}
+			got := result.Steps[len(result.Steps)-1].Response.Thinking
+			if tc.retain && got != "chain of thought" {
+				t.Fatalf("thinking = %q, want retained", got)
+			}
+			if !tc.retain && got != "" {
+				t.Fatalf("thinking = %q, want scrubbed", got)
+			}
+		})
 	}
 }
 
@@ -981,8 +1111,8 @@ func TestRunAfterCloseIsNotReportedAsConflict(t *testing.T) {
 	if err := json.Unmarshal(events[1].Payload, &failed); err != nil {
 		t.Fatalf("decode run.failed: %v", err)
 	}
-	if failed.Code != "internal" {
-		t.Fatalf("run.failed code = %q, want internal", failed.Code)
+	if failed.Code != "runtime_closed" {
+		t.Fatalf("run.failed code = %q, want runtime_closed", failed.Code)
 	}
 }
 
@@ -1467,23 +1597,25 @@ func TestCompressionProviderFailureWithoutWarningHandlerStaysSuccessful(t *testi
 	}
 }
 
-func TestCancellationDuringCompressionWarningWins(t *testing.T) {
+// TestCancellationDuringCompressionKeepsCommittedTurn pins the durable-commit
+// ordering: the turn saves before compression runs, so a cancellation arriving
+// mid-compression loses only the compaction — never the answered turn — and the
+// run still reports run.finished (Cancel finds nothing to cancel).
+func TestCancellationDuringCompressionKeepsCommittedTurn(t *testing.T) {
 	t.Setenv("XDG_DATA_HOME", t.TempDir())
 	answer := strings.Repeat("a", 20*1024)
 	var runtime *golem.Runtime
 	var activeRunID string
-	warningSeen := false
+	compressionSeen := false
 	runtime, err := golem.New(context.Background(), golem.Options{
 		Root:   t.TempDir(),
 		Budget: agent.Budget{InputCeiling: 32 * 1024},
-		Summarizer: func(context.Context, string, []conversation.Message) (string, error) {
-			return "", errors.New("summarizer unavailable")
-		},
-		OnWarning: func(error) {
-			warningSeen = true
-			if !runtime.Cancel(activeRunID) {
-				t.Errorf("Cancel did not find %q during compression warning", activeRunID)
+		Summarizer: func(ctx context.Context, _ string, _ []conversation.Message) (string, error) {
+			compressionSeen = true
+			if runtime.Cancel(activeRunID) {
+				return "", fmt.Errorf("compression must run after the terminal claim; Cancel(%q) succeeded", activeRunID)
 			}
+			return "", context.Canceled
 		},
 		Orchestrator: agent.New(&captureCaller{answer: answer}, agent.ContextManager{}),
 	})
@@ -1492,52 +1624,53 @@ func TestCancellationDuringCompressionWarningWins(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = runtime.Close() })
 
+	var lastMessage string
 	for i := 0; i < 8; i++ {
 		activeRunID = fmt.Sprintf("run-compression-cancel-%d", i)
+		lastMessage = fmt.Sprintf("%d-%s", i, strings.Repeat("q", 20*1024))
 		var events []golem.Event
 		_, runErr := runtime.Run(context.Background(), golem.Turn{
 			ThreadID: "thread-compression-cancel",
 			RunID:    activeRunID,
-			Message:  fmt.Sprintf("%d-%s", i, strings.Repeat("q", 20*1024)),
+			Message:  lastMessage,
 		}, func(event golem.Event) error {
 			events = append(events, event)
 			return nil
 		})
-		if warningSeen {
-			if !errors.Is(runErr, context.Canceled) {
-				t.Fatalf("Run %d error = %v, want context canceled", i, runErr)
-			}
-			if got := events[len(events)-1].Type; got != "run.canceled" {
-				t.Fatalf("terminal event = %q, want run.canceled", got)
-			}
-			if err := runtime.Close(); err != nil {
-				t.Fatalf("Close: %v", err)
-			}
-			db, err := memory.OpenHardenedDB(context.Background(), filepath.Join(os.Getenv("XDG_DATA_HOME"), "golem", "sessions.db"))
-			if err != nil {
-				t.Fatalf("open saved sessions: %v", err)
-			}
-			t.Cleanup(func() { _ = db.Close() })
-			store, err := conversation.NewStore(context.Background(), db)
-			if err != nil {
-				t.Fatalf("open conversation store: %v", err)
-			}
-			saved, err := store.Load(context.Background(), "thread-compression-cancel")
-			if err != nil {
-				t.Fatalf("load saved thread: %v", err)
-			}
-			if slices.ContainsFunc(saved.Messages, func(message conversation.Message) bool {
-				return message.Role == "user" && message.Content == fmt.Sprintf("%d-%s", i, strings.Repeat("q", 20*1024))
-			}) {
-				t.Fatalf("canceled turn %d was persisted", i)
-			}
-			return
-		}
 		if runErr != nil {
-			t.Fatalf("Run %d before compression warning: %v", i, runErr)
+			t.Fatalf("Run %d: %v", i, runErr)
+		}
+		if got := events[len(events)-1].Type; got != "run.finished" {
+			t.Fatalf("terminal event %d = %q, want run.finished", i, got)
+		}
+		if compressionSeen {
+			break
 		}
 	}
-	t.Fatal("compression warning did not occur")
+	if !compressionSeen {
+		t.Fatal("compression did not occur")
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	db, err := memory.OpenHardenedDB(context.Background(), filepath.Join(os.Getenv("XDG_DATA_HOME"), "golem", "sessions.db"))
+	if err != nil {
+		t.Fatalf("open saved sessions: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	store, err := conversation.NewStore(context.Background(), db)
+	if err != nil {
+		t.Fatalf("open conversation store: %v", err)
+	}
+	saved, err := store.Load(context.Background(), "thread-compression-cancel")
+	if err != nil {
+		t.Fatalf("load saved thread: %v", err)
+	}
+	if !slices.ContainsFunc(saved.Messages, func(message conversation.Message) bool {
+		return message.Role == "user" && message.Content == lastMessage
+	}) {
+		t.Fatal("turn interrupted during compression was not persisted")
+	}
 }
 
 func TestNewDiscoversConfigAndBuildsRuntime(t *testing.T) {
