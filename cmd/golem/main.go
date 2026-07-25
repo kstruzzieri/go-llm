@@ -855,7 +855,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		RetainReasoning:    true,
 		DisableCompression: f.noCompress,
 		OnWarning: func(err error) {
-			_, _ = fmt.Fprintf(stderr, "warning: compression skipped: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "warning: %v\n", err)
 		},
 		Orchestrator: orch,
 	})

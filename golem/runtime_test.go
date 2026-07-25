@@ -1673,6 +1673,65 @@ func TestCancellationDuringCompressionKeepsCommittedTurn(t *testing.T) {
 	}
 }
 
+// TestCloseAbortsPostCommitCompression pins that Close cancels a run that is
+// already terminal: only best-effort compression can still be running there,
+// and shutdown must not wait out a summarizer model call it can abort.
+func TestCloseAbortsPostCommitCompression(t *testing.T) {
+	t.Setenv("XDG_DATA_HOME", t.TempDir())
+	answer := strings.Repeat("a", 20*1024)
+	inCompression := make(chan struct{})
+	runtime, err := golem.New(context.Background(), golem.Options{
+		Root:   t.TempDir(),
+		Budget: agent.Budget{InputCeiling: 32 * 1024},
+		Summarizer: func(ctx context.Context, _ string, _ []conversation.Message) (string, error) {
+			close(inCompression)
+			<-ctx.Done()
+			return "", ctx.Err()
+		},
+		Orchestrator: agent.New(&captureCaller{answer: answer}, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	runDone := make(chan error, 1)
+	go func() {
+		var runErr error
+		for i := 0; i < 8; i++ {
+			_, runErr = runtime.Run(context.Background(), golem.Turn{
+				ThreadID: "thread-close-compression",
+				RunID:    fmt.Sprintf("run-close-compression-%d", i),
+				Message:  fmt.Sprintf("%d-%s", i, strings.Repeat("q", 20*1024)),
+			}, func(golem.Event) error { return nil })
+			if runErr != nil {
+				break
+			}
+			select {
+			case <-inCompression:
+				runDone <- runErr
+				return
+			default:
+			}
+		}
+		runDone <- runErr
+	}()
+
+	<-inCompression
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- runtime.Close() }()
+	select {
+	case err := <-closeDone:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close blocked on post-commit compression")
+	}
+	if err := <-runDone; err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+}
+
 func TestNewDiscoversConfigAndBuildsRuntime(t *testing.T) {
 	toolsSeen := make(chan []string, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {

@@ -614,10 +614,11 @@ func (r *Runtime) Close() error {
 		return err
 	}
 	r.closed = true
+	// Cancel terminal runs too: after the terminal claim only best-effort
+	// compression can still be running (the durable save is uncancelable), and
+	// Close must not wait out a summarizer model call it could abort.
 	for _, active := range r.active {
-		if !active.terminal {
-			active.cancel()
-		}
+		active.cancel()
 	}
 	r.mu.Unlock()
 	r.wg.Wait()

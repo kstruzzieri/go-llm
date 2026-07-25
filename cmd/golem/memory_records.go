@@ -35,10 +35,6 @@ func agentMemorySystemFragment(enabled, sessionUp bool) string {
 	}
 }
 
-// agentMemoryResultRedactedMarker replaces an agent-memory tool result when the
-// turn is persisted, so record content does not enter session history, the
-// conversation FTS index, or the pinned durable summary. The live turn already
-// consumed the real result; this only affects what is stored.
 // agentMemoryNotice renders the startup line for agent memory. When the
 // session failed to open at runtime, working-note creation is guaranteed to
 // error (no session id), so the notice must say so instead of a bare
