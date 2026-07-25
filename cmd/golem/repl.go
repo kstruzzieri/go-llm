@@ -194,6 +194,14 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Approver: approver,
 		Observer: observer,
 	}, func(golemruntime.Event) error { return nil })
+	var sessionSaveErr error
+	if res.Answer != "" &&
+		errors.Is(runErr, golemruntime.ErrSessionPersistence) &&
+		!errors.Is(runErr, context.Canceled) &&
+		!errors.Is(runErr, context.DeadlineExceeded) {
+		sessionSaveErr = runErr
+		runErr = nil
+	}
 
 	// Post-run observability on EVERY exit path. Uses the parent ctx (not runCtx)
 	// so a canceled turn still flushes its partial trace.
@@ -234,7 +242,9 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if m := lastRoutedModel(res); m != "" {
 		sess.lastModel = m
 	}
-	if sess.session != nil && res.Answer != "" {
+	if sessionSaveErr != nil {
+		_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", sessionSaveErr)
+	} else if sess.session != nil && res.Answer != "" {
 		if _, err := sess.session.switchTo(ctx, sess.session.id); err != nil {
 			_, _ = fmt.Fprintf(out, "warning: session state not refreshed: %v\n", err)
 		}

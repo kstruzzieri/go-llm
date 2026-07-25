@@ -25,6 +25,9 @@ var ErrClosed = errors.New("golem: runtime is closed")
 // ErrInvalidRequest reports a malformed or oversized turn.
 var ErrInvalidRequest = errors.New("golem: invalid request")
 
+// ErrSessionPersistence reports a failure while persisting a completed answer.
+var ErrSessionPersistence = errors.New("golem: session persistence failed")
+
 var errDuplicateRunID = errors.New("golem: duplicate active run ID")
 
 // ProtocolVersion is the current consumer event contract version.
@@ -379,7 +382,8 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 		return result, finish(eventType, payload, err)
 	}
 	if thread != nil && result.Answer != "" {
-		if err := r.saveThread(runCtx, thread, turn.Message, result); err != nil {
+		if err := r.saveThread(runCtx, active, thread, turn.Message, result); err != nil {
+			err = fmt.Errorf("%w: %w", ErrSessionPersistence, err)
 			eventType := "run.failed"
 			payload := any(struct {
 				Code    string `json:"code"`
@@ -391,8 +395,7 @@ func (r *Runtime) Run(ctx context.Context, turn Turn, sink EventSink) (agent.Res
 			}
 			return result, finish(eventType, payload, err)
 		}
-	}
-	if err := runCtx.Err(); err != nil {
+	} else if err := runCtx.Err(); err != nil {
 		return result, finish("run.canceled", struct{}{}, err)
 	}
 	model := ""
@@ -542,6 +545,9 @@ func (r *Runtime) reserve(turn Turn, cancel context.CancelFunc) (*activeRun, err
 func (r *Runtime) commitTerminal(active *activeRun, ctx context.Context, eventType string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if active.terminal {
+		return eventType
+	}
 	if ctx.Err() != nil {
 		eventType = "run.canceled"
 	}

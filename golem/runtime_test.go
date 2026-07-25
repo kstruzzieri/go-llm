@@ -1510,6 +1510,27 @@ func TestCancellationDuringCompressionWarningWins(t *testing.T) {
 			if got := events[len(events)-1].Type; got != "run.canceled" {
 				t.Fatalf("terminal event = %q, want run.canceled", got)
 			}
+			if err := runtime.Close(); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			db, err := memory.OpenHardenedDB(context.Background(), filepath.Join(os.Getenv("XDG_DATA_HOME"), "golem", "sessions.db"))
+			if err != nil {
+				t.Fatalf("open saved sessions: %v", err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			store, err := conversation.NewStore(context.Background(), db)
+			if err != nil {
+				t.Fatalf("open conversation store: %v", err)
+			}
+			saved, err := store.Load(context.Background(), "thread-compression-cancel")
+			if err != nil {
+				t.Fatalf("load saved thread: %v", err)
+			}
+			if slices.ContainsFunc(saved.Messages, func(message conversation.Message) bool {
+				return message.Role == "user" && message.Content == fmt.Sprintf("%d-%s", i, strings.Repeat("q", 20*1024))
+			}) {
+				t.Fatalf("canceled turn %d was persisted", i)
+			}
 			return
 		}
 		if runErr != nil {

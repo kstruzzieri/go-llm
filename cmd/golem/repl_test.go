@@ -339,6 +339,37 @@ func TestRunOnceUnansweredFreshSessionDoesNotRefreshMissingRow(t *testing.T) {
 	}
 }
 
+func TestRunOnceKeepsAnswerWhenSessionSaveFails(t *testing.T) {
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "completed answer"},
+	}}}, root, "workspace:save-failure")
+	if _, err := sess.session.db.ExecContext(context.Background(), `
+		CREATE TRIGGER fail_conversation_save
+		BEFORE INSERT ON conversations
+		BEGIN
+			SELECT RAISE(FAIL, 'forced save failure');
+		END`); err != nil {
+		t.Fatalf("create failure trigger: %v", err)
+	}
+
+	var out strings.Builder
+	result, err := runOnce(context.Background(), &out, nil, sess, "question", nil)
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if result.Answer != "completed answer" {
+		t.Fatalf("answer = %q, want completed answer", result.Answer)
+	}
+	if got := out.String(); !strings.Contains(got, "warning: session not saved:") ||
+		!strings.Contains(got, "done ·") || strings.Contains(got, "\nerror:") {
+		t.Fatalf("save failure did not preserve successful CLI output:\n%s", got)
+	}
+	if len(sess.session.msgs) != 0 {
+		t.Fatalf("failed save changed cached session: %+v", sess.session.msgs)
+	}
+}
+
 func TestREPL_DoesNotPersistCanceledRun(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{block: make(chan struct{})} // never unblocked

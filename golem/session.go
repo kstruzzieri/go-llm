@@ -88,59 +88,52 @@ func (s *threadState) summary() string {
 	return s.conversation.DurableSummary.Content
 }
 
-func (r *Runtime) saveThread(ctx context.Context, state *threadState, userMessage string, result agent.Result) error {
+func (r *Runtime) saveThread(ctx context.Context, active *activeRun, state *threadState, userMessage string, result agent.Result) error {
 	messages, err := resultMessages(userMessage, result)
 	if err != nil {
 		return err
 	}
-	state.conversation.Messages = append(state.conversation.Messages, messages...)
-	state.conversation.Title = threadTitle(state.conversation.Messages)
+	candidate := state.conversation
+	candidate.Messages = append(append([]conversation.Message(nil), candidate.Messages...), messages...)
+	candidate.Title = threadTitle(candidate.Messages)
 
-	store, err := r.threadStore(ctx)
+	if r.compress {
+		compacted, changed, err := r.compressConversation(ctx, candidate)
+		if err != nil {
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return err
+			}
+			r.reportCompressionWarning(candidate.ID, err)
+		} else if changed {
+			candidate = compacted
+		}
+	}
+
+	if r.commitTerminal(active, ctx, "run.finished") == "run.canceled" {
+		return ctx.Err()
+	}
+	// Cancellation loses once finalization is claimed; otherwise a successful
+	// save could still be reported as canceled and be duplicated on retry.
+	persistCtx := context.WithoutCancel(ctx)
+	store, err := r.threadStore(persistCtx)
 	if err != nil {
 		return err
 	}
-	if err := store.store.Save(ctx, state.conversation); err != nil {
-		return fmt.Errorf("golem: save thread %q: %w", state.conversation.ID, err)
+	if err := store.store.Save(persistCtx, candidate); err != nil {
+		return fmt.Errorf("golem: save thread %q: %w", candidate.ID, err)
 	}
 	if err := memory.SecureDBFiles(store.path); err != nil {
 		return fmt.Errorf("golem: secure session database: %w", err)
 	}
-	if !r.compress {
-		return nil
-	}
-	compacted, changed, err := r.compressConversation(ctx, state.conversation)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		return r.reportCompressionWarning(state.conversation.ID, err)
-	}
-	if !changed {
-		return nil
-	}
-	if err := store.store.Save(ctx, compacted); err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
-		}
-		if secureErr := memory.SecureDBFiles(store.path); secureErr != nil {
-			return fmt.Errorf("golem: secure session database after failed compression save: %w", secureErr)
-		}
-		return r.reportCompressionWarning(state.conversation.ID, fmt.Errorf("save compressed conversation: %w", err))
-	}
-	if err := memory.SecureDBFiles(store.path); err != nil {
-		return fmt.Errorf("golem: secure session database: %w", err)
-	}
-	state.conversation = compacted
+	state.conversation = candidate
 	return nil
 }
 
-func (r *Runtime) reportCompressionWarning(threadID string, err error) error {
+func (r *Runtime) reportCompressionWarning(threadID string, err error) {
 	warning := fmt.Errorf("golem: compress thread %q: %w", threadID, err)
 	if r.onWarning != nil {
 		r.onWarning(warning)
 	}
-	return nil
 }
 
 func (r *Runtime) compressConversation(ctx context.Context, current conversation.Conversation) (conversation.Conversation, bool, error) {
