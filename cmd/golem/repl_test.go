@@ -11,6 +11,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -46,12 +47,53 @@ func newTestSession(t *testing.T, caller agent.ModelCaller, root string) *replSe
 	if err != nil {
 		t.Fatalf("buildTools: %v", err)
 	}
+	system := buildSystemPrompt(false, false)
+	orch := agent.New(caller, agent.ContextManager{})
 	return &replSession{
-		orch:       agent.New(caller, agent.ContextManager{}),
+		orch:       orch,
+		runtime:    newTestRuntime(t, root, system, orch, nil),
 		tools:      tools,
-		baseSystem: buildSystemPrompt(false, false),
+		baseSystem: system,
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
+	}
+}
+
+func newTestRuntime(t *testing.T, root, system string, orch *agent.Orchestrator, tools []agent.Tool) *golemruntime.Runtime {
+	t.Helper()
+	runtime, err := golemruntime.New(context.Background(), golemruntime.Options{
+		Root:         root,
+		System:       system,
+		Tools:        tools,
+		MaxSteps:     16,
+		Orchestrator: orch,
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+	return runtime
+}
+
+func TestRunOnceDelegatesThroughConsumerRuntime(t *testing.T) {
+	root := t.TempDir()
+	caller := &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{Content: "runtime answer"},
+	}}}
+	system := buildSystemPrompt(false, false)
+	sess := &replSession{
+		runtime:    newTestRuntime(t, root, system, agent.New(caller, agent.ContextManager{}), nil),
+		baseSystem: system,
+		maxSteps:   16,
+		clock:      func() time.Time { return time.Unix(0, 0) },
+	}
+	var out strings.Builder
+	result, err := runOnce(context.Background(), &out, nil, sess, "answer this", nil)
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if result.Answer != "runtime answer" {
+		t.Fatalf("answer = %q, want runtime answer", result.Answer)
 	}
 }
 
@@ -166,16 +208,21 @@ func newSessionedTestSession(t *testing.T, caller agent.ModelCaller, root, id st
 	if err != nil {
 		t.Fatalf("buildTools: %v", err)
 	}
-	dbPath := filepath.Join(t.TempDir(), "golem", "sessions.db")
+	dataDir := t.TempDir()
+	t.Setenv("XDG_DATA_HOME", dataDir)
+	dbPath := filepath.Join(dataDir, "golem", "sessions.db")
 	s, _, err := openSession(context.Background(), dbPath, id)
 	if err != nil {
 		t.Fatalf("openSession: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	system := buildSystemPrompt(false, false)
+	orch := agent.New(caller, agent.ContextManager{})
 	return &replSession{
-		orch:       agent.New(caller, agent.ContextManager{}),
+		orch:       orch,
+		runtime:    newTestRuntime(t, root, system, orch, nil),
 		tools:      tools,
-		baseSystem: buildSystemPrompt(false, false),
+		baseSystem: system,
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		session:    s,
@@ -256,6 +303,7 @@ func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
 
 	resume := &captureCaller{answer: "second"}
 	sess.orch = agent.New(resume, agent.ContextManager{})
+	sess.runtime = newTestRuntime(t, root, sess.baseSystem, sess.orch, nil)
 	if err := runREPL(context.Background(), strings.NewReader("again\n"), &out, nil, sess); err != nil {
 		t.Fatalf("second runREPL: %v", err)
 	}
@@ -269,6 +317,25 @@ func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
 	wantRoles := []string{"system", "user", "assistant", "user"}
 	if strings.Join(roles, ",") != strings.Join(wantRoles, ",") {
 		t.Fatalf("resume roles = %v, want %v", roles, wantRoles)
+	}
+}
+
+func TestRunOnceUnansweredFreshSessionDoesNotRefreshMissingRow(t *testing.T) {
+	root := t.TempDir()
+	sess := newSessionedTestSession(t, &scriptCaller{responses: []agent.ModelResult{{
+		Response: provider.ChatResponse{},
+	}}}, root, "workspace:unanswered")
+
+	var out strings.Builder
+	result, err := runOnce(context.Background(), &out, nil, sess, "question", nil)
+	if err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if result.Answer != "" {
+		t.Fatalf("answer = %q, want empty", result.Answer)
+	}
+	if strings.Contains(out.String(), "session state not refreshed") {
+		t.Fatalf("unexpected refresh warning:\n%s", out.String())
 	}
 }
 
@@ -384,10 +451,13 @@ func newWriteEnabledTestSession(t *testing.T, caller agent.ModelCaller, root str
 	if err != nil {
 		t.Fatalf("buildWriteTools: %v", err)
 	}
+	system := buildSystemPrompt(true, false)
+	orch := agent.New(caller, agent.ContextManager{})
 	return &replSession{
-		orch:       agent.New(caller, agent.ContextManager{}),
+		orch:       orch,
+		runtime:    newTestRuntime(t, root, system, orch, writeTools),
 		tools:      append(readTools, writeTools...),
-		baseSystem: buildSystemPrompt(true, false),
+		baseSystem: system,
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		journal:    journal,
@@ -405,10 +475,13 @@ func newExecOnlyTestSession(t *testing.T, caller agent.ModelCaller, root string)
 	if err != nil {
 		t.Fatalf("buildExecTools: %v", err)
 	}
+	system := buildSystemPrompt(false, true)
+	orch := agent.New(caller, agent.ContextManager{})
 	return &replSession{
-		orch:       agent.New(caller, agent.ContextManager{}),
+		orch:       orch,
+		runtime:    newTestRuntime(t, root, system, orch, execTools),
 		tools:      append(readTools, execTools...),
-		baseSystem: buildSystemPrompt(false, true),
+		baseSystem: system,
 		maxSteps:   16,
 		clock:      func() time.Time { return time.Unix(0, 0) },
 		allowExec:  true,

@@ -10,6 +10,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/conversation"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/agenttrace"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -18,6 +19,7 @@ import (
 // replSession holds the per-process state the REPL needs.
 type replSession struct {
 	orch                *agent.Orchestrator
+	runtime             *golemruntime.Runtime
 	newOrchestrator     func() *agent.Orchestrator
 	tools               []agent.Tool
 	baseSystem          string
@@ -152,7 +154,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	rend.warnPressure = sess.pressureWarn
 
 	var (
-		runID     string
+		runID     = conversation.NewID()
 		startedAt time.Time
 		sink      *agenttrace.TelemetrySink
 	)
@@ -181,7 +183,17 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		Approver:       approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Options:        sess.modelOptions,
 	}
-	res, runErr := sess.orch.Run(runCtx, req, observer)
+	threadID := ""
+	if sess.session != nil {
+		threadID = sess.session.id
+	}
+	res, runErr := sess.runtime.Run(runCtx, golemruntime.Turn{
+		ThreadID: threadID,
+		RunID:    runID,
+		Message:  line,
+		Approver: approver,
+		Observer: observer,
+	}, func(golemruntime.Event) error { return nil })
 
 	// Post-run observability on EVERY exit path. Uses the parent ctx (not runCtx)
 	// so a canceled turn still flushes its partial trace.
@@ -222,14 +234,9 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 	if m := lastRoutedModel(res); m != "" {
 		sess.lastModel = m
 	}
-	// Persist only a successful, answered run. recordResult uses the parent ctx so
-	// saving the computed answer is not tied to this turn's cancellation scope.
 	if sess.session != nil && res.Answer != "" {
-		if serr := sess.session.recordResult(ctx, line, res); serr != nil {
-			_, _ = fmt.Fprintf(out, "warning: session not saved: %v\n", serr)
-		}
-		if cerr := sess.maybeCompress(runCtx); cerr != nil {
-			_, _ = fmt.Fprintf(out, "warning: compression skipped: %v\n", cerr)
+		if _, err := sess.session.switchTo(ctx, sess.session.id); err != nil {
+			_, _ = fmt.Fprintf(out, "warning: session state not refreshed: %v\n", err)
 		}
 	}
 	rend.finalFooter(res)

@@ -15,6 +15,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
+	"github.com/kstruzzieri/go-llm/internal/pathguard"
 	"github.com/kstruzzieri/go-llm/memory"
 	"github.com/kstruzzieri/go-llm/provider"
 	_ "modernc.org/sqlite"
@@ -116,24 +117,7 @@ func validateSessionDBOutsideWorkspace(dbPath, root string) error {
 // or nested inside it. Used for both the session DB and the index DB so neither
 // can land inside the indexed/edited tree.
 func validatePathOutsideWorkspace(p, root string) error {
-	absP, err := filepath.Abs(p)
-	if err != nil {
-		return fmt.Errorf("golem: resolve data path: %w", err)
-	}
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		return fmt.Errorf("golem: resolve workspace path: %w", err)
-	}
-	absP = filepath.Clean(absP)
-	absRoot = filepath.Clean(absRoot)
-	rel, err := filepath.Rel(absRoot, absP)
-	if err != nil {
-		return fmt.Errorf("golem: compare data path to workspace: %w", err)
-	}
-	if rel == "." || (rel != ".." && !strings.HasPrefix(rel, ".."+string(os.PathSeparator))) {
-		return fmt.Errorf("golem: data path %q must be outside workspace %q", absP, absRoot)
-	}
-	return nil
+	return pathguard.ValidateOutside(p, root)
 }
 
 const (

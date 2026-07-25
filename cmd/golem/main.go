@@ -15,6 +15,7 @@ import (
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/conversation"
 	"github.com/kstruzzieri/go-llm/fingerprint"
+	golemruntime "github.com/kstruzzieri/go-llm/golem"
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
@@ -663,9 +664,13 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieveLine = rr.line
 		retrieveRequested = retrieveRequested || rr.suppressNotice
 	}
-	tools, err := buildTools(root, retrieve)
+	tools, err := buildTools(root, nil)
 	if err != nil {
 		return err
+	}
+	readToolCount := len(tools)
+	if retrieve != nil {
+		tools = append(tools, retrieve)
 	}
 	retrieveOmitted := retrieve == nil
 
@@ -827,6 +832,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	newOrchestrator := func() *agent.Orchestrator {
 		return agent.New(caller, agent.ContextManager{})
 	}
+	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
 	if err != nil {
@@ -839,8 +845,29 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		// monotonic clamp + defaults); golem only supplies the warn fraction.
 		budget.Pressure = agent.PressureThresholdsForWarn(float64(f.pressureWarn) / 100)
 	}
+	summarizer := agent.NewRouterSummarizer(bundle.Router, summarizeChain)
+	runtime, err := golemruntime.New(ctx, golemruntime.Options{
+		Root:               root,
+		System:             baseSystem,
+		Tools:              tools[readToolCount:],
+		MaxSteps:           f.maxSteps,
+		Budget:             budget,
+		ModelOptions:       thinkOpts,
+		Summarizer:         summarizer,
+		DisableCompression: f.noCompress,
+		OnWarning: func(err error) {
+			_, _ = fmt.Fprintf(stderr, "warning: compression skipped: %v\n", err)
+		},
+		Orchestrator: orch,
+	})
+	if err != nil {
+		return err
+	}
+	defer func() { _ = runtime.Close() }()
+
 	sess := &replSession{
-		orch:                newOrchestrator(),
+		orch:                orch,
+		runtime:             runtime,
 		newOrchestrator:     newOrchestrator,
 		tools:               tools,
 		baseSystem:          baseSystem,
@@ -851,7 +878,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieveOmitted:     retrieveOmitted,
 		session:             sessn,
 		compress: compressPolicy{
-			summarize:          agent.NewRouterSummarizer(bundle.Router, summarizeChain),
+			summarize:          summarizer,
 			estimate:           conversation.CharRatioEstimator(4.0),
 			maxHistoryTokens:   maxHistoryTokens,
 			minRecentExchanges: 4,

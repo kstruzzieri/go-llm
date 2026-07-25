@@ -29,12 +29,20 @@ type planExecutor interface {
 }
 
 type routerModelCaller struct {
+	chain []string
 	route func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error)
 }
 
 // NewRouterModelCaller wires the default adapter to a concrete provider.Router.
 func NewRouterModelCaller(r *provider.Router) ModelCaller {
+	return NewRouterModelCallerWithChain(r, nil)
+}
+
+// NewRouterModelCallerWithChain wires the default adapter with a strict
+// preferred model chain.
+func NewRouterModelCallerWithChain(r *provider.Router, chain []string) ModelCaller {
 	return &routerModelCaller{
+		chain: append([]string(nil), chain...),
 		route: func(ctx context.Context, rr provider.RoutingRequest) (planExecutor, error) {
 			return r.Route(ctx, rr)
 		},
@@ -54,6 +62,10 @@ func (m *routerModelCaller) Chat(ctx context.Context, req provider.ChatRequest,
 	}
 	if len(req.Tools) > 0 {
 		rr.RequiredCaps |= provider.CapToolCall
+	}
+	if len(m.chain) > 0 {
+		rr.PreferredChain = append([]string(nil), m.chain...)
+		rr.StrictChain = true
 	}
 
 	plan, err := m.route(ctx, rr)

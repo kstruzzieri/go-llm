@@ -151,6 +151,23 @@ func TestSessionDBPathForWorkspaceRejectsRepoLocalPath(t *testing.T) {
 	}
 }
 
+func TestSessionDBPathForWorkspaceRejectsSymlinkIntoWorkspace(t *testing.T) {
+	root := t.TempDir()
+	link := filepath.Join(t.TempDir(), "data")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatalf("symlink data directory: %v", err)
+	}
+	getenv := func(k string) string {
+		if k == "XDG_DATA_HOME" {
+			return link
+		}
+		return ""
+	}
+	if _, err := sessionDBPathForWorkspace(getenv, root); err == nil {
+		t.Fatal("want symlinked session DB inside workspace to be rejected")
+	}
+}
+
 func TestValidateSessionDBOutsideWorkspaceAllowsSiblingPrefix(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "repo")
