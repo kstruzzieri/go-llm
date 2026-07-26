@@ -49,11 +49,12 @@ const (
 
 // deriveSummaryValidity computes the reason set for one source at render time.
 // row is nil when no summary row exists. provFound is false when the store
-// could not supply provenance at all (non-SQLite store); the current side is
-// then fully unknown. evidenceOK is false when any retrieved chunk's stored
-// digest is missing or differs (spec section 8). Blank values never compare
-// equal (design rule D6): a blank CURRENT value is unknown_*, while a blank
-// STORED value is malformed_row (it bypassed write validation).
+// could not supply provenance at all (non-SQLite store); prov is then zeroed
+// on entry, so the current side is wholly unknown regardless of what the
+// caller passed. evidenceOK is false when any retrieved chunk's stored digest
+// is missing or differs (spec section 8). Blank values never compare equal
+// (design rule D6): a blank CURRENT value is unknown_*, while a blank STORED
+// value is malformed_row (it bypassed write validation).
 //
 // Reasons have four SCOPES, and the structure below mirrors them — the
 // interleaving is load-bearing, not incidental:
@@ -68,6 +69,16 @@ const (
 // Flattening this into one chain of ifs would let stale_*/unknown_* accompany
 // malformed_row, which the spec section 5 matrix forbids.
 func deriveSummaryValidity(row *SourceSummary, prov SourceProvenance, provFound, evidenceOK bool) []ValidityReason {
+	if !provFound {
+		// The store could not supply provenance at all (a non-*SQLiteStore
+		// VectorStore). The current side is then wholly unknown, so no stale_*
+		// comparison and no mixed signal is meaningful — ignore prov entirely
+		// rather than trusting fields the store never populated. This keeps
+		// stale_* and unknown_* per-field mutually exclusive by construction
+		// (spec section 5) instead of by caller convention. prov is a value
+		// parameter, so this rebinds only the local copy.
+		prov = SourceProvenance{}
+	}
 	var reasons []ValidityReason
 	malformed := row != nil && summaryRowMalformed(*row)
 	switch {
@@ -92,13 +103,16 @@ func deriveSummaryValidity(row *SourceSummary, prov SourceProvenance, provFound,
 	}
 	if !malformed {
 		// Current-side unknowns: why the current side could not be compared.
-		// A missing row still reaches here (malformed is false when row is
-		// nil) and correctly reports an unknown current side: missing is
-		// exclusive with row-bearing reasons only.
-		if !provFound || prov.ContentHash == "" {
+		// Blankness is the only test needed — the !provFound zeroing above is
+		// the single place that case is handled, so a second provFound term
+		// here would be dead logic. A missing row still reaches this block
+		// (malformed is false when row is nil) and correctly reports an
+		// unknown current side: missing is exclusive with row-bearing reasons
+		// only.
+		if prov.ContentHash == "" {
 			reasons = append(reasons, ReasonUnknownContentHash)
 		}
-		if !provFound || prov.VectorSpaceID == "" {
+		if prov.VectorSpaceID == "" {
 			reasons = append(reasons, ReasonUnknownVectorSpace)
 		}
 	}

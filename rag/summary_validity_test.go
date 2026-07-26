@@ -65,10 +65,18 @@ func TestDeriveSummaryValidity(t *testing.T) {
 			[]ValidityReason{ReasonUnknownContentHash, ReasonUnknownVectorSpace}},
 		// provFound=false means the store could not supply provenance, so the
 		// current side is unknown no matter what the struct holds. Fields that
-		// happen to MATCH the row are what pins the !provFound term: drop it
-		// and this case yields a bogus "fresh".
+		// happen to MATCH the row are what pins the !provFound handling: drop
+		// it and this case yields a bogus "fresh".
 		{"provenance not found outranks fields that look valid", &fresh,
 			SourceProvenance{ContentHash: "hash1", VectorSpaceID: "vs1"}, false, true,
+			[]ValidityReason{ReasonUnknownContentHash, ReasonUnknownVectorSpace}},
+		// The same rule with fields that DRIFT: not-found zeroes prov, so no
+		// stale_* may be derived from values the store never populated —
+		// otherwise stale_* and unknown_* would co-occur on one field, which
+		// spec section 5 forbids. Mixed is ignored for the same reason: you
+		// cannot know a source's chunks disagree if you could not read them.
+		{"not found ignores populated provenance entirely", &fresh,
+			SourceProvenance{ContentHash: "changed", VectorSpaceID: "vs2", Mixed: true}, false, true,
 			[]ValidityReason{ReasonUnknownContentHash, ReasonUnknownVectorSpace}},
 		// stale_* and unknown_* are per-field mutually exclusive (a stale
 		// comparison needs a non-blank current value), so this five-reason
