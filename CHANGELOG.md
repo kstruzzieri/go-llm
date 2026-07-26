@@ -6,6 +6,41 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — `rag` progressive source summaries, slice 1 of #189
+
+A store and renderer for per-source L0/L1 summaries, so retrieval context can
+mix short orientation text with full chunk evidence under hard token and byte
+budgets instead of concatenating whole chunks until a limit is hit.
+
+**Nothing here runs unless you opt in, and it renders no summary text until
+slice 2.** No shipping caller sets `tools.RetrieveConfig.Progressive`, and
+nothing in the repo writes a `source_summaries` row — generation is slice 2.
+A caller who opts in today gets the deterministic metadata overview plus
+evidence for every source, with `missing` in its validity reasons.
+`Retriever.BuildContext` is unchanged and remains the default path.
+
+New exported surface in `rag`, all additive:
+
+- `Retriever.RenderProgressive`, with `ProgressiveRenderRequest`,
+  `ProgressiveTrace`, `ProgressiveSourceTrace`, `RenderedEvidence`, `PinRef`,
+  and the `Depth*` and `Decision*` constants.
+- `SourceSummary`, with `SQLiteStore.UpsertSourceSummary`,
+  `SourceSummaryBatch`, and `DeleteSourceSummary`. Writers MUST take
+  `ContentHash` and `VectorSpaceID` from `SQLiteStore.SourceProvenanceBatch`
+  for the same source; any other value stores a row that permanently derives
+  stale and never renders, with no error reported.
+- `SourceProvenance`, with `SQLiteStore.SourceProvenanceBatch` and
+  `SQLiteStore.ChunkContentDigestBatch`.
+- `ValidityReason` and its nine `ValidityReason*` constants.
+- Schema migration **v8** adds the `source_summaries` table. Writable
+  databases migrate on open; a v7 database opened read-only keeps working and
+  degrades to summary-missing rather than failing retrieval.
+
+Rendered source paths and managed document titles are untrusted text that
+reaches the model. Newline-based forgery of a whole block is blocked;
+same-line forgery of a block's own label is not — see the security note on
+`RenderProgressive`.
+
 ## [0.1.0] - 2026-07-22
 
 First tagged release of `go-llm`. Prior to this tag, downstream consumers

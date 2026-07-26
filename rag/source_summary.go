@@ -14,7 +14,11 @@ const SourceSummaryFormatVersion = 1
 // SourceSummary is one persisted source_summaries row: an atomic L0/L1 pair
 // for a single indexed source or managed document (#189 slice 1).
 type SourceSummary struct {
-	Source        string
+	Source string
+	// ContentHash and VectorSpaceID are the provenance this summary was
+	// generated against. They must EQUAL what SourceProvenanceBatch currently
+	// reports for Source — see UpsertSourceSummary for why anything else is a
+	// silent failure rather than an error.
 	ContentHash   string
 	VectorSpaceID string
 	Abstract      string // L0
@@ -73,6 +77,29 @@ func validateSourceSummaryWrite(row SourceSummary) error {
 
 // UpsertSourceSummary writes one L0/L1 pair atomically, replacing any existing
 // row for the source.
+//
+// SourceProvenanceBatch is this method's MANDATORY companion, not an
+// incidental export. Write validation only rejects blank fields — it cannot
+// check that row.ContentHash and row.VectorSpaceID describe the source as
+// currently indexed. Supply anything else and the write succeeds, no error is
+// returned anywhere, and every later render derives stale_content or
+// stale_vector_space and falls back to the deterministic metadata overview:
+// the summary is stored but permanently unreadable.
+//
+// So callers must read the source's provenance first and copy those values:
+//
+//	prov, err := store.SourceProvenanceBatch(ctx, []string{source})
+//	// ... row.ContentHash = prov[source].ContentHash
+//	// ... row.VectorSpaceID = prov[source].VectorSpaceID
+//
+// Do NOT derive ContentHash from GetSourceHash: it returns the raw
+// source_signature JSON, while the value compared at render time is the
+// content_hash INSIDE that document, and the parser for it is unexported.
+// SourceProvenanceBatch is the only supported way to obtain it.
+//
+// A blank prov.ContentHash or prov.VectorSpaceID means the current side is
+// unknown (mixed chunks, or an unparseable signature); there is no correct
+// value to store in that case, so defer the summary rather than guess.
 func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary) error {
 	row = normalizeSourceSummary(row)
 	if err := validateSourceSummaryWrite(row); err != nil {

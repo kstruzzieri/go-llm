@@ -43,6 +43,3 @@ func TestValidateProgressiveRequest(t *testing.T) {
 		})
 	}
 }
-
-// allocFixture builds n sources each with one result of the given content
-// sizes, no summaries (metadata orientation only).

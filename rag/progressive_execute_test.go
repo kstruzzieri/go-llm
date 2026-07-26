@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"slices"
 	"strings"
@@ -829,5 +830,301 @@ func TestAssembleProgressiveDropsWholeBlocks(t *testing.T) {
 	if src.orientation != orientationNone || !src.decisions[DecisionNoFit] {
 		t.Fatalf("dropping the last block must omit the source: orientation=%v decisions=%v",
 			src.orientation, src.decisions)
+	}
+}
+
+// --- Compatibility (spec section 14) ---
+
+// TestRenderProgressiveV7ReadOnlyDegrades exercises a REAL v7 file opened via
+// OpenSQLiteStoreReadOnly: the missing table degrades to summary-missing.
+// Only the immutable open degrades — the writable case below expects an error.
+func TestRenderProgressiveV7ReadOnlyDegrades(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v7ro.db")
+	setup, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	emb := []byte{0, 0, 0, 0}
+	storeChunksRaw(t, setup, [][]any{
+		{"v1", "content", "pkg/v.go", 1, 1, "go", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	})
+	// Rewind to v7: drop the v8 table and its version record.
+	if _, err := setup.db.Exec(`DROP TABLE source_summaries`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := setup.db.Exec(`DELETE FROM rag_schema_version WHERE version >= 8`); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+	if err := setup.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	store, err := OpenSQLiteStoreReadOnly(path)
+	if err != nil {
+		t.Fatalf("read-only open: %v", err)
+	}
+	// Opened outside newTestStore, so this close is this file's only one.
+	defer func() { _ = store.Close() }()
+	r, err := NewRetrieverWithEmbedder(progressiveTestEmbedder(), store)
+	if err != nil {
+		t.Fatalf("retriever: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "v1", Content: "content", Source: "pkg/v.go", StartLine: 1, EndLine: 1},
+		Score: 0.9,
+	}}
+	out, trace, err := r.RenderProgressive(context.Background(), ProgressiveRenderRequest{
+		Results: results, MaxTokens: 10000, MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("v7 read-only degradation must not error: %v", err)
+	}
+	if !strings.Contains(out, "metadata overview") {
+		t.Fatalf("must degrade to metadata overview:\n%s", out)
+	}
+	var hasMissing bool
+	for _, reason := range trace.Sources[0].ValidityReasons {
+		if reason == ValidityReasonMissing {
+			hasMissing = true
+		}
+	}
+	if !hasMissing {
+		t.Fatalf("reasons = %v, want missing", trace.Sources[0].ValidityReasons)
+	}
+}
+
+// TestRenderProgressiveWritableV8MissingTableErrors is the other half of the
+// degradation gate: on a WRITABLE store migration guarantees the table, so a
+// missing one is corruption and must propagate (spec section 13), not degrade.
+func TestRenderProgressiveWritableV8MissingTableErrors(t *testing.T) {
+	r, store := newProgressiveTestRetriever(t)
+	emb := []byte{0, 0, 0, 0}
+	storeChunksRaw(t, store, [][]any{
+		{"w1", "content", "pkg/w.go", 1, 1, "go", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	})
+	if _, err := store.db.Exec(`DROP TABLE source_summaries`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "w1", Content: "content", Source: "pkg/w.go", StartLine: 1, EndLine: 1},
+		Score: 0.9,
+	}}
+	_, _, err := r.RenderProgressive(context.Background(), ProgressiveRenderRequest{
+		Results: results, MaxTokens: 10000, MaxBytes: 1 << 20,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("writable missing table must error, got %v", err)
+	}
+}
+
+// TestRenderProgressiveCollectionRenameLiveMetadata covers spec section 12's
+// last row: collection is live registry metadata, so renaming it changes the
+// rendered overview without touching the stored summary.
+func TestRenderProgressiveCollectionRenameLiveMetadata(t *testing.T) {
+	r, store := newProgressiveTestRetriever(t)
+	ctx := context.Background()
+	emb := []byte{0, 0, 0, 0}
+	source := "managed:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md"
+	storeChunksRaw(t, store, [][]any{
+		{"cr1", "# Doc", source, 1, 1, "markdown", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	})
+	if _, err := store.db.Exec(`
+		INSERT INTO managed_documents
+		  (id, source, title, kind, mime_type, content_hash, source_signature,
+		   collection, tags, state, freshness, created_at, updated_at)
+		VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', ?, 'Doc', 'text', 'text/markdown',
+		        'h', 'sig', 'old-name', '[]', 'indexed', 'fresh', 1, 1)`, source); err != nil {
+		t.Fatalf("insert managed: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "cr1", Content: "# Doc", Source: source, StartLine: 1, EndLine: 1},
+		Score: 0.9,
+	}}
+	req := ProgressiveRenderRequest{Results: results, MaxTokens: 10000, MaxBytes: 1 << 20}
+	before, _, err := r.RenderProgressive(ctx, req)
+	if err != nil {
+		t.Fatalf("render before: %v", err)
+	}
+	if !strings.Contains(before, "collection: old-name") {
+		t.Fatalf("old collection missing:\n%s", before)
+	}
+	if _, err := store.db.Exec(`UPDATE managed_documents SET collection = 'new-name' WHERE source = ?`, source); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	after, _, err := r.RenderProgressive(ctx, req)
+	if err != nil {
+		t.Fatalf("render after: %v", err)
+	}
+	if !strings.Contains(after, "collection: new-name") || strings.Contains(after, "old-name") {
+		t.Fatalf("rename must render live:\n%s", after)
+	}
+}
+
+// nonSQLiteStore is a minimal custom VectorStore: no progressive reader. The
+// embedded field is the VectorStore INTERFACE, not *SQLiteStore, so the
+// progressiveStoreReader assertion in prepareProgressiveSources cannot reach
+// the inner store's methods through it.
+type nonSQLiteStore struct{ VectorStore }
+
+func TestRenderProgressiveCustomStoreFallsBack(t *testing.T) {
+	// newTestStore registers its own Close cleanup; do not add a second one.
+	inner := newTestStore(t)
+	r, err := NewRetrieverWithEmbedder(progressiveTestEmbedder(), nonSQLiteStore{inner})
+	if err != nil {
+		t.Fatalf("retriever: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "n1", Content: "content", Source: "pkg/n.go", StartLine: 1, EndLine: 1, Language: "go"},
+		Score: 0.9,
+	}}
+	out, trace, err := r.RenderProgressive(context.Background(), ProgressiveRenderRequest{
+		Results: results, MaxTokens: 10000, MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("custom store must not error: %v", err)
+	}
+	if !strings.Contains(out, "### pkg/n.go") || !strings.Contains(out, "--- pkg/n.go") {
+		t.Fatalf("must render metadata + evidence from chunk fields alone:\n%s", out)
+	}
+	reasons := trace.Sources[0].ValidityReasons
+	want := []ValidityReason{ValidityReasonMissing, ValidityReasonUnknownContentHash, ValidityReasonUnknownVectorSpace}
+	if !reflect.DeepEqual(reasons, want) {
+		t.Fatalf("reasons = %v, want %v", reasons, want)
+	}
+}
+
+// TestProgressiveTraceWiring pins the trace fields to the allocator and
+// per-source state they are COPIED FROM. Every field below is well covered at
+// its source — st.nonFitting/floorRequested/floorRendered by the allocator
+// tests, the trace itself on the error path — but nothing pinned the wiring
+// between them, so fillProgressiveTrace could zero, swap, or fabricate a value
+// with the suite green.
+//
+// The fixture is built so each field has a DISTINGUISHING value:
+// FloorRequested (2) differs from FloorRendered (1), so swapping them fails;
+// exactly one source lands at each of L0, L1 and L2, so a dropped counter
+// fails; the three scores differ, so a constant BestScore fails; and one
+// source is managed while two are not.
+func TestProgressiveTraceWiring(t *testing.T) {
+	r, store := newProgressiveTestRetriever(t)
+	ctx := context.Background()
+	emb := []byte{0, 0, 0, 0}
+
+	// alpha is managed and cheap: the floor admits its evidence (L2).
+	// beta carries a fresh summary and evidence too big for the floor bundle,
+	// so its orientation renders alone and step 6b upgrades it to L1.
+	// gamma is unsummarized with equally oversized evidence: metadata only (L0).
+	alphaSource := "managed:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.md"
+	alpha := "alpha body"
+	beta := strings.Repeat("beta ", 400)
+	gamma := strings.Repeat("gamma ", 400)
+	storeChunksRaw(t, store, [][]any{
+		{"w1", alpha, alphaSource, 1, 1, "markdown", `{}`, emb, int64(1700000000), "", sigJSON(t, "hashA"), "vs1"},
+		{"w2", beta, "pkg/beta.go", 1, 1, "go", `{}`, emb, int64(1700000000), "", sigJSON(t, "hashB"), "vs1"},
+		{"w3", gamma, "pkg/gamma.go", 1, 1, "go", `{}`, emb, int64(1700000000), "", sigJSON(t, "hashC"), "vs1"},
+	})
+	if _, err := store.db.Exec(`
+		INSERT INTO managed_documents
+		  (id, source, title, kind, mime_type, content_hash, source_signature,
+		   collection, tags, state, freshness, created_at, updated_at)
+		VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', ?, 'Alpha', 'text', 'text/markdown',
+		        'hashA', 'sig', 'notes', '[]', 'indexed', 'fresh', 1, 1)`, alphaSource); err != nil {
+		t.Fatalf("insert managed: %v", err)
+	}
+	if err := store.UpsertSourceSummary(ctx, SourceSummary{
+		Source: "pkg/beta.go", ContentHash: "hashB", VectorSpaceID: "vs1",
+		Abstract: "Beta purpose.", Overview: "Beta overview.", SummaryModel: "m",
+		FormatVersion: SourceSummaryFormatVersion, SummarizedAt: 1700000000,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	results := []SearchResult{
+		{Chunk: Chunk{ID: "w1", Content: alpha, Source: alphaSource, StartLine: 1, EndLine: 1}, Score: 0.9},
+		{Chunk: Chunk{ID: "w2", Content: beta, Source: "pkg/beta.go", StartLine: 1, EndLine: 1}, Score: 0.8},
+		{Chunk: Chunk{ID: "w3", Content: gamma, Source: "pkg/gamma.go", StartLine: 1, EndLine: 1}, Score: 0.7},
+	}
+	// MinFullResults of 2 asks for two full results; only alpha's fits, so the
+	// requested and rendered floors DIFFER. MaxTokens is set above every
+	// orientation but below either oversized evidence block.
+	out, trace, err := r.RenderProgressive(ctx, ProgressiveRenderRequest{
+		Results: results, MinFullResults: 2, MaxTokens: 200, MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("RenderProgressive: %v", err)
+	}
+
+	// Whole-render counters, each copied from allocState by fillProgressiveTrace.
+	if trace.NonFittingBlocks != 2 {
+		t.Errorf("NonFittingBlocks = %d, want 2 (beta and gamma floor bundles)", trace.NonFittingBlocks)
+	}
+	if trace.FloorRequested != 2 {
+		t.Errorf("FloorRequested = %d, want 2", trace.FloorRequested)
+	}
+	if trace.FloorRendered != 1 {
+		t.Errorf("FloorRendered = %d, want 1", trace.FloorRendered)
+	}
+	if trace.SourcesAtL0 != 1 || trace.SourcesAtL1 != 1 || trace.SourcesWithEvidence != 1 {
+		t.Errorf("depth counters = L0:%d L1:%d L2:%d, want 1/1/1",
+			trace.SourcesAtL0, trace.SourcesAtL1, trace.SourcesWithEvidence)
+	}
+	if trace.OmittedSources != 0 || trace.EvidenceBlocks != 1 {
+		t.Errorf("omitted = %d, evidence blocks = %d, want 0 and 1",
+			trace.OmittedSources, trace.EvidenceBlocks)
+	}
+	// OutputTruncated can only be true when assembly exceeds MaxBytes, which
+	// exact admission makes unreachable from here (TestAllocateBudgetAccountingIsExact
+	// and TestProgressiveByteAccountingMatchesAssembly pin st.bytesUsed ==
+	// len(out)). The trim itself is pinned directly by
+	// TestAssembleProgressiveDropsWholeBlocks; this only asserts the healthy
+	// value, and cannot detect a mutation that hard-codes false.
+	if trace.OutputTruncated {
+		t.Errorf("exact admission must never reach the defensive trim; out is %d bytes of %d",
+			len(out), trace.MaxBytes)
+	}
+
+	// Per-source fields, copied from progressiveSource and its provenance.
+	if len(trace.Sources) != 3 {
+		t.Fatalf("want 3 source traces, got %d", len(trace.Sources))
+	}
+	want := []struct {
+		source    string
+		managed   bool
+		bestRank  int
+		bestScore float64
+		depth     Depth
+		generated bool
+	}{
+		{alphaSource, true, 1, 0.9, DepthL2, false},
+		{"pkg/beta.go", false, 2, 0.8, DepthL1, true},
+		{"pkg/gamma.go", false, 3, 0.7, DepthL0, false},
+	}
+	for i, w := range want {
+		got := trace.Sources[i]
+		if got.Source != w.source {
+			t.Errorf("Sources[%d].Source = %q, want %q", i, got.Source, w.source)
+		}
+		if got.Managed != w.managed {
+			t.Errorf("Sources[%d].Managed = %v, want %v", i, got.Managed, w.managed)
+		}
+		if got.BestRank != w.bestRank {
+			t.Errorf("Sources[%d].BestRank = %d, want %d", i, got.BestRank, w.bestRank)
+		}
+		if got.BestScore != w.bestScore {
+			t.Errorf("Sources[%d].BestScore = %v, want %v", i, got.BestScore, w.bestScore)
+		}
+		if got.EffectiveDepth != w.depth {
+			t.Errorf("Sources[%d].EffectiveDepth = %v, want %v", i, got.EffectiveDepth, w.depth)
+		}
+		if got.OrientationGenerated != w.generated {
+			t.Errorf("Sources[%d].OrientationGenerated = %v, want %v", i, got.OrientationGenerated, w.generated)
+		}
+	}
+	// floor_reserved is emitted nowhere else in the suite, by constant or by
+	// literal, so this is its only coverage.
+	if !slices.Contains(trace.Sources[0].Decisions, DecisionFloorReserved) {
+		t.Errorf("alpha was admitted by the floor but lacks %q: %v",
+			DecisionFloorReserved, trace.Sources[0].Decisions)
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"testing"
 )
 
+// allocFixture builds one source per content string, each with a single
+// result, no summaries (metadata orientation only).
 func allocFixture(contents ...string) []*progressiveSource {
 	sources := make([]*progressiveSource, len(contents))
 	for i, c := range contents {
@@ -679,6 +681,16 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 		if st.tokensUsed > req.MaxTokens || st.bytesUsed > req.MaxBytes {
 			t.Fatalf("iter %d: spent %d tokens / %d bytes against a ceiling of %d / %d",
 				iter, st.tokensUsed, st.bytesUsed, req.MaxTokens, req.MaxBytes)
+		}
+		// The real assembler, not just the oracle above: this is the standing
+		// search for an input that reaches the section 11 defensive trim. None
+		// exists as long as admission is exact, which is what the two checks
+		// above assert — but "unreachable" is a claim worth re-measuring on
+		// every run rather than re-deriving by argument. ProgressiveTrace's
+		// OutputTruncated has no other detector; nothing that drives
+		// RenderProgressive can make it true.
+		if _, truncated := assembleProgressive(sources, req.MaxBytes); truncated {
+			t.Fatalf("iter %d: assembly reached the defensive trim with exact admission", iter)
 		}
 		for _, src := range sources {
 			switch {
