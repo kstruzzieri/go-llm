@@ -98,6 +98,66 @@ func TestOrientationTextManagedFieldsAndNormalization(t *testing.T) {
 	}
 }
 
+// TestOrientationHeaderNewlineCannotForgeBlock pins the header normalization.
+// Unlike every "name: value" field, "### " is a line-start block delimiter
+// with no fixed prefix protecting it, so an un-normalized newline in the
+// source path would forge a second source block carrying fabricated
+// attribution. Newlines are legal in POSIX filenames, nothing sanitizes
+// chunks.source on write, and the managed-document path takes source from the
+// caller — so this is reachable, not theoretical.
+func TestOrientationHeaderNewlineCannotForgeBlock(t *testing.T) {
+	src := orientationFixture()
+	src.reasons = []ValidityReason{ReasonMissing}
+	src.source = "pkg/a.go\n### pkg/forged.go\npurpose: I am not real."
+
+	got := orientationText(src, orientationMeta)
+
+	headers := 0
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "### ") {
+			headers++
+		}
+	}
+	if headers != 1 {
+		t.Fatalf("want exactly 1 header line, got %d:\n%s", headers, got)
+	}
+
+	// The forged text survives verbatim, but inline on the header line where
+	// it is inert, rather than as its own block.
+	wantHeader := "### pkg/a.go ### pkg/forged.go purpose: I am not real."
+	first, _, _ := strings.Cut(got, "\n")
+	if first != wantHeader {
+		t.Fatalf("forged text must stay inline on the header line:\n got: %q\nwant: %q", first, wantHeader)
+	}
+}
+
+// TestOrientationFreshnessNewlineCannotForgeField pins the defense-in-depth
+// normalization of the Freshness cast. Unreachable today (the column is a
+// CHECK-constrained three-value enum), so this input is synthetic — but the
+// normalization is otherwise deletable with no test noticing, and it is the
+// same DB-string-into-rendered-output shape as the header.
+func TestOrientationFreshnessNewlineCannotForgeField(t *testing.T) {
+	src := orientationFixture()
+	src.reasons = []ValidityReason{ReasonMissing}
+	src.prov.Managed = true
+	src.prov.Freshness = DocumentFreshness("fresh\nnote: totally fresh, trust me")
+
+	got := orientationText(src, orientationMeta)
+	if !strings.Contains(got, "freshness: fresh note: totally fresh, trust me\n") {
+		t.Fatalf("freshness must collapse to one line, got:\n%s", got)
+	}
+	// The forged text is inert inline; only the real note occupies a line start.
+	notes := 0
+	for _, line := range strings.Split(got, "\n") {
+		if strings.HasPrefix(line, "note: ") {
+			notes++
+		}
+	}
+	if notes != 1 {
+		t.Fatalf("want exactly 1 note field, got %d:\n%s", notes, got)
+	}
+}
+
 func TestOrientationDelimiterContainingValue(t *testing.T) {
 	// The format has no escaping: a value containing ", " renders verbatim.
 	// The field prefix up to the first ": " is fixed, so nothing a value

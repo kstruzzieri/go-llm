@@ -72,7 +72,17 @@ func rfc3339UTC(unix int64) string {
 func orientationText(src *progressiveSource, level orientationLevel) string {
 	var b strings.Builder
 
-	header := "### " + src.source
+	// src.source is normalized because "### " is a line-start block delimiter,
+	// not a fixed "name: " prefix. Every other field is safe unescaped because
+	// its prefix is fixed, so a value can never forge a field; the header has
+	// no such prefix, so an un-normalized newline in the path would forge an
+	// entire additional source block with fabricated attribution — and
+	// attribution is what the model uses to decide what to cite. This call
+	// looks redundant because paths are usually clean. It is not: newlines are
+	// legal in POSIX filenames, nothing sanitizes chunks.source on write
+	// (validateSourceSummaryWrite is blank-checks only), and the
+	// managed-document path takes source straight from the caller.
+	header := "### " + normalizeOrientationValue(src.source)
 	if src.prov.Managed && src.prov.Title != "" {
 		header += " (managed: " + normalizeOrientationValue(src.prov.Title) + ")"
 	}
@@ -87,10 +97,18 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 	if level >= orientationL0 && src.summary != nil {
 		writeField("purpose", normalizeOrientationValue(src.summary.Abstract))
 	}
-	if level == orientationL0L1 && src.summary != nil {
+	// >= rather than == for symmetry with purpose above: behavior-identical
+	// while orientationL0L1 tops the ladder, but if a level is ever added
+	// above it, == would silently drop overview while purpose kept rendering.
+	if level >= orientationL0L1 && src.summary != nil {
 		writeField("overview", normalizeOrientationValue(src.summary.Overview))
 	}
 
+	// language is scalar per source, so it takes the first non-empty value —
+	// i.e. the highest-scoring chunk's, since results arrive in score order.
+	// Mixed-language sources (fenced markdown, .vue, HTML+script) can therefore
+	// render different values for different queries; orientation metadata
+	// describes the retrieval snapshot, not canonical state (spec section 8).
 	var language string
 	var symbols, sections []string
 	for _, res := range src.results {
@@ -113,7 +131,10 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 		writeField("indexed", rfc3339UTC(src.prov.IndexedAt))
 	}
 	if src.prov.Managed && src.prov.Freshness != "" {
-		writeField("freshness", string(src.prov.Freshness))
+		// Defense in depth: Freshness is a CHECK-constrained enum column today,
+		// so this cannot currently carry a newline — but it is the same
+		// DB-string-into-rendered-output shape as the header and costs nothing.
+		writeField("freshness", normalizeOrientationValue(string(src.prov.Freshness)))
 	}
 
 	if level >= orientationL0 && src.summary != nil {
