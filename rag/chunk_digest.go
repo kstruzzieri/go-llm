@@ -20,7 +20,14 @@ func sha256Hex(s string) string {
 // number of retrieved results, not corpus size. In the renderer's read
 // sequence this runs LAST (spec section 8's read-order contract): the digest
 // comparison is the ground truth that catches any reindex racing the earlier
-// provenance and summary reads.
+// provenance and summary reads. Reversing the order reopens the race window
+// — a digest read before those earlier reads could pass, and a reindex that
+// then lands in the gap would go unobserved, since nothing later re-checks it.
+//
+// Callers must pass every chunk ID being rendered, not a budget-limited
+// subset: the earlier provenance read is non-transactional and is only safe
+// under the assumption that this digest covers all of it, so a partial
+// chunkIDs list silently narrows race detection to just the chunks it names.
 func (s *SQLiteStore) ChunkContentDigestBatch(ctx context.Context, chunkIDs []string) (map[string]string, error) {
 	out := make(map[string]string, len(chunkIDs))
 	if len(chunkIDs) == 0 {
@@ -29,6 +36,10 @@ func (s *SQLiteStore) ChunkContentDigestBatch(ctx context.Context, chunkIDs []st
 	query, args := inClauseQuery(`SELECT id, content FROM chunks WHERE id IN (%s)`, chunkIDs)
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
+		// No isMissingTableErr degradation here, unlike SourceSummaryBatch and
+		// attachManagedProvenance: chunks has existed since schema v1, so a
+		// missing chunks table is never a legitimately-older snapshot — it is
+		// unambiguous corruption and must propagate.
 		return nil, fmt.Errorf("rag: chunk digest batch: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
