@@ -52,6 +52,11 @@ var migrations = []migration{
 		description: "add managed document revision",
 		fn:          migrateV7,
 	},
+	{
+		version:     8,
+		description: "add source summary registry (#189)",
+		fn:          migrateV8,
+	},
 }
 
 // migrateV1 creates the baseline chunks table and indexes.
@@ -207,6 +212,26 @@ func migrateV6(tx *sql.Tx) error {
 func migrateV7(tx *sql.Tx) error {
 	if _, err := tx.Exec(`ALTER TABLE managed_documents ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`); err != nil {
 		return fmt.Errorf("rag: migrate v7: %w", err)
+	}
+	return nil
+}
+
+// migrateV8 adds the source_summaries table: one optional L0/L1 pair per
+// source, keyed on source alone. content_hash (not the full source signature)
+// plus vector_space_id drive staleness; see the #189 slice-1 design.
+func migrateV8(tx *sql.Tx) error {
+	_, err := tx.Exec(`CREATE TABLE source_summaries (
+		source          TEXT    NOT NULL PRIMARY KEY,
+		content_hash    TEXT    NOT NULL,
+		vector_space_id TEXT    NOT NULL,
+		abstract        TEXT    NOT NULL,
+		overview        TEXT    NOT NULL,
+		summary_model   TEXT    NOT NULL,
+		format_version  INTEGER NOT NULL,
+		summarized_at   INTEGER NOT NULL
+	)`)
+	if err != nil {
+		return fmt.Errorf("rag: migrate v8: %w", err)
 	}
 	return nil
 }

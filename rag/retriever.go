@@ -958,6 +958,11 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 // starting at startLine, producing line-anchored output (e.g. "42| code").
 // A single trailing newline is dropped so it does not yield a phantom empty
 // numbered line. The returned string ends with a newline when non-empty.
+//
+// Security note: the "%d| " prefix is load-bearing, not just cosmetic — it
+// stops each LF-delimited content line from forging a "--- " block header.
+// Callers rendering untrusted text with other line separators must canonicalize
+// them first; progressive evidenceText does so without changing BuildContext.
 func numberLines(content string, startLine int) string {
 	lines := strings.Split(content, "\n")
 	if n := len(lines); n > 0 && lines[n-1] == "" {

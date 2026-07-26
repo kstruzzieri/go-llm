@@ -2006,3 +2006,114 @@ func TestManagedSourcesValidationAndNilIndexer(t *testing.T) {
 		t.Fatal("NewManagedSources(nil, nil) succeeded")
 	}
 }
+
+func TestDeleteDocumentRemovesSourceSummary(t *testing.T) {
+	ctx := context.Background()
+	m, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+
+	doc, err := m.IngestText(ctx, "note.md", "# Hello\nBody.", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	row := validSummary()
+	row.Source = doc.source // unexported field is visible: same package
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("upsert summary: %v", err)
+	}
+
+	if err := m.DeleteDocument(ctx, doc.ID); err != nil {
+		t.Fatalf("delete document: %v", err)
+	}
+	got, err := store.SourceSummaryBatch(ctx, []string{doc.source})
+	if err != nil {
+		t.Fatalf("summary batch: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatal("managed delete must remove the summary in the same transaction")
+	}
+}
+
+func TestDeleteDocumentRollbackKeepsSummary(t *testing.T) {
+	// A failing delete transaction must leave BOTH the registry row and the
+	// summary row intact (spec section 14 lifecycle rollback case).
+	ctx := context.Background()
+	m, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+
+	doc, err := m.IngestText(ctx, "keep.md", "# Keep\nBody.", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	row := validSummary()
+	row.Source = doc.source
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("upsert summary: %v", err)
+	}
+	// Force the transaction to abort at the registry delete.
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER fail_managed_delete BEFORE DELETE ON managed_documents
+		BEGIN SELECT RAISE(ABORT, 'induced failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if err := m.DeleteDocument(ctx, doc.ID); err == nil {
+		t.Fatal("delete must fail under the abort trigger")
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER fail_managed_delete`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+	got, err := store.SourceSummaryBatch(ctx, []string{doc.source})
+	if err != nil {
+		t.Fatalf("summary batch: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatal("rolled-back delete must keep the summary row")
+	}
+}
+
+// TestDeleteDocumentSummaryFailureRollsBackRegistry pins that the summary
+// delete is part of the SAME transaction as the registry/chunks delete, not
+// merely sequenced after it. TestDeleteDocumentRollbackKeepsSummary aborts at
+// the managed_documents delete, so it cannot tell a summary delete inside the
+// transaction apart from one issued separately right after a successful
+// commit -- in both shapes that trigger fires before either delete runs.
+// Failing here instead, at the summary delete, is the distinguishing case: if
+// the summary delete were hoisted out of the transaction (e.g. executed via
+// m.store.db after tx.Commit()), the registry row and chunks would already be
+// committed by the time this failure surfaces, leaving a deleted document
+// with an orphaned summary that nothing reclaims.
+func TestDeleteDocumentSummaryFailureRollsBackRegistry(t *testing.T) {
+	ctx := context.Background()
+	m, _, store := newManagedTestService(t, &managedTestEmbedder{vectorSpaceID: "test/v1"})
+
+	doc, err := m.IngestText(ctx, "atomic.md", "# Atomic\nBody.", DocumentOptions{})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+	row := validSummary()
+	row.Source = doc.source
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("upsert summary: %v", err)
+	}
+	// Force the transaction to abort at the summary delete, not the registry delete.
+	if _, err := store.db.Exec(`
+		CREATE TRIGGER fail_summary_delete BEFORE DELETE ON source_summaries
+		BEGIN SELECT RAISE(ABORT, 'induced failure'); END`); err != nil {
+		t.Fatalf("create trigger: %v", err)
+	}
+	if err := m.DeleteDocument(ctx, doc.ID); err == nil {
+		t.Fatal("delete must fail under the abort trigger")
+	}
+	if _, err := store.db.Exec(`DROP TRIGGER fail_summary_delete`); err != nil {
+		t.Fatalf("drop trigger: %v", err)
+	}
+
+	var registryCount int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM managed_documents WHERE id = ?`, doc.ID).Scan(&registryCount); err != nil {
+		t.Fatalf("count managed_documents: %v", err)
+	}
+	if registryCount != 1 {
+		t.Fatal("summary-delete failure must roll back the registry row too (same transaction)")
+	}
+	if len(requireManagedChunks(t, store, doc.source)) == 0 {
+		t.Fatal("summary-delete failure must roll back the chunk delete too (same transaction)")
+	}
+}

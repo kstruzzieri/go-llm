@@ -497,6 +497,9 @@ func (m *ManagedSources) DeleteDocument(ctx context.Context, id string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: delete chunks for managed document %q: %w", id, err)
 	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, source); err != nil {
+		return fmt.Errorf("rag: delete summary for managed document %q: %w", id, err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM managed_documents WHERE id = ?`, id); err != nil {
 		return fmt.Errorf("rag: delete managed document %q: %w", id, err)
 	}
