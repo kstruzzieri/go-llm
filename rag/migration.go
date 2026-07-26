@@ -221,7 +221,7 @@ func migrateV7(tx *sql.Tx) error {
 // plus vector_space_id drive staleness; see the #189 slice-1 design.
 func migrateV8(tx *sql.Tx) error {
 	_, err := tx.Exec(`CREATE TABLE source_summaries (
-		source          TEXT    PRIMARY KEY,
+		source          TEXT    NOT NULL PRIMARY KEY,
 		content_hash    TEXT    NOT NULL,
 		vector_space_id TEXT    NOT NULL,
 		abstract        TEXT    NOT NULL,

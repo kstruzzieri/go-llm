@@ -12,6 +12,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// TestMigrationsSliceAscendingContiguous guards an invariant runMigrations
+// and recordVersionsUpTo both rely on but never check: versions must run
+// 1, 2, 3, ... with no gaps or reordering, or the "m.version <= currentVersion"
+// skip logic and recordVersionsUpTo's break can silently misbehave.
+func TestMigrationsSliceAscendingContiguous(t *testing.T) {
+	for i, m := range migrations {
+		if m.version != i+1 {
+			t.Errorf("migrations[%d].version = %d, want %d", i, m.version, i+1)
+		}
+	}
+}
+
 func TestMigrationFreshDB(t *testing.T) {
 	store := newTestStore(t)
 
@@ -521,7 +533,7 @@ func TestMigrationIdempotency(t *testing.T) {
 		t.Fatalf("count versions: %v", err)
 	}
 	if count != len(migrations) {
-		t.Errorf("expected %d version records (v1..v%d), got %d", len(migrations), len(migrations), count)
+		t.Errorf("expected %d version records (v1..v%d), got %d", len(migrations), migrations[len(migrations)-1].version, count)
 	}
 }
 
@@ -1207,7 +1219,6 @@ func TestMigrationV6PreservesChunksAndCreatesManagedRegistry(t *testing.T) {
 
 func TestMigrationFreshDBCreatesSourceSummaries(t *testing.T) {
 	store := newTestStore(t)
-	defer func() { _ = store.Close() }()
 
 	var count int
 	err := store.db.QueryRow(
@@ -1232,34 +1243,48 @@ func TestMigrationFreshDBCreatesSourceSummaries(t *testing.T) {
 	}
 }
 
+// buildV7Fixture applies migrations v5-v7 to a v4 fixture db and records
+// their versions, leaving a genuine v7 database (no later migration's DDL
+// applied) for the v8 migration tests to run against.
+func buildV7Fixture(t *testing.T, db *sql.DB) {
+	t.Helper()
+	tx, err := db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV5(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV6(tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV7(tx); err != nil {
+		t.Fatal(err)
+	}
+	for _, version := range []int{5, 6, 7} {
+		if _, err := tx.Exec(
+			`INSERT INTO rag_schema_version (version, description, applied_at) VALUES (?, 'fixture', 1000)`,
+			version,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestMigrationV7ToV8AddsSourceSummaries(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "v7.db")
+	db := openV4DB(t)
+	buildV7Fixture(t, db)
 
-	// Build a v7 database: open (migrates to current), then drop the v8 table
-	// and rewind the recorded version — same technique the v7 backfill test uses.
-	store, err := NewSQLiteStore(path)
-	if err != nil {
-		t.Fatalf("create store: %v", err)
+	// Migration v8 must run against this genuine v7 fixture and create
+	// source_summaries.
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("runMigrations() error: %v", err)
 	}
-	if _, err := store.db.Exec(`DROP TABLE source_summaries`); err != nil {
-		t.Fatalf("drop v8 table: %v", err)
-	}
-	if _, err := store.db.Exec(`DELETE FROM rag_schema_version WHERE version >= 8`); err != nil {
-		t.Fatalf("rewind version: %v", err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close: %v", err)
-	}
-
-	// Reopen: migration v8 must run again and recreate the table.
-	store2, err := NewSQLiteStore(path)
-	if err != nil {
-		t.Fatalf("reopen store: %v", err)
-	}
-	defer func() { _ = store2.Close() }()
 	var count int
-	if err := store2.db.QueryRow(
+	if err := db.QueryRow(
 		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'source_summaries'`,
 	).Scan(&count); err != nil {
 		t.Fatalf("query sqlite_master: %v", err)
@@ -1270,43 +1295,28 @@ func TestMigrationV7ToV8AddsSourceSummaries(t *testing.T) {
 }
 
 func TestMigrationV8FailureRollsBack(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "v8fail.db")
+	db := openV4DB(t)
+	buildV7Fixture(t, db)
 
-	store, err := NewSQLiteStore(path)
-	if err != nil {
-		t.Fatalf("create store: %v", err)
-	}
-	if _, err := store.db.Exec(`DROP TABLE source_summaries`); err != nil {
-		t.Fatalf("drop v8 table: %v", err)
-	}
-	if _, err := store.db.Exec(`DELETE FROM rag_schema_version WHERE version >= 8`); err != nil {
-		t.Fatalf("rewind version: %v", err)
-	}
 	// Plant a conflicting object so migrateV8's CREATE TABLE fails.
-	if _, err := store.db.Exec(`CREATE TABLE source_summaries (wrong INTEGER)`); err != nil {
+	if _, err := db.Exec(`CREATE TABLE source_summaries (wrong INTEGER)`); err != nil {
 		t.Fatalf("plant conflict: %v", err)
 	}
-	if err := store.Close(); err != nil {
-		t.Fatalf("close: %v", err)
+
+	if err := runMigrations(db); err == nil {
+		t.Fatal("runMigrations() must fail while the conflicting table exists")
 	}
 
-	if _, err := NewSQLiteStore(path); err == nil {
-		t.Fatal("reopen must fail while the conflicting table exists")
-	}
-
-	// The failed migration must not have recorded v8.
-	raw, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatalf("raw open: %v", err)
-	}
-	defer func() { _ = raw.Close() }()
+	// The failed migration must leave the version exactly where the fixture
+	// left it (7) — not just "below 8". A framework bug that wipes or
+	// corrupts rag_schema_version on failure would pass a ">= 8" check but
+	// must fail this one.
 	var maxVersion int
-	if err := raw.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
+	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("version query: %v", err)
 	}
-	if maxVersion >= 8 {
-		t.Fatalf("failed migration recorded version %d", maxVersion)
+	if maxVersion != 7 {
+		t.Fatalf("failed migration left version = %d, want 7 (unchanged)", maxVersion)
 	}
 }
 
