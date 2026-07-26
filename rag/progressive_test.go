@@ -3,6 +3,7 @@ package rag
 import (
 	"fmt"
 	"math/rand"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -497,11 +498,93 @@ func TestAllocateBudgetDemotedRequiresSomethingRendered(t *testing.T) {
 	}
 }
 
+// tieFixture builds n single-result sources whose retrieval positions repeat
+// in an i%3 pattern, which is what steps 4 and 6a sort on.
+//
+// Two details are load-bearing. Mixed duplicates, not all-equal keys: pdqsort
+// short-circuits on all-equal input and on already-sorted input, and only
+// reorders a mix. And firstIndex stays distinct while resultIdx repeats, so
+// the flat slice — built by walking sources in source order — arrives at the
+// sort UNSORTED. Setting both keys to i%3 pre-sorts it and the mutation
+// silently survives, which is how the first version of this test passed
+// against sort.Slice.
+func tieFixture(n int) []*progressiveSource {
+	sources := make([]*progressiveSource, n)
+	for i := range sources {
+		name := fmt.Sprintf("pkg/s%02d.go", i)
+		sources[i] = &progressiveSource{
+			source:     name,
+			firstIndex: i,
+			results: []SearchResult{{
+				Chunk: Chunk{ID: fmt.Sprintf("c%02d", i), Content: "identical body", Source: name, StartLine: 1, EndLine: 1},
+				Score: 0.5,
+			}},
+			resultIdx: []int{i % 3},
+			provFound: true,
+			prov:      SourceProvenance{ContentHash: "h", VectorSpaceID: "v"},
+			reasons:   []ValidityReason{ReasonMissing},
+			decisions: map[string]bool{},
+		}
+	}
+	return sources
+}
+
+func sourcesWithEvidence(sources []*progressiveSource) []string {
+	var out []string
+	for _, src := range sources {
+		if len(src.evidence) > 0 {
+			out = append(out, src.source)
+		}
+	}
+	return out
+}
+
+// TestAllocateTieBreaksPreserveInputOrder pins every sort in the allocator as
+// stable. Equal-ranked results must be admitted in input order, not in
+// whatever order the sort's internals produce: sort.Slice measurably reorders
+// mixed duplicate keys, so with sort.Slice which sources get evidence under a
+// tight budget would depend on pdqsort's pivot choices rather than on
+// retrieval rank. Duplicate keys are exactly the domain stability exists for,
+// so "you need duplicates to see a difference" is the reason to test it.
+func TestAllocateTieBreaksPreserveInputOrder(t *testing.T) {
+	built := tieFixture(20)
+	oc := defaultEstimate(orientationText(built[0], orientationMeta))
+	ec := defaultEstimate(evidenceText(built[0].results[0]))
+	sep := defaultEstimate("\n")
+
+	// Step 4: budget for exactly five floor admissions. Stable order over the
+	// tied pos=0 group is s00, s03, s06, s09, s12.
+	floorReq := ProgressiveRenderRequest{
+		MaxTokens: (oc + ec) + 4*(oc+sep+ec), MaxBytes: 1 << 20, MinFullResults: 5,
+	}
+	if _, err := allocate(append([]*progressiveSource(nil), built...), floorReq, defaultEstimate); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	want := []string{"pkg/s00.go", "pkg/s03.go", "pkg/s06.go", "pkg/s09.go", "pkg/s12.go"}
+	if got := sourcesWithEvidence(built); !slices.Equal(got, want) {
+		t.Fatalf("step 4 admitted %v, want %v (input order within the tied group)", got, want)
+	}
+
+	// Step 6a: floor of one, every orientation affordable, then exactly three
+	// more evidence blocks. Stable order after s00 is s03, s06, s09.
+	built = tieFixture(20)
+	upgradeReq := ProgressiveRenderRequest{
+		MaxTokens: (oc + ec) + 19*(oc+sep) + 3*ec, MaxBytes: 1 << 20, MinFullResults: 1,
+	}
+	if _, err := allocate(append([]*progressiveSource(nil), built...), upgradeReq, defaultEstimate); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	want = []string{"pkg/s00.go", "pkg/s03.go", "pkg/s06.go", "pkg/s09.go"}
+	if got := sourcesWithEvidence(built); !slices.Equal(got, want) {
+		t.Fatalf("step 6a admitted %v, want %v (input order within the tied group)", got, want)
+	}
+}
+
 // assembleAllocated mirrors what assembly emits: one orientation block per
 // rendered source, its admitted evidence directly beneath, sources joined by a
 // single "\n". Returns the bytes and the per-block token sum, which is how the
 // allocator charges — not defaultEstimate over the whole string.
-func assembleAllocated(sources []*progressiveSource) (string, int) {
+func assembleAllocated(sources []*progressiveSource, estimate func(string) int) (string, int) {
 	var blocks []string
 	tokens, rendered := 0, 0
 	for _, src := range sources {
@@ -509,22 +592,30 @@ func assembleAllocated(sources []*progressiveSource) (string, int) {
 			continue
 		}
 		o := orientationText(src, src.orientation)
-		tokens += defaultEstimate(o)
+		tokens += safeEstimate(estimate, o)
 		var b strings.Builder
 		b.WriteString(o)
 		for _, i := range src.evidence {
 			e := evidenceText(src.results[i])
-			tokens += defaultEstimate(e)
+			tokens += safeEstimate(estimate, e)
 			b.WriteString(e)
 		}
 		if rendered > 0 {
-			tokens += defaultEstimate("\n")
+			tokens += safeEstimate(estimate, "\n")
 		}
 		rendered++
 		blocks = append(blocks, b.String())
 	}
 	return strings.Join(blocks, "\n"), tokens
 }
+
+// sawtoothEstimate is deterministic but NOT monotonic in length: the modulo
+// wraps, so a longer block can cost fewer tokens than a shorter one. That is
+// what step 6b's unclamped signed delta has to tolerate — clamping it to a
+// non-negative value would desynchronize the allocator's running totals from
+// the blocks actually emitted. Estimate is public API and callers pass their
+// own tokenizer, so this is reachable, not hypothetical.
+func sawtoothEstimate(s string) int { return defaultEstimate(s) % 64 }
 
 // TestAllocateBudgetAccountingIsExact enforces the allocator's core contract
 // over inputs nobody enumerated:
@@ -605,12 +696,21 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 			MinFullResults: rng.Intn(4), MaxDepth: Depth(rng.Intn(4)), Pinned: pins,
 		}
 
-		st, err := allocate(sources, req, defaultEstimate)
+		// Half the iterations run a non-monotonic estimator, which is the only
+		// thing that exercises a NEGATIVE step 6b delta. The same function goes
+		// to both sides — the property is that the allocator's totals track
+		// whatever estimator it was handed, not that any one estimator is used.
+		estimate := defaultEstimate
+		if rng.Intn(2) == 0 {
+			estimate = sawtoothEstimate
+		}
+
+		st, err := allocate(sources, req, estimate)
 		if err != nil {
 			pinnedErrs++ // pinned blocks over budget is the one legal error
 			continue
 		}
-		text, wantTokens := assembleAllocated(sources)
+		text, wantTokens := assembleAllocated(sources, estimate)
 		if st.bytesUsed != len(text) {
 			t.Fatalf("iter %d: bytesUsed = %d but the assembled output is %d bytes", iter, st.bytesUsed, len(text))
 		}
@@ -638,5 +738,15 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 				upgrades++
 			}
 		}
+	}
+
+	// Coverage is enforced, not just logged: a generator tweak that stopped
+	// producing fallbacks or upgrades would otherwise leave this test green
+	// while silently no longer covering the paths it was added for. The
+	// thresholds sit far below the measured counts so they detect a collapse,
+	// not ordinary drift.
+	if fallbacks < 50 || omissions < 50 || pinnedErrs < 25 || upgrades < 50 {
+		t.Errorf("generator no longer reaches the interesting states: fallbacks=%d omissions=%d pinnedErrs=%d upgrades=%d",
+			fallbacks, omissions, pinnedErrs, upgrades)
 	}
 }

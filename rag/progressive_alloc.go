@@ -74,6 +74,12 @@ func (st *allocState) admit(req ProgressiveRenderRequest, tokens, bytes int) boo
 // retrieval order; the sources slice itself is sorted here rather than
 // trusted, and the caller's backing array is reordered in place — assembly
 // wants the same order, so that is the point, not a side effect.
+//
+// Every source must arrive with a non-nil decisions map: allocate writes to
+// it and a nil map panics. That asymmetry with the source-order normalization
+// above is deliberate — normalize what would otherwise fail SILENTLY, let
+// what fails LOUDLY panic. It is the same reasoning Task 8 used for leaving
+// decisions a nil map rather than lazily initialising it.
 func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estimate func(string) int) (*allocState, error) {
 	// Source order is an input invariant, not a caller convention: steps 5 and
 	// 6b iterate this slice directly, so a slice built from map iteration would
@@ -229,14 +235,10 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 			continue
 		}
 		level := cheapestOrientation(src)
-		// Currently UNREACHABLE and deliberately kept: cheapestOrientation
-		// returns only orientationL0 or orientationMeta, and when maxDepth is
-		// DepthL0 step 6b never runs either, so nothing can produce
-		// orientationL0L1 at this point. Kept for the same reason as the >= in
-		// orientationText (DEV-13): if cheapestOrientation ever returns L0L1,
-		// or a level is added between them, this is what stops an overview
-		// rendering above the caller's depth ceiling. No test can catch its
-		// deletion — do not read it as live logic, do not delete it as dead.
+		// Redundant rather than defense in depth: orientationL0L1 is assigned
+		// in exactly one place, step 6b, whose own maxDepth >= DepthL1 guard
+		// already enforces the depth ceiling. Kept as a cheap local
+		// restatement; step 6b is the real enforcement.
 		if maxDepth == DepthL0 && level == orientationL0L1 {
 			level = orientationL0
 		}
