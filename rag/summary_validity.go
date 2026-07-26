@@ -56,6 +56,9 @@ const (
 // (design rule D6): a blank CURRENT value is unknown_*, while a blank STORED
 // value is malformed_row (it bypassed write validation).
 //
+// A fresh summary returns nil, not an empty slice, so callers must test
+// freshness with len(...) == 0 rather than a nil comparison.
+//
 // Reasons have four SCOPES, and the structure below mirrors them — the
 // interleaving is load-bearing, not incidental:
 //
@@ -132,6 +135,21 @@ var reasonOrder = map[ValidityReason]int{
 	ReasonUnknownVectorSpace: 6, ReasonMixedProvenance: 7, ReasonEvidenceMismatch: 8,
 }
 
+// sortReasons sorts reasons into reasonOrder sequence IN PLACE and returns the
+// same slice.
+//
+// Its call site in deriveSummaryValidity is currently a no-op: that function's
+// appends are already ascending in reasonOrder on every reachable input, so the
+// sort never reorders anything today. It is kept as the guard that holds the
+// byte-stable emission contract if a future edit appends out of order — the
+// call is reachable and load-bearing-on-change, not dead code.
+//
+// Note what is and is not pinned: TestReasonOrderIsCompleteAndSorts exercises
+// this helper directly, so it pins sortReasons AS A FUNCTION, never the CALL to
+// it. Deleting `sortReasons(reasons)` below and returning reasons unsorted
+// leaves the suite green, and no test can close that gap until append order is
+// actually non-ascending — which would mean changing the code under test. Do
+// not read the green suite as permission to drop the call.
 func sortReasons(reasons []ValidityReason) []ValidityReason {
 	sort.Slice(reasons, func(i, j int) bool {
 		return reasonOrder[reasons[i]] < reasonOrder[reasons[j]]

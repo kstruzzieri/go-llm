@@ -105,10 +105,13 @@ func TestDeriveSummaryValidity(t *testing.T) {
 // from both sides.
 //
 // Completeness: sortReasons ranks by reasonOrder[reason], and a Go map returns
-// 0 for an absent key, so a reason declared without an order entry would
-// silently sort ahead of ReasonMissing instead of failing. Go cannot enumerate
-// constants reflectively, so the nine are listed explicitly: adding a tenth
-// without a reasonOrder entry must break this test.
+// 0 for an absent key, so a reason declared without an order entry sorts ahead
+// of ReasonMissing. The derive table would also catch that once the new reason
+// is emitted — position 0 is the most visible possible misplacement — but it
+// would surface as a confusing ordering failure elsewhere; this test fails at
+// the source instead. Go cannot enumerate constants reflectively, so the nine
+// are listed explicitly: adding a tenth without a reasonOrder entry must break
+// this test.
 //
 // Sorting: deriveSummaryValidity happens to append in declaration order today,
 // which makes its sortReasons call a no-op that no table case can falsify. The
