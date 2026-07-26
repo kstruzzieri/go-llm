@@ -3,7 +3,9 @@ package agent_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/agenttest"
@@ -65,5 +67,64 @@ func TestEndToEndRetrieveThenAnswer(t *testing.T) {
 	}
 	if len(res.ToolCalls) != 1 || res.ToolCalls[0].Name != "retrieve" {
 		t.Fatalf("expected one retrieve call: %+v", res.ToolCalls)
+	}
+}
+
+// progressiveCapRetriever renders output near RetrieveOutputCap with
+// multi-byte runes to prove the runtime capOutput is a no-op end to end.
+type progressiveCapRetriever struct{ payload string }
+
+func (p progressiveCapRetriever) Retrieve(context.Context, string, int) ([]rag.SearchResult, error) {
+	return []rag.SearchResult{{Chunk: rag.Chunk{ID: "c1", Source: "a.go", Content: "x"}, Score: 1}}, nil
+}
+func (p progressiveCapRetriever) BuildContext([]rag.SearchResult, int) string { return "unused" }
+func (p progressiveCapRetriever) RenderProgressive(_ context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, error) {
+	// Honor the contract the real renderer guarantees: never exceed MaxBytes,
+	// never split a rune.
+	out := p.payload
+	for len(out) > req.MaxBytes {
+		_, size := utf8.DecodeLastRuneInString(out)
+		out = out[:len(out)-size]
+	}
+	return out, rag.ProgressiveTrace{}, nil
+}
+
+func TestEndToEndProgressiveOutputSurvivesCapExactly(t *testing.T) {
+	// Payload deliberately larger than the cap; the tool-side renderer trims
+	// to MaxBytes = RetrieveOutputCap, so the runtime capOutput must change
+	// nothing. The tool observation in the transcript must equal the renderer
+	// output byte for byte.
+	payload := strings.Repeat("héllo wörld ", tools.RetrieveOutputCap/12+10)
+	fake := progressiveCapRetriever{payload: payload}
+	mc := &scripted{responses: []agent.ModelResult{
+		{Response: provider.ChatResponse{ToolCalls: []provider.ToolCall{{
+			ID: "1", Type: "function",
+			Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{"query":"x"}`)},
+		}}}},
+		{Response: provider.ChatResponse{Content: "done", Done: true}},
+	}}
+	o := agent.New(mc, agent.ContextManager{Compactor: agent.RecencyCompactor{}})
+	res, err := o.Run(context.Background(), agent.Request{
+		Goal:   "big retrieval",
+		Budget: agent.Budget{InputCeiling: 1 << 20},
+		Tools:  []agent.Tool{tools.Retrieve{R: fake, Progressive: true}},
+	}, &agenttest.RecorderObserver{})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	want, _, _ := fake.RenderProgressive(context.Background(),
+		rag.ProgressiveRenderRequest{MaxBytes: tools.RetrieveOutputCap})
+	var toolMsg string
+	for _, msg := range res.Messages {
+		if msg.Role == "tool" {
+			toolMsg = msg.Content
+		}
+	}
+	if toolMsg != want {
+		t.Fatalf("dispatch altered tool output: got %d bytes, want %d — capOutput is not a no-op",
+			len(toolMsg), len(want))
+	}
+	if !utf8.ValidString(toolMsg) {
+		t.Fatal("dispatch split a multi-byte rune")
 	}
 }

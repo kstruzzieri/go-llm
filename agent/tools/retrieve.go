@@ -14,11 +14,25 @@ const (
 	defaultRetrieveMaxTokens = 2048
 )
 
+// RetrieveOutputCap bounds retrieve tool output. It is set explicitly on the
+// Effect AND passed to the progressive renderer as its byte ceiling, so the
+// runtime's post-Invoke capOutput (agent/dispatch.go:193) can never truncate
+// a block the trace and attribution describe as fully rendered. The value
+// matches the runtime's unexported default (agent/types.go:14).
+const RetrieveOutputCap = 64 * 1024
+
 // retriever is the minimal slice of *rag.Retriever the tool needs; abstracting
 // it keeps the tool unit-testable with a fake.
 type retriever interface {
 	Retrieve(ctx context.Context, query string, k int) ([]rag.SearchResult, error)
 	BuildContext(results []rag.SearchResult, maxTokens int) string
+}
+
+// progressiveRetriever is the optional capability the progressive path needs.
+// *rag.Retriever satisfies it.
+type progressiveRetriever interface {
+	retriever
+	RenderProgressive(ctx context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, error)
 }
 
 // Retrieve is the reference read-only retrieval built-in. #95 swaps SearchMulti
@@ -27,6 +41,12 @@ type Retrieve struct {
 	R         retriever
 	K         int // default top-k when the call omits k
 	MaxTokens int // BuildContext budget; 0 => a sane default
+	// Progressive opts into rag.RenderProgressive when R supports it
+	// (#189 slice 1). Off => the legacy BuildContext path, byte-identical
+	// to before. MinFullResults and Estimate pass through to the renderer.
+	Progressive    bool
+	MinFullResults int
+	Estimate       func(string) int
 }
 
 type retrieveArgs struct {
@@ -50,7 +70,7 @@ func (Retrieve) Spec() agent.ToolSpec {
 }
 
 func (t Retrieve) Effect() agent.Effect {
-	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever}
+	return agent.Effect{Class: agent.Read, Approval: agent.ApprovalNever, OutputCap: RetrieveOutputCap}
 }
 
 func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
@@ -77,6 +97,41 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "retrieval failed: " + err.Error()}, nil
 	}
+	if pr, ok := t.R.(progressiveRetriever); ok && t.Progressive {
+		content, trace, err := pr.RenderProgressive(ctx, rag.ProgressiveRenderRequest{
+			Results:        results,
+			MaxTokens:      maxTokens,
+			MaxBytes:       RetrieveOutputCap,
+			MinFullResults: t.MinFullResults,
+			Estimate:       t.Estimate,
+		})
+		if err != nil {
+			// The renderer returns a ZERO trace on every error path, so no
+			// trace field may be read here: doing so would attribute sources
+			// that rendered nothing.
+			return agent.ToolResult{IsError: true, Content: "retrieval render failed: " + err.Error()}, nil
+		}
+		// Attribution equals the rendered set exactly — never the raw
+		// retrieval results (fixes the over-crediting at the legacy path's
+		// expense of precision; see #189 spec section 11). A source that got
+		// orientation only has no RenderedEvidence and contributes nothing.
+		// RenderedEvidence is also the only trace field a section-11
+		// whole-block trim keeps exact; the counters go stale.
+		attrib := &agent.RetrievalAttribution{}
+		for _, src := range trace.Sources {
+			for _, ev := range src.RenderedEvidence {
+				attrib.Sources = append(attrib.Sources, agent.RetrievedSource{
+					StableKey: ev.StableKey,
+					Source:    ev.Source,
+					StartLine: ev.StartLine,
+					EndLine:   ev.EndLine,
+					Score:     ev.Score,
+				})
+			}
+		}
+		return agent.ToolResult{Content: content, Attrib: attrib}, nil
+	}
+
 	content := t.R.BuildContext(results, maxTokens)
 
 	attrib := &agent.RetrievalAttribution{Sources: make([]agent.RetrievedSource, 0, len(results))}
