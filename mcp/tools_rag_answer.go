@@ -235,14 +235,26 @@ func normalizeAnswerLabel(s string) string {
 	return strings.TrimSpace(answerLabelReplacer.Replace(s))
 }
 
-// answerSentinel matches the "[E<n>]" block lead wherever a model would read one:
-// start of input, after LF, or after a bare CR. Go's (?m)^ never matches after a
-// bare CR, so the CR alternative is captured and restored via ${1} rather than
-// rewriting the content's line endings. Matching is case-insensitive because a
-// forged "[e2]" can still prompt a model to emit the canonical "E2". It is
-// deliberately line-anchored: an unanchored \[E[0-9]+\] would mangle ordinary code
-// (slice indexing, table markup) for no security gain.
-var answerSentinel = regexp.MustCompile(`(?im)(^|\r)(\[)(E[0-9]+\])`)
+// answerSentinel matches every structural lead in the answer prompt, wherever a
+// model would read one: start of input, after LF, or after a bare CR.
+//
+// The prompt is assembled in buildAnswerPrompt as "Question: %s\n\nEvidence:\n%s",
+// so untrusted evidence content is the LAST thing in the prompt and can append
+// leads of its own: "[E<n>]" forges a block, and a trailing "Question:" restates
+// the task at the position a model weights most heavily. The list is enumerated
+// against that one prompt's shape, so adding a labeled section to the prompt means
+// adding it here.
+//
+// Go's (?m)^ never matches after a bare CR, so the CR alternative is captured and
+// restored via ${1} rather than rewriting the content's line endings. Matching is
+// case-insensitive because a forged "[e2]" can still prompt a model to emit the
+// canonical "E2". Leads are line-anchored deliberately: unanchored, this would
+// mangle ordinary code (slice indexing, table markup) for no security gain.
+//
+// Known boundary: only LF and CR count as line breaks. Unicode separators
+// (U+2028, U+2029, NEL) do not, matching numberLines' documented LF-only scope in
+// rag/retriever.go. Closing that would mean widening the shared #189 helper too.
+var answerSentinel = regexp.MustCompile(`(?im)(^|\r)(Question|Evidence|\[E[0-9]+)(:|\])`)
 
 // neutralizeAnswerSentinel defangs the block lead inside untrusted content by
 // inserting a space, the same technique cmd/golem's neutralizeFence uses for the

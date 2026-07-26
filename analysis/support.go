@@ -222,16 +222,21 @@ func parseClaimsLenient(reply string) []string {
 	return out
 }
 
-// evidenceLabelReplacer flattens a label onto one line: a block lead must occupy
-// exactly one line, so CR and LF become spaces before the source is interpolated.
-var evidenceLabelReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+var promptLineReplacer = strings.NewReplacer("\r", " ", "\n", " ")
 
-// normalizeEvidenceLabel forces the source path onto a single line. Chunk.Source
-// is untrusted: newlines are legal in POSIX filenames, nothing in the rag write
-// path rejects control characters on chunks.source, and the managed-document path
-// takes source straight from the caller.
-func normalizeEvidenceLabel(s string) string {
-	return strings.TrimSpace(evidenceLabelReplacer.Replace(s))
+// flattenPromptLine forces an untrusted value that occupies exactly one line of
+// the prompt onto one line. Two values qualify, and neither is trustworthy:
+// Chunk.Source, because newlines are legal in POSIX filenames, nothing in the rag
+// write path rejects control characters on chunks.source, and the managed-document
+// path takes source straight from the caller; and claim text, because it is
+// model-authored from the answer under review.
+//
+// This is the label mitigation, and it is the opposite of what content needs.
+// Flattening content would destroy the newlines that carry its meaning, so
+// content goes through neutralizeVerifySentinel instead. Applying either one to
+// the other position is the mistake this pairing exists to prevent.
+func flattenPromptLine(s string) string {
+	return strings.TrimSpace(promptLineReplacer.Replace(s))
 }
 
 // verifySentinel matches every structural lead in the verify prompt, wherever a
@@ -252,7 +257,16 @@ func normalizeEvidenceLabel(s string) string {
 // canonical "E2". Leads are line-anchored deliberately: unanchored, this would
 // mangle ordinary code (error codes, matrix notation, test tables) for no gain.
 // Longer alternatives come first so "Claims:" is not consumed as a bare "C".
-var verifySentinel = regexp.MustCompile(`(?im)(^|\r)(Claims|Evidence|E|C)([0-9]*:)`)
+//
+// E and C require at least one digit; only the section words match bare. Allowing
+// a bare "C:" lead would rewrite a line-leading Windows drive ("C:\Users\...")
+// that a model is then asked to reason about. Defanging is a blocklist, so its
+// false-positive cost is part of its correctness, not a separate concern.
+//
+// Known boundary: only LF and CR are treated as line breaks. Unicode separators
+// (U+2028, U+2029, NEL) are not, matching numberLines' documented LF-only scope
+// in rag/retriever.go. Closing that would mean widening the shared #189 helper too.
+var verifySentinel = regexp.MustCompile(`(?im)(^|\r)(Claims|Evidence|[EC][0-9]+)(:)`)
 
 // neutralizeVerifySentinel defangs a structural lead inside untrusted content by
 // inserting a space, the same technique cmd/golem's neutralizeFence uses for the
@@ -312,7 +326,7 @@ func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []E
 	for i, r := range evidence {
 		id := fmt.Sprintf("E%d", i+1)
 		block := fmt.Sprintf("%s: %s (lines %d-%d)\n%s\n\n", id,
-			normalizeEvidenceLabel(r.Chunk.Source), r.Chunk.StartLine, r.Chunk.EndLine,
+			flattenPromptLine(r.Chunk.Source), r.Chunk.StartLine, r.Chunk.EndLine,
 			neutralizeVerifySentinel(r.Chunk.Content))
 		if i > 0 && b.Len()+len(block) > maxChars {
 			break
@@ -376,7 +390,7 @@ func (j *SupportJudge) verifyClaims(ctx context.Context, claims []ClaimSupport, 
 		// A claim occupies one line in the prompt, and its text is model-authored
 		// from the answer under review, so it is untrusted for this position too:
 		// an unflattened claim could forge a sibling C<n> lead.
-		fmt.Fprintf(&cb, "%s: %s\n", c.ID, normalizeEvidenceLabel(c.Claim))
+		fmt.Fprintf(&cb, "%s: %s\n", c.ID, flattenPromptLine(c.Claim))
 	}
 	zero := 0.0
 	resp, err := j.chat(ctx, config.UseCaseVerify, provider.ChatRequest{

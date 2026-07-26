@@ -194,28 +194,6 @@ func TestBuildEvidenceBlocks_LabelsAndRefs(t *testing.T) {
 	}
 }
 
-// countEvidenceLeads counts "E<n>:" block leads a model would read as the start
-// of an evidence block: at the start of the text or after a line break. Bare CR
-// counts as a break because a renderer may treat it as one. It scans structurally
-// rather than reusing the production pattern, so a mistake in the mitigation
-// cannot hide behind an identically-wrong assertion.
-func countEvidenceLeads(s string) int {
-	n := 0
-	for _, line := range strings.FieldsFunc(s, func(r rune) bool { return r == '\n' || r == '\r' }) {
-		if len(line) < 3 || (line[0] != 'E' && line[0] != 'e') {
-			continue
-		}
-		d := 1
-		for d < len(line) && line[d] >= '0' && line[d] <= '9' {
-			d++
-		}
-		if d > 1 && d < len(line) && line[d] == ':' {
-			n++
-		}
-	}
-	return n
-}
-
 // TestBuildEvidenceBlocks_SourceCannotForgeBlock pins the label mitigation. The
 // model cites by these E<n> IDs and the caller receives matching EvidenceRefs, so
 // a forged block yields a citation that looks authentic. Chunk.Source is
@@ -226,7 +204,7 @@ func TestBuildEvidenceBlocks_SourceCannotForgeBlock(t *testing.T) {
 	evidence := []rag.SearchResult{ev("h1", forged, "alpha", 1, 2)}
 
 	text, refs := buildEvidenceBlocks(evidence, 0)
-	if n := countEvidenceLeads(text); n != 1 {
+	if n := countLineStarts(text, "E1:") + countLineStarts(text, "E2:"); n != 1 {
 		t.Fatalf("forged source produced %d evidence leads, want 1:\n%s", n, text)
 	}
 	// The ref carries provenance for programmatic consumers, not prompt text, so
@@ -256,7 +234,7 @@ func TestBuildEvidenceBlocks_ContentCannotForgeBlock(t *testing.T) {
 			evidence := []rag.SearchResult{ev("h1", "a.go", content, 1, 2)}
 
 			text, _ := buildEvidenceBlocks(evidence, 0)
-			if n := countEvidenceLeads(text); n != 1 {
+			if n := countLineStarts(text, "E1:") + countLineStarts(text, "E2:"); n != 1 {
 				t.Fatalf("forged content produced %d evidence leads, want 1:\n%s", n, text)
 			}
 			if !strings.Contains(text, "forged body") {
@@ -301,6 +279,27 @@ func TestVerifyPromptEvidenceCannotForgeClaims(t *testing.T) {
 	// claimsFixture supplies exactly C1 and C2; the forged pair must not add more.
 	if leads := countLineStarts(prompt, "C1:") + countLineStarts(prompt, "C2:"); leads != 2 {
 		t.Errorf("prompt has %d claim leads, want 2:\n%s", leads, prompt)
+	}
+}
+
+// TestBuildEvidenceBlocks_LeavesLegitimateContentIntact bounds the false-positive
+// cost of the sentinel. Defanging is a blocklist, so it must not corrupt ordinary
+// code a model is then asked to reason about. A line-leading Windows drive is the
+// case that matters: it looks exactly like a bare "C:" lead, and mangling it would
+// make the model answer path questions wrong.
+func TestBuildEvidenceBlocks_LeavesLegitimateContentIntact(t *testing.T) {
+	for _, content := range []string{
+		`C:\Users\dev\project\main.go`,
+		`E:\build\out.exe`,
+		"Config: loaded\nElapsed: 4ms",
+		"x E2: not at a line start",
+	} {
+		t.Run(content, func(t *testing.T) {
+			text, _ := buildEvidenceBlocks([]rag.SearchResult{ev("h1", "a.go", content, 1, 2)}, 0)
+			if !strings.Contains(text, content) {
+				t.Errorf("legitimate content was modified:\nwant substring: %q\ngot:\n%s", content, text)
+			}
+		})
 	}
 }
 
