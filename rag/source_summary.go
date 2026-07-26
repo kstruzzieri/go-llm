@@ -43,7 +43,10 @@ func normalizeSourceSummary(row SourceSummary) SourceSummary {
 // validateSourceSummaryWrite enforces the write contract: no blank fields, the
 // current format version, a positive timestamp. A summary must name the vector
 // space it was generated against — blank provenance is a validity reason on
-// the read side, never a legal stored value.
+// the read side, never a legal stored value. This is deliberately stricter
+// than the read-side summaryRowMalformed check, which rejects only an
+// above-current format_version: a below-current row is stale, not malformed,
+// so it must remain writable-rejected but readable-interpretable.
 func validateSourceSummaryWrite(row SourceSummary) error {
 	switch {
 	case strings.TrimSpace(row.Source) == "":

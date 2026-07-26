@@ -232,14 +232,16 @@ func TestSummaryRowMalformed(t *testing.T) {
 		want   bool
 	}{
 		{"valid", func(s *SourceSummary) {}, false},
-		{"blank abstract", func(s *SourceSummary) { s.Abstract = "" }, true},
-		// Whitespace-only pins the TrimSpace choice: a lazier == "" check would
-		// let this row through uncaught, since it "looks" non-blank byte-wise.
+		// Whitespace-only pins two properties at once: the clause must exist
+		// (delete it and this goes red) and must use TrimSpace, not == ""
+		// (drop the TrimSpace and this goes red too). Exact "" only pins the
+		// former, which is why "empty abstract" below is kept alongside it.
 		{"whitespace-only abstract", func(s *SourceSummary) { s.Abstract = "   " }, true},
-		{"blank overview", func(s *SourceSummary) { s.Overview = "" }, true},
-		{"blank model", func(s *SourceSummary) { s.SummaryModel = "" }, true},
-		{"blank content hash", func(s *SourceSummary) { s.ContentHash = "" }, true},
-		{"blank vector space", func(s *SourceSummary) { s.VectorSpaceID = "" }, true},
+		{"empty abstract", func(s *SourceSummary) { s.Abstract = "" }, true},
+		{"whitespace-only overview", func(s *SourceSummary) { s.Overview = "   " }, true},
+		{"whitespace-only model", func(s *SourceSummary) { s.SummaryModel = "   " }, true},
+		{"whitespace-only content hash", func(s *SourceSummary) { s.ContentHash = "   " }, true},
+		{"whitespace-only vector space", func(s *SourceSummary) { s.VectorSpaceID = "   " }, true},
 		{"zero timestamp", func(s *SourceSummary) { s.SummarizedAt = 0 }, true},
 		// Above-current format: written by a newer build — cannot be interpreted.
 		{"format above current", func(s *SourceSummary) { s.FormatVersion = SourceSummaryFormatVersion + 1 }, true},
