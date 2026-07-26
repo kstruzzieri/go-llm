@@ -21,8 +21,9 @@ func TestMigrationFreshDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 7 {
-		t.Errorf("max schema version = %d, want 7", maxVersion)
+	latest := migrations[len(migrations)-1].version
+	if maxVersion != latest {
+		t.Errorf("max schema version = %d, want %d", maxVersion, latest)
 	}
 
 	// Verify chunks_fts virtual table exists.
@@ -228,8 +229,9 @@ func TestMigrationExistingDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 7 {
-		t.Errorf("max schema version = %d, want 7", maxVersion)
+	latest := migrations[len(migrations)-1].version
+	if maxVersion != latest {
+		t.Errorf("max schema version = %d, want %d", maxVersion, latest)
 	}
 
 	// Verify indexed_at was backfilled (should be non-zero).
@@ -518,8 +520,8 @@ func TestMigrationIdempotency(t *testing.T) {
 	if err := db.QueryRow(`SELECT COUNT(*) FROM rag_schema_version`).Scan(&count); err != nil {
 		t.Fatalf("count versions: %v", err)
 	}
-	if count != 7 {
-		t.Errorf("expected 7 version records (v1..v7), got %d", count)
+	if count != len(migrations) {
+		t.Errorf("expected %d version records (v1..v%d), got %d", len(migrations), len(migrations), count)
 	}
 }
 
@@ -602,8 +604,9 @@ func TestMigrationV4SourceContentHash(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query rag_schema_version: %v", err)
 	}
-	if maxVersion != 7 {
-		t.Errorf("max schema version = %d, want 7", maxVersion)
+	latest := migrations[len(migrations)-1].version
+	if maxVersion != latest {
+		t.Errorf("max schema version = %d, want %d", maxVersion, latest)
 	}
 
 	// Verify source_content_hash column exists by inserting and querying it.
@@ -704,8 +707,9 @@ func TestMigrationV4ExistingDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("query schema version: %v", err)
 	}
-	if maxVersion != 7 {
-		t.Errorf("max schema version = %d, want 7", maxVersion)
+	latest := migrations[len(migrations)-1].version
+	if maxVersion != latest {
+		t.Errorf("max schema version = %d, want %d", maxVersion, latest)
 	}
 
 	// Verify existing row has empty default hash.
@@ -781,8 +785,9 @@ func TestMigrationHalfAppliedV2(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 7 {
-		t.Errorf("max version = %d, want 7", maxVersion)
+	latest := migrations[len(migrations)-1].version
+	if maxVersion != latest {
+		t.Errorf("max version = %d, want %d", maxVersion, latest)
 	}
 }
 
@@ -853,8 +858,9 @@ func TestMigrationHalfAppliedV2WithV1Recorded(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 7 {
-		t.Errorf("max version = %d, want 7", maxVersion)
+	latest := migrations[len(migrations)-1].version
+	if maxVersion != latest {
+		t.Errorf("max version = %d, want %d", maxVersion, latest)
 	}
 }
 
@@ -941,8 +947,9 @@ func TestMigration_v4_to_v5_addsColumn(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if maxVersion != 7 {
-		t.Errorf("max schema version = %d, want 7", maxVersion)
+	latest := migrations[len(migrations)-1].version
+	if maxVersion != latest {
+		t.Errorf("max schema version = %d, want %d", maxVersion, latest)
 	}
 
 	rows, err := db.Query(`PRAGMA table_info(chunks)`)
@@ -1171,8 +1178,9 @@ func TestMigrationV6PreservesChunksAndCreatesManagedRegistry(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&version); err != nil {
 		t.Fatalf("query version: %v", err)
 	}
-	if version != 7 {
-		t.Fatalf("schema version = %d, want 7", version)
+	latest := migrations[len(migrations)-1].version
+	if version != latest {
+		t.Fatalf("schema version = %d, want %d", version, latest)
 	}
 	chunks, err := store.GetBySource(context.Background(), "legacy.md")
 	if err != nil {
@@ -1197,6 +1205,111 @@ func TestMigrationV6PreservesChunksAndCreatesManagedRegistry(t *testing.T) {
 	}
 }
 
+func TestMigrationFreshDBCreatesSourceSummaries(t *testing.T) {
+	store := newTestStore(t)
+	defer func() { _ = store.Close() }()
+
+	var count int
+	err := store.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'source_summaries'`,
+	).Scan(&count)
+	if err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("source_summaries table missing (count = %d)", count)
+	}
+
+	// Column shape: insert a fully-populated row raw; the schema must accept it.
+	_, err = store.db.Exec(
+		`INSERT INTO source_summaries
+		 (source, content_hash, vector_space_id, abstract, overview, summary_model, format_version, summarized_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"pkg/a.go", "hash1", "vs1", "L0 text", "L1 text", "qwen3:8b", 1, int64(1700000000),
+	)
+	if err != nil {
+		t.Fatalf("insert into source_summaries: %v", err)
+	}
+}
+
+func TestMigrationV7ToV8AddsSourceSummaries(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v7.db")
+
+	// Build a v7 database: open (migrates to current), then drop the v8 table
+	// and rewind the recorded version — same technique the v7 backfill test uses.
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE source_summaries`); err != nil {
+		t.Fatalf("drop v8 table: %v", err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM rag_schema_version WHERE version >= 8`); err != nil {
+		t.Fatalf("rewind version: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Reopen: migration v8 must run again and recreate the table.
+	store2, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer func() { _ = store2.Close() }()
+	var count int
+	if err := store2.db.QueryRow(
+		`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'source_summaries'`,
+	).Scan(&count); err != nil {
+		t.Fatalf("query sqlite_master: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("v7->v8 migration did not create source_summaries")
+	}
+}
+
+func TestMigrationV8FailureRollsBack(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v8fail.db")
+
+	store, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE source_summaries`); err != nil {
+		t.Fatalf("drop v8 table: %v", err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM rag_schema_version WHERE version >= 8`); err != nil {
+		t.Fatalf("rewind version: %v", err)
+	}
+	// Plant a conflicting object so migrateV8's CREATE TABLE fails.
+	if _, err := store.db.Exec(`CREATE TABLE source_summaries (wrong INTEGER)`); err != nil {
+		t.Fatalf("plant conflict: %v", err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	if _, err := NewSQLiteStore(path); err == nil {
+		t.Fatal("reopen must fail while the conflicting table exists")
+	}
+
+	// The failed migration must not have recorded v8.
+	raw, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	defer func() { _ = raw.Close() }()
+	var maxVersion int
+	if err := raw.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&maxVersion); err != nil {
+		t.Fatalf("version query: %v", err)
+	}
+	if maxVersion >= 8 {
+		t.Fatalf("failed migration recorded version %d", maxVersion)
+	}
+}
+
 func TestMigration_v5_open_idempotent(t *testing.T) {
 	db := openV4DB(t)
 
@@ -1207,8 +1320,9 @@ func TestMigration_v5_open_idempotent(t *testing.T) {
 	if err := db.QueryRow(`SELECT MAX(version) FROM rag_schema_version`).Scan(&firstVersion); err != nil {
 		t.Fatalf("query first version: %v", err)
 	}
-	if firstVersion != 7 {
-		t.Fatalf("first run max version = %d, want 7", firstVersion)
+	latest := migrations[len(migrations)-1].version
+	if firstVersion != latest {
+		t.Fatalf("first run max version = %d, want %d", firstVersion, latest)
 	}
 
 	var firstRowCount int
