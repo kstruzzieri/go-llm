@@ -941,8 +941,14 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 	b.WriteString("Relevant code context:\n\n")
 
 	for _, res := range results {
+		// The source sits inside a line-start block delimiter and is untrusted:
+		// newlines are legal in POSIX filenames, nothing in the write path rejects
+		// control characters on chunks.source, and the managed-document path takes
+		// source straight from the caller. Flatten it to exactly one line or a path
+		// can forge a second block with fabricated attribution. Content needs no
+		// such treatment here -- numberLines' per-line prefix already blocks it.
 		entry := fmt.Sprintf("--- %s (lines %d-%d, similarity: %.2f) ---\n%s\n",
-			res.Chunk.Source, res.Chunk.StartLine, res.Chunk.EndLine,
+			normalizeOrientationValue(res.Chunk.Source), res.Chunk.StartLine, res.Chunk.EndLine,
 			res.Score, numberLines(res.Chunk.Content, res.Chunk.StartLine))
 
 		if maxChars > 0 && b.Len()+len(entry) > maxChars {

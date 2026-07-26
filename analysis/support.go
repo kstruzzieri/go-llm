@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/config"
@@ -221,6 +222,38 @@ func parseClaimsLenient(reply string) []string {
 	return out
 }
 
+// evidenceLabelReplacer flattens a label onto one line: a block lead must occupy
+// exactly one line, so CR and LF become spaces before the source is interpolated.
+var evidenceLabelReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+
+// normalizeEvidenceLabel forces the source path onto a single line. Chunk.Source
+// is untrusted: newlines are legal in POSIX filenames, nothing in the rag write
+// path rejects control characters on chunks.source, and the managed-document path
+// takes source straight from the caller.
+func normalizeEvidenceLabel(s string) string {
+	return strings.TrimSpace(evidenceLabelReplacer.Replace(s))
+}
+
+// evidenceSentinel matches the "E<n>:" block lead wherever a model would read one:
+// start of input, after LF, or after a bare CR. Go's (?m)^ never matches after a
+// bare CR, so the CR alternative is captured and restored via ${1} rather than
+// rewriting the content's line endings. Matching is case-insensitive because a
+// forged "e2:" can still prompt a model to emit the canonical "E2". It is
+// deliberately line-anchored: an unanchored E[0-9]+: would mangle ordinary code
+// (error codes, matrix notation, test tables) for no security gain.
+var evidenceSentinel = regexp.MustCompile(`(?im)(^|\r)(E)([0-9]+:)`)
+
+// neutralizeEvidenceSentinel defangs the block lead inside untrusted content by
+// inserting a space, the same technique cmd/golem's neutralizeFence uses for the
+// project-context fence. Content must NOT be flattened the way a label is -- its
+// newlines are the payload -- and this renderer gives content no per-line prefix
+// (unlike rag.BuildContext, whose numbering is load-bearing), so the lead itself
+// is broken instead. A space-inserted replacement is sufficient: the model never
+// needs to reconstruct the original bytes.
+func neutralizeEvidenceSentinel(s string) string {
+	return evidenceSentinel.ReplaceAllString(s, "${1}${2} ${3}")
+}
+
 // verdictSeverity ranks a verdict by how unsupportive it is, so that duplicate
 // verdicts for the same claim fail closed: a duplicate can never raise a
 // claim's support level. Contradiction is the most severe.
@@ -243,7 +276,15 @@ func verdictSeverity(v verdict) int {
 // best-first; once the running size would exceed maxChars, the lower-ranked
 // tail is dropped. The first block is always kept even if it alone exceeds the
 // budget. maxChars <= 0 uses defaultMaxEvidenceChars.
-// Evidence content is untrusted, caller-supplied text and is included in the verify prompt verbatim; this judge trusts its own local model, not the evidence.
+//
+// Evidence is untrusted, caller-supplied text; this judge trusts its own local
+// model, not the evidence. Because the model cites by these E<n> IDs and the
+// caller receives matching EvidenceRefs, a forged block would yield a citation
+// that looks authentic, so the source label is flattened and the block lead is
+// neutralized in content. Both happen before the block is measured, so the
+// maxChars budget accounts for the inserted spaces. EvidenceRef.Source keeps the
+// raw value: it is provenance for programmatic consumers, not prompt text, and
+// flattening it would make refs disagree with the chunk they came from.
 func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []EvidenceRef) {
 	if maxChars <= 0 {
 		maxChars = defaultMaxEvidenceChars
@@ -252,7 +293,9 @@ func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []E
 	refs := make([]EvidenceRef, 0, len(evidence))
 	for i, r := range evidence {
 		id := fmt.Sprintf("E%d", i+1)
-		block := fmt.Sprintf("%s: %s (lines %d-%d)\n%s\n\n", id, r.Chunk.Source, r.Chunk.StartLine, r.Chunk.EndLine, r.Chunk.Content)
+		block := fmt.Sprintf("%s: %s (lines %d-%d)\n%s\n\n", id,
+			normalizeEvidenceLabel(r.Chunk.Source), r.Chunk.StartLine, r.Chunk.EndLine,
+			neutralizeEvidenceSentinel(r.Chunk.Content))
 		if i > 0 && b.Len()+len(block) > maxChars {
 			break
 		}

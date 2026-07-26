@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -222,18 +223,59 @@ func deriveAnswer(ma modelAnswer, blocks []evidenceBlock) ragAnswerResult {
 	return res
 }
 
+// answerLabelReplacer flattens a label onto one line: a block lead must occupy
+// exactly one line, so CR and LF become spaces before the source is interpolated.
+var answerLabelReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+
+// normalizeAnswerLabel forces the source path onto a single line. Chunk.Source is
+// untrusted: newlines are legal in POSIX filenames, nothing in the rag write path
+// rejects control characters on chunks.source, and the managed-document path takes
+// source straight from the caller.
+func normalizeAnswerLabel(s string) string {
+	return strings.TrimSpace(answerLabelReplacer.Replace(s))
+}
+
+// answerSentinel matches the "[E<n>]" block lead wherever a model would read one:
+// start of input, after LF, or after a bare CR. Go's (?m)^ never matches after a
+// bare CR, so the CR alternative is captured and restored via ${1} rather than
+// rewriting the content's line endings. Matching is case-insensitive because a
+// forged "[e2]" can still prompt a model to emit the canonical "E2". It is
+// deliberately line-anchored: an unanchored \[E[0-9]+\] would mangle ordinary code
+// (slice indexing, table markup) for no security gain.
+var answerSentinel = regexp.MustCompile(`(?im)(^|\r)(\[)(E[0-9]+\])`)
+
+// neutralizeAnswerSentinel defangs the block lead inside untrusted content by
+// inserting a space, the same technique cmd/golem's neutralizeFence uses for the
+// project-context fence. Content must NOT be flattened the way a label is -- its
+// newlines are the payload -- and this renderer gives content no per-line prefix
+// (unlike rag.BuildContext, whose numbering is load-bearing), so the lead itself
+// is broken instead.
+//
+// quoteInChunk already stops a forged block from laundering a citation: it
+// verifies against the real chunk struct, so an unknown id fails and a real id
+// paired with forged text fails. This closes the remaining lever, which is that
+// res.Answer surfaces whenever any single quote verifies, letting a forged block
+// steer the prose while a genuine citation carries it.
+func neutralizeAnswerSentinel(s string) string {
+	return answerSentinel.ReplaceAllString(s, "${1}${2} ${3}")
+}
+
 // buildEvidenceBlocks assigns stable E1..En labels to the retrieved chunks and
 // formats them for the prompt, honoring a character budget (maxTokens*4, the
 // same chars-per-token ratio BuildContext uses). Lower-ranked blocks are dropped
 // when the budget would be exceeded; a dropped block is omitted from the
 // returned slice so the model cannot cite it. The first block is always kept.
+// The source label is flattened and the block lead is neutralized in content
+// before the block is measured, so the budget accounts for the inserted spaces.
 func buildEvidenceBlocks(results []rag.SearchResult, maxTokens int) (string, []evidenceBlock) {
 	maxChars := maxTokens * 4
 	var b strings.Builder
 	var blocks []evidenceBlock
 	for i, r := range results {
 		id := fmt.Sprintf("E%d", i+1)
-		block := fmt.Sprintf("[%s] %s (lines %d-%d)\n%s\n\n", id, r.Chunk.Source, r.Chunk.StartLine, r.Chunk.EndLine, r.Chunk.Content)
+		block := fmt.Sprintf("[%s] %s (lines %d-%d)\n%s\n\n", id,
+			normalizeAnswerLabel(r.Chunk.Source), r.Chunk.StartLine, r.Chunk.EndLine,
+			neutralizeAnswerSentinel(r.Chunk.Content))
 		if b.Len() > 0 && b.Len()+len(block) > maxChars {
 			break
 		}
