@@ -28,22 +28,6 @@ type SourceSummary struct {
 	SummarizedAt  int64
 }
 
-// normalizeSourceSummary returns a copy of row with its identity/provenance
-// fields (Source, ContentHash, VectorSpaceID, SummaryModel) trimmed to their
-// canonical form. Source is the primary key and the join key against
-// chunks.source / managed_documents.source, so an untrimmed value would
-// silently orphan the row from every downstream reader and from delete.
-// Abstract and Overview are free text, deliberately left untouched: the
-// renderers normalize display text themselves, and trimming here would be a
-// second, competing normalization layer.
-func normalizeSourceSummary(row SourceSummary) SourceSummary {
-	row.Source = strings.TrimSpace(row.Source)
-	row.ContentHash = strings.TrimSpace(row.ContentHash)
-	row.VectorSpaceID = strings.TrimSpace(row.VectorSpaceID)
-	row.SummaryModel = strings.TrimSpace(row.SummaryModel)
-	return row
-}
-
 // validateSourceSummaryWrite enforces the write contract: no blank fields, the
 // current format version, a positive timestamp. A summary must name the vector
 // space it was generated against — blank provenance is a validity reason on
@@ -100,8 +84,12 @@ func validateSourceSummaryWrite(row SourceSummary) error {
 // A blank prov.ContentHash or prov.VectorSpaceID means the current side is
 // unknown (mixed chunks, or an unparseable signature); there is no correct
 // value to store in that case, so defer the summary rather than guess.
+//
+// Source, ContentHash, and VectorSpaceID are stored byte-for-byte: they are
+// exact join/comparison values returned by SourceProvenanceBatch. Whitespace
+// around a nonblank value is therefore significant, not canonicalized here.
 func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary) error {
-	row = normalizeSourceSummary(row)
+	row.SummaryModel = strings.TrimSpace(row.SummaryModel)
 	if err := validateSourceSummaryWrite(row); err != nil {
 		return err
 	}
@@ -137,8 +125,7 @@ func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary
 // instead, precisely to keep the summary delete atomic with the rest of the
 // removal (#189 spec section 12).
 func (s *SQLiteStore) DeleteSourceSummary(ctx context.Context, source string) error {
-	source = strings.TrimSpace(source)
-	if source == "" {
+	if strings.TrimSpace(source) == "" {
 		return fmt.Errorf("rag: delete source summary: blank source")
 	}
 	if _, err := s.db.ExecContext(ctx,

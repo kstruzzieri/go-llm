@@ -116,60 +116,67 @@ func TestDeleteSourceSummary(t *testing.T) {
 	}
 }
 
-// TestUpsertSourceSummaryNormalizesIdentityFields pins the PK-collapse
-// behavior: Source is both the primary key and the join key against
-// chunks.source, so a padded value must normalize to the same row as its
-// trimmed counterpart rather than coexisting as a second, unreachable row.
-func TestUpsertSourceSummaryNormalizesIdentityFields(t *testing.T) {
+func TestUpsertSourceSummaryPreservesExactIdentity(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 
-	row := validSummary()
-	padded := row
-	padded.Source = "  " + row.Source + "  "
-	padded.ContentHash = " " + row.ContentHash + " "
-	padded.VectorSpaceID = " " + row.VectorSpaceID + " "
-	padded.SummaryModel = " " + row.SummaryModel + " "
+	plain := validSummary()
+	padded := plain
+	padded.Source = "  " + plain.Source + "  "
+	padded.ContentHash = " " + plain.ContentHash + " "
+	padded.VectorSpaceID = " " + plain.VectorSpaceID + " "
+	padded.SummaryModel = " " + plain.SummaryModel + " "
+	padded.Abstract = "Padded source."
+	if err := store.UpsertSourceSummary(ctx, plain); err != nil {
+		t.Fatalf("upsert plain: %v", err)
+	}
 	if err := store.UpsertSourceSummary(ctx, padded); err != nil {
 		t.Fatalf("upsert padded: %v", err)
 	}
 
-	got, err := store.SourceSummaryBatch(ctx, []string{row.Source})
+	got, err := store.SourceSummaryBatch(ctx, []string{plain.Source, padded.Source})
 	if err != nil {
 		t.Fatalf("batch read: %v", err)
 	}
-	if got[row.Source] != row {
-		t.Fatalf("canonical lookup mismatch:\n got  %+v\n want %+v", got[row.Source], row)
+	if len(got) != 2 {
+		t.Fatalf("distinct source keys collapsed: got %+v", got)
+	}
+	if got[plain.Source] != plain {
+		t.Fatalf("plain row mismatch:\n got  %+v\n want %+v", got[plain.Source], plain)
+	}
+	wantPadded := padded
+	wantPadded.SummaryModel = plain.SummaryModel
+	if got[padded.Source] != wantPadded {
+		t.Fatalf("padded row mismatch:\n got  %+v\n want %+v", got[padded.Source], wantPadded)
+	}
+}
+
+func TestDeleteSourceSummaryUsesExactSource(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	plain := validSummary()
+	padded := plain
+	padded.Source = "  " + plain.Source + "  "
+	padded.Abstract = "Padded source."
+	for _, row := range []SourceSummary{plain, padded} {
+		if err := store.UpsertSourceSummary(ctx, row); err != nil {
+			t.Fatalf("upsert %q: %v", row.Source, err)
+		}
 	}
 
-	// A second upsert differing only in padding must replace, not duplicate.
-	repadded := row
-	repadded.Source = "\t" + row.Source + "\n"
-	if err := store.UpsertSourceSummary(ctx, repadded); err != nil {
-		t.Fatalf("upsert repadded: %v", err)
-	}
-	// Unfiltered: the whole point is that two *different* input strings must
-	// land on one row, so counting WHERE source = <canonical> would only ever
-	// prove "the canonical row exists," not "no padded duplicate exists."
-	// The test creates exactly one logical source, so this is unambiguous.
-	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM source_summaries`).Scan(&count); err != nil {
-		t.Fatalf("count: %v", err)
-	}
-	if count != 1 {
-		t.Fatalf("expected 1 row for logically-same source, got %d", count)
-	}
-
-	// Delete must use the same canonical key form as write.
-	if err := store.DeleteSourceSummary(ctx, "  "+row.Source+"  "); err != nil {
+	if err := store.DeleteSourceSummary(ctx, padded.Source); err != nil {
 		t.Fatalf("delete padded: %v", err)
 	}
-	got, err = store.SourceSummaryBatch(ctx, []string{row.Source})
+	got, err := store.SourceSummaryBatch(ctx, []string{plain.Source, padded.Source})
 	if err != nil {
 		t.Fatalf("batch read after delete: %v", err)
 	}
-	if len(got) != 0 {
-		t.Fatalf("row survived padded delete: %+v", got)
+	if _, ok := got[padded.Source]; ok {
+		t.Fatalf("padded row survived exact delete: %+v", got)
+	}
+	if got[plain.Source] != plain {
+		t.Fatalf("deleting %q changed distinct row %q: %+v", padded.Source, plain.Source, got)
 	}
 }
 
@@ -284,18 +291,11 @@ func TestSummaryLifecycle(t *testing.T) {
 	})
 }
 
-// TestSummaryLifecycleTrimsPaddedChunkSource pins DEV-2 on the deletion
-// paths: UpsertSourceSummary trims Source before storing, but chunks.source
-// is never normalized (validateStoreInputs does not inspect it), so a
-// padded chunk source and its trimmed summary row are different strings.
-// DeleteBySource and replaceSourceTx must trim before matching against
-// source_summaries or the row is orphaned forever (SourceSummaryBatch
-// deliberately does not trim its own inputs, so nothing else reclaims it).
-func TestSummaryLifecycleTrimsPaddedChunkSource(t *testing.T) {
+func TestSummaryLifecycleUsesExactPaddedSource(t *testing.T) {
 	ctx := context.Background()
 	emb4 := []float64{1, 0, 0, 0}
 	const padded = "  pkg/pad.go  "
-	const trimmed = "pkg/pad.go"
+	const plain = "pkg/pad.go"
 
 	seed := func(t *testing.T) *SQLiteStore {
 		store := newTestStore(t)
@@ -304,39 +304,51 @@ func TestSummaryLifecycleTrimsPaddedChunkSource(t *testing.T) {
 			t.Fatalf("seed chunks: %v", err)
 		}
 		row := validSummary()
-		row.Source = trimmed
+		row.Source = padded
+		row.Abstract = "Padded source."
 		if err := store.UpsertSourceSummary(ctx, row); err != nil {
-			t.Fatalf("seed summary: %v", err)
+			t.Fatalf("seed padded summary: %v", err)
+		}
+		row.Source = plain
+		row.Abstract = "Plain source."
+		if err := store.UpsertSourceSummary(ctx, row); err != nil {
+			t.Fatalf("seed plain summary: %v", err)
 		}
 		return store
 	}
 
-	summaryExists := func(t *testing.T, store *SQLiteStore) bool {
-		got, err := store.SourceSummaryBatch(ctx, []string{trimmed})
+	summaryExists := func(t *testing.T, store *SQLiteStore, source string) bool {
+		got, err := store.SourceSummaryBatch(ctx, []string{source})
 		if err != nil {
 			t.Fatalf("summary batch: %v", err)
 		}
-		_, ok := got[trimmed]
+		_, ok := got[source]
 		return ok
 	}
 
-	t.Run("DeleteBySource reclaims the trimmed row", func(t *testing.T) {
+	t.Run("DeleteBySource deletes only the exact row", func(t *testing.T) {
 		store := seed(t)
 		if err := store.DeleteBySource(ctx, padded); err != nil {
 			t.Fatalf("DeleteBySource: %v", err)
 		}
-		if summaryExists(t, store) {
-			t.Fatal("padded source must still reclaim the trimmed summary row")
+		if summaryExists(t, store, padded) {
+			t.Fatal("padded source kept its summary row")
+		}
+		if !summaryExists(t, store, plain) {
+			t.Fatal("deleting padded source removed the distinct plain summary")
 		}
 	})
 
-	t.Run("replaceSourceTx empty replace reclaims the trimmed row", func(t *testing.T) {
+	t.Run("replaceSourceTx empty replace deletes only the exact row", func(t *testing.T) {
 		store := seed(t)
 		if err := store.ReplaceSource(ctx, padded, nil, nil); err != nil {
 			t.Fatalf("empty replace: %v", err)
 		}
-		if summaryExists(t, store) {
-			t.Fatal("padded source must still reclaim the trimmed summary row")
+		if summaryExists(t, store, padded) {
+			t.Fatal("padded source kept its summary row")
+		}
+		if !summaryExists(t, store, plain) {
+			t.Fatal("empty-replacing padded source removed the distinct plain summary")
 		}
 	})
 }

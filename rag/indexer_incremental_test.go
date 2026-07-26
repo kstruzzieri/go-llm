@@ -2209,15 +2209,9 @@ func TestIndexDirectory_WithoutPrune_KeepsSourceSummary(t *testing.T) {
 	}
 }
 
-// TestIndexDirectory_PruneDeleted_ReclaimsPaddedSourceSummary is the
-// compatibility-level case for DEV-19. chunks.source is never normalized on
-// write (validateStoreInputs does not inspect it) while source_summaries.source
-// is trimmed by normalizeSourceSummary, so a padded chunk row and its summary
-// row are different strings. A trailing space survives filepath.Abs/Clean, so
-// prune hands the padded name to DeleteBySource, which must trim before
-// matching source_summaries or the row is orphaned forever — the read side
-// deliberately does not trim either (DEV-2), so nothing else reclaims it.
-func TestIndexDirectory_PruneDeleted_ReclaimsPaddedSourceSummary(t *testing.T) {
+// TestIndexDirectory_PruneDeleted_DeletesExactPaddedSourceSummary covers a
+// source name whose trailing space survives filepath.Abs/Clean.
+func TestIndexDirectory_PruneDeleted_DeletesExactPaddedSourceSummary(t *testing.T) {
 	idx, store := newPruneTestIndexer(t)
 	ctx := context.Background()
 
@@ -2235,7 +2229,7 @@ func TestIndexDirectory_PruneDeleted_ReclaimsPaddedSourceSummary(t *testing.T) {
 		t.Fatalf("Store() error: %v", err)
 	}
 	row := validSummary()
-	row.Source = trimmed
+	row.Source = padded
 	if err := store.UpsertSourceSummary(ctx, row); err != nil {
 		t.Fatalf("UpsertSourceSummary() error: %v", err)
 	}
@@ -2247,7 +2241,7 @@ func TestIndexDirectory_PruneDeleted_ReclaimsPaddedSourceSummary(t *testing.T) {
 	if set := sourceSet(t, store); set[padded] {
 		t.Fatalf("padded source %q survived prune; the summary assertion below would be vacuous", padded)
 	}
-	if summaryStored(t, store, trimmed) {
-		t.Errorf("prune of padded source %q orphaned its summary row %q", padded, trimmed)
+	if summaryStored(t, store, padded) {
+		t.Errorf("prune of padded source %q kept its exact summary row", padded)
 	}
 }

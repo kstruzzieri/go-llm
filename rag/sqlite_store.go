@@ -541,12 +541,9 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 	// goes with it. A non-empty replace RETAINS the row — it becomes
 	// derived-stale until refreshed (#189 spec section 12).
 	//
-	// source_summaries.source is stored trimmed (normalizeSourceSummary on the
-	// write path), but chunks.source is never normalized, so an untrimmed
-	// source here must be trimmed before matching against the summary row or
-	// a padded source silently orphans it (DEV-2).
+	// source_summaries.source and chunks.source use the same exact key.
 	if len(chunks) == 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, strings.TrimSpace(source)); err != nil {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, source); err != nil {
 			return fmt.Errorf("rag: replace source %q: delete summary for emptied source: %w", source, err)
 		}
 	}
@@ -871,10 +868,7 @@ func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: delete by source %q: %w", source, err)
 	}
-	// source_summaries.source is stored trimmed (normalizeSourceSummary on the
-	// write path); chunks.source is not, so trim before matching or a padded
-	// source silently orphans the summary row (DEV-2).
-	if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, strings.TrimSpace(source)); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: delete summary for source %q: %w", source, err)
 	}
 	if _, err := tx.ExecContext(ctx, `

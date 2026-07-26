@@ -58,10 +58,10 @@ type progressiveSource struct {
 // normalizeOrientationValue forces a line-start or field value onto one line
 // — used by both orientation blocks and the evidence header's source path —
 // by turning CR and LF into single spaces, then trimming leading/trailing
-// space. The one value that must NEVER pass through this is evidence
-// content itself (spec section 9.7): content newlines are the payload, and
-// evidenceText (rag/progressive_render.go) relies on numberLines' per-line
-// prefix, not this function, to keep content from forging a block.
+// space. The one value that must NEVER pass through this is evidence content
+// itself (spec section 9.7): evidenceText canonicalizes only its line endings,
+// then relies on numberLines' per-line prefix to keep content from forging a
+// block.
 var orientationValueReplacer = strings.NewReplacer("\r", " ", "\n", " ")
 
 func normalizeOrientationValue(v string) string {
@@ -212,10 +212,11 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 }
 
 // evidenceText renders one L2 block. The header is byte-identical to
-// BuildContext's format (rag/retriever.go:944) and content flows through
-// numberLines verbatim — evidence is NEVER normalized (spec section 9.7).
-// The header says "similarity:" because SearchResult.Score carries the
-// semantic-similarity contract; the trace qualifies this via ScoreKind.
+// BuildContext's format (rag/retriever.go:944). Evidence line endings are
+// canonicalized to LF before numbering so bare CR cannot introduce an
+// unprefixed model-visible line; all other content bytes are preserved. The
+// header says "similarity:" because SearchResult.Score carries the semantic-
+// similarity contract; the trace qualifies this via ScoreKind.
 //
 // res.Chunk.Source is normalized for the same reason orientationText
 // normalizes src.source: "--- " is a line-start block delimiter with no
@@ -226,14 +227,13 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 // blank-checks only), and the managed-document path takes source from the
 // caller.
 //
-// Chunk.Content is deliberately NOT normalized — newlines are the payload,
-// and collapsing them would destroy the evidence. It needs no mitigation
-// because numberLines' per-line "%d| " prefix means a content line can never
-// begin with "--- ": every line gets a fixed prefix that isn't "--- ", the
-// same fixed-prefix argument that makes "name: value" fields safe above. This
-// makes the line numbering load-bearing for security, not merely formatting:
-// replacing it with raw content or a fenced block would reopen the same
-// block-forgery hole this function closes for Source.
+// Chunk.Content is otherwise left intact — line structure is the payload.
+// numberLines' per-line "%d| " prefix means a content line can never begin
+// with "--- ": every line gets a fixed prefix that isn't "--- ", the same
+// fixed-prefix argument that makes "name: value" fields safe above. This makes
+// the line numbering load-bearing for security, not merely formatting:
+// replacing it with raw content or a fenced block would reopen the same block-
+// forgery hole this function closes for Source.
 //
 // RESIDUAL, deliberately NOT closed — do not read the above as "the evidence
 // header is safe." Normalization stops a source path from starting a NEW line,
@@ -247,7 +247,9 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 // the spec's "No other escaping exists" rules out, so it is carried into the
 // slice-3 format work with the other one rather than fixed here.
 func evidenceText(res SearchResult) string {
+	content := strings.ReplaceAll(res.Chunk.Content, "\r\n", "\n")
+	content = strings.ReplaceAll(content, "\r", "\n")
 	return fmt.Sprintf("--- %s (lines %d-%d, similarity: %.2f) ---\n%s",
 		normalizeOrientationValue(res.Chunk.Source), res.Chunk.StartLine, res.Chunk.EndLine,
-		res.Score, numberLines(res.Chunk.Content, res.Chunk.StartLine))
+		res.Score, numberLines(content, res.Chunk.StartLine))
 }
