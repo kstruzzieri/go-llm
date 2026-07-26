@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"testing"
@@ -628,6 +629,47 @@ func TestRenderProgressiveDeterministic(t *testing.T) {
 	// ...and no separator trails the last source.
 	if strings.HasSuffix(first, "\n\n") {
 		t.Fatalf("trailing separator emitted after the last source:\n%q", first)
+	}
+}
+
+func TestRenderProgressiveErrorReturnsZeroTrace(t *testing.T) {
+	// An error must never hand back a partially filled trace: one carrying
+	// MaxBytes, SelectedResults and DistinctSources with used=0 free=0 reads
+	// exactly like a completed render that found sources, spent nothing, and
+	// exhausted its budget. Zero trace, or the used+free==MaxTokens contract
+	// means nothing.
+	r, store := newProgressiveTestRetriever(t)
+	ctx := context.Background()
+	emb := []byte{0, 0, 0, 0}
+	storeChunksRaw(t, store, [][]any{
+		{"z1", "pinned body", "pkg/z.go", 1, 1, "go", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	})
+	results := []SearchResult{
+		{Chunk: Chunk{ID: "z1", Content: "pinned body", Source: "pkg/z.go", StartLine: 1, EndLine: 1}, Score: 0.9},
+	}
+
+	// Pinned blocks over budget: the deepest error path, and the one whose
+	// partial trace looked most like a real result.
+	out, trace, err := r.RenderProgressive(ctx, ProgressiveRenderRequest{
+		Results: results, MaxTokens: 1, MaxBytes: 1,
+		Pinned: []PinRef{{Source: "pkg/z.go", ChunkID: "z1"}},
+	})
+	if err == nil {
+		t.Fatal("pinned blocks over budget must error")
+	}
+	if out != "" || !reflect.DeepEqual(trace, ProgressiveTrace{}) {
+		t.Fatalf("error path must return the zero trace, got out=%q trace=%+v", out, trace)
+	}
+
+	// The validation path must not echo an invalid budget back either.
+	out, trace, err = r.RenderProgressive(ctx, ProgressiveRenderRequest{
+		Results: results, MaxTokens: 0, MaxBytes: 100,
+	})
+	if err == nil {
+		t.Fatal("MaxTokens of 0 must error")
+	}
+	if out != "" || !reflect.DeepEqual(trace, ProgressiveTrace{}) {
+		t.Fatalf("validation error must return the zero trace, got out=%q trace=%+v", out, trace)
 	}
 }
 

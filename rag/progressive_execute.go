@@ -21,27 +21,31 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 		MaxTokens: req.MaxTokens, MaxBytes: req.MaxBytes, MaxDepth: req.MaxDepth,
 		SelectedResults: len(req.Results),
 	}
+	// Every error return below yields the ZERO trace, never the partially
+	// filled one. A half-filled trace is indistinguishable from a completed
+	// render: "MaxBytes:1 SelectedResults:1 DistinctSources:1 used:0 free:0"
+	// reads as a render that found one source, spent nothing, and has no
+	// budget left, and EstimatedTokensFree of zero is byte-identical to
+	// genuine exhaustion. That is the coupled-zero-value trap Task 7 flagged
+	// on EffectiveDepth/OrientationGenerated. Nothing is lost: a caller that
+	// wants MaxTokens after an error still holds the request it passed in.
+	//
+	// This buys a contract a caller can actually apply: used + free ==
+	// MaxTokens holds whenever the trace is non-zero.
 	if err := validateProgressiveRequest(req); err != nil {
-		return "", trace, err
+		return "", ProgressiveTrace{}, err
 	}
 	if len(req.Results) == 0 {
 		// fillProgressiveTrace never runs on this path, so restate the
-		// invariant it maintains: used + free == MaxTokens. Leaving free at
-		// zero would tell a caller the budget is exhausted when nothing was
-		// charged against it.
-		//
-		// The invariant holds on every NON-ERROR return, not universally: the
-		// three error returns above and below leave free at zero. That is
-		// deliberate — they pair the trace with a non-nil error, so it is a
-		// partial artifact a caller has no business reading budget figures out
-		// of, and widening the invariant would dress it up as a complete one.
+		// invariant it maintains. Leaving free at zero would tell a caller the
+		// budget is exhausted when nothing was charged against it.
 		trace.EstimatedTokensFree = req.MaxTokens
 		return "", trace, nil
 	}
 
 	sources, err := r.prepareProgressiveSources(ctx, req)
 	if err != nil {
-		return "", trace, err
+		return "", ProgressiveTrace{}, err
 	}
 	trace.DistinctSources = len(sources)
 
@@ -49,7 +53,7 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 	// trace both consume that normalized order, not construction order.
 	st, err := allocate(sources, req, req.Estimate)
 	if err != nil {
-		return "", trace, err
+		return "", ProgressiveTrace{}, err
 	}
 
 	out, truncated := assembleProgressive(sources, req.MaxBytes)
@@ -139,6 +143,26 @@ func (r *Retriever) prepareProgressiveSources(ctx context.Context, req Progressi
 		src.reasons = deriveSummaryValidity(row, src.prov, src.provFound, evidenceOK)
 		src.summary = row
 		src.fresh = row != nil && len(src.reasons) == 0
+
+		// Decisions derive from reason MEMBERSHIP, not summary presence: the
+		// spec's emission table (section 10) allows summary_missing and
+		// summary_stale to co-occur (e.g. a custom store yields missing plus
+		// unknown_* reasons). They live here, beside the reasons they are
+		// computed from, rather than in fillProgressiveTrace — which the name
+		// promises only reads.
+		//
+		// budget_demoted is deliberately NOT derived anywhere in this file:
+		// the allocator sets it, guarded on "a cheaper alternative actually
+		// rendered" (DEV-17). Deriving it a second time from costRejected
+		// re-opens the way to emitting it beside no_fit on a source that
+		// rendered nothing.
+		for _, reason := range src.reasons {
+			if reason == ReasonMissing {
+				src.decisions[DecisionSummaryMissing] = true
+			} else {
+				src.decisions[DecisionSummaryStale] = true
+			}
+		}
 		if !evidenceOK {
 			// Metadata must describe the retrieval snapshot the evidence came
 			// from, not the current index (spec section 8). The orientation
@@ -210,6 +234,10 @@ func assembleProgressive(sources []*progressiveSource, maxBytes int) (string, bo
 		}
 		truncated = true
 		if !dropLastBlock(sources) {
+			// Defensive-unreachable, same category as Task 10's M9 clamp: for
+			// dropLastBlock to fail, every source is already orientationNone,
+			// so parts is empty, out is "", and validateProgressiveRequest
+			// guarantees MaxBytes > 0 — the check above would have returned.
 			return "", truncated // nothing left to drop
 		}
 	}
@@ -277,22 +305,6 @@ func fillProgressiveTrace(trace *ProgressiveTrace, sources []*progressiveSource,
 			// Counted by the allocator as st.omitted, not here.
 		}
 
-		// Decisions derive from reason MEMBERSHIP, not summary presence: the
-		// spec's emission table (section 10) allows summary_missing and
-		// summary_stale to co-occur (e.g. a custom store yields missing plus
-		// unknown_* reasons).
-		//
-		// budget_demoted is deliberately NOT derived here: the allocator sets
-		// it, guarded on "a cheaper alternative actually rendered" (DEV-17).
-		// Deriving it a second time from costRejected re-opens the way to
-		// emitting it beside no_fit on a source that rendered nothing.
-		for _, reason := range src.reasons {
-			if reason == ReasonMissing {
-				src.decisions[DecisionSummaryMissing] = true
-			} else {
-				src.decisions[DecisionSummaryStale] = true
-			}
-		}
 		decisions := make([]string, 0, len(src.decisions))
 		for d := range src.decisions {
 			decisions = append(decisions, d)
