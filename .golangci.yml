@@ -7,3 +7,23 @@ linters:
     - govet
     - ineffassign
     - staticcheck
+
+# Formatting is enforced here rather than by a separate gofmt step. In
+# golangci-lint v2 formatters live outside `linters`, and `golangci-lint run`
+# reports their diffs as findings, so the pre-push gate fails on unformatted
+# code. `golangci-lint fmt` applies the fixes.
+#
+# simplify is spelled out because it makes this gate stricter than a bare
+# `gofmt -l`: it also rejects redundant composite literal types. Leaving it
+# implicit means `gofmt -l` and this gate can disagree with no record of why.
+#
+# goimports additionally pins import grouping and ordering, which nothing
+# else here checks. Not gofumpt: its extra rules would rewrite a large
+# fraction of the tree and collide with in-flight branches.
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
