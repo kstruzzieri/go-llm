@@ -148,8 +148,12 @@ func TestUpsertSourceSummaryNormalizesIdentityFields(t *testing.T) {
 	if err := store.UpsertSourceSummary(ctx, repadded); err != nil {
 		t.Fatalf("upsert repadded: %v", err)
 	}
+	// Unfiltered: the whole point is that two *different* input strings must
+	// land on one row, so counting WHERE source = <canonical> would only ever
+	// prove "the canonical row exists," not "no padded duplicate exists."
+	// The test creates exactly one logical source, so this is unambiguous.
 	var count int
-	if err := store.db.QueryRow(`SELECT COUNT(*) FROM source_summaries WHERE source = ?`, row.Source).Scan(&count); err != nil {
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM source_summaries`).Scan(&count); err != nil {
 		t.Fatalf("count: %v", err)
 	}
 	if count != 1 {
@@ -183,9 +187,14 @@ func TestSourceSummaryBatchImmutableDegradation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NewSQLiteStore: %v", err)
 		}
+		defer func() { _ = rw.Close() }()
 		if _, err := rw.db.Exec(`DROP TABLE source_summaries`); err != nil {
 			t.Fatalf("drop table: %v", err)
 		}
+		// Explicit checked close: the file must be flushed before reopening
+		// read-only below. The deferred Close above then becomes a harmless
+		// idempotent no-op on the success path, and the safety net on any
+		// earlier t.Fatalf.
 		if err := rw.Close(); err != nil {
 			t.Fatalf("close: %v", err)
 		}
