@@ -536,6 +536,14 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: replace source %q: delete existing chunks: %w", source, err)
 	}
+	// A source replaced with zero chunks has ceased to exist; its summary row
+	// goes with it. A non-empty replace RETAINS the row — it becomes
+	// derived-stale until refreshed (#189 spec section 12).
+	if len(chunks) == 0 {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, source); err != nil {
+			return fmt.Errorf("rag: delete summary for emptied source %q: %w", source, err)
+		}
+	}
 	if opts.replaceVectorSpace && len(embeddings) > 0 {
 		if err := s.validateMigrationCorpusEmbeddingDimensionTx(ctx, tx, len(embeddings[0])); err != nil {
 			return fmt.Errorf("rag: replace source %q: %w", source, err)
@@ -856,6 +864,9 @@ func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: delete by source %q: %w", source, err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, source); err != nil {
+		return fmt.Errorf("rag: delete summary for source %q: %w", source, err)
 	}
 	if _, err := tx.ExecContext(ctx, `
 		UPDATE managed_documents

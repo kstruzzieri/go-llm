@@ -224,3 +224,62 @@ func TestSourceSummaryBatchImmutableDegradation(t *testing.T) {
 		}
 	})
 }
+
+func TestSummaryLifecycle(t *testing.T) {
+	ctx := context.Background()
+	emb4 := []float64{1, 0, 0, 0}
+
+	seed := func(t *testing.T) *SQLiteStore {
+		store := newTestStore(t)
+		chunk := Chunk{ID: "lc1", Content: "v1", Source: "pkg/lc.go", StartLine: 1, EndLine: 1}
+		if err := store.Store(ctx, []Chunk{chunk}, [][]float64{emb4}); err != nil {
+			t.Fatalf("seed chunks: %v", err)
+		}
+		row := validSummary()
+		row.Source = "pkg/lc.go"
+		if err := store.UpsertSourceSummary(ctx, row); err != nil {
+			t.Fatalf("seed summary: %v", err)
+		}
+		return store
+	}
+
+	summaryExists := func(t *testing.T, store *SQLiteStore) bool {
+		got, err := store.SourceSummaryBatch(ctx, []string{"pkg/lc.go"})
+		if err != nil {
+			t.Fatalf("summary batch: %v", err)
+		}
+		_, ok := got["pkg/lc.go"]
+		return ok
+	}
+
+	t.Run("reindex with content retains", func(t *testing.T) {
+		store := seed(t)
+		chunk := Chunk{ID: "lc2", Content: "v2", Source: "pkg/lc.go", StartLine: 1, EndLine: 1}
+		if err := store.ReplaceSource(ctx, "pkg/lc.go", []Chunk{chunk}, [][]float64{emb4}); err != nil {
+			t.Fatalf("replace: %v", err)
+		}
+		if !summaryExists(t, store) {
+			t.Fatal("summary must survive a content reindex (it becomes derived-stale)")
+		}
+	})
+
+	t.Run("replace to zero chunks deletes", func(t *testing.T) {
+		store := seed(t)
+		if err := store.ReplaceSource(ctx, "pkg/lc.go", nil, nil); err != nil {
+			t.Fatalf("empty replace: %v", err)
+		}
+		if summaryExists(t, store) {
+			t.Fatal("summary must be deleted when the source empties")
+		}
+	})
+
+	t.Run("DeleteBySource deletes", func(t *testing.T) {
+		store := seed(t)
+		if err := store.DeleteBySource(ctx, "pkg/lc.go"); err != nil {
+			t.Fatalf("DeleteBySource: %v", err)
+		}
+		if summaryExists(t, store) {
+			t.Fatal("summary must be deleted with its source")
+		}
+	})
+}
