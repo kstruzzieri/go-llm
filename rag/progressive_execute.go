@@ -29,6 +29,12 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 		// invariant it maintains: used + free == MaxTokens. Leaving free at
 		// zero would tell a caller the budget is exhausted when nothing was
 		// charged against it.
+		//
+		// The invariant holds on every NON-ERROR return, not universally: the
+		// three error returns above and below leave free at zero. That is
+		// deliberate — they pair the trace with a non-nil error, so it is a
+		// partial artifact a caller has no business reading budget figures out
+		// of, and widening the invariant would dress it up as a complete one.
 		trace.EstimatedTokensFree = req.MaxTokens
 		return "", trace, nil
 	}
@@ -161,11 +167,28 @@ func (r *Retriever) prepareProgressiveSources(ctx context.Context, req Progressi
 //
 // It mutates each source's rendered state (evidence, orientation, decisions),
 // which is what keeps attribution and EffectiveDepth describing exactly what
-// was emitted. It does NOT rewind allocState: on this path
-// EstimatedTokensUsed and OmittedSources over- and under-report respectively.
-// That is tolerable only because the path is unreachable under correct
-// admission — see TestProgressiveByteAccountingMatchesAssembly, which pins the
-// equality the unreachability rests on.
+// was emitted. It does NOT rewind allocState, so everything derived from it
+// goes stale together: EstimatedTokensUsed and NonFittingBlocks over-report,
+// OmittedSources and FloorRendered under-report, and EstimatedTokensFree
+// inherits the stale tokensUsed. Two concrete symptoms, so nobody has to
+// rediscover them:
+//
+//   - DistinctSources != SourcesAtL0 + SourcesAtL1 + SourcesWithEvidence +
+//     OmittedSources. A source trimmed to nothing lands in no bucket: the
+//     depth counters read post-trim state while OmittedSources reads pre-trim
+//     st.omitted.
+//   - dropLastBlock does not inspect decisions, so it would drop a PINNED
+//     evidence block — contradicting spec 9.4 step 3 ("a caller-required pin
+//     is never dropped by either ceiling") and leaving no_fit co-occurring
+//     with caller_pinned.
+//
+// Both are unreachable rather than fixed, because admission is exact:
+// TestProgressiveByteAccountingMatchesAssembly pins st.bytesUsed == len(out)
+// on a worked fixture, and Task 10's TestAllocateBudgetAccountingIsExact pins
+// the same equality as a seeded property over randomized inputs including a
+// non-monotonic estimator. Treat the trim path as under-specified, not merely
+// unused: anything that makes it reachable needs the accounting worked out
+// first.
 func assembleProgressive(sources []*progressiveSource, maxBytes int) (string, bool) {
 	truncated := false
 	for {

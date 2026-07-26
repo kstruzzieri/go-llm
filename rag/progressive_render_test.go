@@ -690,6 +690,55 @@ func TestRenderProgressiveRaceReusedChunkID(t *testing.T) {
 	}
 }
 
+func TestRenderProgressiveBlankChunkIDFailsClosed(t *testing.T) {
+	// A blank Chunk.ID cannot be looked up, so it is left out of the digest
+	// query — and must therefore FAIL CLOSED in the comparison. Skipping it
+	// instead would let a custom Chunker's unidentified chunk pass race
+	// detection, rendering a fresh stored summary beside evidence nothing
+	// verified. Built-in chunkers always populate the ID; this guard is what
+	// stands between a custom one and unverified evidence.
+	r, store := newProgressiveTestRetriever(t)
+	ctx := context.Background()
+	emb := []byte{0, 0, 0, 0}
+	const sentinel = "SUMMARY-BESIDE-UNVERIFIED-EVIDENCE"
+
+	// The stored row makes the summary genuinely FRESH: matching content hash
+	// and vector space, so nothing but the blank ID can degrade this source.
+	storeChunksRaw(t, store, [][]any{
+		{"bk1", "verified content", "pkg/bk.go", 1, 1, "go", `{}`, emb, int64(100), "", sigJSON(t, "hashBK"), "vs1"},
+	})
+	if err := store.UpsertSourceSummary(ctx, SourceSummary{
+		Source: "pkg/bk.go", ContentHash: "hashBK", VectorSpaceID: "vs1",
+		Abstract: sentinel, Overview: sentinel, SummaryModel: "m",
+		FormatVersion: SourceSummaryFormatVersion, SummarizedAt: 1700000000,
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "", Content: "verified content", Source: "pkg/bk.go", StartLine: 1, EndLine: 1},
+		Score: 0.9,
+	}}
+	out, trace, err := r.RenderProgressive(ctx, ProgressiveRenderRequest{
+		Results: results, MaxTokens: 10000, MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("RenderProgressive: %v", err)
+	}
+	src := trace.Sources[0]
+	if !slices.Contains(src.ValidityReasons, ReasonEvidenceMismatch) {
+		t.Fatalf("an unverifiable chunk must degrade the source: %v", src.ValidityReasons)
+	}
+	if src.OrientationGenerated {
+		t.Fatal("no stored summary text may render beside unverified evidence")
+	}
+	if strings.Contains(out, sentinel) {
+		t.Fatalf("summary text leaked beside unverified evidence:\n%s", out)
+	}
+	if !src.MetadataFromSnapshot {
+		t.Fatal("fail-closed path must flag MetadataFromSnapshot")
+	}
+}
+
 func TestRenderProgressiveIdenticalReindexStaysValid(t *testing.T) {
 	// A canonical reindex that produces identical chunks must NOT trip the
 	// race check: same IDs, same content, same digests.
