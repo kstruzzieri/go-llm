@@ -46,10 +46,19 @@ type ProgressiveRenderRequest struct {
 	MinFullResults int              // L2 floor preference; 0 => 1; negative rejected
 	MaxDepth       Depth            // DepthNone => DepthL2
 	Pinned         []PinRef         // caller-required L2
-	Estimate       func(string) int // nil => (len+3)/4
+	Estimate       func(string) int // nil, or a negative result, => defaultEstimate
 }
 
-// Decision constants for ProgressiveSourceTrace.Decisions.
+// defaultEstimate is the token heuristic used when the caller supplies no
+// Estimate, or when a supplied one returns a negative value.
+func defaultEstimate(s string) int { return (len(s) + 3) / 4 }
+
+// Decision constants for ProgressiveSourceTrace.Decisions. Unlike
+// ValidityReason, these are plain strings rather than a named type: their
+// emission order carries no meaning (Decisions is sorted with sort.Strings,
+// so alphabetical order is the whole contract, per spec), so there is no
+// reasonOrder-style completeness guard to hang a named type on, and the spec
+// mandates []string directly.
 const (
 	DecisionCallerPinned   = "caller_pinned"
 	DecisionFloorReserved  = "floor_reserved"
@@ -68,17 +77,17 @@ type ProgressiveTrace struct {
 	EstimatedTokensUsed int
 	EstimatedTokensFree int
 	BytesUsed           int
-	SelectedResults     int
+	SelectedResults     int // input results
 	DistinctSources     int
-	SourcesAtL0         int
-	SourcesAtL1         int
+	SourcesAtL0         int // orientation-only, abstract or metadata overview
+	SourcesAtL1         int // orientation-only, stored overview
 	SourcesWithEvidence int
-	EvidenceBlocks      int
+	EvidenceBlocks      int // results rendered, not sources
 	OmittedSources      int
 	NonFittingBlocks    int
 	OutputTruncated     bool
-	FloorRequested      int
-	FloorRendered       int
+	FloorRequested      int // results
+	FloorRendered       int // results, excluding pinned
 	UnmatchedPins       []PinRef
 	Sources             []ProgressiveSourceTrace
 }
@@ -91,7 +100,7 @@ type ProgressiveSourceTrace struct {
 	BestScore            float64 // score of that first result
 	ScoreKind            string  // "semantic_similarity"
 	EffectiveDepth       Depth   // DepthNone here means omitted entirely — unlike ProgressiveRenderRequest.MaxDepth, where DepthNone means unrestricted
-	OrientationGenerated bool    // true => stored summary text; false => metadata overview
+	OrientationGenerated bool    // true => stored summary text; false => metadata overview. Meaningless when EffectiveDepth == DepthNone.
 	MetadataFromSnapshot bool    // metadata built from retrieval-snapshot chunk fields (race path)
 	ValidityReasons      []ValidityReason
 	Decisions            []string // sorted for byte-stable traces
