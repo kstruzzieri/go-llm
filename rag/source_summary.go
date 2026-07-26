@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 )
@@ -169,6 +170,118 @@ func (s *SQLiteStore) SourceSummaryBatch(ctx context.Context, sources []string) 
 		return nil, fmt.Errorf("rag: iterate source summaries: %w", err)
 	}
 	return out, nil
+}
+
+// SourceProvenance is the per-source data the progressive renderer needs that
+// SearchResult does not carry (current content hash, vector space, managed
+// registry metadata). Blank ContentHash/VectorSpaceID mean "unknown" and are
+// validity reasons, never treated as matching values (design rule D6).
+type SourceProvenance struct {
+	Source        string
+	ContentHash   string
+	VectorSpaceID string
+	IndexedAt     int64 // MAX over the source's chunks; display-only
+	Mixed         bool  // MIN != MAX on signature or vector space
+	Managed       bool  // resolved via managed_documents, never the prefix
+	Title         string
+	Collection    string
+	Tags          []string
+	Freshness     DocumentFreshness
+}
+
+// SourceProvenanceBatch loads provenance for the given sources in two bounded
+// queries: a GROUP BY over chunks (MIN/MAX uniformity check, following the
+// probe at rag/sqlite_store.go:671) and a managed_documents ownership join.
+// When a field is mixed across a source it is left blank rather than picking
+// an arbitrary row, so it cascades into the matching unknown_* validity
+// reason alongside mixed_provenance.
+func (s *SQLiteStore) SourceProvenanceBatch(ctx context.Context, sources []string) (map[string]SourceProvenance, error) {
+	out := make(map[string]SourceProvenance, len(sources))
+	if len(sources) == 0 {
+		return out, nil
+	}
+	query, args := inClauseQuery(`
+		SELECT source,
+		       MIN(source_content_hash), MAX(source_content_hash),
+		       MIN(vector_space_id), MAX(vector_space_id),
+		       MAX(indexed_at)
+		FROM chunks WHERE source IN (%s) GROUP BY source`, sources)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("rag: source provenance batch: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var p SourceProvenance
+		var minSig, maxSig, minVS, maxVS string
+		if err := rows.Scan(&p.Source, &minSig, &maxSig, &minVS, &maxVS, &p.IndexedAt); err != nil {
+			return nil, fmt.Errorf("rag: scan source provenance: %w", err)
+		}
+		if minSig != maxSig {
+			p.Mixed = true // content hash left blank
+		} else if sig, ok := parseSourceSignature(minSig); ok {
+			p.ContentHash = sig.ContentHash
+		} // unparseable/blank signature: ContentHash stays "" (unknown)
+		if minVS != maxVS {
+			p.Mixed = true // vector space left blank
+		} else {
+			p.VectorSpaceID = minVS // may be "" (unknown, e.g. legacy or plain Store writes)
+		}
+		out[p.Source] = p
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rag: iterate source provenance: %w", err)
+	}
+
+	if err := s.attachManagedProvenance(ctx, sources, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// attachManagedProvenance overlays managed_documents registry metadata onto
+// already-loaded provenance rows. A missing managed_documents table (pre-v6
+// database opened read-only) degrades to "nothing is managed".
+func (s *SQLiteStore) attachManagedProvenance(ctx context.Context, sources []string, out map[string]SourceProvenance) error {
+	query, args := inClauseQuery(`
+		SELECT source, title, collection, tags, freshness
+		FROM managed_documents WHERE source IN (%s)`, sources)
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		if s.immutable && isMissingTableErr(err, "managed_documents") {
+			// Pre-v6 database opened read-only: nothing is managed. A missing
+			// registry on a writable store is corruption and propagates.
+			return nil
+		}
+		return fmt.Errorf("rag: managed provenance batch: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var source, title, collection, tagsJSON, freshness string
+		if err := rows.Scan(&source, &title, &collection, &tagsJSON, &freshness); err != nil {
+			return fmt.Errorf("rag: scan managed provenance: %w", err)
+		}
+		p, ok := out[source]
+		if !ok {
+			continue // registry row without chunks: nothing to render for it
+		}
+		p.Managed = true
+		p.Title = title
+		p.Collection = collection
+		p.Freshness = DocumentFreshness(freshness)
+		var tags []string
+		if err := json.Unmarshal([]byte(tagsJSON), &tags); err != nil {
+			// Corruption propagates; the spec's degradation paths are
+			// enumerated in section 13 and this is not one of them.
+			return fmt.Errorf("rag: decode managed provenance tags for %q: %w", source, err)
+		}
+		p.Tags = tags
+		out[source] = p
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rag: iterate managed provenance: %w", err)
+	}
+	return nil
 }
 
 // inClauseQuery formats query (which must contain exactly one %s) with the
