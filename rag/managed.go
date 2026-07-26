@@ -101,10 +101,10 @@ type Document struct {
 	// signal for transient states: an "indexing" document whose UpdatedAt is
 	// old was likely orphaned by a crash and needs a manual reindex/delete
 	// (automatic reclaim needs an owner lease; see the follow-up issue).
-	UpdatedAt int64 `json:"updated_at"`
-	source    string
+	UpdatedAt  int64 `json:"updated_at"`
+	source     string
 	storedText string
-	revision  int64
+	revision   int64
 }
 
 // DocumentOptions supplies optional metadata for a managed document.
