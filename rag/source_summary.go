@@ -71,22 +71,6 @@ func validateSourceSummaryWrite(row SourceSummary) error {
 	return nil
 }
 
-// summaryRowMalformed reports whether a stored row cannot be interpreted at
-// all. Malformed means the row bypassed write validation (blank required
-// fields, non-positive timestamp) or was written by a NEWER build
-// (format_version above current). A below-current format_version is stale,
-// not malformed: the row is interpretable, it just no longer applies.
-// Malformed short-circuits all freshness comparison.
-func summaryRowMalformed(row SourceSummary) bool {
-	return strings.TrimSpace(row.ContentHash) == "" ||
-		strings.TrimSpace(row.VectorSpaceID) == "" ||
-		strings.TrimSpace(row.Abstract) == "" ||
-		strings.TrimSpace(row.Overview) == "" ||
-		strings.TrimSpace(row.SummaryModel) == "" ||
-		row.SummarizedAt <= 0 ||
-		row.FormatVersion > SourceSummaryFormatVersion
-}
-
 // UpsertSourceSummary writes one L0/L1 pair atomically, replacing any existing
 // row for the source.
 func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary) error {

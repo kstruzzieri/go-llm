@@ -224,37 +224,3 @@ func TestSourceSummaryBatchImmutableDegradation(t *testing.T) {
 		}
 	})
 }
-
-func TestSummaryRowMalformed(t *testing.T) {
-	tests := []struct {
-		name   string
-		mutate func(*SourceSummary)
-		want   bool
-	}{
-		{"valid", func(s *SourceSummary) {}, false},
-		// Whitespace-only pins two properties at once: the clause must exist
-		// (delete it and this goes red) and must use TrimSpace, not == ""
-		// (drop the TrimSpace and this goes red too). Exact "" only pins the
-		// former, which is why "empty abstract" below is kept alongside it.
-		{"whitespace-only abstract", func(s *SourceSummary) { s.Abstract = "   " }, true},
-		{"empty abstract", func(s *SourceSummary) { s.Abstract = "" }, true},
-		{"whitespace-only overview", func(s *SourceSummary) { s.Overview = "   " }, true},
-		{"whitespace-only model", func(s *SourceSummary) { s.SummaryModel = "   " }, true},
-		{"whitespace-only content hash", func(s *SourceSummary) { s.ContentHash = "   " }, true},
-		{"whitespace-only vector space", func(s *SourceSummary) { s.VectorSpaceID = "   " }, true},
-		{"zero timestamp", func(s *SourceSummary) { s.SummarizedAt = 0 }, true},
-		// Above-current format: written by a newer build — cannot be interpreted.
-		{"format above current", func(s *SourceSummary) { s.FormatVersion = SourceSummaryFormatVersion + 1 }, true},
-		// Below-current format is stale, NOT malformed (spec section 5 matrix).
-		{"format below current", func(s *SourceSummary) { s.FormatVersion = SourceSummaryFormatVersion - 1 }, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			row := validSummary()
-			tt.mutate(&row)
-			if got := summaryRowMalformed(row); got != tt.want {
-				t.Fatalf("summaryRowMalformed = %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
