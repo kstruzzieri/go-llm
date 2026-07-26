@@ -1,6 +1,7 @@
 package rag
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -187,4 +188,33 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 		writeField("note", note)
 	}
 	return b.String()
+}
+
+// evidenceText renders one L2 block. The header is byte-identical to
+// BuildContext's format (rag/retriever.go:944) and content flows through
+// numberLines verbatim — evidence is NEVER normalized (spec section 9.7).
+// The header says "similarity:" because SearchResult.Score carries the
+// semantic-similarity contract; the trace qualifies this via ScoreKind.
+//
+// res.Chunk.Source is normalized for the same reason orientationText
+// normalizes src.source: "--- " is a line-start block delimiter with no
+// fixed prefix protecting it, so an un-normalized newline in the source path
+// would forge a second evidence block with fabricated attribution. This is
+// reachable, not theoretical: newlines are legal in POSIX filenames, nothing
+// sanitizes chunks.source on write (validateSourceSummaryWrite is
+// blank-checks only), and the managed-document path takes source from the
+// caller.
+//
+// Chunk.Content is deliberately NOT normalized — newlines are the payload,
+// and collapsing them would destroy the evidence. It needs no mitigation
+// because numberLines' per-line "%d| " prefix means a content line can never
+// begin with "--- ": every line gets a fixed prefix that isn't "--- ", the
+// same fixed-prefix argument that makes "name: value" fields safe above. This
+// makes the line numbering load-bearing for security, not merely formatting:
+// replacing it with raw content or a fenced block would reopen the same
+// block-forgery hole this function closes for Source.
+func evidenceText(res SearchResult) string {
+	return fmt.Sprintf("--- %s (lines %d-%d, similarity: %.2f) ---\n%s",
+		normalizeOrientationValue(res.Chunk.Source), res.Chunk.StartLine, res.Chunk.EndLine,
+		res.Score, numberLines(res.Chunk.Content, res.Chunk.StartLine))
 }
