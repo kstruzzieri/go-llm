@@ -70,9 +70,19 @@ func (st *allocState) admit(req ProgressiveRenderRequest, tokens, bytes int) boo
 }
 
 // allocate runs the spec section 9.4 algorithm over prepared sources,
-// mutating their allocation state. Sources arrive in source order (first
-// result index ascending); results inside each source are in retrieval order.
+// mutating their allocation state. Results inside each source must be in
+// retrieval order; the sources slice itself is sorted here rather than
+// trusted, and the caller's backing array is reordered in place — assembly
+// wants the same order, so that is the point, not a side effect.
 func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estimate func(string) int) (*allocState, error) {
+	// Source order is an input invariant, not a caller convention: steps 5 and
+	// 6b iterate this slice directly, so a slice built from map iteration would
+	// make omission choices and L1 upgrade order vary run to run while every
+	// assertion in the suite still passed. Normalizing at entry is the same
+	// move as DEV-10 and costs one line. Stable, so equal firstIndex values
+	// keep their relative order instead of being reshuffled arbitrarily.
+	sort.SliceStable(sources, func(i, j int) bool { return sources[i].firstIndex < sources[j].firstIndex })
+
 	st := &allocState{}
 	maxDepth := req.MaxDepth
 	if maxDepth == DepthNone {
@@ -216,6 +226,14 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 			continue
 		}
 		level := cheapestOrientation(src)
+		// Currently UNREACHABLE and deliberately kept: cheapestOrientation
+		// returns only orientationL0 or orientationMeta, and when maxDepth is
+		// DepthL0 step 6b never runs either, so nothing can produce
+		// orientationL0L1 at this point. Kept for the same reason as the >= in
+		// orientationText (DEV-13): if cheapestOrientation ever returns L0L1,
+		// or a level is added between them, this is what stops an overview
+		// rendering above the caller's depth ceiling. No test can catch its
+		// deletion — do not read it as live logic, do not delete it as dead.
 		if maxDepth == DepthL0 && level == orientationL0L1 {
 			level = orientationL0
 		}
@@ -284,9 +302,20 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 		}
 	}
 
-	// Evidence lists must render in retrieval order regardless of admission order.
+	// Evidence lists must render in retrieval order regardless of admission
+	// order: a pin admits its result in step 3, before the floor admits any
+	// earlier-ranked one in step 4.
 	for _, src := range sources {
 		sort.Ints(src.evidence)
+		// budget_demoted needs BOTH halves of the spec section 10 condition —
+		// a more expensive alternative rejected on cost AND a cheaper one
+		// rendered. The orientation guard is the second half: costRejected is
+		// set in step 4 before anything has rendered for that source, so
+		// without it an omitted source would claim budget_demoted alongside
+		// no_fit, which is incoherent — nothing was demoted, nothing rendered.
+		if src.costRejected && src.orientation != orientationNone {
+			src.decisions[DecisionBudgetDemoted] = true
+		}
 	}
 	return st, nil
 }
