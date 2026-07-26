@@ -1,6 +1,9 @@
 package rag
 
 import (
+	"context"
+	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -405,5 +408,182 @@ func TestEvidenceContentCannotForgeBlock(t *testing.T) {
 	}
 }
 
-// progressiveTestEmbedder is a fixed unit-vector embedder: RenderProgressive
-// never embeds anything, but the Retriever constructor requires one.
+// --- Compatibility (spec section 14) ---
+
+// TestRenderProgressiveV7ReadOnlyDegrades exercises a REAL v7 file opened via
+// OpenSQLiteStoreReadOnly: the missing table degrades to summary-missing.
+// Only the immutable open degrades — the writable case below expects an error.
+func TestRenderProgressiveV7ReadOnlyDegrades(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "v7ro.db")
+	setup, err := NewSQLiteStore(path)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	emb := []byte{0, 0, 0, 0}
+	storeChunksRaw(t, setup, [][]any{
+		{"v1", "content", "pkg/v.go", 1, 1, "go", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	})
+	// Rewind to v7: drop the v8 table and its version record.
+	if _, err := setup.db.Exec(`DROP TABLE source_summaries`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	if _, err := setup.db.Exec(`DELETE FROM rag_schema_version WHERE version >= 8`); err != nil {
+		t.Fatalf("rewind: %v", err)
+	}
+	if err := setup.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	store, err := OpenSQLiteStoreReadOnly(path)
+	if err != nil {
+		t.Fatalf("read-only open: %v", err)
+	}
+	// Opened outside newTestStore, so this close is this file's only one.
+	defer func() { _ = store.Close() }()
+	r, err := NewRetrieverWithEmbedder(progressiveTestEmbedder(), store)
+	if err != nil {
+		t.Fatalf("retriever: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "v1", Content: "content", Source: "pkg/v.go", StartLine: 1, EndLine: 1},
+		Score: 0.9,
+	}}
+	out, trace, err := r.RenderProgressive(context.Background(), ProgressiveRenderRequest{
+		Results: results, MaxTokens: 10000, MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("v7 read-only degradation must not error: %v", err)
+	}
+	if !strings.Contains(out, "metadata overview") {
+		t.Fatalf("must degrade to metadata overview:\n%s", out)
+	}
+	var hasMissing bool
+	for _, reason := range trace.Sources[0].ValidityReasons {
+		if reason == ReasonMissing {
+			hasMissing = true
+		}
+	}
+	if !hasMissing {
+		t.Fatalf("reasons = %v, want missing", trace.Sources[0].ValidityReasons)
+	}
+}
+
+// TestRenderProgressiveWritableV8MissingTableErrors is the other half of the
+// degradation gate: on a WRITABLE store migration guarantees the table, so a
+// missing one is corruption and must propagate (spec section 13), not degrade.
+func TestRenderProgressiveWritableV8MissingTableErrors(t *testing.T) {
+	r, store := newProgressiveTestRetriever(t)
+	emb := []byte{0, 0, 0, 0}
+	storeChunksRaw(t, store, [][]any{
+		{"w1", "content", "pkg/w.go", 1, 1, "go", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	})
+	if _, err := store.db.Exec(`DROP TABLE source_summaries`); err != nil {
+		t.Fatalf("drop: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "w1", Content: "content", Source: "pkg/w.go", StartLine: 1, EndLine: 1},
+		Score: 0.9,
+	}}
+	_, _, err := r.RenderProgressive(context.Background(), ProgressiveRenderRequest{
+		Results: results, MaxTokens: 10000, MaxBytes: 1 << 20,
+	})
+	if err == nil || !strings.Contains(err.Error(), "no such table") {
+		t.Fatalf("writable missing table must error, got %v", err)
+	}
+}
+
+// TestRenderProgressiveCollectionRenameLiveMetadata covers spec section 12's
+// last row: collection is live registry metadata, so renaming it changes the
+// rendered overview without touching the stored summary.
+func TestRenderProgressiveCollectionRenameLiveMetadata(t *testing.T) {
+	r, store := newProgressiveTestRetriever(t)
+	ctx := context.Background()
+	emb := []byte{0, 0, 0, 0}
+	source := "managed:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.md"
+	storeChunksRaw(t, store, [][]any{
+		{"cr1", "# Doc", source, 1, 1, "markdown", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	})
+	if _, err := store.db.Exec(`
+		INSERT INTO managed_documents
+		  (id, source, title, kind, mime_type, content_hash, source_signature,
+		   collection, tags, state, freshness, created_at, updated_at)
+		VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', ?, 'Doc', 'text', 'text/markdown',
+		        'h', 'sig', 'old-name', '[]', 'indexed', 'fresh', 1, 1)`, source); err != nil {
+		t.Fatalf("insert managed: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "cr1", Content: "# Doc", Source: source, StartLine: 1, EndLine: 1},
+		Score: 0.9,
+	}}
+	req := ProgressiveRenderRequest{Results: results, MaxTokens: 10000, MaxBytes: 1 << 20}
+	before, _, err := r.RenderProgressive(ctx, req)
+	if err != nil {
+		t.Fatalf("render before: %v", err)
+	}
+	if !strings.Contains(before, "collection: old-name") {
+		t.Fatalf("old collection missing:\n%s", before)
+	}
+	if _, err := store.db.Exec(`UPDATE managed_documents SET collection = 'new-name' WHERE source = ?`, source); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	after, _, err := r.RenderProgressive(ctx, req)
+	if err != nil {
+		t.Fatalf("render after: %v", err)
+	}
+	if !strings.Contains(after, "collection: new-name") || strings.Contains(after, "old-name") {
+		t.Fatalf("rename must render live:\n%s", after)
+	}
+}
+
+// nonSQLiteStore is a minimal custom VectorStore: no progressive reader. The
+// embedded field is the VectorStore INTERFACE, not *SQLiteStore, so the
+// progressiveStoreReader assertion in prepareProgressiveSources cannot reach
+// the inner store's methods through it.
+type nonSQLiteStore struct{ VectorStore }
+
+func TestRenderProgressiveCustomStoreFallsBack(t *testing.T) {
+	// newTestStore registers its own Close cleanup; do not add a second one.
+	inner := newTestStore(t)
+	r, err := NewRetrieverWithEmbedder(progressiveTestEmbedder(), nonSQLiteStore{inner})
+	if err != nil {
+		t.Fatalf("retriever: %v", err)
+	}
+	results := []SearchResult{{
+		Chunk: Chunk{ID: "n1", Content: "content", Source: "pkg/n.go", StartLine: 1, EndLine: 1, Language: "go"},
+		Score: 0.9,
+	}}
+	out, trace, err := r.RenderProgressive(context.Background(), ProgressiveRenderRequest{
+		Results: results, MaxTokens: 10000, MaxBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("custom store must not error: %v", err)
+	}
+	if !strings.Contains(out, "### pkg/n.go") || !strings.Contains(out, "--- pkg/n.go") {
+		t.Fatalf("must render metadata + evidence from chunk fields alone:\n%s", out)
+	}
+	reasons := trace.Sources[0].ValidityReasons
+	want := []ValidityReason{ReasonMissing, ReasonUnknownContentHash, ReasonUnknownVectorSpace}
+	if !reflect.DeepEqual(reasons, want) {
+		t.Fatalf("reasons = %v, want %v", reasons, want)
+	}
+}
+
+// TestBuildContextByteIdentical is the freeze check: BuildContext output is
+// untouched by this feature (spec section 4).
+func TestBuildContextByteIdentical(t *testing.T) {
+	r, _ := newProgressiveTestRetriever(t)
+	results := []SearchResult{{
+		Chunk: Chunk{Content: "func A() {}\n", Source: "pkg/a.go", StartLine: 1, EndLine: 1},
+		Score: 0.5,
+	}}
+	got := r.BuildContext(results, 1000)
+	// BuildContext's entry format is "--- ... ---\n%s\n" — numberLines already
+	// ends with \n, so each entry ends with a blank line (rag/retriever.go:944).
+	want := "Relevant code context:\n\n" +
+		"--- pkg/a.go (lines 1-1, similarity: 0.50) ---\n" +
+		"1| func A() {}\n\n"
+	if got != want {
+		t.Fatalf("BuildContext changed:\n got:\n%q\nwant:\n%q", got, want)
+	}
+}

@@ -2125,3 +2125,129 @@ func TestIndexDirectory_WithIncremental_PreservesDeletedWithoutPrune(t *testing.
 		t.Errorf("kept file %q missing", keptFile)
 	}
 }
+
+// --- Source-summary lifecycle at the indexer (#189 spec section 12) ---
+//
+// The store-level rows are covered by TestSummaryLifecycle. The two rows below
+// only exist at the indexer, because whether a summary is deleted depends on
+// an IndexDirectory option, not on any store call the summary API can see.
+
+// summaryStored reports whether a source_summaries row exists for source.
+func summaryStored(t *testing.T, store *SQLiteStore, source string) bool {
+	t.Helper()
+	got, err := store.SourceSummaryBatch(context.Background(), []string{source})
+	if err != nil {
+		t.Fatalf("SourceSummaryBatch() error: %v", err)
+	}
+	_, ok := got[source]
+	return ok
+}
+
+// seedSummaryPruneFixture indexes two files, installs a summary row for the
+// one it then deletes from disk, and returns the indexer, its store, the
+// workspace root, and the deleted file's stored source name.
+func seedSummaryPruneFixture(t *testing.T) (*Indexer, *SQLiteStore, string, string) {
+	t.Helper()
+	idx, store := newPruneTestIndexer(t)
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	keptFile := filepath.Join(tmpDir, "main.go")
+	deletedFile := filepath.Join(tmpDir, "old.go")
+	_ = os.WriteFile(keptFile, []byte("package main\n\nfunc Hello() {}\n"), 0644)
+	_ = os.WriteFile(deletedFile, []byte("package main\n\nfunc Old() {}\n"), 0644)
+
+	if err := idx.IndexDirectory(ctx, tmpDir); err != nil {
+		t.Fatalf("first IndexDirectory() error: %v", err)
+	}
+	if set := sourceSet(t, store); !set[deletedFile] {
+		t.Fatalf("expected %q indexed, got sources %v", deletedFile, set)
+	}
+	row := validSummary()
+	row.Source = deletedFile
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("UpsertSourceSummary() error: %v", err)
+	}
+	if err := os.Remove(deletedFile); err != nil {
+		t.Fatalf("Remove() error: %v", err)
+	}
+	return idx, store, tmpDir, deletedFile
+}
+
+func TestIndexDirectory_PruneDeleted_DeletesSourceSummary(t *testing.T) {
+	idx, store, tmpDir, deletedFile := seedSummaryPruneFixture(t)
+
+	if err := idx.IndexDirectory(context.Background(), tmpDir, WithIncremental(), WithPruneDeleted()); err != nil {
+		t.Fatalf("prune IndexDirectory() error: %v", err)
+	}
+
+	if set := sourceSet(t, store); set[deletedFile] {
+		t.Fatalf("deleted file %q survived prune; the summary assertion below would be vacuous", deletedFile)
+	}
+	if summaryStored(t, store, deletedFile) {
+		t.Errorf("pruned source %q kept its summary row", deletedFile)
+	}
+}
+
+// TestIndexDirectory_WithoutPrune_KeepsSourceSummary asserts the negative half
+// of the pair: without WithPruneDeleted a removed source keeps BOTH its chunks
+// and its summary, and the summary stays valid against the orphaned chunks.
+// Pruning is opt-in (rag/indexer.go:601), so any change that made deletion
+// unconditional would be silent without this row.
+func TestIndexDirectory_WithoutPrune_KeepsSourceSummary(t *testing.T) {
+	idx, store, tmpDir, deletedFile := seedSummaryPruneFixture(t)
+
+	if err := idx.IndexDirectory(context.Background(), tmpDir, WithIncremental()); err != nil {
+		t.Fatalf("incremental IndexDirectory() error: %v", err)
+	}
+
+	if set := sourceSet(t, store); !set[deletedFile] {
+		t.Fatalf("deleted file %q was pruned without WithPruneDeleted", deletedFile)
+	}
+	if !summaryStored(t, store, deletedFile) {
+		t.Errorf("summary for %q was deleted without WithPruneDeleted", deletedFile)
+	}
+}
+
+// TestIndexDirectory_PruneDeleted_ReclaimsPaddedSourceSummary is the
+// compatibility-level case for DEV-19. chunks.source is never normalized on
+// write (validateStoreInputs does not inspect it) while source_summaries.source
+// is trimmed by normalizeSourceSummary, so a padded chunk row and its summary
+// row are different strings. A trailing space survives filepath.Abs/Clean, so
+// prune hands the padded name to DeleteBySource, which must trim before
+// matching source_summaries or the row is orphaned forever — the read side
+// deliberately does not trim either (DEV-2), so nothing else reclaims it.
+func TestIndexDirectory_PruneDeleted_ReclaimsPaddedSourceSummary(t *testing.T) {
+	idx, store := newPruneTestIndexer(t)
+	ctx := context.Background()
+
+	tmpDir := t.TempDir()
+	keptFile := filepath.Join(tmpDir, "main.go")
+	_ = os.WriteFile(keptFile, []byte("package main\n\nfunc Hello() {}\n"), 0644)
+	if err := idx.IndexDirectory(ctx, tmpDir); err != nil {
+		t.Fatalf("first IndexDirectory() error: %v", err)
+	}
+
+	trimmed := filepath.Join(tmpDir, "pad.go")
+	padded := trimmed + " "
+	chunks := []Chunk{{ID: "pad1", Content: "padded", Source: padded, StartLine: 1, EndLine: 1, Metadata: map[string]string{}}}
+	if err := store.Store(ctx, chunks, [][]float64{{1, 0, 0, 0}}); err != nil {
+		t.Fatalf("Store() error: %v", err)
+	}
+	row := validSummary()
+	row.Source = trimmed
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatalf("UpsertSourceSummary() error: %v", err)
+	}
+
+	if err := idx.IndexDirectory(ctx, tmpDir, WithIncremental(), WithPruneDeleted()); err != nil {
+		t.Fatalf("prune IndexDirectory() error: %v", err)
+	}
+
+	if set := sourceSet(t, store); set[padded] {
+		t.Fatalf("padded source %q survived prune; the summary assertion below would be vacuous", padded)
+	}
+	if summaryStored(t, store, trimmed) {
+		t.Errorf("prune of padded source %q orphaned its summary row %q", padded, trimmed)
+	}
+}
