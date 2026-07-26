@@ -24,6 +24,22 @@ type SourceSummary struct {
 	SummarizedAt  int64
 }
 
+// normalizeSourceSummary returns a copy of row with its identity/provenance
+// fields (Source, ContentHash, VectorSpaceID, SummaryModel) trimmed to their
+// canonical form. Source is the primary key and the join key against
+// chunks.source / managed_documents.source, so an untrimmed value would
+// silently orphan the row from every downstream reader and from delete.
+// Abstract and Overview are free text, deliberately left untouched: the
+// renderers normalize display text themselves, and trimming here would be a
+// second, competing normalization layer.
+func normalizeSourceSummary(row SourceSummary) SourceSummary {
+	row.Source = strings.TrimSpace(row.Source)
+	row.ContentHash = strings.TrimSpace(row.ContentHash)
+	row.VectorSpaceID = strings.TrimSpace(row.VectorSpaceID)
+	row.SummaryModel = strings.TrimSpace(row.SummaryModel)
+	return row
+}
+
 // validateSourceSummaryWrite enforces the write contract: no blank fields, the
 // current format version, a positive timestamp. A summary must name the vector
 // space it was generated against — blank provenance is a validity reason on
@@ -55,6 +71,7 @@ func validateSourceSummaryWrite(row SourceSummary) error {
 // UpsertSourceSummary writes one L0/L1 pair atomically, replacing any existing
 // row for the source.
 func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary) error {
+	row = normalizeSourceSummary(row)
 	if err := validateSourceSummaryWrite(row); err != nil {
 		return err
 	}
@@ -81,7 +98,8 @@ func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary
 // DeleteSourceSummary removes the summary row for source. Deleting an absent
 // row is a no-op.
 func (s *SQLiteStore) DeleteSourceSummary(ctx context.Context, source string) error {
-	if strings.TrimSpace(source) == "" {
+	source = strings.TrimSpace(source)
+	if source == "" {
 		return fmt.Errorf("rag: delete source summary: blank source")
 	}
 	if _, err := s.db.ExecContext(ctx,
@@ -94,6 +112,11 @@ func (s *SQLiteStore) DeleteSourceSummary(ctx context.Context, source string) er
 // SourceSummaryBatch loads summary rows for the given sources. Sources with no
 // row are absent from the map. Rows are returned as stored; interpretation
 // (malformed / stale) happens in deriveSummaryValidity.
+//
+// sources are expected already canonical (untrimmed as-is): they originate
+// from chunks.source, and the returned map is keyed by the DB-returned
+// source, so trimming the query input here would let a padded caller name
+// query successfully while being unable to look up its own result.
 func (s *SQLiteStore) SourceSummaryBatch(ctx context.Context, sources []string) (map[string]SourceSummary, error) {
 	out := make(map[string]SourceSummary, len(sources))
 	if len(sources) == 0 {
@@ -130,7 +153,12 @@ func (s *SQLiteStore) SourceSummaryBatch(ctx context.Context, sources []string) 
 }
 
 // inClauseQuery formats query (which must contain exactly one %s) with the
-// right number of placeholders and returns the matching args slice.
+// right number of placeholders and returns the matching args slice. query
+// must not contain any other printf verb: a stray one (e.g. a literal "%s" in
+// an embedded strftime format) is not caught here and corrupts the SQL
+// silently rather than erroring — fmt substitutes "%!s(MISSING)" for it,
+// SQLite accepts the malformed literal without complaint, and the query
+// simply returns zero rows with a nil error.
 func inClauseQuery(query string, values []string) (string, []any) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(values)), ",")
 	args := make([]any, len(values))

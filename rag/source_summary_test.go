@@ -21,7 +21,6 @@ func validSummary() SourceSummary {
 
 func TestUpsertSourceSummaryValidation(t *testing.T) {
 	store := newTestStore(t)
-	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
 	tests := []struct {
@@ -53,7 +52,6 @@ func TestUpsertSourceSummaryValidation(t *testing.T) {
 
 func TestUpsertSourceSummaryRoundTripAndReplace(t *testing.T) {
 	store := newTestStore(t)
-	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
 	row := validSummary()
@@ -93,7 +91,6 @@ func TestUpsertSourceSummaryRoundTripAndReplace(t *testing.T) {
 
 func TestDeleteSourceSummary(t *testing.T) {
 	store := newTestStore(t)
-	defer func() { _ = store.Close() }()
 	ctx := context.Background()
 
 	if err := store.DeleteSourceSummary(ctx, ""); err == nil {
@@ -117,4 +114,104 @@ func TestDeleteSourceSummary(t *testing.T) {
 	if err := store.DeleteSourceSummary(ctx, row.Source); err != nil {
 		t.Fatalf("second delete: %v", err)
 	}
+}
+
+// TestUpsertSourceSummaryNormalizesIdentityFields pins the PK-collapse
+// behavior: Source is both the primary key and the join key against
+// chunks.source, so a padded value must normalize to the same row as its
+// trimmed counterpart rather than coexisting as a second, unreachable row.
+func TestUpsertSourceSummaryNormalizesIdentityFields(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+
+	row := validSummary()
+	padded := row
+	padded.Source = "  " + row.Source + "  "
+	padded.ContentHash = " " + row.ContentHash + " "
+	padded.VectorSpaceID = " " + row.VectorSpaceID + " "
+	padded.SummaryModel = " " + row.SummaryModel + " "
+	if err := store.UpsertSourceSummary(ctx, padded); err != nil {
+		t.Fatalf("upsert padded: %v", err)
+	}
+
+	got, err := store.SourceSummaryBatch(ctx, []string{row.Source})
+	if err != nil {
+		t.Fatalf("batch read: %v", err)
+	}
+	if got[row.Source] != row {
+		t.Fatalf("canonical lookup mismatch:\n got  %+v\n want %+v", got[row.Source], row)
+	}
+
+	// A second upsert differing only in padding must replace, not duplicate.
+	repadded := row
+	repadded.Source = "\t" + row.Source + "\n"
+	if err := store.UpsertSourceSummary(ctx, repadded); err != nil {
+		t.Fatalf("upsert repadded: %v", err)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM source_summaries WHERE source = ?`, row.Source).Scan(&count); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("expected 1 row for logically-same source, got %d", count)
+	}
+
+	// Delete must use the same canonical key form as write.
+	if err := store.DeleteSourceSummary(ctx, "  "+row.Source+"  "); err != nil {
+		t.Fatalf("delete padded: %v", err)
+	}
+	got, err = store.SourceSummaryBatch(ctx, []string{row.Source})
+	if err != nil {
+		t.Fatalf("batch read after delete: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("row survived padded delete: %+v", got)
+	}
+}
+
+// TestSourceSummaryBatchImmutableDegradation exercises both branches of the
+// SourceSummaryBatch missing-table gate (s.immutable && isMissingTableErr):
+// a read-only v7 snapshot degrades to summary-missing, but the identical
+// missing-table condition on a writable store is corruption and must
+// propagate rather than degrade.
+func TestSourceSummaryBatchImmutableDegradation(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("read-only snapshot degrades to empty result", func(t *testing.T) {
+		path := t.TempDir() + "/v7.db"
+		rw, err := NewSQLiteStore(path)
+		if err != nil {
+			t.Fatalf("NewSQLiteStore: %v", err)
+		}
+		if _, err := rw.db.Exec(`DROP TABLE source_summaries`); err != nil {
+			t.Fatalf("drop table: %v", err)
+		}
+		if err := rw.Close(); err != nil {
+			t.Fatalf("close: %v", err)
+		}
+
+		ro, err := OpenSQLiteStoreReadOnly(path)
+		if err != nil {
+			t.Fatalf("OpenSQLiteStoreReadOnly: %v", err)
+		}
+		defer func() { _ = ro.Close() }()
+
+		got, err := ro.SourceSummaryBatch(ctx, []string{"pkg/a.go"})
+		if err != nil {
+			t.Fatalf("SourceSummaryBatch = %v, want nil error", err)
+		}
+		if len(got) != 0 {
+			t.Fatalf("SourceSummaryBatch = %+v, want empty map", got)
+		}
+	})
+
+	t.Run("writable store propagates missing table as corruption", func(t *testing.T) {
+		store := newTestStore(t)
+		if _, err := store.db.Exec(`DROP TABLE source_summaries`); err != nil {
+			t.Fatalf("drop table: %v", err)
+		}
+		if _, err := store.SourceSummaryBatch(ctx, []string{"pkg/a.go"}); err == nil {
+			t.Fatal("SourceSummaryBatch = nil error, want propagated corruption error")
+		}
+	})
 }
