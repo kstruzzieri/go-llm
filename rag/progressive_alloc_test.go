@@ -22,7 +22,7 @@ func allocFixture(contents ...string) []*progressiveSource {
 			resultIdx: []int{i},
 			provFound: true,
 			prov:      SourceProvenance{ContentHash: "h", VectorSpaceID: "v"},
-			reasons:   []ValidityReason{ReasonMissing},
+			reasons:   []ValidityReason{ValidityReasonMissing},
 			decisions: map[string]bool{},
 		}
 	}
@@ -481,7 +481,7 @@ func tieFixture(n int) []*progressiveSource {
 			resultIdx: []int{i % 3},
 			provFound: true,
 			prov:      SourceProvenance{ContentHash: "h", VectorSpaceID: "v"},
-			reasons:   []ValidityReason{ReasonMissing},
+			reasons:   []ValidityReason{ValidityReasonMissing},
 			decisions: map[string]bool{},
 		}
 	}
@@ -640,7 +640,7 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 					SummaryModel: "m", FormatVersion: SourceSummaryFormatVersion, SummarizedAt: 1700000000,
 				}
 			} else {
-				src.reasons = []ValidityReason{ReasonMissing}
+				src.reasons = []ValidityReason{ValidityReasonMissing}
 			}
 			sources = append(sources, src)
 		}

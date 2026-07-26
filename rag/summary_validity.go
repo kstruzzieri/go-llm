@@ -36,15 +36,15 @@ func summaryRowMalformed(row SourceSummary) bool {
 type ValidityReason string
 
 const (
-	ReasonMissing            ValidityReason = "missing"              // no row
-	ReasonMalformedRow       ValidityReason = "malformed_row"        // row fails read validation; short-circuits comparison
-	ReasonStaleContent       ValidityReason = "stale_content"        // content_hash mismatch
-	ReasonStaleVectorSpace   ValidityReason = "stale_vector_space"   // vector_space_id mismatch
-	ReasonStaleFormat        ValidityReason = "stale_format"         // format_version BELOW constant (above => malformed_row)
-	ReasonUnknownContentHash ValidityReason = "unknown_content_hash" // CURRENT signature unparseable/absent
-	ReasonUnknownVectorSpace ValidityReason = "unknown_vector_space" // CURRENT vector space blank
-	ReasonMixedProvenance    ValidityReason = "mixed_provenance"     // MIN != MAX across the source
-	ReasonEvidenceMismatch   ValidityReason = "evidence_mismatch"    // retrieved chunk digest no longer matches the index
+	ValidityReasonMissing            ValidityReason = "missing"              // no row
+	ValidityReasonMalformedRow       ValidityReason = "malformed_row"        // row fails read validation; short-circuits comparison
+	ValidityReasonStaleContent       ValidityReason = "stale_content"        // content_hash mismatch
+	ValidityReasonStaleVectorSpace   ValidityReason = "stale_vector_space"   // vector_space_id mismatch
+	ValidityReasonStaleFormat        ValidityReason = "stale_format"         // format_version BELOW constant (above => malformed_row)
+	ValidityReasonUnknownContentHash ValidityReason = "unknown_content_hash" // CURRENT signature unparseable/absent
+	ValidityReasonUnknownVectorSpace ValidityReason = "unknown_vector_space" // CURRENT vector space blank
+	ValidityReasonMixedProvenance    ValidityReason = "mixed_provenance"     // MIN != MAX across the source
+	ValidityReasonEvidenceMismatch   ValidityReason = "evidence_mismatch"    // retrieved chunk digest no longer matches the index
 )
 
 // deriveSummaryValidity computes the reason set for one source at render time.
@@ -86,22 +86,22 @@ func deriveSummaryValidity(row *SourceSummary, prov SourceProvenance, provFound,
 	malformed := row != nil && summaryRowMalformed(*row)
 	switch {
 	case row == nil:
-		reasons = append(reasons, ReasonMissing)
+		reasons = append(reasons, ValidityReasonMissing)
 	case malformed:
 		// Malformed short-circuits the row comparison entirely: no stale_*
 		// and no unknown_* accompany it (spec section 5 matrix). Reasons
 		// about the SOURCE (mixed) and the EVIDENCE (mismatch) still apply
 		// below — they do not describe the row.
-		reasons = append(reasons, ReasonMalformedRow)
+		reasons = append(reasons, ValidityReasonMalformedRow)
 	default:
 		if prov.ContentHash != "" && row.ContentHash != prov.ContentHash {
-			reasons = append(reasons, ReasonStaleContent)
+			reasons = append(reasons, ValidityReasonStaleContent)
 		}
 		if prov.VectorSpaceID != "" && row.VectorSpaceID != prov.VectorSpaceID {
-			reasons = append(reasons, ReasonStaleVectorSpace)
+			reasons = append(reasons, ValidityReasonStaleVectorSpace)
 		}
 		if row.FormatVersion < SourceSummaryFormatVersion {
-			reasons = append(reasons, ReasonStaleFormat)
+			reasons = append(reasons, ValidityReasonStaleFormat)
 		}
 	}
 	if !malformed {
@@ -113,26 +113,26 @@ func deriveSummaryValidity(row *SourceSummary, prov SourceProvenance, provFound,
 		// unknown current side: missing is exclusive with row-bearing reasons
 		// only.
 		if prov.ContentHash == "" {
-			reasons = append(reasons, ReasonUnknownContentHash)
+			reasons = append(reasons, ValidityReasonUnknownContentHash)
 		}
 		if prov.VectorSpaceID == "" {
-			reasons = append(reasons, ReasonUnknownVectorSpace)
+			reasons = append(reasons, ValidityReasonUnknownVectorSpace)
 		}
 	}
 	if prov.Mixed {
-		reasons = append(reasons, ReasonMixedProvenance)
+		reasons = append(reasons, ValidityReasonMixedProvenance)
 	}
 	if !evidenceOK {
-		reasons = append(reasons, ReasonEvidenceMismatch)
+		reasons = append(reasons, ValidityReasonEvidenceMismatch)
 	}
 	return sortReasons(reasons)
 }
 
 // reasonOrder is the fixed declaration order for byte-stable trace emission.
 var reasonOrder = map[ValidityReason]int{
-	ReasonMissing: 0, ReasonMalformedRow: 1, ReasonStaleContent: 2,
-	ReasonStaleVectorSpace: 3, ReasonStaleFormat: 4, ReasonUnknownContentHash: 5,
-	ReasonUnknownVectorSpace: 6, ReasonMixedProvenance: 7, ReasonEvidenceMismatch: 8,
+	ValidityReasonMissing: 0, ValidityReasonMalformedRow: 1, ValidityReasonStaleContent: 2,
+	ValidityReasonStaleVectorSpace: 3, ValidityReasonStaleFormat: 4, ValidityReasonUnknownContentHash: 5,
+	ValidityReasonUnknownVectorSpace: 6, ValidityReasonMixedProvenance: 7, ValidityReasonEvidenceMismatch: 8,
 }
 
 // sortReasons sorts reasons into reasonOrder sequence IN PLACE and returns the

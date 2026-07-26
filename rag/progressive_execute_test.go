@@ -123,7 +123,7 @@ func TestRenderProgressiveStaleTextNeverRendered(t *testing.T) {
 		t.Fatalf("stale summary text leaked into output:\n%s", out)
 	}
 	got := trace.Sources[0].ValidityReasons
-	if len(got) != 1 || got[0] != ReasonStaleContent {
+	if len(got) != 1 || got[0] != ValidityReasonStaleContent {
 		t.Fatalf("reasons = %v, want [stale_content]", got)
 	}
 	// OrientationGenerated reports what was RENDERED, not whether a row
@@ -179,7 +179,7 @@ func TestRenderProgressiveRace(t *testing.T) {
 	if strings.Contains(out, bSentinel) {
 		t.Fatalf("version B summary rendered beside version A evidence:\n%s", out)
 	}
-	if !slices.Contains(trace.Sources[0].ValidityReasons, ReasonEvidenceMismatch) {
+	if !slices.Contains(trace.Sources[0].ValidityReasons, ValidityReasonEvidenceMismatch) {
 		t.Fatalf("evidence_mismatch missing: %v", trace.Sources[0].ValidityReasons)
 	}
 	if !trace.Sources[0].MetadataFromSnapshot {
@@ -325,7 +325,7 @@ func TestRenderProgressiveRaceReusedChunkID(t *testing.T) {
 	if strings.Contains(out, bSentinel) {
 		t.Fatalf("reused-ID race leaked B summary beside A evidence:\n%s", out)
 	}
-	if !slices.Contains(trace.Sources[0].ValidityReasons, ReasonEvidenceMismatch) {
+	if !slices.Contains(trace.Sources[0].ValidityReasons, ValidityReasonEvidenceMismatch) {
 		t.Fatalf("digest comparison must flag evidence_mismatch: %v", trace.Sources[0].ValidityReasons)
 	}
 }
@@ -365,7 +365,7 @@ func TestRenderProgressiveBlankChunkIDFailsClosed(t *testing.T) {
 		t.Fatalf("RenderProgressive: %v", err)
 	}
 	src := trace.Sources[0]
-	if !slices.Contains(src.ValidityReasons, ReasonEvidenceMismatch) {
+	if !slices.Contains(src.ValidityReasons, ValidityReasonEvidenceMismatch) {
 		t.Fatalf("an unverifiable chunk must degrade the source: %v", src.ValidityReasons)
 	}
 	if src.OrientationGenerated {
@@ -800,7 +800,7 @@ func TestAssembleProgressiveDropsWholeBlocks(t *testing.T) {
 	src := &progressiveSource{
 		source:      "pkg/t.go",
 		results:     []SearchResult{{Chunk: Chunk{ID: "t1", Content: multi, Source: "pkg/t.go", StartLine: 1, EndLine: 1}, Score: 0.9}},
-		reasons:     []ValidityReason{ReasonMissing},
+		reasons:     []ValidityReason{ValidityReasonMissing},
 		orientation: orientationMeta,
 		evidence:    []int{0},
 		decisions:   map[string]bool{},

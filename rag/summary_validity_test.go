@@ -28,48 +28,48 @@ func TestDeriveSummaryValidity(t *testing.T) {
 	}{
 		{"fresh", &fresh, prov, true, true, nil},
 		{"missing row", nil, prov, true, true,
-			[]ValidityReason{ReasonMissing}},
+			[]ValidityReason{ValidityReasonMissing}},
 		// missing is mutually exclusive with ROW-BEARING reasons only (spec
 		// section 14); unknown_* are current-side, so a missing row whose
 		// current side is also blank emits all three.
 		{"missing row with unknown current side", nil, SourceProvenance{}, true, true,
-			[]ValidityReason{ReasonMissing, ReasonUnknownContentHash, ReasonUnknownVectorSpace}},
+			[]ValidityReason{ValidityReasonMissing, ValidityReasonUnknownContentHash, ValidityReasonUnknownVectorSpace}},
 		{"malformed short-circuits comparison", &blankRow,
 			SourceProvenance{ContentHash: "other", VectorSpaceID: "othervs"}, true, true,
-			[]ValidityReason{ReasonMalformedRow}},
+			[]ValidityReason{ValidityReasonMalformedRow}},
 		{"format above current is malformed", &newer, prov, true, true,
-			[]ValidityReason{ReasonMalformedRow}},
+			[]ValidityReason{ValidityReasonMalformedRow}},
 		{"format below current is stale", &older, prov, true, true,
-			[]ValidityReason{ReasonStaleFormat}},
+			[]ValidityReason{ValidityReasonStaleFormat}},
 		{"content drift", &fresh,
 			SourceProvenance{ContentHash: "changed", VectorSpaceID: "vs1"}, true, true,
-			[]ValidityReason{ReasonStaleContent}},
+			[]ValidityReason{ValidityReasonStaleContent}},
 		{"vector space drift", &fresh,
 			SourceProvenance{ContentHash: "hash1", VectorSpaceID: "vs2"}, true, true,
-			[]ValidityReason{ReasonStaleVectorSpace}},
+			[]ValidityReason{ValidityReasonStaleVectorSpace}},
 		{"both drift preserved in declaration order", &fresh,
 			SourceProvenance{ContentHash: "changed", VectorSpaceID: "vs2"}, true, true,
-			[]ValidityReason{ReasonStaleContent, ReasonStaleVectorSpace}},
+			[]ValidityReason{ValidityReasonStaleContent, ValidityReasonStaleVectorSpace}},
 		{"blank current hash is unknown, never a match", &fresh,
 			SourceProvenance{ContentHash: "", VectorSpaceID: "vs1"}, true, true,
-			[]ValidityReason{ReasonUnknownContentHash}},
+			[]ValidityReason{ValidityReasonUnknownContentHash}},
 		{"blank current vector space is unknown", &fresh,
 			SourceProvenance{ContentHash: "hash1", VectorSpaceID: ""}, true, true,
-			[]ValidityReason{ReasonUnknownVectorSpace}},
+			[]ValidityReason{ValidityReasonUnknownVectorSpace}},
 		{"mixed provenance", &fresh,
 			SourceProvenance{ContentHash: "", VectorSpaceID: "vs1", Mixed: true}, true, true,
-			[]ValidityReason{ReasonUnknownContentHash, ReasonMixedProvenance}},
+			[]ValidityReason{ValidityReasonUnknownContentHash, ValidityReasonMixedProvenance}},
 		{"evidence mismatch", &fresh, prov, true, false,
-			[]ValidityReason{ReasonEvidenceMismatch}},
+			[]ValidityReason{ValidityReasonEvidenceMismatch}},
 		{"no provenance at all", &fresh, SourceProvenance{}, false, true,
-			[]ValidityReason{ReasonUnknownContentHash, ReasonUnknownVectorSpace}},
+			[]ValidityReason{ValidityReasonUnknownContentHash, ValidityReasonUnknownVectorSpace}},
 		// provFound=false means the store could not supply provenance, so the
 		// current side is unknown no matter what the struct holds. Fields that
 		// happen to MATCH the row are what pins the !provFound handling: drop
 		// it and this case yields a bogus "fresh".
 		{"provenance not found outranks fields that look valid", &fresh,
 			SourceProvenance{ContentHash: "hash1", VectorSpaceID: "vs1"}, false, true,
-			[]ValidityReason{ReasonUnknownContentHash, ReasonUnknownVectorSpace}},
+			[]ValidityReason{ValidityReasonUnknownContentHash, ValidityReasonUnknownVectorSpace}},
 		// The same rule with fields that DRIFT: not-found zeroes prov, so no
 		// stale_* may be derived from values the store never populated —
 		// otherwise stale_* and unknown_* would co-occur on one field, which
@@ -77,19 +77,19 @@ func TestDeriveSummaryValidity(t *testing.T) {
 		// cannot know a source's chunks disagree if you could not read them.
 		{"not found ignores populated provenance entirely", &fresh,
 			SourceProvenance{ContentHash: "changed", VectorSpaceID: "vs2", Mixed: true}, false, true,
-			[]ValidityReason{ReasonUnknownContentHash, ReasonUnknownVectorSpace}},
+			[]ValidityReason{ValidityReasonUnknownContentHash, ValidityReasonUnknownVectorSpace}},
 		// stale_* and unknown_* are per-field mutually exclusive (a stale
 		// comparison needs a non-blank current value), so this five-reason
 		// set is the maximal compatible one for a well-formed row.
 		{"maximal compatible set", &older,
 			SourceProvenance{ContentHash: "", VectorSpaceID: "", Mixed: true}, true, false,
-			[]ValidityReason{ReasonStaleFormat, ReasonUnknownContentHash,
-				ReasonUnknownVectorSpace, ReasonMixedProvenance, ReasonEvidenceMismatch}},
+			[]ValidityReason{ValidityReasonStaleFormat, ValidityReasonUnknownContentHash,
+				ValidityReasonUnknownVectorSpace, ValidityReasonMixedProvenance, ValidityReasonEvidenceMismatch}},
 		// malformed_row short-circuits row comparison (no stale_*/unknown_*)
 		// but source- and evidence-scoped reasons still apply.
 		{"malformed with mixed and evidence", &blankRow,
 			SourceProvenance{ContentHash: "", VectorSpaceID: "", Mixed: true}, true, false,
-			[]ValidityReason{ReasonMalformedRow, ReasonMixedProvenance, ReasonEvidenceMismatch}},
+			[]ValidityReason{ValidityReasonMalformedRow, ValidityReasonMixedProvenance, ValidityReasonEvidenceMismatch}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -106,7 +106,7 @@ func TestDeriveSummaryValidity(t *testing.T) {
 //
 // Completeness: sortReasons ranks by reasonOrder[reason], and a Go map returns
 // 0 for an absent key, so a reason declared without an order entry sorts ahead
-// of ReasonMissing. The derive table would also catch that once the new reason
+// of ValidityReasonMissing. The derive table would also catch that once the new reason
 // is emitted — position 0 is the most visible possible misplacement — but it
 // would surface as a confusing ordering failure elsewhere; this test fails at
 // the source instead. Go cannot enumerate constants reflectively, so the nine
@@ -120,9 +120,9 @@ func TestDeriveSummaryValidity(t *testing.T) {
 // without going red.
 func TestReasonOrderIsCompleteAndSorts(t *testing.T) {
 	declared := []ValidityReason{
-		ReasonMissing, ReasonMalformedRow, ReasonStaleContent,
-		ReasonStaleVectorSpace, ReasonStaleFormat, ReasonUnknownContentHash,
-		ReasonUnknownVectorSpace, ReasonMixedProvenance, ReasonEvidenceMismatch,
+		ValidityReasonMissing, ValidityReasonMalformedRow, ValidityReasonStaleContent,
+		ValidityReasonStaleVectorSpace, ValidityReasonStaleFormat, ValidityReasonUnknownContentHash,
+		ValidityReasonUnknownVectorSpace, ValidityReasonMixedProvenance, ValidityReasonEvidenceMismatch,
 	}
 	if len(reasonOrder) != len(declared) {
 		t.Fatalf("reasonOrder has %d entries, want %d: a reason was added or removed without updating the order map",
@@ -132,7 +132,7 @@ func TestReasonOrderIsCompleteAndSorts(t *testing.T) {
 	for _, r := range declared {
 		idx, ok := reasonOrder[r]
 		if !ok {
-			t.Errorf("reason %q absent from reasonOrder: it would sort to 0, ahead of %q", r, ReasonMissing)
+			t.Errorf("reason %q absent from reasonOrder: it would sort to 0, ahead of %q", r, ValidityReasonMissing)
 			continue
 		}
 		if dup, clash := seen[idx]; clash {

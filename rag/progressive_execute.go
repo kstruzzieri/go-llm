@@ -157,7 +157,7 @@ func (r *Retriever) prepareProgressiveSources(ctx context.Context, req Progressi
 		// re-opens the way to emitting it beside no_fit on a source that
 		// rendered nothing.
 		for _, reason := range src.reasons {
-			if reason == ReasonMissing {
+			if reason == ValidityReasonMissing {
 				src.decisions[DecisionSummaryMissing] = true
 			} else {
 				src.decisions[DecisionSummaryStale] = true

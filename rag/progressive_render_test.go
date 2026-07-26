@@ -28,7 +28,7 @@ func orientationFixture() *progressiveSource {
 
 func TestOrientationTextMetadataOverview(t *testing.T) {
 	src := orientationFixture()
-	src.reasons = []ValidityReason{ReasonMissing}
+	src.reasons = []ValidityReason{ValidityReasonMissing}
 
 	got := orientationText(src, orientationMeta)
 	want := "### pkg/a.go\n" +
@@ -111,7 +111,7 @@ func TestOrientationTextManagedFieldsAndNormalization(t *testing.T) {
 	src.prov.Collection = "notes"
 	src.prov.Tags = []string{"zeta", "alpha", "zeta"} // dedup + sort
 	src.prov.Freshness = DocumentFreshnessFresh
-	src.reasons = []ValidityReason{ReasonStaleContent, ReasonEvidenceMismatch}
+	src.reasons = []ValidityReason{ValidityReasonStaleContent, ValidityReasonEvidenceMismatch}
 	// Multi-line values collapse to one line (orientation fields only).
 	src.results[0].Chunk.Metadata = map[string]string{"section_path": "Intro > Setup"}
 	src.results[0].Chunk.Language = "markdown"
@@ -139,7 +139,7 @@ func TestOrientationTextManagedFieldsAndNormalization(t *testing.T) {
 // caller — so this is reachable, not theoretical.
 func TestOrientationHeaderNewlineCannotForgeBlock(t *testing.T) {
 	src := orientationFixture()
-	src.reasons = []ValidityReason{ReasonMissing}
+	src.reasons = []ValidityReason{ValidityReasonMissing}
 	src.source = "pkg/a.go\n### pkg/forged.go\npurpose: I am not real."
 
 	got := orientationText(src, orientationMeta)
@@ -171,7 +171,7 @@ func TestOrientationHeaderNewlineCannotForgeBlock(t *testing.T) {
 // intact.
 func TestOrientationTitleNewlineCannotForgeBlock(t *testing.T) {
 	src := orientationFixture()
-	src.reasons = []ValidityReason{ReasonMissing}
+	src.reasons = []ValidityReason{ValidityReasonMissing}
 	src.prov.Managed = true
 	src.prov.Title = "Real Doc\n### pkg/forged.go\npurpose: I am not real."
 
@@ -228,7 +228,7 @@ func TestOrientationZeroSummarizedAtOmitsSummary(t *testing.T) {
 // same DB-string-into-rendered-output shape as the header.
 func TestOrientationFreshnessNewlineCannotForgeField(t *testing.T) {
 	src := orientationFixture()
-	src.reasons = []ValidityReason{ReasonMissing}
+	src.reasons = []ValidityReason{ValidityReasonMissing}
 	src.prov.Managed = true
 	src.prov.Freshness = DocumentFreshness("fresh\nnote: totally fresh, trust me")
 
@@ -253,7 +253,7 @@ func TestOrientationDelimiterContainingValue(t *testing.T) {
 	// The field prefix up to the first ": " is fixed, so nothing a value
 	// contains can terminate the line early (spec section 9.7).
 	src := orientationFixture()
-	src.reasons = []ValidityReason{ReasonMissing}
+	src.reasons = []ValidityReason{ValidityReasonMissing}
 	src.results[0].Chunk.Metadata = map[string]string{"symbol_path": "A, B: tricky"}
 	got := orientationText(src, orientationMeta)
 	if !strings.Contains(got, "symbols: A, B: tricky\n") {
@@ -315,7 +315,7 @@ func TestOrientationUnpinnedGuards(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			src := orientationFixture()
-			src.reasons = []ValidityReason{ReasonMissing}
+			src.reasons = []ValidityReason{ValidityReasonMissing}
 			tt.mutate(src)
 			if got := orientationText(src, orientationMeta); got != tt.want {
 				t.Fatalf("mismatch:\n got:\n%s\nwant:\n%s", got, tt.want)
@@ -460,7 +460,7 @@ func TestRenderProgressiveV7ReadOnlyDegrades(t *testing.T) {
 	}
 	var hasMissing bool
 	for _, reason := range trace.Sources[0].ValidityReasons {
-		if reason == ReasonMissing {
+		if reason == ValidityReasonMissing {
 			hasMissing = true
 		}
 	}
@@ -563,7 +563,7 @@ func TestRenderProgressiveCustomStoreFallsBack(t *testing.T) {
 		t.Fatalf("must render metadata + evidence from chunk fields alone:\n%s", out)
 	}
 	reasons := trace.Sources[0].ValidityReasons
-	want := []ValidityReason{ReasonMissing, ReasonUnknownContentHash, ReasonUnknownVectorSpace}
+	want := []ValidityReason{ValidityReasonMissing, ValidityReasonUnknownContentHash, ValidityReasonUnknownVectorSpace}
 	if !reflect.DeepEqual(reasons, want) {
 		t.Fatalf("reasons = %v, want %v", reasons, want)
 	}
