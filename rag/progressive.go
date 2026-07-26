@@ -41,11 +41,11 @@ type RenderedEvidence struct {
 // hard ceilings. MaxDepth of DepthNone means unrestricted (DepthL2).
 type ProgressiveRenderRequest struct {
 	Results        []SearchResult
-	MaxTokens      int              // required, > 0
-	MaxBytes       int              // required, > 0
-	MinFullResults int              // L2 floor preference; 0 => 1; negative rejected
-	MaxDepth       Depth            // DepthNone => DepthL2
-	Pinned         []PinRef         // caller-required L2
+	MaxTokens      int      // required, > 0
+	MaxBytes       int      // required, > 0
+	MinFullResults int      // L2 floor preference; 0 => 1; negative rejected
+	MaxDepth       Depth    // DepthNone => DepthL2
+	Pinned         []PinRef // caller-required L2
 	// Estimate must be pure and deterministic — the same string must always
 	// cost the same. The pinned pre-check and the step 6b upgrade delta each
 	// call it twice on the same text and assume the two calls agree, so a

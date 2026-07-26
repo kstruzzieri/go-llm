@@ -2,6 +2,7 @@ package rag
 
 import (
 	"fmt"
+	"math/rand"
 	"strings"
 	"testing"
 )
@@ -493,5 +494,149 @@ func TestAllocateBudgetDemotedRequiresSomethingRendered(t *testing.T) {
 	}
 	if omitted[0].decisions[DecisionBudgetDemoted] {
 		t.Fatal("omitted source must not carry budget_demoted alongside no_fit")
+	}
+}
+
+// assembleAllocated mirrors what assembly emits: one orientation block per
+// rendered source, its admitted evidence directly beneath, sources joined by a
+// single "\n". Returns the bytes and the per-block token sum, which is how the
+// allocator charges — not defaultEstimate over the whole string.
+func assembleAllocated(sources []*progressiveSource) (string, int) {
+	var blocks []string
+	tokens, rendered := 0, 0
+	for _, src := range sources {
+		if src.orientation == orientationNone {
+			continue
+		}
+		o := orientationText(src, src.orientation)
+		tokens += defaultEstimate(o)
+		var b strings.Builder
+		b.WriteString(o)
+		for _, i := range src.evidence {
+			e := evidenceText(src.results[i])
+			tokens += defaultEstimate(e)
+			b.WriteString(e)
+		}
+		if rendered > 0 {
+			tokens += defaultEstimate("\n")
+		}
+		rendered++
+		blocks = append(blocks, b.String())
+	}
+	return strings.Join(blocks, "\n"), tokens
+}
+
+// TestAllocateBudgetAccountingIsExact enforces the allocator's core contract
+// over inputs nobody enumerated:
+//
+//  1. tokensUsed and bytesUsed EQUAL the assembled output, they do not merely
+//     bound it. Task 11 trims to MaxBytes against these numbers, so an
+//     over-count silently drops admitted blocks and an under-count overruns
+//     the ceiling that exists to stop compaction evicting the whole message.
+//  2. Neither ceiling is ever exceeded, on any path.
+//
+// Deliberately redundant with the targeted tests today: every mutation it
+// catches is also caught by one of them. Its value is the regressions nobody
+// has thought of yet — it independently showed that dropping the pinned
+// pre-check's separator accounting OVERSPENDS rather than merely erroring
+// late, which no targeted assertion demonstrated.
+//
+// The generator reaches the interesting states rather than 2,000 trivial
+// ones. Measured at this seed and count: 328 fallbacks, 337 omissions, 158
+// pinned-overflow errors, 453 L1 upgrades. (At 20,000 iterations: 3,710 /
+// 4,456 / 1,841 / 4,653 — same proportions, but 1.32s under -race against
+// 0.14s here, which is not worth 10x the runtime on every CI run. Raise the
+// count locally when hunting something this misses.)
+//
+// Fixed seed on purpose: a nondeterministic property test cannot be bisected,
+// and a flaky one gets deleted by the first person it inconveniences.
+func TestAllocateBudgetAccountingIsExact(t *testing.T) {
+	const iterations = 2000
+	rng := rand.New(rand.NewSource(20260726)) //nolint:gosec // deterministic fixture generation, not security
+	fallbacks, omissions, pinnedErrs, upgrades := 0, 0, 0, 0
+	t.Cleanup(func() {
+		if t.Failed() {
+			t.Logf("generator coverage: fallbacks=%d omissions=%d pinnedErrs=%d L1upgrades=%d",
+				fallbacks, omissions, pinnedErrs, upgrades)
+		}
+	})
+
+	for iter := 0; iter < iterations; iter++ {
+		var sources []*progressiveSource
+		var candidatePins []PinRef
+		pos := 0
+		for s := 0; s < 1+rng.Intn(4); s++ {
+			name := fmt.Sprintf("pkg/r%02d.go", s)
+			src := &progressiveSource{source: name, firstIndex: pos, decisions: map[string]bool{}}
+			for r := 0; r < 1+rng.Intn(3); r++ {
+				id := fmt.Sprintf("c%02d_%02d", s, r)
+				src.results = append(src.results, SearchResult{
+					Chunk: Chunk{
+						ID: id, Content: strings.Repeat("x", rng.Intn(400)), Source: name,
+						StartLine: 1, EndLine: 1 + rng.Intn(20),
+					},
+					Score: rng.Float64(),
+				})
+				src.resultIdx = append(src.resultIdx, pos)
+				candidatePins = append(candidatePins, PinRef{Source: name, ChunkID: id})
+				pos++
+			}
+			if rng.Intn(2) == 0 {
+				src.fresh = true
+				src.summary = &SourceSummary{
+					Source: name, ContentHash: "h", VectorSpaceID: "v",
+					Abstract:     strings.Repeat("a", rng.Intn(600)),
+					Overview:     strings.Repeat("o", rng.Intn(800)),
+					SummaryModel: "m", FormatVersion: SourceSummaryFormatVersion, SummarizedAt: 1700000000,
+				}
+			} else {
+				src.reasons = []ValidityReason{ReasonMissing}
+			}
+			sources = append(sources, src)
+		}
+		var pins []PinRef
+		for _, p := range candidatePins {
+			if rng.Intn(6) == 0 {
+				pins = append(pins, p)
+			}
+		}
+		req := ProgressiveRenderRequest{
+			MaxTokens: 1 + rng.Intn(900), MaxBytes: 1 + rng.Intn(3500),
+			MinFullResults: rng.Intn(4), MaxDepth: Depth(rng.Intn(4)), Pinned: pins,
+		}
+
+		st, err := allocate(sources, req, defaultEstimate)
+		if err != nil {
+			pinnedErrs++ // pinned blocks over budget is the one legal error
+			continue
+		}
+		text, wantTokens := assembleAllocated(sources)
+		if st.bytesUsed != len(text) {
+			t.Fatalf("iter %d: bytesUsed = %d but the assembled output is %d bytes", iter, st.bytesUsed, len(text))
+		}
+		if st.tokensUsed != wantTokens {
+			t.Fatalf("iter %d: tokensUsed = %d but the per-block sum is %d", iter, st.tokensUsed, wantTokens)
+		}
+		if st.tokensUsed > req.MaxTokens || st.bytesUsed > req.MaxBytes {
+			t.Fatalf("iter %d: spent %d tokens / %d bytes against a ceiling of %d / %d",
+				iter, st.tokensUsed, st.bytesUsed, req.MaxTokens, req.MaxBytes)
+		}
+		for _, src := range sources {
+			switch {
+			case src.summaryBudgetOmitted:
+				fallbacks++
+				if src.orientation != orientationMeta || !src.decisions[DecisionBudgetDemoted] {
+					t.Fatalf("iter %d: fallback source in an inconsistent state: orientation %v, decisions %v",
+						iter, src.orientation, src.decisions)
+				}
+			case src.orientation == orientationNone:
+				omissions++
+				if src.decisions[DecisionBudgetDemoted] {
+					t.Fatalf("iter %d: omitted source claims a demotion", iter)
+				}
+			case src.orientation == orientationL0L1:
+				upgrades++
+			}
+		}
 	}
 }
