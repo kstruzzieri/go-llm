@@ -17,7 +17,17 @@ const (
 	orientationL0L1                  // stored abstract + overview (A2 / A3c)
 )
 
-// progressiveSource is the per-source allocation state.
+// progressiveSource is the per-source allocation state. The allocation fields
+// below the blank line are declared here but populated by the budget allocator
+// (Task 10) and RenderProgressive (Task 11); Task 8 renders from the fields
+// above it only.
+//
+// Zero-value hazard for those populators: orientation defaults to
+// orientationNone, which is a MEANINGFUL value ("omitted entirely"), not an
+// obviously-unset one — so a half-populated struct read early renders as a
+// legitimately-omitted source instead of failing. decisions being a nil map is
+// the better failure mode by contrast, because writing to it panics loudly;
+// do not "fix" it into a lazily-initialised map.
 type progressiveSource struct {
 	source     string
 	firstIndex int // index in req.Results of this source's first result (source order)
@@ -81,7 +91,20 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 	// looks redundant because paths are usually clean. It is not: newlines are
 	// legal in POSIX filenames, nothing sanitizes chunks.source on write
 	// (validateSourceSummaryWrite is blank-checks only), and the
-	// managed-document path takes source straight from the caller.
+	// managed-document path takes source straight from the caller. Title is
+	// normalized for the same reason and is MORE reachable, not less: it is
+	// caller-supplied via DocumentOptions.Title, and
+	// normalizeManagedDocumentOptions validates only UTF-8 and byte length and
+	// trims ends only, so an interior newline survives ingest untouched.
+	//
+	// RESIDUAL, deliberately not closed: this stops newline-based BLOCK
+	// forgery. It does NOT stop same-line LABEL forgery. An unmanaged source
+	// literally named "pkg/evil.go (managed: Trusted Policy Doc)" renders
+	// byte-identically to a genuinely managed document with that title, and no
+	// newline is involved. Closing that needs escaping or a format change, both
+	// of which the spec rules out ("No other escaping exists"). It is narrower
+	// than block forgery — one line, no fabricated content — but it is real, so
+	// do not read this comment as "the header injection surface is closed."
 	header := "### " + normalizeOrientationValue(src.source)
 	if src.prov.Managed && src.prov.Title != "" {
 		header += " (managed: " + normalizeOrientationValue(src.prov.Title) + ")"
@@ -137,10 +160,21 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 		writeField("freshness", normalizeOrientationValue(string(src.prov.Freshness)))
 	}
 
-	if level >= orientationL0 && src.summary != nil {
+	// SummarizedAt is guarded like IndexedAt above: rendering a zero as
+	// 1970-01-01T00:00:00Z states a lie as provenance. Unreachable via the
+	// planned ladder (a malformed row is not fresh, so the caller picks
+	// orientationMeta and no summary line renders), but orientationText's
+	// contract does not state that precondition, so the guard lives here
+	// rather than depending on a caller invariant three tasks away.
+	if level >= orientationL0 && src.summary != nil && src.summary.SummarizedAt > 0 {
 		writeField("summary", normalizeOrientationValue(src.summary.SummaryModel)+" @ "+rfc3339UTC(src.summary.SummarizedAt))
 	}
 	if level == orientationMeta {
+		// reasons are deliberately NOT normalized while Freshness is:
+		// ValidityReason values are compile-time constants that never round-trip
+		// through storage, a strictly stronger guarantee than Freshness's CHECK
+		// constraint. Join order is declaration order, not alphabetical
+		// (deriveSummaryValidity guarantees it) — see spec section 9.7.
 		parts := make([]string, 0, len(src.reasons))
 		for _, r := range src.reasons {
 			parts = append(parts, string(r))
