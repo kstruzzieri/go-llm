@@ -234,24 +234,35 @@ func normalizeEvidenceLabel(s string) string {
 	return strings.TrimSpace(evidenceLabelReplacer.Replace(s))
 }
 
-// evidenceSentinel matches the "E<n>:" block lead wherever a model would read one:
-// start of input, after LF, or after a bare CR. Go's (?m)^ never matches after a
-// bare CR, so the CR alternative is captured and restored via ${1} rather than
-// rewriting the content's line endings. Matching is case-insensitive because a
-// forged "e2:" can still prompt a model to emit the canonical "E2". It is
-// deliberately line-anchored: an unanchored E[0-9]+: would mangle ordinary code
-// (error codes, matrix notation, test tables) for no security gain.
-var evidenceSentinel = regexp.MustCompile(`(?im)(^|\r)(E)([0-9]+:)`)
+// verifySentinel matches every structural lead in the verify prompt, wherever a
+// model would read one: start of input, after LF, or after a bare CR.
+//
+// The prompt is assembled in verifyClaims as
+// "Evidence:\n"+blocks+"\nClaims:\n"+claims, so untrusted evidence content sits
+// directly above the claims section and can forge any of these leads, not just
+// the E<n> one. A forged "Claims:" section or "C<n>:" lead makes the verifier rule
+// on fabricated claim text, and verdicts map back to real claims by id, so the
+// genuine claim's status is what gets poisoned -- the value this judge exists to
+// compute. This is an enumerated list tied to that prompt's shape: adding a new
+// labeled section to the prompt means adding it here.
+//
+// Go's (?m)^ never matches after a bare CR, so the CR alternative is captured and
+// restored via ${1} rather than rewriting the content's line endings. Matching is
+// case-insensitive because a forged "e2:" can still prompt a model to emit the
+// canonical "E2". Leads are line-anchored deliberately: unanchored, this would
+// mangle ordinary code (error codes, matrix notation, test tables) for no gain.
+// Longer alternatives come first so "Claims:" is not consumed as a bare "C".
+var verifySentinel = regexp.MustCompile(`(?im)(^|\r)(Claims|Evidence|E|C)([0-9]*:)`)
 
-// neutralizeEvidenceSentinel defangs the block lead inside untrusted content by
+// neutralizeVerifySentinel defangs a structural lead inside untrusted content by
 // inserting a space, the same technique cmd/golem's neutralizeFence uses for the
 // project-context fence. Content must NOT be flattened the way a label is -- its
 // newlines are the payload -- and this renderer gives content no per-line prefix
 // (unlike rag.BuildContext, whose numbering is load-bearing), so the lead itself
 // is broken instead. A space-inserted replacement is sufficient: the model never
 // needs to reconstruct the original bytes.
-func neutralizeEvidenceSentinel(s string) string {
-	return evidenceSentinel.ReplaceAllString(s, "${1}${2} ${3}")
+func neutralizeVerifySentinel(s string) string {
+	return verifySentinel.ReplaceAllString(s, "${1}${2} ${3}")
 }
 
 // verdictSeverity ranks a verdict by how unsupportive it is, so that duplicate
@@ -278,13 +289,20 @@ func verdictSeverity(v verdict) int {
 // budget. maxChars <= 0 uses defaultMaxEvidenceChars.
 //
 // Evidence is untrusted, caller-supplied text; this judge trusts its own local
-// model, not the evidence. Because the model cites by these E<n> IDs and the
-// caller receives matching EvidenceRefs, a forged block would yield a citation
-// that looks authentic, so the source label is flattened and the block lead is
-// neutralized in content. Both happen before the block is measured, so the
-// maxChars budget accounts for the inserted spaces. EvidenceRef.Source keeps the
-// raw value: it is provenance for programmatic consumers, not prompt text, and
-// flattening it would make refs disagree with the chunk they came from.
+// model, not the evidence. The source label is flattened and structural leads are
+// neutralized in content, both before the block is measured, so the maxChars
+// budget accounts for the inserted spaces.
+//
+// What that protects is the verdict, not the citation. Citations are already
+// structurally safe: filterEvidenceIDs drops any cited id with no matching ref,
+// and the report's Evidence list is these refs rather than anything the model
+// echoed, so a forged block cannot add a fake entry or cite a nonexistent one.
+// The exposure is that status, reason, and contradicted come back from the model
+// verbatim, so a forged block can flip a real claim's support level.
+//
+// EvidenceRef.Source keeps the raw value: it is provenance for programmatic
+// consumers, not prompt text, and flattening it would make refs disagree with the
+// chunk they came from.
 func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []EvidenceRef) {
 	if maxChars <= 0 {
 		maxChars = defaultMaxEvidenceChars
@@ -295,7 +313,7 @@ func buildEvidenceBlocks(evidence []rag.SearchResult, maxChars int) (string, []E
 		id := fmt.Sprintf("E%d", i+1)
 		block := fmt.Sprintf("%s: %s (lines %d-%d)\n%s\n\n", id,
 			normalizeEvidenceLabel(r.Chunk.Source), r.Chunk.StartLine, r.Chunk.EndLine,
-			neutralizeEvidenceSentinel(r.Chunk.Content))
+			neutralizeVerifySentinel(r.Chunk.Content))
 		if i > 0 && b.Len()+len(block) > maxChars {
 			break
 		}
@@ -355,7 +373,10 @@ func parseStatus(s string) SupportStatus {
 func (j *SupportJudge) verifyClaims(ctx context.Context, claims []ClaimSupport, blocks string, refs []EvidenceRef) ([]ClaimSupport, []string, []string, error) {
 	var cb strings.Builder
 	for _, c := range claims {
-		fmt.Fprintf(&cb, "%s: %s\n", c.ID, c.Claim)
+		// A claim occupies one line in the prompt, and its text is model-authored
+		// from the answer under review, so it is untrusted for this position too:
+		// an unflattened claim could forge a sibling C<n> lead.
+		fmt.Fprintf(&cb, "%s: %s\n", c.ID, normalizeEvidenceLabel(c.Claim))
 	}
 	zero := 0.0
 	resp, err := j.chat(ctx, config.UseCaseVerify, provider.ChatRequest{
