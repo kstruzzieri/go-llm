@@ -283,3 +283,60 @@ func TestSummaryLifecycle(t *testing.T) {
 		}
 	})
 }
+
+// TestSummaryLifecycleTrimsPaddedChunkSource pins DEV-2 on the deletion
+// paths: UpsertSourceSummary trims Source before storing, but chunks.source
+// is never normalized (validateStoreInputs does not inspect it), so a
+// padded chunk source and its trimmed summary row are different strings.
+// DeleteBySource and replaceSourceTx must trim before matching against
+// source_summaries or the row is orphaned forever (SourceSummaryBatch
+// deliberately does not trim its own inputs, so nothing else reclaims it).
+func TestSummaryLifecycleTrimsPaddedChunkSource(t *testing.T) {
+	ctx := context.Background()
+	emb4 := []float64{1, 0, 0, 0}
+	const padded = "  pkg/pad.go  "
+	const trimmed = "pkg/pad.go"
+
+	seed := func(t *testing.T) *SQLiteStore {
+		store := newTestStore(t)
+		chunk := Chunk{ID: "pad1", Content: "v1", Source: padded, StartLine: 1, EndLine: 1}
+		if err := store.Store(ctx, []Chunk{chunk}, [][]float64{emb4}); err != nil {
+			t.Fatalf("seed chunks: %v", err)
+		}
+		row := validSummary()
+		row.Source = trimmed
+		if err := store.UpsertSourceSummary(ctx, row); err != nil {
+			t.Fatalf("seed summary: %v", err)
+		}
+		return store
+	}
+
+	summaryExists := func(t *testing.T, store *SQLiteStore) bool {
+		got, err := store.SourceSummaryBatch(ctx, []string{trimmed})
+		if err != nil {
+			t.Fatalf("summary batch: %v", err)
+		}
+		_, ok := got[trimmed]
+		return ok
+	}
+
+	t.Run("DeleteBySource reclaims the trimmed row", func(t *testing.T) {
+		store := seed(t)
+		if err := store.DeleteBySource(ctx, padded); err != nil {
+			t.Fatalf("DeleteBySource: %v", err)
+		}
+		if summaryExists(t, store) {
+			t.Fatal("padded source must still reclaim the trimmed summary row")
+		}
+	})
+
+	t.Run("replaceSourceTx empty replace reclaims the trimmed row", func(t *testing.T) {
+		store := seed(t)
+		if err := store.ReplaceSource(ctx, padded, nil, nil); err != nil {
+			t.Fatalf("empty replace: %v", err)
+		}
+		if summaryExists(t, store) {
+			t.Fatal("padded source must still reclaim the trimmed summary row")
+		}
+	})
+}

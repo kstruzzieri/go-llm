@@ -100,6 +100,15 @@ func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary
 
 // DeleteSourceSummary removes the summary row for source. Deleting an absent
 // row is a no-op.
+//
+// This runs on s.db, its own connection, not any caller-supplied transaction
+// — do NOT call it from inside a transaction that also deletes the source's
+// chunks/registry row: the two statements would not commit or roll back
+// together. The three lifecycle deletion sites (DeleteBySource and
+// replaceSourceTx in this file, DeleteDocument in rag/managed.go) issue
+// `DELETE FROM source_summaries WHERE source = ?` directly on their own tx
+// instead, precisely to keep the summary delete atomic with the rest of the
+// removal (#189 spec section 12).
 func (s *SQLiteStore) DeleteSourceSummary(ctx context.Context, source string) error {
 	source = strings.TrimSpace(source)
 	if source == "" {

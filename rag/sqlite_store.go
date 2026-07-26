@@ -19,10 +19,11 @@ import (
 
 // Compile-time interface satisfaction checks.
 var (
-	_ VectorStore       = (*SQLiteStore)(nil)
-	_ Exportable        = (*SQLiteStore)(nil)
-	_ sourceChunkLoader = (*SQLiteStore)(nil)
-	_ sourceHashChecker = (*SQLiteStore)(nil)
+	_ VectorStore                           = (*SQLiteStore)(nil)
+	_ Exportable                            = (*SQLiteStore)(nil)
+	_ sourceChunkLoader                     = (*SQLiteStore)(nil)
+	_ sourceHashChecker                     = (*SQLiteStore)(nil)
+	_ atomicSourceReplacerWithVectorSpaceID = (*SQLiteStore)(nil)
 )
 
 // SQLiteStore is a VectorStore backed by SQLite with brute-force cosine similarity.
@@ -539,9 +540,14 @@ func (s *SQLiteStore) replaceSourceTx(ctx context.Context, tx *sql.Tx, source st
 	// A source replaced with zero chunks has ceased to exist; its summary row
 	// goes with it. A non-empty replace RETAINS the row — it becomes
 	// derived-stale until refreshed (#189 spec section 12).
+	//
+	// source_summaries.source is stored trimmed (normalizeSourceSummary on the
+	// write path), but chunks.source is never normalized, so an untrimmed
+	// source here must be trimmed before matching against the summary row or
+	// a padded source silently orphans it (DEV-2).
 	if len(chunks) == 0 {
-		if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, source); err != nil {
-			return fmt.Errorf("rag: delete summary for emptied source %q: %w", source, err)
+		if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, strings.TrimSpace(source)); err != nil {
+			return fmt.Errorf("rag: replace source %q: delete summary for emptied source: %w", source, err)
 		}
 	}
 	if opts.replaceVectorSpace && len(embeddings) > 0 {
@@ -865,7 +871,10 @@ func (s *SQLiteStore) DeleteBySource(ctx context.Context, source string) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM chunks WHERE source = ?`, source); err != nil {
 		return fmt.Errorf("rag: delete by source %q: %w", source, err)
 	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, source); err != nil {
+	// source_summaries.source is stored trimmed (normalizeSourceSummary on the
+	// write path); chunks.source is not, so trim before matching or a padded
+	// source silently orphans the summary row (DEV-2).
+	if _, err := tx.ExecContext(ctx, `DELETE FROM source_summaries WHERE source = ?`, strings.TrimSpace(source)); err != nil {
 		return fmt.Errorf("rag: delete summary for source %q: %w", source, err)
 	}
 	if _, err := tx.ExecContext(ctx, `
