@@ -1250,27 +1250,28 @@ func buildV7Fixture(t *testing.T, db *sql.DB) {
 	t.Helper()
 	tx, err := db.Begin()
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("begin fixture tx: %v", err)
 	}
+	defer func() { _ = tx.Rollback() }()
 	if err := migrateV5(tx); err != nil {
-		t.Fatal(err)
+		t.Fatalf("migrate v5: %v", err)
 	}
 	if err := migrateV6(tx); err != nil {
-		t.Fatal(err)
+		t.Fatalf("migrate v6: %v", err)
 	}
 	if err := migrateV7(tx); err != nil {
-		t.Fatal(err)
+		t.Fatalf("migrate v7: %v", err)
 	}
 	for _, version := range []int{5, 6, 7} {
 		if _, err := tx.Exec(
 			`INSERT INTO rag_schema_version (version, description, applied_at) VALUES (?, 'fixture', 1000)`,
 			version,
 		); err != nil {
-			t.Fatal(err)
+			t.Fatalf("record version %d: %v", version, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
-		t.Fatal(err)
+		t.Fatalf("commit fixture tx: %v", err)
 	}
 }
 
