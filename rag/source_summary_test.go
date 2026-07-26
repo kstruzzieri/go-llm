@@ -224,3 +224,35 @@ func TestSourceSummaryBatchImmutableDegradation(t *testing.T) {
 		}
 	})
 }
+
+func TestSummaryRowMalformed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*SourceSummary)
+		want   bool
+	}{
+		{"valid", func(s *SourceSummary) {}, false},
+		{"blank abstract", func(s *SourceSummary) { s.Abstract = "" }, true},
+		// Whitespace-only pins the TrimSpace choice: a lazier == "" check would
+		// let this row through uncaught, since it "looks" non-blank byte-wise.
+		{"whitespace-only abstract", func(s *SourceSummary) { s.Abstract = "   " }, true},
+		{"blank overview", func(s *SourceSummary) { s.Overview = "" }, true},
+		{"blank model", func(s *SourceSummary) { s.SummaryModel = "" }, true},
+		{"blank content hash", func(s *SourceSummary) { s.ContentHash = "" }, true},
+		{"blank vector space", func(s *SourceSummary) { s.VectorSpaceID = "" }, true},
+		{"zero timestamp", func(s *SourceSummary) { s.SummarizedAt = 0 }, true},
+		// Above-current format: written by a newer build — cannot be interpreted.
+		{"format above current", func(s *SourceSummary) { s.FormatVersion = SourceSummaryFormatVersion + 1 }, true},
+		// Below-current format is stale, NOT malformed (spec section 5 matrix).
+		{"format below current", func(s *SourceSummary) { s.FormatVersion = SourceSummaryFormatVersion - 1 }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			row := validSummary()
+			tt.mutate(&row)
+			if got := summaryRowMalformed(row); got != tt.want {
+				t.Fatalf("summaryRowMalformed = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
