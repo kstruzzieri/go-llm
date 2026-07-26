@@ -183,8 +183,8 @@ func openSession(ctx context.Context, dbPath, id string) (*session, sessionInfo,
 // cannot leak an unsaved turn into future history() output or a later successful save.
 func (s *session) record(ctx context.Context, userLine, answer string) error {
 	return s.recordMessages(ctx, []conversation.Message{
-		conversation.Message{Role: "user", Content: userLine},
-		conversation.Message{Role: "assistant", Content: answer},
+		{Role: "user", Content: userLine},
+		{Role: "assistant", Content: answer},
 	})
 }
 
