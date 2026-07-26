@@ -46,6 +46,13 @@ type progressiveSource struct {
 	costRejected     bool  // some more-expensive alternative was rejected on cost
 	decisions        map[string]bool
 	snapshotMeta     bool // orientation metadata describes the retrieval snapshot (race path, spec section 8)
+	// summaryBudgetOmitted marks a FRESH source that fell back from its stored
+	// abstract to the metadata overview because the abstract did not fit
+	// (allocator step 5). It keeps the note line honest: "no summary" is false
+	// for such a source. Explicit rather than derived from
+	// fresh && orientation == orientationMeta, because that derivation is
+	// sound only by an invariant neither file states — the DEV-11 shape.
+	summaryBudgetOmitted bool
 }
 
 // normalizeOrientationValue forces a line-start or field value onto one line
@@ -175,20 +182,30 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 		writeField("summary", normalizeOrientationValue(src.summary.SummaryModel)+" @ "+rfc3339UTC(src.summary.SummarizedAt))
 	}
 	if level == orientationMeta {
-		// reasons are deliberately NOT normalized while Freshness is:
-		// ValidityReason values are compile-time constants that never round-trip
-		// through storage, a strictly stronger guarantee than Freshness's CHECK
-		// constraint. Join order is declaration order, not alphabetical
-		// (deriveSummaryValidity guarantees it) — see spec section 9.7.
-		parts := make([]string, 0, len(src.reasons))
-		for _, r := range src.reasons {
-			parts = append(parts, string(r))
+		// A source that fell back from its stored abstract on cost HAS a fresh
+		// summary, so "no summary" would state a falsehood about provenance —
+		// the one thing an orientation block must never do, since the model
+		// uses exactly this line to judge how much the block is worth. The two
+		// variants cannot overlap: fresh means an empty reason set, so a
+		// budget-omitted source never has reasons to list.
+		note := "metadata overview (summary omitted: budget)"
+		if !src.summaryBudgetOmitted {
+			// reasons are deliberately NOT normalized while Freshness is:
+			// ValidityReason values are compile-time constants that never
+			// round-trip through storage, a strictly stronger guarantee than
+			// Freshness's CHECK constraint. Join order is declaration order,
+			// not alphabetical (deriveSummaryValidity guarantees it) — see
+			// spec section 9.7.
+			parts := make([]string, 0, len(src.reasons))
+			for _, r := range src.reasons {
+				parts = append(parts, string(r))
+			}
+			note = "metadata overview (no summary"
+			if len(parts) > 0 {
+				note += ": " + strings.Join(parts, ", ")
+			}
+			note += ")"
 		}
-		note := "metadata overview (no summary"
-		if len(parts) > 0 {
-			note += ": " + strings.Join(parts, ", ")
-		}
-		note += ")"
 		writeField("note", note)
 	}
 	return b.String()

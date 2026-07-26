@@ -46,7 +46,12 @@ type ProgressiveRenderRequest struct {
 	MinFullResults int              // L2 floor preference; 0 => 1; negative rejected
 	MaxDepth       Depth            // DepthNone => DepthL2
 	Pinned         []PinRef         // caller-required L2
-	Estimate       func(string) int // nil, or a negative result, => defaultEstimate
+	// Estimate must be pure and deterministic — the same string must always
+	// cost the same. The pinned pre-check and the step 6b upgrade delta each
+	// call it twice on the same text and assume the two calls agree, so a
+	// stateful estimator would let the pre-check pass and leave the charging
+	// loop to overspend the ceiling it was supposed to guard.
+	Estimate func(string) int // nil, or a negative result, => defaultEstimate
 }
 
 // defaultEstimate is the token heuristic used when the caller supplies no

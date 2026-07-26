@@ -185,7 +185,10 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 				flat = append(flat, flatResult{src, i, src.resultIdx[i]})
 			}
 		}
-		sort.Slice(flat, func(i, j int) bool { return flat[i].pos < flat[j].pos })
+		// Stable: pos comes from resultIdx, which is only globally distinct by
+		// the caller's convention. Same argument as sorting sources at entry —
+		// do not let a cross-file convention decide output order.
+		sort.SliceStable(flat, func(i, j int) bool { return flat[i].pos < flat[j].pos })
 		for _, fr := range flat {
 			if st.floorRendered >= floor {
 				break
@@ -239,6 +242,32 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 		}
 		o := orientationText(src, level)
 		if !st.admit(req, safeEstimate(estimate, o)+separatorTokens(st, estimate), len(o)+separatorBytes(st)) {
+			// Spec 9.5 rung 2: a fresh source whose stored abstract does not
+			// fit falls back to the metadata overview rather than vanishing.
+			// Step 5's "stored L0 abstract when the summary is fresh" is the
+			// PREFERENCE, not the only option — 9.3 lists A0 below A1
+			// cheapest-first, 9.5 names the metadata overview as the rung
+			// below a stored summary, and step 8 skips an oversized
+			// alternative rather than treating it as fatal. A0 is cheaper
+			// than A1 for essentially every source, so without this a source
+			// contributes nothing where a one-line block would have fit.
+			if level == orientationL0 {
+				// Set before rendering, not after: the flag changes the note
+				// line, so the block charged here must be the block assembly
+				// will emit. Reset if it does not fit — an omitted source has
+				// no note to qualify, and a stale true would misreport it.
+				src.summaryBudgetOmitted = true
+				fallback := orientationText(src, orientationMeta)
+				if st.admit(req, safeEstimate(estimate, fallback)+separatorTokens(st, estimate), len(fallback)+separatorBytes(st)) {
+					src.orientation = orientationMeta
+					// A1 was evaluated and rejected on cost and A0 rendered:
+					// that is exactly budget_demoted (spec section 10).
+					src.costRejected = true
+					st.renderedSources++
+					continue
+				}
+				src.summaryBudgetOmitted = false
+			}
 			src.decisions[DecisionNoFit] = true
 			st.omitted++
 			continue
@@ -266,7 +295,10 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 				flat = append(flat, flatResult{src, i, src.resultIdx[i]})
 			}
 		}
-		sort.Slice(flat, func(i, j int) bool { return flat[i].pos < flat[j].pos })
+		// Stable: pos comes from resultIdx, which is only globally distinct by
+		// the caller's convention. Same argument as sorting sources at entry —
+		// do not let a cross-file convention decide output order.
+		sort.SliceStable(flat, func(i, j int) bool { return flat[i].pos < flat[j].pos })
 		for _, fr := range flat {
 			e := evidenceText(fr.src.results[fr.idx])
 			if !st.admit(req, safeEstimate(estimate, e), len(e)) {

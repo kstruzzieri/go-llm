@@ -364,6 +364,74 @@ func TestAllocateEvidenceRendersInRetrievalOrder(t *testing.T) {
 	}
 }
 
+func TestAllocateFreshSourceFallsBackToMetadataOverview(t *testing.T) {
+	// Spec 9.5 rung 2: an expensive stored abstract must not take the source
+	// down with it when the cheap metadata overview would have fit.
+	src := freshSummaryFixture("An overview.")
+	src.summary.Abstract = strings.Repeat("a", 2000)
+	// Measure the block allocate will actually charge: the fallback note is
+	// "summary omitted: budget", which is longer than the plain "no summary".
+	src.summaryBudgetOmitted = true
+	a0 := orientationText(src, orientationMeta)
+	src.summaryBudgetOmitted = false
+	if a1 := orientationText(src, orientationL0); len(a1) <= len(a0) {
+		t.Fatalf("fixture must make the abstract the expensive option: A1 = %d, A0 = %d bytes", len(a1), len(a0))
+	}
+
+	// MaxDepth L1 keeps the floor out of it, so step 5 is the only path in.
+	req := ProgressiveRenderRequest{MaxTokens: defaultEstimate(a0), MaxBytes: len(a0), MaxDepth: DepthL1}
+	st, err := allocate([]*progressiveSource{src}, req, defaultEstimate)
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if src.orientation != orientationMeta {
+		t.Fatalf("orientation = %v, want orientationMeta (fell back, not omitted)", src.orientation)
+	}
+	if !src.summaryBudgetOmitted {
+		t.Fatal("the fallback must flag the source, or its note claims there is no summary")
+	}
+	if src.decisions[DecisionNoFit] {
+		t.Fatal("the source rendered an orientation: no_fit must not be set")
+	}
+	if !src.decisions[DecisionBudgetDemoted] {
+		t.Fatal("the abstract was rejected on cost and a cheaper block rendered: want budget_demoted")
+	}
+	if st.omitted != 0 || st.nonFitting != 1 {
+		t.Fatalf("omitted = %d, nonFitting = %d, want 0 and 1 (the rejected abstract only)", st.omitted, st.nonFitting)
+	}
+	// The charged cost is the block that will be emitted, note variant included.
+	if st.tokensUsed != req.MaxTokens || st.bytesUsed != req.MaxBytes {
+		t.Fatalf("charged %d tokens / %d bytes, want the A0 block exactly (%d / %d)",
+			st.tokensUsed, st.bytesUsed, req.MaxTokens, req.MaxBytes)
+	}
+}
+
+func TestAllocateFreshSourceOmittedWhenNeitherAlternativeFits(t *testing.T) {
+	src := freshSummaryFixture("An overview.")
+	src.summary.Abstract = strings.Repeat("a", 2000)
+	req := ProgressiveRenderRequest{MaxTokens: 1, MaxBytes: 4, MaxDepth: DepthL1}
+	st, err := allocate([]*progressiveSource{src}, req, defaultEstimate)
+	if err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if src.orientation != orientationNone {
+		t.Fatalf("orientation = %v, want orientationNone", src.orientation)
+	}
+	if !src.decisions[DecisionNoFit] {
+		t.Fatal("omitted source must carry no_fit")
+	}
+	if src.decisions[DecisionBudgetDemoted] {
+		t.Fatal("nothing rendered, so nothing was demoted")
+	}
+	if src.summaryBudgetOmitted {
+		t.Fatal("flag must be reset when the fallback also fails: the source has no note to qualify")
+	}
+	if st.omitted != 1 || st.nonFitting != 2 {
+		t.Fatalf("omitted = %d, nonFitting = %d, want 1 and 2 (abstract and metadata overview both rejected)",
+			st.omitted, st.nonFitting)
+	}
+}
+
 func TestAllocateSortsSourcesIntoSourceOrder(t *testing.T) {
 	// Steps 5 and 6b iterate the slice directly, so allocate sorts it rather
 	// than trusting the caller. With a budget that fits exactly one more

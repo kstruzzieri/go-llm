@@ -72,6 +72,35 @@ func TestOrientationTextFreshSummaryL0AndL1(t *testing.T) {
 	}
 }
 
+// TestOrientationTextBudgetOmittedSummaryNote pins the note variant for a
+// source that HAS a fresh summary but fell back to the metadata overview
+// because the stored abstract did not fit. Emitting the ordinary
+// "(no summary)" here would state a falsehood about provenance — the model
+// reads this line to judge how much the block is worth.
+func TestOrientationTextBudgetOmittedSummaryNote(t *testing.T) {
+	src := orientationFixture()
+	src.summary = &SourceSummary{
+		Source: "pkg/a.go", ContentHash: "hash1", VectorSpaceID: "vs1",
+		Abstract: "Handles A.", SummaryModel: "qwen3:8b",
+		FormatVersion: SourceSummaryFormatVersion, SummarizedAt: 1700000000,
+	}
+	src.fresh = true
+	src.summaryBudgetOmitted = true
+
+	got := orientationText(src, orientationMeta)
+	want := "### pkg/a.go\n" +
+		"language: go\n" +
+		"symbols: A\n" +
+		"indexed: 2023-11-14T22:13:20Z\n" +
+		"note: metadata overview (summary omitted: budget)\n"
+	if got != want {
+		t.Fatalf("budget-omitted overview mismatch:\n got:\n%s\nwant:\n%s", got, want)
+	}
+	if strings.Contains(got, "no summary") {
+		t.Fatalf("a source with a fresh summary must not be described as having none:\n%s", got)
+	}
+}
+
 func TestOrientationTextManagedFieldsAndNormalization(t *testing.T) {
 	src := orientationFixture()
 	src.prov.Managed = true
