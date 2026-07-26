@@ -48,9 +48,13 @@ type progressiveSource struct {
 	snapshotMeta     bool // orientation metadata describes the retrieval snapshot (race path, spec section 8)
 }
 
-// normalizeOrientationValue forces one orientation field value onto one line:
-// CR and LF become single spaces, then leading/trailing space is trimmed.
-// Evidence content is NEVER passed through this (spec section 9.7).
+// normalizeOrientationValue forces a line-start or field value onto one line
+// — used by both orientation blocks and the evidence header's source path —
+// by turning CR and LF into single spaces, then trimming leading/trailing
+// space. The one value that must NEVER pass through this is evidence
+// content itself (spec section 9.7): content newlines are the payload, and
+// evidenceText (rag/progressive_render.go) relies on numberLines' per-line
+// prefix, not this function, to keep content from forging a block.
 var orientationValueReplacer = strings.NewReplacer("\r", " ", "\n", " ")
 
 func normalizeOrientationValue(v string) string {
