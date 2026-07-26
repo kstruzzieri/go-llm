@@ -35,18 +35,32 @@ type progressiveRetriever interface {
 	RenderProgressive(ctx context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, error)
 }
 
+// Without this assertion a rename or signature change in rag drifts SILENTLY:
+// the interface is local, every test here uses a fake, and the type switch in
+// Invoke degrades to the legacy BuildContext path with the over-crediting
+// attribution — no build error, no failing test, in rag, agent, agent/tools or
+// cmd/golem. Same convention as rag/progressive.go's progressiveStoreReader
+// assertion (DEV-11) and DEV-20's atomicSourceReplacerWithVectorSpaceID.
+var _ progressiveRetriever = (*rag.Retriever)(nil)
+
 // Retrieve is the reference read-only retrieval built-in. #95 swaps SearchMulti
 // behind the same retriever seam without changing the agent.Tool contract.
 type Retrieve struct {
 	R         retriever
 	K         int // default top-k when the call omits k
-	MaxTokens int // BuildContext budget; 0 => a sane default
+	MaxTokens int // token budget for BuildContext AND RenderProgressive; 0 => a sane default
 	// Progressive opts into rag.RenderProgressive when R supports it
 	// (#189 slice 1). Off => the legacy BuildContext path, byte-identical
 	// to before. MinFullResults and Estimate pass through to the renderer.
 	Progressive    bool
 	MinFullResults int
-	Estimate       func(string) int
+	// Estimate is the token estimator for the progressive path; nil => the
+	// renderer's heuristic. It must be pure and deterministic: the renderer
+	// calls it twice on the same text (pinned pre-check, upgrade delta) and
+	// assumes the two agree. A NEGATIVE return also falls back to the
+	// heuristic, so a tokenizer that returns -1 as an error sentinel degrades
+	// silently rather than failing (rag/progressive.go:49-59).
+	Estimate func(string) int
 }
 
 type retrieveArgs struct {
@@ -134,6 +148,12 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 
 	content := t.R.BuildContext(results, maxTokens)
 
+	// KNOWN OVER-CREDITING, DELIBERATELY RETAINED: BuildContext stops at the
+	// first entry that would exceed its char budget (rag/retriever.go:948) yet
+	// every retrieved result is attributed here, so the model can be credited
+	// with evidence it never saw (#189 spec section 11). BuildContext is frozen
+	// per spec section 4 and byte-identity with the pre-#189 path is the goal;
+	// set Progressive to get attribution equal to what was actually rendered.
 	attrib := &agent.RetrievalAttribution{Sources: make([]agent.RetrievedSource, 0, len(results))}
 	for _, r := range results {
 		attrib.Sources = append(attrib.Sources, agent.RetrievedSource{

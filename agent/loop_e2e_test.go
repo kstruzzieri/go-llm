@@ -70,8 +70,8 @@ func TestEndToEndRetrieveThenAnswer(t *testing.T) {
 	}
 }
 
-// progressiveCapRetriever renders output near RetrieveOutputCap with
-// multi-byte runes to prove the runtime capOutput is a no-op end to end.
+// progressiveCapRetriever renders output filling RetrieveOutputCap exactly,
+// with a multi-byte rune straddling the cap boundary.
 type progressiveCapRetriever struct{ payload string }
 
 func (p progressiveCapRetriever) Retrieve(context.Context, string, int) ([]rag.SearchResult, error) {
@@ -90,10 +90,14 @@ func (p progressiveCapRetriever) RenderProgressive(_ context.Context, req rag.Pr
 }
 
 func TestEndToEndProgressiveOutputSurvivesCapExactly(t *testing.T) {
-	// Payload deliberately larger than the cap; the tool-side renderer trims
-	// to MaxBytes = RetrieveOutputCap, so the runtime capOutput must change
-	// nothing. The tool observation in the transcript must equal the renderer
-	// output byte for byte.
+	// The tool observation reaching the transcript must equal the renderer's
+	// output byte for byte: a full-cap payload survives dispatch uncorrupted,
+	// with no mid-block or mid-rune damage. It does NOT prove capOutput never
+	// fires — capOutput backs up from its limit to a rune start, which is the
+	// same operation the renderer does here, so the two agree wherever they
+	// overlap. That Effect.OutputCap and MaxBytes are the SAME number, which is
+	// what makes the runtime a no-op, is pinned by the unit test's
+	// gotReq.MaxBytes check (agent/tools/retrieve_test.go).
 	payload := strings.Repeat("héllo wörld ", tools.RetrieveOutputCap/12+10)
 	fake := progressiveCapRetriever{payload: payload}
 	mc := &scripted{responses: []agent.ModelResult{
