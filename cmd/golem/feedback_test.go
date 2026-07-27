@@ -28,7 +28,7 @@ func TestFeedbackDBPathForWorkspace(t *testing.T) {
 	}
 }
 
-func TestFeedbackDBPathRejectsInsideWorkspace(t *testing.T) {
+func TestFeedbackDBPathForWorkspaceRejectsInsideWorkspace(t *testing.T) {
 	root := t.TempDir()
 	getenv := func(k string) string {
 		if k == "XDG_DATA_HOME" {

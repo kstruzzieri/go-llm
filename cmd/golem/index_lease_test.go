@@ -40,7 +40,7 @@ func runLeaseHelper(t *testing.T, dbPath string) int {
 	return -1
 }
 
-func TestIndexWriterLease_ContendsAcrossProcesses(t *testing.T) {
+func TestIndexWriterLease_ContendsAcrossProcessesAndReleases(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "k.db")
 	lease, err := acquireIndexWriterLease(dbPath)
 	if err != nil {

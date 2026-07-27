@@ -48,7 +48,7 @@ func TestStartupNotices(t *testing.T) {
 	}
 }
 
-func TestStartupNotices_RetrieveSuppressesGeneric(t *testing.T) {
+func TestStartupNotices_RequestedRetrieveSuppressesGenericLine(t *testing.T) {
 	got := startupNotices(startupInfo{
 		workspace:         "/r",
 		retrieveOmitted:   true,
@@ -221,7 +221,7 @@ func TestParseFlagsAllowExec(t *testing.T) {
 	}
 }
 
-func TestStartupNoticesProjectContextIsInformational(t *testing.T) {
+func TestStartupNoticesProjectContextLineIsInformational(t *testing.T) {
 	got := startupNotices(startupInfo{
 		workspace:          "/abs/root",
 		projectContextLine: "project context: loaded 2 file(s)",
@@ -393,7 +393,7 @@ func TestAutoIndexEnabled(t *testing.T) {
 	}
 }
 
-func TestStartupNotices_AutoWarmSuppressesGeneric(t *testing.T) {
+func TestStartupNotices_AutoWarmingSuppressesGenericLine(t *testing.T) {
 	got := startupNotices(startupInfo{
 		workspace:         "/abs/root",
 		retrieveLine:      "retrieve: auto-index warming in background",
@@ -557,7 +557,7 @@ func TestAgentflowStatusExitHelper(t *testing.T) {
 	os.Exit(0)
 }
 
-func TestAgentflowStatusExitCodesSkipGenericErrors(t *testing.T) {
+func TestAgentflowStatusExitCodesDoNotPrintGenericErrors(t *testing.T) {
 	root := t.TempDir()
 	agentDir := filepath.Join(root, ".agent")
 	if err := os.Mkdir(agentDir, 0o700); err != nil {
@@ -617,7 +617,7 @@ func TestAgentflowStatusExitCodesSkipGenericErrors(t *testing.T) {
 	}
 }
 
-func TestAgentflowStartupHintOnlyWhenInteractive(t *testing.T) {
+func TestAgentflowStartupHintOnlyInOrdinaryInteractiveMode(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		f    flags
@@ -727,7 +727,7 @@ func TestValidateFlags_PlanRejectsAmbientToolFlags(t *testing.T) {
 	}
 }
 
-func TestApplyTaskMode_DisablesPersistentAndAmbient(t *testing.T) {
+func TestApplyTaskMode_DisablesPersistentAndAmbientState(t *testing.T) {
 	f, _ := applyTaskMode(flags{planPath: "plan.json", agentMemory: true})
 	if !f.noSession || !f.noCompress || !f.noMemory || !f.noAutoIndex || !f.noRag || f.agentMemory {
 		t.Fatalf("task-mode defaults not applied: %+v", f)
@@ -904,7 +904,7 @@ func TestParseFlags_AgentflowWorkflowRouting(t *testing.T) {
 	}
 }
 
-func TestApplyGoalMode_DisablesAmbientKeepsContext(t *testing.T) {
+func TestApplyGoalMode_DisablesAmbientStateButKeepsProjectContext(t *testing.T) {
 	f, _ := applyGoalMode(flags{goalSet: true, agentMemory: true, feedback: true, feedbackDB: "x.db"})
 	if !f.noSession || !f.noCompress || !f.noMemory || !f.noAutoIndex || !f.noRag || f.agentMemory {
 		t.Fatalf("planning-mode ambient shutdown not applied: %+v", f)

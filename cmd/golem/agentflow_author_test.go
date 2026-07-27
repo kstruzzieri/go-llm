@@ -17,7 +17,7 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-func TestCanonicalPlanJSONSHA256MatchesPythonEncoding(t *testing.T) {
+func TestCanonicalPlanJSONSHA256MatchesAgentflowPythonEncoding(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		plan string
@@ -106,7 +106,7 @@ func TestCanonicalPlanJSONSHA256RejectsMalformedInput(t *testing.T) {
 	}
 }
 
-func TestDecodeAgentflowPlanJSONRejectsLoneSurrogate(t *testing.T) {
+func TestDecodeAgentflowPlanJSONRejectsUnexecutableLoneSurrogate(t *testing.T) {
 	data := []byte(`{"steps":[{"id":"P1","gates":[{"kind":"command","run":["echo","\ud800"]}]}]}`)
 	var plan agentflow.Plan
 	if err := decodeAgentflowPlanJSON(data, &plan); err == nil || !strings.Contains(err.Error(), "lone UTF-16 surrogate") {
@@ -327,7 +327,7 @@ func TestSubmitPlanTool_Effect(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_PreviewsWithoutMutatingProof(t *testing.T) {
+func TestSubmitPlanTool_PreviewsWithoutMutatingProofState(t *testing.T) {
 	client := &stubLocker{}
 	tool := newSubmitPlanTool(&authorSession{client: client, root: "/root"})
 	plan, err := tool.Plan(context.Background(), validIRJSON(t))
@@ -343,7 +343,7 @@ func TestSubmitPlanTool_PreviewsWithoutMutatingProof(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_PreviewsSignalsAndOverride(t *testing.T) {
+func TestSubmitPlanTool_PreviewsExactTaskSignalsAndOverrideControlSafely(t *testing.T) {
 	truth := true
 	ir := validTraceableIR()
 	ir.SecuritySensitive = &truth
@@ -397,7 +397,7 @@ func TestSubmitPlanTool_PreviewsSignalsAndOverride(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_PreservesFalseSecuritySignal(t *testing.T) {
+func TestSubmitPlanTool_PreservesExplicitFalseSecuritySignal(t *testing.T) {
 	falsity := false
 	ir := validTraceableIR()
 	ir.SecuritySensitive = &falsity
@@ -412,7 +412,7 @@ func TestSubmitPlanTool_PreservesFalseSecuritySignal(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_BadSignalsFailBeforeRecommend(t *testing.T) {
+func TestSubmitPlanTool_InvalidTaskSignalsFailBeforeRecommendation(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		mutate func(*agentflow.PlanIR)
@@ -438,7 +438,7 @@ func TestSubmitPlanTool_BadSignalsFailBeforeRecommend(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_RecommendFailureNoApproval(t *testing.T) {
+func TestSubmitPlanTool_RecommendationFailurePreventsApproval(t *testing.T) {
 	client := &stubLocker{recommendErr: errors.New("routing unavailable")}
 	plan, err := newSubmitPlanTool(&authorSession{client: client, root: "/root"}).Plan(context.Background(), validIRJSON(t))
 	if err == nil || !strings.Contains(err.Error(), "routing unavailable") {
@@ -544,7 +544,7 @@ func TestSubmitPlanTool_SuccessLocksAndCancels(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_UnpreviewedOrStaleNoMutation(t *testing.T) {
+func TestSubmitPlanTool_RejectsUnpreviewedOrStaleInvokeWithoutMutation(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		preview bool
@@ -582,7 +582,7 @@ func TestSubmitPlanTool_UnpreviewedOrStaleNoMutation(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_MaterializeTerminalAfterLock(t *testing.T) {
+func TestSubmitPlanTool_MaterializationFailureIsTerminalAfterLock(t *testing.T) {
 	canceled := false
 	client := &stubLocker{materializeErr: errors.New("contract rejected")}
 	as := &authorSession{client: client, root: "/root", cancel: func() { canceled = true }}
@@ -602,7 +602,7 @@ func TestSubmitPlanTool_MaterializeTerminalAfterLock(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_LocalFailureDiagnosticsNoCancel(t *testing.T) {
+func TestSubmitPlanTool_FirstLocalFailureReturnsDiagnosticsNoCancel(t *testing.T) {
 	canceled := false
 	as := &authorSession{client: &stubLocker{}, root: "/root", cancel: func() { canceled = true }}
 	tool := newSubmitPlanTool(as)
@@ -662,7 +662,7 @@ func TestSubmitPlanTool_TerminalLockErrorFailsFast(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_UnknownLockErrorFailsClosed(t *testing.T) {
+func TestSubmitPlanTool_UnknownStructuredLockErrorFailsClosed(t *testing.T) {
 	canceled := false
 	term := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "future_error", Message: "unknown contract failure"}}}
 	as := &authorSession{client: &stubLocker{lockErrs: []error{term}}, root: "/root", cancel: func() { canceled = true }}
@@ -674,7 +674,7 @@ func TestSubmitPlanTool_UnknownLockErrorFailsClosed(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_ContentValidationIsRepairable(t *testing.T) {
+func TestSubmitPlanTool_ContentValidationErrorIsRepairable(t *testing.T) {
 	canceled := false
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "steps[1].action must be a non-empty string"}}}
 	as := &authorSession{client: &stubLocker{lockErrs: []error{verr}}, root: "/root", cancel: func() { canceled = true }}
@@ -686,7 +686,7 @@ func TestSubmitPlanTool_ContentValidationIsRepairable(t *testing.T) {
 	}
 }
 
-func TestSubmitPlanTool_CompilerValidationIsTerminal(t *testing.T) {
+func TestSubmitPlanTool_CompilerOwnedValidationErrorIsTerminal(t *testing.T) {
 	canceled := false
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "plan-lock schema_version 9.9.9 is incompatible"}}}
 	as := &authorSession{client: &stubLocker{lockErrs: []error{verr}}, root: "/root", cancel: func() { canceled = true }}
@@ -835,7 +835,7 @@ func (c *repairFailureCaller) Chat(_ context.Context, _ provider.ChatRequest, on
 	return c.first, nil
 }
 
-func TestRunAgentflowAuthor_HappyPathPrintsExecute(t *testing.T) {
+func TestRunAgentflowAuthor_HappyPathPrintsExecuteSeparately(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "space and 'quote")
 	agentflowSrc := filepath.Join(t.TempDir(), "agentflow source and 'quote")
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -880,7 +880,7 @@ func TestRunAgentflowAuthor_HappyPathPrintsExecute(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowAuthor_RefusesLockWithoutApproval(t *testing.T) {
+func TestRunAgentflowAuthor_RefusesLockWithoutExplicitApproval(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{responses: []agent.ModelResult{submitPlanCall(validIRJSON(t))}}
 	sess := newTestSession(t, caller, root)
@@ -987,7 +987,7 @@ func TestRunAgentflowAuthor_AutoApproverLocks(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowAuthor_DenialAdmitsRepairMutation(t *testing.T) {
+func TestRunAgentflowAuthor_DenialAfterRepairDoesNotClaimNoMutation(t *testing.T) {
 	root := t.TempDir()
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "repair me"}}}
 	client := &stubLocker{lockErrs: []error{verr}}
@@ -1113,7 +1113,7 @@ func TestRunAgentflowAuthor_ProbeFailsBeforeModel(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowAuthor_WorkflowProbeFailsFirst(t *testing.T) {
+func TestRunAgentflowAuthor_WorkflowProbeFailsBeforeModel(t *testing.T) {
 	root := t.TempDir()
 	caller := &scriptCaller{}
 	sess := newTestSession(t, caller, root)
@@ -1126,7 +1126,7 @@ func TestRunAgentflowAuthor_WorkflowProbeFailsFirst(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowAuthor_UsesPromptAndProjectContext(t *testing.T) {
+func TestRunAgentflowAuthor_UsesPlannerPromptAndProjectContext(t *testing.T) {
 	root := t.TempDir()
 	caller := &captureCaller{answer: "no submission"}
 	sess := newTestSession(t, caller, root)
@@ -1149,7 +1149,7 @@ func (c *optionsCaptureCaller) Chat(_ context.Context, req provider.ChatRequest,
 	return agent.ModelResult{Response: provider.ChatResponse{Content: "no submission"}}, nil
 }
 
-func TestRunAgentflowAuthor_PlannerOptionsKeepSession(t *testing.T) {
+func TestRunAgentflowAuthor_UsesPlannerModelOptionsWithoutMutatingSession(t *testing.T) {
 	on := true
 	for _, tt := range []struct {
 		name       string
@@ -1197,7 +1197,7 @@ func TestRunAgentflowAuthor_PlannerOptionsKeepSession(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowAuthor_ExhaustionDiagnostics(t *testing.T) {
+func TestRunAgentflowAuthor_ExhaustionReportsDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "steps[0].files must be non-empty"}}}
 	// Repairable on BOTH submissions: the flow uses its two-attempt budget, then
@@ -1218,7 +1218,7 @@ func TestRunAgentflowAuthor_ExhaustionDiagnostics(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowAuthor_RepairFailureOverridesStale(t *testing.T) {
+func TestRunAgentflowAuthor_RepairModelFailureOverridesStaleDiagnostics(t *testing.T) {
 	root := t.TempDir()
 	verr := &agentflow.CommandError{Cmd: "lock-plan", Exit: 1, Errors: []agentflow.StructuredError{{Code: "validation_error", Message: "repair me"}}}
 	providerErr := errors.New("provider unavailable during repair")

@@ -157,7 +157,7 @@ func TestPreflight_BareModelNotFound(t *testing.T) {
 	}
 }
 
-func TestPreflight_BareSelectorProbesUntilCapable(t *testing.T) {
+func TestPreflight_BareSelectorProbesUntilProviderCapable(t *testing.T) {
 	a := provider.ModelKey{Provider: "a", Model: "shared"}
 	b := provider.ModelKey{Provider: "b", Model: "shared"}
 	reg := fakeReg{byKey: map[provider.ModelKey]provider.Capability{
@@ -256,9 +256,9 @@ func TestPreflight_LookupErrorNonStatus(t *testing.T) {
 	}
 }
 
-// TestPreflight_QualifiedNotFoundIsLookupFailure: a configured provider
+// TestPreflight_QualifiedModelNotFoundIsLookupFailure: a configured provider
 // with a missing model must not be diagnosed as an unreachable provider.
-func TestPreflight_QualifiedNotFoundIsLookupFailure(t *testing.T) {
+func TestPreflight_QualifiedModelNotFoundIsLookupFailure(t *testing.T) {
 	key := provider.ModelKey{Provider: "ollama", Model: "missing"}
 	reg := fakeReg{errByKey: map[provider.ModelKey]error{
 		key: fmt.Errorf(`provider: lookup %v: model %q not found on %q`, key, key.Model, key.Provider),
@@ -413,12 +413,12 @@ func TestPreflight_ProbeNoContinuesToNextEntry(t *testing.T) {
 	}
 }
 
-// TestPreflight_AllExhaustedFatalIncludesProbes: chain [A probe->no,
+// TestPreflight_AllExhaustedFatalIncludesProbeOutcomes: chain [A probe->no,
 // B probe->inconclusive, C lookup error]. No entry is capable, so preflight
 // fails and the terminal error inlines all three per-entry diagnostics: A's
 // probed-no line, B's inconclusive line, and C's #217 connectivity diagnostic
 // (preserved verbatim).
-func TestPreflight_AllExhaustedFatalIncludesProbes(t *testing.T) {
+func TestPreflight_AllExhaustedFatalIncludesProbeOutcomes(t *testing.T) {
 	a := provider.ModelKey{Provider: "ollama", Model: "a"}
 	b := provider.ModelKey{Provider: "ollama", Model: "b"}
 	c := provider.ModelKey{Provider: "llamacpp", Model: "down"}

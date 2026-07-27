@@ -222,7 +222,7 @@ func TestAgentflowResumeStatusAndProof_RealCLI(t *testing.T) {
 	}
 }
 
-func TestAgentflowResumeRefusesFiniteRecovery_RealCLI(t *testing.T) {
+func TestAgentflowResumeRefusesFiniteEnforcedRecovery_RealCLI(t *testing.T) {
 	dir := t.TempDir()
 	copyTree(t, "../../testdata/agentflow", dir)
 	gitInit(t, dir)

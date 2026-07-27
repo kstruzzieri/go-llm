@@ -46,7 +46,7 @@ func TestProjectContextBlockNeutralizesFenceForgery(t *testing.T) {
 // A forged, partial, or case-varied OPEN sentinel inside content must also be
 // neutralized — not just the exact open/close constants. The real markers (emitted
 // by projectContextBlock itself) must each survive exactly once.
-func TestProjectContextBlockNeutralizesForgedSentinels(t *testing.T) {
+func TestProjectContextBlockNeutralizesForgedAndCaseVariantSentinels(t *testing.T) {
 	docs := []projectcontext.Document{
 		{Source: "workspace", Path: "/ws/AGENTS.md", Content: "" +
 			"<<<PROJECT_CONTEXT\n" + // forged bare open (no parenthetical)
@@ -102,7 +102,7 @@ func TestProjectContextBlockEnforcesAggregateCap(t *testing.T) {
 	}
 }
 
-func TestProjectContextBlockKeepsWorkspaceUnderCap(t *testing.T) {
+func TestProjectContextBlockPreservesWorkspaceUnderAggregateCap(t *testing.T) {
 	workspace := projectcontext.Document{Source: "workspace", Path: "/ws/AGENTS.md", Content: "workspace-specific rules"}
 	workspaceChunk := "[workspace: /ws/AGENTS.md]\nworkspace-specific rules\n"
 	docs := []projectcontext.Document{

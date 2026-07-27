@@ -255,7 +255,7 @@ func TestDriver_ParallelCohortRunsBeforeSerialWork(t *testing.T) {
 	}
 }
 
-func TestDriver_CohortFailuresAbortBeforeSerial(t *testing.T) {
+func TestDriver_ParallelCohortFailuresAbortBeforeSerialWork(t *testing.T) {
 	for _, tt := range []struct {
 		name    string
 		af      *fakeAF
@@ -293,7 +293,7 @@ func TestDriver_CohortFailuresAbortBeforeSerial(t *testing.T) {
 	}
 }
 
-func TestDriver_PreapprovedWorkflowIsReusedNotRebuilt(t *testing.T) {
+func TestDriver_PreapprovedWorkflowIsReusedWithoutRecommendationOrMaterialization(t *testing.T) {
 	af := &fakeAF{}
 	recommendation := defaultWorkflowRecommendation()
 	d := &driver{
@@ -313,7 +313,7 @@ func TestDriver_PreapprovedWorkflowIsReusedNotRebuilt(t *testing.T) {
 	}
 }
 
-func TestReadExternalTaskBrief_FallbackOnlyExactFacts(t *testing.T) {
+func TestReadExternalTaskBrief_ConservativeFallbackUsesOnlyExactPlanFacts(t *testing.T) {
 	plan := agentflow.Plan{
 		RiskLevel:       "low",
 		ValidationGates: []string{"unit", "integration"},
@@ -340,7 +340,7 @@ func TestReadExternalTaskBrief_FallbackOnlyExactFacts(t *testing.T) {
 	}
 }
 
-func TestReadExternalTaskBrief_StrictInputExactFacts(t *testing.T) {
+func TestReadExternalTaskBrief_StrictExplicitInputAndExactFactFill(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	plan := agentflow.Plan{
@@ -442,7 +442,7 @@ func TestReadExternalTaskBrief_CannotHideExactPlanScope(t *testing.T) {
 	}
 }
 
-func TestReadApprovedHandoff_VerifiesAgentflowContract(t *testing.T) {
+func TestReadApprovedWorkflowHandoff_VerifiesExistingAgentflowContract(t *testing.T) {
 	root := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(root, ".agent"), 0o700); err != nil {
 		t.Fatal(err)
@@ -490,7 +490,7 @@ func TestReadApprovedHandoff_VerifiesAgentflowContract(t *testing.T) {
 	}
 }
 
-func TestReadApprovedHandoff_RejectsPlanOrBriefMismatch(t *testing.T) {
+func TestReadApprovedWorkflowHandoff_RejectsDifferentPlanOrBrief(t *testing.T) {
 	root := t.TempDir()
 	approvedPlan := agentflow.Plan{Objective: "approved objective", RiskLevel: "low"}
 	brief := agentflow.TaskBriefFromPlan(approvedPlan, "feature")
@@ -511,7 +511,7 @@ func TestReadApprovedHandoff_RejectsPlanOrBriefMismatch(t *testing.T) {
 	}
 }
 
-func TestReadApprovedHandoff_RejectsUnapprovedFields(t *testing.T) {
+func TestReadApprovedWorkflowHandoff_RejectsUnapprovedAgentflowPlanFields(t *testing.T) {
 	root := t.TempDir()
 	approvedPlan := agentflow.Plan{Objective: "approved objective", RiskLevel: "low"}
 	brief := agentflow.TaskBriefFromPlan(approvedPlan, "feature")
@@ -538,7 +538,7 @@ func TestReadApprovedHandoff_RejectsUnapprovedFields(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowTask_RejectsStaleHandoffEarly(t *testing.T) {
+func TestRunAgentflowTask_RejectsStaleWorkflowHandoffBeforeClientUse(t *testing.T) {
 	root := t.TempDir()
 	ir := validTraceableIR()
 	approvedPlan := agentflow.Compile(ir)
@@ -576,7 +576,7 @@ func TestRunAgentflowTask_RejectsStaleHandoffEarly(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowTask_ParallelNeedsOrchestrator(t *testing.T) {
+func TestRunAgentflowTask_ParallelRequiresOrchestratorFactoryBeforeAgentflow(t *testing.T) {
 	root := t.TempDir()
 	plan := agentflow.Compile(validTraceableIR())
 	planBytes, err := json.Marshal(plan)
@@ -601,7 +601,7 @@ func TestRunAgentflowTask_ParallelNeedsOrchestrator(t *testing.T) {
 	}
 }
 
-func TestDriver_RouteReadOnlyAndShownBeforeReview(t *testing.T) {
+func TestDriver_RouteIsReadOnlyBeforeMutationAndShownBeforeReview(t *testing.T) {
 	rec := defaultWorkflowRecommendation()
 	rec.Selected.Profile = "high-risk"
 	rec.Contract.WorkflowProfile = "high-risk"
@@ -634,7 +634,7 @@ func TestDriver_RouteReadOnlyAndShownBeforeReview(t *testing.T) {
 	}
 }
 
-func TestDriver_WorkflowFailuresStopAtMutationEdge(t *testing.T) {
+func TestDriver_WorkflowFailuresStopAtTheirMutationBoundary(t *testing.T) {
 	for _, tt := range []struct {
 		name     string
 		failAt   string
@@ -684,7 +684,7 @@ func activeFinding(id, owner string) agentflow.ReviewFinding {
 	}
 }
 
-func TestDriver_AmendmentReadyUsesAttemptLifecycle(t *testing.T) {
+func TestDriver_AmendmentReadyFindingUsesExistingAttemptLifecycle(t *testing.T) {
 	finding := activeFinding("RF-1", "P1")
 	finding.Location = &agentflow.ReviewLocation{Path: "src/a.go", Line: 7, LineEnd: 9}
 	af := &fakeAF{review: reviewRun(true, finding)}
@@ -714,7 +714,7 @@ func TestDriver_AmendmentReadyUsesAttemptLifecycle(t *testing.T) {
 	}
 }
 
-func TestAmendmentGoal_OnlyLockedSliceAndRepairContext(t *testing.T) {
+func TestAmendmentGoal_ContainsOnlyLockedSliceAndAuthoritativeRepairContext(t *testing.T) {
 	plan := reviewPlan()
 	finding := activeFinding("RF-1", "P1")
 	finding.Location = &agentflow.ReviewLocation{Path: "src/a.go", Line: 7, LineEnd: 9}
@@ -737,7 +737,7 @@ func TestAmendmentGoal_OnlyLockedSliceAndRepairContext(t *testing.T) {
 	}
 }
 
-func TestDriver_LegacyInactiveFindingsStayVisible(t *testing.T) {
+func TestDriver_LegacyAndInactiveFindingsRemainVisibleWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name string
 		run  agentflow.ReviewRun
@@ -767,7 +767,7 @@ func TestDriver_LegacyInactiveFindingsStayVisible(t *testing.T) {
 	}
 }
 
-func TestDriver_RejectsMalformedAmendmentBeforeEdit(t *testing.T) {
+func TestDriver_RejectsMalformedAmendmentProjectionBeforeEdit(t *testing.T) {
 	tests := []struct {
 		name    string
 		finding agentflow.ReviewFinding
@@ -869,7 +869,7 @@ func TestDriver_AmendmentFailuresStayIncomplete(t *testing.T) {
 	}
 }
 
-func TestDriver_BlockingReviewRequiresRereview(t *testing.T) {
+func TestDriver_BlockingReviewRequiresAuthoritativeRereview(t *testing.T) {
 	af := &fakeAF{
 		review:     reviewRun(true, activeFinding("RF-1", "P1")),
 		proofError: &agentflow.FinishRunError{StoppedAt: "verify-proof", Diagnostics: []string{"review gate still blocked"}},
@@ -965,7 +965,7 @@ func TestValidateTraceability_RejectsInvalidReferences(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowTask_RejectsBadTraceEarly(t *testing.T) {
+func TestRunAgentflowTask_RejectsInvalidTraceabilityBeforeClientUse(t *testing.T) {
 	planJSON := `{
 		"requirements":[{"id":"REQ-1","text":"behavior","acceptance_criteria":[{"id":"AC-1","text":"verified","review":{"minimum_depth":"deep"}}]}],
 		"steps":[{"id":"P1","files":["a.go"],"criterion_ids":["AC-MISSING"],"validation":["true"],"gates":[{"kind":"command","run":["true"]}]}]
@@ -987,7 +987,7 @@ func TestRunAgentflowTask_RejectsBadTraceEarly(t *testing.T) {
 	}
 }
 
-func TestRunAgentflowTask_RejectsBadDesignTraceEarly(t *testing.T) {
+func TestRunAgentflowTask_RejectsInvalidDesignTraceabilityBeforeClientUse(t *testing.T) {
 	planJSON := `{
 		"schema_version":"0.4.0",
 		"design_decisions":[],
@@ -1010,7 +1010,7 @@ func TestRunAgentflowTask_RejectsBadDesignTraceEarly(t *testing.T) {
 	}
 }
 
-func TestDecodeAgentflowPlanJSON_RejectsBadDesignLists(t *testing.T) {
+func TestDecodeAgentflowPlanJSON_RejectsMalformedDesignLists(t *testing.T) {
 	for name, input := range map[string]string{
 		"null declarations": `{"design_decisions":null}`,
 		"null references":   `{"design_decisions":[{"id":"DD-1","text":"x","references":null}]}`,
@@ -1025,7 +1025,7 @@ func TestDecodeAgentflowPlanJSON_RejectsBadDesignLists(t *testing.T) {
 	}
 }
 
-func TestStepGoal_ProjectsOnlyLockedStepSlice(t *testing.T) {
+func TestStepGoal_ProjectsOnlyTheLockedStepSpecificationSlice(t *testing.T) {
 	plan := &agentflow.Plan{
 		Objective:  "ship the requested behavior",
 		Invariants: []string{"no new dependencies", "proof state stays opaque"},
@@ -1107,7 +1107,7 @@ Requirements and acceptance criteria:
 	}
 }
 
-func TestStepGoal_TraceableNoCriteriaEmptySlice(t *testing.T) {
+func TestStepGoal_TraceableStepWithoutCriteriaHasExplicitEmptySlice(t *testing.T) {
 	plan := &agentflow.Plan{
 		Objective: "prepare shared scaffolding",
 		Requirements: []agentflow.Requirement{{
@@ -1126,7 +1126,7 @@ func TestStepGoal_TraceableNoCriteriaEmptySlice(t *testing.T) {
 	}
 }
 
-func TestStepGoal_ProjectsDesignDecisionsInOrder(t *testing.T) {
+func TestStepGoal_ProjectsSelectedDesignDecisionsInDeclarationOrder(t *testing.T) {
 	references := []string{"ADR-2", "ADR-1"}
 	decisions := []agentflow.DesignDecision{
 		{ID: "DD-2", Text: "second decision", References: &references},
@@ -1188,7 +1188,7 @@ Design decisions:
 	}
 }
 
-func TestStepGoal_DesignFamilyNoSelectionEmptySlice(t *testing.T) {
+func TestStepGoal_DesignFamilyWithoutStepSelectionHasExplicitEmptySlice(t *testing.T) {
 	decisions := []agentflow.DesignDecision{{ID: "DD-1", Text: "used by a later step"}}
 	plan := &agentflow.Plan{DesignDecisions: &decisions}
 	got, err := stepGoal(plan, agentflow.Step{ID: "P0", Action: "prepare scaffolding"})
@@ -1219,7 +1219,7 @@ func TestStepGoal_UsesExecutionGateLabelFallback(t *testing.T) {
 	}
 }
 
-func TestStepGoal_AttributesCriteriaToCommandGate(t *testing.T) {
+func TestStepGoal_AttributesCriteriaToCommandGateUnderKindFilter(t *testing.T) {
 	// P0 preflight rejects non-command gates before rendering, but the renderer
 	// must not depend on that: gate criteria have to ride the extracted gate,
 	// not an index back into the unfiltered step.gates slice.
@@ -1252,7 +1252,7 @@ func TestStepGoal_PropagatesInvalidCommandGate(t *testing.T) {
 	}
 }
 
-func TestStepGoal_LegacyPlanPreservesExactBytes(t *testing.T) {
+func TestStepGoal_LegacyPlanPreservesExactInstructionBytes(t *testing.T) {
 	plan := &agentflow.Plan{}
 	step := agentflow.Step{
 		Action:       "change the requested behavior",
@@ -1371,7 +1371,7 @@ func TestResolveTaskPlanPath(t *testing.T) {
 	}
 }
 
-func TestResolveTaskAgentflowSourcePinsRelativeCheckout(t *testing.T) {
+func TestResolveTaskAgentflowSourcePinsRelativeCheckoutToCanonicalRoot(t *testing.T) {
 	root := t.TempDir()
 	relative := filepath.Join("tools", "agentflow")
 	got, err := resolveTaskAgentflowSource(root, relative)
@@ -1423,7 +1423,7 @@ func TestResolveReviewManifest(t *testing.T) {
 	}
 }
 
-func TestReviewAmendments_ValidatesActiveNotDisplayOnly(t *testing.T) {
+func TestReviewAmendments_ValidatesActiveButToleratesDisplayOnly(t *testing.T) {
 	plan := reviewPlan()
 
 	reject := []struct {

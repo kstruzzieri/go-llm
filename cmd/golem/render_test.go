@@ -58,7 +58,7 @@ func TestRenderer_FinalFooter_Stopped(t *testing.T) {
 	}
 }
 
-func TestRenderer_OnStepNewLineAfterUnterminated(t *testing.T) {
+func TestRenderer_OnStepStartsNewLineAfterUnterminatedToken(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
 	r := newRenderer(&buf, false, 16, func() time.Time { return clock })
@@ -92,7 +92,7 @@ func TestRenderer_FinalFooter_Completed_NoStoppedSuffix(t *testing.T) {
 	}
 }
 
-func TestRenderer_OnStep_NilRouteRendersQuestionMark(t *testing.T) {
+func TestRenderer_OnStep_NilRouteOutcome_RendersQuestionMark(t *testing.T) {
 	var buf bytes.Buffer
 	clock := time.Unix(0, 0)
 	r := newRenderer(&buf, false, 16, func() time.Time { return clock })

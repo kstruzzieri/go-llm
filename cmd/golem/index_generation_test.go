@@ -65,7 +65,7 @@ func publishTestGeneration(t *testing.T, baseDB, workspaceID, generation string)
 	return gen
 }
 
-func TestResolveActiveGeneration_ValidatesPublished(t *testing.T) {
+func TestResolveActiveGeneration_ValidatesPublishedGeneration(t *testing.T) {
 	baseDB := filepath.Join(t.TempDir(), "k.db")
 	want := publishTestGeneration(t, baseDB, "workspace:k", strings.Repeat("a", 32))
 
@@ -78,7 +78,7 @@ func TestResolveActiveGeneration_ValidatesPublished(t *testing.T) {
 	}
 }
 
-func TestResolveActiveGeneration_NoFallbackOnCorruptPtr(t *testing.T) {
+func TestResolveActiveGeneration_DoesNotFallbackWhenPointerIsCorrupt(t *testing.T) {
 	baseDB := filepath.Join(t.TempDir(), "k.db")
 	seedIndex(t, baseDB, "workspace:k", "ollama/nomic")
 	if err := os.WriteFile(activePointerPath(baseDB), []byte("{broken"), 0o600); err != nil {
@@ -89,7 +89,7 @@ func TestResolveActiveGeneration_NoFallbackOnCorruptPtr(t *testing.T) {
 	}
 }
 
-func TestResolveActiveGeneration_RejectsBadMetaAndDB(t *testing.T) {
+func TestResolveActiveGeneration_RejectsInvalidMetadataAndDatabase(t *testing.T) {
 	tests := []struct {
 		name   string
 		mutate func(*testing.T, indexGeneration)
@@ -181,7 +181,7 @@ func TestResolveActiveGeneration_RejectsBadMetaAndDB(t *testing.T) {
 	}
 }
 
-func TestCleanupStaleGenerations_KeepsActiveAndLegacy(t *testing.T) {
+func TestCleanupStaleGenerations_PreservesActiveAndLegacy(t *testing.T) {
 	baseDB := filepath.Join(t.TempDir(), "k.db")
 	activeID := strings.Repeat("a", 32)
 	active := publishTestGeneration(t, baseDB, "workspace:k", activeID)
@@ -230,7 +230,7 @@ func TestCleanupStaleGenerations_KeepsActiveAndLegacy(t *testing.T) {
 	}
 }
 
-func TestCleanupStaleGenerations_ReportsRemovalFailure(t *testing.T) {
+func TestCleanupStaleGenerations_ReportsFinalizedRemovalFailure(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("removal-failure injection via directory permissions requires non-root")
 	}
@@ -282,7 +282,7 @@ func TestShouldRemoveUnpublished(t *testing.T) {
 	}
 }
 
-func TestResolveActiveGeneration_RejectsLegacyLiveWAL(t *testing.T) {
+func TestResolveActiveGeneration_RejectsLegacyWithLiveWAL(t *testing.T) {
 	baseDB := filepath.Join(t.TempDir(), "k.db")
 	seedIndex(t, baseDB, "workspace:k", "ollama/nomic")
 	if err := os.WriteFile(baseDB+"-wal", []byte("frame"), 0o600); err != nil {
@@ -297,7 +297,7 @@ func TestResolveActiveGeneration_RejectsLegacyLiveWAL(t *testing.T) {
 	}
 }
 
-func TestPublishActiveGeneration_InterruptRecoversSame(t *testing.T) {
+func TestPublishActiveGeneration_InterruptionHasDeterministicRecovery(t *testing.T) {
 	stop := errors.New("stop")
 	tests := []struct {
 		boundary publicationBoundary

@@ -69,7 +69,7 @@ func (r *assignedWorkerRunner) Run(_ context.Context, args []string, _ []byte) (
 	}
 }
 
-func TestAssignedParallelWorkerRunsOwnedFreshStep(t *testing.T) {
+func TestAssignedParallelWorkerRunsOnlyItsOwnedFreshStep(t *testing.T) {
 	root := t.TempDir()
 	plan := &agentflow.Plan{AllowedFiles: []string{"worker.go"}, Steps: []agentflow.Step{{
 		ID: "P2", Files: []string{"worker.go"}, Validation: []string{"unit"},
@@ -108,7 +108,7 @@ func TestAssignedParallelWorkerRunsOwnedFreshStep(t *testing.T) {
 	}
 }
 
-func TestAssignedParallelWorkerRejectsStaleProjection(t *testing.T) {
+func TestAssignedParallelWorkerRejectsNonFreshProjectionBeforeClaim(t *testing.T) {
 	plan := &agentflow.Plan{Steps: []agentflow.Step{{ID: "P1"}}}
 	runner := &assignedWorkerRunner{nextAction: `{"resumability":{"contract":{"plan_sha256":"plan","locked":true,"execution_contract_sha256":"execution"},"agent_id":"other","attempt":null,"diagnostics":[]}}`}
 	sess := &replSession{newOrchestrator: func() *agent.Orchestrator {
@@ -124,7 +124,7 @@ func TestAssignedParallelWorkerRejectsStaleProjection(t *testing.T) {
 	}
 }
 
-func TestAssignedParallelWorkersIsolateRuntimeJournal(t *testing.T) {
+func TestAssignedParallelWorkersIsolateRuntimeRootAndJournal(t *testing.T) {
 	roots := []string{t.TempDir(), t.TempDir()}
 	plan := &agentflow.Plan{AllowedFiles: []string{"a.go", "b.go"}, Steps: []agentflow.Step{
 		{ID: "P1", Files: []string{"a.go"}},
@@ -183,7 +183,7 @@ func TestAssignedParallelWorkersIsolateRuntimeJournal(t *testing.T) {
 	}
 }
 
-func TestAssignedParallelWorkerFailsClosedIfStale(t *testing.T) {
+func TestAssignedParallelWorkerFailsClosedWithoutFreshOrchestrator(t *testing.T) {
 	plan := &agentflow.Plan{Steps: []agentflow.Step{{ID: "P1"}}}
 	for _, tt := range []struct {
 		name string
@@ -218,7 +218,7 @@ func TestAssignedParallelWorkerFailsClosedIfStale(t *testing.T) {
 	}
 }
 
-func TestParallelAggregateUsesSuppliedOutputRoot(t *testing.T) {
+func TestParallelAggregateUsesSuppliedCanonicalOutputRoot(t *testing.T) {
 	runner := &aggregationRootRunner{}
 	var runnerRoots []string
 	aggregate := newParallelAggregate(func(root string) agentflow.Runner {
@@ -271,7 +271,7 @@ func TestParallelSelectionUsesPlanOrderAndWorkerBound(t *testing.T) {
 	}
 }
 
-func TestParallelSelectionFallsBackSerialOrSingle(t *testing.T) {
+func TestParallelSelectionFallsBackForSerialGraphsAndSingleCandidate(t *testing.T) {
 	serial := &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{{ID: "P1", Files: []string{"a.go"}}, {ID: "P2", Files: []string{"b.go"}}}}
 	if got := selectParallelSteps(serial, 2, func(agentflow.Step, []string) bool { return true }); got != nil {
 		t.Fatalf("all-empty dependency graph selected %v", stepIDs(got))
@@ -289,7 +289,7 @@ func TestParallelSelectionFallsBackSerialOrSingle(t *testing.T) {
 	}
 }
 
-func TestParallelSerialGraphFallsBackWithoutGit(t *testing.T) {
+func TestParallelCoordinatorSerialGraphFallsBackWithoutGit(t *testing.T) {
 	root := t.TempDir()
 	plan := &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{
 		{ID: "P1", Files: []string{"a.go"}},
@@ -305,7 +305,7 @@ func TestParallelSerialGraphFallsBackWithoutGit(t *testing.T) {
 	}
 }
 
-func TestParallelLiteralPathsRejectUnsafeScope(t *testing.T) {
+func TestParallelLiteralPathsRejectUnsafeOrIneffectiveScope(t *testing.T) {
 	tests := []struct {
 		name    string
 		file    string
@@ -336,7 +336,7 @@ func TestParallelLiteralPathsRejectUnsafeScope(t *testing.T) {
 	}
 }
 
-func TestParallelLiteralPathsAcceptExactRejectDupes(t *testing.T) {
+func TestParallelLiteralPathsAcceptExactFilesAndRejectDuplicates(t *testing.T) {
 	plan := &agentflow.Plan{AllowedFiles: []string{"src/*"}, Steps: []agentflow.Step{{ID: "P1", Files: []string{"src/a.go", "src/b.go"}}}}
 	got, ok := parallelLiteralPaths(plan, plan.Steps[0])
 	if !ok || !reflect.DeepEqual(got, plan.Steps[0].Files) {
@@ -402,7 +402,7 @@ func TestParallelSelectionSkipsOverlappingCandidate(t *testing.T) {
 	}
 }
 
-func TestParallelSelectsOnlyGitSafeCandidates(t *testing.T) {
+func TestParallelCoordinatorSelectsOnlyGitSafeCandidates(t *testing.T) {
 	tests := []struct {
 		name   string
 		setup  func(*testing.T, string)
@@ -444,7 +444,7 @@ func TestParallelSelectsOnlyGitSafeCandidates(t *testing.T) {
 	}
 }
 
-func TestParallelAcceptsTrackedAndUnignoredFiles(t *testing.T) {
+func TestParallelCoordinatorAcceptsTrackedAndNewUnignoredFiles(t *testing.T) {
 	root := newParallelTestRepo(t)
 	plan := parallelTestPlan("a.go", "new.go", "b.go")
 	c := newParallelCoordinator(root, plan, 2, nil)
@@ -457,7 +457,7 @@ func TestParallelAcceptsTrackedAndUnignoredFiles(t *testing.T) {
 	}
 }
 
-func TestParallelFallsBackOnHiddenIndexEdits(t *testing.T) {
+func TestParallelCoordinatorFallsBackForTrackedPathsWithHiddenIndexEdits(t *testing.T) {
 	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
 		t.Run(flag, func(t *testing.T) {
 			root := newParallelTestRepo(t)
@@ -483,7 +483,7 @@ func TestParallelFallsBackOnHiddenIndexEdits(t *testing.T) {
 	}
 }
 
-func TestParallelFallsBackOnMissingFlaggedPaths(t *testing.T) {
+func TestParallelCoordinatorFallsBackForMissingTrackedPathsWithHiddenIndexFlags(t *testing.T) {
 	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
 		t.Run(flag, func(t *testing.T) {
 			root := newParallelTestRepo(t)
@@ -508,7 +508,7 @@ func TestParallelFallsBackOnMissingFlaggedPaths(t *testing.T) {
 	}
 }
 
-func TestParallelRecheckRejectsIndexFlagDrift(t *testing.T) {
+func TestParallelCoordinatorRecheckRejectsCandidateIndexFlagDrift(t *testing.T) {
 	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
 		t.Run(flag, func(t *testing.T) {
 			root := newParallelTestRepo(t)
@@ -530,7 +530,7 @@ func TestParallelRecheckRejectsIndexFlagDrift(t *testing.T) {
 	}
 }
 
-func TestParallelFallsBackOnHiddenCanonicalEdit(t *testing.T) {
+func TestParallelCoordinatorFallsBackForHiddenUnassignedCanonicalEdit(t *testing.T) {
 	for _, flag := range []string{"--assume-unchanged", "--skip-worktree"} {
 		t.Run(flag, func(t *testing.T) {
 			root := newParallelTestRepo(t)
@@ -553,7 +553,7 @@ func TestParallelFallsBackOnHiddenCanonicalEdit(t *testing.T) {
 	}
 }
 
-func TestParallelExcludesConcurrentWorkspaceOwner(t *testing.T) {
+func TestParallelCoordinatorExcludesConcurrentWorkspaceOwner(t *testing.T) {
 	root := newParallelTestRepo(t)
 	first := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 2, nil)
 	selected, err := first.selectWorkers(context.Background())
@@ -576,7 +576,7 @@ func TestParallelExcludesConcurrentWorkspaceOwner(t *testing.T) {
 	}
 }
 
-func TestParallelRejectsNonTopLevelOrDirtyRoot(t *testing.T) {
+func TestParallelCoordinatorRejectsNonTopLevelOrDirtyRoot(t *testing.T) {
 	root := newParallelTestRepo(t)
 	if err := os.Mkdir(filepath.Join(root, "sub"), 0o755); err != nil {
 		t.Fatal(err)
@@ -591,7 +591,7 @@ func TestParallelRejectsNonTopLevelOrDirtyRoot(t *testing.T) {
 	}
 }
 
-func TestParallelRejectsUnmergedRootWithoutFallback(t *testing.T) {
+func TestParallelCoordinatorRejectsUnmergedRootInsteadOfFallingBack(t *testing.T) {
 	root := newParallelTestRepo(t)
 	baseBranch := strings.TrimSpace(runTestGit(t, root, "branch", "--show-current"))
 	runTestGit(t, root, "checkout", "-b", "parallel-conflict")
@@ -622,7 +622,7 @@ func TestParallelRejectsUnmergedRootWithoutFallback(t *testing.T) {
 	}
 }
 
-func TestParallelWorktreesShareBaseAndAgentTree(t *testing.T) {
+func TestParallelWorktreesShareDetachedBaseAndCopiedAgentTree(t *testing.T) {
 	root := newParallelTestRepo(t)
 	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 2, nil)
 	selected, err := c.selectWorkers(context.Background())
@@ -652,7 +652,7 @@ func TestParallelWorktreesShareBaseAndAgentTree(t *testing.T) {
 	}
 }
 
-func TestParallelWorkersOverlapWithExactDiff(t *testing.T) {
+func TestParallelWorkersRunConcurrentlyAndValidateExactDiff(t *testing.T) {
 	root := newParallelTestRepo(t)
 	started := make(chan struct{}, 2)
 	release := make(chan struct{})
@@ -758,7 +758,7 @@ func TestParallelWorkersRejectHiddenUnassignedEdits(t *testing.T) {
 	}
 }
 
-func TestParallelWorkersRejectSpacedStagedRename(t *testing.T) {
+func TestParallelWorkersRejectStagedRenameOfSpacedTrackedFile(t *testing.T) {
 	root := newParallelTestRepo(t)
 	writeTestFile(t, filepath.Join(root, "zz .agent"), "renamed source\n", 0o600)
 	runTestGit(t, root, "add", "--", "zz .agent")
@@ -788,7 +788,7 @@ func TestParallelWorkersRejectSpacedStagedRename(t *testing.T) {
 	}
 }
 
-func TestParallelWorkspaceLockRecoversAfterCrash(t *testing.T) {
+func TestParallelWorkspaceLockRecoversAfterCrashLeftoverFile(t *testing.T) {
 	root := newParallelTestRepo(t)
 	writeTestFile(t, filepath.Join(root, ".git", "golem-parallel.lock"), "", 0o600)
 
@@ -814,7 +814,7 @@ func TestParallelGitIgnoresInheritedRepoLocationEnv(t *testing.T) {
 	}
 }
 
-func TestParallelPrepareFailureReportsCreatedOnly(t *testing.T) {
+func TestParallelPrepareFailureReportsOnlyCreatedWorktrees(t *testing.T) {
 	root := newParallelTestRepo(t)
 	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go"), 2, nil)
 	selected, err := c.selectWorkers(context.Background())
@@ -973,7 +973,7 @@ func TestRunTaskDriverProofGatesParallelCleanup(t *testing.T) {
 	})
 }
 
-func TestParallelWorkersRejectUnpreparedCohort(t *testing.T) {
+func TestParallelWorkersRejectUnpreparedCohortBeforeCallbacks(t *testing.T) {
 	t.Run("zero workers", func(t *testing.T) {
 		var calls atomic.Int32
 		c := newParallelCoordinator(t.TempDir(), &agentflow.Plan{}, 2, func(context.Context, parallelWorker) error {
@@ -1034,7 +1034,7 @@ func TestParallelWorkersRejectUnpreparedCohort(t *testing.T) {
 	})
 }
 
-func TestParallelWorkersRejectChangedOrAttachedHead(t *testing.T) {
+func TestParallelWorkersRejectChangedHeadOrAttachedBranch(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		want   string
@@ -1085,7 +1085,7 @@ func TestParallelWorkersRejectChangedOrAttachedHead(t *testing.T) {
 	}
 }
 
-func TestParallelFailuresPreserveCanonicalAndWorktrees(t *testing.T) {
+func TestParallelWorkerFailuresAndDriftPreserveCanonicalAndWorktrees(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		worker parallelWorkerFunc
@@ -1181,7 +1181,7 @@ func TestParallelSetupFailurePreservesCreatedWorktree(t *testing.T) {
 	_ = c.cleanup(context.Background())
 }
 
-func TestParallelRunCohortPromotesAndAggregatesInOrder(t *testing.T) {
+func TestParallelRunCohortPromotesFilesAndAggregatesInOrder(t *testing.T) {
 	root := newParallelTestRepo(t)
 	plan := &agentflow.Plan{AllowedFiles: []string{"*"}, Steps: []agentflow.Step{
 		{ID: "P1", Files: []string{"nested/created.go", "a.go"}},
@@ -1398,7 +1398,7 @@ func TestParallelPromotionFailureRollsBackEarlierWrites(t *testing.T) {
 	}
 }
 
-func TestParallelPromotionRefusesEditAfterSnapshot(t *testing.T) {
+func TestParallelPromotionRefusesCanonicalEditAfterSnapshot(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target.go")
 	writeTestFile(t, target, "original\n", 0o600)
@@ -1425,7 +1425,7 @@ func TestParallelPromotionRefusesEditAfterSnapshot(t *testing.T) {
 	}
 }
 
-func TestParallelPromotionUsesPreWorkerSnapshot(t *testing.T) {
+func TestParallelPromotionUsesPreWorkerCanonicalSnapshot(t *testing.T) {
 	root := newParallelTestRepo(t)
 	c := newParallelCoordinator(root, parallelTestPlan("a.go", "b.go", "c.go"), 2, nil)
 	selected, err := c.selectWorkers(context.Background())
@@ -1449,7 +1449,7 @@ func TestParallelPromotionUsesPreWorkerSnapshot(t *testing.T) {
 	}
 }
 
-func TestParallelRollbackRefusesEditAfterPromotion(t *testing.T) {
+func TestParallelRollbackRefusesCanonicalEditAfterPromotion(t *testing.T) {
 	root := t.TempDir()
 	target := filepath.Join(root, "target.go")
 	writeTestFile(t, target, "original\n", 0o600)
@@ -1515,7 +1515,7 @@ func TestParallelPromotionCannotEscapeSwappedParent(t *testing.T) {
 	}
 }
 
-func TestParallelPromotionPreMutationFailureKeepsTarget(t *testing.T) {
+func TestParallelPromotionPreMutationFailureDoesNotTrackOrReplaceTarget(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		mode   fs.FileMode
@@ -1608,7 +1608,7 @@ func TestParallelAtomicCleanupJoinsRemovalFailure(t *testing.T) {
 	}
 }
 
-func TestParallelPromotionRejectsUnsafeState(t *testing.T) {
+func TestParallelPromotionRejectsUnsafeStateBeforeWriting(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		file  string
@@ -1724,7 +1724,7 @@ func TestParallelRunCohortReportsRollbackFailure(t *testing.T) {
 	t.Cleanup(func() { _ = c.cleanup(context.Background()) })
 }
 
-func TestParallelRunCohortRechecksBeforePromotion(t *testing.T) {
+func TestParallelRunCohortRechecksCanonicalBeforePromotion(t *testing.T) {
 	for _, tt := range []struct {
 		name   string
 		want   string
@@ -1795,7 +1795,7 @@ func TestParallelRunCohortSerialFallbackDoesNothing(t *testing.T) {
 	}
 }
 
-func TestParallelSerialFallbackLeavesInterrupt(t *testing.T) {
+func TestParallelSerialFallbackLeavesNextInterruptForSerialLoop(t *testing.T) {
 	previous := runtime.GOMAXPROCS(1)
 	defer runtime.GOMAXPROCS(previous)
 

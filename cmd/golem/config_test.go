@@ -71,7 +71,7 @@ func TestResolveAgentChain_EmptyAgentKeyFatal(t *testing.T) {
 	}
 }
 
-func TestResolveSummarizeChain_UsesConfiguredChain(t *testing.T) {
+func TestResolveSummarizeChain_UsesConfiguredFallbackChain(t *testing.T) {
 	cfg := &config.Config{
 		Models: map[string]config.ModelConfig{
 			"light":  {Name: "small", Provider: "ollama", Fallbacks: []string{"hosted"}},
