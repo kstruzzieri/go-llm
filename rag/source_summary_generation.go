@@ -36,6 +36,8 @@ type SourceSummaryGenerator func(context.Context, SourceSummaryInput) (Generated
 // Sources with unknown/mixed provenance or a newer unreadable format are
 // skipped. Each publish uses a transaction-local compare-and-swap against the
 // exact ContentHash and VectorSpaceID returned by SourceProvenanceBatch.
+// Per-source failures are joined and returned after the remaining eligible
+// sources run; context cancellation stops immediately.
 func (s *SQLiteStore) GenerateSourceSummaries(ctx context.Context, generate SourceSummaryGenerator) error {
 	if generate == nil {
 		return fmt.Errorf("rag: generate source summaries: generator is required")
@@ -53,6 +55,7 @@ func (s *SQLiteStore) GenerateSourceSummaries(ctx context.Context, generate Sour
 		return err
 	}
 
+	var generationErr error
 	for _, source := range sources {
 		prov, ok := provenance[source]
 		if !ok || prov.Mixed || strings.TrimSpace(prov.Source) == "" ||
@@ -69,10 +72,13 @@ func (s *SQLiteStore) GenerateSourceSummaries(ctx context.Context, generate Sour
 		}
 
 		if err := s.generateSourceSummary(ctx, prov, generate); err != nil {
-			return err
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+			generationErr = errors.Join(generationErr, err)
 		}
 	}
-	return nil
+	return generationErr
 }
 
 func (s *SQLiteStore) generateSourceSummary(ctx context.Context, prov SourceProvenance, generate SourceSummaryGenerator) error {

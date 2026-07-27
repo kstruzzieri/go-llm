@@ -20,7 +20,9 @@ from stored indexed chunks. It copies `ContentHash` and `VectorSpaceID`
 byte-for-byte from `SourceProvenanceBatch` and compare-and-swaps the write
 against both values, so a concurrent reindex cannot publish stale model text.
 Rows below `SourceSummaryFormatVersion` regenerate; rows above it remain
-unreadable and are not overwritten by an older binary.
+unreadable and are not overwritten by an older binary. A per-source model or
+validation failure leaves that source on the deterministic metadata fallback,
+continues the remaining summaries, and warns without blocking index publication.
 
 ### Added — `rag` progressive source summaries, slice 1 of #189
 

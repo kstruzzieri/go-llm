@@ -71,6 +71,7 @@ type generationBuildResult struct {
 	index      indexResult
 	activeErr  error
 	gcWarn     string // non-fatal superseded-generation removal failure
+	summaryErr error  // non-fatal optional summary generation failures
 }
 
 func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (result generationBuildResult, err error) {
@@ -164,7 +165,10 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 	}
 	if opts.summarize != nil {
 		if err := store.GenerateSourceSummaries(ctx, opts.summarize); err != nil {
-			return result, fmt.Errorf("golem: generate staged source summaries: %w", err)
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			result.summaryErr = fmt.Errorf("golem: generate staged source summaries: %w", err)
 		}
 	}
 	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {

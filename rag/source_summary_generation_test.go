@@ -69,24 +69,60 @@ func TestGenerateSourceSummariesPersistsExactProvenance(t *testing.T) {
 	}
 }
 
-func TestGenerateSourceSummariesProviderFailureWritesNothing(t *testing.T) {
+func TestGenerateSourceSummariesProviderFailureDoesNotBlockOtherSources(t *testing.T) {
 	store := newTestStore(t)
 	ctx := context.Background()
 	seedSummaryGenerationSource(t, store, "pkg/a.go", "hash-a", "provider/embedding", "package a")
+	seedSummaryGenerationSource(t, store, "pkg/b.go", "hash-b", "provider/embedding", "package b")
 	wantErr := errors.New("summarizer unavailable")
 
-	err := store.GenerateSourceSummaries(ctx, func(context.Context, SourceSummaryInput) (GeneratedSourceSummary, error) {
-		return GeneratedSourceSummary{}, wantErr
+	var calls []string
+	err := store.GenerateSourceSummaries(ctx, func(_ context.Context, in SourceSummaryInput) (GeneratedSourceSummary, error) {
+		calls = append(calls, in.Source)
+		if in.Source == "pkg/a.go" {
+			return GeneratedSourceSummary{}, wantErr
+		}
+		return GeneratedSourceSummary{
+			Abstract: "Provides B.",
+			Overview: "Defines B.",
+			Model:    "provider/summarizer",
+		}, nil
 	})
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("GenerateSourceSummaries error = %v, want %v", err, wantErr)
 	}
-	rows, err := store.SourceSummaryBatch(ctx, []string{"pkg/a.go"})
+	if len(calls) != 2 || calls[0] != "pkg/a.go" || calls[1] != "pkg/b.go" {
+		t.Fatalf("generator calls = %v, want both sources in order", calls)
+	}
+	rows, err := store.SourceSummaryBatch(ctx, []string{"pkg/a.go", "pkg/b.go"})
 	if err != nil {
 		t.Fatalf("SourceSummaryBatch: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("provider failure wrote summaries: %+v", rows)
+	if _, ok := rows["pkg/a.go"]; ok {
+		t.Fatalf("provider failure wrote a summary for pkg/a.go: %+v", rows)
+	}
+	if got, ok := rows["pkg/b.go"]; !ok || got.Abstract != "Provides B." {
+		t.Fatalf("healthy source summary = %+v, present=%v", got, ok)
+	}
+}
+
+func TestGenerateSourceSummariesContextCancellationStopsRemainingSources(t *testing.T) {
+	store := newTestStore(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	seedSummaryGenerationSource(t, store, "pkg/a.go", "hash-a", "provider/embedding", "package a")
+	seedSummaryGenerationSource(t, store, "pkg/b.go", "hash-b", "provider/embedding", "package b")
+
+	calls := 0
+	err := store.GenerateSourceSummaries(ctx, func(context.Context, SourceSummaryInput) (GeneratedSourceSummary, error) {
+		calls++
+		cancel()
+		return GeneratedSourceSummary{}, context.Canceled
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("GenerateSourceSummaries error = %v, want context.Canceled", err)
+	}
+	if calls != 1 {
+		t.Fatalf("generator calls = %d, want cancellation to stop before the second source", calls)
 	}
 }
 

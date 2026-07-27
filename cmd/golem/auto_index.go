@@ -186,6 +186,9 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		return
 	}
 	job.notice(line)
+	if built.summaryErr != nil {
+		job.notice("warning: retrieve auto-index progressive summaries incomplete: " + firstLine(built.summaryErr.Error()))
+	}
 	if feedbackWarn != "" {
 		job.notice("warning: " + feedbackWarn)
 	}

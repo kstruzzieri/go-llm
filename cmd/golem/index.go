@@ -269,5 +269,9 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		}
 		return err
 	}
+	if built.summaryErr != nil {
+		_, _ = fmt.Fprintf(errOut, "golem index: warning: progressive summaries incomplete: %s\n",
+			firstLine(built.summaryErr.Error()))
+	}
 	return built.index.exitErr
 }

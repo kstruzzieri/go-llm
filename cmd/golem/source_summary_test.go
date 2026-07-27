@@ -88,6 +88,28 @@ func TestSourceSummaryGeneratorProviderFailure(t *testing.T) {
 	}
 }
 
+func TestSourceSummaryGeneratorRejectsOversizedInputBeforeProvider(t *testing.T) {
+	calls := 0
+	generate := sourceSummaryGenerator([]string{"provider/summary"}, func(context.Context, provider.RoutingRequest) (*provider.ChatResponse, error) {
+		calls++
+		return nil, nil
+	})
+
+	_, err := generate(context.Background(), rag.SourceSummaryInput{
+		Source: "pkg/large.go",
+		Chunks: []rag.Chunk{{
+			Content: strings.Repeat("x", sourceSummaryMaxInputChars+1),
+			Source:  "pkg/large.go",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "input limit") {
+		t.Fatalf("generate error = %v, want input-limit rejection", err)
+	}
+	if calls != 0 {
+		t.Fatalf("provider calls = %d, want none for oversized input", calls)
+	}
+}
+
 func TestSourceSummaryGeneratorRejectsMalformedOutput(t *testing.T) {
 	for _, output := range []string{
 		`{"abstract":"","overview":"ok"}`,
