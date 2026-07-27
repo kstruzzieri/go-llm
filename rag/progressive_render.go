@@ -57,15 +57,22 @@ type progressiveSource struct {
 
 // normalizeOrientationValue forces a line-start or field value onto one line
 // — used by both orientation blocks and the evidence header's source path —
-// by turning CR and LF into single spaces, then trimming leading/trailing
-// space. The one value that must NEVER pass through this is evidence content
-// itself (spec section 9.7): evidenceText canonicalizes only its line endings,
-// then relies on numberLines' per-line prefix to keep content from forging a
-// block.
-var orientationValueReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+// by turning model-visible line breaks into single spaces, then trimming
+// leading/trailing space. The one value that must NEVER pass through this is
+// evidence content itself (spec section 9.7): evidenceText canonicalizes only
+// its line endings, then relies on numberLines' per-line prefix to keep content
+// from forging a block.
+var orientationValueReplacer = strings.NewReplacer(
+	"\r", " ", "\n", " ", "\v", " ", "\f", " ",
+	"\u0085", " ", "\u2028", " ", "\u2029", " ",
+)
+
+func replaceOrientationLineBreaks(v string) string {
+	return orientationValueReplacer.Replace(v)
+}
 
 func normalizeOrientationValue(v string) string {
-	return strings.TrimSpace(orientationValueReplacer.Replace(v))
+	return strings.TrimSpace(replaceOrientationLineBreaks(v))
 }
 
 // joinSortedUnique de-duplicates, sorts, and comma-joins list-field values.
