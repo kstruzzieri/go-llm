@@ -268,7 +268,7 @@ func TestREPL_HistoryReachesModelAsRealRoles(t *testing.T) {
 	}
 }
 
-func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
+func TestREPL_PersistsToolTranscriptResumesPlain(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hi"), 0o644); err != nil {
 		t.Fatal(err)
@@ -320,7 +320,7 @@ func TestREPL_PersistsToolTranscriptButResumesPlainHistory(t *testing.T) {
 	}
 }
 
-func TestRunOnceUnansweredFreshSessionDoesNotRefreshMissingRow(t *testing.T) {
+func TestRunOnceUnansweredFreshSessionSkipsRefresh(t *testing.T) {
 	root := t.TempDir()
 	sess := newSessionedTestSession(t, &scriptCaller{responses: []agent.ModelResult{{
 		Response: provider.ChatResponse{},

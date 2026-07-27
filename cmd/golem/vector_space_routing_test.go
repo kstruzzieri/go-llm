@@ -137,7 +137,7 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 	}
 }
 
-func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *testing.T) {
+func TestBuildGatedRetriever_MissingSpaceSkipsPrimary(t *testing.T) {
 	const stored = "embed-test/b"
 	dbPath := filepath.Join(t.TempDir(), "explicit.db")
 	seedIndex(t, dbPath, "workspace:ignored", stored)
@@ -169,7 +169,7 @@ func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *
 	}
 }
 
-func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing.T) {
+func TestBuildGatedRetriever_FailureNamesVectorSpace(t *testing.T) {
 	const stored = "embed-test/b"
 	dbPath := filepath.Join(t.TempDir(), "explicit.db")
 	seedIndex(t, dbPath, "workspace:ignored", stored)
@@ -204,7 +204,7 @@ func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing
 	}
 }
 
-func TestEnableRetrieve_PinsStoredVectorSpaceForExplicitAndAutoIndexes(t *testing.T) {
+func TestEnableRetrieve_PinsVectorSpaceExplicitAndAuto(t *testing.T) {
 	const stored = "embed-test/b"
 	tests := []struct {
 		name string
@@ -250,7 +250,7 @@ func TestEnableRetrieve_PinsStoredVectorSpaceForExplicitAndAutoIndexes(t *testin
 	}
 }
 
-func TestBuildGatedRetriever_LegacyCorpusKeepsConfiguredChainBehavior(t *testing.T) {
+func TestBuildGatedRetriever_LegacyCorpusKeepsChain(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "legacy.db")
 	store, err := rag.NewSQLiteStore(dbPath)
 	if err != nil {

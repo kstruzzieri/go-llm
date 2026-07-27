@@ -151,7 +151,7 @@ func TestSessionDBPathForWorkspaceRejectsRepoLocalPath(t *testing.T) {
 	}
 }
 
-func TestSessionDBPathForWorkspaceRejectsSymlinkIntoWorkspace(t *testing.T) {
+func TestSessionDBPathRejectsSymlinkIntoWorkspace(t *testing.T) {
 	root := t.TempDir()
 	link := filepath.Join(t.TempDir(), "data")
 	if err := os.Symlink(root, link); err != nil {
@@ -168,7 +168,7 @@ func TestSessionDBPathForWorkspaceRejectsSymlinkIntoWorkspace(t *testing.T) {
 	}
 }
 
-func TestValidateSessionDBOutsideWorkspaceAllowsSiblingPrefix(t *testing.T) {
+func TestValidateSessionDBAllowsSiblingPrefix(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "repo")
 	if err := os.Mkdir(root, 0o755); err != nil {

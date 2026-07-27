@@ -17,7 +17,7 @@ import (
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
-func TestProbeAutoIndexEmbedder_CallsWithOneInputAndModel(t *testing.T) {
+func TestProbeAutoIndexEmbedder_CallsOneInputAndModel(t *testing.T) {
 	var gotModel string
 	var gotInputs []string
 	var hadDeadline bool
@@ -46,7 +46,7 @@ func TestProbeAutoIndexEmbedder_CallsWithOneInputAndModel(t *testing.T) {
 	}
 }
 
-func TestProbeAutoIndexEmbedder_EmbedErrorIsOrdinaryError(t *testing.T) {
+func TestProbeAutoIndexEmbedder_EmbedErrorIsOrdinary(t *testing.T) {
 	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
 		return rag.EmbedResult{}, errTestEmbedCmd
 	})
@@ -76,7 +76,7 @@ func TestProbeAutoIndexEmbedder_WrongVectorCount(t *testing.T) {
 	}
 }
 
-func TestProbeAutoIndexEmbedder_RejectsMissingVectorSpaceIdentity(t *testing.T) {
+func TestProbeAutoIndexEmbedder_NeedsVectorSpaceID(t *testing.T) {
 	emb := rag.EmbedderFunc(func(context.Context, string, []string) (rag.EmbedResult, error) {
 		return rag.EmbedResult{Embeddings: [][]float64{realisticTestVector()}}, nil
 	})
@@ -231,7 +231,7 @@ func TestRunAutoIndex_PartialRunMarksReadyWithWarning(t *testing.T) {
 	}
 }
 
-func TestRunAutoIndex_EmbedderDownMarksFailedWithoutTouchingStore(t *testing.T) {
+func TestRunAutoIndex_EmbedderDownDoesNotTouchStore(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -256,7 +256,7 @@ func TestRunAutoIndex_EmbedderDownMarksFailedWithoutTouchingStore(t *testing.T) 
 	}
 }
 
-func TestRunAutoIndex_InvalidSidecarRebuildsAndEndsReady(t *testing.T) {
+func TestRunAutoIndex_InvalidSidecarRebuildsReady(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -277,7 +277,7 @@ func TestRunAutoIndex_InvalidSidecarRebuildsAndEndsReady(t *testing.T) {
 	}
 }
 
-func TestRunAutoIndex_LegacyEmbeddingFormatRebuildsNewGenerationWithoutMutatingActive(t *testing.T) {
+func TestRunAutoIndex_LegacyFormatRebuildsKeepsActive(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -330,7 +330,7 @@ func TestRunAutoIndex_LegacyEmbeddingFormatRebuildsNewGenerationWithoutMutatingA
 	}
 }
 
-func TestRunAutoIndex_WriterClosesBeforeRetrieverAndPrunesDeleted(t *testing.T) {
+func TestRunAutoIndex_WriterClosesFirstPrunesDeleted(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	writeWorkspaceFile(t, root, "b.go", "package a\n\nfunc B() {}\n")
@@ -467,7 +467,7 @@ func TestRunAutoIndex_ContextCanceledStaysSilent(t *testing.T) {
 	}
 }
 
-func TestRunAutoIndex_FailedRefreshPreservesActiveGenerationByteForByte(t *testing.T) {
+func TestRunAutoIndex_RefreshFailKeepsActiveByteForByte(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -512,7 +512,7 @@ func TestRunAutoIndex_FailedRefreshPreservesActiveGenerationByteForByte(t *testi
 	}
 }
 
-func TestRunAutoIndex_RetrieverOpenFailureDoesNotPublish(t *testing.T) {
+func TestRunAutoIndex_RetrieverOpenFailureNoPublish(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -550,7 +550,7 @@ func TestRunAutoIndex_RetrieverOpenFailureDoesNotPublish(t *testing.T) {
 	}
 }
 
-func TestRunAutoIndex_DeletedLastSourceFailsInsteadOfServingStaleMarker(t *testing.T) {
+func TestRunAutoIndex_DeletedLastSourceFailsNotStale(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -580,7 +580,7 @@ func TestRunAutoIndex_DeletedLastSourceFailsInsteadOfServingStaleMarker(t *testi
 	}
 }
 
-func TestRunAutoIndex_ServesActiveWhileBlockedThenPublishesAndSwaps(t *testing.T) {
+func TestRunAutoIndex_ServesActiveThenPublishesSwap(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -640,7 +640,7 @@ func TestRunAutoIndex_ServesActiveWhileBlockedThenPublishesAndSwaps(t *testing.T
 	}
 }
 
-func TestRunAutoIndex_LeaseContentionPreservesActiveAndLiveStaging(t *testing.T) {
+func TestRunAutoIndex_LeaseContentionKeepsActive(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -702,7 +702,7 @@ func TestRunAutoIndex_LeaseContentionPreservesActiveAndLiveStaging(t *testing.T)
 	}
 }
 
-func TestRunAutoIndex_WaitsOutLeaseAndAdoptsPublishedGeneration(t *testing.T) {
+func TestRunAutoIndex_WaitsLeaseAdoptsPublished(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -756,7 +756,7 @@ func TestRunAutoIndex_WaitsOutLeaseAndAdoptsPublishedGeneration(t *testing.T) {
 	}
 }
 
-func TestRunAutoIndex_LeaseWaitCancelledStaysSilentWarming(t *testing.T) {
+func TestRunAutoIndex_LeaseWaitCancelStaysSilent(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -789,7 +789,7 @@ func TestRunAutoIndex_LeaseWaitCancelledStaysSilentWarming(t *testing.T) {
 	}
 }
 
-func TestRunAutoIndex_CancellationPreservesActiveGenerationByteForByte(t *testing.T) {
+func TestRunAutoIndex_CancelKeepsActiveByteForByte(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
@@ -844,7 +844,7 @@ func TestRunAutoIndex_CancellationPreservesActiveGenerationByteForByte(t *testin
 	}
 }
 
-func TestRunAutoIndex_PinsGenerationToSuccessfulProbeVectorSpace(t *testing.T) {
+func TestRunAutoIndex_PinsGenerationToProbeVectorSpace(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
 	dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")

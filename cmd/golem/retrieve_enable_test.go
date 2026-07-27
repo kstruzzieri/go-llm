@@ -114,7 +114,7 @@ func TestEnableRetrieve_ExplicitMismatchHintHasNoFull(t *testing.T) {
 	}
 }
 
-func TestEnableRetrieve_ExplicitLegacyEmbeddingFormatRefusesWithoutMutation(t *testing.T) {
+func TestEnableRetrieve_LegacyFormatRefusesNoMutation(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "explicit.db")
 	seedIndex(t, dbPath, "workspace:ignored", "ollama/nomic")
 	rewriteEmbeddingsAsLegacyJSON(t, dbPath)

@@ -153,7 +153,7 @@ func TestReadyRetrieve_CloseReleasesFeedbackHandle(t *testing.T) {
 // Shutdown can race the background job: close() may run while the wrapper is
 // still warming, and markReady lands afterwards. The handle installed then can
 // never be released by close() again, so markReady must release it itself.
-func TestReadyRetrieve_MarkReadyAfterCloseReleasesHandle(t *testing.T) {
+func TestReadyRetrieve_MarkReadyAfterCloseReleases(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "feedback.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -181,7 +181,7 @@ func TestReadyRetrieve_CloseNilSafe(t *testing.T) {
 
 // A markReady that loses the terminal-transition race to markFailed must not
 // strand its feedback handle either — same ownership rule as the close race.
-func TestReadyRetrieve_MarkReadyAfterFailedReleasesHandle(t *testing.T) {
+func TestReadyRetrieve_MarkReadyAfterFailedReleases(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "feedback.db")
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -279,7 +279,7 @@ func TestReadyRetrieve_InstallSwapsLiveDelegate(t *testing.T) {
 	}
 }
 
-func TestReadyRetrieve_InFlightOldDelegateDrainsWhileNewCallsUseReplacement(t *testing.T) {
+func TestReadyRetrieve_OldDelegateDrainsWhileNewUsed(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	oldTool := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
 	oldClosed := make(chan struct{})
@@ -375,7 +375,7 @@ func TestReadyRetrieve_RepeatedConcurrentInvokeAndSwap(t *testing.T) {
 	}
 }
 
-func TestReadyRetrieve_CloseWaitsForCurrentInFlightDelegate(t *testing.T) {
+func TestReadyRetrieve_CloseWaitsForCurrentDelegate(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	cur := &blockingTool{content: "cur", entered: make(chan struct{}), release: make(chan struct{})}
 	curClosed := make(chan struct{})
@@ -447,7 +447,7 @@ func TestReadyRetrieve_ConcurrentInvokeInstallClose(t *testing.T) {
 	}
 }
 
-func TestReadyRetrieve_CloseWaitsForRetiredInFlightDelegate(t *testing.T) {
+func TestReadyRetrieve_CloseWaitsForRetiredDelegate(t *testing.T) {
 	r := newReadyRetrieve(warmingRetrieveMessage)
 	old := &blockingTool{content: "old", entered: make(chan struct{}), release: make(chan struct{})}
 	oldClosed := make(chan struct{})

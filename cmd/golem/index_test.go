@@ -162,7 +162,7 @@ func TestExecuteIndex_HappyPath(t *testing.T) {
 	}
 }
 
-func TestExecuteIndex_PartialExitsNonZeroButWritesSidecar(t *testing.T) {
+func TestExecuteIndex_PartialExitsNonZeroWritesSidecar(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "ok.go", "package a\n\nfunc A() {}\n")
 	writeWorkspaceFile(t, root, "bad.go", "package a\n\nfunc B() {}\n")

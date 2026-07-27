@@ -117,7 +117,7 @@ func TestAgentflowStatus_JSONRelaysRawProjection(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_CompleteRequiresAndSummarizesProof(t *testing.T) {
+func TestAgentflowStatus_CompleteSummarizesProof(t *testing.T) {
 	fixture := newResumeFixture(t)
 	root := fixture.root
 	proof := `{"checks":[{"status":"passed"},{"status":"warning"},{"status":"passed"}]}`
@@ -141,7 +141,7 @@ func TestAgentflowStatus_CompleteRequiresAndSummarizesProof(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_NonCompleteNeverReadsPresentProof(t *testing.T) {
+func TestAgentflowStatus_NonCompleteSkipsProof(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Mkdir(filepath.Join(root, ".agent"), 0o700); err != nil {
 		t.Fatal(err)
@@ -161,7 +161,7 @@ func TestAgentflowStatus_NonCompleteNeverReadsPresentProof(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_UnsafeActionableProjectionExitsBlocked(t *testing.T) {
+func TestAgentflowStatus_UnsafeActionableExitsBlocked(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(projection map[string]any)
@@ -195,7 +195,7 @@ func TestAgentflowStatus_UnsafeActionableProjectionExitsBlocked(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_FiniteEnforcedRecoveryIsBlocked(t *testing.T) {
+func TestAgentflowStatus_FiniteRecoveryIsBlocked(t *testing.T) {
 	fixture := newResumeFixture(t)
 	state := fixture.attemptState(t, "validation_missing", []agentflow.ResumabilityGate{
 		{Kind: "command", Label: "go test ./...", Status: "missing"},
@@ -213,7 +213,7 @@ func TestAgentflowStatus_FiniteEnforcedRecoveryIsBlocked(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_RejectsUnknownGateStatusForAdvisoryLease(t *testing.T) {
+func TestAgentflowStatus_RejectsUnknownGateStatus(t *testing.T) {
 	fixture := newResumeFixture(t)
 	lease := fixture.projection()["lease"].(map[string]any)
 	lease["policy"], lease["state"], lease["expires_at"], lease["exclusive"] = "advisory", "no_deadline", nil, false
@@ -233,7 +233,7 @@ func TestAgentflowStatus_RejectsUnknownGateStatusForAdvisoryLease(t *testing.T) 
 	}
 }
 
-func TestAgentflowStatus_CompleteRequiresResumabilityProjection(t *testing.T) {
+func TestAgentflowStatus_CompleteNeedsResumability(t *testing.T) {
 	fixture := newResumeFixture(t)
 	fixture.payload["state"] = "complete"
 	delete(fixture.payload, "resumability")
@@ -255,7 +255,7 @@ func TestAgentflowStatus_CompleteRequiresResumabilityProjection(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_ProofSummaryFailureUsesBlockedExit(t *testing.T) {
+func TestAgentflowStatus_ProofFailureUsesBlockedExit(t *testing.T) {
 	for name, proof := range map[string]string{
 		"malformed":    `{`,
 		"failed check": `{"checks":[{"status":"failed"}]}`,
@@ -290,7 +290,7 @@ func TestAgentflowStatus_ProofSummaryFailureUsesBlockedExit(t *testing.T) {
 	}
 }
 
-func TestAgentflowStatus_JSONRelaysMalformedProjectionAndFailsClosed(t *testing.T) {
+func TestAgentflowStatus_JSONMalformedFailsClosed(t *testing.T) {
 	fixture := newResumeFixture(t)
 	fixture.useAdvisoryLease()
 	_ = fixture.noAttemptState(t, "step_unclaimed", true)
@@ -310,7 +310,7 @@ func TestAgentflowStatus_JSONRelaysMalformedProjectionAndFailsClosed(t *testing.
 	}
 }
 
-func TestAgentflowStatus_EmptySuccessfulOutputFailsClosed(t *testing.T) {
+func TestAgentflowStatus_EmptyOutputFailsClosed(t *testing.T) {
 	for _, jsonOutput := range []bool{false, true} {
 		t.Run(fmt.Sprintf("json=%t", jsonOutput), func(t *testing.T) {
 			var out bytes.Buffer
@@ -329,7 +329,7 @@ func TestAgentflowStatus_EmptySuccessfulOutputFailsClosed(t *testing.T) {
 	}
 }
 
-func TestValidateAutomaticRecoveryActionRequiresExplicitNonBreakGlass(t *testing.T) {
+func TestValidateAutoRecoveryRequiresNonBreakGlass(t *testing.T) {
 	explicitFalse := false
 	for _, action := range []string{"claim", "continue"} {
 		t.Run(action, func(t *testing.T) {
@@ -347,7 +347,7 @@ func TestValidateAutomaticRecoveryActionRequiresExplicitNonBreakGlass(t *testing
 	}
 }
 
-func TestAgentflowStatus_ResumeDispositionRequiresGolemPlanPreflight(t *testing.T) {
+func TestAgentflowStatus_ResumeNeedsPlanPreflight(t *testing.T) {
 	fixture := newResumeFixture(t)
 	fixture.useAdvisoryLease()
 	plan := recoveryPlan()
@@ -609,7 +609,7 @@ func TestValidateResumeProjection(t *testing.T) {
 	}
 }
 
-func TestValidateResumeProjection_RejectsOptionalHandoffMismatch(t *testing.T) {
+func TestValidateResumeProjection_RejectsMismatch(t *testing.T) {
 	fixture := newResumeFixture(t)
 	recommendation := defaultWorkflowRecommendation()
 	recommendation.Contract.ReviewDepth = "deep"
@@ -618,7 +618,7 @@ func TestValidateResumeProjection_RejectsOptionalHandoffMismatch(t *testing.T) {
 	}
 }
 
-func TestValidateRecoveryProjectionAcceptsEligibleRetryStates(t *testing.T) {
+func TestValidateRecoveryAcceptsEligibleRetries(t *testing.T) {
 	for _, stepState := range []string{"pending", "blocked", "failed", "abandoned"} {
 		t.Run(stepState, func(t *testing.T) {
 			fixture := newResumeFixture(t)
@@ -754,7 +754,7 @@ func TestProjectedCommandGatesRejectsDuplicateArgv(t *testing.T) {
 	}
 }
 
-func TestResumeGatePairingUsesFilteredPositionAndPlanArgv(t *testing.T) {
+func TestResumeGatePairingUsesFilteredPosition(t *testing.T) {
 	state := recoveryAttemptState("validation_missing", []agentflow.ResumabilityGate{
 		{Kind: "command", Label: "go test ./...", Status: "satisfied"},
 		{Kind: "inspection", Label: "review diff", Status: "satisfied"},
@@ -774,7 +774,7 @@ func TestResumeGatePairingUsesFilteredPositionAndPlanArgv(t *testing.T) {
 	}
 }
 
-func TestSettleAgentflowAttemptRejectsAmbiguousGatesBeforeMutation(t *testing.T) {
+func TestSettleAttemptRejectsAmbiguousGates(t *testing.T) {
 	tests := []struct {
 		name  string
 		gates []agentflow.ResumabilityGate
@@ -943,7 +943,7 @@ func TestResumeRunsMultipleRemainingStepsSerially(t *testing.T) {
 	}
 }
 
-func TestResumeRejectsFiniteEnforcedRecoveryBeforeMutation(t *testing.T) {
+func TestResumeRejectsFiniteEnforcedRecovery(t *testing.T) {
 	for _, stateName := range []string{"step_unclaimed", "validation_missing", "step_unverified", "step_uncompleted"} {
 		t.Run(stateName, func(t *testing.T) {
 			fixture := newResumeFixture(t)
@@ -969,7 +969,7 @@ func TestResumeRejectsFiniteEnforcedRecoveryBeforeMutation(t *testing.T) {
 	}
 }
 
-func TestResumeReentryRefusesAlreadySatisfiedGateInsteadOfDuplicatingIt(t *testing.T) {
+func TestResumeReentryRefusesSatisfiedGate(t *testing.T) {
 	initialFixture := newResumeFixture(t)
 	initialFixture.useAdvisoryLease()
 	initial := initialFixture.noAttemptState(t, "step_unclaimed", true)
@@ -1038,7 +1038,7 @@ func TestResumeProgressReadOccursOnlyAfterSettlement(t *testing.T) {
 	}
 }
 
-func TestResumeSettlementContinuesSeriallyWithoutRepeatingMutation(t *testing.T) {
+func TestResumeSettlementContinuesWithoutRepeating(t *testing.T) {
 	tests := []struct {
 		state string
 		gates []agentflow.ResumabilityGate

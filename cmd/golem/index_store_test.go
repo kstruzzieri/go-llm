@@ -48,7 +48,7 @@ func TestIndexDBPathForWorkspace_RejectsInsideWorkspace(t *testing.T) {
 	}
 }
 
-func TestIndexDBPathForWorkspace_MatchesSessionWorkspaceKey(t *testing.T) {
+func TestIndexDBPathForWorkspace_MatchesSessionKey(t *testing.T) {
 	// The index <sha16> must equal resolveSessionID's default workspace key.
 	root := "/work/proj"
 	id, err := resolveSessionID(sessionIDOpts{root: root})

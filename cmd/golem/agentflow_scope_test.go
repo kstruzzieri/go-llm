@@ -77,7 +77,7 @@ func TestDenyProofState(t *testing.T) {
 	}
 }
 
-func TestAgentflowStateDetectedUsesCaseFoldedDirectoryPredicate(t *testing.T) {
+func TestAgentflowStateDetectedIsCaseFolded(t *testing.T) {
 	for _, test := range []struct {
 		name string
 		want bool
