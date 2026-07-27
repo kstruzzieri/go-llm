@@ -960,16 +960,21 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 	return b.String()
 }
 
+var contentLineBreakReplacer = strings.NewReplacer(
+	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
+	"\u0085", "\n", "\u2028", "\n", "\u2029", "\n",
+)
+
 // numberLines prefixes each line of content with a 1-based source line number
 // starting at startLine, producing line-anchored output (e.g. "42| code").
 // A single trailing newline is dropped so it does not yield a phantom empty
 // numbered line. The returned string ends with a newline when non-empty.
 //
 // Security note: the "%d| " prefix is load-bearing, not just cosmetic — it
-// stops each LF-delimited content line from forging a "--- " block header.
-// Callers rendering untrusted text with other line separators must canonicalize
-// them first; progressive evidenceText does so without changing BuildContext.
+// stops each content line from forging a "--- " block header. Model-visible
+// line separators are canonicalized first so every line receives the prefix.
 func numberLines(content string, startLine int) string {
+	content = contentLineBreakReplacer.Replace(content)
 	lines := strings.Split(content, "\n")
 	if n := len(lines); n > 0 && lines[n-1] == "" {
 		lines = lines[:n-1] // ignore the empty tail from a trailing newline
