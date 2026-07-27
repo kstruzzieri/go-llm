@@ -948,7 +948,7 @@ func (r *Retriever) BuildContext(results []SearchResult, maxTokens int) string {
 		// can forge a second block with fabricated attribution. Content needs no
 		// such treatment here -- numberLines' per-line prefix already blocks it.
 		entry := fmt.Sprintf("--- %s (lines %d-%d, similarity: %.2f) ---\n%s\n",
-			normalizeOrientationValue(res.Chunk.Source), res.Chunk.StartLine, res.Chunk.EndLine,
+			replaceOrientationLineBreaks(res.Chunk.Source), res.Chunk.StartLine, res.Chunk.EndLine,
 			res.Score, numberLines(res.Chunk.Content, res.Chunk.StartLine))
 
 		if maxChars > 0 && b.Len()+len(entry) > maxChars {

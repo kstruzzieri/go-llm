@@ -224,8 +224,12 @@ func deriveAnswer(ma modelAnswer, blocks []evidenceBlock) ragAnswerResult {
 }
 
 // answerLabelReplacer flattens a label onto one line: a block lead must occupy
-// exactly one line, so CR and LF become spaces before the source is interpolated.
-var answerLabelReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+// exactly one line, so model-visible line breaks become spaces before the source
+// is interpolated.
+var answerLabelReplacer = strings.NewReplacer(
+	"\r", " ", "\n", " ", "\v", " ", "\f", " ",
+	"\u0085", " ", "\u2028", " ", "\u2029", " ",
+)
 
 // normalizeAnswerLabel forces the source path onto a single line. Chunk.Source is
 // untrusted: newlines are legal in POSIX filenames, nothing in the rag write path
@@ -238,7 +242,7 @@ var answerLabelReplacer = strings.NewReplacer("\r", " ", "\n", " ")
 // Content must never pass through it: its newlines carry meaning, and the fence
 // already protects content without touching its bytes.
 func normalizeAnswerLabel(s string) string {
-	return strings.TrimSpace(answerLabelReplacer.Replace(s))
+	return answerLabelReplacer.Replace(s)
 }
 
 // evidenceRegion names the fenced region holding untrusted evidence.
@@ -281,7 +285,7 @@ func buildEvidenceBlocks(results []rag.SearchResult, maxTokens int) (string, []e
 		blocks = append(blocks, evidenceBlock{ID: id, Chunk: r.Chunk})
 	}
 	return fence.Open(evidenceRegion) + "\n" +
-		strings.TrimRight(body.String(), "\n") + "\n" +
+		strings.TrimSuffix(body.String(), "\n\n") + "\n" +
 		fence.Close(evidenceRegion), blocks
 }
 

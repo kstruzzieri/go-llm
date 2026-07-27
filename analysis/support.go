@@ -222,7 +222,10 @@ func parseClaimsLenient(reply string) []string {
 	return out
 }
 
-var promptLineReplacer = strings.NewReplacer("\r", " ", "\n", " ")
+var promptLineReplacer = strings.NewReplacer(
+	"\r", " ", "\n", " ", "\v", " ", "\f", " ",
+	"\u0085", " ", "\u2028", " ", "\u2029", " ",
+)
 
 // flattenPromptLine forces an untrusted value that occupies exactly one line of
 // the prompt onto one line. Two values qualify, and neither is trustworthy:
@@ -239,7 +242,7 @@ var promptLineReplacer = strings.NewReplacer("\r", " ", "\n", " ")
 // Content must never pass through it: its newlines carry meaning, and the fence
 // already protects content without touching its bytes.
 func flattenPromptLine(s string) string {
-	return strings.TrimSpace(promptLineReplacer.Replace(s))
+	return promptLineReplacer.Replace(s)
 }
 
 // verdictSeverity ranks a verdict by how unsupportive it is, so that duplicate
