@@ -158,10 +158,11 @@ func chmodIndexDBFiles(dbPath string) error {
 // outcome it returns errIndexFailed so main() exits 1 without double-printing.
 func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	var (
-		configPath string
-		rootFlag   string
-		ollamaURL  string
-		full       bool
+		configPath  string
+		rootFlag    string
+		ollamaURL   string
+		full        bool
+		progressive bool
 	)
 	fs := flag.NewFlagSet("golem index", flag.ContinueOnError)
 	fs.SetOutput(errOut)
@@ -169,6 +170,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	fs.StringVar(&rootFlag, "root", ".", "workspace root to index")
 	fs.StringVar(&ollamaURL, "ollama-url", "", "override Ollama base URL")
 	fs.BoolVar(&full, "full", false, "clean rebuild (drop the existing index first)")
+	fs.BoolVar(&progressive, "progressive", false, "generate opt-in L0/L1 progressive source summaries")
 	fs.Bool("no-color", false, "disable dim ANSI footers in summary")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -202,6 +204,14 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 	embChain, err := embeddingChain(bundle.Config)
 	if err != nil {
 		return err
+	}
+	var summarize rag.SourceSummaryGenerator
+	if progressive {
+		summarizeChain, err := resolveSummarizeChain(bundle.Config)
+		if err != nil {
+			return err
+		}
+		summarize = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 	dbPath, workspaceID, err := indexDBPathForWorkspace(os.Getenv, root)
 	if err != nil {
@@ -237,6 +247,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		requestedModel:      embChain[0],
 		actualVectorSpace:   actualVectorSpace,
 		embedder:            embedder,
+		summarize:           summarize,
 		full:                full,
 		refuseInvalidActive: true,
 		out:                 out,

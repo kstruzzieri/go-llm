@@ -214,7 +214,7 @@ func embeddingChain(cfg *config.Config) ([]string, error) {
 // case retrieval still registers and ranks neutrally.
 //
 // The returned retrievalReader owns and closes the opened store.
-func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, feedbackDB string) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
+func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provider.Router, dbPath string, expected []string, feedbackDB string, progressive bool) (*retrievalReader, string, vsDecision, rag.StoreStats, error) {
 	if cfg == nil || router == nil {
 		return nil, "", vsDecision{}, rag.StoreStats{}, fmt.Errorf("golem: no provider configured for embeddings")
 	}
@@ -281,7 +281,7 @@ func buildGatedRetriever(ctx context.Context, cfg *config.Config, router *provid
 			feedbackWarn = warn
 		}
 	}
-	tool := &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048}
+	tool := &agenttools.Retrieve{R: retr, K: 5, MaxTokens: 2048, Progressive: progressive}
 	return newOwnedRetrievalReader(tool, store, feedbackHandle), feedbackWarn, dec, stats, nil
 }
 

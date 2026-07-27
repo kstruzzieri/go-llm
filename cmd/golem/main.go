@@ -19,6 +19,7 @@ import (
 	"github.com/kstruzzieri/go-llm/mcpclient"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/provider/openaicompat"
+	"github.com/kstruzzieri/go-llm/rag"
 )
 
 type flags struct {
@@ -48,6 +49,7 @@ type flags struct {
 	mcpHTTP             stringSliceFlag
 	noRag               bool
 	noAutoIndex         bool
+	progressive         bool
 	noProjectContext    bool
 	noCompress          bool
 	noMemory            bool
@@ -108,6 +110,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
+	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
@@ -631,7 +634,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		retrieve = ready
 		rr := enableRetrieve(ctx, bundle.Config, bundle.Router, retrieveOpts{
 			autoDBPath:  autoDBPath,
-			workspaceID: autoWorkspaceID, feedbackDB: feedbackDB,
+			workspaceID: autoWorkspaceID, feedbackDB: feedbackDB, progressive: f.progressive,
 		})
 		warns = append(warns, rr.warns...)
 		if rr.reader != nil {
@@ -650,6 +653,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 			autoDBPath:  autoDBPath,
 			workspaceID: autoWorkspaceID,
 			feedbackDB:  feedbackDB,
+			progressive: f.progressive,
 		})
 		if rr.reader != nil {
 			defer func() {
@@ -821,6 +825,10 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	if err != nil {
 		return err
 	}
+	var sourceSummarizer rag.SourceSummaryGenerator
+	if f.progressive {
+		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
+	}
 
 	caller := newRouterChainCaller(bundle.Router, plan.chain)
 	newOrchestrator := func() *agent.Orchestrator {
@@ -942,10 +950,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 				embedder: newChainEmbedder(func(rc context.Context, rreq provider.RoutingRequest) (embedExecutor, error) {
 					return bundle.Router.Route(rc, rreq)
 				}, embChain),
-				embChain:   embChain,
-				feedbackDB: feedbackDB,
-				ready:      ready,
-				notice:     notice,
+				embChain:    embChain,
+				feedbackDB:  feedbackDB,
+				progressive: f.progressive,
+				summarize:   sourceSummarizer,
+				ready:       ready,
+				notice:      notice,
 			})
 		}()
 		// Registered after the reader/provider defers, so shutdown first

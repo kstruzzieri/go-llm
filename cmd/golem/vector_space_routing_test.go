@@ -9,6 +9,7 @@ import (
 	"sync"
 	"testing"
 
+	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
 	"github.com/kstruzzieri/go-llm/config"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -113,7 +114,7 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 			cfg, router, p := testRoutingEmbedder(t)
 
 			reader, _, _, _, err := buildGatedRetriever(
-				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+				context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "", false,
 			)
 			if err != nil {
 				t.Fatalf("buildGatedRetriever: %v", err)
@@ -137,6 +138,34 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 	}
 }
 
+func TestEnableRetrieve_ProgressiveRenderingIsOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default off", true: "enabled"}[enabled], func(t *testing.T) {
+			dbPath := filepath.Join(t.TempDir(), "explicit.db")
+			seedIndex(t, dbPath, "workspace:ignored", "embed-test/a")
+			cfg, router, _ := testRoutingEmbedder(t)
+
+			got := enableRetrieve(context.Background(), cfg, router, retrieveOpts{
+				ragDB: dbPath, progressive: enabled,
+			})
+			if got.reader != nil {
+				defer func() {
+					if err := got.reader.closeAfterDrain(); err != nil {
+						t.Error(err)
+					}
+				}()
+			}
+			tool, ok := got.tool.(*agenttools.Retrieve)
+			if !ok {
+				t.Fatalf("retrieve tool = %T, want *tools.Retrieve", got.tool)
+			}
+			if tool.Progressive != enabled {
+				t.Fatalf("Progressive = %v, want %v", tool.Progressive, enabled)
+			}
+		})
+	}
+}
+
 func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *testing.T) {
 	const stored = "embed-test/b"
 	dbPath := filepath.Join(t.TempDir(), "explicit.db")
@@ -144,7 +173,7 @@ func TestBuildGatedRetriever_RequiredVectorSpaceUnavailableDoesNotUsePrimary(t *
 	cfg, router, p := testRoutingEmbedder(t, "a")
 
 	reader, _, _, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "", false,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
@@ -177,7 +206,7 @@ func TestBuildGatedRetriever_ExecutionFailureNamesRequiredVectorSpace(t *testing
 	p.failEmbedding(errors.New("backend offline"))
 
 	reader, _, _, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "", false,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)
@@ -271,7 +300,7 @@ func TestBuildGatedRetriever_LegacyCorpusKeepsConfiguredChainBehavior(t *testing
 	cfg, router, p := testRoutingEmbedder(t)
 
 	reader, _, dec, _, err := buildGatedRetriever(
-		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "",
+		context.Background(), cfg, router, dbPath, expectedVectorSpaces(cfg), "", false,
 	)
 	if err != nil {
 		t.Fatalf("buildGatedRetriever: %v", err)

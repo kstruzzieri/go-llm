@@ -56,6 +56,8 @@ type autoIndexJob struct {
 	embedder    rag.Embedder
 	embChain    []string
 	feedbackDB  string
+	progressive bool
+	summarize   rag.SourceSummaryGenerator
 	ready       *readyRetrieve
 	notice      func(string)
 
@@ -135,6 +137,7 @@ func runAutoIndex(ctx context.Context, job autoIndexJob) {
 		requestedModel:    job.embChain[0],
 		actualVectorSpace: actualVectorSpace,
 		embedder:          job.embedder,
+		summarize:         job.summarize,
 		pruneDeleted:      true,
 		out:               &buf,
 	})
@@ -216,7 +219,7 @@ func (job autoIndexJob) open(ctx context.Context, dbPath string) (*retrievalRead
 	if job.openRetriever != nil {
 		return job.openRetriever(ctx, dbPath)
 	}
-	return buildGatedRetriever(ctx, job.cfg, job.router, dbPath, job.embChain, job.feedbackDB)
+	return buildGatedRetriever(ctx, job.cfg, job.router, dbPath, job.embChain, job.feedbackDB, job.progressive)
 }
 
 // adoptActiveGeneration installs the generation a competing writer published

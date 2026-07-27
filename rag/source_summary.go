@@ -11,6 +11,19 @@ import (
 // stored text changes in a way that makes existing rows non-comparable.
 const SourceSummaryFormatVersion = 1
 
+const upsertSourceSummarySQL = `
+	INSERT INTO source_summaries
+	  (source, content_hash, vector_space_id, abstract, overview, summary_model, format_version, summarized_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(source) DO UPDATE SET
+	  content_hash    = excluded.content_hash,
+	  vector_space_id = excluded.vector_space_id,
+	  abstract        = excluded.abstract,
+	  overview        = excluded.overview,
+	  summary_model   = excluded.summary_model,
+	  format_version  = excluded.format_version,
+	  summarized_at   = excluded.summarized_at`
+
 // SourceSummary is one persisted source_summaries row: an atomic L0/L1 pair
 // for a single indexed source or managed document (#189 slice 1).
 type SourceSummary struct {
@@ -93,18 +106,7 @@ func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary
 	if err := validateSourceSummaryWrite(row); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO source_summaries
-		  (source, content_hash, vector_space_id, abstract, overview, summary_model, format_version, summarized_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(source) DO UPDATE SET
-		  content_hash    = excluded.content_hash,
-		  vector_space_id = excluded.vector_space_id,
-		  abstract        = excluded.abstract,
-		  overview        = excluded.overview,
-		  summary_model   = excluded.summary_model,
-		  format_version  = excluded.format_version,
-		  summarized_at   = excluded.summarized_at`,
+	_, err := s.db.ExecContext(ctx, upsertSourceSummarySQL,
 		row.Source, row.ContentHash, row.VectorSpaceID, row.Abstract, row.Overview,
 		row.SummaryModel, row.FormatVersion, row.SummarizedAt)
 	if err != nil {

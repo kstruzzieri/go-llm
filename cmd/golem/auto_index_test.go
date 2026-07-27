@@ -212,6 +212,63 @@ func TestRunAutoIndex_FirstRunBuildsAndMarksReady(t *testing.T) {
 	assertIndexDBModes(t, gen.dbPath)
 }
 
+func TestRunAutoIndex_ProgressiveSummaryGenerationIsOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "default no-op", true: "enabled"}[enabled], func(t *testing.T) {
+			root := t.TempDir()
+			writeWorkspaceFile(t, root, "a.go", "package a\n\nfunc A() {}\n")
+			dbPath := filepath.Join(t.TempDir(), "indexes", "k.db")
+			var notices []string
+			job := newAutoIndexTestJob(root, dbPath, autoIndexTestEmbedder("ollama/nomic", ""), &notices)
+
+			calls := 0
+			if enabled {
+				job.summarize = func(_ context.Context, in rag.SourceSummaryInput) (rag.GeneratedSourceSummary, error) {
+					calls++
+					if filepath.Base(in.Source) != "a.go" || len(in.Chunks) == 0 {
+						t.Fatalf("summary input = %+v", in)
+					}
+					return rag.GeneratedSourceSummary{
+						Abstract: "Provides A.",
+						Overview: "Defines the A symbol.",
+						Model:    "provider/summary",
+					}, nil
+				}
+			}
+
+			runAutoIndex(context.Background(), job)
+			gen, err := resolveActiveGeneration(context.Background(), dbPath, "workspace:k")
+			if err != nil {
+				t.Fatalf("resolve active generation: %v; notices=%v", err, notices)
+			}
+			store, err := rag.OpenSQLiteStoreReadOnly(gen.dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sources, readErr := store.ListSources(context.Background())
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			rows, readErr := store.SourceSummaryBatch(context.Background(), sources)
+			closeErr := store.Close()
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+
+			wantCalls, wantRows := 0, 0
+			if enabled {
+				wantCalls, wantRows = 1, 1
+			}
+			if calls != wantCalls || len(rows) != wantRows {
+				t.Fatalf("generator calls/rows = %d/%d, want %d/%d", calls, len(rows), wantCalls, wantRows)
+			}
+		})
+	}
+}
+
 func TestRunAutoIndex_PartialRunMarksReadyWithWarning(t *testing.T) {
 	root := t.TempDir()
 	writeWorkspaceFile(t, root, "ok.go", "package a\n\nfunc A() {}\n")
