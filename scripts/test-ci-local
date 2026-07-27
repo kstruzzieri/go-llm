@@ -2,6 +2,10 @@
 set -euo pipefail
 
 script_dir="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+if ! grep -Fq 'run: golangci-lint fmt --diff' "$script_dir/../.github/workflows/ci.yml"; then
+  printf 'GitHub CI is missing the all-file formatting gate\n' >&2
+  exit 1
+fi
 tmp="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$tmp"' EXIT
 
@@ -25,6 +29,7 @@ if ! (cd "$tmp/outside" && PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LOG="$tmp/actual-
 fi
 
 cat >"$tmp/expected-full" <<EOF
+$module|fmt --diff
 $module|run
 $module|test -race ./...
 $module|test -run ^$ ./...
@@ -42,6 +47,7 @@ if ! (cd "$module" && CDPATH="$tmp/decoy" PATH="$tmp/bin:$PATH" CI_LOCAL_TEST_LO
 fi
 
 cat >"$tmp/expected-pre-push" <<EOF
+$module|fmt --diff
 $module|run
 $module|test -race ./...
 EOF
