@@ -8,10 +8,10 @@ linters:
     - ineffassign
     - staticcheck
 
-# Formatting is enforced here rather than by a separate gofmt step. In
-# golangci-lint v2 formatters live outside `linters`, and `golangci-lint run`
-# reports their diffs as findings, so the pre-push gate fails on unformatted
-# code. `golangci-lint fmt` applies the fixes.
+# In golangci-lint v2 formatters live outside `linters`. The CI gate runs
+# `golangci-lint fmt --diff` so inactive GOOS/build-tag files are checked too;
+# `golangci-lint run` only reports formatter findings for loaded packages.
+# `golangci-lint fmt` without `--diff` applies the fixes.
 #
 # simplify is spelled out because it makes this gate stricter than a bare
 # `gofmt -l`: it also rejects redundant composite literal types. Leaving it
