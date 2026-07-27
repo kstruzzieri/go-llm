@@ -32,6 +32,9 @@ jobs:
         with:
           version: v2.11.4
 
+      - name: Format all Go files
+        run: golangci-lint fmt --diff
+
       - name: Test
         run: go test -race ./...
 

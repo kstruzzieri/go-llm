@@ -67,6 +67,7 @@ docker compose -f docker-compose.ci.yml run --rm ci ./scripts/ci-local --mode fu
 
 `pre-push` runs:
 
+- `golangci-lint fmt --diff` (all Go files, including inactive build tags)
 - `golangci-lint run`
 - `go test -race ./...`
 

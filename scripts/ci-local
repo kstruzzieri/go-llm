@@ -61,7 +61,7 @@ case "$mode" in
     ;;
 esac
 
-# Run from the module root so `golangci-lint run` and `go test ./...` resolve
+# Run from the module root so `golangci-lint` and `go test ./...` resolve
 # packages regardless of the caller's working directory. Resolve the root from
 # this script's location, not the caller's CWD, so absolute-path invocations
 # from outside the repo cannot select the wrong enclosing git checkout.
@@ -81,6 +81,9 @@ cd "$repo_root"
 
 require_cmd golangci-lint
 require_cmd go
+
+section "format"
+golangci-lint fmt --diff
 
 section "lint"
 golangci-lint run
