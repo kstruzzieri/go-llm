@@ -68,11 +68,12 @@ type ProgressiveRenderRequest struct {
 	// call it twice on the same text and assume the two calls agree, so a
 	// stateful estimator would let the pre-check pass and leave the charging
 	// loop to overspend the ceiling it was supposed to guard.
-	Estimate func(string) int // nil, or a negative result, => defaultEstimate
+	Estimate func(string) int // nil, or a non-positive result for non-empty text, => defaultEstimate
 }
 
 // defaultEstimate is the token heuristic used when the caller supplies no
-// Estimate, or when a supplied one returns a negative value.
+// Estimate, or when a supplied one returns a non-positive value for
+// non-empty text.
 func defaultEstimate(s string) int { return (len(s) + 3) / 4 }
 
 // Decision constants for ProgressiveSourceTrace.Decisions. Unlike

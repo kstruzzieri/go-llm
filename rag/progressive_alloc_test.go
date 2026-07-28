@@ -602,6 +602,34 @@ func sawtoothEstimate(s string) int { return defaultEstimate(s) % 64 }
 //
 // Fixed seed on purpose: a nondeterministic property test cannot be bisected,
 // and a flaky one gets deleted by the first person it inconveniences.
+// A zero estimate for NON-EMPTY text must fall back to the heuristic: a
+// zero-cost block would bypass the hard token ceiling (spec 3.5). Empty
+// text legitimately estimates zero.
+func TestSafeEstimateRejectsZeroForNonEmpty(t *testing.T) {
+	zeroEstimator := func(string) int { return 0 }
+	if got := safeEstimate(zeroEstimator, "abcd"); got != defaultEstimate("abcd") {
+		t.Fatalf("safeEstimate(zero, non-empty) = %d, want fallback %d", got, defaultEstimate("abcd"))
+	}
+	if got := safeEstimate(zeroEstimator, ""); got != 0 {
+		t.Fatalf("safeEstimate(zero, empty) = %d, want 0", got)
+	}
+	if got := safeEstimate(nil, ""); got != 0 {
+		t.Fatalf("safeEstimate(nil, empty) = %d, want 0", got)
+	}
+	// Not in the plan's list: nil estimator over non-empty text. Every other
+	// case here pairs "which estimator" with "which text" at an edge (zero
+	// paired with both texts, nil paired only with empty) — this is the one
+	// combination that lands in the middle, and it is the production default
+	// (RenderProgressive with no caller Estimate hits this exact path).
+	if got := safeEstimate(nil, "abcd"); got != defaultEstimate("abcd") {
+		t.Fatalf("safeEstimate(nil, non-empty) = %d, want fallback %d", got, defaultEstimate("abcd"))
+	}
+	neg := func(string) int { return -5 }
+	if got := safeEstimate(neg, "abcd"); got != defaultEstimate("abcd") {
+		t.Fatalf("safeEstimate(negative, non-empty) = %d, want fallback %d", got, defaultEstimate("abcd"))
+	}
+}
+
 func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 	const iterations = 2000
 	rng := rand.New(rand.NewSource(20260726)) //nolint:gosec // deterministic fixture generation, not security

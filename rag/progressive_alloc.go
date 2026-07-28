@@ -34,14 +34,18 @@ func separatorTokens(st *allocState, estimate func(string) int) int {
 	return safeEstimate(estimate, "\n")
 }
 
-// safeEstimate wraps the caller estimator: a negative result falls back to
-// defaultEstimate (rag/progressive.go) for that block. Never zero — a
-// zero-cost block would bypass the hard token ceiling (spec section 9.4
-// step 1). The heuristic itself lives with the Estimate field it documents,
-// so the two cannot drift apart.
+// safeEstimate wraps the caller estimator: a NON-POSITIVE result for
+// non-empty text falls back to defaultEstimate (rag/progressive.go) for that
+// block — a zero-cost block would bypass the hard token ceiling (spec
+// section 9.4 step 1), so zero is only ever returned for empty text. The
+// heuristic itself lives with the Estimate field it documents, so the two
+// cannot drift apart.
 func safeEstimate(estimate func(string) int, s string) int {
+	if s == "" {
+		return 0
+	}
 	if estimate != nil {
-		if n := estimate(s); n >= 0 {
+		if n := estimate(s); n > 0 {
 			return n
 		}
 	}
