@@ -3,6 +3,8 @@ package rag
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -103,6 +105,78 @@ func TestGenerateSourceSummariesProviderFailureDoesNotBlockOtherSources(t *testi
 	}
 	if got, ok := rows["pkg/b.go"]; !ok || got.Abstract != "Provides B." {
 		t.Fatalf("healthy source summary = %+v, present=%v", got, ok)
+	}
+}
+
+// Callers surface this error through a first-line-only warning, so the tally
+// has to lead: errors.Join renders one error per line, and without a count a
+// single failure and every source failing print identically.
+func TestGenerateSourceSummariesErrorLeadsWithFailureCount(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	for _, name := range []string{"pkg/a.go", "pkg/b.go", "pkg/c.go"} {
+		seedSummaryGenerationSource(t, store, name, "hash-"+name, "provider/embedding", "package x")
+	}
+	wantErr := errors.New("summarizer unavailable")
+
+	err := store.GenerateSourceSummaries(ctx, func(_ context.Context, in SourceSummaryInput) (GeneratedSourceSummary, error) {
+		if in.Source == "pkg/c.go" {
+			return GeneratedSourceSummary{
+				Abstract: "Provides C.", Overview: "Defines C.", Model: "provider/summarizer",
+			}, nil
+		}
+		return GeneratedSourceSummary{}, wantErr
+	})
+	if err == nil {
+		t.Fatal("GenerateSourceSummaries: want error")
+	}
+	first, _, _ := strings.Cut(err.Error(), "\n")
+	if !strings.Contains(first, "2 of 3 sources failed") {
+		t.Fatalf("first line = %q, want a leading \"2 of 3 sources failed\" tally", first)
+	}
+	// The tally must not cost errors.Is traversal into the joined causes.
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("error = %v, want errors.Is(err, wantErr)", err)
+	}
+}
+
+// GenerateSourceSummaries passes EVERY source in the index to these batch
+// readers, unlike the retrieval path that introduced them (a handful of
+// results). SQLite's SQLITE_MAX_VARIABLE_NUMBER is 32766 and exceeding it fails
+// the whole statement with "too many SQL variables" rather than degrading.
+func TestSourceBatchReadsExceedSQLiteVariableLimit(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const seeded = "pkg/real.go"
+	seedSummaryGenerationSource(t, store, seeded, "hash-real", "provider/embedding", "package real")
+
+	sources := []string{seeded}
+	for i := 0; i < 40000; i++ {
+		sources = append(sources, fmt.Sprintf("pkg/absent-%d.go", i))
+	}
+
+	prov, err := store.SourceProvenanceBatch(ctx, sources)
+	if err != nil {
+		t.Fatalf("SourceProvenanceBatch(%d sources): %v", len(sources), err)
+	}
+	if got, ok := prov[seeded]; !ok || got.ContentHash != "hash-real" {
+		t.Fatalf("batching lost the real row: %+v present=%v", got, ok)
+	}
+	if len(prov) != 1 {
+		t.Fatalf("provenance rows = %d, want only the seeded source", len(prov))
+	}
+
+	row := validSummary()
+	row.Source, row.ContentHash, row.VectorSpaceID = seeded, "hash-real", "provider/embedding"
+	if err := store.UpsertSourceSummary(ctx, row); err != nil {
+		t.Fatal(err)
+	}
+	summaries, err := store.SourceSummaryBatch(ctx, sources)
+	if err != nil {
+		t.Fatalf("SourceSummaryBatch(%d sources): %v", len(sources), err)
+	}
+	if len(summaries) != 1 || summaries[seeded].ContentHash != "hash-real" {
+		t.Fatalf("summary rows = %+v, want only the seeded source", summaries)
 	}
 }
 

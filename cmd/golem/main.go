@@ -827,6 +827,9 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	}
 	var sourceSummarizer rag.SourceSummaryGenerator
 	if f.progressive {
+		if len(summarizeChain) == 0 {
+			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning)
+		}
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 

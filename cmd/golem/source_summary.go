@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/config"
+	"github.com/kstruzzieri/go-llm/internal/modeltext"
 	"github.com/kstruzzieri/go-llm/internal/promptfence"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -17,6 +18,20 @@ const (
 	sourceSummaryOutputTokens  = 512
 	sourceSummaryMaxInputChars = 64 * 1024
 )
+
+// sourceSummaryRegion names the fenced region holding the untrusted source.
+const sourceSummaryRegion = "SOURCE"
+
+// progressiveNoChainWarning explains why -progressive did nothing. Without it
+// the flag is accepted, indexing succeeds, and not one summary is written or
+// mentioned: resolveSummarizeChain returns an empty chain whenever no
+// summarize/analysis/chat default resolves, which includes the zero-config
+// path where no models.json is discovered and providerbootstrap synthesizes a
+// config with no Defaults at all. An explicit opt-in that silently no-ops is
+// indistinguishable from a broken feature.
+const progressiveNoChainWarning = "-progressive had no effect: no summarize, analysis, " +
+	"or chat default is configured, so no summary model could be selected; " +
+	"sources keep the deterministic metadata overview"
 
 // Changing this prompt or its JSON contract in a non-comparable way requires
 // bumping rag.SourceSummaryFormatVersion.
@@ -68,7 +83,15 @@ func sourceSummaryGenerator(chain []string, chat sourceSummaryChatFunc) rag.Sour
 			Abstract string `json:"abstract"`
 			Overview string `json:"overview"`
 		}
-		dec := json.NewDecoder(strings.NewReader(strings.TrimSpace(resp.Content)))
+		// Local models routinely wrap the object in a Markdown fence despite
+		// the "no markdown" instruction; stripping a single wrapping fence
+		// keeps an otherwise-conforming answer usable. Everything after this
+		// stays strict — unknown fields, trailing objects, and blank fields are
+		// all still rejected, because a summary that silently absorbed garbage
+		// is worse than no summary (the renderer already degrades to the
+		// deterministic metadata overview).
+		dec := json.NewDecoder(strings.NewReader(
+			modeltext.StripCodeFence(strings.TrimSpace(resp.Content))))
 		dec.DisallowUnknownFields()
 		if err := dec.Decode(&reply); err != nil {
 			return rag.GeneratedSourceSummary{}, fmt.Errorf("golem: summarize source %q: decode output: %w", in.Source, err)
@@ -117,6 +140,17 @@ func routerSourceSummaryGenerator(router *provider.Router, chain []string) rag.S
 	})
 }
 
+// sourceSummaryPrompt renders the summarize prompt for one indexed source.
+//
+// Over-budget sources are TRUNCATED, not refused, matching
+// analysis.buildEvidenceBlocks: the lower-ranked tail is dropped and the first
+// block is always kept even if it alone exceeds the budget. Refusing instead
+// would leave every source above the limit permanently unsummarizable and
+// re-erroring on every index run, when an L1 overview is spec'd as compact
+// rather than exhaustive. Chunks arrive ordered by start line rather than by
+// score, so the dropped tail is the end of the source — deterministic, and the
+// caller is told so in the trusted preamble below so the model never presents a
+// partial reading as complete.
 func sourceSummaryPrompt(in rag.SourceSummaryInput) (string, error) {
 	if strings.TrimSpace(in.Source) == "" || len(in.Chunks) == 0 {
 		return "", fmt.Errorf("golem: summarize source: source and chunks are required")
@@ -124,17 +158,30 @@ func sourceSummaryPrompt(in rag.SourceSummaryInput) (string, error) {
 	fence := promptfence.New()
 	var data strings.Builder
 	data.WriteString("source: ")
-	data.WriteString(in.Source)
+	// Flattened because "source: " is a fixed-prefix line this prompt defines:
+	// a newline in the path would otherwise forge a second source line with
+	// fabricated attribution inside the fenced region. The fence still stops
+	// block forgery; this stops label forgery within it.
+	data.WriteString(promptfence.FlattenLine(in.Source))
 	data.WriteByte('\n')
+	included := 0
 	for i, chunk := range in.Chunks {
 		block := fmt.Sprintf("%s lines %d-%d\n%s\n", fence.Lead(fmt.Sprintf("C%d", i+1)),
 			chunk.StartLine, chunk.EndLine, chunk.Content)
-		if data.Len()+len(block) > sourceSummaryMaxInputChars {
-			return "", fmt.Errorf("golem: summarize source %q: indexed chunks exceed the %d-character input limit",
-				in.Source, sourceSummaryMaxInputChars)
+		if i > 0 && data.Len()+len(block) > sourceSummaryMaxInputChars {
+			break
 		}
 		data.WriteString(block)
+		included++
 	}
-	return "Summarize the indexed source inside the authentic fence below.\n" +
-		fence.Open("SOURCE") + "\n" + data.String() + fence.Close("SOURCE"), nil
+	preamble := "Summarize the indexed source inside the authentic fence below.\n"
+	if included < len(in.Chunks) {
+		// Stated OUTSIDE the fence: this is our own trusted framing, and the
+		// model must not read a truncation notice as untrusted source data.
+		preamble += fmt.Sprintf("The fenced data is truncated to the first %d of %d indexed chunks. "+
+			"Summarize only what is present and do not imply the source is covered in full.\n",
+			included, len(in.Chunks))
+	}
+	return preamble + fence.Open(sourceSummaryRegion) + "\n" +
+		data.String() + fence.Close(sourceSummaryRegion), nil
 }

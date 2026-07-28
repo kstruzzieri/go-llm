@@ -3,6 +3,7 @@ package rag
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 )
 
@@ -34,37 +35,42 @@ func (s *SQLiteStore) SourceProvenanceBatch(ctx context.Context, sources []strin
 	if len(sources) == 0 {
 		return out, nil
 	}
-	query, args := inClauseQuery(`
-		SELECT source,
-		       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
-		       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
-		       MAX(indexed_at)
-		FROM chunks WHERE source IN (%s) GROUP BY source`, sources)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		return nil, fmt.Errorf("rag: source provenance batch: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var p SourceProvenance
-		var minSig, maxSig, minVS, maxVS string
-		if err := rows.Scan(&p.Source, &minSig, &maxSig, &minVS, &maxVS, &p.IndexedAt); err != nil {
-			return nil, fmt.Errorf("rag: scan source provenance: %w", err)
+	if err := forEachSourceBatch(sources, func(batch []string) error {
+		query, args := inClauseQuery(`
+			SELECT source,
+			       COALESCE(MIN(source_content_hash), ''), COALESCE(MAX(source_content_hash), ''),
+			       COALESCE(MIN(vector_space_id), ''), COALESCE(MAX(vector_space_id), ''),
+			       MAX(indexed_at)
+			FROM chunks WHERE source IN (%s) GROUP BY source`, batch)
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			return fmt.Errorf("rag: source provenance batch: %w", err)
 		}
-		if minSig != maxSig {
-			p.Mixed = true // content hash left blank
-		} else if sig, ok := parseSourceSignature(minSig); ok {
-			p.ContentHash = sig.ContentHash
-		} // unparseable/blank signature: ContentHash stays "" (unknown)
-		if minVS != maxVS {
-			p.Mixed = true // vector space left blank
-		} else {
-			p.VectorSpaceID = minVS // may be "" (unknown, e.g. legacy or plain Store writes)
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var p SourceProvenance
+			var minSig, maxSig, minVS, maxVS string
+			if err := rows.Scan(&p.Source, &minSig, &maxSig, &minVS, &maxVS, &p.IndexedAt); err != nil {
+				return fmt.Errorf("rag: scan source provenance: %w", err)
+			}
+			if minSig != maxSig {
+				p.Mixed = true // content hash left blank
+			} else if sig, ok := parseSourceSignature(minSig); ok {
+				p.ContentHash = sig.ContentHash
+			} // unparseable/blank signature: ContentHash stays "" (unknown)
+			if minVS != maxVS {
+				p.Mixed = true // vector space left blank
+			} else {
+				p.VectorSpaceID = minVS // may be "" (unknown, e.g. legacy or plain Store writes)
+			}
+			out[p.Source] = p
 		}
-		out[p.Source] = p
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rag: iterate source provenance: %w", err)
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("rag: iterate source provenance: %w", err)
+		}
+		return nil
+	}); err != nil {
+		return nil, err
 	}
 
 	if err := s.attachManagedProvenance(ctx, sources, out); err != nil {
@@ -77,6 +83,22 @@ func (s *SQLiteStore) SourceProvenanceBatch(ctx context.Context, sources []strin
 // already-loaded provenance rows. A missing managed_documents table (pre-v6
 // database opened read-only) degrades to "nothing is managed".
 func (s *SQLiteStore) attachManagedProvenance(ctx context.Context, sources []string, out map[string]SourceProvenance) error {
+	err := forEachSourceBatch(sources, func(batch []string) error {
+		return s.attachManagedProvenanceBatch(ctx, batch, out)
+	})
+	if errors.Is(err, errManagedTableAbsent) {
+		return nil
+	}
+	return err
+}
+
+// errManagedTableAbsent unwinds attachManagedProvenance's per-batch loop when a
+// read-only pre-v6 database has no managed_documents table. Control signal
+// only; the degraded result is "nothing is managed" and a nil error. The table
+// cannot appear between batches, so skipping one skips them all.
+var errManagedTableAbsent = errors.New("rag: managed_documents table absent (read-only degrade)")
+
+func (s *SQLiteStore) attachManagedProvenanceBatch(ctx context.Context, sources []string, out map[string]SourceProvenance) error {
 	query, args := inClauseQuery(`
 		SELECT source, title, collection, tags, freshness
 		FROM managed_documents WHERE source IN (%s)`, sources)
@@ -85,7 +107,7 @@ func (s *SQLiteStore) attachManagedProvenance(ctx context.Context, sources []str
 		if s.immutable && isMissingTableErr(err, "managed_documents") {
 			// Pre-v6 database opened read-only: nothing is managed. A missing
 			// registry on a writable store is corruption and propagates.
-			return nil
+			return errManagedTableAbsent
 		}
 		return fmt.Errorf("rag: managed provenance batch: %w", err)
 	}

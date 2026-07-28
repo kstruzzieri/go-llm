@@ -140,22 +140,8 @@ func TestDelegateCode_StreamsTokens(t *testing.T) {
 	}
 }
 
-func TestStripCodeFence(t *testing.T) {
-	cases := []struct{ name, in, want string }{
-		{"plain go fence", "```go\nfunc x() {}\n```", "func x() {}"},
-		{"no lang fence", "```\nabc\n```", "abc"},
-		{"unfenced unchanged", "func x() {}", "func x() {}"},
-		{"leading text not fenced", "here:\n```\nabc\n```", "here:\n```\nabc\n```"},
-		{"multi-block markdown untouched", "```go\na\n```\ntext\n```go\nb\n```", "```go\na\n```\ntext\n```go\nb\n```"},
-		{"single line backticks untouched", "```justthis", "```justthis"},
-		{"empty wrapping fence", "```go\n   \n```", ""},
-	}
-	for _, c := range cases {
-		if got := stripCodeFence(c.in); got != c.want {
-			t.Errorf("%s: stripCodeFence(%q) = %q, want %q", c.name, c.in, got, c.want)
-		}
-	}
-}
+// The fence-stripping rule itself is pinned by internal/modeltext's own table
+// test; TestDelegateCode_StripsWrappingFence below keeps this tool wired to it.
 
 func TestDelegateCode_StripsWrappingFence(t *testing.T) {
 	fc := &fakeCaller{resp: provider.ChatResponse{Content: "```go\npackage main\n```"}}

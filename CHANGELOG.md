@@ -23,6 +23,32 @@ Rows below `SourceSummaryFormatVersion` regenerate; rows above it remain
 unreadable and are not overwritten by an older binary. A per-source model or
 validation failure leaves that source on the deterministic metadata fallback,
 continues the remaining summaries, and warns without blocking index publication.
+That warning leads with a `N of M sources failed` tally, because callers print
+only its first line.
+
+Degradation rules, so `-progressive` fails visibly rather than quietly:
+
+- A source larger than the prompt budget is summarized from its leading chunks
+  instead of being refused, and the model is told outside the fence how much it
+  is seeing. Refusing would leave large sources permanently unsummarizable and
+  re-erroring on every index run.
+- Model output wrapped in a single Markdown code fence is accepted, since local
+  models emit that despite instructions. The rest of the contract stays strict:
+  unknown fields, trailing objects, blank fields, and a multi-line abstract are
+  all still rejected.
+- `-progressive` now warns when no `summarize`/`analysis`/`chat` default
+  resolves. Previously the flag was accepted and did nothing at all — including
+  on the zero-config path where no `models.json` is discovered.
+
+`SourceProvenanceBatch` and `SourceSummaryBatch` now read in bounded batches.
+They were introduced for retrieval-result-sized inputs;
+`GenerateSourceSummaries` passes every source in the index, which would exceed
+SQLite's 32766-variable ceiling on a large enough workspace and fail the whole
+read rather than degrade.
+
+`internal/promptfence.FlattenLine` and `internal/modeltext.StripCodeFence` hold
+the single copy of two rules that now have multiple callers. No public API
+change: `analysis` and `agent/tools` forward to them.
 
 ### Added — `rag` progressive source summaries, slice 1 of #189
 

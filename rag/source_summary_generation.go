@@ -56,6 +56,7 @@ func (s *SQLiteStore) GenerateSourceSummaries(ctx context.Context, generate Sour
 	}
 
 	var generationErr error
+	var attempted, failed int
 	for _, source := range sources {
 		prov, ok := provenance[source]
 		if !ok || prov.Mixed || strings.TrimSpace(prov.Source) == "" ||
@@ -71,14 +72,24 @@ func (s *SQLiteStore) GenerateSourceSummaries(ctx context.Context, generate Sour
 			}
 		}
 
+		attempted++
 		if err := s.generateSourceSummary(ctx, prov, generate); err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
 			}
+			failed++
 			generationErr = errors.Join(generationErr, err)
 		}
 	}
-	return generationErr
+	if generationErr == nil {
+		return nil
+	}
+	// The count leads the message because callers surface this through a
+	// first-line-only warning: errors.Join renders one error per line, so
+	// without a leading tally a single failure and five hundred of them print
+	// identically. Wrapping with %w keeps errors.Is traversal into the join.
+	return fmt.Errorf("rag: generate source summaries: %d of %d sources failed: %w",
+		failed, attempted, generationErr)
 }
 
 func (s *SQLiteStore) generateSourceSummary(ctx context.Context, prov SourceProvenance, generate SourceSummaryGenerator) error {

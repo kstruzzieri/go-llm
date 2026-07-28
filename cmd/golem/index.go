@@ -211,6 +211,9 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 		if err != nil {
 			return err
 		}
+		if len(summarizeChain) == 0 {
+			_, _ = fmt.Fprintln(errOut, "golem index: warning: "+progressiveNoChainWarning)
+		}
 		summarize = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 	dbPath, workspaceID, err := indexDBPathForWorkspace(os.Getenv, root)
