@@ -43,6 +43,8 @@ type progressiveSource struct {
 	orientation      orientationLevel
 	evidence         []int // admitted indices into results (retrieval order)
 	rejectedEvidence []int // indices rejected on cost; never reconsidered (spec 10 emission table)
+	pinnedEvidence   []int // evidence indices admitted by step 3 (caller pins); the trim may never drop these
+	floorEvidence    []int // evidence indices admitted by step 4 (floor); recounted for FloorRendered after a trim
 	costRejected     bool  // some more-expensive alternative was rejected on cost
 	decisions        map[string]bool
 	snapshotMeta     bool // orientation metadata describes the retrieval snapshot (race path, spec section 8)

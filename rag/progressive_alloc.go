@@ -173,6 +173,7 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 		st.tokensUsed += safeEstimate(estimate, e)
 		st.bytesUsed += len(e)
 		src.evidence = append(src.evidence, pt.idx)
+		src.pinnedEvidence = append(src.pinnedEvidence, pt.idx)
 		src.decisions[DecisionCallerPinned] = true
 	}
 
@@ -228,6 +229,7 @@ func allocate(sources []*progressiveSource, req ProgressiveRenderRequest, estima
 				st.renderedSources++
 			}
 			fr.src.evidence = append(fr.src.evidence, fr.idx)
+			fr.src.floorEvidence = append(fr.src.floorEvidence, fr.idx)
 			fr.src.decisions[DecisionFloorReserved] = true
 			st.floorRendered++
 		}
