@@ -330,6 +330,23 @@ func TestParseFlags_NoAutoIndex(t *testing.T) {
 	}
 }
 
+func TestParseFlags_ProgressiveIsOptIn(t *testing.T) {
+	f, err := parseFlags(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.progressive {
+		t.Fatal("progressive summaries must default to disabled")
+	}
+	f, err = parseFlags([]string{"-progressive"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !f.progressive {
+		t.Fatal("-progressive did not enable progressive summaries")
+	}
+}
+
 func TestParseFlags_NoAutoIndexNoConflicts(t *testing.T) {
 	for _, args := range [][]string{
 		{"-no-auto-index", "-rag-db", "x.db"},

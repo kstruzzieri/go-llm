@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -10,6 +11,19 @@ import (
 // Bump it whenever the summarize prompt, output contract, or rendering of
 // stored text changes in a way that makes existing rows non-comparable.
 const SourceSummaryFormatVersion = 1
+
+const upsertSourceSummarySQL = `
+	INSERT INTO source_summaries
+	  (source, content_hash, vector_space_id, abstract, overview, summary_model, format_version, summarized_at)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(source) DO UPDATE SET
+	  content_hash    = excluded.content_hash,
+	  vector_space_id = excluded.vector_space_id,
+	  abstract        = excluded.abstract,
+	  overview        = excluded.overview,
+	  summary_model   = excluded.summary_model,
+	  format_version  = excluded.format_version,
+	  summarized_at   = excluded.summarized_at`
 
 // SourceSummary is one persisted source_summaries row: an atomic L0/L1 pair
 // for a single indexed source or managed document (#189 slice 1).
@@ -93,18 +107,7 @@ func (s *SQLiteStore) UpsertSourceSummary(ctx context.Context, row SourceSummary
 	if err := validateSourceSummaryWrite(row); err != nil {
 		return err
 	}
-	_, err := s.db.ExecContext(ctx, `
-		INSERT INTO source_summaries
-		  (source, content_hash, vector_space_id, abstract, overview, summary_model, format_version, summarized_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(source) DO UPDATE SET
-		  content_hash    = excluded.content_hash,
-		  vector_space_id = excluded.vector_space_id,
-		  abstract        = excluded.abstract,
-		  overview        = excluded.overview,
-		  summary_model   = excluded.summary_model,
-		  format_version  = excluded.format_version,
-		  summarized_at   = excluded.summarized_at`,
+	_, err := s.db.ExecContext(ctx, upsertSourceSummarySQL,
 		row.Source, row.ContentHash, row.VectorSpaceID, row.Abstract, row.Overview,
 		row.SummaryModel, row.FormatVersion, row.SummarizedAt)
 	if err != nil {
@@ -148,34 +151,75 @@ func (s *SQLiteStore) SourceSummaryBatch(ctx context.Context, sources []string) 
 	if len(sources) == 0 {
 		return out, nil
 	}
-	query, args := inClauseQuery(`
-		SELECT source, content_hash, vector_space_id, abstract, overview,
-		       summary_model, format_version, summarized_at
-		FROM source_summaries WHERE source IN (%s)`, sources)
-	rows, err := s.db.QueryContext(ctx, query, args...)
-	if err != nil {
-		if s.immutable && isMissingTableErr(err, "source_summaries") {
-			// A v7 database opened via OpenSQLiteStoreReadOnly cannot migrate:
-			// the feature degrades to summary-missing. On a WRITABLE store the
-			// table is guaranteed by migration, so a missing table there is
-			// corruption and propagates (spec section 13).
-			return out, nil
+	err := forEachSourceBatch(sources, func(batch []string) error {
+		query, args := inClauseQuery(`
+			SELECT source, content_hash, vector_space_id, abstract, overview,
+			       summary_model, format_version, summarized_at
+			FROM source_summaries WHERE source IN (%s)`, batch)
+		rows, err := s.db.QueryContext(ctx, query, args...)
+		if err != nil {
+			if s.immutable && isMissingTableErr(err, "source_summaries") {
+				// A v7 database opened via OpenSQLiteStoreReadOnly cannot
+				// migrate: the feature degrades to summary-missing. On a
+				// WRITABLE store the table is guaranteed by migration, so a
+				// missing table there is corruption and propagates (spec
+				// section 13). The table cannot appear between batches, so
+				// skipping this one skips them all.
+				return errSummaryTableAbsent
+			}
+			return fmt.Errorf("rag: source summary batch: %w", err)
 		}
-		return nil, fmt.Errorf("rag: source summary batch: %w", err)
-	}
-	defer func() { _ = rows.Close() }()
-	for rows.Next() {
-		var r SourceSummary
-		if err := rows.Scan(&r.Source, &r.ContentHash, &r.VectorSpaceID, &r.Abstract,
-			&r.Overview, &r.SummaryModel, &r.FormatVersion, &r.SummarizedAt); err != nil {
-			return nil, fmt.Errorf("rag: scan source summary: %w", err)
+		defer func() { _ = rows.Close() }()
+		for rows.Next() {
+			var r SourceSummary
+			if err := rows.Scan(&r.Source, &r.ContentHash, &r.VectorSpaceID, &r.Abstract,
+				&r.Overview, &r.SummaryModel, &r.FormatVersion, &r.SummarizedAt); err != nil {
+				return fmt.Errorf("rag: scan source summary: %w", err)
+			}
+			out[r.Source] = r
 		}
-		out[r.Source] = r
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rag: iterate source summaries: %w", err)
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("rag: iterate source summaries: %w", err)
+		}
+		return nil
+	})
+	if err != nil && !errors.Is(err, errSummaryTableAbsent) {
+		return nil, err
 	}
 	return out, nil
+}
+
+// errSummaryTableAbsent unwinds SourceSummaryBatch's per-batch loop when a
+// read-only pre-v8 database has no source_summaries table. It is a control
+// signal, never returned to callers: the degraded result is an empty map and a
+// nil error, exactly as before batching was introduced.
+var errSummaryTableAbsent = errors.New("rag: source_summaries table absent (read-only degrade)")
+
+// maxSourcesPerBatch bounds how many sources one IN (...) read binds at a time.
+//
+// SQLite's SQLITE_MAX_VARIABLE_NUMBER is 32766 in the bundled modernc build,
+// and exceeding it fails the whole statement with "too many SQL variables"
+// rather than degrading. These batch readers were introduced for
+// retrieval-result-sized inputs (a handful of sources), but
+// GenerateSourceSummaries passes every source in the index, so a large enough
+// workspace would hit the ceiling. Chunking here rather than at that one call
+// site keeps the limit handled for every caller, present and future.
+const maxSourcesPerBatch = 8000
+
+// forEachSourceBatch calls fn with successive slices of sources, each no longer
+// than maxSourcesPerBatch. sources is never copied; fn must not retain its
+// argument beyond the call. An empty sources calls fn zero times.
+func forEachSourceBatch(sources []string, fn func([]string) error) error {
+	for start := 0; start < len(sources); start += maxSourcesPerBatch {
+		end := start + maxSourcesPerBatch
+		if end > len(sources) {
+			end = len(sources)
+		}
+		if err := fn(sources[start:end]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // inClauseQuery formats query (which must contain exactly one %s) with the

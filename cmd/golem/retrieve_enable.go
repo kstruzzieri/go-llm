@@ -20,6 +20,7 @@ type retrieveOpts struct {
 	autoDBPath  string // per-workspace index DB path
 	workspaceID string // workspace:<sha16> for sidecar validation
 	feedbackDB  string // resolved feedback DB path; "" => behavioral ranking off
+	progressive bool   // opt into the #189 progressive renderer
 }
 
 // retrieveResult is the startup outcome. line is the positive disclosure to show
@@ -44,7 +45,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 	}
 
 	if opts.ragDB != "" {
-		reader, feedbackWarn, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.feedbackDB)
+		reader, feedbackWarn, dec, _, err := buildGatedRetriever(ctx, cfg, router, opts.ragDB, expected, opts.feedbackDB, opts.progressive)
 		if err != nil {
 			return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 		}
@@ -68,7 +69,7 @@ func enableRetrieve(ctx context.Context, cfg *config.Config, router *provider.Ro
 		}
 		return retrieveResult{warns: []string{"retrieve disabled: " + err.Error()}, suppressNotice: true}
 	}
-	reader, feedbackWarn, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.feedbackDB)
+	reader, feedbackWarn, dec, stats, err := buildGatedRetriever(ctx, cfg, router, gen.dbPath, expected, opts.feedbackDB, opts.progressive)
 	if err != nil {
 		// An index exists but could not be opened/probed: a specific warning
 		// already explains why, so suppress the contradictory generic "no index"

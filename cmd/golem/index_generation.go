@@ -56,6 +56,7 @@ type generationBuildOptions struct {
 	requestedModel      string
 	actualVectorSpace   string
 	embedder            rag.Embedder
+	summarize           rag.SourceSummaryGenerator
 	full                bool
 	pruneDeleted        bool
 	refuseInvalidActive bool
@@ -70,6 +71,7 @@ type generationBuildResult struct {
 	index      indexResult
 	activeErr  error
 	gcWarn     string // non-fatal superseded-generation removal failure
+	summaryErr error  // non-fatal optional summary generation failures
 }
 
 func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (result generationBuildResult, err error) {
@@ -151,6 +153,24 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 		sidecarPath: staging.metadataPath, workspaceID: opts.workspaceID,
 		requestedModel: opts.requestedModel, out: opts.out, pruneDeleted: opts.pruneDeleted,
 	})
+	sc, sidecarErr := readSidecar(staging.metadataPath)
+	if sidecarErr != nil {
+		return result, fmt.Errorf("golem: read staging metadata %q: %w", staging.metadataPath, sidecarErr)
+	}
+	if validateErr := validateSidecar(sc, opts.workspaceID); validateErr != nil {
+		return result, fmt.Errorf("golem: validate staging metadata %q: %w", staging.metadataPath, validateErr)
+	}
+	if result.index.exitErr != nil && sc.Status != "partial" {
+		return result, fmt.Errorf("golem: indexing did not produce a publishable generation")
+	}
+	if opts.summarize != nil {
+		if err := store.GenerateSourceSummaries(ctx, opts.summarize); err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return result, ctxErr
+			}
+			result.summaryErr = fmt.Errorf("golem: generate staged source summaries: %w", err)
+		}
+	}
 	if checkpointErr := checkpointGeneration(ctx, store); checkpointErr != nil {
 		return result, checkpointErr
 	}
@@ -161,16 +181,6 @@ func buildIndexGeneration(ctx context.Context, opts generationBuildOptions) (res
 	storeClosed = true
 	if err := ctx.Err(); err != nil {
 		return result, err
-	}
-	sc, sidecarErr := readSidecar(staging.metadataPath)
-	if sidecarErr != nil {
-		return result, fmt.Errorf("golem: read staging metadata %q: %w", staging.metadataPath, sidecarErr)
-	}
-	if validateErr := validateSidecar(sc, opts.workspaceID); validateErr != nil {
-		return result, fmt.Errorf("golem: validate staging metadata %q: %w", staging.metadataPath, validateErr)
-	}
-	if result.index.exitErr != nil && sc.Status != "partial" {
-		return result, fmt.Errorf("golem: indexing did not produce a publishable generation")
 	}
 	readOnly, err := rag.OpenSQLiteStoreReadOnly(staging.dbPath)
 	if err != nil {

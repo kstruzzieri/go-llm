@@ -222,27 +222,11 @@ func parseClaimsLenient(reply string) []string {
 	return out
 }
 
-var promptLineReplacer = strings.NewReplacer(
-	"\r", " ", "\n", " ", "\v", " ", "\f", " ",
-	"\u0085", " ", "\u2028", " ", "\u2029", " ",
-)
-
-// flattenPromptLine forces an untrusted value that occupies exactly one line of
-// the prompt onto one line. Two values qualify, and neither is trustworthy:
-// Chunk.Source, because newlines are legal in POSIX filenames, nothing in the rag
-// write path rejects control characters on chunks.source, and the managed-document
-// path takes source straight from the caller; and claim text, because it is
-// model-authored from the answer under review.
-//
-// This is not what stops forgery -- the unguessable fence is, and it covers labels
-// and content alike. What flattening still guarantees is that a header occupies one
-// line, so a newline in a source cannot strand the line range on a line of its own
-// and leave the authentic lead carrying a truncated source.
-//
-// Content must never pass through it: its newlines carry meaning, and the fence
-// already protects content without touching its bytes.
+// flattenPromptLine forwards to promptfence.FlattenLine. Two values here
+// qualify, and neither is trustworthy: Chunk.Source, and claim text, because it
+// is model-authored from the answer under review.
 func flattenPromptLine(s string) string {
-	return promptLineReplacer.Replace(s)
+	return promptfence.FlattenLine(s)
 }
 
 // verdictSeverity ranks a verdict by how unsupportive it is, so that duplicate

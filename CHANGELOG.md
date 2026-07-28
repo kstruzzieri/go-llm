@@ -6,18 +6,58 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — model-backed progressive source summaries, slice 2 of #189
+
+Golem can now generate and serve the existing L0 abstract/L1 overview ladder
+with the explicit `-progressive` flag. Generation runs only in an unpublished
+index generation, routes through the configured `summarize` role (including
+its existing `analysis`/`chat` fallback), and records the model that actually
+served the request. Default indexing and retrieval still make zero summary
+model calls.
+
+`SQLiteStore.GenerateSourceSummaries` refreshes missing or stale summaries
+from stored indexed chunks. It copies `ContentHash` and `VectorSpaceID`
+byte-for-byte from `SourceProvenanceBatch` and compare-and-swaps the write
+against both values, so a concurrent reindex cannot publish stale model text.
+Rows below `SourceSummaryFormatVersion` regenerate; rows above it remain
+unreadable and are not overwritten by an older binary. A per-source model or
+validation failure leaves that source on the deterministic metadata fallback,
+continues the remaining summaries, and warns without blocking index publication.
+That warning leads with a `N of M sources failed` tally, because callers print
+only its first line.
+
+Degradation rules, so `-progressive` fails visibly rather than quietly:
+
+- A source larger than the prompt budget is summarized from its leading chunks
+  instead of being refused, and the model is told outside the fence how much it
+  is seeing. Refusing would leave large sources permanently unsummarizable and
+  re-erroring on every index run.
+- Model output wrapped in a single Markdown code fence is accepted, since local
+  models emit that despite instructions. The rest of the contract stays strict:
+  unknown fields, trailing objects, blank fields, and a multi-line abstract are
+  all still rejected.
+- `-progressive` now warns when no `summarize`/`analysis`/`chat` default
+  resolves. Previously the flag was accepted and did nothing at all — including
+  on the zero-config path where no `models.json` is discovered.
+
+`SourceProvenanceBatch` and `SourceSummaryBatch` now read in bounded batches.
+They were introduced for retrieval-result-sized inputs;
+`GenerateSourceSummaries` passes every source in the index, which would exceed
+SQLite's 32766-variable ceiling on a large enough workspace and fail the whole
+read rather than degrade.
+
+`internal/promptfence.FlattenLine` and `internal/modeltext.StripCodeFence` hold
+the single copy of two rules that now have multiple callers. No public API
+change: `analysis` and `agent/tools` forward to them.
+
 ### Added — `rag` progressive source summaries, slice 1 of #189
 
 A store and renderer for per-source L0/L1 summaries, so retrieval context can
 mix short orientation text with full chunk evidence under hard token and byte
 budgets instead of concatenating whole chunks until a limit is hit.
 
-**Nothing here runs unless you opt in, and it renders no summary text until
-slice 2.** No shipping caller sets `tools.RetrieveConfig.Progressive`, and
-nothing in the repo writes a `source_summaries` row — generation is slice 2.
-A caller who opts in today gets the deterministic metadata overview plus
-evidence for every source, with `missing` in its validity reasons.
-`Retriever.BuildContext` is unchanged and remains the default path.
+**Nothing here runs unless you opt in.** `Retriever.BuildContext` is unchanged
+and remains the default path; Golem's slice-2 opt-in is described above.
 
 New exported surface in `rag`, all additive:
 

@@ -225,7 +225,19 @@ Golem builds and refreshes the workspace RAG index automatically in the backgrou
 golem index -root /path/to/project              # explicit index rebuild
 golem -root /path/to/project -no-auto-index     # disable the startup refresh
 golem -root /path/to/project -no-rag            # disable retrieval entirely
+golem -root /path/to/project -progressive       # generate and serve L0/L1 source summaries
 ```
+
+`-progressive` is opt-in and uses `defaults.summarize`, falling back to an
+existing `analysis` or `chat` default. With none configured, Golem warns that
+the flag had no effect and every source keeps the deterministic metadata
+overview. Add `-progressive` to `golem index` for the same behavior on an
+explicit rebuild.
+
+Summaries are generated once per source and refreshed only when the source's
+content or vector space changes, so the model cost lands on the first indexing
+run after you enable the flag. A source that fails to summarize keeps the
+metadata overview and never blocks index publication.
 
 Use a specific config or backend endpoint:
 

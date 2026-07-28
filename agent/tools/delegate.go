@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/internal/modeltext"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -112,7 +113,7 @@ func (t *DelegateCode) Invoke(ctx context.Context, raw json.RawMessage) (agent.T
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "delegate failed: " + err.Error()}, nil
 	}
-	content := stripCodeFence(strings.TrimSpace(result.Response.Content))
+	content := modeltext.StripCodeFence(strings.TrimSpace(result.Response.Content))
 	if strings.TrimSpace(content) == "" {
 		return agent.ToolResult{IsError: true, Content: "delegate returned no content"}, nil
 	}
@@ -136,31 +137,7 @@ func delegatePreview(outcome *provider.RouteOutcome, content string) string {
 	return fmt.Sprintf("delegated to %s · %d lines", model, lines)
 }
 
-// stripCodeFence removes a single outer Markdown code fence when the ENTIRE
-// content is one fenced block (```lang\n...\n```), the common way local models
-// wrap generated code despite instructions. It strips only when the content
-// starts with a fence line, ends with a closing fence, the inner body is
-// non-empty, and the body contains no further fence — so a genuine multi-block
-// Markdown document (which does not reduce to a single fence pair) is left
-// untouched.
-func stripCodeFence(s string) string {
-	if !strings.HasPrefix(s, "```") {
-		return s
-	}
-	nl := strings.IndexByte(s, '\n')
-	if nl < 0 {
-		return s // single line starting with ``` — not a real block
-	}
-	inner := strings.TrimRight(s[nl+1:], " \t\n")
-	if !strings.HasSuffix(inner, "```") {
-		return s
-	}
-	inner = strings.TrimRight(strings.TrimSuffix(inner, "```"), " \t\n")
-	if strings.TrimSpace(inner) == "" {
-		return ""
-	}
-	if strings.Contains(inner, "```") {
-		return s // multi-block document — not a single wrapping fence
-	}
-	return inner
-}
+// Wrapping-fence stripping lives in internal/modeltext: cmd/golem's source
+// summarizer parses a JSON contract out of the same kind of local-model output
+// and needs the identical rule, and two copies would drift on which shapes
+// count as a wrapper.
