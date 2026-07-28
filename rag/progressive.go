@@ -3,18 +3,31 @@ package rag
 import (
 	"context"
 	"fmt"
+
+	"github.com/kstruzzieri/go-llm/contextdepth"
 )
 
 // Depth is the rendered fidelity of one source in a progressive render.
-// Slice 3 of #189 supersedes this with a cross-domain contextdepth package;
-// it lives in rag until the mixed assembler exists.
-type Depth int
+//
+// Deprecated: use contextdepth.Depth. Depth is a compatibility alias kept
+// for source and numeric-encoding compatibility (Firn IDE, Flux ML, Quantum
+// Trader consume this package); it will not be removed before the next major
+// version. Note one boundary-only legacy behavior documented on
+// ProgressiveRenderRequest.MaxDepth: the zero value there means
+// "unrestricted (DepthL2)". New APIs reject the invalid zero instead.
+type Depth = contextdepth.Depth
 
 const (
-	DepthNone Depth = iota // omitted entirely
-	DepthL0                // one-line abstract, or a deterministic metadata overview
-	DepthL1                // structured overview
-	DepthL2                // full chunk evidence
+	// Deprecated: use contextdepth.DepthInvalid. Retains its historical
+	// "unrestricted" meaning only in ProgressiveRenderRequest.MaxDepth and its
+	// historical "omitted" meaning only in ProgressiveSourceTrace.EffectiveDepth.
+	DepthNone = contextdepth.DepthInvalid
+	// Deprecated: use contextdepth.DepthL0.
+	DepthL0 = contextdepth.DepthL0
+	// Deprecated: use contextdepth.DepthL1.
+	DepthL1 = contextdepth.DepthL1
+	// Deprecated: use contextdepth.DepthL2.
+	DepthL2 = contextdepth.DepthL2
 )
 
 // PinRef identifies one caller-required L2 result. ChunkID is the chunks
@@ -41,11 +54,15 @@ type RenderedEvidence struct {
 // hard ceilings. MaxDepth of DepthNone means unrestricted (DepthL2).
 type ProgressiveRenderRequest struct {
 	Results        []SearchResult
-	MaxTokens      int      // required, > 0
-	MaxBytes       int      // required, > 0
-	MinFullResults int      // L2 floor preference; 0 => 1; negative rejected
-	MaxDepth       Depth    // DepthNone => DepthL2
-	Pinned         []PinRef // caller-required L2
+	MaxTokens      int // required, > 0
+	MaxBytes       int // required, > 0
+	MinFullResults int // L2 floor preference; 0 => 1; negative rejected
+	// MaxDepth caps rendered fidelity. LEGACY BOUNDARY BEHAVIOR: the zero
+	// value (DepthNone / contextdepth.DepthInvalid) means unrestricted
+	// (DepthL2). This survives for compatibility at the rag boundary only;
+	// new contextdepth-based APIs reject the invalid zero (spec D2).
+	MaxDepth Depth    // DepthNone => DepthL2
+	Pinned   []PinRef // caller-required L2
 	// Estimate must be pure and deterministic — the same string must always
 	// cost the same. The pinned pre-check and the step 6b upgrade delta each
 	// call it twice on the same text and assume the two calls agree, so a
@@ -123,7 +140,7 @@ func validateProgressiveRequest(req ProgressiveRenderRequest) error {
 		return fmt.Errorf("rag: progressive render: MaxBytes must be > 0, got %d", req.MaxBytes)
 	case req.MinFullResults < 0:
 		return fmt.Errorf("rag: progressive render: MinFullResults must be >= 0, got %d", req.MinFullResults)
-	case req.MaxDepth < DepthNone || req.MaxDepth > DepthL2:
+	case req.MaxDepth > DepthL2:
 		return fmt.Errorf("rag: progressive render: MaxDepth out of range: %d", int(req.MaxDepth))
 	}
 	for i, pin := range req.Pinned {
