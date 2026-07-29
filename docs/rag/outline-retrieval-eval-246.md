@@ -42,11 +42,11 @@ Apple M3 Max (16 cores); 128 GB RAM
 Commands:
 
 ```sh
-rtk go version
-rtk sw_vers
-rtk uname -mrs
-rtk system_profiler SPHardwareDataType
-rtk go run ./cmd/rag-eval \
+go version
+sw_vers
+uname -mrs
+system_profiler SPHardwareDataType
+go run ./cmd/rag-eval \
   -experiment outline \
   -dimensions 768 \
   -candidate-m 50 \

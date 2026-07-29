@@ -1,7 +1,7 @@
 # #95 Search vs SearchMulti latency benchmarks
 
 Backend: in-memory SQLite (`:memory:`), synthetic 3-dim embeddings. Host: Apple M3 Max, macOS 26.5.1 (arm64).
-Command: `rtk env -u GOROOT go test ./rag/ -run '^$' -bench BenchmarkSearchVsSearchMulti -benchmem -count 5`.
+Command: `env -u GOROOT go test ./rag/ -run '^$' -bench BenchmarkSearchVsSearchMulti -benchmem -count 5`.
 Absolute ns/op is host-specific; the SearchMulti/Search ratio is the portable figure.
 
 Figures below are the median of 5 samples per sub-benchmark. `SearchMulti` runs the

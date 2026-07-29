@@ -153,7 +153,7 @@ Notable invariants:
 Run the production-scale comparison with:
 
 ```sh
-rtk go run ./cmd/rag-eval \
+go run ./cmd/rag-eval \
   -experiment outline \
   -dimensions 768 \
   -candidate-m 50 \
