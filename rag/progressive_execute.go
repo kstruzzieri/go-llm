@@ -23,6 +23,21 @@ import (
 // structural positions, so embedded newlines, labels, and delimiters remain
 // data and cannot forge orientation or evidence headers.
 func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, error) {
+	out, trace, _, err := r.renderProgressive(ctx, req, false)
+	return out, trace, err
+}
+
+// RenderProgressiveWithGroups is RenderProgressive plus the domain-owned
+// groups projection, built from the SAME prepared-source snapshot BEFORE
+// allocation — the tool-local budget never prunes the capability declaration
+// (#331 spec 3.1). A blank result source is an indexed error on this entry
+// point only: SubjectRef.ID must identify a source, and the legacy entry point
+// keeps rendering blank-sourced results exactly as it always has.
+func (r *Retriever) RenderProgressiveWithGroups(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, []ProgressiveGroup, error) {
+	return r.renderProgressive(ctx, req, true)
+}
+
+func (r *Retriever) renderProgressive(ctx context.Context, req ProgressiveRenderRequest, wantGroups bool) (string, ProgressiveTrace, []ProgressiveGroup, error) {
 	trace := ProgressiveTrace{
 		MaxTokens: req.MaxTokens, MaxBytes: req.MaxBytes, MaxDepth: req.MaxDepth,
 		SelectedResults:     len(req.Results),
@@ -39,35 +54,53 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 	// This buys a contract a caller can actually apply: used + free ==
 	// MaxTokens holds whenever the trace is non-zero.
 	if err := validateProgressiveRequest(req); err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
+	}
+	if wantGroups {
+		for i, res := range req.Results {
+			if res.Chunk.Source == "" {
+				return "", ProgressiveTrace{}, nil, fmt.Errorf(
+					"rag: progressive render: result %d has a blank Chunk.Source; groups need it as a subject id", i)
+			}
+		}
 	}
 	if len(req.Results) == 0 {
 		// fillProgressiveTrace never runs on this path, so restate the
 		// invariant it maintains. Leaving free at zero would tell a caller the
 		// budget is exhausted when nothing was charged against it.
 		trace.EstimatedTokensFree = req.MaxTokens
-		return "", trace, nil
+		return "", trace, nil, nil
 	}
 
 	sources, err := r.prepareProgressiveSources(ctx, req)
 	if err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
 	}
 	trace.DistinctSources = len(sources)
+
+	// BEFORE allocate, deliberately: allocate mutates per-source allocation
+	// state, and the groups projection must declare what this source COULD
+	// contribute, not what this call's budget happened to admit (#331 spec
+	// 3.1). Moving this below the allocate call would make the retrieve tool's
+	// local ceiling the permanent upper bound on every downstream allocator.
+	var groups []ProgressiveGroup
+	if wantGroups {
+		groups = buildProgressiveGroups(sources)
+	}
 
 	// allocate sorts sources by firstIndex in place (DEV-16); assembly and the
 	// trace both consume that normalized order, not construction order.
 	st, err := allocate(sources, req, req.Estimate)
 	if err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
 	}
 
 	out, trimmed, err := assembleProgressive(sources, req.MaxBytes)
 	if err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
 	}
 	fillProgressiveTrace(&trace, sources, st, out, trimmed, req.Estimate)
-	return out, trace, nil
+	return out, trace, groups, nil
 }
 
 // prepareProgressiveSources groups results by source (source order = index of
