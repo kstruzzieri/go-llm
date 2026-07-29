@@ -7,11 +7,12 @@ import (
 	"strings"
 )
 
-// This file is the ORCHESTRATION layer for the progressive renderer: the
-// public entry point, the three store reads in their contracted order,
+// This file is the ORCHESTRATION layer for the progressive renderer: both
+// public entry points, the three store reads in their contracted order,
 // assembly, and trace filling. Text rendering lives in
-// progressive_render.go, budget arithmetic in progressive_alloc.go, and the
-// declaration surface in progressive.go (DEV-15).
+// progressive_render.go, budget arithmetic in progressive_alloc.go, the
+// capability projection in progressive_groups.go, and the declaration
+// surface in progressive.go (DEV-15).
 
 // RenderProgressive renders already-selected retrieval results at mixed
 // depths under hard token and byte budgets (spec sections 9-10). It never
@@ -33,6 +34,16 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 // (#331 spec 3.1). A blank result source is an indexed error on this entry
 // point only: SubjectRef.ID must identify a source, and the legacy entry point
 // keeps rendering blank-sourced results exactly as it always has.
+//
+// Groups are returned in source order (ascending ProgressiveGroup.Desc.Rank),
+// one per distinct source, lining up positionally with the trace's Sources.
+//
+// COST CEILING: unlike the returned output, the groups are NOT bounded by
+// MaxTokens/MaxBytes. Every evidence prefix is materialized unconditionally,
+// so content memory is Theta(rungs * n^2/2 * average block bytes) in the
+// number of results for one source — quadratic where the flat path is capped.
+// Callers that pass a model-supplied result count must clamp it themselves;
+// this entry point applies no upper bound today.
 func (r *Retriever) RenderProgressiveWithGroups(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, []ProgressiveGroup, error) {
 	return r.renderProgressive(ctx, req, true)
 }

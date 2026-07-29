@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -264,6 +265,34 @@ func TestProgressiveGroupsValidityMatrix(t *testing.T) {
 				if alt.Content == "" {
 					t.Errorf("%s alternative %d has empty content", tc.source, i)
 				}
+				// Descriptor <-> content, per alternative. The evidence-bearing
+				// alternatives are the ones with no other coverage: a builder
+				// that rendered every prefix at a single hard-coded orientation
+				// level would keep all the counts above consistent while
+				// shipping abstract-only bytes under an [abstract, overview]
+				// descriptor, and stale summary text under a metadata-only one.
+				hasKind := func(k contextdepth.RepresentationKind) bool {
+					for _, rep := range alt.Desc.Representations {
+						if rep.Kind == k {
+							return true
+						}
+					}
+					return false
+				}
+				metadataOnly := !hasKind(contextdepth.RepresentationGenerated)
+				if metadataOnly && strings.Contains(alt.Content, "\npurpose: ") {
+					t.Errorf("%s alternative %d declares no generated component but renders stored summary text:\n%s",
+						tc.source, i, alt.Content)
+				}
+				if metadataOnly != strings.Contains(alt.Content, "(no summary") {
+					t.Errorf("%s alternative %d: metadata-only=%v but note presence=%v:\n%s",
+						tc.source, i, metadataOnly, !metadataOnly, alt.Content)
+				}
+				wantOverview := slices.Contains(alt.Desc.Representations, wantRepOverview)
+				if got := strings.Contains(alt.Content, "\noverview: "); got != wantOverview {
+					t.Errorf("%s alternative %d: declares overview=%v but renders overview=%v:\n%s",
+						tc.source, i, wantOverview, got, alt.Content)
+				}
 			}
 		})
 	}
@@ -391,9 +420,9 @@ func TestProgressiveGroupsContentBytes(t *testing.T) {
 	if len(sources) != 1 || !sources[0].fresh {
 		t.Fatalf("fixture must be one FRESH source, got %d sources", len(sources))
 	}
-	want := orientationText(sources[0], orientationL0)
+	evidence := ""
 	for _, res := range sources[0].results {
-		want += evidenceText(res)
+		evidence += evidenceText(res)
 	}
 
 	_, _, groups, err := r.RenderProgressiveWithGroups(ctx, req)
@@ -401,67 +430,120 @@ func TestProgressiveGroupsContentBytes(t *testing.T) {
 		t.Fatalf("RenderProgressiveWithGroups: %v", err)
 	}
 	g := groupForSource(t, groups, "pkg/cb.go")
-	wantDesc := []contextdepth.RepresentationDesc{
-		wantRepAbstract, wantRepEvidence, wantRepEvidence, wantRepEvidence,
-	}
-	var found *ProgressiveAlternative
-	for i := range g.Alternatives {
-		if reflect.DeepEqual(g.Alternatives[i].Desc.Representations, wantDesc) {
-			found = &g.Alternatives[i]
-			break
-		}
-	}
-	if found == nil {
-		t.Fatalf("no [abstract + 3 evidence] alternative among %d", len(g.Alternatives))
-	}
-	if found.Content != want {
-		t.Fatalf("alternative content mismatch\n got (%d bytes):\n%s\nwant (%d bytes):\n%s",
-			len(found.Content), found.Content, len(want), want)
-	}
-	if len(found.RenderedEvidence) != 3 {
-		t.Fatalf("RenderedEvidence = %d, want 3", len(found.RenderedEvidence))
-	}
-	if found.Desc.Depth() != contextdepth.DepthL2 {
-		t.Fatalf("evidence-bearing alternative depth = %v, want L2", found.Desc.Depth())
+
+	// BOTH rungs' deepest prefix, byte for byte. Pinning only the abstract rung
+	// leaves a builder free to render every prefix at orientationL0 while the
+	// overview rung's descriptor still promises [abstract, overview, ...].
+	for _, tc := range []struct {
+		name  string
+		level orientationLevel
+		desc  []contextdepth.RepresentationDesc
+	}{
+		{"abstract", orientationL0, []contextdepth.RepresentationDesc{
+			wantRepAbstract, wantRepEvidence, wantRepEvidence, wantRepEvidence}},
+		{"abstract_overview", orientationL0L1, []contextdepth.RepresentationDesc{
+			wantRepAbstract, wantRepOverview, wantRepEvidence, wantRepEvidence, wantRepEvidence}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			want := orientationText(sources[0], tc.level) + evidence
+			var found *ProgressiveAlternative
+			for i := range g.Alternatives {
+				if reflect.DeepEqual(g.Alternatives[i].Desc.Representations, tc.desc) {
+					found = &g.Alternatives[i]
+					break
+				}
+			}
+			if found == nil {
+				t.Fatalf("no %s + 3 evidence alternative among %d", tc.name, len(g.Alternatives))
+			}
+			if found.Content != want {
+				t.Fatalf("alternative content mismatch\n got (%d bytes):\n%s\nwant (%d bytes):\n%s",
+					len(found.Content), found.Content, len(want), want)
+			}
+			if len(found.RenderedEvidence) != 3 {
+				t.Fatalf("RenderedEvidence = %d, want 3", len(found.RenderedEvidence))
+			}
+			if found.Desc.Depth() != contextdepth.DepthL2 {
+				t.Fatalf("evidence-bearing alternative depth = %v, want L2", found.Desc.Depth())
+			}
+		})
 	}
 }
 
 // TestRenderProgressiveWithGroupsBlankSource: a blank Chunk.Source cannot key
-// a SubjectRef, so the groups entry point rejects it. The legacy entry point
-// keeps its existing behavior exactly — this validation is additive.
+// a SubjectRef, so the groups entry point rejects it. Two arms so the reported
+// index is pinned to the offending result rather than to a constant — a single
+// arm is satisfied by any error message containing that digit. The legacy
+// entry point keeps its existing behavior exactly; this validation is additive.
 func TestRenderProgressiveWithGroupsBlankSource(t *testing.T) {
-	r, store := newProgressiveTestRetriever(t)
-	ctx := context.Background()
-	emb := []byte{0, 0, 0, 0}
-	storeChunksRaw(t, store, [][]any{
-		{"bs1", "named body", "pkg/bs.go", 1, 1, "go", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+	named := SearchResult{
+		Chunk: Chunk{ID: "bs1", Content: "named body", Source: "pkg/bs.go", StartLine: 1, EndLine: 1}, Score: 0.9}
+	blank := SearchResult{
+		Chunk: Chunk{ID: "bs2", Content: "anonymous body", Source: "", StartLine: 1, EndLine: 1}, Score: 0.8}
+
+	tests := []struct {
+		name      string
+		results   []SearchResult
+		wantIndex int
+	}{
+		{"blank_first", []SearchResult{blank, named}, 0},
+		{"blank_second", []SearchResult{named, blank}, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, store := newProgressiveTestRetriever(t)
+			ctx := context.Background()
+			emb := []byte{0, 0, 0, 0}
+			storeChunksRaw(t, store, [][]any{
+				{"bs1", "named body", "pkg/bs.go", 1, 1, "go", `{}`, emb, int64(1), "", sigJSON(t, "h"), "vs1"},
+			})
+			req := ProgressiveRenderRequest{Results: tc.results, MaxTokens: 1 << 20, MaxBytes: 1 << 20}
+
+			out, trace, groups, err := r.RenderProgressiveWithGroups(ctx, req)
+			if err == nil {
+				t.Fatal("blank Chunk.Source must error on the groups entry point")
+			}
+			if want := fmt.Sprintf("result %d", tc.wantIndex); !strings.Contains(err.Error(), want) {
+				t.Fatalf("error must name %q, got: %v", want, err)
+			}
+			if out != "" || groups != nil || !reflect.DeepEqual(trace, ProgressiveTrace{}) {
+				t.Fatalf("error path must return zero values, got out=%q groups=%v trace=%+v", out, groups, trace)
+			}
+
+			// Same request, legacy entry point: unchanged, no new error.
+			legacyOut, legacyTrace, err := r.RenderProgressive(ctx, req)
+			if err != nil {
+				t.Fatalf("legacy entry point must not gain an error: %v", err)
+			}
+			if legacyTrace.DistinctSources != 2 {
+				t.Fatalf("legacy render must still group the blank source: %d distinct", legacyTrace.DistinctSources)
+			}
+			if !strings.Contains(legacyOut, `### source: ""`) {
+				t.Fatalf("legacy render must still emit the blank source:\n%s", legacyOut)
+			}
+		})
+	}
+}
+
+// TestRenderProgressiveWithGroupsNoResults is the one path where
+// len(groups) == DistinctSources holds by accident rather than by the builder
+// loop: both are zero, and the early return never reaches the builder at all.
+func TestRenderProgressiveWithGroupsNoResults(t *testing.T) {
+	r, _ := newProgressiveTestRetriever(t)
+	out, trace, groups, err := r.RenderProgressiveWithGroups(context.Background(), ProgressiveRenderRequest{
+		Results: nil, MaxTokens: 100, MaxBytes: 1000,
 	})
-	results := []SearchResult{
-		{Chunk: Chunk{ID: "bs1", Content: "named body", Source: "pkg/bs.go", StartLine: 1, EndLine: 1}, Score: 0.9},
-		{Chunk: Chunk{ID: "bs2", Content: "anonymous body", Source: "", StartLine: 1, EndLine: 1}, Score: 0.8},
-	}
-	req := ProgressiveRenderRequest{Results: results, MaxTokens: 1 << 20, MaxBytes: 1 << 20}
-
-	out, trace, groups, err := r.RenderProgressiveWithGroups(ctx, req)
-	if err == nil {
-		t.Fatal("blank Chunk.Source must error on the groups entry point")
-	}
-	if !strings.Contains(err.Error(), "1") {
-		t.Fatalf("error must name the offending index: %v", err)
-	}
-	if out != "" || groups != nil || !reflect.DeepEqual(trace, ProgressiveTrace{}) {
-		t.Fatalf("error path must return zero values, got out=%q groups=%v trace=%+v", out, groups, trace)
-	}
-
-	// Same request, legacy entry point: unchanged, no new error.
-	legacyOut, legacyTrace, err := r.RenderProgressive(ctx, req)
 	if err != nil {
-		t.Fatalf("legacy entry point must not gain an error: %v", err)
+		t.Fatalf("empty render: %v", err)
 	}
-	if legacyTrace.DistinctSources != 2 {
-		t.Fatalf("legacy render must still group the blank source: %d distinct", legacyTrace.DistinctSources)
+	if groups != nil {
+		t.Fatalf("no results means no groups, got %d", len(groups))
 	}
-	if !strings.Contains(legacyOut, `### source: ""`) {
-		t.Fatalf("legacy render must still emit the blank source:\n%s", legacyOut)
+	if out != "" || trace.DistinctSources != 0 || trace.SelectedResults != 0 {
+		t.Fatalf("empty render wrong: out=%q trace=%+v", out, trace)
+	}
+	// The trace itself is NOT zero on this path — it still reports the budget.
+	if trace.MaxTokens != 100 || trace.EstimatedTokensFree != 100 {
+		t.Fatalf("empty render must report the whole budget free: %+v", trace)
 	}
 }

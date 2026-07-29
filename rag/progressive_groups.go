@@ -1,16 +1,19 @@
 package rag
 
 import (
+	"slices"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/contextdepth"
 )
 
-// This file is the DECLARATION layer for the progressive renderer: it projects
-// one prepared source into the complete set of alternatives rag could legally
-// contribute, so a cross-domain allocator can choose among them. It renders
-// through the same two helpers the flat path uses (orientationText,
-// evidenceText) and owns no budget arithmetic of its own.
+// This file is the CAPABILITY PROJECTION layer for the progressive renderer:
+// it projects one prepared source into the complete set of alternatives rag
+// could legally contribute, so a cross-domain allocator can choose among them.
+// It renders through the same two helpers the flat path uses (orientationText,
+// evidenceText) and owns no budget arithmetic of its own. Not to be confused
+// with progressive.go, the DECLARATION SURFACE, which holds the request,
+// trace, and constant vocabulary.
 
 // ProgressiveGroup is one RAG source's capability declaration: every complete
 // alternative the renderer could contribute for that source, payload
@@ -20,6 +23,10 @@ import (
 // Alternatives are in ascending utility order (cheapest orientation first,
 // deepest evidence prefix last); the mixed-domain upgrade pass relies on that
 // declaration order rather than re-deriving a ranking.
+//
+// A slice of groups is in SOURCE ORDER — ascending Desc.Rank, one group per
+// distinct source — which lines up positionally with
+// ProgressiveTrace.Sources from the same call.
 type ProgressiveGroup struct {
 	Desc         contextdepth.GroupDesc
 	Alternatives []ProgressiveAlternative
@@ -54,13 +61,27 @@ type ladderRung struct {
 	reps  []contextdepth.RepresentationDesc
 }
 
-// buildProgressiveGroups runs on the prepared snapshot BEFORE allocation: no
-// field it reads (fresh, results, firstIndex, prov, summary, reasons) is
-// allocation-mutated, and the evidence families cover src.results — every
-// result in hand — never src.evidence, which after allocation holds only what
-// the caller's LOCAL budget admitted. Building from post-allocation state
-// would let the retrieve tool's 2048-token ceiling irrevocably prune
-// alternatives a global allocator still had room for (#331 spec 3.1).
+// buildProgressiveGroups runs on the prepared snapshot BEFORE allocation. Its
+// read set is source, fresh, results and firstIndex, plus every field
+// orientationText and evidenceText read: prov, summary, reasons, and
+// summaryBudgetOmitted. All but the last are untouched by the allocator.
+//
+// summaryBudgetOmitted IS allocator-written (progressive_alloc.go step 5), and
+// reading it here is safe for a two-part reason that must hold together:
+// the allocator sets it only on the orientationL0 path, reached only when
+// cheapestOrientation returns orientationL0, i.e. only for a FRESH source;
+// and orientationText reads it only at orientationMeta, a rung this builder
+// offers only to NON-fresh sources. The two sets are disjoint, so the value
+// this builder can observe is always the false zero value. Widening either
+// side — offering fresh sources a metadata rung, or letting the allocator
+// demote a non-fresh source — breaks the pre-allocate safety argument, not
+// merely this comment.
+//
+// The evidence families cover src.results — every result in hand — never
+// src.evidence, which after allocation holds only what the caller's LOCAL
+// budget admitted. Building from post-allocation state would let the retrieve
+// tool's 2048-token ceiling irrevocably prune alternatives a global allocator
+// still had room for (#331 spec 3.1).
 //
 // Fresh sources get abstract rungs only. The metadata rung's note line claims
 // "no summary", which is false for a fresh source, and an orientation block
@@ -93,10 +114,19 @@ func buildProgressiveGroups(sources []*progressiveSource) []ProgressiveGroup {
 			},
 			Alternatives: make([]ProgressiveAlternative, 0, (len(src.results)+1)*len(rungs)),
 		}
-		for _, rung := range rungs {
+		// Each rung's orientation block is rendered ONCE: orientationText
+		// re-scans src.results and sorts the symbol/section lists, and the
+		// prefix loop below would otherwise call it (n+1)*len(rungs) times for
+		// the same len(rungs) distinct strings.
+		orient := make([]string, len(rungs))
+		for i, rung := range rungs {
+			orient[i] = orientationText(src, rung.level)
 			g.Alternatives = append(g.Alternatives, ProgressiveAlternative{
-				Desc:    contextdepth.AlternativeDesc{Representations: cloneReps(rung.reps)},
-				Content: orientationText(src, rung.level),
+				// Cloned, not shared: without this every orientation-only
+				// alternative of a source aliases one backing array, and a
+				// consumer writing Desc.Representations[0] mutates its siblings.
+				Desc:    contextdepth.AlternativeDesc{Representations: slices.Clone(rung.reps)},
+				Content: orient[i],
 			})
 		}
 
@@ -113,25 +143,19 @@ func buildProgressiveGroups(sources []*progressiveSource) []ProgressiveGroup {
 				Source: res.Chunk.Source, ChunkID: res.Chunk.ID, StableKey: res.Chunk.StableKey,
 				StartLine: res.Chunk.StartLine, EndLine: res.Chunk.EndLine, Score: res.Score,
 			})
-			for _, rung := range rungs {
-				reps := cloneReps(rung.reps)
+			for i, rung := range rungs {
+				reps := slices.Clone(rung.reps)
 				for range rendered {
 					reps = append(reps, repEvidence)
 				}
 				g.Alternatives = append(g.Alternatives, ProgressiveAlternative{
 					Desc:             contextdepth.AlternativeDesc{Representations: reps},
-					Content:          orientationText(src, rung.level) + ev.String(),
-					RenderedEvidence: append([]RenderedEvidence(nil), rendered...),
+					Content:          orient[i] + ev.String(),
+					RenderedEvidence: slices.Clone(rendered),
 				})
 			}
 		}
 		groups = append(groups, g)
 	}
 	return groups
-}
-
-// cloneReps copies a rung's shared descriptor slice so appending evidence
-// components to one alternative can never write into another's backing array.
-func cloneReps(reps []contextdepth.RepresentationDesc) []contextdepth.RepresentationDesc {
-	return append([]contextdepth.RepresentationDesc(nil), reps...)
 }
