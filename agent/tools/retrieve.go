@@ -79,12 +79,22 @@ type Retrieve struct {
 	// behind -progressive, so the shipped path never pays it.
 	Progressive    bool
 	MinFullResults int
-	// MaxK bounds the model-supplied k. The progressive groups projection
-	// renders every evidence prefix, so its cost grows with k^2; unlike the
-	// flat path there is no token/byte ceiling on the projection itself.
-	// 0 => defaultRetrieveMaxK. A value above maxRetrieveMaxK is rejected by
-	// Invoke: it could project more alternatives than the agent carriers
-	// accept.
+	// MaxK bounds the model-supplied k on EVERY path: k is clamped to it before
+	// the backend call, so one {"k":500} tool call cannot cost 500 lookups.
+	// 0 => defaultRetrieveMaxK (20, already 4x defaultRetrieveK).
+	//
+	// That default DOES change behavior for a consumer who never sets MaxK: a
+	// model asking for 500 results now gets 20, on the legacy path too, and the
+	// legacy attribution set shrinks with it (that path credits every retrieved
+	// result). Deliberate hardening — unbounded model-supplied k is a resource
+	// vector in flat mode as well — and MaxK is the escape hatch.
+	//
+	// In PROGRESSIVE mode only, MaxK is additionally capped at maxRetrieveMaxK
+	// and Invoke rejects anything above it: the groups projection renders every
+	// evidence prefix, emitting (k+1) x rungs alternatives per source with no
+	// token/byte ceiling of its own, and agent's maxContextAlternatives would
+	// reject the projection later. The flat path builds no groups and carries no
+	// such ceiling — set MaxK freely there.
 	MaxK int
 	// Estimate is the token estimator for the progressive path; nil => the
 	// renderer's heuristic. It must be pure and deterministic: the renderer
@@ -120,13 +130,23 @@ func (t Retrieve) Effect() agent.Effect {
 }
 
 func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	// Resolved ONCE: the carrier ceiling below and the branch that builds the
+	// groups must agree on whether a projection happens at all.
+	pr, capable := t.R.(progressiveRetriever)
+	progressive := capable && t.Progressive
 	// Configuration, not model input: a hard error, not an IsError observation
 	// the model can neither fix nor learn from. Checked here because
 	// agent/tools has no constructors — every tool is a struct literal — and
 	// the alternative is a mixed-assembly failure much later whose message
 	// talks about alternative counts rather than about MaxK.
-	if t.MaxK > maxRetrieveMaxK {
-		return agent.ToolResult{}, fmt.Errorf("tools: retrieve: MaxK must be <= %d, got %d", maxRetrieveMaxK, t.MaxK)
+	//
+	// The ceiling is a MIXED-MODE CARRIER constraint, so it binds only where
+	// groups are actually built. Caging the flat path at 31 would be a
+	// functional regression on a shipped path, enforced by a bound that path
+	// cannot violate: a legacy consumer asking for 500 results must get 500.
+	if progressive && t.MaxK > maxRetrieveMaxK {
+		return agent.ToolResult{}, fmt.Errorf(
+			"tools: retrieve: MaxK must be <= %d in progressive mode, got %d", maxRetrieveMaxK, t.MaxK)
 	}
 	var args retrieveArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
@@ -160,7 +180,7 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "retrieval failed: " + err.Error()}, nil
 	}
-	if pr, ok := t.R.(progressiveRetriever); ok && t.Progressive {
+	if progressive {
 		content, trace, groups, err := pr.RenderProgressiveWithGroups(ctx, rag.ProgressiveRenderRequest{
 			Results:        results,
 			MaxTokens:      maxTokens,

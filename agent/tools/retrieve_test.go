@@ -503,20 +503,49 @@ func TestRetrieveRejectsMaxKAboveCarrierBound(t *testing.T) {
 	// symptom is a hard mixed-assembly validation failure much later, with a
 	// message about alternative counts rather than about MaxK. Reject it here,
 	// as a hard error, at the same severity assembly would.
-	for _, maxK := range []int{maxRetrieveMaxK + 1, 500} {
-		tool := Retrieve{R: &capturingRetriever{}, MaxK: maxK}
-		res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
-		if err == nil {
-			t.Fatalf("MaxK=%d must be rejected, got result %+v", maxK, res)
-		}
-		if !strings.Contains(err.Error(), "MaxK") {
-			t.Errorf("MaxK=%d: error must name the field, got %v", maxK, err)
-		}
+	//
+	// The ceiling binds EXACTLY where groups get built: it comes from agent's
+	// maxContextAlternatives, which nothing but the projection can violate. The
+	// two negative cases below pin it to the branch predicate rather than to the
+	// Progressive field alone.
+	tests := []struct {
+		name    string
+		tool    Retrieve
+		wantErr bool
+	}{
+		{"progressive, one over the ceiling", Retrieve{R: progressiveFixture(), Progressive: true, MaxK: maxRetrieveMaxK + 1}, true},
+		{"progressive, far over the ceiling", Retrieve{R: progressiveFixture(), Progressive: true, MaxK: 500}, true},
+		{"progressive, at the ceiling", Retrieve{R: progressiveFixture(), Progressive: true, MaxK: maxRetrieveMaxK}, false},
+		{"capable retriever, progressive off", Retrieve{R: progressiveFixture(), MaxK: 500}, false},
+		{"progressive on, retriever not capable", Retrieve{R: fakeRetrieverLegacy{}, Progressive: true, MaxK: 500}, false},
 	}
-	// The ceiling itself is legal.
-	tool := Retrieve{R: &capturingRetriever{}, MaxK: maxRetrieveMaxK}
-	if _, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`)); err != nil {
-		t.Fatalf("MaxK at the ceiling must be accepted: %v", err)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			res, err := tc.tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+			switch {
+			case tc.wantErr && err == nil:
+				t.Fatalf("MaxK=%d must be rejected, got result %+v", tc.tool.MaxK, res)
+			case tc.wantErr && !strings.Contains(err.Error(), "MaxK"):
+				t.Errorf("error must name the field, got %v", err)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("MaxK=%d must be accepted here: %v", tc.tool.MaxK, err)
+			}
+		})
+	}
+}
+
+func TestRetrieveLegacyMaxKAboveCarrierBoundIsHonored(t *testing.T) {
+	// The flat path builds no groups, so agent's carrier bound cannot constrain
+	// it: a legacy consumer asking for 500 results must GET 500. Caging the flat
+	// path at 31 would be a functional regression on a shipped path, enforced by
+	// a constraint that has nothing to do with it.
+	cr := &capturingRetriever{}
+	tool := Retrieve{R: cr, MaxK: 500}
+	if _, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q","k":500}`)); err != nil {
+		t.Fatalf("legacy MaxK above the carrier bound must be honored: %v", err)
+	}
+	if cr.gotK != 500 {
+		t.Fatalf("backend received k = %d, want 500", cr.gotK)
 	}
 }
 
