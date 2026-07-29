@@ -7,6 +7,7 @@
       "final_answer_criteria": "States the base retry delay is 400 milliseconds (400ms), as set by baseDelay in internal/relay/retry.go. Answers derived only from summaries or paths cannot contain this value."
     },
     "max_tokens": 512,
+    "answer_literal": "baseDelay  = 400 * time.Millisecond",
     "sources": [
       {
         "path": "internal/relay/retry.go",
@@ -39,6 +40,7 @@
       "final_answer_criteria": "States the claim batch size is 25, as set by claimBatch in internal/queue/sqlite.go. The docs and summaries only say 'small batches'; the number exists solely in the code body."
     },
     "max_tokens": 512,
+    "answer_literal": "claimBatch = 25",
     "sources": [
       {
         "path": "internal/queue/queue.go",
@@ -78,6 +80,7 @@
       "final_answer_criteria": "Names the header X-Ledger-Digest, defined by signatureHeader in internal/sign/hmac.go. No summary or path names the header, and it is not derivable from the project name or from convention; it exists only in that file's body."
     },
     "max_tokens": 512,
+    "answer_literal": "signatureHeader = \"X-Ledger-Digest\"",
     "sources": [
       {
         "path": "internal/sign/doc.go",
@@ -124,6 +127,7 @@
       "final_answer_criteria": "States the grace period is 15 seconds, as set by shutdownGrace in cmd/beacond/main.go. The operations guide and summaries say only 'a bounded grace period' without the value."
     },
     "max_tokens": 512,
+    "answer_literal": "shutdownGrace = 15 * time.Second",
     "sources": [
       {
         "path": "docs/operations.md",
@@ -156,6 +160,7 @@
       "final_answer_criteria": "Identifies internal/sign/hmac.go as the file implementing signature verification. Path and summary information is sufficient; quoting the implementation is not required."
     },
     "max_tokens": 512,
+    "answer_literal": "internal/sign/hmac.go",
     "sources": [
       {
         "path": "internal/relay/handler.go",
@@ -195,6 +200,7 @@
       "final_answer_criteria": "States the queue schema is defined in SQL (internal/queue/schema.sql). The file path and language metadata alone support the answer."
     },
     "max_tokens": 512,
+    "answer_literal": "internal/queue/schema.sql",
     "sources": [
       {
         "path": "internal/queue/schema.sql",
@@ -227,6 +233,7 @@
       "final_answer_criteria": "Identifies docs/operations.md as the deployment and restart runbook. Orientation from paths and summaries is sufficient."
     },
     "max_tokens": 512,
+    "answer_literal": "docs/operations.md",
     "sources": [
       {
         "path": "docs/README.md",
@@ -266,6 +273,7 @@
       "final_answer_criteria": "Identifies internal/metrics (metrics.go) as the package declaring and registering the Prometheus counters."
     },
     "max_tokens": 512,
+    "answer_literal": "internal/metrics/metrics.go",
     "sources": [
       {
         "path": "internal/metrics/metrics.go",
@@ -298,6 +306,7 @@
       "final_answer_criteria": "States the burst capacity is 40 tokens, from `burst` in internal/ratelimit/bucket.go. Other pacing numbers in context (retry delays, worker counts, batch sizes) are not the rate-limit burst."
     },
     "max_tokens": 512,
+    "answer_literal": "burst        = 40",
     "sources": [
       {
         "path": "internal/relay/retry.go",
@@ -344,6 +353,7 @@
       "final_answer_criteria": "States the suppression window is 10 minutes, from dedupWindow in internal/relay/dedup.go. The 30-second claim lease and the retry delays in context are different durations and wrong answers."
     },
     "max_tokens": 512,
+    "answer_literal": "dedupWindow = 10 * time.Minute",
     "sources": [
       {
         "path": "internal/queue/sqlite.go",
@@ -390,6 +400,7 @@
       "final_answer_criteria": "States the cap is 1 MiB (1 << 20 bytes), enforced by maxBody in internal/relay/handler.go. Queue, rate-limit, and config numbers in context are not the body cap."
     },
     "max_tokens": 512,
+    "answer_literal": "maxBody = 1 << 20",
     "sources": [
       {
         "path": "internal/config/config.go",
@@ -443,6 +454,7 @@
       "final_answer_criteria": "States the pool starts 8 workers, from defaultWorkers in internal/relay/fanout.go. The rate-limit refill rate, claim batch size, and other counts in context are wrong answers."
     },
     "max_tokens": 512,
+    "answer_literal": "defaultWorkers = 8",
     "sources": [
       {
         "path": "internal/relay/fanout.go",

@@ -35,6 +35,7 @@ A JSON array of case objects:
 | `question` | The user question both arms are asked. Non-blank. |
 | `golden.final_answer_criteria` | What a correct answer must contain (the labeling rubric). Non-blank. |
 | `max_tokens` | Context token budget applied identically to both arms. Positive. |
+| `answer_literal` | Optional. The anchored answer string the builder requires at least one rendered arm to contain (see Reachability). Omitted on `no_answer` cases, which have no answer by design. |
 | `sources` | 3–6 source objects (below). Fixture order IS retrieval order: the builder assigns rank embeddings so source 0 is the top retrieval hit. |
 
 Each source object:
@@ -83,20 +84,36 @@ the rest to orientation-only blocks. Two authoring rules follow:
    only while the earlier bodies stay short (`co-signature-header` is the
    one committed case relying on that) and dies the moment an earlier body
    grows.
-2. **After building, grep the answer literal in the built
-   `<case-id>-flat.json`.** Absent from BOTH arms means the case is dead:
-   it contributes a guaranteed 0/0 delta, and a rubric demanding the value
-   then penalizes a model that correctly says "not in the provided
-   context". Fix the case before labeling — usually by moving the
-   answer-bearing source earlier.
+2. **Set `answer_literal`, and anchor it.** The builder enforces
+   reachability: it renders both arms and fails the build when the literal
+   appears in NEITHER. A dead case contributes a guaranteed 0/0 delta, and
+   a rubric demanding the value then penalizes a model that correctly says
+   "not in the provided context" — so a dead case is impossible to commit
+   rather than merely discouraged. Fix it by moving the answer-bearing
+   source earlier.
 
-Three dead cases have been caught so far, all the same shape — an answer
-source sitting past the flat arm's reach with a summary that deliberately
-omitted the value. Two were `content_only` cases the author caught while
-building; the third, the `distractor` case `dx-dedup-window`, survived the
-author's own checks and was caught in review. None is visible in
-`cases.json`; only the built trace shows it. Run the grep even when the
-case looks obviously fine.
+   Anchor the literal on its identifier or full path — `claimBatch = 25`,
+   not `25`; `internal/sign/hmac.go`, not `hmac`. Bare digits and bare
+   words match unrelated trace text and report a false "reachable". Copy
+   the declaration verbatim, including any alignment spacing
+   (`burst        = 40`), since the check is a plain substring match.
+
+   The builder also prints one line per case whose literal reaches only
+   ONE arm, which is the shape authors previously derived by hand. Single
+   arm reach is legal, not an error: `content_only` cases are usually
+   flat-only (the answer lives in a body the progressive arm demotes),
+   and `md-deploy-doc` is progressive-only (flat truncates before
+   `docs/operations.md`, but the orientation block still names it).
+
+Three dead cases were caught by hand before the gate existed, all the same
+shape — an answer source sitting past the flat arm's reach with a summary
+that deliberately omitted the value. Two were `content_only` cases the
+author caught while building; the third, the `distractor` case
+`dx-dedup-window`, survived the author's own checks and was caught in
+review. None was visible in `cases.json`; only the built trace showed it.
+That is the failure the `answer_literal` gate now catches mechanically,
+and it is why growing this corpus toward 60+ cases no longer depends on
+anyone remembering to grep.
 
 ### Guessability: four channels, not three
 
@@ -139,6 +156,13 @@ this and invalidates any pair where the arms diverge.
 If a build is interrupted after publishing a trace but before updating the
 manifest, the next run refuses to overwrite that unowned file. Remove the
 reported unmanifested trace, then rerun the build.
+
+`TestAssemblyCommittedCorpusUpToDate` rebuilds this corpus from the
+committed `cases.json` on every test run and byte-compares the result,
+including `.assembly-manifest`. Any builder change that shifts rendered
+output, and any hand edit to a committed trace, fails there — so a
+rendering fix can no longer ship while the committed traces still carry
+the old bytes. Rerun the build command above after intentional changes.
 
 ## Labeling flow
 
