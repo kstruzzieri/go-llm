@@ -203,3 +203,46 @@ once before measurements; their build cost and retained memory, like
 long-lived persistent-memory pressure, are excluded. The raw JSON contains
 measurements only and no recommendation or conclusion. See the measured
 [issue #246 report](../../docs/rag/outline-retrieval-eval-246.md).
+
+## Progressive rendering experiment (#331)
+
+Run with:
+
+```sh
+go run ./cmd/rag-eval \
+  -experiment progressive \
+  -dimensions 768 \
+  -out internal/rageval/testdata/progressive-baseline.json
+```
+
+This experiment measures flat `Retriever.BuildContext` against
+`Retriever.RenderProgressive` at equal budget over the same outline fixture
+corpus used by `#246`. Retrieval selection runs once per query so both arms
+render the identical result slice (`candidate_sets_equal` records this rather
+than asserting it). Fresh summaries are seeded on the even-indexed half of the
+corpus sources before rendering; the other half exercises the deterministic
+metadata-overview fallback, so `summary.total_metadata_fallback` should always
+be nonzero on a passing regeneration.
+
+On this fixture `summary.mean_token_reduction` is negative (~-0.116):
+`total_omitted_sources` is 0 across the corpus (the 512-token budget never
+binds), and 16 of 20 queries select all top-10 chunks from a single source, so
+progressive rendering only adds its orientation block and v2 headers on top of
+content the flat renderer already emits in full — pure overhead in this
+regime. That is a mechanical property of this fixture's selection, not a
+quality verdict on progressive rendering: the depth-for-coverage trade the
+renderer exists for needs either a `MaxTokens` budget below flat's natural
+~445-token size, or a selection spanning more distinct sources, to actually
+engage. Relatedly, the one query with `sources_at_l1 > 0` is a reachability
+indicator, not a measurement: L1 can only appear on the 4 multi-source
+(`distributed_support`) queries, and the fixture is intentionally thin there;
+broadening it is out of scope for this baseline.
+
+`contextPrecision` is deliberately not claimed for this experiment: the frozen
+`BuildContext` exposes no emitted-result trace to compute it against (spec
+3.8), so only token/byte reduction and progressive-arm trace counters
+(`sources_at_l0`, `sources_at_l1`, `sources_with_evidence`, `omitted_sources`)
+are reported.
+
+Like the outline baseline, every experiment requires an explicit `-out` path,
+so no invocation can overwrite the committed baseline by accident.

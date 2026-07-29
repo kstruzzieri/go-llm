@@ -329,6 +329,33 @@ func TestLoadLabelsAndArtifacts_DuplicateMatchedLabelRejected(t *testing.T) {
 	}
 }
 
+func TestLoadArtifactsRejectsHashMismatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	artifact := testCalibrationArtifact("t1", "original")
+	artifact.ActualFinalAnswer = "tampered"
+	if err := writeJSONL(path, []any{artifact}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadArtifacts(path)
+	if err == nil || !strings.Contains(err.Error(), "artifact_hash mismatch") {
+		t.Fatalf("loadArtifacts error = %v, want artifact_hash mismatch", err)
+	}
+}
+
+func TestLoadArtifactsRejectsDuplicateHash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	artifact := testCalibrationArtifact("t1", "answer")
+	if err := writeJSONL(path, []any{artifact, artifact}); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := loadArtifacts(path)
+	if err == nil || !strings.Contains(err.Error(), "duplicate artifact_hash") {
+		t.Fatalf("loadArtifacts error = %v, want duplicate artifact_hash", err)
+	}
+}
+
 func TestLoadLabels_InvalidExpectedAnswerQualityRejected(t *testing.T) {
 	dir := t.TempDir()
 	labels := filepath.Join(dir, "labels.jsonl")

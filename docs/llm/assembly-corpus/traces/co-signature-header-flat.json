@@ -1,0 +1,29 @@
+{
+  "id": "co-signature-header-flat",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\nRelevant code context:\n\n--- internal/sign/doc.go (lines 1-10, similarity: 1.00) ---\n1| // Package sign authenticates inbound publishes.\n2| //\n3| // Producers MAC the request body with a shared secret and send the\n4| // digest with the request; beacond recomputes and compares it before\n5| // any payload is enqueued. Key handling and verification live here so\n6| // the relay package never touches raw secrets.\n7| //\n8| // The secret is provisioned by the operator; rotation order is\n9| // documented in the operations guide.\n10| package sign\n\n--- internal/sign/signer.go (lines 1-19, similarity: 1.00) ---\n1| package sign\n2| \n3| import \"os\"\n4| \n5| // Signer holds the shared secret used to authenticate publishes.\n6| // Verification lives alongside it in this package.\n7| type Signer struct {\n8| \tsecret []byte\n9| }\n10| \n11| // NewSigner loads the shared secret from the operator-provided key\n12| // file. The file content is the raw secret.\n13| func NewSigner(path string) (*Signer, error) {\n14| \traw, err := os.ReadFile(path)\n15| \tif err != nil {\n16| \t\treturn nil, err\n17| \t}\n18| \treturn \u0026Signer{secret: raw}, nil\n19| }\n\n--- internal/sign/hmac.go (lines 1-29, similarity: 1.00) ---\n1| package sign\n2| \n3| import (\n4| \t\"crypto/hmac\"\n5| \t\"crypto/sha256\"\n6| \t\"encoding/hex\"\n7| \t\"errors\"\n8| \t\"net/http\"\n9| )\n10| \n11| // signatureHeader carries the hex-encoded request MAC.\n12| const signatureHeader = \"X-Ledger-Digest\"\n13| \n14| var errBadSignature = errors.New(\"sign: signature mismatch\")\n15| \n16| // Verify recomputes the payload MAC under the shared secret and\n17| // compares it, in constant time, with the digest the client sent.\n18| func (s *Signer) Verify(r *http.Request, body []byte) error {\n19| \tgot, err := hex.DecodeString(r.Header.Get(signatureHeader))\n20| \tif err != nil {\n21| \t\treturn errBadSignature\n22| \t}\n23| \tmac := hmac.New(sha256.New, s.secret)\n24| \tmac.Write(body)\n25| \tif !hmac.Equal(mac.Sum(nil), got) {\n26| \t\treturn errBadSignature\n27| \t}\n28| \treturn nil\n29| }\n\n\n\nQuestion: Which HTTP request header carries the webhook payload signature?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Names the header X-Ledger-Digest, defined by signatureHeader in internal/sign/hmac.go. No summary or path names the header, and it is not derivable from the project name or from convention; it exists only in that file's body."
+  },
+  "assembly_eval": {
+    "pair_id": "co-signature-header",
+    "mode": "flat",
+    "candidate_ids": [
+      "a796720b0c8bb9d1bbfa74c9223e12734850aaa80b858de935298cb8cb529692",
+      "3d7d0ca2ed9c4dff3f2a1db61050b46a3acab63f80842ae0f817582f8c2ce67e",
+      "8451a71ab380cfe1d6fcb41dca0955af0f287ead820d4a8d7c9e741dc0621dbb",
+      "d9036c4e5c8818fc730235510c92128ecc764c38703bd17f2129bb6bd9abdcb1",
+      "b733e22e6c2f9746c606ffa87dfe96bfcd7e7fbbd102308563303604637392a3"
+    ],
+    "estimated_prompt_tokens": 547
+  }
+}

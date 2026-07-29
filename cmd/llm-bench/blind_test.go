@@ -47,6 +47,29 @@ func TestRenderBlindWorksheet_OrdersByTraceThenHash(t *testing.T) {
 	}
 }
 
+func TestRenderBlindWorksheet_HidesAssemblyTraceIDAndOrdersByHash(t *testing.T) {
+	flat := testCalibrationArtifact("pair-flat", "flat answer")
+	flat.Trace.AssemblyEval = &AssemblyEval{
+		PairID: "pair", Mode: AssemblyFlat, CandidateIDs: []string{"c1"}, EstimatedPromptTokens: 10,
+	}
+	flat.ArtifactHash = "sha256:bbbb"
+	progressive := testCalibrationArtifact("pair-progressive", "progressive answer")
+	progressive.Trace.AssemblyEval = &AssemblyEval{
+		PairID: "pair", Mode: AssemblyProgressive, CandidateIDs: []string{"c1"}, EstimatedPromptTokens: 10,
+	}
+	progressive.ArtifactHash = "sha256:aaaa"
+
+	out := renderBlindWorksheet([]Artifact{flat, progressive})
+	for _, leaked := range []string{"trace: pair-flat", "trace: pair-progressive"} {
+		if strings.Contains(out, leaked) {
+			t.Fatalf("worksheet leaked assembly arm via %q:\n%s", leaked, out)
+		}
+	}
+	if iA, iB := strings.Index(out, "sha256:aaaa"), strings.Index(out, "sha256:bbbb"); iA >= iB {
+		t.Fatalf("assembly order is not hash-based: aaaa@%d bbbb@%d", iA, iB)
+	}
+}
+
 func TestIngestBlindWorksheet_RoundTripRejoinsModelOnHash(t *testing.T) {
 	a1 := testCalibrationArtifact("r2c-fabrication-01", "answer one")
 	a1.CandidateModel = "ollama/gemma4:31b"

@@ -602,6 +602,34 @@ func sawtoothEstimate(s string) int { return defaultEstimate(s) % 64 }
 //
 // Fixed seed on purpose: a nondeterministic property test cannot be bisected,
 // and a flaky one gets deleted by the first person it inconveniences.
+// A zero estimate for NON-EMPTY text must fall back to the heuristic: a
+// zero-cost block would bypass the hard token ceiling (spec 3.5). Empty
+// text legitimately estimates zero.
+func TestSafeEstimateRejectsZeroForNonEmpty(t *testing.T) {
+	zeroEstimator := func(string) int { return 0 }
+	if got := safeEstimate(zeroEstimator, "abcd"); got != defaultEstimate("abcd") {
+		t.Fatalf("safeEstimate(zero, non-empty) = %d, want fallback %d", got, defaultEstimate("abcd"))
+	}
+	if got := safeEstimate(zeroEstimator, ""); got != 0 {
+		t.Fatalf("safeEstimate(zero, empty) = %d, want 0", got)
+	}
+	if got := safeEstimate(nil, ""); got != 0 {
+		t.Fatalf("safeEstimate(nil, empty) = %d, want 0", got)
+	}
+	// Not in the plan's list: nil estimator over non-empty text. Every other
+	// case here pairs "which estimator" with "which text" at an edge (zero
+	// paired with both texts, nil paired only with empty) — this is the one
+	// combination that lands in the middle, and it is the production default
+	// (RenderProgressive with no caller Estimate hits this exact path).
+	if got := safeEstimate(nil, "abcd"); got != defaultEstimate("abcd") {
+		t.Fatalf("safeEstimate(nil, non-empty) = %d, want fallback %d", got, defaultEstimate("abcd"))
+	}
+	neg := func(string) int { return -5 }
+	if got := safeEstimate(neg, "abcd"); got != defaultEstimate("abcd") {
+		t.Fatalf("safeEstimate(negative, non-empty) = %d, want fallback %d", got, defaultEstimate("abcd"))
+	}
+}
+
 func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 	const iterations = 2000
 	rng := rand.New(rand.NewSource(20260726)) //nolint:gosec // deterministic fixture generation, not security
@@ -686,11 +714,44 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 		// search for an input that reaches the section 11 defensive trim. None
 		// exists as long as admission is exact, which is what the two checks
 		// above assert — but "unreachable" is a claim worth re-measuring on
-		// every run rather than re-deriving by argument. ProgressiveTrace's
-		// OutputTruncated has no other detector; nothing that drives
-		// RenderProgressive can make it true.
-		if _, truncated := assembleProgressive(sources, req.MaxBytes); truncated {
-			t.Fatalf("iter %d: assembly reached the defensive trim with exact admission", iter)
+		// every run rather than re-deriving by argument. And with no trim
+		// fired, the trace recompute in fillProgressiveTrace must equal the
+		// allocator's own charge exactly — which is what makes the used+free
+		// invariant below non-vacuous.
+		out, trimmed, err := assembleProgressive(sources, req.MaxBytes)
+		if err != nil {
+			t.Fatalf("iter %d: assemble: %v", iter, err)
+		}
+		if trimmed != 0 {
+			t.Fatalf("iter %d: exact admission reached defensive trim", iter)
+		}
+		trace := ProgressiveTrace{
+			MaxTokens: req.MaxTokens, MaxBytes: req.MaxBytes, MaxDepth: req.MaxDepth,
+			SelectedResults: pos, DistinctSources: len(sources),
+			RenderFormatVersion: ProgressiveRenderFormatVersion,
+		}
+		fillProgressiveTrace(&trace, sources, st, out, trimmed, estimate)
+		if trace.EstimatedTokensUsed != st.tokensUsed {
+			t.Fatalf("iter %d: trace used=%d allocator=%d",
+				iter, trace.EstimatedTokensUsed, st.tokensUsed)
+		}
+		if trace.EstimatedTokensUsed+trace.EstimatedTokensFree != trace.MaxTokens {
+			t.Fatalf("iter %d: used+free=%d, max=%d", iter,
+				trace.EstimatedTokensUsed+trace.EstimatedTokensFree, trace.MaxTokens)
+		}
+		if trace.DistinctSources != trace.SourcesAtL0+trace.SourcesAtL1+
+			trace.SourcesWithEvidence+trace.OmittedSources {
+			t.Fatalf("iter %d: source partition broken: %+v", iter, trace)
+		}
+		for _, sourceTrace := range trace.Sources {
+			if sourceTrace.Omitted {
+				if sourceTrace.EffectiveDepth != DepthNone || sourceTrace.EstimatedTokens != 0 ||
+					len(sourceTrace.RenderedEvidence) != 0 {
+					t.Fatalf("iter %d: omitted source invariant broken: %+v", iter, sourceTrace)
+				}
+			} else if !sourceTrace.EffectiveDepth.Valid() {
+				t.Fatalf("iter %d: rendered source has invalid depth: %+v", iter, sourceTrace)
+			}
 		}
 		for _, src := range sources {
 			switch {
@@ -719,5 +780,129 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 	if fallbacks < 50 || omissions < 50 || pinnedErrs < 25 || upgrades < 50 {
 		t.Errorf("generator no longer reaches the interesting states: fallbacks=%d omissions=%d pinnedErrs=%d upgrades=%d",
 			fallbacks, omissions, pinnedErrs, upgrades)
+	}
+}
+
+// Trim needs per-index provenance: which admitted evidence indices came from
+// pins (must never be trimmed) and which from the floor (recounted after
+// trim). Per-source decision flags cannot answer that.
+func TestAllocateTracksPinnedAndFloorEvidenceIndices(t *testing.T) {
+	// freshSummaryFixture already supplies one source with two results in
+	// retrieval order. Result 0 is pinned; the floor must skip it and admit
+	// result 1.
+	src := freshSummaryFixture("short overview")
+	req := ProgressiveRenderRequest{
+		MaxTokens: 100000, MaxBytes: 100000, MinFullResults: 1,
+		Pinned: []PinRef{{Source: src.source, ChunkID: src.results[0].Chunk.ID}},
+	}
+	if _, err := allocate([]*progressiveSource{src}, req, nil); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if !containsInt(src.pinnedEvidence, 0) || len(src.pinnedEvidence) != 1 {
+		t.Fatalf("pinnedEvidence = %v, want exactly [0]", src.pinnedEvidence)
+	}
+	if !containsInt(src.floorEvidence, 1) || len(src.floorEvidence) != 1 {
+		t.Fatalf("floorEvidence = %v, want exactly [1]", src.floorEvidence)
+	}
+	if containsInt(src.floorEvidence, 0) {
+		t.Fatal("pinned index leaked into floorEvidence")
+	}
+}
+
+// TestAllocateTracksPinnedFloorEvidenceNonEdgeIndices strengthens the case
+// above: a one-source/two-result fixture cannot distinguish "records the
+// admitted index" from "records index 1" or "records the last index" — a
+// wrong implementation that always appends a fixed position could pass it by
+// coincidence. Here the source has four results; the pin sits in the middle
+// (index 2, neither 0 nor the last index 3) and the floor must accumulate
+// TWO indices (0 and 1) while stopping short of the pinned one and never
+// reaching index 3 at all.
+func TestAllocateTracksPinnedFloorEvidenceNonEdgeIndices(t *testing.T) {
+	src := &progressiveSource{
+		source:     "pkg/a.go",
+		firstIndex: 0,
+		results: []SearchResult{
+			{Chunk: Chunk{ID: "c0", Content: "zero", Source: "pkg/a.go", StartLine: 1, EndLine: 1}, Score: 0.9},
+			{Chunk: Chunk{ID: "c1", Content: "one", Source: "pkg/a.go", StartLine: 2, EndLine: 2}, Score: 0.8},
+			{Chunk: Chunk{ID: "c2", Content: "two", Source: "pkg/a.go", StartLine: 3, EndLine: 3}, Score: 0.7},
+			{Chunk: Chunk{ID: "c3", Content: "three", Source: "pkg/a.go", StartLine: 4, EndLine: 4}, Score: 0.6},
+		},
+		resultIdx: []int{0, 1, 2, 3},
+		provFound: true,
+		prov:      SourceProvenance{ContentHash: "h", VectorSpaceID: "v"},
+		reasons:   []ValidityReason{ValidityReasonMissing},
+		decisions: map[string]bool{},
+	}
+	req := ProgressiveRenderRequest{
+		MaxTokens: 100000, MaxBytes: 100000, MinFullResults: 2,
+		Pinned: []PinRef{{Source: "pkg/a.go", ChunkID: "c2"}},
+	}
+	if _, err := allocate([]*progressiveSource{src}, req, nil); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	if !containsInt(src.pinnedEvidence, 2) || len(src.pinnedEvidence) != 1 {
+		t.Fatalf("pinnedEvidence = %v, want exactly [2]", src.pinnedEvidence)
+	}
+	if len(src.floorEvidence) != 2 || !containsInt(src.floorEvidence, 0) || !containsInt(src.floorEvidence, 1) {
+		t.Fatalf("floorEvidence = %v, want exactly [0 1]", src.floorEvidence)
+	}
+	if containsInt(src.floorEvidence, 2) || containsInt(src.floorEvidence, 3) {
+		t.Fatal("floorEvidence must not contain the pinned index or the untouched trailing result")
+	}
+}
+
+// TestAllocateTracksPinFloorEvidencePerSource verifies pinnedEvidence and
+// floorEvidence are tracked independently per source rather than shared
+// across a shared/global slice: pinning a result in one source must not
+// leave any trace in a sibling source's slices, and both sources can be
+// floor-admitted independently.
+func TestAllocateTracksPinFloorEvidencePerSource(t *testing.T) {
+	srcA := &progressiveSource{
+		source:     "pkg/a.go",
+		firstIndex: 0,
+		results: []SearchResult{
+			{Chunk: Chunk{ID: "a0", Content: "a-zero", Source: "pkg/a.go", StartLine: 1, EndLine: 1}, Score: 0.9},
+			{Chunk: Chunk{ID: "a1", Content: "a-one", Source: "pkg/a.go", StartLine: 2, EndLine: 2}, Score: 0.8},
+		},
+		resultIdx: []int{0, 2}, // globally distinct retrieval positions, interleaved with srcB
+		provFound: true,
+		prov:      SourceProvenance{ContentHash: "h", VectorSpaceID: "v"},
+		reasons:   []ValidityReason{ValidityReasonMissing},
+		decisions: map[string]bool{},
+	}
+	srcB := &progressiveSource{
+		source:     "pkg/b.go",
+		firstIndex: 1,
+		results: []SearchResult{
+			{Chunk: Chunk{ID: "b0", Content: "b-zero", Source: "pkg/b.go", StartLine: 1, EndLine: 1}, Score: 0.85},
+			{Chunk: Chunk{ID: "b1", Content: "b-one", Source: "pkg/b.go", StartLine: 2, EndLine: 2}, Score: 0.75},
+		},
+		resultIdx: []int{1, 3},
+		provFound: true,
+		prov:      SourceProvenance{ContentHash: "h", VectorSpaceID: "v"},
+		reasons:   []ValidityReason{ValidityReasonMissing},
+		decisions: map[string]bool{},
+	}
+	req := ProgressiveRenderRequest{
+		MaxTokens: 100000, MaxBytes: 100000, MinFullResults: 2,
+		Pinned: []PinRef{{Source: "pkg/a.go", ChunkID: "a1"}}, // srcA's global-pos-2 result
+	}
+	if _, err := allocate([]*progressiveSource{srcA, srcB}, req, nil); err != nil {
+		t.Fatalf("allocate: %v", err)
+	}
+	// Retrieval order by global pos: srcA[0](pos0), srcB[0](pos1), srcA[1]
+	// pinned(pos2), srcB[1](pos3). Floor (2) admits srcA[0] then srcB[0] and
+	// stops before ever reaching the pinned entry.
+	if !containsInt(srcA.pinnedEvidence, 1) || len(srcA.pinnedEvidence) != 1 {
+		t.Fatalf("srcA.pinnedEvidence = %v, want exactly [1]", srcA.pinnedEvidence)
+	}
+	if len(srcB.pinnedEvidence) != 0 {
+		t.Fatalf("srcB.pinnedEvidence = %v, want empty: the pin targets srcA only", srcB.pinnedEvidence)
+	}
+	if !containsInt(srcA.floorEvidence, 0) || len(srcA.floorEvidence) != 1 {
+		t.Fatalf("srcA.floorEvidence = %v, want exactly [0]", srcA.floorEvidence)
+	}
+	if !containsInt(srcB.floorEvidence, 0) || len(srcB.floorEvidence) != 1 {
+		t.Fatalf("srcB.floorEvidence = %v, want exactly [0]", srcB.floorEvidence)
 	}
 }

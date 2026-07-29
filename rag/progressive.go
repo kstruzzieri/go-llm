@@ -3,18 +3,34 @@ package rag
 import (
 	"context"
 	"fmt"
+
+	"github.com/kstruzzieri/go-llm/contextdepth"
 )
 
 // Depth is the rendered fidelity of one source in a progressive render.
-// Slice 3 of #189 supersedes this with a cross-domain contextdepth package;
-// it lives in rag until the mixed assembler exists.
-type Depth int
+//
+// Deprecated: use contextdepth.Depth. Depth is a compatibility alias kept
+// for source and numeric-encoding compatibility (Firn IDE, Flux ML, Quantum
+// Trader consume this package); it will not be removed before the next major
+// version. Formatting now uses contextdepth.Depth.String, so fmt.Sprint and
+// related format verbs render names such as "L2" rather than the old numeric
+// value; integer conversion and JSON encoding remain numeric. Note one
+// boundary-only legacy behavior documented on
+// ProgressiveRenderRequest.MaxDepth: the zero value there means
+// "unrestricted (DepthL2)". New APIs reject the invalid zero instead.
+type Depth = contextdepth.Depth
 
 const (
-	DepthNone Depth = iota // omitted entirely
-	DepthL0                // one-line abstract, or a deterministic metadata overview
-	DepthL1                // structured overview
-	DepthL2                // full chunk evidence
+	// Deprecated: use contextdepth.DepthInvalid. Retains its historical
+	// "unrestricted" meaning only in ProgressiveRenderRequest.MaxDepth and its
+	// historical "omitted" meaning only in ProgressiveSourceTrace.EffectiveDepth.
+	DepthNone = contextdepth.DepthInvalid
+	// Deprecated: use contextdepth.DepthL0.
+	DepthL0 = contextdepth.DepthL0
+	// Deprecated: use contextdepth.DepthL1.
+	DepthL1 = contextdepth.DepthL1
+	// Deprecated: use contextdepth.DepthL2.
+	DepthL2 = contextdepth.DepthL2
 )
 
 // PinRef identifies one caller-required L2 result. ChunkID is the chunks
@@ -41,21 +57,26 @@ type RenderedEvidence struct {
 // hard ceilings. MaxDepth of DepthNone means unrestricted (DepthL2).
 type ProgressiveRenderRequest struct {
 	Results        []SearchResult
-	MaxTokens      int      // required, > 0
-	MaxBytes       int      // required, > 0
-	MinFullResults int      // L2 floor preference; 0 => 1; negative rejected
-	MaxDepth       Depth    // DepthNone => DepthL2
-	Pinned         []PinRef // caller-required L2
+	MaxTokens      int // required, > 0
+	MaxBytes       int // required, > 0
+	MinFullResults int // L2 floor preference; 0 => 1; negative rejected
+	// MaxDepth caps rendered fidelity. LEGACY BOUNDARY BEHAVIOR: the zero
+	// value (DepthNone / contextdepth.DepthInvalid) means unrestricted
+	// (DepthL2). This survives for compatibility at the rag boundary only;
+	// new contextdepth-based APIs reject the invalid zero (spec D2).
+	MaxDepth Depth    // DepthNone => DepthL2
+	Pinned   []PinRef // caller-required L2
 	// Estimate must be pure and deterministic — the same string must always
 	// cost the same. The pinned pre-check and the step 6b upgrade delta each
 	// call it twice on the same text and assume the two calls agree, so a
 	// stateful estimator would let the pre-check pass and leave the charging
 	// loop to overspend the ceiling it was supposed to guard.
-	Estimate func(string) int // nil, or a negative result, => defaultEstimate
+	Estimate func(string) int // nil, or a non-positive result for non-empty text, => defaultEstimate
 }
 
 // defaultEstimate is the token heuristic used when the caller supplies no
-// Estimate, or when a supplied one returns a negative value.
+// Estimate, or when a supplied one returns a non-positive value for
+// non-empty text.
 func defaultEstimate(s string) int { return (len(s) + 3) / 4 }
 
 // Decision constants for ProgressiveSourceTrace.Decisions. Unlike
@@ -74,12 +95,31 @@ const (
 	DecisionNoFit          = "no_fit"
 )
 
+// ProgressiveRenderFormatVersion identifies the rendered-block format emitted
+// by RenderProgressive, reported on ProgressiveTrace.RenderFormatVersion.
+// Version 2 quotes untrusted values (source, managed title) in orientation
+// and evidence headers; version 1 (slice 1) interpolated them raw and is not
+// kept — there is no legacy render switch. This is NOT
+// SourceSummaryFormatVersion: stored summary rows are unchanged.
+const ProgressiveRenderFormatVersion = 2
+
 // ProgressiveTrace explains a whole progressive render (spec section 10).
 type ProgressiveTrace struct {
-	MaxTokens           int
-	MaxBytes            int
-	MaxDepth            Depth
+	MaxTokens int
+	MaxBytes  int
+	MaxDepth  Depth
+	// EstimatedTokensUsed is the configured estimator applied to every
+	// FINALLY-emitted block and separator — recomputed from surviving blocks
+	// after the defensive trim, so it always describes the returned output.
+	// Estimator arithmetic, never provider-tokenizer truth.
 	EstimatedTokensUsed int
+	// EstimatedTokensFree == max(0, MaxTokens - EstimatedTokensUsed), computed
+	// after final rendering and the defensive trim. For a conforming Estimate
+	// (pure and deterministic, per its documented contract), every non-error
+	// render satisfies EstimatedTokensUsed + EstimatedTokensFree == MaxTokens;
+	// the max(0, ...) floor engages only when a contract-violating estimator
+	// pushes the recompute past MaxTokens. An empty successful render reports
+	// the full budget free; error returns keep the zero trace.
 	EstimatedTokensFree int
 	BytesUsed           int
 	SelectedResults     int // input results
@@ -91,6 +131,14 @@ type ProgressiveTrace struct {
 	OmittedSources      int
 	NonFittingBlocks    int
 	OutputTruncated     bool
+	// TrimmedBlocks counts admitted blocks dropped by the defensive
+	// whole-block byte trim. OutputTruncated == (TrimmedBlocks > 0).
+	// NonFittingBlocks, by contrast, keeps its admission-time meaning: blocks
+	// rejected on cost that never entered the output.
+	TrimmedBlocks int
+	// RenderFormatVersion is ProgressiveRenderFormatVersion for the format
+	// this trace's render emitted.
+	RenderFormatVersion int
 	FloorRequested      int // results
 	FloorRendered       int // results, excluding pinned
 	UnmatchedPins       []PinRef
@@ -99,14 +147,21 @@ type ProgressiveTrace struct {
 
 // ProgressiveSourceTrace explains one source's rendering decision.
 type ProgressiveSourceTrace struct {
-	Source               string
-	Managed              bool
-	BestRank             int     // 1-based index in Results of this source's first result
-	BestScore            float64 // score of that first result
-	ScoreKind            string  // "semantic_similarity"
-	EffectiveDepth       Depth   // DepthNone here means omitted entirely — unlike ProgressiveRenderRequest.MaxDepth, where DepthNone means unrestricted
-	OrientationGenerated bool    // true => stored summary text; false => metadata overview. Meaningless when EffectiveDepth == DepthNone.
-	MetadataFromSnapshot bool    // metadata built from retrieval-snapshot chunk fields (race path)
+	Source    string
+	Managed   bool
+	BestRank  int     // 1-based index in Results of this source's first result
+	BestScore float64 // score of that first result
+	ScoreKind string  // "semantic_similarity"
+	// Omitted is true when nothing for this source was emitted. Invariants:
+	// Omitted => EffectiveDepth == DepthNone (contextdepth.DepthInvalid),
+	// EstimatedTokens == 0, RenderedEvidence empty. !Omitted =>
+	// EffectiveDepth is a valid depth (L0/L1/L2).
+	Omitted        bool
+	EffectiveDepth Depth
+	// OrientationGenerated: true => stored summary text rendered; false =>
+	// deterministic metadata overview. Meaningful iff !Omitted.
+	OrientationGenerated bool
+	MetadataFromSnapshot bool // metadata built from retrieval-snapshot chunk fields (race path)
 	ValidityReasons      []ValidityReason
 	Decisions            []string // sorted for byte-stable traces
 	EstimatedTokens      int
@@ -123,7 +178,7 @@ func validateProgressiveRequest(req ProgressiveRenderRequest) error {
 		return fmt.Errorf("rag: progressive render: MaxBytes must be > 0, got %d", req.MaxBytes)
 	case req.MinFullResults < 0:
 		return fmt.Errorf("rag: progressive render: MinFullResults must be >= 0, got %d", req.MinFullResults)
-	case req.MaxDepth < DepthNone || req.MaxDepth > DepthL2:
+	case req.MaxDepth > DepthL2:
 		return fmt.Errorf("rag: progressive render: MaxDepth out of range: %d", int(req.MaxDepth))
 	}
 	for i, pin := range req.Pinned {

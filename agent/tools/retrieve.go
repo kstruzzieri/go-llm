@@ -129,8 +129,10 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 		// retrieval results (fixes the over-crediting at the legacy path's
 		// expense of precision; see #189 spec section 11). A source that got
 		// orientation only has no RenderedEvidence and contributes nothing.
-		// RenderedEvidence is also the only trace field a section-11
-		// whole-block trim keeps exact; the counters go stale.
+		// Every output-derived trace field is recomputed from surviving blocks
+		// after the defensive trim (#331 spec 3.6), so attribution built from
+		// RenderedEvidence and the token/omission counters all describe exactly
+		// the rendered output.
 		attrib := &agent.RetrievalAttribution{}
 		for _, src := range trace.Sources {
 			for _, ev := range src.RenderedEvidence {

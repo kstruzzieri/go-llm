@@ -2,6 +2,7 @@ package rag
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 )
@@ -18,25 +19,22 @@ import (
 // text. BuildContext is unchanged; this is the opt-in progressive path.
 //
 // Security: rendered source paths and managed document titles are UNTRUSTED
-// data that reaches the model. Newline-based forgery of a whole block is
-// blocked — every value placed at a line-start delimiter is collapsed to one
-// line. Same-line forgery of a block's own label is NOT blocked: a source
-// path can still spell out a convincing "(managed: ...)" parenthetical or a
-// second line range inside an evidence header. Treat orientation and evidence
-// headers as attacker-influenceable text, not as trusted attribution.
+// data that reaches the model. Render format v2 quotes both values at
+// structural positions, so embedded newlines, labels, and delimiters remain
+// data and cannot forge orientation or evidence headers.
 func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, error) {
 	trace := ProgressiveTrace{
 		MaxTokens: req.MaxTokens, MaxBytes: req.MaxBytes, MaxDepth: req.MaxDepth,
-		SelectedResults: len(req.Results),
+		SelectedResults:     len(req.Results),
+		RenderFormatVersion: ProgressiveRenderFormatVersion,
 	}
 	// Every error return below yields the ZERO trace, never the partially
 	// filled one. A half-filled trace is indistinguishable from a completed
 	// render: "MaxBytes:1 SelectedResults:1 DistinctSources:1 used:0 free:0"
 	// reads as a render that found one source, spent nothing, and has no
 	// budget left, and EstimatedTokensFree of zero is byte-identical to
-	// genuine exhaustion. That is the coupled-zero-value trap Task 7 flagged
-	// on EffectiveDepth/OrientationGenerated. Nothing is lost: a caller that
-	// wants MaxTokens after an error still holds the request it passed in.
+	// genuine exhaustion. Nothing is lost: a caller that wants MaxTokens
+	// after an error still holds the request it passed in.
 	//
 	// This buys a contract a caller can actually apply: used + free ==
 	// MaxTokens holds whenever the trace is non-zero.
@@ -64,9 +62,11 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 		return "", ProgressiveTrace{}, err
 	}
 
-	out, truncated := assembleProgressive(sources, req.MaxBytes)
-	trace.OutputTruncated = truncated
-	fillProgressiveTrace(&trace, sources, st, len(out), req.Estimate)
+	out, trimmed, err := assembleProgressive(sources, req.MaxBytes)
+	if err != nil {
+		return "", ProgressiveTrace{}, err
+	}
+	fillProgressiveTrace(&trace, sources, st, out, trimmed, req.Estimate)
 	return out, trace, nil
 }
 
@@ -190,39 +190,21 @@ func (r *Retriever) prepareProgressiveSources(ctx context.Context, req Progressi
 // exactly. Blocks within one source concatenate with no separator because
 // orientationText and evidenceText each already end in one newline.
 //
-// The drop loop is the defensive whole-block trim required by spec section 11:
-// with correct admission it never fires, but if it does, it drops whole
+// The drop loop is the defensive whole-block trim required by spec section
+// 11: with correct admission it never fires, but if it does, it drops whole
 // trailing blocks (evidence first, then the source's orientation) so
 // truncation can never land inside a multi-byte rune and no partially
 // rendered block is ever attributed. It exists so the runtime capOutput can
 // never be the thing that truncates.
 //
-// It mutates each source's rendered state (evidence, orientation, decisions),
-// which is what keeps attribution and EffectiveDepth describing exactly what
-// was emitted. It does NOT rewind allocState, so everything derived from it
-// goes stale together: EstimatedTokensUsed and NonFittingBlocks over-report,
-// OmittedSources and FloorRendered under-report, and EstimatedTokensFree
-// inherits the stale tokensUsed. Two concrete symptoms, so nobody has to
-// rediscover them:
-//
-//   - DistinctSources != SourcesAtL0 + SourcesAtL1 + SourcesWithEvidence +
-//     OmittedSources. A source trimmed to nothing lands in no bucket: the
-//     depth counters read post-trim state while OmittedSources reads pre-trim
-//     st.omitted.
-//   - dropLastBlock does not inspect decisions, so it would drop a PINNED
-//     evidence block — contradicting spec 9.4 step 3 ("a caller-required pin
-//     is never dropped by either ceiling") and leaving no_fit co-occurring
-//     with caller_pinned.
-//
-// Both are unreachable rather than fixed, because admission is exact:
-// TestProgressiveByteAccountingMatchesAssembly pins st.bytesUsed == len(out)
-// on a worked fixture, and Task 10's TestAllocateBudgetAccountingIsExact pins
-// the same equality as a seeded property over randomized inputs including a
-// non-monotonic estimator. Treat the trim path as under-specified, not merely
-// unused: anything that makes it reachable needs the accounting worked out
-// first.
-func assembleProgressive(sources []*progressiveSource, maxBytes int) (string, bool) {
-	truncated := false
+// Trim contract (#331 spec 3.6): every output-derived trace field is
+// recomputed from the surviving blocks in fillProgressiveTrace, so a trace
+// always describes the returned output. TrimmedBlocks counts the drops.
+// Dropping PINNED evidence is an error, never silent: admission already
+// errored if pins alone exceeded a ceiling, so reaching a pinned block here
+// means the accounting invariant is broken.
+func assembleProgressive(sources []*progressiveSource, maxBytes int) (string, int, error) {
+	trimmed := 0
 	for {
 		var parts []string
 		for _, src := range sources {
@@ -238,67 +220,80 @@ func assembleProgressive(sources []*progressiveSource, maxBytes int) (string, bo
 		}
 		out := strings.Join(parts, "\n")
 		if len(out) <= maxBytes {
-			return out, truncated
+			return out, trimmed, nil
 		}
-		truncated = true
-		if !dropLastBlock(sources) {
-			// Defensive-unreachable, same category as Task 10's M9 clamp: for
-			// dropLastBlock to fail, every source is already orientationNone,
-			// so parts is empty, out is "", and validateProgressiveRequest
-			// guarantees MaxBytes > 0 — the check above would have returned.
-			return "", truncated // nothing left to drop
+		dropped, err := dropLastBlock(sources)
+		if err != nil {
+			return "", trimmed, err
 		}
+		if !dropped {
+			// Defensive-unreachable: for dropLastBlock to find nothing, every
+			// source is orientationNone, so out is "" and MaxBytes > 0 would
+			// have returned above.
+			return "", trimmed, nil
+		}
+		trimmed++
 	}
 }
 
 // dropLastBlock removes the last rendered block in assembly order: the last
 // evidence block of the last rendered source, or that source's orientation
 // (omitting the source) when it has no evidence left. Returns false when no
-// rendered block remains.
-func dropLastBlock(sources []*progressiveSource) bool {
+// rendered block remains, and an error when the block to drop is pinned.
+func dropLastBlock(sources []*progressiveSource) (bool, error) {
 	for i := len(sources) - 1; i >= 0; i-- {
 		src := sources[i]
 		if src.orientation == orientationNone {
 			continue
 		}
 		if n := len(src.evidence); n > 0 {
+			idx := src.evidence[n-1]
+			if containsInt(src.pinnedEvidence, idx) {
+				return false, fmt.Errorf(
+					"rag: progressive render: defensive trim would drop pinned evidence (source %q, chunk %q); admission accounting invariant broken",
+					src.source, src.results[idx].Chunk.ID)
+			}
 			src.evidence = src.evidence[:n-1]
-			return true
+			return true, nil
 		}
 		src.orientation = orientationNone
 		src.decisions[DecisionNoFit] = true
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
-// fillProgressiveTrace populates the whole-render and per-source telemetry.
-// estimate is the caller's estimator (nil-safe via safeEstimate) so per-source
-// token counts agree with the allocator's accounting.
-func fillProgressiveTrace(trace *ProgressiveTrace, sources []*progressiveSource, st *allocState, outBytes int, estimate func(string) int) {
-	trace.EstimatedTokensUsed = st.tokensUsed
-	// Free is the REMAINDER of the ceiling, not a second copy of used. admit
-	// keeps tokensUsed <= MaxTokens, so the clamp below is belt-and-braces
-	// against a future path that charges without admitting.
-	trace.EstimatedTokensFree = trace.MaxTokens - st.tokensUsed
-	if trace.EstimatedTokensFree < 0 {
-		trace.EstimatedTokensFree = 0
-	}
-	trace.BytesUsed = outBytes
+// fillProgressiveTrace populates the whole-render and per-source telemetry
+// FROM THE SURVIVING BLOCKS (#331 spec 3.6): after a defensive trim, every
+// output-derived field still describes exactly the returned output.
+// Request/candidate facts (MaxTokens, MaxBytes, MaxDepth, SelectedResults,
+// DistinctSources, FloorRequested, UnmatchedPins) pass through unchanged,
+// and NonFittingBlocks keeps its admission-time meaning. estimate is the
+// caller's estimator (nil-safe via safeEstimate) so token counts agree with
+// the allocator's accounting; when no trim fired the recompute below equals
+// st.tokensUsed exactly (charges are per-block sums of the same texts).
+func fillProgressiveTrace(trace *ProgressiveTrace, sources []*progressiveSource, st *allocState, out string, trimmed int, estimate func(string) int) {
+	trace.TrimmedBlocks = trimmed
+	trace.OutputTruncated = trimmed > 0
+	trace.BytesUsed = len(out)
 	trace.NonFittingBlocks = st.nonFitting
-	trace.OmittedSources = st.omitted
 	trace.FloorRequested = st.floorRequested
-	trace.FloorRendered = st.floorRendered
 	trace.UnmatchedPins = st.unmatchedPins
 
+	tokensUsed, renderedSources, omitted, floorRendered := 0, 0, 0, 0
 	for _, src := range sources {
 		depth := DepthNone
 		switch {
+		case src.orientation == orientationNone:
+			// Omitted first, mirroring assembleProgressive: the assembler
+			// skips an orientationNone source wholesale, leftover evidence
+			// indices included, so the source is DepthNone regardless of
+			// what the evidence slice still holds.
 		case len(src.evidence) > 0:
 			depth = DepthL2
 		case src.orientation == orientationL0L1:
 			depth = DepthL1
-		case src.orientation != orientationNone:
+		default:
 			depth = DepthL0
 		}
 		switch depth {
@@ -310,7 +305,15 @@ func fillProgressiveTrace(trace *ProgressiveTrace, sources []*progressiveSource,
 		case DepthL0:
 			trace.SourcesAtL0++
 		case DepthNone:
-			// Counted by the allocator as st.omitted, not here.
+			omitted++
+		}
+		if depth != DepthNone {
+			renderedSources++
+		}
+		for _, idx := range src.evidence {
+			if containsInt(src.floorEvidence, idx) {
+				floorRendered++
+			}
 		}
 
 		decisions := make([]string, 0, len(src.decisions))
@@ -336,11 +339,12 @@ func fillProgressiveTrace(trace *ProgressiveTrace, sources []*progressiveSource,
 			// first-ranked one — the same result firstIndex points at.
 			BestScore:      src.results[0].Score,
 			ScoreKind:      "semantic_similarity",
+			Omitted:        depth == DepthNone,
 			EffectiveDepth: depth,
 			// What was RENDERED, not whether a row existed: a fresh source that
 			// fell back to the metadata overview on cost (DEV-18) has a summary
 			// and still renders none of its text, so orientationMeta must report
-			// false.
+			// false. Meaningful iff !Omitted (spec 3.3).
 			OrientationGenerated: src.orientation >= orientationL0,
 			MetadataFromSnapshot: src.snapshotMeta,
 			ValidityReasons:      src.reasons,
@@ -354,6 +358,20 @@ func fillProgressiveTrace(trace *ProgressiveTrace, sources []*progressiveSource,
 				srcTrace.EstimatedTokens += safeEstimate(estimate, evidenceText(src.results[idx]))
 			}
 		}
+		tokensUsed += srcTrace.EstimatedTokens
 		trace.Sources = append(trace.Sources, srcTrace)
+	}
+	if renderedSources > 1 {
+		tokensUsed += (renderedSources - 1) * safeEstimate(estimate, "\n")
+	}
+	trace.EstimatedTokensUsed = tokensUsed
+	trace.OmittedSources = omitted
+	trace.FloorRendered = floorRendered
+	trace.EstimatedTokensFree = trace.MaxTokens - tokensUsed
+	if trace.EstimatedTokensFree < 0 {
+		// Belt-and-braces: admission keeps the charge within MaxTokens, so
+		// only an estimator violating the Estimate contract (stateful or
+		// nondeterministic) can push the recompute past the ceiling.
+		trace.EstimatedTokensFree = 0
 	}
 }

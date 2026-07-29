@@ -2,8 +2,12 @@ package rageval
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -206,6 +210,30 @@ func outlineIdentity(chunk rag.Chunk) string {
 	return "id:" + chunk.ID
 }
 
+// outlineSourceSignature builds a parseable versioned source signature over
+// the source's chunks, so SourceProvenanceBatch derives a non-blank
+// ContentHash for fixture sources (a bare string parses as unknown). Same
+// shape as cmd/llm-bench's assemblySourceSignature; kept separate — two
+// fixtures, no shared constructor.
+func outlineSourceSignature(chunks []rag.Chunk) string {
+	var content strings.Builder
+	for _, chunk := range chunks {
+		content.WriteString(chunk.ID)
+		content.WriteByte(0)
+		content.WriteString(chunk.Content)
+		content.WriteByte(0)
+	}
+	sum := sha256.Sum256([]byte(content.String()))
+	raw, _ := json.Marshal(struct {
+		Version     int    `json:"version"`
+		ContentHash string `json:"content_hash"`
+	}{
+		Version:     2,
+		ContentHash: hex.EncodeToString(sum[:]),
+	})
+	return string(raw)
+}
+
 func seedOutlineStore(ctx context.Context, path string, fixture outlineFixture) error {
 	store, err := rag.NewSQLiteStore(path)
 	if err != nil {
@@ -226,7 +254,7 @@ func seedOutlineStore(ctx context.Context, path string, fixture outlineFixture) 
 		for i, chunk := range chunks {
 			embeddings[i] = fixture.embeddings[chunk.ID]
 		}
-		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, "outline-fixture:"+source, vectorSpaceID); err != nil {
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, outlineSourceSignature(chunks), vectorSpaceID); err != nil {
 			_ = store.Close()
 			return fmt.Errorf("rag eval: seed outline source %q: %w", source, err)
 		}

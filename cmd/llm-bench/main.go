@@ -45,12 +45,16 @@ func main() {
 	importXlamManifest := flag.String("import-xlam-manifest", filepath.Join("docs", "llm", "calibration", "xlam-irrelevance-manifest.jsonl"), "Output manifest path for -import-xlam")
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
+	assemblyBuildPath := flag.String("assembly-build", "", "Build paired flat/progressive assembly traces from this case-fixture JSON (#331)")
+	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build")
+
 	importXlamMinTools := flag.Int("import-xlam-min-tools", 1, "Drop -import-xlam records offering fewer than this many tools")
 
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	pairedReport := flag.Bool("paired-report", false, "Emit the paired-label report: paired-complete means, completeness worklist, win/loss/tie matrix, bootstrap delta CIs, resolution diagnostic (uses -labels, -artifacts, -baseline, -report)")
+	assemblyReport := flag.Bool("assembly-report", false, "Emit the paired assembly (flat vs progressive) report using -labels, -artifacts, and -report (#331)")
 	discriminationReport := flag.Bool("discrimination-report", false, "Classify each trace (spec §9.1: valid-discriminator/saturated/unsolved/floor-only/no-signal/unpaired), emit the per-stratum funnel + K-gate, and write the derived valid-discriminator manifest (uses -labels, -artifacts, -corpus-manifest, -top-models, -floor-model, -gate-source, -discriminator-manifest-out, -report; does NOT honor -corpus-sources/-partitions/-categories — it always classifies all strata so the funnel shows every source)")
 	topModels := flag.String("top-models", "", "Comma-separated top-cluster selectors for -discrimination-report (transport prefix optional; e.g. gemma4:31b or ollama/gemma4:31b)")
 	floorModel := flag.String("floor-model", "", "Floor model selector for -discrimination-report (transport prefix optional)")
@@ -116,6 +120,9 @@ func main() {
 	if *pairedReport {
 		modes++
 	}
+	if *assemblyReport {
+		modes++
+	}
 	if *fimLatency {
 		modes++
 	}
@@ -131,12 +138,22 @@ func main() {
 	if *importXlam != "" {
 		modes++
 	}
+	if *assemblyBuildPath != "" {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	if *assemblyBuildPath != "" {
+		if err := assemblyBuild(ctx, *assemblyBuildPath, *assemblyOut); err != nil {
+			log.Fatalf("llm-bench: assembly-build: %v", err)
+		}
+		return
+	}
 
 	if *capture {
 		if err := validateCaptureSampleAndLimit(*captureLimit, *captureSample); err != nil {
@@ -326,6 +343,22 @@ func main() {
 			log.Fatalf("llm-bench: write report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: paired-label report written to %s\n", *reportPath)
+		return
+	}
+
+	if *assemblyReport {
+		report, err := runAssemblyReport(*labelsPath, *artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: assembly-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write assembly report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: assembly report written to %s\n", *reportPath)
 		return
 	}
 

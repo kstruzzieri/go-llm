@@ -1,0 +1,27 @@
+{
+  "id": "na-license-flat",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\nRelevant code context:\n\n--- docs/README.md (lines 1-25, similarity: 1.00) ---\n1| # beacond\n2| \n3| beacond is a small self-hosted webhook relay. Producers publish events\n4| to a single ingest endpoint; beacond persists them in a local queue and\n5| fans each event out to every subscribed endpoint, retrying failures so\n6| producers never have to.\n7| \n8| ## How it works\n9| \n10| - Publishes are authenticated by a shared-secret request MAC.\n11| - Accepted events land in a durable queue before the HTTP response is\n12|   sent, so an accepted publish survives a crash.\n13| - Delivery workers claim events from the queue in small batches and\n14|   post them to subscribers, with backoff on failure.\n15| - Oversized payloads are rejected at the door.\n16| \n17| ## Layout\n18| \n19| - `cmd/beacond` — process entrypoint\n20| - `internal/relay` — ingest handler and delivery fanout\n21| - `internal/queue` — durable event queue\n22| - `internal/sign` — request signing\n23| - `internal/config` — configuration loading\n24| \n25| See the operations guide for deployment.\n\n--- docs/changelog.md (lines 1-21, similarity: 1.00) ---\n1| # Changelog\n2| \n3| ## 0.5.0\n4| \n5| - Duplicate publishes inside the suppression window are now dropped\n6|   before enqueue instead of after claim.\n7| - The claim scan uses a covering index; dequeue no longer table-scans.\n8| \n9| ## 0.4.1\n10| \n11| - Fixed a race where Drain could return while a worker still held a\n12|   claimed batch.\n13| \n14| ## 0.4.0\n15| \n16| - Added delivery metrics and the /metrics endpoint.\n17| - Request MAC verification moved to constant-time compare.\n18| \n19| ## 0.3.0\n20| \n21| - Initial durable queue; events survive restarts.\n\n\n\nQuestion: Under which open-source license is beacond distributed?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "No source names a license; the correct behavior is to state explicitly that the answer is not in the provided context, WITHOUT guessing a license."
+  },
+  "assembly_eval": {
+    "pair_id": "na-license",
+    "mode": "flat",
+    "candidate_ids": [
+      "3558db9a788ebb34c3d123726b0d1db8f1e6f954a7249dd4c39c58a653d30e19",
+      "831f101e1b8f6243f5cf677ca22c2ce0093899d00c56928abfb8e61e0972634b",
+      "673ae45b7a7d6a50563c1f8912e11bde719652c4218e084bbfd76277466bb676"
+    ],
+    "estimated_prompt_tokens": 468
+  }
+}
