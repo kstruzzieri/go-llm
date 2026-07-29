@@ -714,11 +714,30 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 		// search for an input that reaches the section 11 defensive trim. None
 		// exists as long as admission is exact, which is what the two checks
 		// above assert — but "unreachable" is a claim worth re-measuring on
-		// every run rather than re-deriving by argument. ProgressiveTrace's
-		// OutputTruncated has no other detector; nothing that drives
-		// RenderProgressive can make it true.
-		if _, truncated := assembleProgressive(sources, req.MaxBytes); truncated {
-			t.Fatalf("iter %d: assembly reached the defensive trim with exact admission", iter)
+		// every run rather than re-deriving by argument. And with no trim
+		// fired, the trace recompute in fillProgressiveTrace must equal the
+		// allocator's own charge exactly — which is what makes the used+free
+		// invariant below non-vacuous.
+		out, trimmed, err := assembleProgressive(sources, req.MaxBytes)
+		if err != nil {
+			t.Fatalf("iter %d: assemble: %v", iter, err)
+		}
+		if trimmed != 0 {
+			t.Fatalf("iter %d: exact admission reached defensive trim", iter)
+		}
+		trace := ProgressiveTrace{
+			MaxTokens: req.MaxTokens, MaxBytes: req.MaxBytes, MaxDepth: req.MaxDepth,
+			SelectedResults: pos, DistinctSources: len(sources),
+			RenderFormatVersion: ProgressiveRenderFormatVersion,
+		}
+		fillProgressiveTrace(&trace, sources, st, out, trimmed, estimate)
+		if trace.EstimatedTokensUsed != st.tokensUsed {
+			t.Fatalf("iter %d: trace used=%d allocator=%d",
+				iter, trace.EstimatedTokensUsed, st.tokensUsed)
+		}
+		if trace.EstimatedTokensUsed+trace.EstimatedTokensFree != trace.MaxTokens {
+			t.Fatalf("iter %d: used+free=%d, max=%d", iter,
+				trace.EstimatedTokensUsed+trace.EstimatedTokensFree, trace.MaxTokens)
 		}
 		for _, src := range sources {
 			switch {

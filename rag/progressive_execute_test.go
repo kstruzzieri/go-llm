@@ -69,6 +69,12 @@ func TestRenderProgressiveEndToEnd(t *testing.T) {
 	if st.BestRank != 1 || st.EffectiveDepth != DepthL2 || st.ScoreKind != "semantic_similarity" {
 		t.Fatalf("source trace wrong: %+v", st)
 	}
+	if st.Omitted {
+		t.Fatalf("rendered source must not report Omitted: %+v", st)
+	}
+	if !st.EffectiveDepth.Valid() {
+		t.Fatalf("rendered source must carry a valid depth, got %v", st.EffectiveDepth)
+	}
 	if len(st.RenderedEvidence) != 1 || st.RenderedEvidence[0].ChunkID != "e1" ||
 		st.RenderedEvidence[0].StartLine != 10 || st.RenderedEvidence[0].StableKey != "k1" {
 		t.Fatalf("rendered evidence wrong: %+v", st.RenderedEvidence)
@@ -510,6 +516,12 @@ func TestRenderProgressiveOmittedSourceIsNotBudgetDemoted(t *testing.T) {
 	if omitted.Source != "pkg/big.go" || omitted.EffectiveDepth != DepthNone {
 		t.Fatalf("fixture must omit pkg/big.go entirely, got %+v", omitted)
 	}
+	if !omitted.Omitted {
+		t.Fatal("source that rendered nothing must report Omitted")
+	}
+	if omitted.EstimatedTokens != 0 || len(omitted.RenderedEvidence) != 0 {
+		t.Fatalf("omitted source carries output-derived data: %+v", omitted)
+	}
 	if trace.OmittedSources != 1 {
 		t.Fatalf("OmittedSources = %d, want 1", trace.OmittedSources)
 	}
@@ -785,8 +797,11 @@ func TestProgressiveByteAccountingMatchesAssembly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("allocate: %v", err)
 	}
-	out, truncated := assembleProgressive(sources, req.MaxBytes)
-	if truncated {
+	out, trimmed, err := assembleProgressive(sources, req.MaxBytes)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if trimmed != 0 {
 		t.Fatal("ample budget must not reach the defensive trim")
 	}
 	if st.bytesUsed != len(out) {
@@ -810,9 +825,12 @@ func TestAssembleProgressiveDropsWholeBlocks(t *testing.T) {
 	orientationOnly := orientationText(src, orientationMeta)
 	full := orientationOnly + evidenceText(src.results[0])
 
-	out, truncated := assembleProgressive([]*progressiveSource{src}, len(full)-1)
-	if !truncated {
-		t.Fatal("over-budget assembly must report truncation")
+	out, trimmed, err := assembleProgressive([]*progressiveSource{src}, len(full)-1)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if trimmed != 1 {
+		t.Fatalf("over-budget assembly must report the one dropped block, got %d", trimmed)
 	}
 	if out != orientationOnly {
 		t.Fatalf("evidence must be dropped whole, got %q", out)
@@ -824,13 +842,186 @@ func TestAssembleProgressiveDropsWholeBlocks(t *testing.T) {
 		t.Fatalf("dropped evidence must leave attribution state, got %v", src.evidence)
 	}
 
-	out, truncated = assembleProgressive([]*progressiveSource{src}, len(orientationOnly)-1)
-	if !truncated || out != "" {
-		t.Fatalf("orientation must be dropped whole too, got %q truncated=%v", out, truncated)
+	out, trimmed, err = assembleProgressive([]*progressiveSource{src}, len(orientationOnly)-1)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	if trimmed != 1 || out != "" {
+		t.Fatalf("orientation must be dropped whole too, got %q trimmed=%d", out, trimmed)
 	}
 	if src.orientation != orientationNone || !src.decisions[DecisionNoFit] {
 		t.Fatalf("dropping the last block must omit the source: orientation=%v decisions=%v",
 			src.orientation, src.decisions)
+	}
+}
+
+func TestTrimRecomputesOutputDerivedTraceFields(t *testing.T) {
+	multi := strings.Repeat("héllo wörld ", 6)
+	src := &progressiveSource{
+		source:     "pkg/t.go",
+		firstIndex: 0,
+		results: []SearchResult{{
+			Chunk: Chunk{ID: "t1", Content: multi, Source: "pkg/t.go", StartLine: 1, EndLine: 1},
+			Score: 0.9,
+		}},
+		resultIdx:     []int{0},
+		reasons:       []ValidityReason{ValidityReasonMissing},
+		orientation:   orientationMeta,
+		evidence:      []int{0},
+		floorEvidence: []int{0},
+		decisions:     map[string]bool{},
+	}
+	orientationOnly := orientationText(src, orientationMeta)
+	full := orientationOnly + evidenceText(src.results[0])
+	maxTokens := defaultEstimate(orientationOnly) + defaultEstimate(evidenceText(src.results[0])) + 10
+	// st carries the allocator's PRE-TRIM charges — wrong on purpose after the
+	// trim below. fillProgressiveTrace must recompute from survivors, not copy
+	// these; do not "correct" them to post-trim values.
+	st := &allocState{
+		tokensUsed: defaultEstimate(orientationOnly) + defaultEstimate(evidenceText(src.results[0])),
+		bytesUsed:  len(full), floorRequested: 1, floorRendered: 1, renderedSources: 1,
+	}
+	trace := ProgressiveTrace{
+		MaxTokens: maxTokens, MaxBytes: len(full) - 1, MaxDepth: DepthL2,
+		SelectedResults: 1, DistinctSources: 1,
+		RenderFormatVersion: ProgressiveRenderFormatVersion,
+	}
+
+	out, trimmed, err := assembleProgressive([]*progressiveSource{src}, len(full)-1)
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	fillProgressiveTrace(&trace, []*progressiveSource{src}, st, out, trimmed, defaultEstimate)
+
+	if out != orientationOnly || trimmed != 1 || !trace.OutputTruncated {
+		t.Fatalf("trim result = %q / %d / %v", out, trimmed, trace.OutputTruncated)
+	}
+	if trace.BytesUsed != len(out) {
+		t.Fatalf("BytesUsed = %d, want survivor bytes %d (not st's pre-trim %d)",
+			trace.BytesUsed, len(out), st.bytesUsed)
+	}
+	if trace.EstimatedTokensUsed != defaultEstimate(orientationOnly) {
+		t.Fatalf("EstimatedTokensUsed = %d, want survivor cost %d",
+			trace.EstimatedTokensUsed, defaultEstimate(orientationOnly))
+	}
+	if trace.EstimatedTokensUsed+trace.EstimatedTokensFree != trace.MaxTokens {
+		t.Fatalf("used+free != max: %d+%d != %d",
+			trace.EstimatedTokensUsed, trace.EstimatedTokensFree, trace.MaxTokens)
+	}
+	if trace.FloorRendered != 0 || trace.SourcesAtL0 != 1 ||
+		trace.SourcesWithEvidence != 0 || trace.OmittedSources != 0 {
+		t.Fatalf("survivor counters stale: %+v", trace)
+	}
+	if trace.DistinctSources != trace.SourcesAtL0+trace.SourcesAtL1+
+		trace.SourcesWithEvidence+trace.OmittedSources {
+		t.Fatalf("source partition broken: %+v", trace)
+	}
+	if trace.Sources[0].Omitted || trace.Sources[0].EffectiveDepth != DepthL0 ||
+		len(trace.Sources[0].RenderedEvidence) != 0 {
+		t.Fatalf("source trace does not describe survivors: %+v", trace.Sources[0])
+	}
+}
+
+// TestTrimAcrossSourcesRecountsSurvivorsAndSeparators is the non-edge trim
+// case: three sources, and the trim reaches INTO the middle one. The
+// single-source trim test above cannot distinguish "recount survivors" from
+// "recount the only source", and its separator term is vacuously zero; here
+// the omitted source changes the inter-source separator count (2 -> 1), so a
+// recompute that reads the allocator's pre-trim renderedSources instead of
+// the survivors is off by exactly one separator.
+func TestTrimAcrossSourcesRecountsSurvivorsAndSeparators(t *testing.T) {
+	sources := allocFixture("alpha body", "beta body", "gamma body")
+	preTrimTokens := 0
+	for i, src := range sources {
+		src.orientation = orientationMeta
+		src.evidence = []int{0}
+		src.floorEvidence = []int{0}
+		preTrimTokens += defaultEstimate(orientationText(src, orientationMeta)) +
+			defaultEstimate(evidenceText(src.results[0]))
+		if i > 0 {
+			preTrimTokens += defaultEstimate("\n")
+		}
+	}
+	// Assembly order: A.orient, A.ev, B.orient, B.ev, C.orient, C.ev. Cap the
+	// bytes at exactly A-full + separator + B-orientation, so the tail three
+	// blocks (C.ev, C.orient, B.ev) must all go: survivors are A at L2 and B
+	// at L0, C omitted.
+	aFull := orientationText(sources[0], orientationMeta) + evidenceText(sources[0].results[0])
+	bOrient := orientationText(sources[1], orientationMeta)
+	want := aFull + "\n" + bOrient
+	// st carries PRE-TRIM values (including a deliberately absurd bytesUsed) —
+	// wrong on purpose. fillProgressiveTrace must recompute every
+	// output-derived field from survivors; if any of these leak into the
+	// trace, the assertions below catch it.
+	st := &allocState{
+		tokensUsed: preTrimTokens, bytesUsed: len(want) + 100,
+		floorRequested: 3, floorRendered: 3, renderedSources: 3,
+	}
+	trace := ProgressiveTrace{
+		MaxTokens: preTrimTokens + 5, MaxBytes: len(want), MaxDepth: DepthL2,
+		SelectedResults: 3, DistinctSources: 3,
+		RenderFormatVersion: ProgressiveRenderFormatVersion,
+	}
+
+	out, trimmed, err := assembleProgressive(sources, len(want))
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+	fillProgressiveTrace(&trace, sources, st, out, trimmed, defaultEstimate)
+
+	if out != want || trimmed != 3 {
+		t.Fatalf("trim result = %q / %d, want survivors A-full + B-orientation / 3", out, trimmed)
+	}
+	if trace.BytesUsed != len(want) {
+		t.Fatalf("BytesUsed = %d, want survivor bytes %d (not st's poison %d)",
+			trace.BytesUsed, len(want), st.bytesUsed)
+	}
+	wantTokens := defaultEstimate(orientationText(sources[0], orientationMeta)) +
+		defaultEstimate(evidenceText(sources[0].results[0])) +
+		defaultEstimate(bOrient) + defaultEstimate("\n") // ONE surviving separator
+	if trace.EstimatedTokensUsed != wantTokens {
+		t.Fatalf("EstimatedTokensUsed = %d, want survivor cost %d (one separator, not two)",
+			trace.EstimatedTokensUsed, wantTokens)
+	}
+	if trace.EstimatedTokensUsed+trace.EstimatedTokensFree != trace.MaxTokens {
+		t.Fatalf("used+free != max: %d+%d != %d",
+			trace.EstimatedTokensUsed, trace.EstimatedTokensFree, trace.MaxTokens)
+	}
+	if trace.FloorRendered != 1 || trace.SourcesWithEvidence != 1 ||
+		trace.SourcesAtL0 != 1 || trace.OmittedSources != 1 {
+		t.Fatalf("survivor counters stale: %+v", trace)
+	}
+	if trace.DistinctSources != trace.SourcesAtL0+trace.SourcesAtL1+
+		trace.SourcesWithEvidence+trace.OmittedSources {
+		t.Fatalf("source partition broken: %+v", trace)
+	}
+	if trace.Sources[0].Omitted || trace.Sources[0].EffectiveDepth != DepthL2 ||
+		len(trace.Sources[0].RenderedEvidence) != 1 {
+		t.Fatalf("surviving L2 source misdescribed: %+v", trace.Sources[0])
+	}
+	if trace.Sources[1].Omitted || trace.Sources[1].EffectiveDepth != DepthL0 ||
+		len(trace.Sources[1].RenderedEvidence) != 0 {
+		t.Fatalf("middle source trimmed to orientation misdescribed: %+v", trace.Sources[1])
+	}
+	if !trace.Sources[2].Omitted || trace.Sources[2].EffectiveDepth != DepthNone ||
+		trace.Sources[2].EstimatedTokens != 0 {
+		t.Fatalf("trimmed-away source misdescribed: %+v", trace.Sources[2])
+	}
+}
+
+func TestTrimDroppingPinnedEvidenceErrors(t *testing.T) {
+	src := allocFixture("pinned")[0]
+	src.orientation = orientationMeta
+	src.evidence = []int{0}
+	src.pinnedEvidence = []int{0}
+	full := orientationText(src, orientationMeta) + evidenceText(src.results[0])
+
+	_, trimmed, err := assembleProgressive([]*progressiveSource{src}, len(full)-1)
+	if err == nil || !strings.Contains(err.Error(), "pinned") {
+		t.Fatalf("pinned trim error = %v, want pinned invariant", err)
+	}
+	if trimmed != 0 {
+		t.Fatalf("TrimmedBlocks = %d, want 0 when the first drop is forbidden", trimmed)
 	}
 }
 

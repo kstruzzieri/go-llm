@@ -102,10 +102,21 @@ const ProgressiveRenderFormatVersion = 2
 
 // ProgressiveTrace explains a whole progressive render (spec section 10).
 type ProgressiveTrace struct {
-	MaxTokens           int
-	MaxBytes            int
-	MaxDepth            Depth
+	MaxTokens int
+	MaxBytes  int
+	MaxDepth  Depth
+	// EstimatedTokensUsed is the configured estimator applied to every
+	// FINALLY-emitted block and separator — recomputed from surviving blocks
+	// after the defensive trim, so it always describes the returned output.
+	// Estimator arithmetic, never provider-tokenizer truth.
 	EstimatedTokensUsed int
+	// EstimatedTokensFree == max(0, MaxTokens - EstimatedTokensUsed), computed
+	// after final rendering and the defensive trim. For a conforming Estimate
+	// (pure and deterministic, per its documented contract), every non-error
+	// render satisfies EstimatedTokensUsed + EstimatedTokensFree == MaxTokens;
+	// the max(0, ...) floor engages only when a contract-violating estimator
+	// pushes the recompute past MaxTokens. An empty successful render reports
+	// the full budget free; error returns keep the zero trace.
 	EstimatedTokensFree int
 	BytesUsed           int
 	SelectedResults     int // input results
@@ -117,6 +128,14 @@ type ProgressiveTrace struct {
 	OmittedSources      int
 	NonFittingBlocks    int
 	OutputTruncated     bool
+	// TrimmedBlocks counts admitted blocks dropped by the defensive
+	// whole-block byte trim. OutputTruncated == (TrimmedBlocks > 0).
+	// NonFittingBlocks, by contrast, keeps its admission-time meaning: blocks
+	// rejected on cost that never entered the output.
+	TrimmedBlocks int
+	// RenderFormatVersion is ProgressiveRenderFormatVersion for the format
+	// this trace's render emitted.
+	RenderFormatVersion int
 	FloorRequested      int // results
 	FloorRendered       int // results, excluding pinned
 	UnmatchedPins       []PinRef
@@ -125,14 +144,21 @@ type ProgressiveTrace struct {
 
 // ProgressiveSourceTrace explains one source's rendering decision.
 type ProgressiveSourceTrace struct {
-	Source               string
-	Managed              bool
-	BestRank             int     // 1-based index in Results of this source's first result
-	BestScore            float64 // score of that first result
-	ScoreKind            string  // "semantic_similarity"
-	EffectiveDepth       Depth   // DepthNone here means omitted entirely — unlike ProgressiveRenderRequest.MaxDepth, where DepthNone means unrestricted
-	OrientationGenerated bool    // true => stored summary text; false => metadata overview. Meaningless when EffectiveDepth == DepthNone.
-	MetadataFromSnapshot bool    // metadata built from retrieval-snapshot chunk fields (race path)
+	Source    string
+	Managed   bool
+	BestRank  int     // 1-based index in Results of this source's first result
+	BestScore float64 // score of that first result
+	ScoreKind string  // "semantic_similarity"
+	// Omitted is true when nothing for this source was emitted. Invariants:
+	// Omitted => EffectiveDepth == DepthNone (contextdepth.DepthInvalid),
+	// EstimatedTokens == 0, RenderedEvidence empty. !Omitted =>
+	// EffectiveDepth is a valid depth (L0/L1/L2).
+	Omitted        bool
+	EffectiveDepth Depth
+	// OrientationGenerated: true => stored summary text rendered; false =>
+	// deterministic metadata overview. Meaningful iff !Omitted.
+	OrientationGenerated bool
+	MetadataFromSnapshot bool // metadata built from retrieval-snapshot chunk fields (race path)
 	ValidityReasons      []ValidityReason
 	Decisions            []string // sorted for byte-stable traces
 	EstimatedTokens      int
