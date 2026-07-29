@@ -10,6 +10,7 @@ import (
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/agent/agenttest"
 	"github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
@@ -78,7 +79,7 @@ func (p progressiveCapRetriever) Retrieve(context.Context, string, int) ([]rag.S
 	return []rag.SearchResult{{Chunk: rag.Chunk{ID: "c1", Source: "a.go", Content: "x"}, Score: 1}}, nil
 }
 func (p progressiveCapRetriever) BuildContext([]rag.SearchResult, int) string { return "unused" }
-func (p progressiveCapRetriever) RenderProgressive(_ context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, error) {
+func (p progressiveCapRetriever) RenderProgressiveWithGroups(_ context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, []rag.ProgressiveGroup, error) {
 	// Honor the contract the real renderer guarantees: never exceed MaxBytes,
 	// never split a rune.
 	out := p.payload
@@ -86,7 +87,21 @@ func (p progressiveCapRetriever) RenderProgressive(_ context.Context, req rag.Pr
 		_, size := utf8.DecodeLastRuneInString(out)
 		out = out[:len(out)-size]
 	}
-	return out, rag.ProgressiveTrace{}, nil
+	// One minimal orientation-only group, so this run really does carry a
+	// ContextSet through dispatch. Result.Messages is []provider.ChatMessage, so
+	// the retained-or-not question is not observable from here; the point is
+	// that the whole loop runs with a set attached and the tool observation
+	// still arrives byte-identical.
+	groups := []rag.ProgressiveGroup{{
+		Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "a.go"}, Rank: 1},
+		Alternatives: []rag.ProgressiveAlternative{{
+			Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{
+				{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata},
+			}},
+			Content: "orientation",
+		}},
+	}}
+	return out, rag.ProgressiveTrace{}, groups, nil
 }
 
 func TestEndToEndProgressiveOutputSurvivesCapExactly(t *testing.T) {
@@ -116,7 +131,7 @@ func TestEndToEndProgressiveOutputSurvivesCapExactly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	want, _, _ := fake.RenderProgressive(context.Background(),
+	want, _, _, _ := fake.RenderProgressiveWithGroups(context.Background(),
 		rag.ProgressiveRenderRequest{MaxBytes: tools.RetrieveOutputCap})
 	var toolMsg string
 	for _, msg := range res.Messages {

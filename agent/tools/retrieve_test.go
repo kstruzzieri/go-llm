@@ -4,9 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
+	"slices"
+	"strings"
 	"testing"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -119,6 +123,7 @@ type fakeProgressive struct {
 	results []rag.SearchResult
 	out     string
 	trace   rag.ProgressiveTrace
+	groups  []rag.ProgressiveGroup
 	err     error
 	gotReq  rag.ProgressiveRenderRequest
 }
@@ -129,13 +134,14 @@ func (f *fakeProgressive) Retrieve(ctx context.Context, query string, k int) ([]
 func (f *fakeProgressive) BuildContext(results []rag.SearchResult, maxTokens int) string {
 	return "LEGACY-PATH"
 }
-func (f *fakeProgressive) RenderProgressive(ctx context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, error) {
+func (f *fakeProgressive) RenderProgressiveWithGroups(ctx context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, []rag.ProgressiveGroup, error) {
 	f.gotReq = req
 	if f.err != nil {
-		// Mirrors the real renderer: every error path yields the ZERO trace.
-		return "", rag.ProgressiveTrace{}, f.err
+		// Mirrors the real renderer: every error path yields the ZERO trace and
+		// no groups.
+		return "", rag.ProgressiveTrace{}, nil, f.err
 	}
-	return f.out, f.trace, nil
+	return f.out, f.trace, f.groups, nil
 }
 
 func TestRetrieveEffectOutputCap(t *testing.T) {
@@ -259,6 +265,260 @@ func (fakeRetrieverLegacy) Retrieve(context.Context, string, int) ([]rag.SearchR
 	return []rag.SearchResult{{Chunk: rag.Chunk{Source: "x.go", Content: "c"}, Score: 1}}, nil
 }
 func (fakeRetrieverLegacy) BuildContext([]rag.SearchResult, int) string { return "LEGACY" }
+
+// The four ladder descriptors rag's projection emits (rag/progressive_groups.go
+// repMeta/repAbstract/repOverview/repEvidence, unexported there). Used to BUILD
+// the fixture groups; the bridge is asserted to pass them through untouched.
+var (
+	dAbstract = contextdepth.RepresentationDesc{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationGenerated}
+	dOverview = contextdepth.RepresentationDesc{Depth: contextdepth.DepthL1, Kind: contextdepth.RepresentationGenerated}
+	dMeta     = contextdepth.RepresentationDesc{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}
+	dEvidence = contextdepth.RepresentationDesc{Depth: contextdepth.DepthL2, Kind: contextdepth.RepresentationVerbatim}
+)
+
+func alt(content string, reps []contextdepth.RepresentationDesc, ev ...rag.RenderedEvidence) rag.ProgressiveAlternative {
+	return rag.ProgressiveAlternative{
+		Desc:             contextdepth.AlternativeDesc{Representations: reps},
+		Content:          content,
+		RenderedEvidence: ev,
+	}
+}
+
+// progressiveGroupsFixture is the groups half of the retrieve fixture, shaped
+// like rag's real projection: a.go is FRESH (two orientation rungs) with two
+// evidence prefixes, b.go is stale (one metadata rung) with one.
+//
+// Its per-alternative evidence deliberately DISAGREES with progressiveFixture's
+// trace, which renders only k1 on a.go and nothing on b.go. So an attribution
+// built from the whole trace rather than from the alternative in hand is
+// detectable here: it would credit k1 everywhere, understating the two-block
+// prefixes, crediting orientation-only alternatives, and never mentioning k3.
+func progressiveGroupsFixture() []rag.ProgressiveGroup {
+	e1 := rag.RenderedEvidence{Source: "a.go", ChunkID: "c1", StableKey: "k1", StartLine: 1, EndLine: 2, Score: 0.9}
+	e2 := rag.RenderedEvidence{Source: "a.go", ChunkID: "c2", StableKey: "k2", StartLine: 8, EndLine: 12, Score: 0.7}
+	e3 := rag.RenderedEvidence{Source: "b.go", ChunkID: "c3", StableKey: "k3", StartLine: 5, EndLine: 9, Score: 0.6}
+	return []rag.ProgressiveGroup{{
+		Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "a.go"}, Rank: 1},
+		Alternatives: []rag.ProgressiveAlternative{
+			alt("A0", []contextdepth.RepresentationDesc{dAbstract}),
+			alt("A0A1", []contextdepth.RepresentationDesc{dAbstract, dOverview}),
+			alt("A0+e1", []contextdepth.RepresentationDesc{dAbstract, dEvidence}, e1),
+			alt("A0A1+e1", []contextdepth.RepresentationDesc{dAbstract, dOverview, dEvidence}, e1),
+			alt("A0+e1e2", []contextdepth.RepresentationDesc{dAbstract, dEvidence, dEvidence}, e1, e2),
+			alt("A0A1+e1e2", []contextdepth.RepresentationDesc{dAbstract, dOverview, dEvidence, dEvidence}, e1, e2),
+		},
+	}, {
+		Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "b.go"}, Rank: 2},
+		Alternatives: []rag.ProgressiveAlternative{
+			alt("M", []contextdepth.RepresentationDesc{dMeta}),
+			alt("M+e3", []contextdepth.RepresentationDesc{dMeta, dEvidence}, e3),
+		},
+	}}
+}
+
+func TestRetrieveProgressiveAttachesGroups(t *testing.T) {
+	fake := progressiveFixture()
+	fake.groups = progressiveGroupsFixture()
+	tool := Retrieve{R: fake, Progressive: true}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	// The flat rendering stays the canonical fallback, unchanged bytes, and the
+	// anchor attribution still equals the RENDERED set (one block) — not the
+	// groups, which declare three.
+	if res.Content != "rendered" {
+		t.Fatalf("content = %q, want the flat rendering unchanged", res.Content)
+	}
+	if res.Attrib == nil || len(res.Attrib.Sources) != 1 || res.Attrib.Sources[0].StableKey != "k1" {
+		t.Fatalf("anchor attribution must still equal the rendered set: %+v", res.Attrib)
+	}
+	if res.Context == nil {
+		t.Fatal("progressive groups must reach ToolResult.Context")
+	}
+	if res.Context.MinVerbatim != 1 {
+		t.Fatalf("MinVerbatim = %d, want the renderer-normalized floor 1", res.Context.MinVerbatim)
+	}
+
+	// Expected per-alternative attribution, stated literally: nil sources means
+	// the alternative must carry NO attribution at all.
+	a1 := agent.RetrievedSource{StableKey: "k1", Source: "a.go", StartLine: 1, EndLine: 2, Score: 0.9}
+	a2 := agent.RetrievedSource{StableKey: "k2", Source: "a.go", StartLine: 8, EndLine: 12, Score: 0.7}
+	b3 := agent.RetrievedSource{StableKey: "k3", Source: "b.go", StartLine: 5, EndLine: 9, Score: 0.6}
+	want := [][][]agent.RetrievedSource{
+		{nil, nil, {a1}, {a1}, {a1, a2}, {a1, a2}},
+		{nil, {b3}},
+	}
+
+	groups := progressiveGroupsFixture()
+	if len(res.Context.Groups) != len(groups) {
+		t.Fatalf("got %d groups, want %d", len(res.Context.Groups), len(groups))
+	}
+	for i, got := range res.Context.Groups {
+		src := groups[i]
+		if got.Desc != src.Desc {
+			t.Errorf("group %d: Desc = %+v, want %+v", i, got.Desc, src.Desc)
+		}
+		if len(got.Alternatives) != len(src.Alternatives) {
+			t.Fatalf("group %d: got %d alternatives, want %d", i, len(got.Alternatives), len(src.Alternatives))
+		}
+		for j, ga := range got.Alternatives {
+			sa := src.Alternatives[j]
+			if ga.Content != sa.Content {
+				t.Errorf("group %d alt %d: content = %q, want %q", i, j, ga.Content, sa.Content)
+			}
+			if !slices.Equal(ga.Desc.Representations, sa.Desc.Representations) {
+				t.Errorf("group %d alt %d: reps = %+v, want %+v", i, j, ga.Desc.Representations, sa.Desc.Representations)
+			}
+			switch wantSources := want[i][j]; {
+			case wantSources == nil:
+				if ga.Attrib != nil {
+					t.Errorf("group %d alt %d: orientation-only alternative must carry no attribution, got %+v",
+						i, j, ga.Attrib.Sources)
+				}
+			case ga.Attrib == nil:
+				t.Errorf("group %d alt %d: evidence-bearing alternative lost its attribution", i, j)
+			default:
+				if !reflect.DeepEqual(ga.Attrib.Sources, wantSources) {
+					t.Errorf("group %d alt %d: attribution = %+v, want %+v", i, j, ga.Attrib.Sources, wantSources)
+				}
+			}
+		}
+	}
+}
+
+func TestRetrieveProgressiveMinVerbatimIsNormalizedFloor(t *testing.T) {
+	// The floor is reported in the renderer's normalized units (0 => 1), so a
+	// consumer never has to re-derive rag's normalization. Negative values
+	// cannot reach here: the renderer rejects them.
+	for _, tc := range []struct{ minFull, want int }{{0, 1}, {1, 1}, {2, 2}, {7, 7}} {
+		fake := progressiveFixture()
+		fake.groups = progressiveGroupsFixture()
+		tool := Retrieve{R: fake, Progressive: true, MinFullResults: tc.minFull}
+		res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+		if err != nil {
+			t.Fatalf("MinFullResults=%d: invoke: %v", tc.minFull, err)
+		}
+		if res.Context == nil {
+			t.Fatalf("MinFullResults=%d: no context set", tc.minFull)
+		}
+		if res.Context.MinVerbatim != tc.want {
+			t.Errorf("MinFullResults=%d: MinVerbatim = %d, want %d", tc.minFull, res.Context.MinVerbatim, tc.want)
+		}
+	}
+}
+
+func TestRetrieveProgressiveEmptyResults(t *testing.T) {
+	// No results => rag returns no groups => no set. A non-nil set with zero
+	// groups is a hard validation failure downstream (agent/context_set.go).
+	fake := &fakeProgressive{out: ""}
+	tool := Retrieve{R: fake, Progressive: true}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if res.Context != nil {
+		t.Fatalf("zero groups must leave Context nil, got %+v", res.Context)
+	}
+}
+
+func TestRetrieveLegacyNoContext(t *testing.T) {
+	// Same capable retriever WITH groups available, Progressive off: the legacy
+	// path is untouched — no set, and the byte-identical BuildContext output.
+	fake := progressiveFixture()
+	fake.groups = progressiveGroupsFixture()
+	tool := Retrieve{R: fake}
+	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if res.Context != nil {
+		t.Fatalf("legacy path must attach no context set, got %+v", res.Context)
+	}
+	if res.Content != "LEGACY-PATH" {
+		t.Fatalf("content = %q, want the legacy BuildContext output", res.Content)
+	}
+	if res.Attrib == nil || len(res.Attrib.Sources) != 2 {
+		t.Fatalf("legacy path attributes every retrieved result: %+v", res.Attrib)
+	}
+}
+
+func TestRetrieveClampsK(t *testing.T) {
+	tests := []struct {
+		name  string
+		toolK int
+		maxK  int
+		args  string
+		wantK int
+	}{
+		{"model k above default cap", 0, 0, `{"query":"q","k":500}`, defaultRetrieveMaxK},
+		{"model k above explicit cap", 0, 7, `{"query":"q","k":500}`, 7},
+		{"model k below cap unchanged", 0, 0, `{"query":"q","k":3}`, 3},
+		{"model k at cap unchanged", 0, 0, `{"query":"q","k":20}`, 20},
+		{"tool default k is clamped too", 500, 0, `{"query":"q"}`, defaultRetrieveMaxK},
+		{"explicit cap at the carrier ceiling", 0, maxRetrieveMaxK, `{"query":"q","k":500}`, maxRetrieveMaxK},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cr := &capturingRetriever{}
+			tool := Retrieve{R: cr, K: tc.toolK, MaxK: tc.maxK}
+			if _, err := tool.Invoke(context.Background(), json.RawMessage(tc.args)); err != nil {
+				t.Fatalf("invoke: %v", err)
+			}
+			// gotK is what the BACKEND was asked for: clamping the results after
+			// retrieval would still let a {"k":500} call cost 500 lookups and,
+			// on the progressive path, 500 prefix families.
+			if cr.gotK != tc.wantK {
+				t.Fatalf("backend received k = %d, want %d", cr.gotK, tc.wantK)
+			}
+		})
+	}
+}
+
+func TestRetrieveMaxKWithinCarrierBound(t *testing.T) {
+	// SOURCE OF TRUTH: maxContextAlternatives in package agent
+	// (agent/context_set.go), unexported and unreachable from this package.
+	// Restated here so the two move together; if this literal ever disagrees
+	// with agent's, mixed assembly rejects a projection the tool produced.
+	const carrierMaxAlternatives = 64
+	// Worst case: every result lands on ONE fresh source, which rag renders at
+	// two orientation rungs, giving (k+1) prefixes x 2 rungs alternatives.
+	if got := 2 * (maxRetrieveMaxK + 1); got > carrierMaxAlternatives {
+		t.Fatalf("maxRetrieveMaxK=%d yields %d alternatives for one fresh source, over the carrier limit %d",
+			maxRetrieveMaxK, got, carrierMaxAlternatives)
+	}
+	// And the ceiling must actually be the largest value that fits, or the tool
+	// is rejecting configurations assembly would accept.
+	if got := 2 * (maxRetrieveMaxK + 2); got <= carrierMaxAlternatives {
+		t.Fatalf("maxRetrieveMaxK=%d is below the carrier limit %d: %d alternatives would still fit",
+			maxRetrieveMaxK, carrierMaxAlternatives, got)
+	}
+	if defaultRetrieveMaxK > maxRetrieveMaxK {
+		t.Fatalf("default MaxK %d exceeds its own ceiling %d", defaultRetrieveMaxK, maxRetrieveMaxK)
+	}
+}
+
+func TestRetrieveRejectsMaxKAboveCarrierBound(t *testing.T) {
+	// A MaxK over the ceiling is a programmer misconfiguration whose only other
+	// symptom is a hard mixed-assembly validation failure much later, with a
+	// message about alternative counts rather than about MaxK. Reject it here,
+	// as a hard error, at the same severity assembly would.
+	for _, maxK := range []int{maxRetrieveMaxK + 1, 500} {
+		tool := Retrieve{R: &capturingRetriever{}, MaxK: maxK}
+		res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+		if err == nil {
+			t.Fatalf("MaxK=%d must be rejected, got result %+v", maxK, res)
+		}
+		if !strings.Contains(err.Error(), "MaxK") {
+			t.Errorf("MaxK=%d: error must name the field, got %v", maxK, err)
+		}
+	}
+	// The ceiling itself is legal.
+	tool := Retrieve{R: &capturingRetriever{}, MaxK: maxRetrieveMaxK}
+	if _, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`)); err != nil {
+		t.Fatalf("MaxK at the ceiling must be accepted: %v", err)
+	}
+}
 
 func TestRetrieveProgressiveFallsBackWithoutCapability(t *testing.T) {
 	// Progressive requested but R lacks RenderProgressive: legacy path.

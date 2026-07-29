@@ -4,6 +4,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/rag"
@@ -12,6 +13,16 @@ import (
 const (
 	defaultRetrieveK         = 5
 	defaultRetrieveMaxTokens = 2048
+	defaultRetrieveMaxK      = 20
+	// maxRetrieveMaxK is the largest MaxK the carriers can hold. rag projects
+	// (k+1) prefixes x rungs alternatives per source, 2 rungs for a fresh one,
+	// so all k results landing on ONE fresh source yields 2(k+1) alternatives.
+	// SOURCE OF TRUTH for the 64 it must stay under: maxContextAlternatives in
+	// package agent (agent/context_set.go) — unexported, and agent/tools is a
+	// different package, so the derived ceiling is restated here and pinned by
+	// TestRetrieveMaxKWithinCarrierBound. Exceeding it is a hard mixed-mode
+	// validation failure, not a degradation.
+	maxRetrieveMaxK = 31
 )
 
 // RetrieveOutputCap bounds retrieve tool output. It is set explicitly on the
@@ -29,10 +40,13 @@ type retriever interface {
 }
 
 // progressiveRetriever is the optional capability the progressive path needs.
-// *rag.Retriever satisfies it.
+// *rag.Retriever satisfies it. The groups variant is the only one used: it
+// returns the same output and trace as RenderProgressive plus the capability
+// projection, so requiring both would let a retriever satisfy the interface
+// while being unable to feed mixed assembly.
 type progressiveRetriever interface {
 	retriever
-	RenderProgressive(ctx context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, error)
+	RenderProgressiveWithGroups(ctx context.Context, req rag.ProgressiveRenderRequest) (string, rag.ProgressiveTrace, []rag.ProgressiveGroup, error)
 }
 
 // Without this assertion a rename or signature change in rag drifts SILENTLY:
@@ -48,12 +62,30 @@ var _ progressiveRetriever = (*rag.Retriever)(nil)
 type Retrieve struct {
 	R         retriever
 	K         int // default top-k when the call omits k
-	MaxTokens int // token budget for BuildContext AND RenderProgressive; 0 => a sane default
-	// Progressive opts into rag.RenderProgressive when R supports it
+	MaxTokens int // token budget for BuildContext AND the progressive renderer; 0 => a sane default
+	// Progressive opts into the progressive renderer when R supports it
 	// (#189 slice 1). Off => the legacy BuildContext path, byte-identical
 	// to before. MinFullResults and Estimate pass through to the renderer.
+	//
+	// On, it also builds the ToolResult.Context capability projection
+	// UNCONDITIONALLY — the tool cannot see ContextManager.Mixed, so a consumer
+	// that sets Progressive without Mixed pays the full projection and dispatch
+	// then discards it (agent/dispatch.go). That cost is accepted, not gated:
+	// it is one transient allocation per call, bounded by MaxK at
+	// O(rungs x k^2/2) block copies (<= ~1000 for the ceiling MaxK of 31),
+	// freed as soon as dispatch drops the result. Gating it would mean
+	// plumbing an assembly-mode signal into every tool — new API for a cost
+	// smaller than the retrieval it accompanies. Golem couples both flags
+	// behind -progressive, so the shipped path never pays it.
 	Progressive    bool
 	MinFullResults int
+	// MaxK bounds the model-supplied k. The progressive groups projection
+	// renders every evidence prefix, so its cost grows with k^2; unlike the
+	// flat path there is no token/byte ceiling on the projection itself.
+	// 0 => defaultRetrieveMaxK. A value above maxRetrieveMaxK is rejected by
+	// Invoke: it could project more alternatives than the agent carriers
+	// accept.
+	MaxK int
 	// Estimate is the token estimator for the progressive path; nil => the
 	// renderer's heuristic. It must be pure and deterministic: the renderer
 	// calls it twice on the same text (pinned pre-check, upgrade delta) and
@@ -88,6 +120,14 @@ func (t Retrieve) Effect() agent.Effect {
 }
 
 func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolResult, error) {
+	// Configuration, not model input: a hard error, not an IsError observation
+	// the model can neither fix nor learn from. Checked here because
+	// agent/tools has no constructors — every tool is a struct literal — and
+	// the alternative is a mixed-assembly failure much later whose message
+	// talks about alternative counts rather than about MaxK.
+	if t.MaxK > maxRetrieveMaxK {
+		return agent.ToolResult{}, fmt.Errorf("tools: retrieve: MaxK must be <= %d, got %d", maxRetrieveMaxK, t.MaxK)
+	}
 	var args retrieveArgs
 	if err := json.Unmarshal(raw, &args); err != nil {
 		return agent.ToolResult{IsError: true, Content: "invalid arguments: " + err.Error()}, nil
@@ -102,6 +142,15 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 	if k <= 0 {
 		k = defaultRetrieveK
 	}
+	// Clamped BEFORE the backend call: clamping the results afterwards would
+	// still let one {"k":500} call pay for 500 lookups and 500 prefix families.
+	maxK := t.MaxK
+	if maxK <= 0 {
+		maxK = defaultRetrieveMaxK
+	}
+	if k > maxK {
+		k = maxK
+	}
 	maxTokens := t.MaxTokens
 	if maxTokens <= 0 {
 		maxTokens = defaultRetrieveMaxTokens
@@ -112,7 +161,7 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 		return agent.ToolResult{IsError: true, Content: "retrieval failed: " + err.Error()}, nil
 	}
 	if pr, ok := t.R.(progressiveRetriever); ok && t.Progressive {
-		content, trace, err := pr.RenderProgressive(ctx, rag.ProgressiveRenderRequest{
+		content, trace, groups, err := pr.RenderProgressiveWithGroups(ctx, rag.ProgressiveRenderRequest{
 			Results:        results,
 			MaxTokens:      maxTokens,
 			MaxBytes:       RetrieveOutputCap,
@@ -135,17 +184,9 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 		// the rendered output.
 		attrib := &agent.RetrievalAttribution{}
 		for _, src := range trace.Sources {
-			for _, ev := range src.RenderedEvidence {
-				attrib.Sources = append(attrib.Sources, agent.RetrievedSource{
-					StableKey: ev.StableKey,
-					Source:    ev.Source,
-					StartLine: ev.StartLine,
-					EndLine:   ev.EndLine,
-					Score:     ev.Score,
-				})
-			}
+			attrib.Sources = appendEvidence(attrib.Sources, src.RenderedEvidence)
 		}
-		return agent.ToolResult{Content: content, Attrib: attrib}, nil
+		return agent.ToolResult{Content: content, Attrib: attrib, Context: bridgeGroups(groups, t.MinFullResults)}, nil
 	}
 
 	content := t.R.BuildContext(results, maxTokens)
@@ -167,4 +208,60 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 		})
 	}
 	return agent.ToolResult{Content: content, Attrib: attrib}, nil
+}
+
+// appendEvidence maps rendered evidence onto attribution entries, preserving
+// order. Both the anchor attribution (the whole rendered set) and each group
+// alternative's attribution are built from RenderedEvidence, so the mapping
+// lives in one place: a field added to either type must reach both.
+func appendEvidence(dst []agent.RetrievedSource, ev []rag.RenderedEvidence) []agent.RetrievedSource {
+	for _, e := range ev {
+		dst = append(dst, agent.RetrievedSource{
+			StableKey: e.StableKey,
+			Source:    e.Source,
+			StartLine: e.StartLine,
+			EndLine:   e.EndLine,
+			Score:     e.Score,
+		})
+	}
+	return dst
+}
+
+// bridgeGroups carries rag's capability projection across into the agent
+// carriers: one group per source, descriptors and content passed through
+// untouched, and per-alternative attribution built from THAT alternative's
+// RenderedEvidence only. Orientation-only alternatives get nil Attrib — the
+// carriers reject attribution on an alternative with no verbatim component,
+// and crediting evidence a rendering does not contain is the over-crediting
+// the progressive path exists to avoid.
+//
+// minFull is the caller's raw MinFullResults, normalized to the renderer's
+// units (0 => 1) so a consumer never re-derives rag's normalization. It is the
+// preferred verbatim-component COUNT; the mixed assembler's selection policy
+// is its own (spec 3.5), not a reproduction of rag's flat floor scan.
+//
+// Zero groups => nil set: a non-nil set with no groups is a hard validation
+// failure in agent.
+func bridgeGroups(groups []rag.ProgressiveGroup, minFull int) *agent.ContextSet {
+	if len(groups) == 0 {
+		return nil
+	}
+	if minFull <= 0 {
+		minFull = 1
+	}
+	set := &agent.ContextSet{MinVerbatim: minFull, Groups: make([]agent.ContextGroup, len(groups))}
+	for i, g := range groups {
+		cg := agent.ContextGroup{Desc: g.Desc, Alternatives: make([]agent.ContextAlternative, len(g.Alternatives))}
+		for j, a := range g.Alternatives {
+			ca := agent.ContextAlternative{Desc: a.Desc, Content: a.Content}
+			if len(a.RenderedEvidence) > 0 {
+				ca.Attrib = &agent.RetrievalAttribution{
+					Sources: appendEvidence(make([]agent.RetrievedSource, 0, len(a.RenderedEvidence)), a.RenderedEvidence),
+				}
+			}
+			cg.Alternatives[j] = ca
+		}
+		set.Groups[i] = cg
+	}
+	return set
 }
