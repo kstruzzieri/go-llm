@@ -50,6 +50,26 @@ func groupsSet(n int) *ContextSet {
 	return s
 }
 
+// verbatimLadder returns one alternative per count, each carrying that many
+// verbatim components on top of a metadata component (so every descriptor stays
+// valid and non-empty whatever the count).
+func verbatimLadder(counts ...int) []ContextAlternative {
+	alts := make([]ContextAlternative, 0, len(counts))
+	for j, n := range counts {
+		reps := []contextdepth.RepresentationDesc{
+			{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata},
+		}
+		for range n {
+			reps = append(reps, testVerbatimRep)
+		}
+		alts = append(alts, ContextAlternative{
+			Desc:    contextdepth.AlternativeDesc{Representations: reps},
+			Content: fmt.Sprintf("alternative %d with %d verbatim", j, n),
+		})
+	}
+	return alts
+}
+
 // altsSet returns a one-group set holding n otherwise-valid alternatives.
 func altsSet(n int) *ContextSet {
 	s := validSet()
@@ -287,6 +307,25 @@ func TestValidateContextSet(t *testing.T) {
 			s.Groups[0].Alternatives[0].Desc.Representations = []contextdepth.RepresentationDesc{testVerbatimRep}
 			s.Groups[0].Alternatives[0].Attrib = &RetrievalAttribution{Sources: []RetrievedSource{{Source: "pkg/doc.go"}}}
 		})},
+		{
+			// The rag ladder shape: orientation rungs, then evidence prefixes.
+			// Verbatim counts 0, 1, 2 — non-decreasing, so legal.
+			name: "non-decreasing verbatim ladder ok",
+			set:  setWith(func(s *ContextSet) { s.Groups[0].Alternatives = verbatimLadder(0, 1, 2) }),
+		},
+		{
+			name:    "verbatim components decrease",
+			set:     setWith(func(s *ContextSet) { s.Groups[0].Alternatives = verbatimLadder(0, 2, 1) }),
+			wantErr: true,
+			wantMsg: []string{`group 0 ("pkg/doc.go")`, "alternative 2", "verbatim components decrease from 2 to 1"},
+		},
+		{
+			// The drop need not reach zero, and it is caught wherever it happens.
+			name:    "verbatim components decrease mid-ladder",
+			set:     setWith(func(s *ContextSet) { s.Groups[0].Alternatives = verbatimLadder(1, 3, 2, 4) }),
+			wantErr: true,
+			wantMsg: []string{"alternative 2", "verbatim components decrease from 3 to 2"},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

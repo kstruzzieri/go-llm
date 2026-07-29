@@ -281,6 +281,17 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit, est fun
 // Per subject only the cheapest affordable later alternative in declaration
 // order competes; across subjects the smallest exact marginal cost wins, with
 // input order breaking ties (strict <, so the first candidate found keeps it).
+//
+// ponytail: a full re-scan per commit, measured at ~O(groups^2.5) — 8 groups x
+// 32 alternatives 635us, 128x32 1.24s, and 256x64 (the maxContextGroups /
+// maxContextAlternatives ceiling) 21.1s. Realistic input is a retrieve call's
+// ~8 sources x ~30 alternatives, i.e. sub-millisecond, and the carrier bounds
+// keep even a pathological set finite, which is what they exist for. Worth
+// memoizing per-anchor candidate costs and invalidating only the committed
+// anchor if realistic sizes ever approach the ceiling. Not done now because
+// #331 Task 11's exhaustive oracle is written against this exact greedy shape,
+// and a silent divergence between allocator and oracle costs more than the
+// scan does.
 func (m ContextManager) upgradeOnce(st *mixedAllocState, units []*mixedUnit, est func(string) int, evidenceOnly bool) bool {
 	type cand struct {
 		a    *mixedAnchor

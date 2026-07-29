@@ -126,6 +126,7 @@ func validateContextSet(callID string, s *ContextSet) error {
 		if len(g.Alternatives) > maxContextAlternatives {
 			return fmt.Errorf("agent: context set (call %q): group %d (%q): %d alternatives exceeds limit %d", callID, i, g.Desc.Subject.ID, len(g.Alternatives), maxContextAlternatives)
 		}
+		prevVerbatim := 0
 		for j, a := range g.Alternatives {
 			if !a.Desc.Valid() {
 				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: invalid descriptor", callID, i, g.Desc.Subject.ID, j)
@@ -133,9 +134,24 @@ func validateContextSet(callID string, s *ContextSet) error {
 			if a.Content == "" {
 				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: empty content", callID, i, g.Desc.Subject.ID, j)
 			}
-			if a.Attrib != nil && verbatimComponents(a.Desc) == 0 {
+			verbatim := verbatimComponents(a.Desc)
+			if a.Attrib != nil && verbatim == 0 {
 				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: attribution on a non-verbatim alternative", callID, i, g.Desc.Subject.ID, j)
 			}
+			// ContextGroup's contract is that declaration order IS ascending
+			// utility order, and BOTH mixed-assembly passes rest on it: the
+			// verbatim floor admits the first evidence-bearing alternative that
+			// fits, and the upgrade pass treats every later alternative as at
+			// least as good. A ladder that sheds verbatim evidence as it goes
+			// would let an upgrade silently invalidate a floor the trace already
+			// recorded as met. Enforced here, at the public-field boundary, so
+			// the allocator needs no defensive guard. Both built-in producers
+			// already satisfy it: rag's prefix families ordered by (prefix
+			// length, rung) yield 0,0,1,1,2,2, and memory's ladder is all zeros.
+			if verbatim < prevVerbatim {
+				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: verbatim components decrease from %d to %d; declaration order must be ascending utility", callID, i, g.Desc.Subject.ID, j, prevVerbatim, verbatim)
+			}
+			prevVerbatim = verbatim
 		}
 	}
 	return nil
