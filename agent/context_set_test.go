@@ -138,6 +138,32 @@ func TestContextSetCloneIsolation(t *testing.T) {
 	}
 }
 
+// TestVerbatimComponents covers the COUNT, not just the "any" predicate every
+// current caller uses: Task 7's MinVerbatim floor consumes the integer, so
+// "returns 1 if any verbatim component" must fail here, two tasks before it
+// could hurt anyone. The two-verbatim row is the one that sees it.
+func TestVerbatimComponents(t *testing.T) {
+	meta := contextdepth.RepresentationDesc{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}
+	tests := []struct {
+		name string
+		reps []contextdepth.RepresentationDesc
+		want int
+	}{
+		{"empty", nil, 0},
+		{"metadata only", []contextdepth.RepresentationDesc{meta}, 0},
+		{"one verbatim", []contextdepth.RepresentationDesc{meta, testVerbatimRep}, 1},
+		{"two verbatim", []contextdepth.RepresentationDesc{meta, testVerbatimRep, testVerbatimRep}, 2},
+		{"three verbatim", []contextdepth.RepresentationDesc{testVerbatimRep, testVerbatimRep, meta, testVerbatimRep}, 3},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := verbatimComponents(contextdepth.AlternativeDesc{Representations: tt.reps}); got != tt.want {
+				t.Errorf("verbatimComponents() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestValidateContextSet(t *testing.T) {
 	// wantMsg pins the rule each error names AND its indexing. "wantErr plus a
 	// prefix" cannot tell two rules apart: deleting the conversation branch
@@ -151,6 +177,9 @@ func TestValidateContextSet(t *testing.T) {
 		wantMsg []string
 	}{
 		{name: "valid", set: validSet()},
+		// Nil is absence, legal everywhere: legacy anchors carry no set and no
+		// caller should need a guard of its own.
+		{name: "nil set", set: nil},
 		{name: "memory domain", set: setWith(func(s *ContextSet) {
 			s.Groups[0].Desc.Subject.Domain = contextdepth.DomainMemory
 		})},
@@ -196,10 +225,27 @@ func TestValidateContextSet(t *testing.T) {
 			wantMsg: []string{"group 0", `domain "conversation" is assembler-owned`},
 		},
 		{
+			name: "duplicate subject",
+			set: setWith(func(s *ContextSet) {
+				s.Groups = append(s.Groups, s.Groups[0])
+			}),
+			wantErr: true,
+			wantMsg: []string{"group 1", `duplicate subject rag/"pkg/doc.go"`, "also group 0"},
+		},
+		{
+			// Same ID under a different domain is a different subject.
+			name: "same ID across domains",
+			set: setWith(func(s *ContextSet) {
+				g := s.Groups[0]
+				g.Desc.Subject.Domain = contextdepth.DomainMemory
+				s.Groups = append(s.Groups, g)
+			}),
+		},
+		{
 			name:    "empty alternatives",
 			set:     setWith(func(s *ContextSet) { s.Groups[0].Alternatives = nil }),
 			wantErr: true,
-			wantMsg: []string{"group 0 (pkg/doc.go)", "no alternatives"},
+			wantMsg: []string{`group 0 ("pkg/doc.go")`, "no alternatives"},
 		},
 		{
 			name: "invalid desc",
@@ -207,13 +253,13 @@ func TestValidateContextSet(t *testing.T) {
 				s.Groups[0].Alternatives[0].Desc.Representations = nil
 			}),
 			wantErr: true,
-			wantMsg: []string{"group 0 (pkg/doc.go)", "alternative 0", "invalid descriptor"},
+			wantMsg: []string{`group 0 ("pkg/doc.go")`, "alternative 0", "invalid descriptor"},
 		},
 		{
 			name:    "empty content",
 			set:     setWith(func(s *ContextSet) { s.Groups[0].Alternatives[0].Content = "" }),
 			wantErr: true,
-			wantMsg: []string{"group 0 (pkg/doc.go)", "alternative 0", "empty content"},
+			wantMsg: []string{`group 0 ("pkg/doc.go")`, "alternative 0", "empty content"},
 		},
 		{name: "max groups", set: groupsSet(256)},
 		{
@@ -227,7 +273,7 @@ func TestValidateContextSet(t *testing.T) {
 			name:    "too many alternatives",
 			set:     altsSet(65),
 			wantErr: true,
-			wantMsg: []string{"group 0 (pkg/doc.go)", "65 alternatives exceeds limit 64"},
+			wantMsg: []string{`group 0 ("pkg/doc.go")`, "65 alternatives exceeds limit 64"},
 		},
 		{
 			name: "attrib on non-verbatim",
@@ -235,7 +281,7 @@ func TestValidateContextSet(t *testing.T) {
 				s.Groups[0].Alternatives[0].Attrib = &RetrievalAttribution{Sources: []RetrievedSource{{Source: "pkg/doc.go"}}}
 			}),
 			wantErr: true,
-			wantMsg: []string{"group 0 (pkg/doc.go)", "alternative 0", "attribution on a non-verbatim alternative"},
+			wantMsg: []string{`group 0 ("pkg/doc.go")`, "alternative 0", "attribution on a non-verbatim alternative"},
 		},
 		{name: "attrib on verbatim ok", set: setWith(func(s *ContextSet) {
 			s.Groups[0].Alternatives[0].Desc.Representations = []contextdepth.RepresentationDesc{testVerbatimRep}
@@ -253,6 +299,9 @@ func TestValidateContextSet(t *testing.T) {
 			}
 			if err == nil {
 				t.Fatal("validateContextSet() = nil, want an error")
+			}
+			if len(tt.wantMsg) == 0 {
+				t.Fatal("error rows must pin their message: a prefix-only assertion cannot tell two rules apart")
 			}
 			msg := err.Error()
 			if !strings.HasPrefix(msg, "agent: context set") || !strings.Contains(msg, testCallID) {
