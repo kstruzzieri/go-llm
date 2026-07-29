@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/memory"
 )
 
@@ -108,14 +109,79 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 	if len(records) == 0 {
 		return agent.ToolResult{Content: "no records found"}, nil
 	}
+	// The set is attached unconditionally: the tool cannot see
+	// ContextManager.Mixed, and dispatch clones ToolResult.Context only when
+	// Mixed is on (agent/dispatch.go), so with mixed assembly off this costs one
+	// transient projection that nothing reads. MinVerbatim stays 0 — memory
+	// records have no verbatim component to floor.
 	var b strings.Builder
+	set := &agent.ContextSet{}
+	repCard := contextdepth.RepresentationDesc{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}
+	repCompact := contextdepth.RepresentationDesc{Depth: contextdepth.DepthL1, Kind: contextdepth.RepresentationCompact}
+	// Subject uniqueness within one set is a carrier invariant (agent's
+	// validateContextSet rejects a duplicate SubjectRef), and the store sits
+	// behind an interface that promises nothing. Enforced here so a duplicate ID
+	// is a model-visible tool error instead of an assembly failure that aborts
+	// the run one layer down.
+	seen := make(map[string]int, len(records))
 	for i, r := range records {
+		if r.ID == "" {
+			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has blank ID", i)}, nil
+		}
+		if prev, dup := seen[r.ID]; dup {
+			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has duplicate ID %q (also record %d)", i, r.ID, prev)}, nil
+		}
+		seen[r.ID] = i
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
+		b.WriteString(recordLine(r))
+		set.Groups = append(set.Groups, agent.ContextGroup{
+			Desc: contextdepth.GroupDesc{
+				Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainMemory, ID: r.ID},
+				Rank:    i + 1,
+			},
+			Alternatives: []agent.ContextAlternative{
+				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{repCard}}, Content: recordCard(r)},
+				{
+					Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{repCard, repCompact}},
+					Content: recordCard(r) + " · " + FlattenRecordContent(r.Content),
+				},
+			},
+		})
 	}
-	return agent.ToolResult{Content: b.String()}, nil
+	return agent.ToolResult{Content: b.String(), Context: set}, nil
+}
+
+// recordScopeClass names the visibility class WITHOUT the actual
+// workspace/session IDs — those are storage identifiers, not model context
+// (#331 spec 3.5 whitelist).
+func recordScopeClass(r memory.MemoryRecord) string {
+	switch {
+	case r.SessionID != "":
+		return "session"
+	case r.WorkspaceID != "":
+		return "workspace"
+	default:
+		return "global"
+	}
+}
+
+// recordLine is the flat per-record rendering (fixed prefix, flattened
+// content) — also the basis of the L1 compact alternative. Its bytes are
+// frozen: it is the fallback Content a non-mixed consumer sees.
+func recordLine(r memory.MemoryRecord) string {
+	return fmt.Sprintf("%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
+}
+
+// recordCard is the L0 metadata card: whitelist fields only. Never opaque
+// Metadata, provenance source IDs/hashes, or workspace/session ID values.
+func recordCard(r memory.MemoryRecord) string {
+	return fmt.Sprintf("%s · %s · created:%s · updated:%s · scope:%s · ns:%s · src:%s",
+		r.ID, r.Kind,
+		r.CreatedAt.Format("2006-01-02"), r.UpdatedAt.Format("2006-01-02"),
+		recordScopeClass(r), FlattenRecordContent(r.Namespace),
+		FlattenRecordContent(r.Provenance.SourceKind))
 }
 
 // FlattenRecordContent is the shared display-sanitizer for record content: one
