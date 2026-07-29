@@ -1,0 +1,27 @@
+{
+  "id": "md-schema-language-progressive",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\n### source: \"internal/queue/schema.sql\"\npurpose: SQL schema for the durable event queue.\noverview: schema.sql defines the events table (state machine pending/claimed/delivered with lease expiry) and the schema_meta version table.\nlanguage: sql\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/queue/schema.sql\" (lines 1-17, similarity: 1.00) ---\n1| -- Durable event queue. One row per accepted publish; state moves\n2| -- pending -\u003e claimed -\u003e delivered. Failed claims lapse back to\n3| -- pending when claimed_until passes.\n4| CREATE TABLE IF NOT EXISTS events (\n5|     id            INTEGER PRIMARY KEY AUTOINCREMENT,\n6|     subscriber    TEXT    NOT NULL,\n7|     payload       BLOB    NOT NULL,\n8|     state         TEXT    NOT NULL DEFAULT 'pending',\n9|     attempts      INTEGER NOT NULL DEFAULT 0,\n10|     claimed_until INTEGER NOT NULL DEFAULT 0\n11| );\n12| \n13| CREATE TABLE IF NOT EXISTS schema_meta (\n14|     version    INTEGER PRIMARY KEY,\n15|     applied_at INTEGER NOT NULL\n16| );\n\n### source: \"internal/queue/sqlite.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"docs/README.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: In which language is the delivery queue schema defined?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the queue schema is defined in SQL (internal/queue/schema.sql). The file path and language metadata alone support the answer."
+  },
+  "assembly_eval": {
+    "pair_id": "md-schema-language",
+    "mode": "progressive",
+    "candidate_ids": [
+      "ad790688dd2d",
+      "3482ff1f86a5",
+      "97762f846186"
+    ],
+    "estimated_prompt_tokens": 373
+  }
+}

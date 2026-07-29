@@ -1,0 +1,27 @@
+{
+  "id": "md-metrics-package-flat",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\nRelevant code context:\n\n--- internal/metrics/metrics.go (lines 1-29, similarity: 1.00) ---\n1| package metrics\n2| \n3| import \"github.com/prometheus/client_golang/prometheus\"\n4| \n5| // Counters exposed on /metrics. Names are stable; dashboards and\n6| // alerts key on them.\n7| var (\n8| \tDelivered = prometheus.NewCounter(prometheus.CounterOpts{\n9| \t\tName: \"beacond_delivered_total\",\n10| \t\tHelp: \"Events successfully posted to a subscriber.\",\n11| \t})\n12| \tRetried = prometheus.NewCounter(prometheus.CounterOpts{\n13| \t\tName: \"beacond_delivery_retries_total\",\n14| \t\tHelp: \"Delivery attempts that were rescheduled.\",\n15| \t})\n16| \tSigReject = prometheus.NewCounter(prometheus.CounterOpts{\n17| \t\tName: \"beacond_sig_reject_total\",\n18| \t\tHelp: \"Publishes rejected for a bad request MAC.\",\n19| \t})\n20| \tDupSuppressed = prometheus.NewCounter(prometheus.CounterOpts{\n21| \t\tName: \"beacond_duplicate_suppressed_total\",\n22| \t\tHelp: \"Publishes dropped as duplicates of a recent event.\",\n23| \t})\n24| )\n25| \n26| func init() {\n27| \tprometheus.MustRegister(Delivered, Retried, SigReject, DupSuppressed)\n28| }\n\n--- internal/relay/fanout.go (lines 1-31, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"context\"\n5| \t\"sync\"\n6| )\n7| \n8| // defaultWorkers is the delivery pool size when the operator does not\n9| // override it.\n10| const defaultWorkers = 8\n11| \n12| // Fanout drains the queue and posts each claimed event to its\n13| // subscriber endpoint. Failures are rescheduled using retryDelay.\n14| type Fanout struct {\n15| \tq  Queue\n16| \twg sync.WaitGroup\n17| }\n18| \n19| func (f *Fanout) Run(ctx context.Context) {\n20| \tfor i := 0; i \u003c defaultWorkers; i++ {\n21| \t\tf.wg.Add(1)\n22| \t\tgo f.worker(ctx)\n23| \t}\n24| }\n25| \n26| // Drain blocks until every in-flight delivery has completed. Callers\n27| // bound it with a context; the pool itself imposes no deadline.\n28| func (f *Fanout) Drain() {\n29| \tf.wg.Wait()\n30| }\n\n\n\nQuestion: Which package registers beacond's Prometheus metrics?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Identifies internal/metrics (metrics.go) as the package declaring and registering the Prometheus counters."
+  },
+  "assembly_eval": {
+    "pair_id": "md-metrics-package",
+    "mode": "flat",
+    "candidate_ids": [
+      "472a993d9af1",
+      "cffda334a17a",
+      "be437766f86f"
+    ],
+    "estimated_prompt_tokens": 524
+  }
+}

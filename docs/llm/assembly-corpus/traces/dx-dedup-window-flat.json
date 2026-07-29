@@ -1,0 +1,29 @@
+{
+  "id": "dx-dedup-window-flat",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\nRelevant code context:\n\n--- internal/queue/sqlite.go (lines 1-33, similarity: 1.00) ---\n1| package queue\n2| \n3| import (\n4| \t\"context\"\n5| \t\"database/sql\"\n6| \t\"time\"\n7| )\n8| \n9| // claimBatch is how many pending events one dequeue claims at a time.\n10| // Small batches keep redelivery cheap when a worker dies mid-claim.\n11| const claimBatch = 25\n12| \n13| // claimLease is how long a claim holds before the row becomes\n14| // claimable again.\n15| const claimLease = 30 * time.Second\n16| \n17| // ClaimPending marks up to claimBatch rows as claimed by this worker\n18| // and returns them in enqueue order.\n19| func (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n20| \tuntil := time.Now().Add(claimLease).Unix()\n21| \trows, err := q.db.QueryContext(ctx, `\n22| \t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n23| \t\tWHERE id IN (\n24| \t\t\tSELECT id FROM events\n25| \t\t\tWHERE state = 'pending' OR claimed_until \u003c unixepoch()\n26| \t\t\tORDER BY id LIMIT ?\n27| \t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n28| \tif err != nil {\n29| \t\treturn nil, err\n30| \t}\n31| \treturn scanEvents(rows)\n32| }\n\n--- internal/relay/dedup.go (lines 1-29, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // dedupWindow is how long a previously seen event ID suppresses\n9| // duplicates. Redeliveries from flaky publishers inside the window\n10| // are dropped instead of fanned out twice.\n11| const dedupWindow = 10 * time.Minute\n12| \n13| type deduper struct {\n14| \tmu   sync.Mutex\n15| \tseen map[string]time.Time\n16| }\n17| \n18| // Seen reports whether id arrived inside the window, recording it\n19| // either way. A janitor goroutine sweeps expired entries.\n20| func (d *deduper) Seen(id string, now time.Time) bool {\n21| \td.mu.Lock()\n22| \tdefer d.mu.Unlock()\n23| \tif at, ok := d.seen[id]; ok \u0026\u0026 now.Sub(at) \u003c dedupWindow {\n24| \t\treturn true\n25| \t}\n26| \td.seen[id] = now\n27| \treturn false\n28| }\n\n\n\nQuestion: For how long are duplicate event IDs suppressed after first receipt?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the suppression window is 10 minutes, from dedupWindow in internal/relay/dedup.go. The 30-second claim lease and the retry delays in context are different durations and wrong answers."
+  },
+  "assembly_eval": {
+    "pair_id": "dx-dedup-window",
+    "mode": "flat",
+    "candidate_ids": [
+      "3482ff1f86a5",
+      "f4c7600d9d23",
+      "e56062264b6e",
+      "4051f0fb872b",
+      "472a993d9af1"
+    ],
+    "estimated_prompt_tokens": 546
+  }
+}

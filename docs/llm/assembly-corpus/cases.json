@@ -1,0 +1,626 @@
+[
+  {
+    "id": "co-retry-backoff",
+    "category": "content_only",
+    "question": "What base delay does beacond use before the first webhook delivery retry?",
+    "golden": {
+      "final_answer_criteria": "States the base retry delay is 400 milliseconds (400ms), as set by baseDelay in internal/relay/retry.go. Answers derived only from summaries or paths cannot contain this value."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/relay/retry.go",
+        "content": "package relay\n\nimport (\n\t\"math/rand\"\n\t\"time\"\n)\n\n// retryDelay computes the wait before the next delivery attempt.\n// Growth is exponential with full jitter; the ceiling keeps a flapping\n// endpoint from pushing waits past what operators expect.\nconst (\n\tbaseDelay  = 400 * time.Millisecond\n\tmaxDelay   = 2 * time.Minute\n\tgrowFactor = 2.0\n)\n\nfunc retryDelay(attempt int) time.Duration {\n\td := baseDelay\n\tfor i := 0; i < attempt && d < maxDelay; i++ {\n\t\td = time.Duration(float64(d) * growFactor)\n\t}\n\tif d > maxDelay {\n\t\td = maxDelay\n\t}\n\t// Full jitter: uniform in [0, d].\n\treturn time.Duration(rand.Int63n(int64(d) + 1))\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/relay/fanout.go",
+        "content": "package relay\n\nimport (\n\t\"context\"\n\t\"sync\"\n)\n\n// defaultWorkers is the delivery pool size when the operator does not\n// override it.\nconst defaultWorkers = 8\n\n// Fanout drains the queue and posts each claimed event to its\n// subscriber endpoint. Failures are rescheduled using retryDelay.\ntype Fanout struct {\n\tq  Queue\n\twg sync.WaitGroup\n}\n\nfunc (f *Fanout) Run(ctx context.Context) {\n\tfor i := 0; i < defaultWorkers; i++ {\n\t\tf.wg.Add(1)\n\t\tgo f.worker(ctx)\n\t}\n}\n\n// Drain blocks until every in-flight delivery has completed. Callers\n// bound it with a context; the pool itself imposes no deadline.\nfunc (f *Fanout) Drain() {\n\tf.wg.Wait()\n}\n",
+        "language": "go",
+        "abstract": "Delivery worker pool that drains the queue and posts events to subscribers.",
+        "overview": "fanout.go starts the delivery workers, claims batches from the queue, posts each event to its subscriber endpoint, and reschedules failures using the retry pacing helpers. It owns worker lifecycle and shutdown draining, not the pacing constants themselves."
+      },
+      {
+        "path": "docs/operations.md",
+        "content": "# beacond operations guide\n\n## Deployment\n\nbeacond ships as a single static binary. Run it under a process\nsupervisor (a systemd unit is the reference setup) with the queue\ndatabase on local disk. Point subscribers at stable DNS names such as\n`hooks.example.net`, never at ephemeral addresses.\n\n## Restart procedure\n\nSend SIGTERM and wait. The process stops accepting publishes, then\ndrains in-flight deliveries for a bounded grace period before\nexiting. Events still queued are picked up on the next start; no\nmanual intervention is needed.\n\n## Signing secret rotation\n\nGenerate a new secret file, install it on producers first, then\nrestart beacond with the new `SigningKeyPath`. Producers signing with\nthe old secret are rejected after the restart, so rotate producers\nbefore the relay.\n\n## Tuning delivery\n\nFailed deliveries back off exponentially with jitter; the exact\nschedule lives in the relay package. If a subscriber flaps, expect\ndelivery attempts to spread out rather than hammer it.\n",
+        "language": "markdown",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "co-queue-claim-batch",
+    "category": "content_only",
+    "question": "How many pending events does the queue claim in one dequeue batch?",
+    "golden": {
+      "final_answer_criteria": "States the claim batch size is 25, as set by claimBatch in internal/queue/sqlite.go. The docs and summaries only say 'small batches'; the number exists solely in the code body."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/queue/queue.go",
+        "content": "package queue\n\nimport \"context\"\n\n// Queue is the durable event queue the relay drains. The SQLite\n// implementation is the only one shipped; the interface exists so\n// the relay package stays storage-agnostic.\ntype Queue interface {\n\tEnqueue(ctx context.Context, payload []byte) error\n\tClaimPending(ctx context.Context, worker string) ([]Event, error)\n\tAck(ctx context.Context, id int64) error\n}\n\n// Event is one claimed queue row.\ntype Event struct {\n\tID         int64\n\tSubscriber string\n\tPayload    []byte\n}\n",
+        "language": "go",
+        "abstract": "Queue interface and Event row type the relay depends on.",
+        "overview": "queue.go declares the storage-agnostic Queue interface (enqueue, claim, ack) and the Event struct. Batch sizing and lease policy belong to the implementation, not this contract."
+      },
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/queue/migrations.go",
+        "content": "package queue\n\nimport \"database/sql\"\n\n// migrations are applied in order at open time. Each entry is a full\n// statement; the runner records the applied version in schema_meta.\nvar migrations = []string{\n\t// version 1: initial events table, see schema.sql\n\tschemaV1,\n\t// version 2: claimed_by column for worker attribution\n\t`ALTER TABLE events ADD COLUMN claimed_by TEXT NOT NULL DEFAULT ''`,\n\t// version 3: covering index for the claim scan\n\t`CREATE INDEX IF NOT EXISTS idx_events_state ON events(state, claimed_until)`,\n}\n\nfunc migrate(db *sql.DB) error {\n\tfor v, stmt := range migrations {\n\t\tapplied, err := versionApplied(db, v+1)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t\tif applied {\n\t\t\tcontinue\n\t\t}\n\t\tif _, err := db.Exec(stmt); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tif err := recordVersion(db, v+1); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n\treturn nil\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "docs/README.md",
+        "content": "# beacond\n\nbeacond is a small self-hosted webhook relay. Producers publish events\nto a single ingest endpoint; beacond persists them in a local queue and\nfans each event out to every subscribed endpoint, retrying failures so\nproducers never have to.\n\n## How it works\n\n- Publishes are authenticated by a shared-secret request MAC.\n- Accepted events land in a durable queue before the HTTP response is\n  sent, so an accepted publish survives a crash.\n- Delivery workers claim events from the queue in small batches and\n  post them to subscribers, with backoff on failure.\n- Oversized payloads are rejected at the door.\n\n## Layout\n\n- `cmd/beacond` \u2014 process entrypoint\n- `internal/relay` \u2014 ingest handler and delivery fanout\n- `internal/queue` \u2014 durable event queue\n- `internal/sign` \u2014 request signing\n- `internal/config` \u2014 configuration loading\n\nSee the operations guide for deployment.\n",
+        "language": "markdown",
+        "abstract": "Top-level project overview: what beacond is and how the pieces fit.",
+        "overview": "README.md introduces the relay, sketches the publish-queue-fanout flow, and maps the package layout. Operational detail is deferred to the operations guide."
+      }
+    ]
+  },
+  {
+    "id": "co-signature-header",
+    "category": "content_only",
+    "question": "Which HTTP request header carries the webhook payload signature?",
+    "golden": {
+      "final_answer_criteria": "Names the header X-Ledger-Digest, defined by signatureHeader in internal/sign/hmac.go. No summary or path names the header, and it is not derivable from the project name or from convention; it exists only in that file's body."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/sign/doc.go",
+        "content": "// Package sign authenticates inbound publishes.\n//\n// Producers MAC the request body with a shared secret and send the\n// digest with the request; beacond recomputes and compares it before\n// any payload is enqueued. Key handling and verification live here so\n// the relay package never touches raw secrets.\n//\n// The secret is provisioned by the operator; rotation order is\n// documented in the operations guide.\npackage sign\n",
+        "language": "go",
+        "abstract": "Package overview: shared-secret authentication of inbound publishes.",
+        "overview": "doc.go explains the sign package's job: producers MAC the request body with a shared secret and beacond recomputes and compares the digest before enqueueing. Wire details live in the implementation files."
+      },
+      {
+        "path": "internal/sign/signer.go",
+        "content": "package sign\n\nimport \"os\"\n\n// Signer holds the shared secret used to authenticate publishes.\n// Verification lives alongside it in this package.\ntype Signer struct {\n\tsecret []byte\n}\n\n// NewSigner loads the shared secret from the operator-provided key\n// file. The file content is the raw secret.\nfunc NewSigner(path string) (*Signer, error) {\n\traw, err := os.ReadFile(path)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn &Signer{secret: raw}, nil\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/sign/hmac.go",
+        "content": "package sign\n\nimport (\n\t\"crypto/hmac\"\n\t\"crypto/sha256\"\n\t\"encoding/hex\"\n\t\"errors\"\n\t\"net/http\"\n)\n\n// signatureHeader carries the hex-encoded request MAC.\nconst signatureHeader = \"X-Ledger-Digest\"\n\nvar errBadSignature = errors.New(\"sign: signature mismatch\")\n\n// Verify recomputes the payload MAC under the shared secret and\n// compares it, in constant time, with the digest the client sent.\nfunc (s *Signer) Verify(r *http.Request, body []byte) error {\n\tgot, err := hex.DecodeString(r.Header.Get(signatureHeader))\n\tif err != nil {\n\t\treturn errBadSignature\n\t}\n\tmac := hmac.New(sha256.New, s.secret)\n\tmac.Write(body)\n\tif !hmac.Equal(mac.Sum(nil), got) {\n\t\treturn errBadSignature\n\t}\n\treturn nil\n}\n",
+        "language": "go",
+        "abstract": "HMAC request-signing helpers for inbound webhook publishes.",
+        "overview": "hmac.go verifies webhook request signatures: it reads the digest the client sent, recomputes the payload MAC under the shared secret, and compares in constant time. Key material comes from the config layer."
+      },
+      {
+        "path": "internal/relay/handler.go",
+        "content": "package relay\n\nimport (\n\t\"io\"\n\t\"net/http\"\n)\n\n// maxBody caps an ingest request body at 1 MiB. Oversized publishes\n// are rejected before the payload is read into memory.\nconst maxBody = 1 << 20\n\n// Ingest accepts a signed event publish and enqueues it for fanout.\nfunc (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n\tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n\tif err != nil || int64(len(body)) > maxBody {\n\t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n\t\treturn\n\t}\n\tif err := s.signer.Verify(r, body); err != nil {\n\t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n\t\treturn\n\t}\n\tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n\t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n\t\treturn\n\t}\n\tw.WriteHeader(http.StatusAccepted)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/metrics/metrics.go",
+        "content": "package metrics\n\nimport \"github.com/prometheus/client_golang/prometheus\"\n\n// Counters exposed on /metrics. Names are stable; dashboards and\n// alerts key on them.\nvar (\n\tDelivered = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_delivered_total\",\n\t\tHelp: \"Events successfully posted to a subscriber.\",\n\t})\n\tRetried = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_delivery_retries_total\",\n\t\tHelp: \"Delivery attempts that were rescheduled.\",\n\t})\n\tSigReject = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_sig_reject_total\",\n\t\tHelp: \"Publishes rejected for a bad request MAC.\",\n\t})\n\tDupSuppressed = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_duplicate_suppressed_total\",\n\t\tHelp: \"Publishes dropped as duplicates of a recent event.\",\n\t})\n)\n\nfunc init() {\n\tprometheus.MustRegister(Delivered, Retried, SigReject, DupSuppressed)\n}\n",
+        "language": "go",
+        "abstract": "Prometheus counters beacond exposes on /metrics.",
+        "overview": "metrics.go declares and registers the delivery, retry, signature-reject, and duplicate-suppression counters. Names are stable for dashboards."
+      }
+    ]
+  },
+  {
+    "id": "co-shutdown-grace",
+    "category": "content_only",
+    "question": "How long does beacond wait for in-flight deliveries to finish during graceful shutdown?",
+    "golden": {
+      "final_answer_criteria": "States the grace period is 15 seconds, as set by shutdownGrace in cmd/beacond/main.go. The operations guide and summaries say only 'a bounded grace period' without the value."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "docs/operations.md",
+        "content": "# beacond operations guide\n\n## Deployment\n\nbeacond ships as a single static binary. Run it under a process\nsupervisor (a systemd unit is the reference setup) with the queue\ndatabase on local disk. Point subscribers at stable DNS names such as\n`hooks.example.net`, never at ephemeral addresses.\n\n## Restart procedure\n\nSend SIGTERM and wait. The process stops accepting publishes, then\ndrains in-flight deliveries for a bounded grace period before\nexiting. Events still queued are picked up on the next start; no\nmanual intervention is needed.\n\n## Signing secret rotation\n\nGenerate a new secret file, install it on producers first, then\nrestart beacond with the new `SigningKeyPath`. Producers signing with\nthe old secret are rejected after the restart, so rotate producers\nbefore the relay.\n\n## Tuning delivery\n\nFailed deliveries back off exponentially with jitter; the exact\nschedule lives in the relay package. If a subscriber flaps, expect\ndelivery attempts to spread out rather than hammer it.\n",
+        "language": "markdown",
+        "abstract": "Production deployment and restart runbook for beacond.",
+        "overview": "operations.md covers running the binary under a supervisor, the restart and drain procedure, signing-secret rotation order, and qualitative delivery-tuning guidance."
+      },
+      {
+        "path": "cmd/beacond/main.go",
+        "content": "package main\n\nimport (\n\t\"context\"\n\t\"flag\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n)\n\n// shutdownGrace bounds how long beacond waits for in-flight deliveries\n// to finish after a stop signal before aborting them.\nconst shutdownGrace = 15 * time.Second\n\nfunc main() {\n\tcfgPath := flag.String(\"config\", \"\", \"path to beacond config JSON\")\n\tflag.Parse()\n\n\tctx, stop := signal.NotifyContext(context.Background(),\n\t\tsyscall.SIGINT, syscall.SIGTERM)\n\tdefer stop()\n\n\tsrv := newServer(*cfgPath)\n\tgo srv.ListenAndServe()\n\n\t<-ctx.Done()\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)\n\tdefer cancel()\n\tsrv.Shutdown(shutdownCtx)\n}\n",
+        "language": "go",
+        "abstract": "Process entrypoint: flags, server startup, signal-driven shutdown.",
+        "overview": "main.go parses flags, starts the HTTP server, and on SIGINT/SIGTERM shuts the server down with a bounded grace period so in-flight work can finish."
+      },
+      {
+        "path": "internal/relay/fanout.go",
+        "content": "package relay\n\nimport (\n\t\"context\"\n\t\"sync\"\n)\n\n// defaultWorkers is the delivery pool size when the operator does not\n// override it.\nconst defaultWorkers = 8\n\n// Fanout drains the queue and posts each claimed event to its\n// subscriber endpoint. Failures are rescheduled using retryDelay.\ntype Fanout struct {\n\tq  Queue\n\twg sync.WaitGroup\n}\n\nfunc (f *Fanout) Run(ctx context.Context) {\n\tfor i := 0; i < defaultWorkers; i++ {\n\t\tf.wg.Add(1)\n\t\tgo f.worker(ctx)\n\t}\n}\n\n// Drain blocks until every in-flight delivery has completed. Callers\n// bound it with a context; the pool itself imposes no deadline.\nfunc (f *Fanout) Drain() {\n\tf.wg.Wait()\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "md-signature-file",
+    "category": "metadata",
+    "question": "Which file implements verification of webhook request signatures?",
+    "golden": {
+      "final_answer_criteria": "Identifies internal/sign/hmac.go as the file implementing signature verification. Path and summary information is sufficient; quoting the implementation is not required."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/relay/handler.go",
+        "content": "package relay\n\nimport (\n\t\"io\"\n\t\"net/http\"\n)\n\n// maxBody caps an ingest request body at 1 MiB. Oversized publishes\n// are rejected before the payload is read into memory.\nconst maxBody = 1 << 20\n\n// Ingest accepts a signed event publish and enqueues it for fanout.\nfunc (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n\tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n\tif err != nil || int64(len(body)) > maxBody {\n\t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n\t\treturn\n\t}\n\tif err := s.signer.Verify(r, body); err != nil {\n\t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n\t\treturn\n\t}\n\tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n\t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n\t\treturn\n\t}\n\tw.WriteHeader(http.StatusAccepted)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/sign/hmac.go",
+        "content": "package sign\n\nimport (\n\t\"crypto/hmac\"\n\t\"crypto/sha256\"\n\t\"encoding/hex\"\n\t\"errors\"\n\t\"net/http\"\n)\n\n// signatureHeader carries the hex-encoded request MAC.\nconst signatureHeader = \"X-Ledger-Digest\"\n\nvar errBadSignature = errors.New(\"sign: signature mismatch\")\n\n// Verify recomputes the payload MAC under the shared secret and\n// compares it, in constant time, with the digest the client sent.\nfunc (s *Signer) Verify(r *http.Request, body []byte) error {\n\tgot, err := hex.DecodeString(r.Header.Get(signatureHeader))\n\tif err != nil {\n\t\treturn errBadSignature\n\t}\n\tmac := hmac.New(sha256.New, s.secret)\n\tmac.Write(body)\n\tif !hmac.Equal(mac.Sum(nil), got) {\n\t\treturn errBadSignature\n\t}\n\treturn nil\n}\n",
+        "language": "go",
+        "abstract": "HMAC request-signing helpers for inbound webhook publishes.",
+        "overview": "hmac.go verifies webhook request signatures: it reads the digest the client sent, recomputes the payload MAC under the shared secret, and compares in constant time. Key material comes from the config layer."
+      },
+      {
+        "path": "internal/config/config.go",
+        "content": "package config\n\nimport \"time\"\n\n// Config is the resolved beacond runtime configuration.\ntype Config struct {\n\tListenAddr     string\n\tDeliverTimeout time.Duration\n\tQueuePath      string\n\tSigningKeyPath string\n}\n\n// Defaults returns the configuration used when no file or environment\n// override is present.\nfunc Defaults() Config {\n\treturn Config{\n\t\tListenAddr:     \":9091\",\n\t\tDeliverTimeout: 10 * time.Second,\n\t\tQueuePath:      \"beacond.db\",\n\t\tSigningKeyPath: \"beacond.key\",\n\t}\n}\n",
+        "language": "go",
+        "abstract": "Beacond runtime configuration type and its defaults.",
+        "overview": "config.go declares the Config struct (listen address, delivery timeout, queue and signing-key paths) and the Defaults constructor used when no file or environment override is present."
+      },
+      {
+        "path": "docs/README.md",
+        "content": "# beacond\n\nbeacond is a small self-hosted webhook relay. Producers publish events\nto a single ingest endpoint; beacond persists them in a local queue and\nfans each event out to every subscribed endpoint, retrying failures so\nproducers never have to.\n\n## How it works\n\n- Publishes are authenticated by a shared-secret request MAC.\n- Accepted events land in a durable queue before the HTTP response is\n  sent, so an accepted publish survives a crash.\n- Delivery workers claim events from the queue in small batches and\n  post them to subscribers, with backoff on failure.\n- Oversized payloads are rejected at the door.\n\n## Layout\n\n- `cmd/beacond` \u2014 process entrypoint\n- `internal/relay` \u2014 ingest handler and delivery fanout\n- `internal/queue` \u2014 durable event queue\n- `internal/sign` \u2014 request signing\n- `internal/config` \u2014 configuration loading\n\nSee the operations guide for deployment.\n",
+        "language": "markdown",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "md-schema-language",
+    "category": "metadata",
+    "question": "In which language is the delivery queue schema defined?",
+    "golden": {
+      "final_answer_criteria": "States the queue schema is defined in SQL (internal/queue/schema.sql). The file path and language metadata alone support the answer."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/queue/schema.sql",
+        "content": "-- Durable event queue. One row per accepted publish; state moves\n-- pending -> claimed -> delivered. Failed claims lapse back to\n-- pending when claimed_until passes.\nCREATE TABLE IF NOT EXISTS events (\n    id            INTEGER PRIMARY KEY AUTOINCREMENT,\n    subscriber    TEXT    NOT NULL,\n    payload       BLOB    NOT NULL,\n    state         TEXT    NOT NULL DEFAULT 'pending',\n    attempts      INTEGER NOT NULL DEFAULT 0,\n    claimed_until INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE TABLE IF NOT EXISTS schema_meta (\n    version    INTEGER PRIMARY KEY,\n    applied_at INTEGER NOT NULL\n);\n",
+        "language": "sql",
+        "abstract": "SQL schema for the durable event queue.",
+        "overview": "schema.sql defines the events table (state machine pending/claimed/delivered with lease expiry) and the schema_meta version table."
+      },
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "docs/README.md",
+        "content": "# beacond\n\nbeacond is a small self-hosted webhook relay. Producers publish events\nto a single ingest endpoint; beacond persists them in a local queue and\nfans each event out to every subscribed endpoint, retrying failures so\nproducers never have to.\n\n## How it works\n\n- Publishes are authenticated by a shared-secret request MAC.\n- Accepted events land in a durable queue before the HTTP response is\n  sent, so an accepted publish survives a crash.\n- Delivery workers claim events from the queue in small batches and\n  post them to subscribers, with backoff on failure.\n- Oversized payloads are rejected at the door.\n\n## Layout\n\n- `cmd/beacond` \u2014 process entrypoint\n- `internal/relay` \u2014 ingest handler and delivery fanout\n- `internal/queue` \u2014 durable event queue\n- `internal/sign` \u2014 request signing\n- `internal/config` \u2014 configuration loading\n\nSee the operations guide for deployment.\n",
+        "language": "markdown",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "md-deploy-doc",
+    "category": "metadata",
+    "question": "Which document describes the production deployment and restart procedure for beacond?",
+    "golden": {
+      "final_answer_criteria": "Identifies docs/operations.md as the deployment and restart runbook. Orientation from paths and summaries is sufficient."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "docs/README.md",
+        "content": "# beacond\n\nbeacond is a small self-hosted webhook relay. Producers publish events\nto a single ingest endpoint; beacond persists them in a local queue and\nfans each event out to every subscribed endpoint, retrying failures so\nproducers never have to.\n\n## How it works\n\n- Publishes are authenticated by a shared-secret request MAC.\n- Accepted events land in a durable queue before the HTTP response is\n  sent, so an accepted publish survives a crash.\n- Delivery workers claim events from the queue in small batches and\n  post them to subscribers, with backoff on failure.\n- Oversized payloads are rejected at the door.\n\n## Layout\n\n- `cmd/beacond` \u2014 process entrypoint\n- `internal/relay` \u2014 ingest handler and delivery fanout\n- `internal/queue` \u2014 durable event queue\n- `internal/sign` \u2014 request signing\n- `internal/config` \u2014 configuration loading\n\nSee the operations guide for deployment.\n",
+        "language": "markdown",
+        "abstract": "Top-level project overview: what beacond is and how the pieces fit.",
+        "overview": "README.md introduces the relay, sketches the publish-queue-fanout flow, and maps the package layout. Operational detail is deferred to the operations guide."
+      },
+      {
+        "path": "cmd/beacond/main.go",
+        "content": "package main\n\nimport (\n\t\"context\"\n\t\"flag\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n)\n\n// shutdownGrace bounds how long beacond waits for in-flight deliveries\n// to finish after a stop signal before aborting them.\nconst shutdownGrace = 15 * time.Second\n\nfunc main() {\n\tcfgPath := flag.String(\"config\", \"\", \"path to beacond config JSON\")\n\tflag.Parse()\n\n\tctx, stop := signal.NotifyContext(context.Background(),\n\t\tsyscall.SIGINT, syscall.SIGTERM)\n\tdefer stop()\n\n\tsrv := newServer(*cfgPath)\n\tgo srv.ListenAndServe()\n\n\t<-ctx.Done()\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)\n\tdefer cancel()\n\tsrv.Shutdown(shutdownCtx)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "docs/operations.md",
+        "content": "# beacond operations guide\n\n## Deployment\n\nbeacond ships as a single static binary. Run it under a process\nsupervisor (a systemd unit is the reference setup) with the queue\ndatabase on local disk. Point subscribers at stable DNS names such as\n`hooks.example.net`, never at ephemeral addresses.\n\n## Restart procedure\n\nSend SIGTERM and wait. The process stops accepting publishes, then\ndrains in-flight deliveries for a bounded grace period before\nexiting. Events still queued are picked up on the next start; no\nmanual intervention is needed.\n\n## Signing secret rotation\n\nGenerate a new secret file, install it on producers first, then\nrestart beacond with the new `SigningKeyPath`. Producers signing with\nthe old secret are rejected after the restart, so rotate producers\nbefore the relay.\n\n## Tuning delivery\n\nFailed deliveries back off exponentially with jitter; the exact\nschedule lives in the relay package. If a subscriber flaps, expect\ndelivery attempts to spread out rather than hammer it.\n",
+        "language": "markdown",
+        "abstract": "Production deployment and restart runbook for beacond.",
+        "overview": "operations.md covers running the binary under a supervisor, the restart and drain procedure, signing-secret rotation order, and qualitative delivery-tuning guidance."
+      },
+      {
+        "path": "internal/config/loader.go",
+        "content": "package config\n\nimport (\n\t\"encoding/json\"\n\t\"os\"\n)\n\n// Load resolves the runtime configuration: defaults, then the optional\n// JSON file, then environment overrides, in that order.\nfunc Load(path string) (Config, error) {\n\tcfg := Defaults()\n\tif path != \"\" {\n\t\traw, err := os.ReadFile(path)\n\t\tif err != nil {\n\t\t\treturn Config{}, err\n\t\t}\n\t\tif err := json.Unmarshal(raw, &cfg); err != nil {\n\t\t\treturn Config{}, err\n\t\t}\n\t}\n\tif addr := os.Getenv(\"BEACOND_LISTEN\"); addr != \"\" {\n\t\tcfg.ListenAddr = addr\n\t}\n\treturn cfg, nil\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "md-metrics-package",
+    "category": "metadata",
+    "question": "Which package registers beacond's Prometheus metrics?",
+    "golden": {
+      "final_answer_criteria": "Identifies internal/metrics (metrics.go) as the package declaring and registering the Prometheus counters."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/metrics/metrics.go",
+        "content": "package metrics\n\nimport \"github.com/prometheus/client_golang/prometheus\"\n\n// Counters exposed on /metrics. Names are stable; dashboards and\n// alerts key on them.\nvar (\n\tDelivered = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_delivered_total\",\n\t\tHelp: \"Events successfully posted to a subscriber.\",\n\t})\n\tRetried = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_delivery_retries_total\",\n\t\tHelp: \"Delivery attempts that were rescheduled.\",\n\t})\n\tSigReject = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_sig_reject_total\",\n\t\tHelp: \"Publishes rejected for a bad request MAC.\",\n\t})\n\tDupSuppressed = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_duplicate_suppressed_total\",\n\t\tHelp: \"Publishes dropped as duplicates of a recent event.\",\n\t})\n)\n\nfunc init() {\n\tprometheus.MustRegister(Delivered, Retried, SigReject, DupSuppressed)\n}\n",
+        "language": "go",
+        "abstract": "Prometheus counters beacond exposes on /metrics.",
+        "overview": "metrics.go declares and registers the delivery, retry, signature-reject, and duplicate-suppression counters. Names are stable for dashboards."
+      },
+      {
+        "path": "internal/relay/fanout.go",
+        "content": "package relay\n\nimport (\n\t\"context\"\n\t\"sync\"\n)\n\n// defaultWorkers is the delivery pool size when the operator does not\n// override it.\nconst defaultWorkers = 8\n\n// Fanout drains the queue and posts each claimed event to its\n// subscriber endpoint. Failures are rescheduled using retryDelay.\ntype Fanout struct {\n\tq  Queue\n\twg sync.WaitGroup\n}\n\nfunc (f *Fanout) Run(ctx context.Context) {\n\tfor i := 0; i < defaultWorkers; i++ {\n\t\tf.wg.Add(1)\n\t\tgo f.worker(ctx)\n\t}\n}\n\n// Drain blocks until every in-flight delivery has completed. Callers\n// bound it with a context; the pool itself imposes no deadline.\nfunc (f *Fanout) Drain() {\n\tf.wg.Wait()\n}\n",
+        "language": "go",
+        "abstract": "Delivery worker pool that drains the queue and posts events to subscribers.",
+        "overview": "fanout.go starts the delivery workers, claims batches from the queue, posts each event to its subscriber endpoint, and reschedules failures using the retry pacing helpers. It owns worker lifecycle and shutdown draining, not the pacing constants themselves."
+      },
+      {
+        "path": "internal/relay/handler.go",
+        "content": "package relay\n\nimport (\n\t\"io\"\n\t\"net/http\"\n)\n\n// maxBody caps an ingest request body at 1 MiB. Oversized publishes\n// are rejected before the payload is read into memory.\nconst maxBody = 1 << 20\n\n// Ingest accepts a signed event publish and enqueues it for fanout.\nfunc (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n\tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n\tif err != nil || int64(len(body)) > maxBody {\n\t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n\t\treturn\n\t}\n\tif err := s.signer.Verify(r, body); err != nil {\n\t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n\t\treturn\n\t}\n\tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n\t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n\t\treturn\n\t}\n\tw.WriteHeader(http.StatusAccepted)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "dx-rate-limit-burst",
+    "category": "distractor",
+    "question": "What burst capacity does the ingest rate limiter allow per client?",
+    "golden": {
+      "final_answer_criteria": "States the burst capacity is 40 tokens, from `burst` in internal/ratelimit/bucket.go. Other pacing numbers in context (retry delays, worker counts, batch sizes) are not the rate-limit burst."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/relay/retry.go",
+        "content": "package relay\n\nimport (\n\t\"math/rand\"\n\t\"time\"\n)\n\n// retryDelay computes the wait before the next delivery attempt.\n// Growth is exponential with full jitter; the ceiling keeps a flapping\n// endpoint from pushing waits past what operators expect.\nconst (\n\tbaseDelay  = 400 * time.Millisecond\n\tmaxDelay   = 2 * time.Minute\n\tgrowFactor = 2.0\n)\n\nfunc retryDelay(attempt int) time.Duration {\n\td := baseDelay\n\tfor i := 0; i < attempt && d < maxDelay; i++ {\n\t\td = time.Duration(float64(d) * growFactor)\n\t}\n\tif d > maxDelay {\n\t\td = maxDelay\n\t}\n\t// Full jitter: uniform in [0, d].\n\treturn time.Duration(rand.Int63n(int64(d) + 1))\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/ratelimit/bucket.go",
+        "content": "package ratelimit\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// Per-client token bucket for the ingest endpoint. A client may burst\n// up to `burst` publishes; sustained throughput is refillPerSec.\nconst (\n\tburst        = 40\n\trefillPerSec = 10\n)\n\ntype bucket struct {\n\tmu     sync.Mutex\n\ttokens float64\n\tlast   time.Time\n}\n\nfunc (b *bucket) Allow(now time.Time) bool {\n\tb.mu.Lock()\n\tdefer b.mu.Unlock()\n\tb.tokens += now.Sub(b.last).Seconds() * refillPerSec\n\tif b.tokens > burst {\n\t\tb.tokens = burst\n\t}\n\tb.last = now\n\tif b.tokens < 1 {\n\t\treturn false\n\t}\n\tb.tokens--\n\treturn true\n}\n",
+        "language": "go",
+        "abstract": "Token-bucket rate limiting for the ingest endpoint.",
+        "overview": "bucket.go implements a per-client token bucket: publishes draw a token, tokens refill continuously, and a client that exhausts its bucket is throttled until it refills."
+      },
+      {
+        "path": "internal/relay/fanout.go",
+        "content": "package relay\n\nimport (\n\t\"context\"\n\t\"sync\"\n)\n\n// defaultWorkers is the delivery pool size when the operator does not\n// override it.\nconst defaultWorkers = 8\n\n// Fanout drains the queue and posts each claimed event to its\n// subscriber endpoint. Failures are rescheduled using retryDelay.\ntype Fanout struct {\n\tq  Queue\n\twg sync.WaitGroup\n}\n\nfunc (f *Fanout) Run(ctx context.Context) {\n\tfor i := 0; i < defaultWorkers; i++ {\n\t\tf.wg.Add(1)\n\t\tgo f.worker(ctx)\n\t}\n}\n\n// Drain blocks until every in-flight delivery has completed. Callers\n// bound it with a context; the pool itself imposes no deadline.\nfunc (f *Fanout) Drain() {\n\tf.wg.Wait()\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/config/config.go",
+        "content": "package config\n\nimport \"time\"\n\n// Config is the resolved beacond runtime configuration.\ntype Config struct {\n\tListenAddr     string\n\tDeliverTimeout time.Duration\n\tQueuePath      string\n\tSigningKeyPath string\n}\n\n// Defaults returns the configuration used when no file or environment\n// override is present.\nfunc Defaults() Config {\n\treturn Config{\n\t\tListenAddr:     \":9091\",\n\t\tDeliverTimeout: 10 * time.Second,\n\t\tQueuePath:      \"beacond.db\",\n\t\tSigningKeyPath: \"beacond.key\",\n\t}\n}\n",
+        "language": "go",
+        "abstract": "Beacond runtime configuration type and its defaults.",
+        "overview": "config.go declares the Config struct (listen address, delivery timeout, queue and signing-key paths) and the Defaults constructor used when no file or environment override is present."
+      },
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "dx-dedup-window",
+    "category": "distractor",
+    "question": "For how long are duplicate event IDs suppressed after first receipt?",
+    "golden": {
+      "final_answer_criteria": "States the suppression window is 10 minutes, from dedupWindow in internal/relay/dedup.go. The 30-second claim lease and the retry delays in context are different durations and wrong answers."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "Durable SQLite-backed event queue: enqueue, claim, ack.",
+        "overview": "sqlite.go implements the queue over a local database file. Workers claim pending rows in small batches under a lease; lapsed claims become claimable again automatically."
+      },
+      {
+        "path": "internal/relay/dedup.go",
+        "content": "package relay\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// dedupWindow is how long a previously seen event ID suppresses\n// duplicates. Redeliveries from flaky publishers inside the window\n// are dropped instead of fanned out twice.\nconst dedupWindow = 10 * time.Minute\n\ntype deduper struct {\n\tmu   sync.Mutex\n\tseen map[string]time.Time\n}\n\n// Seen reports whether id arrived inside the window, recording it\n// either way. A janitor goroutine sweeps expired entries.\nfunc (d *deduper) Seen(id string, now time.Time) bool {\n\td.mu.Lock()\n\tdefer d.mu.Unlock()\n\tif at, ok := d.seen[id]; ok && now.Sub(at) < dedupWindow {\n\t\treturn true\n\t}\n\td.seen[id] = now\n\treturn false\n}\n",
+        "language": "go",
+        "abstract": "In-memory suppression of recently seen event IDs.",
+        "overview": "dedup.go drops publishes whose event ID arrived recently, so publisher retries do not fan out twice. A janitor sweeps expired entries."
+      },
+      {
+        "path": "internal/relay/retry.go",
+        "content": "package relay\n\nimport (\n\t\"math/rand\"\n\t\"time\"\n)\n\n// retryDelay computes the wait before the next delivery attempt.\n// Growth is exponential with full jitter; the ceiling keeps a flapping\n// endpoint from pushing waits past what operators expect.\nconst (\n\tbaseDelay  = 400 * time.Millisecond\n\tmaxDelay   = 2 * time.Minute\n\tgrowFactor = 2.0\n)\n\nfunc retryDelay(attempt int) time.Duration {\n\td := baseDelay\n\tfor i := 0; i < attempt && d < maxDelay; i++ {\n\t\td = time.Duration(float64(d) * growFactor)\n\t}\n\tif d > maxDelay {\n\t\td = maxDelay\n\t}\n\t// Full jitter: uniform in [0, d].\n\treturn time.Duration(rand.Int63n(int64(d) + 1))\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "docs/operations.md",
+        "content": "# beacond operations guide\n\n## Deployment\n\nbeacond ships as a single static binary. Run it under a process\nsupervisor (a systemd unit is the reference setup) with the queue\ndatabase on local disk. Point subscribers at stable DNS names such as\n`hooks.example.net`, never at ephemeral addresses.\n\n## Restart procedure\n\nSend SIGTERM and wait. The process stops accepting publishes, then\ndrains in-flight deliveries for a bounded grace period before\nexiting. Events still queued are picked up on the next start; no\nmanual intervention is needed.\n\n## Signing secret rotation\n\nGenerate a new secret file, install it on producers first, then\nrestart beacond with the new `SigningKeyPath`. Producers signing with\nthe old secret are rejected after the restart, so rotate producers\nbefore the relay.\n\n## Tuning delivery\n\nFailed deliveries back off exponentially with jitter; the exact\nschedule lives in the relay package. If a subscriber flaps, expect\ndelivery attempts to spread out rather than hammer it.\n",
+        "language": "markdown",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/metrics/metrics.go",
+        "content": "package metrics\n\nimport \"github.com/prometheus/client_golang/prometheus\"\n\n// Counters exposed on /metrics. Names are stable; dashboards and\n// alerts key on them.\nvar (\n\tDelivered = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_delivered_total\",\n\t\tHelp: \"Events successfully posted to a subscriber.\",\n\t})\n\tRetried = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_delivery_retries_total\",\n\t\tHelp: \"Delivery attempts that were rescheduled.\",\n\t})\n\tSigReject = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_sig_reject_total\",\n\t\tHelp: \"Publishes rejected for a bad request MAC.\",\n\t})\n\tDupSuppressed = prometheus.NewCounter(prometheus.CounterOpts{\n\t\tName: \"beacond_duplicate_suppressed_total\",\n\t\tHelp: \"Publishes dropped as duplicates of a recent event.\",\n\t})\n)\n\nfunc init() {\n\tprometheus.MustRegister(Delivered, Retried, SigReject, DupSuppressed)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "dx-max-payload",
+    "category": "distractor",
+    "question": "What is the largest request body the ingest endpoint accepts?",
+    "golden": {
+      "final_answer_criteria": "States the cap is 1 MiB (1 << 20 bytes), enforced by maxBody in internal/relay/handler.go. Queue, rate-limit, and config numbers in context are not the body cap."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/config/config.go",
+        "content": "package config\n\nimport \"time\"\n\n// Config is the resolved beacond runtime configuration.\ntype Config struct {\n\tListenAddr     string\n\tDeliverTimeout time.Duration\n\tQueuePath      string\n\tSigningKeyPath string\n}\n\n// Defaults returns the configuration used when no file or environment\n// override is present.\nfunc Defaults() Config {\n\treturn Config{\n\t\tListenAddr:     \":9091\",\n\t\tDeliverTimeout: 10 * time.Second,\n\t\tQueuePath:      \"beacond.db\",\n\t\tSigningKeyPath: \"beacond.key\",\n\t}\n}\n",
+        "language": "go",
+        "abstract": "Beacond runtime configuration type and its defaults.",
+        "overview": "config.go declares the Config struct (listen address, delivery timeout, queue and signing-key paths) and the Defaults constructor used when no file or environment override is present."
+      },
+      {
+        "path": "internal/relay/handler.go",
+        "content": "package relay\n\nimport (\n\t\"io\"\n\t\"net/http\"\n)\n\n// maxBody caps an ingest request body at 1 MiB. Oversized publishes\n// are rejected before the payload is read into memory.\nconst maxBody = 1 << 20\n\n// Ingest accepts a signed event publish and enqueues it for fanout.\nfunc (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n\tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n\tif err != nil || int64(len(body)) > maxBody {\n\t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n\t\treturn\n\t}\n\tif err := s.signer.Verify(r, body); err != nil {\n\t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n\t\treturn\n\t}\n\tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n\t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n\t\treturn\n\t}\n\tw.WriteHeader(http.StatusAccepted)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/ratelimit/bucket.go",
+        "content": "package ratelimit\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// Per-client token bucket for the ingest endpoint. A client may burst\n// up to `burst` publishes; sustained throughput is refillPerSec.\nconst (\n\tburst        = 40\n\trefillPerSec = 10\n)\n\ntype bucket struct {\n\tmu     sync.Mutex\n\ttokens float64\n\tlast   time.Time\n}\n\nfunc (b *bucket) Allow(now time.Time) bool {\n\tb.mu.Lock()\n\tdefer b.mu.Unlock()\n\tb.tokens += now.Sub(b.last).Seconds() * refillPerSec\n\tif b.tokens > burst {\n\t\tb.tokens = burst\n\t}\n\tb.last = now\n\tif b.tokens < 1 {\n\t\treturn false\n\t}\n\tb.tokens--\n\treturn true\n}\n",
+        "language": "go",
+        "abstract": "Token-bucket rate limiting for the ingest endpoint.",
+        "overview": "bucket.go implements a per-client token bucket: publishes draw a token, tokens refill continuously, and a client that exhausts its bucket is throttled until it refills."
+      },
+      {
+        "path": "docs/README.md",
+        "content": "# beacond\n\nbeacond is a small self-hosted webhook relay. Producers publish events\nto a single ingest endpoint; beacond persists them in a local queue and\nfans each event out to every subscribed endpoint, retrying failures so\nproducers never have to.\n\n## How it works\n\n- Publishes are authenticated by a shared-secret request MAC.\n- Accepted events land in a durable queue before the HTTP response is\n  sent, so an accepted publish survives a crash.\n- Delivery workers claim events from the queue in small batches and\n  post them to subscribers, with backoff on failure.\n- Oversized payloads are rejected at the door.\n\n## Layout\n\n- `cmd/beacond` \u2014 process entrypoint\n- `internal/relay` \u2014 ingest handler and delivery fanout\n- `internal/queue` \u2014 durable event queue\n- `internal/sign` \u2014 request signing\n- `internal/config` \u2014 configuration loading\n\nSee the operations guide for deployment.\n",
+        "language": "markdown",
+        "abstract": "Top-level project overview: what beacond is and how the pieces fit.",
+        "overview": "README.md introduces the relay, sketches the publish-queue-fanout flow, and maps the package layout. Operational detail is deferred to the operations guide."
+      },
+      {
+        "path": "internal/config/loader.go",
+        "content": "package config\n\nimport (\n\t\"encoding/json\"\n\t\"os\"\n)\n\n// Load resolves the runtime configuration: defaults, then the optional\n// JSON file, then environment overrides, in that order.\nfunc Load(path string) (Config, error) {\n\tcfg := Defaults()\n\tif path != \"\" {\n\t\traw, err := os.ReadFile(path)\n\t\tif err != nil {\n\t\t\treturn Config{}, err\n\t\t}\n\t\tif err := json.Unmarshal(raw, &cfg); err != nil {\n\t\t\treturn Config{}, err\n\t\t}\n\t}\n\tif addr := os.Getenv(\"BEACOND_LISTEN\"); addr != \"\" {\n\t\tcfg.ListenAddr = addr\n\t}\n\treturn cfg, nil\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "dx-worker-count",
+    "category": "distractor",
+    "question": "How many delivery workers does the fanout pool start by default?",
+    "golden": {
+      "final_answer_criteria": "States the pool starts 8 workers, from defaultWorkers in internal/relay/fanout.go. The rate-limit refill rate, claim batch size, and other counts in context are wrong answers."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/relay/fanout.go",
+        "content": "package relay\n\nimport (\n\t\"context\"\n\t\"sync\"\n)\n\n// defaultWorkers is the delivery pool size when the operator does not\n// override it.\nconst defaultWorkers = 8\n\n// Fanout drains the queue and posts each claimed event to its\n// subscriber endpoint. Failures are rescheduled using retryDelay.\ntype Fanout struct {\n\tq  Queue\n\twg sync.WaitGroup\n}\n\nfunc (f *Fanout) Run(ctx context.Context) {\n\tfor i := 0; i < defaultWorkers; i++ {\n\t\tf.wg.Add(1)\n\t\tgo f.worker(ctx)\n\t}\n}\n\n// Drain blocks until every in-flight delivery has completed. Callers\n// bound it with a context; the pool itself imposes no deadline.\nfunc (f *Fanout) Drain() {\n\tf.wg.Wait()\n}\n",
+        "language": "go",
+        "abstract": "Delivery worker pool that drains the queue and posts events to subscribers.",
+        "overview": "fanout.go starts the delivery workers, claims batches from the queue, posts each event to its subscriber endpoint, and reschedules failures using the retry pacing helpers. It owns worker lifecycle and shutdown draining, not the pacing constants themselves."
+      },
+      {
+        "path": "internal/ratelimit/bucket.go",
+        "content": "package ratelimit\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// Per-client token bucket for the ingest endpoint. A client may burst\n// up to `burst` publishes; sustained throughput is refillPerSec.\nconst (\n\tburst        = 40\n\trefillPerSec = 10\n)\n\ntype bucket struct {\n\tmu     sync.Mutex\n\ttokens float64\n\tlast   time.Time\n}\n\nfunc (b *bucket) Allow(now time.Time) bool {\n\tb.mu.Lock()\n\tdefer b.mu.Unlock()\n\tb.tokens += now.Sub(b.last).Seconds() * refillPerSec\n\tif b.tokens > burst {\n\t\tb.tokens = burst\n\t}\n\tb.last = now\n\tif b.tokens < 1 {\n\t\treturn false\n\t}\n\tb.tokens--\n\treturn true\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "Durable SQLite-backed event queue: enqueue, claim, ack.",
+        "overview": "sqlite.go implements the queue over a local database file. Workers claim pending rows in small batches under a lease; lapsed claims become claimable again automatically."
+      },
+      {
+        "path": "cmd/beacond/main.go",
+        "content": "package main\n\nimport (\n\t\"context\"\n\t\"flag\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n)\n\n// shutdownGrace bounds how long beacond waits for in-flight deliveries\n// to finish after a stop signal before aborting them.\nconst shutdownGrace = 15 * time.Second\n\nfunc main() {\n\tcfgPath := flag.String(\"config\", \"\", \"path to beacond config JSON\")\n\tflag.Parse()\n\n\tctx, stop := signal.NotifyContext(context.Background(),\n\t\tsyscall.SIGINT, syscall.SIGTERM)\n\tdefer stop()\n\n\tsrv := newServer(*cfgPath)\n\tgo srv.ListenAndServe()\n\n\t<-ctx.Done()\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)\n\tdefer cancel()\n\tsrv.Shutdown(shutdownCtx)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "na-postgres-version",
+    "category": "no_answer",
+    "question": "Which PostgreSQL version does the beacond queue backend require?",
+    "golden": {
+      "final_answer_criteria": "The provided context never mentions PostgreSQL or any PostgreSQL version requirement (the queue shown is SQLite-backed); the correct behavior is to state explicitly that the answer is not in the provided context, WITHOUT inventing a version."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "Durable SQLite-backed event queue: enqueue, claim, ack.",
+        "overview": "sqlite.go implements the queue over a local database file. Workers claim pending rows in small batches under a lease; lapsed claims become claimable again automatically."
+      },
+      {
+        "path": "internal/queue/schema.sql",
+        "content": "-- Durable event queue. One row per accepted publish; state moves\n-- pending -> claimed -> delivered. Failed claims lapse back to\n-- pending when claimed_until passes.\nCREATE TABLE IF NOT EXISTS events (\n    id            INTEGER PRIMARY KEY AUTOINCREMENT,\n    subscriber    TEXT    NOT NULL,\n    payload       BLOB    NOT NULL,\n    state         TEXT    NOT NULL DEFAULT 'pending',\n    attempts      INTEGER NOT NULL DEFAULT 0,\n    claimed_until INTEGER NOT NULL DEFAULT 0\n);\n\nCREATE TABLE IF NOT EXISTS schema_meta (\n    version    INTEGER PRIMARY KEY,\n    applied_at INTEGER NOT NULL\n);\n",
+        "language": "sql",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/config/config.go",
+        "content": "package config\n\nimport \"time\"\n\n// Config is the resolved beacond runtime configuration.\ntype Config struct {\n\tListenAddr     string\n\tDeliverTimeout time.Duration\n\tQueuePath      string\n\tSigningKeyPath string\n}\n\n// Defaults returns the configuration used when no file or environment\n// override is present.\nfunc Defaults() Config {\n\treturn Config{\n\t\tListenAddr:     \":9091\",\n\t\tDeliverTimeout: 10 * time.Second,\n\t\tQueuePath:      \"beacond.db\",\n\t\tSigningKeyPath: \"beacond.key\",\n\t}\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "docs/operations.md",
+        "content": "# beacond operations guide\n\n## Deployment\n\nbeacond ships as a single static binary. Run it under a process\nsupervisor (a systemd unit is the reference setup) with the queue\ndatabase on local disk. Point subscribers at stable DNS names such as\n`hooks.example.net`, never at ephemeral addresses.\n\n## Restart procedure\n\nSend SIGTERM and wait. The process stops accepting publishes, then\ndrains in-flight deliveries for a bounded grace period before\nexiting. Events still queued are picked up on the next start; no\nmanual intervention is needed.\n\n## Signing secret rotation\n\nGenerate a new secret file, install it on producers first, then\nrestart beacond with the new `SigningKeyPath`. Producers signing with\nthe old secret are rejected after the restart, so rotate producers\nbefore the relay.\n\n## Tuning delivery\n\nFailed deliveries back off exponentially with jitter; the exact\nschedule lives in the relay package. If a subscriber flaps, expect\ndelivery attempts to spread out rather than hammer it.\n",
+        "language": "markdown",
+        "abstract": "Production deployment and restart runbook for beacond.",
+        "overview": "operations.md covers running the binary under a supervisor, the restart and drain procedure, signing-secret rotation order, and qualitative delivery-tuning guidance."
+      }
+    ]
+  },
+  {
+    "id": "na-oauth-scopes",
+    "category": "no_answer",
+    "question": "What OAuth scopes must a client hold to publish events to beacond?",
+    "golden": {
+      "final_answer_criteria": "The context describes only HMAC shared-secret request signing and never mentions OAuth or scopes; the correct behavior is to state explicitly that the answer is not in the provided context, WITHOUT inventing scopes."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/sign/hmac.go",
+        "content": "package sign\n\nimport (\n\t\"crypto/hmac\"\n\t\"crypto/sha256\"\n\t\"encoding/hex\"\n\t\"errors\"\n\t\"net/http\"\n)\n\n// signatureHeader carries the hex-encoded request MAC.\nconst signatureHeader = \"X-Ledger-Digest\"\n\nvar errBadSignature = errors.New(\"sign: signature mismatch\")\n\n// Verify recomputes the payload MAC under the shared secret and\n// compares it, in constant time, with the digest the client sent.\nfunc (s *Signer) Verify(r *http.Request, body []byte) error {\n\tgot, err := hex.DecodeString(r.Header.Get(signatureHeader))\n\tif err != nil {\n\t\treturn errBadSignature\n\t}\n\tmac := hmac.New(sha256.New, s.secret)\n\tmac.Write(body)\n\tif !hmac.Equal(mac.Sum(nil), got) {\n\t\treturn errBadSignature\n\t}\n\treturn nil\n}\n",
+        "language": "go",
+        "abstract": "HMAC request-signing helpers for inbound webhook publishes.",
+        "overview": "hmac.go verifies webhook request signatures: it reads the digest the client sent, recomputes the payload MAC under the shared secret, and compares in constant time. Key material comes from the config layer."
+      },
+      {
+        "path": "internal/relay/handler.go",
+        "content": "package relay\n\nimport (\n\t\"io\"\n\t\"net/http\"\n)\n\n// maxBody caps an ingest request body at 1 MiB. Oversized publishes\n// are rejected before the payload is read into memory.\nconst maxBody = 1 << 20\n\n// Ingest accepts a signed event publish and enqueues it for fanout.\nfunc (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n\tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n\tif err != nil || int64(len(body)) > maxBody {\n\t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n\t\treturn\n\t}\n\tif err := s.signer.Verify(r, body); err != nil {\n\t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n\t\treturn\n\t}\n\tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n\t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n\t\treturn\n\t}\n\tw.WriteHeader(http.StatusAccepted)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "docs/README.md",
+        "content": "# beacond\n\nbeacond is a small self-hosted webhook relay. Producers publish events\nto a single ingest endpoint; beacond persists them in a local queue and\nfans each event out to every subscribed endpoint, retrying failures so\nproducers never have to.\n\n## How it works\n\n- Publishes are authenticated by a shared-secret request MAC.\n- Accepted events land in a durable queue before the HTTP response is\n  sent, so an accepted publish survives a crash.\n- Delivery workers claim events from the queue in small batches and\n  post them to subscribers, with backoff on failure.\n- Oversized payloads are rejected at the door.\n\n## Layout\n\n- `cmd/beacond` \u2014 process entrypoint\n- `internal/relay` \u2014 ingest handler and delivery fanout\n- `internal/queue` \u2014 durable event queue\n- `internal/sign` \u2014 request signing\n- `internal/config` \u2014 configuration loading\n\nSee the operations guide for deployment.\n",
+        "language": "markdown",
+        "abstract": "Top-level project overview: what beacond is and how the pieces fit.",
+        "overview": "README.md introduces the relay, sketches the publish-queue-fanout flow, and maps the package layout. Operational detail is deferred to the operations guide."
+      }
+    ]
+  },
+  {
+    "id": "na-retention-period",
+    "category": "no_answer",
+    "question": "After how many days are delivered events purged from the beacond queue?",
+    "golden": {
+      "final_answer_criteria": "No source states any retention or purge schedule; the correct behavior is to state explicitly that the answer is not in the provided context, WITHOUT inventing a number of days."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "internal/queue/sqlite.go",
+        "content": "package queue\n\nimport (\n\t\"context\"\n\t\"database/sql\"\n\t\"time\"\n)\n\n// claimBatch is how many pending events one dequeue claims at a time.\n// Small batches keep redelivery cheap when a worker dies mid-claim.\nconst claimBatch = 25\n\n// claimLease is how long a claim holds before the row becomes\n// claimable again.\nconst claimLease = 30 * time.Second\n\n// ClaimPending marks up to claimBatch rows as claimed by this worker\n// and returns them in enqueue order.\nfunc (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n\tuntil := time.Now().Add(claimLease).Unix()\n\trows, err := q.db.QueryContext(ctx, `\n\t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n\t\tWHERE id IN (\n\t\t\tSELECT id FROM events\n\t\t\tWHERE state = 'pending' OR claimed_until < unixepoch()\n\t\t\tORDER BY id LIMIT ?\n\t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\treturn scanEvents(rows)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "internal/queue/migrations.go",
+        "content": "package queue\n\nimport \"database/sql\"\n\n// migrations are applied in order at open time. Each entry is a full\n// statement; the runner records the applied version in schema_meta.\nvar migrations = []string{\n\t// version 1: initial events table, see schema.sql\n\tschemaV1,\n\t// version 2: claimed_by column for worker attribution\n\t`ALTER TABLE events ADD COLUMN claimed_by TEXT NOT NULL DEFAULT ''`,\n\t// version 3: covering index for the claim scan\n\t`CREATE INDEX IF NOT EXISTS idx_events_state ON events(state, claimed_until)`,\n}\n\nfunc migrate(db *sql.DB) error {\n\tfor v, stmt := range migrations {\n\t\tapplied, err := versionApplied(db, v+1)\n\t\tif err != nil {\n\t\t\treturn err\n\t\t}\n\t\tif applied {\n\t\t\tcontinue\n\t\t}\n\t\tif _, err := db.Exec(stmt); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tif err := recordVersion(db, v+1); err != nil {\n\t\t\treturn err\n\t\t}\n\t}\n\treturn nil\n}\n",
+        "language": "go",
+        "abstract": "Ordered schema migration runner for the queue database.",
+        "overview": "migrations.go applies versioned statements at open time and records each applied version in schema_meta so reopen is idempotent."
+      },
+      {
+        "path": "docs/operations.md",
+        "content": "# beacond operations guide\n\n## Deployment\n\nbeacond ships as a single static binary. Run it under a process\nsupervisor (a systemd unit is the reference setup) with the queue\ndatabase on local disk. Point subscribers at stable DNS names such as\n`hooks.example.net`, never at ephemeral addresses.\n\n## Restart procedure\n\nSend SIGTERM and wait. The process stops accepting publishes, then\ndrains in-flight deliveries for a bounded grace period before\nexiting. Events still queued are picked up on the next start; no\nmanual intervention is needed.\n\n## Signing secret rotation\n\nGenerate a new secret file, install it on producers first, then\nrestart beacond with the new `SigningKeyPath`. Producers signing with\nthe old secret are rejected after the restart, so rotate producers\nbefore the relay.\n\n## Tuning delivery\n\nFailed deliveries back off exponentially with jitter; the exact\nschedule lives in the relay package. If a subscriber flaps, expect\ndelivery attempts to spread out rather than hammer it.\n",
+        "language": "markdown",
+        "abstract": "Production deployment and restart runbook for beacond.",
+        "overview": "operations.md covers running the binary under a supervisor, the restart and drain procedure, signing-secret rotation order, and qualitative delivery-tuning guidance."
+      },
+      {
+        "path": "internal/config/config.go",
+        "content": "package config\n\nimport \"time\"\n\n// Config is the resolved beacond runtime configuration.\ntype Config struct {\n\tListenAddr     string\n\tDeliverTimeout time.Duration\n\tQueuePath      string\n\tSigningKeyPath string\n}\n\n// Defaults returns the configuration used when no file or environment\n// override is present.\nfunc Defaults() Config {\n\treturn Config{\n\t\tListenAddr:     \":9091\",\n\t\tDeliverTimeout: 10 * time.Second,\n\t\tQueuePath:      \"beacond.db\",\n\t\tSigningKeyPath: \"beacond.key\",\n\t}\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "docs/changelog.md",
+        "content": "# Changelog\n\n## 0.5.0\n\n- Duplicate publishes inside the suppression window are now dropped\n  before enqueue instead of after claim.\n- The claim scan uses a covering index; dequeue no longer table-scans.\n\n## 0.4.1\n\n- Fixed a race where Drain could return while a worker still held a\n  claimed batch.\n\n## 0.4.0\n\n- Added delivery metrics and the /metrics endpoint.\n- Request MAC verification moved to constant-time compare.\n\n## 0.3.0\n\n- Initial durable queue; events survive restarts.\n",
+        "language": "markdown",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  },
+  {
+    "id": "na-license",
+    "category": "no_answer",
+    "question": "Under which open-source license is beacond distributed?",
+    "golden": {
+      "final_answer_criteria": "No source names a license; the correct behavior is to state explicitly that the answer is not in the provided context, WITHOUT guessing a license."
+    },
+    "max_tokens": 512,
+    "sources": [
+      {
+        "path": "docs/README.md",
+        "content": "# beacond\n\nbeacond is a small self-hosted webhook relay. Producers publish events\nto a single ingest endpoint; beacond persists them in a local queue and\nfans each event out to every subscribed endpoint, retrying failures so\nproducers never have to.\n\n## How it works\n\n- Publishes are authenticated by a shared-secret request MAC.\n- Accepted events land in a durable queue before the HTTP response is\n  sent, so an accepted publish survives a crash.\n- Delivery workers claim events from the queue in small batches and\n  post them to subscribers, with backoff on failure.\n- Oversized payloads are rejected at the door.\n\n## Layout\n\n- `cmd/beacond` \u2014 process entrypoint\n- `internal/relay` \u2014 ingest handler and delivery fanout\n- `internal/queue` \u2014 durable event queue\n- `internal/sign` \u2014 request signing\n- `internal/config` \u2014 configuration loading\n\nSee the operations guide for deployment.\n",
+        "language": "markdown",
+        "abstract": "Top-level project overview: what beacond is and how the pieces fit.",
+        "overview": "README.md introduces the relay, sketches the publish-queue-fanout flow, and maps the package layout. Operational detail is deferred to the operations guide."
+      },
+      {
+        "path": "docs/changelog.md",
+        "content": "# Changelog\n\n## 0.5.0\n\n- Duplicate publishes inside the suppression window are now dropped\n  before enqueue instead of after claim.\n- The claim scan uses a covering index; dequeue no longer table-scans.\n\n## 0.4.1\n\n- Fixed a race where Drain could return while a worker still held a\n  claimed batch.\n\n## 0.4.0\n\n- Added delivery metrics and the /metrics endpoint.\n- Request MAC verification moved to constant-time compare.\n\n## 0.3.0\n\n- Initial durable queue; events survive restarts.\n",
+        "language": "markdown",
+        "abstract": "",
+        "overview": ""
+      },
+      {
+        "path": "cmd/beacond/main.go",
+        "content": "package main\n\nimport (\n\t\"context\"\n\t\"flag\"\n\t\"os/signal\"\n\t\"syscall\"\n\t\"time\"\n)\n\n// shutdownGrace bounds how long beacond waits for in-flight deliveries\n// to finish after a stop signal before aborting them.\nconst shutdownGrace = 15 * time.Second\n\nfunc main() {\n\tcfgPath := flag.String(\"config\", \"\", \"path to beacond config JSON\")\n\tflag.Parse()\n\n\tctx, stop := signal.NotifyContext(context.Background(),\n\t\tsyscall.SIGINT, syscall.SIGTERM)\n\tdefer stop()\n\n\tsrv := newServer(*cfgPath)\n\tgo srv.ListenAndServe()\n\n\t<-ctx.Done()\n\tshutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)\n\tdefer cancel()\n\tsrv.Shutdown(shutdownCtx)\n}\n",
+        "language": "go",
+        "abstract": "",
+        "overview": ""
+      }
+    ]
+  }
+]

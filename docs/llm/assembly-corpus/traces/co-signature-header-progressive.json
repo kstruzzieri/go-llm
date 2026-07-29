@@ -1,0 +1,29 @@
+{
+  "id": "co-signature-header-progressive",
+  "source": "assembly-corpus",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "Answer the question using ONLY the provided context. If the context does not contain the answer, say so explicitly.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Context:\n### source: \"internal/sign/doc.go\"\npurpose: Package overview: shared-secret authentication of inbound publishes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/sign/doc.go\" (lines 1-11, similarity: 1.00) ---\n1| // Package sign authenticates inbound publishes.\n2| //\n3| // Producers MAC the request body with a shared secret and send the\n4| // digest with the request; beacond recomputes and compares it before\n5| // any payload is enqueued. Key handling and verification live here so\n6| // the relay package never touches raw secrets.\n7| //\n8| // The secret is provisioned by the operator; rotation order is\n9| // documented in the operations guide.\n10| package sign\n\n### source: \"internal/sign/signer.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/sign/signer.go\" (lines 1-20, similarity: 1.00) ---\n1| package sign\n2| \n3| import \"os\"\n4| \n5| // Signer holds the shared secret used to authenticate publishes.\n6| // Verification lives alongside it in this package.\n7| type Signer struct {\n8| \tsecret []byte\n9| }\n10| \n11| // NewSigner loads the shared secret from the operator-provided key\n12| // file. The file content is the raw secret.\n13| func NewSigner(path string) (*Signer, error) {\n14| \traw, err := os.ReadFile(path)\n15| \tif err != nil {\n16| \t\treturn nil, err\n17| \t}\n18| \treturn \u0026Signer{secret: raw}, nil\n19| }\n\n### source: \"internal/sign/hmac.go\"\npurpose: HMAC request-signing helpers for inbound webhook publishes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/relay/handler.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/metrics/metrics.go\"\npurpose: Prometheus counters beacond exposes on /metrics.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n\nQuestion: Which HTTP request header carries the webhook payload signature?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Names the header X-Ledger-Digest, defined by signatureHeader in internal/sign/hmac.go. No summary or path names the header, and it is not derivable from the project name or from convention; it exists only in that file's body."
+  },
+  "assembly_eval": {
+    "pair_id": "co-signature-header",
+    "mode": "progressive",
+    "candidate_ids": [
+      "1a9a6b7fd80a",
+      "9f929c63178f",
+      "ef1a27a9a75f",
+      "be437766f86f",
+      "472a993d9af1"
+    ],
+    "estimated_prompt_tokens": 544
+  }
+}
