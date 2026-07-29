@@ -3,9 +3,47 @@ package rageval
 import (
 	"context"
 	"encoding/json"
+	"os"
 	"reflect"
 	"testing"
 )
+
+// progressiveBaselinePath is the committed progressive-experiment report,
+// generated via `go run ./cmd/rag-eval -experiment progressive`.
+const progressiveBaselinePath = "testdata/progressive-baseline.json"
+
+// TestProgressiveBaselineReproducible re-runs RunProgressiveExperiment at
+// default options, marshals it exactly as writeJSONReport does, and
+// byte-compares against the committed baseline. Mirrors
+// TestBaselineReproducible in runner_test.go, catching the same two failure
+// modes:
+//
+//  1. rag/rageval changes that shift the report without a baseline regen.
+//  2. Manual edits to progressive-baseline.json that don't match what the
+//     code produces.
+//
+// Run `go run ./cmd/rag-eval -experiment progressive -out
+// internal/rageval/testdata/progressive-baseline.json` to regenerate after
+// intentional changes.
+func TestProgressiveBaselineReproducible(t *testing.T) {
+	report, err := RunProgressiveExperiment(context.Background(), ProgressiveOptions{})
+	if err != nil {
+		t.Fatalf("RunProgressiveExperiment: %v", err)
+	}
+	got, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal report: %v", err)
+	}
+	got = append(got, '\n') // writeJSONReport appends a trailing newline.
+
+	want, err := os.ReadFile(progressiveBaselinePath)
+	if err != nil {
+		t.Fatalf("read committed baseline: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatal("live progressive report differs from committed testdata/progressive-baseline.json; regenerate via `go run ./cmd/rag-eval -experiment progressive -out internal/rageval/testdata/progressive-baseline.json`")
+	}
+}
 
 func TestProgressiveExperimentDeterministicAndCandidateEqual(t *testing.T) {
 	ctx := context.Background()

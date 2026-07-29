@@ -21,13 +21,13 @@ func main() {
 
 func run(args []string) error {
 	flags := flag.NewFlagSet("rag-eval", flag.ContinueOnError)
-	experiment := flags.String("experiment", "baseline", "Experiment to run: baseline or outline")
+	experiment := flags.String("experiment", "baseline", "Experiment to run: baseline, outline, or progressive")
 	fixturePath := flags.String("fixtures", "internal/rageval/testdata/fixtures.json", "Path to baseline fixture JSON")
 	outPath := flags.String("out", "", "Path to write report JSON (required)")
 	warmRuns := flags.Int("warm-runs", 3, "Baseline warm retrieval runs per query")
 	samples := flags.Int("samples", 5, "Outline measured samples per query")
 	noLatency := flags.Bool("no-latency", false, "Disable baseline wall-clock latency measurement")
-	dimensions := flags.Int("dimensions", 768, "Outline embedding dimensions")
+	dimensions := flags.Int("dimensions", 768, "Outline/progressive embedding dimensions")
 	candidateLimit := flags.Int("candidate-m", 50, "Outline candidate limit")
 	if err := flags.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -89,7 +89,15 @@ func run(args []string) error {
 			return err
 		}
 		return rageval.WriteReport(*outPath, report)
+	case "progressive":
+		report, err := rageval.RunProgressiveExperiment(context.Background(), rageval.ProgressiveOptions{
+			Dimensions: *dimensions,
+		})
+		if err != nil {
+			return err
+		}
+		return rageval.WriteProgressiveReport(*outPath, report)
 	default:
-		return fmt.Errorf("unknown experiment %q (want baseline or outline)", *experiment)
+		return fmt.Errorf("unknown experiment %q (want baseline, outline, or progressive)", *experiment)
 	}
 }

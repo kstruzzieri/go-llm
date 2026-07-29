@@ -186,3 +186,38 @@ func TestRunRejectsUnknownExperiment(t *testing.T) {
 		t.Fatalf("output exists after rejected experiment: %v", statErr)
 	}
 }
+
+func TestProgressiveExperimentRequiresOut(t *testing.T) {
+	err := run([]string{"-experiment", "progressive"})
+	if err == nil || !strings.Contains(err.Error(), "requires an explicit -out") {
+		t.Fatalf("error = %v, want explicit output requirement", err)
+	}
+}
+
+func TestRunProgressiveExperiment(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "progressive.json")
+	if err := run([]string{
+		"-experiment", "progressive",
+		"-dimensions", "16",
+		"-out", out,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var report rageval.ProgressiveReport
+	if err := json.Unmarshal(mustReadRAGEvalFile(t, out), &report); err != nil {
+		t.Fatal(err)
+	}
+	if report.SchemaVersion != rageval.ProgressiveSchemaVersion ||
+		report.Corpus.Dimensions != 16 || report.Corpus.SelectedK != 10 {
+		t.Fatalf("progressive report options = %+v", report)
+	}
+}
+
+func mustReadRAGEvalFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
+}
