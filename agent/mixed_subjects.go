@@ -40,6 +40,8 @@ const (
 const omittedObservation = "context omitted for budget"
 
 // durableSummarySubjectID names the pinned durable-summary subject in traces.
+// Nothing here reads it: the summary is materialized and traced by the
+// assembler, which is its only consumer.
 const durableSummarySubjectID = "durable-summary"
 
 // Retention lanes, derived from — not invented alongside — RecencyCompactor's
@@ -68,8 +70,8 @@ const (
 )
 
 // mixedSubject is one allocatable subject: either a structured anchor group
-// (alts set) or a whole conversation span (span=true). Fields past alts are
-// written by the allocator, not the builder.
+// (alts set) or a whole conversation span (span=true). omitted, decision and
+// reason are written by the allocator; every other field by the builder.
 type mixedSubject struct {
 	ref        contextdepth.SubjectRef
 	toolCallID string // producing tool call; "" for conversation spans
@@ -110,12 +112,14 @@ type mixedUnit struct {
 	msgs       []Message
 	baseTokens int
 	anchors    []*mixedAnchor
-	subject    *mixedSubject // plain/history spans only
+	subject    *mixedSubject // every kind except pinned/unresolved (must-fit)
 	evicted    bool          // chains
 }
 
-// buildMixedUnits walks st.Messages with the compactor's own grouping helpers
-// and returns the allocation units in stable input order.
+// buildMixedUnits returns the allocation units for st.Messages in stable input
+// order, one per RecencyCompactor group. The walk itself is the compactor's:
+// reusing groups() rather than re-deriving spans is what keeps the lane policy
+// from drifting away from the eviction order it mirrors.
 //
 // PRECONDITION — st MUST be the PRE-materialization State (the caller-visible
 // one, with DurableSummary still a field). materializeDurableSummary prepends
@@ -127,53 +131,78 @@ type mixedUnit struct {
 // materializes the summary separately and charges it as a pinned reservation
 // (#331 spec 4.1 step 1).
 func (m ContextManager) buildMixedUnits(st State) ([]*mixedUnit, error) {
-	units := make([]*mixedUnit, 0, len(st.Messages))
-	firstPinned := firstPinnedIndex(st.Messages)
-	for i := 0; i < len(st.Messages); {
-		end := chainAt(st.Messages, i)
-		if end == i && pairableExchange(st.Messages, i) {
-			end = i + 1 // the user->assistant exchange is allocated atomically
-		}
-		span := st.Messages[i : end+1]
-		u := &mixedUnit{msgs: span}
-		// Verbatim cost of the whole span. Correct for every unit EXCEPT a
-		// completed chain, whose structured anchors' content is allocated
-		// rather than charged, so the chain branch discards it and computes
-		// its own base. It is therefore ASSIGNED per branch, never up front:
-		// a wrong baseTokens living in the struct until a later overwrite is
-		// one stray early return away from shipping.
-		verbatim := m.spanCost(span)
-		switch classifyGroup(st.Messages, i, end, firstPinned) {
-		case groupPinned:
-			u.kind, u.baseTokens = unitPinned, verbatim
-		case groupUnresolvedTool:
-			u.kind, u.baseTokens = unitUnresolved, verbatim
-		case groupPlainElastic:
-			u.kind, u.baseTokens = unitPlainSpan, verbatim
-			u.subject = spanSubject(i, lanePlain, verbatim)
-		case groupHistory:
-			u.kind, u.baseTokens = unitHistorySpan, verbatim
-			u.subject = spanSubject(i, laneHistory, verbatim)
-		case groupCompletedTool:
-			u.kind = unitChain
-			if err := validateChainBijection(span); err != nil {
-				return nil, err
-			}
-			anchors, base, err := m.chainAnchors(span)
-			if err != nil {
-				return nil, err
-			}
-			u.anchors, u.baseTokens = anchors, base
+	groups := RecencyCompactor{Estimate: m.Estimate}.groups(st)
+	units := make([]*mixedUnit, 0, len(groups))
+	// Running first-message index. This relies on groups() returning
+	// contiguous spans, in input order, covering all of st.Messages — the
+	// invariant that replaces an explicit index walk here.
+	first := 0
+	for _, g := range groups {
+		u, err := m.mixedUnitFor(g, first)
+		if err != nil {
+			return nil, err
 		}
 		units = append(units, u)
-		i = end + 1
+		first += len(g.msgs)
 	}
 	return units, nil
 }
 
+// mixedUnitFor converts one compactor group into an allocation unit. first is
+// the index of g.msgs[0] in the caller-visible State.Messages, which is the
+// conversation subject ID (#331 spec 3.4).
+//
+// g.tokens is the group's FULL verbatim cost. That is the right charge for
+// every kind except a completed chain, whose structured anchors' content is
+// allocated rather than charged — so the chain branch recomputes its own
+// envelope base and baseTokens is ASSIGNED per branch, never up front: a wrong
+// baseTokens living in the struct until a later overwrite is one stray early
+// return away from shipping.
+func (m ContextManager) mixedUnitFor(g compactionGroup, first int) (*mixedUnit, error) {
+	u := &mixedUnit{msgs: g.msgs}
+	switch g.kind {
+	case groupPinned:
+		u.kind, u.baseTokens = unitPinned, g.tokens
+	case groupUnresolvedTool:
+		u.kind, u.baseTokens = unitUnresolved, g.tokens
+	case groupPlainElastic:
+		u.kind, u.baseTokens = unitPlainSpan, g.tokens
+		u.subject = spanSubject(first, lanePlain, g.tokens)
+	case groupHistory:
+		u.kind, u.baseTokens = unitHistorySpan, g.tokens
+		u.subject = spanSubject(first, laneHistory, g.tokens)
+	case groupCompletedTool:
+		u.kind = unitChain
+		if err := validateChainBijection(g.msgs); err != nil {
+			return nil, err
+		}
+		anchors, base, err := m.chainAnchors(g.msgs)
+		if err != nil {
+			return nil, err
+		}
+		u.anchors, u.baseTokens = anchors, base
+		// Every chain gets a chain-level subject, structured or not, so no
+		// retained-or-evicted span is missing from the trace (spec 3.5 counts
+		// a completed chain as one elastic subject). It accounts for the chain
+		// SPAN — the envelope footprint — while anchor subjects account for the
+		// structured CONTENT allocated into those envelopes. The two are
+		// disjoint by construction: baseTokens is charged once here, admitted
+		// alternatives are charged per admission, so nothing double-counts.
+		u.subject = spanSubject(first, laneTool, base)
+	default:
+		// Fail closed. Go does not check switch exhaustiveness and `exhaustive`
+		// is not an enabled linter, so a sixth compactionGroupKind would
+		// otherwise land here with kind unitPinned (zero value: never
+		// droppable) and baseTokens 0 (invisible to the ledger) — the two worst
+		// defaults at once.
+		return nil, fmt.Errorf("agent: mixed assembly: unhandled group kind %d at message %d", g.kind, first)
+	}
+	return u, nil
+}
+
 // spanSubject builds the conversation subject for one whole span. The ID is
 // the decimal index of the span's FIRST message in the caller-visible
-// State.Messages (#331 spec 3.4); Rank is unused because conversation order
+// State.Messages (#331 spec 3.4); rank is unused because conversation order
 // IS the rank.
 func spanSubject(firstMsg, lane, tokens int) *mixedSubject {
 	return &mixedSubject{
@@ -225,9 +254,8 @@ func validateChainBijection(span []Message) error {
 // result per call ID, so all groups of one ContextSet share one call ID and
 // the spec's (ToolCallID, Domain, ID) triple is fully determined within the
 // set — validateContextSet owns it. Duplicates ACROSS calls are legal.
-func (m ContextManager) chainAnchors(span []Message) ([]*mixedAnchor, int, error) {
-	base := m.messageCost(span[0])
-	var anchors []*mixedAnchor
+func (m ContextManager) chainAnchors(span []Message) (anchors []*mixedAnchor, base int, err error) {
+	base = m.messageCost(span[0])
 	for j := 1; j < len(span); j++ {
 		msg := span[j]
 		if msg.Context == nil {
@@ -261,13 +289,4 @@ func (m ContextManager) chainAnchors(span []Message) ([]*mixedAnchor, int, error
 		anchors = append(anchors, a)
 	}
 	return anchors, base, nil
-}
-
-// spanCost is the messageCost of a whole message span.
-func (m ContextManager) spanCost(span []Message) int {
-	n := 0
-	for _, msg := range span {
-		n += m.messageCost(msg)
-	}
-	return n
 }
