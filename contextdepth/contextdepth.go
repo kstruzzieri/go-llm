@@ -76,7 +76,9 @@ func (k RepresentationKind) String() string {
 
 // SubjectRef identifies one subject of context across domains. Domain is one
 // of the Domain* constants; ID is domain-owned and unique within
-// (Domain, one assembly call).
+// (Domain, one producer call). It is NOT unique assembly-wide: two retrieve
+// calls in one run legally produce the same {rag, source} subject, so
+// assembly-wide identity additionally carries the producing tool call ID.
 type SubjectRef struct {
 	Domain string
 	ID     string
