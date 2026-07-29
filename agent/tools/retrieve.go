@@ -17,6 +17,8 @@ const (
 	// maxRetrieveMaxK is the largest MaxK the carriers can hold. rag projects
 	// (k+1) prefixes x rungs alternatives per source, 2 rungs for a fresh one,
 	// so all k results landing on ONE fresh source yields 2(k+1) alternatives.
+	// Invoke truncates the result set to k, so that bound holds for any R, not
+	// only for a retriever that honors k.
 	// SOURCE OF TRUTH for the 64 it must stay under: maxContextAlternatives in
 	// package agent (agent/context_set.go) — unexported, and agent/tools is a
 	// different package, so the derived ceiling is restated here and pinned by
@@ -71,9 +73,9 @@ type Retrieve struct {
 	// UNCONDITIONALLY — the tool cannot see ContextManager.Mixed, so a consumer
 	// that sets Progressive without Mixed pays the full projection and dispatch
 	// then discards it (agent/dispatch.go). That cost is accepted, not gated:
-	// it is one transient allocation per call, bounded by MaxK at
-	// O(rungs x k^2/2) block copies (<= ~1000 for the ceiling MaxK of 31),
-	// freed as soon as dispatch drops the result. Gating it would mean
+	// one transient projection per call, O(rungs x k^2/2) block copies — ~1000
+	// of them at the ceiling MaxK of 31, low-single-digit MB for typical block
+	// sizes — freed as soon as dispatch drops the result. Gating it would mean
 	// plumbing an assembly-mode signal into every tool — new API for a cost
 	// smaller than the retrieval it accompanies. Golem couples both flags
 	// behind -progressive, so the shipped path never pays it.
@@ -134,16 +136,9 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 	// groups must agree on whether a projection happens at all.
 	pr, capable := t.R.(progressiveRetriever)
 	progressive := capable && t.Progressive
-	// Configuration, not model input: a hard error, not an IsError observation
-	// the model can neither fix nor learn from. Checked here because
-	// agent/tools has no constructors — every tool is a struct literal — and
-	// the alternative is a mixed-assembly failure much later whose message
-	// talks about alternative counts rather than about MaxK.
-	//
-	// The ceiling is a MIXED-MODE CARRIER constraint, so it binds only where
-	// groups are actually built. Caging the flat path at 31 would be a
-	// functional regression on a shipped path, enforced by a bound that path
-	// cannot violate: a legacy consumer asking for 500 results must get 500.
+	// Misconfiguration, not model input: a hard error, and progressive-only.
+	// Derivation on maxRetrieveMaxK, consumer contract on the MaxK field.
+	// Before the backend call, so a rejected tool retrieves nothing.
 	if progressive && t.MaxK > maxRetrieveMaxK {
 		return agent.ToolResult{}, fmt.Errorf(
 			"tools: retrieve: MaxK must be <= %d in progressive mode, got %d", maxRetrieveMaxK, t.MaxK)
@@ -179,6 +174,15 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 	results, err := t.R.Retrieve(ctx, args.Query, k)
 	if err != nil {
 		return agent.ToolResult{IsError: true, Content: "retrieval failed: " + err.Error()}, nil
+	}
+	// R is an interface and promises nothing about honoring k, yet the
+	// alternative-count ceiling is DERIVED from k: an over-returning retriever
+	// would push the projection past agent's maxContextAlternatives and hard-fail
+	// mixed assembly — the exact outcome maxRetrieveMaxK exists to prevent,
+	// reached through the one seam it cannot see. Enforce it here instead of
+	// documenting it. *rag.Retriever already honors k, so this is a no-op there.
+	if len(results) > k {
+		results = results[:k]
 	}
 	if progressive {
 		content, trace, groups, err := pr.RenderProgressiveWithGroups(ctx, rag.ProgressiveRenderRequest{

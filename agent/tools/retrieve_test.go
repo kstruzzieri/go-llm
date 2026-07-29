@@ -126,9 +126,18 @@ type fakeProgressive struct {
 	groups  []rag.ProgressiveGroup
 	err     error
 	gotReq  rag.ProgressiveRenderRequest
+	// gotK and retrieveCalls make the progressive path observable: without them
+	// the clamp is only ever asserted on the flat path, which is not the path
+	// whose k^2 projection cost the clamp exists for.
+	gotK          int
+	retrieveCalls int
 }
 
+// Retrieve ignores k and returns the whole fixture — so this fake is also an
+// over-returning retriever, which the truncation test relies on.
 func (f *fakeProgressive) Retrieve(ctx context.Context, query string, k int) ([]rag.SearchResult, error) {
+	f.gotK = k
+	f.retrieveCalls++
 	return f.results, nil
 }
 func (f *fakeProgressive) BuildContext(results []rag.SearchResult, maxTokens int) string {
@@ -472,6 +481,62 @@ func TestRetrieveClampsK(t *testing.T) {
 				t.Fatalf("backend received k = %d, want %d", cr.gotK, tc.wantK)
 			}
 		})
+	}
+}
+
+func TestRetrieveClampsKInProgressiveMode(t *testing.T) {
+	// The clamp exists FOR this path: the groups projection renders every
+	// evidence prefix, so an unclamped k of 500 materializes ~500 prefix
+	// families per source. The flat table above cannot observe that path at all.
+	for _, tc := range []struct {
+		name        string
+		maxK, wantK int
+	}{
+		{"default cap", 0, defaultRetrieveMaxK},
+		{"explicit cap", 9, 9},
+		{"cap at the carrier ceiling", maxRetrieveMaxK, maxRetrieveMaxK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := progressiveFixture()
+			fake.groups = progressiveGroupsFixture()
+			tool := Retrieve{R: fake, Progressive: true, MaxK: tc.maxK}
+			if _, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q","k":500}`)); err != nil {
+				t.Fatalf("invoke: %v", err)
+			}
+			if fake.gotK != tc.wantK {
+				t.Fatalf("progressive backend received k = %d, want %d", fake.gotK, tc.wantK)
+			}
+		})
+	}
+}
+
+func TestRetrieveTruncatesOverReturningRetriever(t *testing.T) {
+	// R is an interface: nothing forces an implementation to honor k, and the
+	// alternative-count ceiling is derived from k. fakeProgressive ignores k and
+	// returns its whole fixture, so it IS such a retriever — the renderer must
+	// still see at most k results, or the projection can exceed the carrier
+	// bound through a seam maxRetrieveMaxK cannot guard.
+	fake := progressiveFixture() // two results
+	fake.groups = progressiveGroupsFixture()
+	tool := Retrieve{R: fake, Progressive: true}
+	if _, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q","k":1}`)); err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if got := len(fake.gotReq.Results); got != 1 {
+		t.Fatalf("renderer received %d results for k=1: the projection bound is derived from k", got)
+	}
+}
+
+func TestRetrieveMaxKRejectionSkipsRetrieval(t *testing.T) {
+	// The ceiling is checked before the backend call, so a misconfigured tool
+	// costs nothing.
+	fake := progressiveFixture()
+	tool := Retrieve{R: fake, Progressive: true, MaxK: 500}
+	if _, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`)); err == nil {
+		t.Fatal("MaxK over the ceiling must be rejected")
+	}
+	if fake.retrieveCalls != 0 {
+		t.Fatalf("rejected configuration still called the backend %d time(s)", fake.retrieveCalls)
 	}
 }
 
