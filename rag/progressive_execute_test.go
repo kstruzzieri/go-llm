@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -55,7 +56,7 @@ func TestRenderProgressiveEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RenderProgressive: %v", err)
 	}
-	if !strings.Contains(out, "--- pkg/a.go (lines 10-12, similarity: 0.87) ---") {
+	if !strings.Contains(out, `--- source: "pkg/a.go" (lines 10-12, similarity: 0.87) ---`) {
 		t.Fatalf("evidence missing:\n%s", out)
 	}
 	if !strings.Contains(out, "note: metadata overview (no summary: missing)") {
@@ -216,13 +217,13 @@ func TestRenderProgressiveDeterministic(t *testing.T) {
 	}
 	// Source order = first-result order, not lexical: pkg/x.go before pkg/y.go
 	// here, but assert via index to prove it is rank, not name.
-	if !strings.HasPrefix(first, "### pkg/x.go") {
+	if !strings.HasPrefix(first, `### source: "pkg/x.go"`) {
 		t.Fatalf("first source must be the first-ranked one:\n%s", first)
 	}
 	// Exactly one "\n" separator between sources: every block already ends in
 	// one newline, so the separator shows up as the blank line before the next
 	// header. The allocator charged for exactly this byte (separatorBytes).
-	if !strings.Contains(first, "\n\n### pkg/y.go") {
+	if !strings.Contains(first, "\n\n"+`### source: "pkg/y.go"`) {
 		t.Fatalf("sources must be separated by exactly one \\n:\n%q", first)
 	}
 	// ...and no separator trails the last source.
@@ -673,7 +674,7 @@ func TestRenderProgressiveMaxBytesWholeBlocksUTF8(t *testing.T) {
 	// Attribution invariant: no partially-rendered block may be attributed.
 	for _, src := range trace.Sources {
 		for _, ev := range src.RenderedEvidence {
-			if !strings.Contains(out, fmt.Sprintf("--- %s (lines %d-", ev.Source, ev.StartLine)) {
+			if !strings.Contains(out, fmt.Sprintf("--- source: %s (lines %d-", strconv.Quote(ev.Source), ev.StartLine)) {
 				t.Fatalf("attributed evidence %+v not present in output", ev)
 			}
 		}
@@ -984,7 +985,7 @@ func TestRenderProgressiveCustomStoreFallsBack(t *testing.T) {
 	if err != nil {
 		t.Fatalf("custom store must not error: %v", err)
 	}
-	if !strings.Contains(out, "### pkg/n.go") || !strings.Contains(out, "--- pkg/n.go") {
+	if !strings.Contains(out, `### source: "pkg/n.go"`) || !strings.Contains(out, `--- source: "pkg/n.go"`) {
 		t.Fatalf("must render metadata + evidence from chunk fields alone:\n%s", out)
 	}
 	reasons := trace.Sources[0].ValidityReasons

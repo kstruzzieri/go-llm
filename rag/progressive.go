@@ -92,6 +92,14 @@ const (
 	DecisionNoFit          = "no_fit"
 )
 
+// ProgressiveRenderFormatVersion identifies the rendered-block format emitted
+// by RenderProgressive, reported on ProgressiveTrace.RenderFormatVersion.
+// Version 2 quotes untrusted values (source, managed title) in orientation
+// and evidence headers; version 1 (slice 1) interpolated them raw and is not
+// kept — there is no legacy render switch. This is NOT
+// SourceSummaryFormatVersion: stored summary rows are unchanged.
+const ProgressiveRenderFormatVersion = 2
+
 // ProgressiveTrace explains a whole progressive render (spec section 10).
 type ProgressiveTrace struct {
 	MaxTokens           int
