@@ -45,6 +45,9 @@ func main() {
 	importXlamManifest := flag.String("import-xlam-manifest", filepath.Join("docs", "llm", "calibration", "xlam-irrelevance-manifest.jsonl"), "Output manifest path for -import-xlam")
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
+	assemblyBuildPath := flag.String("assembly-build", "", "Build paired flat/progressive assembly traces from this case-fixture JSON (#331)")
+	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build")
+
 	importXlamMinTools := flag.Int("import-xlam-min-tools", 1, "Drop -import-xlam records offering fewer than this many tools")
 
 	calibrateCapture := flag.Bool("calibrate-capture", false, "Phase 1: replay candidates and write frozen artifacts.jsonl")
@@ -131,12 +134,22 @@ func main() {
 	if *importXlam != "" {
 		modes++
 	}
+	if *assemblyBuildPath != "" {
+		modes++
+	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	if *assemblyBuildPath != "" {
+		if err := assemblyBuild(ctx, *assemblyBuildPath, *assemblyOut); err != nil {
+			log.Fatalf("llm-bench: assembly-build: %v", err)
+		}
+		return
+	}
 
 	if *capture {
 		if err := validateCaptureSampleAndLimit(*captureLimit, *captureSample); err != nil {
