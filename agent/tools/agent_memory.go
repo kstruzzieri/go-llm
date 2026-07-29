@@ -163,7 +163,13 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 		}
 		b.WriteString(recordLine(r))
 		if set == nil {
-			continue // over the carrier ceiling: flat only, exactly as with Mixed off
+			// Over the carrier ceiling: flat only, exactly as with Mixed off. The
+			// ID guards below are DELIBERATELY inside this skip, not an oversight —
+			// they enforce validateContextSet's blank-subject and duplicate-subject
+			// rules, so they apply only when a set is actually built. With no set
+			// there is no subject to violate, and the flat path behaves exactly as
+			// it did pre-#331.
+			continue
 		}
 		if r.ID == "" {
 			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has blank ID", i)}, nil

@@ -422,13 +422,26 @@ func TestAgentMemoryGroupCeilingDegradesToFlat(t *testing.T) {
 	// store-controlled (recordSearcher need not honor Limit) and Limit is an
 	// unclamped public field reaching SQL LIMIT directly, so a large-Limit
 	// consumer must keep working. Flat Content stays complete either way.
+	// The ID guards live inside the projection, so above the ceiling a faulted
+	// record is never inspected. Both halves of that contrast are pinned below;
+	// index 100 is valid at either record count.
+	blankID := func(out []memory.MemoryRecord) { out[100].ID = "" }
+	dupID := func(out []memory.MemoryRecord) { out[100].ID = out[99].ID }
 	cases := []struct {
 		name       string
 		records    int
-		wantGroups int // 0 => no set attached at all
+		fault      func([]memory.MemoryRecord) // nil => a clean fixture
+		wantErr    string                      // non-empty => IsError containing this, no Context
+		wantGroups int                         // 0 => no set attached at all
 	}{
-		{"at the ceiling", maxMemoryGroups, maxMemoryGroups},
-		{"one over the ceiling", maxMemoryGroups + 1, 0},
+		{name: "at the ceiling", records: maxMemoryGroups, wantGroups: maxMemoryGroups},
+		{name: "one over the ceiling", records: maxMemoryGroups + 1},
+		{name: "blank ID over the ceiling is never inspected", records: maxMemoryGroups + 1, fault: blankID},
+		{name: "blank ID at the ceiling is rejected", records: maxMemoryGroups, fault: blankID,
+			wantErr: "record 100 has blank ID"},
+		{name: "duplicate ID over the ceiling is never inspected", records: maxMemoryGroups + 1, fault: dupID},
+		{name: "duplicate ID at the ceiling is rejected", records: maxMemoryGroups, fault: dupID,
+			wantErr: `record 100 has duplicate ID "r99" (also record 99)`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -440,10 +453,25 @@ func TestAgentMemoryGroupCeilingDegradesToFlat(t *testing.T) {
 					UpdatedAt: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 				}
 			}
+			if c.fault != nil {
+				c.fault(out)
+			}
 			tool := AgentMemorySearch{S: &fakeRecordStore{searchOut: out}, WorkspaceID: "w", SessionID: sidFunc("s"), Limit: c.records}
 			res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"x"}`))
-			if err != nil || res.IsError {
-				t.Fatalf("invoke: err=%v result=%+v", err, res)
+			if err != nil {
+				t.Fatalf("invoke returned a Go error: %v", err)
+			}
+			if c.wantErr != "" {
+				if !res.IsError || !strings.Contains(res.Content, c.wantErr) {
+					t.Fatalf("result = %+v, want IsError containing %q", res, c.wantErr)
+				}
+				if res.Context != nil {
+					t.Errorf("Context = %+v, want nil on a projection error", res.Context)
+				}
+				return
+			}
+			if res.IsError {
+				t.Fatalf("unexpected IsError result: %+v", res)
 			}
 			// The flat fallback is unaffected at any record count. A line COUNT
 			// alone is blind to the failure that matters here: the separator is
@@ -455,7 +483,10 @@ func TestAgentMemoryGroupCeilingDegradesToFlat(t *testing.T) {
 				t.Fatalf("flat Content has %d lines, want one per record (%d)", len(lines), c.records)
 			}
 			for i, ln := range lines {
-				if want := fmt.Sprintf("r%d · working · 2026-07-01 · note", i); ln != want {
+				// The ID comes from the fixture (a faulted row legitimately renders a
+				// blank or repeated one); the rest of the line stays a literal, which
+				// is the part a skipped flat write would lose.
+				if want := out[i].ID + " · working · 2026-07-01 · note"; ln != want {
 					t.Errorf("flat line %d = %q, want %q", i, ln, want)
 					break
 				}
