@@ -9,6 +9,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/rag"
@@ -310,4 +312,218 @@ func writeTraceJSON(path string, tr Trace) error {
 		return err
 	}
 	return os.WriteFile(path, append(raw, '\n'), 0o644)
+}
+
+// Decision-rule constants, pre-registered (#331 spec 3.8). AnswerQuality
+// labels are on the harness's 0..1 scale, so the non-inferiority margin is
+// -0.10 (10% of range) and the minimum useful median token reduction is 20%.
+const (
+	assemblyNonInferiorityMargin = -0.10
+	assemblyMinTokenReduction    = 0.20
+	assemblyMinimumPairsPerModel = 60
+)
+
+// assemblyDecision applies the pre-registered rule to the paired-delta CI
+// (progressive - flat) and the median token reduction. Only a lower CI bound
+// above zero may use the word "improved".
+func assemblyDecision(ciLo, ciHi, medianReduction float64) string {
+	switch {
+	case ciLo > 0 && medianReduction >= assemblyMinTokenReduction:
+		return "quality-improved"
+	case ciHi < assemblyNonInferiorityMargin:
+		return "regressed"
+	case ciLo > assemblyNonInferiorityMargin && medianReduction >= assemblyMinTokenReduction:
+		return "efficient-noninferior"
+	default:
+		return "inconclusive"
+	}
+}
+
+// AssemblyReport is the -assembly-report output.
+type AssemblyReport struct {
+	SchemaVersion        string                `json:"schema_version"` // "llm-bench-assembly/v1"
+	MinimumPairsPerModel int                   `json:"minimum_pairs_per_model"`
+	DecisionRule         string                `json:"decision_rule"`
+	Models               []AssemblyModelReport `json:"models"`
+	BootstrapSeed        int64                 `json:"bootstrap_seed"`
+	BootstrapN           int                   `json:"bootstrap_n"`
+}
+
+// AssemblyModelReport keeps assembly effects separate by candidate model.
+// Pooling several models would pseudo-replicate the same cases and could hide
+// a regression that affects one model family.
+type AssemblyModelReport struct {
+	CandidateModel       string    `json:"candidate_model"`
+	Pairs                int       `json:"pairs"`
+	InvalidPairs         int       `json:"invalid_pairs"`
+	PairingGaps          int       `json:"pairing_gaps"`
+	MeanDelta            float64   `json:"mean_delta"`
+	DeltaCILow           float64   `json:"delta_ci_low"`
+	DeltaCIHigh          float64   `json:"delta_ci_high"`
+	MedianTokenReduction float64   `json:"median_token_reduction"`
+	Decision             string    `json:"decision"`
+	Deltas               []float64 `json:"deltas"` // lexicographic pair-ID order ("case-10" < "case-2")
+}
+
+// computeAssemblyReport pairs artifacts on (PairID, CandidateModel), joins
+// human labels by ArtifactHash, and applies the decision rule. Cases with
+// unequal candidate sets are invalid; cases missing an arm or a label are
+// pairing gaps. Both are excluded from the deltas and counted.
+func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int) (*AssemblyReport, error) {
+	matched, _, err := matchLabels(labels, arts)
+	if err != nil {
+		return nil, fmt.Errorf("assembly report: match labels: %w", err)
+	}
+	quality := make(map[string]float64, len(matched)) // ArtifactHash -> quality
+	for _, m := range matched {
+		quality[m.Artifact.ArtifactHash] = m.Label.ExpectedAnswerQuality
+	}
+	type pairKey struct{ pair, model string }
+	type armSet struct{ flat, prog *Artifact }
+	pairs := map[pairKey]*armSet{}
+	var keys []pairKey
+	for i := range arts {
+		a := &arts[i]
+		if a.Trace.AssemblyEval == nil {
+			continue // non-assembly artifact in the same directory: ignore
+		}
+		if err := validateTrace(a.Trace); err != nil {
+			return nil, fmt.Errorf("assembly report: artifact %q: %w", a.TraceID, err)
+		}
+		k := pairKey{a.Trace.AssemblyEval.PairID, modelKey(a.CandidateModel)}
+		if k.model == "" {
+			return nil, fmt.Errorf("assembly report: artifact %q has blank candidate model", a.TraceID)
+		}
+		s, ok := pairs[k]
+		if !ok {
+			s = &armSet{}
+			pairs[k] = s
+			keys = append(keys, k)
+		}
+		switch a.Trace.AssemblyEval.Mode {
+		case AssemblyFlat:
+			if s.flat != nil {
+				return nil, fmt.Errorf("assembly report: duplicate flat arm for pair %q model %q", k.pair, k.model)
+			}
+			s.flat = a
+		case AssemblyProgressive:
+			if s.prog != nil {
+				return nil, fmt.Errorf("assembly report: duplicate progressive arm for pair %q model %q", k.pair, k.model)
+			}
+			s.prog = a
+		default:
+			return nil, fmt.Errorf("assembly report: pair %q model %q has invalid mode %q",
+				k.pair, k.model, a.Trace.AssemblyEval.Mode)
+		}
+	}
+	sort.Slice(keys, func(i, j int) bool {
+		if keys[i].model != keys[j].model {
+			return keys[i].model < keys[j].model
+		}
+		return keys[i].pair < keys[j].pair
+	})
+
+	rep := &AssemblyReport{
+		SchemaVersion:        "llm-bench-assembly/v1",
+		MinimumPairsPerModel: assemblyMinimumPairsPerModel,
+		BootstrapSeed:        seed,
+		BootstrapN:           bootstrapN,
+		DecisionRule: fmt.Sprintf(
+			"minimum %d complete pairs per model; quality-improved: CI low > 0 and median token reduction >= %.0f%%; "+
+				"efficient-noninferior: CI low > %.2f and reduction >= %.0f%%; "+
+				"regressed: CI high < %.2f; else inconclusive",
+			assemblyMinimumPairsPerModel, assemblyMinTokenReduction*100, assemblyNonInferiorityMargin,
+			assemblyMinTokenReduction*100, assemblyNonInferiorityMargin),
+	}
+	type modelAccumulator struct {
+		report     AssemblyModelReport
+		reductions []float64
+	}
+	models := map[string]*modelAccumulator{}
+	var modelOrder []string
+	totalPairs := 0
+	for _, k := range keys {
+		acc, ok := models[k.model]
+		if !ok {
+			acc = &modelAccumulator{report: AssemblyModelReport{CandidateModel: k.model}}
+			models[k.model] = acc
+			modelOrder = append(modelOrder, k.model)
+		}
+		s := pairs[k]
+		if s.flat == nil || s.prog == nil {
+			acc.report.PairingGaps++
+			continue
+		}
+		qf, okF := quality[s.flat.ArtifactHash]
+		qp, okP := quality[s.prog.ArtifactHash]
+		if !okF || !okP {
+			acc.report.PairingGaps++
+			continue
+		}
+		if !reflect.DeepEqual(s.flat.Trace.AssemblyEval.CandidateIDs, s.prog.Trace.AssemblyEval.CandidateIDs) {
+			acc.report.InvalidPairs++
+			continue
+		}
+		acc.report.Pairs++
+		totalPairs++
+		acc.report.Deltas = append(acc.report.Deltas, qp-qf)
+		// validateTrace enforced tokens > 0 for every paired artifact.
+		ft := float64(s.flat.Trace.AssemblyEval.EstimatedPromptTokens)
+		pt := float64(s.prog.Trace.AssemblyEval.EstimatedPromptTokens)
+		acc.reductions = append(acc.reductions, 1-pt/ft)
+	}
+	if totalPairs == 0 {
+		return nil, fmt.Errorf("assembly report: no complete labeled pairs")
+	}
+	for _, model := range modelOrder {
+		acc := models[model]
+		if acc.report.Pairs > 0 {
+			var sum float64
+			for _, delta := range acc.report.Deltas {
+				sum += delta
+			}
+			acc.report.MeanDelta = sum / float64(acc.report.Pairs)
+			acc.report.DeltaCILow, acc.report.DeltaCIHigh =
+				bootstrapDeltaCI(acc.report.Deltas, seed, bootstrapN)
+			sort.Float64s(acc.reductions)
+			// len(reductions) == Pairs > 0 inside this branch.
+			if n := len(acc.reductions); n%2 == 1 {
+				acc.report.MedianTokenReduction = acc.reductions[n/2]
+			} else {
+				acc.report.MedianTokenReduction =
+					(acc.reductions[n/2-1] + acc.reductions[n/2]) / 2
+			}
+		}
+		if acc.report.Pairs < assemblyMinimumPairsPerModel {
+			acc.report.Decision = "insufficient-corpus"
+		} else {
+			acc.report.Decision = assemblyDecision(
+				acc.report.DeltaCILow, acc.report.DeltaCIHigh,
+				acc.report.MedianTokenReduction)
+		}
+		rep.Models = append(rep.Models, acc.report)
+	}
+	return rep, nil
+}
+
+// runAssemblyReport loads the (labels, artifacts) pair and renders the
+// assembly report as indented JSON.
+func runAssemblyReport(labelsPath, artifactsPath string) (string, error) {
+	arts, err := loadArtifacts(artifactsPath)
+	if err != nil {
+		return "", err
+	}
+	labels, err := loadLabels(labelsPath)
+	if err != nil {
+		return "", err
+	}
+	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN)
+	if err != nil {
+		return "", err
+	}
+	raw, err := json.MarshalIndent(report, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(append(raw, '\n')), nil
 }

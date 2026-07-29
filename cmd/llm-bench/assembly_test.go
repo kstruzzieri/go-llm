@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -220,6 +221,190 @@ func TestAssemblyBuildProducesValidPairs(t *testing.T) {
 		if !bytes.Equal(b1, b2) {
 			t.Fatalf("non-deterministic build for %s", e.Name())
 		}
+	}
+}
+
+func assemblyArtifact(pair string, mode AssemblyMode, model string, tokens int, ids []string) Artifact {
+	tr := validAssemblyTrace(mode)
+	tr.ID = pair + "-" + string(mode)
+	tr.AssemblyEval.PairID = pair
+	tr.AssemblyEval.CandidateIDs = ids
+	tr.AssemblyEval.EstimatedPromptTokens = tokens
+	a := Artifact{TraceID: tr.ID, CandidateModel: model, Trace: tr,
+		ActualFinalAnswer: "answer"}
+	a.ArtifactHash = artifactHash(a)
+	return a
+}
+
+func labelFor(a Artifact, quality float64) Label {
+	return Label{TraceID: a.TraceID, CandidateModel: a.CandidateModel,
+		ArtifactHash: a.ArtifactHash, ExpectedAnswerQuality: quality,
+		Labeler: "test"}
+}
+
+func TestAssemblyReportPairingAndDecision(t *testing.T) {
+	ids := []string{"c1", "c2"}
+	var arts []Artifact
+	var labels []Label
+	// 60 pairs meets the pre-registered minimum; progressive is one legal
+	// rubric step better with 50% token reduction.
+	for i := 0; i < assemblyMinimumPairsPerModel; i++ {
+		pair := fmt.Sprintf("case-%d", i)
+		f := assemblyArtifact(pair, AssemblyFlat, "m", 1000, ids)
+		p := assemblyArtifact(pair, AssemblyProgressive, "m", 500, ids)
+		arts = append(arts, f, p)
+		labels = append(labels, labelFor(f, 0.5), labelFor(p, 1.0))
+	}
+	rep, err := computeAssemblyReport(arts, labels, 1, 10000)
+	if err != nil {
+		t.Fatalf("computeAssemblyReport: %v", err)
+	}
+	if len(rep.Models) != 1 {
+		t.Fatalf("models=%d, want 1", len(rep.Models))
+	}
+	model := rep.Models[0]
+	if model.Pairs != assemblyMinimumPairsPerModel || model.InvalidPairs != 0 {
+		t.Fatalf("pairs=%d invalid=%d, want %d/0",
+			model.Pairs, model.InvalidPairs, assemblyMinimumPairsPerModel)
+	}
+	if model.MedianTokenReduction < 0.49 || model.MedianTokenReduction > 0.51 {
+		t.Fatalf("median token reduction = %v, want ~0.5", model.MedianTokenReduction)
+	}
+	if model.Decision != "quality-improved" {
+		t.Fatalf("decision = %q, want quality-improved (uniform +0.5 deltas)", model.Decision)
+	}
+
+	// Candidate mismatch invalidates the case, never skews it. The extra
+	// pair uses a FRESH pair ID ("case-mismatch", not one of case-0..59):
+	// reusing an existing pair ID would trip the duplicate-arm error, which
+	// is a different contract tested separately.
+	ids2 := []string{"other"}
+	badFlat := assemblyArtifact("case-mismatch", AssemblyFlat, "m", 1000, ids)
+	bad := assemblyArtifact("case-mismatch", AssemblyProgressive, "m", 500, ids2)
+	arts2 := append(append([]Artifact{}, arts...), badFlat, bad)
+	labels2 := append(append([]Label{}, labels...), labelFor(badFlat, 0.5), labelFor(bad, 0.5))
+	rep2, err := computeAssemblyReport(arts2, labels2, 1, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep2.Models[0].Pairs != assemblyMinimumPairsPerModel || rep2.Models[0].InvalidPairs != 1 {
+		t.Fatalf("pairs=%d invalid=%d, want %d/1",
+			rep2.Models[0].Pairs, rep2.Models[0].InvalidPairs, assemblyMinimumPairsPerModel)
+	}
+
+	// A pair missing one arm is a pairing gap, excluded and counted.
+	// Fresh pair ID for the same reason as above.
+	orphan := assemblyArtifact("case-orphan", AssemblyFlat, "m", 1000, ids)
+	rep3, err := computeAssemblyReport(append(arts, orphan), append(labels, labelFor(orphan, 0.5)), 1, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rep3.Models[0].Pairs != assemblyMinimumPairsPerModel || rep3.Models[0].PairingGaps != 1 {
+		t.Fatalf("pairs=%d gaps=%d, want %d/1",
+			rep3.Models[0].Pairs, rep3.Models[0].PairingGaps, assemblyMinimumPairsPerModel)
+	}
+
+	// A statistically favorable result remains explicitly ineligible below
+	// the corpus target; the report never prints "improved" on a seed corpus.
+	small, err := computeAssemblyReport(arts[:10], labels[:10], 1, 10000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if small.Models[0].Decision != "insufficient-corpus" {
+		t.Fatalf("small-corpus decision = %q", small.Models[0].Decision)
+	}
+}
+
+// TestAssemblyReportPerModelSeparation falsifies pooling: two models share
+// the same pair IDs with OPPOSITE label patterns. A pooled implementation
+// would average the two families to ~0 and report neither effect.
+func TestAssemblyReportPerModelSeparation(t *testing.T) {
+	ids := []string{"c1", "c2"}
+	var arts []Artifact
+	var labels []Label
+	for i := 0; i < assemblyMinimumPairsPerModel; i++ {
+		pair := fmt.Sprintf("case-%d", i)
+		mf := assemblyArtifact(pair, AssemblyFlat, "m", 1000, ids)
+		mp := assemblyArtifact(pair, AssemblyProgressive, "m", 500, ids)
+		nf := assemblyArtifact(pair, AssemblyFlat, "n", 1000, ids)
+		np := assemblyArtifact(pair, AssemblyProgressive, "n", 500, ids)
+		arts = append(arts, mf, mp, nf, np)
+		labels = append(labels,
+			labelFor(mf, 0.5), labelFor(mp, 1.0), // m: progressive better
+			labelFor(nf, 1.0), labelFor(np, 0.5)) // n: progressive worse
+	}
+	rep, err := computeAssemblyReport(arts, labels, 1, 10000)
+	if err != nil {
+		t.Fatalf("computeAssemblyReport: %v", err)
+	}
+	if len(rep.Models) != 2 {
+		t.Fatalf("models=%d, want 2", len(rep.Models))
+	}
+	m, n := rep.Models[0], rep.Models[1]
+	if m.CandidateModel != "m" || n.CandidateModel != "n" {
+		t.Fatalf("model order = %q, %q; want sorted m, n", m.CandidateModel, n.CandidateModel)
+	}
+	if m.Pairs != assemblyMinimumPairsPerModel || n.Pairs != assemblyMinimumPairsPerModel {
+		t.Fatalf("pairs = %d/%d, want %d each", m.Pairs, n.Pairs, assemblyMinimumPairsPerModel)
+	}
+	if m.MeanDelta < 0.49 || m.MeanDelta > 0.51 {
+		t.Fatalf("model m mean delta = %v, want ~+0.5", m.MeanDelta)
+	}
+	if n.MeanDelta > -0.49 || n.MeanDelta < -0.51 {
+		t.Fatalf("model n mean delta = %v, want ~-0.5", n.MeanDelta)
+	}
+	if m.Decision != "quality-improved" {
+		t.Fatalf("model m decision = %q, want quality-improved", m.Decision)
+	}
+	if n.Decision != "regressed" {
+		t.Fatalf("model n decision = %q, want regressed", n.Decision)
+	}
+}
+
+func TestAssemblyReportErrors(t *testing.T) {
+	ids := []string{"c1"}
+	dupA := assemblyArtifact("p1", AssemblyFlat, "m", 1000, ids)
+	dupB := assemblyArtifact("p1", AssemblyFlat, "m", 900, ids) // distinct hash, same arm
+	orphan := assemblyArtifact("p2", AssemblyFlat, "m", 1000, ids)
+	cases := []struct {
+		name    string
+		arts    []Artifact
+		labels  []Label
+		wantErr string
+	}{
+		{"duplicate flat arm", []Artifact{dupA, dupB}, []Label{labelFor(dupA, 0.5)}, "duplicate flat arm"},
+		{"no complete labeled pairs", []Artifact{orphan}, []Label{labelFor(orphan, 0.5)}, "no complete labeled pairs"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := computeAssemblyReport(tc.arts, tc.labels, 1, 10000)
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestAssemblyDecisionRuleStatuses(t *testing.T) {
+	cases := []struct {
+		name       string
+		ciLo, ciHi float64
+		reduction  float64
+		want       string
+	}{
+		{"improved", 0.05, 0.40, 0.30, "quality-improved"},
+		{"noninferior", -0.05, 0.20, 0.30, "efficient-noninferior"},
+		{"regressed", -0.60, -0.15, 0.30, "regressed"},
+		{"inconclusive-ci", -0.20, 0.30, 0.30, "inconclusive"},
+		{"improved-but-no-savings", 0.05, 0.40, 0.10, "inconclusive"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := assemblyDecision(tc.ciLo, tc.ciHi, tc.reduction); got != tc.want {
+				t.Fatalf("assemblyDecision(%v, %v, %v) = %q, want %q",
+					tc.ciLo, tc.ciHi, tc.reduction, got, tc.want)
+			}
+		})
 	}
 }
 

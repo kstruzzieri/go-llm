@@ -54,6 +54,7 @@ func main() {
 	calibrate := flag.Bool("calibrate", false, "Phase 2: re-score frozen labeled artifacts with the judge model")
 	manualReport := flag.Bool("manual-report", false, "Score frozen labeled artifacts with human labels (manual scorer) and emit a quality baseline report (uses -labels, -artifacts, -report)")
 	pairedReport := flag.Bool("paired-report", false, "Emit the paired-label report: paired-complete means, completeness worklist, win/loss/tie matrix, bootstrap delta CIs, resolution diagnostic (uses -labels, -artifacts, -baseline, -report)")
+	assemblyReport := flag.Bool("assembly-report", false, "Emit the paired assembly (flat vs progressive) report using -labels, -artifacts, and -report (#331)")
 	discriminationReport := flag.Bool("discrimination-report", false, "Classify each trace (spec §9.1: valid-discriminator/saturated/unsolved/floor-only/no-signal/unpaired), emit the per-stratum funnel + K-gate, and write the derived valid-discriminator manifest (uses -labels, -artifacts, -corpus-manifest, -top-models, -floor-model, -gate-source, -discriminator-manifest-out, -report; does NOT honor -corpus-sources/-partitions/-categories — it always classifies all strata so the funnel shows every source)")
 	topModels := flag.String("top-models", "", "Comma-separated top-cluster selectors for -discrimination-report (transport prefix optional; e.g. gemma4:31b or ollama/gemma4:31b)")
 	floorModel := flag.String("floor-model", "", "Floor model selector for -discrimination-report (transport prefix optional)")
@@ -119,6 +120,9 @@ func main() {
 	if *pairedReport {
 		modes++
 	}
+	if *assemblyReport {
+		modes++
+	}
 	if *fimLatency {
 		modes++
 	}
@@ -138,7 +142,7 @@ func main() {
 		modes++
 	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -339,6 +343,22 @@ func main() {
 			log.Fatalf("llm-bench: write report: %v", err)
 		}
 		fmt.Fprintf(os.Stderr, "llm-bench: paired-label report written to %s\n", *reportPath)
+		return
+	}
+
+	if *assemblyReport {
+		report, err := runAssemblyReport(*labelsPath, *artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: assembly-report: %v", err)
+		}
+		if *reportPath == "" {
+			fmt.Print(report)
+			return
+		}
+		if err := os.WriteFile(*reportPath, []byte(report), 0o600); err != nil {
+			log.Fatalf("llm-bench: write assembly report: %v", err)
+		}
+		fmt.Fprintf(os.Stderr, "llm-bench: assembly report written to %s\n", *reportPath)
 		return
 	}
 
