@@ -139,55 +139,129 @@ func TestContextSetCloneIsolation(t *testing.T) {
 }
 
 func TestValidateContextSet(t *testing.T) {
+	// wantMsg pins the rule each error names AND its indexing. "wantErr plus a
+	// prefix" cannot tell two rules apart: deleting the conversation branch
+	// makes that set fall through to the generic unknown-domain error, and
+	// stripping "group %d" from a message loses the indexing the spec requires
+	// — both stay green without these substrings.
 	tests := []struct {
 		name    string
 		set     *ContextSet
 		wantErr bool
+		wantMsg []string
 	}{
-		{"valid", validSet(), false},
-		{"memory domain", setWith(func(s *ContextSet) {
+		{name: "valid", set: validSet()},
+		{name: "memory domain", set: setWith(func(s *ContextSet) {
 			s.Groups[0].Desc.Subject.Domain = contextdepth.DomainMemory
-		}), false},
-		{"positive MinVerbatim", setWith(func(s *ContextSet) { s.MinVerbatim = 2 }), false},
-		{"negative MinVerbatim", setWith(func(s *ContextSet) { s.MinVerbatim = -1 }), true},
-		{"zero groups", setWith(func(s *ContextSet) { s.Groups = nil }), true},
-		{"blank ID", setWith(func(s *ContextSet) { s.Groups[0].Desc.Subject.ID = "" }), true},
-		{"unknown domain", setWith(func(s *ContextSet) { s.Groups[0].Desc.Subject.Domain = "x" }), true},
-		{"blank domain", setWith(func(s *ContextSet) { s.Groups[0].Desc.Subject.Domain = "" }), true},
-		{"conversation domain reserved", setWith(func(s *ContextSet) {
-			s.Groups[0].Desc.Subject.Domain = contextdepth.DomainConversation
-		}), true},
-		{"empty alternatives", setWith(func(s *ContextSet) { s.Groups[0].Alternatives = nil }), true},
-		{"invalid desc", setWith(func(s *ContextSet) {
-			s.Groups[0].Alternatives[0].Desc.Representations = nil
-		}), true},
-		{"empty content", setWith(func(s *ContextSet) { s.Groups[0].Alternatives[0].Content = "" }), true},
-		{"max groups", groupsSet(256), false},
-		{"too many groups", groupsSet(257), true},
-		{"max alternatives", altsSet(64), false},
-		{"too many alternatives", altsSet(65), true},
-		{"attrib on non-verbatim", setWith(func(s *ContextSet) {
-			s.Groups[0].Alternatives[0].Attrib = &RetrievalAttribution{Sources: []RetrievedSource{{Source: "pkg/doc.go"}}}
-		}), true},
-		{"attrib on verbatim ok", setWith(func(s *ContextSet) {
+		})},
+		{name: "positive MinVerbatim", set: setWith(func(s *ContextSet) { s.MinVerbatim = 2 })},
+		{
+			name:    "negative MinVerbatim",
+			set:     setWith(func(s *ContextSet) { s.MinVerbatim = -1 }),
+			wantErr: true,
+			wantMsg: []string{"MinVerbatim must be >= 0"},
+		},
+		{
+			name:    "zero groups",
+			set:     setWith(func(s *ContextSet) { s.Groups = nil }),
+			wantErr: true,
+			wantMsg: []string{"zero groups"},
+		},
+		{
+			name:    "blank ID",
+			set:     setWith(func(s *ContextSet) { s.Groups[0].Desc.Subject.ID = "" }),
+			wantErr: true,
+			wantMsg: []string{"group 0", "blank subject ID"},
+		},
+		{
+			name:    "unknown domain",
+			set:     setWith(func(s *ContextSet) { s.Groups[0].Desc.Subject.Domain = "x" }),
+			wantErr: true,
+			wantMsg: []string{"group 0", `unknown domain "x"`},
+		},
+		{
+			name:    "blank domain",
+			set:     setWith(func(s *ContextSet) { s.Groups[0].Desc.Subject.Domain = "" }),
+			wantErr: true,
+			wantMsg: []string{"group 0", `unknown domain ""`},
+		},
+		{
+			name: "conversation domain reserved",
+			set: setWith(func(s *ContextSet) {
+				s.Groups[0].Desc.Subject.Domain = contextdepth.DomainConversation
+			}),
+			wantErr: true,
+			// Rejected AS assembler-owned, not merely rejected: the generic
+			// unknown-domain message would satisfy every other expectation.
+			wantMsg: []string{"group 0", `domain "conversation" is assembler-owned`},
+		},
+		{
+			name:    "empty alternatives",
+			set:     setWith(func(s *ContextSet) { s.Groups[0].Alternatives = nil }),
+			wantErr: true,
+			wantMsg: []string{"group 0 (pkg/doc.go)", "no alternatives"},
+		},
+		{
+			name: "invalid desc",
+			set: setWith(func(s *ContextSet) {
+				s.Groups[0].Alternatives[0].Desc.Representations = nil
+			}),
+			wantErr: true,
+			wantMsg: []string{"group 0 (pkg/doc.go)", "alternative 0", "invalid descriptor"},
+		},
+		{
+			name:    "empty content",
+			set:     setWith(func(s *ContextSet) { s.Groups[0].Alternatives[0].Content = "" }),
+			wantErr: true,
+			wantMsg: []string{"group 0 (pkg/doc.go)", "alternative 0", "empty content"},
+		},
+		{name: "max groups", set: groupsSet(256)},
+		{
+			name:    "too many groups",
+			set:     groupsSet(257),
+			wantErr: true,
+			wantMsg: []string{"257 groups exceeds limit 256"},
+		},
+		{name: "max alternatives", set: altsSet(64)},
+		{
+			name:    "too many alternatives",
+			set:     altsSet(65),
+			wantErr: true,
+			wantMsg: []string{"group 0 (pkg/doc.go)", "65 alternatives exceeds limit 64"},
+		},
+		{
+			name: "attrib on non-verbatim",
+			set: setWith(func(s *ContextSet) {
+				s.Groups[0].Alternatives[0].Attrib = &RetrievalAttribution{Sources: []RetrievedSource{{Source: "pkg/doc.go"}}}
+			}),
+			wantErr: true,
+			wantMsg: []string{"group 0 (pkg/doc.go)", "alternative 0", "attribution on a non-verbatim alternative"},
+		},
+		{name: "attrib on verbatim ok", set: setWith(func(s *ContextSet) {
 			s.Groups[0].Alternatives[0].Desc.Representations = []contextdepth.RepresentationDesc{testVerbatimRep}
 			s.Groups[0].Alternatives[0].Attrib = &RetrievalAttribution{Sources: []RetrievedSource{{Source: "pkg/doc.go"}}}
-		}), false},
+		})},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			err := validateContextSet(testCallID, tt.set)
-			if tt.wantErr {
-				if err == nil {
-					t.Fatal("validateContextSet() = nil, want an error")
-				}
-				if msg := err.Error(); !strings.HasPrefix(msg, "agent: context set") || !strings.Contains(msg, testCallID) {
-					t.Errorf("error %q must be package-prefixed and name call %q", msg, testCallID)
+			if !tt.wantErr {
+				if err != nil {
+					t.Fatalf("validateContextSet() = %v, want nil", err)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("validateContextSet() = %v, want nil", err)
+			if err == nil {
+				t.Fatal("validateContextSet() = nil, want an error")
+			}
+			msg := err.Error()
+			if !strings.HasPrefix(msg, "agent: context set") || !strings.Contains(msg, testCallID) {
+				t.Errorf("error %q must be package-prefixed and name call %q", msg, testCallID)
+			}
+			for _, want := range tt.wantMsg {
+				if !strings.Contains(msg, want) {
+					t.Errorf("error %q must contain %q", msg, want)
+				}
 			}
 		})
 	}

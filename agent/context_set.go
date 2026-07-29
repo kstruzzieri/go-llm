@@ -56,12 +56,15 @@ func (s *ContextSet) clone() *ContextSet {
 	for i, g := range s.Groups {
 		cg := ContextGroup{Desc: g.Desc, Alternatives: make([]ContextAlternative, len(g.Alternatives))}
 		for j, a := range g.Alternatives {
-			ca := ContextAlternative{
-				Desc:    contextdepth.AlternativeDesc{Representations: slices.Clone(a.Desc.Representations)},
-				Content: a.Content,
-			}
+			// Copy the struct, then replace only its slice: a composite literal
+			// naming just the slice field would silently drop any field a later
+			// slice adds to AlternativeDesc or RetrievalAttribution.
+			ca := ContextAlternative{Desc: a.Desc, Content: a.Content}
+			ca.Desc.Representations = slices.Clone(a.Desc.Representations)
 			if a.Attrib != nil {
-				ca.Attrib = &RetrievalAttribution{Sources: slices.Clone(a.Attrib.Sources)}
+				at := *a.Attrib
+				at.Sources = slices.Clone(a.Attrib.Sources)
+				ca.Attrib = &at
 			}
 			cg.Alternatives[j] = ca
 		}
