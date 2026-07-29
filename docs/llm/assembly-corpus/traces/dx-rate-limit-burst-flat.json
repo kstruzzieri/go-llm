@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Context:\nRelevant code context:\n\n--- internal/relay/retry.go (lines 1-28, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"math/rand\"\n5| \t\"time\"\n6| )\n7| \n8| // retryDelay computes the wait before the next delivery attempt.\n9| // Growth is exponential with full jitter; the ceiling keeps a flapping\n10| // endpoint from pushing waits past what operators expect.\n11| const (\n12| \tbaseDelay  = 400 * time.Millisecond\n13| \tmaxDelay   = 2 * time.Minute\n14| \tgrowFactor = 2.0\n15| )\n16| \n17| func retryDelay(attempt int) time.Duration {\n18| \td := baseDelay\n19| \tfor i := 0; i \u003c attempt \u0026\u0026 d \u003c maxDelay; i++ {\n20| \t\td = time.Duration(float64(d) * growFactor)\n21| \t}\n22| \tif d \u003e maxDelay {\n23| \t\td = maxDelay\n24| \t}\n25| \t// Full jitter: uniform in [0, d].\n26| \treturn time.Duration(rand.Int63n(int64(d) + 1))\n27| }\n\n--- internal/ratelimit/bucket.go (lines 1-35, similarity: 1.00) ---\n1| package ratelimit\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // Per-client token bucket for the ingest endpoint. A client may burst\n9| // up to `burst` publishes; sustained throughput is refillPerSec.\n10| const (\n11| \tburst        = 40\n12| \trefillPerSec = 10\n13| )\n14| \n15| type bucket struct {\n16| \tmu     sync.Mutex\n17| \ttokens float64\n18| \tlast   time.Time\n19| }\n20| \n21| func (b *bucket) Allow(now time.Time) bool {\n22| \tb.mu.Lock()\n23| \tdefer b.mu.Unlock()\n24| \tb.tokens += now.Sub(b.last).Seconds() * refillPerSec\n25| \tif b.tokens \u003e burst {\n26| \t\tb.tokens = burst\n27| \t}\n28| \tb.last = now\n29| \tif b.tokens \u003c 1 {\n30| \t\treturn false\n31| \t}\n32| \tb.tokens--\n33| \treturn true\n34| }\n\n\n\nQuestion: What burst capacity does the ingest rate limiter allow per client?"
+      "content": "Context:\nRelevant code context:\n\n--- internal/relay/retry.go (lines 1-27, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"math/rand\"\n5| \t\"time\"\n6| )\n7| \n8| // retryDelay computes the wait before the next delivery attempt.\n9| // Growth is exponential with full jitter; the ceiling keeps a flapping\n10| // endpoint from pushing waits past what operators expect.\n11| const (\n12| \tbaseDelay  = 400 * time.Millisecond\n13| \tmaxDelay   = 2 * time.Minute\n14| \tgrowFactor = 2.0\n15| )\n16| \n17| func retryDelay(attempt int) time.Duration {\n18| \td := baseDelay\n19| \tfor i := 0; i \u003c attempt \u0026\u0026 d \u003c maxDelay; i++ {\n20| \t\td = time.Duration(float64(d) * growFactor)\n21| \t}\n22| \tif d \u003e maxDelay {\n23| \t\td = maxDelay\n24| \t}\n25| \t// Full jitter: uniform in [0, d].\n26| \treturn time.Duration(rand.Int63n(int64(d) + 1))\n27| }\n\n--- internal/ratelimit/bucket.go (lines 1-34, similarity: 1.00) ---\n1| package ratelimit\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // Per-client token bucket for the ingest endpoint. A client may burst\n9| // up to `burst` publishes; sustained throughput is refillPerSec.\n10| const (\n11| \tburst        = 40\n12| \trefillPerSec = 10\n13| )\n14| \n15| type bucket struct {\n16| \tmu     sync.Mutex\n17| \ttokens float64\n18| \tlast   time.Time\n19| }\n20| \n21| func (b *bucket) Allow(now time.Time) bool {\n22| \tb.mu.Lock()\n23| \tdefer b.mu.Unlock()\n24| \tb.tokens += now.Sub(b.last).Seconds() * refillPerSec\n25| \tif b.tokens \u003e burst {\n26| \t\tb.tokens = burst\n27| \t}\n28| \tb.last = now\n29| \tif b.tokens \u003c 1 {\n30| \t\treturn false\n31| \t}\n32| \tb.tokens--\n33| \treturn true\n34| }\n\n\n\nQuestion: What burst capacity does the ingest rate limiter allow per client?"
     }
   ],
   "golden": {
@@ -18,11 +18,11 @@
     "pair_id": "dx-rate-limit-burst",
     "mode": "flat",
     "candidate_ids": [
-      "e56062264b6e",
-      "72e22a31d847",
-      "cffda334a17a",
-      "0e9870352cb7",
-      "3482ff1f86a5"
+      "d0f5e1dcc104ba962315855e153d5def50cc7f0c3588e56fe0e6f85084b4991e",
+      "fc8a2f43adb099dea854f33fdde9526606d168928ba2a2cef9116c2dae3d6597",
+      "7bd603dd16774ac195449851669f89133812e7615af3bc319baff9e67a0d4b18",
+      "6a8d6ac532644efa3481a7489b50c41cada2d4bc555e3e36a9a330f38dbb9904",
+      "ff93d51ff6ea7a95637fdf73af23719a5b962beb41b310679ed82e870d021931"
     ],
     "estimated_prompt_tokens": 444
   }

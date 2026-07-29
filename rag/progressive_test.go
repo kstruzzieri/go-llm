@@ -1,6 +1,8 @@
 package rag
 
 import (
+	"encoding/json"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -63,6 +65,26 @@ func TestDepthAliasInterchangeable(t *testing.T) {
 	if int(DepthNone) != 0 || int(DepthL0) != 1 || int(DepthL1) != 2 || int(DepthL2) != 3 {
 		t.Fatalf("depth numeric values moved: %d %d %d %d",
 			DepthNone, DepthL0, DepthL1, DepthL2)
+	}
+}
+
+func TestDepthAliasFormattingAndJSONCompatibility(t *testing.T) {
+	if got := fmt.Sprint(DepthL2); got != "L2" {
+		t.Fatalf("fmt.Sprint(DepthL2) = %q, want named depth", got)
+	}
+	raw, err := json.Marshal(DepthL2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != "3" {
+		t.Fatalf("json.Marshal(DepthL2) = %s, want numeric encoding 3", raw)
+	}
+	var got Depth
+	if err := json.Unmarshal([]byte("2"), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got != DepthL1 {
+		t.Fatalf("json.Unmarshal(2) = %v, want DepthL1", got)
 	}
 }
 

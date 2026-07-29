@@ -19,12 +19,9 @@ import (
 // text. BuildContext is unchanged; this is the opt-in progressive path.
 //
 // Security: rendered source paths and managed document titles are UNTRUSTED
-// data that reaches the model. Newline-based forgery of a whole block is
-// blocked — every value placed at a line-start delimiter is collapsed to one
-// line. Same-line forgery of a block's own label is NOT blocked: a source
-// path can still spell out a convincing "(managed: ...)" parenthetical or a
-// second line range inside an evidence header. Treat orientation and evidence
-// headers as attacker-influenceable text, not as trusted attribution.
+// data that reaches the model. Render format v2 quotes both values at
+// structural positions, so embedded newlines, labels, and delimiters remain
+// data and cannot forge orientation or evidence headers.
 func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, error) {
 	trace := ProgressiveTrace{
 		MaxTokens: req.MaxTokens, MaxBytes: req.MaxBytes, MaxDepth: req.MaxDepth,

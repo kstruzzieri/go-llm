@@ -125,9 +125,11 @@ func parseBlindScore(s string) (float64, error) {
 
 // renderBlindWorksheet emits one fill-in block per artifact for blind labeling
 // (R-D3): the trace prompt, committed rubric, and candidate final answer are
-// shown, but the model identity is withheld. Blocks are ordered by
+// shown, but the model identity is withheld. Normal blocks are ordered by
 // (trace_id, artifact_hash) so all candidates for one prompt sit together while
-// their order is model-independent. The labeler fills score:/notes:;
+// their order is model-independent. Assembly-eval trace IDs encode the arm, so
+// those blocks omit the trace line and sort by artifact hash instead. The
+// labeler fills score:/notes:;
 // -blind-ingest then rejoins the true model on artifact_hash from the untouched
 // artifacts file.
 //
@@ -142,6 +144,14 @@ func renderBlindWorksheet(arts []Artifact) string {
 	ordered := make([]Artifact, len(arts))
 	copy(ordered, arts)
 	sort.SliceStable(ordered, func(i, j int) bool {
+		iAssembly := ordered[i].Trace.AssemblyEval != nil
+		jAssembly := ordered[j].Trace.AssemblyEval != nil
+		if iAssembly != jAssembly {
+			return !iAssembly
+		}
+		if iAssembly {
+			return ordered[i].ArtifactHash < ordered[j].ArtifactHash
+		}
 		if ordered[i].TraceID != ordered[j].TraceID {
 			return ordered[i].TraceID < ordered[j].TraceID
 		}
@@ -158,7 +168,9 @@ func renderBlindWorksheet(arts []Artifact) string {
 	fmt.Fprintln(&b)
 	for _, a := range ordered {
 		fmt.Fprintf(&b, "=== ARTIFACT %s ===\n", a.ArtifactHash)
-		fmt.Fprintf(&b, "trace: %s\n\n", a.TraceID)
+		if a.Trace.AssemblyEval == nil {
+			fmt.Fprintf(&b, "trace: %s\n\n", a.TraceID)
+		}
 		fmt.Fprintln(&b, "[prompt]")
 		fmt.Fprintln(&b, strings.TrimSpace(a.Trace.System))
 		for _, turn := range a.Trace.Turns {

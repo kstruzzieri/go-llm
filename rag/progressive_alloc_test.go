@@ -739,6 +739,20 @@ func TestAllocateBudgetAccountingIsExact(t *testing.T) {
 			t.Fatalf("iter %d: used+free=%d, max=%d", iter,
 				trace.EstimatedTokensUsed+trace.EstimatedTokensFree, trace.MaxTokens)
 		}
+		if trace.DistinctSources != trace.SourcesAtL0+trace.SourcesAtL1+
+			trace.SourcesWithEvidence+trace.OmittedSources {
+			t.Fatalf("iter %d: source partition broken: %+v", iter, trace)
+		}
+		for _, sourceTrace := range trace.Sources {
+			if sourceTrace.Omitted {
+				if sourceTrace.EffectiveDepth != DepthNone || sourceTrace.EstimatedTokens != 0 ||
+					len(sourceTrace.RenderedEvidence) != 0 {
+					t.Fatalf("iter %d: omitted source invariant broken: %+v", iter, sourceTrace)
+				}
+			} else if !sourceTrace.EffectiveDepth.Valid() {
+				t.Fatalf("iter %d: rendered source has invalid depth: %+v", iter, sourceTrace)
+			}
+		}
 		for _, src := range sources {
 			switch {
 			case src.summaryBudgetOmitted:

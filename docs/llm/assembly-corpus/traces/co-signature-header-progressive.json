@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Context:\n### source: \"internal/sign/doc.go\"\npurpose: Package overview: shared-secret authentication of inbound publishes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/sign/doc.go\" (lines 1-11, similarity: 1.00) ---\n1| // Package sign authenticates inbound publishes.\n2| //\n3| // Producers MAC the request body with a shared secret and send the\n4| // digest with the request; beacond recomputes and compares it before\n5| // any payload is enqueued. Key handling and verification live here so\n6| // the relay package never touches raw secrets.\n7| //\n8| // The secret is provisioned by the operator; rotation order is\n9| // documented in the operations guide.\n10| package sign\n\n### source: \"internal/sign/signer.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/sign/signer.go\" (lines 1-20, similarity: 1.00) ---\n1| package sign\n2| \n3| import \"os\"\n4| \n5| // Signer holds the shared secret used to authenticate publishes.\n6| // Verification lives alongside it in this package.\n7| type Signer struct {\n8| \tsecret []byte\n9| }\n10| \n11| // NewSigner loads the shared secret from the operator-provided key\n12| // file. The file content is the raw secret.\n13| func NewSigner(path string) (*Signer, error) {\n14| \traw, err := os.ReadFile(path)\n15| \tif err != nil {\n16| \t\treturn nil, err\n17| \t}\n18| \treturn \u0026Signer{secret: raw}, nil\n19| }\n\n### source: \"internal/sign/hmac.go\"\npurpose: HMAC request-signing helpers for inbound webhook publishes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/relay/handler.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/metrics/metrics.go\"\npurpose: Prometheus counters beacond exposes on /metrics.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n\nQuestion: Which HTTP request header carries the webhook payload signature?"
+      "content": "Context:\n### source: \"internal/sign/doc.go\"\npurpose: Package overview: shared-secret authentication of inbound publishes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/sign/doc.go\" (lines 1-10, similarity: 1.00) ---\n1| // Package sign authenticates inbound publishes.\n2| //\n3| // Producers MAC the request body with a shared secret and send the\n4| // digest with the request; beacond recomputes and compares it before\n5| // any payload is enqueued. Key handling and verification live here so\n6| // the relay package never touches raw secrets.\n7| //\n8| // The secret is provisioned by the operator; rotation order is\n9| // documented in the operations guide.\n10| package sign\n\n### source: \"internal/sign/signer.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/sign/signer.go\" (lines 1-19, similarity: 1.00) ---\n1| package sign\n2| \n3| import \"os\"\n4| \n5| // Signer holds the shared secret used to authenticate publishes.\n6| // Verification lives alongside it in this package.\n7| type Signer struct {\n8| \tsecret []byte\n9| }\n10| \n11| // NewSigner loads the shared secret from the operator-provided key\n12| // file. The file content is the raw secret.\n13| func NewSigner(path string) (*Signer, error) {\n14| \traw, err := os.ReadFile(path)\n15| \tif err != nil {\n16| \t\treturn nil, err\n17| \t}\n18| \treturn \u0026Signer{secret: raw}, nil\n19| }\n\n### source: \"internal/sign/hmac.go\"\npurpose: HMAC request-signing helpers for inbound webhook publishes.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/relay/handler.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/metrics/metrics.go\"\npurpose: Prometheus counters beacond exposes on /metrics.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n\nQuestion: Which HTTP request header carries the webhook payload signature?"
     }
   ],
   "golden": {
@@ -18,11 +18,11 @@
     "pair_id": "co-signature-header",
     "mode": "progressive",
     "candidate_ids": [
-      "1a9a6b7fd80a",
-      "9f929c63178f",
-      "ef1a27a9a75f",
-      "be437766f86f",
-      "472a993d9af1"
+      "a796720b0c8bb9d1bbfa74c9223e12734850aaa80b858de935298cb8cb529692",
+      "3d7d0ca2ed9c4dff3f2a1db61050b46a3acab63f80842ae0f817582f8c2ce67e",
+      "8451a71ab380cfe1d6fcb41dca0955af0f287ead820d4a8d7c9e741dc0621dbb",
+      "d9036c4e5c8818fc730235510c92128ecc764c38703bd17f2129bb6bd9abdcb1",
+      "b733e22e6c2f9746c606ffa87dfe96bfcd7e7fbbd102308563303604637392a3"
     ],
     "estimated_prompt_tokens": 544
   }

@@ -158,11 +158,17 @@ func TestAssemblyBuildProducesValidPairs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(entries) != 4 { // 2 cases x 2 arms
-		t.Fatalf("wrote %d traces, want 4", len(entries))
+	var traceEntries []os.DirEntry
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) == ".json" {
+			traceEntries = append(traceEntries, entry)
+		}
+	}
+	if len(traceEntries) != 4 { // 2 cases x 2 arms
+		t.Fatalf("wrote %d traces, want 4", len(traceEntries))
 	}
 	byPair := map[string][]Trace{}
-	for _, e := range entries {
+	for _, e := range traceEntries {
 		var tr Trace
 		readAssemblyJSON(t, filepath.Join(outDir, e.Name()), &tr)
 		if err := validateTrace(tr); err != nil {
@@ -215,12 +221,273 @@ func TestAssemblyBuildProducesValidPairs(t *testing.T) {
 	if err := assemblyBuild(context.Background(), fixture, outDir2); err != nil {
 		t.Fatal(err)
 	}
-	for _, e := range entries {
+	for _, e := range traceEntries {
 		b1 := mustReadAssemblyFile(t, filepath.Join(outDir, e.Name()))
 		b2 := mustReadAssemblyFile(t, filepath.Join(outDir2, e.Name()))
 		if !bytes.Equal(b1, b2) {
 			t.Fatalf("non-deterministic build for %s", e.Name())
 		}
+	}
+}
+
+func TestAssemblyCommittedCorpusUpToDate(t *testing.T) {
+	corpusDir := filepath.Join("..", "..", "docs", "llm", "assembly-corpus")
+	wantDir := filepath.Join(corpusDir, "traces")
+	gotDir := t.TempDir()
+	if err := assemblyBuild(context.Background(), filepath.Join(corpusDir, "cases.json"), gotDir); err != nil {
+		t.Fatal(err)
+	}
+
+	wantEntries, err := os.ReadDir(wantDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotEntries, err := os.ReadDir(gotDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(gotEntries) != len(wantEntries) {
+		t.Fatalf("generated %d traces, committed corpus has %d", len(gotEntries), len(wantEntries))
+	}
+	for i, wantEntry := range wantEntries {
+		if gotEntries[i].Name() != wantEntry.Name() {
+			t.Fatalf("trace %d = %q, want %q", i, gotEntries[i].Name(), wantEntry.Name())
+		}
+		got := mustReadAssemblyFile(t, filepath.Join(gotDir, gotEntries[i].Name()))
+		want := mustReadAssemblyFile(t, filepath.Join(wantDir, wantEntry.Name()))
+		if !bytes.Equal(got, want) {
+			t.Fatalf("committed trace %s is stale; rebuild the assembly corpus", wantEntry.Name())
+		}
+	}
+}
+
+func TestAssemblyBuildRemovesStaleGeneratedTraces(t *testing.T) {
+	dir := t.TempDir()
+	fixture := writeFile(t, dir, "cases.json", assemblyFixtureJSON)
+	outDir := filepath.Join(dir, "traces")
+	if err := assemblyBuild(context.Background(), fixture, outDir); err != nil {
+		t.Fatal(err)
+	}
+	keepPath := filepath.Join(outDir, "keep.txt")
+	if err := os.WriteFile(keepPath, []byte("not an assembly trace\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cases []assemblyCase
+	if err := json.Unmarshal([]byte(assemblyFixtureJSON), &cases); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(cases[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := assemblyBuild(context.Background(), fixture, outDir); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, stale := range []string{"case-content-flat.json", "case-content-progressive.json"} {
+		if _, err := os.Stat(filepath.Join(outDir, stale)); !os.IsNotExist(err) {
+			t.Fatalf("stale generated trace %s remains: %v", stale, err)
+		}
+	}
+	if _, err := os.Stat(keepPath); err != nil {
+		t.Fatalf("non-assembly file was removed: %v", err)
+	}
+}
+
+func TestAssemblyBuildRefusesUnownedAssemblyJSON(t *testing.T) {
+	dir := t.TempDir()
+	fixture := writeFile(t, dir, "cases.json", assemblyFixtureJSON)
+	outDir := filepath.Join(dir, "traces")
+	if err := assemblyBuild(context.Background(), fixture, outDir); err != nil {
+		t.Fatal(err)
+	}
+	owned := mustReadAssemblyFile(t, filepath.Join(outDir, "case-content-flat.json"))
+	unowned := filepath.Join(outDir, "valuable-run.json")
+	if err := os.WriteFile(unowned, owned, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var cases []assemblyCase
+	if err := json.Unmarshal([]byte(assemblyFixtureJSON), &cases); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(cases[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture, raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = assemblyBuild(context.Background(), fixture, outDir)
+	if err == nil || !strings.Contains(err.Error(), "unowned JSON") {
+		t.Fatalf("assemblyBuild error = %v, want unowned JSON refusal", err)
+	}
+	if got := mustReadAssemblyFile(t, unowned); !bytes.Equal(got, owned) {
+		t.Fatal("builder changed an assembly-shaped JSON file it did not own")
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "case-content-progressive.json")); err != nil {
+		t.Fatalf("builder removed an owned stale trace before preflight failed: %v", err)
+	}
+}
+
+func TestAssemblyBuildRefusesUnownedOutputCollision(t *testing.T) {
+	dir := t.TempDir()
+	fixture := writeFile(t, dir, "cases.json", assemblyFixtureJSON)
+	outDir := filepath.Join(dir, "traces")
+	if err := os.Mkdir(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	collision := filepath.Join(outDir, "case-metadata-flat.json")
+	const original = "valuable existing output\n"
+	if err := os.WriteFile(collision, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := assemblyBuild(context.Background(), fixture, outDir)
+	if err == nil || !strings.Contains(err.Error(), "unowned output") {
+		t.Fatalf("assemblyBuild error = %v, want unowned output refusal", err)
+	}
+	if got := string(mustReadAssemblyFile(t, collision)); got != original {
+		t.Fatalf("unowned output overwritten: %q", got)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "case-metadata-progressive.json")); !os.IsNotExist(err) {
+		t.Fatalf("builder wrote another trace before preflight failed: %v", err)
+	}
+}
+
+func TestAssemblyBuildPreflightsStaleFilesBeforeWriting(t *testing.T) {
+	var cases []assemblyCase
+	if err := json.Unmarshal([]byte(assemblyFixtureJSON), &cases); err != nil {
+		t.Fatal(err)
+	}
+	first, err := json.Marshal(cases[:1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	fixture := writeFile(t, dir, "cases.json", string(first))
+	outDir := filepath.Join(dir, "traces")
+	if err := assemblyBuild(context.Background(), fixture, outDir); err != nil {
+		t.Fatal(err)
+	}
+	stale := filepath.Join(outDir, "case-metadata-flat.json")
+	if err := os.WriteFile(stale, []byte("modified\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	second, err := json.Marshal(cases[1:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(fixture, second, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err = assemblyBuild(context.Background(), fixture, outDir)
+	if err == nil || !strings.Contains(err.Error(), "modified output") {
+		t.Fatalf("assemblyBuild error = %v, want modified output refusal", err)
+	}
+	for _, name := range []string{"case-content-flat.json", "case-content-progressive.json"} {
+		if _, err := os.Stat(filepath.Join(outDir, name)); !os.IsNotExist(err) {
+			t.Fatalf("builder wrote %s before stale-file preflight failed: %v", name, err)
+		}
+	}
+}
+
+func TestAssemblyBuildRefusesSymlinkOutput(t *testing.T) {
+	dir := t.TempDir()
+	fixture := writeFile(t, dir, "cases.json", assemblyFixtureJSON)
+	outDir := filepath.Join(dir, "traces")
+	if err := assemblyBuild(context.Background(), fixture, outDir); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := filepath.Join(dir, "sentinel")
+	const original = "do not overwrite\n"
+	if err := os.WriteFile(sentinel, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	output := filepath.Join(outDir, "case-metadata-flat.json")
+	if err := os.Remove(output); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(sentinel, output); err != nil {
+		t.Fatal(err)
+	}
+
+	err := assemblyBuild(context.Background(), fixture, outDir)
+	if err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("assemblyBuild error = %v, want symlink refusal", err)
+	}
+	if got := string(mustReadAssemblyFile(t, sentinel)); got != original {
+		t.Fatalf("symlink target overwritten: %q", got)
+	}
+}
+
+func TestAssemblyBuildRejectsEmptyFixtureWithoutDeletingOutput(t *testing.T) {
+	dir := t.TempDir()
+	fixture := writeFile(t, dir, "cases.json", assemblyFixtureJSON)
+	outDir := filepath.Join(dir, "traces")
+	if err := assemblyBuild(context.Background(), fixture, outDir); err != nil {
+		t.Fatal(err)
+	}
+	keptTrace := filepath.Join(outDir, "case-content-flat.json")
+	if err := os.WriteFile(fixture, []byte("[]\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := assemblyBuild(context.Background(), fixture, outDir); err == nil {
+		t.Fatal("empty fixture accepted")
+	}
+	if _, err := os.Stat(keptTrace); err != nil {
+		t.Fatalf("existing traces changed after rejected fixture: %v", err)
+	}
+}
+
+func TestAssemblyBuildEndLinesMatchRenderedContent(t *testing.T) {
+	const fixtureJSON = `[{
+		"id":"line-range",
+		"category":"content_only",
+		"question":"What is the second line?",
+		"golden":{"final_answer_criteria":"States beta."},
+		"max_tokens":512,
+		"sources":[{"path":"two.txt","content":"alpha\nbeta\n","language":"text"}]
+	}]`
+	dir := t.TempDir()
+	fixture := writeFile(t, dir, "cases.json", fixtureJSON)
+	outDir := filepath.Join(dir, "traces")
+	if err := assemblyBuild(context.Background(), fixture, outDir); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		file   string
+		header string
+	}{
+		{"line-range-flat.json", "--- two.txt (lines 1-2,"},
+		{"line-range-progressive.json", `--- source: "two.txt" (lines 1-2,`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.file, func(t *testing.T) {
+			var tr Trace
+			readAssemblyJSON(t, filepath.Join(outDir, tc.file), &tr)
+			if got := tr.Turns[0].Content; !strings.Contains(got, tc.header) {
+				t.Fatalf("rendered context missing %q:\n%s", tc.header, got)
+			}
+		})
+	}
+}
+
+func TestAssemblyChunkIDUnambiguousAndFullWidth(t *testing.T) {
+	a := assemblyChunkID("a", "\x00b")
+	b := assemblyChunkID("a\x00", "b")
+	if a == b {
+		t.Fatalf("distinct source/content pairs collided: %q", a)
+	}
+	if len(a) != 64 || len(b) != 64 {
+		t.Fatalf("chunk IDs are not full SHA-256 digests: %q / %q", a, b)
 	}
 }
 
@@ -412,6 +679,7 @@ func TestAssemblyBuildRejectsUnsafeOrDuplicateCaseIDs(t *testing.T) {
 	for _, body := range []string{
 		`[{"id":"../escape","category":"metadata","question":"q","golden":{"final_answer_criteria":"answer"},"max_tokens":64,"sources":[{"path":"a.go","content":"x"}]}]`,
 		`[{"id":"dup","category":"metadata","question":"q","golden":{"final_answer_criteria":"answer"},"max_tokens":64,"sources":[{"path":"a.go","content":"x"}]},{"id":"dup","category":"metadata","question":"q","golden":{"final_answer_criteria":"answer"},"max_tokens":64,"sources":[{"path":"b.go","content":"y"}]},{"id":"dup2","category":"metadata","question":"q","golden":{"final_answer_criteria":"answer"},"max_tokens":64,"sources":[{"path":"c.go","content":"z"}]}]`,
+		`[{"id":"case","category":"metadata","question":"q","golden":{"final_answer_criteria":"answer"},"max_tokens":64,"sources":[{"path":"a.go","content":"x"}]},{"id":"CASE","category":"metadata","question":"q","golden":{"final_answer_criteria":"answer"},"max_tokens":64,"sources":[{"path":"b.go","content":"y"}]}]`,
 	} {
 		dir := t.TempDir()
 		fixture := writeFile(t, dir, "cases.json", body)

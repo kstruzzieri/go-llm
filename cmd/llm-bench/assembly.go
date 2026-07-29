@@ -71,6 +71,13 @@ const assemblySystemPrompt = "Answer the question using ONLY the provided contex
 // non-reproducible byte-for-byte.
 const assemblyFixedEpoch = int64(1753574400)
 
+const assemblyManifestName = ".assembly-manifest"
+
+type assemblyManifest struct {
+	Version int               `json:"version"`
+	Files   map[string]string `json:"files"`
+}
+
 // assemblyBuild renders every case's candidate set both ways and writes
 // <out>/<case-id>-flat.json and <out>/<case-id>-progressive.json.
 func assemblyBuild(ctx context.Context, fixturePath, outDir string) error {
@@ -82,7 +89,11 @@ func assemblyBuild(ctx context.Context, fixturePath, outDir string) error {
 	if err := json.Unmarshal(raw, &cases); err != nil {
 		return fmt.Errorf("assembly build: parse fixture: %w", err)
 	}
+	if len(cases) == 0 {
+		return fmt.Errorf("assembly build: no cases")
+	}
 	seen := make(map[string]struct{}, len(cases))
+	expected := make(map[string]struct{}, len(cases)*2)
 	for _, c := range cases {
 		if _, ok := seen[c.ID]; ok {
 			return fmt.Errorf("assembly build: duplicate case id %q", c.ID)
@@ -91,19 +102,48 @@ func assemblyBuild(ctx context.Context, fixturePath, outDir string) error {
 		if err := validateAssemblyCase(c); err != nil {
 			return fmt.Errorf("assembly build: case %q: %w", c.ID, err)
 		}
+		expected[c.ID+"-flat.json"] = struct{}{}
+		expected[c.ID+"-progressive.json"] = struct{}{}
 	}
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return fmt.Errorf("assembly build: %w", err)
 	}
+	previous, err := readAssemblyManifest(outDir)
+	if err != nil {
+		return fmt.Errorf("assembly build: read output manifest: %w", err)
+	}
+	if err := preflightAssemblyOutput(outDir, previous.Files, expected); err != nil {
+		return fmt.Errorf("assembly build: preflight output: %w", err)
+	}
+	// ponytail: publication is atomic per file, not for the whole corpus. An
+	// interrupted build may leave an unmanifested trace that preflight refuses;
+	// the README documents remove-and-retry recovery. Add directory staging
+	// only if corpus-level transactions become a requirement.
 	for _, c := range cases {
 		if err := buildAssemblyCase(ctx, c, outDir); err != nil {
 			return fmt.Errorf("assembly build: case %q: %w", c.ID, err)
 		}
 	}
+	if err := removeStaleAssemblyTraces(outDir, previous.Files, expected); err != nil {
+		return fmt.Errorf("assembly build: reconcile output: %w", err)
+	}
+	if err := writeAssemblyManifest(outDir, expected); err != nil {
+		return fmt.Errorf("assembly build: write output manifest: %w", err)
+	}
 	return nil
 }
 
 func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error {
+	chunkIDs := make([]string, len(c.Sources))
+	seenChunkIDs := make(map[string]string, len(c.Sources))
+	for i, source := range c.Sources {
+		chunkIDs[i] = assemblyChunkID(source.Path, source.Content)
+		if previous, ok := seenChunkIDs[chunkIDs[i]]; ok {
+			return fmt.Errorf("source %q: chunk ID collides with source %q", source.Path, previous)
+		}
+		seenChunkIDs[chunkIDs[i]] = source.Path
+	}
+
 	store, err := rag.NewSQLiteStore(":memory:")
 	if err != nil {
 		return err
@@ -116,13 +156,12 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 	// content hashes.
 	const vectorSpaceID = "assembly-fixture-space"
 	for i, s := range c.Sources {
-		lines := strings.Count(s.Content, "\n") + 1
 		chunk := rag.Chunk{
-			ID:        assemblyChunkID(s.Path, s.Content),
+			ID:        chunkIDs[i],
 			Content:   s.Content,
 			Source:    s.Path,
 			StartLine: 1,
-			EndLine:   lines,
+			EndLine:   assemblySourceLineCount(s.Content),
 			Language:  s.Language,
 		}
 		emb := assemblyRankEmbedding(i)
@@ -224,8 +263,8 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 }
 
 func validateAssemblyCase(c assemblyCase) error {
-	if c.ID == "" || filepath.Base(c.ID) != c.ID || c.ID == "." || c.ID == ".." {
-		return fmt.Errorf("invalid id %q: must be one filename-safe segment", c.ID)
+	if !validAssemblyCaseID(c.ID) {
+		return fmt.Errorf("invalid id %q: use lowercase ASCII letters, digits, and non-leading hyphens", c.ID)
 	}
 	switch c.Category {
 	case "content_only", "metadata", "distractor", "no_answer":
@@ -252,6 +291,172 @@ func validateAssemblyCase(c assemblyCase) error {
 		}
 	}
 	return nil
+}
+
+func validAssemblyCaseID(id string) bool {
+	if id == "" {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		if c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || i > 0 && c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func readAssemblyManifest(outDir string) (assemblyManifest, error) {
+	path := filepath.Join(outDir, assemblyManifestName)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return assemblyManifest{Version: 1, Files: map[string]string{}}, nil
+	}
+	if err != nil {
+		return assemblyManifest{}, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return assemblyManifest{}, fmt.Errorf("%s is not a regular file", path)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return assemblyManifest{}, err
+	}
+	var manifest assemblyManifest
+	if err := json.Unmarshal(raw, &manifest); err != nil {
+		return assemblyManifest{}, err
+	}
+	if manifest.Version != 1 || manifest.Files == nil {
+		return assemblyManifest{}, fmt.Errorf("unsupported or incomplete manifest")
+	}
+	for name, digest := range manifest.Files {
+		if !validAssemblyTraceFilename(name) || len(digest) != sha256.Size*2 {
+			return assemblyManifest{}, fmt.Errorf("invalid manifest entry %q", name)
+		}
+		if _, err := hex.DecodeString(digest); err != nil {
+			return assemblyManifest{}, fmt.Errorf("invalid manifest digest for %q", name)
+		}
+	}
+	return manifest, nil
+}
+
+func validAssemblyTraceFilename(name string) bool {
+	for _, suffix := range []string{"-flat.json", "-progressive.json"} {
+		if strings.HasSuffix(name, suffix) {
+			return validAssemblyCaseID(strings.TrimSuffix(name, suffix))
+		}
+	}
+	return false
+}
+
+func preflightAssemblyOutput(outDir string, previous map[string]string, expected map[string]struct{}) error {
+	for name, digest := range previous {
+		if _, err := verifyOwnedAssemblyOutput(outDir, name, digest); err != nil {
+			return err
+		}
+	}
+	for name := range expected {
+		if _, owned := previous[name]; owned {
+			continue
+		}
+		_, err := os.Lstat(filepath.Join(outDir, name))
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("refuse to overwrite unowned output %q", name)
+	}
+	entries, err := os.ReadDir(outDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		if _, owned := previous[entry.Name()]; owned {
+			continue
+		}
+		if _, wanted := expected[entry.Name()]; wanted {
+			continue
+		}
+		return fmt.Errorf("refuse unowned JSON output %q", entry.Name())
+	}
+	return nil
+}
+
+func verifyOwnedAssemblyOutput(outDir, name, digest string) (bool, error) {
+	path := filepath.Join(outDir, name)
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("refuse to change symlink output %q", name)
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("refuse to change modified output %q", name)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, err
+	}
+	sum := sha256.Sum256(raw)
+	if hex.EncodeToString(sum[:]) != digest {
+		return false, fmt.Errorf("refuse to change modified output %q", name)
+	}
+	return true, nil
+}
+
+func removeStaleAssemblyTraces(outDir string, previous map[string]string, expected map[string]struct{}) error {
+	for name, digest := range previous {
+		if _, ok := expected[name]; ok {
+			continue
+		}
+		exists, err := verifyOwnedAssemblyOutput(outDir, name, digest)
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue
+		}
+		if err := os.Remove(filepath.Join(outDir, name)); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func writeAssemblyManifest(outDir string, expected map[string]struct{}) error {
+	manifest := assemblyManifest{Version: 1, Files: make(map[string]string, len(expected))}
+	for name := range expected {
+		raw, err := os.ReadFile(filepath.Join(outDir, name))
+		if err != nil {
+			return err
+		}
+		sum := sha256.Sum256(raw)
+		manifest.Files[name] = hex.EncodeToString(sum[:])
+	}
+	raw, err := json.MarshalIndent(manifest, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writeFileAtomic(filepath.Join(outDir, assemblyManifestName), append(raw, '\n'))
+}
+
+var assemblyLineBreakReplacer = strings.NewReplacer(
+	"\r\n", "\n", "\r", "\n", "\v", "\n", "\f", "\n",
+	"\u0085", "\n", "\u2028", "\n", "\u2029", "\n",
+)
+
+func assemblySourceLineCount(content string) int {
+	return strings.Count(strings.TrimSuffix(assemblyLineBreakReplacer.Replace(content), "\n"), "\n") + 1
 }
 
 func assemblyQueryEmbedder() rag.Embedder {
@@ -294,8 +499,8 @@ func assemblySourceSignature(content string) string {
 }
 
 func assemblyChunkID(source, content string) string {
-	sum := sha256.Sum256([]byte(source + "\x00" + content))
-	return hex.EncodeToString(sum[:])[:12]
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%d:%s%s", len(source), source, content)))
+	return hex.EncodeToString(sum[:])
 }
 
 func sourcePaths(srcs []assemblySource) []string {
@@ -311,7 +516,40 @@ func writeTraceJSON(path string, tr Trace) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(path, append(raw, '\n'), 0o644)
+	return writeFileAtomic(path, append(raw, '\n'))
+}
+
+func writeFileAtomic(path string, data []byte) error {
+	info, err := os.Lstat(path)
+	if err == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("refuse to overwrite symlink %q", path)
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("refuse to overwrite non-regular file %q", path)
+		}
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+
+	tmp, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpPath, path)
 }
 
 // Decision-rule constants, pre-registered (#331 spec 3.8). AnswerQuality

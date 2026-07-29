@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Context:\n### source: \"internal/relay/handler.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/relay/handler.go\" (lines 1-29, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"io\"\n5| \t\"net/http\"\n6| )\n7| \n8| // maxBody caps an ingest request body at 1 MiB. Oversized publishes\n9| // are rejected before the payload is read into memory.\n10| const maxBody = 1 \u003c\u003c 20\n11| \n12| // Ingest accepts a signed event publish and enqueues it for fanout.\n13| func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n14| \tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n15| \tif err != nil || int64(len(body)) \u003e maxBody {\n16| \t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n17| \t\treturn\n18| \t}\n19| \tif err := s.signer.Verify(r, body); err != nil {\n20| \t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n21| \t\treturn\n22| \t}\n23| \tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n24| \t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n25| \t\treturn\n26| \t}\n27| \tw.WriteHeader(http.StatusAccepted)\n28| }\n\n### source: \"internal/sign/hmac.go\"\npurpose: HMAC request-signing helpers for inbound webhook publishes.\noverview: hmac.go verifies webhook request signatures: it reads the digest the client sent, recomputes the payload MAC under the shared secret, and compares in constant time. Key material comes from the config layer.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/config/config.go\"\npurpose: Beacond runtime configuration type and its defaults.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/README.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: Which file implements verification of webhook request signatures?"
+      "content": "Context:\n### source: \"internal/relay/handler.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/relay/handler.go\" (lines 1-28, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"io\"\n5| \t\"net/http\"\n6| )\n7| \n8| // maxBody caps an ingest request body at 1 MiB. Oversized publishes\n9| // are rejected before the payload is read into memory.\n10| const maxBody = 1 \u003c\u003c 20\n11| \n12| // Ingest accepts a signed event publish and enqueues it for fanout.\n13| func (s *Server) Ingest(w http.ResponseWriter, r *http.Request) {\n14| \tbody, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))\n15| \tif err != nil || int64(len(body)) \u003e maxBody {\n16| \t\thttp.Error(w, \"payload too large\", http.StatusRequestEntityTooLarge)\n17| \t\treturn\n18| \t}\n19| \tif err := s.signer.Verify(r, body); err != nil {\n20| \t\thttp.Error(w, \"bad signature\", http.StatusUnauthorized)\n21| \t\treturn\n22| \t}\n23| \tif err := s.queue.Enqueue(r.Context(), body); err != nil {\n24| \t\thttp.Error(w, \"enqueue failed\", http.StatusServiceUnavailable)\n25| \t\treturn\n26| \t}\n27| \tw.WriteHeader(http.StatusAccepted)\n28| }\n\n### source: \"internal/sign/hmac.go\"\npurpose: HMAC request-signing helpers for inbound webhook publishes.\noverview: hmac.go verifies webhook request signatures: it reads the digest the client sent, recomputes the payload MAC under the shared secret, and compares in constant time. Key material comes from the config layer.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/config/config.go\"\npurpose: Beacond runtime configuration type and its defaults.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/README.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: Which file implements verification of webhook request signatures?"
     }
   ],
   "golden": {
@@ -18,10 +18,10 @@
     "pair_id": "md-signature-file",
     "mode": "progressive",
     "candidate_ids": [
-      "be437766f86f",
-      "ef1a27a9a75f",
-      "0e9870352cb7",
-      "97762f846186"
+      "d9036c4e5c8818fc730235510c92128ecc764c38703bd17f2129bb6bd9abdcb1",
+      "8451a71ab380cfe1d6fcb41dca0955af0f287ead820d4a8d7c9e741dc0621dbb",
+      "6a8d6ac532644efa3481a7489b50c41cada2d4bc555e3e36a9a330f38dbb9904",
+      "3558db9a788ebb34c3d123726b0d1db8f1e6f954a7249dd4c39c58a653d30e19"
     ],
     "estimated_prompt_tokens": 515
   }

@@ -20,13 +20,17 @@ pairs per model, and until then `-assembly-report` says
 only after the seed cases have been reviewed by the repo owner — cases are
 inspected at PR review before more are added in the same style.
 
+Before decision labeling, expand to at least 60 cases balanced across the
+four categories below. The report enforces the pair minimum; reviewers must
+verify category balance in `cases.json`.
+
 ## Case schema (`cases.json`)
 
 A JSON array of case objects:
 
 | Field | Meaning |
 |---|---|
-| `id` | Unique, filename-safe, single path segment (it becomes the trace filename prefix). |
+| `id` | Unique lowercase ASCII ID matching `[a-z0-9][a-z0-9-]*` (it becomes the trace filename prefix). |
 | `category` | Stratum: `content_only`, `metadata`, `distractor`, or `no_answer`. |
 | `question` | The user question both arms are asked. Non-blank. |
 | `golden.final_answer_criteria` | What a correct answer must contain (the labeling rubric). Non-blank. |
@@ -108,16 +112,9 @@ content inflates exactly the arm the stratum exists to stress. Channel 1 is
 why the signing header is `X-Ledger-Digest` and not the `X-Beacon-*` a model
 could guess from the project name.
 
-Channel 4 is live in the committed corpus: `md-deploy-doc` asks which
-document describes deployment, and its flat arm admits `docs/README.md`,
-whose line 25 reads "See the operations guide for deployment." A flat-arm
-model can answer "the operations guide" from that cross-reference alone,
-without the `docs/operations.md` path ever appearing in its context — and a
-lenient labeler reading the criteria "Identifies docs/operations.md" might
-accept it. The case stays as-is (it is still a legitimate orientation
-discriminator: only the progressive arm sees the actual path), but label it
-strictly — credit the flat arm only for the path, not for the paraphrase.
-New cases should avoid the leak rather than document it.
+Channel 4 was caught in `md-deploy-doc`: its flat arm once admitted a README
+cross-reference to the operations guide. That hint has been removed; keep
+future distractors equally free of answer-bearing cross-references.
 
 Content rules: invented project material only — no real client data, no
 secrets, no real hostnames or keys (example domains per RFC 2606).
@@ -131,9 +128,17 @@ go run ./cmd/llm-bench -assembly-build docs/llm/assembly-corpus/cases.json \
 
 The build is deterministic (pinned store timestamps, rank-derived
 embeddings): rebuilding from an unchanged `cases.json` reproduces the trace
-files byte-for-byte. Both arms of a pair share `assembly_eval.pair_id` and
-identical `candidate_ids`; the report asserts this and invalidates any pair
-where the arms diverge.
+files byte-for-byte. A successful rebuild removes obsolete assembly-trace
+JSON files recorded in the builder's `.assembly-manifest`. Because capture
+uses `*.json`, the builder refuses any unowned JSON in this dedicated output
+directory rather than deleting or silently evaluating it; move that file
+elsewhere before rebuilding. Non-JSON files are left alone. Both arms share
+`assembly_eval.pair_id` and identical `candidate_ids`; the report asserts
+this and invalidates any pair where the arms diverge.
+
+If a build is interrupted after publishing a trace but before updating the
+manifest, the next run refuses to overwrite that unowned file. Remove the
+reported unmanifested trace, then rerun the build.
 
 ## Labeling flow
 
@@ -151,11 +156,11 @@ label files stay local.
      -labels-out docs/llm/calibration/assembly-artifacts.jsonl
    ```
 
-2. **Blind-label** — render a worksheet with model identity hidden, fill in
-   the quality labels by hand, then ingest it back. Note the worksheet's
-   `trace:` line shows the trace ID, whose `-flat`/`-progressive` suffix
-   reveals the arm — labeling is blind to the model, not to the arm, so
-   score strictly against `final_answer_criteria`:
+2. **Blind-label** — render a worksheet with model and explicit arm identity
+   hidden, fill in the quality labels by hand, then ingest it back. Assembly
+   blocks omit the mode-bearing `trace:` line and are ordered by artifact
+   hash instead of flat-first. The prompt format can still make the rendering
+   strategy inferable, so score strictly against `final_answer_criteria`:
 
    ```
    go run ./cmd/llm-bench -blind-render \
@@ -213,12 +218,12 @@ of the built traces):
 
 | Statistic | Value |
 |---|---|
-| Median token reduction | +0.003 |
-| Mean token reduction | -0.051 |
+| Median token reduction | -0.006 |
+| Mean token reduction | -0.056 |
 | Range | -56.3% to +27.6% |
 | Cases at or above the 20% threshold | 1 of 16 |
 | Mean reduction, 3-source cases (n=6) | +0.049 |
-| Mean reduction, 4-source cases (n=5) | -0.033 |
+| Mean reduction, 4-source cases (n=5) | -0.051 |
 | Mean reduction, 5-source cases (n=4) | -0.184 |
 | Mean reduction, 6-source case (n=1) | -0.197 |
 

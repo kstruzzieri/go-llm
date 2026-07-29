@@ -241,12 +241,21 @@ func loadArtifacts(path string) ([]Artifact, error) {
 	}
 	defer func() { _ = f.Close() }()
 	var out []Artifact
+	seen := make(map[string]struct{})
 	dec := json.NewDecoder(f)
 	for dec.More() {
 		var a Artifact
 		if err := dec.Decode(&a); err != nil {
 			return nil, fmt.Errorf("decode artifact: %w", err)
 		}
+		if want := artifactHash(a); a.ArtifactHash != want {
+			return nil, fmt.Errorf("artifact %d: artifact_hash mismatch: got %q, want %q",
+				len(out)+1, a.ArtifactHash, want)
+		}
+		if _, ok := seen[a.ArtifactHash]; ok {
+			return nil, fmt.Errorf("artifact %d: duplicate artifact_hash %q", len(out)+1, a.ArtifactHash)
+		}
+		seen[a.ArtifactHash] = struct{}{}
 		out = append(out, a)
 	}
 	return out, nil

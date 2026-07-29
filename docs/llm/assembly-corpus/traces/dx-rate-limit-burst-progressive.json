@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Context:\n### source: \"internal/relay/retry.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/relay/retry.go\" (lines 1-28, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"math/rand\"\n5| \t\"time\"\n6| )\n7| \n8| // retryDelay computes the wait before the next delivery attempt.\n9| // Growth is exponential with full jitter; the ceiling keeps a flapping\n10| // endpoint from pushing waits past what operators expect.\n11| const (\n12| \tbaseDelay  = 400 * time.Millisecond\n13| \tmaxDelay   = 2 * time.Minute\n14| \tgrowFactor = 2.0\n15| )\n16| \n17| func retryDelay(attempt int) time.Duration {\n18| \td := baseDelay\n19| \tfor i := 0; i \u003c attempt \u0026\u0026 d \u003c maxDelay; i++ {\n20| \t\td = time.Duration(float64(d) * growFactor)\n21| \t}\n22| \tif d \u003e maxDelay {\n23| \t\td = maxDelay\n24| \t}\n25| \t// Full jitter: uniform in [0, d].\n26| \treturn time.Duration(rand.Int63n(int64(d) + 1))\n27| }\n\n### source: \"internal/ratelimit/bucket.go\"\npurpose: Token-bucket rate limiting for the ingest endpoint.\noverview: bucket.go implements a per-client token bucket: publishes draw a token, tokens refill continuously, and a client that exhausts its bucket is throttled until it refills.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/relay/fanout.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/config/config.go\"\npurpose: Beacond runtime configuration type and its defaults.\noverview: config.go declares the Config struct (listen address, delivery timeout, queue and signing-key paths) and the Defaults constructor used when no file or environment override is present.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/queue/sqlite.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: What burst capacity does the ingest rate limiter allow per client?"
+      "content": "Context:\n### source: \"internal/relay/retry.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n--- source: \"internal/relay/retry.go\" (lines 1-27, similarity: 1.00) ---\n1| package relay\n2| \n3| import (\n4| \t\"math/rand\"\n5| \t\"time\"\n6| )\n7| \n8| // retryDelay computes the wait before the next delivery attempt.\n9| // Growth is exponential with full jitter; the ceiling keeps a flapping\n10| // endpoint from pushing waits past what operators expect.\n11| const (\n12| \tbaseDelay  = 400 * time.Millisecond\n13| \tmaxDelay   = 2 * time.Minute\n14| \tgrowFactor = 2.0\n15| )\n16| \n17| func retryDelay(attempt int) time.Duration {\n18| \td := baseDelay\n19| \tfor i := 0; i \u003c attempt \u0026\u0026 d \u003c maxDelay; i++ {\n20| \t\td = time.Duration(float64(d) * growFactor)\n21| \t}\n22| \tif d \u003e maxDelay {\n23| \t\td = maxDelay\n24| \t}\n25| \t// Full jitter: uniform in [0, d].\n26| \treturn time.Duration(rand.Int63n(int64(d) + 1))\n27| }\n\n### source: \"internal/ratelimit/bucket.go\"\npurpose: Token-bucket rate limiting for the ingest endpoint.\noverview: bucket.go implements a per-client token bucket: publishes draw a token, tokens refill continuously, and a client that exhausts its bucket is throttled until it refills.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/relay/fanout.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/config/config.go\"\npurpose: Beacond runtime configuration type and its defaults.\noverview: config.go declares the Config struct (listen address, delivery timeout, queue and signing-key paths) and the Defaults constructor used when no file or environment override is present.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/queue/sqlite.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: What burst capacity does the ingest rate limiter allow per client?"
     }
   ],
   "golden": {
@@ -18,11 +18,11 @@
     "pair_id": "dx-rate-limit-burst",
     "mode": "progressive",
     "candidate_ids": [
-      "e56062264b6e",
-      "72e22a31d847",
-      "cffda334a17a",
-      "0e9870352cb7",
-      "3482ff1f86a5"
+      "d0f5e1dcc104ba962315855e153d5def50cc7f0c3588e56fe0e6f85084b4991e",
+      "fc8a2f43adb099dea854f33fdde9526606d168928ba2a2cef9116c2dae3d6597",
+      "7bd603dd16774ac195449851669f89133812e7615af3bc319baff9e67a0d4b18",
+      "6a8d6ac532644efa3481a7489b50c41cada2d4bc555e3e36a9a330f38dbb9904",
+      "ff93d51ff6ea7a95637fdf73af23719a5b962beb41b310679ed82e870d021931"
     ],
     "estimated_prompt_tokens": 537
   }

@@ -896,6 +896,10 @@ func TestTrimRecomputesOutputDerivedTraceFields(t *testing.T) {
 	if out != orientationOnly || trimmed != 1 || !trace.OutputTruncated {
 		t.Fatalf("trim result = %q / %d / %v", out, trimmed, trace.OutputTruncated)
 	}
+	if trace.TrimmedBlocks != trimmed || trace.OutputTruncated != (trace.TrimmedBlocks > 0) {
+		t.Fatalf("trim telemetry inconsistent: trimmed=%d trace=%d truncated=%v",
+			trimmed, trace.TrimmedBlocks, trace.OutputTruncated)
+	}
 	if trace.BytesUsed != len(out) {
 		t.Fatalf("BytesUsed = %d, want survivor bytes %d (not st's pre-trim %d)",
 			trace.BytesUsed, len(out), st.bytesUsed)
@@ -971,6 +975,10 @@ func TestTrimAcrossSourcesRecountsSurvivorsAndSeparators(t *testing.T) {
 
 	if out != want || trimmed != 3 {
 		t.Fatalf("trim result = %q / %d, want survivors A-full + B-orientation / 3", out, trimmed)
+	}
+	if trace.TrimmedBlocks != trimmed || trace.OutputTruncated != (trace.TrimmedBlocks > 0) {
+		t.Fatalf("trim telemetry inconsistent: trimmed=%d trace=%d truncated=%v",
+			trimmed, trace.TrimmedBlocks, trace.OutputTruncated)
 	}
 	if trace.BytesUsed != len(want) {
 		t.Fatalf("BytesUsed = %d, want survivor bytes %d (not st's poison %d)",

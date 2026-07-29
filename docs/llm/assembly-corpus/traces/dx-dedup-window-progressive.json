@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Context:\n### source: \"internal/queue/sqlite.go\"\npurpose: Durable SQLite-backed event queue: enqueue, claim, ack.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/queue/sqlite.go\" (lines 1-33, similarity: 1.00) ---\n1| package queue\n2| \n3| import (\n4| \t\"context\"\n5| \t\"database/sql\"\n6| \t\"time\"\n7| )\n8| \n9| // claimBatch is how many pending events one dequeue claims at a time.\n10| // Small batches keep redelivery cheap when a worker dies mid-claim.\n11| const claimBatch = 25\n12| \n13| // claimLease is how long a claim holds before the row becomes\n14| // claimable again.\n15| const claimLease = 30 * time.Second\n16| \n17| // ClaimPending marks up to claimBatch rows as claimed by this worker\n18| // and returns them in enqueue order.\n19| func (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n20| \tuntil := time.Now().Add(claimLease).Unix()\n21| \trows, err := q.db.QueryContext(ctx, `\n22| \t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n23| \t\tWHERE id IN (\n24| \t\t\tSELECT id FROM events\n25| \t\t\tWHERE state = 'pending' OR claimed_until \u003c unixepoch()\n26| \t\t\tORDER BY id LIMIT ?\n27| \t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n28| \tif err != nil {\n29| \t\treturn nil, err\n30| \t}\n31| \treturn scanEvents(rows)\n32| }\n\n### source: \"internal/relay/dedup.go\"\npurpose: In-memory suppression of recently seen event IDs.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/relay/retry.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/metrics/metrics.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: For how long are duplicate event IDs suppressed after first receipt?"
+      "content": "Context:\n### source: \"internal/queue/sqlite.go\"\npurpose: Durable SQLite-backed event queue: enqueue, claim, ack.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/queue/sqlite.go\" (lines 1-32, similarity: 1.00) ---\n1| package queue\n2| \n3| import (\n4| \t\"context\"\n5| \t\"database/sql\"\n6| \t\"time\"\n7| )\n8| \n9| // claimBatch is how many pending events one dequeue claims at a time.\n10| // Small batches keep redelivery cheap when a worker dies mid-claim.\n11| const claimBatch = 25\n12| \n13| // claimLease is how long a claim holds before the row becomes\n14| // claimable again.\n15| const claimLease = 30 * time.Second\n16| \n17| // ClaimPending marks up to claimBatch rows as claimed by this worker\n18| // and returns them in enqueue order.\n19| func (q *Queue) ClaimPending(ctx context.Context, worker string) ([]Event, error) {\n20| \tuntil := time.Now().Add(claimLease).Unix()\n21| \trows, err := q.db.QueryContext(ctx, `\n22| \t\tUPDATE events SET state = 'claimed', claimed_by = ?, claimed_until = ?\n23| \t\tWHERE id IN (\n24| \t\t\tSELECT id FROM events\n25| \t\t\tWHERE state = 'pending' OR claimed_until \u003c unixepoch()\n26| \t\t\tORDER BY id LIMIT ?\n27| \t\t) RETURNING id, subscriber, payload`, worker, until, claimBatch)\n28| \tif err != nil {\n29| \t\treturn nil, err\n30| \t}\n31| \treturn scanEvents(rows)\n32| }\n\n### source: \"internal/relay/dedup.go\"\npurpose: In-memory suppression of recently seen event IDs.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"internal/relay/retry.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"docs/operations.md\"\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n### source: \"internal/metrics/metrics.go\"\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nnote: metadata overview (no summary: missing)\n\n\nQuestion: For how long are duplicate event IDs suppressed after first receipt?"
     }
   ],
   "golden": {
@@ -18,11 +18,11 @@
     "pair_id": "dx-dedup-window",
     "mode": "progressive",
     "candidate_ids": [
-      "3482ff1f86a5",
-      "f4c7600d9d23",
-      "e56062264b6e",
-      "4051f0fb872b",
-      "472a993d9af1"
+      "ff93d51ff6ea7a95637fdf73af23719a5b962beb41b310679ed82e870d021931",
+      "0b3bc6288f53be736e495b940b89e43b9f4415e6754d39929c4fbc9649de372e",
+      "d0f5e1dcc104ba962315855e153d5def50cc7f0c3588e56fe0e6f85084b4991e",
+      "d89110773bc5f989b982305bd88c0fa56a1a41f0f567a900b3b71518751c822d",
+      "b733e22e6c2f9746c606ffa87dfe96bfcd7e7fbbd102308563303604637392a3"
     ],
     "estimated_prompt_tokens": 530
   }

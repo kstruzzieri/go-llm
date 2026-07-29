@@ -12,7 +12,10 @@ import (
 // Deprecated: use contextdepth.Depth. Depth is a compatibility alias kept
 // for source and numeric-encoding compatibility (Firn IDE, Flux ML, Quantum
 // Trader consume this package); it will not be removed before the next major
-// version. Note one boundary-only legacy behavior documented on
+// version. Formatting now uses contextdepth.Depth.String, so fmt.Sprint and
+// related format verbs render names such as "L2" rather than the old numeric
+// value; integer conversion and JSON encoding remain numeric. Note one
+// boundary-only legacy behavior documented on
 // ProgressiveRenderRequest.MaxDepth: the zero value there means
 // "unrestricted (DepthL2)". New APIs reject the invalid zero instead.
 type Depth = contextdepth.Depth

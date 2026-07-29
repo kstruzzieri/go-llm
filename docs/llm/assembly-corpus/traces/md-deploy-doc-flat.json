@@ -7,7 +7,7 @@
   "turns": [
     {
       "role": "user",
-      "content": "Context:\nRelevant code context:\n\n--- docs/README.md (lines 1-26, similarity: 1.00) ---\n1| # beacond\n2| \n3| beacond is a small self-hosted webhook relay. Producers publish events\n4| to a single ingest endpoint; beacond persists them in a local queue and\n5| fans each event out to every subscribed endpoint, retrying failures so\n6| producers never have to.\n7| \n8| ## How it works\n9| \n10| - Publishes are authenticated by a shared-secret request MAC.\n11| - Accepted events land in a durable queue before the HTTP response is\n12|   sent, so an accepted publish survives a crash.\n13| - Delivery workers claim events from the queue in small batches and\n14|   post them to subscribers, with backoff on failure.\n15| - Oversized payloads are rejected at the door.\n16| \n17| ## Layout\n18| \n19| - `cmd/beacond` — process entrypoint\n20| - `internal/relay` — ingest handler and delivery fanout\n21| - `internal/queue` — durable event queue\n22| - `internal/sign` — request signing\n23| - `internal/config` — configuration loading\n24| \n25| See the operations guide for deployment.\n\n--- cmd/beacond/main.go (lines 1-31, similarity: 1.00) ---\n1| package main\n2| \n3| import (\n4| \t\"context\"\n5| \t\"flag\"\n6| \t\"os/signal\"\n7| \t\"syscall\"\n8| \t\"time\"\n9| )\n10| \n11| // shutdownGrace bounds how long beacond waits for in-flight deliveries\n12| // to finish after a stop signal before aborting them.\n13| const shutdownGrace = 15 * time.Second\n14| \n15| func main() {\n16| \tcfgPath := flag.String(\"config\", \"\", \"path to beacond config JSON\")\n17| \tflag.Parse()\n18| \n19| \tctx, stop := signal.NotifyContext(context.Background(),\n20| \t\tsyscall.SIGINT, syscall.SIGTERM)\n21| \tdefer stop()\n22| \n23| \tsrv := newServer(*cfgPath)\n24| \tgo srv.ListenAndServe()\n25| \n26| \t\u003c-ctx.Done()\n27| \tshutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)\n28| \tdefer cancel()\n29| \tsrv.Shutdown(shutdownCtx)\n30| }\n\n\n\nQuestion: Which document describes the production deployment and restart procedure for beacond?"
+      "content": "Context:\nRelevant code context:\n\n--- docs/README.md (lines 1-23, similarity: 1.00) ---\n1| # beacond\n2| \n3| beacond is a small self-hosted webhook relay. Producers publish events\n4| to a single ingest endpoint; beacond persists them in a local queue and\n5| fans each event out to every subscribed endpoint, retrying failures so\n6| producers never have to.\n7| \n8| ## How it works\n9| \n10| - Publishes are authenticated by a shared-secret request MAC.\n11| - Accepted events land in a durable queue before the HTTP response is\n12|   sent, so an accepted publish survives a crash.\n13| - Delivery workers claim events from the queue in small batches and\n14|   post them to subscribers, with backoff on failure.\n15| - Oversized payloads are rejected at the door.\n16| \n17| ## Layout\n18| \n19| - `cmd/beacond` — process entrypoint\n20| - `internal/relay` — ingest handler and delivery fanout\n21| - `internal/queue` — durable event queue\n22| - `internal/sign` — request signing\n23| - `internal/config` — configuration loading\n\n--- cmd/beacond/main.go (lines 1-30, similarity: 1.00) ---\n1| package main\n2| \n3| import (\n4| \t\"context\"\n5| \t\"flag\"\n6| \t\"os/signal\"\n7| \t\"syscall\"\n8| \t\"time\"\n9| )\n10| \n11| // shutdownGrace bounds how long beacond waits for in-flight deliveries\n12| // to finish after a stop signal before aborting them.\n13| const shutdownGrace = 15 * time.Second\n14| \n15| func main() {\n16| \tcfgPath := flag.String(\"config\", \"\", \"path to beacond config JSON\")\n17| \tflag.Parse()\n18| \n19| \tctx, stop := signal.NotifyContext(context.Background(),\n20| \t\tsyscall.SIGINT, syscall.SIGTERM)\n21| \tdefer stop()\n22| \n23| \tsrv := newServer(*cfgPath)\n24| \tgo srv.ListenAndServe()\n25| \n26| \t\u003c-ctx.Done()\n27| \tshutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownGrace)\n28| \tdefer cancel()\n29| \tsrv.Shutdown(shutdownCtx)\n30| }\n\n\n\nQuestion: Which document describes the production deployment and restart procedure for beacond?"
     }
   ],
   "golden": {
@@ -18,11 +18,11 @@
     "pair_id": "md-deploy-doc",
     "mode": "flat",
     "candidate_ids": [
-      "97762f846186",
-      "5baba70de93a",
-      "4051f0fb872b",
-      "a3d71ca84f46"
+      "e7a25c6558992e87173b55f1646db7527f8ed6858cbf9ad8caa3ff65656a464a",
+      "673ae45b7a7d6a50563c1f8912e11bde719652c4218e084bbfd76277466bb676",
+      "d89110773bc5f989b982305bd88c0fa56a1a41f0f567a900b3b71518751c822d",
+      "4c9ae3199e40cc7d2ac99118c880909f03e9458c025a9ad04d54782b942e4e1c"
     ],
-    "estimated_prompt_tokens": 526
+    "estimated_prompt_tokens": 513
   }
 }
