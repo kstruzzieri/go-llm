@@ -114,6 +114,11 @@ func WriteOutlineReport(path string, report *OutlineReport) error {
 	return writeJSONReport(path, report)
 }
 
+// WriteProgressiveReport writes a stable, pretty JSON progressive experiment report.
+func WriteProgressiveReport(path string, report *ProgressiveReport) error {
+	return writeJSONReport(path, report)
+}
+
 func writeJSONReport(path string, report any) error {
 	data, err := json.MarshalIndent(report, "", "  ")
 	if err != nil {
