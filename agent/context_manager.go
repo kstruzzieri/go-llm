@@ -17,6 +17,12 @@ const DefaultInputCeiling = 8192
 type ContextManager struct {
 	Compactor Compactor
 	Estimate  func(string) int // token estimator; len/4 when nil
+	// Mixed opts into structured mixed-budget assembly. Zero value and any
+	// request whose State carries no structured anchors keep the legacy
+	// Compactor path and model-visible messages byte-identical. Its only
+	// reader today is dispatch, which skips the tool-result deep copy when
+	// mixed assembly is off (#331).
+	Mixed bool
 }
 
 // DurableSummaryPrompt renders the durable summary as the pinned system message

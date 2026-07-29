@@ -95,6 +95,14 @@ type Message struct {
 	provider.ChatMessage
 	Segment Segment
 	Attrib  *RetrievalAttribution
+	// Context and OutputCap are runtime-only assembly metadata (like Segment):
+	// excluded from JSON, never provider-visible, never persisted. Context is
+	// the deep-copied structured payload of a tool-result anchor; OutputCap is
+	// the normalized Effect.OutputCap the anchor was dispatched under (mixed
+	// assembly enforces the same byte boundary capOutput enforces on fallback
+	// Content).
+	Context   *ContextSet `json:"-"`
+	OutputCap int         `json:"-"`
 }
 
 // State is the canonical transcript the Orchestrator owns.
