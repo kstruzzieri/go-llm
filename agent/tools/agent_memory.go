@@ -33,6 +33,27 @@ const (
 	MaxAgentMemoryContentBytes = 4096
 )
 
+// maxMemoryGroups is the largest record count AgentMemorySearch will project
+// into ToolResult.Context. Over it the set is DROPPED, not errored: that
+// degrades to exactly the mixed-off path — a legacy anchor whose flat Content
+// is still complete and correct, and agent's validateContextSet accepts a nil
+// set. A hard error would be wrong here (unlike Retrieve.MaxK): this tool
+// cannot see ContextManager.Mixed, so it would reject a large-Limit consumer
+// that works fine in flat mode today.
+//
+// The bound is needed because the group count is len(records), which is
+// STORE-controlled: recordSearcher promises nothing about honoring Limit, and
+// Limit is an unclamped public field that reaches SQL LIMIT directly
+// (memory/record_store.go:194-199). Without this, a consumer setting
+// Limit: 300 with Mixed on gets a run-aborting "301 groups exceeds limit 256"
+// — a message about group counts rather than about Limit.
+//
+// SOURCE OF TRUTH for the 256: maxContextGroups in package agent
+// (agent/context_set.go) — unexported, and agent/tools is a different package,
+// so the bound is restated here and pinned by
+// TestAgentMemoryGroupsWithinCarrierBound.
+const maxMemoryGroups = 256
+
 // recordSearcher is the minimal slice of *memory.MemoryRecordStore the search
 // tool needs; consumer-side interfaces keep the tools unit-testable with fakes.
 type recordSearcher interface {
@@ -109,22 +130,41 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 	if len(records) == 0 {
 		return agent.ToolResult{Content: "no records found"}, nil
 	}
-	// The set is attached unconditionally: the tool cannot see
+	// The set is attached whenever it fits the carrier bound: the tool cannot see
 	// ContextManager.Mixed, and dispatch clones ToolResult.Context only when
 	// Mixed is on (agent/dispatch.go), so with mixed assembly off this costs one
 	// transient projection that nothing reads. MinVerbatim stays 0 — memory
 	// records have no verbatim component to floor.
-	var b strings.Builder
-	set := &agent.ContextSet{}
+	//
+	// Every group built below satisfies agent's validateContextSet, but that
+	// coupling is verified BY INSPECTION ONLY: agent cannot import agent/tools
+	// without an import cycle, so no test spans producer and validator. That is
+	// precisely why the group ceiling matters — a violation surfaces as a
+	// run-aborting assembly error, never as a failing test here.
+	var (
+		b   strings.Builder
+		set *agent.ContextSet
+		// Subject uniqueness within one set is a carrier invariant (agent's
+		// validateContextSet rejects a duplicate SubjectRef), and the store sits
+		// behind an interface that promises nothing. Enforced below so a
+		// duplicate ID is a model-visible tool error instead of an assembly
+		// failure that aborts the run one layer down.
+		seen map[string]int
+	)
+	if len(records) <= maxMemoryGroups {
+		set = &agent.ContextSet{}
+		seen = make(map[string]int, len(records))
+	}
 	repCard := contextdepth.RepresentationDesc{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}
 	repCompact := contextdepth.RepresentationDesc{Depth: contextdepth.DepthL1, Kind: contextdepth.RepresentationCompact}
-	// Subject uniqueness within one set is a carrier invariant (agent's
-	// validateContextSet rejects a duplicate SubjectRef), and the store sits
-	// behind an interface that promises nothing. Enforced here so a duplicate ID
-	// is a model-visible tool error instead of an assembly failure that aborts
-	// the run one layer down.
-	seen := make(map[string]int, len(records))
 	for i, r := range records {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(recordLine(r))
+		if set == nil {
+			continue // over the carrier ceiling: flat only, exactly as with Mixed off
+		}
 		if r.ID == "" {
 			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has blank ID", i)}, nil
 		}
@@ -132,20 +172,17 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has duplicate ID %q (also record %d)", i, r.ID, prev)}, nil
 		}
 		seen[r.ID] = i
-		if i > 0 {
-			b.WriteByte('\n')
-		}
-		b.WriteString(recordLine(r))
+		card := recordCard(r)
 		set.Groups = append(set.Groups, agent.ContextGroup{
 			Desc: contextdepth.GroupDesc{
 				Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainMemory, ID: r.ID},
 				Rank:    i + 1,
 			},
 			Alternatives: []agent.ContextAlternative{
-				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{repCard}}, Content: recordCard(r)},
+				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{repCard}}, Content: card},
 				{
 					Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{repCard, repCompact}},
-					Content: recordCard(r) + " · " + FlattenRecordContent(r.Content),
+					Content: card + " · " + FlattenRecordContent(r.Content),
 				},
 			},
 		})
@@ -176,9 +213,15 @@ func recordLine(r memory.MemoryRecord) string {
 
 // recordCard is the L0 metadata card: whitelist fields only. Never opaque
 // Metadata, provenance source IDs/hashes, or workspace/session ID values.
+//
+// EVERY string field is flattened, ID and kind included: a newline in either
+// would reopen the fake-row injection FlattenRecordContent exists to close.
+// recordLine leaves those two raw because its bytes are frozen (it is the
+// pre-#331 flat fallback); this card is new code with no such constraint, and
+// the dates and scope class are closed vocabularies that cannot carry one.
 func recordCard(r memory.MemoryRecord) string {
 	return fmt.Sprintf("%s · %s · created:%s · updated:%s · scope:%s · ns:%s · src:%s",
-		r.ID, r.Kind,
+		FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
 		r.CreatedAt.Format("2006-01-02"), r.UpdatedAt.Format("2006-01-02"),
 		recordScopeClass(r), FlattenRecordContent(r.Namespace),
 		FlattenRecordContent(r.Provenance.SourceKind))
