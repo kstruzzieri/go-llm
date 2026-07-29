@@ -66,8 +66,14 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 			return false, err
 		}
 	}
-	msg := toolObservation(call, out, o.ctxMgr.Mixed)
+	msg := toolObservation(call, out)
 	msg.OutputCap = effect.OutputCap
+	// The structured payload is deep-copied only when mixed assembly is on:
+	// with Mixed off nothing reads it, so cloning would make State retain a
+	// guaranteed-dead copy of every alternative for the rest of the run.
+	if o.ctxMgr.Mixed {
+		msg.Context = out.Context.clone() // clone is nil-safe
+	}
 	state.Messages = append(state.Messages, msg)
 	gov.observe(call, out)
 	if sr, tripped := gov.stopReason(); tripped {
@@ -207,13 +213,8 @@ func capOutput(r ToolResult, limit int) ToolResult {
 	return r
 }
 
-// toolObservation builds the model-visible tool-role anchor. The structured
-// payload is deep-copied only when mixed assembly is on: with Mixed off nothing
-// reads it, so cloning would make State retain a guaranteed-dead copy of every
-// alternative for the rest of the run. clone is nil-safe, so ordinary tools
-// need no guard here.
-func toolObservation(call provider.ToolCall, r ToolResult, mixed bool) Message {
-	msg := Message{
+func toolObservation(call provider.ToolCall, r ToolResult) Message {
+	return Message{
 		ChatMessage: provider.ChatMessage{
 			Role:       "tool",
 			Content:    r.Content,
@@ -223,8 +224,4 @@ func toolObservation(call provider.ToolCall, r ToolResult, mixed bool) Message {
 		Segment: Elastic,
 		Attrib:  r.Attrib,
 	}
-	if mixed {
-		msg.Context = r.Context.clone()
-	}
-	return msg
 }

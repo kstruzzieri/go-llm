@@ -42,7 +42,7 @@ type ContextSet struct {
 // Carrier bounds: ContextSet is a public field settable by untrusted tools.
 // These cap the work and trace size of mixed assembly (groups x alternatives
 // candidates, each estimated and traced), which is where they are enforced.
-// They do NOT bound dispatch's clone: that runs unconditionally and before
+// They do NOT bound dispatch's clone: with Mixed on it runs before
 // validation, and Representations per alternative is unbounded — clone-time
 // cost stays bounded only by what the tool already allocated (#331 spec 3.2).
 // Built-in producers sit far below both limits.

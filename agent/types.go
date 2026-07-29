@@ -95,12 +95,14 @@ type Message struct {
 	provider.ChatMessage
 	Segment Segment
 	Attrib  *RetrievalAttribution
-	// Context and OutputCap are runtime-only assembly metadata (like Segment):
-	// excluded from JSON, never provider-visible, never persisted. Context is
-	// the deep-copied structured payload of a tool-result anchor; OutputCap is
-	// the normalized Effect.OutputCap the anchor was dispatched under (mixed
-	// assembly enforces the same byte boundary capOutput enforces on fallback
-	// Content).
+	// Context and OutputCap are runtime-only assembly metadata — never
+	// provider-visible, and unlike Segment/Attrib also excluded from JSON so
+	// they are never persisted. Context is the deep-copied structured payload
+	// of a tool-result anchor; OutputCap is the normalized Effect.OutputCap the
+	// anchor was dispatched under (mixed assembly enforces the same byte
+	// boundary capOutput enforces on fallback Content); 0 for anchors that
+	// never resolved an effect (unknown tool, malformed arguments, plan
+	// failure — all three return before prepareCall normalizes).
 	Context   *ContextSet `json:"-"`
 	OutputCap int         `json:"-"`
 }

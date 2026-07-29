@@ -106,7 +106,8 @@ func (c *ctxTool) Invoke(context.Context, json.RawMessage) (ToolResult, error) {
 
 // dispatchPaths pairs the two dispatch entry points with the effect class that
 // routes to each: recordResult is shared, so both must show identical structure
-// handling. dispatchBatch asserts the routing actually happened.
+// handling. dispatchBatch asserts from the event order that the intended path
+// actually ran.
 var dispatchPaths = []struct {
 	name     string
 	parallel bool
@@ -143,15 +144,27 @@ func dispatchBatch(t *testing.T, mixed, parallel bool, set *ContextSet, outputCa
 			Function: provider.ToolCallFunction{Name: tl.Spec().Name, Arguments: json.RawMessage(`{}`)},
 		}
 	}
-	if got := canRunParallel(reg, calls); got != parallel {
-		t.Fatalf("canRunParallel = %v, want %v: the intended dispatch path was not exercised", got, parallel)
-	}
-
 	o := New(nil, ContextManager{Mixed: mixed})
 	var res Result
 	var state State
 	if err := o.runToolCalls(context.Background(), &res, &state, reg, calls, nil, normalizeObserver(nil), 0, &restraintGovernor{}); err != nil {
 		t.Fatalf("runToolCalls: %v", err)
+	}
+	// Assert the path actually TAKEN, not the predicate that selects it: the
+	// serial path interleaves call/result per tool, the parallel path emits all
+	// calls (phase 1) before all results (phase 3). Checking canRunParallel here
+	// would stay green even if runToolCalls stopped routing to the parallel path.
+	wantKinds := []string{"tool_call", "tool_result", "tool_call", "tool_result"}
+	if parallel {
+		wantKinds = []string{"tool_call", "tool_call", "tool_result", "tool_result"}
+	}
+	if len(res.Events) != len(wantKinds) {
+		t.Fatalf("events = %+v, want %d of %v", res.Events, len(wantKinds), wantKinds)
+	}
+	for i, e := range res.Events {
+		if e.Kind != wantKinds[i] {
+			t.Fatalf("event kinds = %+v, want %v: the intended dispatch path was not taken", res.Events, wantKinds)
+		}
 	}
 	if len(state.Messages) != len(tools) {
 		t.Fatalf("state.Messages = %d, want %d", len(state.Messages), len(tools))
@@ -282,6 +295,25 @@ func TestRecordResultCopiesOutputCap(t *testing.T) {
 			}
 		})
 	}
+
+	// Unresolved effect: unknown tool, malformed arguments, and plan failure all
+	// return from prepareCall BEFORE normalizeEffect, so recordResult receives a
+	// zero Effect while the anchor still carries model-visible Content. It must
+	// record 0 — quietly substituting a default the call was never dispatched
+	// under would hand mixed assembly a cap that bounds nothing.
+	t.Run("unresolved effect stays zero", func(t *testing.T) {
+		var res Result
+		var state State
+		o := New(nil, ContextManager{})
+		if _, err := o.recordResult(context.Background(), &res, &state, nil, &restraintGovernor{}, 0,
+			provider.ToolCall{Function: provider.ToolCallFunction{Name: "nope"}},
+			Effect{}, ToolCallRecord{}, ToolResult{IsError: true, Content: "unknown tool: nope"}); err != nil {
+			t.Fatalf("recordResult: %v", err)
+		}
+		if got := state.Messages[0].OutputCap; got != 0 {
+			t.Errorf("unresolved-effect anchor OutputCap = %d, want 0", got)
+		}
+	})
 }
 
 // TestMessageSerializationExcludesRuntimeFields closes the persistence leak:
