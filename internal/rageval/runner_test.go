@@ -78,6 +78,67 @@ func TestFixtureValidateRejectsDuplicateQueryText(t *testing.T) {
 	}
 }
 
+// TestBuildStoreSeedsParseableProvenance pins that buildStore writes a
+// versioned source-signature document, not a bare string. rag's
+// parseSourceSignature accepts a signature only when it unmarshals to
+// version != 0 AND content_hash != "", so a bare value leaves ContentHash
+// blank ("unknown") for every seeded source. Any eval that reuses buildStore
+// and then needs provenance — installing fresh summaries via
+// UpsertSourceSummary, which must copy ContentHash/VectorSpaceID from
+// SourceProvenanceBatch — would either fail "lacks provenance" or silently
+// derive stale validity. The sibling outline path already hit this
+// (fixtureSourceSignature, added as outlineSourceSignature in f9ab4f6).
+func TestBuildStoreSeedsParseableProvenance(t *testing.T) {
+	fixture, err := LoadFixture(fixturePath)
+	if err != nil {
+		t.Fatalf("LoadFixture: %v", err)
+	}
+	ctx := context.Background()
+	store, err := buildStore(ctx, fixture)
+	if err != nil {
+		t.Fatalf("buildStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	seen := make(map[string]bool, len(fixture.Corpus))
+	sources := make([]string, 0, len(fixture.Corpus))
+	for _, chunk := range fixture.Corpus {
+		if !seen[chunk.Source] {
+			seen[chunk.Source] = true
+			sources = append(sources, chunk.Source)
+		}
+	}
+	sort.Strings(sources)
+
+	provenance, err := store.SourceProvenanceBatch(ctx, sources)
+	if err != nil {
+		t.Fatalf("SourceProvenanceBatch: %v", err)
+	}
+	if len(provenance) != len(sources) {
+		t.Fatalf("provenance rows = %d, want %d", len(provenance), len(sources))
+	}
+	hashes := make(map[string]string, len(sources))
+	for _, source := range sources {
+		p, ok := provenance[source]
+		if !ok {
+			t.Fatalf("source %q missing from provenance batch", source)
+		}
+		if p.Mixed {
+			t.Fatalf("source %q reports mixed provenance; buildStore seeds one signature per source", source)
+		}
+		if p.ContentHash == "" {
+			t.Fatalf("source %q has blank ContentHash: buildStore's stored signature did not parse", source)
+		}
+		if p.VectorSpaceID != vectorSpaceID {
+			t.Fatalf("source %q VectorSpaceID = %q, want %q", source, p.VectorSpaceID, vectorSpaceID)
+		}
+		if previous, dup := hashes[p.ContentHash]; dup {
+			t.Fatalf("sources %q and %q share ContentHash %q: signature does not cover chunk content", previous, source, p.ContentHash)
+		}
+		hashes[p.ContentHash] = source
+	}
+}
+
 func sortedKeys[V any](m map[string]V) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
