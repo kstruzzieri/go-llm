@@ -39,6 +39,12 @@ type mixedAllocState struct {
 	used               int
 	verbatimShortfalls int // anchors whose MinVerbatim preference went unmet, evicted ones included
 	evictedGroups      int
+	// anchorOmissions counts subjects dropped from a RETAINED anchor — content
+	// the model never sees while its carrier message, its chain and every other
+	// signal look nominal. Disjoint from evictedGroups by construction: a
+	// subject under an evicted chain is already counted there as one group, and
+	// counting it twice would inflate both figures.
+	anchorOmissions int
 }
 
 func (st *mixedAllocState) fits(tokens int) bool { return st.used+tokens <= st.budget }
@@ -307,6 +313,14 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 			// that blocked alternative 0 rather than the one that blocked them
 			// all. Diagnostic, never load-bearing: the subject is omitted either
 			// way.
+			//
+			// The chain and its anchor are RETAINED, so no group eviction records
+			// this: without the counter a byte-cap omission is invisible to every
+			// operator signal (Pressure, the compaction event, ToolResult.Truncated,
+			// which describes the discarded flat rendering). Counted for BOTH
+			// reasons — a token-budget omission inside a retained anchor is exactly
+			// as silent, it just happens to correlate with a high UsedPct.
+			st.anchorOmissions++
 			s.chosen = 0
 			wouldBe := anchorJoined(a)
 			s.chosen = -1

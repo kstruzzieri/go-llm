@@ -63,6 +63,35 @@ budget fallback, so a source that does not fit at summary depth still
 contributes a short block instead of vanishing. Its note line reads
 `summary omitted: budget` — never `no summary`, which would be false.
 
+**`Pressure` gains a field, and one existing field changes meaning.** Read
+this before upgrading a telemetry consumer.
+
+- NEW `Pressure.AnchorOmissions` counts subjects mixed assembly dropped from a
+  RETAINED structured anchor. The usual cause is a full anchor byte cap
+  (`Message.OutputCap`, 64 KB for `retrieve`), which a large retrieval hits
+  routinely — a 20-source projection is far more alternative text than the cap
+  can hold. Before this counter such a drop was invisible: `Evicted` stayed 0,
+  `UsedPct` stayed low, `Level` stayed `ok`, and `ToolResult.Truncated`
+  describes the DISCARDED flat rendering, not the mixed one. Always 0 with
+  `Mixed` off.
+- `Pressure.Evicted` is unchanged and still counts WHOLE groups (spans and
+  chains). Within-anchor omissions are deliberately NOT folded into it: five
+  sources shed from one retained anchor is not five evicted groups.
+- CHANGED `Pressure.Compactions` and `Pressure.Mitigation`: under mixed
+  assembly a turn that only shed subjects from a retained anchor now reports
+  `Compactions: 1` / `MitigationEvict` (previously `0` / `MitigationNone`).
+  The orchestrator emits its `compaction` `EventRecord` for such a turn, and a
+  consumer counting compactions will see turns it did not see before. Legacy
+  (`Mixed` off) values are byte-for-byte unchanged.
+- `Pressure.Level` deliberately does NOT react. The bands measure TOKEN-budget
+  usage; a byte-cap omission is orthogonal (a turn can shed a quarter of its
+  retrieval at 8% of budget), and promoting `Level` would make the bands mean
+  two different things and break existing level histograms.
+- `internal/agenttrace` carries the count as `anchor_omissions` on the
+  `model_step` and `runtime_stage` spans. Additive within `SchemaVersion` 2:
+  the key is omitted when zero, so legacy and lossless turns emit the same
+  bytes as before.
+
 MEMORY: with `Mixed` on, each tool result's projection is cloned onto its
 anchor message and retained for the rest of the run. For `Retrieve` that is
 quadratic in `k` — 1.35 MB per call at `MaxK` 20 over 2 KB chunks, so a

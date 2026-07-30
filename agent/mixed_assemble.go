@@ -202,23 +202,28 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 	out := materializeMixed(stMat.System, summary, units)
 	used := m.totalTokens(out, 0)
 	after := used + toolSchemaTokens
-	evicted := alloc.evictedGroups > 0
+	// Both causes shed model-visible content, so both drive the mitigation and
+	// the compaction event. They stay separate COUNTS: folding anchor omissions
+	// into Evicted would report "5 groups evicted" for one retained anchor that
+	// lost five of its sources, which is a different and much worse fact.
+	shed := alloc.evictedGroups > 0 || alloc.anchorOmissions > 0
 	compactions := 0
-	if evicted {
+	if shed {
 		compactions = 1
 	}
 	exhausted := after > budget.Input
 	usedPct := usedFraction(after, budget.Input)
-	level, mitigation := thresholds.Classify(usedPct, exhausted, evicted)
+	level, mitigation := thresholds.Classify(usedPct, exhausted, shed)
 	pressure := Pressure{
-		UsedPct:     usedPct,
-		Evicted:     alloc.evictedGroups,
-		Compactions: compactions,
-		InputTokens: after,
-		InputBudget: budget.Input,
-		Level:       level,
-		Cause:       m.dominantCause(out, toolSchemaTokens),
-		Mitigation:  mitigation,
+		UsedPct:         usedPct,
+		Evicted:         alloc.evictedGroups,
+		Compactions:     compactions,
+		AnchorOmissions: alloc.anchorOmissions,
+		InputTokens:     after,
+		InputBudget:     budget.Input,
+		Level:           level,
+		Cause:           m.dominantCause(out, toolSchemaTokens),
+		Mitigation:      mitigation,
 	}
 	if exhausted {
 		// Unreachable for a pure estimator: exact-delta accounting makes this

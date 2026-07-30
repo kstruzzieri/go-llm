@@ -297,3 +297,54 @@ func TestTelemetrySinkStepSpanEnrichedPressure(t *testing.T) {
 	}
 	t.Fatal("no model_step span written")
 }
+
+// TestTelemetrySinkAnchorOmissions guards the field that carries #331's
+// within-anchor omissions to operators. Both span kinds are checked because the
+// sink projects Pressure twice, and a copy dropped from either one loses the
+// signal on that span. The zero case pins omitempty: a legacy or lossless turn
+// emits the same bytes schema v2 always did.
+func TestTelemetrySinkAnchorOmissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, _ := NewTelemetrySink(path, "runA", started, func() time.Time { return started })
+	shed := agent.Pressure{UsedPct: 0.08, AnchorOmissions: 5, Compactions: 1, InputTokens: 8, InputBudget: 100,
+		Level: agent.LevelOK, Cause: agent.CauseToolOutput, Mitigation: agent.MitigationEvict}
+	clean := agent.Pressure{UsedPct: 0.08, InputTokens: 8, InputBudget: 100,
+		Level: agent.LevelOK, Cause: agent.CauseToolOutput, Mitigation: agent.MitigationNone}
+	_ = sink.OnPressure(context.Background(), agent.PressureEvent{Step: 0, Pressure: shed})
+	_ = sink.OnPressure(context.Background(), agent.PressureEvent{Step: 1, Pressure: clean})
+	_ = sink.OnStep(context.Background(), agent.StepEvent{Index: 0, Pressure: shed})
+	_ = sink.OnStep(context.Background(), agent.StepEvent{Index: 1, Pressure: clean})
+	_ = sink.Close()
+
+	seen := 0
+	for _, s := range readSpans(t, path) {
+		field := s
+		switch s["kind"] {
+		case "runtime_stage":
+		case "model_step":
+			pr, ok := s["pressure"].(map[string]any)
+			if !ok {
+				t.Fatalf("model_step missing pressure object: %+v", s)
+			}
+			field = pr
+		default:
+			continue
+		}
+		seen++
+		v, present := field["anchor_omissions"]
+		if s["step"].(float64) == 0 {
+			if !present || int(v.(float64)) != 5 {
+				t.Errorf("%v span: anchor_omissions = %v (present %v), want 5", s["kind"], v, present)
+			}
+			continue
+		}
+		if present {
+			t.Errorf("%v span: anchor_omissions = %v on a lossless turn, want the key omitted", s["kind"], v)
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("%d pressure-bearing spans, want 4", seen)
+	}
+}

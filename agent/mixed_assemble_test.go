@@ -1312,3 +1312,273 @@ func TestMixedThroughAgentNew(t *testing.T) {
 		t.Errorf("Result.Messages tool content = %q, want the fallback %q", canonical, []string{traceFallback})
 	}
 }
+
+// --- S2: within-anchor omission must be visible in Pressure ---
+
+// retrieveOutputCap mirrors agent/tools.RetrieveOutputCap. Copied rather than
+// imported because agent/tools imports agent.
+const retrieveOutputCap = 64 * 1024
+
+// capSourceGroup builds a one-alternative RAG group whose only rendering is
+// exactly bytes long. ONE alternative deliberately: with no ladder there is no
+// upgrade pass, so the byte cap is the only thing deciding what is admitted and
+// the fixture's arithmetic is exact.
+func capSourceGroup(id string, rank, bytes int) ContextGroup {
+	head := id + ":"
+	return ContextGroup{
+		Desc: contextdepth.GroupDesc{
+			Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: id},
+			Rank:    rank,
+		},
+		Alternatives: []ContextAlternative{{
+			Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}},
+			Content: head + strings.Repeat("x", bytes-len(head)),
+		}},
+	}
+}
+
+// bigRetrievalState is the shape a real retrieve call produces: 20 sources of
+// 4 KB orientation each behind ONE anchor. Joined that is 20*4096 + 19
+// separators = 81939 bytes against a 65536-byte cap, so 15 fit (15*4096 + 14 =
+// 61454) and 5 do not — with the token budget barely touched.
+func bigRetrievalState(outputCap int) State {
+	groups := make([]ContextGroup, 0, 20)
+	for i := range 20 {
+		groups = append(groups, capSourceGroup(fmt.Sprintf("src%02d.go", i), i, 4096))
+	}
+	return State{Messages: []Message{
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", traceFallback, chainSet(0, groups...), outputCap),
+	}}
+}
+
+// anchorOmissionRows counts trace rows for subjects dropped from a RETAINED
+// anchor, which is exactly what Pressure.AnchorOmissions claims to count. It
+// excludes chain_evicted rows, so it cannot silently agree with a counter that
+// double-counted evicted chains.
+func anchorOmissionRows(tr ContextAssemblyTrace) int {
+	n := 0
+	for _, s := range tr.Subjects {
+		if s.Omitted && s.ToolCallID != "" && s.OmissionReason != OmitChainEvicted {
+			n++
+		}
+	}
+	return n
+}
+
+// TestPressureReportsAnchorOmissions is the S2 regression: a large retrieval
+// against a full anchor byte cap drops content the model never sees, while the
+// token budget, the eviction count and every level band report nominal. Before
+// the AnchorOmissions counter the ONLY channel carrying this was the assembly
+// trace, which no shipped observer consumes.
+func TestPressureReportsAnchorOmissions(t *testing.T) {
+	st := bigRetrievalState(retrieveOutputCap)
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+
+	out, pressure, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 200_000})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	assertTraceInvariants(t, tr)
+	assertMixedLedger(t, st, out, tr)
+
+	// What actually reached the model: 15 of the 20 sources, and specifically
+	// the first 15 in group order. Pinning the bytes and the identities is what
+	// makes the counter assertions below mean "content was lost" rather than
+	// "some integer moved".
+	if len(out.Messages) != 2 {
+		t.Fatalf("%d messages, want assistant + anchor: %+v", len(out.Messages), out.Messages)
+	}
+	anchor := out.Messages[1].Content
+	if len(anchor) != 61454 {
+		t.Errorf("anchor bytes = %d, want 61454 (15 fragments + 14 separators under the %d cap)",
+			len(anchor), retrieveOutputCap)
+	}
+	if got := strings.Count(anchor, "\n") + 1; got != 15 {
+		t.Errorf("%d anchor fragments, want 15", got)
+	}
+	for i := range 20 {
+		id := fmt.Sprintf("src%02d.go:", i)
+		if got, want := strings.Contains(anchor, id), i < 15; got != want {
+			t.Errorf("anchor contains %q = %v, want %v", id, got, want)
+		}
+	}
+
+	// The defect: five sources gone, and this is the only count that says so.
+	if pressure.AnchorOmissions != 5 {
+		t.Errorf("pressure.AnchorOmissions = %d, want 5 (sources 15-19 never reached the model)",
+			pressure.AnchorOmissions)
+	}
+	if got := anchorOmissionRows(tr); pressure.AnchorOmissions != got {
+		t.Errorf("pressure.AnchorOmissions = %d, but the trace carries %d within-anchor omissions",
+			pressure.AnchorOmissions, got)
+	}
+	for _, s := range tr.Subjects {
+		if s.Omitted && s.OmissionReason != OmitByteCap {
+			t.Errorf("row %s/%s omitted for %q, want %q: the token budget was never the constraint",
+				s.Subject.Domain, s.Subject.ID, s.OmissionReason, OmitByteCap)
+		}
+	}
+
+	// Kept SEPARATE from Evicted: no whole group was dropped. Folding the five
+	// into Evicted would report "5 groups evicted" for one retained anchor.
+	if pressure.Evicted != 0 {
+		t.Errorf("pressure.Evicted = %d, want 0: the chain and its anchor were both retained", pressure.Evicted)
+	}
+	// ...but the turn DID shed content, so the operator-facing "something was
+	// shed" signals must fire. Compactions is what the orchestrator's
+	// "compaction" EventRecord keys on.
+	if pressure.Compactions != 1 {
+		t.Errorf("pressure.Compactions = %d, want 1: content was shed this turn", pressure.Compactions)
+	}
+	if pressure.Mitigation != MitigationEvict {
+		t.Errorf("pressure.Mitigation = %v, want %v", pressure.Mitigation, MitigationEvict)
+	}
+	// Level deliberately does NOT react: it bands TOKEN-budget usage, and this
+	// turn used a third of its budget while losing a quarter of its retrieval.
+	// Pinning it documents that the counter, not the band, carries the fact.
+	if pressure.Level != LevelOK {
+		t.Errorf("pressure.Level = %v, want ok (Level bands token usage only)", pressure.Level)
+	}
+	if pressure.InputTokens != 61484 || pressure.UsedPct <= 0 || pressure.UsedPct >= 0.60 {
+		t.Errorf("pressure tokens/pct = %d/%v, want 61484 and a fraction well under the watch band",
+			pressure.InputTokens, pressure.UsedPct)
+	}
+}
+
+// TestPressureAnchorOmissionsZeroWhenNothingDropped is the control: the same 20
+// sources under a cap that holds them all report zero. A counter incremented
+// unconditionally in the subject loop passes the test above and fails here.
+func TestPressureAnchorOmissionsZeroWhenNothingDropped(t *testing.T) {
+	st := bigRetrievalState(1 << 20)
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+
+	out, pressure, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 200_000})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	assertTraceInvariants(t, tr)
+	assertMixedLedger(t, st, out, tr)
+	if len(out.Messages) != 2 {
+		t.Fatalf("%d messages, want assistant + anchor: %+v", len(out.Messages), out.Messages)
+	}
+	if got := len(out.Messages[1].Content); got != 81939 {
+		t.Errorf("anchor bytes = %d, want all 81939 (20 fragments + 19 separators)", got)
+	}
+	if tr.OmittedSubjects != 0 {
+		t.Fatalf("%d subjects omitted under a roomy cap; the control fixture drops nothing", tr.OmittedSubjects)
+	}
+	if pressure.AnchorOmissions != 0 || pressure.Evicted != 0 || pressure.Compactions != 0 {
+		t.Errorf("nothing was shed, got anchor omissions %d evicted %d compactions %d",
+			pressure.AnchorOmissions, pressure.Evicted, pressure.Compactions)
+	}
+	if pressure.Mitigation != MitigationNone || pressure.Level != LevelOK {
+		t.Errorf("pressure = %v/%v, want ok/none", pressure.Level, pressure.Mitigation)
+	}
+}
+
+// TestPressureDistinguishesEvictionFromAnchorOmission runs both causes in one
+// turn: one chain evicted whole (cap below the omission placeholder) and one
+// retained chain shedding five subjects. The two counts must stay separable —
+// an implementation that folded within-anchor omissions into Evicted reports
+// 6/0 here and passes every single-cause test.
+func TestPressureDistinguishesEvictionFromAnchorOmission(t *testing.T) {
+	big := bigRetrievalState(retrieveOutputCap)
+	st := State{Messages: []Message{
+		mixedAsstCall("c0"),
+		// Cap below len(omittedObservation): no legal rendering, chain evicted.
+		mixedToolResult("c0", traceFallback, chainSet(0, capSourceGroup("gone.go", 0, 64)), 20),
+		big.Messages[0],
+		big.Messages[1],
+	}}
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+
+	out, pressure, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 200_000})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	assertTraceInvariants(t, tr)
+	assertMixedLedger(t, st, out, tr)
+
+	if pressure.Evicted != 1 {
+		t.Errorf("pressure.Evicted = %d, want 1 (the c0 chain, whole)", pressure.Evicted)
+	}
+	if pressure.AnchorOmissions != 5 {
+		t.Errorf("pressure.AnchorOmissions = %d, want 5 (c1's shed sources, and NOT c0's subject)",
+			pressure.AnchorOmissions)
+	}
+	if got := anchorOmissionRows(tr); pressure.AnchorOmissions != got {
+		t.Errorf("pressure.AnchorOmissions = %d, but the trace carries %d within-anchor omissions",
+			pressure.AnchorOmissions, got)
+	}
+	// gone.go is omitted too, but as part of an evicted chain: it belongs to
+	// Evicted, not AnchorOmissions, and this is the row that proves it.
+	if row := traceRow(t, tr, contextdepth.DomainRAG, "gone.go"); row.OmissionReason != OmitChainEvicted {
+		t.Errorf("gone.go omitted for %q, want %q", row.OmissionReason, OmitChainEvicted)
+	}
+	if pressure.Compactions != 1 || pressure.Mitigation != MitigationEvict {
+		t.Errorf("compactions %d mitigation %v, want 1/%v", pressure.Compactions, pressure.Mitigation, MitigationEvict)
+	}
+	// c0's messages are gone; c1's anchor still carries its 15 admitted sources.
+	if len(out.Messages) != 2 {
+		t.Fatalf("%d messages, want only the retained c1 chain: %+v", len(out.Messages), out.Messages)
+	}
+	if len(out.Messages[1].Content) != 61454 {
+		t.Errorf("retained anchor bytes = %d, want 61454", len(out.Messages[1].Content))
+	}
+}
+
+// TestLegacyPressureUnaffectedByAnchorOmissions pins the WHOLE Pressure value on
+// the legacy (Mixed off) arm, field by field, for the same fixture that trips
+// the counter on the mixed arm and for a plain legacy eviction. Pressure feeds
+// existing telemetry, so a shifted baseline would corrupt comparisons across the
+// change; struct equality catches a drift in any field, not just the new one.
+func TestLegacyPressureUnaffectedByAnchorOmissions(t *testing.T) {
+	t.Run("structured anchors, mixed off", func(t *testing.T) {
+		st := bigRetrievalState(retrieveOutputCap)
+		m := ContextManager{Compactor: RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator}
+		// Legacy takes Content as-is: the anchor is the short fallback string,
+		// so nothing is dropped and nothing may be reported.
+		_, pressure, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: 200_000})
+		if err != nil {
+			t.Fatalf("Assemble: %v", err)
+		}
+		want := Pressure{
+			UsedPct:     float64(43) / 200_000,
+			InputTokens: 43,
+			InputBudget: 200_000,
+			Level:       LevelOK,
+			Cause:       CauseToolOutput,
+			Mitigation:  MitigationNone,
+		}
+		if pressure != want {
+			t.Errorf("legacy Pressure = %+v, want %+v", pressure, want)
+		}
+	})
+
+	t.Run("legacy eviction", func(t *testing.T) {
+		m := ContextManager{Compactor: RecencyCompactor{Estimate: runeEstimator}, Estimate: runeEstimator}
+		st := State{System: "s", Messages: []Message{
+			pinned("user", "g"),
+			elastic("assistant", "oldold"),
+			elastic("user", "new"),
+		}}
+		_, pressure, err := m.Assemble(context.Background(), st, 0, TokenBudget{Input: 5})
+		if err != nil {
+			t.Fatalf("Assemble: %v", err)
+		}
+		want := Pressure{
+			UsedPct:     1,
+			Evicted:     1,
+			Compactions: 1,
+			InputTokens: 5,
+			InputBudget: 5,
+			Level:       LevelCritical,
+			Cause:       CauseHistory,
+			Mitigation:  MitigationEvict,
+		}
+		if pressure != want {
+			t.Errorf("legacy Pressure = %+v, want %+v", pressure, want)
+		}
+	})
+}

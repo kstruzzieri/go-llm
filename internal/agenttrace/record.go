@@ -65,11 +65,14 @@ type pressureLite struct {
 	UsedPct     float64 `json:"used_pct"`
 	Evicted     int     `json:"evicted"`
 	Compactions int     `json:"compactions"`
-	Level       string  `json:"level"`
-	Cause       string  `json:"cause"`
-	Mitigation  string  `json:"mitigation"`
-	InputTokens int     `json:"input_tokens"`
-	InputBudget int     `json:"input_budget"`
+	// Additive within SchemaVersion 2: omitempty keeps every span a legacy or
+	// lossless mixed turn emits byte-identical to what v2 already emitted.
+	AnchorOmissions int    `json:"anchor_omissions,omitempty"`
+	Level           string `json:"level"`
+	Cause           string `json:"cause"`
+	Mitigation      string `json:"mitigation"`
+	InputTokens     int    `json:"input_tokens"`
+	InputBudget     int    `json:"input_budget"`
 }
 
 type runSpan struct {
@@ -146,6 +149,8 @@ type runtimeStageSpan struct {
 	InputBudget   int     `json:"input_budget"`
 	Evicted       int     `json:"evicted"`
 	Compactions   int     `json:"compactions"`
+	// Additive within SchemaVersion 2: see pressureLite.AnchorOmissions.
+	AnchorOmissions int `json:"anchor_omissions,omitempty"`
 }
 
 // effectString renders an EffectClass bitset as a stable, content-light label.
