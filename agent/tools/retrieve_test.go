@@ -723,7 +723,9 @@ func TestRetrieveRejectsMaxKAboveCarrierBound(t *testing.T) {
 		{"progressive, far over the ceiling", Retrieve{R: progressiveFixture(), Progressive: true, MaxK: 500}, true},
 		{"progressive, at the ceiling", Retrieve{R: progressiveFixture(), Progressive: true, MaxK: maxRetrieveMaxK}, false},
 		{"capable retriever, progressive off", Retrieve{R: progressiveFixture(), MaxK: 500}, false},
-		{"progressive on, retriever not capable", Retrieve{R: fakeRetrieverLegacy{}, Progressive: true, MaxK: 500}, false},
+		// There is no "progressive on, retriever not capable" row any more: that
+		// configuration is rejected before MaxK is looked at, so it could only
+		// assert the wrong error.
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -755,17 +757,46 @@ func TestRetrieveLegacyMaxKAboveCarrierBoundIsHonored(t *testing.T) {
 	}
 }
 
-func TestRetrieveProgressiveFallsBackWithoutCapability(t *testing.T) {
-	// Progressive requested but R lacks RenderProgressive: legacy path.
-	tool := Retrieve{R: fakeRetrieverLegacy{}, Progressive: true}
+// TestRetrieveProgressiveRejectsIncapableRetriever: Progressive is a hard
+// contract on R, not a preference. It used to fall through to BuildContext,
+// which serves a DIFFERENT retrieval contract under the same configuration —
+// attribution that credits every retrieved result rather than the rendered ones,
+// and no ContextSet for mixed assembly — with no signal on any seam.
+func TestRetrieveProgressiveRejectsIncapableRetriever(t *testing.T) {
+	legacy := &countingLegacyRetriever{}
+	tool := Retrieve{R: legacy, Progressive: true}
 	res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
-	if err != nil {
-		t.Fatalf("invoke: %v", err)
+	if err == nil {
+		t.Fatalf("an incapable retriever under Progressive must fail the call, got %+v", res)
 	}
-	if res.Content != "LEGACY" {
-		t.Fatalf("must fall back to BuildContext, got %q", res.Content)
+	// Name both the field and the offending type: the whole point is that the
+	// operator can tell WHICH dependency is wrong.
+	for _, want := range []string{"Progressive", "countingLegacyRetriever"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error must name %q, got: %v", want, err)
+		}
 	}
-	if res.Attrib == nil || len(res.Attrib.Sources) != 1 || res.Attrib.Sources[0].Source != "x.go" {
-		t.Fatalf("fallback keeps the legacy attribution semantics: %+v", res.Attrib)
+	// Rejected BEFORE the backend call, like the MaxK ceiling: a misconfigured
+	// tool must not pay for a retrieval whose result it cannot serve.
+	if legacy.calls != 0 {
+		t.Errorf("rejected configuration still called the backend %d time(s)", legacy.calls)
 	}
+	// ...and with Progressive off the same retriever is entirely legal.
+	res, err = Retrieve{R: legacy}.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+	if err != nil || res.Content != "LEGACY" {
+		t.Fatalf("the legacy path must still accept this retriever: err %v, content %q", err, res.Content)
+	}
+}
+
+// countingLegacyRetriever is fakeRetrieverLegacy plus a call counter, so the
+// "rejected before the backend call" assertion is not blind.
+type countingLegacyRetriever struct{ calls int }
+
+func (r *countingLegacyRetriever) Retrieve(ctx context.Context, q string, k int) ([]rag.SearchResult, error) {
+	r.calls++
+	return fakeRetrieverLegacy{}.Retrieve(ctx, q, k)
+}
+
+func (r *countingLegacyRetriever) BuildContext(results []rag.SearchResult, maxTokens int) string {
+	return fakeRetrieverLegacy{}.BuildContext(results, maxTokens)
 }

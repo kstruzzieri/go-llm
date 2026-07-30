@@ -31,9 +31,14 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 // RenderProgressiveWithGroups is RenderProgressive plus the domain-owned
 // groups projection, built from the SAME prepared-source snapshot BEFORE
 // allocation — the tool-local budget never prunes the capability declaration
-// (#331 spec 3.1). A blank result source is an indexed error on this entry
-// point only: SubjectRef.ID must identify a source, and the legacy entry point
-// keeps rendering blank-sourced results exactly as it always has.
+// (#331 spec 3.1). Output and trace are value-identical to RenderProgressive
+// for the same request, on every path including the degraded one below.
+//
+// A blank Chunk.Source on ANY result yields NO groups for the whole call:
+// SubjectRef.ID must identify a source, so such a result cannot be projected,
+// and a partial projection would lose its blocks under mixed assembly. The
+// render itself is unaffected — blank-sourced results render exactly as the
+// legacy entry point has always rendered them.
 //
 // Groups are returned in source order (ascending ProgressiveGroup.Desc.Rank),
 // one per distinct source, lining up positionally with the trace's Sources.
@@ -67,11 +72,22 @@ func (r *Retriever) renderProgressive(ctx context.Context, req ProgressiveRender
 	if err := validateProgressiveRequest(req); err != nil {
 		return "", ProgressiveTrace{}, nil, err
 	}
+	// A blank Chunk.Source has no subject id, so it cannot be projected. That
+	// degrades the PROJECTION, never the render: failing the call would break
+	// every caller of the WithGroups entry point, including the ones that only
+	// wanted the output (agent/tools.Retrieve builds groups unconditionally when
+	// Progressive is set, because it cannot see whether mixed assembly is on).
+	//
+	// All-or-nothing per call, deliberately. Projecting only the sourced results
+	// would declare a partial capability, and under mixed assembly the anchor's
+	// flat content is REPLACED by the selected alternatives — so the blank-sourced
+	// blocks would silently vanish from the model's view. Returning no groups
+	// leaves the anchor a legacy one carrying the complete flat rendering.
 	if wantGroups {
-		for i, res := range req.Results {
+		for _, res := range req.Results {
 			if res.Chunk.Source == "" {
-				return "", ProgressiveTrace{}, nil, fmt.Errorf(
-					"rag: progressive render: result %d has a blank Chunk.Source; groups need it as a subject id", i)
+				wantGroups = false
+				break
 			}
 		}
 	}

@@ -56,9 +56,18 @@ const (
 	maxContextAlternatives = 64
 )
 
-// clone deep-copies the set so tool-owned mutation after dispatch can never
-// change State (spec 3.2). String bytes are shared because strings are
-// immutable; every slice and the nested attribution are copied.
+// clone deep-copies the set so a tool that keeps a reference to the ContextSet
+// it returned cannot change State by writing through it LATER (spec 3.2).
+// String bytes are shared because strings are immutable; every slice and the
+// nested attribution are copied.
+//
+// The isolation is one-directional and starts when recordResult runs, which is
+// AFTER Invoke returns. A tool still mutating from a goroutine at that instant
+// races the copy rather than being isolated from it, and the clone would then
+// capture whichever half-written state it read. Nothing in-repo does that —
+// every built-in producer builds its set and returns it — and the fix is not
+// here: a tool that mutates what it has already handed back has no defined
+// result under any copy strategy.
 func (s *ContextSet) clone() *ContextSet {
 	if s == nil {
 		return nil

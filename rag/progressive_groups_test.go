@@ -578,11 +578,14 @@ func TestProgressiveGroupsContentBytes(t *testing.T) {
 	}
 }
 
-// TestRenderProgressiveWithGroupsBlankSource: a blank Chunk.Source cannot key
-// a SubjectRef, so the groups entry point rejects it. Two arms so the reported
-// index is pinned to the offending result rather than to a constant — a single
-// arm is satisfied by any error message containing that digit. The legacy
-// entry point keeps its existing behavior exactly; this validation is additive.
+// TestRenderProgressiveWithGroupsBlankSource: a blank Chunk.Source cannot key a
+// SubjectRef, so it degrades the PROJECTION and nothing else. The render, the
+// trace and the error are value-identical to the legacy entry point's — which is
+// what a Progressive-but-not-Mixed consumer depends on, since agent/tools.Retrieve
+// calls the WithGroups entry point unconditionally and cannot see the assembly
+// mode. Two arms because the blank result must poison the projection from either
+// position: dropping only the alternatives it would have contributed would leave
+// its blocks in the flat content that mixed assembly then REPLACES.
 func TestRenderProgressiveWithGroupsBlankSource(t *testing.T) {
 	named := SearchResult{
 		Chunk: Chunk{ID: "bs1", Content: "named body", Source: "pkg/bs.go", StartLine: 1, EndLine: 1}, Score: 0.9}
@@ -590,12 +593,11 @@ func TestRenderProgressiveWithGroupsBlankSource(t *testing.T) {
 		Chunk: Chunk{ID: "bs2", Content: "anonymous body", Source: "", StartLine: 1, EndLine: 1}, Score: 0.8}
 
 	tests := []struct {
-		name      string
-		results   []SearchResult
-		wantIndex int
+		name    string
+		results []SearchResult
 	}{
-		{"blank_first", []SearchResult{blank, named}, 0},
-		{"blank_second", []SearchResult{named, blank}, 1},
+		{"blank_first", []SearchResult{blank, named}},
+		{"blank_second", []SearchResult{named, blank}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -608,26 +610,34 @@ func TestRenderProgressiveWithGroupsBlankSource(t *testing.T) {
 			req := ProgressiveRenderRequest{Results: tc.results, MaxTokens: 1 << 20, MaxBytes: 1 << 20}
 
 			out, trace, groups, err := r.RenderProgressiveWithGroups(ctx, req)
-			if err == nil {
-				t.Fatal("blank Chunk.Source must error on the groups entry point")
+			if err != nil {
+				t.Fatalf("a blank source must not fail the render: %v", err)
 			}
-			if want := fmt.Sprintf("result %d", tc.wantIndex); !strings.Contains(err.Error(), want) {
-				t.Fatalf("error must name %q, got: %v", want, err)
-			}
-			if out != "" || groups != nil || !reflect.DeepEqual(trace, ProgressiveTrace{}) {
-				t.Fatalf("error path must return zero values, got out=%q groups=%v trace=%+v", out, groups, trace)
+			if groups != nil {
+				t.Fatalf("blank source must yield NO groups, got %d", len(groups))
 			}
 
-			// Same request, legacy entry point: unchanged, no new error.
+			// Value-identical to the legacy entry point, output and trace both.
 			legacyOut, legacyTrace, err := r.RenderProgressive(ctx, req)
 			if err != nil {
 				t.Fatalf("legacy entry point must not gain an error: %v", err)
 			}
-			if legacyTrace.DistinctSources != 2 {
-				t.Fatalf("legacy render must still group the blank source: %d distinct", legacyTrace.DistinctSources)
+			if out != legacyOut {
+				t.Fatalf("groups entry point changed the render:\nGOT:\n%s\nWANT:\n%s", out, legacyOut)
 			}
-			if !strings.Contains(legacyOut, `### source: ""`) {
-				t.Fatalf("legacy render must still emit the blank source:\n%s", legacyOut)
+			if !reflect.DeepEqual(trace, legacyTrace) {
+				t.Fatalf("groups entry point changed the trace:\ngot  %+v\nwant %+v", trace, legacyTrace)
+			}
+			// Content pins, not shape pins: an empty render would satisfy both
+			// equalities above.
+			if legacyTrace.DistinctSources != 2 {
+				t.Fatalf("render must still group the blank source: %d distinct", legacyTrace.DistinctSources)
+			}
+			if !strings.Contains(out, `### source: ""`) {
+				t.Fatalf("render must still emit the blank source:\n%s", out)
+			}
+			if !strings.Contains(out, "anonymous body") || !strings.Contains(out, "named body") {
+				t.Fatalf("both bodies must survive; mixed assembly has no groups to replace them with:\n%s", out)
 			}
 		})
 	}

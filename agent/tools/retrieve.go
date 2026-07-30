@@ -68,9 +68,14 @@ type Retrieve struct {
 	R         retriever
 	K         int // default top-k when the call omits k
 	MaxTokens int // token budget for BuildContext AND the progressive renderer; 0 => a sane default
-	// Progressive opts into the progressive renderer when R supports it
-	// (#189 slice 1). Off => the legacy BuildContext path, byte-identical
-	// to before. MinFullResults and Estimate pass through to the renderer.
+	// Progressive opts into the progressive renderer (#189 slice 1). Off => the
+	// legacy BuildContext path, byte-identical to before. MinFullResults and
+	// Estimate pass through to the renderer.
+	//
+	// It is a HARD CONTRACT on R: setting it with a retriever that does not
+	// implement RenderProgressiveWithGroups fails every call rather than quietly
+	// serving the legacy path with its over-crediting attribution and no
+	// ContextSet. *rag.Retriever satisfies it.
 	//
 	// On, it also builds the ToolResult.Context capability projection
 	// UNCONDITIONALLY — the tool cannot see ContextManager.Mixed, so the cost
@@ -150,7 +155,23 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 	// Resolved ONCE: the carrier ceiling below and the branch that builds the
 	// groups must agree on whether a projection happens at all.
 	pr, capable := t.R.(progressiveRetriever)
-	progressive := capable && t.Progressive
+	progressive := t.Progressive
+	// Progressive with a retriever that cannot serve it USED to fall through to
+	// the legacy path — same tool, same spec, but the over-crediting attribution
+	// and no ContextSet, with nothing anywhere saying so. There is no logger on
+	// this seam and adding one for a single condition is more API than the
+	// condition is worth, so it takes the same shape as the MaxK check below: a
+	// per-call error the orchestrator surfaces as a model-visible IsError
+	// observation. A consumer who ships it gets a run where every retrieve call
+	// says this, which is the point — silently serving a different retrieval
+	// contract than the one configured is the failure being fixed.
+	//
+	// *rag.Retriever satisfies the interface (asserted at package level), so
+	// this only fires for a consumer-supplied retriever.
+	if progressive && !capable {
+		return agent.ToolResult{}, fmt.Errorf(
+			"tools: retrieve: Progressive is set but %T does not implement RenderProgressiveWithGroups", t.R)
+	}
 	// Misconfiguration, not model input, so it fails the CALL rather than
 	// degrading silently — but it does not abort the run: the orchestrator turns
 	// any tool error into a model-visible IsError observation (invokeCall in

@@ -29,6 +29,11 @@ have to re-discover which turns the model still sees.
 
 **Two behavior changes reach consumers who do not opt in:**
 
+- `agent/tools.Retrieve.Progressive` is now a HARD CONTRACT on `R`. Setting it
+  with a retriever that does not implement `RenderProgressiveWithGroups` fails
+  every call instead of silently serving the legacy `BuildContext` path with
+  its over-crediting attribution and no `ContextSet`. `*rag.Retriever`
+  satisfies it; only a consumer-supplied retriever is affected.
 - `agent/tools.Retrieve` now clamps the model-supplied `k` to 20 on the
   LEGACY path too, before the backend call. A consumer whose model asks for
   50 results silently gets 20, and the legacy attribution set (which credits
@@ -56,6 +61,13 @@ New public API:
   `ProgressiveAlternative`.
 - `contextdepth`: the descriptor vocabulary these carry (`SubjectRef`,
   `GroupDesc`, `AlternativeDesc`, `RepresentationDesc`).
+
+`Retriever.RenderProgressiveWithGroups` returns the same output, trace and
+error as `RenderProgressive` for the same request, on every path. A blank
+`Chunk.Source` on any result yields NO groups for that call rather than
+failing it — such a result has no subject id, and a partial projection would
+lose its blocks under mixed assembly, which replaces the anchor's flat content
+with the selected alternatives.
 
 Under mixed assembly a fresh source is offered the deterministic metadata
 overview as its cheapest alternative, matching the flat renderer's own

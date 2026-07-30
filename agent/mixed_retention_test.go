@@ -159,3 +159,68 @@ func TestMixedAssemblyRetainsSameMessagesAsRecencyCompactor(t *testing.T) {
 		})
 	}
 }
+
+// TestHasStructuredAnchorInspectsNonToolRoles covers hasStructuredAnchor's
+// stated reason for scanning EVERY message rather than completed tool chains:
+// a set riding a pinned span or an unresolved chain still has to be stripped
+// from the materialized copy (spec 4.2), and only mixed assembly strips it.
+//
+// The existing retention suite cannot see this. Its gateAnchor rides a PINNED
+// message, but every assertion there is "mixed == legacy" — narrow the gate to
+// tool roles and those states quietly take the legacy path, where the two agree
+// trivially. So this asserts the two things a legacy fall-through cannot fake:
+// the trace is non-zero (mixed actually ran) and the payload is gone from the
+// returned copy while the caller's State still has it.
+func TestHasStructuredAnchorInspectsNonToolRoles(t *testing.T) {
+	set := &ContextSet{Groups: []ContextGroup{ladderGroup("pkg/a.go", 1, "AAAA", "bbbb", "1111")}}
+	for _, tc := range []struct {
+		name string
+		st   State
+	}{{
+		// A pinned span: never a completed chain, so it builds no anchor.
+		name: "set on a pinned message",
+		st:   State{Messages: []Message{withContext(pinned("system", "SYS"), set), elastic("user", "U")}},
+	}, {
+		// An assistant tool call with NO matching result: an unresolved chain.
+		name: "set on an unresolved tool call",
+		st: State{Messages: []Message{
+			elastic("user", "U"), withContext(mixedAsstCall("c1"), set),
+		}},
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := ContextManager{Mixed: true, Estimate: runeEstimator}
+			out, _, tr, err := m.AssembleWithTrace(context.Background(), tc.st, 0, TokenBudget{Input: 4096})
+			if err != nil {
+				t.Fatalf("AssembleWithTrace: %v", err)
+			}
+			// Mixed assembly returns a NON-NIL Subjects slice; the legacy and
+			// no-anchor paths return the zero trace. That is the only signal that
+			// separates "mixed ran and found nothing to allocate" from "the gate
+			// sent this State to the compactor".
+			if tr.Subjects == nil {
+				t.Fatalf("zero trace: the gate sent a structured State down the legacy path\n%+v", tr)
+			}
+			for i, msg := range out.Messages {
+				if msg.Context != nil {
+					t.Errorf("materialized message %d still carries the runtime payload", i)
+				}
+			}
+			// ...and the caller's State is untouched, so the strip is on the copy.
+			found := false
+			for _, msg := range tc.st.Messages {
+				if msg.Context != nil {
+					found = true
+				}
+			}
+			if !found {
+				t.Error("assembly stripped the CALLER's State, not just the returned copy")
+			}
+		})
+	}
+}
+
+// withContext attaches a structured payload to any message, whatever its role.
+func withContext(m Message, set *ContextSet) Message {
+	m.Context = set
+	return m
+}
