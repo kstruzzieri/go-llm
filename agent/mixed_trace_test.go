@@ -22,12 +22,27 @@ import (
 // TAUTOLOGICAL — fillMixedTrace computes EstimatedTokensFree as maxTokens-used,
 // so Used+Free==MaxTokens cannot fail — and the independent-recompute form is
 // blind to anchor CONTENT, because admission and materialization both call
-// anchorJoined: a mutated separator moves both sides together. Measured during
-// Task 11: substituting " " for "\n" in anchorJoined leaves both the identity
-// and the recompute green (runeEstimator prices "A\nB" and "A B" alike). The
-// literal content pins in TestMixedTraceAnchorContentExactPin are what catch
-// it. The identity assertions are kept — they pin the arithmetic wiring — but
-// they are NOT coverage of anchorJoined.
+// anchorJoined: a mutated separator moves both sides together. Measured twice
+// (Task 11 and its review): substituting " " for "\n" in anchorJoined leaves
+// both the identity and the recompute green (runeEstimator prices "A\nB" and
+// "A B" alike), and DROPPING the placeholder precharge likewise leaves the whole
+// sweep and oracle green, ledger and cap included. Two arithmetic-invariant
+// blind spots, both caught only by literal content pins:
+// TestMixedTraceAnchorContentExactPin. The identity assertions are kept — they
+// pin the arithmetic wiring — but they are NOT coverage of anchorJoined.
+//
+// SCOPE OF THAT CLAIM: it is about THIS layer. Module-wide, the separator
+// mutation is also caught by TestMixedAllocVerbatimFloor and
+// TestAssembleWithTraceMixedEndToEnd, and the precharge mutation by five
+// pre-existing per-task tests. What is true is that within the property layer
+// nothing else catches either one, which is why the pins live here rather than
+// being left to the scenario tests.
+//
+// NOT COVERED HERE: VerbatimShortfalls carries no property-layer invariant —
+// only the == 0 pin in TestMixedTraceFloorTerminalRow. Both directions are
+// covered by per-task tests (TestMixedAllocVerbatimFloor,
+// TestAssembleWithTraceUpgradedSubject), so this is a known residual, not a gap
+// this file silently certifies.
 
 // Content sentinels. They are deliberately unlike every trace vocabulary word,
 // subject ID and call ID in this file, so the content-free property can search
@@ -243,7 +258,13 @@ func assertLedgerExact(t *testing.T, where string, est func(string) int, st, out
 	if tr.EstimatedTokensUsed+tr.EstimatedTokensFree != tr.MaxTokens {
 		t.Errorf("%s: used %d + free %d != MaxTokens %d", where, tr.EstimatedTokensUsed, tr.EstimatedTokensFree, tr.MaxTokens)
 	}
-	if tr.EstimatedTokensFree < 0 || tr.EstimatedTokensUsed > tr.MaxTokens {
+	// TWO-FAULT BACKSTOP with NO single-mutation coverage, kept deliberately.
+	// Given the identity above, `Free < 0` is the SAME predicate, so it is not
+	// restated. Reaching this needs two faults at once: st.fits must stop
+	// bounding alloc.used AND assembleMixed's fail-closed exhaustion gate must
+	// be gone — either alone converts the overrun into ErrContextExhausted,
+	// which the sweep classifies as the must-fit path instead.
+	if tr.EstimatedTokensUsed > tr.MaxTokens {
 		t.Errorf("%s: used %d exceeds MaxTokens %d (free %d)", where, tr.EstimatedTokensUsed, tr.MaxTokens, tr.EstimatedTokensFree)
 	}
 }
@@ -282,11 +303,14 @@ func assertContentFree(t *testing.T, where, js string, sentinels []string) {
 }
 
 // assertNoNullSlices: ContextAssemblyTrace and ContextSubjectTrace hold no
-// pointer fields, so any `null` in the marshaled form is a nil slice — Subjects
-// (the orchestrator's zero-trace guard keys on it) or a row's Representations.
+// pointer fields, so a `null` VALUE in the marshaled form is a nil slice —
+// Subjects (the orchestrator's zero-trace guard keys on it) or a row's
+// Representations. The search is anchored to `":null"` rather than bare "null"
+// because subject IDs are source paths: a bare search false-positives on
+// pkg/nullable.go, and a check that fails on legitimate data gets deleted.
 func assertNoNullSlices(t *testing.T, where, js string) {
 	t.Helper()
-	if strings.Contains(js, "null") {
+	if strings.Contains(js, ":null") {
 		t.Errorf("%s: marshaled trace contains null; every slice field must marshal []: %s", where, js)
 	}
 }
@@ -294,7 +318,9 @@ func assertNoNullSlices(t *testing.T, where, js string) {
 // assertRowsUnaliased: no row's Representations may share a backing array with
 // the caller's ContextSet or with the package-level implicit descriptors, both
 // of which outlive the trace — spanRepresentations and summaryRepresentations
-// are shared by every assembly in the process. Pointer identity is asserted
+// are shared by every assembly in the process. This covers ALL THREE clone sites
+// (anchorRow, spanRow and the summary row in fillMixedTrace), provided the sweep
+// includes a fixture with a DurableSummary — it does. Pointer identity is asserted
 // directly, so this fails on the aliasing itself rather than by tripping
 // validation on some later call.
 func assertRowsUnaliased(t *testing.T, where string, st State, tr ContextAssemblyTrace) int {
@@ -499,9 +525,20 @@ func TestMixedTraceFloorTerminalRow(t *testing.T) {
 // traceFixture is one input to the property sweep, with the model-visible
 // strings its trace must never carry.
 type traceFixture struct {
-	name      string
-	st        State
+	name string
+	st   State
+	// sentinels are checked as a SET, not one by one: the sighting guard below
+	// demands that SOME sentinel reached the model-visible state, not each. Some
+	// never can — traceFallback is the flat rendering mixed mode always replaces,
+	// and floorOrient loses to the floor rung at every budget (swapping the
+	// 26-byte placeholder for the 18-byte evidence rung is a NEGATIVE delta, so
+	// it always fits). Their absence from a trace proves nothing; the property
+	// binds through the reachable ones.
 	sentinels []string
+	// maxBudget must be high enough to reach a zero-omission trace under BOTH
+	// estimators, which the sawFull guard below enforces — nonAdditiveEstimator
+	// prices the same fixture higher, and a number tuned against runeEstimator
+	// alone silently leaves the retained end of the fixture unswept.
 	maxBudget int
 	// invisible marks a fixture whose content can never reach the model at ANY
 	// budget — its chain is evicted by an under-placeholder cap, or its only
@@ -522,7 +559,7 @@ func traceFixtures() []traceFixture {
 	ladderSentinels := []string{"LAD-ABS-a.go", "LAD-ABS-b.go", "LAD-OVR", "LAD-EV1", "LAD-EV2"}
 	return []traceFixture{
 		{name: "end to end", st: mixedTraceState(),
-			sentinels: []string{traceCardContent, traceEvidenceContent, traceFallback}, maxBudget: 90},
+			sentinels: []string{traceCardContent, traceEvidenceContent, traceFallback}, maxBudget: 110},
 		{name: "durable summary and history lane", st: summarized,
 			sentinels: []string{traceCardContent, traceEvidenceContent, traceFallback}, maxBudget: 130},
 		{name: "omission by token budget", st: mixedOmitState(4096),
@@ -550,6 +587,12 @@ func traceFixtures() []traceFixture {
 // The vocabulary check is also a coverage check: all four Decision values and
 // all three OmissionReason values must actually OCCUR across the sweep, so the
 // fixture table cannot silently stop exercising one of them.
+//
+// BISECTING NOTE: those coverage guards live at the parent level and run whatever
+// -run filter is in effect, so narrowing to one subtest (-run
+// 'TestMixedTraceProperties/rune/end_to_end') reports spurious "never occurred"
+// errors. Read the subtest's own failures and ignore the parent's; the guards are
+// only meaningful over the whole table.
 func TestMixedTraceProperties(t *testing.T) {
 	estimators := []struct {
 		name string
@@ -568,7 +611,7 @@ func TestMixedTraceProperties(t *testing.T) {
 		for _, f := range traceFixtures() {
 			t.Run(e.name+"/"+f.name, func(t *testing.T) {
 				before := stateSnapshot(t, f.st)
-				seen := false
+				seen, sawFull := false, false
 				for budget := 0; budget <= f.maxBudget; budget++ {
 					where := fmt.Sprintf("%s/%s budget %d", e.name, f.name, budget)
 					m := ContextManager{Mixed: true, Estimate: e.est}
@@ -591,6 +634,9 @@ func TestMixedTraceProperties(t *testing.T) {
 					}
 					if tr.MaxTokens != budget {
 						t.Errorf("%s: MaxTokens = %d, want the state budget %d", where, tr.MaxTokens, budget)
+					}
+					if tr.OmittedSubjects == 0 {
+						sawFull = true
 					}
 					assertTraceInvariants(t, tr)
 					assertLedgerExact(t, where, e.est, f.st, out, tr)
@@ -624,6 +670,21 @@ func TestMixedTraceProperties(t *testing.T) {
 				if !seen && !f.invisible {
 					t.Errorf("no fixture content ever reached the assembled State; the content-free check on %q is vacuous", f.name)
 				}
+				// The CONVERSE of the annotation, asserted in the same place it is
+				// honored: `invisible` only ever weakens a guard, so a fixture that
+				// becomes visible — or a new one mislabelled — would otherwise lose
+				// its sighting guard silently.
+				if f.invisible && seen {
+					t.Errorf("fixture %q is annotated invisible but surfaced content; the guard is disarmed for nothing", f.name)
+				}
+				// Per-fixture counterpart of the oracle's fullRuns guard: without it
+				// a stale maxBudget leaves the fixture's RETAINED end unswept and
+				// nothing notices. Skipped for invisible fixtures, whose subjects are
+				// omitted at every budget by construction.
+				if !sawFull && !f.invisible {
+					t.Errorf("maxBudget %d never reached a zero-omission trace; the retained end of %q is unswept",
+						f.maxBudget, f.name)
+				}
 			})
 		}
 	}
@@ -655,9 +716,18 @@ func TestMixedTraceProperties(t *testing.T) {
 //	(b) every materialized anchor's Content fits its cap, or the chain is evicted;
 //	(c) the subject partition Selected == Rendered + Omitted;
 //	(d) chain atomicity: an assistant call and its anchors are retained or
-//	    evicted together, and in step with the chain's own span row;
+//	    evicted together, and in step with the chain's own span row. The SPAN-ROW
+//	    half carries this property: a retained chain whose span row says omitted
+//	    is invisible to every other assertion here (the ledger balances). The
+//	    message-count half is not independently falsifiable — (a) fires first on
+//	    any change to which messages are emitted — so it is a cheap restatement,
+//	    not a second net. Eight per-task tests also catch the span-row mutant;
+//	    this is the only PROPERTY-layer one.
 //	(e) (ToolCallID, Domain, ID) uniqueness across rows;
 //	(f) determinism: the same input twice yields an identical trace and State.
+//	    FORWARD-LOOKING INSURANCE, not coverage of a present defect: no map is
+//	    iterated anywhere in the three production files, so today only an
+//	    injected one (verified: keying anchor subjects by ID) can break it.
 //
 // The fixture reserves nothing must-fit (no pinned message, no unresolved
 // chain, empty System), so every budget — zero included — must SUCCEED by
@@ -675,7 +745,11 @@ func TestMixedExhaustiveOracle(t *testing.T) {
 
 	sharedRefs, evictions, capBound, fullRuns, splitRuns := 0, 0, 0, 0, 0
 	for _, e := range estimators {
-		for _, minVerbatim := range []int{0, 1} {
+		// Swept past what one subject can satisfy: with two subjects per anchor and
+		// at most two verbatim components per alternative, a floor of 1 is met by
+		// the FIRST subject and the pass never spreads. 2 and 3 make it walk both,
+		// and 3 is unreachable, which is the shortfall-counting path.
+		for _, minVerbatim := range []int{0, 1, 2, 3} {
 			for _, outputCap := range caps {
 				name := fmt.Sprintf("%s/minVerbatim=%d/cap=%d", e.name, minVerbatim, outputCap)
 				t.Run(name, func(t *testing.T) {

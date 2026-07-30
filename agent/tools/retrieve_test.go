@@ -573,7 +573,11 @@ func TestRetrieveMaxKWithinCarrierBound(t *testing.T) {
 //
 // The SHAPE is restated rather than produced by rag's own builder, which calls a
 // source fresh only when a store hands it a valid summary; the COUNT is what
-// this fixture exists to push at agent. RenderedEvidence rides only the
+// this fixture exists to push at agent. The shape itself is pinned against the
+// REAL buildProgressiveGroups by rag's own TestProgressiveGroupsValidityMatrix
+// ("fresh" case, rag/progressive_groups_test.go) — adding a third rung turns
+// three rag tests red, so the drift this restatement could hide is loud, just on
+// the rag side of the seam. RenderedEvidence rides only the
 // evidence-bearing rungs, because bridgeGroups derives per-alternative
 // attribution from it and the carriers reject attribution on an alternative
 // with no verbatim component.
