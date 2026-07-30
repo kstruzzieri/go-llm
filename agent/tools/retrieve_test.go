@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"reflect"
 	"slices"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	"github.com/kstruzzieri/go-llm/contextdepth"
+	"github.com/kstruzzieri/go-llm/provider"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -560,6 +562,128 @@ func TestRetrieveMaxKWithinCarrierBound(t *testing.T) {
 	}
 	if defaultRetrieveMaxK > maxRetrieveMaxK {
 		t.Fatalf("default MaxK %d exceeds its own ceiling %d", defaultRetrieveMaxK, maxRetrieveMaxK)
+	}
+}
+
+// worstCaseGroups is rag's projection for the WORST case: all k results landing
+// on ONE FRESH source. buildProgressiveGroups renders a fresh source at two
+// orientation rungs (abstract, abstract+overview) crossed with the k+1 evidence
+// prefixes, ordered by (prefix length, rung index) — 2(k+1) alternatives in one
+// group, verbatim component counts 0,0,1,1,2,2,... (rag/progressive_groups.go).
+//
+// The SHAPE is restated rather than produced by rag's own builder, which calls a
+// source fresh only when a store hands it a valid summary; the COUNT is what
+// this fixture exists to push at agent. RenderedEvidence rides only the
+// evidence-bearing rungs, because bridgeGroups derives per-alternative
+// attribution from it and the carriers reject attribution on an alternative
+// with no verbatim component.
+func worstCaseGroups(k int) []rag.ProgressiveGroup {
+	rungs := [][]contextdepth.RepresentationDesc{
+		{{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationGenerated}},
+		{
+			{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationGenerated},
+			{Depth: contextdepth.DepthL1, Kind: contextdepth.RepresentationGenerated},
+		},
+	}
+	g := rag.ProgressiveGroup{Desc: contextdepth.GroupDesc{
+		Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "one.go"},
+		Rank:    1,
+	}}
+	add := func(reps []contextdepth.RepresentationDesc, content string, ev []rag.RenderedEvidence) {
+		g.Alternatives = append(g.Alternatives, rag.ProgressiveAlternative{
+			Desc:             contextdepth.AlternativeDesc{Representations: slices.Clone(reps)},
+			Content:          content,
+			RenderedEvidence: ev,
+		})
+	}
+	for i, reps := range rungs {
+		add(reps, fmt.Sprintf("orientation-%d", i), nil)
+	}
+	var ev []rag.RenderedEvidence
+	for n := 1; n <= k; n++ {
+		ev = append(ev, rag.RenderedEvidence{
+			Source: "one.go", ChunkID: fmt.Sprintf("c%d", n), StableKey: fmt.Sprintf("k%d", n),
+			StartLine: n, EndLine: n + 1, Score: 0.5,
+		})
+		for i, reps := range rungs {
+			r := slices.Clone(reps)
+			for range ev {
+				r = append(r, contextdepth.RepresentationDesc{
+					Depth: contextdepth.DepthL2, Kind: contextdepth.RepresentationVerbatim,
+				})
+			}
+			add(r, fmt.Sprintf("orientation-%d+evidence-%d", i, n), slices.Clone(ev))
+		}
+	}
+	return []rag.ProgressiveGroup{g}
+}
+
+// TestRetrieveProjectionFitsCarrierBound makes the cross-package derivation
+// EXECUTABLE. maxRetrieveMaxK is a RESTATED copy of a ceiling owned by agent's
+// UNEXPORTED maxContextAlternatives, and TestRetrieveMaxKWithinCarrierBound can
+// only check it against a second restatement of the same 64: raising agent's
+// constant fires nothing, and lowering it breaks this package silently, with
+// only a comment linking the two. Here the worst-case projection is bridged into
+// the real carriers and pushed through agent's exported assembly entry point, so
+// BOTH directions fail loudly — the at-ceiling projection must be accepted, and
+// the one-larger projection must be rejected (that second row is what pins the
+// ceiling as MAXIMAL; the tool itself can never build it, since Invoke rejects
+// MaxK above its own ceiling).
+func TestRetrieveProjectionFitsCarrierBound(t *testing.T) {
+	tests := []struct {
+		name    string
+		k       int
+		wantErr bool
+	}{
+		{"worst case at the ceiling is accepted", maxRetrieveMaxK, false},
+		{"one evidence prefix past the ceiling is rejected", maxRetrieveMaxK + 1, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := progressiveFixture()
+			fake.groups = worstCaseGroups(tc.k)
+			tool := Retrieve{R: fake, Progressive: true, MaxK: maxRetrieveMaxK}
+			res, err := tool.Invoke(context.Background(), json.RawMessage(`{"query":"q"}`))
+			if err != nil || res.IsError {
+				t.Fatalf("Invoke: err %v, result %+v", err, res)
+			}
+			if res.Context == nil || len(res.Context.Groups) != 1 {
+				t.Fatalf("projection did not reach the carriers: %+v", res.Context)
+			}
+			// Vacuity guard: the fixture must really carry the derived count, or
+			// the assembly below is not testing the bound the comment claims.
+			if got, want := len(res.Context.Groups[0].Alternatives), 2*(tc.k+1); got != want {
+				t.Fatalf("%d alternatives for one fresh source at k=%d, want 2(k+1) = %d", got, tc.k, want)
+			}
+
+			st := agent.State{Messages: []agent.Message{{
+				ChatMessage: provider.ChatMessage{Role: "assistant", ToolCalls: []provider.ToolCall{{
+					ID: "call-1", Type: "function",
+					Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(`{}`)},
+				}}},
+				Segment: agent.Elastic,
+			}, {
+				ChatMessage: provider.ChatMessage{
+					Role: "tool", ToolName: "retrieve", ToolCallID: "call-1", Content: res.Content,
+				},
+				Segment:   agent.Elastic,
+				Context:   res.Context,
+				OutputCap: RetrieveOutputCap,
+			}}}
+			m := agent.ContextManager{Mixed: true}
+			_, _, tr, err := m.AssembleWithTrace(context.Background(), st, 0, agent.TokenBudget{Input: 1 << 20})
+			switch {
+			case tc.wantErr && err == nil:
+				t.Fatalf("agent accepted %d alternatives: maxRetrieveMaxK is no longer the largest k the carriers hold, so it can be raised",
+					len(res.Context.Groups[0].Alternatives))
+			case tc.wantErr && !strings.Contains(err.Error(), "alternatives"):
+				t.Fatalf("rejection must name the alternative-count bound, got %v", err)
+			case !tc.wantErr && err != nil:
+				t.Fatalf("agent rejected the worst-case projection maxRetrieveMaxK permits: %v", err)
+			case !tc.wantErr && len(tr.Subjects) == 0:
+				t.Fatalf("accepted projection produced no trace rows: %+v", tr)
+			}
+		})
 	}
 }
 
