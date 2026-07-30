@@ -139,8 +139,15 @@ type Pressure struct {
 	InputTokens int
 	InputBudget int
 	Level       PressureLevel
-	Cause       PressureCause
-	Mitigation  PressureMitigation
+	// Cause is NOT comparable across the legacy and mixed assembly arms for the
+	// same transcript. dominantCause attributes a message to CauseRetrieval when
+	// Message.Attrib is set, and mixed assembly correctly drops an anchor's
+	// fallback attribution when no chosen alternative carries any (#331 spec
+	// 4.2) — so the same anchor can be counted as retrieval under
+	// ContextManager.Mixed off and tool_output under Mixed on. Aggregate cause
+	// histograms within one arm; do not diff them between arms.
+	Cause      PressureCause
+	Mitigation PressureMitigation
 }
 
 // StepRecord is the durable per-turn truth. RouteOutcome is captured

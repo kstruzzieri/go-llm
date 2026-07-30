@@ -107,6 +107,20 @@ func mixedOmitState(outputCap int) State {
 	return State{Messages: []Message{mixedAsstCall("c1"), anchor}}
 }
 
+// mixedSysTokens is the only reservation mixed assembly charges outside the
+// units: the system prompt plus the materialized durable summary. Pinned
+// MESSAGES are units and must NOT appear here — adding them would double-charge
+// the pinned span, which is only observable at a budget tight enough that the
+// inflated ledger changes a decision (see TestAssembleWithTraceExactFitBudget).
+func mixedSysTokens(st State) int {
+	lenR := func(s string) int { return len([]rune(s)) }
+	n := lenR(st.System)
+	if summary := strings.TrimSpace(st.DurableSummary); summary != "" {
+		n += lenR(DurableSummaryPrompt(summary))
+	}
+	return n
+}
+
 // mixedAssembleOracle recomputes an assembled State's model-visible cost from
 // the raw estimator INLINE — not through messageCost/totalTokens, which are the
 // functions under test — so a drift between the trace's number and the state it
@@ -132,8 +146,13 @@ func mixedAssembleOracle(out State) int {
 // the materialized copy — so materialization that emits uncharged content (an
 // evicted chain, a differently joined anchor) breaks this even though each side
 // is internally consistent.
-func assertMixedLedger(t *testing.T, st State, out State, tr ContextAssemblyTrace, sysTokens int) {
+//
+// sysTokens is DERIVED here, never supplied by the caller: a hand-passed number
+// makes the oracle and the implementation agree on that term by construction,
+// which is exactly how a double-charged pinned span would hide.
+func assertMixedLedger(t *testing.T, st State, out State, tr ContextAssemblyTrace) {
 	t.Helper()
+	sysTokens := mixedSysTokens(st)
 	_, alloc, err := allocFixture(t, runeEstimator, st, tr.MaxTokens, sysTokens)
 	if err != nil {
 		t.Fatalf("ledger oracle: re-running allocation failed: %v", err)
@@ -415,7 +434,7 @@ func TestAssembleWithTraceMixedEndToEnd(t *testing.T) {
 	if rowSum != 58 {
 		t.Errorf("row token sum = %d, want 58 (system 3 + goal 4 + separator 1 are in the total only)", rowSum)
 	}
-	assertMixedLedger(t, st, out, tr, 3) // sysTokens = estimate("SYS")
+	assertMixedLedger(t, st, out, tr)
 
 	if pressure.InputTokens != 66 || pressure.InputBudget != 200 {
 		t.Errorf("pressure tokens/budget = %d/%d, want 66/200", pressure.InputTokens, pressure.InputBudget)
@@ -448,7 +467,7 @@ func TestAssembleWithTraceUpgradedSubject(t *testing.T) {
 		t.Fatalf("AssembleWithTrace: %v", err)
 	}
 	assertTraceInvariants(t, tr)
-	assertMixedLedger(t, st, out, tr, 0)
+	assertMixedLedger(t, st, out, tr)
 
 	if len(out.Messages) != 2 || out.Messages[1].Content != "AAOOOEEEE" {
 		t.Fatalf("anchor Content = %q, want the last ladder rung %q", out.Messages[1].Content, "AAOOOEEEE")
@@ -466,6 +485,167 @@ func TestAssembleWithTraceUpgradedSubject(t *testing.T) {
 	}
 	if tr.VerbatimShortfalls != 1 {
 		t.Errorf("VerbatimShortfalls = %d, want 1 (MinVerbatim 5 is unreachable)", tr.VerbatimShortfalls)
+	}
+}
+
+// attribLadder is a two-rung group whose alternatives differ ONLY in
+// attribution: rung 0 is orientation with nil Attrib, rung 1 adds the verbatim
+// evidence and the attribution that credits it. Nothing else in the suite has
+// this shape, and without it anchorAttrib reading alts[0] instead of
+// alts[s.chosen] emits the right bytes with no attribution at all.
+func attribLadder(id, key string) ContextGroup {
+	return ContextGroup{
+		Desc: contextdepth.GroupDesc{
+			Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: id},
+			Rank:    1,
+		},
+		Alternatives: []ContextAlternative{{
+			Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}},
+			Content: "OR-" + id,
+		}, {
+			Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract, altEvidence}},
+			Content: "OR-" + id + "-EV",
+			Attrib:  &RetrievalAttribution{Sources: []RetrievedSource{{StableKey: key, Source: id}}},
+		}},
+	}
+}
+
+// TestAssembleWithTraceParallelAnchors is the two-anchor (parallel tool call)
+// shape. It pins the two things a single-anchor fixture cannot:
+//
+//   - each anchor's Attrib comes from ITS OWN chosen alternative, so reading
+//     alts[0] (no attribution) or the sibling anchor's subjects both fail;
+//   - each row's ToolCallID is its own anchor's. ToolCallID is one third of the
+//     assembly-wide subject identity (ToolCallID, Domain, ID), so a row that
+//     borrowed anchors[0]'s call ID would collapse two distinct subjects into one.
+func TestAssembleWithTraceParallelAnchors(t *testing.T) {
+	st := State{Messages: []Message{
+		mixedAsstCall("c1", "c2"),
+		mixedToolResult("c1", traceFallback, chainSet(0, attribLadder("one.go", "K1")), 4096),
+		mixedToolResult("c2", traceFallback, chainSet(0, attribLadder("two.go", "K2")), 4096),
+	}}
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+
+	out, _, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 300})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	assertTraceInvariants(t, tr)
+	assertMixedLedger(t, st, out, tr)
+	// assistant(40) + two envelopes(10 each) + two upgraded contents(12 each).
+	if tr.EstimatedTokensUsed != 84 {
+		t.Errorf("EstimatedTokensUsed = %d, want 84", tr.EstimatedTokensUsed)
+	}
+
+	// One tool message per call ID, each carrying its own evidence and its own
+	// attribution key.
+	wantAnchors := []struct{ callID, content, key string }{
+		{"c1", "OR-one.go-EV", "K1"},
+		{"c2", "OR-two.go-EV", "K2"},
+	}
+	if len(out.Messages) != len(wantAnchors)+1 {
+		t.Fatalf("%d messages, want assistant + %d anchors: %+v", len(out.Messages), len(wantAnchors), out.Messages)
+	}
+	for i, w := range wantAnchors {
+		msg := out.Messages[i+1]
+		if msg.ToolCallID != w.callID || msg.Content != w.content {
+			t.Errorf("anchor %d = callID %q content %q, want %q %q", i, msg.ToolCallID, msg.Content, w.callID, w.content)
+		}
+		var keys []string
+		if msg.Attrib != nil {
+			for _, s := range msg.Attrib.Sources {
+				keys = append(keys, s.StableKey)
+			}
+		}
+		if !slices.Equal(keys, []string{w.key}) {
+			t.Errorf("anchor %d (%s): attribution keys = %v, want [%s] from its own chosen alternative",
+				i, w.callID, keys, w.key)
+		}
+	}
+
+	// Rows: the chain span, then one row per anchor subject, each stamped with
+	// the call ID of the anchor it came from.
+	assertRows(t, tr.Subjects, []wantRow{
+		{domain: contextdepth.DomainConversation, id: "0", lane: 1, depth: contextdepth.DepthL2,
+			reps: []contextdepth.RepresentationDesc{repL2Verbatim}, tokens: 60, bytes: 0, decision: DecisionBase},
+		{domain: contextdepth.DomainRAG, id: "one.go", callID: "c1", lane: 1, rank: 1,
+			depth: contextdepth.DepthL2, reps: []contextdepth.RepresentationDesc{altAbstract, altEvidence},
+			tokens: 12, bytes: 12, decision: DecisionUpgrade},
+		{domain: contextdepth.DomainRAG, id: "two.go", callID: "c2", lane: 1, rank: 1,
+			depth: contextdepth.DepthL2, reps: []contextdepth.RepresentationDesc{altAbstract, altEvidence},
+			tokens: 12, bytes: 12, decision: DecisionUpgrade},
+	})
+}
+
+// TestContextAssemblyTraceRowsOwnTheirSlices: a consumer mutating a returned
+// row must not reach back into package state or into the caller's ContextSet.
+// Both would be cross-request corruption from a read-only-looking operation —
+// spanRepresentations and summaryRepresentations are package vars shared by
+// every assembly in the process, and an anchor row's descriptor belongs to the
+// tool's set. Both assemblies share ONE State so the anchor path is covered too.
+func TestContextAssemblyTraceRowsOwnTheirSlices(t *testing.T) {
+	st := mixedTraceState()
+	st.DurableSummary = "PRIOR" // exercise the summary row's clone as well
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+	budget := TokenBudget{Input: 300}
+
+	_, _, first, err := m.AssembleWithTrace(context.Background(), st, 0, budget)
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	baseline := make([][]contextdepth.RepresentationDesc, len(first.Subjects))
+	for i, s := range first.Subjects {
+		if len(s.Representations) == 0 {
+			t.Fatalf("row %d has no representations; the test would be vacuous", i)
+		}
+		baseline[i] = slices.Clone(s.Representations)
+	}
+	// A consumer zeroing what it was handed.
+	for _, s := range first.Subjects {
+		for j := range s.Representations {
+			s.Representations[j] = contextdepth.RepresentationDesc{}
+		}
+	}
+
+	_, _, second, err := m.AssembleWithTrace(context.Background(), st, 0, budget)
+	if err != nil {
+		t.Fatalf("second AssembleWithTrace: %v", err)
+	}
+	if len(second.Subjects) != len(baseline) {
+		t.Fatalf("%d rows on the second assembly, want %d", len(second.Subjects), len(baseline))
+	}
+	for i, s := range second.Subjects {
+		if !slices.Equal(s.Representations, baseline[i]) {
+			t.Errorf("row %d (%s/%s): Representations = %+v after a consumer mutated an earlier trace, want %+v",
+				i, s.Subject.Domain, s.Subject.ID, s.Representations, baseline[i])
+		}
+	}
+}
+
+// TestAssembleWithTraceExactFitBudget runs the end-to-end fixture at the
+// tightest budget that retains everything. Peak ledger is 67, not the final 66:
+// a chain's anchors are charged the omission placeholder BEFORE their cheaper
+// alternatives replace it. At the peak, any reservation charged twice — a
+// sysTokens that also added pinnedTokens, say — evicts something, which is the
+// only place that double charge is observable.
+func TestAssembleWithTraceExactFitBudget(t *testing.T) {
+	st := mixedTraceState()
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+
+	out, _, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 67})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace at the peak budget: %v", err)
+	}
+	assertTraceInvariants(t, tr)
+	assertMixedLedger(t, st, out, tr)
+	if tr.OmittedSubjects != 0 {
+		t.Errorf("%d subjects omitted at the exact-fit budget: %+v", tr.OmittedSubjects, tr.Subjects)
+	}
+	if tr.EstimatedTokensUsed != 66 || tr.EstimatedTokensFree != 1 {
+		t.Errorf("used/free = %d/%d, want 66/1", tr.EstimatedTokensUsed, tr.EstimatedTokensFree)
+	}
+	if len(out.Messages) != 7 {
+		t.Errorf("%d messages, want all 7 retained: %+v", len(out.Messages), out.Messages)
 	}
 }
 
@@ -495,7 +675,7 @@ func TestAssembleWithTraceOmittedSubject(t *testing.T) {
 				t.Fatalf("AssembleWithTrace: %v", err)
 			}
 			assertTraceInvariants(t, tr)
-			assertMixedLedger(t, st, out, tr, 0)
+			assertMixedLedger(t, st, out, tr)
 			if tr.EstimatedTokensUsed != tc.wantUsed {
 				t.Errorf("EstimatedTokensUsed = %d, want %d", tr.EstimatedTokensUsed, tc.wantUsed)
 			}
@@ -560,7 +740,7 @@ func TestAssembleWithTraceEvictedChainContributesNothing(t *testing.T) {
 	if tr.EstimatedTokensUsed != 7 {
 		t.Errorf("EstimatedTokensUsed = %d, want 7 (system + the retained plain exchange only)", tr.EstimatedTokensUsed)
 	}
-	assertMixedLedger(t, st, out, tr, 3)
+	assertMixedLedger(t, st, out, tr)
 
 	if len(out.Messages) != 2 {
 		t.Fatalf("%d messages, want only the retained plain exchange: %+v", len(out.Messages), out.Messages)
@@ -622,7 +802,7 @@ func TestAssembleWithTraceStripsContextOnUnvalidatedSpans(t *testing.T) {
 	if tr.EstimatedTokensUsed != 80 {
 		t.Errorf("EstimatedTokensUsed = %d, want 80", tr.EstimatedTokensUsed)
 	}
-	assertMixedLedger(t, st, out, tr, 3)
+	assertMixedLedger(t, st, out, tr)
 	if len(tr.Subjects) != 0 {
 		t.Errorf("must-fit spans are not subjects; got rows %+v", tr.Subjects)
 	}
@@ -686,36 +866,49 @@ func TestAssembleWithTraceHistoryLane(t *testing.T) {
 	if len(out.Messages) == 0 || out.Messages[0].Content != summaryPrompt || out.Messages[0].Segment != Pinned {
 		t.Fatalf("assembled head = %+v, want the pinned durable summary", out.Messages)
 	}
-	// sysTokens = estimate(System) + the materialized summary's messageCost.
-	sysTokens := len([]rune("SYS")) + len([]rune(summaryPrompt))
+	// The summary reservation is charged once: system(3) + prompt(36) + goal(4)
+	// + chain envelope(30) + anchor content(21) + two history spans(4+6).
+	if want := 3 + len([]rune(summaryPrompt)); mixedSysTokens(st) != want {
+		t.Errorf("fixture sysTokens = %d, want %d", mixedSysTokens(st), want)
+	}
 	if tr.EstimatedTokensUsed != 104 {
 		t.Errorf("EstimatedTokensUsed = %d, want 104", tr.EstimatedTokensUsed)
 	}
-	assertMixedLedger(t, st, out, tr, sysTokens)
+	assertMixedLedger(t, st, out, tr)
 }
 
 // TestAssembleWithTraceMustFitPressure: an unresolved tool chain is a must-fit
 // reservation, so its overflow reports the FULL reserved cost — the pinned subset
 // alone would under-report what did not fit (spec 5).
+// The Cause rows additionally pin the three-way must-fit attribution: an
+// unresolved tool chain is tool_output, not the pinned span it is not part of.
 func TestAssembleWithTraceMustFitPressure(t *testing.T) {
-	set := validSet()
-	st := State{Messages: []Message{
-		pinned("system", "SYS-PROMPT"),        // 10
-		mixedAsstCall("c1", "c2"),             // 40, unresolved (only c1 answered)
-		mixedToolResult("c1", "R", set, 4096), // 11
-	}}
+	// The unresolved chain costs 51: assistant calls(40) + the one answered
+	// result(11). Only c1 is answered, so the whole group is non-droppable.
+	mustFitState := func(pinnedContent string) State {
+		return State{Messages: []Message{
+			pinned("system", pinnedContent),
+			mixedAsstCall("c1", "c2"),
+			mixedToolResult("c1", "R", validSet(), 4096),
+		}}
+	}
 	tests := []struct {
 		name             string
+		pinnedContent    string
 		toolSchemaTokens int
 		budget           int
 		wantTokens       int
 		pinnedOnly       int
+		wantCause        PressureCause
 	}{
-		{"no tool schemas", 0, 30, 61, 10},
-		{"tool schemas counted too", 5, 30, 66, 15},
+		{"unresolved chain dominates", "SYS-PROMPT", 0, 30, 61, 10, CauseToolOutput},
+		{"tool schemas counted too", "SYS-PROMPT", 5, 30, 66, 15, CauseToolOutput},
+		{"pinned span dominates", strings.Repeat("P", 60), 0, 100, 111, 60, CausePinned},
+		{"tool schemas dominate", "SYS-PROMPT", 500, 520, 561, 510, CauseToolSchema},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			st := mustFitState(tc.pinnedContent)
 			m := ContextManager{Mixed: true, Estimate: runeEstimator}
 			_, pressure, tr, err := m.AssembleWithTrace(context.Background(), st,
 				tc.toolSchemaTokens, TokenBudget{Input: tc.budget})
@@ -734,6 +927,10 @@ func TestAssembleWithTraceMustFitPressure(t *testing.T) {
 			}
 			if pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
 				t.Errorf("pressure = %v/%v, want critical/halt", pressure.Level, pressure.Mitigation)
+			}
+			if pressure.Cause != tc.wantCause {
+				t.Errorf("Cause = %v, want %v (attribution must name the bucket that actually overflowed)",
+					pressure.Cause, tc.wantCause)
 			}
 		})
 	}

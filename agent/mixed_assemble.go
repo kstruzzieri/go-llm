@@ -71,9 +71,15 @@ type ContextSubjectTrace struct {
 	EffectiveDepth  contextdepth.Depth
 	Representations []contextdepth.RepresentationDesc
 	EstimatedTokens int
-	Bytes           int
-	Decision        string
-	OmissionReason  string
+	// Bytes is model-visible Content bytes — the quantity the anchor byte cap
+	// bounds. It is NOT a byte rendering of EstimatedTokens: the token figure
+	// also covers the envelope fields messageCost charges (tool-call id/type/
+	// name/arguments, ToolName, ToolCallID), which carry no Content bytes. A
+	// chain span whose only text lives in its anchors is the visible case:
+	// EstimatedTokens 30, Bytes 0.
+	Bytes          int
+	Decision       string
+	OmissionReason string
 }
 
 // Implicit alternatives for the two assembler-owned subject kinds (spec 3.5).
@@ -176,15 +182,14 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		// Must-fit overflow. alloc.used is the FULL reservation cost — pinned
 		// messages, the durable summary AND unresolved chains — so the pressure
 		// row reports what actually did not fit rather than the pinned subset
-		// (spec 5). Cause still resolves over the pinned/tool-schema split; an
-		// unresolved chain is not separately attributed.
+		// (spec 5).
 		reserved := alloc.used + toolSchemaTokens
 		return stMat, Pressure{
 			UsedPct:     usedFraction(reserved, budget.Input),
 			InputTokens: reserved,
 			InputBudget: budget.Input,
 			Level:       LevelCritical,
-			Cause:       m.pinnedOverflowCause(stMat, toolSchemaTokens),
+			Cause:       m.mustFitCause(stMat, units, toolSchemaTokens),
 			Mitigation:  MitigationHalt,
 		}, ContextAssemblyTrace{}, err
 	}
@@ -218,7 +223,29 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		// EstimatedTokensUsed + EstimatedTokensFree == MaxTokens identity is a lie.
 		return out, pressure, ContextAssemblyTrace{}, ErrContextExhausted
 	}
-	return out, pressure, m.fillMixedTrace(out, units, summary, alloc, stateBudget, used), nil
+	return out, pressure, m.fillMixedTrace(units, summary, alloc, stateBudget, used), nil
+}
+
+// mustFitCause attributes a must-fit overflow across the THREE buckets mixed
+// assembly reserves from: pinned messages (system, goal, durable summary), tool
+// schemas, and unresolved tool chains. The third is why this exists rather than
+// reusing pinnedOverflowCause alone — an unresolved chain is a new must-fit
+// reservation on a new path, and reporting a 450-token tool tail as CausePinned
+// points the operator at the wrong lever. Ties resolve to the pinned/schema
+// split, matching dominantCause's earliest-bucket precedence.
+func (m ContextManager) mustFitCause(stMat State, units []*mixedUnit, toolSchemaTokens int) PressureCause {
+	unresolved := 0
+	for _, u := range units {
+		if u.kind == unitUnresolved {
+			unresolved += u.baseTokens
+		}
+	}
+	// pinnedTokens with zero schemas is exactly the pinned-message subtotal
+	// pinnedOverflowCause weighs, so the two cannot disagree about that term.
+	if unresolved > toolSchemaTokens && unresolved > m.pinnedTokens(stMat, 0) {
+		return CauseToolOutput
+	}
+	return m.pinnedOverflowCause(stMat, toolSchemaTokens)
 }
 
 // materializeMixed renders the assembled copy: the pinned durable summary (when
@@ -316,7 +343,7 @@ func anchorAttrib(a *mixedAnchor) *RetrievalAttribution {
 // fillMixedTrace renders the trace from the same structures materialization
 // read. used is the recompute of the materialized copy, which equals the
 // admission ledger for any pure estimator (spec 4.1 exact-delta accounting).
-func (m ContextManager) fillMixedTrace(out State, units []*mixedUnit, summary *Message,
+func (m ContextManager) fillMixedTrace(units []*mixedUnit, summary *Message,
 	alloc *mixedAllocState, maxTokens, used int) ContextAssemblyTrace {
 
 	tr := ContextAssemblyTrace{
