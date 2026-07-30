@@ -98,6 +98,11 @@ type mixedSubject struct {
 	omitted    bool
 	decision   string
 	reason     string
+	// cands is the upgrade pass's memo of later alternatives already priced for
+	// the CURRENT assignment of this subject's anchor. Allocator scratch, never
+	// read by the builder; tryAssign drops it for every subject of the anchor it
+	// commits to. See upgradeCandidate (agent/mixed_alloc.go).
+	cands []upgradeCand
 }
 
 // mixedAnchor is one structured tool-result message within a chain.

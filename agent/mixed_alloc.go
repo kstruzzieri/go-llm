@@ -96,6 +96,15 @@ func (m ContextManager) tryAssign(st *mixedAllocState, a *mixedAnchor, s *mixedS
 		a.verbatimGot -= verbatimComponents(s.alts[prev].Desc)
 	}
 	s.decision = decision
+	// Everything upgradeCandidate memoized about THIS anchor is now stale: the
+	// joined text, a.tokens and this subject's own base index all just moved.
+	// Dropped here rather than in upgradeOnce because tryAssign is the single
+	// place any anchor's assignment changes — the floor pass and base admission
+	// commit through it too, and a cache invalidated only on the upgrade path
+	// would survive those with a stale a.tokens.
+	for _, sub := range a.subjects {
+		sub.cands = nil
+	}
 	return true
 }
 
@@ -341,19 +350,35 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 // order competes; across subjects the smallest exact marginal cost wins, with
 // input order breaking ties (strict <, so the first candidate found keeps it).
 //
-// ponytail: a full re-scan per commit, ~O(groups^2.5) in the counts and linear
-// in total content bytes, since every candidate re-joins its whole anchor. On a
-// 10-byte-per-rung fixture: 8 groups x 32 alternatives 635us, 128x32 1.24s, and
-// tens of seconds at the maxContextGroups / maxContextAlternatives ceiling
-// (measured 21.1s and 49.2s on two differently-sized ceiling fixtures — the
-// figure tracks bytes, not just counts). Realistic input is a retrieve call's
-// ~8 sources x ~30 alternatives, i.e. sub-millisecond, and the carrier bounds
-// keep even a pathological set finite, which is what they exist for; ctx is the
-// backstop for the rest. Worth memoizing per-anchor candidate costs and
-// invalidating only the committed anchor if realistic sizes ever approach the
-// ceiling. Not done now because #331 Task 11's exhaustive oracle is written
-// against this exact greedy shape, and a silent divergence between allocator and
-// oracle costs more than the scan does.
+// Still a full re-scan of every subject per commit, but the scan itself is now
+// memoized per anchor (upgradeCandidate): a round re-prices only the anchor the
+// previous round committed to, and reads a cached verdict for the rest. Cost is
+// therefore dominated by the number of commits times the number of SUBJECTS,
+// not times total content bytes.
+//
+// Measured on a 20-step run of retrieve-shaped states, 2 KB blocks, median of
+// three, before -> after this memo:
+//
+//	subjects   ceiling 8192          ceiling 131072
+//	 40        537us  ->  206us      644us   ->  259us
+//	100        70.7ms ->  6.41ms     39.5ms  ->  6.64ms
+//	220        77.4ms ->  6.92ms     211.4ms ->  22.9ms
+//	420        131.7ms -> 15.5ms     776.1ms ->  70.0ms
+//
+// 420 subjects is the worst case agent/tools' Retrieve can actually reach: it
+// truncates to k TOTAL results across all sources and k <= maxRetrieveMaxK, so
+// one call tops out at 20 groups, and a 20-step run at 420 subjects. The
+// remaining 70ms is the per-round walk over all subjects; collapsing that needs
+// a priority queue over anchors, which is not worth its invalidation bugs at
+// these sizes.
+//
+// ponytail: the memo is deliberately per-ANCHOR-wide rather than per-subject.
+// Invalidating only the committed subject leaves its siblings holding a cap
+// verdict priced against a shorter anchor, and an over-cap candidate that wins
+// selection stops the whole upgrade phase (TestMixedAllocUpgradeMemoMatchesUnmemoized,
+// cap-bound case, is red without it). Dropping the invalidation altogether does
+// not merely mis-order upgrades — it hands back a candidate whose index no
+// longer advances s.chosen, and the caller's loop never terminates.
 func (m ContextManager) upgradeOnce(ctx context.Context, st *mixedAllocState, units []*mixedUnit, evidenceOnly bool) bool {
 	// Cancellation stops upgrading, it does not fail: base admission already
 	// produced a complete allocation, so every invariant (D6 decisions, the
@@ -377,33 +402,15 @@ func (m ContextManager) upgradeOnce(ctx context.Context, st *mixedAllocState, un
 				if s.chosen < 0 {
 					continue
 				}
-				for next := s.chosen + 1; next < len(s.alts); next++ {
-					if evidenceOnly && verbatimComponents(s.alts[next].Desc) <= verbatimComponents(s.alts[s.chosen].Desc) {
-						continue
-					}
-					prev := s.chosen
-					s.chosen = next
-					joined := anchorJoined(a)
-					s.chosen = prev
-					// The cap must be checked HERE, not only in tryAssign. An
-					// over-cap candidate with the smallest dTok would otherwise win
-					// selection, fail at commit, and stop the whole upgrade phase
-					// with affordable upgrades elsewhere left unbought — starvation,
-					// not just a wasted round.
-					if len(joined) > a.cap {
-						continue
-					}
-					dTok := m.estimate(joined) - a.tokens
-					if !st.fits(dTok) {
-						continue
-					}
-					// Strict <: ties keep the EARLIER candidate, so the winner is
-					// stable in input order (spec 4.1 step 6). <= would silently
-					// hand every tie to the last subject scanned.
-					if best == nil || dTok < best.dTok {
-						best = &cand{a: a, s: s, next: next, dTok: dTok}
-					}
-					break // cheapest affordable later alternative for this subject
+				next, dTok, ok := m.upgradeCandidate(st, a, s, evidenceOnly)
+				if !ok {
+					continue
+				}
+				// Strict <: ties keep the EARLIER candidate, so the winner is
+				// stable in input order (spec 4.1 step 6). <= would silently
+				// hand every tie to the last subject scanned.
+				if best == nil || dTok < best.dTok {
+					best = &cand{a: a, s: s, next: next, dTok: dTok}
 				}
 			}
 		}
@@ -417,4 +424,68 @@ func (m ContextManager) upgradeOnce(ctx context.Context, st *mixedAllocState, un
 	// successful upgrade strictly advances one subject's chosen index, so the
 	// caller's loop terminates.
 	return m.tryAssign(st, best.a, best.s, best.next, DecisionUpgrade)
+}
+
+// upgradeCandidate returns the cheapest affordable later alternative for s —
+// the first one, in declaration order, that clears the evidenceOnly filter, the
+// anchor byte cap and the remaining budget. It is the inner scan upgradeOnce
+// used to run inline; the split exists so the per-anchor memo below has one
+// owner.
+//
+// MEMO: everything the scan measures except affordability is anchor-local.
+// dTok and the cap verdict depend on the anchor's joined text and a.tokens,
+// which change ONLY when that anchor commits (tryAssign, which drops the memo);
+// addsVerbatim compares against s.chosen, which likewise only moves on a commit
+// to this anchor. So a candidate priced in one round stays correct for every
+// later round until its own anchor is touched, and each round re-applies just
+// st.fits — the one global term. s.cands is filled lazily, in declaration
+// order, and never past the candidate that won: a scan that stops at index 3
+// prices three candidates, and a later scan whose budget rejects them extends
+// from there rather than re-pricing.
+//
+// The cap verdict is computed HERE, not left to tryAssign. An over-cap
+// candidate with the smallest dTok would otherwise win selection, fail at
+// commit, and stop the whole upgrade phase with affordable upgrades elsewhere
+// left unbought — starvation, not just a wasted round. dTok stays unset for an
+// over-cap candidate, exactly as the inline scan skipped the estimate call.
+func (m ContextManager) upgradeCandidate(st *mixedAllocState, a *mixedAnchor, s *mixedSubject, evidenceOnly bool) (int, int, bool) {
+	base := s.chosen + 1
+	for i := 0; base+i < len(s.alts); i++ {
+		if i == len(s.cands) {
+			next := base + i
+			prev := s.chosen
+			s.chosen = next
+			joined := anchorJoined(a)
+			s.chosen = prev
+			c := upgradeCand{
+				next:         next,
+				capOK:        len(joined) <= a.cap,
+				addsVerbatim: verbatimComponents(s.alts[next].Desc) > verbatimComponents(s.alts[prev].Desc),
+			}
+			if c.capOK {
+				c.dTok = m.estimate(joined) - a.tokens
+			}
+			s.cands = append(s.cands, c)
+		}
+		c := s.cands[i]
+		if evidenceOnly && !c.addsVerbatim {
+			continue
+		}
+		if !c.capOK || !st.fits(c.dTok) {
+			continue
+		}
+		return c.next, c.dTok, true
+	}
+	return 0, 0, false
+}
+
+// upgradeCand is one later alternative priced against its anchor's current
+// assignment. capOK and dTok are the cap and cost verdicts; addsVerbatim is the
+// evidenceOnly filter's answer. All three survive any commit to a DIFFERENT
+// anchor, which is what makes the memo sound.
+type upgradeCand struct {
+	next         int
+	dTok         int
+	capOK        bool
+	addsVerbatim bool
 }

@@ -1327,3 +1327,123 @@ func TestMixedAllocZeroCostEstimatorCannotBypassBudget(t *testing.T) {
 		t.Errorf("anchor content = %q, want the placeholder", units[0].anchors[0].content)
 	}
 }
+
+// memoState is a multi-anchor, multi-chain fixture: enough subjects that the
+// upgrade pass runs many rounds, and enough anchors that most rounds leave most
+// anchors untouched — which is the only condition under which upgradeCandidate's
+// memo can be wrong and go unnoticed.
+//
+// outputCap is a parameter because the two stale facts a memo can hold fail
+// DIFFERENTLY. A stale dTok only mis-ORDERS upgrades: tryAssign re-prices at
+// commit, so the ledger stays exact and the greedy loop usually converges on the
+// same terminal state anyway. A stale CAP verdict is the one that changes the
+// outcome — an over-cap candidate wins selection, tryAssign refuses it,
+// upgradeOnce reports no progress and the whole upgrade phase stops with
+// affordable upgrades elsewhere left unbought. Only the tight-cap case below
+// detects an invalidation that covers just the committed subject.
+func memoState(t *testing.T, outputCap int) State {
+	t.Helper()
+	var msgs []Message
+	for c := range 3 {
+		call := fmt.Sprintf("c%d", c)
+		var groups []ContextGroup
+		for g := range 3 {
+			id := fmt.Sprintf("pkg/%d-%d.go", c, g)
+			// Deliberately uneven block sizes: equal costs would let a memo that
+			// returned the WRONG candidate still land on an equal-cost one.
+			groups = append(groups, ladderGroup(id, g+1,
+				strings.Repeat("A", 10+g), strings.Repeat("a", 20+c),
+				strings.Repeat("1", 10+2*g), strings.Repeat("2", 15+3*c)))
+		}
+		msgs = append(msgs, mixedAsstCall(call), mixedToolResult(call, "FLAT", chainSet(1, groups...), outputCap))
+	}
+	return State{Messages: msgs}
+}
+
+// clearUpgradeMemo drops every subject's memo, which is what makes the next
+// upgradeOnce scan price its candidates from scratch. Calling it before EVERY
+// scan reproduces the pre-memo allocator exactly: within one scan each subject
+// is visited once, so a memo written during that scan is never read.
+func clearUpgradeMemo(units []*mixedUnit) {
+	for _, u := range units {
+		for _, a := range u.anchors {
+			for _, s := range a.subjects {
+				s.cands = nil
+			}
+		}
+	}
+}
+
+// TestMixedAllocUpgradeMemoMatchesUnmemoized pins upgradeCandidate's per-anchor
+// memo as a pure optimization. The reference run reaches the same starting point
+// through a SUPPORTED path — a cancelled context yields base admission with no
+// upgrades (TestMixedAllocUpgradesCancelled) — and then drives the same two-pass
+// upgrade loop allocateMixed runs, clearing the memo before every scan.
+//
+// The comparison surface is allocSnapshot: the ledger, every anchor's exact
+// content and token count, and every subject's chosen index, decision and
+// reason. A stale memo can only show up as a different candidate winning some
+// round, and every one of those is visible here.
+func TestMixedAllocUpgradeMemoMatchesUnmemoized(t *testing.T) {
+	const budget = 700
+	for _, tc := range []struct {
+		name      string
+		outputCap int
+	}{
+		{"budget-bound", 4096},
+		// Tight enough that the cap binds part-way through the upgrade phase, so
+		// a candidate priced as cap-OK before a sibling grew the anchor becomes
+		// cap-violating afterwards.
+		{"cap-bound", 150},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			memoUnits, memoAlloc, err := allocFixture(t, nonAdditiveEstimator, memoState(t, tc.outputCap), budget, 0)
+			if err != nil {
+				t.Fatalf("memoized allocateMixed: %v", err)
+			}
+			assertDecided(t, memoUnits)
+
+			// Vacuity guard: the fixture must actually reach the upgrade phase, on
+			// more than one anchor, or "the two runs agree" says nothing about the
+			// memo.
+			upgraded, anchorsUpgraded := 0, map[string]bool{}
+			for _, u := range memoUnits {
+				for _, a := range u.anchors {
+					for _, s := range a.subjects {
+						if s.decision == DecisionUpgrade {
+							upgraded++
+							anchorsUpgraded[a.callID] = true
+						}
+					}
+				}
+			}
+			if upgraded < 4 || len(anchorsUpgraded) < 2 {
+				t.Fatalf("fixture ran %d upgrades across %d anchors; too few to exercise the memo\n%s",
+					upgraded, len(anchorsUpgraded), allocSnapshot(memoUnits, memoAlloc))
+			}
+
+			cancelled, cancel := context.WithCancel(context.Background())
+			cancel()
+			refUnits, refAlloc, err := allocFixtureCtx(t, cancelled, nonAdditiveEstimator, memoState(t, tc.outputCap), budget, 0)
+			if err != nil {
+				t.Fatalf("reference allocateMixed: %v", err)
+			}
+			m := ContextManager{Estimate: guardedEstimate(nonAdditiveEstimator)}
+			for {
+				clearUpgradeMemo(refUnits)
+				if m.upgradeOnce(context.Background(), refAlloc, refUnits, true) {
+					continue
+				}
+				clearUpgradeMemo(refUnits)
+				if m.upgradeOnce(context.Background(), refAlloc, refUnits, false) {
+					continue
+				}
+				break
+			}
+
+			if got, want := allocSnapshot(memoUnits, memoAlloc), allocSnapshot(refUnits, refAlloc); got != want {
+				t.Errorf("memoized allocation differs from the unmemoized reference\nMEMOIZED:\n%s\nREFERENCE:\n%s", got, want)
+			}
+		})
+	}
+}
