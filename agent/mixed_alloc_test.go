@@ -936,11 +936,16 @@ func TestMixedAllocUpgradesCancelled(t *testing.T) {
 			mixedToolResult("c1", "FLAT", chainSet(0, jumpLadder()), 4096),
 		}}
 	}
+	// Shared by the cancelled run and the control below: if only one of them
+	// changed, the control would re-run at its own budget and every assertion
+	// here would still hold while nothing about cancellation was tested.
+	const budget = 95
+
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
 	m := ContextManager{Estimate: guardedEstimate(runeEstimator)}
-	units, alloc, err := allocFixtureCtx(t, ctx, runeEstimator, newState(), 95, 0)
+	units, alloc, err := allocFixtureCtx(t, ctx, runeEstimator, newState(), budget, 0)
 	if err != nil {
 		t.Fatalf("allocateMixed: %v", err)
 	}
@@ -966,7 +971,7 @@ func TestMixedAllocUpgradesCancelled(t *testing.T) {
 	}
 	// Control: the same fixture and budget upgrade twice when not cancelled, so
 	// the assertions above are about cancellation and not about the budget.
-	liveUnits, liveAlloc, err := allocFixture(t, runeEstimator, newState(), 95, 0)
+	liveUnits, liveAlloc, err := allocFixture(t, runeEstimator, newState(), budget, 0)
 	if err != nil {
 		t.Fatalf("allocateMixed (live): %v", err)
 	}
