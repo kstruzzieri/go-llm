@@ -170,16 +170,17 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		}
 	}
 
+	// Trace metadata only: the runtime builds the real agent.Request. Tools,
+	// Approver, and Options are deliberately absent — the runtime supplies its
+	// own tools and model options (both from golem.Options), and the approver
+	// travels on the Turn below.
 	req := agent.Request{
 		Goal:           line,
 		System:         sess.baseSystem,
 		HistorySummary: sess.session.historySummary(), // nil-safe: nil session => empty
 		History:        sess.session.history(),        // nil-safe: nil session => nil
-		Tools:          sess.tools,
 		MaxSteps:       sess.maxSteps,
 		Budget:         sess.budget,
-		Approver:       approver, // nil when read-only => runtime fail-safe denies Write/Exec
-		Options:        sess.modelOptions,
 	}
 	threadID := ""
 	if sess.session != nil {
@@ -189,7 +190,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		ThreadID: threadID,
 		RunID:    runID,
 		Message:  line,
-		Approver: approver,
+		Approver: approver, // nil when read-only => runtime fail-safe denies Write/Exec
 		Observer: observer,
 	}, func(golemruntime.Event) error { return nil })
 	var sessionSaveErr error
