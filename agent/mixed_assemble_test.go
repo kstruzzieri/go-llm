@@ -428,6 +428,47 @@ func TestAssembleWithTraceMixedEndToEnd(t *testing.T) {
 	}
 }
 
+// TestAssembleWithTraceUpgradedSubject pins that a row describes the alternative
+// the allocator SETTLED ON, not the one it started from. Every other fixture here
+// admits alternative 0, so a row builder reading alts[0] instead of
+// alts[s.chosen] would pass all of them. The unreachable MinVerbatim of 5 also
+// puts a verbatim shortfall on the wire.
+func TestAssembleWithTraceUpgradedSubject(t *testing.T) {
+	// Ladder: "AA", "AAOOO", "AAEEEE", "AAOOOEEEE" (verbatim counts 0,0,1,1).
+	// The floor pass takes index 2, the upgrade pass finishes at index 3.
+	set := chainSet(5, ladderGroup("src.go", 2, "AA", "OOO", "EEEE"))
+	st := State{Messages: []Message{
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", traceFallback, set, 4096),
+	}}
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+
+	out, _, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 300})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	assertTraceInvariants(t, tr)
+	assertMixedLedger(t, st, out, tr, 0)
+
+	if len(out.Messages) != 2 || out.Messages[1].Content != "AAOOOEEEE" {
+		t.Fatalf("anchor Content = %q, want the last ladder rung %q", out.Messages[1].Content, "AAOOOEEEE")
+	}
+	assertRows(t, []ContextSubjectTrace{traceRow(t, tr, contextdepth.DomainRAG, "src.go")}, []wantRow{{
+		domain: contextdepth.DomainRAG, id: "src.go", callID: "c1", lane: 1, rank: 2,
+		depth: contextdepth.DepthL2,
+		reps:  []contextdepth.RepresentationDesc{altAbstract, altOverview, altEvidence},
+		// The chosen rung, not the cheapest one (which costs 2 tokens / 2 bytes).
+		tokens: 9, bytes: 9, decision: DecisionUpgrade,
+	}})
+	// assistant call(20) + anchor envelope(10) + content(9).
+	if tr.EstimatedTokensUsed != 39 {
+		t.Errorf("EstimatedTokensUsed = %d, want 39", tr.EstimatedTokensUsed)
+	}
+	if tr.VerbatimShortfalls != 1 {
+		t.Errorf("VerbatimShortfalls = %d, want 1 (MinVerbatim 5 is unreachable)", tr.VerbatimShortfalls)
+	}
+}
+
 // TestAssembleWithTraceOmittedSubject covers the three omission reasons an
 // anchor can carry, the precharged placeholder, and the partition with an
 // omitted row present.
