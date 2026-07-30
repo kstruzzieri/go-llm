@@ -95,6 +95,22 @@ type ThinkingObserver interface {
 	OnThinking(ctx context.Context, e ThinkingEvent) error
 }
 
+// ContextAssemblyEvent is one mixed assembly's content-free trace, tagged with
+// the step whose model call it assembled.
+type ContextAssemblyEvent struct {
+	Step  int
+	Trace ContextAssemblyTrace
+}
+
+// ContextAssemblyObserver is an OPTIONAL extension of Observer. When an Observer
+// also implements it, the Orchestrator calls OnContextAssembly after every MIXED
+// assembly, before the step's model call. Legacy and no-anchor assemblies emit
+// NOTHING (they return a zero trace), and so do assembly errors. A returned
+// error aborts Run, like the other observer callbacks.
+type ContextAssemblyObserver interface {
+	OnContextAssembly(ctx context.Context, e ContextAssemblyEvent) error
+}
+
 type nopObserver struct{}
 
 func (nopObserver) OnStep(context.Context, StepEvent) error         { return nil }
