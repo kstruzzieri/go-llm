@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -12,18 +13,26 @@ import (
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
-// asmRec implements Observer AND ContextAssemblyObserver, recording every
-// OnContextAssembly. err, when set, is returned from every callback.
+// asmRec implements Observer, ContextAssemblyObserver AND PressureObserver,
+// recording every OnContextAssembly plus a single interleaved log of the two
+// per-step callbacks so their ordering contract is falsifiable. err, when set,
+// is returned from OnContextAssembly.
 type asmRec struct {
 	events []ContextAssemblyEvent
+	log    []string // "pressure:<step>" / "assembly:<step>" in call order
 	err    error
 }
 
 func (r *asmRec) OnStep(context.Context, StepEvent) error         { return nil }
 func (r *asmRec) OnToolCall(context.Context, ToolCallEvent) error { return nil }
 func (r *asmRec) OnToken(context.Context, TokenEvent) error       { return nil }
+func (r *asmRec) OnPressure(_ context.Context, e PressureEvent) error {
+	r.log = append(r.log, fmt.Sprintf("pressure:%d", e.Step))
+	return nil
+}
 func (r *asmRec) OnContextAssembly(_ context.Context, e ContextAssemblyEvent) error {
 	r.events = append(r.events, e)
+	r.log = append(r.log, fmt.Sprintf("assembly:%d", e.Step))
 	return r.err
 }
 
@@ -240,33 +249,19 @@ func TestOnContextAssemblyEmitsWhenEverySubjectOmitted(t *testing.T) {
 	}
 }
 
-// TestMixedTraceWithNoRowsIsStillNonNil is the constructed distinguishing input
-// for the guard's shape: a set riding a PINNED tool message enters mixed
-// assembly (hasStructuredAnchor inspects every message) but yields no traced
-// subject at all, because a pinned unit has neither a span subject nor anchors.
-// The trace is therefore non-nil with ZERO rows — a `len(Subjects) > 0` guard
-// would swallow it, which is why the orchestrator keys on nil.
-//
-// It goes through the ContextManager rather than Run because Run cannot reach
-// this State: a structured payload only enters State via dispatch's tool
-// observation, which is Elastic and always completes its chain, and every
-// completed chain contributes a chain-span row.
-func TestMixedTraceWithNoRowsIsStillNonNil(t *testing.T) {
-	st := State{Messages: []Message{
-		{ChatMessage: provider.ChatMessage{Role: "user", Content: "GOAL"}, Segment: Pinned},
-		{ChatMessage: provider.ChatMessage{Role: "tool", Content: "x", ToolName: "t", ToolCallID: "c0"},
-			Segment: Pinned, Context: mixedTraceSet(), OutputCap: 4096},
-	}}
-	m := ContextManager{Mixed: true, Estimate: runeEstimator}
-	_, _, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 500})
-	if err != nil {
-		t.Fatalf("AssembleWithTrace: %v", err)
+// TestOnContextAssemblyFollowsOnPressure pins the cross-callback order with one
+// interleaved log: for a given step, OnPressure comes first. The legacy step 0
+// contributes pressure ALONE, which is the shape the two callbacks' different
+// gates produce — pressure also fires on the exhaustion error path, the trace
+// only on mixed success.
+func TestOnContextAssemblyFollowsOnPressure(t *testing.T) {
+	rec := &asmRec{}
+	if _, err := assemblyRun(t, rec, true, mixedTraceSet(), 0, 2); err != nil {
+		t.Fatalf("Run: %v", err)
 	}
-	if tr.Subjects == nil {
-		t.Fatal("mixed assembly returned the ZERO trace: the orchestrator's guard would drop it")
-	}
-	if len(tr.Subjects) != 0 {
-		t.Fatalf("rows = %d, want zero (the pinned unit is not a traced subject): %+v", len(tr.Subjects), tr.Subjects)
+	want := []string{"pressure:0", "pressure:1", "assembly:1", "pressure:2", "assembly:2"}
+	if !slices.Equal(rec.log, want) {
+		t.Fatalf("callback log = %q, want %q", rec.log, want)
 	}
 }
 

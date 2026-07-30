@@ -118,7 +118,9 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		// Mixed assemblies only. The discriminator is nil Subjects, not Mixed and
 		// not a length: legacy, no-anchor and error paths return a zero trace,
 		// while a successful mixed assembly always carries a non-nil slice — even
-		// the all-omitted one an operator most wants to see.
+		// the all-omitted one an operator most wants to see, and even a zero-ROW
+		// one (TestMixedTraceWithNoRowsIsStillNonNil), which is why length is the
+		// wrong test.
 		if cao, ok := obs.(ContextAssemblyObserver); ok && atrace.Subjects != nil {
 			if aerr := cao.OnContextAssembly(ctx, ContextAssemblyEvent{Step: step, Trace: atrace}); aerr != nil {
 				return res, aerr

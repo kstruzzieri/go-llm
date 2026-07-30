@@ -104,9 +104,10 @@ type ContextAssemblyEvent struct {
 
 // ContextAssemblyObserver is an OPTIONAL extension of Observer. When an Observer
 // also implements it, the Orchestrator calls OnContextAssembly after every MIXED
-// assembly, before the step's model call. Legacy and no-anchor assemblies emit
-// NOTHING (they return a zero trace), and so do assembly errors. A returned
-// error aborts Run, like the other observer callbacks.
+// assembly, before the step's model call and — for the same step — after
+// OnPressure. Legacy and no-anchor assemblies emit NOTHING (they return a zero
+// trace), and so do assembly errors. A returned error aborts Run, like the other
+// observer callbacks.
 type ContextAssemblyObserver interface {
 	OnContextAssembly(ctx context.Context, e ContextAssemblyEvent) error
 }

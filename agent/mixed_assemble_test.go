@@ -1048,6 +1048,34 @@ func TestAssembleWithTraceRejectsMixedCompactor(t *testing.T) {
 	}
 }
 
+// TestMixedTraceWithNoRowsIsStillNonNil: a SUCCESSFUL mixed assembly can carry
+// zero rows, and its Subjects slice is still non-nil. A set riding a PINNED tool
+// message enters mixed assembly (hasStructuredAnchor inspects every message) but
+// yields no traced subject, because a pinned unit has neither a span subject nor
+// anchors — so "success" and "zero trace" stay distinguishable, which is what the
+// orchestrator's `Subjects != nil` emit guard rests on. Reachable through this
+// exported entry point but not through Run: a payload only enters State via
+// dispatch's Elastic tool observation, whose chain always completes and always
+// contributes a chain-span row.
+func TestMixedTraceWithNoRowsIsStillNonNil(t *testing.T) {
+	st := State{Messages: []Message{
+		pinned("user", "GOAL"),
+		{ChatMessage: provider.ChatMessage{Role: "tool", Content: "x", ToolName: "t", ToolCallID: "c0"},
+			Segment: Pinned, Context: mixedTraceSet(), OutputCap: 4096},
+	}}
+	m := ContextManager{Mixed: true, Estimate: runeEstimator}
+	_, _, tr, err := m.AssembleWithTrace(context.Background(), st, 0, TokenBudget{Input: 500})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	if tr.Subjects == nil {
+		t.Fatal("mixed assembly returned the ZERO trace: the orchestrator's guard would drop it")
+	}
+	if len(tr.Subjects) != 0 {
+		t.Fatalf("rows = %d, want zero (a pinned unit is not a traced subject): %+v", len(tr.Subjects), tr.Subjects)
+	}
+}
+
 // TestAssembleWithTraceLegacyPath: both ways into legacy assembly return a ZERO
 // trace and messages byte-identical to a manager configured with an explicit
 // RecencyCompactor — including the untouched fallback Content, the retained
