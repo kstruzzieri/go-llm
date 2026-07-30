@@ -52,6 +52,19 @@ type assemblyCase struct {
 	Golden    Golden           `json:"golden"`
 	MaxTokens int              `json:"max_tokens"`
 	Sources   []assemblySource `json:"sources"`
+	// AnswerLiteral is the OPTIONAL anchored answer string the builder
+	// requires at least one rendered arm to contain. Anchor it — "claimBatch
+	// = 25", not "25" — or unrelated trace text produces a false reachable
+	// reading. Blank means "no reachability claim": no_answer cases have no
+	// answer by design and must stay unaffected.
+	//
+	// There is deliberately no "must NOT appear" inverse for no_answer cases.
+	// Their risk is near-synonym-shaped — the README's own authoring rule says
+	// to grep for near-synonyms, not just the literal — and no substring-
+	// absence check can prove a synonym absent. A negative literal would
+	// certify one exact string missing while the real leak walks past under
+	// another name: false confidence, not a weaker guarantee.
+	AnswerLiteral string `json:"answer_literal,omitempty"`
 }
 
 type assemblySource struct {
@@ -224,6 +237,28 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 		return err
 	}
 
+	// Reachability gate. A case whose answer reaches NEITHER arm is dead: it
+	// contributes a guaranteed zero delta to the paired report, and its golden
+	// criteria score a model 0 for correctly answering "not in the provided
+	// context". This is a hard error, not a warning, because -assembly-build
+	// regenerates a COMMITTED corpus — a warning can be scrolled past and
+	// committed, an error cannot.
+	if c.AnswerLiteral != "" {
+		switch reach := assemblyAnswerReach(c.AnswerLiteral, flatCtx, progCtx); len(reach) {
+		case 0:
+			return fmt.Errorf("answer_literal %q reaches neither arm: either the "+
+				"literal is not verbatim in any source, or the answer-bearing source "+
+				"sits past both arms' reach at max_tokens=%d (move it to index 0 or 1)",
+				c.AnswerLiteral, c.MaxTokens)
+		case 1:
+			// Single-arm reach is legal and expected (content_only cases are
+			// usually flat-only), but it is the shape the author otherwise
+			// derives by hand, so surface it instead of making them grep.
+			_, _ = fmt.Fprintf(os.Stderr, "assembly build: %s: answer_literal reaches the %s arm only\n",
+				c.ID, reach[0])
+		}
+	}
+
 	ids := make([]string, len(results))
 	for i, r := range results {
 		ids[i] = r.Chunk.ID
@@ -277,6 +312,12 @@ func validateAssemblyCase(c assemblyCase) error {
 	if strings.TrimSpace(c.Golden.FinalAnswerCriteria) == "" {
 		return fmt.Errorf("golden.final_answer_criteria is required")
 	}
+	// Blank means "no reachability claim"; whitespace-only is an authoring
+	// slip that would match nearly any rendered context and report a false
+	// reachable reading.
+	if c.AnswerLiteral != "" && strings.TrimSpace(c.AnswerLiteral) == "" {
+		return fmt.Errorf("answer_literal is whitespace-only; omit it or anchor it")
+	}
 	seen := make(map[string]struct{}, len(c.Sources))
 	for i, s := range c.Sources {
 		if strings.TrimSpace(s.Path) == "" || strings.TrimSpace(s.Content) == "" {
@@ -291,6 +332,21 @@ func validateAssemblyCase(c assemblyCase) error {
 		}
 	}
 	return nil
+}
+
+// assemblyAnswerReach names the arms whose RENDERED CONTEXT contains lit, in
+// flat-then-progressive order. The question text is deliberately not searched:
+// a question that leaks its own answer would otherwise mask a case no arm can
+// actually answer.
+func assemblyAnswerReach(lit, flatCtx, progCtx string) []AssemblyMode {
+	var reach []AssemblyMode
+	if strings.Contains(flatCtx, lit) {
+		reach = append(reach, AssemblyFlat)
+	}
+	if strings.Contains(progCtx, lit) {
+		reach = append(reach, AssemblyProgressive)
+	}
+	return reach
 }
 
 func validAssemblyCaseID(id string) bool {

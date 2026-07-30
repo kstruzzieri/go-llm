@@ -230,6 +230,24 @@ func TestAssemblyBuildProducesValidPairs(t *testing.T) {
 	}
 }
 
+// TestAssemblyCommittedCorpusUpToDate rebuilds the committed corpus from the
+// committed cases.json into a temp dir and byte-compares every artifact.
+// Mirrors TestProgressiveBaselineReproducible in internal/rageval, catching
+// the same two failure modes:
+//
+//  1. Builder or rag changes that shift rendered output without a corpus
+//     regen (this is how an EndLine off-by-one shipped in all 32 traces).
+//  2. Hand edits to a committed trace that no build would produce.
+//
+// The .assembly-manifest is compared too, not excluded: it is a sorted
+// map marshaled with MarshalIndent over a fixed key set, so it is as
+// deterministic as the traces it digests, and including it is what makes a
+// builder change visible even when a trace edit is self-consistent.
+//
+// Regenerate after intentional changes with:
+//
+//	go run ./cmd/llm-bench -assembly-build docs/llm/assembly-corpus/cases.json \
+//	  -assembly-out docs/llm/assembly-corpus/traces
 func TestAssemblyCommittedCorpusUpToDate(t *testing.T) {
 	corpusDir := filepath.Join("..", "..", "docs", "llm", "assembly-corpus")
 	wantDir := filepath.Join(corpusDir, "traces")
@@ -477,6 +495,139 @@ func TestAssemblyBuildEndLinesMatchRenderedContent(t *testing.T) {
 				t.Fatalf("rendered context missing %q:\n%s", tc.header, got)
 			}
 		})
+	}
+}
+
+// assemblyReachFixture builds a one-case fixture whose answer-bearing source
+// sits at answerIndex, preceded by filler bodies long enough to exhaust the
+// budget. Placing the answer last reproduces the real dead-case shape: the
+// value exists in the corpus but past the reach of BOTH arms (flat truncates,
+// progressive demotes the source to an orientation-only block).
+func assemblyReachFixture(answerIndex int, literal string) string {
+	filler := strings.Repeat("// pacing detail that consumes budget without answering.\n", 30)
+	sources := make([]string, 5)
+	for i := range sources {
+		body := "package svc\n\n" + filler
+		if i == answerIndex {
+			// The constant leads the body, and the body is filler-sized: at
+			// index 0 it fits the budget whole, at a late index neither arm
+			// has budget left for it. A SHORT answer body would instead slip
+			// into whatever the long fillers leave over and read as reachable
+			// for reasons unrelated to its position.
+			body = "package svc\n\nconst answerToken = 4242\n" + filler
+		}
+		sources[i] = fmt.Sprintf(
+			`{"path":"internal/svc/f%d.go","content":%s,"language":"go",`+
+				`"abstract":"Service file %d; the tuning value is deliberately omitted here.",`+
+				`"overview":"Service file %d. This summary names no numeric constant."}`,
+			i, mustJSONString(body), i, i)
+	}
+	lit := ""
+	if literal != "" {
+		lit = `"answer_literal":` + mustJSONString(literal) + `,`
+	}
+	return fmt.Sprintf(`[{"id":"reach-case","category":"content_only",`+
+		`"question":"What is the tuned answer token?",`+
+		`"golden":{"final_answer_criteria":"States answerToken is 4242."},`+
+		`%s"max_tokens":520,"sources":[%s]}]`, lit, strings.Join(sources, ","))
+}
+
+func mustJSONString(s string) string {
+	raw, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(raw)
+}
+
+// TestAssemblyBuildEnforcesAnswerLiteralReachability is the mechanized
+// replacement for the README's manual "grep the answer literal in the built
+// flat trace" rule. A dead case (literal in NEITHER rendered arm) contributes
+// a guaranteed zero delta to the paired report and lets its golden criteria
+// score a model 0 for correctly answering "not in the provided context", so
+// the builder refuses to publish one.
+func TestAssemblyBuildEnforcesAnswerLiteralReachability(t *testing.T) {
+	tests := []struct {
+		name    string
+		fixture string
+		wantErr string
+	}{
+		// The answer sits past both arms' reach: build must fail.
+		{"dead case", assemblyReachFixture(4, "answerToken = 4242"), "reaches neither arm"},
+		// Same literal, answer-bearing source promoted to index 0: build passes.
+		{"reachable case", assemblyReachFixture(0, "answerToken = 4242"), ""},
+		// The field is optional: a case with no literal keeps building even
+		// though nothing in it is reachable. This is the no_answer contract.
+		{"no literal", assemblyReachFixture(4, ""), ""},
+		// A whitespace-only literal would match essentially any rendered
+		// context and report a false "reachable". Assert the SPECIFIC
+		// message: "answer_literal" alone also appears in the reachability
+		// error, so it stays green with the validation deleted (confirmed by
+		// mutation) and would guard nothing.
+		{"blank literal", assemblyReachFixture(0, "  "), "whitespace-only"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			fixture := writeFile(t, dir, "cases.json", tc.fixture)
+			err := assemblyBuild(context.Background(), fixture, filepath.Join(dir, "traces"))
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("assemblyBuild: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("assemblyBuild error = %v, want containing %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// TestAssemblyAnswerReachReportsPerArmShape covers the diagnostic the corpus
+// author currently derives by hand: which arm(s) can actually answer.
+func TestAssemblyAnswerReachReportsPerArmShape(t *testing.T) {
+	tests := []struct {
+		name            string
+		flat, prog, lit string
+		want            []AssemblyMode
+	}{
+		{"both arms", "x claimBatch = 25 y", "claimBatch = 25", "claimBatch = 25",
+			[]AssemblyMode{AssemblyFlat, AssemblyProgressive}},
+		{"flat only", "claimBatch = 25", "purpose: queue internals", "claimBatch = 25",
+			[]AssemblyMode{AssemblyFlat}},
+		{"progressive only", "purpose: queue internals", "claimBatch = 25", "claimBatch = 25",
+			[]AssemblyMode{AssemblyProgressive}},
+		{"neither", "purpose: a", "purpose: b", "claimBatch = 25", nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := assemblyAnswerReach(tc.lit, tc.flat, tc.prog); !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("assemblyAnswerReach = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestAssemblyCommittedCasesDeclareAnswerLiterals pins the corpus convention:
+// every fact-bearing case carries an answer_literal (so the reachability gate
+// actually runs on it) and every no_answer case carries none.
+func TestAssemblyCommittedCasesDeclareAnswerLiterals(t *testing.T) {
+	raw := mustReadAssemblyFile(t, filepath.Join("..", "..", "docs", "llm", "assembly-corpus", "cases.json"))
+	var cases []assemblyCase
+	if err := json.Unmarshal(raw, &cases); err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if c.Category == "no_answer" {
+			if c.AnswerLiteral != "" {
+				t.Errorf("no_answer case %q declares answer_literal %q", c.ID, c.AnswerLiteral)
+			}
+			continue
+		}
+		if c.AnswerLiteral == "" {
+			t.Errorf("fact-bearing case %q has no answer_literal; the reachability gate cannot run on it", c.ID)
+		}
 	}
 }
 
