@@ -1,6 +1,9 @@
 package agent
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // guardedEstimate wraps a caller estimator with the same contract as rag's
 // safeEstimate (rag/progressive_alloc.go): empty text is free, and a
@@ -9,10 +12,11 @@ import "strings"
 // block of any size through admission, so the guard is a ceiling invariant, not
 // a defensive nicety.
 //
-// Task 8 wraps ContextManager.Estimate with this ONCE, before building units, so
-// span/envelope costs (messageCost) and the allocator's deltas share a single
-// function — mixing a guarded and a raw estimator would break the exactness
-// identity below.
+// Task 8 wraps ContextManager.Estimate with this ONCE, before building units.
+// Everything downstream then reads that one field: span and envelope costs go
+// through messageCost and the allocator's deltas through m.estimate, so there is
+// no second estimator channel that could drift out of alignment and break the
+// exactness identity below.
 func guardedEstimate(est func(string) int) func(string) int {
 	return func(s string) int {
 		if s == "" {
@@ -64,9 +68,9 @@ func anchorJoined(a *mixedAnchor) string {
 //
 // Exactness removes every estimator-additivity assumption: because the anchor's
 // content starts as the precharged placeholder and each admission replaces it
-// wholesale, a.tokens always equals est(a.content) and admission equals final
-// recomputation for any pure estimator (#331 spec 4.1).
-func (m ContextManager) tryAssign(st *mixedAllocState, a *mixedAnchor, s *mixedSubject, i int, est func(string) int, decision string) bool {
+// wholesale, a.tokens always equals m.estimate(a.content) and admission equals
+// final recomputation for any pure estimator (#331 spec 4.1).
+func (m ContextManager) tryAssign(st *mixedAllocState, a *mixedAnchor, s *mixedSubject, i int, decision string) bool {
 	prev := s.chosen
 	s.chosen = i
 	next := anchorJoined(a)
@@ -74,7 +78,7 @@ func (m ContextManager) tryAssign(st *mixedAllocState, a *mixedAnchor, s *mixedS
 		s.chosen = prev
 		return false
 	}
-	dTok := est(next) - a.tokens
+	dTok := m.estimate(next) - a.tokens
 	if !st.fits(dTok) {
 		s.chosen = prev
 		return false
@@ -103,8 +107,14 @@ func omitSubject(s *mixedSubject, reason string) {
 // place and returns the ledger; the caller materializes and traces from the same
 // structures (Task 8).
 //
-// budget is the state budget already net of tool schemas. est must be the
-// guarded estimator.
+// budget is the state budget already net of tool schemas. Every cost goes
+// through m.estimate, so the caller must have wrapped m.Estimate with
+// guardedEstimate BEFORE building the units it passes here: that single field is
+// what makes the builder's envelope costs and these deltas commensurable.
+//
+// ctx only cancels the upgrade phase, which is the sole unbounded-ish loop. A
+// cancelled context yields the fully-admitted allocation without upgrades — a
+// valid result satisfying every invariant, not a partial one.
 //
 // sysTokens covers only what units do NOT represent: the system prompt and the
 // materialized durable summary. Pinned MESSAGES are units (unitPinned) and are
@@ -115,7 +125,7 @@ func omitSubject(s *mixedSubject, reason string) {
 // ErrContextExhausted is the only error: the must-fit reservations alone exceed
 // the budget. st.used then reports the FULL must-fit cost so the caller's
 // pressure row covers the reservations, not just the pinned subset (spec 5).
-func (m ContextManager) allocateMixed(units []*mixedUnit, budget, sysTokens int, est func(string) int) (*mixedAllocState, error) {
+func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, budget, sysTokens int) (*mixedAllocState, error) {
 	st := &mixedAllocState{budget: budget, used: sysTokens}
 
 	// 1. Must-fit reservations: pinned spans and unresolved tool chains. Neither
@@ -143,7 +153,7 @@ func (m ContextManager) allocateMixed(units []*mixedUnit, budget, sysTokens int,
 		if u.kind != unitChain {
 			continue
 		}
-		m.allocateChain(st, u, est)
+		m.allocateChain(st, u)
 	}
 
 	// 4. Lane 2: prior raw-history exchanges. Lowest retention priority.
@@ -159,7 +169,7 @@ func (m ContextManager) allocateMixed(units []*mixedUnit, budget, sysTokens int,
 	// cheapest exact marginal cost wins. Adjacent-step-only would force an
 	// orientation upgrade before any evidence, because the prefix families
 	// interleave the orientation rungs with the evidence ones (spec 4.1 step 6).
-	for m.upgradeOnce(st, units, est, true) || m.upgradeOnce(st, units, est, false) {
+	for m.upgradeOnce(ctx, st, units, true) || m.upgradeOnce(ctx, st, units, false) {
 	}
 	return st, nil
 }
@@ -184,7 +194,7 @@ func (m ContextManager) admitSpan(st *mixedAllocState, u *mixedUnit) {
 // and is what the chain-level subject accounts for; anchor CONTENT is charged
 // separately per admitted alternative. The two are disjoint by construction, so
 // nothing double-counts.
-func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit, est func(string) int) {
+func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 	base := u.baseTokens
 	capViolated := false
 	for _, a := range u.anchors {
@@ -194,7 +204,7 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit, est fun
 			capViolated = true
 		}
 		a.content = omittedObservation
-		a.tokens = est(a.content)
+		a.tokens = m.estimate(a.content)
 		base += a.tokens
 	}
 	if capViolated || !st.fits(base) {
@@ -227,11 +237,14 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit, est fun
 			if a.verbatimGot >= a.minVerbatim {
 				break
 			}
-			for i := range s.alts { // declaration order: cheapest evidence-bearing first
+			// declaration order = ascending utility; alternative 0 is the cheapest
+			// for every in-repo producer, so the first evidence-bearing
+			// alternative that fits is also the cheapest one that does.
+			for i := range s.alts {
 				if verbatimComponents(s.alts[i].Desc) == 0 {
 					continue
 				}
-				if m.tryAssign(st, a, s, i, est, DecisionFloor) {
+				if m.tryAssign(st, a, s, i, DecisionFloor) {
 					break
 				}
 			}
@@ -250,8 +263,12 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit, est fun
 				continue
 			}
 			admitted := false
-			for i := range s.alts { // declaration order = cheapest-first
-				if m.tryAssign(st, a, s, i, est, DecisionBase) {
+			// declaration order = ascending utility; alternative 0 is the cheapest
+			// for every in-repo producer (its content is a prefix of every other),
+			// so first-that-fits is cheapest-that-fits. A producer whose costs are
+			// non-monotonic loses optimality here, nothing more.
+			for i := range s.alts {
+				if m.tryAssign(st, a, s, i, DecisionBase) {
 					admitted = true
 					break
 				}
@@ -282,17 +299,26 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit, est fun
 // order competes; across subjects the smallest exact marginal cost wins, with
 // input order breaking ties (strict <, so the first candidate found keeps it).
 //
-// ponytail: a full re-scan per commit, measured at ~O(groups^2.5) — 8 groups x
-// 32 alternatives 635us, 128x32 1.24s, and 256x64 (the maxContextGroups /
-// maxContextAlternatives ceiling) 21.1s. Realistic input is a retrieve call's
+// ponytail: a full re-scan per commit, ~O(groups^2.5) in the counts and linear
+// in total content bytes, since every candidate re-joins its whole anchor. On a
+// 10-byte-per-rung fixture: 8 groups x 32 alternatives 635us, 128x32 1.24s, and
+// tens of seconds at the maxContextGroups / maxContextAlternatives ceiling
+// (measured 21.1s and 49.2s on two differently-sized ceiling fixtures — the
+// figure tracks bytes, not just counts). Realistic input is a retrieve call's
 // ~8 sources x ~30 alternatives, i.e. sub-millisecond, and the carrier bounds
-// keep even a pathological set finite, which is what they exist for. Worth
-// memoizing per-anchor candidate costs and invalidating only the committed
-// anchor if realistic sizes ever approach the ceiling. Not done now because
-// #331 Task 11's exhaustive oracle is written against this exact greedy shape,
-// and a silent divergence between allocator and oracle costs more than the
-// scan does.
-func (m ContextManager) upgradeOnce(st *mixedAllocState, units []*mixedUnit, est func(string) int, evidenceOnly bool) bool {
+// keep even a pathological set finite, which is what they exist for; ctx is the
+// backstop for the rest. Worth memoizing per-anchor candidate costs and
+// invalidating only the committed anchor if realistic sizes ever approach the
+// ceiling. Not done now because #331 Task 11's exhaustive oracle is written
+// against this exact greedy shape, and a silent divergence between allocator and
+// oracle costs more than the scan does.
+func (m ContextManager) upgradeOnce(ctx context.Context, st *mixedAllocState, units []*mixedUnit, evidenceOnly bool) bool {
+	// Cancellation stops upgrading, it does not fail: base admission already
+	// produced a complete allocation, so every invariant (D6 decisions, the
+	// ledger identity, cap and budget compliance) holds without this phase.
+	if ctx.Err() != nil {
+		return false
+	}
 	type cand struct {
 		a    *mixedAnchor
 		s    *mixedSubject
@@ -317,13 +343,21 @@ func (m ContextManager) upgradeOnce(st *mixedAllocState, units []*mixedUnit, est
 					s.chosen = next
 					joined := anchorJoined(a)
 					s.chosen = prev
+					// The cap must be checked HERE, not only in tryAssign. An
+					// over-cap candidate with the smallest dTok would otherwise win
+					// selection, fail at commit, and stop the whole upgrade phase
+					// with affordable upgrades elsewhere left unbought — starvation,
+					// not just a wasted round.
 					if len(joined) > a.cap {
 						continue
 					}
-					dTok := est(joined) - a.tokens
+					dTok := m.estimate(joined) - a.tokens
 					if !st.fits(dTok) {
 						continue
 					}
+					// Strict <: ties keep the EARLIER candidate, so the winner is
+					// stable in input order (spec 4.1 step 6). <= would silently
+					// hand every tie to the last subject scanned.
 					if best == nil || dTok < best.dTok {
 						best = &cand{a: a, s: s, next: next, dTok: dTok}
 					}
@@ -340,5 +374,5 @@ func (m ContextManager) upgradeOnce(st *mixedAllocState, units []*mixedUnit, est
 	// between selection and commit would otherwise spin here forever. Each
 	// successful upgrade strictly advances one subject's chosen index, so the
 	// caller's loop terminates.
-	return m.tryAssign(st, best.a, best.s, best.next, est, DecisionUpgrade)
+	return m.tryAssign(st, best.a, best.s, best.next, DecisionUpgrade)
 }

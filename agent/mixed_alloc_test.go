@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"slices"
@@ -81,17 +82,21 @@ func chainSet(minVerbatim int, groups ...ContextGroup) *ContextSet {
 }
 
 // allocFixture wires the estimator exactly as Task 8's AssembleWithTrace will:
-// guarded ONCE so envelope/span costs (messageCost) and allocator deltas share
-// one function. Mixing a guarded and a raw estimator would break the exactness
-// identity these tests assert.
+// guarded ONCE into m.Estimate, so envelope/span costs (messageCost) and
+// allocator deltas read the same single field.
 func allocFixture(t *testing.T, est func(string) int, st State, budget, sysTokens int) ([]*mixedUnit, *mixedAllocState, error) {
+	t.Helper()
+	return allocFixtureCtx(t, context.Background(), est, st, budget, sysTokens)
+}
+
+func allocFixtureCtx(t *testing.T, ctx context.Context, est func(string) int, st State, budget, sysTokens int) ([]*mixedUnit, *mixedAllocState, error) {
 	t.Helper()
 	m := ContextManager{Estimate: guardedEstimate(est)}
 	units, err := m.buildMixedUnits(st)
 	if err != nil {
 		t.Fatalf("buildMixedUnits: %v", err)
 	}
-	alloc, allocErr := m.allocateMixed(units, budget, sysTokens, m.estimate)
+	alloc, allocErr := m.allocateMixed(ctx, units, budget, sysTokens)
 	return units, alloc, allocErr
 }
 
@@ -145,27 +150,43 @@ func assertDecided(t *testing.T, units []*mixedUnit) {
 }
 
 // ledgerRecompute is the INDEPENDENT cost of what allocation actually decided:
-// builder-measured spans and envelopes plus a fresh estimate of every retained
-// anchor's materialized content. It shares no arithmetic with the allocator's
-// running ledger, which is what makes st.used == ledgerRecompute a real check
-// rather than a restatement.
-func ledgerRecompute(units []*mixedUnit, est func(string) int, sysTokens int) int {
+// every span and envelope re-derived from the raw Messages, plus a fresh
+// estimate of every retained anchor's materialized content. It deliberately does
+// NOT reuse u.baseTokens — a builder-side envelope error would then appear on
+// both sides of the identity and cancel, leaving the check green while both
+// numbers were wrong.
+func ledgerRecompute(m ContextManager, units []*mixedUnit, sysTokens int) int {
 	total := sysTokens
+	spanCost := func(msgs []Message) int {
+		n := 0
+		for _, msg := range msgs {
+			n += m.messageCost(msg)
+		}
+		return n
+	}
 	for _, u := range units {
 		switch u.kind {
 		case unitPinned, unitUnresolved:
-			total += u.baseTokens
+			total += spanCost(u.msgs)
 		case unitPlainSpan, unitHistorySpan:
 			if !u.subject.omitted {
-				total += u.baseTokens
+				total += spanCost(u.msgs)
 			}
 		case unitChain:
 			if u.evicted {
 				continue
 			}
-			total += u.baseTokens
+			// A structured anchor contributes its ENVELOPE only; its content is
+			// allocated, not assumed. msg is a range copy, so blanking Content
+			// cannot reach the aliased State.Messages.
+			for _, msg := range u.msgs {
+				if msg.Context != nil {
+					msg.Content = ""
+				}
+				total += m.messageCost(msg)
+			}
 			for _, a := range u.anchors {
-				total += est(a.content)
+				total += m.estimate(a.content)
 			}
 		}
 	}
@@ -321,6 +342,15 @@ func TestMixedAllocLaneOrder(t *testing.T) {
 		name:   "span-sized budget keeps plain, evicts the chain, drops history",
 		budget: 7, wantUsed: 7, wantEvicted: 2, wantChainGone: true,
 		wantPlain: DecisionBase, wantHistory: OmitTokenBudget,
+		wantAnchorDec: OmitChainEvicted, wantAnchorText: omittedObservation,
+	}, {
+		// The plain-vs-CHAIN discrimination, which the rows above miss: 59 fits
+		// the 4-token plain span or the 56-token chain base, not both. Plain wins
+		// and the chain is evicted; swapping lanes 0 and 1 would charge the chain
+		// first (3+56 = 59, exactly) and omit the plain exchange instead.
+		name:   "budget for one of plain-or-chain keeps plain",
+		budget: 59, wantUsed: 11, wantEvicted: 1, wantChainGone: true,
+		wantPlain: DecisionBase, wantHistory: DecisionBase,
 		wantAnchorDec: OmitChainEvicted, wantAnchorText: omittedObservation,
 	}, {
 		name:   "roomy budget admits all three lanes",
@@ -482,7 +512,8 @@ func TestMixedAllocExactAccounting(t *testing.T) {
 
 	for _, e := range estimators {
 		t.Run(e.name, func(t *testing.T) {
-			est := guardedEstimate(e.est)
+			m := ContextManager{Estimate: guardedEstimate(e.est)}
+			est := m.estimate
 			seen := map[string]int{}
 			placeholders := 0
 			for _, budget := range budgets {
@@ -509,7 +540,7 @@ func TestMixedAllocExactAccounting(t *testing.T) {
 							}
 						}
 					}
-					if want := ledgerRecompute(units, est, 11); alloc.used != want {
+					if want := ledgerRecompute(m, units, 11); alloc.used != want {
 						t.Errorf("used = %d, want %d (independent recompute)\n%s",
 							alloc.used, want, allocSnapshot(units, alloc))
 					}
@@ -807,53 +838,298 @@ func TestMixedAllocByteCap(t *testing.T) {
 	}
 }
 
-// TestMixedAllocUpgradesJump: declaration order is UTILITY order, so an upgrade
-// considers every later alternative, not just the next rung. Here the leftover
-// budget fits [abstract ev1] (index 2) but not the intervening orientation
-// upgrade [abstract overview] (index 1); an adjacent-step-only pass stalls at
-// index 0 and ships no evidence at all.
-func TestMixedAllocUpgradesJump(t *testing.T) {
-	// Alternative lengths: 40, 100, 50, 110, 60, 120. Verbatim: 0,0,1,1,2,2.
-	group := ladderGroup("pkg/one.go", 1, strings.Repeat("A", 40), strings.Repeat("O", 60),
+// jumpLadder: alternative lengths 40, 100, 50, 110, 60, 120; verbatim counts
+// 0,0,1,1,2,2. The orientation rung at index 1 is DEARER than the evidence rung
+// at index 2, which is the real shape rag produces and the reason declaration
+// order is utility order rather than cost order.
+func jumpLadder() ContextGroup {
+	return ladderGroup("pkg/one.go", 1, strings.Repeat("A", 40), strings.Repeat("O", 60),
 		strings.Repeat("E", 10), strings.Repeat("F", 10))
-	st := State{Messages: []Message{
-		mixedAsstCall("c1"),
-		mixedToolResult("c1", "FLAT", chainSet(0, group), 4096),
+}
+
+// TestMixedAllocUpgradesJump: an upgrade considers every later alternative, not
+// just the next rung. The leftover budget fits [abstract ev1] (index 2) but not
+// the intervening orientation upgrade [abstract overview] (index 1), so an
+// adjacent-step-only pass stalls at index 0 and ships no evidence at all.
+//
+// The second row also pins verbatimGot across a REPLACEMENT: upgrading a subject
+// from a 1-verbatim to a 2-verbatim alternative must revert the count it already
+// contributed, giving 2 rather than 3. Nothing in Task 7 reads verbatimGot after
+// the upgrade phase, but Task 8's trace and Task 11's properties will.
+func TestMixedAllocUpgradesJump(t *testing.T) {
+	tests := []struct {
+		name        string
+		budget      int
+		wantChosen  int
+		wantUsed    int
+		wantVerb    int
+		wantContent string
+	}{{
+		// chain base 30 + placeholder 26 = 56; base admission of index 0 costs
+		// +14 (40 - 26) => 70 used, 15 free. Index 2 costs +10, index 1 costs
+		// +60 and index 4 costs +20, so exactly one jump is affordable.
+		name:   "one jump past the dearer orientation rung",
+		budget: 85, wantChosen: 2, wantUsed: 80, wantVerb: 1,
+		wantContent: strings.Repeat("A", 40) + strings.Repeat("E", 10),
+	}, {
+		// 25 free: index 2 (+10) then index 4 (+10 more), the second one
+		// REPLACING a 1-verbatim choice with a 2-verbatim one.
+		name:   "second jump replaces a verbatim choice",
+		budget: 95, wantChosen: 4, wantUsed: 90, wantVerb: 2,
+		wantContent: strings.Repeat("A", 40) + strings.Repeat("E", 10) + strings.Repeat("F", 10),
 	}}
 
-	// chain base 30 + placeholder 26 = 56; base admission of index 0 costs
-	// +14 (40 - 26) => 70 used, 15 free. Index 2 costs +10; index 1 costs +60
-	// and index 4 costs +20, so exactly one jump is affordable.
-	units, alloc, err := allocFixture(t, runeEstimator, st, 85, 0)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			st := State{Messages: []Message{
+				mixedAsstCall("c1"),
+				mixedToolResult("c1", "FLAT", chainSet(0, jumpLadder()), 4096),
+			}}
+			units, alloc, err := allocFixture(t, runeEstimator, st, tc.budget, 0)
+			if err != nil {
+				t.Fatalf("allocateMixed: %v", err)
+			}
+			assertDecided(t, units)
+			a := units[0].anchors[0]
+			s := a.subjects[0]
+
+			// Fixture self-check: the adjacent rung must be UNAFFORDABLE, or the
+			// test cannot distinguish a jump from a step.
+			if len(s.alts) != 6 {
+				t.Fatalf("ladder has %d alternatives, want the real six-rung shape", len(s.alts))
+			}
+			free := tc.budget - 70
+			if adjacent := len(s.alts[1].Content) - len(s.alts[0].Content); adjacent <= free {
+				t.Fatalf("adjacent upgrade costs %d and fits in the %d free tokens; the fixture no longer traps a step-only pass",
+					adjacent, free)
+			}
+
+			if s.chosen != tc.wantChosen {
+				t.Errorf("chosen = %d, want %d: the upgrade must jump past the unaffordable orientation rung",
+					s.chosen, tc.wantChosen)
+			}
+			if s.decision != DecisionUpgrade {
+				t.Errorf("decision = %q, want %q", s.decision, DecisionUpgrade)
+			}
+			if a.content != tc.wantContent {
+				t.Errorf("anchor content = %q, want %q", a.content, tc.wantContent)
+			}
+			if a.verbatimGot != tc.wantVerb {
+				t.Errorf("verbatimGot = %d, want %d (a replacement must revert the count it superseded)",
+					a.verbatimGot, tc.wantVerb)
+			}
+			if alloc.used != tc.wantUsed {
+				t.Errorf("used = %d, want %d\n%s", alloc.used, tc.wantUsed, allocSnapshot(units, alloc))
+			}
+		})
+	}
+}
+
+// TestMixedAllocUpgradesCancelled: a cancelled context stops the upgrade phase
+// and leaves the base allocation intact. Cancellation must degrade, never
+// corrupt — the same fixture that upgrades twice under a live context must still
+// satisfy D6 and the ledger identity with no upgrades at all.
+func TestMixedAllocUpgradesCancelled(t *testing.T) {
+	newState := func() State {
+		return State{Messages: []Message{
+			mixedAsstCall("c1"),
+			mixedToolResult("c1", "FLAT", chainSet(0, jumpLadder()), 4096),
+		}}
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	m := ContextManager{Estimate: guardedEstimate(runeEstimator)}
+	units, alloc, err := allocFixtureCtx(t, ctx, runeEstimator, newState(), 95, 0)
 	if err != nil {
 		t.Fatalf("allocateMixed: %v", err)
 	}
 	assertDecided(t, units)
 	a := units[0].anchors[0]
 	s := a.subjects[0]
+	if s.chosen != 0 || s.decision != DecisionBase {
+		t.Errorf("chosen = %d decision = %q, want 0 %q: a cancelled context must skip upgrades",
+			s.chosen, s.decision, DecisionBase)
+	}
+	if want := strings.Repeat("A", 40); a.content != want {
+		t.Errorf("anchor content = %q, want the base rung %q", a.content, want)
+	}
+	if alloc.used != 70 {
+		t.Errorf("used = %d, want 70 (chain base 56, less the 26-token placeholder, plus the 40-token base rung)", alloc.used)
+	}
+	// Still internally consistent: the ledger identity and a.tokens hold.
+	if want := ledgerRecompute(m, units, 0); alloc.used != want {
+		t.Errorf("used = %d, want %d (independent recompute)\n%s", alloc.used, want, allocSnapshot(units, alloc))
+	}
+	if want := m.estimate(a.content); a.tokens != want {
+		t.Errorf("anchor tokens = %d, want %d", a.tokens, want)
+	}
+	// Control: the same fixture and budget upgrade twice when not cancelled, so
+	// the assertions above are about cancellation and not about the budget.
+	liveUnits, liveAlloc, err := allocFixture(t, runeEstimator, newState(), 95, 0)
+	if err != nil {
+		t.Fatalf("allocateMixed (live): %v", err)
+	}
+	if got := liveUnits[0].anchors[0].subjects[0].chosen; got != 4 {
+		t.Fatalf("live run chose %d, want 4; the fixture no longer distinguishes cancellation\n%s",
+			got, allocSnapshot(liveUnits, liveAlloc))
+	}
+}
 
-	// Fixture self-check: the adjacent rung must be UNAFFORDABLE, or the test
-	// cannot distinguish a jump from a step.
-	alts := s.alts
-	if len(alts) != 6 {
-		t.Fatalf("ladder has %d alternatives, want the real six-rung shape", len(alts))
-	}
-	if adjacent := len(alts[1].Content) - len(alts[0].Content); adjacent <= 85-70 {
-		t.Fatalf("adjacent upgrade costs %d and fits in the %d free tokens; the fixture no longer traps a step-only pass",
-			adjacent, 85-70)
-	}
+// twoAnchorState builds one chain answered by two structured results. A policy
+// that only matters ACROSS anchors — upgrade priority, the tie-break direction,
+// the selection-phase cap check — needs two of them to be wrong about. Chain
+// base under runeEstimator: two calls (40) + two envelopes (20) = 60, plus two
+// 26-token placeholders = 112.
+func twoAnchorState(capA, capB int, groupA, groupB ContextGroup) State {
+	return State{Messages: []Message{
+		mixedAsstCall("c1", "c2"),
+		mixedToolResult("c1", "F", chainSet(0, groupA), capA),
+		mixedToolResult("c2", "F", chainSet(0, groupB), capB),
+	}}
+}
 
-	if s.chosen != 2 {
-		t.Errorf("chosen = %d, want 2: the upgrade must jump past the unaffordable orientation rung", s.chosen)
+// upgradeCost is the exact marginal token cost of moving s from alternative
+// from to alternative to. With one subject per anchor the joined content IS that
+// alternative, so under runeEstimator this is a byte delta — which is what lets
+// the fixture self-checks below state the candidate ordering in the test's own
+// terms. from is explicit because these checks run AFTER allocation, when
+// s.chosen has already moved off the base rung the candidates were ranked from.
+func upgradeCost(s *mixedSubject, from, to int) int {
+	return len(s.alts[to].Content) - len(s.alts[from].Content)
+}
+
+// TestMixedAllocUpgradesEvidenceBeforeCost: evidence-adding candidates are
+// considered before cheaper orientation ones (spec 4.1 step 6). The priority is
+// only observable ACROSS subjects — within one subject the exact deltas make the
+// two passes converge on the same alternative — so this needs two anchors whose
+// cheapest candidate and whose evidence candidate belong to different ones.
+func TestMixedAllocUpgradesEvidenceBeforeCost(t *testing.T) {
+	// A: base 40, evidence rung 60 (+20), orientation rung 140 (unaffordable).
+	// B: base 40, orientation rung 45 (+5), evidence rung 90 (unaffordable).
+	st := twoAnchorState(4096, 4096,
+		ladderGroup("pkg/a.go", 1, strings.Repeat("A", 40), strings.Repeat("o", 100), strings.Repeat("E", 20)),
+		ladderGroup("pkg/b.go", 2, strings.Repeat("B", 40), strings.Repeat("p", 5), strings.Repeat("F", 50)),
+	)
+	// 112 base + two base admissions (+14 each) = 140; 160 leaves exactly 20 —
+	// A's evidence upgrade, or B's orientation upgrade with change to spare.
+	units, alloc, err := allocFixture(t, runeEstimator, st, 160, 0)
+	if err != nil {
+		t.Fatalf("allocateMixed: %v", err)
 	}
-	if s.decision != DecisionUpgrade {
-		t.Errorf("decision = %q, want %q", s.decision, DecisionUpgrade)
+	assertDecided(t, units)
+	subA := findSubject(t, units, contextdepth.DomainRAG, "pkg/a.go")
+	subB := findSubject(t, units, contextdepth.DomainRAG, "pkg/b.go")
+
+	// Fixture self-check: B's orientation upgrade must be strictly CHEAPER than
+	// A's evidence upgrade, or evidence-first and cheapest-first agree and the
+	// test proves nothing.
+	if orCost, evCost := upgradeCost(subB, 0, 1), upgradeCost(subA, 0, 2); orCost >= evCost {
+		t.Fatalf("B's orientation upgrade costs %d, not less than A's evidence upgrade %d; the fixture cannot separate the two passes",
+			orCost, evCost)
 	}
-	if want := strings.Repeat("A", 40) + strings.Repeat("E", 10); a.content != want {
-		t.Errorf("anchor content = %q, want %q", a.content, want)
+	if subA.chosen != 2 || subA.decision != DecisionUpgrade {
+		t.Errorf("subject A: chosen = %d decision = %q, want 2 %q — the leftover budget must buy EVIDENCE first",
+			subA.chosen, subA.decision, DecisionUpgrade)
 	}
-	if alloc.used != 80 {
-		t.Errorf("used = %d, want 80\n%s", alloc.used, allocSnapshot(units, alloc))
+	if subB.chosen != 0 || subB.decision != DecisionBase {
+		t.Errorf("subject B: chosen = %d decision = %q, want 0 %q — its cheaper orientation upgrade must not preempt A's evidence",
+			subB.chosen, subB.decision, DecisionBase)
+	}
+	if alloc.used != 160 {
+		t.Errorf("used = %d, want 160\n%s", alloc.used, allocSnapshot(units, alloc))
+	}
+}
+
+// TestMixedAllocUpgradeCapDoesNotStarve: the byte cap is re-checked during
+// candidate SELECTION, not only at commit. An over-cap candidate that wins
+// selection on cost fails at commit, upgradeOnce reports no progress, and the
+// whole upgrade phase halts with affordable upgrades elsewhere unbought — so
+// dropping the selection-phase check starves the OTHER anchor rather than
+// shipping anything over cap.
+func TestMixedAllocUpgradeCapDoesNotStarve(t *testing.T) {
+	// A's cap (42) admits its 40-byte base rung and its 26-byte placeholder, but
+	// not the 45-byte next rung whose +5 is the cheapest candidate in the scan.
+	// B's cap is roomy and its next rung costs +10.
+	st := twoAnchorState(42, 4096,
+		ladderGroup("pkg/a.go", 1, strings.Repeat("A", 40), strings.Repeat("o", 5), strings.Repeat("E", 60)),
+		ladderGroup("pkg/b.go", 2, strings.Repeat("B", 40), strings.Repeat("p", 10), strings.Repeat("F", 60)),
+	)
+	// 112 base + two base admissions = 140; 152 leaves 12 — enough for B's +10.
+	units, alloc, err := allocFixture(t, runeEstimator, st, 152, 0)
+	if err != nil {
+		t.Fatalf("allocateMixed: %v", err)
+	}
+	assertDecided(t, units)
+	if units[0].evicted {
+		t.Fatalf("chain evicted; both caps hold the placeholder\n%s", allocSnapshot(units, alloc))
+	}
+	subA := findSubject(t, units, contextdepth.DomainRAG, "pkg/a.go")
+	subB := findSubject(t, units, contextdepth.DomainRAG, "pkg/b.go")
+
+	// Fixture self-checks: A's next rung must be over ITS cap and cheaper than
+	// B's, or it never wins selection and cannot starve anything.
+	capA := units[0].anchors[0].cap
+	if len(subA.alts[1].Content) <= capA {
+		t.Fatalf("A's next rung is %d bytes, within its %d-byte cap; nothing would be rejected",
+			len(subA.alts[1].Content), capA)
+	}
+	if a1, b1 := upgradeCost(subA, 0, 1), upgradeCost(subB, 0, 1); a1 >= b1 {
+		t.Fatalf("A's over-cap candidate costs %d, not less than B's %d; it would not win selection", a1, b1)
+	}
+	if subB.chosen != 1 || subB.decision != DecisionUpgrade {
+		t.Errorf("subject B: chosen = %d decision = %q, want 1 %q — an over-cap candidate elsewhere must not halt the upgrade phase",
+			subB.chosen, subB.decision, DecisionUpgrade)
+	}
+	if subA.chosen != 0 || subA.decision != DecisionBase {
+		t.Errorf("subject A: chosen = %d decision = %q, want 0 %q", subA.chosen, subA.decision, DecisionBase)
+	}
+	if alloc.used != 150 {
+		t.Errorf("used = %d, want 150\n%s", alloc.used, allocSnapshot(units, alloc))
+	}
+	for _, a := range units[0].anchors {
+		if len(a.content) > a.cap {
+			t.Errorf("anchor %s: %d bytes over its %d-byte cap", a.callID, len(a.content), a.cap)
+		}
+	}
+}
+
+// TestMixedAllocUpgradeTieKeepsInputOrder: equal marginal costs are broken by
+// stable input order (spec 4.1 step 6), so the EARLIER subject wins. A <= in the
+// comparison is still deterministic — which is exactly why the determinism test
+// cannot see it — but it hands every tie to the last subject scanned.
+func TestMixedAllocUpgradeTieKeepsInputOrder(t *testing.T) {
+	// Byte-identical ladders under different subject IDs: 40, 50, 100, 110. Both
+	// next rungs therefore cost exactly +10.
+	abs, ov, ev := strings.Repeat("X", 40), strings.Repeat("y", 10), strings.Repeat("Z", 60)
+	st := twoAnchorState(4096, 4096,
+		ladderGroup("pkg/a.go", 1, abs, ov, ev),
+		ladderGroup("pkg/b.go", 2, abs, ov, ev),
+	)
+	// 112 base + two base admissions = 140; 150 affords exactly one +10 upgrade.
+	units, alloc, err := allocFixture(t, runeEstimator, st, 150, 0)
+	if err != nil {
+		t.Fatalf("allocateMixed: %v", err)
+	}
+	assertDecided(t, units)
+	subA := findSubject(t, units, contextdepth.DomainRAG, "pkg/a.go")
+	subB := findSubject(t, units, contextdepth.DomainRAG, "pkg/b.go")
+
+	// Fixture self-check: the tie must be exact, or the winner is decided by cost
+	// and the tie-break direction is untested.
+	if a1, b1 := upgradeCost(subA, 0, 1), upgradeCost(subB, 0, 1); a1 != b1 {
+		t.Fatalf("upgrade costs are %d and %d; the fixture no longer ties", a1, b1)
+	}
+	if subA.chosen != 1 || subA.decision != DecisionUpgrade {
+		t.Errorf("subject A: chosen = %d decision = %q, want 1 %q — a tie must go to the earlier subject",
+			subA.chosen, subA.decision, DecisionUpgrade)
+	}
+	if subB.chosen != 0 || subB.decision != DecisionBase {
+		t.Errorf("subject B: chosen = %d decision = %q, want 0 %q — the later subject must not take the tie",
+			subB.chosen, subB.decision, DecisionBase)
+	}
+	if alloc.used != 150 {
+		t.Errorf("used = %d, want 150\n%s", alloc.used, allocSnapshot(units, alloc))
 	}
 }
 
