@@ -189,7 +189,7 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 			InputTokens: reserved,
 			InputBudget: budget.Input,
 			Level:       LevelCritical,
-			Cause:       m.mustFitCause(stMat, units, toolSchemaTokens),
+			Cause:       m.mustFitCause(stMat, units, toolSchemaTokens, alloc.used),
 			Mitigation:  MitigationHalt,
 		}, ContextAssemblyTrace{}, err
 	}
@@ -227,22 +227,29 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 }
 
 // mustFitCause attributes a must-fit overflow across the THREE buckets mixed
-// assembly reserves from: pinned messages (system, goal, durable summary), tool
-// schemas, and unresolved tool chains. The third is why this exists rather than
-// reusing pinnedOverflowCause alone — an unresolved chain is a new must-fit
-// reservation on a new path, and reporting a 450-token tool tail as CausePinned
-// points the operator at the wrong lever. Ties resolve to the pinned/schema
-// split, matching dominantCause's earliest-bucket precedence.
-func (m ContextManager) mustFitCause(stMat State, units []*mixedUnit, toolSchemaTokens int) PressureCause {
+// assembly reserves from: pinned spans, tool schemas, and unresolved tool
+// chains. The third is why this exists rather than reusing pinnedOverflowCause
+// alone — an unresolved chain is a new must-fit reservation on a new path, and
+// reporting a 450-token tool tail as CausePinned points the operator at the
+// wrong lever.
+//
+// Both sides of the comparison are WHOLE-SPAN reservation cost: allocUsed is the
+// allocator's ledger (sysTokens + every pinned and unresolved unit), so
+// allocUsed-unresolved is the pinned remainder measured exactly as unresolved
+// is. Weighing it against pinnedTokens instead would compare a span total to a
+// pinned-MESSAGE total, and those differ: chainAt bundles an Elastic tool result
+// under a Pinned assistant into one span and classifyGroup calls the whole span
+// pinned, so the pinned reservation would be understated and a smaller
+// unresolved chain would win. Ties resolve to the pinned/schema split, matching
+// dominantCause's earliest-bucket precedence.
+func (m ContextManager) mustFitCause(stMat State, units []*mixedUnit, toolSchemaTokens, allocUsed int) PressureCause {
 	unresolved := 0
 	for _, u := range units {
 		if u.kind == unitUnresolved {
 			unresolved += u.baseTokens
 		}
 	}
-	// pinnedTokens with zero schemas is exactly the pinned-message subtotal
-	// pinnedOverflowCause weighs, so the two cannot disagree about that term.
-	if unresolved > toolSchemaTokens && unresolved > m.pinnedTokens(stMat, 0) {
+	if unresolved > toolSchemaTokens && unresolved > allocUsed-unresolved {
 		return CauseToolOutput
 	}
 	return m.pinnedOverflowCause(stMat, toolSchemaTokens)

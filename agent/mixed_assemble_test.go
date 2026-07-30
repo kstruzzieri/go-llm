@@ -589,6 +589,21 @@ func TestContextAssemblyTraceRowsOwnTheirSlices(t *testing.T) {
 	m := ContextManager{Mixed: true, Estimate: runeEstimator}
 	budget := TokenBudget{Input: 300}
 
+	// Snapshot the caller's own set, so the anchor clone site gets a DIRECT
+	// assertion below. Without it that site is only caught indirectly, by the
+	// second assembly failing validateContextSet on the descriptors this
+	// mutation corrupted — a kill that depends on validation staying strict and
+	// that cannot see a consumer who mutates a trace and never re-assembles.
+	setBefore := [][]contextdepth.RepresentationDesc{}
+	for _, g := range st.Messages[6].Context.Groups {
+		for _, a := range g.Alternatives {
+			setBefore = append(setBefore, slices.Clone(a.Desc.Representations))
+		}
+	}
+	if len(setBefore) == 0 {
+		t.Fatal("fixture anchor carries no alternatives; the set check would be vacuous")
+	}
+
 	_, _, first, err := m.AssembleWithTrace(context.Background(), st, 0, budget)
 	if err != nil {
 		t.Fatalf("AssembleWithTrace: %v", err)
@@ -604,6 +619,20 @@ func TestContextAssemblyTraceRowsOwnTheirSlices(t *testing.T) {
 	for _, s := range first.Subjects {
 		for j := range s.Representations {
 			s.Representations[j] = contextdepth.RepresentationDesc{}
+		}
+	}
+
+	// Checked HERE — after the mutation, before any re-assembly — so an aliased
+	// anchor descriptor fails on the property itself rather than by tripping
+	// validation on the next call.
+	i := 0
+	for gi, g := range st.Messages[6].Context.Groups {
+		for ai, a := range g.Alternatives {
+			if !slices.Equal(a.Desc.Representations, setBefore[i]) {
+				t.Errorf("caller's set corrupted at group %d alternative %d: %+v, want %+v",
+					gi, ai, a.Desc.Representations, setBefore[i])
+			}
+			i++
 		}
 	}
 
@@ -885,30 +914,46 @@ func TestAssembleWithTraceHistoryLane(t *testing.T) {
 func TestAssembleWithTraceMustFitPressure(t *testing.T) {
 	// The unresolved chain costs 51: assistant calls(40) + the one answered
 	// result(11). Only c1 is answered, so the whole group is non-droppable.
+	unresolvedTail := []Message{
+		mixedAsstCall("c1", "c2"),
+		mixedToolResult("c1", "R", validSet(), 4096),
+	}
 	mustFitState := func(pinnedContent string) State {
-		return State{Messages: []Message{
-			pinned("system", pinnedContent),
-			mixedAsstCall("c1", "c2"),
-			mixedToolResult("c1", "R", validSet(), 4096),
-		}}
+		return State{Messages: append([]Message{pinned("system", pinnedContent)}, unresolvedTail...)}
+	}
+	// pinnedSpanWithTailState is the two-BASIS trap. chainAt bundles the Elastic
+	// tool result under the Pinned assistant into ONE span and classifyGroup calls
+	// the whole span pinned, so the unit reserves 120 (call 20 + result 100) while
+	// only 20 of it is a pinned MESSAGE. Weighing whole-span unresolved cost (51)
+	// against the pinned-message subtotal reports tool_output — blaming a 51-token
+	// tool tail for a 120-token pinned span, the very mis-attribution this
+	// function exists to prevent, pointing the other way.
+	pinnedSpanWithTailState := func() State {
+		asst := mixedAsstCall("p1")
+		asst.Segment = Pinned
+		return State{Messages: append([]Message{
+			asst,
+			mixedToolResult("p1", strings.Repeat("R", 90), nil, 0),
+		}, unresolvedTail...)}
 	}
 	tests := []struct {
 		name             string
-		pinnedContent    string
+		st               State
 		toolSchemaTokens int
 		budget           int
 		wantTokens       int
 		pinnedOnly       int
 		wantCause        PressureCause
 	}{
-		{"unresolved chain dominates", "SYS-PROMPT", 0, 30, 61, 10, CauseToolOutput},
-		{"tool schemas counted too", "SYS-PROMPT", 5, 30, 66, 15, CauseToolOutput},
-		{"pinned span dominates", strings.Repeat("P", 60), 0, 100, 111, 60, CausePinned},
-		{"tool schemas dominate", "SYS-PROMPT", 500, 520, 561, 510, CauseToolSchema},
+		{"unresolved chain dominates", mustFitState("SYS-PROMPT"), 0, 30, 61, 10, CauseToolOutput},
+		{"tool schemas counted too", mustFitState("SYS-PROMPT"), 5, 30, 66, 15, CauseToolOutput},
+		{"pinned span dominates", mustFitState(strings.Repeat("P", 60)), 0, 100, 111, 60, CausePinned},
+		{"tool schemas dominate", mustFitState("SYS-PROMPT"), 500, 520, 561, 510, CauseToolSchema},
+		{"pinned span bundling an elastic tool tail dominates", pinnedSpanWithTailState(), 0, 100, 171, 20, CausePinned},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			st := mustFitState(tc.pinnedContent)
+			st := tc.st
 			m := ContextManager{Mixed: true, Estimate: runeEstimator}
 			_, pressure, tr, err := m.AssembleWithTrace(context.Background(), st,
 				tc.toolSchemaTokens, TokenBudget{Input: tc.budget})
