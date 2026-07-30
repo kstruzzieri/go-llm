@@ -15,9 +15,11 @@ const (
 	defaultToolErrorCap = 3         // consecutive tool errors / repeats before stop
 )
 
-// ErrContextExhausted is returned when the pinned segment (system + goal +
-// tool schemas) alone exceeds the input budget. The runtime never silently
-// truncates the goal; selecting a bigger-context model is the provider's job.
+// ErrContextExhausted is returned when the must-fit reservations alone exceed
+// the input budget: the pinned segment (system + goal + tool schemas), or — under
+// mixed assembly — the durable summary or an unresolved tool chain, none of
+// which is droppable. The runtime never silently truncates the goal; selecting a
+// bigger-context model is the provider's job.
 var ErrContextExhausted = errors.New("agent: context exhausted (pinned segment exceeds budget)")
 
 // StopReason explains why Run returned. A non-Completed reason is still a

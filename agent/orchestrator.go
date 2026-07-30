@@ -34,8 +34,14 @@ func WithClock(now func() time.Time) Option {
 }
 
 // New constructs an Orchestrator from a ModelCaller and ContextManager.
+//
+// The manager is stored UNNORMALIZED. Installing the default compactor here
+// would make every mixed manager look like it carries a custom one, and mixed
+// assembly rejects that combination (ErrMixedCompactor). Legacy behavior is
+// unchanged: assembleLegacy applies the same default at the same effective
+// point.
 func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator {
-	o := &Orchestrator{model: model, ctxMgr: normalizeContextManager(ctxMgr), now: time.Now}
+	o := &Orchestrator{model: model, ctxMgr: ctxMgr, now: time.Now}
 	for _, opt := range opts {
 		opt(o)
 	}

@@ -16,12 +16,23 @@ const DefaultInputCeiling = 8192
 // function over State, tool-schema token count, and budget.
 type ContextManager struct {
 	Compactor Compactor
-	Estimate  func(string) int // token estimator; len/4 when nil
-	// Mixed opts into structured mixed-budget assembly. Zero value and any
-	// request whose State carries no structured anchors keep the legacy
-	// Compactor path and model-visible messages byte-identical. Its only
-	// reader today is dispatch, which skips the tool-result deep copy when
-	// mixed assembly is off (#331).
+	// Estimate is the token estimator; len/4 when nil. It must be pure and
+	// deterministic. The mixed path additionally enforces the same fallback
+	// rag.ProgressiveRenderRequest.Estimate documents — a non-positive result
+	// for non-empty text falls back to the default heuristic — because its cost
+	// accounting is an exact identity rather than an approximation. The legacy
+	// path is unchanged.
+	Estimate func(string) int
+	// Mixed opts into structured mixed-budget assembly. It requires the DEFAULT
+	// compactor: Mixed together with a non-nil Compactor is a configuration
+	// error (ErrMixedCompactor) whatever any one request carries, because the
+	// two are alternative strategies for the same messages and an
+	// anchor-dependent error would surface intermittently.
+	//
+	// With the default compactor, any request whose State carries no structured
+	// anchors keeps the legacy Compactor path and model-visible messages
+	// byte-identical. Its readers are dispatch, which skips the tool-result deep
+	// copy when mixed assembly is off, and AssembleWithTrace (#331).
 	Mixed bool
 }
 
@@ -105,7 +116,19 @@ func materializeDurableSummary(st State) State {
 // pinned cost of the active tool schemas (not stored in State). The returned
 // Pressure is fully populated on every path — including the exhaustion error
 // paths — so the orchestrator can emit it before the model call.
+//
+// It is AssembleWithTrace with the trace discarded; callers that want the
+// mixed-assembly trace call that instead.
 func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens int, budget TokenBudget) (State, Pressure, error) {
+	out, pressure, _, err := m.AssembleWithTrace(ctx, st, toolSchemaTokens, budget)
+	return out, pressure, err
+}
+
+// assembleLegacy is the Compactor-driven path: unchanged behavior, and the only
+// place the default compactor is installed. Doing it here rather than in
+// agent.New is what keeps a mixed manager's nil Compactor distinguishable from
+// a custom one.
+func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchemaTokens int, budget TokenBudget) (State, Pressure, error) {
 	m = normalizeContextManager(m)
 	thresholds := budget.Thresholds.normalize()
 	st = materializeDurableSummary(st)
