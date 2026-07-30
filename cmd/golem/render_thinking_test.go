@@ -22,7 +22,7 @@ func thinkingRendererEmit(t *testing.T, r *renderer, deltas ...string) {
 
 func TestRendererThinkingDistinctFromAnswer(t *testing.T) {
 	var buf bytes.Buffer
-	r := newRenderer(&buf, true, 4, nil)
+	r := newRenderer(&buf, true, 4, nil, false)
 	thinkingRendererEmit(t, r, "I should", " check")
 	if err := r.OnToken(context.Background(), agent.TokenEvent{Content: "answer"}); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestRendererThinkingDistinctFromAnswer(t *testing.T) {
 
 func TestRendererThinkingNoColor(t *testing.T) {
 	var buf bytes.Buffer
-	r := newRenderer(&buf, false, 4, nil)
+	r := newRenderer(&buf, false, 4, nil, false)
 	thinkingRendererEmit(t, r, "pondering")
 	out := buf.String()
 	if !strings.Contains(out, "[thinking]") {
@@ -62,7 +62,7 @@ func TestRendererThinkingNoColor(t *testing.T) {
 func TestRendererThinkingResetsPerStep(t *testing.T) {
 	var buf bytes.Buffer
 	now := func() time.Time { return time.Unix(1719600000, 0) }
-	r := newRenderer(&buf, false, 4, now)
+	r := newRenderer(&buf, false, 4, now, false)
 	if err := r.OnThinking(context.Background(), agent.ThinkingEvent{Step: 0, Content: "first"}); err != nil {
 		t.Fatal(err)
 	}
@@ -79,7 +79,7 @@ func TestRendererThinkingResetsPerStep(t *testing.T) {
 
 func TestComposedObserverForwardsThinking(t *testing.T) {
 	var buf bytes.Buffer
-	rend := newRenderer(&buf, false, 4, nil)
+	rend := newRenderer(&buf, false, 4, nil, false)
 
 	now := func() time.Time { return time.Unix(1719600000, 0) }
 	sink, err := agenttrace.NewTelemetrySink(t.TempDir()+"/telemetry.jsonl", "run-1", now(), now)

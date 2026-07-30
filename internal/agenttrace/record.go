@@ -153,6 +153,42 @@ type runtimeStageSpan struct {
 	AnchorOmissions int `json:"anchor_omissions,omitempty"`
 }
 
+// contextAssemblySpan is one mixed-assembly outcome (#331). A NEW span kind, so
+// it is additive within SchemaVersion 2 by construction: no record any existing
+// run emits changes a byte, and only a mixed assembly emits this one at all.
+//
+// It is AGGREGATE on purpose. ContextAssemblyTrace is content-free but not
+// privacy-free — its rows carry source paths, memory record IDs and tool call
+// IDs — and this sink persists no such identifier today (tool spans carry the
+// tool NAME and a content byte count, never arguments, output or call IDs).
+// Emitting the rows would widen what telemetry retains about a workspace, so the
+// span keeps the counts and drops the names: ByDecision says whether the upgrade
+// pass is doing anything, ByOmissionReason is what makes Pressure.AnchorOmissions
+// actionable (byte_cap vs token_budget vs chain_evicted), and neither can
+// identify a file. The content-full per-subject rows already ride agent.Result
+// into the -trace record for operators who want them.
+type contextAssemblySpan struct {
+	SchemaVersion      int    `json:"schema_version"`
+	RunID              string `json:"run_id"`
+	SpanID             string `json:"span_id"`
+	ParentID           string `json:"parent_id"`
+	Kind               string `json:"kind"` // "context_assembly"
+	Step               int    `json:"step"`
+	MaxTokens          int    `json:"max_tokens"`
+	UsedTokens         int    `json:"used_tokens"`
+	FreeTokens         int    `json:"free_tokens"`
+	Subjects           int    `json:"subjects"`
+	Rendered           int    `json:"rendered"`
+	Omitted            int    `json:"omitted"`
+	VerbatimShortfalls int    `json:"verbatim_shortfalls"`
+	RenderedBytes      int    `json:"rendered_bytes"`
+	// Keyed by agent's fixed Decision/Omit vocabulary, so the keys are a closed
+	// set and never payload-derived. Omitted when empty rather than written as
+	// null, which keeps a zero-subject assembly's span readable.
+	ByDecision       map[string]int `json:"by_decision,omitempty"`
+	ByOmissionReason map[string]int `json:"by_omission_reason,omitempty"`
+}
+
 // effectString renders an EffectClass bitset as a stable, content-light label.
 // There is no agent.EffectClass.String(), so agenttrace owns this projection.
 func effectString(c agent.EffectClass) string {

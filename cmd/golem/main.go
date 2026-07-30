@@ -908,6 +908,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		workspaceID:         workspaceID(root),
 		obs:                 obsv,
 		pressureWarn:        f.pressureWarn > 0,
+		mixed:               f.progressive,
 		modelOptions:        thinkOpts,
 	}
 	if sess.maxSteps == 0 {

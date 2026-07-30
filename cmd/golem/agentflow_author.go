@@ -1445,7 +1445,7 @@ func runAgentflowAuthorWithClient(ctx context.Context, stdout, stderr io.Writer,
 		Options:  plannerModelOptions(sess.modelOptions),
 		Approver: &authorPlanApprover{delegate: approver, sess: as},
 	}
-	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock)))
+	_, runErr := sess.orch.Run(loopCtx, req, agent.Observer(newRenderer(stderr, false, sess.maxSteps, sess.clock, sess.mixed)))
 	budgetExhausted := as.attempts >= maxPlanSubmissions
 
 	switch {

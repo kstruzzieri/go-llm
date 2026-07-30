@@ -175,7 +175,7 @@ func TestRunStatus(t *testing.T) {
 }
 
 func TestComposeObserver(t *testing.T) {
-	rend := newRenderer(io.Discard, false, 4, nil)
+	rend := newRenderer(io.Discard, false, 4, nil, false)
 	if got := composeObserver(rend, nil); got != agent.Observer(rend) {
 		t.Fatalf("nil sink should return renderer unchanged")
 	}

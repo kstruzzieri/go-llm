@@ -187,10 +187,11 @@ func (m *multiObserver) OnPressure(ctx context.Context, e agent.PressureEvent) e
 }
 
 // OnContextAssembly fans the #331 mixed-assembly trace out to children that
-// opted in. Golem's own renderer and telemetry sink do not consume it yet; the
-// forwarding exists because when telemetry is enabled this wrapper IS the CLI's
-// observer (composeObserver returns the renderer alone otherwise), so an
-// unimplemented callback here would silently swallow the event for every child.
+// opted in. The telemetry sink consumes it (an aggregate context_assembly span);
+// Golem's renderer does not. The type-switch shape still matters because when
+// telemetry is enabled this wrapper IS the CLI's observer (composeObserver
+// returns the renderer alone otherwise), so an unimplemented callback here would
+// silently swallow the event for every child.
 func (m *multiObserver) OnContextAssembly(ctx context.Context, e agent.ContextAssemblyEvent) error {
 	for _, c := range m.children {
 		if cao, ok := c.(agent.ContextAssemblyObserver); ok {

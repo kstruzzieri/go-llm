@@ -92,10 +92,26 @@ this before upgrading a telemetry consumer.
   the key is omitted when zero, so legacy and lossless turns emit the same
   bytes as before.
 
+`golem -telemetry` now emits a `context_assembly` span per mixed assembly,
+pairing with `anchor_omissions`: token totals, subject counts,
+`verbatim_shortfalls`, rendered bytes, and `by_decision` / `by_omission_reason`
+breakdowns keyed on agent's fixed vocabulary. It is a NEW span kind, so it is
+additive within `SchemaVersion` 2 and only mixed turns emit it. The breakdowns
+are counts only — the per-subject rows carry source paths, memory record IDs
+and tool call IDs, which telemetry does not retain; use `-trace` for those.
+
+`golem` no longer prints `(truncated)` on a tool-result line when mixed
+assembly replaced that result's content. `ToolResult.Truncated` describes the
+DISCARDED flat rendering, and the flag cannot be recomputed at that point:
+assembly runs against a global budget before the next step's model call. Plain
+tools under mixed, and every tool with `Mixed` off, are unaffected.
+
 MEMORY: with `Mixed` on, each tool result's projection is cloned onto its
 anchor message and retained for the rest of the run. For `Retrieve` that is
 quadratic in `k` — 1.35 MB per call at `MaxK` 20 over 2 KB chunks, so a
-20-step run holds roughly 27 MB. With `Mixed` off nothing is cloned.
+20-step run holds roughly 27 MB. That worst case needs every one of a call's
+`k` results to land on ONE source; results spread over 4 or more sources cost
+under 0.4 MB per call. With `Mixed` off nothing is cloned.
 
 ### Added — model-backed progressive source summaries, slice 2 of #189
 
