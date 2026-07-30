@@ -469,6 +469,20 @@ func startupNotices(info startupInfo) []string {
 	return out
 }
 
+// newOrchestratorFactory returns the session's orchestrator constructor. The
+// session builds one per agentflow parallel worker on top of the startup
+// orchestrator, and every one must see the same context policy: -progressive
+// drives BOTH the Retrieve renderer and #331 mixed context assembly, from one
+// flag.
+//
+// It takes flags rather than a bool so the production call site cannot pass a
+// value other than the one -progressive parsed into.
+func newOrchestratorFactory(caller agent.ModelCaller, f flags) func() *agent.Orchestrator {
+	return func() *agent.Orchestrator {
+		return agent.New(caller, agent.ContextManager{Mixed: f.progressive})
+	}
+}
+
 func shouldShowAgentflowHint(f flags) bool {
 	return !f.promptSet && f.planPath == "" && !f.goalSet && !f.agentflowStatus && !f.agentflowResume
 }
@@ -833,10 +847,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	caller := newRouterChainCaller(bundle.Router, plan.chain)
-	newOrchestrator := func() *agent.Orchestrator {
-		return agent.New(caller, agent.ContextManager{})
-	}
+	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)

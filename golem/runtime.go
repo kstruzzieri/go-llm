@@ -69,6 +69,19 @@ type Options struct {
 	// Orchestrator overrides the config-driven bootstrap. The caller retains
 	// ownership: Close never releases it or its providers.
 	Orchestrator *agent.Orchestrator
+	// Progressive enables #331 mixed context assembly on the orchestrator this
+	// package bootstraps. That is ALL it does here. Off preserves current
+	// behavior exactly.
+	//
+	// It does NOT configure any tool: this package builds no retrieval tool, so
+	// a host that supplies agent/tools.Retrieve via Tools must set that tool's
+	// own Progressive field to get progressive rendering. Setting only this
+	// field yields mixed assembly over flat-rendered retrieval results.
+	//
+	// It also does not touch a caller-supplied Orchestrator, which brings its
+	// own ContextManager. The golem CLI's -progressive flag drives both halves;
+	// a library host owns both itself.
+	Progressive bool
 }
 
 // ContextItem is trusted context supplied with one turn.
@@ -164,7 +177,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 	summarizer := opts.Summarizer
 	if orchestrator == nil {
 		var defaultSummarizer conversation.Summarizer
-		orchestrator, bundle, defaultSummarizer, err = bootstrapOrchestrator(ctx, opts.ConfigPath, opts.OnWarning)
+		orchestrator, bundle, defaultSummarizer, err = bootstrapOrchestrator(ctx, opts.ConfigPath, opts.Progressive, opts.OnWarning)
 		if err != nil {
 			return nil, err
 		}
@@ -724,6 +737,16 @@ func (o *eventObserver) OnPressure(ctx context.Context, event agent.PressureEven
 func (o *eventObserver) OnThinking(ctx context.Context, event agent.ThinkingEvent) error {
 	if host, ok := o.host.(agent.ThinkingObserver); ok {
 		return wrapHostObserverError(host.OnThinking(ctx, event))
+	}
+	return nil
+}
+
+// OnContextAssembly forwards the mixed-assembly trace to a host that opted into
+// it. The trace is content-free but describes the private context layout, so it
+// reaches the host observer only — never the protocol event stream.
+func (o *eventObserver) OnContextAssembly(ctx context.Context, event agent.ContextAssemblyEvent) error {
+	if host, ok := o.host.(agent.ContextAssemblyObserver); ok {
+		return wrapHostObserverError(host.OnContextAssembly(ctx, event))
 	}
 	return nil
 }

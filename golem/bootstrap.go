@@ -11,7 +11,10 @@ import (
 	"github.com/kstruzzieri/go-llm/internal/providerbootstrap"
 )
 
-func bootstrapOrchestrator(ctx context.Context, configPath string, onWarning func(error)) (*agent.Orchestrator, *providerbootstrap.Bundle, conversation.Summarizer, error) {
+// bootstrapOrchestrator builds the config-driven orchestrator. progressive
+// enables #331 mixed context assembly on the returned orchestrator's
+// ContextManager; off leaves the legacy assembly path untouched.
+func bootstrapOrchestrator(ctx context.Context, configPath string, progressive bool, onWarning func(error)) (*agent.Orchestrator, *providerbootstrap.Bundle, conversation.Summarizer, error) {
 	cfg, err := loadConfig(configPath)
 	if err != nil {
 		return nil, nil, nil, err
@@ -41,7 +44,7 @@ func bootstrapOrchestrator(ctx context.Context, configPath string, onWarning fun
 			return nil, nil, nil, fmt.Errorf("golem: resolve summarize chain: %w", err)
 		}
 	}
-	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, chain), agent.ContextManager{}),
+	return agent.New(agent.NewRouterModelCallerWithChain(bundle.Router, chain), agent.ContextManager{Mixed: progressive}),
 		bundle, agent.NewRouterSummarizer(bundle.Router, summarizeChain), nil
 }
 

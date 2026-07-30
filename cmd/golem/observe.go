@@ -122,8 +122,8 @@ func composeObserver(rend agent.Observer, sink *agenttrace.TelemetrySink) agent.
 
 // multiObserver fans every callback out to its children in order, propagating
 // the first error. It implements the optional ToolResultObserver, Thinking-
-// Observer, and PressureObserver extensions, forwarding each callback only to
-// children that implement it.
+// Observer, PressureObserver, and ContextAssemblyObserver extensions, forwarding
+// each callback only to children that implement it.
 type multiObserver struct{ children []agent.Observer }
 
 func (m *multiObserver) OnStep(ctx context.Context, e agent.StepEvent) error {
@@ -179,6 +179,22 @@ func (m *multiObserver) OnPressure(ctx context.Context, e agent.PressureEvent) e
 	for _, c := range m.children {
 		if po, ok := c.(agent.PressureObserver); ok {
 			if err := po.OnPressure(ctx, e); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// OnContextAssembly fans the #331 mixed-assembly trace out to children that
+// opted in. Golem's own renderer and telemetry sink do not consume it yet; the
+// forwarding exists because when telemetry is enabled this wrapper IS the CLI's
+// observer (composeObserver returns the renderer alone otherwise), so an
+// unimplemented callback here would silently swallow the event for every child.
+func (m *multiObserver) OnContextAssembly(ctx context.Context, e agent.ContextAssemblyEvent) error {
+	for _, c := range m.children {
+		if cao, ok := c.(agent.ContextAssemblyObserver); ok {
+			if err := cao.OnContextAssembly(ctx, e); err != nil {
 				return err
 			}
 		}
