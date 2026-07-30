@@ -228,7 +228,7 @@ func buildStore(ctx context.Context, fixture *Fixture) (*rag.SQLiteStore, error)
 			})
 			embeddings = append(embeddings, append([]float64(nil), fixtureChunk.Embedding...))
 		}
-		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, "fixture:"+source, vectorSpaceID); err != nil {
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, fixtureSourceSignature(chunks), vectorSpaceID); err != nil {
 			_ = store.Close()
 			return nil, fmt.Errorf("rag eval: seed source %q: %w", source, err)
 		}
