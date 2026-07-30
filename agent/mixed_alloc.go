@@ -101,11 +101,12 @@ func omitSubject(s *mixedSubject, reason string) {
 	s.reason = reason
 }
 
-// allocateMixed runs the fixed lane-ordered allocation policy (#331 spec 4.1)
-// over units in stable input order, writing chosen/decision/reason onto every
-// subject and content/tokens onto every retained anchor. It mutates units in
-// place and returns the ledger; the caller materializes and traces from the same
-// structures (Task 8).
+// allocateMixed runs the fixed lane-ordered allocation policy (#331 spec 4.1),
+// admitting NEWEST-first within each lane, and writes chosen/decision/reason
+// onto every subject and content/tokens onto every retained anchor. It mutates
+// units in place and returns the ledger; the caller materializes and traces from
+// the same structures, walking units forward, so the OUTPUT is in stable input
+// order regardless of the order they were admitted in (Task 8).
 //
 // budget is the state budget already net of tool schemas. Every cost goes
 // through m.estimate, so the caller must have wrapped m.Estimate with
@@ -139,29 +140,43 @@ func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, b
 		return st, ErrContextExhausted
 	}
 
-	// 2. Lane 0: current-run plain exchanges. Highest retention priority — the
-	// reverse of RecencyCompactor's drop order.
-	for _, u := range units {
-		if u.kind != unitPlainSpan {
+	// Lanes 0-2. Two ORTHOGONAL orderings are in play and conflating them
+	// inverts the policy:
+	//
+	//   - Lane PRECEDENCE (which kind competes first) is the reverse of
+	//     RecencyCompactor's dropKind order: plain > chains > history.
+	//   - WITHIN a lane, admission is NEWEST-FIRST — hence the descending walks
+	//     below. Compact's dropKind scans groups from index 0 and drops until the
+	//     transcript fits, so it KEEPS the newest members of each kind. Admitting
+	//     in forward State order would keep the oldest instead: the model would
+	//     receive its stalest prior exchanges and lose the most recent ones, which
+	//     is worse than not compacting at all.
+	//
+	// Only the admission ORDER reverses. Materialization and tracing walk units
+	// forward, so output stays in State order.
+
+	// 2. Lane 0: current-run plain exchanges. Highest retention priority.
+	for i := len(units) - 1; i >= 0; i-- {
+		if units[i].kind != unitPlainSpan {
 			continue
 		}
-		m.admitSpan(st, u)
+		m.admitSpan(st, units[i])
 	}
 
-	// 3. Lane 1: completed tool chains in input order.
-	for _, u := range units {
-		if u.kind != unitChain {
+	// 3. Lane 1: completed tool chains, newest first.
+	for i := len(units) - 1; i >= 0; i-- {
+		if units[i].kind != unitChain {
 			continue
 		}
-		m.allocateChain(st, u)
+		m.allocateChain(st, units[i])
 	}
 
 	// 4. Lane 2: prior raw-history exchanges. Lowest retention priority.
-	for _, u := range units {
-		if u.kind != unitHistorySpan {
+	for i := len(units) - 1; i >= 0; i-- {
+		if units[i].kind != unitHistorySpan {
 			continue
 		}
-		m.admitSpan(st, u)
+		m.admitSpan(st, units[i])
 	}
 
 	// 5. Upgrades to ANY later-declared alternative: declaration order IS utility
@@ -263,10 +278,18 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 				continue
 			}
 			admitted := false
-			// declaration order = ascending utility; alternative 0 is the cheapest
-			// for every in-repo producer (its content is a prefix of every other),
-			// so first-that-fits is cheapest-that-fits. A producer whose costs are
-			// non-monotonic loses optimality here, nothing more.
+			// Declaration order is ascending UTILITY — the one ordering
+			// validateContextSet actually enforces. Cost is NOT enforced to be
+			// monotone and in-repo producers do not deliver it: rag's fresh-source
+			// ladder renders alternative 0 at orientationMeta, which carries a
+			// trailing "note: metadata overview (summary omitted: budget)" line
+			// that alternative 1 (orientationL0, which writes "purpose:" instead)
+			// does not, so alternative 0's bytes are not a prefix of alternative
+			// 1's and can even be the dearer of the two. First-that-fits is
+			// therefore lowest-utility-that-fits, not strictly cheapest-that-fits;
+			// the loop still finds a fitting alternative whenever one exists, it
+			// just may not be the globally cheapest. The omission probe below
+			// inherits the same caveat.
 			for i := range s.alts {
 				if m.tryAssign(st, a, s, i, DecisionBase) {
 					admitted = true
@@ -276,9 +299,14 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 			if admitted {
 				continue
 			}
-			// Attribute the omission to the constraint that actually blocked the
-			// CHEAPEST alternative, so the trace reason is diagnostic rather
-			// than a catch-all.
+			// Attribute the omission to the constraint that blocked the
+			// LOWEST-UTILITY alternative, so the trace reason is diagnostic
+			// rather than a catch-all. It is alternative 0 specifically, which
+			// is not guaranteed to be the cheapest (see above), so with a
+			// non-monotone-cost producer the named constraint can be the one
+			// that blocked alternative 0 rather than the one that blocked them
+			// all. Diagnostic, never load-bearing: the subject is omitted either
+			// way.
 			s.chosen = 0
 			wouldBe := anchorJoined(a)
 			s.chosen = -1

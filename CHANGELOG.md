@@ -18,6 +18,15 @@ reports every choice in a content-free trace.
 Opt-in via `ContextManager.Mixed`. Off, model-visible messages stay
 byte-identical and the new trace is the zero value.
 
+Mixed assembly preserves `RecencyCompactor`'s recency semantics: it replaces
+the compactor rather than layering on it, and under pressure it retains the
+same messages the compactor would have. Two orderings are involved. Retention
+PRIORITY by kind is the reverse of the compactor's drop order (current-run
+plain exchanges, then completed tool chains, then prior history). WITHIN each
+of those, the NEWEST members are retained, exactly as dropping oldest-first
+does. A consumer switching a pressured session to `Mixed` therefore does not
+have to re-discover which turns the model still sees.
+
 **Two behavior changes reach consumers who do not opt in:**
 
 - `agent/tools.Retrieve` now clamps the model-supplied `k` to 20 on the

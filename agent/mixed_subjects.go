@@ -58,6 +58,12 @@ const durableSummarySubjectID = "durable-summary"
 // reverse: plain > tool chains > history. Smaller lane number = retained
 // earlier. Producer GroupDesc.Lane values are deliberately ignored; there is
 // no lane-tuning API (#331 spec 4.1).
+//
+// This covers lane PRECEDENCE only — which KIND competes first. The second,
+// independent ordering is which member WITHIN a lane wins, and it is the one
+// that decides what the model actually reads. That is newest-first, mirroring
+// dropKind's drop-oldest-until-it-fits walk, and it lives in allocateMixed's
+// descending lane loops (agent/mixed_alloc.go).
 const (
 	lanePlain   = 0 // current-run plain elastic exchanges
 	laneTool    = 1 // current-run tool context (structured anchors and chain spans)
