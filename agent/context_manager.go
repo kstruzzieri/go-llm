@@ -33,6 +33,23 @@ type ContextManager struct {
 	// anchors keeps the legacy Compactor path and model-visible messages
 	// byte-identical. Its readers are dispatch, which skips the tool-result deep
 	// copy when mixed assembly is off, and AssembleWithTrace (#331).
+	//
+	// MEMORY: On, dispatch clones each tool result's ContextSet onto its anchor
+	// Message and NOTHING ever clears it, so every producer's whole capability
+	// projection is retained for the rest of the run — including alternatives no
+	// allocation will ever choose again. For agent/tools' Retrieve that is
+	// quadratic in k: 1.35 MB per call at the ceiling MaxK of 20 over 2 KB
+	// chunks, so a 20-step run holds ~27 MB (measured by rag's
+	// TestProgressiveGroupsProjectionBytes). With Mixed OFF the clone never
+	// happens and the projection is garbage as soon as dispatch returns.
+	//
+	// Releasing the sets of units the allocator evicted would reclaim most of it
+	// under pressure, and eviction IS permanent for a run. It is deliberately not
+	// done: mixedUnit.msgs aliases State.Messages, so any release writes the
+	// caller's canonical State, and mixed assembly's contract — pinned per budget
+	// by TestMixedTraceProperties, whose state snapshot marshals every message's
+	// Context — is that assembling a State does not mutate it. Budget the memory;
+	// do not buy it with a non-idempotent Assemble.
 	Mixed bool
 }
 

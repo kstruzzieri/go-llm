@@ -840,8 +840,11 @@ func TestMixedAllocByteCap(t *testing.T) {
 
 // jumpLadder: alternative lengths 40, 100, 50, 110, 60, 120; verbatim counts
 // 0,0,1,1,2,2. The orientation rung at index 1 is DEARER than the evidence rung
-// at index 2, which is the real shape rag produces and the reason declaration
-// order is utility order rather than cost order.
+// at index 2 — the non-monotonic cost rag really produces (its metadata,
+// abstract and abstract+overview rungs interleave with the evidence prefixes),
+// and the reason declaration order is utility order rather than cost order.
+// Two rungs rather than rag's three: this fixture exists for the jump, and a
+// third would only lengthen it.
 func jumpLadder() ContextGroup {
 	return ladderGroup("pkg/one.go", 1, strings.Repeat("A", 40), strings.Repeat("O", 60),
 		strings.Repeat("E", 10), strings.Repeat("F", 10))

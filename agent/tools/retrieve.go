@@ -15,23 +15,26 @@ const (
 	defaultRetrieveMaxTokens = 2048
 	defaultRetrieveMaxK      = 20
 	// maxRetrieveMaxK is the largest MaxK the carriers can hold. rag projects
-	// (k+1) prefixes x rungs alternatives per source, 2 rungs for a fresh one,
-	// so all k results landing on ONE fresh source yields 2(k+1) alternatives.
-	// Invoke truncates the result set to k, so that bound holds for any R, not
-	// only for a retriever that honors k.
+	// (k+1) prefixes x rungs alternatives per source, 3 rungs for a fresh one
+	// (metadata, abstract, abstract+overview), so all k results landing on ONE
+	// fresh source yields 3(k+1) alternatives. Invoke truncates the result set
+	// to k, so that bound holds for any R, not only for a retriever that
+	// honors k.
 	// SOURCE OF TRUTH for the 64 it must stay under: maxContextAlternatives in
 	// package agent (agent/context_set.go) — unexported, and agent/tools is a
 	// different package, so the derived ceiling is restated here and pinned by
 	// TestRetrieveMaxKWithinCarrierBound. Exceeding it is a hard mixed-mode
 	// validation failure, not a degradation.
-	maxRetrieveMaxK = 31
+	maxRetrieveMaxK = 20
 )
 
 // RetrieveOutputCap bounds retrieve tool output. It is set explicitly on the
 // Effect AND passed to the progressive renderer as its byte ceiling, so the
-// runtime's post-Invoke capOutput (agent/dispatch.go:193) can never truncate
+// runtime's post-Invoke capOutput (agent/dispatch.go) can never truncate
 // a block the trace and attribution describe as fully rendered. The value
-// matches the runtime's unexported default (agent/types.go:14).
+// matches the runtime's unexported defaultOutputCap (agent/types.go). Both
+// references name symbols rather than line numbers: the last one went stale
+// inside this very PR.
 const RetrieveOutputCap = 64 * 1024
 
 // retriever is the minimal slice of *rag.Retriever the tool needs; abstracting
@@ -70,15 +73,27 @@ type Retrieve struct {
 	// to before. MinFullResults and Estimate pass through to the renderer.
 	//
 	// On, it also builds the ToolResult.Context capability projection
-	// UNCONDITIONALLY — the tool cannot see ContextManager.Mixed, so a consumer
-	// that sets Progressive without Mixed pays the full projection and dispatch
-	// then discards it (agent/dispatch.go). That cost is accepted, not gated:
-	// one transient projection per call, O(rungs x k^2/2) block copies — ~1000
-	// of them at the ceiling MaxK of 31, low-single-digit MB for typical block
-	// sizes — freed as soon as dispatch drops the result. Gating it would mean
-	// plumbing an assembly-mode signal into every tool — new API for a cost
-	// smaller than the retrieval it accompanies. Golem couples both flags
-	// behind -progressive, so the shipped path never pays it.
+	// UNCONDITIONALLY — the tool cannot see ContextManager.Mixed, so the cost
+	// is paid either way. What happens to it afterwards differs, and only one
+	// of the two cases is transient:
+	//
+	//	Progressive && !Mixed  dispatch never clones the set (agent/dispatch.go),
+	//	                       so the projection is garbage after Invoke returns.
+	//	Progressive && Mixed   dispatch clones the set onto the anchor Message and
+	//	                       nothing clears it, so it is RETAINED for the rest
+	//	                       of the run (see ContextManager.Mixed).
+	//
+	// Retained content is rungs x k(k+1)/2 evidence-block copies plus the
+	// orientation blocks: MEASURED at 1.35 MB for one call at the ceiling MaxK
+	// of 20 over 2 KB chunks, 5.28 MB over 8 KB chunks (rag's
+	// TestProgressiveGroupsProjectionBytes pins both), so a 20-step run holds
+	// ~27 MB at 2 KB chunks. Nothing gives it back mid-run; ContextManager.Mixed
+	// documents why not.
+	//
+	// Gating the BUILD on assembly mode would mean plumbing that signal into
+	// every tool — new API for a build cost smaller than the retrieval it
+	// accompanies, and it would not touch the retention above. Golem couples
+	// both flags behind -progressive, so the shipped path is the retaining one.
 	Progressive    bool
 	MinFullResults int
 	// MaxK bounds the model-supplied k on EVERY path: k is clamped to it before
@@ -136,9 +151,14 @@ func (t Retrieve) Invoke(ctx context.Context, raw json.RawMessage) (agent.ToolRe
 	// groups must agree on whether a projection happens at all.
 	pr, capable := t.R.(progressiveRetriever)
 	progressive := capable && t.Progressive
-	// Misconfiguration, not model input: a hard error, and progressive-only.
-	// Derivation on maxRetrieveMaxK, consumer contract on the MaxK field.
-	// Before the backend call, so a rejected tool retrieves nothing.
+	// Misconfiguration, not model input, so it fails the CALL rather than
+	// degrading silently — but it does not abort the run: the orchestrator turns
+	// any tool error into a model-visible IsError observation (invokeCall in
+	// agent/dispatch.go), so a consumer who ships this misconfiguration gets a
+	// run where every retrieve call returns this message and retrieval never
+	// happens. Loud in the transcript, not fatal. Progressive-only: derivation
+	// on maxRetrieveMaxK, consumer contract on the MaxK field. Checked before
+	// the backend call, so a rejected tool retrieves nothing.
 	if progressive && t.MaxK > maxRetrieveMaxK {
 		return agent.ToolResult{}, fmt.Errorf(
 			"tools: retrieve: MaxK must be <= %d in progressive mode, got %d", maxRetrieveMaxK, t.MaxK)

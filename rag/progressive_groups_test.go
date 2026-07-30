@@ -27,10 +27,10 @@ var (
 // progressiveGroupsFixture seeds a store with the three ladder shapes the
 // groups projection must distinguish, in retrieval order:
 //
-//	pkg/fresh.go   two results, valid stored summary  -> abstract rungs
-//	pkg/stale.go   two results, content-hash mismatch -> metadata rung
-//	pkg/demote.go  one result, valid but huge summary -> abstract rungs, and
-//	               under a tight budget the FLAT render either demotes it to
+//	pkg/fresh.go   two results, valid stored summary  -> metadata + abstract rungs
+//	pkg/stale.go   two results, content-hash mismatch -> metadata rung only
+//	pkg/demote.go  one result, valid but huge summary -> metadata + abstract rungs,
+//	               and under a tight budget the FLAT render either demotes it to
 //	               the metadata overview or omits it entirely — both are
 //	               allocation state written after the groups snapshot is taken.
 func progressiveGroupsFixture(t *testing.T) (*Retriever, []SearchResult) {
@@ -165,8 +165,8 @@ func TestRenderProgressiveWrapperEquivalence(t *testing.T) {
 			// The declaration is budget-blind: even the source that rendered
 			// NOTHING still offers its whole ladder.
 			demote := groupForSource(t, groups, "pkg/demote.go")
-			if len(demote.Alternatives) != 4 {
-				t.Fatalf("arm %q: pkg/demote.go offers %d alternatives, want the full 4",
+			if len(demote.Alternatives) != 6 {
+				t.Fatalf("arm %q: pkg/demote.go offers %d alternatives, want the full 6",
 					tc.name, len(demote.Alternatives))
 			}
 			for i, g := range groups {
@@ -185,32 +185,52 @@ func TestRenderProgressiveWrapperEquivalence(t *testing.T) {
 }
 
 // TestProgressiveGroupsValidityMatrix pins the ladder shape per source class:
-// which rungs exist, in which order, and that a FRESH source is never offered
-// a metadata rung (whose note would claim "no summary" about a source that has
-// one).
+// which rungs exist, in which order, and that EVERY source — fresh included —
+// is offered the metadata rung as its cheapest alternative, with a note line
+// that tells the truth about whether a summary exists.
 func TestProgressiveGroupsValidityMatrix(t *testing.T) {
 	r, results := progressiveGroupsFixture(t)
-	_, _, groups, err := r.RenderProgressiveWithGroups(context.Background(), ProgressiveRenderRequest{
+	out, _, groups, err := r.RenderProgressiveWithGroups(context.Background(), ProgressiveRenderRequest{
 		Results: results, MaxTokens: 1 << 20, MaxBytes: 1 << 20,
 	})
 	if err != nil {
 		t.Fatalf("RenderProgressiveWithGroups: %v", err)
 	}
 
+	// The FLAT render is unperturbed by the projection above it. Under this
+	// ample budget exactly one source (pkg/stale.go) is at the metadata level
+	// and no source is budget-demoted, so a builder that wrote the allocator's
+	// summaryBudgetOmitted flag — or that swapped a fresh source's rendered
+	// orientation — moves one of these three counts.
+	if got := strings.Count(out, "note: metadata overview"); got != 1 {
+		t.Errorf("flat output carries %d metadata notes, want 1 (pkg/stale.go only):\n%s", got, out)
+	}
+	if strings.Contains(out, "summary omitted: budget") {
+		t.Errorf("flat output claims a budget demotion under an ample budget:\n%s", out)
+	}
+	if got := strings.Count(out, "\npurpose: "); got != 2 {
+		t.Errorf("flat output carries %d stored abstracts, want 2 (fresh + demote):\n%s", got, out)
+	}
+
 	tests := []struct {
 		name   string
 		source string
+		fresh  bool
 		want   [][]contextdepth.RepresentationDesc
 	}{
 		{
-			// Two orientation rungs, then prefixes k=1,2 ordered by (k, rung).
+			// Three orientation rungs, then prefixes k=1,2 ordered by (k, rung).
 			name:   "fresh",
 			source: "pkg/fresh.go",
+			fresh:  true,
 			want: [][]contextdepth.RepresentationDesc{
+				{wantRepMeta},
 				{wantRepAbstract},
 				{wantRepAbstract, wantRepOverview},
+				{wantRepMeta, wantRepEvidence},
 				{wantRepAbstract, wantRepEvidence},
 				{wantRepAbstract, wantRepOverview, wantRepEvidence},
+				{wantRepMeta, wantRepEvidence, wantRepEvidence},
 				{wantRepAbstract, wantRepEvidence, wantRepEvidence},
 				{wantRepAbstract, wantRepOverview, wantRepEvidence, wantRepEvidence},
 			},
@@ -227,9 +247,12 @@ func TestProgressiveGroupsValidityMatrix(t *testing.T) {
 		{
 			name:   "fresh_single_result",
 			source: "pkg/demote.go",
+			fresh:  true,
 			want: [][]contextdepth.RepresentationDesc{
+				{wantRepMeta},
 				{wantRepAbstract},
 				{wantRepAbstract, wantRepOverview},
+				{wantRepMeta, wantRepEvidence},
 				{wantRepAbstract, wantRepEvidence},
 				{wantRepAbstract, wantRepOverview, wantRepEvidence},
 			},
@@ -284,9 +307,22 @@ func TestProgressiveGroupsValidityMatrix(t *testing.T) {
 					t.Errorf("%s alternative %d declares no generated component but renders stored summary text:\n%s",
 						tc.source, i, alt.Content)
 				}
-				if metadataOnly != strings.Contains(alt.Content, "(no summary") {
-					t.Errorf("%s alternative %d: metadata-only=%v but note presence=%v:\n%s",
-						tc.source, i, metadataOnly, !metadataOnly, alt.Content)
+				// The note is the provenance claim the model reads to price the
+				// block, so it is pinned as EXACT text and per source class:
+				// "no summary" about a source that has one is the lie this rung
+				// used to be withheld to avoid.
+				const noteNone, noteBudget = "(no summary", "(summary omitted: budget)"
+				wantNote, otherNote := noteNone, noteBudget
+				if tc.fresh {
+					wantNote, otherNote = noteBudget, noteNone
+				}
+				if got := strings.Contains(alt.Content, wantNote); got != metadataOnly {
+					t.Errorf("%s alternative %d: metadata-only=%v but %q presence=%v:\n%s",
+						tc.source, i, metadataOnly, wantNote, got, alt.Content)
+				}
+				if strings.Contains(alt.Content, otherNote) {
+					t.Errorf("%s alternative %d carries the wrong note variant %q:\n%s",
+						tc.source, i, otherNote, alt.Content)
 				}
 				wantOverview := slices.Contains(alt.Desc.Representations, wantRepOverview)
 				if got := strings.Contains(alt.Content, "\noverview: "); got != wantOverview {
@@ -297,26 +333,98 @@ func TestProgressiveGroupsValidityMatrix(t *testing.T) {
 		})
 	}
 
-	// A fresh source may never be offered the metadata rung: its note line
-	// would state "no summary" about a source that has a valid one.
+	// A fresh source's CHEAPEST alternative is the metadata rung. Without it
+	// mixed assembly is strictly less capable than the flat allocator, which
+	// falls back to exactly this block when a stored abstract does not fit
+	// (progressive_alloc.go step 5): the mixed allocator would omit the source
+	// where flat renders a short one. Cheapest is asserted by bytes, not by
+	// position alone — a rung declared first that is not actually smaller buys
+	// the allocator nothing.
 	for _, source := range []string{"pkg/fresh.go", "pkg/demote.go"} {
 		g := groupForSource(t, groups, source)
-		for i, alt := range g.Alternatives {
-			for _, rep := range alt.Desc.Representations {
-				if rep.Kind == contextdepth.RepresentationMetadata {
-					t.Errorf("%s alternative %d offers a metadata rung", source, i)
-				}
-			}
-			if strings.Contains(alt.Content, "(no summary") {
-				t.Errorf("%s alternative %d claims no summary:\n%s", source, i, alt.Content)
+		meta := g.Alternatives[0]
+		if len(meta.Desc.Representations) != 1 ||
+			meta.Desc.Representations[0].Kind != contextdepth.RepresentationMetadata {
+			t.Fatalf("%s alternative 0 is not the metadata rung: %v", source, meta.Desc.Representations)
+		}
+		if !strings.Contains(meta.Content, "note: metadata overview (summary omitted: budget)\n") {
+			t.Errorf("%s metadata rung lacks the truthful budget note:\n%s", source, meta.Content)
+		}
+		if strings.Contains(meta.Content, "(no summary") {
+			t.Errorf("%s metadata rung claims no summary about a source that has one:\n%s", source, meta.Content)
+		}
+		for i, alt := range g.Alternatives[1:] {
+			if len(alt.Content) <= len(meta.Content) {
+				t.Errorf("%s alternative %d is %d bytes, not larger than the %d-byte metadata rung",
+					source, i+1, len(alt.Content), len(meta.Content))
 			}
 		}
 	}
-	// ...and the stale source's metadata rung must carry the honest note, so
-	// the assertion above is testing a distinction that exists.
+	// ...and the stale source's metadata rung must carry the OTHER note, so
+	// the assertions above are testing a distinction that exists.
 	stale := groupForSource(t, groups, "pkg/stale.go")
-	if !strings.Contains(stale.Alternatives[0].Content, "(no summary") {
+	if !strings.Contains(stale.Alternatives[0].Content, "note: metadata overview (no summary") {
 		t.Fatalf("stale metadata rung lost its note:\n%s", stale.Alternatives[0].Content)
+	}
+}
+
+// TestProgressiveGroupsProjectionBytes measures what ONE call's projection
+// costs in retained content bytes, because agent/tools/retrieve.go documents
+// those figures on Retrieve.Progressive and a documented cost nobody measures
+// drifts silently. In mixed mode the bytes are not transient: dispatch clones
+// the set onto the anchor message and only an EVICTED chain gives it back.
+//
+// Content is quadratic in k — rungs x k(k+1)/2 evidence-block copies plus the
+// orientation blocks — so the totals below are exact, not bands: a change to
+// the rung set or to either block template must move them, and then the numbers
+// in retrieve.go's comment have to move with them.
+func TestProgressiveGroupsProjectionBytes(t *testing.T) {
+	// k is agent/tools' maxRetrieveMaxK, the worst case that ceiling permits:
+	// every retrieved result landing on ONE fresh source.
+	const k = 20
+	for _, tc := range []struct {
+		name       string
+		chunkBytes int
+		want       int
+	}{
+		{"2KB chunks", 2048, 1410381},
+		{"8KB chunks", 8192, 5541291},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			line := strings.Repeat("x", 63) + "\n"
+			body := strings.Repeat(line, tc.chunkBytes/len(line))
+			src := &progressiveSource{
+				source: "pkg/big.go",
+				fresh:  true,
+				summary: &SourceSummary{
+					Source: "pkg/big.go", Abstract: "Handles the big thing.",
+					Overview:     "A slightly longer overview of the big thing.",
+					SummaryModel: "m", FormatVersion: SourceSummaryFormatVersion,
+					SummarizedAt: 1700000000,
+				},
+				decisions: map[string]bool{},
+			}
+			for i := 0; i < k; i++ {
+				src.results = append(src.results, SearchResult{
+					Chunk: Chunk{ID: fmt.Sprintf("c%d", i), Source: "pkg/big.go", Content: body,
+						StartLine: 1, EndLine: 32, Language: "go"},
+					Score: 0.5,
+				})
+			}
+			groups := buildProgressiveGroups([]*progressiveSource{src})
+			if len(groups) != 1 {
+				t.Fatalf("fixture must be one source, got %d groups", len(groups))
+			}
+			total := 0
+			for _, a := range groups[0].Alternatives {
+				total += len(a.Content)
+			}
+			if total != tc.want {
+				t.Fatalf("projection retains %d content bytes (%.2f MB) for k=%d, want %d (%.2f MB); "+
+					"update the figures on Retrieve.Progressive in agent/tools/retrieve.go",
+					total, float64(total)/(1<<20), k, tc.want, float64(tc.want)/(1<<20))
+			}
+		})
 	}
 }
 

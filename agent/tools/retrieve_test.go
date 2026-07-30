@@ -295,9 +295,12 @@ func alt(content string, reps []contextdepth.RepresentationDesc, ev ...rag.Rende
 	}
 }
 
-// progressiveGroupsFixture is the groups half of the retrieve fixture, shaped
-// like rag's real projection: a.go is FRESH (two orientation rungs) with two
-// evidence prefixes, b.go is stale (one metadata rung) with one.
+// progressiveGroupsFixture is the groups half of the retrieve fixture. It is
+// shaped like rag's projection but deliberately SMALLER than it: a.go carries
+// two of a fresh source's three orientation rungs with two evidence prefixes,
+// b.go one metadata rung with one. bridgeGroups passes rungs through untouched,
+// so the count is irrelevant to what this fixture tests (per-alternative
+// attribution); worstCaseGroups is the one that must track rag's real rung set.
 //
 // Its per-alternative evidence deliberately DISAGREES with progressiveFixture's
 // trace, which renders only k1 on a.go and nothing on b.go. So an attribution
@@ -549,14 +552,15 @@ func TestRetrieveMaxKWithinCarrierBound(t *testing.T) {
 	// with agent's, mixed assembly rejects a projection the tool produced.
 	const carrierMaxAlternatives = 64
 	// Worst case: every result lands on ONE fresh source, which rag renders at
-	// two orientation rungs, giving (k+1) prefixes x 2 rungs alternatives.
-	if got := 2 * (maxRetrieveMaxK + 1); got > carrierMaxAlternatives {
+	// three orientation rungs (metadata, abstract, abstract+overview), giving
+	// (k+1) prefixes x 3 rungs alternatives.
+	if got := freshRungs * (maxRetrieveMaxK + 1); got > carrierMaxAlternatives {
 		t.Fatalf("maxRetrieveMaxK=%d yields %d alternatives for one fresh source, over the carrier limit %d",
 			maxRetrieveMaxK, got, carrierMaxAlternatives)
 	}
 	// And the ceiling must actually be the largest value that fits, or the tool
 	// is rejecting configurations assembly would accept.
-	if got := 2 * (maxRetrieveMaxK + 2); got <= carrierMaxAlternatives {
+	if got := freshRungs * (maxRetrieveMaxK + 2); got <= carrierMaxAlternatives {
 		t.Fatalf("maxRetrieveMaxK=%d is below the carrier limit %d: %d alternatives would still fit",
 			maxRetrieveMaxK, carrierMaxAlternatives, got)
 	}
@@ -565,17 +569,24 @@ func TestRetrieveMaxKWithinCarrierBound(t *testing.T) {
 	}
 }
 
+// freshRungs is the number of orientation rungs rag projects for a FRESH
+// source: metadata (the truthful budget-omitted variant), abstract, and
+// abstract+overview (rag/progressive_groups.go). maxRetrieveMaxK is derived
+// from it, so it is named once here rather than spelled as a literal in each
+// derivation below.
+const freshRungs = 3
+
 // worstCaseGroups is rag's projection for the WORST case: all k results landing
-// on ONE FRESH source. buildProgressiveGroups renders a fresh source at two
-// orientation rungs (abstract, abstract+overview) crossed with the k+1 evidence
-// prefixes, ordered by (prefix length, rung index) — 2(k+1) alternatives in one
-// group, verbatim component counts 0,0,1,1,2,2,... (rag/progressive_groups.go).
+// on ONE FRESH source. buildProgressiveGroups renders a fresh source at
+// freshRungs orientation rungs crossed with the k+1 evidence prefixes, ordered
+// by (prefix length, rung index) — freshRungs*(k+1) alternatives in one group,
+// verbatim component counts 0,0,0,1,1,1,2,2,2,... (rag/progressive_groups.go).
 //
 // The SHAPE is restated rather than produced by rag's own builder, which calls a
 // source fresh only when a store hands it a valid summary; the COUNT is what
 // this fixture exists to push at agent. The shape itself is pinned against the
 // REAL buildProgressiveGroups by rag's own TestProgressiveGroupsValidityMatrix
-// ("fresh" case, rag/progressive_groups_test.go) — adding a third rung turns
+// ("fresh" case, rag/progressive_groups_test.go) — changing the rung set turns
 // three rag tests red, so the drift this restatement could hide is loud, just on
 // the rag side of the seam. RenderedEvidence rides only the
 // evidence-bearing rungs, because bridgeGroups derives per-alternative
@@ -583,6 +594,7 @@ func TestRetrieveMaxKWithinCarrierBound(t *testing.T) {
 // with no verbatim component.
 func worstCaseGroups(k int) []rag.ProgressiveGroup {
 	rungs := [][]contextdepth.RepresentationDesc{
+		{{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}},
 		{{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationGenerated}},
 		{
 			{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationGenerated},
@@ -656,8 +668,9 @@ func TestRetrieveProjectionFitsCarrierBound(t *testing.T) {
 			}
 			// Vacuity guard: the fixture must really carry the derived count, or
 			// the assembly below is not testing the bound the comment claims.
-			if got, want := len(res.Context.Groups[0].Alternatives), 2*(tc.k+1); got != want {
-				t.Fatalf("%d alternatives for one fresh source at k=%d, want 2(k+1) = %d", got, tc.k, want)
+			if got, want := len(res.Context.Groups[0].Alternatives), freshRungs*(tc.k+1); got != want {
+				t.Fatalf("%d alternatives for one fresh source at k=%d, want %d(k+1) = %d",
+					got, tc.k, freshRungs, want)
 			}
 
 			st := agent.State{Messages: []agent.Message{{

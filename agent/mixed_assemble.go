@@ -32,10 +32,15 @@ var ErrMixedCompactor = errors.New("agent: ContextManager.Mixed is incompatible 
 //
 // MaxTokens is the state budget net of tool schemas, and
 // EstimatedTokensUsed + EstimatedTokensFree == MaxTokens on every trace this
-// returns. Per-subject EstimatedTokens cover each subject's OWN content only:
-// message envelopes, the system prompt, pinned reservations and the separators
-// between an anchor's fragments are counted in EstimatedTokensUsed and in no
-// row, so the rows deliberately do not sum to the total.
+// returns. Per-subject EstimatedTokens cover each subject's OWN content only.
+// Counted in EstimatedTokensUsed and in NO row: message envelopes, the system
+// prompt, pinned reservations, the separators between an anchor's fragments,
+// and the omission placeholder allocateChain precharges every structured
+// anchor with. An admission replaces that placeholder charge with an exact
+// delta, so it survives in the total only where it survives in the output —
+// a retained anchor whose subjects were ALL omitted, whose rows are then every
+// one of them a zero-cost omission while its placeholder text is model-visible
+// and paid for. The rows therefore deliberately do not sum to the total.
 type ContextAssemblyTrace struct {
 	MaxTokens           int
 	EstimatedTokensUsed int

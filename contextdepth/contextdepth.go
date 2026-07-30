@@ -141,6 +141,12 @@ func (a AlternativeDesc) Valid() bool {
 // GroupDesc describes one subject's candidacy for assembly.
 type GroupDesc struct {
 	Subject SubjectRef
-	Lane    int // consumer-assigned priority lane; smaller = earlier (spec D7)
-	Rank    int // domain-owned rank for trace/debugging; not cross-domain comparable
+	// Lane is RESERVED. It is declared for consumer-assigned priority lanes
+	// (smaller = earlier, spec D7), but no assembler reads it today: go-llm's
+	// mixed assembly derives every lane from the compactor's eviction order and
+	// assigns it itself, deliberately ignoring what a producer sets here. A tool
+	// that sets Lane is met with silence, not an error — treat it as a
+	// forward-declaration, not a tuning knob.
+	Lane int
+	Rank int // domain-owned rank for trace/debugging; not cross-domain comparable
 }

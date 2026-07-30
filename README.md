@@ -225,14 +225,20 @@ Golem builds and refreshes the workspace RAG index automatically in the backgrou
 golem index -root /path/to/project              # explicit index rebuild
 golem -root /path/to/project -no-auto-index     # disable the startup refresh
 golem -root /path/to/project -no-rag            # disable retrieval entirely
-golem -root /path/to/project -progressive       # generate and serve L0/L1 source summaries
+golem -root /path/to/project -progressive       # L0/L1 source summaries + mixed context assembly
 ```
 
-`-progressive` is opt-in and uses `defaults.summarize`, falling back to an
-existing `analysis` or `chat` default. With none configured, Golem warns that
-the flag had no effect and every source keeps the deterministic metadata
-overview. Add `-progressive` to `golem index` for the same behavior on an
-explicit rebuild.
+`-progressive` is opt-in and does two things. It generates and serves the L0/L1
+source summaries, using `defaults.summarize` and falling back to an existing
+`analysis` or `chat` default; with none configured, Golem warns that the
+summary half had no effect and every source keeps the deterministic metadata
+overview. It also switches the agent runtime to **mixed context assembly**,
+which allocates RAG results, conversation spans and agent-memory records at
+mixed fidelity under one global token budget instead of dropping whole tool
+results. That rewrites the model-visible bytes of every tool anchor, so the
+transcript a run sends differs from the non-`-progressive` one even when no
+summary model is configured. Add `-progressive` to `golem index` for the same
+summary behavior on an explicit rebuild.
 
 Summaries are generated once per source and refreshed only when the source's
 content or vector space changes, so the model cost lands on the first indexing

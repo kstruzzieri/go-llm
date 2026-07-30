@@ -6,6 +6,59 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — mixed-domain context assembly, slice 3b of #331
+
+The agent runtime can now assemble model context from RAG results,
+conversation spans and agent-memory records at MIXED fidelity under one global
+token budget, instead of retaining or dropping each tool result whole. Tools
+declare what they COULD contribute (a `ContextSet` of per-subject
+alternatives); `ContextManager` picks at most one alternative per subject and
+reports every choice in a content-free trace.
+
+Opt-in via `ContextManager.Mixed`. Off, model-visible messages stay
+byte-identical and the new trace is the zero value.
+
+**Two behavior changes reach consumers who do not opt in:**
+
+- `agent/tools.Retrieve` now clamps the model-supplied `k` to 20 on the
+  LEGACY path too, before the backend call. A consumer whose model asks for
+  50 results silently gets 20, and the legacy attribution set (which credits
+  every retrieved result) shrinks with it. Unbounded model-supplied `k` is a
+  resource vector in flat mode as well; the new `Retrieve.MaxK` field is the
+  escape hatch. In progressive mode `MaxK` is additionally capped at 20 and a
+  larger value is rejected per call, because the capability projection emits
+  3(k+1) alternatives per fresh source and 21 would exceed the carrier bound.
+- `golem -progressive` now also sets `ContextManager.Mixed`, not only the
+  summary generation described below. That rewrites the model-visible bytes of
+  every tool anchor and shifts which `Pressure.Cause` bucket a pressured run
+  reports. The library-level `golem.Options.Progressive` sets ONLY the mixed
+  flag; a library host wires the tool's own `Progressive` field itself.
+
+New public API:
+
+- `agent`: `ContextManager.AssembleWithTrace`, `ContextManager.Mixed`,
+  `ContextSet` / `ContextGroup` / `ContextAlternative`,
+  `ContextAssemblyTrace` / `ContextSubjectTrace`,
+  `ContextAssemblyObserver` / `ContextAssemblyEvent`, `ErrMixedCompactor`,
+  and the `Decision*` / `Omit*` trace vocabulary.
+- `agent/tools`: `Retrieve.MaxK`.
+- `golem`: `Options.Progressive`.
+- `rag`: `Retriever.RenderProgressiveWithGroups`, `ProgressiveGroup`,
+  `ProgressiveAlternative`.
+- `contextdepth`: the descriptor vocabulary these carry (`SubjectRef`,
+  `GroupDesc`, `AlternativeDesc`, `RepresentationDesc`).
+
+Under mixed assembly a fresh source is offered the deterministic metadata
+overview as its cheapest alternative, matching the flat renderer's own
+budget fallback, so a source that does not fit at summary depth still
+contributes a short block instead of vanishing. Its note line reads
+`summary omitted: budget` — never `no summary`, which would be false.
+
+MEMORY: with `Mixed` on, each tool result's projection is cloned onto its
+anchor message and retained for the rest of the run. For `Retrieve` that is
+quadratic in `k` — 1.35 MB per call at `MaxK` 20 over 2 KB chunks, so a
+20-step run holds roughly 27 MB. With `Mixed` off nothing is cloned.
+
 ### Added — model-backed progressive source summaries, slice 2 of #189
 
 Golem can now generate and serve the existing L0 abstract/L1 overview ladder

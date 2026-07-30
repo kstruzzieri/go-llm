@@ -58,24 +58,25 @@ var (
 // components it renders as.
 type ladderRung struct {
 	level orientationLevel
-	reps  []contextdepth.RepresentationDesc
+	// summaryBudgetOmitted selects the truthful metadata note for a source that
+	// HAS a fresh summary ("summary omitted: budget" rather than "no summary").
+	// Passed to the renderer explicitly because the field of the same name on
+	// progressiveSource is allocator-owned; see buildProgressiveGroups.
+	summaryBudgetOmitted bool
+	reps                 []contextdepth.RepresentationDesc
 }
 
 // buildProgressiveGroups runs on the prepared snapshot BEFORE allocation. Its
 // read set is source, fresh, results and firstIndex, plus every field
-// orientationText and evidenceText read: prov, summary, reasons, and
-// summaryBudgetOmitted. All but the last are untouched by the allocator.
+// orientationTextWithNote and evidenceText read: prov, summary and reasons.
+// All of them are untouched by the allocator.
 //
-// summaryBudgetOmitted IS allocator-written (progressive_alloc.go step 5), and
-// reading it here is safe for a two-part reason that must hold together:
-// the allocator sets it only on the orientationL0 path, reached only when
-// cheapestOrientation returns orientationL0, i.e. only for a FRESH source;
-// and orientationText reads it only at orientationMeta, a rung this builder
-// offers only to NON-fresh sources. The two sets are disjoint, so the value
-// this builder can observe is always the false zero value. Widening either
-// side — offering fresh sources a metadata rung, or letting the allocator
-// demote a non-fresh source — breaks the pre-allocate safety argument, not
-// merely this comment.
+// summaryBudgetOmitted is the one allocator-written field the orientation
+// template consults, and this builder never reads or writes it: it renders
+// through orientationTextWithNote and passes the rung's own value. Reading the
+// source's field would couple the projection to allocation state it runs
+// before; writing it would rewrite the note line of the block the FLAT render
+// emits moments later.
 //
 // The evidence families cover src.results — every result in hand — never
 // src.evidence, which after allocation holds only what the caller's LOCAL
@@ -83,11 +84,14 @@ type ladderRung struct {
 // tool's 2048-token ceiling irrevocably prune alternatives a global allocator
 // still had room for (#331 spec 3.1).
 //
-// Fresh sources get abstract rungs only. The metadata rung's note line claims
-// "no summary", which is false for a fresh source, and an orientation block
-// must never lie about provenance — the model uses exactly that line to judge
-// what the block is worth. Stale and missing summaries get the metadata rung,
-// where the note is true.
+// EVERY source gets a metadata rung as its cheapest orientation, fresh ones
+// included. The flat allocator already falls back to the metadata overview for
+// a fresh source whose stored abstract does not fit (progressive_alloc.go step
+// 5), so withholding that rung here would make mixed mode strictly LESS capable
+// than the path it replaces: under pressure the mixed allocator would omit the
+// source entirely where the flat one renders a short block. Fresh sources get
+// the rung with the truthful "summary omitted: budget" note, so no orientation
+// block ever claims "no summary" about a source that has one.
 //
 // Alternatives are ordered by (prefix length, rung index): declaration order
 // IS utility order, which the mixed upgrade pass relies on.
@@ -97,11 +101,13 @@ func buildProgressiveGroups(sources []*progressiveSource) []ProgressiveGroup {
 		var rungs []ladderRung
 		if src.fresh {
 			rungs = []ladderRung{
-				{orientationL0, []contextdepth.RepresentationDesc{repAbstract}},
-				{orientationL0L1, []contextdepth.RepresentationDesc{repAbstract, repOverview}},
+				{level: orientationMeta, summaryBudgetOmitted: true,
+					reps: []contextdepth.RepresentationDesc{repMeta}},
+				{level: orientationL0, reps: []contextdepth.RepresentationDesc{repAbstract}},
+				{level: orientationL0L1, reps: []contextdepth.RepresentationDesc{repAbstract, repOverview}},
 			}
 		} else {
-			rungs = []ladderRung{{orientationMeta, []contextdepth.RepresentationDesc{repMeta}}}
+			rungs = []ladderRung{{level: orientationMeta, reps: []contextdepth.RepresentationDesc{repMeta}}}
 		}
 
 		g := ProgressiveGroup{
@@ -114,13 +120,13 @@ func buildProgressiveGroups(sources []*progressiveSource) []ProgressiveGroup {
 			},
 			Alternatives: make([]ProgressiveAlternative, 0, (len(src.results)+1)*len(rungs)),
 		}
-		// Each rung's orientation block is rendered ONCE: orientationText
-		// re-scans src.results and sorts the symbol/section lists, and the
-		// prefix loop below would otherwise call it (n+1)*len(rungs) times for
-		// the same len(rungs) distinct strings.
+		// Each rung's orientation block is rendered ONCE: the renderer re-scans
+		// src.results and sorts the symbol/section lists, and the prefix loop
+		// below would otherwise call it (n+1)*len(rungs) times for the same
+		// len(rungs) distinct strings.
 		orient := make([]string, len(rungs))
 		for i, rung := range rungs {
-			orient[i] = orientationText(src, rung.level)
+			orient[i] = orientationTextWithNote(src, rung.level, rung.summaryBudgetOmitted)
 			g.Alternatives = append(g.Alternatives, ProgressiveAlternative{
 				// Cloned, not shared: without this every orientation-only
 				// alternative of a source aliases one backing array, and a

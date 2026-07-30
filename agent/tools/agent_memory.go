@@ -210,11 +210,21 @@ func recordScopeClass(r memory.MemoryRecord) string {
 	}
 }
 
-// recordLine is the flat per-record rendering (fixed prefix, flattened
-// content) — also the basis of the L1 compact alternative. Its bytes are
-// frozen: it is the fallback Content a non-mixed consumer sees.
+// recordLine is the flat per-record rendering — also the basis of the L1
+// compact alternative. It is the fallback Content every non-mixed consumer
+// sees, so its bytes are frozen for records that render legitimately.
+//
+// EVERY field is flattened, ID and kind included. Leaving those two raw was a
+// knowingly-open fake-row injection on exactly the path with the widest
+// audience: a newline in either forges an extra one-record-per-line row, which
+// is what FlattenRecordContent exists to prevent for the content field. The
+// frozen-bytes argument survives, now scoped: flattening is the identity on
+// every ID and kind a legitimate record carries, so only a record that was
+// already forging rows renders differently.
 func recordLine(r memory.MemoryRecord) string {
-	return fmt.Sprintf("%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
+	return fmt.Sprintf("%s · %s · %s · %s",
+		FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
+		r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
 }
 
 // recordCard is the L0 metadata card: whitelist fields only. Never opaque
@@ -222,9 +232,8 @@ func recordLine(r memory.MemoryRecord) string {
 //
 // EVERY string field is flattened, ID and kind included: a newline in either
 // would reopen the fake-row injection FlattenRecordContent exists to close.
-// recordLine leaves those two raw because its bytes are frozen (it is the
-// pre-#331 flat fallback); this card is new code with no such constraint, and
-// the dates and scope class are closed vocabularies that cannot carry one.
+// recordLine now flattens the same two, so the two renderings agree; the dates
+// and scope class are closed vocabularies that cannot carry one.
 func recordCard(r memory.MemoryRecord) string {
 	return fmt.Sprintf("%s · %s · created:%s · updated:%s · scope:%s · ns:%s · src:%s",
 		FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),

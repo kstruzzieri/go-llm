@@ -40,8 +40,13 @@ type ContextSet struct {
 }
 
 // Carrier bounds: ContextSet is a public field settable by untrusted tools.
-// These cap the work and trace size of mixed assembly (groups x alternatives
-// candidates, each estimated and traced), which is where they are enforced.
+// The two bound DIFFERENT quantities, and conflating them overstates the trace:
+//   - WORK is groups x alternatives. Base admission stops at the first
+//     alternative that fits, but the upgrade pass rescans every subject's
+//     remaining alternatives on every commit, so the product is the real bound.
+//   - TRACE SIZE is groups alone. fillMixedTrace emits one row per SUBJECT,
+//     carrying only the alternative that was chosen.
+//
 // They do NOT bound dispatch's clone: with Mixed on it runs before
 // validation, and Representations per alternative is unbounded — clone-time
 // cost stays bounded only by what the tool already allocated (#331 spec 3.2).
@@ -147,7 +152,9 @@ func validateContextSet(callID string, s *ContextSet) error {
 			// recorded as met. Enforced here, at the public-field boundary, so
 			// the allocator needs no defensive guard. Both built-in producers
 			// already satisfy it: rag's prefix families ordered by (prefix
-			// length, rung) yield 0,0,1,1,2,2, and memory's ladder is all zeros.
+			// length, rung) yield 0,0,0,1,1,1,2,2,2 for a fresh source's three
+			// rungs (0,1,2 for a stale source's one), and memory's ladder is all
+			// zeros.
 			if verbatim < prevVerbatim {
 				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: verbatim components decrease from %d to %d; declaration order must be ascending utility", callID, i, g.Desc.Subject.ID, j, prevVerbatim, verbatim)
 			}

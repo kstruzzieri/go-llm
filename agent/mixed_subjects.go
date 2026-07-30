@@ -17,6 +17,14 @@ const (
 	DecisionBase = "base"
 	// DecisionFloor marks an alternative admitted to meet an anchor's
 	// preferred verbatim-component count (ContextSet.MinVerbatim).
+	//
+	// It is LAST-WRITE-WINS, not sticky: tryAssign overwrites the subject's
+	// decision on every commit, so any later upgrade of the same subject
+	// replaces "floor" with "upgrade". rag's ladder always declares rungs above
+	// the one the floor lands on, so with budget to spare a real trace will
+	// essentially never carry "floor" — its absence says nothing about whether
+	// the floor pass ran. VerbatimShortfalls, not this string, is the signal
+	// for whether the preference was met.
 	DecisionFloor = "floor"
 	// DecisionUpgrade marks a later-declared alternative admitted with budget
 	// left over after base admission.
