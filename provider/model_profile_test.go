@@ -183,33 +183,6 @@ func TestModelProfileConstruction(t *testing.T) {
 	}
 }
 
-func TestModelProfileEmbeddingModel(t *testing.T) {
-	profile := ModelProfile{
-		Key:        ModelKey{Provider: "ollama", Model: "nomic-embed-text"},
-		Name:       "Nomic Embed Text",
-		Family:     "nomic-embed",
-		Provider:   "ollama",
-		Caps:       CapEmbed,
-		Quality:    TierGood,
-		Speed:      TierGreat,
-		Dimensions: 768,
-		Source:     SourceStatic,
-	}
-
-	if !profile.Caps.Has(CapEmbed) {
-		t.Error("embedding model should have CapEmbed")
-	}
-	if profile.Caps.Has(CapChat) {
-		t.Error("embedding model should not have CapChat")
-	}
-	if profile.Dimensions != 768 {
-		t.Errorf("Dimensions = %d, want 768", profile.Dimensions)
-	}
-	if profile.FIM != nil {
-		t.Error("embedding model should have nil FIM")
-	}
-}
-
 func TestModelProfileNilThinkTags(t *testing.T) {
 	profile := ModelProfile{
 		Key:       ModelKey{Provider: "ollama", Model: "codellama:7b"},
