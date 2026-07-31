@@ -97,6 +97,50 @@ func TestRunOnceDelegatesThroughConsumerRuntime(t *testing.T) {
 	}
 }
 
+// runOnce deliberately does not put sess.modelOptions on an agent.Request of
+// its own: golem.Runtime owns model options (golem.Options.ModelOptions) and
+// stamps them onto every turn's request. This pins that the -think options
+// still reach the model through that path, so the REPL-side field is
+// genuinely redundant rather than silently dropped.
+func TestRunOnceAppliesRuntimeModelOptions(t *testing.T) {
+	root := t.TempDir()
+	caller := &captureCaller{answer: "answer"}
+	system := buildSystemPrompt(false, false)
+	thinkOpts := thinkModelOptions("high") // exactly what -think=high produces
+	runtime, err := golemruntime.New(context.Background(), golemruntime.Options{
+		Root:         root,
+		System:       system,
+		MaxSteps:     16,
+		ModelOptions: thinkOpts,
+		Orchestrator: agent.New(caller, agent.ContextManager{}),
+	})
+	if err != nil {
+		t.Fatalf("new runtime: %v", err)
+	}
+	t.Cleanup(func() { _ = runtime.Close() })
+
+	// main.go sets both golem.Options.ModelOptions and replSession.modelOptions
+	// from the same -think value; mirror that so the test proves which one
+	// actually carries the options to the model.
+	sess := &replSession{
+		runtime:      runtime,
+		baseSystem:   system,
+		maxSteps:     16,
+		clock:        func() time.Time { return time.Unix(0, 0) },
+		modelOptions: thinkOpts,
+	}
+	var out strings.Builder
+	if _, err := runOnce(context.Background(), &out, nil, sess, "think hard about this", nil); err != nil {
+		t.Fatalf("runOnce: %v", err)
+	}
+	if caller.options.Think == nil || !*caller.options.Think {
+		t.Fatalf("model options Think = %v, want true", caller.options.Think)
+	}
+	if caller.options.ThinkEffort != "high" {
+		t.Fatalf("model options ThinkEffort = %q, want high", caller.options.ThinkEffort)
+	}
+}
+
 func TestREPL_EndToEndReadOnly(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "hello.txt"), []byte("hi there"), 0o644); err != nil {
@@ -177,17 +221,19 @@ func TestREPL_CtrlCCancelsRunKeepsREPL(t *testing.T) {
 	}
 }
 
-// captureCaller records the full message list of the first request it serves,
-// then returns a final answer.
+// captureCaller records the full message list and model options of the first
+// request it serves, then returns a final answer.
 type captureCaller struct {
 	messages []provider.ChatMessage
 	system   string
+	options  provider.ModelOptions
 	answer   string
 }
 
 func (c *captureCaller) Chat(_ context.Context, req provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
 	if c.messages == nil {
 		c.messages = append([]provider.ChatMessage(nil), req.Messages...)
+		c.options = req.Options
 		for _, m := range req.Messages {
 			if m.Role == "system" {
 				c.system = m.Content

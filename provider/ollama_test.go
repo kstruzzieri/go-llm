@@ -105,6 +105,10 @@ func TestOllamaProvider_ResponseProviderField(t *testing.T) {
 	if chatResp.Provider != instance {
 		t.Errorf("Chat response Provider = %q, want %q", chatResp.Provider, instance)
 	}
+	// A direct provider call has no Router, so nothing may attribute routing.
+	if chatResp.RouteOutcome != nil {
+		t.Errorf("Chat response RouteOutcome = %+v, want nil for a direct call", chatResp.RouteOutcome)
+	}
 
 	embResp, err := p.Embed(context.Background(), EmbedRequest{
 		Model: "qwen3-embedding:8b",
@@ -115,6 +119,9 @@ func TestOllamaProvider_ResponseProviderField(t *testing.T) {
 	}
 	if embResp.Provider != instance {
 		t.Errorf("Embed response Provider = %q, want %q", embResp.Provider, instance)
+	}
+	if embResp.RouteOutcome != nil {
+		t.Errorf("Embed response RouteOutcome = %+v, want nil for a direct call", embResp.RouteOutcome)
 	}
 }
 
@@ -168,6 +175,9 @@ func TestOllamaProvider_ResponseProviderField_AllPaths(t *testing.T) {
 		}
 		if resp.Provider != instance {
 			t.Errorf("Provider = %q, want %q", resp.Provider, instance)
+		}
+		if resp.RouteOutcome != nil {
+			t.Errorf("RouteOutcome = %+v, want nil for a direct call", resp.RouteOutcome)
 		}
 	})
 

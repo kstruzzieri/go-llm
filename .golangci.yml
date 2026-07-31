@@ -7,6 +7,36 @@ linters:
     - govet
     - ineffassign
     - staticcheck
+  # unusedwrite is off in govet's default analyzer set. It catches a class
+  # nothing else here does: a field assigned in a composite literal that is
+  # never read back. staticcheck's SA4005/SA4006 are narrower and missed a
+  # three-field instance in cmd/golem/repl.go, where a struct was built, three
+  # fields set, and the struct then passed nowhere that read them.
+  settings:
+    govet:
+      enable:
+        - unusedwrite
+  exclusions:
+    rules:
+      # unusedwrite has a high false-positive rate on test fixtures, which set
+      # surrounding fields to make a literal realistic and then assert on one
+      # of them. Every finding in provider/ is that shape. Rather than exclude
+      # all test code, exclude only keyed composite-literal fields: `Model:
+      # "x"` inside a fixture is skipped, while `resp.Model = "x"` in a test
+      # helper -- the shape that is actually dead plumbing -- still reports.
+      #
+      # The alternation covers both fixture layouts: one field per line (the
+      # `^` branch) and fields inline after `{` or `,` on a single line.
+      #
+      # Known blind spot: the upstream analyzer disables itself for packages
+      # importing `unsafe`, so `GOOS=windows` lint runs see nothing in
+      # cmd/golem (index_lease_windows.go imports it). CI lints on Ubuntu, so
+      # the gate itself is unaffected.
+      - path: _test\.go$
+        source: '(^|[{,])[[:space:]]*[A-Za-z_][A-Za-z0-9_]*:[[:space:]]'
+        text: unusedwrite
+        linters:
+          - govet
 
 # In golangci-lint v2 formatters live outside `linters`. The CI gate runs
 # `golangci-lint fmt --diff` so inactive GOOS/build-tag files are checked too;
