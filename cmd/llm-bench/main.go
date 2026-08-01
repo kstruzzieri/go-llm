@@ -97,6 +97,7 @@ func main() {
 	fcRender := flag.Bool("fc-render", false, "Render a forced-choice worksheet (complete legacy/mixed pairs, arm identity hidden behind hash-parity A/B sides) from -artifacts to -report (#331 slice 3c)")
 	fcIngest := flag.Bool("fc-ingest", false, "Parse a filled forced-choice worksheet (-worksheet) into a preference sidecar JSONL (-fc-out), validating pairs against -artifacts")
 	fcOut := flag.String("fc-out", "", "Output JSONL path for -fc-ingest preference rows (required with -fc-ingest)")
+	fcPreferences := flag.String("fc-preferences", "", "With -assembly-report: optional -fc-ingest sidecar JSONL; adds the registered forced-choice sign-test secondary analysis to each legacy-mixed model section (never feeds the primary decision)")
 	adjudicateRender := flag.Bool("adjudicate-render", false, "Render the grounding adjudication worksheet (full prompt shown) for labels flagged grounding-check, from -artifacts and -labels to -report (#331 slice 3c)")
 	adjudicateIngest := flag.Bool("adjudicate-ingest", false, "Parse a filled adjudication worksheet (-worksheet) and emit the full updated label set (-labels-out) from -artifacts and -labels; every flagged label must be adjudicated with a reason")
 	worksheetPath := flag.String("worksheet", "", "Path to a filled worksheet (required with -blind-ingest, -fc-ingest, -adjudicate-ingest)")
@@ -375,7 +376,7 @@ func main() {
 	}
 
 	if *assemblyReport {
-		report, err := runAssemblyReport(*labelsPath, *artifactsPath)
+		report, err := runAssemblyReport(*labelsPath, *artifactsPath, *fcPreferences)
 		if err != nil {
 			log.Fatalf("llm-bench: assembly-report: %v", err)
 		}

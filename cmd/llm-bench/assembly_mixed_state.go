@@ -43,7 +43,9 @@ const mixedDefaultOutputCap = 64 << 10
 // DIFFERENT calendar dates on a UTC CI runner vs a US workstation — and the
 // rendered lines land verbatim in committed mixed traces, breaking
 // byte-reproducibility by build machine. Noon UTC keeps every zone from
-// UTC-11 through UTC+11 on the same calendar date; rageval's
+// UTC-11 through UTC+11 on the same calendar date; UTC+12 through UTC+14
+// (and UTC-12) still flip the rendered date and are OUTSIDE the supported
+// build-zone band — build the corpus from a UTC-11..UTC+11 zone. rageval's
 // mixedEvalFixedEpoch (internal/rageval/mixed_fixture.go) is the same move.
 // The RAG indexed_at pin stays at assemblyFixedEpoch: rag renders it as an
 // RFC3339 UTC line, which is TZ-immune. Date stability is pinned by

@@ -748,7 +748,7 @@ type AssemblyModelReport struct {
 // never pair; they feed the descriptive ceiling section. Flat-progressive
 // cases with unequal candidate sets are invalid; cases missing an arm or a
 // label are pairing gaps. Both are excluded from the deltas and counted.
-func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int) (*AssemblyReport, error) {
+func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int, fcPrefs []FCPreference) (*AssemblyReport, error) {
 	matched, _, err := matchLabels(labels, arts)
 	if err != nil {
 		return nil, fmt.Errorf("assembly report: match labels: %w", err)
@@ -902,12 +902,26 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		rep.LegacyMixedDecisionRule = assemblyMixedDecisionRuleText()
 	}
 	rep.Topline = computeAssemblyTopline(topline, quality)
+	// Forced-choice is attached AFTER every Decision above is final: the
+	// registered sign test is a secondary analysis and must never feed the
+	// primary decision. fcPrefs == nil means -fc-preferences was not set (an
+	// empty file still attaches zero-count sections).
+	if fcPrefs != nil {
+		artHashes := make(map[string]struct{}, len(arts))
+		for i := range arts {
+			artHashes[arts[i].ArtifactHash] = struct{}{}
+		}
+		if err := attachAssemblyForcedChoice(rep.LegacyMixedModels, fcPrefs, pairs, artHashes); err != nil {
+			return nil, fmt.Errorf("assembly report: %w", err)
+		}
+	}
 	return rep, nil
 }
 
-// runAssemblyReport loads the (labels, artifacts) pair and renders the
+// runAssemblyReport loads the (labels, artifacts) pair — plus, when
+// fcPrefsPath is set, the -fc-ingest preference sidecar — and renders the
 // assembly report as indented JSON.
-func runAssemblyReport(labelsPath, artifactsPath string) (string, error) {
+func runAssemblyReport(labelsPath, artifactsPath, fcPrefsPath string) (string, error) {
 	arts, err := loadArtifacts(artifactsPath)
 	if err != nil {
 		return "", err
@@ -916,7 +930,17 @@ func runAssemblyReport(labelsPath, artifactsPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN)
+	var fcPrefs []FCPreference
+	if strings.TrimSpace(fcPrefsPath) != "" {
+		fcPrefs, err = loadFCPreferences(fcPrefsPath)
+		if err != nil {
+			return "", err
+		}
+		if fcPrefs == nil {
+			fcPrefs = []FCPreference{} // empty sidecar still means "flag set"
+		}
+	}
+	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN, fcPrefs)
 	if err != nil {
 		return "", err
 	}

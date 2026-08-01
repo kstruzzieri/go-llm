@@ -135,6 +135,135 @@ type AssemblyMixedModelReport struct {
 	ControlAbsDeltas []float64               `json:"control_abs_deltas,omitempty"` // |delta| per control pair, pair-ID order
 	ArmPressure      []AssemblyArmPressure   `json:"arm_pressure,omitempty"`
 	Exclusions       []AssemblyExclusion     `json:"exclusions,omitempty"`
+	// ForcedChoice is the registered SECONDARY analysis over the -fc-ingest
+	// preference sidecar (-fc-preferences). Present only when the flag is set;
+	// nil (and absent from JSON) otherwise — 3a sections never carry it. It
+	// never feeds Decision.
+	ForcedChoice *AssemblyForcedChoice `json:"forced_choice,omitempty"`
+}
+
+// AssemblyForcedChoice is the registered forced-choice secondary analysis for
+// one legacy-mixed model section: preference rows resolved to arms through
+// fcSideIsLegacyA (the single parity authority) and a two-sided exact
+// binomial sign test on the non-tie preferences (p = 0.5 null).
+// SkippedExcluded counts preference rows whose pair did not enter the
+// primary analysis (report-excluded for any reason, or a negative-control
+// pair) — they never enter the sign test.
+type AssemblyForcedChoice struct {
+	MixedWins       int     `json:"mixed_wins"`
+	LegacyWins      int     `json:"legacy_wins"`
+	Ties            int     `json:"ties"`
+	NNonTie         int     `json:"n_nontie"`
+	PTwoSided       float64 `json:"p_two_sided"`
+	SkippedExcluded int     `json:"skipped_excluded"`
+}
+
+// signTestTwoSidedP is the registered two-sided exact binomial sign test
+// against p = 0.5 over the n non-tie preferences:
+// p = min(1, 2 * P(X >= max(wins, n-wins))), X ~ Bin(n, 0.5). Binomial
+// coefficients are built iteratively (C(n,i+1) = C(n,i)*(n-i)/(i+1)) with
+// stdlib float64 only — exact while every C(n,i) fits 2^53 (n <= 56), far
+// past a mixed-corpus pair count; beyond that the tiny float error is
+// irrelevant to a p-value. n == 0 is pinned to p = 1.0 (no non-tie
+// preferences carry no evidence against the null) rather than omitting the
+// field.
+func signTestTwoSidedP(wins, n int) float64 {
+	if n == 0 {
+		return 1
+	}
+	k := wins
+	if n-wins > k {
+		k = n - wins
+	}
+	coef, tail := 1.0, 0.0
+	for i := 0; i <= n; i++ {
+		if i >= k {
+			tail += coef
+		}
+		coef = coef * float64(n-i) / float64(i+1)
+	}
+	if p := 2 * tail / math.Exp2(float64(n)); p < 1 {
+		return p
+	}
+	return 1
+}
+
+// attachAssemblyForcedChoice attaches the registered forced-choice secondary
+// analysis to every legacy-mixed model section. Each preference row's a/b
+// sides resolve to arms through fcSideIsLegacyA ONLY (the single parity
+// authority; hashes are presence-validated, never used for resolution). Rows
+// on pairs the primary analysis excluded (any Exclusions reason) or on
+// negative-control pairs are skipped and counted in SkippedExcluded. Unknown
+// model/pair/hash, a duplicate row, or an invalid preference value is a loud
+// error. Runs strictly after every Decision is final and never writes one.
+func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPreference, pairs map[assemblyPairKey]*assemblyArmSet, artHashes map[string]struct{}) error {
+	byModel := make(map[string]*AssemblyMixedModelReport, len(models))
+	excluded := make(map[string]map[string]struct{}, len(models))
+	for i := range models {
+		m := &models[i]
+		m.ForcedChoice = &AssemblyForcedChoice{PTwoSided: 1}
+		byModel[m.CandidateModel] = m
+		ex := make(map[string]struct{}, len(m.Exclusions))
+		for _, e := range m.Exclusions {
+			ex[e.PairID] = struct{}{}
+		}
+		excluded[m.CandidateModel] = ex
+	}
+	seen := map[assemblyPairKey]struct{}{}
+	for i, row := range prefs {
+		m, ok := byModel[row.CandidateModel]
+		if !ok {
+			return fmt.Errorf("fc-preference row %d: unknown candidate model %q", i, row.CandidateModel)
+		}
+		for _, h := range []string{row.ArtifactHashA, row.ArtifactHashB} {
+			if _, ok := artHashes[h]; !ok {
+				return fmt.Errorf("fc-preference row %d (pair %q model %q): artifact hash %q not in -artifacts", i, row.PairID, row.CandidateModel, h)
+			}
+		}
+		k := assemblyPairKey{assemblyKindLegacyMixed, row.PairID, row.CandidateModel}
+		s, ok := pairs[k]
+		if !ok {
+			return fmt.Errorf("fc-preference row %d: unknown pair %q for model %q", i, row.PairID, row.CandidateModel)
+		}
+		if _, dup := seen[k]; dup {
+			return fmt.Errorf("fc-preference row %d: duplicate preference for pair %q model %q", i, row.PairID, row.CandidateModel)
+		}
+		seen[k] = struct{}{}
+		fc := m.ForcedChoice
+		if _, ex := excluded[row.CandidateModel][row.PairID]; ex {
+			fc.SkippedExcluded++
+			continue
+		}
+		if s.base != nil && s.base.Trace.AssemblyEval.Control {
+			fc.SkippedExcluded++ // negative controls never enter the verdict, so never the sign test
+			continue
+		}
+		legacyIsA := fcSideIsLegacyA(row.PairID, row.CandidateModel)
+		switch row.Preference {
+		case "tie":
+			fc.Ties++
+		case "a":
+			if legacyIsA {
+				fc.LegacyWins++
+			} else {
+				fc.MixedWins++
+			}
+		case "b":
+			if legacyIsA {
+				fc.MixedWins++
+			} else {
+				fc.LegacyWins++
+			}
+		default:
+			return fmt.Errorf("fc-preference row %d (pair %q): invalid preference %q (want a, b, or tie)", i, row.PairID, row.Preference)
+		}
+	}
+	for i := range models {
+		fc := models[i].ForcedChoice
+		fc.NNonTie = fc.MixedWins + fc.LegacyWins
+		fc.PTwoSided = signTestTwoSidedP(fc.MixedWins, fc.NNonTie)
+	}
+	return nil
 }
 
 // AssemblyToplineStratum is one stratum's slice of the topline ceiling.

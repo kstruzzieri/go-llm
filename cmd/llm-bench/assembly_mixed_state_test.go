@@ -371,7 +371,7 @@ func TestMixedMemoryEpochDateStable(t *testing.T) {
 	for off := -11; off <= 11; off++ {
 		got := time.UnixMilli((mixedMemoryEpoch + int64(off)*3600) * 1000).UTC().Format("2006-01-02")
 		if got != want {
-			t.Errorf("UTC%+dh renders date %s; want %s (mixedMemoryEpoch is not date-stable across UTC-11..+11)", off, got, want)
+			t.Errorf("UTC%+dh renders date %s; want %s (mixedMemoryEpoch is not date-stable across the supported UTC-11..+11 build-zone band; UTC+12..+14 sit outside the band and are unsupported by design)", off, got, want)
 		}
 	}
 }

@@ -11,6 +11,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -127,8 +128,12 @@ func TestMixedCorpusRegeneration(t *testing.T) {
 	if err := runMixedFixture(context.Background(), raw, out, io.Discard); err != nil {
 		t.Fatalf("rebuild mixed corpus: %v", err)
 	}
-	diff, err := corpusDirDiff(out, filepath.Join(root, "docs", "llm", "assembly-corpus", "mixed", "traces"))
+	committed := filepath.Join(root, "docs", "llm", "assembly-corpus", "mixed", "traces")
+	diff, err := corpusDirDiff(out, committed)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("mixed fixture exists but %s does not: the corpus was never committed; build it with -assembly-build (see this test's doc comment) and commit the traces: %v", committed, err)
+		}
 		t.Fatal(err)
 	}
 	if diff != "" {

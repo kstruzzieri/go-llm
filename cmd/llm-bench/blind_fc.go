@@ -8,8 +8,10 @@ package main
 // fcSideIsLegacyA, which is the single place the secret lives.
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -41,6 +43,35 @@ func fcSideIsLegacyA(pairID, modelKey string) bool {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte(pairID + "|" + modelKey + "|fc"))
 	return h.Sum64()%2 == 0
+}
+
+// loadFCPreferences reads a -fc-ingest sidecar JSONL. Join fields and the
+// preference domain are validated at load so every downstream consumer
+// (-assembly-report -fc-preferences) can trust the rows.
+func loadFCPreferences(path string) ([]FCPreference, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open %q: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+	var out []FCPreference
+	dec := json.NewDecoder(f)
+	for dec.More() {
+		var r FCPreference
+		if err := dec.Decode(&r); err != nil {
+			return nil, fmt.Errorf("decode fc-preference row %d: %w", len(out)+1, err)
+		}
+		if r.PairID == "" || r.CandidateModel == "" || r.ArtifactHashA == "" || r.ArtifactHashB == "" {
+			return nil, fmt.Errorf("fc-preference row %d: blank join field (pair_id, candidate_model, artifact_hash_a, artifact_hash_b are all required)", len(out)+1)
+		}
+		switch r.Preference {
+		case "a", "b", "tie":
+		default:
+			return nil, fmt.Errorf("fc-preference row %d (pair %q): invalid preference %q (want a, b, or tie)", len(out)+1, r.PairID, r.Preference)
+		}
+		out = append(out, r)
+	}
+	return out, nil
 }
 
 // fcPair is one complete forced-choice pair: both arms present with non-empty

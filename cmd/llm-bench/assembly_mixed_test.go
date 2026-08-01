@@ -58,7 +58,7 @@ func appendMixedPairs(arts []Artifact, labels []Label, model string, start, n in
 
 func mustMixedReport(t *testing.T, arts []Artifact, labels []Label) *AssemblyReport {
 	t.Helper()
-	rep, err := computeAssemblyReport(arts, labels, 1, 10000)
+	rep, err := computeAssemblyReport(arts, labels, 1, 10000, nil)
 	if err != nil {
 		t.Fatalf("computeAssemblyReport: %v", err)
 	}
@@ -673,4 +673,196 @@ func TestAssemblyReportNoCrossArmCauseDiff(t *testing.T) {
 		t.Fatal(err)
 	}
 	walk(tree)
+}
+
+// --- forced-choice sign test (registered secondary analysis, #331 3c) ---
+
+// TestSignTestTwoSidedP pins the exact two-sided binomial sign test.
+// Hand check for (wins=8, n=10): upper-tail extreme k = max(8, 2) = 8;
+// tail = C(10,8)+C(10,9)+C(10,10) = 45+10+1 = 56; p = 2*56/2^10 =
+// 112/1024 = 0.109375 (every term exactly representable in float64).
+func TestSignTestTwoSidedP(t *testing.T) {
+	cases := []struct {
+		wins, n int
+		want    float64
+	}{
+		{8, 10, 0.109375},
+		{2, 10, 0.109375}, // symmetric: k = max(wins, n-wins)
+		{5, 5, 0.0625},    // 2*C(5,5)/2^5 = 2/32
+		{2, 4, 1},         // 2*(C(4,2)+C(4,3)+C(4,4))/16 = 22/16, clamped
+		{1, 1, 1},         // 2*1/2
+		{0, 0, 1},         // pinned convention: no non-tie preferences => 1.0
+	}
+	for _, tc := range cases {
+		if got := signTestTwoSidedP(tc.wins, tc.n); got != tc.want {
+			t.Errorf("signTestTwoSidedP(%d, %d) = %v; want %v", tc.wins, tc.n, got, tc.want)
+		}
+	}
+}
+
+// fcReportFixture: labeled legacy/mixed pairs for model "c" on pair-alpha
+// (FNV-1a-64("pair-alpha|c|fc") = 18218199419608068020, even => legacy is A)
+// and pair-gamma (15644729119194098327, odd => mixed is A); pair-beta is left
+// unlabeled (report-excluded) and pair-ctl is a negative-control pair.
+func fcReportFixture() (arts []Artifact, labels []Label) {
+	for _, pair := range []string{"pair-alpha", "pair-beta", "pair-gamma"} {
+		l := mixedArtifact(pair, AssemblyLegacy, "c", nil)
+		m := mixedArtifact(pair, AssemblyMixed, "c", nil)
+		arts = append(arts, l, m)
+		if pair != "pair-beta" {
+			labels = append(labels, labelFor(l, 0), labelFor(m, 1))
+		}
+	}
+	ctl := func(ae *AssemblyEval) { ae.Control = true }
+	l := mixedArtifact("pair-ctl", AssemblyLegacy, "c", ctl)
+	m := mixedArtifact("pair-ctl", AssemblyMixed, "c", ctl)
+	arts = append(arts, l, m)
+	labels = append(labels, labelFor(l, 1), labelFor(m, 1))
+	return arts, labels
+}
+
+// fcRowFor builds a valid preference row for one fixture pair, with hashA/B
+// ordered by the registered parity exactly as -fc-ingest would emit them.
+func fcRowFor(arts []Artifact, pair, preference string) FCPreference {
+	var legacy, mixed string
+	for _, a := range arts {
+		if a.Trace.AssemblyEval.PairID != pair {
+			continue
+		}
+		if a.Trace.AssemblyEval.Mode == AssemblyLegacy {
+			legacy = a.ArtifactHash
+		} else {
+			mixed = a.ArtifactHash
+		}
+	}
+	hashA, hashB := legacy, mixed
+	if !fcSideIsLegacyA(pair, "c") {
+		hashA, hashB = mixed, legacy
+	}
+	return FCPreference{PairID: pair, CandidateModel: "c",
+		ArtifactHashA: hashA, ArtifactHashB: hashB, Preference: preference, Labeler: "t"}
+}
+
+func TestAssemblyForcedChoiceSection(t *testing.T) {
+	arts, labels := fcReportFixture()
+	report := func(prefs []FCPreference) *AssemblyReport {
+		t.Helper()
+		rep, err := computeAssemblyReport(arts, labels, 1, 200, prefs)
+		if err != nil {
+			t.Fatalf("computeAssemblyReport: %v", err)
+		}
+		return rep
+	}
+	fcOf := func(rep *AssemblyReport) *AssemblyForcedChoice {
+		t.Helper()
+		if len(rep.LegacyMixedModels) != 1 {
+			t.Fatalf("legacy-mixed models = %d; want 1", len(rep.LegacyMixedModels))
+		}
+		fc := rep.LegacyMixedModels[0].ForcedChoice
+		if fc == nil {
+			t.Fatalf("forced_choice section missing with -fc-preferences set")
+		}
+		return fc
+	}
+
+	t.Run("a and b resolve through the registered parity", func(t *testing.T) {
+		// pair-alpha: legacy is A, so "a" is a LEGACY win; pair-gamma: mixed
+		// is A, so "a" is a MIXED win.
+		fc := fcOf(report([]FCPreference{fcRowFor(arts, "pair-alpha", "a"), fcRowFor(arts, "pair-gamma", "a")}))
+		if fc.LegacyWins != 1 || fc.MixedWins != 1 || fc.Ties != 0 || fc.NNonTie != 2 || fc.SkippedExcluded != 0 {
+			t.Fatalf("fc = %+v; want legacy 1 / mixed 1 / ties 0 / n_nontie 2", fc)
+		}
+		if fc.PTwoSided != 1 { // k = max(1,1) = 1 of n=2: 2*(C(2,1)+C(2,2))/4 = 1.5, clamped
+			t.Fatalf("p = %v; want 1.0", fc.PTwoSided)
+		}
+		// "b" flips through the SAME parity: pair-alpha "b" is a MIXED win.
+		fc = fcOf(report([]FCPreference{fcRowFor(arts, "pair-alpha", "b")}))
+		if fc.MixedWins != 1 || fc.LegacyWins != 0 {
+			t.Fatalf("fc = %+v; want pair-alpha b => mixed win", fc)
+		}
+	})
+
+	t.Run("ties never enter the sign test", func(t *testing.T) {
+		fc := fcOf(report([]FCPreference{fcRowFor(arts, "pair-alpha", "tie"), fcRowFor(arts, "pair-gamma", "a")}))
+		if fc.Ties != 1 || fc.NNonTie != 1 || fc.MixedWins != 1 {
+			t.Fatalf("fc = %+v; want 1 tie excluded from n_nontie", fc)
+		}
+	})
+
+	t.Run("n_nontie zero pins p to 1.0", func(t *testing.T) {
+		fc := fcOf(report([]FCPreference{fcRowFor(arts, "pair-alpha", "tie")}))
+		if fc.NNonTie != 0 || fc.PTwoSided != 1 {
+			t.Fatalf("fc = %+v; want n_nontie 0 with p pinned to 1.0", fc)
+		}
+	})
+
+	t.Run("excluded and control pairs are skipped and counted", func(t *testing.T) {
+		fc := fcOf(report([]FCPreference{
+			fcRowFor(arts, "pair-beta", "a"), // unlabeled => report-excluded
+			fcRowFor(arts, "pair-ctl", "a"),  // negative control
+			fcRowFor(arts, "pair-alpha", "a"),
+		}))
+		if fc.SkippedExcluded != 2 || fc.NNonTie != 1 || fc.LegacyWins != 1 || fc.MixedWins != 0 {
+			t.Fatalf("fc = %+v; want 2 skipped (unlabeled + control), only pair-alpha counted", fc)
+		}
+	})
+
+	t.Run("flag unset leaves no forced_choice key anywhere", func(t *testing.T) {
+		raw, err := json.Marshal(report(nil))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "forced_choice") {
+			t.Fatalf("forced_choice key present without -fc-preferences:\n%s", raw)
+		}
+	})
+
+	t.Run("empty sidecar with flag set still emits the section", func(t *testing.T) {
+		fc := fcOf(report([]FCPreference{}))
+		if fc.NNonTie != 0 || fc.PTwoSided != 1 || fc.SkippedExcluded != 0 {
+			t.Fatalf("fc = %+v; want a zero-count section with p 1.0", fc)
+		}
+	})
+
+	t.Run("unknown pair, model, or hash are loud errors", func(t *testing.T) {
+		unknownPair := fcRowFor(arts, "pair-alpha", "a")
+		unknownPair.PairID = "pair-nope" // hashes stay valid; pair lookup must fail
+		unknownModel := fcRowFor(arts, "pair-alpha", "a")
+		unknownModel.CandidateModel = "z"
+		unknownHash := fcRowFor(arts, "pair-alpha", "a")
+		unknownHash.ArtifactHashA = "sha256:nope"
+		for name, row := range map[string]FCPreference{
+			"unknown pair": unknownPair, "unknown model": unknownModel, "unknown hash": unknownHash,
+		} {
+			if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}); err == nil {
+				t.Errorf("%s accepted; want loud error", name)
+			}
+		}
+	})
+
+	t.Run("duplicate row is a loud error", func(t *testing.T) {
+		row := fcRowFor(arts, "pair-alpha", "a")
+		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row, row}); err == nil {
+			t.Fatalf("duplicate preference row accepted; want loud error")
+		}
+	})
+
+	t.Run("invalid preference value is a loud error", func(t *testing.T) {
+		row := fcRowFor(arts, "pair-alpha", "a")
+		row.Preference = "x"
+		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}); err == nil {
+			t.Fatalf("preference %q accepted; want loud error", row.Preference)
+		}
+	})
+
+	t.Run("primary decision is independent of forced-choice data", func(t *testing.T) {
+		without := report(nil)
+		with := report([]FCPreference{fcRowFor(arts, "pair-alpha", "a"), fcRowFor(arts, "pair-gamma", "a")})
+		for i := range without.LegacyMixedModels {
+			w, g := without.LegacyMixedModels[i].Decision, with.LegacyMixedModels[i].Decision
+			if w != g {
+				t.Fatalf("decision changed when forced-choice data was supplied: %q -> %q", w, g)
+			}
+		}
+	})
 }
