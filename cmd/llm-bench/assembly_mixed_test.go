@@ -195,16 +195,37 @@ func TestAssemblyReportInvalidPairContract(t *testing.T) {
 	arts = append(arts, cl, cm)
 	labels = append(labels, labelFor(cl, 0.5), labelFor(cm, 0.5))
 
+	// Stratum mismatch across arms: stratum drives the registered per-stratum
+	// floor and the CI stratification, so divergent arms must not pair.
+	sl := mixedArtifact("pair-stratum", AssemblyLegacy, "m", nil)
+	sm := mixedArtifact("pair-stratum", AssemblyMixed, "m", func(ae *AssemblyEval) {
+		ae.Stratum = "deep"
+	})
+	arts = append(arts, sl, sm)
+	labels = append(labels, labelFor(sl, 0.5), labelFor(sm, 0.5))
+
+	// ScenarioFamily mismatch across arms: family drives cluster structure.
+	fl := mixedArtifact("pair-family", AssemblyLegacy, "m", func(ae *AssemblyEval) {
+		ae.ScenarioFamily = "fam-a"
+	})
+	fm := mixedArtifact("pair-family", AssemblyMixed, "m", func(ae *AssemblyEval) {
+		ae.ScenarioFamily = "fam-b"
+	})
+	arts = append(arts, fl, fm)
+	labels = append(labels, labelFor(fl, 0.5), labelFor(fm, 0.5))
+
 	rep := mustMixedReport(t, arts, labels)
 	lm := rep.LegacyMixedModels[0]
 	if lm.Pairs != 2 {
 		t.Fatalf("complete pairs = %d, want 2 (bad pairs must not pair)", lm.Pairs)
 	}
 	want := map[string]string{
-		"odd":         "missing-legacy-arm",
-		"pair-digest": "state-digest-mismatch",
-		"pair-budget": "budget-mismatch",
-		"pair-cand":   "candidate-ids-mismatch",
+		"odd":          "missing-legacy-arm",
+		"pair-digest":  "state-digest-mismatch",
+		"pair-budget":  "budget-mismatch",
+		"pair-cand":    "candidate-ids-mismatch",
+		"pair-stratum": "stratum-mismatch",
+		"pair-family":  "scenario-family-mismatch",
 	}
 	got := map[string]string{}
 	for _, e := range lm.Exclusions {
@@ -320,13 +341,15 @@ func TestAssemblyReportStratifiedBootstrap(t *testing.T) {
 			first.DeltaCILow, first.DeltaCIHigh, second.DeltaCILow, second.DeltaCIHigh)
 	}
 
-	// Removing the family IDs (every pair its own cluster) must CHANGE the
-	// CI: with the family present the two -1.0 twins move together.
+	// Removing the family IDs (every pair its own cluster) must change the
+	// CI, and DIRECTIONALLY: the two -1.0 twins moving together fatten the
+	// lower tail, so the clustered lower bound sits strictly below the naive
+	// per-pair resampling's lower bound.
 	artsB, labelsB := build("")
 	naive := mustMixedReport(t, artsB, labelsB).LegacyMixedModels[0]
-	if first.DeltaCILow == naive.DeltaCILow && first.DeltaCIHigh == naive.DeltaCIHigh {
-		t.Fatalf("clustered CI [%v, %v] identical to naive per-pair resampling; clusters are not moving together",
-			first.DeltaCILow, first.DeltaCIHigh)
+	if !(first.DeltaCILow < naive.DeltaCILow) {
+		t.Fatalf("clustered CI low %v not below naive CI low %v; twin clusters are not moving together",
+			first.DeltaCILow, naive.DeltaCILow)
 	}
 
 	// Per-stratum entries: descriptives only.
@@ -501,6 +524,66 @@ func TestAssemblyReportAuxModes(t *testing.T) {
 	}
 	if shallow.Stratum != "shallow" || shallow.Count != 2 || shallow.Labeled != 1 || shallow.MeanQuality != 0.75 {
 		t.Fatalf("shallow topline stratum = %+v", shallow)
+	}
+}
+
+// TestAssemblyReportScenarioFamilyCrossesStrata: a non-empty family under
+// more than one stratum cannot cluster-within-stratum; every pair it touches
+// is excluded with a structural reason instead of silently splitting.
+func TestAssemblyReportScenarioFamilyCrossesStrata(t *testing.T) {
+	arts, labels := appendMixedPairs(nil, nil, "m", 0, 58, 0.5, 1.0, nil)
+	for i, stratum := range []string{"shallow", "deep"} {
+		pair := fmt.Sprintf("xf-%03d", i)
+		mut := func(ae *AssemblyEval) {
+			ae.Stratum = stratum
+			ae.ScenarioFamily = "xfam"
+		}
+		l := mixedArtifact(pair, AssemblyLegacy, "m", mut)
+		x := mixedArtifact(pair, AssemblyMixed, "m", mut)
+		arts = append(arts, l, x)
+		labels = append(labels, labelFor(l, 0.5), labelFor(x, 1.0))
+	}
+
+	lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+	if lm.Pairs != 58 {
+		t.Fatalf("pairs = %d, want 58 (cross-strata family pairs must be excluded)", lm.Pairs)
+	}
+	got := map[string]string{}
+	for _, e := range lm.Exclusions {
+		got[e.PairID] = e.Reason
+	}
+	for _, pair := range []string{"xf-000", "xf-001"} {
+		if got[pair] != "scenario-family-crosses-strata" {
+			t.Errorf("exclusion for %q = %q, want scenario-family-crosses-strata", pair, got[pair])
+		}
+	}
+	if len(lm.Exclusions) != 2 {
+		t.Fatalf("exclusions = %v, want exactly the two xfam pairs", lm.Exclusions)
+	}
+	// The strata section is rebuilt from the filtered set: only "shallow"
+	// remains, and the excluded deltas are gone from the pooled evidence.
+	if len(lm.Strata) != 1 || lm.Strata[0].Stratum != "shallow" || lm.Strata[0].Pairs != 58 {
+		t.Fatalf("strata = %+v, want shallow/58 only", lm.Strata)
+	}
+}
+
+func TestMedianOf(t *testing.T) {
+	cases := []struct {
+		name string
+		xs   []float64
+		want float64
+	}{
+		{"even count averages the middle pair", []float64{1, 2, 3, 4}, 2.5},
+		{"odd count takes the middle", []float64{1, 2, 3}, 2},
+		{"unsorted input", []float64{3, 1, 4, 2}, 2.5},
+		{"single value", []float64{7}, 7},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := medianOf(tc.xs); got != tc.want {
+				t.Fatalf("medianOf(%v) = %v, want %v", tc.xs, got, tc.want)
+			}
+		})
 	}
 }
 

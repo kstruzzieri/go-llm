@@ -692,6 +692,17 @@ func TestAssemblyReportPairingAndDecision(t *testing.T) {
 		t.Fatalf("decision = %q, want quality-improved (uniform +0.5 deltas)", model.Decision)
 	}
 
+	// Pure-3a input: the marshaled report must carry NO 3c keys. The 3c
+	// sections are omitempty, so a flat-progressive-only report stays
+	// byte-identical to the 3a schema — asserted, not just commented.
+	rawRep, err := json.Marshal(rep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(rawRep), "legacy_mixed") || strings.Contains(string(rawRep), `"topline"`) {
+		t.Fatalf("pure-3a report leaked 3c keys:\n%s", rawRep)
+	}
+
 	// Candidate mismatch invalidates the case, never skews it. The extra
 	// pair uses a FRESH pair ID ("case-mismatch", not one of case-0..59):
 	// reusing an existing pair ID would trip the duplicate-arm error, which

@@ -10,7 +10,9 @@ import (
 
 // Slice 3c (#331) legacy-mixed assembly kind: pairing invariants, the
 // pre-registered decision rule v2, and the stratified cluster bootstrap.
-// The flat-progressive kind's rule and header live in assembly.go, untouched.
+// Also owns the topline descriptive section (computeAssemblyTopline) and the
+// medianOf helper. The flat-progressive kind's rule and header live in
+// assembly.go, untouched.
 
 // Assembly pair kinds. Each mode maps to a kind individually, so the pair
 // key (kind, PairID, model) is computable per artifact and the SAME PairID
@@ -86,7 +88,8 @@ func assemblyMixedDecisionRuleText() string {
 }
 
 // AssemblyExclusion records one pair a kind excluded from pairing, with the
-// invariant it failed. Exclusions never abort the report.
+// invariant it failed. Exclusions never abort the report; duplicate arms
+// remain report-wide errors, matching 3a.
 type AssemblyExclusion struct {
 	PairID string `json:"pair_id"`
 	Kind   string `json:"kind"`
@@ -154,6 +157,7 @@ type AssemblyToplineReport struct {
 
 // assemblyMixedPair is one complete labeled non-control legacy-mixed pair.
 type assemblyMixedPair struct {
+	pairID  string
 	delta   float64
 	stratum string
 	family  string
@@ -207,6 +211,12 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		case leg.Budget != mix.Budget:
 			exclude("budget-mismatch")
 			continue
+		case leg.Stratum != mix.Stratum:
+			exclude("stratum-mismatch")
+			continue
+		case leg.ScenarioFamily != mix.ScenarioFamily:
+			exclude("scenario-family-mismatch")
+			continue
 		case leg.Control != mix.Control:
 			exclude("control-flag-mismatch")
 			continue
@@ -222,10 +232,11 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 			a.report.ControlAbsDeltas = append(a.report.ControlAbsDeltas, math.Abs(qM-qL))
 			continue
 		}
-		// ponytail: stratum/family read from the legacy arm; arm mismatch on
-		// these labels is not a registered invariant, add one if it bites.
+		// Arms verified identical above (stratum/family invariants), so
+		// reading them from the legacy arm is exact.
 		a.complete = append(a.complete, assemblyMixedPair{
-			delta: qM - qL, stratum: leg.Stratum, family: leg.ScenarioFamily,
+			pairID: k.pair,
+			delta:  qM - qL, stratum: leg.Stratum, family: leg.ScenarioFamily,
 			legacy: leg, mixed: mix,
 		})
 	}
@@ -233,6 +244,37 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 	var out []AssemblyMixedModelReport
 	for _, model := range order {
 		a := models[model]
+		// A non-empty scenario family spanning more than one stratum breaks
+		// the cluster-within-stratum bootstrap model (its pairs could no
+		// longer move together); exclude every pair such a family touches.
+		famStratum := map[string]string{}
+		crossed := map[string]bool{}
+		for _, p := range a.complete {
+			if p.family == "" {
+				continue
+			}
+			if s, ok := famStratum[p.family]; ok {
+				if s != p.stratum {
+					crossed[p.family] = true
+				}
+				continue
+			}
+			famStratum[p.family] = p.stratum
+		}
+		if len(crossed) > 0 {
+			kept := make([]assemblyMixedPair, 0, len(a.complete))
+			for _, p := range a.complete {
+				if crossed[p.family] {
+					a.report.Exclusions = append(a.report.Exclusions, AssemblyExclusion{
+						PairID: p.pairID, Kind: assemblyKindLegacyMixed,
+						Reason: "scenario-family-crosses-strata",
+					})
+					continue
+				}
+				kept = append(kept, p)
+			}
+			a.complete = kept
+		}
 		r := a.report
 		r.Pairs = len(a.complete)
 		if r.Pairs > 0 {
