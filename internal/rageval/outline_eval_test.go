@@ -210,7 +210,7 @@ func TestEvalCandidateRankingMatchesSearchMultiForWholeCorpus(t *testing.T) {
 	}
 	embeddings := [][]float64{{1, 0}, {0.8, 0.2}, {0, 1}, {-1, 0}, {-1, 0}}
 	for i := range chunks {
-		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, chunks[i].Source, chunks[i:i+1], embeddings[i:i+1], "fixture:"+chunks[i].Source, vectorSpaceID); err != nil {
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, chunks[i].Source, chunks[i:i+1], embeddings[i:i+1], fixtureSourceSignature(chunks[i:i+1]), vectorSpaceID); err != nil {
 			t.Fatalf("ReplaceSourceWithHashAndVectorSpaceID: %v", err)
 		}
 	}

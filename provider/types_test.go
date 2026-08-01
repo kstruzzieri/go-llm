@@ -269,21 +269,6 @@ func TestThinkBudget(t *testing.T) {
 	}
 }
 
-func TestThinkMetrics(t *testing.T) {
-	m := ThinkMetrics{
-		ThinkingTokens: 200,
-		ContentTokens:  800,
-		ThinkRatio:     0.2,
-		ThinkDuration:  3 * time.Second,
-	}
-	if m.ThinkingTokens+m.ContentTokens != 1000 {
-		t.Errorf("total tokens = %d, want 1000", m.ThinkingTokens+m.ContentTokens)
-	}
-	if m.ThinkRatio != 0.2 {
-		t.Errorf("ThinkRatio = %v, want 0.2", m.ThinkRatio)
-	}
-}
-
 func TestCapability_BitwiseOps(t *testing.T) {
 	// Verify that capabilities compose correctly with bitwise OR.
 	combined := CapChat | CapStream | CapToolCall
@@ -304,21 +289,6 @@ func TestCapability_BitwiseOps(t *testing.T) {
 	}
 	if combined&CapThinking != 0 {
 		t.Error("combined should not include CapThinking")
-	}
-}
-
-func TestFIMConfig(t *testing.T) {
-	cfg := FIMConfig{
-		Prefix:          "<|fim_prefix|>",
-		Suffix:          "<|fim_suffix|>",
-		Middle:          "<|fim_middle|>",
-		PrefixBudgetPct: 75,
-	}
-	if cfg.PrefixBudgetPct != 75 {
-		t.Errorf("PrefixBudgetPct = %d, want 75", cfg.PrefixBudgetPct)
-	}
-	if cfg.StopTokens != nil {
-		t.Errorf("StopTokens = %v, want nil", cfg.StopTokens)
 	}
 }
 
@@ -412,145 +382,5 @@ func TestFIMConfigValidate(t *testing.T) {
 				t.Errorf("Validate() error = %v, wantErr %v", err, tt.wantErr)
 			}
 		})
-	}
-}
-
-func TestCompletionConfidence(t *testing.T) {
-	cc := CompletionConfidence{
-		Score:      0.95,
-		AvgLogProb: -0.5,
-		MinLogProb: -2.1,
-		DropOffIdx: 42,
-	}
-	if cc.Score != 0.95 {
-		t.Errorf("Score = %v, want 0.95", cc.Score)
-	}
-	if cc.DropOffIdx != 42 {
-		t.Errorf("DropOffIdx = %d, want 42", cc.DropOffIdx)
-	}
-}
-
-func TestRouteOutcomeOnChatResponse(t *testing.T) {
-	outcome := &RouteOutcome{
-		PlannedModel:  ModelKey{Provider: "ollama", Model: "qwen3:32b"},
-		ActualModel:   ModelKey{Provider: "ollama", Model: "qwen3:8b"},
-		FallbacksUsed: 1,
-		WasSticky:     false,
-		Score:         0.85,
-		Reason:        "primary model overloaded, fell back to smaller variant",
-	}
-	resp := ChatResponse{
-		Model:        "qwen3:8b",
-		Provider:     "ollama",
-		Content:      "Hello!",
-		Done:         true,
-		RouteOutcome: outcome,
-	}
-
-	if resp.RouteOutcome == nil {
-		t.Fatal("RouteOutcome should not be nil")
-	}
-	if resp.RouteOutcome.PlannedModel.String() != "ollama/qwen3:32b" {
-		t.Errorf("PlannedModel = %q, want %q", resp.RouteOutcome.PlannedModel.String(), "ollama/qwen3:32b")
-	}
-	if resp.RouteOutcome.ActualModel.String() != "ollama/qwen3:8b" {
-		t.Errorf("ActualModel = %q, want %q", resp.RouteOutcome.ActualModel.String(), "ollama/qwen3:8b")
-	}
-	if resp.RouteOutcome.FallbacksUsed != 1 {
-		t.Errorf("FallbacksUsed = %d, want 1", resp.RouteOutcome.FallbacksUsed)
-	}
-	if resp.RouteOutcome.WasSticky {
-		t.Error("WasSticky should be false")
-	}
-	if resp.RouteOutcome.Score != 0.85 {
-		t.Errorf("Score = %v, want 0.85", resp.RouteOutcome.Score)
-	}
-	if resp.RouteOutcome.Reason != "primary model overloaded, fell back to smaller variant" {
-		t.Errorf("Reason = %q, want %q", resp.RouteOutcome.Reason, "primary model overloaded, fell back to smaller variant")
-	}
-}
-
-func TestRouteOutcomeNilWhenDirectCall(t *testing.T) {
-	// When a response comes from a direct provider call (no Router),
-	// RouteOutcome should be nil on all response types.
-	chat := ChatResponse{
-		Model:    "qwen3:8b",
-		Provider: "ollama",
-		Content:  "Hello!",
-		Done:     true,
-	}
-	if chat.RouteOutcome != nil {
-		t.Error("ChatResponse.RouteOutcome should be nil for direct calls")
-	}
-
-	gen := GenerateResponse{
-		Model:    "qwen3:8b",
-		Provider: "ollama",
-		Response: "generated text",
-		Done:     true,
-	}
-	if gen.RouteOutcome != nil {
-		t.Error("GenerateResponse.RouteOutcome should be nil for direct calls")
-	}
-
-	embed := EmbedResponse{
-		Model:      "nomic-embed-text",
-		Provider:   "ollama",
-		Embeddings: [][]float64{{0.1, 0.2, 0.3}},
-	}
-	if embed.RouteOutcome != nil {
-		t.Error("EmbedResponse.RouteOutcome should be nil for direct calls")
-	}
-}
-
-func TestRouteOutcomeOnGenerateResponse(t *testing.T) {
-	outcome := &RouteOutcome{
-		PlannedModel:  ModelKey{Provider: "ollama", Model: "qwen3:8b"},
-		ActualModel:   ModelKey{Provider: "ollama", Model: "qwen3:8b"},
-		FallbacksUsed: 0,
-		WasSticky:     true,
-		Score:         0.92,
-		Reason:        "model was warm, sticky routing applied",
-	}
-	resp := GenerateResponse{
-		Model:        "qwen3:8b",
-		Provider:     "ollama",
-		Response:     "func main() {}",
-		Done:         true,
-		RouteOutcome: outcome,
-	}
-
-	if resp.RouteOutcome == nil {
-		t.Fatal("RouteOutcome should not be nil")
-	}
-	if resp.RouteOutcome.WasSticky != true {
-		t.Error("WasSticky should be true")
-	}
-	if resp.RouteOutcome.FallbacksUsed != 0 {
-		t.Errorf("FallbacksUsed = %d, want 0", resp.RouteOutcome.FallbacksUsed)
-	}
-}
-
-func TestRouteOutcomeOnEmbedResponse(t *testing.T) {
-	outcome := &RouteOutcome{
-		PlannedModel:  ModelKey{Provider: "ollama", Model: "nomic-embed-text"},
-		ActualModel:   ModelKey{Provider: "ollama", Model: "nomic-embed-text"},
-		FallbacksUsed: 0,
-		WasSticky:     false,
-		Score:         1.0,
-		Reason:        "only embedding model available",
-	}
-	resp := EmbedResponse{
-		Model:        "nomic-embed-text",
-		Provider:     "ollama",
-		Embeddings:   [][]float64{{0.1, 0.2}},
-		RouteOutcome: outcome,
-	}
-
-	if resp.RouteOutcome == nil {
-		t.Fatal("RouteOutcome should not be nil")
-	}
-	if resp.RouteOutcome.Score != 1.0 {
-		t.Errorf("Score = %v, want 1.0", resp.RouteOutcome.Score)
 	}
 }

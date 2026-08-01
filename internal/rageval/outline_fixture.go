@@ -210,12 +210,13 @@ func outlineIdentity(chunk rag.Chunk) string {
 	return "id:" + chunk.ID
 }
 
-// outlineSourceSignature builds a parseable versioned source signature over
+// fixtureSourceSignature builds a parseable versioned source signature over
 // the source's chunks, so SourceProvenanceBatch derives a non-blank
-// ContentHash for fixture sources (a bare string parses as unknown). Same
-// shape as cmd/llm-bench's assemblySourceSignature; kept separate — two
-// fixtures, no shared constructor.
-func outlineSourceSignature(chunks []rag.Chunk) string {
+// ContentHash for fixture sources (a bare string parses as unknown). Shared by
+// every rageval fixture that seeds a store: the outline fixture here and
+// runner.buildStore. Same shape as cmd/llm-bench's assemblySourceSignature,
+// which stays separate — different package, different chunk shape.
+func fixtureSourceSignature(chunks []rag.Chunk) string {
 	var content strings.Builder
 	for _, chunk := range chunks {
 		content.WriteString(chunk.ID)
@@ -254,7 +255,7 @@ func seedOutlineStore(ctx context.Context, path string, fixture outlineFixture) 
 		for i, chunk := range chunks {
 			embeddings[i] = fixture.embeddings[chunk.ID]
 		}
-		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, outlineSourceSignature(chunks), vectorSpaceID); err != nil {
+		if err := store.ReplaceSourceWithHashAndVectorSpaceID(ctx, source, chunks, embeddings, fixtureSourceSignature(chunks), vectorSpaceID); err != nil {
 			_ = store.Close()
 			return fmt.Errorf("rag eval: seed outline source %q: %w", source, err)
 		}
