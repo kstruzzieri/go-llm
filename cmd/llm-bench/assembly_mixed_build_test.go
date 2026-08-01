@@ -241,6 +241,63 @@ func TestMixedPressureEvidenceGate(t *testing.T) {
 	}
 }
 
+// TestMixedControlSilentTruncation covers the control-hole fix: the control
+// budget is raw+slack on the REGISTERED basis, but agent's messageCost also
+// prices tool-call args — which for fixture_echo duplicate the echoed content
+// — so a fat echo makes agent's total exceed the budget and BOTH arms shed
+// identically. The control branch of the pressure gate must catch that
+// instead of exempting it, or truncated control traces emit silently.
+func TestMixedControlSilentTruncation(t *testing.T) {
+	big := strings.Repeat("padding words for the fat echo control case. ", 60)
+	args, err := json.Marshal(map[string]string{"content": big})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fat := mixedTinyEchoCase("fat-ctl", true)
+	fat.Events[1].ToolCall.Args = args
+	built := buildMixedStateT(t, fat)
+	budget := mixedCaseBudget(built, true)
+	legacy, mixed := buildMixedArmsT(t, built, budget)
+	// Precondition for the test to mean anything: the arms really shed.
+	if legacy.shedMessages == 0 && legacy.shedBytes == 0 {
+		t.Fatalf("fat-echo legacy arm did not shed; fixture not fat enough")
+	}
+	gerr := mixedPressureGate(fat.ID, true, legacy, mixed)
+	if gerr == nil || !strings.Contains(gerr.Error(), "control") || !strings.Contains(gerr.Error(), "shed") {
+		t.Errorf("fat-echo control: err = %v; want a control-arm-shed error", gerr)
+	}
+}
+
+// TestMixedControlAnchorFree covers the control-with-anchors misdiagnosis
+// fix on both ends: author-time rejection, and (validation bypassed) the
+// control-differ error carrying the first differing message index.
+func TestMixedControlAnchorFree(t *testing.T) {
+	for _, tool := range []mixedToolCall{
+		{CallID: "c-r", Tool: "retrieve", Args: json.RawMessage(`{"query":"beta gate"}`)},
+		{CallID: "c-m", Tool: "agent_memory_search", Args: json.RawMessage(`{"query":"standup"}`)},
+	} {
+		c := withMixedToolCall(mixedControlCase("ctl-anchor"), tool)
+		err := validateMixedCase(c)
+		if err == nil || !strings.Contains(err.Error(), "anchor-free") {
+			t.Errorf("control + %s: err = %v; want the anchor-free rejection", tool.Tool, err)
+		}
+	}
+
+	// Validation bypassed (direct build): mixed assembly rewrites the anchor
+	// content even at the generous control budget, so the control-differ gate
+	// fires and names the first differing message index.
+	c := withMixedToolCall(mixedControlCase("ctl-anchor-direct"), mixedToolCall{
+		CallID: "c-m1", Tool: "agent_memory_search", Args: json.RawMessage(`{"query":"standup wednesdays"}`),
+	})
+	built := buildMixedStateT(t, c)
+	legacy, mixed := buildMixedArmsT(t, built, mixedCaseBudget(built, true))
+	err := mixedArmsDifferGate(c.ID, true, legacy.state, mixed.state)
+	if err == nil || !strings.Contains(err.Error(), "first at message 3") ||
+		!strings.Contains(err.Error(), "ctl-anchor-direct") {
+		t.Errorf("control-with-anchor direct build: err = %v; want a control-differ error carrying index 3 (the tool message)", err)
+	}
+}
+
 func TestMixedArmsDifferGate(t *testing.T) {
 	// Control integration: no structured anchors, generous budget => both arms
 	// identical, gate passes and asserts it.
@@ -458,8 +515,11 @@ func TestMixedBuildDeterminism(t *testing.T) {
 			t.Fatalf("runMixedFixture: %v\noutput:\n%s", err, buf.String())
 		}
 		out := buf.String()
-		if !strings.Contains(out, "det-press") || !strings.Contains(out, "budget=") {
+		if !strings.Contains(out, "case det-press gated: budget=") {
 			t.Errorf("per-case gate summary missing from output:\n%s", out)
+		}
+		if !strings.Contains(out, "wrote 5 trace(s)") {
+			t.Errorf("trailing wrote-count line missing from output:\n%s", out)
 		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {

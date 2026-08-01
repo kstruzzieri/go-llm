@@ -445,6 +445,13 @@ func validateMixedEvents(c mixedCase) error {
 				return fmt.Errorf("event %d: turn content is blank", i)
 			}
 		default:
+			// Control cases must stay anchor-free: mixed assembly rewrites a
+			// structured anchor's Content (anchorJoined) even at a generous
+			// budget, so a control case with retrieve/agent_memory_search would
+			// fail the control-identity gate for a reason no budget fixes.
+			if c.Control && e.ToolCall.Tool != "fixture_echo" {
+				return fmt.Errorf("event %d: control cases must be anchor-free: conversation turns and fixture_echo only — mixed assembly rewrites anchor content even at generous budgets", i)
+			}
 			if err := validateMixedToolCall(i, e.ToolCall, c.CapStress, callIDs); err != nil {
 				return err
 			}

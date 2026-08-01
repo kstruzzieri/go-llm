@@ -41,6 +41,10 @@ type mixedArm struct {
 // round(f * raw) floored at the minimum viable prompt — system + final user
 // question + slack, all on the registered mixedEstTokens basis — so no legal
 // fixture can starve the must-fit segment into ErrContextExhausted.
+//
+// Precondition: built.State's final message is the user question (the fixture
+// validator guarantees a final user turn, and buildMixedState preserves event
+// order).
 func mixedCaseBudget(built mixedBuiltState, control bool) int {
 	if control {
 		return built.RawStateTokens + mixedMinViableSlack
@@ -74,16 +78,15 @@ func mixedCaseBudget(built mixedBuiltState, control bool) int {
 // fixture, so ErrContextExhausted here means the fixture (or the formula) is
 // wrong — never something to paper over.
 func buildMixedArms(ctx context.Context, built mixedBuiltState, budget int) (mixedArm, mixedArm, error) {
+	const exhaustedHint = "the budget floor should keep every legal fixture assemblable; fixture bug"
 	tb := agent.TokenBudget{Input: budget}
 	legacySt, legacyP, err := agent.ContextManager{}.Assemble(ctx, built.State, 0, tb)
 	if err != nil {
-		return mixedArm{}, mixedArm{}, fmt.Errorf(
-			"legacy arm: assemble at budget %d: %w (the budget floor should keep every legal fixture assemblable; fixture bug)", budget, err)
+		return mixedArm{}, mixedArm{}, fmt.Errorf("legacy arm: assemble at budget %d: %w (%s)", budget, err, exhaustedHint)
 	}
 	mixedSt, mixedP, tr, err := agent.ContextManager{Mixed: true}.AssembleWithTrace(ctx, built.State, 0, tb)
 	if err != nil {
-		return mixedArm{}, mixedArm{}, fmt.Errorf(
-			"mixed arm: assemble at budget %d: %w (the budget floor should keep every legal fixture assemblable; fixture bug)", budget, err)
+		return mixedArm{}, mixedArm{}, fmt.Errorf("mixed arm: assemble at budget %d: %w (%s)", budget, err, exhaustedHint)
 	}
 	legacy := mixedArm{mode: AssemblyLegacy, state: legacySt, pressure: legacyP}
 	legacy.shedMessages, legacy.shedBytes = mixedShed(built.State, legacySt)
@@ -116,14 +119,21 @@ func mixedStateContentBytes(st agent.State) int {
 	return n
 }
 
-// mixedPressureGate (gate 1) rejects a non-control case either arm assembled
-// without shedding anything: a case the budget never pressures measures
-// nothing. Control cases are exempt — their budget is generous by design.
+// mixedPressureGate (gate 1). Non-control: each arm must have shed something —
+// a case the budget never pressures measures nothing. Control: the INVERSE
+// assertion — the generous budget must retain everything, so ANY shed means
+// agent's envelope pricing (tool-call args/IDs, which the registered raw
+// basis does not count) exceeded raw+slack and the control traces would emit
+// silently truncated.
 func mixedPressureGate(caseID string, control bool, legacy, mixed mixedArm) error {
-	if control {
-		return nil
-	}
 	for _, arm := range []mixedArm{legacy, mixed} {
+		if control {
+			if arm.shedMessages != 0 || arm.shedBytes != 0 {
+				return fmt.Errorf("case %q: control %s arm shed %dmsg/%dB under the generous budget: agent's envelope (tool-call args/ids) exceeded raw+slack; shrink the case's tool-call payloads",
+					caseID, arm.mode, arm.shedMessages, arm.shedBytes)
+			}
+			continue
+		}
 		if arm.shedMessages == 0 && arm.shedBytes == 0 {
 			return fmt.Errorf("case %q: %s arm shows no pressure evidence (shed_messages=0, shed_bytes=0): the registered budget retained the full state (fixture bug: grow the state until f=%v binds)",
 				caseID, arm.mode, mixedBudgetFraction)
@@ -132,32 +142,54 @@ func mixedPressureGate(caseID string, control bool, legacy, mixed mixedArm) erro
 	return nil
 }
 
-// mixedArmMessagesEqual compares two assembled arms role+content pairwise —
-// the model-visible sequence, which is what the experiment contrasts.
-func mixedArmMessagesEqual(a, b agent.State) bool {
-	if len(a.Messages) != len(b.Messages) {
-		return false
+// mixedArmsFirstDiff returns the first index at which the two assembled
+// message sequences differ (role+content pairwise — the model-visible
+// sequence, which is what the experiment contrasts), or -1 when identical.
+// When one sequence is a strict prefix of the other, the diff index is the
+// shorter length (the first message present on only one side).
+func mixedArmsFirstDiff(a, b agent.State) int {
+	n := len(a.Messages)
+	if len(b.Messages) < n {
+		n = len(b.Messages)
 	}
-	for i := range a.Messages {
+	for i := 0; i < n; i++ {
 		if a.Messages[i].Role != b.Messages[i].Role || a.Messages[i].Content != b.Messages[i].Content {
-			return false
+			return i
 		}
 	}
-	return true
+	if len(a.Messages) != len(b.Messages) {
+		return n
+	}
+	return -1
+}
+
+func mixedArmMessagesEqual(a, b agent.State) bool { return mixedArmsFirstDiff(a, b) < 0 }
+
+// mixedRoleAt names the role at index i, or "(absent)" past the end — the
+// prefix-diff case, where one arm simply has fewer messages.
+func mixedRoleAt(st agent.State, i int) string {
+	if i >= len(st.Messages) {
+		return "(absent)"
+	}
+	return st.Messages[i].Role
 }
 
 // mixedArmsDifferGate (gate 2): non-control arms must differ (identical arms
 // carry no assembly contrast); control arms must be identical (the generous
-// budget retains everything on both paths, so a difference is a fixture bug).
+// budget retains everything on both paths, so a difference is a fixture bug —
+// the anchor-free control rule in validateMixedCase should make this
+// unreachable, and the diff index below is the belt for a future tool that
+// slips past it).
 func mixedArmsDifferGate(caseID string, control bool, legacy, mixed agent.State) error {
-	equal := mixedArmMessagesEqual(legacy, mixed)
+	idx := mixedArmsFirstDiff(legacy, mixed)
 	if control {
-		if !equal {
-			return fmt.Errorf("case %q: control arms differ (role+content): the control budget must retain both arms fully and identically; a control case with differing arms is a fixture bug", caseID)
+		if idx >= 0 {
+			return fmt.Errorf("case %q: control arms differ (role+content) first at message %d (legacy role %s, mixed role %s): control cases must be anchor-free and fully retained; a control case with differing arms is a fixture bug",
+				caseID, idx, mixedRoleAt(legacy, idx), mixedRoleAt(mixed, idx))
 		}
 		return nil
 	}
-	if equal {
+	if idx < 0 {
 		return fmt.Errorf("case %q: legacy and mixed arms are identical (role+content): no assembly contrast to measure (fixture bug)", caseID)
 	}
 	return nil
@@ -173,10 +205,18 @@ func mixedQuestionSurvivalGate(caseID string, mode AssemblyMode, st agent.State,
 	}
 	final := st.Messages[len(st.Messages)-1]
 	if final.Role != "user" || final.Content != question {
-		return fmt.Errorf("case %q: %s arm final message (role %q) is not identically the original user question (question survival is an identity check, not a substring check)",
-			caseID, mode, final.Role)
+		return fmt.Errorf("case %q: %s arm final message (role %q, content %q) is not identically the original user question (question survival is an identity check, not a substring check)",
+			caseID, mode, final.Role, mixedPreview(final.Content))
 	}
 	return nil
+}
+
+// mixedPreview truncates diagnostic content to ~80 bytes on a rune boundary.
+func mixedPreview(s string) string {
+	if len(s) <= 80 {
+		return s
+	}
+	return mixedCapContent(s, 80) + "..."
 }
 
 // mixedArmContains reports whether lit appears verbatim (case-SENSITIVE —
@@ -301,6 +341,10 @@ func mixedArmTrace(c mixedCase, built mixedBuiltState, budget int, arm mixedArm)
 // that declares topline_facts (validated non-control with every required
 // literal contained). CandidateIDs/StateDigest/Budget stay empty: topline
 // validation requires only PairID, and the arm never enters pairing.
+//
+// topline_facts is trusted fixture prose: a "Question:" embedded inside the
+// facts is not rejected — it could only confuse the ceiling arm itself, which
+// is descriptive and never enters the paired verdict.
 func mixedToplineTrace(c mixedCase) Trace {
 	question := c.Events[len(c.Events)-1].Turn.Content
 	content := "Facts:\n" + c.ToplineFacts + "\n\nQuestion: " + question
@@ -327,6 +371,9 @@ func mixedToplineTrace(c mixedCase) Trace {
 // traces. A validateTrace failure on an assembled arm is a REAL finding — the
 // prefilled contract says assembled chains stay atomic — so it is a loud stop,
 // never a reason to loosen validation.
+//
+// Precondition: built is c's own frozen State (emitMixedCorpus pairs them by
+// index), whose final message is the case's user question.
 func buildMixedCaseTraces(ctx context.Context, c mixedCase, built mixedBuiltState, w io.Writer) ([]Trace, error) {
 	budget := mixedCaseBudget(built, c.Control)
 	legacy, mixed, err := buildMixedArms(ctx, built, budget)
@@ -363,7 +410,7 @@ func buildMixedCaseTraces(ctx context.Context, c mixedCase, built mixedBuiltStat
 				c.ID, tr.ID, err)
 		}
 	}
-	_, _ = fmt.Fprintf(w, "  case %s: budget=%d legacy shed=%dmsg/%dB mixed shed=%dmsg/%dB omitted_subjects=%d\n",
+	_, _ = fmt.Fprintf(w, "  case %s gated: budget=%d legacy shed=%dmsg/%dB mixed shed=%dmsg/%dB omitted_subjects=%d\n",
 		c.ID, budget, legacy.shedMessages, legacy.shedBytes, mixed.shedMessages, mixed.shedBytes, mixed.omittedSubjects)
 	return traces, nil
 }
@@ -374,6 +421,9 @@ func buildMixedCaseTraces(ctx context.Context, c mixedCase, built mixedBuiltStat
 // stale owned traces are reconciled away. All gates for all cases run before
 // the first byte is written.
 func emitMixedCorpus(ctx context.Context, f mixedFixture, states []mixedBuiltState, outDir string, w io.Writer) error {
+	if len(states) != len(f.Cases) {
+		return fmt.Errorf("built %d state(s) for %d case(s): buildMixedStates must produce exactly one State per case, in order", len(states), len(f.Cases))
+	}
 	traces := make([]Trace, 0, len(f.Cases)*3)
 	for i, c := range f.Cases {
 		caseTraces, err := buildMixedCaseTraces(ctx, c, states[i], w)
@@ -407,5 +457,6 @@ func emitMixedCorpus(ctx context.Context, f mixedFixture, states []mixedBuiltSta
 	if err := writeAssemblyManifest(outDir, expected); err != nil {
 		return fmt.Errorf("write output manifest: %w", err)
 	}
+	_, _ = fmt.Fprintf(w, "  wrote %d trace(s)\n", len(traces))
 	return nil
 }
