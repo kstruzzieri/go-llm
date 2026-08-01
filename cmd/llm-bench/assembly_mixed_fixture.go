@@ -93,6 +93,14 @@ type mixedCase struct {
 	// absent.
 	AnswerTurnIndex *int `json:"answer_turn_index,omitempty"`
 
+	// ToplineFacts, when set, feeds the unpaired topline ceiling arm: a single
+	// "Facts + Question" prompt with the answer-bearing facts handed over
+	// directly. Only legal on non-control cases (controls are excluded from the
+	// verdict and feed no ceiling), and must contain every required_evidence
+	// literal case-sensitively — facts that cannot support the answer would
+	// make the ceiling meaningless.
+	ToplineFacts string `json:"topline_facts,omitempty"`
+
 	Golden Golden `json:"golden"`
 }
 
@@ -337,6 +345,22 @@ func validateMixedCase(c mixedCase) error {
 	if !c.Control {
 		if err := validateMixedEvidenceContract(c); err != nil {
 			return err
+		}
+	}
+
+	if c.ToplineFacts != "" {
+		if c.Control {
+			return fmt.Errorf("topline_facts is only legal on non-control cases (controls are excluded from the verdict and feed no ceiling arm)")
+		}
+		if strings.TrimSpace(c.ToplineFacts) == "" {
+			return fmt.Errorf("topline_facts is whitespace-only; omit it or state the facts")
+		}
+		// Case-SENSITIVE containment: the facts must support the answer with
+		// the same verbatim anchors the evidence contract pinned.
+		for i, ev := range c.RequiredEvidence {
+			if !strings.Contains(c.ToplineFacts, ev.Literal) {
+				return fmt.Errorf("topline_facts does not contain required_evidence[%d] literal %q (the facts must support the answer)", i, ev.Literal)
+			}
 		}
 	}
 
@@ -622,10 +646,10 @@ func mixedAnswerThird(c mixedCase) string {
 // runMixedFixture parses + validates a mixed-assembly fixture, prints the
 // bookkeeping summary to w, builds every case's frozen State through the
 // production producers (buildMixedStates, assembly_mixed_state.go), then
-// returns the Task 5 placeholder error: arm rendering, gates, and trace
-// emission land next task, and a loud error cannot be mistaken for a
-// successful build.
-func runMixedFixture(ctx context.Context, raw []byte, w io.Writer) error {
+// hands off to the Task 5 arm build: paired legacy/mixed assembly under the
+// registered budget, the gates, and manifest-backed trace emission into
+// outDir (emitMixedCorpus, assembly_mixed_build.go).
+func runMixedFixture(ctx context.Context, raw []byte, outDir string, w io.Writer) error {
 	f, err := parseMixedFixture(raw)
 	if err != nil {
 		return fmt.Errorf("assembly build: parse mixed fixture: %w", err)
@@ -656,14 +680,18 @@ func runMixedFixture(ctx context.Context, raw []byte, w io.Writer) error {
 		return fmt.Errorf("assembly build: %w", err)
 	}
 	_, _ = fmt.Fprintf(w, "  built %d frozen state(s)\n", len(states))
-	return fmt.Errorf("mixed-assembly arm build not yet implemented (Task 5)")
+	if err := emitMixedCorpus(ctx, f, states, outDir, w); err != nil {
+		return fmt.Errorf("assembly build: %w", err)
+	}
+	return nil
 }
 
 // assemblyBuildDispatch routes -assembly-build by fixture shape: a JSON
-// array is the 3a flat/progressive case corpus (existing path, unchanged);
-// a JSON object is the 3c mixed-assembly fixture (validate + frozen-State
-// build; arm emission lands in Task 5).
-func assemblyBuildDispatch(ctx context.Context, fixturePath, outDir string) error {
+// array is the 3a flat/progressive case corpus (existing path, unchanged,
+// emitted into outDir); a JSON object is the 3c mixed-assembly fixture,
+// emitted into mixedOutDir (the mixed corpus keeps its own directory and its
+// own manifest).
+func assemblyBuildDispatch(ctx context.Context, fixturePath, outDir, mixedOutDir string) error {
 	raw, err := os.ReadFile(fixturePath)
 	if err != nil {
 		return fmt.Errorf("assembly build: read fixture: %w", err)
@@ -672,7 +700,7 @@ func assemblyBuildDispatch(ctx context.Context, fixturePath, outDir string) erro
 	case len(trimmed) > 0 && trimmed[0] == '[':
 		return assemblyBuild(ctx, fixturePath, outDir)
 	case len(trimmed) > 0 && trimmed[0] == '{':
-		return runMixedFixture(ctx, raw, os.Stderr)
+		return runMixedFixture(ctx, raw, mixedOutDir, os.Stderr)
 	default:
 		return fmt.Errorf("assembly build: fixture %q must be a JSON array of 3a assembly cases or a mixed-assembly fixture object with version/kind", fixturePath)
 	}

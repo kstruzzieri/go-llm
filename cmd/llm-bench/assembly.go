@@ -467,7 +467,13 @@ func readAssemblyManifest(outDir string) (assemblyManifest, error) {
 }
 
 func validAssemblyTraceFilename(name string) bool {
-	for _, suffix := range []string{"-flat.json", "-progressive.json"} {
+	// 3a flat/progressive plus the 3c mixed-corpus arms; the two corpora live
+	// in separate directories with separate manifests, but share this shape
+	// check (case ID + known arm suffix).
+	for _, suffix := range []string{
+		"-flat.json", "-progressive.json",
+		"-legacy.json", "-mixed.json", "-topline.json",
+	} {
 		if strings.HasSuffix(name, suffix) {
 			return validAssemblyCaseID(strings.TrimSuffix(name, suffix))
 		}

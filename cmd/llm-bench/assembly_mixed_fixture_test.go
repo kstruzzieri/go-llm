@@ -139,10 +139,11 @@ func TestMixedFixtureParseDispatch(t *testing.T) {
 		return path
 	}
 	outDir := filepath.Join(dir, "out")
+	mixedOutDir := filepath.Join(dir, "out-mixed")
 
 	t.Run("array routes to the 3a builder", func(t *testing.T) {
 		path := write("arr.json", "[]")
-		err := assemblyBuildDispatch(context.Background(), path, outDir)
+		err := assemblyBuildDispatch(context.Background(), path, outDir, mixedOutDir)
 		if err == nil || !strings.Contains(err.Error(), "no cases") {
 			t.Fatalf("err = %v; want the 3a builder's no-cases error", err)
 		}
@@ -154,15 +155,18 @@ func TestMixedFixtureParseDispatch(t *testing.T) {
 			t.Fatalf("marshal: %v", err)
 		}
 		path := write("mixed.json", string(raw))
-		err = assemblyBuildDispatch(context.Background(), path, outDir)
-		if err == nil || !strings.Contains(err.Error(), "mixed-assembly arm build not yet implemented (Task 5)") {
-			t.Fatalf("err = %v; want the Task 5 placeholder error", err)
+		// The tiny case retains everything under the minViable-floored budget,
+		// so the mixed builder's own pressure-evidence gate rejects it: proof
+		// the object shape routed all the way into the Task 5 arm build.
+		err = assemblyBuildDispatch(context.Background(), path, outDir, mixedOutDir)
+		if err == nil || !strings.Contains(err.Error(), "pressure evidence") {
+			t.Fatalf("err = %v; want the mixed builder's pressure-evidence gate error", err)
 		}
 	})
 
 	t.Run("garbage errors naming both shapes", func(t *testing.T) {
 		path := write("garbage.json", `"nope"`)
-		err := assemblyBuildDispatch(context.Background(), path, outDir)
+		err := assemblyBuildDispatch(context.Background(), path, outDir, mixedOutDir)
 		if err == nil || !strings.Contains(err.Error(), "JSON array") || !strings.Contains(err.Error(), "mixed-assembly fixture") {
 			t.Fatalf("err = %v; want a shape error naming both accepted shapes", err)
 		}
@@ -175,7 +179,7 @@ func TestMixedFixtureParseDispatch(t *testing.T) {
 		}
 		body := strings.Replace(string(raw), `"version"`, `"versionn"`, 1)
 		path := write("typo.json", body)
-		err = assemblyBuildDispatch(context.Background(), path, outDir)
+		err = assemblyBuildDispatch(context.Background(), path, outDir, mixedOutDir)
 		if err == nil || !strings.Contains(err.Error(), "unknown field") {
 			t.Fatalf("err = %v; want an unknown-field parse error", err)
 		}
@@ -784,15 +788,17 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 	}
 
 	// The mixed build path prints the bookkeeping summary and the built-state
-	// count before the Task 5 placeholder error.
+	// count before the arm build; these tiny cases retain everything under
+	// the minViable-floored budget, so the pressure-evidence gate then stops
+	// the build loudly.
 	raw, err := json.Marshal(mixedFixtureFor(early, late, mem, control))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	var buf bytes.Buffer
-	err = runMixedFixture(context.Background(), raw, &buf)
-	if err == nil || !strings.Contains(err.Error(), "not yet implemented (Task 5)") {
-		t.Fatalf("runMixedFixture = %v; want the Task 5 placeholder error", err)
+	err = runMixedFixture(context.Background(), raw, t.TempDir(), &buf)
+	if err == nil || !strings.Contains(err.Error(), "pressure evidence") {
+		t.Fatalf("runMixedFixture = %v; want the pressure-evidence gate error", err)
 	}
 	out := buf.String()
 	for _, want := range []string{
