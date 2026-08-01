@@ -1,0 +1,656 @@
+package main
+
+import (
+	"encoding/json"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+	"time"
+)
+
+// blindGoldenWorksheet is the byte-exact pre-Task-6 renderBlindWorksheet
+// output for goldenBlindArtifacts(), captured at HEAD 1b1024f before the
+// promptless treatment landed. Non-assembly and 3a (flat/progressive) blocks
+// must stay byte-identical to it forever.
+const blindGoldenWorksheet = "# llm-bench — blind labeling worksheet\n#\n# Score each candidate output from the text alone. Model identity is hidden.\n# For each block, fill the score: line with 0, 0.5, or 1, and notes: optionally.\n# Leave score: blank to skip a block (it will be reported as unscored, not labeled).\n# Then run: llm-bench -blind-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -labels-out <labels.jsonl>\n\n=== ARTIFACT sha256:plain ===\ntrace: t-plain\n\n[prompt]\nsystem for t-plain\n\n<user>\nquestion for t-plain\n\n<assistant>\nassistant turn for t-plain\n\n<user>\nfollow-up for t-plain\n\n[rubric]\nrubric for t-plain\n\n[candidate output]\nplain answer\n\n--- fill below (score: 0 | 0.5 | 1) ---\nscore: \nnotes: \n=== END ===\n\n=== ARTIFACT sha256:flat ===\n[prompt]\nsystem for p3a-flat\n\n<user>\nquestion for p3a-flat\n\n[rubric]\nrubric for p3a-flat\n\n[candidate output]\nflat answer\n\n--- fill below (score: 0 | 0.5 | 1) ---\nscore: \nnotes: \n=== END ===\n\n=== ARTIFACT sha256:prog ===\n[prompt]\nsystem for p3a-progressive\n\n<user>\nquestion for p3a-progressive\n\n[rubric]\nrubric for p3a-progressive\n\n[candidate output]\nprogressive answer\n\n--- fill below (score: 0 | 0.5 | 1) ---\nscore: \nnotes: \n=== END ===\n\n"
+
+// goldenBlindArtifacts is the fixed artifact set behind blindGoldenWorksheet:
+// one plain multi-turn artifact plus a 3a flat/progressive pair.
+func goldenBlindArtifacts() []Artifact {
+	plain := testCalibrationArtifact("t-plain", "plain answer")
+	plain.Trace.Turns = append(plain.Trace.Turns,
+		Turn{Role: "assistant", Content: "assistant turn for t-plain"},
+		Turn{Role: "user", Content: "follow-up for t-plain"})
+	plain.ArtifactHash = "sha256:plain"
+	flat := testCalibrationArtifact("p3a-flat", "flat answer")
+	flat.Trace.AssemblyEval = &AssemblyEval{PairID: "p3a", Mode: AssemblyFlat, CandidateIDs: []string{"c1"}, EstimatedPromptTokens: 10}
+	flat.ArtifactHash = "sha256:flat"
+	prog := testCalibrationArtifact("p3a-progressive", "progressive answer")
+	prog.Trace.AssemblyEval = &AssemblyEval{PairID: "p3a", Mode: AssemblyProgressive, CandidateIDs: []string{"c1"}, EstimatedPromptTokens: 10}
+	prog.ArtifactHash = "sha256:prog"
+	return []Artifact{plain, flat, prog}
+}
+
+// testPromptlessArtifact builds one prefilled-mode assembly artifact whose
+// prompt (system, earlier turns, tool content) is salted with PROMPT-SENTINEL;
+// the final user turn carries the question. hash is assigned verbatim.
+func testPromptlessArtifact(traceID, hash string, mode AssemblyMode, question, answer string) Artifact {
+	trace := Trace{
+		ID:     traceID,
+		System: "PROMPT-SENTINEL system for " + traceID,
+		Turns: []Turn{
+			{Role: "user", Content: "PROMPT-SENTINEL earlier turn for " + traceID},
+			{Role: "assistant", ToolCalls: []ToolCall{{ID: "c1", Name: "search", Arguments: json.RawMessage(`{}`)}}},
+			{Role: "tool", ToolCallID: "c1", Content: "PROMPT-SENTINEL tool content for " + traceID},
+			{Role: "user", Content: question},
+		},
+		Golden: Golden{FinalAnswerCriteria: "rubric for " + traceID},
+	}
+	ae := &AssemblyEval{PairID: "pair-" + traceID, Mode: mode, CandidateIDs: []string{"c1"}, EstimatedPromptTokens: 10}
+	if mode == AssemblyLegacy || mode == AssemblyMixed {
+		ae.Budget = 100
+		ae.StateDigest = "sha256:state"
+	}
+	trace.AssemblyEval = ae
+	return Artifact{
+		TraceID:           traceID,
+		CandidateModel:    "ollama/c",
+		ArtifactHash:      hash,
+		Trace:             trace,
+		ActualFinalAnswer: answer,
+		ActualTranscript:  []Turn{{Role: "assistant", Content: answer}},
+	}
+}
+
+// fillWorksheetField sets the first "<field>:" line inside the fill region of
+// the block opened by blockHeader (exact line match). Works for primary, DUP,
+// PAIR, and adjudication blocks.
+func fillWorksheetField(t *testing.T, worksheet, blockHeader, field, value string) string {
+	t.Helper()
+	lines := strings.Split(worksheet, "\n")
+	inBlock, afterMarker := false, false
+	for i, line := range lines {
+		switch {
+		case line == blockHeader:
+			inBlock = true
+		case inBlock && strings.HasPrefix(line, "--- fill below"):
+			afterMarker = true
+		case inBlock && strings.HasPrefix(line, blindEndMarker):
+			inBlock, afterMarker = false, false
+		case inBlock && afterMarker && strings.HasPrefix(line, field+":"):
+			lines[i] = field + ": " + value
+			return strings.Join(lines, "\n")
+		}
+	}
+	t.Fatalf("fillWorksheetField: no %q line in block %q", field, blockHeader)
+	return ""
+}
+
+func mustRenderBlind(t *testing.T, arts []Artifact, dupN int) string {
+	t.Helper()
+	out, err := renderBlindWorksheet(arts, dupN)
+	if err != nil {
+		t.Fatalf("renderBlindWorksheet: %v", err)
+	}
+	return out
+}
+
+func TestBlindWorksheetPromptlessPrimary(t *testing.T) {
+	for _, mode := range []AssemblyMode{AssemblyLegacy, AssemblyMixed, AssemblyTopline} {
+		art := testPromptlessArtifact("t-"+string(mode), "sha256:pl-"+string(mode), mode, "final question for "+string(mode)+"?", "answer body")
+		out := mustRenderBlind(t, []Artifact{art}, 0)
+		for _, want := range []string{
+			"=== ARTIFACT " + art.ArtifactHash + " ===",
+			"[question]\nfinal question for " + string(mode) + "?",
+			"[rubric]\nrubric for t-" + string(mode),
+			"[candidate output]\nanswer body",
+			"flag: ",
+		} {
+			if !strings.Contains(out, want) {
+				t.Errorf("%s worksheet missing %q:\n%s", mode, want, out)
+			}
+		}
+		// ZERO prompt bytes anywhere in a promptless-only worksheet: no
+		// sentinel, no [prompt] section, no trace line.
+		for _, leaked := range []string{"PROMPT-SENTINEL", "[prompt]", "trace:"} {
+			if strings.Contains(out, leaked) {
+				t.Errorf("%s worksheet leaked %q:\n%s", mode, leaked, out)
+			}
+		}
+	}
+
+	// Non-assembly and 3a flat/progressive rendering is frozen byte-for-byte.
+	if got := mustRenderBlind(t, goldenBlindArtifacts(), 0); got != blindGoldenWorksheet {
+		t.Errorf("non-promptless worksheet drifted from pre-change golden:\ngot:\n%s\nwant:\n%s", got, blindGoldenWorksheet)
+	}
+}
+
+func TestBlindIngestGroundingFlag(t *testing.T) {
+	art := testPromptlessArtifact("t1", "sha256:f1", AssemblyMixed, "q?", "ans")
+	header := "=== ARTIFACT " + art.ArtifactHash + " ==="
+	base := mustRenderBlind(t, []Artifact{art}, 0)
+
+	t.Run("grounding-check flag prefixes notes and is summarized", func(t *testing.T) {
+		ws := fillWorksheetField(t, base, header, "score", "1")
+		ws = fillWorksheetField(t, ws, header, "notes", "shaky claim")
+		ws = fillWorksheetField(t, ws, header, "flag", "grounding-check")
+		res, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester")
+		if err != nil {
+			t.Fatalf("ingestBlindWorksheet: %v", err)
+		}
+		if len(res.Labels) != 1 || res.Labels[0].LabelNotes != "grounding-check;shaky claim" {
+			t.Fatalf("labels = %+v; want one label with notes %q", res.Labels, "grounding-check;shaky claim")
+		}
+		if !reflect.DeepEqual(res.FlaggedHashes, []string{art.ArtifactHash}) {
+			t.Fatalf("FlaggedHashes = %v; want [%s]", res.FlaggedHashes, art.ArtifactHash)
+		}
+	})
+
+	t.Run("blank flag emits a normal label", func(t *testing.T) {
+		ws := fillWorksheetField(t, base, header, "score", "0.5")
+		res, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester")
+		if err != nil {
+			t.Fatalf("ingestBlindWorksheet: %v", err)
+		}
+		if len(res.Labels) != 1 || res.Labels[0].LabelNotes != "" || len(res.FlaggedHashes) != 0 {
+			t.Fatalf("res = %+v; want one unflagged label with empty notes", res)
+		}
+	})
+
+	t.Run("unknown flag value is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, base, header, "score", "1")
+		ws = fillWorksheetField(t, ws, header, "flag", "verify-me")
+		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil || !strings.Contains(err.Error(), "flag") {
+			t.Fatalf("err = %v; want loud unknown-flag error", err)
+		}
+	})
+
+	t.Run("flag on an unscored block is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, base, header, "flag", "grounding-check")
+		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil {
+			t.Fatalf("flag on unscored block accepted; want error")
+		}
+	})
+
+	t.Run("flag on a non-promptless block is a loud error", func(t *testing.T) {
+		plain := testCalibrationArtifact("t-plain", "ans")
+		plain.ArtifactHash = artifactHash(plain)
+		ws := "=== ARTIFACT " + plain.ArtifactHash + " ===\n" +
+			blindFillMarker + "\nscore: 1\nflag: grounding-check\n" + blindEndMarker + "\n"
+		if _, err := ingestBlindWorksheet(ws, []Artifact{plain}, "tester"); err == nil || !strings.Contains(err.Error(), "flag") {
+			t.Fatalf("err = %v; want loud flag-on-non-promptless error", err)
+		}
+	})
+}
+
+// blindDupPool: topline sha256:d0 sorts before all eligible hashes and MUST
+// NOT be selected (only legacy/mixed are dup-eligible); flat sha256:zz-flat is
+// likewise ineligible. Eligible sorted: d1 d2 d3 d4 d5; N=2 => step
+// ceil(5/2)=3 => dups d1 and d4.
+func blindDupPool() []Artifact {
+	arts := []Artifact{
+		testPromptlessArtifact("t-top", "sha256:d0", AssemblyTopline, "top q?", "top answer"),
+		testPromptlessArtifact("t1", "sha256:d1", AssemblyMixed, "q1?", "a1"),
+		testPromptlessArtifact("t2", "sha256:d2", AssemblyLegacy, "q2?", "a2"),
+		testPromptlessArtifact("t3", "sha256:d3", AssemblyMixed, "q3?", "a3"),
+		testPromptlessArtifact("t4", "sha256:d4", AssemblyLegacy, "q4?", "a4"),
+		testPromptlessArtifact("t5", "sha256:d5", AssemblyMixed, "q5?", "a5"),
+	}
+	flat := testCalibrationArtifact("t-flat", "flat answer")
+	flat.Trace.AssemblyEval = &AssemblyEval{PairID: "pf", Mode: AssemblyFlat, CandidateIDs: []string{"c1"}, EstimatedPromptTokens: 10}
+	flat.ArtifactHash = "sha256:zz-flat"
+	return append(arts, flat)
+}
+
+func TestBlindDupInjection(t *testing.T) {
+	arts := blindDupPool()
+	out := mustRenderBlind(t, arts, 2)
+
+	if got := strings.Count(out, " DUP ==="); got != 2 {
+		t.Fatalf("DUP block count = %d; want 2:\n%s", got, out)
+	}
+	for _, want := range []string{"=== ARTIFACT sha256:d1 DUP ===", "=== ARTIFACT sha256:d4 DUP ==="} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("worksheet missing %q (deterministic selection broken):\n%s", want, out)
+		}
+	}
+	// DUP blocks render after ALL primary blocks.
+	firstDup := strings.Index(out, " DUP ===")
+	for _, a := range arts {
+		if idx := strings.Index(out, "=== ARTIFACT "+a.ArtifactHash+" ==="); idx > firstDup {
+			t.Fatalf("primary block %s at %d renders after first DUP at %d", a.ArtifactHash, idx, firstDup)
+		}
+	}
+
+	// Fill every primary; dup d1 agrees (1 vs 1), dup d4 disagrees (0.5 vs 1).
+	ws := out
+	scores := map[string]string{"sha256:d0": "0", "sha256:d1": "1", "sha256:d2": "0", "sha256:d3": "0.5", "sha256:d4": "0.5", "sha256:d5": "1", "sha256:zz-flat": "0"}
+	for hash, score := range scores {
+		ws = fillWorksheetField(t, ws, "=== ARTIFACT "+hash+" ===", "score", score)
+	}
+	ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d1 DUP ===", "score", "1")
+	ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d4 DUP ===", "score", "1")
+
+	res, err := ingestBlindWorksheet(ws, arts, "tester")
+	if err != nil {
+		t.Fatalf("ingestBlindWorksheet: %v", err)
+	}
+	if len(res.Labels) != 7 {
+		t.Fatalf("labels = %d; want 7 (DUP scores must never become labels)", len(res.Labels))
+	}
+	seen := map[string]int{}
+	for _, l := range res.Labels {
+		seen[l.ArtifactHash]++
+	}
+	for hash, n := range seen {
+		if n != 1 {
+			t.Fatalf("hash %s labeled %d times; DUP score leaked into labels", hash, n)
+		}
+	}
+	wantPairs := []blindDupPair{
+		{ArtifactHash: "sha256:d1", PrimaryScore: 1, DupScore: 1},
+		{ArtifactHash: "sha256:d4", PrimaryScore: 0.5, DupScore: 1},
+	}
+	if !reflect.DeepEqual(res.DupPairs, wantPairs) {
+		t.Fatalf("DupPairs = %+v; want %+v", res.DupPairs, wantPairs)
+	}
+	agree, disagree, meanAbs := blindDupSummary(res.DupPairs)
+	if agree != 1 || disagree != 1 || meanAbs != 0.25 {
+		t.Fatalf("summary = agree %d disagree %d mean|d| %v; want 1/1/0.25", agree, disagree, meanAbs)
+	}
+	if len(res.DupUnpaired) != 0 {
+		t.Fatalf("DupUnpaired = %v; want none", res.DupUnpaired)
+	}
+
+	// -dups-out JSONL rows pinned.
+	path := filepath.Join(t.TempDir(), "dups.jsonl")
+	if err := writeJSONLRows(path, "dups", res.DupPairs); err != nil {
+		t.Fatalf("writeJSONLRows: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"artifact_hash":"sha256:d1","primary_score":1,"dup_score":1}` + "\n" +
+		`{"artifact_hash":"sha256:d4","primary_score":0.5,"dup_score":1}` + "\n"
+	if string(data) != want {
+		t.Fatalf("dups-out = %q; want %q", data, want)
+	}
+
+	t.Run("dup without a scored primary is unpaired", func(t *testing.T) {
+		ws := out
+		for hash, score := range scores {
+			if hash == "sha256:d1" {
+				continue // primary d1 left unscored
+			}
+			ws = fillWorksheetField(t, ws, "=== ARTIFACT "+hash+" ===", "score", score)
+		}
+		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d1 DUP ===", "score", "1")
+		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d4 DUP ===", "score", "1")
+		res, err := ingestBlindWorksheet(ws, arts, "tester")
+		if err != nil {
+			t.Fatalf("ingestBlindWorksheet: %v", err)
+		}
+		if res.Skipped != 1 || !reflect.DeepEqual(res.DupUnpaired, []string{"sha256:d1"}) {
+			t.Fatalf("skipped=%d unpaired=%v; want 1 skipped, unpaired [sha256:d1]", res.Skipped, res.DupUnpaired)
+		}
+		if len(res.DupPairs) != 1 || res.DupPairs[0].ArtifactHash != "sha256:d4" {
+			t.Fatalf("DupPairs = %+v; want only sha256:d4", res.DupPairs)
+		}
+	})
+
+	t.Run("flag on a DUP block is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, "=== ARTIFACT sha256:d1 DUP ===", "flag", "grounding-check")
+		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d1 DUP ===", "score", "1")
+		if _, err := ingestBlindWorksheet(ws, arts, "tester"); err == nil {
+			t.Fatalf("flag on DUP block accepted; want error")
+		}
+	})
+
+	t.Run("dup count exceeding eligible artifacts is a loud error", func(t *testing.T) {
+		if _, err := renderBlindWorksheet(arts, 6); err == nil {
+			t.Fatalf("blind-dups 6 over 5 eligible accepted; want error")
+		}
+	})
+}
+
+// fcPairArtifacts builds complete legacy/mixed pairs for pair-alpha (FNV-1a-64
+// of "pair-alpha|c|fc" = 18218199419608068020, even => legacy is A) and
+// pair-gamma ("pair-gamma|c|fc" = 15644729119194098327, odd => mixed is A).
+func fcPairArtifacts() []Artifact {
+	mk := func(traceID, hash, pairID string, mode AssemblyMode, question, answer string) Artifact {
+		a := testPromptlessArtifact(traceID, hash, mode, question, answer)
+		a.Trace.AssemblyEval.PairID = pairID
+		a.Trace.Golden.FinalAnswerCriteria = "rubric for " + pairID
+		return a
+	}
+	return []Artifact{
+		mk("alpha-legacy", "sha256:al", "pair-alpha", AssemblyLegacy, "alpha question?", "legacy alpha answer"),
+		mk("alpha-mixed", "sha256:am", "pair-alpha", AssemblyMixed, "alpha question?", "mixed alpha answer"),
+		mk("gamma-legacy", "sha256:gl", "pair-gamma", AssemblyLegacy, "gamma question?", "legacy gamma answer"),
+		mk("gamma-mixed", "sha256:gm", "pair-gamma", AssemblyMixed, "gamma question?", "mixed gamma answer"),
+	}
+}
+
+func TestForcedChoiceRenderIngest(t *testing.T) {
+	arts := fcPairArtifacts()
+	out, err := renderForcedChoiceWorksheet(arts)
+	if err != nil {
+		t.Fatalf("renderForcedChoiceWorksheet: %v", err)
+	}
+
+	// pair-alpha: legacy is A (even parity), so hashA=sha256:al and answer A is
+	// the legacy answer. Block shape pinned exactly.
+	wantAlpha := "=== PAIR pair-alpha c sha256:al sha256:am ===\n" +
+		"[question]\nalpha question?\n\n" +
+		"[rubric]\nrubric for pair-alpha\n\n" +
+		"[answer A]\nlegacy alpha answer\n\n" +
+		"[answer B]\nmixed alpha answer\n\n" +
+		fcFillMarker + "\nprefer: \n" + blindEndMarker + "\n"
+	if !strings.Contains(out, wantAlpha) {
+		t.Errorf("worksheet missing exact pair-alpha block:\nwant:\n%s\ngot:\n%s", wantAlpha, out)
+	}
+	// pair-gamma: mixed is A (odd parity).
+	if want := "=== PAIR pair-gamma c sha256:gm sha256:gl ==="; !strings.Contains(out, want) {
+		t.Errorf("worksheet missing %q (parity assignment broken):\n%s", want, out)
+	}
+	if !strings.Contains(out, "[answer A]\nmixed gamma answer") {
+		t.Errorf("pair-gamma answer A is not the mixed arm:\n%s", out)
+	}
+	for _, leaked := range []string{"legacy", "mixed", "topline"} {
+		for _, line := range strings.Split(out, "\n") {
+			if strings.HasPrefix(line, "=== PAIR ") && strings.Contains(line, leaked) {
+				t.Errorf("PAIR header leaks arm name %q: %s", leaked, line)
+			}
+		}
+	}
+
+	t.Run("question mismatch across arms is a loud error", func(t *testing.T) {
+		bad := fcPairArtifacts()
+		bad[1].Trace.Turns[len(bad[1].Trace.Turns)-1].Content = "different question?"
+		if _, err := renderForcedChoiceWorksheet(bad); err == nil {
+			t.Fatalf("question mismatch accepted; want error")
+		}
+	})
+
+	t.Run("incomplete pairs are excluded", func(t *testing.T) {
+		extra := append(fcPairArtifacts(),
+			testPromptlessArtifact("delta-legacy", "sha256:dl", AssemblyLegacy, "delta q?", "delta answer"))
+		blank := testPromptlessArtifact("eps-legacy", "sha256:el", AssemblyLegacy, "eps q?", "")
+		blankMixed := testPromptlessArtifact("eps-mixed", "sha256:em", AssemblyMixed, "eps q?", "eps mixed answer")
+		blank.Trace.AssemblyEval.PairID = "pair-eps"
+		blankMixed.Trace.AssemblyEval.PairID = "pair-eps"
+		extra = append(extra, blank, blankMixed)
+		got, err := renderForcedChoiceWorksheet(extra)
+		if err != nil {
+			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
+		}
+		for _, absent := range []string{"pair-delta-legacy", "pair-eps"} {
+			if strings.Contains(got, absent) {
+				t.Errorf("incomplete pair %q rendered:\n%s", absent, got)
+			}
+		}
+	})
+
+	t.Run("ingest happy path emits pinned preference rows", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "A")
+		ws = fillWorksheetField(t, ws, "=== PAIR pair-gamma c sha256:gm sha256:gl ===", "prefer", "tie")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		if err != nil {
+			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
+		}
+		if skipped != 0 || len(rows) != 2 {
+			t.Fatalf("rows=%d skipped=%d; want 2 rows, 0 skipped", len(rows), skipped)
+		}
+		alpha, gamma := rows[0], rows[1]
+		if alpha.PairID != "pair-alpha" || alpha.CandidateModel != "c" || alpha.ArtifactHashA != "sha256:al" ||
+			alpha.ArtifactHashB != "sha256:am" || alpha.Preference != "a" || alpha.Labeler != "tester" || alpha.LabeledAt.IsZero() {
+			t.Fatalf("alpha row = %+v; want a-preference with full join fields and labeler stamp", alpha)
+		}
+		if gamma.PairID != "pair-gamma" || gamma.ArtifactHashA != "sha256:gm" || gamma.ArtifactHashB != "sha256:gl" || gamma.Preference != "tie" {
+			t.Fatalf("gamma row = %+v; want tie with mixed-first hashes", gamma)
+		}
+		// JSON row shape: labeled_at must be RFC3339 (time.Time marshals so).
+		raw, err := json.Marshal(alpha)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{"pair_id", "candidate_model", "artifact_hash_a", "artifact_hash_b", "preference", "labeler", "labeled_at"} {
+			if _, ok := decoded[key]; !ok {
+				t.Errorf("row JSON missing key %q: %s", key, raw)
+			}
+		}
+		stamp, ok := decoded["labeled_at"].(string)
+		if !ok {
+			t.Fatalf("labeled_at is not a string: %s", raw)
+		}
+		if _, err := time.Parse(time.RFC3339, stamp); err != nil {
+			t.Errorf("labeled_at %q is not RFC3339: %v", stamp, err)
+		}
+	})
+
+	t.Run("blank prefer is skipped and counted", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "B")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		if err != nil {
+			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Preference != "b" || skipped != 1 {
+			t.Fatalf("rows=%+v skipped=%d; want one b-row and one skipped", rows, skipped)
+		}
+	})
+
+	t.Run("invalid prefer value is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "C")
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil {
+			t.Fatalf("prefer C accepted; want error")
+		}
+	})
+
+	t.Run("unknown hash in header is a loud error", func(t *testing.T) {
+		ws := strings.Replace(out, "sha256:al", "sha256:forged", 1)
+		ws = fillWorksheetField(t, ws, "=== PAIR pair-alpha c sha256:forged sha256:am ===", "prefer", "A")
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil {
+			t.Fatalf("forged hash accepted; want error")
+		}
+	})
+
+	t.Run("swapped A/B hashes are a loud error", func(t *testing.T) {
+		ws := strings.Replace(out, "=== PAIR pair-alpha c sha256:al sha256:am ===",
+			"=== PAIR pair-alpha c sha256:am sha256:al ===", 1)
+		ws = fillWorksheetField(t, ws, "=== PAIR pair-alpha c sha256:am sha256:al ===", "prefer", "A")
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil {
+			t.Fatalf("parity-swapped header accepted; want error")
+		}
+	})
+
+	t.Run("duplicate pair block is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "A")
+		if _, _, err := ingestForcedChoiceWorksheet(ws+"\n"+ws, arts, "tester"); err == nil {
+			t.Fatalf("duplicate pair block accepted; want error")
+		}
+	})
+}
+
+// TestFCSideIsLegacyA pins the registered A/B assignment: FNV-1a-64 over
+// pairID+"|"+modelKey+"|fc" (offset 14695981039346656037, prime
+// 1099511628211), even sum => legacy renders as answer A. Hash literals were
+// computed independently with hash/fnv outside this package.
+func TestFCSideIsLegacyA(t *testing.T) {
+	cases := []struct {
+		pairID, modelKey string
+		fnv              uint64
+		want             bool
+	}{
+		{"pair-alpha", "c", 18218199419608068020, true},
+		{"pair-beta", "c", 3565649076032149826, true},
+		{"pair-gamma", "c", 15644729119194098327, false},
+		{"pair-delta", "c", 10176336996731909166, true},
+		{"p1", "gemma4:31b", 13823460209950699956, true},
+		{"p1", "qwen3:8b", 7483125776458196605, false},
+	}
+	for _, tc := range cases {
+		if tc.want != (tc.fnv%2 == 0) {
+			t.Fatalf("test-case inconsistency for %s|%s: literal %d parity disagrees with want %v", tc.pairID, tc.modelKey, tc.fnv, tc.want)
+		}
+		if got := fcSideIsLegacyA(tc.pairID, tc.modelKey); got != tc.want {
+			t.Errorf("fcSideIsLegacyA(%q, %q) = %v; want %v (fnv %d)", tc.pairID, tc.modelKey, got, tc.want, tc.fnv)
+		}
+	}
+}
+
+func TestAdjudicationRoundTrip(t *testing.T) {
+	m1 := testPromptlessArtifact("adj-1", "sha256:m1", AssemblyMixed, "q1?", "answer one")
+	m2 := testPromptlessArtifact("adj-2", "sha256:m2", AssemblyMixed, "q2?", "answer two")
+	arts := []Artifact{m1, m2}
+	flagged := Label{TraceID: "adj-1", CandidateModel: "ollama/c", ArtifactHash: "sha256:m1",
+		ExpectedAnswerQuality: 0.5, LabelNotes: "grounding-check;odd claim", Labeler: "tester", LabeledAt: time.Unix(1753574400, 0).UTC()}
+	clean := Label{TraceID: "adj-2", CandidateModel: "ollama/c", ArtifactHash: "sha256:m2",
+		ExpectedAnswerQuality: 1, LabelNotes: "clean", Labeler: "tester", LabeledAt: time.Unix(1753574400, 0).UTC()}
+	labels := []Label{flagged, clean}
+
+	out, err := renderAdjudicationWorksheet(arts, labels)
+	if err != nil {
+		t.Fatalf("renderAdjudicationWorksheet: %v", err)
+	}
+	for _, want := range []string{
+		"=== ARTIFACT sha256:m1 ===",
+		"[prompt]",
+		"PROMPT-SENTINEL system for adj-1", // full prompt IS present here
+		"[question]\nq1?",
+		"score: 0.5", // pre-filled with the primary score
+		"reason: ",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("adjudication worksheet missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "sha256:m2") {
+		t.Errorf("unflagged label rendered into adjudication worksheet:\n%s", out)
+	}
+
+	header := "=== ARTIFACT sha256:m1 ==="
+	t.Run("changed score rewrites the note", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, header, "score", "1")
+		ws = fillWorksheetField(t, ws, header, "reason", "prompt supports the claim")
+		got, err := ingestAdjudicationWorksheet(ws, arts, labels)
+		if err != nil {
+			t.Fatalf("ingestAdjudicationWorksheet: %v", err)
+		}
+		if len(got) != 2 {
+			t.Fatalf("labels = %d; want 2", len(got))
+		}
+		if got[0].ExpectedAnswerQuality != 1 || got[0].LabelNotes != "adjudicated(0.5->1): prompt supports the claim" {
+			t.Fatalf("adjudicated label = %+v; want score 1 and note %q", got[0], "adjudicated(0.5->1): prompt supports the claim")
+		}
+		if !reflect.DeepEqual(got[1], clean) {
+			t.Fatalf("unflagged label mutated: %+v; want byte-identical %+v", got[1], clean)
+		}
+	})
+
+	t.Run("kept score notes adjudicated(kept)", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, header, "reason", "checked against prompt")
+		got, err := ingestAdjudicationWorksheet(ws, arts, labels)
+		if err != nil {
+			t.Fatalf("ingestAdjudicationWorksheet: %v", err)
+		}
+		if got[0].ExpectedAnswerQuality != 0.5 || got[0].LabelNotes != "adjudicated(kept): checked against prompt" {
+			t.Fatalf("kept label = %+v; want unchanged score and note %q", got[0], "adjudicated(kept): checked against prompt")
+		}
+	})
+
+	t.Run("missing reason is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, header, "score", "1")
+		if _, err := ingestAdjudicationWorksheet(ws, arts, labels); err == nil || !strings.Contains(err.Error(), "reason") {
+			t.Fatalf("err = %v; want loud missing-reason error", err)
+		}
+	})
+
+	t.Run("flagged label absent from worksheet is a loud error", func(t *testing.T) {
+		if _, err := ingestAdjudicationWorksheet("", arts, labels); err == nil {
+			t.Fatalf("empty worksheet accepted; adjudication must be complete")
+		}
+	})
+
+	t.Run("worksheet block for an unflagged label is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, header, "reason", "fine")
+		ws += "=== ARTIFACT sha256:m2 ===\n" + blindFillMarker + "\nscore: 1\nreason: forged\n" + blindEndMarker + "\n"
+		if _, err := ingestAdjudicationWorksheet(ws, arts, labels); err == nil {
+			t.Fatalf("unflagged worksheet block accepted; want error")
+		}
+	})
+
+	t.Run("flagged label missing its artifact is a loud render error", func(t *testing.T) {
+		if _, err := renderAdjudicationWorksheet([]Artifact{m2}, labels); err == nil {
+			t.Fatalf("flagged label without artifact accepted; want error")
+		}
+	})
+}
+
+// TestMainWorksheetOutputAliasGuards: every new worksheet-mode output flag
+// mirrors the hardened -blind-ingest rule that an output path must never
+// clobber an input file (cleaned-path equality; refuseOutputAlias also adds
+// the os.SameFile backstop).
+func TestMainWorksheetOutputAliasGuards(t *testing.T) {
+	dir := t.TempDir()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	for _, path := range []string{artsPath, labelsPath, wsPath} {
+		if err := os.WriteFile(path, []byte("x\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cases := []struct {
+		name, wantErr string
+		args          []string
+	}{
+		{"fc-out aliasing artifacts", "-fc-out must differ from -artifacts",
+			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-fc-out", artsPath}},
+		{"adjudicate labels-out aliasing labels", "-labels-out must differ from -labels",
+			[]string{"-adjudicate-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-labels", labelsPath, "-labels-out", labelsPath}},
+		{"dups-out aliasing artifacts", "-dups-out must differ from -artifacts",
+			[]string{"-blind-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-labels-out", filepath.Join(dir, "out.jsonl"), "-dups-out", artsPath}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], tc.args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("output aliasing an input was accepted:\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.wantErr) {
+				t.Fatalf("output missing %q:\n%s", tc.wantErr, out)
+			}
+		})
+	}
+}
+
+func TestBlindFlowsRenderDeterminism(t *testing.T) {
+	arts := blindDupPool()
+	if a, b := mustRenderBlind(t, arts, 2), mustRenderBlind(t, arts, 2); a != b {
+		t.Errorf("blind worksheet render is not deterministic")
+	}
+	fcArts := fcPairArtifacts()
+	fc1, err1 := renderForcedChoiceWorksheet(fcArts)
+	fc2, err2 := renderForcedChoiceWorksheet(fcArts)
+	if err1 != nil || err2 != nil || fc1 != fc2 {
+		t.Errorf("forced-choice render not deterministic (err1=%v err2=%v)", err1, err2)
+	}
+	adjArt := testPromptlessArtifact("adj", "sha256:aj", AssemblyMixed, "q?", "ans")
+	adjLabels := []Label{{TraceID: "adj", CandidateModel: "ollama/c", ArtifactHash: "sha256:aj",
+		ExpectedAnswerQuality: 0, LabelNotes: "grounding-check;", Labeler: "t", LabeledAt: time.Unix(0, 0).UTC()}}
+	ad1, err1 := renderAdjudicationWorksheet([]Artifact{adjArt}, adjLabels)
+	ad2, err2 := renderAdjudicationWorksheet([]Artifact{adjArt}, adjLabels)
+	if err1 != nil || err2 != nil || ad1 != ad2 {
+		t.Errorf("adjudication render not deterministic (err1=%v err2=%v)", err1, err2)
+	}
+}
