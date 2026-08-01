@@ -581,6 +581,16 @@ func TestValidateMixedCase(t *testing.T) {
 			c:       mutConv(func(c *mixedCase) { c.MemoryRecords[0].Content = "\t" }),
 			wantErr: "blank content",
 		},
+		{
+			name:    "memory record unknown kind",
+			c:       mutConv(func(c *mixedCase) { c.MemoryRecords[0].Kind = "durable" }),
+			wantErr: "unknown kind",
+		},
+		{
+			name:    "working record without workspace",
+			c:       mutConv(func(c *mixedCase) { c.MemoryRecords[0].WorkspaceID = "" }),
+			wantErr: "working kind requires a workspace_id",
+		},
 
 		// Rule 7: rag sources reuse the 3a per-source validation.
 		{

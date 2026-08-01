@@ -42,6 +42,16 @@ const mixedDefaultOutputCap = 64 << 10
 // session both writes and searches its own working notes.
 const mixedMemorySessionID = "mixed-fixture-session"
 
+// Retrieve wiring values, pinned: they mirror golem's live construction
+// (cmd/golem/tools.go: Retrieve{K: 5, MaxTokens: 2048, Progressive: ...}),
+// and 2048 also equals agent/tools' unexported defaultRetrieveMaxTokens.
+// Pinned by literal in TestBuildMixedStateProductionCaps so a drift here is a
+// test failure, not a silently different production shape.
+const (
+	mixedRetrieveK         = 5
+	mixedRetrieveMaxTokens = 2048
+)
+
 // mixedBuiltState is one case's frozen pre-assembly State plus the trace
 // bookkeeping Task 5 stamps into AssemblyEval: RawStateTokens feeds the
 // registered budget formula, StateDigest/CandidateIDs are the cross-arm
@@ -93,7 +103,7 @@ func buildMixedState(ctx context.Context, c mixedCase) (mixedBuiltState, error) 
 	// binary, and the contract here is the VALUES, not its package graph.
 	// Now is pinned for build purity; it only feeds expiry filtering, and
 	// fixture records carry no expiry.
-	retrieveTool := agenttools.Retrieve{R: rig.retr, K: 5, MaxTokens: 2048, Progressive: true}
+	retrieveTool := agenttools.Retrieve{R: rig.retr, K: mixedRetrieveK, MaxTokens: mixedRetrieveMaxTokens, Progressive: true}
 	memoryTool := agenttools.AgentMemorySearch{
 		S: memStore, WorkspaceID: workspaceID,
 		SessionID: func() string { return mixedMemorySessionID },
@@ -228,7 +238,9 @@ func mixedCapContent(s string, limit int) string {
 //     drops ChunkID from attribution (agent.RetrievedSource carries none), so
 //     the builder restates each returned subject in 3a's chunk-ID vocabulary
 //     via the seed-time path->chunkID map — total by construction, since
-//     3a-style seeding writes exactly one chunk per source.
+//     3a-style seeding writes exactly one chunk per source. Vocabulary
+//     assumption: fixture record IDs are short human-readable strings, never
+//     64-hex chunk digests, so the union cannot collapse a record onto a chunk.
 func mixedSubjectsAndCandidates(c mixedCase, st agent.State, chunkIDs map[string]string) ([]string, []string, error) {
 	var subjects []string
 	candidateSet := map[string]struct{}{}
@@ -243,7 +255,7 @@ func mixedSubjectsAndCandidates(c mixedCase, st agent.State, chunkIDs map[string
 			case contextdepth.DomainRAG:
 				id, ok := chunkIDs[ref.ID]
 				if !ok {
-					return nil, nil, fmt.Errorf("case %q: rag subject %q has no seeded chunk", c.ID, ref.ID)
+					return nil, nil, fmt.Errorf("case %q: call %q: rag subject %q has no seeded chunk", c.ID, m.ToolCallID, ref.ID)
 				}
 				candidateSet[id] = struct{}{}
 			case contextdepth.DomainMemory:
@@ -389,7 +401,7 @@ func seedMixedMemoryStore(ctx context.Context, records []mixedMemoryRecord) (*me
 	}()
 	store, err := memory.NewMemoryRecordStore(ctx, db)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, "", fmt.Errorf("new record store: %w", err)
 	}
 
 	epochMs := assemblyFixedEpoch * 1000

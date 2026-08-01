@@ -314,6 +314,21 @@ func validateMixedCase(c mixedCase) error {
 		if strings.TrimSpace(r.Content) == "" {
 			return fmt.Errorf("memory_records[%d]: blank content", i)
 		}
+		// Restates memory's MemoryKind vocabulary (memory/record_agent.go:
+		// working|semantic|episodic; blank = builder default). This file stays
+		// memory-import-free, so the strings are pinned here; the Task 4 builder
+		// seeds through the real store, which re-validates them.
+		switch r.Kind {
+		case "", "working", "semantic", "episodic":
+		default:
+			return fmt.Errorf("memory_records[%d]: unknown kind %q (want working, semantic, or episodic)", i, r.Kind)
+		}
+		// The store binds working records to a session, and a session requires a
+		// workspace (memory/record_store.go Create); reject at author time
+		// instead of failing the build.
+		if r.Kind == "working" && strings.TrimSpace(r.WorkspaceID) == "" {
+			return fmt.Errorf("memory_records[%d]: working kind requires a workspace_id", i)
+		}
 	}
 	if err := validateAssemblySources(c.RagSources); err != nil {
 		return fmt.Errorf("rag_sources: %w", err)

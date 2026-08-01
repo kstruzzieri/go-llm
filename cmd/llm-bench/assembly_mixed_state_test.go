@@ -251,11 +251,66 @@ func TestBuildMixedStateUsesRealProducers(t *testing.T) {
 	}
 }
 
+// TestMixedCapContent pins the capOutput-equivalent truncation, including the
+// UTF-8 rune-boundary backup a plain s[:limit] would get wrong.
+func TestMixedCapContent(t *testing.T) {
+	tests := []struct {
+		s     string
+		limit int
+		want  string
+	}{
+		{"héllo", 2, "h"},  // limit splits é; back up to the rune boundary
+		{"héllo", 3, "hé"}, // limit lands exactly after é
+		{"abc", 0, "abc"},  // 0 = uncapped
+		{"abc", 3, "abc"},  // at the limit: unchanged
+	}
+	for _, tt := range tests {
+		if got := mixedCapContent(tt.s, tt.limit); got != tt.want {
+			t.Errorf("mixedCapContent(%q, %d) = %q; want %q", tt.s, tt.limit, got, tt.want)
+		}
+	}
+}
+
+// TestBuildMixedStateWorkingMemoryVisible proves the working-kind seeding
+// path end to end: a session-scoped working record (workspace set) comes back
+// through the REAL search tool, i.e. the builder's session injection keeps
+// working records visible to the tool's session.
+func TestBuildMixedStateWorkingMemoryVisible(t *testing.T) {
+	c := withMixedToolCall(mixedConvCase("work-mem"), mixedToolCall{
+		CallID: "call-w1", Tool: "agent_memory_search",
+		Args: json.RawMessage(`{"query":"standup wednesdays"}`),
+	})
+	built := buildMixedStateT(t, c)
+	var toolMsg *agent.Message
+	for i := range built.State.Messages {
+		if built.State.Messages[i].Role == "tool" {
+			toolMsg = &built.State.Messages[i]
+		}
+	}
+	if toolMsg == nil {
+		t.Fatalf("no tool message in built State")
+	}
+	if !strings.Contains(toolMsg.Content, "standup moved to 09:30 on wednesdays") {
+		t.Errorf("working record content not returned by the real search tool; got %q", toolMsg.Content)
+	}
+	if toolMsg.Context == nil || len(toolMsg.Context.Groups) != 1 ||
+		toolMsg.Context.Groups[0].Desc.Subject.ID != "rec-1" {
+		t.Errorf("Context = %+v; want one memory group for rec-1", toolMsg.Context)
+	}
+}
+
 func TestBuildMixedStateProductionCaps(t *testing.T) {
 	built := buildMixedStateT(t, mixedStateCase("caps-1"))
 	msgs := built.State.Messages
 	if got := msgs[3].OutputCap; got != agenttools.RetrieveOutputCap {
 		t.Errorf("retrieve OutputCap = %d; want tools.RetrieveOutputCap %d", got, agenttools.RetrieveOutputCap)
+	}
+	// Wiring pins, by literal (golem construction values; see the consts).
+	if got := mixedRetrieveK; got != 5 {
+		t.Errorf("mixedRetrieveK = %d; want 5 (golem wiring)", got)
+	}
+	if got := mixedRetrieveMaxTokens; got != 2048 {
+		t.Errorf("mixedRetrieveMaxTokens = %d; want 2048 (golem wiring)", got)
 	}
 	// Coupling pins, by literal: mixedDefaultOutputCap restates agent's
 	// unexported defaultOutputCap (agent/types.go), and RetrieveOutputCap
