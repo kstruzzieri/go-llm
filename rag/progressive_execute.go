@@ -44,9 +44,9 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 // one per distinct source, lining up positionally with the trace's Sources.
 //
 // COST CEILING: unlike the returned output, the groups are NOT bounded by
-// MaxTokens/MaxBytes. Every evidence prefix is materialized unconditionally,
-// so content memory is Theta(rungs * n^2/2 * average block bytes) in the
-// number of results for one source — quadratic where the flat path is capped.
+// MaxTokens/MaxBytes. At effective MaxDepth L2 every evidence prefix is
+// materialized, so content memory is Theta(rungs * n^2/2 * average block bytes)
+// in the number of results for one source — quadratic where the flat path is capped.
 // Callers that pass a model-supplied result count must clamp it themselves;
 // this entry point applies no upper bound today.
 func (r *Retriever) RenderProgressiveWithGroups(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, []ProgressiveGroup, error) {
@@ -112,7 +112,11 @@ func (r *Retriever) renderProgressive(ctx context.Context, req ProgressiveRender
 	// local ceiling the permanent upper bound on every downstream allocator.
 	var groups []ProgressiveGroup
 	if wantGroups {
-		groups = buildProgressiveGroups(sources)
+		maxDepth := req.MaxDepth
+		if maxDepth == DepthNone {
+			maxDepth = DepthL2
+		}
+		groups = buildProgressiveGroups(sources, maxDepth)
 	}
 
 	// allocate sorts sources by firstIndex in place (DEV-16); assembly and the

@@ -66,8 +66,9 @@ type ladderRung struct {
 	reps                 []contextdepth.RepresentationDesc
 }
 
-// buildProgressiveGroups runs on the prepared snapshot BEFORE allocation. Its
-// read set is source, fresh, results and firstIndex, plus every field
+// buildProgressiveGroups runs on the prepared snapshot BEFORE allocation.
+// maxDepth is the request's effective maximum (DepthNone normalized to
+// DepthL2). Its read set is source, fresh, results and firstIndex, plus every field
 // orientationTextWithNote and evidenceText read: prov, summary and reasons.
 // All of them are untouched by the allocator.
 //
@@ -95,7 +96,7 @@ type ladderRung struct {
 //
 // Alternatives are ordered by (prefix length, rung index): declaration order
 // IS utility order, which the mixed upgrade pass relies on.
-func buildProgressiveGroups(sources []*progressiveSource) []ProgressiveGroup {
+func buildProgressiveGroups(sources []*progressiveSource, maxDepth Depth) []ProgressiveGroup {
 	groups := make([]ProgressiveGroup, 0, len(sources))
 	for _, src := range sources {
 		var rungs []ladderRung
@@ -104,7 +105,10 @@ func buildProgressiveGroups(sources []*progressiveSource) []ProgressiveGroup {
 				{level: orientationMeta, summaryBudgetOmitted: true,
 					reps: []contextdepth.RepresentationDesc{repMeta}},
 				{level: orientationL0, reps: []contextdepth.RepresentationDesc{repAbstract}},
-				{level: orientationL0L1, reps: []contextdepth.RepresentationDesc{repAbstract, repOverview}},
+			}
+			if maxDepth >= DepthL1 {
+				rungs = append(rungs, ladderRung{level: orientationL0L1,
+					reps: []contextdepth.RepresentationDesc{repAbstract, repOverview}})
 			}
 		} else {
 			rungs = []ladderRung{{level: orientationMeta, reps: []contextdepth.RepresentationDesc{repMeta}}}
@@ -142,7 +146,7 @@ func buildProgressiveGroups(sources []*progressiveSource) []ProgressiveGroup {
 		// construction.
 		var ev strings.Builder
 		var rendered []RenderedEvidence
-		for k := 1; k <= len(src.results); k++ {
+		for k := 1; maxDepth >= DepthL2 && k <= len(src.results); k++ {
 			res := src.results[k-1]
 			ev.WriteString(evidenceText(res))
 			rendered = append(rendered, RenderedEvidence{

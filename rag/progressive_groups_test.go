@@ -368,6 +368,45 @@ func TestProgressiveGroupsValidityMatrix(t *testing.T) {
 	}
 }
 
+func TestRenderProgressiveWithGroupsRespectsMaxDepth(t *testing.T) {
+	tests := []struct {
+		name       string
+		maxDepth   Depth
+		wantDepth  contextdepth.Depth
+		wantCounts []int
+	}{
+		{"L0", DepthL0, contextdepth.DepthL0, []int{2, 1, 2}},
+		{"L1", DepthL1, contextdepth.DepthL1, []int{3, 1, 3}},
+		{"default_L2", DepthNone, contextdepth.DepthL2, []int{9, 3, 6}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, results := progressiveGroupsFixture(t)
+			_, _, groups, err := r.RenderProgressiveWithGroups(context.Background(), ProgressiveRenderRequest{
+				Results: results, MaxTokens: 1 << 20, MaxBytes: 1 << 20, MaxDepth: tc.maxDepth,
+			})
+			if err != nil {
+				t.Fatalf("RenderProgressiveWithGroups: %v", err)
+			}
+			if len(groups) != len(tc.wantCounts) {
+				t.Fatalf("len(groups) = %d, want %d", len(groups), len(tc.wantCounts))
+			}
+			for i, g := range groups {
+				if len(g.Alternatives) != tc.wantCounts[i] {
+					t.Errorf("group %q has %d alternatives, want %d",
+						g.Desc.Subject.ID, len(g.Alternatives), tc.wantCounts[i])
+				}
+				for j, alt := range g.Alternatives {
+					if got := alt.Desc.Depth(); got > tc.wantDepth {
+						t.Errorf("group %q alternative %d depth = %v, exceeds %v",
+							g.Desc.Subject.ID, j, got, tc.wantDepth)
+					}
+				}
+			}
+		})
+	}
+}
+
 // TestProgressiveGroupsProjectionBytes measures what ONE call's projection
 // costs in retained content bytes, because agent/tools/retrieve.go documents
 // those figures on Retrieve.Progressive and a documented cost nobody measures
@@ -411,7 +450,7 @@ func TestProgressiveGroupsProjectionBytes(t *testing.T) {
 					Score: 0.5,
 				})
 			}
-			groups := buildProgressiveGroups([]*progressiveSource{src})
+			groups := buildProgressiveGroups([]*progressiveSource{src}, DepthL2)
 			if len(groups) != 1 {
 				t.Fatalf("fixture must be one source, got %d groups", len(groups))
 			}
