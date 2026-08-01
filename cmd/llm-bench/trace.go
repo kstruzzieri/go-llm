@@ -51,8 +51,12 @@ type Turn struct {
 	Raw        json.RawMessage `json:"raw,omitempty"`
 }
 
-// ToolCall is a minimal representation of a tool invocation.
+// ToolCall is a minimal representation of a tool invocation. ID is set on
+// prefilled-mode assembly traces (#331 slice 3c) so tool-result turns can
+// reference the originating assistant call via ToolCallID; it is omitempty,
+// so legacy traces and their hashes are unaffected.
 type ToolCall struct {
+	ID        string          `json:"id,omitempty"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments"`
 }
@@ -141,6 +145,83 @@ func validateTrace(t Trace) error {
 		default:
 			return fmt.Errorf("assembly_eval: unknown mode %q", ae.Mode)
 		}
+		if prefilledAssemblyMode(t) {
+			if err := validatePrefilledTurns(t.Turns); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// prefilledAssemblyMode reports whether a trace carries a prefilled
+// assembled history (#331 slice 3c legacy/mixed/topline arms). Prefilled
+// traces are replayed with a single generation call over their verbatim
+// Turns; every other trace (including 3a flat/progressive) keeps the legacy
+// scripted-replacement replay and turn rules.
+func prefilledAssemblyMode(t Trace) bool {
+	if t.AssemblyEval == nil {
+		return false
+	}
+	switch t.AssemblyEval.Mode {
+	case AssemblyLegacy, AssemblyMixed, AssemblyTopline:
+		return true
+	}
+	return false
+}
+
+// anyPrefilledAssemblyTrace reports whether any trace in the set is a
+// prefilled assembly arm (legacy/mixed/topline).
+func anyPrefilledAssemblyTrace(traces []Trace) bool {
+	for _, t := range traces {
+		if prefilledAssemblyMode(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// validatePrefilledTurns enforces the prefilled-history turn rules: roles
+// user/assistant/tool only; each tool turn answers exactly one earlier
+// assistant tool call by ToolCallID, at most once per call; and the final
+// turn is a user question with non-empty content (the single generation
+// prompt the candidate answers).
+func validatePrefilledTurns(turns []Turn) error {
+	declared := map[string]struct{}{} // assistant tool-call IDs seen so far
+	answered := map[string]struct{}{}
+	for i, turn := range turns {
+		switch turn.Role {
+		case "user":
+		case "assistant":
+			for j, call := range turn.ToolCalls {
+				id := strings.TrimSpace(call.ID)
+				if id == "" {
+					continue // never referenceable; tolerated, not indexed
+				}
+				if _, ok := declared[id]; ok {
+					return fmt.Errorf("turn %d tool_call %d: duplicate assistant tool-call id %q", i, j, id)
+				}
+				declared[id] = struct{}{}
+			}
+		case "tool":
+			id := strings.TrimSpace(turn.ToolCallID)
+			if id == "" {
+				return fmt.Errorf("turn %d: prefilled tool turn requires non-empty tool_call_id", i)
+			}
+			if _, ok := declared[id]; !ok {
+				return fmt.Errorf("turn %d: tool_call_id %q does not reference a preceding assistant tool call", i, id)
+			}
+			if _, ok := answered[id]; ok {
+				return fmt.Errorf("turn %d: assistant tool call %q already answered", i, id)
+			}
+			answered[id] = struct{}{}
+		default:
+			return fmt.Errorf("turn %d role %q: prefilled traces allow only user, assistant, tool", i, turn.Role)
+		}
+	}
+	final := turns[len(turns)-1]
+	if final.Role != "user" || strings.TrimSpace(final.Content) == "" {
+		return fmt.Errorf("prefilled final turn must be role user with non-empty content, got role %q", final.Role)
 	}
 	return nil
 }

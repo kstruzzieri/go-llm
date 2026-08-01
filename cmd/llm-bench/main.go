@@ -232,11 +232,21 @@ func main() {
 			Timeout:             *timeout,
 			Scorer:              &CaptureScorer{},
 		}
+		// Model digests feed assembly-artifact capture provenance only, so
+		// resolution (an /api/show round-trip per ollama target) is skipped
+		// entirely when the trace set has no prefilled assembly arms.
+		var modelDigests map[string]string
+		if anyPrefilledAssemblyTrace(traces) {
+			if client, clientErr := newOllamaClient(*ollamaURL); clientErr == nil {
+				modelDigests = resolveCandidateDigests(ctx, client, targets)
+			}
+		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
-			Runner:     runner,
-			Targets:    targets,
-			Traces:     traces,
-			OutputPath: *labelsOut,
+			Runner:       runner,
+			Targets:      targets,
+			Traces:       traces,
+			OutputPath:   *labelsOut,
+			ModelDigests: modelDigests,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)
 		}

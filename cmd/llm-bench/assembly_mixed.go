@@ -167,8 +167,11 @@ type assemblyMixedPair struct {
 
 // computeAssemblyMixedSection builds the legacy-mixed per-model reports from
 // the already-keyed pairs. keys must be sorted (model, kind, pair) so deltas
-// and exclusions land in lexicographic pair-ID order per model. Invariant
-// failures become Exclusions, never report-wide errors.
+// land in lexicographic pair-ID order per model. Exclusions accumulate in
+// two pair-ID-ordered phases, not one merged order: the first (per-pair)
+// loop appends missing-arm/invariant/unlabeled exclusions, then the
+// second loop appends every scenario-family-crosses-strata exclusion after
+// it. Invariant failures become Exclusions, never report-wide errors.
 func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairKey]*assemblyArmSet, quality map[string]float64, seed int64, bootstrapN int) []AssemblyMixedModelReport {
 	type acc struct {
 		report   AssemblyMixedModelReport

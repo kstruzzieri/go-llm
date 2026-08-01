@@ -118,6 +118,10 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
 	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
+	if prefilledAssemblyMode(trace) {
+		temp := assemblyCaptureTemperature
+		opts.Temperature = &temp
+	}
 	out, err := replayWith(replayCtx, transport.chat, target.Model, trace, opts)
 	cancel()
 	if err != nil {
@@ -187,11 +191,24 @@ type replayOutput struct {
 }
 
 // replayOptions are the per-replay knobs threaded down from Runner.
-// Zero values preserve current behavior: no per-turn bound, no NumCtx.
+// Zero values preserve current behavior: no per-turn bound, no NumCtx,
+// no explicit temperature.
 type replayOptions struct {
 	PerTurnTimeout time.Duration
 	NumCtx         int
+	// Temperature, when non-nil, is sent explicitly on every chat request.
+	// The Runner sets it to assemblyCaptureTemperature for prefilled
+	// assembly-mode traces (#331 slice 3c registered greedy decoding); nil
+	// preserves today's behavior of sending no temperature at all. There is
+	// no Seed knob: neither transport's options shape supports one, so
+	// temperature-0 is the sole registered decoding control.
+	Temperature *float64
 }
+
+// assemblyCaptureTemperature is the registered decoding control for
+// prefilled assembly-mode replays: explicit greedy decoding. Single source
+// for both the wire request and the artifact capture provenance.
+const assemblyCaptureTemperature = 0.0
 
 // replay is the legacy entry point retained for tests and callers that
 // don't need the Runner-level knobs (PerTurnTimeout, NumCtx).
@@ -228,6 +245,9 @@ func replay(ctx context.Context, client *ollama.Client, model string, trace Trac
 // All accumulated divergence notes are appended to the resulting Score's
 // Notes so aggregate consumers can see why a candidate diverged.
 func replayWith(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
+	if prefilledAssemblyMode(trace) {
+		return replayPrefilled(ctx, client, model, trace, opts)
+	}
 	if !hasUserTurn(trace.Turns) {
 		return replayOutput{}, fmt.Errorf("trace %q: %w", trace.ID, errNoUserTurn)
 	}
@@ -328,6 +348,107 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 	return out, nil
 }
 
+// replayPrefilled replays a prefilled-history assembly trace (#331 slice
+// 3c): the entire assembled conversation (system + every turn, verbatim,
+// including assistant tool_calls and tool results) is sent upstream in ONE
+// generation call with NO tools field, and the candidate's reply is the
+// single generated transcript turn. There is no tool loop and no scripted
+// matching — if the candidate replies with tool calls anyway, that is a
+// scored restraint divergence (Notes annotation, content kept; the
+// divergence sentinel stands in when the reply has no content at all).
+func replayPrefilled(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
+	if n := len(trace.Turns); n == 0 || trace.Turns[n-1].Role != "user" || trace.Turns[n-1].Content == "" {
+		return replayOutput{}, fmt.Errorf("trace %q: prefilled final turn must be a non-empty user question: %w", trace.ID, errUnsupportedTurns)
+	}
+
+	messages := make([]ollama.ChatMessage, 0, len(trace.Turns)+1)
+	messages = append(messages, ollama.ChatMessage{Role: "system", Content: trace.System})
+	for i, turn := range trace.Turns {
+		msg, err := prefilledChatMessage(turn)
+		if err != nil {
+			return replayOutput{}, fmt.Errorf("trace %q turn %d: %w", trace.ID, i, err)
+		}
+		messages = append(messages, msg)
+	}
+
+	out := replayOutput{}
+	msg, actualTurn, latencyMs, usage, err := chatReplayTurn(ctx, client, model, messages, nil, opts)
+	out.TurnLatenciesMs = append(out.TurnLatenciesMs, latencyMs)
+	if err != nil {
+		return out, err
+	}
+	out.PromptEvalTokens += usage.PromptEval
+	out.GenTokens += usage.Gen
+	out.TotalTokens += usage.PromptEval + usage.Gen
+	if usage.ThinkingComputed {
+		out.ThinkingTokens += usage.Thinking
+		out.ThinkingComputed = true
+	}
+	out.Transcript = append(out.Transcript, actualTurn)
+
+	if len(msg.ToolCalls) == 0 && msg.Content == "" {
+		return out, fmt.Errorf("trace %q: %w", trace.ID, errEmptyAssistantReply)
+	}
+	if n := len(msg.ToolCalls); n > 0 {
+		// Restraint is part of what labels judge, so a tool-calling reply is
+		// recorded and scored on its content, never errored.
+		out.Notes = append(out.Notes,
+			fmt.Sprintf("prefilled trace %q: candidate emitted %d tool call(s); scored on content", trace.ID, n))
+		if msg.Content == "" {
+			out.Transcript[len(out.Transcript)-1].Content = plainChatToolDivergenceFinal
+		}
+	}
+	if note := thinkMarkupResidueNote(lastAssistantContent(out.Transcript)); note != "" {
+		out.Notes = append(out.Notes, note)
+	}
+	return out, nil
+}
+
+// prefilledChatMessage maps one prefilled trace turn to its verbatim wire
+// message: assistant tool_calls carried with their IDs, tool turns with
+// ToolCallID + ToolName.
+func prefilledChatMessage(turn Turn) (ollama.ChatMessage, error) {
+	switch turn.Role {
+	case "user":
+		return ollama.ChatMessage{Role: "user", Content: turn.Content}, nil
+	case "assistant":
+		calls, err := prefilledToolCalls(turn.ToolCalls)
+		if err != nil {
+			return ollama.ChatMessage{}, err
+		}
+		return ollama.ChatMessage{Role: "assistant", Content: turn.Content, ToolCalls: calls}, nil
+	case "tool":
+		return ollama.ChatMessage{Role: "tool", Content: turn.Content, ToolName: turn.Name, ToolCallID: turn.ToolCallID}, nil
+	default:
+		return ollama.ChatMessage{}, fmt.Errorf("role %q: %w", turn.Role, errUnsupportedTurns)
+	}
+}
+
+func prefilledToolCalls(calls []ToolCall) ([]ollama.ToolCall, error) {
+	if len(calls) == 0 {
+		return nil, nil
+	}
+	out := make([]ollama.ToolCall, 0, len(calls))
+	for i, call := range calls {
+		args := map[string]any{}
+		if len(call.Arguments) > 0 {
+			if err := json.Unmarshal(call.Arguments, &args); err != nil {
+				return nil, fmt.Errorf("tool_call %d %q arguments: %w", i, call.Name, err)
+			}
+		}
+		out = append(out, ollama.ToolCall{
+			ID:   call.ID,
+			Type: "function",
+			Function: ollama.ToolCallFunction{
+				Index:     i,
+				Name:      call.Name,
+				Arguments: args,
+			},
+		})
+	}
+	return out, nil
+}
+
 func scorePlainChatToolDivergence(out replayOutput, traceID string, userIndex, toolCallCount int, reason string) replayOutput {
 	// A captured plain-chat trace (no expected tool route) has no frozen tool
 	// result to feed back, so replay cannot continue deterministically once the
@@ -374,8 +495,8 @@ func chatReplayTurn(ctx context.Context, client candidateChatClient, model strin
 		Tools:     tools,
 		KeepAlive: benchKeepAlive,
 	}
-	if opts.NumCtx > 0 {
-		req.Options = &ollama.ModelOptions{NumCtx: opts.NumCtx}
+	if opts.NumCtx > 0 || opts.Temperature != nil {
+		req.Options = &ollama.ModelOptions{NumCtx: opts.NumCtx, Temperature: opts.Temperature}
 	}
 
 	start := time.Now()

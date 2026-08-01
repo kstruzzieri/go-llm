@@ -7,10 +7,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/kstruzzieri/go-llm/ollama"
 )
 
 // Artifact is one frozen candidate output for a (trace, candidate model)
@@ -26,6 +30,37 @@ type Artifact struct {
 	ActualToolCalls   []string  `json:"actual_tool_calls"`
 	ActualTranscript  []Turn    `json:"actual_transcript"`
 	CapturedAt        time.Time `json:"captured_at"`
+	// Capture records controlled-capture provenance for assembly-mode traces
+	// (#331 slice 3c): nil on every other artifact so their JSON stays
+	// byte-identical to the pre-3c shape. Deliberately excluded from
+	// artifactHash: provenance describes HOW an output was captured, not
+	// WHAT was captured, so it must not change artifact identity.
+	Capture *CaptureProvenance `json:"capture,omitempty"`
+}
+
+// CaptureProvenance pins the controlled conditions one assembly artifact was
+// captured under. Temperature is the registered greedy-decoding setting.
+// Seed is always nil today: neither ollama.ModelOptions nor the
+// openai-compat request shape exposes a seed field, so temperature-0 is the
+// sole registered decoding control on both transports. ModelDigest is the
+// ollama /api/show digest when the transport exposes one; openai-compat
+// servers have no digest endpoint, so it stays empty there.
+type CaptureProvenance struct {
+	// OrderIndex is the trace's position in the counterbalanced capture
+	// order (the per-target replay sequence); artifacts of the same trace
+	// under different targets share it.
+	OrderIndex   int      `json:"order_index"`
+	Temperature  *float64 `json:"temperature,omitempty"`
+	Seed         *int     `json:"seed,omitempty"`
+	Transport    string   `json:"transport"`
+	Model        string   `json:"model"`
+	ModelDigest  string   `json:"model_digest,omitempty"`
+	PromptTokens int      `json:"prompt_tokens"`
+	GenTokens    int      `json:"gen_tokens"`
+	// CapturedOrder is "legacy-first" or "mixed-first" for legacy/mixed pair
+	// members (which arm of the pair the counterbalanced order ran first);
+	// empty for topline artifacts.
+	CapturedOrder string `json:"captured_order,omitempty"`
 }
 
 // Label is the human-supplied truth for one frozen Artifact. ArtifactHash
@@ -73,6 +108,33 @@ func artifactHash(a Artifact) string {
 	return fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
 }
 
+// candidateDigestResolver is the minimal ShowModel surface needed to
+// resolve candidate model digests (satisfied by *ollama.Client).
+type candidateDigestResolver interface {
+	ShowModel(ctx context.Context, name string) (*ollama.ModelInfo, error)
+}
+
+// resolveCandidateDigests resolves the content digest for each ollama
+// candidate target via /api/show, keyed by the normalized Display selector.
+// Errors are swallowed per resolveJudgeDigest precedent: a missing digest is
+// degraded provenance, not a capture failure. openai-compat targets are
+// skipped — that transport has no digest endpoint, so their provenance
+// ModelDigest stays empty by design.
+func resolveCandidateDigests(ctx context.Context, resolver candidateDigestResolver, targets []ModelTarget) map[string]string {
+	digests := make(map[string]string, len(targets))
+	for _, target := range targets {
+		if normalizeModelSelector(target.Provider) != defaultBenchProvider {
+			continue
+		}
+		info, err := resolver.ShowModel(ctx, target.Model)
+		if err != nil || info == nil || info.Digest == "" {
+			continue
+		}
+		digests[normalizeModelSelector(target.Display)] = info.Digest
+	}
+	return digests
+}
+
 // calibrationRunner abstracts Runner.RunAll so calibration tests can
 // inject canned Results without needing a live Ollama.
 type calibrationRunner interface {
@@ -90,6 +152,11 @@ type calibrateCaptureOptions struct {
 	Traces     []Trace
 	OutputPath string
 	Clock      func() time.Time
+	// ModelDigests maps a normalized target Display selector to the model
+	// content digest recorded on assembly-artifact capture provenance.
+	// Resolved by the caller (see resolveCandidateDigests); missing entries
+	// leave CaptureProvenance.ModelDigest empty.
+	ModelDigests map[string]string
 }
 
 // runCalibrateCapture replays each (trace, candidate) and writes one
@@ -116,7 +183,12 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 		traceByID[trace.ID] = trace
 	}
-	results, err := opts.Runner.RunAll(ctx, opts.Targets, opts.Traces)
+	ordered := counterbalanceCaptureTraces(opts.Traces)
+	orderIndex := make(map[string]int, len(ordered))
+	for i, trace := range ordered {
+		orderIndex[trace.ID] = i
+	}
+	results, err := opts.Runner.RunAll(ctx, opts.Targets, ordered)
 	if err != nil {
 		return fmt.Errorf("calibrate-capture: run: %w", err)
 	}
@@ -147,6 +219,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			ActualToolCalls:   extractToolNames(r.Transcript),
 			ActualTranscript:  r.Transcript,
 			CapturedAt:        now(),
+			Capture:           captureProvenance(trace, r, orderIndex, opts.ModelDigests),
 		}
 		artifact.ArtifactHash = artifactHash(artifact)
 		artifacts = append(artifacts, artifact)
@@ -180,6 +253,102 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 	}
 	return nil
+}
+
+// counterbalanceCaptureTraces returns the deterministic capture order for a
+// mixed trace set: non-assembly traces (and 3a flat/progressive arms) first
+// in their input order, then legacy/mixed pairs sorted by PairID with the
+// FNV-1a-64(PairID)-parity-selected arm first (even => legacy first, odd =>
+// mixed first), then topline traces sorted by trace ID. A set with no
+// legacy/mixed/topline traces is returned untouched, preserving today's
+// capture order byte-for-byte.
+func counterbalanceCaptureTraces(traces []Trace) []Trace {
+	var plain, topline []Trace
+	var pairOrder []string
+	pairs := map[string][]Trace{}
+	for _, t := range traces {
+		if !prefilledAssemblyMode(t) {
+			plain = append(plain, t)
+			continue
+		}
+		switch t.AssemblyEval.Mode {
+		case AssemblyLegacy, AssemblyMixed:
+			id := t.AssemblyEval.PairID
+			if _, ok := pairs[id]; !ok {
+				pairOrder = append(pairOrder, id)
+			}
+			pairs[id] = append(pairs[id], t)
+		default: // AssemblyTopline
+			topline = append(topline, t)
+		}
+	}
+	if len(pairOrder) == 0 && len(topline) == 0 {
+		return traces
+	}
+	sort.Strings(pairOrder)
+	sort.Slice(topline, func(i, j int) bool { return topline[i].ID < topline[j].ID })
+	out := make([]Trace, 0, len(traces))
+	out = append(out, plain...)
+	for _, id := range pairOrder {
+		// Derive the leading arm from capturedOrderLabel so the recorded
+		// captured_order provenance can never disagree with the actual order.
+		first := AssemblyLegacy
+		if capturedOrderLabel(id) == "mixed-first" {
+			first = AssemblyMixed
+		}
+		for _, t := range pairs[id] {
+			if t.AssemblyEval.Mode == first {
+				out = append(out, t)
+			}
+		}
+		for _, t := range pairs[id] {
+			if t.AssemblyEval.Mode != first {
+				out = append(out, t)
+			}
+		}
+	}
+	return append(out, topline...)
+}
+
+// pairIDHash is the registered counterbalance hash: FNV-1a 64 of the PairID.
+func pairIDHash(pairID string) uint64 {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(pairID))
+	return h.Sum64()
+}
+
+// capturedOrderLabel names which arm of a legacy/mixed pair the
+// counterbalanced capture order runs first.
+func capturedOrderLabel(pairID string) string {
+	if pairIDHash(pairID)%2 == 1 {
+		return "mixed-first"
+	}
+	return "legacy-first"
+}
+
+// captureProvenance builds the controlled-capture provenance for one
+// result, or nil for non-assembly traces so their artifacts stay
+// byte-identical to the pre-3c shape. Prompt/gen tokens come from the
+// replay usage carried on Result.Score.
+func captureProvenance(trace Trace, r Result, orderIndex map[string]int, digests map[string]string) *CaptureProvenance {
+	if !prefilledAssemblyMode(trace) {
+		return nil
+	}
+	temp := assemblyCaptureTemperature
+	prov := &CaptureProvenance{
+		OrderIndex:   orderIndex[trace.ID],
+		Temperature:  &temp,
+		Transport:    r.CandidateProvider,
+		Model:        r.Model,
+		ModelDigest:  digests[normalizeModelSelector(r.Model)],
+		PromptTokens: r.Score.PromptEvalTokens,
+		GenTokens:    r.Score.GenTokens,
+	}
+	switch trace.AssemblyEval.Mode {
+	case AssemblyLegacy, AssemblyMixed:
+		prov.CapturedOrder = capturedOrderLabel(trace.AssemblyEval.PairID)
+	}
+	return prov
 }
 
 // matchedLabel pairs a Label with its current Artifact so the calibration
