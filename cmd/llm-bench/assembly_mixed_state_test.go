@@ -237,7 +237,7 @@ func TestBuildMixedStateUsesRealProducers(t *testing.T) {
 	oracle := agenttools.AgentMemorySearch{
 		S: memStore, WorkspaceID: ws,
 		SessionID: func() string { return mixedMemorySessionID },
-		Now:       func() time.Time { return time.Unix(assemblyFixedEpoch, 0).UTC() },
+		Now:       func() time.Time { return time.Unix(mixedMemoryEpoch, 0).UTC() },
 	}
 	out, err := oracle.Invoke(ctx, json.RawMessage(`{"query":"gateway port"}`))
 	if err != nil || out.IsError {
@@ -343,6 +343,36 @@ func TestBuildMixedStatePinnedEpochs(t *testing.T) {
 	}
 	if a.State.Messages[5].Content != b.State.Messages[5].Content {
 		t.Errorf("memory content differs across builds")
+	}
+	// The memory tool renders CreatedAt as a LOCAL-time date (recordLine,
+	// agent/tools/agent_memory.go), so the rendered date is only build-machine
+	// stable because mixedMemoryEpoch sits at noon UTC. Assert the noon date
+	// literal: under the midnight assemblyFixedEpoch this line reads
+	// "2025-07-26" on any US-timezone machine.
+	if mem := a.State.Messages[5].Content; !strings.Contains(mem, " · 2025-07-27 · ") {
+		t.Errorf("memory content missing the noon-UTC pinned date 2025-07-27 (created_at must be pinned to mixedMemoryEpoch, not midnight UTC):\n%s", mem)
+	}
+}
+
+// TestMixedMemoryEpochDateStable pins the property that makes committed mixed
+// traces build-machine independent WITHOUT mutating the process timezone
+// (time.Local is process-wide and set once, so per-test TZ switching is not
+// reliable): for every fixed offset from UTC-11 through UTC+11, the local
+// calendar date at mixedMemoryEpoch — computed arithmetically as the UTC date
+// of (epoch + offset) — must equal the UTC calendar date. A midnight-UTC
+// epoch fails this at any negative offset (UTC-11 lands on 2025-07-26).
+func TestMixedMemoryEpochDateStable(t *testing.T) {
+	// time.UnixMilli mirrors how the record store loads created_at
+	// (memory/record_store.go) before recordLine formats it.
+	want := time.UnixMilli(mixedMemoryEpoch * 1000).UTC().Format("2006-01-02")
+	if want != "2025-07-27" {
+		t.Fatalf("mixedMemoryEpoch UTC date = %s; want 2025-07-27 (assemblyFixedEpoch's date at noon)", want)
+	}
+	for off := -11; off <= 11; off++ {
+		got := time.UnixMilli((mixedMemoryEpoch + int64(off)*3600) * 1000).UTC().Format("2006-01-02")
+		if got != want {
+			t.Errorf("UTC%+dh renders date %s; want %s (mixedMemoryEpoch is not date-stable across UTC-11..+11)", off, got, want)
+		}
 	}
 }
 

@@ -36,6 +36,20 @@ import (
 // internal/rageval/mixed_fixture.go mirrors this as mixedEvalOutputCap.
 const mixedDefaultOutputCap = 64 << 10
 
+// mixedMemoryEpoch pins memory record created_at/updated_at and the search
+// tool's Now: assemblyFixedEpoch shifted to 12:00 UTC. The memory tool's
+// recordLine/recordCard (agent/tools/agent_memory.go) render CreatedAt as a
+// "2006-01-02" date in LOCAL time, so a midnight-UTC epoch renders as
+// DIFFERENT calendar dates on a UTC CI runner vs a US workstation — and the
+// rendered lines land verbatim in committed mixed traces, breaking
+// byte-reproducibility by build machine. Noon UTC keeps every zone from
+// UTC-11 through UTC+11 on the same calendar date; rageval's
+// mixedEvalFixedEpoch (internal/rageval/mixed_fixture.go) is the same move.
+// The RAG indexed_at pin stays at assemblyFixedEpoch: rag renders it as an
+// RFC3339 UTC line, which is TZ-immune. Date stability is pinned by
+// TestMixedMemoryEpochDateStable.
+const mixedMemoryEpoch = assemblyFixedEpoch + 12*3600
+
 // mixedMemorySessionID is the fixed session working-kind fixture records are
 // scoped to. The memory store requires a session on working records
 // (memory/record_store.go Create), and the search tool resolves the same
@@ -83,7 +97,8 @@ func buildMixedStates(ctx context.Context, f mixedFixture) ([]mixedBuiltState, e
 
 // buildMixedState replays one case's event script into its frozen State. The
 // build is a pure function of the case: stores are seeded fresh in memory,
-// every timestamp is pinned to assemblyFixedEpoch, and iteration only ever
+// every timestamp is pinned (assemblyFixedEpoch for rag, mixedMemoryEpoch for
+// memory — see that const for the timezone split), and iteration only ever
 // walks slices (the one set — candidate IDs — is sorted), so two builds of
 // the same case are deep-equal with equal digests.
 func buildMixedState(ctx context.Context, c mixedCase) (mixedBuiltState, error) {
@@ -108,7 +123,7 @@ func buildMixedState(ctx context.Context, c mixedCase) (mixedBuiltState, error) 
 	memoryTool := agenttools.AgentMemorySearch{
 		S: memStore, WorkspaceID: workspaceID,
 		SessionID: func() string { return mixedMemorySessionID },
-		Now:       func() time.Time { return time.Unix(assemblyFixedEpoch, 0).UTC() },
+		Now:       func() time.Time { return time.Unix(mixedMemoryEpoch, 0).UTC() },
 	}
 
 	msgs := make([]agent.Message, 0, len(c.Events)+len(c.Events)/2)
@@ -405,7 +420,7 @@ func seedMixedMemoryStore(ctx context.Context, records []mixedMemoryRecord) (*me
 		return nil, nil, "", fmt.Errorf("new record store: %w", err)
 	}
 
-	epochMs := assemblyFixedEpoch * 1000
+	epochMs := mixedMemoryEpoch * 1000
 	for i, r := range records {
 		kind := memory.MemoryKind(r.Kind)
 		if r.Kind == "" {
