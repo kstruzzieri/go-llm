@@ -33,10 +33,11 @@ const mixedFixtureKind = "mixed-assembly"
 
 // Closed per-case vocabularies.
 var (
-	mixedStrata = map[string]struct{}{
-		"conversation_only": {}, "memory_only": {}, "cross_domain_join": {},
-		"stale_vs_fresh": {}, "chain_retention": {},
-	}
+	// mixedStrata is the registered stratum vocabulary — an alias of the
+	// SAME set the report gate enforces (assemblyMixedRegisteredStrata /
+	// assemblyMixedStratumSet, assembly_mixed.go), so fixture validation and
+	// report-side exclusion cannot drift.
+	mixedStrata      = assemblyMixedStratumSet
 	mixedAnswerHomes = map[string]struct{}{
 		"conversation": {}, "memory": {}, "rag": {}, "join": {},
 	}

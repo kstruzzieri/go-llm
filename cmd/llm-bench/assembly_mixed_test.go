@@ -9,14 +9,17 @@ import (
 
 // mixedArtifact builds one legacy/mixed/topline-arm artifact with valid 3c
 // metadata; mut (optional) adjusts the eval before the artifact hash is
-// computed, so every variant stays self-consistent.
+// computed, so every variant stays self-consistent. Defaults: a registered
+// stratum and a unique per-pair scenario family (a singleton cluster), so a
+// default pair passes every registered report gate.
 func mixedArtifact(pair string, mode AssemblyMode, model string, mut func(*AssemblyEval)) Artifact {
 	ae := &AssemblyEval{
-		PairID:      pair,
-		Mode:        mode,
-		StateDigest: "sha256:state-" + pair,
-		Budget:      4096,
-		Stratum:     "shallow",
+		PairID:         pair,
+		Mode:           mode,
+		StateDigest:    "sha256:state-" + pair,
+		Budget:         4096,
+		Stratum:        "conversation_only",
+		ScenarioFamily: "fam-" + pair,
 	}
 	if mut != nil {
 		mut(ae)
@@ -37,13 +40,18 @@ func mixedArtifact(pair string, mode AssemblyMode, model string, mut func(*Assem
 
 // appendMixedPairs appends n complete labeled legacy/mixed pairs for model
 // with pair IDs mx-<start+i> (zero-padded, so lexicographic order is build
-// order). mut, when non-nil, runs on BOTH arms' evals (distinguish by
-// ae.Mode) before hashing.
+// order). Strata round-robin over the registered set by absolute index
+// (start+i), so 60 pairs from start 0 land exactly 12 in each registered
+// stratum; families stay the mixedArtifact per-pair singleton default. mut,
+// when non-nil, runs on BOTH arms' evals (distinguish by ae.Mode) after the
+// defaults and before hashing.
 func appendMixedPairs(arts []Artifact, labels []Label, model string, start, n int, legacyQ, mixedQ float64, mut func(i int, ae *AssemblyEval)) ([]Artifact, []Label) {
 	for i := 0; i < n; i++ {
 		pair := fmt.Sprintf("mx-%03d", start+i)
 		idx := i
+		stratum := assemblyMixedRegisteredStrata[(start+i)%len(assemblyMixedRegisteredStrata)]
 		wrap := func(ae *AssemblyEval) {
+			ae.Stratum = stratum
 			if mut != nil {
 				mut(idx, ae)
 			}
@@ -307,6 +315,7 @@ func TestAssemblyReportRuleV2Boundaries(t *testing.T) {
 		return mustMixedReport(t, arts, labels)
 	}()
 	const wantRule = "legacy-mixed rule v2 (registered): minimum 60 complete labeled non-control pairs pooled and minimum 12 per stratum present; " +
+		"minimum 6 scenario-family clusters per stratum and maximum cluster size 3; " +
 		"quality-improved: stratified-bootstrap CI low > 0; noninferior: CI low strictly > -0.10; " +
 		"materially-regressed: CI high < -0.10; else inconclusive; " +
 		"token and pressure numbers are descriptive only, never consulted; registered pressure fraction f=0.6"
@@ -319,12 +328,18 @@ func TestAssemblyReportRuleV2Boundaries(t *testing.T) {
 // integrity (scenario-family clusters resample as a unit), and the
 // pooled-CI-only contract for per-stratum entries.
 func TestAssemblyReportStratifiedBootstrap(t *testing.T) {
-	build := func(family string) ([]Artifact, []Label) {
+	build := func(clustered bool) ([]Artifact, []Label) {
 		arts, labels := appendMixedPairs(nil, nil, "m", 0, 58, 0.5, 1.0, nil)
-		// Two strongly-negative twin pairs; family "" means each pair is its
-		// own cluster (the naive/unclustered shape).
+		// Two strongly-negative twin pairs in conversation_only (the
+		// mixedArtifact default stratum). clustered shares one family so
+		// they resample as a unit; otherwise each keeps its unique default
+		// family (the naive per-pair shape).
 		for _, pair := range []string{"tw-000", "tw-001"} {
-			mut := func(ae *AssemblyEval) { ae.ScenarioFamily = family }
+			mut := func(ae *AssemblyEval) {
+				if clustered {
+					ae.ScenarioFamily = "twin-fam"
+				}
+			}
 			l := mixedArtifact(pair, AssemblyLegacy, "m", mut)
 			x := mixedArtifact(pair, AssemblyMixed, "m", mut)
 			arts = append(arts, l, x)
@@ -333,7 +348,7 @@ func TestAssemblyReportStratifiedBootstrap(t *testing.T) {
 		return arts, labels
 	}
 
-	artsA, labelsA := build("twin-fam")
+	artsA, labelsA := build(true)
 	first := mustMixedReport(t, artsA, labelsA).LegacyMixedModels[0]
 	second := mustMixedReport(t, artsA, labelsA).LegacyMixedModels[0]
 	if first.DeltaCILow != second.DeltaCILow || first.DeltaCIHigh != second.DeltaCIHigh {
@@ -341,27 +356,34 @@ func TestAssemblyReportStratifiedBootstrap(t *testing.T) {
 			first.DeltaCILow, first.DeltaCIHigh, second.DeltaCILow, second.DeltaCIHigh)
 	}
 
-	// Removing the family IDs (every pair its own cluster) must change the
+	// Splitting the twin family (every pair its own cluster) must change the
 	// CI, and DIRECTIONALLY: the two -1.0 twins moving together fatten the
 	// lower tail, so the clustered lower bound sits strictly below the naive
 	// per-pair resampling's lower bound.
-	artsB, labelsB := build("")
+	artsB, labelsB := build(false)
 	naive := mustMixedReport(t, artsB, labelsB).LegacyMixedModels[0]
 	if !(first.DeltaCILow < naive.DeltaCILow) {
 		t.Fatalf("clustered CI low %v not below naive CI low %v; twin clusters are not moving together",
 			first.DeltaCILow, naive.DeltaCILow)
 	}
 
-	// Per-stratum entries: descriptives only.
-	if len(first.Strata) != 1 {
-		t.Fatalf("strata = %v, want exactly one", first.Strata)
+	// Per-stratum entries: descriptives only. 58 base pairs round-robin the
+	// five registered strata (12/12/12/11/11); the twins land in
+	// conversation_only, so it holds 12 base wins plus the 2 twin losses.
+	if len(first.Strata) != len(assemblyMixedRegisteredStrata) {
+		t.Fatalf("strata = %v, want all %d registered strata", first.Strata, len(assemblyMixedRegisteredStrata))
 	}
-	s := first.Strata[0]
-	if s.Stratum != "shallow" || s.Pairs != 60 || s.Wins != 58 || s.Losses != 2 || s.Ties != 0 {
-		t.Fatalf("stratum entry = %+v, want shallow/60/58/2/0", s)
+	var s AssemblyStratumReport
+	for _, entry := range first.Strata {
+		if entry.Stratum == "conversation_only" {
+			s = entry
+		}
 	}
-	if s.MeanDelta != 0.45 { // (58*0.5 - 2*1.0) / 60
-		t.Fatalf("stratum mean delta = %v, want 0.45", s.MeanDelta)
+	if s.Stratum != "conversation_only" || s.Pairs != 14 || s.Wins != 12 || s.Losses != 2 || s.Ties != 0 {
+		t.Fatalf("stratum entry = %+v, want conversation_only/14/12/2/0", s)
+	}
+	if s.MeanDelta != 4.0/14 { // (12*0.5 - 2*1.0) / 14
+		t.Fatalf("stratum mean delta = %v, want %v", s.MeanDelta, 4.0/14)
 	}
 	raw, err := json.Marshal(s)
 	if err != nil {
@@ -391,6 +413,14 @@ func TestAssemblyReportStratifiedBootstrap(t *testing.T) {
 }
 
 func TestAssemblyReportCompleteness(t *testing.T) {
+	exclusionsOf := func(lm AssemblyMixedModelReport) map[string]string {
+		got := map[string]string{}
+		for _, e := range lm.Exclusions {
+			got[e.PairID] = e.Reason
+		}
+		return got
+	}
+
 	t.Run("insufficient corpus below pooled floor", func(t *testing.T) {
 		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs-1, 0.5, 1.0, nil)
 		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
@@ -401,10 +431,12 @@ func TestAssemblyReportCompleteness(t *testing.T) {
 	})
 
 	t.Run("stratum floor", func(t *testing.T) {
-		// 60 pooled, but the "deep" stratum holds only 11.
-		arts, labels := appendMixedPairs(nil, nil, "m", 0, 49, 0.5, 1.0, nil)
-		arts, labels = appendMixedPairs(arts, labels, "m", 49, 11, 0.5, 1.0, func(_ int, ae *AssemblyEval) {
-			ae.Stratum = "deep"
+		// 60 pooled, but one registered stratum holds only 11: move pair
+		// mx-000 out of conversation_only into memory_only (11 vs 13).
+		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, func(i int, ae *AssemblyEval) {
+			if i == 0 {
+				ae.Stratum = "memory_only"
+			}
 		})
 		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
 		if lm.Pairs != assemblyMixedMinimumPairs || lm.Decision != "insufficient-stratum-balance" {
@@ -413,34 +445,154 @@ func TestAssemblyReportCompleteness(t *testing.T) {
 		}
 	})
 
-	t.Run("unlabeled and invalid pairs are excluded with reasons", func(t *testing.T) {
+	t.Run("absent registered stratum trips the stratum floor", func(t *testing.T) {
+		// 60 pooled and every PRESENT stratum holds >= 12, but
+		// chain_retention is entirely absent (its pairs folded into
+		// conversation_only). The registered set demands all five.
+		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, func(_ int, ae *AssemblyEval) {
+			if ae.Stratum == "chain_retention" {
+				ae.Stratum = "conversation_only"
+			}
+		})
+		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+		if lm.Pairs != assemblyMixedMinimumPairs || lm.Decision != "insufficient-stratum-balance" {
+			t.Fatalf("pairs=%d decision=%q, want %d/insufficient-stratum-balance for an absent stratum",
+				lm.Pairs, lm.Decision, assemblyMixedMinimumPairs)
+		}
+	})
+
+	t.Run("unregistered stratum is excluded, never pooled", func(t *testing.T) {
 		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, nil)
-		// Unlabeled: both arms captured, mixed arm never labeled.
+		il := mixedArtifact("pair-invented", AssemblyLegacy, "m", func(ae *AssemblyEval) { ae.Stratum = "shallow" })
+		im := mixedArtifact("pair-invented", AssemblyMixed, "m", func(ae *AssemblyEval) { ae.Stratum = "shallow" })
+		arts = append(arts, il, im)
+		labels = append(labels, labelFor(il, 0.5), labelFor(im, 1.0))
+
+		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+		if lm.Pairs != assemblyMixedMinimumPairs {
+			t.Fatalf("pairs = %d, want %d (invented-stratum pair must not pool)", lm.Pairs, assemblyMixedMinimumPairs)
+		}
+		if got := exclusionsOf(lm); got["pair-invented"] != "unregistered-stratum" {
+			t.Fatalf("exclusions = %v, want pair-invented => unregistered-stratum", lm.Exclusions)
+		}
+		if lm.Decision != "quality-improved" {
+			t.Fatalf("decision = %q, want quality-improved after the exclusion", lm.Decision)
+		}
+	})
+
+	t.Run("missing scenario family is excluded", func(t *testing.T) {
+		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, nil)
+		nl := mixedArtifact("pair-nofam", AssemblyLegacy, "m", func(ae *AssemblyEval) { ae.ScenarioFamily = "" })
+		nm := mixedArtifact("pair-nofam", AssemblyMixed, "m", func(ae *AssemblyEval) { ae.ScenarioFamily = "" })
+		arts = append(arts, nl, nm)
+		labels = append(labels, labelFor(nl, 0.5), labelFor(nm, 1.0))
+
+		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+		if lm.Pairs != assemblyMixedMinimumPairs {
+			t.Fatalf("pairs = %d, want %d (family-less pair must not pool)", lm.Pairs, assemblyMixedMinimumPairs)
+		}
+		if got := exclusionsOf(lm); got["pair-nofam"] != "missing-scenario-family" {
+			t.Fatalf("exclusions = %v, want pair-nofam => missing-scenario-family", lm.Exclusions)
+		}
+		if lm.Decision != "quality-improved" {
+			t.Fatalf("decision = %q, want quality-improved after the exclusion", lm.Decision)
+		}
+	})
+
+	t.Run("one unlabeled built pair gates the whole verdict", func(t *testing.T) {
+		// 61 built non-control pairs, 60 labeled: completeness is EVERY
+		// eligible pair labeled, so one unlabeled pair means
+		// incomplete-labeling regardless of the floors being met.
+		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, nil)
 		ul := mixedArtifact("pair-nolabel", AssemblyLegacy, "m", nil)
 		um := mixedArtifact("pair-nolabel", AssemblyMixed, "m", nil)
 		arts = append(arts, ul, um)
-		labels = append(labels, labelFor(ul, 0.5))
-		// Invalidated: digest mismatch.
-		dl := mixedArtifact("pair-digest", AssemblyLegacy, "m", nil)
-		dm := mixedArtifact("pair-digest", AssemblyMixed, "m", func(ae *AssemblyEval) {
-			ae.StateDigest = "sha256:other"
-		})
-		arts = append(arts, dl, dm)
-		labels = append(labels, labelFor(dl, 0.5), labelFor(dm, 0.5))
+		labels = append(labels, labelFor(ul, 0.5)) // mixed arm never labeled
 
 		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
 		if lm.Pairs != assemblyMixedMinimumPairs {
 			t.Fatalf("pairs = %d, want %d", lm.Pairs, assemblyMixedMinimumPairs)
 		}
-		got := map[string]string{}
-		for _, e := range lm.Exclusions {
-			got[e.PairID] = e.Reason
+		if got := exclusionsOf(lm); got["pair-nolabel"] != "unlabeled" {
+			t.Fatalf("exclusions = %v, want pair-nolabel => unlabeled", lm.Exclusions)
 		}
-		if got["pair-nolabel"] != "unlabeled" || got["pair-digest"] != "state-digest-mismatch" {
-			t.Fatalf("exclusions = %v, want unlabeled + state-digest-mismatch entries", lm.Exclusions)
+		if lm.Decision != "incomplete-labeling" {
+			t.Fatalf("decision = %q, want incomplete-labeling (an eligible pair was never labeled)", lm.Decision)
+		}
+	})
+
+	t.Run("structural exclusions never trip incomplete-labeling", func(t *testing.T) {
+		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, nil)
+		// Missing-arm pair, its lone arm UNLABELED: a capture gap, not a
+		// labeling gap.
+		arts = append(arts, mixedArtifact("pair-lone", AssemblyLegacy, "m", nil))
+		// Digest mismatch, unlabeled on one arm: invariant failure wins.
+		dl := mixedArtifact("pair-digest", AssemblyLegacy, "m", nil)
+		dm := mixedArtifact("pair-digest", AssemblyMixed, "m", func(ae *AssemblyEval) {
+			ae.StateDigest = "sha256:other"
+		})
+		arts = append(arts, dl, dm)
+		labels = append(labels, labelFor(dl, 0.5))
+		// Unlabeled CONTROL pair: controls are outside the verdict, so an
+		// unlabeled control never gates it.
+		cl := mixedArtifact("pair-ctl", AssemblyLegacy, "m", func(ae *AssemblyEval) { ae.Control = true })
+		cm := mixedArtifact("pair-ctl", AssemblyMixed, "m", func(ae *AssemblyEval) { ae.Control = true })
+		arts = append(arts, cl, cm)
+		labels = append(labels, labelFor(cl, 1.0))
+
+		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+		if lm.Pairs != assemblyMixedMinimumPairs {
+			t.Fatalf("pairs = %d, want %d", lm.Pairs, assemblyMixedMinimumPairs)
+		}
+		got := exclusionsOf(lm)
+		if got["pair-lone"] != "missing-mixed-arm" || got["pair-digest"] != "state-digest-mismatch" || got["pair-ctl"] != "unlabeled" {
+			t.Fatalf("exclusions = %v, want missing-mixed-arm + state-digest-mismatch + control unlabeled", lm.Exclusions)
 		}
 		if lm.Decision != "quality-improved" {
-			t.Fatalf("decision = %q, want quality-improved despite exclusions", lm.Decision)
+			t.Fatalf("decision = %q, want quality-improved (structural gaps consume slack, they do not gate labeling)", lm.Decision)
+		}
+	})
+
+	t.Run("cluster diversity floor", func(t *testing.T) {
+		// Fold conversation_only's 12 pairs into 5 families (3/3/3/2/1):
+		// floors all pass, but 5 distinct clusters < the registered 6.
+		fam := []int{0, 0, 0, 1, 1, 1, 2, 2, 2, 3, 3, 4}
+		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, func(i int, ae *AssemblyEval) {
+			if ae.Stratum == "conversation_only" {
+				ae.ScenarioFamily = fmt.Sprintf("cfam-%d", fam[i/5])
+			}
+		})
+		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+		if lm.Pairs != assemblyMixedMinimumPairs || lm.Decision != "insufficient-cluster-diversity" {
+			t.Fatalf("pairs=%d decision=%q, want %d/insufficient-cluster-diversity",
+				lm.Pairs, lm.Decision, assemblyMixedMinimumPairs)
+		}
+	})
+
+	t.Run("oversized cluster is excluded loudly", func(t *testing.T) {
+		arts, labels := appendMixedPairs(nil, nil, "m", 0, assemblyMixedMinimumPairs, 0.5, 1.0, nil)
+		// Four extra pairs sharing one family in one stratum: one past the
+		// registered cap of 3, so ALL four pairs leave, listed.
+		arts, labels = appendMixedPairs(arts, labels, "m", assemblyMixedMinimumPairs, 4, 0.5, 1.0, func(_ int, ae *AssemblyEval) {
+			ae.Stratum = "conversation_only"
+			ae.ScenarioFamily = "big-fam"
+		})
+		lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+		if lm.Pairs != assemblyMixedMinimumPairs {
+			t.Fatalf("pairs = %d, want %d (oversized cluster must not pool)", lm.Pairs, assemblyMixedMinimumPairs)
+		}
+		got := exclusionsOf(lm)
+		for i := 0; i < 4; i++ {
+			pair := fmt.Sprintf("mx-%03d", assemblyMixedMinimumPairs+i)
+			if got[pair] != "oversized-cluster" {
+				t.Errorf("exclusion for %q = %q, want oversized-cluster", pair, got[pair])
+			}
+		}
+		if len(lm.Exclusions) != 4 {
+			t.Fatalf("exclusions = %v, want exactly the four big-fam pairs", lm.Exclusions)
+		}
+		if lm.Decision != "quality-improved" {
+			t.Fatalf("decision = %q, want quality-improved after the exclusion", lm.Decision)
 		}
 	})
 }
@@ -464,9 +616,9 @@ func TestAssemblyReportAuxModes(t *testing.T) {
 			quality float64
 			labeled bool
 		}{
-			{"top-000", "shallow", 0.75, true},
-			{"top-001", "deep", 0.25, true},
-			{"top-002", "shallow", 0, false},
+			{"top-000", "conversation_only", 0.75, true},
+			{"top-001", "memory_only", 0.25, true},
+			{"top-002", "conversation_only", 0, false},
 		}
 		for _, tc := range top {
 			a := mixedArtifact(tc.pair, AssemblyTopline, "m", func(ae *AssemblyEval) {
@@ -518,12 +670,12 @@ func TestAssemblyReportAuxModes(t *testing.T) {
 	if len(tl.ByStratum) != 2 {
 		t.Fatalf("topline strata = %v, want 2", tl.ByStratum)
 	}
-	deep, shallow := tl.ByStratum[0], tl.ByStratum[1]
-	if deep.Stratum != "deep" || deep.Count != 1 || deep.Labeled != 1 || deep.MeanQuality != 0.25 {
-		t.Fatalf("deep topline stratum = %+v", deep)
+	conv, mem := tl.ByStratum[0], tl.ByStratum[1]
+	if conv.Stratum != "conversation_only" || conv.Count != 2 || conv.Labeled != 1 || conv.MeanQuality != 0.75 {
+		t.Fatalf("conversation_only topline stratum = %+v", conv)
 	}
-	if shallow.Stratum != "shallow" || shallow.Count != 2 || shallow.Labeled != 1 || shallow.MeanQuality != 0.75 {
-		t.Fatalf("shallow topline stratum = %+v", shallow)
+	if mem.Stratum != "memory_only" || mem.Count != 1 || mem.Labeled != 1 || mem.MeanQuality != 0.25 {
+		t.Fatalf("memory_only topline stratum = %+v", mem)
 	}
 }
 
@@ -532,7 +684,7 @@ func TestAssemblyReportAuxModes(t *testing.T) {
 // is excluded with a structural reason instead of silently splitting.
 func TestAssemblyReportScenarioFamilyCrossesStrata(t *testing.T) {
 	arts, labels := appendMixedPairs(nil, nil, "m", 0, 58, 0.5, 1.0, nil)
-	for i, stratum := range []string{"shallow", "deep"} {
+	for i, stratum := range []string{"conversation_only", "memory_only"} {
 		pair := fmt.Sprintf("xf-%03d", i)
 		mut := func(ae *AssemblyEval) {
 			ae.Stratum = stratum
@@ -560,10 +712,15 @@ func TestAssemblyReportScenarioFamilyCrossesStrata(t *testing.T) {
 	if len(lm.Exclusions) != 2 {
 		t.Fatalf("exclusions = %v, want exactly the two xfam pairs", lm.Exclusions)
 	}
-	// The strata section is rebuilt from the filtered set: only "shallow"
-	// remains, and the excluded deltas are gone from the pooled evidence.
-	if len(lm.Strata) != 1 || lm.Strata[0].Stratum != "shallow" || lm.Strata[0].Pairs != 58 {
-		t.Fatalf("strata = %+v, want shallow/58 only", lm.Strata)
+	// The strata section is rebuilt from the filtered set: the 58 base
+	// pairs remain (12/12/12/11/11 round-robin) and the excluded xfam
+	// deltas are gone from the pooled evidence.
+	total := 0
+	for _, s := range lm.Strata {
+		total += s.Pairs
+	}
+	if len(lm.Strata) != len(assemblyMixedRegisteredStrata) || total != 58 {
+		t.Fatalf("strata = %+v, want the five registered strata holding 58 pairs total", lm.Strata)
 	}
 }
 
@@ -701,11 +858,13 @@ func TestSignTestTwoSidedP(t *testing.T) {
 }
 
 // fcReportFixture: labeled legacy/mixed pairs for model "c" on pair-alpha
-// (FNV-1a-64("pair-alpha|c|fc") = 18218199419608068020, even => legacy is A)
-// and pair-gamma (15644729119194098327, odd => mixed is A); pair-beta is left
-// unlabeled (report-excluded) and pair-ctl is a negative-control pair.
+// (FNV-1a-64("pair-alpha|c|fc") = 18218199419608068020, even => legacy is A),
+// pair-gamma (15644729119194098327, odd => mixed is A), and pair-delta;
+// pair-beta is left unlabeled (report-excluded) and pair-ctl is a
+// negative-control pair. Every pair keeps its unique default scenario family,
+// so each labeled pair is its own independence group.
 func fcReportFixture() (arts []Artifact, labels []Label) {
-	for _, pair := range []string{"pair-alpha", "pair-beta", "pair-gamma"} {
+	for _, pair := range []string{"pair-alpha", "pair-beta", "pair-delta", "pair-gamma"} {
 		l := mixedArtifact(pair, AssemblyLegacy, "c", nil)
 		m := mixedArtifact(pair, AssemblyMixed, "c", nil)
 		arts = append(arts, l, m)
@@ -719,6 +878,15 @@ func fcReportFixture() (arts []Artifact, labels []Label) {
 	arts = append(arts, l, m)
 	labels = append(labels, labelFor(l, 1), labelFor(m, 1))
 	return arts, labels
+}
+
+// fcMixedWinPref returns the preference value ("a" or "b") that scores a
+// MIXED win for pair under the registered parity.
+func fcMixedWinPref(pair, model string) string {
+	if fcSideIsLegacyA(pair, model) {
+		return "b"
+	}
+	return "a"
 }
 
 // fcRowFor builds a valid preference row for one fixture pair, with hashA/B
@@ -865,4 +1033,202 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 			}
 		}
 	})
+
+	t.Run("a/b hashes must bind to the pair's exact arms", func(t *testing.T) {
+		// Swapped hashes: the right arm SET but the wrong a/b order for the
+		// registered parity.
+		swapped := fcRowFor(arts, "pair-alpha", "a")
+		swapped.ArtifactHashA, swapped.ArtifactHashB = swapped.ArtifactHashB, swapped.ArtifactHashA
+		// Foreign hashes: valid artifacts, but another pair's arms.
+		foreign := fcRowFor(arts, "pair-alpha", "a")
+		other := fcRowFor(arts, "pair-gamma", "a")
+		foreign.ArtifactHashA, foreign.ArtifactHashB = other.ArtifactHashA, other.ArtifactHashB
+		for name, row := range map[string]FCPreference{"swapped hashes": swapped, "foreign hashes": foreign} {
+			_, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row})
+			if err == nil || !strings.Contains(err.Error(), "pair-alpha") {
+				t.Errorf("%s: want loud error naming pair-alpha, got %v", name, err)
+			}
+		}
+	})
+
+	t.Run("cluster permutation p pins to 1 for a single group", func(t *testing.T) {
+		// One group with aggregate +1: every flip yields |sum| = 1 >= 1, so
+		// count = B and p = (B+1)/(B+1) = 1 exactly.
+		fc := fcOf(report([]FCPreference{fcRowFor(arts, "pair-alpha", "a")}))
+		if fc.PClusterPermutation != 1 {
+			t.Fatalf("p_cluster_permutation = %v, want exactly 1 (single group)", fc.PClusterPermutation)
+		}
+	})
+
+	t.Run("cluster permutation p pins to 1 for balanced signs", func(t *testing.T) {
+		// Aggregates +1 and -1: observed |sum| = 0, every flip satisfies
+		// |sum| >= 0, so count = B and p = 1 exactly.
+		fc := fcOf(report([]FCPreference{fcRowFor(arts, "pair-alpha", "a"), fcRowFor(arts, "pair-gamma", "a")}))
+		if fc.PClusterPermutation != 1 {
+			t.Fatalf("p_cluster_permutation = %v, want exactly 1 (balanced signs)", fc.PClusterPermutation)
+		}
+	})
+
+	t.Run("cluster permutation p for three singleton wins", func(t *testing.T) {
+		rows := []FCPreference{
+			fcRowFor(arts, "pair-alpha", fcMixedWinPref("pair-alpha", "c")),
+			fcRowFor(arts, "pair-delta", fcMixedWinPref("pair-delta", "c")),
+			fcRowFor(arts, "pair-gamma", fcMixedWinPref("pair-gamma", "c")),
+		}
+		rep := report(rows)
+		fc := fcOf(rep)
+		if fc.MixedWins != 3 || fc.LegacyWins != 0 || fc.NNonTie != 3 {
+			t.Fatalf("fc = %+v; want three mixed wins", fc)
+		}
+		// Three singleton groups, aggregates (+1,+1,+1), observed |sum| = 3.
+		// A permutation reaches |sum| >= 3 only when all three flips agree:
+		// 2 of the 8 equally likely patterns, so the exact expectation is
+		// 2/8 = 0.25 and p ~= (0.25*B+1)/(B+1). The pinned literal is the
+		// deterministic seed-1 Monte Carlo draw at the registered B = 10000:
+		// count = 2480, p = 2481/10001 ~= 0.2481.
+		if want := 2481.0 / 10001; fc.PClusterPermutation != want {
+			t.Fatalf("p_cluster_permutation = %v, want %v (seed-1 draw, expectation 0.25)", fc.PClusterPermutation, want)
+		}
+		// Deterministic across runs.
+		if again := fcOf(report(rows)); again.PClusterPermutation != fc.PClusterPermutation {
+			t.Fatalf("p_cluster_permutation not deterministic: %v vs %v", fc.PClusterPermutation, again.PClusterPermutation)
+		}
+		// Decision stays the fixture's own (pair-beta is unlabeled): the
+		// permutation p must never feed the primary rule.
+		if d := rep.LegacyMixedModels[0].Decision; d != "incomplete-labeling" {
+			t.Fatalf("decision = %q, want incomplete-labeling regardless of the permutation p", d)
+		}
+	})
+
+	t.Run("twin groups merge families in the permutation test", func(t *testing.T) {
+		// Three labeled pairs, two sharing twin_group tg-1: two independence
+		// groups with aggregates (+2, +1), observed |sum| = 3. |±2 ±1| >= 3
+		// only when the two flips agree: exact expectation 2/4 = 0.5 — twice
+		// the unmerged three-group fraction, so merging observably weakens
+		// the evidence. Pinned literal: the deterministic seed-1 Monte Carlo
+		// draw at B = 10000 is count = 4987, p = 4988/10001 ~= 0.4988.
+		var twinArts []Artifact
+		var twinLabels []Label
+		for _, pair := range []string{"tw-a", "tw-b", "tw-c"} {
+			mut := func(ae *AssemblyEval) {
+				if pair != "tw-c" {
+					ae.TwinGroup = "tg-1"
+				}
+			}
+			l := mixedArtifact(pair, AssemblyLegacy, "c", mut)
+			m := mixedArtifact(pair, AssemblyMixed, "c", mut)
+			twinArts = append(twinArts, l, m)
+			twinLabels = append(twinLabels, labelFor(l, 0), labelFor(m, 1))
+		}
+		var rows []FCPreference
+		for _, pair := range []string{"tw-a", "tw-b", "tw-c"} {
+			rows = append(rows, fcRowFor(twinArts, pair, fcMixedWinPref(pair, "c")))
+		}
+		rep, err := computeAssemblyReport(twinArts, twinLabels, 1, 200, rows)
+		if err != nil {
+			t.Fatalf("computeAssemblyReport: %v", err)
+		}
+		fc := rep.LegacyMixedModels[0].ForcedChoice
+		if fc == nil || fc.MixedWins != 3 {
+			t.Fatalf("fc = %+v; want three mixed wins", fc)
+		}
+		if want := 4988.0 / 10001; fc.PClusterPermutation != want {
+			t.Fatalf("p_cluster_permutation = %v, want %v (twin-merged, expectation 0.5)", fc.PClusterPermutation, want)
+		}
+	})
+}
+
+// TestAssemblyStratifiedClusterCIFixedWeights pins the registered
+// fixed-stratum-weight scheme with a structural property the old pooled
+// scheme violates. Stratum A: 12 pairs of delta +1 in 6 clusters of size 2.
+// Stratum B: 12 pairs of delta -1 in UNEVEN clusters (3,3,2,2,1,1). Under
+// fixed weights every replicate is exactly
+// (12/24)*(+1) + (12/24)*(-1) = 0.5 - 0.5 = 0: each stratum's ratio-of-sums
+// mean over identical deltas is exactly +/-1 whatever clusters are drawn,
+// and the weights never move — so BOTH CI endpoints equal 0 exactly. The old
+// pooled replicate (sum of resampled deltas / resampled count) depends on how
+// many stratum-B pairs a resample happens to draw (anywhere from 6 to 18), so
+// its replicates scatter around +/- a nonzero value and its endpoints
+// separate. Equal-to-zero endpoints are therefore a scheme-distinguishing
+// pin, not a tautology.
+func TestAssemblyStratifiedClusterCIFixedWeights(t *testing.T) {
+	cluster := func(size int, d float64) []float64 {
+		c := make([]float64, size)
+		for i := range c {
+			c[i] = d
+		}
+		return c
+	}
+	strataA := [][]float64{cluster(2, 1), cluster(2, 1), cluster(2, 1), cluster(2, 1), cluster(2, 1), cluster(2, 1)}
+	strataB := [][]float64{cluster(3, -1), cluster(3, -1), cluster(2, -1), cluster(2, -1), cluster(1, -1), cluster(1, -1)}
+	lo, hi := assemblyStratifiedClusterCI([][][]float64{strataA, strataB}, 1, 5000)
+	if lo != 0 || hi != 0 {
+		t.Fatalf("fixed-weight CI = [%v, %v], want exactly [0, 0]", lo, hi)
+	}
+	lo2, hi2 := assemblyStratifiedClusterCI([][][]float64{strataA, strataB}, 1, 5000)
+	if lo2 != lo || hi2 != hi {
+		t.Fatalf("CI not deterministic: [%v, %v] vs [%v, %v]", lo, hi, lo2, hi2)
+	}
+}
+
+// TestAssemblyReportClusterDiagnostics pins the descriptive
+// cluster-independence section: per-stratum cluster counts, max cluster
+// size, twin-merged independence-group count, and the leave-one-group-out
+// band — including the exact upper end when removing the only negative
+// group leaves a uniform +0.5 corpus (every replicate exactly 0.5).
+func TestAssemblyReportClusterDiagnostics(t *testing.T) {
+	// 58 pairs of +0.5 (round-robin strata, singleton families), then 2
+	// pairs of -1.0 sharing twin_group tg-x across two strata: 60 pairs,
+	// 12 per stratum, 60 singleton clusters, 59 independence groups.
+	arts, labels := appendMixedPairs(nil, nil, "m", 0, 58, 0.5, 1.0, nil)
+	arts, labels = appendMixedPairs(arts, labels, "m", 58, 2, 1.0, 0.0, func(_ int, ae *AssemblyEval) {
+		ae.TwinGroup = "tg-x"
+	})
+	lm := mustMixedReport(t, arts, labels).LegacyMixedModels[0]
+	if lm.Pairs != 60 || lm.Decision != "quality-improved" {
+		t.Fatalf("pairs=%d decision=%q, want 60/quality-improved", lm.Pairs, lm.Decision)
+	}
+	diag := lm.ClusterDiagnostics
+	if diag == nil {
+		t.Fatal("cluster_diagnostics missing")
+	}
+	if len(diag.ClustersPerStratum) != len(assemblyMixedRegisteredStrata) {
+		t.Fatalf("clusters_per_stratum = %v, want all five registered strata", diag.ClustersPerStratum)
+	}
+	for _, s := range assemblyMixedRegisteredStrata {
+		if diag.ClustersPerStratum[s] != 12 {
+			t.Errorf("clusters_per_stratum[%s] = %d, want 12", s, diag.ClustersPerStratum[s])
+		}
+	}
+	if diag.MaxClusterSize != 1 {
+		t.Fatalf("max_cluster_size = %d, want 1 (singleton families)", diag.MaxClusterSize)
+	}
+	if diag.IndependenceGroups != 59 {
+		t.Fatalf("independence_groups = %d, want 59 (tg-x merges two singleton clusters)", diag.IndependenceGroups)
+	}
+	// Removing the tg-x group leaves 58 uniform +0.5 deltas: every replicate
+	// is exactly 0.5, so the band's upper end is exactly 0.5. Every other
+	// removal keeps the two -1.0 pairs, so its lower bound sits strictly
+	// below.
+	if diag.LeaveOneOut.MaxLow != 0.5 {
+		t.Fatalf("leave_one_out.max_low = %v, want exactly 0.5", diag.LeaveOneOut.MaxLow)
+	}
+	if !(diag.LeaveOneOut.MinLow < diag.LeaveOneOut.MaxLow) {
+		t.Fatalf("leave_one_out band [%v, %v] not ordered min < max", diag.LeaveOneOut.MinLow, diag.LeaveOneOut.MaxLow)
+	}
+
+	// No complete pairs => no diagnostics section at all.
+	ul := mixedArtifact("pair-empty", AssemblyLegacy, "m", nil)
+	um := mixedArtifact("pair-empty", AssemblyMixed, "m", nil)
+	empty := mustMixedReport(t, []Artifact{ul, um}, []Label{labelFor(ul, 0.5)}).LegacyMixedModels[0]
+	if empty.Pairs != 0 || empty.ClusterDiagnostics != nil {
+		t.Fatalf("pairs=%d diagnostics=%+v, want 0 pairs and no diagnostics", empty.Pairs, empty.ClusterDiagnostics)
+	}
+	raw, err := json.Marshal(empty)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "cluster_diagnostics") {
+		t.Fatalf("cluster_diagnostics key present with zero complete pairs:\n%s", raw)
+	}
 }

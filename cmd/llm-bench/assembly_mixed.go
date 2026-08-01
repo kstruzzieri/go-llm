@@ -55,6 +55,39 @@ const (
 	assemblyMixedPressureFraction     = 0.6
 )
 
+// REGISTERED cluster-independence constants (#331 slice 3c): every registered
+// stratum must hold at least assemblyMixedMinClustersPerStratum DISTINCT
+// scenario-family clusters among the complete pairs (fewer trips the
+// insufficient-cluster-diversity gate, like insufficient-corpus), and no
+// cluster may hold more than assemblyMixedMaxClusterSize complete pairs
+// (every pair of an oversized cluster is excluded loudly with reason
+// "oversized-cluster", never silently down-weighted).
+const (
+	assemblyMixedMinClustersPerStratum = 6
+	assemblyMixedMaxClusterSize        = 3
+)
+
+// assemblyMixedRegisteredStrata is the REGISTERED closed stratum set of the
+// legacy-mixed experiment, in registration order. Single source of truth:
+// the report gate (unregistered-stratum exclusion + the absent-stratum arm of
+// insufficient-stratum-balance) and the fixture validator's vocabulary
+// (mixedStrata, assembly_mixed_fixture.go) both read it, so the two cannot
+// drift.
+var assemblyMixedRegisteredStrata = []string{
+	"conversation_only", "memory_only", "cross_domain_join",
+	"stale_vs_fresh", "chain_retention",
+}
+
+// assemblyMixedStratumSet is the membership view of
+// assemblyMixedRegisteredStrata.
+var assemblyMixedStratumSet = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(assemblyMixedRegisteredStrata))
+	for _, s := range assemblyMixedRegisteredStrata {
+		m[s] = struct{}{}
+	}
+	return m
+}()
+
 // assemblyMixedDecision applies rule v2 to the pooled stratified-bootstrap
 // CI on the paired delta (mixed - legacy). Strict inequalities throughout:
 // a lower bound landing exactly on the margin is NOT noninferior, and a
@@ -79,10 +112,12 @@ func assemblyMixedDecision(ciLo, ciHi float64) string {
 func assemblyMixedDecisionRuleText() string {
 	return fmt.Sprintf(
 		"legacy-mixed rule v2 (registered): minimum %d complete labeled non-control pairs pooled and minimum %d per stratum present; "+
+			"minimum %d scenario-family clusters per stratum and maximum cluster size %d; "+
 			"quality-improved: stratified-bootstrap CI low > 0; noninferior: CI low strictly > %.2f; "+
 			"materially-regressed: CI high < %.2f; else inconclusive; "+
 			"token and pressure numbers are descriptive only, never consulted; registered pressure fraction f=%.1f",
 		assemblyMixedMinimumPairs, assemblyMixedMinimumStratumPairs,
+		assemblyMixedMinClustersPerStratum, assemblyMixedMaxClusterSize,
 		assemblyMixedNonInferiorityMargin, assemblyMixedNonInferiorityMargin,
 		assemblyMixedPressureFraction)
 }
@@ -135,6 +170,11 @@ type AssemblyMixedModelReport struct {
 	ControlAbsDeltas []float64               `json:"control_abs_deltas,omitempty"` // |delta| per control pair, pair-ID order
 	ArmPressure      []AssemblyArmPressure   `json:"arm_pressure,omitempty"`
 	Exclusions       []AssemblyExclusion     `json:"exclusions,omitempty"`
+	// ClusterDiagnostics is the descriptive cluster-independence summary and
+	// leave-one-group-out sensitivity band. Descriptive ONLY: the decision
+	// rule never consults it. Nil (absent from JSON) when no complete pairs
+	// exist; 3a sections never carry it.
+	ClusterDiagnostics *AssemblyClusterDiagnostics `json:"cluster_diagnostics,omitempty"`
 	// ForcedChoice is the registered SECONDARY analysis over the -fc-ingest
 	// preference sidecar (-fc-preferences). Present only when the flag is set;
 	// nil (and absent from JSON) otherwise — 3a sections never carry it. It
@@ -142,31 +182,40 @@ type AssemblyMixedModelReport struct {
 	ForcedChoice *AssemblyForcedChoice `json:"forced_choice,omitempty"`
 }
 
-// AssemblyForcedChoice is the registered forced-choice secondary analysis for
-// one legacy-mixed model section: preference rows resolved to arms through
-// fcSideIsLegacyA (the single parity authority) and a two-sided exact
-// binomial sign test on the non-tie preferences (p = 0.5 null).
-// SkippedExcluded counts preference rows whose pair did not enter the
-// primary analysis (report-excluded for any reason, or a negative-control
-// pair) — they never enter the sign test.
+// AssemblyForcedChoice is the forced-choice secondary analysis for one
+// legacy-mixed model section: preference rows resolved to arms through the
+// registered side assignment (fcSideIsLegacyA) with each row's a/b hashes
+// bound to its pair's exact arms. SkippedExcluded counts preference rows
+// whose pair did not enter the primary analysis (report-excluded for any
+// reason, or a negative-control pair) — they never enter either test.
 type AssemblyForcedChoice struct {
-	MixedWins       int     `json:"mixed_wins"`
-	LegacyWins      int     `json:"legacy_wins"`
-	Ties            int     `json:"ties"`
-	NNonTie         int     `json:"n_nontie"`
-	PTwoSided       float64 `json:"p_two_sided"`
-	SkippedExcluded int     `json:"skipped_excluded"`
+	MixedWins  int `json:"mixed_wins"`
+	LegacyWins int `json:"legacy_wins"`
+	Ties       int `json:"ties"`
+	NNonTie    int `json:"n_nontie"`
+	// PTwoSided is the two-sided binomial sign test over the non-tie
+	// preferences (p = 0.5 null). DESCRIPTIVE only: it treats every non-tie
+	// preference as independent, which the clustered corpus design does not
+	// guarantee. The registered secondary p-value is PClusterPermutation.
+	PTwoSided float64 `json:"p_two_sided"`
+	// PClusterPermutation is the REGISTERED secondary p-value: the cluster
+	// sign-flip permutation test (fcClusterPermutationP), whose flip unit is
+	// the independence group, honoring the corpus's cluster structure. Never
+	// consulted by the primary Decision.
+	PClusterPermutation float64 `json:"p_cluster_permutation"`
+	SkippedExcluded     int     `json:"skipped_excluded"`
 }
 
-// signTestTwoSidedP is the registered two-sided exact binomial sign test
-// against p = 0.5 over the n non-tie preferences:
+// signTestTwoSidedP is the two-sided binomial sign test against p = 0.5 over
+// the n non-tie preferences:
 // p = min(1, 2 * P(X >= max(wins, n-wins))), X ~ Bin(n, 0.5). Binomial
 // coefficients are built iteratively (C(n,i+1) = C(n,i)*(n-i)/(i+1)) with
-// stdlib float64 only — exact while every C(n,i) fits 2^53 (n <= 56), far
-// past a mixed-corpus pair count; beyond that the tiny float error is
-// irrelevant to a p-value. n == 0 is pinned to p = 1.0 (no non-tie
-// preferences carry no evidence against the null) rather than omitting the
-// field.
+// stdlib float64 sums — NOT exact arithmetic: coefficients round once n
+// exceeds 56 and every term carries float64 rounding, but the accumulated
+// relative error stays orders of magnitude below any reporting threshold for
+// n up to a few hundred, far past a mixed-corpus pair count. n == 0 is
+// pinned to p = 1.0 (no non-tie preferences carry no evidence against the
+// null) rather than omitting the field.
 func signTestTwoSidedP(wins, n int) float64 {
 	if n == 0 {
 		return 1
@@ -188,20 +237,34 @@ func signTestTwoSidedP(wins, n int) float64 {
 	return 1
 }
 
-// attachAssemblyForcedChoice attaches the registered forced-choice secondary
-// analysis to every legacy-mixed model section. Each preference row's a/b
-// sides resolve to arms through fcSideIsLegacyA ONLY (the single parity
-// authority; hashes are presence-validated, never used for resolution). Rows
-// on pairs the primary analysis excluded (any Exclusions reason) or on
-// negative-control pairs are skipped and counted in SkippedExcluded. Unknown
-// model/pair/hash, a duplicate row, or an invalid preference value is a loud
-// error. Runs strictly after every Decision is final and never writes one.
-func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPreference, pairs map[assemblyPairKey]*assemblyArmSet, artHashes map[string]struct{}) error {
+// fcGroupSign is one non-tie forced-choice sign with the pair metadata the
+// cluster permutation test groups by.
+type fcGroupSign struct {
+	pairID, fam, twin string
+	sign              float64 // +1 mixed win, -1 legacy win
+}
+
+// attachAssemblyForcedChoice attaches the forced-choice secondary analyses to
+// every legacy-mixed model section. Each preference row's a/b sides resolve
+// to arms through sideIsLegacyA (nil defaults to fcSideIsLegacyA, the
+// registered parity authority), and every row that enters the tests must
+// carry EXACTLY its pair's legacy/mixed arm hashes in the a/b order that
+// parity dictates — a mismatch is a loud error naming the pair. Rows on
+// pairs the primary analysis excluded (any Exclusions reason) or on
+// negative-control pairs are skipped and counted in SkippedExcluded (their
+// hashes are presence-checked only; a skipped pair may lack an arm to bind
+// against). Unknown model/pair/hash, a duplicate row, or an invalid
+// preference value is a loud error. Runs strictly after every Decision is
+// final and never writes one.
+func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPreference, pairs map[assemblyPairKey]*assemblyArmSet, artHashes map[string]struct{}, sideIsLegacyA func(pairID, modelKey string) bool) error {
+	if sideIsLegacyA == nil {
+		sideIsLegacyA = fcSideIsLegacyA
+	}
 	byModel := make(map[string]*AssemblyMixedModelReport, len(models))
 	excluded := make(map[string]map[string]struct{}, len(models))
 	for i := range models {
 		m := &models[i]
-		m.ForcedChoice = &AssemblyForcedChoice{PTwoSided: 1}
+		m.ForcedChoice = &AssemblyForcedChoice{PTwoSided: 1, PClusterPermutation: 1}
 		byModel[m.CandidateModel] = m
 		ex := make(map[string]struct{}, len(m.Exclusions))
 		for _, e := range m.Exclusions {
@@ -210,6 +273,7 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 		excluded[m.CandidateModel] = ex
 	}
 	seen := map[assemblyPairKey]struct{}{}
+	signs := map[string][]fcGroupSign{}
 	for i, row := range prefs {
 		m, ok := byModel[row.CandidateModel]
 		if !ok {
@@ -235,25 +299,37 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 			continue
 		}
 		if s.base != nil && s.base.Trace.AssemblyEval.Control {
-			fc.SkippedExcluded++ // negative controls never enter the verdict, so never the sign test
+			fc.SkippedExcluded++ // negative controls never enter the verdict, so never the tests
 			continue
 		}
-		legacyIsA := fcSideIsLegacyA(row.PairID, row.CandidateModel)
+		// A non-excluded non-control legacy-mixed pair is complete: both arms
+		// exist. Bind the row's a/b hashes to the pair's EXACT arms under the
+		// registered side assignment.
+		legacyIsA := sideIsLegacyA(row.PairID, row.CandidateModel)
+		wantA, wantB := s.base.ArtifactHash, s.treat.ArtifactHash
+		if !legacyIsA {
+			wantA, wantB = wantB, wantA
+		}
+		if row.ArtifactHashA != wantA || row.ArtifactHashB != wantB {
+			return fmt.Errorf("fc-preference row %d (pair %q model %q): artifact_hash_a/b %q/%q do not match the pair's legacy/mixed arms under the registered side assignment (want %q/%q)",
+				i, row.PairID, row.CandidateModel, row.ArtifactHashA, row.ArtifactHashB, wantA, wantB)
+		}
 		switch row.Preference {
 		case "tie":
 			fc.Ties++
-		case "a":
-			if legacyIsA {
-				fc.LegacyWins++
-			} else {
+		case "a", "b":
+			mixedWin := (row.Preference == "a") != legacyIsA
+			sign := -1.0
+			if mixedWin {
 				fc.MixedWins++
-			}
-		case "b":
-			if legacyIsA {
-				fc.MixedWins++
+				sign = 1
 			} else {
 				fc.LegacyWins++
 			}
+			ae := s.base.Trace.AssemblyEval
+			signs[row.CandidateModel] = append(signs[row.CandidateModel], fcGroupSign{
+				pairID: row.PairID, fam: ae.ScenarioFamily, twin: ae.TwinGroup, sign: sign,
+			})
 		default:
 			return fmt.Errorf("fc-preference row %d (pair %q): invalid preference %q (want a, b, or tie)", i, row.PairID, row.Preference)
 		}
@@ -262,8 +338,110 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 		fc := models[i].ForcedChoice
 		fc.NNonTie = fc.MixedWins + fc.LegacyWins
 		fc.PTwoSided = signTestTwoSidedP(fc.MixedWins, fc.NNonTie)
+		fc.PClusterPermutation = fcClusterPermutationP(signs[models[i].CandidateModel], pairedBootstrapSeed, pairedBootstrapN)
 	}
 	return nil
+}
+
+// fcClusterPermutationP is the REGISTERED forced-choice secondary test: a
+// cluster sign-flip permutation test over the non-tie preferences. Signs
+// (+1 mixed win, -1 legacy win) are aggregated per independence group
+// (group = scenario_family, with twin_group merging where set); each of the
+// b seeded permutations flips every group's aggregate sign independently
+// with p = 0.5; the two-sided p is the add-one-smoothed fraction
+// (count+1)/(b+1) of permutations whose |statistic| >= the observed
+// |statistic|. The statistic is the mean non-tie sign; the comparison uses
+// the sign SUMS, which is equivalent (both sides divide by the same fixed
+// n). Entries are sorted by pair ID before grouping so the group order — and
+// therefore the seeded flip stream — never depends on sidecar row order.
+// Zero non-tie preferences pin p to 1.0, matching signTestTwoSidedP.
+func fcClusterPermutationP(entries []fcGroupSign, seed int64, b int) float64 {
+	if len(entries) == 0 || b <= 0 {
+		return 1
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].pairID < entries[j].pairID })
+	fams := make([]string, len(entries))
+	twins := make([]string, len(entries))
+	for i, e := range entries {
+		fams[i], twins[i] = e.fam, e.twin
+	}
+	groups := independenceGroups(fams, twins)
+	agg := make([]float64, len(groups))
+	var obs float64
+	for gi, g := range groups {
+		for _, i := range g {
+			agg[gi] += entries[i].sign
+		}
+		obs += agg[gi]
+	}
+	obs = math.Abs(obs)
+	rng := rand.New(rand.NewSource(seed))
+	count := 0
+	for i := 0; i < b; i++ {
+		var sum float64
+		for _, a := range agg {
+			if rng.Intn(2) == 1 {
+				sum -= a
+			} else {
+				sum += a
+			}
+		}
+		if math.Abs(sum) >= obs {
+			count++
+		}
+	}
+	return float64(count+1) / float64(b+1)
+}
+
+// independenceGroups partitions items into independence groups for the
+// cluster diagnostics and the forced-choice permutation test: items sharing
+// a scenario family form one group, and every non-empty twin_group merges
+// the families it touches into a single group (a twin group may span strata,
+// so this is the one place cluster boundaries merge). fams and twins are
+// parallel; a blank family isolates its item. Groups come back in
+// first-item order, so deterministic input order yields deterministic
+// groups.
+func independenceGroups(fams, twins []string) [][]int {
+	parent := map[string]string{}
+	var find func(string) string
+	find = func(x string) string {
+		p, ok := parent[x]
+		if !ok || p == x {
+			parent[x] = x
+			return x
+		}
+		root := find(p)
+		parent[x] = root
+		return root
+	}
+	keys := make([]string, len(fams))
+	for i := range fams {
+		key := "fam\x00" + fams[i]
+		if fams[i] == "" {
+			key = fmt.Sprintf("solo\x00%d", i)
+		}
+		keys[i] = key
+		find(key)
+		if twins[i] != "" {
+			ra, rb := find(key), find("twin\x00"+twins[i])
+			if ra != rb {
+				parent[ra] = rb
+			}
+		}
+	}
+	idx := map[string]int{}
+	var groups [][]int
+	for i, key := range keys {
+		root := find(key)
+		g, ok := idx[root]
+		if !ok {
+			g = len(groups)
+			idx[root] = g
+			groups = append(groups, nil)
+		}
+		groups[g] = append(groups[g], i)
+	}
+	return groups
 }
 
 // AssemblyToplineStratum is one stratum's slice of the topline ceiling.
@@ -284,12 +462,35 @@ type AssemblyToplineReport struct {
 	ByStratum      []AssemblyToplineStratum `json:"by_stratum,omitempty"`
 }
 
+// AssemblyClusterDiagnostics is the descriptive cluster-independence summary
+// for one legacy-mixed model section. Descriptive ONLY — the decision rule
+// never consults any field here (mutation-checked).
+type AssemblyClusterDiagnostics struct {
+	ClustersPerStratum map[string]int           `json:"clusters_per_stratum"`
+	MaxClusterSize     int                      `json:"max_cluster_size"`
+	IndependenceGroups int                      `json:"independence_groups"`
+	LeaveOneOut        AssemblyLeaveOneGroupOut `json:"leave_one_out"`
+}
+
+// AssemblyLeaveOneGroupOut is the leave-one-group-out sensitivity band: the
+// pooled CI lower bound recomputed (same seed, same B) with each independence
+// group's pairs removed in turn; MinLow/MaxLow are the extremes over the
+// removals.
+type AssemblyLeaveOneGroupOut struct {
+	MinLow float64 `json:"min_low"`
+	MaxLow float64 `json:"max_low"`
+}
+
 // assemblyMixedPair is one complete labeled non-control legacy-mixed pair.
+// twin is descriptive-only metadata (independence-group merging for the
+// diagnostics and the forced-choice permutation test), read from the legacy
+// arm; the fixture validator owns author-time cross-arm consistency.
 type assemblyMixedPair struct {
 	pairID  string
 	delta   float64
 	stratum string
 	family  string
+	twin    string
 	legacy  *AssemblyEval
 	mixed   *AssemblyEval
 }
@@ -297,14 +498,20 @@ type assemblyMixedPair struct {
 // computeAssemblyMixedSection builds the legacy-mixed per-model reports from
 // the already-keyed pairs. keys must be sorted (model, kind, pair) so deltas
 // land in lexicographic pair-ID order per model. Exclusions accumulate in
-// two pair-ID-ordered phases, not one merged order: the first (per-pair)
-// loop appends missing-arm/invariant/unlabeled exclusions, then the
-// second loop appends every scenario-family-crosses-strata exclusion after
-// it. Invariant failures become Exclusions, never report-wide errors.
+// pair-ID-ordered phases, not one merged order: the per-pair loop appends
+// missing-arm / invariant / unregistered-stratum / missing-scenario-family /
+// unlabeled exclusions, then the per-model loop appends every
+// scenario-family-crosses-strata exclusion, then every oversized-cluster
+// exclusion. Invariant failures become Exclusions, never report-wide errors.
+// Decision gates run in registered order: incomplete-labeling (any
+// complete-built non-control pair missing a label on either arm), the pooled
+// floor, the per-stratum floor over the REGISTERED strata (an absent
+// registered stratum trips it too), then the cluster-diversity floor.
 func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairKey]*assemblyArmSet, quality map[string]float64, seed int64, bootstrapN int) []AssemblyMixedModelReport {
 	type acc struct {
-		report   AssemblyMixedModelReport
-		complete []assemblyMixedPair
+		report    AssemblyMixedModelReport
+		complete  []assemblyMixedPair
+		unlabeled int // complete-built non-control pairs missing a label on either arm
 	}
 	models := map[string]*acc{}
 	var order []string
@@ -353,9 +560,25 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 			exclude("control-flag-mismatch")
 			continue
 		}
+		if !leg.Control {
+			// Registered strata only: a stratum outside the registered set is
+			// excluded loudly, never silently pooled. The independence unit is
+			// mandatory: a pair without a scenario family cannot cluster.
+			if _, ok := assemblyMixedStratumSet[leg.Stratum]; !ok {
+				exclude("unregistered-stratum")
+				continue
+			}
+			if leg.ScenarioFamily == "" {
+				exclude("missing-scenario-family")
+				continue
+			}
+		}
 		qL, okL := quality[s.base.ArtifactHash]
 		qM, okM := quality[s.treat.ArtifactHash]
 		if !okL || !okM {
+			if !leg.Control {
+				a.unlabeled++ // trips the incomplete-labeling gate below
+			}
 			exclude("unlabeled")
 			continue
 		}
@@ -369,6 +592,7 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		a.complete = append(a.complete, assemblyMixedPair{
 			pairID: k.pair,
 			delta:  qM - qL, stratum: leg.Stratum, family: leg.ScenarioFamily,
+			twin:   leg.TwinGroup,
 			legacy: leg, mixed: mix,
 		})
 	}
@@ -407,8 +631,36 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 			}
 			a.complete = kept
 		}
+		// A cluster above the registered size cap would dominate its
+		// stratum's resampling; exclude every pair it holds, loudly.
+		famCount := map[string]int{}
+		for _, p := range a.complete {
+			famCount[p.family]++
+		}
+		oversized := false
+		for _, n := range famCount {
+			if n > assemblyMixedMaxClusterSize {
+				oversized = true
+				break
+			}
+		}
+		if oversized {
+			kept := make([]assemblyMixedPair, 0, len(a.complete))
+			for _, p := range a.complete {
+				if famCount[p.family] > assemblyMixedMaxClusterSize {
+					a.report.Exclusions = append(a.report.Exclusions, AssemblyExclusion{
+						PairID: p.pairID, Kind: assemblyKindLegacyMixed,
+						Reason: "oversized-cluster",
+					})
+					continue
+				}
+				kept = append(kept, p)
+			}
+			a.complete = kept
+		}
 		r := a.report
 		r.Pairs = len(a.complete)
+		var clusters [][][]float64
 		if r.Pairs > 0 {
 			var sum float64
 			for _, p := range a.complete {
@@ -416,16 +668,21 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 				sum += p.delta
 			}
 			r.MeanDelta = sum / float64(r.Pairs)
-			var clusters [][][]float64
 			r.Strata, clusters = assemblyMixedStrata(a.complete)
 			r.DeltaCILow, r.DeltaCIHigh = assemblyStratifiedClusterCI(clusters, seed, bootstrapN)
 			r.ArmPressure = assemblyMixedArmPressure(a.complete)
+			r.ClusterDiagnostics = assemblyMixedClusterDiagnostics(
+				a.complete, r.Strata, clusters, r.DeltaCILow, seed, bootstrapN)
 		}
 		switch {
+		case a.unlabeled > 0:
+			r.Decision = "incomplete-labeling"
 		case r.Pairs < assemblyMixedMinimumPairs:
 			r.Decision = "insufficient-corpus"
 		case assemblyMixedStratumBelowFloor(r.Strata):
 			r.Decision = "insufficient-stratum-balance"
+		case assemblyMixedClusterDiversityBelowFloor(clusters):
+			r.Decision = "insufficient-cluster-diversity"
 		default:
 			r.Decision = assemblyMixedDecision(r.DeltaCILow, r.DeltaCIHigh)
 		}
@@ -434,13 +691,92 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 	return out
 }
 
+// assemblyMixedStratumBelowFloor checks the registered per-stratum floor over
+// the REGISTERED stratum set: a registered stratum entirely absent from the
+// complete pairs counts as zero and trips the floor exactly like a present
+// stratum below it. Unregistered strata cannot appear in strata (their pairs
+// were excluded upstream).
 func assemblyMixedStratumBelowFloor(strata []AssemblyStratumReport) bool {
+	counts := make(map[string]int, len(strata))
 	for _, s := range strata {
-		if s.Pairs < assemblyMixedMinimumStratumPairs {
+		counts[s.Stratum] = s.Pairs
+	}
+	for _, name := range assemblyMixedRegisteredStrata {
+		if counts[name] < assemblyMixedMinimumStratumPairs {
 			return true
 		}
 	}
 	return false
+}
+
+// assemblyMixedClusterDiversityBelowFloor checks the registered
+// cluster-diversity floor: every stratum among the complete pairs must hold
+// at least assemblyMixedMinClustersPerStratum distinct scenario-family
+// clusters. Callers gate on the stratum floor first, so every registered
+// stratum is present when this runs.
+func assemblyMixedClusterDiversityBelowFloor(clusters [][][]float64) bool {
+	for _, cs := range clusters {
+		if len(cs) < assemblyMixedMinClustersPerStratum {
+			return true
+		}
+	}
+	return false
+}
+
+// assemblyMixedClusterDiagnostics computes the descriptive
+// cluster-independence summary and the leave-one-group-out sensitivity band
+// for one model's complete pairs. Descriptive ONLY — the decision rule never
+// consults it. strata and clusters are the aligned assemblyMixedStrata
+// outputs over complete; pooledLow is the full-set CI lower bound, used as
+// the degenerate band when a single group covers every pair (removing it
+// would leave nothing to estimate).
+func assemblyMixedClusterDiagnostics(complete []assemblyMixedPair, strata []AssemblyStratumReport, clusters [][][]float64, pooledLow float64, seed int64, bootstrapN int) *AssemblyClusterDiagnostics {
+	diag := &AssemblyClusterDiagnostics{ClustersPerStratum: make(map[string]int, len(strata))}
+	for i, sr := range strata {
+		diag.ClustersPerStratum[sr.Stratum] = len(clusters[i])
+		for _, c := range clusters[i] {
+			if len(c) > diag.MaxClusterSize {
+				diag.MaxClusterSize = len(c)
+			}
+		}
+	}
+	fams := make([]string, len(complete))
+	twins := make([]string, len(complete))
+	for i, p := range complete {
+		fams[i], twins[i] = p.family, p.twin
+	}
+	groups := independenceGroups(fams, twins)
+	diag.IndependenceGroups = len(groups)
+	lows := make([]float64, 0, len(groups))
+	for _, g := range groups {
+		drop := make(map[int]bool, len(g))
+		for _, i := range g {
+			drop[i] = true
+		}
+		remaining := make([]assemblyMixedPair, 0, len(complete)-len(g))
+		for i, p := range complete {
+			if !drop[i] {
+				remaining = append(remaining, p)
+			}
+		}
+		if len(remaining) == 0 {
+			continue
+		}
+		_, cs := assemblyMixedStrata(remaining)
+		lo, _ := assemblyStratifiedClusterCI(cs, seed, bootstrapN)
+		lows = append(lows, lo)
+	}
+	if len(lows) == 0 {
+		diag.LeaveOneOut = AssemblyLeaveOneGroupOut{MinLow: pooledLow, MaxLow: pooledLow}
+		return diag
+	}
+	band := AssemblyLeaveOneGroupOut{MinLow: lows[0], MaxLow: lows[0]}
+	for _, lo := range lows[1:] {
+		band.MinLow = math.Min(band.MinLow, lo)
+		band.MaxLow = math.Max(band.MaxLow, lo)
+	}
+	diag.LeaveOneOut = band
+	return diag
 }
 
 // assemblyMixedStrata groups complete pairs by stratum (sorted) and returns
@@ -496,35 +832,53 @@ func assemblyMixedStrata(complete []assemblyMixedPair) ([]AssemblyStratumReport,
 
 // assemblyStratifiedClusterCI extends bootstrapDeltaCI's mechanics (same
 // seed handling, same N, same nearest-rank 2.5/97.5 percentiles) to a
-// stratified cluster bootstrap: each stratum is resampled independently
-// (its cluster count preserved), and the resampling unit within a stratum
-// is a scenario-family cluster — all pairs sharing a family move together.
-// The CI is pooled only, by pre-registration.
+// FIXED-STRATUM-WEIGHT cluster bootstrap. REGISTERED estimand and scheme:
+// the point estimand is the unweighted mean delta over all complete
+// non-control pairs; each replicate resamples every stratum independently
+// (k_s of its k_s scenario-family clusters with replacement — all pairs
+// sharing a family move together), takes the stratum's ratio-of-sums mean
+// over the resampled pairs, and combines the strata as
+// sum_s (n_s/N) * mean_s, where n_s is the ORIGINAL complete-pair count of
+// stratum s and N = sum_s n_s. The stratum weights are FIXED across
+// replicates, so replicate noise reflects within-stratum cluster resampling
+// only — never accidental stratum re-weighting when uneven cluster sizes
+// make a resample land more pairs in one stratum. The CI is pooled only, by
+// pre-registration.
 func assemblyStratifiedClusterCI(strata [][][]float64, seed int64, n int) (lo, hi float64) {
 	totalPairs := 0
-	for _, clusters := range strata {
+	weights := make([]float64, len(strata))
+	for si, clusters := range strata {
 		for _, c := range clusters {
+			weights[si] += float64(len(c))
 			totalPairs += len(c)
 		}
 	}
 	if totalPairs == 0 || n <= 0 {
 		return math.NaN(), math.NaN()
 	}
+	for si := range weights {
+		weights[si] /= float64(totalPairs)
+	}
 	rng := rand.New(rand.NewSource(seed))
 	means := make([]float64, n)
 	for i := 0; i < n; i++ {
-		var sum float64
-		count := 0
-		for _, clusters := range strata {
+		var rep float64
+		for si, clusters := range strata {
 			k := len(clusters)
+			if k == 0 {
+				continue // zero-weight stratum: nothing to draw
+			}
+			var sum float64
+			count := 0
 			for j := 0; j < k; j++ {
 				for _, d := range clusters[rng.Intn(k)] {
 					sum += d
 					count++
 				}
 			}
+			rep += weights[si] * (sum / float64(count))
 		}
-		means[i] = sum / float64(count)
+		means[i] = rep
 	}
 	ps := percentiles(means, 0.025, 0.975)
 	return ps[0], ps[1]
