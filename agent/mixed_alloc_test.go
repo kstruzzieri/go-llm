@@ -296,6 +296,23 @@ func TestMixedAllocMustFitOverflow(t *testing.T) {
 	}
 }
 
+// TestMixedAllocEstimateOverflowFailsClosed catches unchecked ledger addition:
+// a near-MaxInt must-fit estimate plus the system reservation must saturate and
+// remain over budget, not wrap negative and pass admission.
+func TestMixedAllocEstimateOverflowFailsClosed(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	est := func(string) int { return maxInt - 5 }
+	_, alloc, err := allocFixture(t, est, State{Messages: []Message{
+		pinned("system", "P"),
+	}}, 100, 10)
+	if !errors.Is(err, ErrContextExhausted) {
+		t.Fatalf("allocateMixed error = %v, want ErrContextExhausted", err)
+	}
+	if alloc.used != maxInt {
+		t.Errorf("used = %d, want saturated %d", alloc.used, maxInt)
+	}
+}
+
 // laneOrderState is the three-lane fixture: one prior-history exchange (4), one
 // pinned message (3), one current-run plain exchange (4), one completed chain
 // with a structured anchor (call 20 + envelope 10 = 30 base, + 26 placeholder).
@@ -1325,6 +1342,54 @@ func TestMixedAllocZeroCostEstimatorCannotBypassBudget(t *testing.T) {
 	}
 	if units[0].anchors[0].content != omittedObservation {
 		t.Errorf("anchor content = %q, want the placeholder", units[0].anchors[0].content)
+	}
+}
+
+// TestMixedAllocRetriesOmittedAfterShrinkingUpgrade catches a terminal skip of
+// chosen<0 subjects. A later, higher-utility alternative releases enough
+// capacity for the previously omitted sibling's base alternative.
+func TestMixedAllocRetriesOmittedAfterShrinkingUpgrade(t *testing.T) {
+	shrinking := ContextGroup{
+		Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "pkg/a.go"}, Rank: 1},
+		Alternatives: []ContextAlternative{
+			{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}}, Content: strings.Repeat("A", 60)},
+			{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract, altOverview}}, Content: strings.Repeat("a", 10)},
+		},
+	}
+	waiting := ContextGroup{
+		Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "pkg/b.go"}, Rank: 2},
+		Alternatives: []ContextAlternative{{
+			Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}},
+			Content: strings.Repeat("B", 40),
+		}},
+	}
+	waitingSecond := waiting
+	waitingSecond.Desc.Subject.ID = "pkg/c.go"
+	waitingSecond.Desc.Rank = 3
+	st := State{Messages: []Message{
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", "FLAT", chainSet(0, shrinking, waiting, waitingSecond), 4096),
+	}}
+
+	units, alloc, err := allocFixture(t, runeEstimator, st, 100, 0)
+	if err != nil {
+		t.Fatalf("allocateMixed: %v", err)
+	}
+	assertDecided(t, units)
+	a := findSubject(t, units, contextdepth.DomainRAG, "pkg/a.go")
+	b := findSubject(t, units, contextdepth.DomainRAG, "pkg/b.go")
+	c := findSubject(t, units, contextdepth.DomainRAG, "pkg/c.go")
+	if a.chosen != 1 || a.decision != DecisionUpgrade {
+		t.Errorf("shrinking subject = %+v, want upgraded alternative 1", a)
+	}
+	if b.omitted || b.chosen != 0 || b.decision != DecisionBase {
+		t.Errorf("first retried subject = %+v, want admitted base alternative", b)
+	}
+	if !c.omitted || c.reason != OmitTokenBudget {
+		t.Errorf("second retried subject = %+v, want deterministic token-budget omission", c)
+	}
+	if alloc.used != 81 || alloc.anchorOmissions != 1 {
+		t.Errorf("used/anchorOmissions = %d/%d, want 81/1\n%s", alloc.used, alloc.anchorOmissions, allocSnapshot(units, alloc))
 	}
 }
 

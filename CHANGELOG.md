@@ -109,8 +109,12 @@ pairing with `anchor_omissions`: token totals, subject counts,
 `verbatim_shortfalls`, rendered bytes, and `by_decision` / `by_omission_reason`
 breakdowns keyed on agent's fixed vocabulary. It is a NEW span kind, so it is
 additive within `SchemaVersion` 2 and only mixed turns emit it. The breakdowns
-are counts only — the per-subject rows carry source paths, memory record IDs
-and tool call IDs, which telemetry does not retain; use `-trace` for those.
+are counts only — persisted telemetry does not retain the per-subject rows that
+carry source paths, memory record IDs, and tool call IDs. `-trace` likewise
+does not serialize structured `ContextAssemblyTrace` rows or row fields, though
+its content-full model-visible messages can independently contain those
+identifiers. The rows themselves are available only to a live
+`ContextAssemblyObserver`.
 
 `golem` no longer prints `(truncated)` on a tool-result line when mixed
 assembly replaced that result's content. `ToolResult.Truncated` describes the

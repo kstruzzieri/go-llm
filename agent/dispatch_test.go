@@ -239,6 +239,45 @@ func TestToolObservationDeepCopiesContext(t *testing.T) {
 	}
 }
 
+// TestRecordResultRejectsOversizedContextBeforeCloning pins the admission
+// boundary: the completed result is recorded and observed first, but its
+// oversized carrier never reaches State for cloning.
+func TestRecordResultRejectsOversizedContextBeforeCloning(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		set  *ContextSet
+		want string
+	}{
+		{"groups", groupsSet(maxContextGroups + 1), "257 groups exceeds limit 256"},
+		{"alternatives", altsSet(maxContextAlternatives + 1), "65 alternatives exceeds limit 64"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var res Result
+			var state State
+			obs := &resultRec{}
+			o := New(nil, ContextManager{Mixed: true})
+			_, err := o.recordResult(context.Background(), &res, &state, obs, &restraintGovernor{}, 0,
+				provider.ToolCall{ID: "call-1", Function: provider.ToolCallFunction{Name: "ctx"}},
+				Effect{}, ToolCallRecord{}, ToolResult{Content: "result", Context: tt.set})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("recordResult error = %v, want %q", err, tt.want)
+			}
+			if len(res.ToolCalls) != 1 {
+				t.Fatalf("completed result was not recorded: %+v", res.ToolCalls)
+			}
+			if len(res.Events) != 1 || res.Events[0].Kind != "tool_result" {
+				t.Fatalf("result event = %+v, want one tool_result", res.Events)
+			}
+			if len(obs.results) != 1 || obs.results[0].Result.Context != tt.set {
+				t.Fatalf("ToolResultObserver did not receive the completed result: %+v", obs.results)
+			}
+			if len(state.Messages) != 0 {
+				t.Fatalf("oversized ContextSet reached State: %+v", state.Messages)
+			}
+		})
+	}
+}
+
 // TestToolObservationSkipsContextWhenNotMixed pins the legacy default: nothing
 // reads the set with Mixed off, so cloning it would make State retain a
 // guaranteed-dead copy of every alternative for the whole run.

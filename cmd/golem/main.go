@@ -110,7 +110,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
-	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries")
+	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
@@ -842,7 +842,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	var sourceSummarizer rag.SourceSummaryGenerator
 	if f.progressive {
 		if len(summarizeChain) == 0 {
-			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning)
+			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning(true))
 		}
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}

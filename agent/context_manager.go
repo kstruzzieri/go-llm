@@ -2,10 +2,34 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"math"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+// checkedTokenAdd is the single arithmetic boundary for estimator-driven token
+// counts. Overflow saturates for diagnostics and reports false so admission can
+// fail closed instead of treating a wrapped negative as spare capacity.
+func checkedTokenAdd(a, b int) (int, bool) {
+	if (b > 0 && a > math.MaxInt-b) || (b < 0 && a < math.MinInt-b) {
+		return math.MaxInt, false
+	}
+	return a + b, true
+}
+
+func checkedTokenSub(a, b int) (int, bool) {
+	if (b > 0 && a < math.MinInt+b) || (b < 0 && a > math.MaxInt+b) {
+		return math.MaxInt, false
+	}
+	return a - b, true
+}
+
+func saturatedTokenAdd(a, b int) int {
+	n, _ := checkedTokenAdd(a, b)
+	return n
+}
 
 // DefaultInputCeiling is a conservative fallback when Budget.InputCeiling is 0.
 // Exported so consumers (e.g. Golem's compression policy) derive their own
@@ -64,7 +88,10 @@ func (m ContextManager) estimate(s string) int {
 	if m.Estimate != nil {
 		return m.Estimate(s)
 	}
-	return (len(s) + 3) / 4
+	if s == "" {
+		return 0
+	}
+	return 1 + (len(s)-1)/4
 }
 
 func normalizeContextManager(m ContextManager) ContextManager {
@@ -76,6 +103,10 @@ func normalizeContextManager(m ContextManager) ContextManager {
 
 func (m ContextManager) messageCost(msg Message) int {
 	return RecencyCompactor{Estimate: m.Estimate}.messageCost(msg)
+}
+
+func (m ContextManager) checkedMessageCost(msg Message) (int, bool) {
+	return RecencyCompactor{Estimate: m.Estimate}.checkedMessageCost(msg)
 }
 
 // turnBudget resolves the per-turn input ceiling from the run Budget, applying
@@ -96,21 +127,51 @@ func turnBudget(b Budget) TokenBudget {
 }
 
 func (m ContextManager) pinnedTokens(st State, toolSchemaTokens int) int {
-	n := m.estimate(st.System) + toolSchemaTokens
-	for _, msg := range st.Messages {
-		if msg.Segment == Pinned {
-			n += m.messageCost(msg)
-		}
-	}
+	n, _ := m.checkedPinnedTokens(st, toolSchemaTokens)
 	return n
 }
 
-func (m ContextManager) totalTokens(st State, toolSchemaTokens int) int {
-	n := m.estimate(st.System) + toolSchemaTokens
-	for _, msg := range st.Messages {
-		n += m.messageCost(msg)
+func (m ContextManager) checkedPinnedTokens(st State, toolSchemaTokens int) (int, bool) {
+	n, ok := checkedTokenAdd(m.estimate(st.System), toolSchemaTokens)
+	if !ok {
+		return n, false
 	}
+	for _, msg := range st.Messages {
+		if msg.Segment == Pinned {
+			cost, costOK := m.checkedMessageCost(msg)
+			if !costOK {
+				return cost, false
+			}
+			n, ok = checkedTokenAdd(n, cost)
+			if !ok {
+				return n, false
+			}
+		}
+	}
+	return n, true
+}
+
+func (m ContextManager) totalTokens(st State, toolSchemaTokens int) int {
+	n, _ := m.checkedTotalTokens(st, toolSchemaTokens)
 	return n
+}
+
+func (m ContextManager) checkedTotalTokens(st State, toolSchemaTokens int) (int, bool) {
+	n, ok := checkedTokenAdd(m.estimate(st.System), toolSchemaTokens)
+	if !ok {
+		return n, false
+	}
+	for _, msg := range st.Messages {
+		cost, costOK := m.checkedMessageCost(msg)
+		if !costOK {
+			return cost, false
+		}
+		n, ok = checkedTokenAdd(n, cost)
+		if !ok {
+			return n, false
+		}
+	}
+	return n, true
 }
 
 func materializeDurableSummary(st State) State {
@@ -150,8 +211,8 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 	thresholds := budget.Thresholds.normalize()
 	st = materializeDurableSummary(st)
 
-	pinned := m.pinnedTokens(st, toolSchemaTokens)
-	if pinned > budget.Input {
+	pinned, pinnedOK := m.checkedPinnedTokens(st, toolSchemaTokens)
+	if !pinnedOK || pinned > budget.Input {
 		// Pinned segment (system + goal + tool schemas) alone exceeds the ceiling:
 		// a hard runtime exhaustion. Report pinned tokens as the input cost.
 		p := Pressure{
@@ -165,19 +226,33 @@ func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchema
 		return st, p, ErrContextExhausted
 	}
 
-	stateBudget := TokenBudget{Input: budget.Input - toolSchemaTokens}
+	stateInput, stateBudgetOK := checkedTokenSub(budget.Input, toolSchemaTokens)
+	if !stateBudgetOK {
+		return st, Pressure{
+			UsedPct: 1, InputTokens: stateInput, InputBudget: budget.Input,
+			Level: LevelCritical, Cause: CauseToolSchema, Mitigation: MitigationHalt,
+		}, ErrContextExhausted
+	}
+	stateBudget := TokenBudget{Input: stateInput}
 	out, report, err := m.Compactor.Compact(ctx, st, stateBudget)
 	if err != nil {
+		if errors.Is(err, ErrContextExhausted) {
+			tokens := saturatedTokenAdd(report.TokensAfter, toolSchemaTokens)
+			return st, Pressure{
+				UsedPct: usedFraction(tokens, budget.Input), InputTokens: tokens, InputBudget: budget.Input,
+				Level: LevelCritical, Cause: m.dominantCause(st, toolSchemaTokens), Mitigation: MitigationHalt,
+			}, err
+		}
 		return st, Pressure{}, err
 	}
-	after := m.totalTokens(out, toolSchemaTokens)
+	after, afterOK := m.checkedTotalTokens(out, toolSchemaTokens)
 	used := usedFraction(after, budget.Input)
 	evicted := report.DroppedCount > 0
 	compactions := 0
 	if evicted {
 		compactions = 1
 	}
-	exhausted := after > budget.Input
+	exhausted := !afterOK || after > budget.Input
 	level, mitigation := thresholds.Classify(used, exhausted, evicted)
 	pressure := Pressure{
 		UsedPct:     used,
@@ -213,7 +288,7 @@ func (m ContextManager) pinnedOverflowCause(st State, toolSchemaTokens int) Pres
 	pinnedMsgs := m.estimate(st.System)
 	for _, msg := range st.Messages {
 		if msg.Segment == Pinned {
-			pinnedMsgs += m.messageCost(msg)
+			pinnedMsgs = saturatedTokenAdd(pinnedMsgs, m.messageCost(msg))
 		}
 	}
 	if toolSchemaTokens > pinnedMsgs {

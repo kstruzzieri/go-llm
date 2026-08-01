@@ -38,9 +38,12 @@ type TraceRequest struct {
 	Budget         agent.Budget           `json:"budget"`
 }
 
-// TraceRecord is one content-full run trace (#238). It embeds agent.Result; the
-// embedded record uses Go's default JSON shape (e.g. Latency as integer
-// nanoseconds) - the schema documents that rather than forking a trace-only copy.
+// TraceRecord is one content-full run trace (#238). It embeds agent.Result but
+// does not serialize structured ContextAssemblyTrace rows or row fields; those
+// are available live to ContextAssemblyObserver. Its model-visible messages may
+// independently contain tool-call, source, or record identifiers. The embedded
+// record uses Go's default JSON shape (e.g. Latency as integer nanoseconds) -
+// the schema documents that rather than forking a trace-only copy.
 type TraceRecord struct {
 	SchemaVersion int          `json:"schema_version"`
 	RunID         string       `json:"run_id"`
@@ -165,8 +168,10 @@ type runtimeStageSpan struct {
 // span keeps the counts and drops the names: ByDecision says whether the upgrade
 // pass is doing anything, ByOmissionReason is what makes Pressure.AnchorOmissions
 // actionable (byte_cap vs token_budget vs chain_evicted), and neither can
-// identify a file. The content-full per-subject rows already ride agent.Result
-// into the -trace record for operators who want them.
+// identify a file. Telemetry retains only these aggregates; -trace does not
+// serialize structured ContextAssemblyTrace rows or row fields, though its
+// model-visible messages can independently contain the same identifiers. The
+// rows themselves are available only to the live ContextAssemblyObserver.
 type contextAssemblySpan struct {
 	SchemaVersion      int    `json:"schema_version"`
 	RunID              string `json:"run_id"`

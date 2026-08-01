@@ -47,10 +47,11 @@ type ContextSet struct {
 //   - TRACE SIZE is groups alone. fillMixedTrace emits one row per SUBJECT,
 //     carrying only the alternative that was chosen.
 //
-// They do NOT bound dispatch's clone: with Mixed on it runs before
-// validation, and Representations per alternative is unbounded — clone-time
-// cost stays bounded only by what the tool already allocated (#331 spec 3.2).
-// Built-in producers sit far below both limits.
+// Dispatch checks these cardinalities before cloning a returned set. The
+// per-alternative Representations and attribution Sources slices have no
+// carrier limit, so their clone-time cost remains bounded only by what the
+// tool already allocated (#331 spec 3.2). Built-in producers sit far below
+// both limits.
 const (
 	maxContextGroups       = 256
 	maxContextAlternatives = 64
@@ -93,6 +94,24 @@ func (s *ContextSet) clone() *ContextSet {
 	return out
 }
 
+// validateContextSetCardinality is the cheap resource preflight used before
+// dispatch clones a tool-owned set. It deliberately does not inspect semantic
+// fields; those remain validated only for completed chains during assembly.
+func validateContextSetCardinality(callID string, s *ContextSet) error {
+	if s == nil {
+		return nil
+	}
+	if len(s.Groups) > maxContextGroups {
+		return fmt.Errorf("agent: context set (call %q): %d groups exceeds limit %d", callID, len(s.Groups), maxContextGroups)
+	}
+	for i, g := range s.Groups {
+		if len(g.Alternatives) > maxContextAlternatives {
+			return fmt.Errorf("agent: context set (call %q): group %d (%q): %d alternatives exceeds limit %d", callID, i, g.Desc.Subject.ID, len(g.Alternatives), maxContextAlternatives)
+		}
+	}
+	return nil
+}
+
 // validateContextSet enforces the mixed-assembly boundary (#331 spec 4.3).
 // ToolResult.Context is a public field, so a hand-built set is validated
 // here; the built-in projections cannot produce a malformed one. Never skip,
@@ -111,8 +130,8 @@ func validateContextSet(callID string, s *ContextSet) error {
 	if len(s.Groups) == 0 {
 		return fmt.Errorf("agent: context set (call %q): non-nil set with zero groups", callID)
 	}
-	if len(s.Groups) > maxContextGroups {
-		return fmt.Errorf("agent: context set (call %q): %d groups exceeds limit %d", callID, len(s.Groups), maxContextGroups)
+	if err := validateContextSetCardinality(callID, s); err != nil {
+		return err
 	}
 	// One ContextSet belongs to one tool result, and chain bijection gives one
 	// tool result per call ID, so the spec's (ToolCallID, Domain, ID) triple is
@@ -136,9 +155,6 @@ func validateContextSet(callID string, s *ContextSet) error {
 		seen[g.Desc.Subject] = i
 		if len(g.Alternatives) == 0 {
 			return fmt.Errorf("agent: context set (call %q): group %d (%q): no alternatives", callID, i, g.Desc.Subject.ID)
-		}
-		if len(g.Alternatives) > maxContextAlternatives {
-			return fmt.Errorf("agent: context set (call %q): group %d (%q): %d alternatives exceeds limit %d", callID, i, g.Desc.Subject.ID, len(g.Alternatives), maxContextAlternatives)
 		}
 		prevVerbatim := 0
 		for j, a := range g.Alternatives {

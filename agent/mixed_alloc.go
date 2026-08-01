@@ -27,7 +27,7 @@ func guardedEstimate(est func(string) int) func(string) int {
 				return n
 			}
 		}
-		return (len(s) + 3) / 4
+		return 1 + (len(s)-1)/4
 	}
 }
 
@@ -37,6 +37,7 @@ func guardedEstimate(est func(string) int) func(string) int {
 type mixedAllocState struct {
 	budget             int
 	used               int
+	arithmeticOverflow bool
 	verbatimShortfalls int // anchors whose MinVerbatim preference went unmet, evicted ones included
 	evictedGroups      int
 	// anchorOmissions counts subjects dropped from a RETAINED anchor — content
@@ -47,7 +48,26 @@ type mixedAllocState struct {
 	anchorOmissions int
 }
 
-func (st *mixedAllocState) fits(tokens int) bool { return st.used+tokens <= st.budget }
+func (st *mixedAllocState) fits(tokens int) bool {
+	if st.arithmeticOverflow {
+		return false
+	}
+	next, ok := checkedTokenAdd(st.used, tokens)
+	if !ok {
+		st.used, st.arithmeticOverflow = next, true
+	}
+	return ok && next <= st.budget
+}
+
+func (st *mixedAllocState) charge(tokens int) bool {
+	if st.arithmeticOverflow {
+		return false
+	}
+	var ok bool
+	st.used, ok = checkedTokenAdd(st.used, tokens)
+	st.arithmeticOverflow = st.arithmeticOverflow || !ok
+	return ok
+}
 
 // anchorJoined renders the anchor's would-be Content for the current chosen
 // assignment: the selected fragments in GROUP (subject) order joined by "\n", or
@@ -84,13 +104,14 @@ func (m ContextManager) tryAssign(st *mixedAllocState, a *mixedAnchor, s *mixedS
 		s.chosen = prev
 		return false
 	}
-	dTok := m.estimate(next) - a.tokens
+	nextTokens := m.estimate(next)
+	dTok := nextTokens - a.tokens
 	if !st.fits(dTok) {
 		s.chosen = prev
 		return false
 	}
-	st.used += dTok
-	a.content, a.tokens = next, a.tokens+dTok
+	st.charge(dTok) // fits already proved this addition cannot overflow
+	a.content, a.tokens = next, nextTokens
 	a.verbatimGot += verbatimComponents(s.alts[i].Desc)
 	if prev >= 0 {
 		a.verbatimGot -= verbatimComponents(s.alts[prev].Desc)
@@ -146,12 +167,13 @@ func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, b
 
 	// 1. Must-fit reservations: pinned spans and unresolved tool chains. Neither
 	// is droppable, so they are charged before any lane competes for the rest.
+	reservationsOK := true
 	for _, u := range units {
 		if u.kind == unitPinned || u.kind == unitUnresolved {
-			st.used += u.baseTokens
+			reservationsOK = st.charge(u.baseTokens) && reservationsOK
 		}
 	}
-	if st.used > st.budget {
+	if !reservationsOK || st.used > st.budget {
 		return st, ErrContextExhausted
 	}
 
@@ -199,7 +221,25 @@ func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, b
 	// cheapest exact marginal cost wins. Adjacent-step-only would force an
 	// orientation upgrade before any evidence, because the prefix families
 	// interleave the orientation rungs with the evidence ones (spec 4.1 step 6).
-	for m.upgradeOnce(ctx, st, units, true) || m.upgradeOnce(ctx, st, units, false) {
+	for {
+		if m.upgradeOnce(ctx, st, units, true) || m.upgradeOnce(ctx, st, units, false) {
+			m.retryOmitted(st, units)
+			continue
+		}
+		break
+	}
+	if !st.arithmeticOverflow {
+		m.refreshOmissionReasons(st, units)
+	}
+	for _, u := range units {
+		for _, a := range u.anchors {
+			if a.minVerbatim > 0 && a.verbatimGot < a.minVerbatim {
+				st.verbatimShortfalls++
+			}
+		}
+	}
+	if st.arithmeticOverflow {
+		return st, ErrContextExhausted
 	}
 	return st, nil
 }
@@ -208,7 +248,7 @@ func (m ContextManager) allocateMixed(ctx context.Context, units []*mixedUnit, b
 // are atomic: a dropped question must never orphan its answer.
 func (m ContextManager) admitSpan(st *mixedAllocState, u *mixedUnit) {
 	if st.fits(u.baseTokens) {
-		st.used += u.baseTokens
+		st.charge(u.baseTokens)
 		u.subject.chosen, u.subject.decision = 0, DecisionBase
 		return
 	}
@@ -226,6 +266,7 @@ func (m ContextManager) admitSpan(st *mixedAllocState, u *mixedUnit) {
 // nothing double-counts.
 func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 	base := u.baseTokens
+	baseOK := true
 	capViolated := false
 	for _, a := range u.anchors {
 		// The cap bounds final model-visible bytes, and the placeholder is
@@ -235,25 +276,27 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 		}
 		a.content = omittedObservation
 		a.tokens = m.estimate(a.content)
-		base += a.tokens
+		var ok bool
+		base, ok = checkedTokenAdd(base, a.tokens)
+		baseOK = ok && baseOK
 	}
-	if capViolated || !st.fits(base) {
+	if capViolated || !baseOK || !st.fits(base) {
+		if !baseOK {
+			st.used, st.arithmeticOverflow = base, true
+		}
 		// Evicted: content/tokens set above are never charged and never
 		// materialized, because Task 8 skips evicted chains entirely.
 		u.evicted = true
 		st.evictedGroups++
 		omitSubject(u.subject, OmitChainEvicted)
 		for _, a := range u.anchors {
-			if a.minVerbatim > 0 {
-				st.verbatimShortfalls++ // the preference went unmet, evicted or not (spec 3.4)
-			}
 			for _, s := range a.subjects {
 				omitSubject(s, OmitChainEvicted)
 			}
 		}
 		return
 	}
-	st.used += base
+	st.charge(base)
 	// The chain span is retained. Every completed chain carries this subject,
 	// structured or not, so an unstructured chain (no anchors at all) still has
 	// exactly one decided trace row.
@@ -281,9 +324,6 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 			// The floor pass NEVER omits. A non-fit leaves the subject eligible
 			// for base admission below, which may well afford its cheap
 			// orientation alternative (spec 4.1 step 4).
-		}
-		if a.verbatimGot < a.minVerbatim {
-			st.verbatimShortfalls++
 		}
 	}
 
@@ -330,14 +370,84 @@ func (m ContextManager) allocateChain(st *mixedAllocState, u *mixedUnit) {
 			// reasons — a token-budget omission inside a retained anchor is exactly
 			// as silent, it just happens to correlate with a high UsedPct.
 			st.anchorOmissions++
-			s.chosen = 0
-			wouldBe := anchorJoined(a)
-			s.chosen = -1
-			if len(wouldBe) > a.cap {
-				omitSubject(s, OmitByteCap)
-			} else {
-				omitSubject(s, OmitTokenBudget)
+			omitSubject(s, m.omissionReason(st, a, s))
+		}
+	}
+}
+
+// refreshOmissionReasons re-prices retained omissions against the terminal
+// anchor and ledger. Chain evictions and malformed no-alternative subjects keep
+// their original semantics.
+func (m ContextManager) refreshOmissionReasons(st *mixedAllocState, units []*mixedUnit) {
+	for _, u := range units {
+		if u.kind != unitChain || u.evicted {
+			continue
+		}
+		for _, a := range u.anchors {
+			for _, s := range a.subjects {
+				if s.omitted && s.reason != OmitChainEvicted && len(s.alts) > 0 {
+					s.reason = m.omissionReason(st, a, s)
+				}
 			}
+		}
+	}
+}
+
+// omissionReason diagnoses the lowest-utility alternative, matching base
+// admission's deterministic declaration order and byte-before-token checks.
+func (m ContextManager) omissionReason(st *mixedAllocState, a *mixedAnchor, s *mixedSubject) string {
+	if len(s.alts) == 0 {
+		return s.reason
+	}
+	prev := s.chosen
+	s.chosen = 0
+	next := anchorJoined(a)
+	s.chosen = prev
+	if len(next) > a.cap {
+		return OmitByteCap
+	}
+	nextTokens := m.estimate(next)
+	total, ok := checkedTokenAdd(st.used, nextTokens-a.tokens)
+	if !ok || total > st.budget {
+		return OmitTokenBudget
+	}
+	if s.reason == "" {
+		return OmitTokenBudget // all alternatives just failed; estimator re-priced during diagnosis
+	}
+	return s.reason
+}
+
+// retryOmitted gives retained-anchor subjects another base-admission chance
+// after an upgrade changes capacity. Chains keep their original newest-first
+// order; subjects keep declaration order. A successful retry removes the
+// omission from pressure accounting.
+func (m ContextManager) retryOmitted(st *mixedAllocState, units []*mixedUnit) {
+	for {
+		progress := false
+		for i := len(units) - 1; i >= 0; i-- {
+			u := units[i]
+			if u.kind != unitChain || u.evicted {
+				continue
+			}
+			for _, a := range u.anchors {
+				for _, s := range a.subjects {
+					if !s.omitted || s.reason == OmitChainEvicted {
+						continue
+					}
+					for j := range s.alts {
+						if !m.tryAssign(st, a, s, j, DecisionBase) {
+							continue
+						}
+						s.omitted, s.reason = false, ""
+						st.anchorOmissions--
+						progress = true
+						break
+					}
+				}
+			}
+		}
+		if !progress {
+			return
 		}
 	}
 }

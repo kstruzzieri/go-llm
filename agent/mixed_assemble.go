@@ -145,8 +145,8 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 	hadSummary := strings.TrimSpace(st.DurableSummary) != ""
 	stMat := materializeDurableSummary(st)
 
-	pinned := m.pinnedTokens(stMat, toolSchemaTokens)
-	if pinned > budget.Input {
+	pinned, pinnedOK := m.checkedPinnedTokens(stMat, toolSchemaTokens)
+	if !pinnedOK || pinned > budget.Input {
 		return stMat, Pressure{
 			UsedPct:     usedFraction(pinned, budget.Input),
 			InputTokens: pinned,
@@ -163,6 +163,13 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 	// plain one — buildMixedUnits' documented precondition.
 	units, err := m.buildMixedUnits(st)
 	if err != nil {
+		if errors.Is(err, ErrContextExhausted) {
+			tokens, _ := m.checkedTotalTokens(stMat, toolSchemaTokens)
+			return stMat, Pressure{
+				UsedPct: usedFraction(tokens, budget.Input), InputTokens: tokens, InputBudget: budget.Input,
+				Level: LevelCritical, Cause: m.dominantCause(stMat, toolSchemaTokens), Mitigation: MitigationHalt,
+			}, ContextAssemblyTrace{}, err
+		}
 		return stMat, Pressure{}, ContextAssemblyTrace{}, err
 	}
 
@@ -178,30 +185,48 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 		// pointed at, so nothing downstream can reach stMat.Messages.
 		msg := stMat.Messages[0]
 		summary = &msg
-		sysTokens += m.messageCost(msg)
+		cost, costOK := m.checkedMessageCost(msg)
+		var addOK bool
+		sysTokens, addOK = checkedTokenAdd(sysTokens, cost)
+		if !costOK || !addOK {
+			return stMat, Pressure{
+				UsedPct: 1, InputTokens: sysTokens, InputBudget: budget.Input,
+				Level: LevelCritical, Cause: CausePinned, Mitigation: MitigationHalt,
+			}, ContextAssemblyTrace{}, ErrContextExhausted
+		}
 	}
 
-	stateBudget := budget.Input - toolSchemaTokens
+	stateBudget, stateBudgetOK := checkedTokenSub(budget.Input, toolSchemaTokens)
+	if !stateBudgetOK {
+		return stMat, Pressure{
+			UsedPct: 1, InputTokens: stateBudget, InputBudget: budget.Input,
+			Level: LevelCritical, Cause: CauseToolSchema, Mitigation: MitigationHalt,
+		}, ContextAssemblyTrace{}, ErrContextExhausted
+	}
 	alloc, err := m.allocateMixed(ctx, units, stateBudget, sysTokens)
 	if err != nil {
 		// Must-fit overflow. alloc.used is the FULL reservation cost — pinned
 		// messages, the durable summary AND unresolved chains — so the pressure
 		// row reports what actually did not fit rather than the pinned subset
 		// (spec 5).
-		reserved := alloc.used + toolSchemaTokens
+		reserved := saturatedTokenAdd(alloc.used, toolSchemaTokens)
+		cause := m.mustFitCause(stMat, units, toolSchemaTokens, alloc.used)
+		if alloc.arithmeticOverflow {
+			cause = m.dominantCause(stMat, toolSchemaTokens)
+		}
 		return stMat, Pressure{
 			UsedPct:     usedFraction(reserved, budget.Input),
 			InputTokens: reserved,
 			InputBudget: budget.Input,
 			Level:       LevelCritical,
-			Cause:       m.mustFitCause(stMat, units, toolSchemaTokens, alloc.used),
+			Cause:       cause,
 			Mitigation:  MitigationHalt,
 		}, ContextAssemblyTrace{}, err
 	}
 
 	out := materializeMixed(stMat.System, summary, units)
-	used := m.totalTokens(out, 0)
-	after := used + toolSchemaTokens
+	used, usedOK := m.checkedTotalTokens(out, 0)
+	after, afterOK := checkedTokenAdd(used, toolSchemaTokens)
 	// Both causes shed model-visible content, so both drive the mitigation and
 	// the compaction event. They stay separate COUNTS: folding anchor omissions
 	// into Evicted would report "5 groups evicted" for one retained anchor that
@@ -211,7 +236,7 @@ func (m ContextManager) assembleMixed(ctx context.Context, st State, toolSchemaT
 	if shed {
 		compactions = 1
 	}
-	exhausted := after > budget.Input
+	exhausted := !usedOK || !afterOK || after > budget.Input
 	usedPct := usedFraction(after, budget.Input)
 	level, mitigation := thresholds.Classify(usedPct, exhausted, shed)
 	pressure := Pressure{
@@ -256,10 +281,14 @@ func (m ContextManager) mustFitCause(stMat State, units []*mixedUnit, toolSchema
 	unresolved := 0
 	for _, u := range units {
 		if u.kind == unitUnresolved {
-			unresolved += u.baseTokens
+			unresolved = saturatedTokenAdd(unresolved, u.baseTokens)
 		}
 	}
-	if unresolved > toolSchemaTokens && unresolved > allocUsed-unresolved {
+	pinnedRemainder, ok := checkedTokenSub(allocUsed, unresolved)
+	if !ok {
+		pinnedRemainder = int(^uint(0) >> 1)
+	}
+	if unresolved > toolSchemaTokens && unresolved > pinnedRemainder {
 		return CauseToolOutput
 	}
 	return m.pinnedOverflowCause(stMat, toolSchemaTokens)
@@ -362,11 +391,12 @@ func anchorAttrib(a *mixedAnchor) *RetrievalAttribution {
 // admission ledger for any pure estimator (spec 4.1 exact-delta accounting).
 func (m ContextManager) fillMixedTrace(units []*mixedUnit, summary *Message,
 	alloc *mixedAllocState, maxTokens, used int) ContextAssemblyTrace {
+	free, _ := checkedTokenSub(maxTokens, used) // caller proved 0 <= used <= maxTokens
 
 	tr := ContextAssemblyTrace{
 		MaxTokens:           maxTokens,
 		EstimatedTokensUsed: used,
-		EstimatedTokensFree: maxTokens - used,
+		EstimatedTokensFree: free,
 		VerbatimShortfalls:  alloc.verbatimShortfalls,
 		// Always non-nil, even with no subjects: a nil slice marshals as null,
 		// and the orchestrator's zero-trace guard keys on Subjects != nil.

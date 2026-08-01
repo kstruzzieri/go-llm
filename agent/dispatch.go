@@ -45,9 +45,10 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 // recordResult appends one completed tool call's record, result event, optional
 // observer callback, state observation, and governor update — the shared tail used
 // by BOTH the serial and parallel paths so their model-visible semantics cannot
-// drift. `out` is the exact ToolResult appended to State (Invoke results are
-// already capOutput-ed; synthetic failures are short and uncapped) — so the
-// observer sees what the model sees. It returns stop=true (and sets
+// drift. `out` is the capped canonical fallback immediately after execution
+// (synthetic failures are short and uncapped). The observer sees it before its
+// Context is cloned onto State and before mixed assembly, so it is not promised
+// byte-identical to the model's later input. It returns stop=true (and sets
 // res.StopReason) when the governor trips, or an error to hard-abort the run.
 // It is a method so the mixed-assembly flag is read from o.ctxMgr in ONE place:
 // a flag threaded from each caller could drift between the two paths.
@@ -63,6 +64,11 @@ func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *Sta
 			Step: step, Call: call, Effect: effect, Result: out,
 			Denied: rec.Denied, Invoked: rec.Invoked, Latency: rec.Latency,
 		}); err != nil {
+			return false, err
+		}
+	}
+	if o.ctxMgr.Mixed {
+		if err := validateContextSetCardinality(call.ID, out.Context); err != nil {
 			return false, err
 		}
 	}

@@ -359,6 +359,24 @@ func TestBuildMixedUnitsChainBijection(t *testing.T) {
 	}
 }
 
+// TestBuildMixedUnitsRejectsDuplicateTraceTripleAcrossChains catches removal
+// of assembly-wide (ToolCallID, Domain, ID) validation. Per-chain validation
+// alone accepts both chains, but their structured subjects would trace with the
+// same identity.
+func TestBuildMixedUnitsRejectsDuplicateTraceTripleAcrossChains(t *testing.T) {
+	st := State{Messages: []Message{
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", "A", validSet(), 512),
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", "B", validSet(), 512),
+	}}
+
+	_, err := (ContextManager{Estimate: runeEstimator}).buildMixedUnits(st)
+	if err == nil || !strings.Contains(err.Error(), `duplicate trace subject ("c1", "rag", "pkg/doc.go")`) {
+		t.Fatalf("buildMixedUnits error = %v, want duplicate trace subject", err)
+	}
+}
+
 func TestBuildMixedUnitsValidation(t *testing.T) {
 	bad := setWith(func(s *ContextSet) { s.Groups[0].Desc.Subject.ID = "" })
 	st := State{Messages: []Message{

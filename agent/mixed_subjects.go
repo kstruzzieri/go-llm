@@ -152,14 +152,27 @@ type mixedUnit struct {
 func (m ContextManager) buildMixedUnits(st State) ([]*mixedUnit, error) {
 	groups := RecencyCompactor{Estimate: m.Estimate}.groups(st)
 	units := make([]*mixedUnit, 0, len(groups))
+	seen := map[[3]string]bool{}
 	// Running first-message index. This relies on groups() returning
 	// contiguous spans, in input order, covering all of st.Messages — the
 	// invariant that replaces an explicit index walk here.
 	first := 0
 	for _, g := range groups {
+		if g.overflow {
+			return nil, ErrContextExhausted
+		}
 		u, err := m.mixedUnitFor(g, first)
 		if err != nil {
 			return nil, err
+		}
+		for _, a := range u.anchors {
+			for _, s := range a.subjects {
+				key := [3]string{a.callID, s.ref.Domain, s.ref.ID}
+				if seen[key] {
+					return nil, fmt.Errorf("agent: mixed assembly: duplicate trace subject (%q, %q, %q)", key[0], key[1], key[2])
+				}
+				seen[key] = true
+			}
 		}
 		units = append(units, u)
 		first += len(g.msgs)
@@ -269,16 +282,23 @@ func validateChainBijection(span []Message) error {
 // with Content emptied, because an anchor's content is allocated, not assumed
 // (#331 spec 4.1 step 4).
 //
-// Duplicate subjects are NOT re-checked here. Chain bijection gives one tool
-// result per call ID, so all groups of one ContextSet share one call ID and
-// the spec's (ToolCallID, Domain, ID) triple is fully determined within the
-// set — validateContextSet owns it. Duplicates ACROSS calls are legal.
+// Duplicate subjects are NOT re-checked here. validateContextSet owns
+// within-set uniqueness; buildMixedUnits owns assembly-wide trace-triple
+// uniqueness. The same subject reached through different calls remains legal.
 func (m ContextManager) chainAnchors(span []Message) (anchors []*mixedAnchor, base int, err error) {
-	base = m.messageCost(span[0])
+	var ok bool
+	base, ok = m.checkedMessageCost(span[0])
+	if !ok {
+		return nil, 0, ErrContextExhausted
+	}
 	for j := 1; j < len(span); j++ {
 		msg := span[j]
 		if msg.Context == nil {
-			base += m.messageCost(msg) // ordinary tool result: verbatim, as today
+			cost, costOK := m.checkedMessageCost(msg)
+			base, ok = checkedTokenAdd(base, cost)
+			if !costOK || !ok {
+				return nil, 0, ErrContextExhausted
+			}
 			continue
 		}
 		if err := validateContextSet(msg.ToolCallID, msg.Context); err != nil {
@@ -286,7 +306,11 @@ func (m ContextManager) chainAnchors(span []Message) (anchors []*mixedAnchor, ba
 		}
 		envelope := msg
 		envelope.Content = ""
-		base += m.messageCost(envelope)
+		cost, costOK := m.checkedMessageCost(envelope)
+		base, ok = checkedTokenAdd(base, cost)
+		if !costOK || !ok {
+			return nil, 0, ErrContextExhausted
+		}
 
 		a := &mixedAnchor{
 			msgIdx:      j,

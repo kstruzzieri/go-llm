@@ -488,6 +488,62 @@ func TestAssembleWithTraceUpgradedSubject(t *testing.T) {
 	}
 }
 
+// TestAssembleWithTraceDerivesShortfallsAfterRetry catches a shortfall latched
+// after the floor pass. The expensive evidence subject cannot fit until a
+// sibling's shrinking upgrade releases capacity; the final anchor nevertheless
+// meets MinVerbatim and must report no shortfall or omission pressure.
+func TestAssembleWithTraceDerivesShortfallsAfterRetry(t *testing.T) {
+	largeA, smallA, evidence := strings.Repeat("A", 60), strings.Repeat("a", 10), strings.Repeat("B", 40)
+	set := chainSet(1,
+		ContextGroup{
+			Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "pkg/a.go"}, Rank: 1},
+			Alternatives: []ContextAlternative{
+				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}}, Content: largeA},
+				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract, altOverview}}, Content: smallA},
+			},
+		},
+		ContextGroup{
+			Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "pkg/b.go"}, Rank: 2},
+			Alternatives: []ContextAlternative{{
+				Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altEvidence}},
+				Content: evidence,
+			}},
+		},
+	)
+	est := func(s string) int {
+		if s == evidence || s == largeA+"\n"+evidence {
+			return 300
+		}
+		return len([]rune(s))
+	}
+	st := State{Messages: []Message{
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", traceFallback, set, 4096),
+	}}
+
+	out, pressure, tr, err := (ContextManager{Mixed: true, Estimate: est}).AssembleWithTrace(
+		context.Background(), st, 0, TokenBudget{Input: 200})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	if got := out.Messages[1].Content; got != smallA+"\n"+evidence {
+		t.Fatalf("anchor Content = %q, want retried evidence", got)
+	}
+	if tr.VerbatimShortfalls != 0 {
+		t.Errorf("VerbatimShortfalls = %d, want 0 from the final anchor state", tr.VerbatimShortfalls)
+	}
+	if pressure.AnchorOmissions != 0 || pressure.Compactions != 0 {
+		t.Errorf("pressure omissions/compactions = %d/%d, want 0/0", pressure.AnchorOmissions, pressure.Compactions)
+	}
+	if pressure.Level != LevelOK || pressure.Mitigation != MitigationNone {
+		t.Errorf("pressure = %v/%v, want ok/none", pressure.Level, pressure.Mitigation)
+	}
+	row := traceRow(t, tr, contextdepth.DomainRAG, "pkg/b.go")
+	if row.Omitted || row.EffectiveDepth != contextdepth.DepthL2 {
+		t.Errorf("retried evidence row = %+v, want rendered L2", row)
+	}
+}
+
 // attribLadder is a two-rung group whose alternatives differ ONLY in
 // attribution: rung 0 is orientation with nil Attrib, rung 1 adds the verbatim
 // evidence and the attribution that credits it. Nothing else in the suite has
@@ -749,6 +805,66 @@ func TestAssembleWithTraceOmittedSubject(t *testing.T) {
 	}
 }
 
+// TestAssembleWithTraceOmissionReasonUsesFinalConstraints catches a stale
+// byte-cap reason after a sibling's shrinking upgrade moves the omitted
+// subject inside the cap but leaves it blocked by the token budget.
+func TestAssembleWithTraceOmissionReasonUsesFinalConstraints(t *testing.T) {
+	large, small, waiting := strings.Repeat("A", 60), strings.Repeat("a", 10), strings.Repeat("B", 40)
+	set := chainSet(0,
+		ContextGroup{
+			Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "large.go"}, Rank: 1},
+			Alternatives: []ContextAlternative{
+				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}}, Content: large},
+				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract, altOverview}}, Content: small},
+			},
+		},
+		ContextGroup{
+			Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "waiting.go"}, Rank: 2},
+			Alternatives: []ContextAlternative{{
+				Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}}, Content: waiting,
+			}},
+		},
+	)
+	est := func(s string) int {
+		switch s {
+		case large:
+			return 20
+		case small:
+			return 10
+		case small + "\n" + waiting:
+			return 100
+		default:
+			return len([]rune(s))
+		}
+	}
+	st := State{Messages: []Message{
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", traceFallback, set, 80),
+	}}
+
+	_, pressure, tr, err := (ContextManager{Mixed: true, Estimate: est}).AssembleWithTrace(
+		context.Background(), st, 0, TokenBudget{Input: 80})
+	if err != nil {
+		t.Fatalf("AssembleWithTrace: %v", err)
+	}
+	waitingRow := traceRow(t, tr, contextdepth.DomainRAG, "waiting.go")
+	if !waitingRow.Omitted || waitingRow.OmissionReason != OmitTokenBudget {
+		t.Errorf("waiting row = %+v, want final token-budget omission", waitingRow)
+	}
+	byteCap, tokenBudget := 0, 0
+	for _, row := range tr.Subjects {
+		switch row.OmissionReason {
+		case OmitByteCap:
+			byteCap++
+		case OmitTokenBudget:
+			tokenBudget++
+		}
+	}
+	if byteCap != 0 || tokenBudget != 1 || pressure.AnchorOmissions != 1 {
+		t.Errorf("omission breakdown byte/token/pressure = %d/%d/%d, want 0/1/1", byteCap, tokenBudget, pressure.AnchorOmissions)
+	}
+}
+
 // TestAssembleWithTraceEvictedChainContributesNothing is the Task 7
 // carry-forward: allocateChain assigns the placeholder to every anchor BEFORE
 // its fit check, so an evicted chain's anchors hold content that was never
@@ -1003,6 +1119,185 @@ func TestAssembleWithTracePinnedOverflow(t *testing.T) {
 	if pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
 		t.Errorf("pressure = %v/%v, want critical/halt", pressure.Level, pressure.Mitigation)
 	}
+}
+
+// TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed catches
+// estimator-driven message/group arithmetic wrapping before allocator
+// admission. Two near-MaxInt fields in one pinned message must saturate and
+// return exhaustion, never become a negative reservation.
+func TestAssembleWithTraceEstimatorArithmeticOverflowFailsClosed(t *testing.T) {
+	maxInt := int(^uint(0) >> 1)
+	est := func(s string) int {
+		if s == "P" || s == "T" {
+			return maxInt - 5
+		}
+		return len([]rune(s))
+	}
+	pin := pinned("user", "P")
+	pin.ToolName = "T"
+	st := State{Messages: []Message{
+		pin,
+		mixedAsstCall("c1"),
+		mixedToolResult("c1", traceFallback, validSet(), 4096),
+	}}
+
+	for _, mixed := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pinned/mixed=%v", mixed), func(t *testing.T) {
+			_, pressure, tr, err := (ContextManager{Mixed: mixed, Estimate: est}).AssembleWithTrace(
+				context.Background(), st, 0, TokenBudget{Input: 200})
+			if !errors.Is(err, ErrContextExhausted) {
+				t.Fatalf("AssembleWithTrace error = %v, want ErrContextExhausted", err)
+			}
+			if !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
+				t.Errorf("overflow path trace = %+v, want zero trace", tr)
+			}
+			if pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
+				t.Errorf("pressure = %v/%v, want critical/halt", pressure.Level, pressure.Mitigation)
+			}
+			if pressure.InputTokens != maxInt || pressure.Cause != CausePinned {
+				t.Errorf("pressure tokens/cause = %d/%v, want saturated %d/pinned", pressure.InputTokens, pressure.Cause, maxInt)
+			}
+		})
+	}
+
+	t.Run("chain message group and envelope", func(t *testing.T) {
+		chainEst := func(s string) int {
+			if s == "function" || s == "retrieve" {
+				return maxInt - 5
+			}
+			return len([]rune(s))
+		}
+		chain := State{Messages: []Message{
+			mixedAsstCall("c1"),
+			mixedToolResult("c1", traceFallback, validSet(), 4096),
+		}}
+		for _, mixed := range []bool{false, true} {
+			_, pressure, tr, err := (ContextManager{Mixed: mixed, Estimate: chainEst}).AssembleWithTrace(
+				context.Background(), chain, 0, TokenBudget{Input: 200})
+			if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
+				t.Fatalf("mixed=%v: AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", mixed, tr, err)
+			}
+			if pressure.InputTokens != maxInt || pressure.InputBudget != 200 ||
+				pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt || pressure.Cause != CauseHistory {
+				t.Errorf("mixed=%v: pressure = %+v, want saturated 200-budget critical/halt history diagnostic", mixed, pressure)
+			}
+		}
+	})
+
+	t.Run("mixed final recompute", func(t *testing.T) {
+		const final = "FINAL"
+		calls := 0
+		finalEst := func(s string) int {
+			if s == final {
+				calls++
+				if calls > 1 {
+					return maxInt - 5
+				}
+			}
+			return len([]rune(s))
+		}
+		set := validSet()
+		set.Groups[0].Alternatives[0].Content = final
+		state := State{Messages: []Message{
+			mixedAsstCall("c1"),
+			mixedToolResult("c1", traceFallback, set, 4096),
+		}}
+		_, pressure, tr, err := (ContextManager{Mixed: true, Estimate: finalEst}).AssembleWithTrace(
+			context.Background(), state, 0, TokenBudget{Input: 200})
+		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
+			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
+		}
+		if pressure.InputTokens != maxInt || pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
+			t.Errorf("pressure = tokens %d level %v mitigation %v, want saturated critical halt",
+				pressure.InputTokens, pressure.Level, pressure.Mitigation)
+		}
+	})
+
+	t.Run("mixed allocator optional chain", func(t *testing.T) {
+		allocEst := func(s string) int {
+			if s == omittedObservation {
+				return maxInt - 5
+			}
+			return len([]rune(s))
+		}
+		state := State{Messages: []Message{
+			mixedAsstCall("c1"),
+			mixedToolResult("c1", traceFallback, validSet(), 4096),
+		}}
+		_, pressure, tr, err := (ContextManager{Mixed: true, Estimate: allocEst}).AssembleWithTrace(
+			context.Background(), state, 0, TokenBudget{Input: 200})
+		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
+			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
+		}
+		if pressure.InputTokens != maxInt || pressure.InputBudget != 200 ||
+			pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt || pressure.Cause != CauseToolOutput {
+			t.Errorf("pressure = %+v, want saturated 200-budget critical/halt tool-output diagnostic", pressure)
+		}
+	})
+
+	t.Run("mixed overflow before shrinking upgrade", func(t *testing.T) {
+		large, small, waiting := strings.Repeat("A", 60), strings.Repeat("a", 10), strings.Repeat("B", 40)
+		overflowEst := func(s string) int {
+			if s == large+"\n"+waiting {
+				return maxInt - 5
+			}
+			return len([]rune(s))
+		}
+		set := chainSet(0,
+			ContextGroup{
+				Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "large.go"}, Rank: 1},
+				Alternatives: []ContextAlternative{
+					{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}}, Content: large},
+					{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract, altOverview}}, Content: small},
+				},
+			},
+			ContextGroup{
+				Desc: contextdepth.GroupDesc{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "waiting.go"}, Rank: 2},
+				Alternatives: []ContextAlternative{{
+					Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{altAbstract}}, Content: waiting,
+				}},
+			},
+		)
+		state := State{Messages: []Message{
+			mixedAsstCall("c1"),
+			mixedToolResult("c1", traceFallback, set, 4096),
+		}}
+		_, pressure, tr, err := (ContextManager{Mixed: true, Estimate: overflowEst}).AssembleWithTrace(
+			context.Background(), state, 0, TokenBudget{Input: maxInt})
+		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
+			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
+		}
+		if pressure.InputTokens != maxInt || pressure.InputBudget != maxInt ||
+			pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
+			t.Errorf("pressure = %+v, want sticky saturated MaxInt critical/halt diagnostic", pressure)
+		}
+	})
+
+	t.Run("legacy local group accumulation", func(t *testing.T) {
+		groupEst := func(s string) int {
+			switch s {
+			case "SYS":
+				return -maxInt
+			case "A", "B":
+				return maxInt - 5
+			default:
+				return len([]rune(s))
+			}
+		}
+		state := State{System: "SYS", Messages: []Message{
+			elastic("user", "A"),
+			elastic("assistant", "B"),
+		}}
+		_, pressure, tr, err := (ContextManager{Estimate: groupEst}).AssembleWithTrace(
+			context.Background(), state, 0, TokenBudget{Input: 200})
+		if !errors.Is(err, ErrContextExhausted) || !reflect.DeepEqual(tr, ContextAssemblyTrace{}) {
+			t.Fatalf("AssembleWithTrace = trace %+v, error %v; want zero trace and exhaustion", tr, err)
+		}
+		if pressure.InputTokens != maxInt || pressure.InputBudget != 200 ||
+			pressure.Level != LevelCritical || pressure.Mitigation != MitigationHalt {
+			t.Errorf("pressure = %+v, want saturated 200-budget critical/halt diagnostic", pressure)
+		}
+	})
 }
 
 // TestAssembleWithTraceRejectsMixedCompactor: Mixed plus a custom Compactor is a
