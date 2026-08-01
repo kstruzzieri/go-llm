@@ -272,7 +272,25 @@ func TestValidateMixedCase(t *testing.T) {
 		{name: "accept memory_only", c: mixedMemCase("case-1")},
 		{name: "accept cross_domain_join", c: mixedJoinCase("case-1")},
 		{name: "accept stale_vs_fresh any answer_home", c: mixedStaleCase("case-1")},
+		{
+			name: "accept stale_vs_fresh memory home",
+			c: func() mixedCase {
+				c := mixedMemCase("case-1")
+				c.Stratum = "stale_vs_fresh"
+				return c
+			}(),
+		},
 		{name: "accept chain_retention memory home", c: mixedChainCase("case-1")},
+		{
+			name: "accept chain_retention rag home",
+			c: func() mixedCase {
+				c := mixedConvCase("case-1")
+				c.Stratum = "chain_retention"
+				c.AnswerHome = "rag"
+				c.RequiredEvidence = []mixedEvidence{{Domain: "rag", Literal: "04:00 UTC"}}
+				return c
+			}(),
+		},
 		{name: "accept control without required_evidence", c: mixedControlCase("case-1")},
 		{name: "accept cap_stress with output_cap", c: mixedCapStressCase("case-1")},
 		{
@@ -442,28 +460,40 @@ func TestValidateMixedCase(t *testing.T) {
 			c: withMixedToolCall(mixedConvCase("case-1"), mixedToolCall{
 				CallID: "c1", Tool: "retrieve",
 			}),
-			wantErr: "args must be a JSON object",
+			wantErr: "args must be a non-empty JSON object",
 		},
 		{
 			name: "invalid args JSON",
 			c: withMixedToolCall(mixedConvCase("case-1"), mixedToolCall{
 				CallID: "c1", Tool: "retrieve", Args: json.RawMessage(`{"query"`),
 			}),
-			wantErr: "args must be a JSON object",
+			wantErr: "args must be a non-empty JSON object",
 		},
 		{
 			name: "non-object args",
 			c: withMixedToolCall(mixedConvCase("case-1"), mixedToolCall{
 				CallID: "c1", Tool: "retrieve", Args: json.RawMessage(`["x"]`),
 			}),
-			wantErr: "args must be a JSON object",
+			wantErr: "args must be a non-empty JSON object",
 		},
 		{
 			name: "null args",
 			c: withMixedToolCall(mixedConvCase("case-1"), mixedToolCall{
 				CallID: "c1", Tool: "retrieve", Args: json.RawMessage(`null`),
 			}),
-			wantErr: "args must be a JSON object",
+			wantErr: "args must be a non-empty JSON object",
+		},
+		{
+			name: "empty object args",
+			c: withMixedToolCall(mixedConvCase("case-1"), mixedToolCall{
+				CallID: "c1", Tool: "retrieve", Args: json.RawMessage(`{}`),
+			}),
+			wantErr: "args must be a non-empty JSON object",
+		},
+		{
+			name:    "cap_stress without tool_call events",
+			c:       mutConv(func(c *mixedCase) { c.CapStress = true }),
+			wantErr: "at least one tool_call event",
 		},
 		{
 			name: "fixture_echo without content",
@@ -623,6 +653,17 @@ func TestValidateMixedCase(t *testing.T) {
 				c.MemoryRecords[0].Content = "reminder: flag-alpha-7 is the gate"
 			}),
 			wantErr: "leaks into memory content",
+		},
+		{
+			// Also pins two scan properties at once: summaries (abstract and
+			// overview) are contamination surfaces, and the contamination side
+			// is case-insensitive (a re-cased leak cannot slip past).
+			name: "contamination: re-cased literal leaks into rag abstract",
+			c: mutConv(func(c *mixedCase) {
+				c.RagSources[0].Abstract = "Deploy notes mention FLAG-ALPHA-7 for rollout."
+				c.RagSources[0].Overview = "Deployment overview."
+			}),
+			wantErr: "leaks into rag content",
 		},
 		{
 			name: "self-match: literal appears in the final question",

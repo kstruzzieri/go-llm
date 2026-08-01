@@ -111,7 +111,9 @@ type mixedTurn struct {
 
 // mixedToolCall scripts one tool invocation the Task 4 builder replays
 // through the real tool. OutputCap truncates the tool's output and is only
-// legal on cap_stress cases.
+// legal on cap_stress cases; the uniform-cap design is intended — every tool
+// call on a cap_stress case carries a cap, and mixed capped/uncapped
+// scenarios are authored as separate cases.
 type mixedToolCall struct {
 	CallID    string          `json:"call_id"`
 	Tool      string          `json:"tool"` // retrieve | agent_memory_search | fixture_echo
@@ -132,7 +134,12 @@ type mixedMemoryRecord struct {
 }
 
 // mixedEvidence is one required-evidence entry: a literal that must appear
-// verbatim in its declared domain's fixture content and nowhere else.
+// verbatim (case-sensitive) in its declared domain's fixture content and be
+// absent — case-INSENSITIVELY — everywhere else (the other two domains, the
+// final question, and the system prompt), so a re-cased leak cannot slip
+// past the contamination scan. Anchor literals per the 3a AnswerLiteral rule
+// ("claimBatch = 25", not "25"); there is no hard length check, but short
+// unanchored literals are rejected by the contamination scan in practice.
 type mixedEvidence struct {
 	Domain  string `json:"domain"` // conversation | memory | rag
 	Literal string `json:"literal"`
@@ -408,6 +415,11 @@ func validateMixedEvents(c mixedCase) error {
 	if final.Turn == nil || final.Turn.Role != "user" {
 		return fmt.Errorf("final event must be a user turn (the question) with non-empty content")
 	}
+	// A cap_stress case with nothing to cap tests nothing: the flag exists to
+	// stress tool-output truncation.
+	if c.CapStress && len(callIDs) == 0 {
+		return fmt.Errorf("cap_stress case requires at least one tool_call event")
+	}
 	return nil
 }
 
@@ -423,8 +435,8 @@ func validateMixedToolCall(i int, tc *mixedToolCall, capStress bool, callIDs map
 		return fmt.Errorf("event %d: unknown tool %q (want retrieve, agent_memory_search, or fixture_echo)", i, tc.Tool)
 	}
 	var args map[string]json.RawMessage
-	if len(tc.Args) == 0 || json.Unmarshal(tc.Args, &args) != nil || args == nil {
-		return fmt.Errorf("event %d: tool_call args must be a JSON object", i)
+	if len(tc.Args) == 0 || json.Unmarshal(tc.Args, &args) != nil || len(args) == 0 {
+		return fmt.Errorf("event %d: tool_call args must be a non-empty JSON object", i)
 	}
 	if tc.Tool == "fixture_echo" {
 		var content string
@@ -456,32 +468,49 @@ func mixedConversationTurnCount(c mixedCase) int {
 	return n
 }
 
-// mixedDomainContains reports whether lit appears verbatim in one domain's
-// fixture content, scanned per item (no concatenation artifacts).
-// Conversation content deliberately EXCLUDES the final question turn: a
-// question that leaks its own literal must not satisfy containment — that
-// would mask a case no domain can actually answer (same move as 3a's
-// assemblyAnswerReach).
+// mixedDomainContains reports whether lit appears verbatim (case-sensitive)
+// in one domain's fixture content — the CONTAINMENT side of the evidence
+// contract.
 func mixedDomainContains(c mixedCase, domain, lit string) bool {
+	return mixedDomainScan(c, domain, func(s string) bool { return strings.Contains(s, lit) })
+}
+
+// mixedDomainContainsFold is the CONTAMINATION-side variant: case-insensitive
+// on both sides, so a re-cased leak ("Flag-Alpha-7") cannot slip past.
+// Containment stays case-sensitive (verbatim) by design — the asymmetry is a
+// pure tightening.
+func mixedDomainContainsFold(c mixedCase, domain, lit string) bool {
+	folded := strings.ToLower(lit)
+	return mixedDomainScan(c, domain, func(s string) bool {
+		return strings.Contains(strings.ToLower(s), folded)
+	})
+}
+
+// mixedDomainScan applies match to every item of one domain's fixture
+// content, per item (no concatenation artifacts). Conversation content
+// deliberately EXCLUDES the final question turn: a question that leaks its
+// own literal must not satisfy containment — that would mask a case no
+// domain can actually answer (same move as 3a's assemblyAnswerReach).
+func mixedDomainScan(c mixedCase, domain string, match func(string) bool) bool {
 	switch domain {
 	case "conversation":
 		for i, e := range c.Events {
 			if e.Turn == nil || i == len(c.Events)-1 {
 				continue
 			}
-			if strings.Contains(e.Turn.Content, lit) {
+			if match(e.Turn.Content) {
 				return true
 			}
 		}
 	case "memory":
 		for _, r := range c.MemoryRecords {
-			if strings.Contains(r.Content, lit) {
+			if match(r.Content) {
 				return true
 			}
 		}
 	case "rag":
 		for _, s := range c.RagSources {
-			if strings.Contains(s.Content, lit) || strings.Contains(s.Abstract, lit) || strings.Contains(s.Overview, lit) {
+			if match(s.Content) || match(s.Abstract) || match(s.Overview) {
 				return true
 			}
 		}
@@ -490,15 +519,18 @@ func mixedDomainContains(c mixedCase, domain, lit string) bool {
 }
 
 // validateMixedEvidenceContract enforces the required/forbidden evidence
-// rules for non-control cases: containment in the declared domain,
-// contamination-freedom everywhere else (the other two domains, the final
-// question, and the system prompt), answer_home coherence, and join
-// coverage. Callers skip it entirely for control cases.
+// rules for non-control cases: containment in the declared domain
+// (case-sensitive), contamination-freedom everywhere else — the other two
+// domains, the final question, and the system prompt, all case-insensitive —
+// answer_home coherence, and join coverage. Callers skip it entirely for
+// control cases, and it requires validateMixedEvents to have passed (it
+// reads the final event as the guaranteed user-question turn).
 func validateMixedEvidenceContract(c mixedCase) error {
 	if len(c.RequiredEvidence) == 0 {
 		return fmt.Errorf("non-control case requires at least one required_evidence entry")
 	}
-	question := c.Events[len(c.Events)-1].Turn.Content
+	lowerQuestion := strings.ToLower(c.Events[len(c.Events)-1].Turn.Content)
+	lowerSystem := strings.ToLower(c.System)
 	homes := map[string]struct{}{}
 	for i, ev := range c.RequiredEvidence {
 		if !mixedValidEvidenceDomain(ev.Domain) {
@@ -517,14 +549,15 @@ func validateMixedEvidenceContract(c mixedCase) error {
 			if d == ev.Domain {
 				continue
 			}
-			if mixedDomainContains(c, d, ev.Literal) {
+			if mixedDomainContainsFold(c, d, ev.Literal) {
 				return fmt.Errorf("required_evidence[%d]: literal %q leaks into %s content", i, ev.Literal, d)
 			}
 		}
-		if strings.Contains(question, ev.Literal) {
+		folded := strings.ToLower(ev.Literal)
+		if strings.Contains(lowerQuestion, folded) {
 			return fmt.Errorf("required_evidence[%d]: literal %q appears in the final question", i, ev.Literal)
 		}
-		if strings.Contains(c.System, ev.Literal) {
+		if strings.Contains(lowerSystem, folded) {
 			return fmt.Errorf("required_evidence[%d]: literal %q appears in the system prompt", i, ev.Literal)
 		}
 		homes[ev.Domain] = struct{}{}
@@ -537,7 +570,7 @@ func validateMixedEvidenceContract(c mixedCase) error {
 			return fmt.Errorf("forbidden_evidence[%d]: blank literal", i)
 		}
 		for _, d := range mixedEvidenceDomains {
-			if mixedDomainContains(c, d, lit) {
+			if mixedDomainContainsFold(c, d, lit) {
 				return fmt.Errorf("forbidden_evidence[%d]: literal %q present in %s content", i, lit, d)
 			}
 		}
