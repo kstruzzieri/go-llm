@@ -120,14 +120,26 @@ func validateTrace(t Trace) error {
 		if ae.PairID == "" {
 			return fmt.Errorf("assembly_eval: blank pair_id")
 		}
-		if ae.Mode != AssemblyFlat && ae.Mode != AssemblyProgressive {
+		switch ae.Mode {
+		case AssemblyFlat, AssemblyProgressive:
+			if len(ae.CandidateIDs) == 0 {
+				return fmt.Errorf("assembly_eval: empty candidate_ids")
+			}
+			if ae.EstimatedPromptTokens <= 0 {
+				return fmt.Errorf("assembly_eval: non-positive estimated_prompt_tokens")
+			}
+		case AssemblyLegacy, AssemblyMixed:
+			if ae.Budget <= 0 {
+				return fmt.Errorf("assembly_eval: %s arm requires positive budget", ae.Mode)
+			}
+			if ae.StateDigest == "" {
+				return fmt.Errorf("assembly_eval: %s arm requires state_digest", ae.Mode)
+			}
+		case AssemblyTopline:
+			// pair_id is the only requirement; topline arms are unpaired
+			// descriptive ceilings with no budget or digest contract.
+		default:
 			return fmt.Errorf("assembly_eval: unknown mode %q", ae.Mode)
-		}
-		if len(ae.CandidateIDs) == 0 {
-			return fmt.Errorf("assembly_eval: empty candidate_ids")
-		}
-		if ae.EstimatedPromptTokens <= 0 {
-			return fmt.Errorf("assembly_eval: non-positive estimated_prompt_tokens")
 		}
 	}
 	return nil

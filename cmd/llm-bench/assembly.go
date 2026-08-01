@@ -29,16 +29,39 @@ type AssemblyMode string
 const (
 	AssemblyFlat        AssemblyMode = "flat"        // frozen BuildContext
 	AssemblyProgressive AssemblyMode = "progressive" // RenderProgressive, same budget
+
+	// Slice 3c (#331) agent-State arms: legacy vs mixed assembly of the SAME
+	// frozen State under one input budget; topline is the unpaired
+	// full-State ceiling arm (descriptive only, never enters pairing).
+	AssemblyLegacy  AssemblyMode = "legacy"
+	AssemblyMixed   AssemblyMode = "mixed"
+	AssemblyTopline AssemblyMode = "topline"
 )
 
 // AssemblyEval is the per-trace assembly-eval metadata. Both arms of a pair
 // share PairID and must carry identical CandidateIDs (asserted at report
-// time; a mismatch invalidates the case rather than skewing it).
+// time; a mismatch invalidates the case rather than skewing it). The
+// legacy-mixed kind additionally pair-checks StateDigest and Budget.
 type AssemblyEval struct {
 	PairID                string       `json:"pair_id"`
 	Mode                  AssemblyMode `json:"mode"`
 	CandidateIDs          []string     `json:"candidate_ids"`
 	EstimatedPromptTokens int          `json:"estimated_prompt_tokens"`
+
+	// Slice 3c (legacy/mixed/topline) metadata, filled by the 3c builder.
+	// All omitempty so existing 3a trace JSON stays byte-identical.
+	StateDigest     string   `json:"state_digest,omitempty"`     // sha256 of the canonical pre-assembly State
+	Subjects        []string `json:"subjects,omitempty"`         // ORDERED, non-deduplicated "(callID|domain|subjectID)" entries
+	Stratum         string   `json:"stratum,omitempty"`          // corpus stratum (drives the stratified bootstrap)
+	AnswerHome      string   `json:"answer_home,omitempty"`      // where the answer-bearing evidence lives
+	ScenarioFamily  string   `json:"scenario_family,omitempty"`  // bootstrap cluster ID; empty = own cluster
+	Control         bool     `json:"control,omitempty"`          // negative-control pair, excluded from the verdict
+	Budget          int      `json:"budget,omitempty"`           // TokenBudget.Input, identical across both arms
+	RawStateTokens  int      `json:"raw_state_tokens,omitempty"` // pre-assembly State size
+	PressureLevel   string   `json:"pressure_level,omitempty"`   // per-arm pressure tier
+	ShedMessages    int      `json:"shed_messages,omitempty"`    // full-state msg count minus assembled
+	ShedBytes       int      `json:"shed_bytes,omitempty"`       // full-state byte count minus assembled
+	OmittedSubjects int      `json:"omitted_subjects,omitempty"` // mixed arm only
 }
 
 // assemblyCase is one QA case in the corpus fixture. Chunks are whole-file
@@ -641,6 +664,12 @@ type AssemblyReport struct {
 	Models               []AssemblyModelReport `json:"models"`
 	BootstrapSeed        int64                 `json:"bootstrap_seed"`
 	BootstrapN           int                   `json:"bootstrap_n"`
+
+	// Slice 3c sections (legacy-mixed kind + topline ceiling). All omitempty
+	// so a flat-progressive-only report stays byte-identical to the 3a schema.
+	LegacyMixedDecisionRule string                     `json:"legacy_mixed_decision_rule,omitempty"`
+	LegacyMixedModels       []AssemblyMixedModelReport `json:"legacy_mixed_models,omitempty"`
+	Topline                 []AssemblyToplineReport    `json:"topline,omitempty"`
 }
 
 // AssemblyModelReport keeps assembly effects separate by candidate model.
@@ -659,10 +688,14 @@ type AssemblyModelReport struct {
 	Deltas               []float64 `json:"deltas"` // lexicographic pair-ID order ("case-10" < "case-2")
 }
 
-// computeAssemblyReport pairs artifacts on (PairID, CandidateModel), joins
-// human labels by ArtifactHash, and applies the decision rule. Cases with
-// unequal candidate sets are invalid; cases missing an arm or a label are
-// pairing gaps. Both are excluded from the deltas and counted.
+// computeAssemblyReport pairs artifacts on (kind, PairID, CandidateModel) —
+// kind derives from each artifact's mode (flat/progressive => the 3a
+// flat-progressive kind, legacy/mixed => the 3c legacy-mixed kind) so one
+// PairID may appear under both kinds without collision — joins human labels
+// by ArtifactHash, and applies each kind's decision rule. Topline artifacts
+// never pair; they feed the descriptive ceiling section. Flat-progressive
+// cases with unequal candidate sets are invalid; cases missing an arm or a
+// label are pairing gaps. Both are excluded from the deltas and counted.
 func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int) (*AssemblyReport, error) {
 	matched, _, err := matchLabels(labels, arts)
 	if err != nil {
@@ -672,10 +705,9 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 	for _, m := range matched {
 		quality[m.Artifact.ArtifactHash] = m.Label.ExpectedAnswerQuality
 	}
-	type pairKey struct{ pair, model string }
-	type armSet struct{ flat, prog *Artifact }
-	pairs := map[pairKey]*armSet{}
-	var keys []pairKey
+	pairs := map[assemblyPairKey]*assemblyArmSet{}
+	var keys []assemblyPairKey
+	var topline []*Artifact
 	for i := range arts {
 		a := &arts[i]
 		if a.Trace.AssemblyEval == nil {
@@ -684,35 +716,43 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		if err := validateTrace(a.Trace); err != nil {
 			return nil, fmt.Errorf("assembly report: artifact %q: %w", a.TraceID, err)
 		}
-		k := pairKey{a.Trace.AssemblyEval.PairID, modelKey(a.CandidateModel)}
-		if k.model == "" {
+		if modelKey(a.CandidateModel) == "" {
 			return nil, fmt.Errorf("assembly report: artifact %q has blank candidate model", a.TraceID)
 		}
+		mode := a.Trace.AssemblyEval.Mode
+		if mode == AssemblyTopline {
+			topline = append(topline, a)
+			continue
+		}
+		k := assemblyPairKey{assemblyModeKind(mode), a.Trace.AssemblyEval.PairID, modelKey(a.CandidateModel)}
 		s, ok := pairs[k]
 		if !ok {
-			s = &armSet{}
+			s = &assemblyArmSet{}
 			pairs[k] = s
 			keys = append(keys, k)
 		}
-		switch a.Trace.AssemblyEval.Mode {
-		case AssemblyFlat:
-			if s.flat != nil {
-				return nil, fmt.Errorf("assembly report: duplicate flat arm for pair %q model %q", k.pair, k.model)
+		switch mode {
+		case AssemblyFlat, AssemblyLegacy:
+			if s.base != nil {
+				return nil, fmt.Errorf("assembly report: duplicate %s arm for pair %q model %q", mode, k.pair, k.model)
 			}
-			s.flat = a
-		case AssemblyProgressive:
-			if s.prog != nil {
-				return nil, fmt.Errorf("assembly report: duplicate progressive arm for pair %q model %q", k.pair, k.model)
+			s.base = a
+		case AssemblyProgressive, AssemblyMixed:
+			if s.treat != nil {
+				return nil, fmt.Errorf("assembly report: duplicate %s arm for pair %q model %q", mode, k.pair, k.model)
 			}
-			s.prog = a
+			s.treat = a
 		default:
 			return nil, fmt.Errorf("assembly report: pair %q model %q has invalid mode %q",
-				k.pair, k.model, a.Trace.AssemblyEval.Mode)
+				k.pair, k.model, mode)
 		}
 	}
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].model != keys[j].model {
 			return keys[i].model < keys[j].model
+		}
+		if keys[i].kind != keys[j].kind {
+			return keys[i].kind < keys[j].kind
 		}
 		return keys[i].pair < keys[j].pair
 	})
@@ -736,7 +776,12 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 	models := map[string]*modelAccumulator{}
 	var modelOrder []string
 	totalPairs := 0
+	mixedEvidence := len(topline) > 0
 	for _, k := range keys {
+		if k.kind != assemblyKindFlatProgressive {
+			mixedEvidence = true
+			continue
+		}
 		acc, ok := models[k.model]
 		if !ok {
 			acc = &modelAccumulator{report: AssemblyModelReport{CandidateModel: k.model}}
@@ -744,17 +789,17 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 			modelOrder = append(modelOrder, k.model)
 		}
 		s := pairs[k]
-		if s.flat == nil || s.prog == nil {
+		if s.base == nil || s.treat == nil {
 			acc.report.PairingGaps++
 			continue
 		}
-		qf, okF := quality[s.flat.ArtifactHash]
-		qp, okP := quality[s.prog.ArtifactHash]
+		qf, okF := quality[s.base.ArtifactHash]
+		qp, okP := quality[s.treat.ArtifactHash]
 		if !okF || !okP {
 			acc.report.PairingGaps++
 			continue
 		}
-		if !reflect.DeepEqual(s.flat.Trace.AssemblyEval.CandidateIDs, s.prog.Trace.AssemblyEval.CandidateIDs) {
+		if !reflect.DeepEqual(s.base.Trace.AssemblyEval.CandidateIDs, s.treat.Trace.AssemblyEval.CandidateIDs) {
 			acc.report.InvalidPairs++
 			continue
 		}
@@ -762,11 +807,14 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		totalPairs++
 		acc.report.Deltas = append(acc.report.Deltas, qp-qf)
 		// validateTrace enforced tokens > 0 for every paired artifact.
-		ft := float64(s.flat.Trace.AssemblyEval.EstimatedPromptTokens)
-		pt := float64(s.prog.Trace.AssemblyEval.EstimatedPromptTokens)
+		ft := float64(s.base.Trace.AssemblyEval.EstimatedPromptTokens)
+		pt := float64(s.treat.Trace.AssemblyEval.EstimatedPromptTokens)
 		acc.reductions = append(acc.reductions, 1-pt/ft)
 	}
-	if totalPairs == 0 {
+	// A pure-3a input with nothing labeled still hard-errors exactly as
+	// before; any 3c evidence (legacy/mixed/topline artifacts) makes the
+	// report worth emitting even when the flat-progressive side is empty.
+	if totalPairs == 0 && !mixedEvidence {
 		return nil, fmt.Errorf("assembly report: no complete labeled pairs")
 	}
 	for _, model := range modelOrder {
@@ -797,6 +845,11 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		}
 		rep.Models = append(rep.Models, acc.report)
 	}
+	rep.LegacyMixedModels = computeAssemblyMixedSection(keys, pairs, quality, seed, bootstrapN)
+	if len(rep.LegacyMixedModels) > 0 {
+		rep.LegacyMixedDecisionRule = assemblyMixedDecisionRuleText()
+	}
+	rep.Topline = computeAssemblyTopline(topline, quality)
 	return rep, nil
 }
 
