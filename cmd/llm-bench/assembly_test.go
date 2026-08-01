@@ -244,38 +244,25 @@ func TestAssemblyBuildProducesValidPairs(t *testing.T) {
 // deterministic as the traces it digests, and including it is what makes a
 // builder change visible even when a trace edit is self-consistent.
 //
+// The comparison runs through corpusDirDiff (corpus_regen_test.go) — shared
+// with the mixed-corpus gate and itself proven by TestRegenGateDetectsDrift.
+//
 // Regenerate after intentional changes with:
 //
 //	go run ./cmd/llm-bench -assembly-build docs/llm/assembly-corpus/cases.json \
 //	  -assembly-out docs/llm/assembly-corpus/traces
 func TestAssemblyCommittedCorpusUpToDate(t *testing.T) {
-	corpusDir := filepath.Join("..", "..", "docs", "llm", "assembly-corpus")
-	wantDir := filepath.Join(corpusDir, "traces")
+	corpusDir := filepath.Join(corpusRepoRoot(t), "docs", "llm", "assembly-corpus")
 	gotDir := t.TempDir()
 	if err := assemblyBuild(context.Background(), filepath.Join(corpusDir, "cases.json"), gotDir); err != nil {
 		t.Fatal(err)
 	}
-
-	wantEntries, err := os.ReadDir(wantDir)
+	diff, err := corpusDirDiff(gotDir, filepath.Join(corpusDir, "traces"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	gotEntries, err := os.ReadDir(gotDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(gotEntries) != len(wantEntries) {
-		t.Fatalf("generated %d traces, committed corpus has %d", len(gotEntries), len(wantEntries))
-	}
-	for i, wantEntry := range wantEntries {
-		if gotEntries[i].Name() != wantEntry.Name() {
-			t.Fatalf("trace %d = %q, want %q", i, gotEntries[i].Name(), wantEntry.Name())
-		}
-		got := mustReadAssemblyFile(t, filepath.Join(gotDir, gotEntries[i].Name()))
-		want := mustReadAssemblyFile(t, filepath.Join(wantDir, wantEntry.Name()))
-		if !bytes.Equal(got, want) {
-			t.Fatalf("committed trace %s is stale; rebuild the assembly corpus", wantEntry.Name())
-		}
+	if diff != "" {
+		t.Fatalf("committed corpus is stale; rebuild the assembly corpus: %s", diff)
 	}
 }
 
