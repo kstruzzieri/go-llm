@@ -148,15 +148,15 @@ func TestMixedFixtureParseDispatch(t *testing.T) {
 		}
 	})
 
-	t.Run("object routes to the mixed placeholder", func(t *testing.T) {
+	t.Run("object routes to the mixed builder", func(t *testing.T) {
 		raw, err := json.Marshal(mixedFixtureFor(mixedConvCase("case-1")))
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
 		path := write("mixed.json", string(raw))
 		err = assemblyBuildDispatch(context.Background(), path, outDir)
-		if err == nil || !strings.Contains(err.Error(), "mixed-assembly build not yet implemented (Task 4)") {
-			t.Fatalf("err = %v; want the Task 4 placeholder error", err)
+		if err == nil || !strings.Contains(err.Error(), "mixed-assembly arm build not yet implemented (Task 5)") {
+			t.Fatalf("err = %v; want the Task 5 placeholder error", err)
 		}
 	})
 
@@ -773,16 +773,16 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 		t.Errorf("twinWarnings = %v; want exactly one naming tw-solo", bk.twinWarnings)
 	}
 
-	// The mixed build path prints the bookkeeping summary before the Task 4
-	// placeholder error.
+	// The mixed build path prints the bookkeeping summary and the built-state
+	// count before the Task 5 placeholder error.
 	raw, err := json.Marshal(mixedFixtureFor(early, late, mem, control))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	var buf bytes.Buffer
-	err = runMixedFixture(raw, &buf)
-	if err == nil || !strings.Contains(err.Error(), "not yet implemented (Task 4)") {
-		t.Fatalf("runMixedFixture = %v; want the Task 4 placeholder error", err)
+	err = runMixedFixture(context.Background(), raw, &buf)
+	if err == nil || !strings.Contains(err.Error(), "not yet implemented (Task 5)") {
+		t.Fatalf("runMixedFixture = %v; want the Task 5 placeholder error", err)
 	}
 	out := buf.String()
 	for _, want := range []string{
@@ -791,6 +791,7 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 		"stratum memory_only: 1",
 		"early=1 middle=0 late=1",
 		"tw-solo",
+		"built 4 frozen state(s)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q; got:\n%s", want, out)

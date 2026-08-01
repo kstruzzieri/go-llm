@@ -13,9 +13,9 @@ import (
 )
 
 // Mixed-assembly fixture schema v2 (#331 slice 3c, Task 3). This file owns
-// the corpus fixture PARSE + VALIDATION only; the builder that replays
-// events through real agent tools into frozen States lands in Task 4, so
-// this file must not import agent packages.
+// the corpus fixture PARSE + VALIDATION only; the Task 4 builder that replays
+// events through real agent tools into frozen States lives in
+// assembly_mixed_state.go, so this file must not import agent packages.
 
 // Registered mixed-assembly constants: the single source of truth for the
 // budget formula inputs. The fixture restates them under "constants" so the
@@ -605,10 +605,12 @@ func mixedAnswerThird(c mixedCase) string {
 }
 
 // runMixedFixture parses + validates a mixed-assembly fixture, prints the
-// bookkeeping summary to w, and returns the Task 4 placeholder error: the
-// builder that turns validated cases into trace arms lands next task, and a
-// loud error cannot be mistaken for a successful build.
-func runMixedFixture(raw []byte, w io.Writer) error {
+// bookkeeping summary to w, builds every case's frozen State through the
+// production producers (buildMixedStates, assembly_mixed_state.go), then
+// returns the Task 5 placeholder error: arm rendering, gates, and trace
+// emission land next task, and a loud error cannot be mistaken for a
+// successful build.
+func runMixedFixture(ctx context.Context, raw []byte, w io.Writer) error {
 	f, err := parseMixedFixture(raw)
 	if err != nil {
 		return fmt.Errorf("assembly build: parse mixed fixture: %w", err)
@@ -634,13 +636,18 @@ func runMixedFixture(raw []byte, w io.Writer) error {
 	for _, warn := range bk.twinWarnings {
 		_, _ = fmt.Fprintf(w, "  warning: %s\n", warn)
 	}
-	return fmt.Errorf("mixed-assembly build not yet implemented (Task 4)")
+	states, err := buildMixedStates(ctx, f)
+	if err != nil {
+		return fmt.Errorf("assembly build: %w", err)
+	}
+	_, _ = fmt.Fprintf(w, "  built %d frozen state(s)\n", len(states))
+	return fmt.Errorf("mixed-assembly arm build not yet implemented (Task 5)")
 }
 
 // assemblyBuildDispatch routes -assembly-build by fixture shape: a JSON
 // array is the 3a flat/progressive case corpus (existing path, unchanged);
-// a JSON object is the 3c mixed-assembly fixture (validate-only until the
-// Task 4 builder lands).
+// a JSON object is the 3c mixed-assembly fixture (validate + frozen-State
+// build; arm emission lands in Task 5).
 func assemblyBuildDispatch(ctx context.Context, fixturePath, outDir string) error {
 	raw, err := os.ReadFile(fixturePath)
 	if err != nil {
@@ -650,7 +657,7 @@ func assemblyBuildDispatch(ctx context.Context, fixturePath, outDir string) erro
 	case len(trimmed) > 0 && trimmed[0] == '[':
 		return assemblyBuild(ctx, fixturePath, outDir)
 	case len(trimmed) > 0 && trimmed[0] == '{':
-		return runMixedFixture(raw, os.Stderr)
+		return runMixedFixture(ctx, raw, os.Stderr)
 	default:
 		return fmt.Errorf("assembly build: fixture %q must be a JSON array of 3a assembly cases or a mixed-assembly fixture object with version/kind", fixturePath)
 	}

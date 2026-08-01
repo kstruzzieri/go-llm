@@ -170,29 +170,56 @@ func assemblyBuild(ctx context.Context, fixturePath, outDir string) error {
 	return nil
 }
 
-func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error {
-	chunkIDs := make([]string, len(c.Sources))
-	seenChunkIDs := make(map[string]string, len(c.Sources))
-	for i, source := range c.Sources {
+// assemblyRig is the seeded 3a fixture store plus the retriever built over
+// it. Shared by the 3a case builder and the 3c mixed-state builder so both
+// corpora retrieve from an identically seeded store; chunkIDs maps each source
+// path to its seeded chunk ID (one chunk per source by construction), which
+// the mixed builder uses to restate rag group subjects (source paths) in the
+// 3a chunk-ID candidate vocabulary.
+type assemblyRig struct {
+	store    *rag.SQLiteStore
+	retr     *rag.Retriever
+	chunkIDs map[string]string // source path -> seeded chunk ID
+}
+
+// Close releases the underlying in-memory store.
+func (r *assemblyRig) Close() error { return r.store.Close() }
+
+// seedAssemblyRig seeds an in-memory rag store from fixture sources exactly as
+// the 3a builder always has (provenance-complete sources, rank embeddings,
+// pinned indexed_at epoch, atomic abstract/overview summaries) and returns the
+// retriever over it. Extracted from buildAssemblyCase unchanged; 3a behavior
+// stays byte-identical.
+func seedAssemblyRig(ctx context.Context, sources []assemblySource) (*assemblyRig, error) {
+	chunkIDs := make([]string, len(sources))
+	byPath := make(map[string]string, len(sources))
+	seenChunkIDs := make(map[string]string, len(sources))
+	for i, source := range sources {
 		chunkIDs[i] = assemblyChunkID(source.Path, source.Content)
 		if previous, ok := seenChunkIDs[chunkIDs[i]]; ok {
-			return fmt.Errorf("source %q: chunk ID collides with source %q", source.Path, previous)
+			return nil, fmt.Errorf("source %q: chunk ID collides with source %q", source.Path, previous)
 		}
 		seenChunkIDs[chunkIDs[i]] = source.Path
+		byPath[source.Path] = chunkIDs[i]
 	}
 
 	store, err := rag.NewSQLiteStore(":memory:")
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer func() { _ = store.Close() }()
+	ok := false
+	defer func() {
+		if !ok {
+			_ = store.Close()
+		}
+	}()
 
 	// Seed provenance-complete sources: one chunk per source. The fixture's
 	// source order is the intended retrieval order; deterministic unit vectors
 	// make that order explicit instead of deriving accidental relevance from
 	// content hashes.
 	const vectorSpaceID = "assembly-fixture-space"
-	for i, s := range c.Sources {
+	for i, s := range sources {
 		chunk := rag.Chunk{
 			ID:        chunkIDs[i],
 			Content:   s.Content,
@@ -205,7 +232,7 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 		if err := store.ReplaceSourceWithHashAndVectorSpaceID(
 			ctx, s.Path, []rag.Chunk{chunk}, [][]float64{emb},
 			assemblySourceSignature(s.Content), vectorSpaceID); err != nil {
-			return fmt.Errorf("seed source %q: %w", s.Path, err)
+			return nil, fmt.Errorf("seed source %q: %w", s.Path, err)
 		}
 	}
 	// The store stamps indexed_at with time.Now(); the progressive renderer
@@ -214,18 +241,18 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 	// depends on the wall clock.
 	if _, err := store.DB().ExecContext(ctx,
 		"UPDATE chunks SET indexed_at = ?", assemblyFixedEpoch); err != nil {
-		return fmt.Errorf("pin indexed_at: %w", err)
+		return nil, fmt.Errorf("pin indexed_at: %w", err)
 	}
-	prov, err := store.SourceProvenanceBatch(ctx, sourcePaths(c.Sources))
+	prov, err := store.SourceProvenanceBatch(ctx, sourcePaths(sources))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	for _, s := range c.Sources {
+	for _, s := range sources {
 		if s.Abstract == "" {
 			continue
 		}
 		if s.Overview == "" {
-			return fmt.Errorf("source %q: abstract without overview (atomic pair)", s.Path)
+			return nil, fmt.Errorf("source %q: abstract without overview (atomic pair)", s.Path)
 		}
 		p := prov[s.Path]
 		if err := store.UpsertSourceSummary(ctx, rag.SourceSummary{
@@ -234,15 +261,26 @@ func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error
 			SummaryModel: "assembly-fixture", FormatVersion: rag.SourceSummaryFormatVersion,
 			SummarizedAt: assemblyFixedEpoch,
 		}); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
 	retr, err := rag.NewRetrieverWithEmbedder(assemblyQueryEmbedder(), store,
 		rag.WithRetrieverModel("assembly-fixture"), rag.WithVectorOnly())
 	if err != nil {
+		return nil, err
+	}
+	ok = true
+	return &assemblyRig{store: store, retr: retr, chunkIDs: byPath}, nil
+}
+
+func buildAssemblyCase(ctx context.Context, c assemblyCase, outDir string) error {
+	rig, err := seedAssemblyRig(ctx, c.Sources)
+	if err != nil {
 		return err
 	}
+	defer func() { _ = rig.Close() }()
+	retr := rig.retr
 	// Selection runs ONCE; both arms render this exact slice.
 	results, err := retr.Retrieve(ctx, c.Question, len(c.Sources))
 	if err != nil {
