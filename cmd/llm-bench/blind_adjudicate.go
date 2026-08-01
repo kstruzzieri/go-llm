@@ -105,6 +105,12 @@ func renderAdjudicationWorksheet(arts []Artifact, labels []Label) (string, error
 // a hash that is not a flagged label (or not an artifact), a missing or
 // invalid score, a missing reason, a duplicate block, or a flagged label
 // absent from the worksheet — adjudication must be complete.
+//
+// Adjudicated rows deliberately keep the primary pass's Labeler and
+// LabeledAt: this slice's protocol has ONE person running both passes, so a
+// separate identity/stamp would duplicate the same value. Before a second
+// adjudicator can be supported, Label needs distinct adjudication provenance
+// fields (adjudicator, adjudicated_at) — do not overload Labeler for that.
 func ingestAdjudicationWorksheet(worksheet string, arts []Artifact, labels []Label) ([]Label, error) {
 	artByHash := make(map[string]Artifact, len(arts))
 	for _, a := range arts {
@@ -127,12 +133,11 @@ func ingestAdjudicationWorksheet(worksheet string, arts []Artifact, labels []Lab
 	}
 	verdicts := map[string]verdict{}
 	var hash, score, reason string
-	afterMarker := false
 	flush := func() error {
 		if hash == "" {
 			return nil
 		}
-		defer func() { hash, score, reason, afterMarker = "", "", "", false }()
+		defer func() { hash, score, reason = "", "", "" }()
 		if _, dup := verdicts[hash]; dup {
 			return fmt.Errorf("adjudication worksheet: duplicate block for artifact_hash %q", hash)
 		}
@@ -154,29 +159,22 @@ func ingestAdjudicationWorksheet(worksheet string, arts []Artifact, labels []Lab
 		return nil
 	}
 
-	inBlock := false
-	for _, line := range strings.Split(worksheet, "\n") {
-		switch {
-		case !inBlock && strings.HasPrefix(line, "=== ARTIFACT "):
-			hash = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "=== ARTIFACT "), " ==="))
-			score, reason, afterMarker, inBlock = "", "", false, true
-		case inBlock && strings.HasPrefix(line, blindFillMarker):
-			afterMarker = true
-		case inBlock && strings.HasPrefix(line, blindEndMarker):
-			if ferr := flush(); ferr != nil {
-				return nil, ferr
+	grammar := worksheetGrammar{headerPrefix: "=== ARTIFACT ", fillMarker: blindFillMarker, fields: []string{"score", "reason"}}
+	err := scanWorksheetBlocks(worksheet, grammar,
+		func(body string) error {
+			hash, score, reason = body, "", ""
+			return nil
+		},
+		func(field, value string) {
+			if field == "score" {
+				score = value
+			} else {
+				reason = value
 			}
-			inBlock = false
-		case inBlock && afterMarker && strings.HasPrefix(line, "score:"):
-			score = strings.TrimSpace(strings.TrimPrefix(line, "score:"))
-		case inBlock && afterMarker && strings.HasPrefix(line, "reason:"):
-			reason = strings.TrimSpace(strings.TrimPrefix(line, "reason:"))
-		}
-	}
-	if inBlock {
-		if ferr := flush(); ferr != nil {
-			return nil, ferr
-		}
+		},
+		flush)
+	if err != nil {
+		return nil, err
 	}
 
 	out := make([]Label, 0, len(labels))

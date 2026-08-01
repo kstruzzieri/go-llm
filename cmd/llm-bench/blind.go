@@ -22,6 +22,67 @@ const blindFillMarker = "--- fill below (score: 0 | 0.5 | 1) ---"
 // this literal, so it lives in one place.
 const blindEndMarker = "=== END ==="
 
+// worksheetGrammar describes one worksheet block dialect for
+// scanWorksheetBlocks: the header prefix that opens a block, the fill marker
+// that opens the human-fill region, and the recognized fill-region fields.
+type worksheetGrammar struct {
+	headerPrefix string
+	fillMarker   string
+	fields       []string
+}
+
+// scanWorksheetBlocks is the single block scanner behind all three worksheet
+// parsers (blind, forced-choice, adjudication). Line rules: outside a block,
+// only a headerPrefix line opens one — so a forged header inside candidate
+// output or an answer can never split a block; inside a block nothing is read
+// until fillMarker; inside the fill region every non-blank line must start
+// with a recognized field (loud error naming the block otherwise — this
+// catches multi-line notes/reason continuations, leading spaces, and
+// capitalized field typos that would otherwise silently drop data); a
+// blindEndMarker line flushes the block, and a block still open at end of
+// input is flushed once.
+func scanWorksheetBlocks(text string, g worksheetGrammar, open func(headerBody string) error, setField func(field, value string), flush func() error) error {
+	inBlock, afterMarker := false, false
+	blockID := ""
+	for _, line := range strings.Split(text, "\n") {
+		switch {
+		case !inBlock && strings.HasPrefix(line, g.headerPrefix):
+			body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, g.headerPrefix), " ==="))
+			if err := open(body); err != nil {
+				return err
+			}
+			blockID = body
+			afterMarker, inBlock = false, true
+		case inBlock && strings.HasPrefix(line, g.fillMarker):
+			afterMarker = true
+		case inBlock && strings.HasPrefix(line, blindEndMarker):
+			// The fill region ends at the block terminator: a stray field line
+			// between "=== END ===" and the next block must not attach to the
+			// previous block.
+			if err := flush(); err != nil {
+				return err
+			}
+			inBlock, afterMarker = false, false
+		case inBlock && afterMarker && strings.TrimSpace(line) != "":
+			matched := ""
+			for _, f := range g.fields {
+				if strings.HasPrefix(line, f+":") {
+					matched = f
+					break
+				}
+			}
+			if matched == "" {
+				return fmt.Errorf("block %q: unrecognized fill-region line %q (recognized fields: %s)", blockID, line, strings.Join(g.fields, ", "))
+			}
+			setField(matched, strings.TrimSpace(strings.TrimPrefix(line, matched+":")))
+		}
+	}
+	if inBlock {
+		return flush()
+	}
+	return nil
+}
+
 // blindDupPair pairs a primary score with its DUP re-score for one artifact
 // (the intra-rater control). Written as JSONL via -dups-out.
 type blindDupPair struct {
@@ -88,7 +149,6 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (bl
 
 	var hash, score, notes, flagVal string
 	isDup := false
-	afterMarker := false
 	seenWorksheetHash := map[string]struct{}{}
 	seenDupHash := map[string]struct{}{}
 	primaryScore := map[string]float64{}
@@ -99,7 +159,7 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (bl
 			return nil
 		}
 		defer func() {
-			hash, score, notes, flagVal, isDup, afterMarker = "", "", "", "", false, false
+			hash, score, notes, flagVal, isDup = "", "", "", "", false
 		}()
 		a, ok := artByHash[hash]
 		if !ok {
@@ -154,6 +214,11 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (bl
 		}
 		primaryScore[hash] = q
 		labelNotes := strings.TrimSpace(notes)
+		if flag == "" && strings.HasPrefix(labelNotes, groundingCheckPrefix) {
+			// Spoofed-flag guard: the prefix is the downstream adjudication
+			// selector, so it may only ever enter notes via the flag: line.
+			return fmt.Errorf("artifact %s: notes begin with %q but flag: is blank; use flag: %s to request adjudication", hash, groundingCheckPrefix, groundingCheckFlag)
+		}
 		if flag == groundingCheckFlag {
 			labelNotes = groundingCheckPrefix + labelNotes
 			res.FlaggedHashes = append(res.FlaggedHashes, hash)
@@ -170,39 +235,27 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (bl
 		return nil
 	}
 
-	inBlock := false
-	for _, line := range strings.Split(worksheet, "\n") {
-		switch {
-		case !inBlock && strings.HasPrefix(line, "=== ARTIFACT "):
-			body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, "=== ARTIFACT "), " ==="))
+	grammar := worksheetGrammar{headerPrefix: "=== ARTIFACT ", fillMarker: blindFillMarker, fields: []string{"score", "notes", "flag"}}
+	err := scanWorksheetBlocks(worksheet, grammar,
+		func(body string) error {
 			isDup = strings.HasSuffix(body, " DUP")
 			hash = strings.TrimSpace(strings.TrimSuffix(body, " DUP"))
-			score, notes, flagVal, afterMarker, inBlock = "", "", "", false, true
-		case inBlock && strings.HasPrefix(line, blindFillMarker):
-			afterMarker = true
-		case inBlock && strings.HasPrefix(line, blindEndMarker):
-			// The fill region ends at the block terminator: a stray score:/notes:
-			// line between "=== END ===" and the next block must not attach to
-			// the previous block (it would be reported as unscored instead).
-			if ferr := flush(); ferr != nil {
-				return blindIngestResult{}, ferr
+			score, notes, flagVal = "", "", ""
+			return nil
+		},
+		func(field, value string) {
+			switch field {
+			case "score":
+				score = value
+			case "notes":
+				notes = value
+			case "flag":
+				flagVal = value
 			}
-			inBlock = false
-		case inBlock && afterMarker && strings.HasPrefix(line, "score:"):
-			score = strings.TrimSpace(strings.TrimPrefix(line, "score:"))
-		case inBlock && afterMarker && strings.HasPrefix(line, "notes:"):
-			notes = strings.TrimSpace(strings.TrimPrefix(line, "notes:"))
-		case inBlock && afterMarker && strings.HasPrefix(line, "flag:"):
-			flagVal = strings.TrimSpace(strings.TrimPrefix(line, "flag:"))
-		}
-	}
-	if inBlock {
-		if ferr := flush(); ferr != nil {
-			return blindIngestResult{}, ferr
-		}
-	}
-	if ferr := flush(); ferr != nil {
-		return blindIngestResult{}, ferr
+		},
+		flush)
+	if err != nil {
+		return blindIngestResult{}, err
 	}
 
 	sort.Strings(res.FlaggedHashes)
@@ -287,9 +340,15 @@ func renderBlindWorksheet(arts []Artifact, dupN int) (string, error) {
 	}
 	hasPromptless := false
 	for _, a := range ordered {
-		if prefilledAssemblyMode(a.Trace) {
-			hasPromptless = true
-			break
+		if !prefilledAssemblyMode(a.Trace) {
+			continue
+		}
+		hasPromptless = true
+		// The [question] a promptless block shows is the final turn; if that
+		// turn is not the user question (hand-built or corrupt artifact), the
+		// block would leak prompt bytes into the primary pass.
+		if turns := a.Trace.Turns; len(turns) == 0 || turns[len(turns)-1].Role != "user" {
+			return "", fmt.Errorf("promptless artifact %s: final turn must be a user question (worksheet would leak prompt bytes otherwise)", a.ArtifactHash)
 		}
 	}
 
@@ -326,7 +385,8 @@ func renderBlindWorksheet(arts []Artifact, dupN int) (string, error) {
 // writeBlindBlock renders one worksheet block. Promptless (prefilled-mode)
 // artifacts get [question] + a flag: fill line; everything else keeps the
 // pre-3c [prompt] body byte-for-byte. DUP blocks reuse the promptless body
-// under the DUP header (only legacy/mixed artifacts are dup-eligible).
+// under the DUP header minus the flag: line (only legacy/mixed artifacts are
+// dup-eligible, and flags belong on the primary block).
 func writeBlindBlock(b *strings.Builder, a Artifact, dup bool) {
 	if dup {
 		fmt.Fprintf(b, "=== ARTIFACT %s DUP ===\n", a.ArtifactHash)
@@ -353,7 +413,9 @@ func writeBlindBlock(b *strings.Builder, a Artifact, dup bool) {
 	fmt.Fprintln(b, blindFillMarker)
 	fmt.Fprintln(b, "score: ")
 	fmt.Fprintln(b, "notes: ")
-	if promptless {
+	// DUP blocks get no flag: line — flags belong on the primary block (a
+	// flag on a DUP is an ingest error) so the duplicate cannot invite one.
+	if promptless && !dup {
 		fmt.Fprintln(b, "flag: ")
 	}
 	fmt.Fprintln(b, blindEndMarker)

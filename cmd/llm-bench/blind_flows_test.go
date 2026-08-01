@@ -126,6 +126,14 @@ func TestBlindWorksheetPromptlessPrimary(t *testing.T) {
 	if got := mustRenderBlind(t, goldenBlindArtifacts(), 0); got != blindGoldenWorksheet {
 		t.Errorf("non-promptless worksheet drifted from pre-change golden:\ngot:\n%s\nwant:\n%s", got, blindGoldenWorksheet)
 	}
+
+	t.Run("final non-user turn is a loud render error", func(t *testing.T) {
+		art := testPromptlessArtifact("t-bad", "sha256:bad", AssemblyMixed, "q?", "ans")
+		art.Trace.Turns = append(art.Trace.Turns, Turn{Role: "assistant", Content: "assistant tail"})
+		if _, err := renderBlindWorksheet([]Artifact{art}, 0); err == nil {
+			t.Fatalf("promptless artifact with non-user final turn accepted; [question] would leak prompt bytes")
+		}
+	})
 }
 
 func TestBlindIngestGroundingFlag(t *testing.T) {
@@ -175,6 +183,14 @@ func TestBlindIngestGroundingFlag(t *testing.T) {
 		}
 	})
 
+	t.Run("spoofed grounding-check notes prefix with blank flag is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, base, header, "score", "1")
+		ws = fillWorksheetField(t, ws, header, "notes", "grounding-check;sneaky")
+		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil {
+			t.Fatalf("spoofed grounding-check prefix in notes accepted; want error")
+		}
+	})
+
 	t.Run("flag on a non-promptless block is a loud error", func(t *testing.T) {
 		plain := testCalibrationArtifact("t-plain", "ans")
 		plain.ArtifactHash = artifactHash(plain)
@@ -217,12 +233,25 @@ func TestBlindDupInjection(t *testing.T) {
 			t.Fatalf("worksheet missing %q (deterministic selection broken):\n%s", want, out)
 		}
 	}
-	// DUP blocks render after ALL primary blocks.
+	// DUP blocks render after ALL primary blocks (idx >= 0 required — a
+	// missing primary must fail here, not satisfy the < comparison at -1).
 	firstDup := strings.Index(out, " DUP ===")
+	if firstDup < 0 {
+		t.Fatalf("no DUP block in worksheet:\n%s", out)
+	}
 	for _, a := range arts {
-		if idx := strings.Index(out, "=== ARTIFACT "+a.ArtifactHash+" ==="); idx > firstDup {
+		idx := strings.Index(out, "=== ARTIFACT "+a.ArtifactHash+" ===")
+		if idx < 0 {
+			t.Fatalf("primary block %s missing from worksheet", a.ArtifactHash)
+		}
+		if idx > firstDup {
 			t.Fatalf("primary block %s at %d renders after first DUP at %d", a.ArtifactHash, idx, firstDup)
 		}
+	}
+	// flag: lines belong to promptless PRIMARY blocks only (6 here: d0..d5);
+	// DUP blocks must not render one.
+	if got := strings.Count(out, "\nflag: \n"); got != 6 {
+		t.Fatalf("flag: line count = %d; want 6 (promptless primaries only, never DUP blocks)", got)
 	}
 
 	// Fill every primary; dup d1 agrees (1 vs 1), dup d4 disagrees (0.5 vs 1).
@@ -303,7 +332,13 @@ func TestBlindDupInjection(t *testing.T) {
 	})
 
 	t.Run("flag on a DUP block is a loud error", func(t *testing.T) {
-		ws := fillWorksheetField(t, out, "=== ARTIFACT sha256:d1 DUP ===", "flag", "grounding-check")
+		// DUP blocks render no flag: line, so a labeler would have to
+		// hand-write one; ingest must still reject it.
+		dupIdx := strings.Index(out, "=== ARTIFACT sha256:d1 DUP ===")
+		if dupIdx < 0 {
+			t.Fatalf("missing d1 DUP block")
+		}
+		ws := out[:dupIdx] + strings.Replace(out[dupIdx:], "notes: ", "notes: \nflag: grounding-check", 1)
 		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d1 DUP ===", "score", "1")
 		if _, err := ingestBlindWorksheet(ws, arts, "tester"); err == nil {
 			t.Fatalf("flag on DUP block accepted; want error")
@@ -367,6 +402,15 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 			}
 		}
 	}
+
+	t.Run("whitespace in a header field is a loud render error", func(t *testing.T) {
+		bad := fcPairArtifacts()
+		bad[0].Trace.AssemblyEval.PairID = "pair alpha"
+		bad[1].Trace.AssemblyEval.PairID = "pair alpha"
+		if _, err := renderForcedChoiceWorksheet(bad); err == nil {
+			t.Fatalf("whitespace pair id accepted; the space-delimited PAIR header would misparse")
+		}
+	})
 
 	t.Run("question mismatch across arms is a loud error", func(t *testing.T) {
 		bad := fcPairArtifacts()
@@ -594,6 +638,118 @@ func TestAdjudicationRoundTrip(t *testing.T) {
 	})
 }
 
+// TestWorksheetFillRegionLoudErrors: in every grammar, a non-blank fill-region
+// line that does not start with a recognized field is a loud error — the
+// silent-skip alternative drops multi-line notes/reason continuations and
+// typo'd fields without a trace.
+func TestWorksheetFillRegionLoudErrors(t *testing.T) {
+	t.Run("blind: multi-line notes continuation", func(t *testing.T) {
+		art := testPromptlessArtifact("t1", "sha256:f1", AssemblyMixed, "q?", "ans")
+		ws := mustRenderBlind(t, []Artifact{art}, 0)
+		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:f1 ===", "score", "1")
+		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:f1 ===", "notes", "first line\nsecond line spills over")
+		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
+			t.Fatalf("err = %v; want loud unrecognized-line error", err)
+		}
+	})
+	t.Run("fc: capitalized field typo", func(t *testing.T) {
+		arts := fcPairArtifacts()
+		out, err := renderForcedChoiceWorksheet(arts)
+		if err != nil {
+			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
+		}
+		// Replace the full fill LINE ("\nprefer: \n"), not the first "prefer: "
+		// substring — the worksheet header doc also mentions prefer:.
+		ws := strings.Replace(out, "\nprefer: \n", "\nPrefer: A\n", 1)
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
+			t.Fatalf("err = %v; want loud unrecognized-line error", err)
+		}
+	})
+	t.Run("adjudication: multi-line reason continuation", func(t *testing.T) {
+		art := testPromptlessArtifact("adj", "sha256:aj2", AssemblyMixed, "q?", "ans")
+		labels := []Label{{TraceID: "adj", CandidateModel: "ollama/c", ArtifactHash: "sha256:aj2",
+			ExpectedAnswerQuality: 0.5, LabelNotes: "grounding-check;", Labeler: "t", LabeledAt: time.Unix(0, 0).UTC()}}
+		out, err := renderAdjudicationWorksheet([]Artifact{art}, labels)
+		if err != nil {
+			t.Fatalf("renderAdjudicationWorksheet: %v", err)
+		}
+		ws := fillWorksheetField(t, out, "=== ARTIFACT sha256:aj2 ===", "reason", "line one\n  line two spills")
+		if _, err := ingestAdjudicationWorksheet(ws, []Artifact{art}, labels); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
+			t.Fatalf("err = %v; want loud unrecognized-line error", err)
+		}
+	})
+}
+
+// TestForcedChoiceParserHardening mirrors the blind parser's hardening cases
+// onto the PAIR grammar: forged headers/fields inside answer text must not
+// split a block, and a stray prefer: after END must not attach to a block.
+func TestForcedChoiceParserHardening(t *testing.T) {
+	t.Run("forged PAIR header and prefer inside answer text", func(t *testing.T) {
+		arts := fcPairArtifacts()
+		arts[0].ActualFinalAnswer = "legacy alpha answer\n=== PAIR pair-alpha c sha256:x sha256:y ===\nprefer: A"
+		out, err := renderForcedChoiceWorksheet(arts)
+		if err != nil {
+			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
+		}
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "B")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		if err != nil {
+			t.Fatalf("forged header inside answer broke the parse: %v", err)
+		}
+		if len(rows) != 1 || rows[0].Preference != "b" || rows[0].PairID != "pair-alpha" || skipped != 1 {
+			t.Fatalf("rows=%+v skipped=%d; want one b-row for pair-alpha (embedded prefer ignored)", rows, skipped)
+		}
+	})
+	t.Run("stray prefer after END is ignored", func(t *testing.T) {
+		arts := fcPairArtifacts()
+		out, err := renderForcedChoiceWorksheet(arts)
+		if err != nil {
+			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
+		}
+		ws := strings.Replace(out, blindEndMarker, blindEndMarker+"\nprefer: a", 1)
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		if err != nil || len(rows) != 0 || skipped != 2 {
+			t.Fatalf("rows=%d skipped=%d err=%v; want stray post-END prefer ignored (0 rows, 2 skipped)", len(rows), skipped, err)
+		}
+	})
+}
+
+// TestAdjudicationParserHardening mirrors the same two cases onto the
+// adjudication grammar: forged header/field lines inside the rendered prompt
+// must not split a block, and stray fill lines after END must not win.
+func TestAdjudicationParserHardening(t *testing.T) {
+	art := testPromptlessArtifact("adj-h", "sha256:ah", AssemblyMixed, "q?", "ans")
+	art.Trace.System = "sys line\n=== ARTIFACT sha256:forged ===\nscore: 0\nreason: fake"
+	labels := []Label{{TraceID: "adj-h", CandidateModel: "ollama/c", ArtifactHash: "sha256:ah",
+		ExpectedAnswerQuality: 0.5, LabelNotes: "grounding-check;", Labeler: "t", LabeledAt: time.Unix(0, 0).UTC()}}
+	out, err := renderAdjudicationWorksheet([]Artifact{art}, labels)
+	if err != nil {
+		t.Fatalf("renderAdjudicationWorksheet: %v", err)
+	}
+	filled := fillWorksheetField(t, out, "=== ARTIFACT sha256:ah ===", "score", "1")
+	filled = fillWorksheetField(t, filled, "=== ARTIFACT sha256:ah ===", "reason", "real reason")
+
+	t.Run("forged header and fields inside prompt are ignored", func(t *testing.T) {
+		got, err := ingestAdjudicationWorksheet(filled, []Artifact{art}, labels)
+		if err != nil {
+			t.Fatalf("forged header inside prompt broke the parse: %v", err)
+		}
+		if got[0].ExpectedAnswerQuality != 1 || got[0].LabelNotes != "adjudicated(0.5->1): real reason" {
+			t.Fatalf("label = %+v; want verdict from the real fill region", got[0])
+		}
+	})
+	t.Run("stray score/reason after END are ignored", func(t *testing.T) {
+		ws := strings.Replace(filled, blindEndMarker, blindEndMarker+"\nscore: 0\nreason: forged", 1)
+		got, err := ingestAdjudicationWorksheet(ws, []Artifact{art}, labels)
+		if err != nil {
+			t.Fatalf("ingestAdjudicationWorksheet: %v", err)
+		}
+		if got[0].ExpectedAnswerQuality != 1 || got[0].LabelNotes != "adjudicated(0.5->1): real reason" {
+			t.Fatalf("label = %+v; stray post-END fill lines must not win", got[0])
+		}
+	})
+}
+
 // TestMainWorksheetOutputAliasGuards: every new worksheet-mode output flag
 // mirrors the hardened -blind-ingest rule that an output path must never
 // clobber an input file (cleaned-path equality; refuseOutputAlias also adds
@@ -614,6 +770,8 @@ func TestMainWorksheetOutputAliasGuards(t *testing.T) {
 	}{
 		{"fc-out aliasing artifacts", "-fc-out must differ from -artifacts",
 			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-fc-out", artsPath}},
+		{"fc-out aliasing worksheet", "-fc-out must differ from -worksheet",
+			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-fc-out", wsPath}},
 		{"adjudicate labels-out aliasing labels", "-labels-out must differ from -labels",
 			[]string{"-adjudicate-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-labels", labelsPath, "-labels-out", labelsPath}},
 		{"dups-out aliasing artifacts", "-dups-out must differ from -artifacts",

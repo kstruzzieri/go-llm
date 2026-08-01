@@ -470,7 +470,8 @@ func main() {
 		if strings.TrimSpace(*fcOut) == "" {
 			log.Fatalf("llm-bench: -fc-ingest requires -fc-out")
 		}
-		refuseOutputAlias("fc-ingest", "-fc-out", *fcOut, [][2]string{{"-artifacts", *artifactsPath}})
+		refuseOutputAlias("fc-ingest", "-fc-out", *fcOut,
+			[][2]string{{"-artifacts", *artifactsPath}, {"-worksheet", *worksheetPath}})
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: read worksheet: %v", err)
@@ -504,7 +505,8 @@ func main() {
 		}
 		worksheet, err := renderAdjudicationWorksheet(arts, labels)
 		if err != nil {
-			log.Fatalf("llm-bench: adjudicate-render: %v", err)
+			// The labels path names WHICH file lacked grounding-check flags.
+			log.Fatalf("llm-bench: adjudicate-render: %v (labels: %s)", err, *labelsPath)
 		}
 		if *reportPath == "" {
 			fmt.Print(worksheet)
@@ -528,7 +530,7 @@ func main() {
 			log.Fatalf("llm-bench: -adjudicate-ingest requires an explicit -labels-out that differs from -artifacts and -labels")
 		}
 		refuseOutputAlias("adjudicate-ingest", "-labels-out", *labelsOut,
-			[][2]string{{"-artifacts", *artifactsPath}, {"-labels", *labelsPath}})
+			[][2]string{{"-artifacts", *artifactsPath}, {"-labels", *labelsPath}, {"-worksheet", *worksheetPath}})
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {
 			log.Fatalf("llm-bench: adjudicate-ingest: read worksheet: %v", err)
@@ -572,9 +574,13 @@ func main() {
 				log.Fatalf("llm-bench: -blind-ingest: -labels-out resolves to the same file as -artifacts; choose a different output path")
 			}
 		}
+		// The hand-rolled -labels-out vs -artifacts checks above keep their
+		// pinned error strings; refuseOutputAlias covers the remaining pairs.
+		refuseOutputAlias("blind-ingest", "-labels-out", *labelsOut,
+			[][2]string{{"-worksheet", *worksheetPath}})
 		if strings.TrimSpace(*dupsOut) != "" {
 			refuseOutputAlias("blind-ingest", "-dups-out", *dupsOut,
-				[][2]string{{"-artifacts", *artifactsPath}, {"-labels-out", *labelsOut}})
+				[][2]string{{"-artifacts", *artifactsPath}, {"-labels-out", *labelsOut}, {"-worksheet", *worksheetPath}})
 		}
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {

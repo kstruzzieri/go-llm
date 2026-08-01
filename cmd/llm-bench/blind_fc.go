@@ -139,6 +139,13 @@ func renderForcedChoiceWorksheet(arts []Artifact) (string, error) {
 		if !fcSideIsLegacyA(p.pairID, p.model) {
 			sideA, sideB = p.mixed, p.legacy
 		}
+		// The PAIR header is space-delimited: any whitespace inside a field
+		// would shift the ingest join columns, so refuse it at render time.
+		for _, part := range []string{p.pairID, p.model, sideA.ArtifactHash, sideB.ArtifactHash} {
+			if part == "" || strings.ContainsAny(part, " \t\r\n") {
+				return "", fmt.Errorf("forced-choice: pair %q model %q: header field %q is empty or contains whitespace (the PAIR header is space-delimited)", p.pairID, p.model, part)
+			}
+		}
 		fmt.Fprintf(&b, "=== PAIR %s %s %s %s ===\n", p.pairID, p.model, sideA.ArtifactHash, sideB.ArtifactHash)
 		fmt.Fprintln(&b, "[question]")
 		fmt.Fprintln(&b, question)
@@ -177,12 +184,11 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 
 	var header []string
 	var prefer string
-	afterMarker := false
 	flush := func() error {
 		if header == nil {
 			return nil
 		}
-		defer func() { header, prefer, afterMarker = nil, "", false }()
+		defer func() { header, prefer = nil, "" }()
 		pairID, model, hashA, hashB := header[0], header[1], header[2], header[3]
 		seenKey := pairID + "\x00" + model
 		if _, dup := seen[seenKey]; dup {
@@ -232,30 +238,20 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 		return nil
 	}
 
-	inBlock := false
-	for _, line := range strings.Split(worksheet, "\n") {
-		switch {
-		case !inBlock && strings.HasPrefix(line, "=== PAIR "):
-			fields := strings.Fields(strings.TrimSuffix(strings.TrimPrefix(line, "=== PAIR "), " ==="))
+	grammar := worksheetGrammar{headerPrefix: "=== PAIR ", fillMarker: fcFillMarker, fields: []string{"prefer"}}
+	err = scanWorksheetBlocks(worksheet, grammar,
+		func(body string) error {
+			fields := strings.Fields(body)
 			if len(fields) != 4 {
-				return nil, 0, fmt.Errorf("forced-choice worksheet: malformed header %q (want === PAIR <pair> <model> <hashA> <hashB> ===)", line)
+				return fmt.Errorf("forced-choice worksheet: malformed header %q (want === PAIR <pair> <model> <hashA> <hashB> ===)", body)
 			}
-			header, prefer, afterMarker, inBlock = fields, "", false, true
-		case inBlock && strings.HasPrefix(line, fcFillMarker):
-			afterMarker = true
-		case inBlock && strings.HasPrefix(line, blindEndMarker):
-			if ferr := flush(); ferr != nil {
-				return nil, 0, ferr
-			}
-			inBlock = false
-		case inBlock && afterMarker && strings.HasPrefix(line, "prefer:"):
-			prefer = strings.TrimSpace(strings.TrimPrefix(line, "prefer:"))
-		}
-	}
-	if inBlock {
-		if ferr := flush(); ferr != nil {
-			return nil, 0, ferr
-		}
+			header, prefer = fields, ""
+			return nil
+		},
+		func(field, value string) { prefer = value },
+		flush)
+	if err != nil {
+		return nil, 0, err
 	}
 	return rows, skipped, nil
 }
