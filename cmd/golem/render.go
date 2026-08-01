@@ -24,14 +24,20 @@ type renderer struct {
 	warnPressure bool // print a one-line context-pressure warning
 	warned       bool // ensures at most one pressure line per run
 	thinkOpen    bool // "[thinking]" header printed for the current step
+	// mixed mirrors ContextManager.Mixed for the run this renderer observes. It
+	// is a constructor PARAMETER rather than a settable field like warnPressure
+	// because forgetting it at a new call site would not fail loudly — it would
+	// silently restore the wrong "(truncated)" marker resultSummary exists to
+	// suppress.
+	mixed bool
 }
 
-func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time) *renderer {
+func newRenderer(out io.Writer, color bool, maxSteps int, now func() time.Time, mixed bool) *renderer {
 	if now == nil {
 		now = time.Now
 	}
 	start := now()
-	return &renderer{out: out, color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, lastNL: true}
+	return &renderer{out: out, color: color, maxSteps: maxSteps, now: now, lastMark: start, runStart: start, lastNL: true, mixed: mixed}
 }
 
 func (r *renderer) OnToken(_ context.Context, e agent.TokenEvent) error {
@@ -148,7 +154,7 @@ func (r *renderer) OnToolResult(_ context.Context, e agent.ToolResultEvent) erro
 			return err
 		}
 	}
-	_, err := io.WriteString(r.out, "< "+resultSummary(e)+"\n")
+	_, err := io.WriteString(r.out, "< "+r.resultSummary(e)+"\n")
 	if err == nil {
 		r.lastNL = true
 	}
@@ -169,7 +175,19 @@ func (r *renderer) OnPressure(_ context.Context, e agent.PressureEvent) error {
 
 // resultSummary derives a terse one-line summary from the result. A tool-set
 // Preview wins; otherwise the summary is keyed on the tool name. Display-only.
-func resultSummary(e agent.ToolResultEvent) string {
+//
+// ToolResult.Truncated describes ToolResult.Content, which capOutput trimmed to
+// the tool's output cap. Under MIXED assembly that string is not what the model
+// reads: the assembler replaces the anchor's content with the alternatives it
+// selected from ToolResult.Context, so a "(truncated)" marker would describe a
+// rendering that was discarded. It cannot be recomputed here either — assembly
+// runs before the NEXT step's model call, against a global budget this event
+// predates. So it is suppressed, and only for results that actually carry a
+// structured set: a plain tool under mixed keeps its flat content verbatim and
+// its truncation is real. What replaces the signal under mixed is
+// Pressure.AnchorOmissions and the telemetry context_assembly span, both of
+// which describe what the model was actually given.
+func (r *renderer) resultSummary(e agent.ToolResultEvent) string {
 	res := e.Result
 	if res.Preview != "" {
 		return res.Preview
@@ -177,8 +195,9 @@ func resultSummary(e agent.ToolResultEvent) string {
 	if res.IsError {
 		return "error: " + firstLine(res.Content)
 	}
+	flatDiscarded := r.mixed && res.Context != nil
 	suffix := ""
-	if res.Truncated {
+	if res.Truncated && !flatDiscarded {
 		suffix = " (truncated)"
 	}
 	switch e.Call.Function.Name {

@@ -6,6 +6,129 @@ All notable changes to `go-llm` are documented here. Downstream consumers
 
 ## [Unreleased]
 
+### Added — mixed-domain context assembly, slice 3b of #331
+
+The agent runtime can now assemble model context from RAG results,
+conversation spans and agent-memory records at MIXED fidelity under one global
+token budget, instead of retaining or dropping each tool result whole. Tools
+declare what they COULD contribute (a `ContextSet` of per-subject
+alternatives); `ContextManager` picks at most one alternative per subject and
+reports every choice in a content-free trace.
+
+Opt-in via `ContextManager.Mixed`. Off, model-visible messages stay
+byte-identical and the new trace is the zero value.
+
+Mixed assembly preserves `RecencyCompactor`'s recency semantics: it replaces
+the compactor rather than layering on it, and under pressure it retains the
+same messages the compactor would have. Two orderings are involved. Retention
+PRIORITY by kind is the reverse of the compactor's drop order (current-run
+plain exchanges, then completed tool chains, then prior history). WITHIN each
+of those, the NEWEST members are retained, exactly as dropping oldest-first
+does. A consumer switching a pressured session to `Mixed` therefore does not
+have to re-discover which turns the model still sees.
+
+**Two behavior changes reach consumers who do not opt in:**
+
+- `agent/tools.Retrieve.Progressive` is now a HARD CONTRACT on `R`. Setting it
+  with a retriever that does not implement `RenderProgressiveWithGroups` fails
+  every call instead of silently serving the legacy `BuildContext` path with
+  its over-crediting attribution and no `ContextSet`. `*rag.Retriever`
+  satisfies it; only a consumer-supplied retriever is affected.
+- `agent/tools.Retrieve` now clamps the model-supplied `k` to 20 on the
+  LEGACY path too, before the backend call. A consumer whose model asks for
+  50 results silently gets 20, and the legacy attribution set (which credits
+  every retrieved result) shrinks with it. Unbounded model-supplied `k` is a
+  resource vector in flat mode as well; the new `Retrieve.MaxK` field is the
+  escape hatch. In progressive mode `MaxK` is additionally capped at 20 and a
+  larger value is rejected per call, because the capability projection emits
+  3(k+1) alternatives per fresh source and 21 would exceed the carrier bound.
+- `golem -progressive` now also sets `ContextManager.Mixed`, not only the
+  summary generation described below. That rewrites the model-visible bytes of
+  every tool anchor and shifts which `Pressure.Cause` bucket a pressured run
+  reports. The library-level `golem.Options.Progressive` sets ONLY the mixed
+  flag; a library host wires the tool's own `Progressive` field itself.
+
+New public API:
+
+- `agent`: `ContextManager.AssembleWithTrace`, `ContextManager.Mixed`,
+  `ContextSet` / `ContextGroup` / `ContextAlternative`,
+  `ContextAssemblyTrace` / `ContextSubjectTrace`,
+  `ContextAssemblyObserver` / `ContextAssemblyEvent`, `ErrMixedCompactor`,
+  and the `Decision*` / `Omit*` trace vocabulary.
+- `agent/tools`: `Retrieve.MaxK`.
+- `golem`: `Options.Progressive`.
+- `rag`: `Retriever.RenderProgressiveWithGroups`, `ProgressiveGroup`,
+  `ProgressiveAlternative`.
+- `contextdepth`: the descriptor vocabulary these carry (`SubjectRef`,
+  `GroupDesc`, `AlternativeDesc`, `RepresentationDesc`).
+
+`Retriever.RenderProgressiveWithGroups` returns the same output, trace and
+error as `RenderProgressive` for the same request, on every path. A blank
+`Chunk.Source` on any result yields NO groups for that call rather than
+failing it — such a result has no subject id, and a partial projection would
+lose its blocks under mixed assembly, which replaces the anchor's flat content
+with the selected alternatives.
+
+Under mixed assembly a fresh source is offered the deterministic metadata
+overview as its cheapest alternative, matching the flat renderer's own
+budget fallback, so a source that does not fit at summary depth still
+contributes a short block instead of vanishing. Its note line reads
+`summary omitted: budget` — never `no summary`, which would be false.
+
+**`Pressure` gains a field, and one existing field changes meaning.** Read
+this before upgrading a telemetry consumer.
+
+- NEW `Pressure.AnchorOmissions` counts subjects mixed assembly dropped from a
+  RETAINED structured anchor. The usual cause is a full anchor byte cap
+  (`Message.OutputCap`, 64 KB for `retrieve`), which a large retrieval hits
+  routinely — a 20-source projection is far more alternative text than the cap
+  can hold. Before this counter such a drop was invisible: `Evicted` stayed 0,
+  `UsedPct` stayed low, `Level` stayed `ok`, and `ToolResult.Truncated`
+  describes the DISCARDED flat rendering, not the mixed one. Always 0 with
+  `Mixed` off.
+- `Pressure.Evicted` is unchanged and still counts WHOLE groups (spans and
+  chains). Within-anchor omissions are deliberately NOT folded into it: five
+  sources shed from one retained anchor is not five evicted groups.
+- CHANGED `Pressure.Compactions` and `Pressure.Mitigation`: under mixed
+  assembly a turn that only shed subjects from a retained anchor now reports
+  `Compactions: 1` / `MitigationEvict` (previously `0` / `MitigationNone`).
+  The orchestrator emits its `compaction` `EventRecord` for such a turn, and a
+  consumer counting compactions will see turns it did not see before. Legacy
+  (`Mixed` off) values are byte-for-byte unchanged.
+- `Pressure.Level` deliberately does NOT react. The bands measure TOKEN-budget
+  usage; a byte-cap omission is orthogonal (a turn can shed a quarter of its
+  retrieval at 8% of budget), and promoting `Level` would make the bands mean
+  two different things and break existing level histograms.
+- `internal/agenttrace` carries the count as `anchor_omissions` on the
+  `model_step` and `runtime_stage` spans. Additive within `SchemaVersion` 2:
+  the key is omitted when zero, so legacy and lossless turns emit the same
+  bytes as before.
+
+`golem -telemetry` now emits a `context_assembly` span per mixed assembly,
+pairing with `anchor_omissions`: token totals, subject counts,
+`verbatim_shortfalls`, rendered bytes, and `by_decision` / `by_omission_reason`
+breakdowns keyed on agent's fixed vocabulary. It is a NEW span kind, so it is
+additive within `SchemaVersion` 2 and only mixed turns emit it. The breakdowns
+are counts only — persisted telemetry does not retain the per-subject rows that
+carry source paths, memory record IDs, and tool call IDs. `-trace` likewise
+does not serialize structured `ContextAssemblyTrace` rows or row fields, though
+its content-full model-visible messages can independently contain those
+identifiers. The rows themselves are available only to a live
+`ContextAssemblyObserver`.
+
+`golem` no longer prints `(truncated)` on a tool-result line when mixed
+assembly replaced that result's content. `ToolResult.Truncated` describes the
+DISCARDED flat rendering, and the flag cannot be recomputed at that point:
+assembly runs against a global budget before the next step's model call. Plain
+tools under mixed, and every tool with `Mixed` off, are unaffected.
+
+MEMORY: with `Mixed` on, each tool result's projection is cloned onto its
+anchor message and retained for the rest of the run. For `Retrieve` that is
+quadratic in `k` — 1.35 MB per call at `MaxK` 20 over 2 KB chunks, so a
+20-step run holds roughly 27 MB. That worst case needs every one of a call's
+`k` results to land on ONE source; results spread over 4 or more sources cost
+under 0.4 MB per call. With `Mixed` off nothing is cloned.
+
 ### Added — model-backed progressive source summaries, slice 2 of #189
 
 Golem can now generate and serve the existing L0 abstract/L1 overview ladder

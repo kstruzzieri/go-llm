@@ -1,0 +1,202 @@
+package agent
+
+import (
+	"fmt"
+	"slices"
+
+	"github.com/kstruzzieri/go-llm/contextdepth"
+)
+
+// ContextAlternative is one content fragment admitted whole or not at all
+// (#331 spec 3.2): a partially emitted alternative would attribute evidence
+// that is not in the output. Attrib is set only on evidence-bearing
+// alternatives; orientation/compact alternatives never inherit evidence
+// attribution. The rule is deliberately ONE-directional: Attrib on an
+// alternative with no verbatim component is rejected, but a verbatim
+// alternative with nil Attrib is legal — memory-domain records carry verbatim
+// content and no attribution, because RetrievedSource is RAG-shaped.
+type ContextAlternative struct {
+	Desc    contextdepth.AlternativeDesc
+	Content string
+	Attrib  *RetrievalAttribution
+}
+
+// ContextGroup is one tool-result subject plus its complete legal
+// alternatives in declaration (cheapest-first) order; measured-cost ties
+// preserve declaration order. A consumer picks AT MOST ONE alternative per
+// group — they are mutually exclusive renderings of the same subject.
+type ContextGroup struct {
+	Desc         contextdepth.GroupDesc
+	Alternatives []ContextAlternative
+}
+
+// ContextSet is the structured payload of one tool result. In mixed mode the
+// groups are the authoritative model-visible alternatives and replace, never
+// duplicate, the fallback ToolResult.Content; with Mixed off the set is
+// ignored everywhere.
+type ContextSet struct {
+	Groups      []ContextGroup
+	MinVerbatim int // preferred count of verbatim components; 0 = no floor
+}
+
+// Carrier bounds: ContextSet is a public field settable by untrusted tools.
+// The two bound DIFFERENT quantities, and conflating them overstates the trace:
+//   - WORK is groups x alternatives. Base admission stops at the first
+//     alternative that fits, but the upgrade pass rescans every subject's
+//     remaining alternatives on every commit, so the product is the real bound.
+//   - TRACE SIZE is groups alone. fillMixedTrace emits one row per SUBJECT,
+//     carrying only the alternative that was chosen.
+//
+// Dispatch checks these cardinalities before cloning a returned set. The
+// per-alternative Representations and attribution Sources slices have no
+// carrier limit, so their clone-time cost remains bounded only by what the
+// tool already allocated (#331 spec 3.2). Built-in producers sit far below
+// both limits.
+const (
+	maxContextGroups       = 256
+	maxContextAlternatives = 64
+)
+
+// clone deep-copies the set so a tool that keeps a reference to the ContextSet
+// it returned cannot change State by writing through it LATER (spec 3.2).
+// String bytes are shared because strings are immutable; every slice and the
+// nested attribution are copied.
+//
+// The isolation is one-directional and starts when recordResult runs, which is
+// AFTER Invoke returns. A tool still mutating from a goroutine at that instant
+// races the copy rather than being isolated from it, and the clone would then
+// capture whichever half-written state it read. Nothing in-repo does that —
+// every built-in producer builds its set and returns it — and the fix is not
+// here: a tool that mutates what it has already handed back has no defined
+// result under any copy strategy.
+func (s *ContextSet) clone() *ContextSet {
+	if s == nil {
+		return nil
+	}
+	out := &ContextSet{MinVerbatim: s.MinVerbatim, Groups: make([]ContextGroup, len(s.Groups))}
+	for i, g := range s.Groups {
+		cg := ContextGroup{Desc: g.Desc, Alternatives: make([]ContextAlternative, len(g.Alternatives))}
+		for j, a := range g.Alternatives {
+			// Copy the struct, then replace only its slice: a composite literal
+			// naming just the slice field would silently drop any field a later
+			// slice adds to AlternativeDesc or RetrievalAttribution.
+			ca := ContextAlternative{Desc: a.Desc, Content: a.Content}
+			ca.Desc.Representations = slices.Clone(a.Desc.Representations)
+			if a.Attrib != nil {
+				at := *a.Attrib
+				at.Sources = slices.Clone(a.Attrib.Sources)
+				ca.Attrib = &at
+			}
+			cg.Alternatives[j] = ca
+		}
+		out.Groups[i] = cg
+	}
+	return out
+}
+
+// validateContextSetCardinality is the cheap resource preflight used before
+// dispatch clones a tool-owned set. It deliberately does not inspect semantic
+// fields; those remain validated only for completed chains during assembly.
+func validateContextSetCardinality(callID string, s *ContextSet) error {
+	if s == nil {
+		return nil
+	}
+	if len(s.Groups) > maxContextGroups {
+		return fmt.Errorf("agent: context set (call %q): %d groups exceeds limit %d", callID, len(s.Groups), maxContextGroups)
+	}
+	for i, g := range s.Groups {
+		if len(g.Alternatives) > maxContextAlternatives {
+			return fmt.Errorf("agent: context set (call %q): group %d (%q): %d alternatives exceeds limit %d", callID, i, g.Desc.Subject.ID, len(g.Alternatives), maxContextAlternatives)
+		}
+	}
+	return nil
+}
+
+// validateContextSet enforces the mixed-assembly boundary (#331 spec 4.3).
+// ToolResult.Context is a public field, so a hand-built set is validated
+// here; the built-in projections cannot produce a malformed one. Never skip,
+// never fabricate: a malformed set is an assembly error, indexed and
+// domain-qualified so the offending group is identifiable.
+func validateContextSet(callID string, s *ContextSet) error {
+	// Total by construction: legacy anchors carry no set, and a caller should
+	// not have to guard. Nil is absence, which is legal everywhere; the
+	// "non-nil set with zero groups" rule below is untouched by this.
+	if s == nil {
+		return nil
+	}
+	if s.MinVerbatim < 0 {
+		return fmt.Errorf("agent: context set (call %q): MinVerbatim must be >= 0, got %d", callID, s.MinVerbatim)
+	}
+	if len(s.Groups) == 0 {
+		return fmt.Errorf("agent: context set (call %q): non-nil set with zero groups", callID)
+	}
+	if err := validateContextSetCardinality(callID, s); err != nil {
+		return err
+	}
+	// One ContextSet belongs to one tool result, and chain bijection gives one
+	// tool result per call ID, so the spec's (ToolCallID, Domain, ID) triple is
+	// fully determined here. Duplicates ACROSS calls are legal — the same
+	// {rag, source} subject from two retrieve calls is expected.
+	seen := make(map[contextdepth.SubjectRef]int, len(s.Groups))
+	for i, g := range s.Groups {
+		switch g.Desc.Subject.Domain {
+		case contextdepth.DomainRAG, contextdepth.DomainMemory:
+		case contextdepth.DomainConversation:
+			return fmt.Errorf("agent: context set (call %q): group %d: domain %q is assembler-owned", callID, i, g.Desc.Subject.Domain)
+		default:
+			return fmt.Errorf("agent: context set (call %q): group %d: unknown domain %q", callID, i, g.Desc.Subject.Domain)
+		}
+		if g.Desc.Subject.ID == "" {
+			return fmt.Errorf("agent: context set (call %q): group %d: blank subject ID", callID, i)
+		}
+		if prev, dup := seen[g.Desc.Subject]; dup {
+			return fmt.Errorf("agent: context set (call %q): group %d: duplicate subject %s/%q (also group %d)", callID, i, g.Desc.Subject.Domain, g.Desc.Subject.ID, prev)
+		}
+		seen[g.Desc.Subject] = i
+		if len(g.Alternatives) == 0 {
+			return fmt.Errorf("agent: context set (call %q): group %d (%q): no alternatives", callID, i, g.Desc.Subject.ID)
+		}
+		prevVerbatim := 0
+		for j, a := range g.Alternatives {
+			if !a.Desc.Valid() {
+				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: invalid descriptor", callID, i, g.Desc.Subject.ID, j)
+			}
+			if a.Content == "" {
+				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: empty content", callID, i, g.Desc.Subject.ID, j)
+			}
+			verbatim := verbatimComponents(a.Desc)
+			if a.Attrib != nil && verbatim == 0 {
+				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: attribution on a non-verbatim alternative", callID, i, g.Desc.Subject.ID, j)
+			}
+			// ContextGroup's contract is that declaration order IS ascending
+			// utility order, and BOTH mixed-assembly passes rest on it: the
+			// verbatim floor admits the first evidence-bearing alternative that
+			// fits, and the upgrade pass treats every later alternative as at
+			// least as good. A ladder that sheds verbatim evidence as it goes
+			// would let an upgrade silently invalidate a floor the trace already
+			// recorded as met. Enforced here, at the public-field boundary, so
+			// the allocator needs no defensive guard. Both built-in producers
+			// already satisfy it: rag's prefix families ordered by (prefix
+			// length, rung) yield 0,0,0,1,1,1,2,2,2 for a fresh source's three
+			// rungs (0,1,2 for a stale source's one), and memory's ladder is all
+			// zeros.
+			if verbatim < prevVerbatim {
+				return fmt.Errorf("agent: context set (call %q): group %d (%q): alternative %d: verbatim components decrease from %d to %d; declaration order must be ascending utility", callID, i, g.Desc.Subject.ID, j, prevVerbatim, verbatim)
+			}
+			prevVerbatim = verbatim
+		}
+	}
+	return nil
+}
+
+// verbatimComponents counts RepresentationVerbatim components; the
+// MinVerbatim floor is satisfied in these units.
+func verbatimComponents(d contextdepth.AlternativeDesc) int {
+	n := 0
+	for _, r := range d.Representations {
+		if r.Kind == contextdepth.RepresentationVerbatim {
+			n++
+		}
+	}
+	return n
+}

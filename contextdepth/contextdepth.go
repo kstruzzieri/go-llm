@@ -76,7 +76,9 @@ func (k RepresentationKind) String() string {
 
 // SubjectRef identifies one subject of context across domains. Domain is one
 // of the Domain* constants; ID is domain-owned and unique within
-// (Domain, one assembly call).
+// (Domain, one producer call). It is NOT unique assembly-wide: two retrieve
+// calls in one run legally produce the same {rag, source} subject, so
+// assembly-wide identity additionally carries the producing tool call ID.
 type SubjectRef struct {
 	Domain string
 	ID     string
@@ -139,6 +141,12 @@ func (a AlternativeDesc) Valid() bool {
 // GroupDesc describes one subject's candidacy for assembly.
 type GroupDesc struct {
 	Subject SubjectRef
-	Lane    int // consumer-assigned priority lane; smaller = earlier (spec D7)
-	Rank    int // domain-owned rank for trace/debugging; not cross-domain comparable
+	// Lane is RESERVED. It is declared for consumer-assigned priority lanes
+	// (smaller = earlier, spec D7), but no assembler reads it today: go-llm's
+	// mixed assembly derives every lane from the compactor's eviction order and
+	// assigns it itself, deliberately ignoring what a producer sets here. A tool
+	// that sets Lane is met with silence, not an error — treat it as a
+	// forward-declaration, not a tuning knob.
+	Lane int
+	Rank int // domain-owned rank for trace/debugging; not cross-domain comparable
 }

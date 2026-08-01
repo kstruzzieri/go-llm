@@ -22,16 +22,27 @@ const (
 // sourceSummaryRegion names the fenced region holding the untrusted source.
 const sourceSummaryRegion = "SOURCE"
 
-// progressiveNoChainWarning explains why -progressive did nothing. Without it
-// the flag is accepted, indexing succeeds, and not one summary is written or
-// mentioned: resolveSummarizeChain returns an empty chain whenever no
+// progressiveNoChainIndexWarning is for `golem index`, where -progressive controls
+// summary generation only. resolveSummarizeChain returns an empty chain whenever no
 // summarize/analysis/chat default resolves, which includes the zero-config
 // path where no models.json is discovered and providerbootstrap synthesizes a
-// config with no Defaults at all. An explicit opt-in that silently no-ops is
-// indistinguishable from a broken feature.
-const progressiveNoChainWarning = "-progressive had no effect: no summarize, analysis, " +
+// config with no Defaults at all.
+const progressiveNoChainIndexWarning = "-progressive had no effect: no summarize, analysis, " +
 	"or chat default is configured, so no summary model could be selected; " +
 	"sources keep the deterministic metadata overview"
+
+// progressiveNoChainMixedWarning is for the main command, where -progressive
+// also enables mixed context assembly even when no summary model is available.
+const progressiveNoChainMixedWarning = "-progressive could not generate source summaries: no summarize, analysis, " +
+	"or chat default is configured, so sources keep the deterministic metadata overview; " +
+	"mixed context assembly remains enabled"
+
+func progressiveNoChainWarning(mixed bool) string {
+	if mixed {
+		return progressiveNoChainMixedWarning
+	}
+	return progressiveNoChainIndexWarning
+}
 
 // Changing this prompt or its JSON contract in a non-comparable way requires
 // bumping rag.SourceSummaryFormatVersion.

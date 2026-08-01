@@ -2,10 +2,34 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"math"
 	"strings"
 
 	"github.com/kstruzzieri/go-llm/provider"
 )
+
+// checkedTokenAdd is the single arithmetic boundary for estimator-driven token
+// counts. Overflow saturates for diagnostics and reports false so admission can
+// fail closed instead of treating a wrapped negative as spare capacity.
+func checkedTokenAdd(a, b int) (int, bool) {
+	if (b > 0 && a > math.MaxInt-b) || (b < 0 && a < math.MinInt-b) {
+		return math.MaxInt, false
+	}
+	return a + b, true
+}
+
+func checkedTokenSub(a, b int) (int, bool) {
+	if (b > 0 && a < math.MinInt+b) || (b < 0 && a > math.MaxInt+b) {
+		return math.MaxInt, false
+	}
+	return a - b, true
+}
+
+func saturatedTokenAdd(a, b int) int {
+	n, _ := checkedTokenAdd(a, b)
+	return n
+}
 
 // DefaultInputCeiling is a conservative fallback when Budget.InputCeiling is 0.
 // Exported so consumers (e.g. Golem's compression policy) derive their own
@@ -16,7 +40,41 @@ const DefaultInputCeiling = 8192
 // function over State, tool-schema token count, and budget.
 type ContextManager struct {
 	Compactor Compactor
-	Estimate  func(string) int // token estimator; len/4 when nil
+	// Estimate is the token estimator; len/4 when nil. It must be pure and
+	// deterministic. The mixed path additionally enforces the same fallback
+	// rag.ProgressiveRenderRequest.Estimate documents — a non-positive result
+	// for non-empty text falls back to the default heuristic — because its cost
+	// accounting is an exact identity rather than an approximation. The legacy
+	// path is unchanged.
+	Estimate func(string) int
+	// Mixed opts into structured mixed-budget assembly. It requires the DEFAULT
+	// compactor: Mixed together with a non-nil Compactor is a configuration
+	// error (ErrMixedCompactor) whatever any one request carries, because the
+	// two are alternative strategies for the same messages and an
+	// anchor-dependent error would surface intermittently.
+	//
+	// With the default compactor, any request whose State carries no structured
+	// anchors keeps the legacy Compactor path and model-visible messages
+	// byte-identical. Its readers are dispatch, which skips the tool-result deep
+	// copy when mixed assembly is off, and AssembleWithTrace (#331).
+	//
+	// MEMORY: On, dispatch clones each tool result's ContextSet onto its anchor
+	// Message and NOTHING ever clears it, so every producer's whole capability
+	// projection is retained for the rest of the run — including alternatives no
+	// allocation will ever choose again. For agent/tools' Retrieve that is
+	// quadratic in k: 1.35 MB per call at the ceiling MaxK of 20 over 2 KB
+	// chunks, so a 20-step run holds ~27 MB (measured by rag's
+	// TestProgressiveGroupsProjectionBytes). With Mixed OFF the clone never
+	// happens and the projection is garbage as soon as dispatch returns.
+	//
+	// Releasing the sets of units the allocator evicted would reclaim most of it
+	// under pressure, and eviction IS permanent for a run. It is deliberately not
+	// done: mixedUnit.msgs aliases State.Messages, so any release writes the
+	// caller's canonical State, and mixed assembly's contract — pinned per budget
+	// by TestMixedTraceProperties, whose state snapshot marshals every message's
+	// Context — is that assembling a State does not mutate it. Budget the memory;
+	// do not buy it with a non-idempotent Assemble.
+	Mixed bool
 }
 
 // DurableSummaryPrompt renders the durable summary as the pinned system message
@@ -30,7 +88,10 @@ func (m ContextManager) estimate(s string) int {
 	if m.Estimate != nil {
 		return m.Estimate(s)
 	}
-	return (len(s) + 3) / 4
+	if s == "" {
+		return 0
+	}
+	return 1 + (len(s)-1)/4
 }
 
 func normalizeContextManager(m ContextManager) ContextManager {
@@ -42,6 +103,10 @@ func normalizeContextManager(m ContextManager) ContextManager {
 
 func (m ContextManager) messageCost(msg Message) int {
 	return RecencyCompactor{Estimate: m.Estimate}.messageCost(msg)
+}
+
+func (m ContextManager) checkedMessageCost(msg Message) (int, bool) {
+	return RecencyCompactor{Estimate: m.Estimate}.checkedMessageCost(msg)
 }
 
 // turnBudget resolves the per-turn input ceiling from the run Budget, applying
@@ -62,21 +127,51 @@ func turnBudget(b Budget) TokenBudget {
 }
 
 func (m ContextManager) pinnedTokens(st State, toolSchemaTokens int) int {
-	n := m.estimate(st.System) + toolSchemaTokens
-	for _, msg := range st.Messages {
-		if msg.Segment == Pinned {
-			n += m.messageCost(msg)
-		}
-	}
+	n, _ := m.checkedPinnedTokens(st, toolSchemaTokens)
 	return n
 }
 
-func (m ContextManager) totalTokens(st State, toolSchemaTokens int) int {
-	n := m.estimate(st.System) + toolSchemaTokens
-	for _, msg := range st.Messages {
-		n += m.messageCost(msg)
+func (m ContextManager) checkedPinnedTokens(st State, toolSchemaTokens int) (int, bool) {
+	n, ok := checkedTokenAdd(m.estimate(st.System), toolSchemaTokens)
+	if !ok {
+		return n, false
 	}
+	for _, msg := range st.Messages {
+		if msg.Segment == Pinned {
+			cost, costOK := m.checkedMessageCost(msg)
+			if !costOK {
+				return cost, false
+			}
+			n, ok = checkedTokenAdd(n, cost)
+			if !ok {
+				return n, false
+			}
+		}
+	}
+	return n, true
+}
+
+func (m ContextManager) totalTokens(st State, toolSchemaTokens int) int {
+	n, _ := m.checkedTotalTokens(st, toolSchemaTokens)
 	return n
+}
+
+func (m ContextManager) checkedTotalTokens(st State, toolSchemaTokens int) (int, bool) {
+	n, ok := checkedTokenAdd(m.estimate(st.System), toolSchemaTokens)
+	if !ok {
+		return n, false
+	}
+	for _, msg := range st.Messages {
+		cost, costOK := m.checkedMessageCost(msg)
+		if !costOK {
+			return cost, false
+		}
+		n, ok = checkedTokenAdd(n, cost)
+		if !ok {
+			return n, false
+		}
+	}
+	return n, true
 }
 
 func materializeDurableSummary(st State) State {
@@ -99,13 +194,25 @@ func materializeDurableSummary(st State) State {
 // pinned cost of the active tool schemas (not stored in State). The returned
 // Pressure is fully populated on every path — including the exhaustion error
 // paths — so the orchestrator can emit it before the model call.
+//
+// It is AssembleWithTrace with the trace discarded; callers that want the
+// mixed-assembly trace call that instead.
 func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens int, budget TokenBudget) (State, Pressure, error) {
+	out, pressure, _, err := m.AssembleWithTrace(ctx, st, toolSchemaTokens, budget)
+	return out, pressure, err
+}
+
+// assembleLegacy is the Compactor-driven path: unchanged behavior, and the only
+// place the default compactor is installed. Doing it here rather than in
+// agent.New is what keeps a mixed manager's nil Compactor distinguishable from
+// a custom one.
+func (m ContextManager) assembleLegacy(ctx context.Context, st State, toolSchemaTokens int, budget TokenBudget) (State, Pressure, error) {
 	m = normalizeContextManager(m)
 	thresholds := budget.Thresholds.normalize()
 	st = materializeDurableSummary(st)
 
-	pinned := m.pinnedTokens(st, toolSchemaTokens)
-	if pinned > budget.Input {
+	pinned, pinnedOK := m.checkedPinnedTokens(st, toolSchemaTokens)
+	if !pinnedOK || pinned > budget.Input {
 		// Pinned segment (system + goal + tool schemas) alone exceeds the ceiling:
 		// a hard runtime exhaustion. Report pinned tokens as the input cost.
 		p := Pressure{
@@ -119,19 +226,33 @@ func (m ContextManager) Assemble(ctx context.Context, st State, toolSchemaTokens
 		return st, p, ErrContextExhausted
 	}
 
-	stateBudget := TokenBudget{Input: budget.Input - toolSchemaTokens}
+	stateInput, stateBudgetOK := checkedTokenSub(budget.Input, toolSchemaTokens)
+	if !stateBudgetOK {
+		return st, Pressure{
+			UsedPct: 1, InputTokens: stateInput, InputBudget: budget.Input,
+			Level: LevelCritical, Cause: CauseToolSchema, Mitigation: MitigationHalt,
+		}, ErrContextExhausted
+	}
+	stateBudget := TokenBudget{Input: stateInput}
 	out, report, err := m.Compactor.Compact(ctx, st, stateBudget)
 	if err != nil {
+		if errors.Is(err, ErrContextExhausted) {
+			tokens := saturatedTokenAdd(report.TokensAfter, toolSchemaTokens)
+			return st, Pressure{
+				UsedPct: usedFraction(tokens, budget.Input), InputTokens: tokens, InputBudget: budget.Input,
+				Level: LevelCritical, Cause: m.dominantCause(st, toolSchemaTokens), Mitigation: MitigationHalt,
+			}, err
+		}
 		return st, Pressure{}, err
 	}
-	after := m.totalTokens(out, toolSchemaTokens)
+	after, afterOK := m.checkedTotalTokens(out, toolSchemaTokens)
 	used := usedFraction(after, budget.Input)
 	evicted := report.DroppedCount > 0
 	compactions := 0
 	if evicted {
 		compactions = 1
 	}
-	exhausted := after > budget.Input
+	exhausted := !afterOK || after > budget.Input
 	level, mitigation := thresholds.Classify(used, exhausted, evicted)
 	pressure := Pressure{
 		UsedPct:     used,
@@ -167,7 +288,7 @@ func (m ContextManager) pinnedOverflowCause(st State, toolSchemaTokens int) Pres
 	pinnedMsgs := m.estimate(st.System)
 	for _, msg := range st.Messages {
 		if msg.Segment == Pinned {
-			pinnedMsgs += m.messageCost(msg)
+			pinnedMsgs = saturatedTokenAdd(pinnedMsgs, m.messageCost(msg))
 		}
 	}
 	if toolSchemaTokens > pinnedMsgs {

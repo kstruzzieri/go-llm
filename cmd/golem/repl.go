@@ -45,6 +45,10 @@ type replSession struct {
 	mcpAttached  bool    // true when external MCP tools are attached (force approver)
 	obs          *observ // nil unless -trace/-telemetry enabled
 	pressureWarn bool    // enable the one-per-run context-pressure warning line
+	// mixed mirrors what newOrchestratorFactory puts in ContextManager.Mixed, so
+	// the renderer can tell whether a tool result's flat Content is what the
+	// model actually read. Same -progressive flag, one source.
+	mixed bool
 
 	modelOptions provider.ModelOptions // per-run model options (-think)
 
@@ -148,7 +152,7 @@ func runOnce(ctx context.Context, out io.Writer, interrupts <-chan struct{}, ses
 		approver = newReplApprover(lr, out, sess.color)
 	}
 
-	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock)
+	rend := newRenderer(out, sess.color, sess.maxSteps, sess.clock, sess.mixed)
 	rend.warnPressure = sess.pressureWarn
 
 	var (

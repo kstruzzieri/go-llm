@@ -110,10 +110,24 @@ func TestProgressiveWithoutSummarizeChainProducesNoGenerator(t *testing.T) {
 			}
 		})
 	}
-	for _, want := range []string{"-progressive", "no summarize", "metadata overview"} {
-		if !strings.Contains(progressiveNoChainWarning, want) {
-			t.Errorf("warning must mention %q: %q", want, progressiveNoChainWarning)
-		}
+}
+
+func TestProgressiveNoSummaryWarningSelection(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		mixed      bool
+		want       string
+		wantAbsent string
+	}{
+		{"main", true, "mixed context assembly remains enabled", "had no effect"},
+		{"index", false, "-progressive had no effect", "mixed context assembly"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := progressiveNoChainWarning(tt.mixed)
+			if !strings.Contains(got, tt.want) || strings.Contains(got, tt.wantAbsent) {
+				t.Fatalf("warning = %q, want %q without %q", got, tt.want, tt.wantAbsent)
+			}
+		})
 	}
 }
 

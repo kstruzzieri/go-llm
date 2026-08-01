@@ -40,9 +40,10 @@ type TokenEvent struct {
 }
 
 // ToolResultEvent reports a tool's result (or a synthetic dispatch failure such
-// as unknown tool / malformed args / planning failure / approval denial) after
-// capping and BEFORE the runtime appends it to State. Result is byte-identical
-// to the observation the model receives.
+// as unknown tool / malformed args / planning failure / approval denial). For
+// invoked tools it is the capped canonical fallback immediately after execution,
+// before Context is cloned onto State or mixed assembly. Under mixed assembly
+// Result is not necessarily byte-identical to the model's later input.
 type ToolResultEvent struct {
 	Step    int
 	Call    provider.ToolCall
@@ -57,7 +58,8 @@ type ToolResultEvent struct {
 // implements it, the Orchestrator calls OnToolResult for every ToolResult
 // produced by dispatch — including synthetic failures — but NOT for hard
 // dispatch aborts (context cancellation, approver error) that return before a
-// ToolResult exists. Callbacks run serially in loop order in the calling
+// ToolResult exists. It observes the canonical fallback, not a promise about
+// the final model input. Callbacks run serially in loop order in the calling
 // goroutine; a returned error aborts Run, like the other observer callbacks.
 type ToolResultObserver interface {
 	OnToolResult(ctx context.Context, e ToolResultEvent) error
@@ -93,6 +95,23 @@ type ThinkingEvent struct {
 // aborts Run, like the other observer callbacks.
 type ThinkingObserver interface {
 	OnThinking(ctx context.Context, e ThinkingEvent) error
+}
+
+// ContextAssemblyEvent is one mixed assembly's content-free trace, tagged with
+// the step whose model call it assembled.
+type ContextAssemblyEvent struct {
+	Step  int
+	Trace ContextAssemblyTrace
+}
+
+// ContextAssemblyObserver is an OPTIONAL extension of Observer. When an Observer
+// also implements it, the Orchestrator calls OnContextAssembly after every MIXED
+// assembly, before the step's model call and — for the same step — after
+// OnPressure. Legacy and no-anchor assemblies emit NOTHING (they return a zero
+// trace), and so do assembly errors. A returned error aborts Run, like the other
+// observer callbacks.
+type ContextAssemblyObserver interface {
+	OnContextAssembly(ctx context.Context, e ContextAssemblyEvent) error
 }
 
 type nopObserver struct{}

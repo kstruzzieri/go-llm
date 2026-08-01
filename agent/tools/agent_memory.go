@@ -9,6 +9,7 @@ import (
 	"unicode"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/memory"
 )
 
@@ -31,6 +32,27 @@ const (
 	// alone is not a storage bound.
 	MaxAgentMemoryContentBytes = 4096
 )
+
+// maxMemoryGroups is the largest record count AgentMemorySearch will project
+// into ToolResult.Context. Over it the set is DROPPED, not errored: that
+// degrades to exactly the mixed-off path — a legacy anchor whose flat Content
+// is still complete and correct, and agent's validateContextSet accepts a nil
+// set. A hard error would be wrong here (unlike Retrieve.MaxK): this tool
+// cannot see ContextManager.Mixed, so it would reject a large-Limit consumer
+// that works fine in flat mode today.
+//
+// The bound is needed because the group count is len(records), which is
+// STORE-controlled: recordSearcher promises nothing about honoring Limit, and
+// Limit is an unclamped public field that reaches SQL LIMIT directly
+// (memory/record_store.go:194-199). Without this, a consumer setting
+// Limit: 300 with Mixed on gets a run-aborting "301 groups exceeds limit 256"
+// — a message about group counts rather than about Limit.
+//
+// SOURCE OF TRUTH for the 256: maxContextGroups in package agent
+// (agent/context_set.go) — unexported, and agent/tools is a different package,
+// so the bound is restated here and pinned by
+// TestAgentMemoryGroupsWithinCarrierBound.
+const maxMemoryGroups = 256
 
 // recordSearcher is the minimal slice of *memory.MemoryRecordStore the search
 // tool needs; consumer-side interfaces keep the tools unit-testable with fakes.
@@ -108,14 +130,116 @@ func (t AgentMemorySearch) Invoke(ctx context.Context, raw json.RawMessage) (age
 	if len(records) == 0 {
 		return agent.ToolResult{Content: "no records found"}, nil
 	}
-	var b strings.Builder
+	// The set is attached whenever it fits the carrier bound: the tool cannot see
+	// ContextManager.Mixed, and dispatch clones ToolResult.Context only when
+	// Mixed is on (agent/dispatch.go), so with mixed assembly off this costs one
+	// transient projection that nothing reads. MinVerbatim stays 0 — memory
+	// records have no verbatim component to floor.
+	//
+	// Every group built below satisfies agent's validateContextSet, but that
+	// coupling is verified BY INSPECTION ONLY: agent cannot import agent/tools
+	// without an import cycle, so no test spans producer and validator. That is
+	// precisely why the group ceiling matters — a violation surfaces as a
+	// run-aborting assembly error, never as a failing test here.
+	var (
+		b   strings.Builder
+		set *agent.ContextSet
+		// Subject uniqueness within one set is a carrier invariant (agent's
+		// validateContextSet rejects a duplicate SubjectRef), and the store sits
+		// behind an interface that promises nothing. Enforced below so a
+		// duplicate ID is a model-visible tool error instead of an assembly
+		// failure that aborts the run one layer down.
+		seen map[string]int
+	)
+	if len(records) <= maxMemoryGroups {
+		set = &agent.ContextSet{}
+		seen = make(map[string]int, len(records))
+	}
+	repCard := contextdepth.RepresentationDesc{Depth: contextdepth.DepthL0, Kind: contextdepth.RepresentationMetadata}
+	repCompact := contextdepth.RepresentationDesc{Depth: contextdepth.DepthL1, Kind: contextdepth.RepresentationCompact}
 	for i, r := range records {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		fmt.Fprintf(&b, "%s · %s · %s · %s", r.ID, r.Kind, r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
+		b.WriteString(recordLine(r))
+		if set == nil {
+			// Over the carrier ceiling: flat only, exactly as with Mixed off. The
+			// ID guards below are DELIBERATELY inside this skip, not an oversight —
+			// they enforce validateContextSet's blank-subject and duplicate-subject
+			// rules, so they apply only when a set is actually built. With no set
+			// there is no subject to violate, and the flat path behaves exactly as
+			// it did pre-#331.
+			continue
+		}
+		if r.ID == "" {
+			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has blank ID", i)}, nil
+		}
+		if prev, dup := seen[r.ID]; dup {
+			return agent.ToolResult{IsError: true, Content: fmt.Sprintf("agent memory search: record %d has duplicate ID %q (also record %d)", i, r.ID, prev)}, nil
+		}
+		seen[r.ID] = i
+		card := recordCard(r)
+		set.Groups = append(set.Groups, agent.ContextGroup{
+			Desc: contextdepth.GroupDesc{
+				Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainMemory, ID: r.ID},
+				Rank:    i + 1,
+			},
+			Alternatives: []agent.ContextAlternative{
+				{Desc: contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{repCard}}, Content: card},
+				{
+					Desc:    contextdepth.AlternativeDesc{Representations: []contextdepth.RepresentationDesc{repCard, repCompact}},
+					Content: card + " · " + FlattenRecordContent(r.Content),
+				},
+			},
+		})
 	}
-	return agent.ToolResult{Content: b.String()}, nil
+	return agent.ToolResult{Content: b.String(), Context: set}, nil
+}
+
+// recordScopeClass names the visibility class WITHOUT the actual
+// workspace/session IDs — those are storage identifiers, not model context
+// (#331 spec 3.5 whitelist).
+func recordScopeClass(r memory.MemoryRecord) string {
+	switch {
+	case r.SessionID != "":
+		return "session"
+	case r.WorkspaceID != "":
+		return "workspace"
+	default:
+		return "global"
+	}
+}
+
+// recordLine is the flat per-record rendering — also the basis of the L1
+// compact alternative. It is the fallback Content every non-mixed consumer
+// sees, so its bytes are frozen for records that render legitimately.
+//
+// EVERY field is flattened, ID and kind included. Leaving those two raw was a
+// knowingly-open fake-row injection on exactly the path with the widest
+// audience: a newline in either forges an extra one-record-per-line row, which
+// is what FlattenRecordContent exists to prevent for the content field. The
+// frozen-bytes argument survives, now scoped: flattening is the identity on
+// every ID and kind a legitimate record carries, so only a record that was
+// already forging rows renders differently.
+func recordLine(r memory.MemoryRecord) string {
+	return fmt.Sprintf("%s · %s · %s · %s",
+		FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
+		r.CreatedAt.Format("2006-01-02"), FlattenRecordContent(r.Content))
+}
+
+// recordCard is the L0 metadata card: whitelist fields only. Never opaque
+// Metadata, provenance source IDs/hashes, or workspace/session ID values.
+//
+// EVERY string field is flattened, ID and kind included: a newline in either
+// would reopen the fake-row injection FlattenRecordContent exists to close.
+// recordLine now flattens the same two, so the two renderings agree; the dates
+// and scope class are closed vocabularies that cannot carry one.
+func recordCard(r memory.MemoryRecord) string {
+	return fmt.Sprintf("%s · %s · created:%s · updated:%s · scope:%s · ns:%s · src:%s",
+		FlattenRecordContent(r.ID), FlattenRecordContent(string(r.Kind)),
+		r.CreatedAt.Format("2006-01-02"), r.UpdatedAt.Format("2006-01-02"),
+		recordScopeClass(r), FlattenRecordContent(r.Namespace),
+		FlattenRecordContent(r.Provenance.SourceKind))
 }
 
 // FlattenRecordContent is the shared display-sanitizer for record content: one

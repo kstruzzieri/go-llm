@@ -42,6 +42,11 @@ type ToolResult struct {
 	Preview   string
 	Truncated bool
 	Attrib    *RetrievalAttribution // set by retrieval-style tools; copied to Message.Attrib
+	// Context is the optional structured payload for mixed assembly (#331).
+	// Content remains the canonical fallback for legacy mode and persisted
+	// transcripts; in mixed mode the set's groups replace it in the
+	// model-visible anchor. Nil for ordinary tools.
+	Context *ContextSet
 	// RouteOutcome is set by tools that make their own model call (e.g.
 	// delegate_code) so the run can record which model authored the result.
 	// Nil for ordinary tools. Display-only fields (Preview) and the model-facing

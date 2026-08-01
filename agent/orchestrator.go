@@ -34,8 +34,14 @@ func WithClock(now func() time.Time) Option {
 }
 
 // New constructs an Orchestrator from a ModelCaller and ContextManager.
+//
+// The manager is stored UNNORMALIZED. Installing the default compactor here
+// would make every mixed manager look like it carries a custom one, and mixed
+// assembly rejects that combination (ErrMixedCompactor). Legacy behavior is
+// unchanged: assembleLegacy applies the same default at the same effective
+// point.
 func New(model ModelCaller, ctxMgr ContextManager, opts ...Option) *Orchestrator {
-	o := &Orchestrator{model: model, ctxMgr: normalizeContextManager(ctxMgr), now: time.Now}
+	o := &Orchestrator{model: model, ctxMgr: ctxMgr, now: time.Now}
 	for _, opt := range opts {
 		opt(o)
 	}
@@ -96,7 +102,7 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 	var res Result
 
 	for step := 0; step < maxSteps; step++ {
-		assembled, pressure, err := o.ctxMgr.Assemble(ctx, state, toolSchemaTokens, budget)
+		assembled, pressure, atrace, err := o.ctxMgr.AssembleWithTrace(ctx, state, toolSchemaTokens, budget)
 		// Emit pressure before the model call on the success path and on the
 		// exhaustion path; skip only opaque compactor failures (pressure is zero).
 		if err == nil || errors.Is(err, ErrContextExhausted) {
@@ -108,6 +114,17 @@ func (o *Orchestrator) Run(ctx context.Context, req Request, obs Observer) (Resu
 		}
 		if err != nil {
 			return res, err
+		}
+		// Mixed assemblies only. The discriminator is nil Subjects, not Mixed and
+		// not a length: legacy, no-anchor and error paths return a zero trace,
+		// while a successful mixed assembly always carries a non-nil slice — even
+		// the all-omitted one an operator most wants to see, and even a zero-ROW
+		// one (TestMixedTraceWithNoRowsIsStillNonNil), which is why length is the
+		// wrong test.
+		if cao, ok := obs.(ContextAssemblyObserver); ok && atrace.Subjects != nil {
+			if aerr := cao.OnContextAssembly(ctx, ContextAssemblyEvent{Step: step, Trace: atrace}); aerr != nil {
+				return res, aerr
+			}
 		}
 		if pressure.Compactions > 0 {
 			res.Events = append(res.Events, EventRecord{Step: step, Kind: "compaction"})
