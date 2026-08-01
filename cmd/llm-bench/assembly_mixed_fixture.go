@@ -21,6 +21,8 @@ import (
 // budget formula inputs. The fixture restates them under "constants" so the
 // committed corpus is self-describing, but the Go constants govern — a
 // fixture that disagrees is rejected at validation time.
+// internal/rageval/mixed_fixture.go mirrors these values (this is package
+// main, so it cannot import them); its tests pin the mirror.
 const (
 	mixedBudgetFraction = 0.6
 	mixedEnvelopeTokens = 8

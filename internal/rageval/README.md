@@ -246,3 +246,63 @@ are reported.
 
 Like the outline baseline, every experiment requires an explicit `-out` path,
 so no invocation can overwrite the committed baseline by accident.
+
+## Mixed-assembly experiment (#331 slice 3c)
+
+Run — this exact invocation is also the baseline regeneration command — with:
+
+```sh
+go run ./cmd/rag-eval \
+  -experiment mixed \
+  -out internal/rageval/testdata/mixed-baseline.json
+```
+
+This is the deterministic companion to `cmd/llm-bench`'s human-labeled mixed
+corpus: llm-bench measures answer quality on arms-differ-gated cases, while
+this experiment measures assembly SHAPE only. Five hand-built states — one per
+stratum flavor (`conversation_only`, `memory_only`, `cross_domain_join`,
+`stale_vs_fresh`, `chain_retention`) — are built through the production tool
+producers (`agent/tools.Retrieve` in progressive mode over a seeded rag store,
+`agent/tools.AgentMemorySearch` over a seeded record store) and assembled by
+BOTH arms (legacy `ContextManager{}` and `ContextManager{Mixed: true}`) at
+budget fractions {0.4, 0.6, 0.8} of the registered raw state size.
+
+`conversation_only` and `chain_retention` are deliberately degenerate: neither
+carries a structured anchor (plain turns only; an echo-style chain with plain
+`Content` and nil `Context`), so the mixed arm takes the legacy path, both
+arms report byte-identical shapes, and the mixed-only fields are zero with an
+empty decision histogram. They keep the no-anchor shape in the sweep on
+purpose — they are not fixture bugs.
+
+Budgets are `max(minViable, round(f*raw))` with `minViable = est(system) +
+est(final pinned goal) + 64` on the registered `est=(len+3)/4` basis — the
+same formula as llm-bench's `mixedCaseBudget`. Floor semantics: when the floor
+wins, fraction rows collapse. `memory_only` is sized to show this — f=0.4 and
+f=0.6 both floor to budget 218 and produce identical rows; only f=0.8 clears
+the floor. That is the floor working as designed, not a missing sweep point.
+
+How to read the per-arm fields:
+
+- `decision_histogram` (mixed arm only) counts trace subject rows by the fixed
+  decision vocabulary — `base`, `floor`, `upgrade`, `omitted` — covering
+  conversation spans, chain spans, and structured-anchor subjects alike.
+- `omitted_subjects` is the trace total of omitted rows (evicted spans and
+  evicted chains' subjects included); `anchor_omissions` is the narrower
+  Pressure counter — subjects dropped from a RETAINED anchor only.
+- `pressure_level` is each arm's own classification and routinely disagrees
+  between arms at the same budget: legacy under-fills after whole-chain drops
+  (often `ok`) while mixed packs the budget (often `critical`).
+
+Every metric is recorded PER ARM and NEVER diffed across arms, and the report
+schema carries no cross-arm diff field (a reflection test pins the full key
+set). This is policy, not omission: slice 3b documented that `Pressure.Cause`
+shifts between arms for the same transcript (agent/types.go) — the same anchor
+can count as `retrieval` under legacy and `tool_output` under mixed — so a
+cross-arm delta of decisions or causes would compare vocabularies, not
+behavior.
+
+The experiment runs the whole sweep twice internally and byte-compares the
+marshaled reports; any difference is a hard error, so a returned report always
+carries `summary.all_deterministic: true`. `TestMixedEvalBaselineUpToDate` is
+the regeneration gate: the committed `testdata/mixed-baseline.json` must equal
+the live report byte-for-byte.

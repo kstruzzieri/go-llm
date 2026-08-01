@@ -155,9 +155,11 @@ func runMixedSweep(ctx context.Context) (*MixedReport, error) {
 
 // mixedEvalBudget resolves one cell's input budget:
 // max(minViable, round(fraction*RawTokens)) with
-// minViable = est(System) + est(final pinned goal) + slack, restating the
-// registered formula in cmd/llm-bench/assembly_mixed_fixture.go. The floor
-// guarantees the pinned segment always fits, so assembly never exhausts.
+// minViable = est(System) + est(final pinned goal) + slack. The formula's
+// home is cmd/llm-bench/assembly_mixed_build.go (mixedCaseBudget), restated
+// here per fraction; the constants it reads are the registered ones in
+// assembly_mixed_fixture.go. The floor guarantees the pinned segment always
+// fits, so assembly never exhausts.
 func mixedEvalBudget(c mixedEvalCase, fraction float64) int {
 	goal := c.State.Messages[len(c.State.Messages)-1] // builder-validated pinned user goal
 	minViable := mixedEvalEst(c.State.System) + mixedEvalEst(goal.Content) + mixedEvalMinViableSlack

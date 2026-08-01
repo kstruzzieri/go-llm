@@ -43,6 +43,11 @@ func TestMixedEvalSchemaAndShape(t *testing.T) {
 	if MixedSchemaVersion != "mixed-assembly-eval/v1" {
 		t.Fatalf("MixedSchemaVersion const = %q", MixedSchemaVersion)
 	}
+	// The anchor byte cap must stay agent's defaultOutputCap; a drifted mirror
+	// would silently change every anchor's admission ceiling.
+	if mixedEvalOutputCap != 64<<10 {
+		t.Fatalf("mixedEvalOutputCap = %d, want 64<<10 (agent's defaultOutputCap)", mixedEvalOutputCap)
+	}
 	wantCases := []struct{ name, stratum string }{
 		{"conversation_only", "conversation_only"},
 		{"memory_only", "memory_only"},
@@ -123,7 +128,11 @@ func TestMixedEvalShedsUnderSweep(t *testing.T) {
 	}
 	// At f=0.4 every fixture case sheds messages in BOTH arms.
 	for _, name := range []string{"conversation_only", "memory_only", "cross_domain", "stale_fresh", "chain_retention"} {
-		row := byName[name].Fractions[0]
+		c, ok := byName[name]
+		if !ok {
+			t.Fatalf("case %q missing from report", name)
+		}
+		row := c.Fractions[0]
 		if row.Fraction != 0.4 {
 			t.Fatalf("%s: row 0 fraction = %v, want 0.4", name, row.Fraction)
 		}
@@ -144,9 +153,6 @@ func TestMixedEvalShedsUnderSweep(t *testing.T) {
 	if got := conv.Fractions[2].Legacy.Messages; got != 9 {
 		t.Fatalf("conversation_only f=0.8 legacy messages = %d, want 9", got)
 	}
-	if conv.Fractions[2].Legacy.Messages <= conv.Fractions[0].Legacy.Messages {
-		t.Fatal("conversation_only: f=0.8 retains no more than f=0.4")
-	}
 }
 
 // TestMixedEvalDecisionHistogram pins the mixed arm's per-subject decision
@@ -156,10 +162,14 @@ func TestMixedEvalShedsUnderSweep(t *testing.T) {
 func TestMixedEvalDecisionHistogram(t *testing.T) {
 	report := mixedEvalReport(t)
 	var cross MixedCaseReport
+	found := false
 	for _, c := range report.Cases {
 		if c.Name == "cross_domain" {
-			cross = c
+			cross, found = c, true
 		}
+	}
+	if !found {
+		t.Fatal("cross_domain case missing from report")
 	}
 	row := cross.Fractions[1]
 	if row.Fraction != 0.6 {

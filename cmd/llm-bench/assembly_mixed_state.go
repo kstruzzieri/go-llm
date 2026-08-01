@@ -33,6 +33,7 @@ import (
 // A zero OutputCap would be silently fatal downstream: mixed assembly copies
 // it into the anchor byte cap and rejects EVERY alternative over it
 // (agent/mixed_alloc.go tryAssign). Pinned by TestBuildMixedStateProductionCaps.
+// internal/rageval/mixed_fixture.go mirrors this as mixedEvalOutputCap.
 const mixedDefaultOutputCap = 64 << 10
 
 // mixedMemorySessionID is the fixed session working-kind fixture records are
