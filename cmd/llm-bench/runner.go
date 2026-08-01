@@ -118,10 +118,6 @@ func (r *Runner) runOne(ctx context.Context, transport candidateTransport, targe
 	replayCtx, cancel := context.WithTimeout(ctx, r.Timeout)
 
 	opts := replayOptions{PerTurnTimeout: r.PerTurnTimeout, NumCtx: r.NumCtx}
-	if prefilledAssemblyMode(trace) {
-		temp := assemblyCaptureTemperature
-		opts.Temperature = &temp
-	}
 	out, err := replayWith(replayCtx, transport.chat, target.Model, trace, opts)
 	cancel()
 	if err != nil {
@@ -190,6 +186,17 @@ type replayOutput struct {
 	ThinkingComputed bool // true once any turn reported isolated thinking tokens
 }
 
+// addUsage folds one chat turn's token usage into the replay totals.
+func (out *replayOutput) addUsage(usage tokenUsage) {
+	out.PromptEvalTokens += usage.PromptEval
+	out.GenTokens += usage.Gen
+	out.TotalTokens += usage.PromptEval + usage.Gen
+	if usage.ThinkingComputed {
+		out.ThinkingTokens += usage.Thinking
+		out.ThinkingComputed = true
+	}
+}
+
 // replayOptions are the per-replay knobs threaded down from Runner.
 // Zero values preserve current behavior: no per-turn bound, no NumCtx,
 // no explicit temperature.
@@ -197,11 +204,12 @@ type replayOptions struct {
 	PerTurnTimeout time.Duration
 	NumCtx         int
 	// Temperature, when non-nil, is sent explicitly on every chat request.
-	// The Runner sets it to assemblyCaptureTemperature for prefilled
-	// assembly-mode traces (#331 slice 3c registered greedy decoding); nil
-	// preserves today's behavior of sending no temperature at all. There is
-	// no Seed knob: neither transport's options shape supports one, so
-	// temperature-0 is the sole registered decoding control.
+	// replayPrefilled defaults it to assemblyCaptureTemperature for
+	// prefilled assembly-mode traces (#331 slice 3c registered greedy
+	// decoding); nil on the legacy path preserves today's behavior of
+	// sending no temperature at all. There is no Seed knob: neither
+	// transport's options shape supports one, so temperature-0 is the sole
+	// registered decoding control.
 	Temperature *float64
 }
 
@@ -288,13 +296,7 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 			if err != nil {
 				return out, err
 			}
-			out.PromptEvalTokens += usage.PromptEval
-			out.GenTokens += usage.Gen
-			out.TotalTokens += usage.PromptEval + usage.Gen
-			if usage.ThinkingComputed {
-				out.ThinkingTokens += usage.Thinking
-				out.ThinkingComputed = true
-			}
+			out.addUsage(usage)
 			messages = append(messages, msg)
 			out.Transcript = append(out.Transcript, actualTurn)
 
@@ -360,6 +362,14 @@ func replayPrefilled(ctx context.Context, client candidateChatClient, model stri
 	if n := len(trace.Turns); n == 0 || trace.Turns[n-1].Role != "user" || trace.Turns[n-1].Content == "" {
 		return replayOutput{}, fmt.Errorf("trace %q: prefilled final turn must be a non-empty user question: %w", trace.ID, errUnsupportedTurns)
 	}
+	// Registered greedy decoding is defaulted HERE, at the same place the
+	// prefilled dispatch commits to a single generation call, so capture
+	// provenance stamping Temperature 0 can never describe a request that
+	// was sent without it. Callers may still pin an explicit value.
+	if opts.Temperature == nil {
+		temp := assemblyCaptureTemperature
+		opts.Temperature = &temp
+	}
 
 	messages := make([]ollama.ChatMessage, 0, len(trace.Turns)+1)
 	messages = append(messages, ollama.ChatMessage{Role: "system", Content: trace.System})
@@ -377,16 +387,10 @@ func replayPrefilled(ctx context.Context, client candidateChatClient, model stri
 	if err != nil {
 		return out, err
 	}
-	out.PromptEvalTokens += usage.PromptEval
-	out.GenTokens += usage.Gen
-	out.TotalTokens += usage.PromptEval + usage.Gen
-	if usage.ThinkingComputed {
-		out.ThinkingTokens += usage.Thinking
-		out.ThinkingComputed = true
-	}
+	out.addUsage(usage)
 	out.Transcript = append(out.Transcript, actualTurn)
 
-	if len(msg.ToolCalls) == 0 && msg.Content == "" {
+	if len(msg.ToolCalls) == 0 && strings.TrimSpace(msg.Content) == "" {
 		return out, fmt.Errorf("trace %q: %w", trace.ID, errEmptyAssistantReply)
 	}
 	if n := len(msg.ToolCalls); n > 0 {
@@ -394,7 +398,7 @@ func replayPrefilled(ctx context.Context, client candidateChatClient, model stri
 		// recorded and scored on its content, never errored.
 		out.Notes = append(out.Notes,
 			fmt.Sprintf("prefilled trace %q: candidate emitted %d tool call(s); scored on content", trace.ID, n))
-		if msg.Content == "" {
+		if strings.TrimSpace(msg.Content) == "" {
 			out.Transcript[len(out.Transcript)-1].Content = plainChatToolDivergenceFinal
 		}
 	}

@@ -49,14 +49,19 @@ type CaptureProvenance struct {
 	// OrderIndex is the trace's position in the counterbalanced capture
 	// order (the per-target replay sequence); artifacts of the same trace
 	// under different targets share it.
-	OrderIndex   int      `json:"order_index"`
-	Temperature  *float64 `json:"temperature,omitempty"`
-	Seed         *int     `json:"seed,omitempty"`
-	Transport    string   `json:"transport"`
-	Model        string   `json:"model"`
-	ModelDigest  string   `json:"model_digest,omitempty"`
-	PromptTokens int      `json:"prompt_tokens"`
-	GenTokens    int      `json:"gen_tokens"`
+	OrderIndex  int      `json:"order_index"`
+	Temperature *float64 `json:"temperature,omitempty"`
+	Seed        *int     `json:"seed,omitempty"`
+	Transport   string   `json:"transport"`
+	Model       string   `json:"model"`
+	ModelDigest string   `json:"model_digest,omitempty"`
+	// KNOWN GAP: a provider that omits usage counts JSON-decodes to 0
+	// tokens — a plausible-looking value — so "usage not reported" is
+	// indistinguishable from a genuine zero. Closing it needs presence
+	// signals (*int) threaded from the transports; deferred because the
+	// replay usage plumbing is shared with Score's token fields.
+	PromptTokens int `json:"prompt_tokens"`
+	GenTokens    int `json:"gen_tokens"`
 	// CapturedOrder is "legacy-first" or "mixed-first" for legacy/mixed pair
 	// members (which arm of the pair the counterbalanced order ran first);
 	// empty for topline artifacts.
@@ -114,12 +119,28 @@ type candidateDigestResolver interface {
 	ShowModel(ctx context.Context, name string) (*ollama.ModelInfo, error)
 }
 
+// digestResolutionTimeout bounds the digest-resolution client only; the
+// capture replay client keeps the operator-configured -timeout.
+const digestResolutionTimeout = 10 * time.Second
+
+// resolveCaptureModelDigests constructs a short-timeout ollama client and
+// resolves candidate digests for capture provenance. Failures degrade to
+// missing digests with one stderr line each, never a capture failure.
+func resolveCaptureModelDigests(ctx context.Context, ollamaURL string, targets []ModelTarget) map[string]string {
+	client, err := newOllamaClient(ollamaURL, ollama.WithTimeout(digestResolutionTimeout))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped: %v\n", err)
+		return nil
+	}
+	return resolveCandidateDigests(ctx, client, targets)
+}
+
 // resolveCandidateDigests resolves the content digest for each ollama
 // candidate target via /api/show, keyed by the normalized Display selector.
-// Errors are swallowed per resolveJudgeDigest precedent: a missing digest is
-// degraded provenance, not a capture failure. openai-compat targets are
-// skipped — that transport has no digest endpoint, so their provenance
-// ModelDigest stays empty by design.
+// Per-target errors degrade to a missing digest (with a stderr note) per
+// resolveJudgeDigest precedent — degraded provenance, not a capture
+// failure. openai-compat targets are skipped — that transport has no digest
+// endpoint, so their provenance ModelDigest stays empty by design.
 func resolveCandidateDigests(ctx context.Context, resolver candidateDigestResolver, targets []ModelTarget) map[string]string {
 	digests := make(map[string]string, len(targets))
 	for _, target := range targets {
@@ -127,7 +148,11 @@ func resolveCandidateDigests(ctx context.Context, resolver candidateDigestResolv
 			continue
 		}
 		info, err := resolver.ShowModel(ctx, target.Model)
-		if err != nil || info == nil || info.Digest == "" {
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: %v\n", target.Display, err)
+			continue
+		}
+		if info == nil || info.Digest == "" {
 			continue
 		}
 		digests[normalizeModelSelector(target.Display)] = info.Digest

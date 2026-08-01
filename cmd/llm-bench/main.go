@@ -237,9 +237,7 @@ func main() {
 		// entirely when the trace set has no prefilled assembly arms.
 		var modelDigests map[string]string
 		if anyPrefilledAssemblyTrace(traces) {
-			if client, clientErr := newOllamaClient(*ollamaURL); clientErr == nil {
-				modelDigests = resolveCandidateDigests(ctx, client, targets)
-			}
+			modelDigests = resolveCaptureModelDigests(ctx, *ollamaURL, targets)
 		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
 			Runner:       runner,

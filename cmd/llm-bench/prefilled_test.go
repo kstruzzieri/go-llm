@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -96,6 +97,20 @@ func TestPrefilledTraceValidation(t *testing.T) {
 			wantErr: "duplicate",
 		},
 		{
+			name: "unanswered assistant tool call",
+			trace: mutate(func(tr *Trace) {
+				tr.Turns = append(tr.Turns[:2], tr.Turns[3:]...) // drop the tool-result turn
+			}),
+			wantErr: "never answered",
+		},
+		{
+			name: "blank assistant tool-call id",
+			trace: mutate(func(tr *Trace) {
+				tr.Turns[1].ToolCalls[0].ID = ""
+			}),
+			wantErr: "non-empty id",
+		},
+		{
 			name: "final turn not user",
 			trace: mutate(func(tr *Trace) {
 				tr.Turns = tr.Turns[:4] // ends on assistant summary
@@ -184,14 +199,9 @@ func (l *rawRequestLog) snapshot() [][]byte {
 func newOllamaCaptureServer(t *testing.T, log *rawRequestLog, respond func() ollama.ChatResponse) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, 0, 4096)
-		buf := make([]byte, 4096)
-		for {
-			n, readErr := r.Body.Read(buf)
-			body = append(body, buf[:n]...)
-			if readErr != nil {
-				break
-			}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
 		}
 		log.append(body)
 		if err := json.NewEncoder(w).Encode(respond()); err != nil {
@@ -314,14 +324,9 @@ func TestPrefilledReplaySendsExactHistory(t *testing.T) {
 			if r.URL.Path != "/v1/chat/completions" {
 				t.Errorf("path = %q; want /v1/chat/completions", r.URL.Path)
 			}
-			var body []byte
-			buf := make([]byte, 4096)
-			for {
-				n, readErr := r.Body.Read(buf)
-				body = append(body, buf[:n]...)
-				if readErr != nil {
-					break
-				}
+			body, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				t.Errorf("read request body: %v", readErr)
 			}
 			log.append(body)
 			w.Header().Set("Content-Type", "application/json")
@@ -419,6 +424,40 @@ func TestPrefilledReplayCandidateToolCallDivergence(t *testing.T) {
 	})
 }
 
+func TestPrefilledReplayErrorPaths(t *testing.T) {
+	trace := prefilledTestTrace(AssemblyMixed)
+
+	t.Run("whitespace-only empty reply", func(t *testing.T) {
+		srv := newOllamaCaptureServer(t, &rawRequestLog{}, func() ollama.ChatResponse {
+			return ollama.ChatResponse{Model: "m", Done: true, Message: ollama.ChatMessage{Role: "assistant", Content: "  \n"}}
+		})
+		client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+		_, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "m", trace, replayOptions{})
+		if !errors.Is(err, errEmptyAssistantReply) {
+			t.Fatalf("err = %v; want errEmptyAssistantReply", err)
+		}
+	})
+
+	t.Run("transport error surfaces as Result.Err", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "boom", http.StatusInternalServerError)
+		}))
+		t.Cleanup(srv.Close)
+		runner := &Runner{OllamaURL: srv.URL, Timeout: 5 * time.Second, Scorer: &CaptureScorer{}}
+		results, err := runner.RunAll(context.Background(),
+			[]ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}}, []Trace{trace})
+		if err != nil {
+			t.Fatalf("RunAll: %v", err)
+		}
+		if len(results) != 1 {
+			t.Fatalf("results = %d; want 1", len(results))
+		}
+		if results[0].Err == nil {
+			t.Fatal("Result.Err = nil; want the transport error surfaced per-result")
+		}
+	})
+}
+
 func TestAssemblyCaptureDecodingOptions(t *testing.T) {
 	assembly := prefilledTestTrace(AssemblyMixed)
 	plain := Trace{
@@ -470,14 +509,9 @@ func TestAssemblyCaptureDecodingOptions(t *testing.T) {
 	t.Run("openai-compat", func(t *testing.T) {
 		log := &rawRequestLog{}
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			var body []byte
-			buf := make([]byte, 4096)
-			for {
-				n, readErr := r.Body.Read(buf)
-				body = append(body, buf[:n]...)
-				if readErr != nil {
-					break
-				}
+			body, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				t.Errorf("read request body: %v", readErr)
 			}
 			log.append(body)
 			w.Header().Set("Content-Type", "application/json")
@@ -581,6 +615,9 @@ func readArtifactsFile(t *testing.T, path string) []Artifact {
 		}
 		out = append(out, a)
 	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan artifacts: %v", err)
+	}
 	return out
 }
 
@@ -600,7 +637,12 @@ func TestAssemblyCaptureCounterbalance(t *testing.T) {
 		toplineCaptureTrace("top-a"),
 	}
 	wantOrder := []string{"zz-plain", "pa-mixed", "pa-legacy", "pb-legacy", "pb-mixed", "top-a", "top-b"}
-	targets := []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}}
+	// Two targets: the same trace must get the SAME capture order index
+	// under every target (the index is the per-target replay position).
+	targets := []ModelTarget{
+		{Display: "m", Provider: "ollama", Model: "m"},
+		{Display: "m2", Provider: "ollama", Model: "m2"},
+	}
 
 	runOnce := func(t *testing.T) ([]string, []Artifact) {
 		t.Helper()
@@ -622,12 +664,17 @@ func TestAssemblyCaptureCounterbalance(t *testing.T) {
 		t.Fatalf("capture order = %v; want %v", gotOrder, wantOrder)
 	}
 
-	byID := map[string]Artifact{}
-	for _, a := range artifacts {
-		byID[a.TraceID] = a
+	if want := len(wantOrder) * len(targets); len(artifacts) != want {
+		t.Fatalf("artifacts = %d; want %d (traces x targets)", len(artifacts), want)
 	}
-	if a := byID["zz-plain"]; a.Capture != nil {
-		t.Fatalf("plain artifact has capture provenance: %+v", a.Capture)
+	byID := map[string][]Artifact{}
+	for _, a := range artifacts {
+		byID[a.TraceID] = append(byID[a.TraceID], a)
+	}
+	for _, a := range byID["zz-plain"] {
+		if a.Capture != nil {
+			t.Fatalf("plain artifact (%s) has capture provenance: %+v", a.CandidateModel, a.Capture)
+		}
 	}
 	wantIndex := map[string]int{}
 	for i, id := range wantOrder {
@@ -639,15 +686,21 @@ func TestAssemblyCaptureCounterbalance(t *testing.T) {
 		"top-a": "", "top-b": "",
 	}
 	for id, want := range wantCapturedOrder {
-		a, ok := byID[id]
-		if !ok || a.Capture == nil {
-			t.Fatalf("artifact %s missing capture provenance", id)
+		group := byID[id]
+		if len(group) != len(targets) {
+			t.Fatalf("artifacts for %s = %d; want one per target", id, len(group))
 		}
-		if a.Capture.OrderIndex != wantIndex[id] {
-			t.Fatalf("artifact %s order_index = %d; want %d", id, a.Capture.OrderIndex, wantIndex[id])
-		}
-		if a.Capture.CapturedOrder != want {
-			t.Fatalf("artifact %s captured_order = %q; want %q", id, a.Capture.CapturedOrder, want)
+		for _, a := range group {
+			if a.Capture == nil {
+				t.Fatalf("artifact %s/%s missing capture provenance", id, a.CandidateModel)
+			}
+			if a.Capture.OrderIndex != wantIndex[id] {
+				t.Fatalf("artifact %s/%s order_index = %d; want %d (same index across targets)",
+					id, a.CandidateModel, a.Capture.OrderIndex, wantIndex[id])
+			}
+			if a.Capture.CapturedOrder != want {
+				t.Fatalf("artifact %s/%s captured_order = %q; want %q", id, a.CandidateModel, a.Capture.CapturedOrder, want)
+			}
 		}
 	}
 
@@ -687,32 +740,35 @@ func TestAssemblyCaptureProvenanceAndUsage(t *testing.T) {
 		}
 		lines[a.TraceID] = line
 	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("scan artifacts: %v", err)
+	}
 
 	var assemblyArtifact Artifact
 	if err := json.Unmarshal([]byte(lines["arm-legacy"]), &assemblyArtifact); err != nil {
 		t.Fatalf("decode assembly artifact: %v", err)
 	}
-	cap := assemblyArtifact.Capture
-	if cap == nil {
+	prov := assemblyArtifact.Capture
+	if prov == nil {
 		t.Fatal("assembly artifact missing capture provenance")
 	}
-	if cap.Temperature == nil || *cap.Temperature != 0 {
-		t.Fatalf("capture temperature = %v; want 0", cap.Temperature)
+	if prov.Temperature == nil || *prov.Temperature != 0 {
+		t.Fatalf("capture temperature = %v; want 0", prov.Temperature)
 	}
-	if cap.Seed != nil {
-		t.Fatalf("capture seed = %v; want nil (no transport supports seed)", cap.Seed)
+	if prov.Seed != nil {
+		t.Fatalf("capture seed = %v; want nil (no transport supports seed)", prov.Seed)
 	}
-	if cap.Transport != "ollama" {
-		t.Fatalf("capture transport = %q; want ollama", cap.Transport)
+	if prov.Transport != "ollama" {
+		t.Fatalf("capture transport = %q; want ollama", prov.Transport)
 	}
-	if cap.Model != "m" {
-		t.Fatalf("capture model = %q; want m", cap.Model)
+	if prov.Model != "m" {
+		t.Fatalf("capture model = %q; want m", prov.Model)
 	}
-	if cap.ModelDigest != "sha256:model-digest" {
-		t.Fatalf("capture model_digest = %q; want sha256:model-digest", cap.ModelDigest)
+	if prov.ModelDigest != "sha256:model-digest" {
+		t.Fatalf("capture model_digest = %q; want sha256:model-digest", prov.ModelDigest)
 	}
-	if cap.PromptTokens != 10 || cap.GenTokens != 2 {
-		t.Fatalf("capture usage = %d/%d; want 10/2 from replay usage", cap.PromptTokens, cap.GenTokens)
+	if prov.PromptTokens != 10 || prov.GenTokens != 2 {
+		t.Fatalf("capture usage = %d/%d; want 10/2 from replay usage", prov.PromptTokens, prov.GenTokens)
 	}
 
 	// Non-assembly artifacts must marshal byte-identical to today: no
@@ -784,5 +840,11 @@ func TestResolveCandidateDigests(t *testing.T) {
 	}
 	if d, ok := got["missing"]; ok && d != "" {
 		t.Fatalf("failed ShowModel produced digest %q; want absent/empty (errors swallowed)", d)
+	}
+
+	// A resolver that fails outright degrades to no digests, never an error.
+	down := resolveCandidateDigests(context.Background(), &fakeShowModeler{err: fmt.Errorf("ollama down")}, targets)
+	if len(down) != 0 {
+		t.Fatalf("digests from failing resolver = %v; want empty", down)
 	}
 }

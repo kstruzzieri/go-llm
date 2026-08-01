@@ -183,11 +183,13 @@ func anyPrefilledAssemblyTrace(traces []Trace) bool {
 
 // validatePrefilledTurns enforces the prefilled-history turn rules: roles
 // user/assistant/tool only; each tool turn answers exactly one earlier
-// assistant tool call by ToolCallID, at most once per call; and the final
-// turn is a user question with non-empty content (the single generation
-// prompt the candidate answers).
+// assistant tool call by ToolCallID; every declared assistant tool call is
+// answered exactly once (IDs required non-empty); and the final turn is a
+// user question with non-empty content (the single generation prompt the
+// candidate answers).
 func validatePrefilledTurns(turns []Turn) error {
 	declared := map[string]struct{}{} // assistant tool-call IDs seen so far
+	var declaredOrder []string
 	answered := map[string]struct{}{}
 	for i, turn := range turns {
 		switch turn.Role {
@@ -196,12 +198,16 @@ func validatePrefilledTurns(turns []Turn) error {
 			for j, call := range turn.ToolCalls {
 				id := strings.TrimSpace(call.ID)
 				if id == "" {
-					continue // never referenceable; tolerated, not indexed
+					// A blank-ID call could never be answered by any tool
+					// turn, so it is the same unanswered-call hazard the
+					// post-loop check below rejects.
+					return fmt.Errorf("turn %d tool_call %d: prefilled assistant tool call requires non-empty id", i, j)
 				}
 				if _, ok := declared[id]; ok {
 					return fmt.Errorf("turn %d tool_call %d: duplicate assistant tool-call id %q", i, j, id)
 				}
 				declared[id] = struct{}{}
+				declaredOrder = append(declaredOrder, id)
 			}
 		case "tool":
 			id := strings.TrimSpace(turn.ToolCallID)
@@ -217,6 +223,15 @@ func validatePrefilledTurns(turns []Turn) error {
 			answered[id] = struct{}{}
 		default:
 			return fmt.Errorf("turn %d role %q: prefilled traces allow only user, assistant, tool", i, turn.Role)
+		}
+	}
+	// Every declared call must be answered: llama.cpp strict chat templates
+	// reject histories with unanswered assistant tool calls at capture time,
+	// and both 3b assemblers keep call/result chains atomic, so an assembled
+	// State never legitimately contains one.
+	for _, id := range declaredOrder {
+		if _, ok := answered[id]; !ok {
+			return fmt.Errorf("assistant tool call %q is never answered by a tool turn (assembled chains are atomic; built corpora always answer every declared call)", id)
 		}
 	}
 	final := turns[len(turns)-1]
