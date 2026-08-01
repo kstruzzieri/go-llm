@@ -45,7 +45,7 @@ func main() {
 	importXlamManifest := flag.String("import-xlam-manifest", filepath.Join("docs", "llm", "calibration", "xlam-irrelevance-manifest.jsonl"), "Output manifest path for -import-xlam")
 	importXlamN := flag.Int("import-xlam-n", 300, "Number of eligible records to sample for -import-xlam (<=0 = all eligible)")
 	importXlamSeed := flag.Int64("import-xlam-seed", 42, "Deterministic sampling seed for -import-xlam")
-	assemblyBuildPath := flag.String("assembly-build", "", "Build paired flat/progressive assembly traces from this case-fixture JSON (#331)")
+	assemblyBuildPath := flag.String("assembly-build", "", "Build assembly traces from this case-fixture JSON (#331): a JSON array is the 3a flat/progressive corpus; a JSON object is the 3c mixed-assembly fixture (validate-only until the Task 4 builder lands)")
 	assemblyOut := flag.String("assembly-out", filepath.Join("docs", "llm", "assembly-corpus", "traces"), "Output directory for -assembly-build")
 
 	importXlamMinTools := flag.Int("import-xlam-min-tools", 1, "Drop -import-xlam records offering fewer than this many tools")
@@ -149,7 +149,7 @@ func main() {
 	defer cancel()
 
 	if *assemblyBuildPath != "" {
-		if err := assemblyBuild(ctx, *assemblyBuildPath, *assemblyOut); err != nil {
+		if err := assemblyBuildDispatch(ctx, *assemblyBuildPath, *assemblyOut); err != nil {
 			log.Fatalf("llm-bench: assembly-build: %v", err)
 		}
 		return

@@ -359,7 +359,7 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 // scored restraint divergence (Notes annotation, content kept; the
 // divergence sentinel stands in when the reply has no content at all).
 func replayPrefilled(ctx context.Context, client candidateChatClient, model string, trace Trace, opts replayOptions) (replayOutput, error) {
-	if n := len(trace.Turns); n == 0 || trace.Turns[n-1].Role != "user" || trace.Turns[n-1].Content == "" {
+	if n := len(trace.Turns); n == 0 || trace.Turns[n-1].Role != "user" || strings.TrimSpace(trace.Turns[n-1].Content) == "" {
 		return replayOutput{}, fmt.Errorf("trace %q: prefilled final turn must be a non-empty user question: %w", trace.ID, errUnsupportedTurns)
 	}
 	// Registered greedy decoding is defaulted HERE, at the same place the

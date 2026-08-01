@@ -55,6 +55,7 @@ type AssemblyEval struct {
 	Stratum         string   `json:"stratum,omitempty"`          // corpus stratum (drives the stratified bootstrap)
 	AnswerHome      string   `json:"answer_home,omitempty"`      // where the answer-bearing evidence lives
 	ScenarioFamily  string   `json:"scenario_family,omitempty"`  // bootstrap cluster ID; empty = own cluster
+	TwinGroup       string   `json:"twin_group,omitempty"`       // descriptive lane-bias label; may span strata, never a clustering unit
 	Control         bool     `json:"control,omitempty"`          // negative-control pair, excluded from the verdict
 	Budget          int      `json:"budget,omitempty"`           // TokenBudget.Input, identical across both arms
 	RawStateTokens  int      `json:"raw_state_tokens,omitempty"` // pre-assembly State size
@@ -341,8 +342,15 @@ func validateAssemblyCase(c assemblyCase) error {
 	if c.AnswerLiteral != "" && strings.TrimSpace(c.AnswerLiteral) == "" {
 		return fmt.Errorf("answer_literal is whitespace-only; omit it or anchor it")
 	}
-	seen := make(map[string]struct{}, len(c.Sources))
-	for i, s := range c.Sources {
+	return validateAssemblySources(c.Sources)
+}
+
+// validateAssemblySources is the per-source validation shared by the 3a case
+// fixture (Sources) and the 3c mixed fixture (RagSources): non-blank path and
+// content, unique paths, and the atomic abstract/overview pair.
+func validateAssemblySources(sources []assemblySource) error {
+	seen := make(map[string]struct{}, len(sources))
+	for i, s := range sources {
 		if strings.TrimSpace(s.Path) == "" || strings.TrimSpace(s.Content) == "" {
 			return fmt.Errorf("source %d: path and content are required", i)
 		}
@@ -776,10 +784,10 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 	models := map[string]*modelAccumulator{}
 	var modelOrder []string
 	totalPairs := 0
-	mixedEvidence := len(topline) > 0
+	hasMixedEvidence := len(topline) > 0
 	for _, k := range keys {
 		if k.kind != assemblyKindFlatProgressive {
-			mixedEvidence = true
+			hasMixedEvidence = true
 			continue
 		}
 		acc, ok := models[k.model]
@@ -814,7 +822,7 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 	// A pure-3a input with nothing labeled still hard-errors exactly as
 	// before; any 3c evidence (legacy/mixed/topline artifacts) makes the
 	// report worth emitting even when the flat-progressive side is empty.
-	if totalPairs == 0 && !mixedEvidence {
+	if totalPairs == 0 && !hasMixedEvidence {
 		return nil, fmt.Errorf("assembly report: no complete labeled pairs")
 	}
 	for _, model := range modelOrder {

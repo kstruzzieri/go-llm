@@ -153,6 +153,9 @@ func resolveCandidateDigests(ctx context.Context, resolver candidateDigestResolv
 			continue
 		}
 		if info == nil || info.Digest == "" {
+			// A successful ShowModel with no digest degrades exactly like the
+			// error branch above — noted, never silent.
+			fmt.Fprintf(os.Stderr, "calibrate-capture: digest resolution skipped for %q: ShowModel returned no digest\n", target.Display)
 			continue
 		}
 		digests[normalizeModelSelector(target.Display)] = info.Digest
