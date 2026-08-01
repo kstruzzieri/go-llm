@@ -7,11 +7,12 @@ import (
 	"strings"
 )
 
-// This file is the ORCHESTRATION layer for the progressive renderer: the
-// public entry point, the three store reads in their contracted order,
+// This file is the ORCHESTRATION layer for the progressive renderer: both
+// public entry points, the three store reads in their contracted order,
 // assembly, and trace filling. Text rendering lives in
-// progressive_render.go, budget arithmetic in progressive_alloc.go, and the
-// declaration surface in progressive.go (DEV-15).
+// progressive_render.go, budget arithmetic in progressive_alloc.go, the
+// capability projection in progressive_groups.go, and the declaration
+// surface in progressive.go (DEV-15).
 
 // RenderProgressive renders already-selected retrieval results at mixed
 // depths under hard token and byte budgets (spec sections 9-10). It never
@@ -23,6 +24,36 @@ import (
 // structural positions, so embedded newlines, labels, and delimiters remain
 // data and cannot forge orientation or evidence headers.
 func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, error) {
+	out, trace, _, err := r.renderProgressive(ctx, req, false)
+	return out, trace, err
+}
+
+// RenderProgressiveWithGroups is RenderProgressive plus the domain-owned
+// groups projection, built from the SAME prepared-source snapshot BEFORE
+// allocation — the tool-local budget never prunes the capability declaration
+// (#331 spec 3.1). Output and trace are value-identical to RenderProgressive
+// for the same request, on every path including the degraded one below.
+//
+// A blank Chunk.Source on ANY result yields NO groups for the whole call:
+// SubjectRef.ID must identify a source, so such a result cannot be projected,
+// and a partial projection would lose its blocks under mixed assembly. The
+// render itself is unaffected — blank-sourced results render exactly as the
+// legacy entry point has always rendered them.
+//
+// Groups are returned in source order (ascending ProgressiveGroup.Desc.Rank),
+// one per distinct source, lining up positionally with the trace's Sources.
+//
+// COST CEILING: unlike the returned output, the groups are NOT bounded by
+// MaxTokens/MaxBytes. At effective MaxDepth L2 every evidence prefix is
+// materialized, so content memory is Theta(rungs * n^2/2 * average block bytes)
+// in the number of results for one source — quadratic where the flat path is capped.
+// Callers that pass a model-supplied result count must clamp it themselves;
+// this entry point applies no upper bound today.
+func (r *Retriever) RenderProgressiveWithGroups(ctx context.Context, req ProgressiveRenderRequest) (string, ProgressiveTrace, []ProgressiveGroup, error) {
+	return r.renderProgressive(ctx, req, true)
+}
+
+func (r *Retriever) renderProgressive(ctx context.Context, req ProgressiveRenderRequest, wantGroups bool) (string, ProgressiveTrace, []ProgressiveGroup, error) {
 	trace := ProgressiveTrace{
 		MaxTokens: req.MaxTokens, MaxBytes: req.MaxBytes, MaxDepth: req.MaxDepth,
 		SelectedResults:     len(req.Results),
@@ -39,35 +70,68 @@ func (r *Retriever) RenderProgressive(ctx context.Context, req ProgressiveRender
 	// This buys a contract a caller can actually apply: used + free ==
 	// MaxTokens holds whenever the trace is non-zero.
 	if err := validateProgressiveRequest(req); err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
+	}
+	// A blank Chunk.Source has no subject id, so it cannot be projected. That
+	// degrades the PROJECTION, never the render: failing the call would break
+	// every caller of the WithGroups entry point, including the ones that only
+	// wanted the output (agent/tools.Retrieve builds groups unconditionally when
+	// Progressive is set, because it cannot see whether mixed assembly is on).
+	//
+	// All-or-nothing per call, deliberately. Projecting only the sourced results
+	// would declare a partial capability, and under mixed assembly the anchor's
+	// flat content is REPLACED by the selected alternatives — so the blank-sourced
+	// blocks would silently vanish from the model's view. Returning no groups
+	// leaves the anchor a legacy one carrying the complete flat rendering.
+	if wantGroups {
+		for _, res := range req.Results {
+			if res.Chunk.Source == "" {
+				wantGroups = false
+				break
+			}
+		}
 	}
 	if len(req.Results) == 0 {
 		// fillProgressiveTrace never runs on this path, so restate the
 		// invariant it maintains. Leaving free at zero would tell a caller the
 		// budget is exhausted when nothing was charged against it.
 		trace.EstimatedTokensFree = req.MaxTokens
-		return "", trace, nil
+		return "", trace, nil, nil
 	}
 
 	sources, err := r.prepareProgressiveSources(ctx, req)
 	if err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
 	}
 	trace.DistinctSources = len(sources)
+
+	// BEFORE allocate, deliberately: allocate mutates per-source allocation
+	// state, and the groups projection must declare what this source COULD
+	// contribute, not what this call's budget happened to admit (#331 spec
+	// 3.1). Moving this below the allocate call would make the retrieve tool's
+	// local ceiling the permanent upper bound on every downstream allocator.
+	var groups []ProgressiveGroup
+	if wantGroups {
+		maxDepth := req.MaxDepth
+		if maxDepth == DepthNone {
+			maxDepth = DepthL2
+		}
+		groups = buildProgressiveGroups(sources, maxDepth)
+	}
 
 	// allocate sorts sources by firstIndex in place (DEV-16); assembly and the
 	// trace both consume that normalized order, not construction order.
 	st, err := allocate(sources, req, req.Estimate)
 	if err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
 	}
 
 	out, trimmed, err := assembleProgressive(sources, req.MaxBytes)
 	if err != nil {
-		return "", ProgressiveTrace{}, err
+		return "", ProgressiveTrace{}, nil, err
 	}
 	fillProgressiveTrace(&trace, sources, st, out, trimmed, req.Estimate)
-	return out, trace, nil
+	return out, trace, groups, nil
 }
 
 // prepareProgressiveSources groups results by source (source order = index of

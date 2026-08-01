@@ -15,9 +15,11 @@ const (
 	defaultToolErrorCap = 3         // consecutive tool errors / repeats before stop
 )
 
-// ErrContextExhausted is returned when the pinned segment (system + goal +
-// tool schemas) alone exceeds the input budget. The runtime never silently
-// truncates the goal; selecting a bigger-context model is the provider's job.
+// ErrContextExhausted is returned when the must-fit reservations alone exceed
+// the input budget: the pinned segment (system + goal + tool schemas), or — under
+// mixed assembly — the durable summary or an unresolved tool chain, none of
+// which is droppable. The runtime never silently truncates the goal; selecting a
+// bigger-context model is the provider's job.
 var ErrContextExhausted = errors.New("agent: context exhausted (pinned segment exceeds budget)")
 
 // StopReason explains why Run returned. A non-Completed reason is still a
@@ -95,6 +97,16 @@ type Message struct {
 	provider.ChatMessage
 	Segment Segment
 	Attrib  *RetrievalAttribution
+	// Context and OutputCap are runtime-only assembly metadata — never
+	// provider-visible, and unlike Segment/Attrib also excluded from JSON so
+	// they are never persisted. Context is the deep-copied structured payload
+	// of a tool-result anchor; OutputCap is the normalized Effect.OutputCap the
+	// anchor was dispatched under (mixed assembly enforces the same byte
+	// boundary capOutput enforces on fallback Content); 0 for anchors that
+	// never resolved an effect (unknown tool, malformed arguments, plan
+	// failure — all three return before prepareCall normalizes).
+	Context   *ContextSet `json:"-"`
+	OutputCap int         `json:"-"`
 }
 
 // State is the canonical transcript the Orchestrator owns.
@@ -121,14 +133,48 @@ type RetrievedSource struct {
 // Pressure is the per-turn context-budget telemetry (#63 seam). UsedPct,
 // Evicted, Compactions are the original v1 fields; the rest enrich them.
 type Pressure struct {
-	UsedPct     float64
-	Evicted     int
+	UsedPct float64
+	// Evicted counts whole GROUPS the assembler dropped: a conversation span or
+	// a completed tool chain under legacy compaction and under mixed assembly
+	// alike. It never counts a partial trim inside a retained group — see
+	// AnchorOmissions.
+	Evicted int
+	// Compactions is 1 when the assembler shed anything this turn and 0
+	// otherwise, and is what the orchestrator's "compaction" EventRecord keys
+	// on. Under mixed assembly "anything" includes an AnchorOmissions-only turn,
+	// where no whole group was evicted but a retained anchor still lost content.
 	Compactions int
-	InputTokens int
-	InputBudget int
-	Level       PressureLevel
-	Cause       PressureCause
-	Mitigation  PressureMitigation
+	// AnchorOmissions counts subjects mixed assembly dropped from a RETAINED
+	// structured anchor — content the model never sees while the carrier
+	// message, its chain and the token budget all look nominal. It is always 0
+	// on the legacy (ContextManager.Mixed off) path, which has no subjects.
+	//
+	// Disjoint from Evicted: subjects under an evicted chain are counted there,
+	// once, as one group. It is also NOT
+	// ContextAssemblyTrace.OmittedSubjects, which counts every omitted trace
+	// row including evicted spans and evicted chains' subjects.
+	//
+	// The dominant cause is a full anchor byte cap (Message.OutputCap), which a
+	// large retrieval hits routinely: a 20-source projection is megabytes of
+	// alternatives against a 64 KB cap. Level deliberately does NOT react to it
+	// — Level bands measure TOKEN-budget usage, and a byte-cap omission is
+	// orthogonal to that (the reviewer's probe shed a quarter of its sources at
+	// 8% of budget). Promoting Level would make the bands mean two different
+	// things and corrupt every level histogram already collected. Mitigation and
+	// Compactions carry the "content was shed" fact; this field carries how much.
+	AnchorOmissions int
+	InputTokens     int
+	InputBudget     int
+	Level           PressureLevel
+	// Cause is NOT comparable across the legacy and mixed assembly arms for the
+	// same transcript. dominantCause attributes a message to CauseRetrieval when
+	// Message.Attrib is set, and mixed assembly correctly drops an anchor's
+	// fallback attribution when no chosen alternative carries any (#331 spec
+	// 4.2) — so the same anchor can be counted as retrieval under
+	// ContextManager.Mixed off and tool_output under Mixed on. Aggregate cause
+	// histograms within one arm; do not diff them between arms.
+	Cause      PressureCause
+	Mitigation PressureMitigation
 }
 
 // StepRecord is the durable per-turn truth. RouteOutcome is captured

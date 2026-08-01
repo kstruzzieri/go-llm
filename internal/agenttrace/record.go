@@ -38,9 +38,12 @@ type TraceRequest struct {
 	Budget         agent.Budget           `json:"budget"`
 }
 
-// TraceRecord is one content-full run trace (#238). It embeds agent.Result; the
-// embedded record uses Go's default JSON shape (e.g. Latency as integer
-// nanoseconds) - the schema documents that rather than forking a trace-only copy.
+// TraceRecord is one content-full run trace (#238). It embeds agent.Result but
+// does not serialize structured ContextAssemblyTrace rows or row fields; those
+// are available live to ContextAssemblyObserver. Its model-visible messages may
+// independently contain tool-call, source, or record identifiers. The embedded
+// record uses Go's default JSON shape (e.g. Latency as integer nanoseconds) -
+// the schema documents that rather than forking a trace-only copy.
 type TraceRecord struct {
 	SchemaVersion int          `json:"schema_version"`
 	RunID         string       `json:"run_id"`
@@ -65,11 +68,14 @@ type pressureLite struct {
 	UsedPct     float64 `json:"used_pct"`
 	Evicted     int     `json:"evicted"`
 	Compactions int     `json:"compactions"`
-	Level       string  `json:"level"`
-	Cause       string  `json:"cause"`
-	Mitigation  string  `json:"mitigation"`
-	InputTokens int     `json:"input_tokens"`
-	InputBudget int     `json:"input_budget"`
+	// Additive within SchemaVersion 2: omitempty keeps every span a legacy or
+	// lossless mixed turn emits byte-identical to what v2 already emitted.
+	AnchorOmissions int    `json:"anchor_omissions,omitempty"`
+	Level           string `json:"level"`
+	Cause           string `json:"cause"`
+	Mitigation      string `json:"mitigation"`
+	InputTokens     int    `json:"input_tokens"`
+	InputBudget     int    `json:"input_budget"`
 }
 
 type runSpan struct {
@@ -146,6 +152,46 @@ type runtimeStageSpan struct {
 	InputBudget   int     `json:"input_budget"`
 	Evicted       int     `json:"evicted"`
 	Compactions   int     `json:"compactions"`
+	// Additive within SchemaVersion 2: see pressureLite.AnchorOmissions.
+	AnchorOmissions int `json:"anchor_omissions,omitempty"`
+}
+
+// contextAssemblySpan is one mixed-assembly outcome (#331). A NEW span kind, so
+// it is additive within SchemaVersion 2 by construction: no record any existing
+// run emits changes a byte, and only a mixed assembly emits this one at all.
+//
+// It is AGGREGATE on purpose. ContextAssemblyTrace is content-free but not
+// privacy-free — its rows carry source paths, memory record IDs and tool call
+// IDs — and this sink persists no such identifier today (tool spans carry the
+// tool NAME and a content byte count, never arguments, output or call IDs).
+// Emitting the rows would widen what telemetry retains about a workspace, so the
+// span keeps the counts and drops the names: ByDecision says whether the upgrade
+// pass is doing anything, ByOmissionReason is what makes Pressure.AnchorOmissions
+// actionable (byte_cap vs token_budget vs chain_evicted), and neither can
+// identify a file. Telemetry retains only these aggregates; -trace does not
+// serialize structured ContextAssemblyTrace rows or row fields, though its
+// model-visible messages can independently contain the same identifiers. The
+// rows themselves are available only to the live ContextAssemblyObserver.
+type contextAssemblySpan struct {
+	SchemaVersion      int    `json:"schema_version"`
+	RunID              string `json:"run_id"`
+	SpanID             string `json:"span_id"`
+	ParentID           string `json:"parent_id"`
+	Kind               string `json:"kind"` // "context_assembly"
+	Step               int    `json:"step"`
+	MaxTokens          int    `json:"max_tokens"`
+	UsedTokens         int    `json:"used_tokens"`
+	FreeTokens         int    `json:"free_tokens"`
+	Subjects           int    `json:"subjects"`
+	Rendered           int    `json:"rendered"`
+	Omitted            int    `json:"omitted"`
+	VerbatimShortfalls int    `json:"verbatim_shortfalls"`
+	RenderedBytes      int    `json:"rendered_bytes"`
+	// Keyed by agent's fixed Decision/Omit vocabulary, so the keys are a closed
+	// set and never payload-derived. Omitted when empty rather than written as
+	// null, which keeps a zero-subject assembly's span readable.
+	ByDecision       map[string]int `json:"by_decision,omitempty"`
+	ByOmissionReason map[string]int `json:"by_omission_reason,omitempty"`
 }
 
 // effectString renders an EffectClass bitset as a stable, content-light label.

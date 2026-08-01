@@ -455,7 +455,7 @@ func newTaskStepRunner(root string, plan *agentflow.Plan, af afClient, orch *age
 			Approver: taskApprover(approveEdits),
 			Options:  sess.modelOptions,
 		}
-		_, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock)))
+		_, runErr := orch.Run(stepCtx, req, agent.Observer(newRenderer(out, false, sess.maxSteps, sess.clock, sess.mixed)))
 		if fatal := afJournal.fatalErr(); fatal != nil {
 			return fmt.Errorf("unreceipted edit aborted the run: %w", fatal)
 		}

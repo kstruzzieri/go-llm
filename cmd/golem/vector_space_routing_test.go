@@ -138,6 +138,10 @@ func TestBuildGatedRetriever_PinsStoredVectorSpace(t *testing.T) {
 	}
 }
 
+// TestEnableRetrieve_ProgressiveRenderingIsOptIn covers BOTH halves -progressive
+// drives, independently, for the same flag value: the Retrieve renderer and
+// (#331) the orchestrator's mixed context assembly. Threading it to one and not
+// the other must fail here.
 func TestEnableRetrieve_ProgressiveRenderingIsOptIn(t *testing.T) {
 	for _, enabled := range []bool{false, true} {
 		t.Run(map[bool]string{false: "default off", true: "enabled"}[enabled], func(t *testing.T) {
@@ -162,6 +166,7 @@ func TestEnableRetrieve_ProgressiveRenderingIsOptIn(t *testing.T) {
 			if tool.Progressive != enabled {
 				t.Fatalf("Progressive = %v, want %v", tool.Progressive, enabled)
 			}
+			assertMixedAssembly(t, enabled)
 		})
 	}
 }

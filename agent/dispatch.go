@@ -31,7 +31,7 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 		if err != nil {
 			return err // hard abort (ctx cancel / approver error): no ToolResult, no OnToolResult
 		}
-		stop, err := recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out)
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, call, effect, rec, out)
 		if err != nil {
 			return err
 		}
@@ -45,11 +45,14 @@ func (o *Orchestrator) runToolCallsSerial(ctx context.Context, res *Result, stat
 // recordResult appends one completed tool call's record, result event, optional
 // observer callback, state observation, and governor update — the shared tail used
 // by BOTH the serial and parallel paths so their model-visible semantics cannot
-// drift. `out` is the exact ToolResult appended to State (Invoke results are
-// already capOutput-ed; synthetic failures are short and uncapped) — so the
-// observer sees what the model sees. It returns stop=true (and sets
+// drift. `out` is the capped canonical fallback immediately after execution
+// (synthetic failures are short and uncapped). The observer sees it before its
+// Context is cloned onto State and before mixed assembly, so it is not promised
+// byte-identical to the model's later input. It returns stop=true (and sets
 // res.StopReason) when the governor trips, or an error to hard-abort the run.
-func recordResult(ctx context.Context, res *Result, state *State, obs Observer,
+// It is a method so the mixed-assembly flag is read from o.ctxMgr in ONE place:
+// a flag threaded from each caller could drift between the two paths.
+func (o *Orchestrator) recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 	gov *restraintGovernor, step int, call provider.ToolCall, effect Effect, rec ToolCallRecord,
 	out ToolResult) (stop bool, err error) {
 
@@ -64,7 +67,20 @@ func recordResult(ctx context.Context, res *Result, state *State, obs Observer,
 			return false, err
 		}
 	}
-	state.Messages = append(state.Messages, toolObservation(call, out))
+	if o.ctxMgr.Mixed {
+		if err := validateContextSetCardinality(call.ID, out.Context); err != nil {
+			return false, err
+		}
+	}
+	msg := toolObservation(call, out)
+	msg.OutputCap = effect.OutputCap
+	// The structured payload is deep-copied only when mixed assembly is on:
+	// with Mixed off nothing reads it, so cloning would make State retain a
+	// guaranteed-dead copy of every alternative for the rest of the run.
+	if o.ctxMgr.Mixed {
+		msg.Context = out.Context.clone() // clone is nil-safe
+	}
+	state.Messages = append(state.Messages, msg)
 	gov.observe(call, out)
 	if sr, tripped := gov.stopReason(); tripped {
 		res.StopReason = sr

@@ -110,7 +110,7 @@ func parseFlags(args []string) (flags, error) {
 	fs.Var(&f.mcpHTTP, "mcp-http", "attach an MCP server over streamable HTTP: \"[alias=]https://endpoint\" (repeatable)")
 	fs.BoolVar(&f.noRag, "no-rag", false, "disable the retrieve tool entirely (ignore any auto index)")
 	fs.BoolVar(&f.noAutoIndex, "no-auto-index", false, "disable startup auto-index refresh; existing auto indexes may still be used")
-	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries")
+	fs.BoolVar(&f.progressive, "progressive", false, "generate and retrieve opt-in L0/L1 progressive source summaries; enable mixed context assembly")
 	fs.BoolVar(&f.noProjectContext, "no-project-context", false, "do not load AGENTS.md project-context files into the system prompt")
 	fs.BoolVar(&f.noCompress, "no-compress", false, "disable post-turn conversation compression into a durable summary")
 	fs.BoolVar(&f.noMemory, "no-memory", false, "disable explicit local memories (/remember, /memories, memory_search)")
@@ -467,6 +467,20 @@ func startupNotices(info startupInfo) []string {
 		out = append(out, "retrieve unavailable: no RAG index configured; using file/search tools")
 	}
 	return out
+}
+
+// newOrchestratorFactory returns the session's orchestrator constructor. The
+// session builds one per agentflow parallel worker on top of the startup
+// orchestrator, and every one must see the same context policy: -progressive
+// drives BOTH the Retrieve renderer and #331 mixed context assembly, from one
+// flag.
+//
+// It takes flags rather than a bool so the production call site cannot pass a
+// value other than the one -progressive parsed into.
+func newOrchestratorFactory(caller agent.ModelCaller, f flags) func() *agent.Orchestrator {
+	return func() *agent.Orchestrator {
+		return agent.New(caller, agent.ContextManager{Mixed: f.progressive})
+	}
 }
 
 func shouldShowAgentflowHint(f flags) bool {
@@ -828,15 +842,12 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 	var sourceSummarizer rag.SourceSummaryGenerator
 	if f.progressive {
 		if len(summarizeChain) == 0 {
-			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning)
+			_, _ = fmt.Fprintln(stderr, "golem: warning: "+progressiveNoChainWarning(true))
 		}
 		sourceSummarizer = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
 
-	caller := newRouterChainCaller(bundle.Router, plan.chain)
-	newOrchestrator := func() *agent.Orchestrator {
-		return agent.New(caller, agent.ContextManager{})
-	}
+	newOrchestrator := newOrchestratorFactory(newRouterChainCaller(bundle.Router, plan.chain), f)
 	orch := newOrchestrator()
 
 	obsv, err := newObserv(os.Getenv, root, f.trace, f.telemetry, time.Now)
@@ -897,6 +908,7 @@ func run(args []string, stdin *os.File, stdout, stderr *os.File) error {
 		workspaceID:         workspaceID(root),
 		obs:                 obsv,
 		pressureWarn:        f.pressureWarn > 0,
+		mixed:               f.progressive,
 		modelOptions:        thinkOpts,
 	}
 	if sess.maxSteps == 0 {

@@ -90,18 +90,18 @@ func (m PressureMitigation) String() string {
 // retrieval}; an all-zero state yields CauseUnknown.
 func (m ContextManager) dominantCause(st State, toolSchemaTokens int) PressureCause {
 	var pinned, toolOutput, retrieval, history int
-	pinned += m.estimate(st.System)
+	pinned = m.estimate(st.System)
 	for _, msg := range st.Messages {
 		cost := m.messageCost(msg)
 		switch {
 		case msg.Segment == Pinned:
-			pinned += cost
+			pinned = saturatedTokenAdd(pinned, cost)
 		case msg.Attrib != nil:
-			retrieval += cost
+			retrieval = saturatedTokenAdd(retrieval, cost)
 		case msg.Role == "tool":
-			toolOutput += cost
+			toolOutput = saturatedTokenAdd(toolOutput, cost)
 		default:
-			history += cost
+			history = saturatedTokenAdd(history, cost)
 		}
 	}
 	buckets := []struct {

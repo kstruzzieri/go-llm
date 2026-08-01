@@ -100,7 +100,24 @@ func rfc3339UTC(unix int64) string {
 // orientationText renders one source's single orientation block per the exact
 // spec section 9.7 template. Field order is fixed; empty fields are omitted
 // entirely. All values are untrusted data rendered as delimited context.
+//
+// The metadata note variant comes from the source's own allocator-written
+// summaryBudgetOmitted flag, which is what every FLAT caller wants.
 func orientationText(src *progressiveSource, level orientationLevel) string {
+	return orientationTextWithNote(src, level, src.summaryBudgetOmitted)
+}
+
+// orientationTextWithNote is orientationText with the metadata note variant
+// supplied by the caller instead of read off the source.
+//
+// It exists for the capability projection (progressive_groups.go), which runs
+// BEFORE allocation and must offer a fresh source the truthful
+// "summary omitted: budget" metadata rung. summaryBudgetOmitted is
+// allocator-owned state, so the projection cannot set it: writing it would
+// change the note line of the block the FLAT render emits moments later, and
+// a write-then-restore would still be visible to anything reading the source
+// concurrently. Passing the flag keeps the projection a pure reader.
+func orientationTextWithNote(src *progressiveSource, level orientationLevel, summaryBudgetOmitted bool) string {
 	var b strings.Builder
 
 	// Render format v2 (#331 spec 3.4): source and managed title are untrusted
@@ -180,14 +197,15 @@ func orientationText(src *progressiveSource, level orientationLevel) string {
 		writeField("summary", normalizeOrientationValue(src.summary.SummaryModel)+" @ "+rfc3339UTC(src.summary.SummarizedAt))
 	}
 	if level == orientationMeta {
-		// A source that fell back from its stored abstract on cost HAS a fresh
-		// summary, so "no summary" would state a falsehood about provenance —
-		// the one thing an orientation block must never do, since the model
-		// uses exactly this line to judge how much the block is worth. The two
-		// variants cannot overlap: fresh means an empty reason set, so a
-		// budget-omitted source never has reasons to list.
+		// A source rendered at metadata level DESPITE having a fresh summary —
+		// the allocator's step-5 cost fallback, or the projection's cheapest
+		// rung — has one, so "no summary" would state a falsehood about
+		// provenance, the one thing an orientation block must never do, since
+		// the model uses exactly this line to judge how much the block is
+		// worth. The two variants cannot overlap: fresh means an empty reason
+		// set, so a budget-omitted source never has reasons to list.
 		note := "metadata overview (summary omitted: budget)"
-		if !src.summaryBudgetOmitted {
+		if !summaryBudgetOmitted {
 			// reasons are deliberately NOT normalized while Freshness is:
 			// ValidityReason values are compile-time constants that never
 			// round-trip through storage, a strictly stronger guarantee than

@@ -100,7 +100,7 @@ func (o *Orchestrator) runToolCallsParallel(ctx context.Context, res *Result, st
 		rec.IsError = results[i].IsError
 		rec.Invoked = true
 		rec.Latency = latencies[i]
-		stop, err := recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i])
+		stop, err := o.recordResult(ctx, res, state, obs, gov, step, prepared[i].call, prepared[i].effect, rec, results[i])
 		if err != nil {
 			return err
 		}

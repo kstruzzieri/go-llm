@@ -6,11 +6,13 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/kstruzzieri/go-llm/agent"
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/provider"
 )
 
@@ -296,4 +298,149 @@ func TestTelemetrySinkStepSpanEnrichedPressure(t *testing.T) {
 		return
 	}
 	t.Fatal("no model_step span written")
+}
+
+// TestTelemetrySinkAnchorOmissions guards the field that carries #331's
+// within-anchor omissions to operators. Both span kinds are checked because the
+// sink projects Pressure twice, and a copy dropped from either one loses the
+// signal on that span. The zero case pins omitempty: a legacy or lossless turn
+// emits the same bytes schema v2 always did.
+func TestTelemetrySinkAnchorOmissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, _ := NewTelemetrySink(path, "runA", started, func() time.Time { return started })
+	shed := agent.Pressure{UsedPct: 0.08, AnchorOmissions: 5, Compactions: 1, InputTokens: 8, InputBudget: 100,
+		Level: agent.LevelOK, Cause: agent.CauseToolOutput, Mitigation: agent.MitigationEvict}
+	clean := agent.Pressure{UsedPct: 0.08, InputTokens: 8, InputBudget: 100,
+		Level: agent.LevelOK, Cause: agent.CauseToolOutput, Mitigation: agent.MitigationNone}
+	_ = sink.OnPressure(context.Background(), agent.PressureEvent{Step: 0, Pressure: shed})
+	_ = sink.OnPressure(context.Background(), agent.PressureEvent{Step: 1, Pressure: clean})
+	_ = sink.OnStep(context.Background(), agent.StepEvent{Index: 0, Pressure: shed})
+	_ = sink.OnStep(context.Background(), agent.StepEvent{Index: 1, Pressure: clean})
+	_ = sink.Close()
+
+	seen := 0
+	for _, s := range readSpans(t, path) {
+		field := s
+		switch s["kind"] {
+		case "runtime_stage":
+		case "model_step":
+			pr, ok := s["pressure"].(map[string]any)
+			if !ok {
+				t.Fatalf("model_step missing pressure object: %+v", s)
+			}
+			field = pr
+		default:
+			continue
+		}
+		seen++
+		v, present := field["anchor_omissions"]
+		if s["step"].(float64) == 0 {
+			if !present || int(v.(float64)) != 5 {
+				t.Errorf("%v span: anchor_omissions = %v (present %v), want 5", s["kind"], v, present)
+			}
+			continue
+		}
+		if present {
+			t.Errorf("%v span: anchor_omissions = %v on a lossless turn, want the key omitted", s["kind"], v)
+		}
+	}
+	if seen != 4 {
+		t.Fatalf("%d pressure-bearing spans, want 4", seen)
+	}
+}
+
+// TestTelemetrySinkContextAssemblySpan pins the #331 span: the aggregate
+// counters, the decision/omission breakdowns, and — the part that is a policy
+// choice rather than a mapping — that NO subject identifier reaches the file.
+// The fixture deliberately uses a real-looking source path, a memory record ID
+// and a tool call ID, so a future field that forwarded any of them turns this
+// red instead of quietly widening what telemetry retains.
+func TestTelemetrySinkContextAssemblySpan(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, err := NewTelemetrySink(path, "runA", started, func() time.Time { return started })
+	if err != nil {
+		t.Fatalf("NewTelemetrySink: %v", err)
+	}
+	tr := agent.ContextAssemblyTrace{
+		MaxTokens: 4096, EstimatedTokensUsed: 1200, EstimatedTokensFree: 2896,
+		SelectedSubjects: 5, RenderedSubjects: 3, OmittedSubjects: 2, VerbatimShortfalls: 1,
+		Subjects: []agent.ContextSubjectTrace{
+			{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "internal/secret/plan.go"},
+				ToolCallID: "call-abc123", Decision: agent.DecisionBase, Bytes: 100},
+			{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "internal/secret/other.go"},
+				ToolCallID: "call-abc123", Decision: agent.DecisionUpgrade, Bytes: 250},
+			{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainMemory, ID: "mem-9f3c"},
+				ToolCallID: "call-def456", Decision: agent.DecisionFloor, Bytes: 40},
+			{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainRAG, ID: "internal/secret/big.go"},
+				ToolCallID: "call-abc123", Omitted: true, Decision: agent.DecisionOmitted, OmissionReason: agent.OmitByteCap},
+			{Subject: contextdepth.SubjectRef{Domain: contextdepth.DomainConversation, ID: "3"},
+				Omitted: true, Decision: agent.DecisionOmitted, OmissionReason: agent.OmitTokenBudget},
+		},
+	}
+	if err := sink.OnContextAssembly(context.Background(), agent.ContextAssemblyEvent{Step: 2, Trace: tr}); err != nil {
+		t.Fatalf("OnContextAssembly: %v", err)
+	}
+	_ = sink.Close()
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	// Content pin, not a shape pin: greping the RAW bytes is what catches an
+	// identifier smuggled in under any field name, including one added later.
+	for _, leak := range []string{"internal/secret", "plan.go", "mem-9f3c", "call-abc123", "call-def456"} {
+		if strings.Contains(string(raw), leak) {
+			t.Errorf("telemetry leaked %q:\n%s", leak, raw)
+		}
+	}
+
+	spans := readSpans(t, path)
+	if len(spans) != 1 {
+		t.Fatalf("%d spans, want 1: %+v", len(spans), spans)
+	}
+	s := spans[0]
+	for field, want := range map[string]float64{
+		"schema_version": SchemaVersion, "step": 2, "max_tokens": 4096,
+		"used_tokens": 1200, "free_tokens": 2896, "subjects": 5, "rendered": 3,
+		"omitted": 2, "verbatim_shortfalls": 1, "rendered_bytes": 390,
+	} {
+		if got, ok := s[field].(float64); !ok || got != want {
+			t.Errorf("%s = %v, want %v", field, s[field], want)
+		}
+	}
+	if s["kind"] != "context_assembly" {
+		t.Errorf("kind = %v, want context_assembly", s["kind"])
+	}
+	if s["span_id"] != "runA-stage-context-2" || s["parent_id"] != "runA-run" {
+		t.Errorf("span_id = %v parent_id = %v", s["span_id"], s["parent_id"])
+	}
+	wantDec := map[string]any{agent.DecisionBase: 1.0, agent.DecisionUpgrade: 1.0, agent.DecisionFloor: 1.0}
+	if got := s["by_decision"]; !reflect.DeepEqual(got, wantDec) {
+		t.Errorf("by_decision = %v, want %v", got, wantDec)
+	}
+	wantOmit := map[string]any{agent.OmitByteCap: 1.0, agent.OmitTokenBudget: 1.0}
+	if got := s["by_omission_reason"]; !reflect.DeepEqual(got, wantOmit) {
+		t.Errorf("by_omission_reason = %v, want %v", got, wantOmit)
+	}
+}
+
+// A legacy or no-anchor turn never fires OnContextAssembly, so the maps must not
+// appear at all on the spans such a run does emit — the same
+// byte-identical-when-unused rule AnchorOmissions follows.
+func TestTelemetrySinkContextAssemblyAbsentWithoutMixed(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "t.jsonl")
+	started := time.Unix(0, 0)
+	sink, _ := NewTelemetrySink(path, "runA", started, func() time.Time { return started })
+	_ = sink.OnStep(context.Background(), agent.StepEvent{Index: 0})
+	_ = sink.Close()
+	for _, s := range readSpans(t, path) {
+		if s["kind"] == "context_assembly" {
+			t.Errorf("context_assembly span emitted without a mixed assembly: %+v", s)
+		}
+	}
 }

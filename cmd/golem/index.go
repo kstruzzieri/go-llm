@@ -212,7 +212,7 @@ func runIndex(ctx context.Context, args []string, out, errOut io.Writer) error {
 			return err
 		}
 		if len(summarizeChain) == 0 {
-			_, _ = fmt.Fprintln(errOut, "golem index: warning: "+progressiveNoChainWarning)
+			_, _ = fmt.Fprintln(errOut, "golem index: warning: "+progressiveNoChainWarning(false))
 		}
 		summarize = routerSourceSummaryGenerator(bundle.Router, summarizeChain)
 	}
