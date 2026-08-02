@@ -540,7 +540,10 @@ type captureVerification struct {
 }
 
 // capturePairTemperaturesEqual reports whether both arms carry capture
-// provenance with an explicit, equal temperature. A missing provenance or
+// provenance with an explicit temperature equal to the REGISTERED
+// assemblyCaptureTemperature — not merely equal to each other: provenance is
+// the one field artifactHash does not seal, so a pair captured consistently
+// at the wrong temperature must be excluded too. A missing provenance or
 // temperature fails: the manifest-verified workflow cannot vouch for a pair
 // whose decoding conditions it cannot compare.
 func capturePairTemperaturesEqual(base, treat *Artifact) bool {
@@ -548,7 +551,8 @@ func capturePairTemperaturesEqual(base, treat *Artifact) bool {
 		base.Capture.Temperature == nil || treat.Capture.Temperature == nil {
 		return false
 	}
-	return *base.Capture.Temperature == *treat.Capture.Temperature
+	return *base.Capture.Temperature == assemblyCaptureTemperature &&
+		*treat.Capture.Temperature == assemblyCaptureTemperature
 }
 
 // computeAssemblyMixedSection builds the legacy-mixed per-model reports from

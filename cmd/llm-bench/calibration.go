@@ -327,6 +327,9 @@ func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captur
 	if m.SchemaVersion != captureManifestSchemaVersion {
 		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q schema_version %q (want %q)", path, m.SchemaVersion, captureManifestSchemaVersion)
 	}
+	if m.ArtifactCount != len(m.PerArtifact) {
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q artifact_count %d does not match its %d per_artifact row(s) (corrupt or hand-edited manifest)", path, m.ArtifactCount, len(m.PerArtifact))
+	}
 	usage := make(map[string]bool, len(m.PerArtifact))
 	for _, row := range m.PerArtifact {
 		usage[row.ArtifactHash] = row.UsagePresent
@@ -526,7 +529,20 @@ func counterbalanceCaptureTraces(traces []Trace) ([]Trace, map[string]string) {
 			topline = append(topline, t)
 		}
 	}
-	pairOrder, labels := counterbalancePairOrder(pairIDs)
+	// Only pairs with BOTH arms present are counterbalanced (and labeled):
+	// a single-arm pair has no within-pair order to balance, so it must not
+	// carry a captured_order label or consume an alternation slot.
+	var completeIDs, incompleteIDs []string
+	for _, id := range pairIDs {
+		if pairArmsComplete(pairs[id]) {
+			completeIDs = append(completeIDs, id)
+		} else {
+			incompleteIDs = append(incompleteIDs, id)
+		}
+	}
+	pairOrder, labels := counterbalancePairOrder(completeIDs)
+	incompleteOrder, _ := counterbalancePairOrder(incompleteIDs) // hash order only; labels discarded
+	pairOrder = append(pairOrder, incompleteOrder...)
 	if len(pairOrder) == 0 && len(topline) == 0 {
 		return traces, labels
 	}
@@ -550,6 +566,21 @@ func counterbalanceCaptureTraces(traces []Trace) ([]Trace, map[string]string) {
 		}
 	}
 	return append(out, topline...), labels
+}
+
+// pairArmsComplete reports whether a pair's collected traces include at
+// least one legacy AND one mixed arm.
+func pairArmsComplete(ts []Trace) bool {
+	var hasLegacy, hasMixed bool
+	for _, t := range ts {
+		switch t.AssemblyEval.Mode {
+		case AssemblyLegacy:
+			hasLegacy = true
+		case AssemblyMixed:
+			hasMixed = true
+		}
+	}
+	return hasLegacy && hasMixed
 }
 
 // pairIDHash is the registered counterbalance hash: FNV-1a 64 of the PairID.

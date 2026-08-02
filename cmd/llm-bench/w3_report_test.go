@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -350,14 +351,20 @@ func withCaptureTemp(a Artifact, temp float64) Artifact {
 }
 
 func TestAssemblyReportCaptureManifestVerification(t *testing.T) {
-	// Three complete labeled pairs: pair-ok verified; pair-miss absent from
+	// Five complete labeled pairs: pair-ok verified; pair-miss absent from
 	// the manifest; pair-cold listed but with usage_present false; pair-temp
-	// verified but with mismatched capture temperatures.
+	// with mismatched capture temperatures; pair-warm consistently captured
+	// at 0.7 on BOTH arms — pair-internal agreement is not enough, the
+	// registered temperature (0) is the requirement.
 	var arts []Artifact
 	var labels []Label
-	for _, pair := range []string{"pair-ok", "pair-miss", "pair-cold", "pair-temp"} {
-		l := withCaptureTemp(mixedArtifact(pair, AssemblyLegacy, "c", nil), 0)
-		m := withCaptureTemp(mixedArtifact(pair, AssemblyMixed, "c", nil), 0)
+	for _, pair := range []string{"pair-ok", "pair-miss", "pair-cold", "pair-temp", "pair-warm"} {
+		temp := 0.0
+		if pair == "pair-warm" {
+			temp = 0.7
+		}
+		l := withCaptureTemp(mixedArtifact(pair, AssemblyLegacy, "c", nil), temp)
+		m := withCaptureTemp(mixedArtifact(pair, AssemblyMixed, "c", nil), temp)
 		if pair == "pair-temp" {
 			m = withCaptureTemp(m, 0.7)
 		}
@@ -399,6 +406,9 @@ func TestAssemblyReportCaptureManifestVerification(t *testing.T) {
 	}
 	if reasons["pair-temp"] != "temperature-mismatch" {
 		t.Errorf("pair-temp reason = %q; want temperature-mismatch", reasons["pair-temp"])
+	}
+	if reasons["pair-warm"] != "temperature-mismatch" {
+		t.Errorf("pair-warm reason = %q; want temperature-mismatch (0.7 on both arms is not the registered temperature)", reasons["pair-warm"])
 	}
 	if rep.CaptureManifest == nil || rep.CaptureManifest.Digest != "sha256:feed" || rep.CaptureManifest.ArtifactCount != len(arts) {
 		t.Errorf("capture_manifest = %+v; want the embedded reference", rep.CaptureManifest)
@@ -462,8 +472,8 @@ func TestAssemblyReportCaptureManifestVerification(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if rep.LegacyMixedModels[0].Pairs != 4 || len(rep.LegacyMixedModels[0].Exclusions) != 0 {
-			t.Errorf("without a manifest pairs=%d exclusions=%d; want 4/0",
+		if rep.LegacyMixedModels[0].Pairs != 5 || len(rep.LegacyMixedModels[0].Exclusions) != 0 {
+			t.Errorf("without a manifest pairs=%d exclusions=%d; want 5/0",
 				rep.LegacyMixedModels[0].Pairs, len(rep.LegacyMixedModels[0].Exclusions))
 		}
 		raw, err := json.Marshal(rep)
@@ -515,6 +525,68 @@ func TestLoadCaptureManifestForReport(t *testing.T) {
 			t.Errorf("wrong schema version = %v; want a schema error", err)
 		}
 	})
+
+	t.Run("artifact_count row mismatch rejected", func(t *testing.T) {
+		manifest.ArtifactCount = 3 // 2 per_artifact rows
+		raw, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		bad := filepath.Join(dir, "count-mismatch.json")
+		if err := os.WriteFile(bad, raw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadCaptureManifestForReport(bad); err == nil || !strings.Contains(err.Error(), "artifact_count") {
+			t.Errorf("count/row mismatch = %v; want an artifact_count consistency error", err)
+		}
+	})
+}
+
+// TestMainFCSidemapDigestGate drives the -fc-sidemap-digest verification
+// through the -fc-render and -fc-ingest CLI paths: a wrong committed digest
+// is fatal before any artifacts load; the right digest passes the gate (the
+// runs then fail later, on the unreadable artifacts input — proof the gate
+// was traversed, not skipped).
+func TestMainFCSidemapDigestGate(t *testing.T) {
+	dir := t.TempDir()
+	sidemapPath := filepath.Join(dir, "sidemap.json")
+	digest, err := writeFCSidemap(sidemapPath, parityFCSidemap("c", "pair-alpha"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wsPath := filepath.Join(dir, "worksheet.txt")
+	if err := os.WriteFile(wsPath, []byte("x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	missingArts := filepath.Join(dir, "no-such-artifacts.jsonl")
+	wrong := strings.Repeat("0", 64)
+	cases := []struct {
+		name, wantErr string
+		args          []string
+	}{
+		{"fc-render wrong digest", "mismatch",
+			[]string{"-fc-render", "-artifacts", missingArts, "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", wrong}},
+		{"fc-ingest wrong digest", "mismatch",
+			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", missingArts, "-fc-out", filepath.Join(dir, "out.jsonl"), "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", wrong}},
+		{"fc-render right digest passes the gate", "no-such-artifacts",
+			[]string{"-fc-render", "-artifacts", missingArts, "-fc-sidemap", sidemapPath, "-fc-sidemap-digest", digest}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cmd := exec.Command(os.Args[0], tc.args...)
+			cmd.Env = append(os.Environ(), "LLM_BENCH_TEST_MAIN=1")
+			out, err := cmd.CombinedOutput()
+			if err == nil {
+				t.Fatalf("run succeeded; want failure:\n%s", out)
+			}
+			if !strings.Contains(string(out), tc.wantErr) {
+				t.Fatalf("output missing %q:\n%s", tc.wantErr, out)
+			}
+			if tc.wantErr != "mismatch" && strings.Contains(string(out), "mismatch") {
+				t.Fatalf("right digest reported a mismatch:\n%s", out)
+			}
+		})
+	}
 }
 
 func TestFilterArtifactsByModel(t *testing.T) {

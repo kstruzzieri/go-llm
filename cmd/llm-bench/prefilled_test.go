@@ -815,6 +815,49 @@ func TestAssemblyCaptureCounterbalance(t *testing.T) {
 	}
 }
 
+// TestCounterbalanceIncompletePairUnlabeled: a pair with only one arm
+// present is neither counterbalanced nor labeled — captured_order exists to
+// name which arm ran first, which is meaningless with one arm — and it must
+// not consume an alternation slot from the complete pairs.
+func TestCounterbalanceIncompletePairUnlabeled(t *testing.T) {
+	traces := []Trace{
+		pairedCaptureTrace("solo-legacy", "p-solo", AssemblyLegacy), // mixed arm missing
+		pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy),
+		pairedCaptureTrace("pa-mixed", "p-a", AssemblyMixed),
+	}
+	_, labels := counterbalanceCaptureTraces(traces)
+	if got, ok := labels["p-solo"]; ok {
+		t.Errorf("incomplete pair labeled %q; want no captured_order label", got)
+	}
+	// p-a is the ONLY complete pair, so it sits at alternation position 0
+	// regardless of p-solo's hash.
+	if labels["p-a"] != "legacy-first" {
+		t.Errorf("complete pair label = %q; want legacy-first (position 0)", labels["p-a"])
+	}
+
+	// End to end: the single-arm artifact's provenance omits captured_order.
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:  &orderRecordingRunner{},
+		Targets: []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces:  traces, OutputPath: out, Stdout: io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	for _, a := range readArtifactsFile(t, out) {
+		if a.Capture == nil {
+			t.Fatalf("artifact %s missing capture provenance", a.TraceID)
+		}
+		want := "legacy-first"
+		if a.TraceID == "solo-legacy" {
+			want = ""
+		}
+		if a.Capture.CapturedOrder != want {
+			t.Errorf("artifact %s captured_order = %q; want %q", a.TraceID, a.Capture.CapturedOrder, want)
+		}
+	}
+}
+
 // TestCounterbalanceAlternationBalance proves the W3 counterbalance is
 // balanced BY CONSTRUCTION, not by hash luck: the five pair IDs below all
 // have ODD FNV-1a-64 hashes, so the retired parity rule would have run every

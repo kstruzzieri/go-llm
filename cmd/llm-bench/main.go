@@ -101,7 +101,7 @@ func main() {
 	fcSidemapGenerate := flag.Bool("fc-sidemap-generate", false, "Generate the sealed random forced-choice side map over the complete legacy/mixed pairs in -artifacts, write it to -fc-sidemap-out, and print its sha256 (commit the digest BEFORE labeling)")
 	fcSidemapOut := flag.String("fc-sidemap-out", "", "Output path for -fc-sidemap-generate (required with it)")
 	fcSidemapPath := flag.String("fc-sidemap", "", "Sealed side-map JSON path: REQUIRED with -fc-render and -fc-ingest; optional with -assembly-report, where it replaces the pre-sidemap parity side resolution and enables the descriptive arm-guess audit")
-	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -assembly-report -fc-sidemap: the committed sha256 of the sidemap file; a mismatch is a hard error")
+	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -fc-render, -fc-ingest, or -assembly-report (alongside -fc-sidemap): the committed sha256 of the sidemap file; a mismatch is a hard error")
 	fcRequireComplete := flag.Bool("fc-require-complete", false, "With -fc-ingest: any rendered pair block left blank is a loud error listing the pairs (the registered workflow)")
 	captureManifestFlag := flag.String("capture-manifest", "", "With -assembly-report: the -calibrate-capture run manifest; embeds its digest and excludes legacy/mixed pairs it cannot verify (unverified-capture / temperature-mismatch)")
 	modelFilter := flag.String("model", "", "With -blind-render, -fc-render, or -adjudicate-render: only render artifacts whose candidate model matches this selector (the registered workflow labels one model at a time); empty renders all")
@@ -495,10 +495,7 @@ func main() {
 		if strings.TrimSpace(*fcSidemapPath) == "" {
 			log.Fatalf("llm-bench: -fc-render requires -fc-sidemap (generate one with -fc-sidemap-generate)")
 		}
-		_, resolver, _, err := loadFCSidemap(*fcSidemapPath)
-		if err != nil {
-			log.Fatalf("llm-bench: fc-render: %v", err)
-		}
+		resolver := mustLoadVerifiedFCSidemap("fc-render", *fcSidemapPath, *fcSidemapDigest)
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-render: load artifacts: %v", err)
@@ -534,10 +531,7 @@ func main() {
 		}
 		refuseOutputAlias("fc-ingest", "-fc-out", *fcOut,
 			[][2]string{{"-artifacts", *artifactsPath}, {"-worksheet", *worksheetPath}, {"-fc-sidemap", *fcSidemapPath}})
-		_, resolver, _, err := loadFCSidemap(*fcSidemapPath)
-		if err != nil {
-			log.Fatalf("llm-bench: fc-ingest: %v", err)
-		}
+		resolver := mustLoadVerifiedFCSidemap("fc-ingest", *fcSidemapPath, *fcSidemapDigest)
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: read worksheet: %v", err)
@@ -900,6 +894,24 @@ func main() {
 // filesystems, symlinks, hardlinks). Mirrors the hardened -blind-ingest
 // -labels-out guard for the other worksheet-mode output flags; inputs are
 // ordered (flag, path) pairs so the failure is deterministic.
+// mustLoadVerifiedFCSidemap loads the sealed side map for a worksheet mode
+// and, when the operator supplied -fc-sidemap-digest, verifies the file
+// against the committed digest — the same gate -assembly-report applies, so
+// a swapped sidemap cannot slip into render or ingest either. Fatal on any
+// failure.
+func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSideResolver {
+	_, resolver, digest, err := loadFCSidemap(path)
+	if err != nil {
+		log.Fatalf("llm-bench: %s: %v", mode, err)
+	}
+	if strings.TrimSpace(committedDigest) != "" {
+		if err := verifyFCSidemapDigest(digest, committedDigest); err != nil {
+			log.Fatalf("llm-bench: %s: %v", mode, err)
+		}
+	}
+	return resolver
+}
+
 func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {
 	for _, in := range inputs {
 		inFlag, inPath := in[0], in[1]
