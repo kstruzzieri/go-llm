@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"os"
 	"sort"
@@ -30,6 +31,29 @@ const (
 )
 
 const mixedFixtureKind = "mixed-assembly"
+
+// REGISTERED topline quotas (#331 slice 3c W2): how many scenario families
+// per stratum carry topline_facts. The 12-trace topline ceiling does not
+// divide evenly over 5 strata, so the split is REGISTERED here rather than
+// derived: 3 + 2 + 3 + 2 + 2 = 12. Selection within a stratum is the
+// deterministic rule in mixedToplineSelection — the rule, not the author,
+// chooses the carriers.
+const (
+	mixedToplineConversationOnly = 3
+	mixedToplineMemoryOnly       = 2
+	mixedToplineCrossDomainJoin  = 3
+	mixedToplineStaleVsFresh     = 2
+	mixedToplineChainRetention   = 2
+)
+
+// mixedToplineQuotas maps each registered stratum to its registered quota.
+var mixedToplineQuotas = map[string]int{
+	"conversation_only": mixedToplineConversationOnly,
+	"memory_only":       mixedToplineMemoryOnly,
+	"cross_domain_join": mixedToplineCrossDomainJoin,
+	"stale_vs_fresh":    mixedToplineStaleVsFresh,
+	"chain_retention":   mixedToplineChainRetention,
+}
 
 // Closed per-case vocabularies.
 var (
@@ -85,6 +109,17 @@ type mixedCase struct {
 
 	RequiredEvidence  []mixedEvidence `json:"required_evidence,omitempty"`
 	ForbiddenEvidence []string        `json:"forbidden_evidence,omitempty"`
+	// PressureTarget is MANDATORY on non-control cases and illegal on controls:
+	// a registered {domain, literal} the budget must actually bite. The build's
+	// carrier-change gate requires that in at least one arm some built-State
+	// message carrying the literal is dropped, truncated, or re-rendered —
+	// otherwise both arms shed only answer-irrelevant filler ("pressure
+	// theater") and the case measures nothing. RECOMMENDED authoring: one of
+	// the required_evidence anchors, or the stale representation on
+	// stale_vs_fresh (the domain scan covers rag abstract/overview, so a stale
+	// carrier literal validates); the only mechanical tie is case-sensitive
+	// containment in the declared domain's fixture content.
+	PressureTarget *mixedEvidence `json:"pressure_target,omitempty"`
 	// RequiredDomains is self-description, not choice: every case carries all
 	// three domains as competing distractors by design, so the field must be
 	// exactly {conversation, memory, rag}.
@@ -158,19 +193,19 @@ type mixedEvidence struct {
 
 // mixedBookkeeping is the corpus balance summary computed alongside
 // validation — reporting only, never rejection (the Task 12 pre-label gate
-// hardens the balance checks).
+// hardens the balance checks). Primary and control counts are kept separately
+// per stratum: controls are excluded from the verdict, so a stratum's real
+// sample size is its primary count alone.
 type mixedBookkeeping struct {
-	stratumCounts map[string]int
-	controlCases  int
+	stratumPrimary  map[string]int
+	stratumControls map[string]int
+	controlCases    int
 	// toplineEligible counts non-control cases: control pairs are excluded
 	// from the verdict, so only real cases feed the topline ceiling arm.
 	toplineEligible int
 	// answerThirds buckets conversation_only cases that declare
 	// answer_turn_index into early/middle/late position thirds.
 	answerThirds map[string]int
-	// twinWarnings flags twin groups covering fewer than two distinct
-	// answer_home values (warning-level; the hard check is Task 12's).
-	twinWarnings []string
 }
 
 // parseMixedFixture strictly decodes a mixed-assembly fixture object.
@@ -191,9 +226,12 @@ func parseMixedFixture(raw []byte) (mixedFixture, error) {
 }
 
 // validateMixedFixture applies the corpus-level rules and per-case
-// validation, returning the balance bookkeeping on success.
+// validation, returning the balance bookkeeping on success. Corpus-level
+// hard rules beyond ID uniqueness and family/stratum coherence: the twin
+// contract (validateMixedTwins), at most 2 controls per stratum, and the
+// registered topline selection (mixedToplineSelection).
 func validateMixedFixture(f mixedFixture) (mixedBookkeeping, error) {
-	bk := mixedBookkeeping{stratumCounts: map[string]int{}, answerThirds: map[string]int{}}
+	bk := mixedBookkeeping{stratumPrimary: map[string]int{}, stratumControls: map[string]int{}, answerThirds: map[string]int{}}
 	if f.Version != 1 {
 		return bk, fmt.Errorf("unsupported fixture version %d (want 1)", f.Version)
 	}
@@ -218,7 +256,6 @@ func validateMixedFixture(f mixedFixture) (mixedBookkeeping, error) {
 	}
 	seen := make(map[string]struct{}, len(f.Cases))
 	famStratum := map[string]string{} // scenario family -> the one stratum it may inhabit
-	twinHomes := map[string]map[string]struct{}{}
 	for _, c := range f.Cases {
 		if _, dup := seen[c.ID]; dup {
 			return bk, fmt.Errorf("duplicate case id %q", c.ID)
@@ -238,34 +275,187 @@ func validateMixedFixture(f mixedFixture) (mixedBookkeeping, error) {
 			famStratum[c.ScenarioFamily] = c.Stratum
 		}
 
-		bk.stratumCounts[c.Stratum]++
 		if c.Control {
+			bk.stratumControls[c.Stratum]++
 			bk.controlCases++
+			// Controls calibrate the pipeline, they never enter the verdict:
+			// more than 2 per stratum spends authoring budget on cases that
+			// cannot move the decision.
+			if bk.stratumControls[c.Stratum] > 2 {
+				return bk, fmt.Errorf("stratum %q has %d control cases (at most 2 control cases per stratum)",
+					c.Stratum, bk.stratumControls[c.Stratum])
+			}
 		} else {
+			bk.stratumPrimary[c.Stratum]++
 			bk.toplineEligible++
 		}
 		if c.Stratum == "conversation_only" && c.AnswerTurnIndex != nil {
 			bk.answerThirds[mixedAnswerThird(c)]++
 		}
-		if c.TwinGroup != "" {
-			if twinHomes[c.TwinGroup] == nil {
-				twinHomes[c.TwinGroup] = map[string]struct{}{}
-			}
-			twinHomes[c.TwinGroup][c.AnswerHome] = struct{}{}
-		}
 	}
-	twins := make([]string, 0, len(twinHomes))
-	for tg := range twinHomes {
-		twins = append(twins, tg)
+	if err := validateMixedTwins(f.Cases); err != nil {
+		return bk, err
 	}
-	sort.Strings(twins)
-	for _, tg := range twins {
-		if n := len(twinHomes[tg]); n < 2 {
-			bk.twinWarnings = append(bk.twinWarnings, fmt.Sprintf(
-				"twin_group %q covers %d answer_home value(s); twins should span >= 2 (hard check lands in Task 12)", tg, n))
-		}
+	if err := validateMixedToplinePlacement(f.Cases); err != nil {
+		return bk, err
 	}
 	return bk, nil
+}
+
+// mixedTwinStrata is the closed stratum set twin members may inhabit: the
+// three strata whose answer_home is pinned, so a 2-3 member group necessarily
+// spans distinct homes.
+var mixedTwinStrata = map[string]struct{}{
+	"conversation_only": {}, "memory_only": {}, "cross_domain_join": {},
+}
+
+// validateMixedTwins enforces the twin contract, corpus-wide: at most 4
+// distinct non-empty twin_group values; each group 2-3 members, every member
+// in a DIFFERENT stratum drawn from {conversation_only, memory_only,
+// cross_domain_join}; and all members of a group share the identical
+// rag_sources path set and memory_records id set — the same distractor pool,
+// a cheap structural proxy for "same scenario, different home".
+func validateMixedTwins(cases []mixedCase) error {
+	type twinInfo struct {
+		firstID  string
+		members  int
+		strata   map[string]string // stratum -> first member id in it
+		ragPaths string            // canonical fingerprint of the first member
+		memIDs   string
+	}
+	groups := map[string]*twinInfo{}
+	order := []string{}
+	for _, c := range cases {
+		if c.TwinGroup == "" {
+			continue
+		}
+		if _, ok := mixedTwinStrata[c.Stratum]; !ok {
+			return fmt.Errorf("twin_group %q: case %q sits in stratum %q; twin members must be in conversation_only, memory_only, or cross_domain_join",
+				c.TwinGroup, c.ID, c.Stratum)
+		}
+		tg := groups[c.TwinGroup]
+		if tg == nil {
+			tg = &twinInfo{
+				firstID:  c.ID,
+				strata:   map[string]string{},
+				ragPaths: mixedRagPathSet(c),
+				memIDs:   mixedMemoryIDSet(c),
+			}
+			groups[c.TwinGroup] = tg
+			order = append(order, c.TwinGroup)
+			if len(order) > 4 {
+				sort.Strings(order)
+				return fmt.Errorf("corpus declares %d twin_group values (%s); at most 4 are allowed",
+					len(order), strings.Join(order, ", "))
+			}
+		}
+		if prev, dup := tg.strata[c.Stratum]; dup {
+			return fmt.Errorf("twin_group %q: cases %q and %q share stratum %q (twin members must sit in different strata)",
+				c.TwinGroup, prev, c.ID, c.Stratum)
+		}
+		tg.strata[c.Stratum] = c.ID
+		tg.members++
+		if got := mixedRagPathSet(c); got != tg.ragPaths {
+			return fmt.Errorf("twin_group %q: case %q rag_sources paths {%s} differ from twin %q {%s} (twins must share the same distractor pool)",
+				c.TwinGroup, c.ID, got, tg.firstID, tg.ragPaths)
+		}
+		if got := mixedMemoryIDSet(c); got != tg.memIDs {
+			return fmt.Errorf("twin_group %q: case %q memory_records ids {%s} differ from twin %q {%s} (twins must share the same distractor pool)",
+				c.TwinGroup, c.ID, got, tg.firstID, tg.memIDs)
+		}
+	}
+	sort.Strings(order)
+	for _, name := range order {
+		if n := groups[name].members; n < 2 || n > 3 {
+			return fmt.Errorf("twin_group %q has %d member(s); a twin group is 2-3 cases", name, n)
+		}
+	}
+	return nil
+}
+
+// mixedRagPathSet and mixedMemoryIDSet render sorted set fingerprints for the
+// twin distractor-pool identity checks.
+func mixedRagPathSet(c mixedCase) string {
+	paths := make([]string, 0, len(c.RagSources))
+	for _, s := range c.RagSources {
+		paths = append(paths, s.Path)
+	}
+	sort.Strings(paths)
+	return strings.Join(paths, ", ")
+}
+
+func mixedMemoryIDSet(c mixedCase) string {
+	ids := make([]string, 0, len(c.MemoryRecords))
+	for _, r := range c.MemoryRecords {
+		ids = append(ids, r.ID)
+	}
+	sort.Strings(ids)
+	return strings.Join(ids, ", ")
+}
+
+// mixedToplineSelection computes the REGISTERED author-independent topline
+// carrier set. Eligible: non-control cases with a non-empty scenario_family.
+// Per stratum, order the eligible families by FNV-1a-64(family) ascending
+// (family name breaks the astronomically unlikely hash tie), take the first
+// mixedToplineQuotas[stratum] families, and within each selected family the
+// case with the lexicographically smallest id carries topline_facts.
+func mixedToplineSelection(cases []mixedCase) map[string]struct{} {
+	perStratum := map[string]map[string]string{} // stratum -> family -> smallest case id
+	for _, c := range cases {
+		if c.Control || c.ScenarioFamily == "" {
+			continue
+		}
+		fams := perStratum[c.Stratum]
+		if fams == nil {
+			fams = map[string]string{}
+			perStratum[c.Stratum] = fams
+		}
+		if id, ok := fams[c.ScenarioFamily]; !ok || c.ID < id {
+			fams[c.ScenarioFamily] = c.ID
+		}
+	}
+	selected := map[string]struct{}{}
+	for stratum, fams := range perStratum {
+		type famEntry struct {
+			hash   uint64
+			family string
+		}
+		entries := make([]famEntry, 0, len(fams))
+		for fam := range fams {
+			h := fnv.New64a()
+			_, _ = h.Write([]byte(fam))
+			entries = append(entries, famEntry{hash: h.Sum64(), family: fam})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].hash != entries[j].hash {
+				return entries[i].hash < entries[j].hash
+			}
+			return entries[i].family < entries[j].family
+		})
+		quota := mixedToplineQuotas[stratum]
+		for i := 0; i < len(entries) && i < quota; i++ {
+			selected[perStratum[stratum][entries[i].family]] = struct{}{}
+		}
+	}
+	return selected
+}
+
+// validateMixedToplinePlacement enforces topline_facts on EXACTLY the
+// registered selection: missing on a selected case and present on an
+// unselected case are both authoring errors, reported in declaration order.
+func validateMixedToplinePlacement(cases []mixedCase) error {
+	selected := mixedToplineSelection(cases)
+	for _, c := range cases {
+		_, sel := selected[c.ID]
+		switch {
+		case sel && c.ToplineFacts == "":
+			return fmt.Errorf("case %q: topline_facts missing: the registered topline rule selects this case (stratum %q, scenario_family %q, smallest id in a selected family)",
+				c.ID, c.Stratum, c.ScenarioFamily)
+		case !sel && c.ToplineFacts != "":
+			return fmt.Errorf("case %q: topline_facts present on a case outside the registered topline selection (the rule, not the author, chooses the carriers)", c.ID)
+		}
+	}
+	return nil
 }
 
 // validateMixedCase applies the per-case rules: vocabularies, the pinned
@@ -350,6 +540,9 @@ func validateMixedCase(c mixedCase) error {
 			return err
 		}
 	}
+	if err := validateMixedPressureTarget(c); err != nil {
+		return err
+	}
 
 	if c.ToplineFacts != "" {
 		if c.Control {
@@ -367,6 +560,15 @@ func validateMixedCase(c mixedCase) error {
 		}
 	}
 
+	// answer_turn_index: REQUIRED on conversation_only (controls included —
+	// they sit in the stratum's bookkeeping too), optional elsewhere; when
+	// present, in range, a turn, and not the final question. On
+	// conversation_only the indexed turn must additionally contain every
+	// conversation-domain required_evidence literal (case-sensitive): the
+	// declared answer position and the anchors' actual home may not diverge.
+	if c.Stratum == "conversation_only" && c.AnswerTurnIndex == nil {
+		return fmt.Errorf("answer_turn_index is required on conversation_only cases")
+	}
 	if c.AnswerTurnIndex != nil {
 		idx := *c.AnswerTurnIndex
 		if idx < 0 || idx >= len(c.Events) {
@@ -378,6 +580,45 @@ func validateMixedCase(c mixedCase) error {
 		if idx == len(c.Events)-1 {
 			return fmt.Errorf("answer_turn_index %d must not be the final question turn", idx)
 		}
+		if c.Stratum == "conversation_only" {
+			for i, ev := range c.RequiredEvidence {
+				if ev.Domain == "conversation" && !strings.Contains(c.Events[idx].Turn.Content, ev.Literal) {
+					return fmt.Errorf("answer_turn_index does not contain the conversation anchors: required_evidence[%d] literal %q is absent from turn %d",
+						i, ev.Literal, idx)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// validateMixedPressureTarget enforces the pressure_target coupling: illegal
+// on controls (they assert ZERO shed — there is nothing for a target to
+// witness), mandatory on non-control cases, with a known domain, a non-blank
+// literal, and case-sensitive containment in that domain's fixture content
+// (the same scan as required_evidence containment, so on stale_vs_fresh a
+// stale rag abstract/overview literal counts). No further mechanical tie is
+// enforced; RECOMMENDED authoring is a required_evidence anchor or the stale
+// representation.
+func validateMixedPressureTarget(c mixedCase) error {
+	if c.Control {
+		if c.PressureTarget != nil {
+			return fmt.Errorf("pressure_target is illegal on control cases (controls assert zero shed; there is nothing for the target to witness)")
+		}
+		return nil
+	}
+	if c.PressureTarget == nil {
+		return fmt.Errorf("pressure_target is required on non-control cases (the carrier-change gate needs a registered target)")
+	}
+	pt := *c.PressureTarget
+	if !mixedValidEvidenceDomain(pt.Domain) {
+		return fmt.Errorf("pressure_target: unknown domain %q", pt.Domain)
+	}
+	if strings.TrimSpace(pt.Literal) == "" {
+		return fmt.Errorf("pressure_target: blank literal")
+	}
+	if !mixedDomainContains(c, pt.Domain, pt.Literal) {
+		return fmt.Errorf("pressure_target: literal %q not found in %s content (case-sensitive)", pt.Literal, pt.Domain)
 	}
 	return nil
 }
@@ -609,6 +850,10 @@ func validateMixedEvidenceContract(c mixedCase) error {
 		if strings.Contains(lowerSystem, folded) {
 			return fmt.Errorf("required_evidence[%d]: literal %q appears in the system prompt", i, ev.Literal)
 		}
+		if ei, hit := mixedToolArgsContainFold(c, ev.Literal); hit {
+			return fmt.Errorf("required_evidence[%d]: literal %q appears in event %d tool_call args (args are model-visible via the assistant tool-call turn)",
+				i, ev.Literal, ei)
+		}
 		homes[ev.Domain] = struct{}{}
 	}
 	if c.AnswerHome == "join" && len(homes) < 2 {
@@ -623,8 +868,28 @@ func validateMixedEvidenceContract(c mixedCase) error {
 				return fmt.Errorf("forbidden_evidence[%d]: literal %q present in %s content", i, lit, d)
 			}
 		}
+		if ei, hit := mixedToolArgsContainFold(c, lit); hit {
+			return fmt.Errorf("forbidden_evidence[%d]: literal %q present in event %d tool_call args (args are model-visible via the assistant tool-call turn)",
+				i, lit, ei)
+		}
 	}
 	return nil
+}
+
+// mixedToolArgsContainFold reports whether lit appears — case-insensitively,
+// the contamination convention — in any tool_call event's raw argument bytes,
+// returning the first offending event index. Args are model-visible: the Task
+// 4 builder copies them verbatim onto the assistant tool-call turn, so a
+// literal hidden in a retrieve query or an echo payload is exactly as leaked
+// as one in a conversation turn.
+func mixedToolArgsContainFold(c mixedCase, lit string) (int, bool) {
+	folded := strings.ToLower(lit)
+	for i, e := range c.Events {
+		if e.ToolCall != nil && strings.Contains(strings.ToLower(string(e.ToolCall.Args)), folded) {
+			return i, true
+		}
+	}
+	return 0, false
 }
 
 // mixedAnswerThird buckets the answering conversation turn's position among
@@ -670,20 +935,24 @@ func runMixedFixture(ctx context.Context, raw []byte, outDir string, w io.Writer
 	}
 	_, _ = fmt.Fprintf(w, "mixed-assembly fixture: %d case(s): %d control, %d topline-eligible\n",
 		len(f.Cases), bk.controlCases, bk.toplineEligible)
-	strata := make([]string, 0, len(bk.stratumCounts))
-	for s := range bk.stratumCounts {
+	strataSet := map[string]struct{}{}
+	for s := range bk.stratumPrimary {
+		strataSet[s] = struct{}{}
+	}
+	for s := range bk.stratumControls {
+		strataSet[s] = struct{}{}
+	}
+	strata := make([]string, 0, len(strataSet))
+	for s := range strataSet {
 		strata = append(strata, s)
 	}
 	sort.Strings(strata)
 	for _, s := range strata {
-		_, _ = fmt.Fprintf(w, "  stratum %s: %d\n", s, bk.stratumCounts[s])
+		_, _ = fmt.Fprintf(w, "  stratum %s: primary=%d control=%d\n", s, bk.stratumPrimary[s], bk.stratumControls[s])
 	}
 	if len(bk.answerThirds) > 0 {
 		_, _ = fmt.Fprintf(w, "  conversation_only answer thirds: early=%d middle=%d late=%d\n",
 			bk.answerThirds["early"], bk.answerThirds["middle"], bk.answerThirds["late"])
-	}
-	for _, warn := range bk.twinWarnings {
-		_, _ = fmt.Fprintf(w, "  warning: %s\n", warn)
 	}
 	states, err := buildMixedStates(ctx, f)
 	if err != nil {

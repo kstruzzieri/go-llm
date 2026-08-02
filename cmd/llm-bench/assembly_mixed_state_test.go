@@ -11,6 +11,7 @@ import (
 
 	"github.com/kstruzzieri/go-llm/agent"
 	agenttools "github.com/kstruzzieri/go-llm/agent/tools"
+	"github.com/kstruzzieri/go-llm/contextdepth"
 	"github.com/kstruzzieri/go-llm/rag"
 )
 
@@ -395,6 +396,22 @@ func TestBuildMixedStateDigest(t *testing.T) {
 		{"alternative content", func(st *agent.State) {
 			alts := st.Messages[3].Context.Groups[0].Alternatives
 			alts[len(alts)-1].Content += "x"
+		}},
+		// Wave 2: every remaining assembly-affecting field flips the digest.
+		{"durable summary", func(st *agent.State) { st.DurableSummary = "carried summary" }},
+		{"segment", func(st *agent.State) { st.Messages[0].Segment = agent.Pinned }},
+		{"tool name", func(st *agent.State) { st.Messages[3].ToolName = "renamed" }},
+		{"context min verbatim", func(st *agent.State) { st.Messages[3].Context.MinVerbatim++ }},
+		{"alternative representation descriptor", func(st *agent.State) {
+			st.Messages[3].Context.Groups[0].Alternatives[0].Desc.Representations[0] =
+				contextdepth.RepresentationDesc{Depth: contextdepth.DepthL2, Kind: contextdepth.RepresentationGenerated}
+		}},
+		{"alternative attrib presence", func(st *agent.State) {
+			alts := st.Messages[3].Context.Groups[0].Alternatives
+			if alts[len(alts)-1].Attrib == nil {
+				t.Fatalf("last retrieve alternative has no Attrib; the presence mutation needs one to clear")
+			}
+			alts[len(alts)-1].Attrib = nil
 		}},
 	}
 	for _, m := range mutations {

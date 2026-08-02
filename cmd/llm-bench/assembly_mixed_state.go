@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -315,6 +316,9 @@ func mixedRawStateTokens(st agent.State) int {
 type mixedDigestState struct {
 	System   string           `json:"system"`
 	Messages []mixedDigestMsg `json:"messages"`
+	// DurableSummary appended in W2: the assemblers materialize it as a pinned
+	// system message, so two States differing only here assemble differently.
+	DurableSummary string `json:"durable_summary"`
 }
 
 type mixedDigestMsg struct {
@@ -324,6 +328,13 @@ type mixedDigestMsg struct {
 	ToolCallID string             `json:"tool_call_id,omitempty"`
 	OutputCap  int                `json:"output_cap"`
 	Context    []mixedDigestGroup `json:"context,omitempty"`
+	// W2 appends — all assembly-affecting: Segment picks pinned vs elastic
+	// treatment; ToolName is priced by agent's messageCost and rendered on the
+	// tool turn; MinVerbatim is the carrying ContextSet's verbatim floor
+	// (ContextSet-level in agent/context_set.go, stamped per message here).
+	Segment     int    `json:"segment"`
+	ToolName    string `json:"tool_name,omitempty"`
+	MinVerbatim int    `json:"min_verbatim"`
 }
 
 type mixedDigestCall struct {
@@ -334,24 +345,47 @@ type mixedDigestCall struct {
 
 // mixedDigestGroup keeps the digest content-sensitive without serializing
 // alternative payloads wholesale: per alternative, the sha256 of its Content,
-// so any deep content change flips the state digest.
+// so any deep content change flips the state digest. AltDescs and AltAttrib
+// (W2, parallel to Alternatives) cover the alternative's assembly-affecting
+// metadata: the representation descriptors (kind@depth per component — the
+// verbatim floor and upgrade ladder read them) and the PRESENCE of retrieval
+// attribution (dominant-cause and attrib propagation read it; content is
+// already covered by the hash).
 type mixedDigestGroup struct {
 	Domain       string   `json:"domain"`
 	ID           string   `json:"id"`
 	Alternatives []string `json:"alternatives"` // sha256 hex per alternative Content
+	AltDescs     []string `json:"alt_descs"`    // "kind@depth+kind@depth" per alternative
+	AltAttrib    []bool   `json:"alt_attrib"`   // Attrib presence per alternative
+}
+
+// mixedAltDescString renders one alternative's representation descriptors as
+// the canonical "kind@depth" list in declaration order.
+func mixedAltDescString(d contextdepth.AlternativeDesc) string {
+	parts := make([]string, 0, len(d.Representations))
+	for _, r := range d.Representations {
+		parts = append(parts, r.Kind.String()+"@"+r.Depth.String())
+	}
+	return strings.Join(parts, "+")
 }
 
 // mixedStateDigest is the canonical pre-assembly State digest: sha256 hex
-// over the JSON encoding above. It covers System; per message role, content,
-// tool-call IDs/names/args, ToolCallID, OutputCap; and per attached
-// ContextSet the ordered (domain, id) subjects with per-alternative content
-// hashes.
+// over the JSON encoding above. It covers System and DurableSummary; per
+// message role, content, tool-call IDs/names/args, ToolCallID, OutputCap,
+// Segment, ToolName; and per attached ContextSet its MinVerbatim floor plus
+// the ordered (domain, id) subjects with per-alternative content hashes,
+// representation descriptors, and attribution presence.
 func mixedStateDigest(st agent.State) string {
-	d := mixedDigestState{System: st.System, Messages: make([]mixedDigestMsg, 0, len(st.Messages))}
+	d := mixedDigestState{
+		System:         st.System,
+		DurableSummary: st.DurableSummary,
+		Messages:       make([]mixedDigestMsg, 0, len(st.Messages)),
+	}
 	for _, m := range st.Messages {
 		dm := mixedDigestMsg{
 			Role: m.Role, Content: m.Content,
 			ToolCallID: m.ToolCallID, OutputCap: m.OutputCap,
+			Segment: int(m.Segment), ToolName: m.ToolName,
 		}
 		for _, call := range m.ToolCalls {
 			dm.ToolCalls = append(dm.ToolCalls, mixedDigestCall{
@@ -359,21 +393,26 @@ func mixedStateDigest(st agent.State) string {
 			})
 		}
 		if m.Context != nil {
+			dm.MinVerbatim = m.Context.MinVerbatim
 			for _, g := range m.Context.Groups {
 				dg := mixedDigestGroup{
 					Domain: g.Desc.Subject.Domain, ID: g.Desc.Subject.ID,
 					Alternatives: make([]string, 0, len(g.Alternatives)),
+					AltDescs:     make([]string, 0, len(g.Alternatives)),
+					AltAttrib:    make([]bool, 0, len(g.Alternatives)),
 				}
 				for _, a := range g.Alternatives {
 					sum := sha256.Sum256([]byte(a.Content))
 					dg.Alternatives = append(dg.Alternatives, hex.EncodeToString(sum[:]))
+					dg.AltDescs = append(dg.AltDescs, mixedAltDescString(a.Desc))
+					dg.AltAttrib = append(dg.AltAttrib, a.Attrib != nil)
 				}
 				dm.Context = append(dm.Context, dg)
 			}
 		}
 		d.Messages = append(d.Messages, dm)
 	}
-	raw, _ := json.Marshal(d) // strings/ints/slices only; cannot fail
+	raw, _ := json.Marshal(d) // strings/ints/bools/slices only; cannot fail
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }

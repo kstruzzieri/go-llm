@@ -443,6 +443,211 @@ func TestMixedEvidenceReachability(t *testing.T) {
 	}
 }
 
+// --- Wave 2 (round-2 consult): build-side hardening tests. ---
+
+// Synthetic message constructors for gate unit tests.
+func mixedTestUser(content string) agent.Message {
+	return agent.Message{ChatMessage: provider.ChatMessage{Role: "user", Content: content}}
+}
+
+func mixedTestTool(callID, content string) agent.Message {
+	return agent.Message{ChatMessage: provider.ChatMessage{
+		Role: "tool", Content: content, ToolCallID: callID, ToolName: "retrieve",
+	}}
+}
+
+func mixedTestAsst(callID, args string) agent.Message {
+	return agent.Message{ChatMessage: provider.ChatMessage{
+		Role: "assistant",
+		ToolCalls: []provider.ToolCall{{ID: callID, Type: "function",
+			Function: provider.ToolCallFunction{Name: "retrieve", Arguments: json.RawMessage(args)}}},
+	}}
+}
+
+func mixedTestState(msgs ...agent.Message) agent.State {
+	return agent.State{System: "sys", Messages: msgs}
+}
+
+func TestMixedPressureTargetGate(t *testing.T) {
+	target := mixedEvidence{Domain: "memory", Literal: "port 7443"}
+	full := mixedTestState(
+		mixedTestUser("filler about logistics"),
+		mixedTestTool("c1", "carrier holds port 7443 today"),
+		mixedTestUser("q"),
+	)
+
+	// Unchanged carrier in both arms: pressure theater, named loudly.
+	err := mixedPressureTargetGate("pt-1", target, full, full, full)
+	if err == nil || !strings.Contains(err.Error(), "pressure theater") ||
+		!strings.Contains(err.Error(), "pt-1") || !strings.Contains(err.Error(), "port 7443") {
+		t.Errorf("unchanged carrier: err = %v; want a pressure-theater error naming case and target", err)
+	}
+
+	// Shedding ONLY answer-irrelevant filler while the carrier survives
+	// unchanged is exactly the theater the gate exists to kill.
+	fillerShed := mixedTestState(
+		mixedTestTool("c1", "carrier holds port 7443 today"),
+		mixedTestUser("q"),
+	)
+	err = mixedPressureTargetGate("pt-2", target, full, fillerShed, fillerShed)
+	if err == nil || !strings.Contains(err.Error(), "pressure theater") {
+		t.Errorf("filler-only shed: err = %v; want a pressure-theater error", err)
+	}
+
+	// Re-rendered carrier (same ToolCallID, different Content) in ONE arm
+	// passes — direction-neutral in both directions.
+	rerendered := mixedTestState(
+		mixedTestUser("filler about logistics"),
+		mixedTestTool("c1", "compact card: gateway port"),
+		mixedTestUser("q"),
+	)
+	if err := mixedPressureTargetGate("pt-3", target, full, full, rerendered); err != nil {
+		t.Errorf("re-rendered carrier in mixed arm: err = %v; want nil", err)
+	}
+	if err := mixedPressureTargetGate("pt-4", target, full, rerendered, full); err != nil {
+		t.Errorf("re-rendered carrier in legacy arm: err = %v; want nil", err)
+	}
+
+	// Dropped carrier in one arm passes.
+	droppedCarrier := mixedTestState(mixedTestUser("filler about logistics"), mixedTestUser("q"))
+	if err := mixedPressureTargetGate("pt-5", target, full, full, droppedCarrier); err != nil {
+		t.Errorf("dropped carrier: err = %v; want nil", err)
+	}
+
+	// No carrier in the full State at all: loud fixture-bug error.
+	err = mixedPressureTargetGate("pt-6", mixedEvidence{Domain: "memory", Literal: "absent-literal"}, full, full, full)
+	if err == nil || !strings.Contains(err.Error(), "pt-6") || !strings.Contains(err.Error(), "no ") {
+		t.Errorf("carrier-free target: err = %v; want a loud no-carrier fixture-bug error", err)
+	}
+}
+
+// TestMixedPressureTargetGateEndToEnd proves the gate is wired into the real
+// build path: a pressured, otherwise-valid case whose registered target rides
+// a late conversation turn that BOTH assemblers retain byte-identical (only
+// the early filler sheds) must fail the whole build as pressure theater.
+func TestMixedPressureTargetGateEndToEnd(t *testing.T) {
+	p := mixedPressuredCase("theater-1")
+	p.PressureTarget = &mixedEvidence{Domain: "conversation", Literal: "gateway settings yesterday"}
+	if err := validateMixedCase(p); err != nil {
+		t.Fatalf("theater fixture case invalid: %v", err)
+	}
+	raw, err := json.Marshal(mixedFixtureFor(p))
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var buf bytes.Buffer
+	err = runMixedFixture(context.Background(), raw, t.TempDir(), &buf)
+	if err == nil || !strings.Contains(err.Error(), "pressure theater") || !strings.Contains(err.Error(), "theater-1") {
+		t.Fatalf("runMixedFixture = %v; want the pressure-theater rejection naming theater-1", err)
+	}
+}
+
+func TestMixedArmContainsToolCallArgs(t *testing.T) {
+	// An anchor visible ONLY through assistant tool-call arguments reaches.
+	st := mixedTestState(mixedTestAsst("c1", `{"query":"port 7443"}`), mixedTestUser("q"))
+	if !mixedArmContains(st, "port 7443") {
+		t.Errorf("anchor in tool-call args not seen by mixedArmContains")
+	}
+	// The final-message exclusion applies to its args too.
+	stFinal := mixedTestState(mixedTestUser("x"), mixedTestAsst("c1", `{"query":"port 7443"}`))
+	if mixedArmContains(stFinal, "port 7443") {
+		t.Errorf("anchor in the FINAL message's tool-call args must not count")
+	}
+	// Case-sensitive: a re-cased arg occurrence is not a reach.
+	stCase := mixedTestState(mixedTestAsst("c1", `{"query":"PORT 7443"}`), mixedTestUser("q"))
+	if mixedArmContains(stCase, "port 7443") {
+		t.Errorf("re-cased arg occurrence must not count (anchors are verbatim)")
+	}
+	// Integration: the evidence gate accepts an args-only reach.
+	var buf bytes.Buffer
+	if err := mixedEvidenceGate("args-reach", []mixedEvidence{{Domain: "memory", Literal: "port 7443"}}, st, st, &buf); err != nil {
+		t.Errorf("args-only reach through the evidence gate: err = %v; want nil", err)
+	}
+}
+
+func TestMixedArmsDeepDiff(t *testing.T) {
+	q := mixedTestUser("q")
+
+	// Identical role+content, differing tool-call ID: the arms now DIFFER.
+	a := mixedTestState(mixedTestAsst("c1", `{"query":"x"}`), q)
+	b := mixedTestState(mixedTestAsst("c2", `{"query":"x"}`), q)
+	if mixedArmMessagesEqual(a, b) {
+		t.Errorf("tool-call ID difference not detected by the deep compare")
+	}
+	if idx, field := mixedArmsFirstDiff(a, b); idx != 0 || field != "tool_calls" {
+		t.Errorf("first diff = (%d, %q); want (0, tool_calls)", idx, field)
+	}
+
+	// Differing tool-call argument bytes.
+	c := mixedTestState(mixedTestAsst("c1", `{"query":"y"}`), q)
+	if idx, field := mixedArmsFirstDiff(a, c); idx != 0 || field != "tool_calls" {
+		t.Errorf("args diff = (%d, %q); want (0, tool_calls)", idx, field)
+	}
+
+	// Differing ToolCallID on a tool message.
+	ta := mixedTestState(mixedTestTool("c1", "out"), q)
+	tb := mixedTestState(mixedTestTool("c2", "out"), q)
+	if idx, field := mixedArmsFirstDiff(ta, tb); idx != 0 || field != "tool_call_id" {
+		t.Errorf("tool_call_id diff = (%d, %q); want (0, tool_call_id)", idx, field)
+	}
+
+	// Differing ToolName.
+	tn := mixedTestState(mixedTestTool("c1", "out"), q)
+	tn.Messages[0].ToolName = "agent_memory_search"
+	if idx, field := mixedArmsFirstDiff(ta, tn); idx != 0 || field != "tool_name" {
+		t.Errorf("tool_name diff = (%d, %q); want (0, tool_name)", idx, field)
+	}
+
+	// Identical states still compare equal, and the prefix case reports the
+	// shorter length.
+	if !mixedArmMessagesEqual(a, a) {
+		t.Errorf("identical states compare unequal")
+	}
+	if idx, field := mixedArmsFirstDiff(a, mixedTestState(a.Messages[0])); idx != 1 || field != "presence" {
+		t.Errorf("prefix diff = (%d, %q); want (1, presence)", idx, field)
+	}
+
+	// The gate error names the differing field.
+	err := mixedArmsDifferGate("dd-1", true, ta, tb)
+	if err == nil || !strings.Contains(err.Error(), "tool_call_id") {
+		t.Errorf("control-differ error = %v; want it naming the tool_call_id field", err)
+	}
+}
+
+func TestMixedArmSubsequenceGate(t *testing.T) {
+	u1 := mixedTestUser("early context")
+	asst := mixedTestAsst("c1", `{"query":"x"}`)
+	tool := mixedTestTool("c1", "tool output text")
+	q := mixedTestUser("q")
+	full := mixedTestState(u1, asst, tool, q)
+
+	tests := []struct {
+		name      string
+		assembled agent.State
+		wantErr   bool
+	}{
+		{"identity is a subsequence", mixedTestState(u1, asst, tool, q), false},
+		{"dropping a message keeps the subsequence", mixedTestState(asst, tool, q), false},
+		{"anchor rewrite (same ToolCallID) is legal", mixedTestState(u1, asst, mixedTestTool("c1", "rewritten"), q), false},
+		{"reordering rejected", mixedTestState(asst, u1, tool, q), true},
+		{"duplication rejected", mixedTestState(u1, u1, asst, tool, q), true},
+		{"synthesized message rejected", mixedTestState(mixedTestUser("not in the full state"), q), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := mixedArmSubsequenceGate("sub-1", AssemblyMixed, full, tt.assembled)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("err = %v; wantErr = %t", err, tt.wantErr)
+			}
+			if err != nil && (!strings.Contains(err.Error(), "sub-1") ||
+				!strings.Contains(err.Error(), "reordered or duplicated") ||
+				!strings.Contains(err.Error(), string(AssemblyMixed))) {
+				t.Errorf("err = %v; must name the case, the arm, and the invariant", err)
+			}
+		})
+	}
+}
+
 func TestMixedToplineEmission(t *testing.T) {
 	// Validation: topline_facts is illegal on control cases.
 	ctl := mixedControlCase("top-ctl")
@@ -500,6 +705,9 @@ func TestMixedToplineEmission(t *testing.T) {
 
 func TestMixedBuildDeterminism(t *testing.T) {
 	p := mixedPressuredCase("det-press")
+	// The registered topline rule selects carriers by scenario family; the
+	// lone eligible family in its stratum is always selected.
+	p.ScenarioFamily = "fam-press"
 	p.ToplineFacts = "The gateway listens on port 7443 and its retry ceiling 6 is enforced."
 	ctl := mixedControlCase("det-ctl")
 	fixture := mixedFixtureFor(p, ctl)

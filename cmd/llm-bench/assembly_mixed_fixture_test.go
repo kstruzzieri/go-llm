@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,12 @@ func mixedConvCase(id string) mixedCase {
 		},
 		RequiredEvidence: []mixedEvidence{{Domain: "conversation", Literal: "flag-alpha-7"}},
 		RequiredDomains:  []string{"conversation", "memory", "rag"},
-		Golden:           Golden{FinalAnswerCriteria: "States the beta gate is flag-alpha-7."},
+		// W2 mandatory fields: the answering turn (required on
+		// conversation_only) and the registered pressure target (required on
+		// every non-control case; recommended authoring is an anchor).
+		AnswerTurnIndex: intPtr(0),
+		PressureTarget:  &mixedEvidence{Domain: "conversation", Literal: "flag-alpha-7"},
+		Golden:          Golden{FinalAnswerCriteria: "States the beta gate is flag-alpha-7."},
 	}
 }
 
@@ -53,6 +59,7 @@ func mixedMemCase(id string) mixedCase {
 		{ID: "rec-1", Content: "trainer checkpoint uses batch-size 512", Kind: "semantic"},
 	}
 	c.RequiredEvidence = []mixedEvidence{{Domain: "memory", Literal: "batch-size 512"}}
+	c.PressureTarget = &mixedEvidence{Domain: "memory", Literal: "batch-size 512"}
 	c.Golden = Golden{FinalAnswerCriteria: "States the trainer checkpoint batch size is 512."}
 	return c
 }
@@ -76,6 +83,7 @@ func mixedJoinCase(id string) mixedCase {
 		{Domain: "memory", Literal: "port 7443"},
 		{Domain: "rag", Literal: "retry ceiling 6"},
 	}
+	c.PressureTarget = &mixedEvidence{Domain: "memory", Literal: "port 7443"}
 	c.Golden = Golden{FinalAnswerCriteria: "Combines the memory port with the rag retry ceiling."}
 	return c
 }
@@ -97,6 +105,7 @@ func mixedControlCase(id string) mixedCase {
 	c := mixedConvCase(id)
 	c.Control = true
 	c.RequiredEvidence = nil
+	c.PressureTarget = nil // controls must not carry a pressure target
 	return c
 }
 
@@ -745,15 +754,15 @@ func TestValidateMixedCase(t *testing.T) {
 
 func TestMixedFixtureBookkeeping(t *testing.T) {
 	early := mixedConvCase("bk-early")
-	early.AnswerTurnIndex = intPtr(0)
 	early.TwinGroup = "tw-pair"
 
 	late := mixedConvCase("bk-late")
 	// Three conversation turns; the answer sits on the last one => late third.
+	// The answering turn must carry the conversation anchor (W2 binding rule).
 	late.Events = []mixedEvent{
 		late.Events[0],
 		late.Events[1],
-		{Turn: &mixedTurn{Role: "assistant", Content: "Confirmed once more."}},
+		{Turn: &mixedTurn{Role: "assistant", Content: "Confirmed: flag-alpha-7 stays the gate."}},
 		late.Events[2],
 	}
 	late.AnswerTurnIndex = intPtr(2)
@@ -762,17 +771,22 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 	mem.TwinGroup = "tw-pair"
 
 	control := mixedControlCase("bk-control")
-	control.TwinGroup = "tw-solo"
 
 	bk, err := validateMixedFixture(mixedFixtureFor(early, late, mem, control))
 	if err != nil {
 		t.Fatalf("validateMixedFixture = %v; want nil", err)
 	}
-	if got := bk.stratumCounts["conversation_only"]; got != 3 {
-		t.Errorf("conversation_only count = %d; want 3", got)
+	if got := bk.stratumPrimary["conversation_only"]; got != 2 {
+		t.Errorf("conversation_only primary = %d; want 2", got)
 	}
-	if got := bk.stratumCounts["memory_only"]; got != 1 {
-		t.Errorf("memory_only count = %d; want 1", got)
+	if got := bk.stratumControls["conversation_only"]; got != 1 {
+		t.Errorf("conversation_only controls = %d; want 1", got)
+	}
+	if got := bk.stratumPrimary["memory_only"]; got != 1 {
+		t.Errorf("memory_only primary = %d; want 1", got)
+	}
+	if got := bk.stratumControls["memory_only"]; got != 0 {
+		t.Errorf("memory_only controls = %d; want 0", got)
 	}
 	if bk.controlCases != 1 {
 		t.Errorf("controlCases = %d; want 1", bk.controlCases)
@@ -780,11 +794,8 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 	if bk.toplineEligible != 3 {
 		t.Errorf("toplineEligible = %d; want 3", bk.toplineEligible)
 	}
-	if bk.answerThirds["early"] != 1 || bk.answerThirds["middle"] != 0 || bk.answerThirds["late"] != 1 {
-		t.Errorf("answerThirds = %v; want early=1 middle=0 late=1", bk.answerThirds)
-	}
-	if len(bk.twinWarnings) != 1 || !strings.Contains(bk.twinWarnings[0], "tw-solo") {
-		t.Errorf("twinWarnings = %v; want exactly one naming tw-solo", bk.twinWarnings)
+	if bk.answerThirds["early"] != 2 || bk.answerThirds["middle"] != 0 || bk.answerThirds["late"] != 1 {
+		t.Errorf("answerThirds = %v; want early=2 middle=0 late=1", bk.answerThirds)
 	}
 
 	// The mixed build path prints the bookkeeping summary and the built-state
@@ -803,10 +814,9 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 	out := buf.String()
 	for _, want := range []string{
 		"mixed-assembly fixture: 4 case(s)",
-		"stratum conversation_only: 3",
-		"stratum memory_only: 1",
-		"early=1 middle=0 late=1",
-		"tw-solo",
+		"stratum conversation_only: primary=2 control=1",
+		"stratum memory_only: primary=1 control=0",
+		"early=2 middle=0 late=1",
 		"built 4 frozen state(s)",
 	} {
 		if !strings.Contains(out, want) {
@@ -825,6 +835,330 @@ func TestReplayPrefilledFinalTurnBackstopTrimsWhitespace(t *testing.T) {
 	_, err := replayPrefilled(context.Background(), client, "m", trace, replayOptions{})
 	if err == nil || !strings.Contains(err.Error(), "prefilled final turn must be a non-empty user question") {
 		t.Fatalf("err = %v; want the final-turn backstop error", err)
+	}
+}
+
+// --- Wave 2 (round-2 consult): fixture-side hardening tests. ---
+
+func TestMixedPressureTargetValidation(t *testing.T) {
+	tests := []struct {
+		name    string
+		c       mixedCase
+		wantErr string
+	}{
+		{
+			name: "control must not carry pressure_target",
+			c: func() mixedCase {
+				c := mixedControlCase("pt-ctl")
+				c.PressureTarget = &mixedEvidence{Domain: "conversation", Literal: "beta rollout"}
+				return c
+			}(),
+			wantErr: "pressure_target",
+		},
+		{
+			name: "non-control requires pressure_target",
+			c: func() mixedCase {
+				c := mixedConvCase("pt-req")
+				c.PressureTarget = nil
+				return c
+			}(),
+			wantErr: "pressure_target is required",
+		},
+		{
+			name: "unknown domain",
+			c: func() mixedCase {
+				c := mixedConvCase("pt-dom")
+				c.PressureTarget = &mixedEvidence{Domain: "wiki", Literal: "beta rollout"}
+				return c
+			}(),
+			wantErr: "pressure_target: unknown domain",
+		},
+		{
+			name: "blank literal",
+			c: func() mixedCase {
+				c := mixedConvCase("pt-blank")
+				c.PressureTarget = &mixedEvidence{Domain: "conversation", Literal: "  "}
+				return c
+			}(),
+			wantErr: "pressure_target: blank literal",
+		},
+		{
+			name: "literal absent from its domain content",
+			c: func() mixedCase {
+				c := mixedConvCase("pt-miss")
+				c.PressureTarget = &mixedEvidence{Domain: "conversation", Literal: "flag-omega-9"}
+				return c
+			}(),
+			wantErr: "pressure_target",
+		},
+		{
+			// stale_vs_fresh may target the stale carrier: the domain scan covers
+			// rag abstract/overview, so a summary-only literal validates.
+			name: "stale case may target the stale rag representation",
+			c: func() mixedCase {
+				c := mixedStaleCase("pt-stale")
+				c.RagSources[0].Abstract = "Stale deploy digest 0421 summary."
+				c.RagSources[0].Overview = "Deployment overview."
+				c.PressureTarget = &mixedEvidence{Domain: "rag", Literal: "digest 0421"}
+				return c
+			}(),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateMixedCase(tt.c)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateMixedCase = %v; want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateMixedCase = %v; want error containing %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestMixedEvidenceToolArgScan(t *testing.T) {
+	// A required anchor hidden — re-cased — in a retrieve query arg is
+	// model-visible via the assistant tool-call turn: rejected.
+	c := withMixedToolCall(mixedConvCase("arg-req"), mixedToolCall{
+		CallID: "c1", Tool: "retrieve", Args: json.RawMessage(`{"query":"FLAG-ALPHA-7 gate"}`),
+	})
+	err := validateMixedCase(c)
+	if err == nil || !strings.Contains(err.Error(), "tool_call args") || !strings.Contains(err.Error(), "required_evidence") {
+		t.Errorf("anchor in retrieve args: err = %v; want a required_evidence tool_call-args rejection", err)
+	}
+
+	// Exact-case anchor in agent_memory_search args: rejected too.
+	e := withMixedToolCall(mixedConvCase("arg-exact"), mixedToolCall{
+		CallID: "c1", Tool: "agent_memory_search", Args: json.RawMessage(`{"query":"flag-alpha-7"}`),
+	})
+	err = validateMixedCase(e)
+	if err == nil || !strings.Contains(err.Error(), "tool_call args") {
+		t.Errorf("exact anchor in memory args: err = %v; want a tool_call-args rejection", err)
+	}
+
+	// A forbidden literal in fixture_echo args: rejected.
+	f := mixedConvCase("arg-forb")
+	f.ForbiddenEvidence = []string{"stale-flag-9"}
+	f = withMixedToolCall(f, mixedToolCall{
+		CallID: "c1", Tool: "fixture_echo", Args: json.RawMessage(`{"content":"note mentions stale-flag-9 here"}`),
+	})
+	err = validateMixedCase(f)
+	if err == nil || !strings.Contains(err.Error(), "tool_call args") || !strings.Contains(err.Error(), "forbidden_evidence") {
+		t.Errorf("forbidden literal in echo args: err = %v; want a forbidden_evidence tool_call-args rejection", err)
+	}
+
+	// Anchor-free args stay legal.
+	ok := withMixedToolCall(mixedConvCase("arg-ok"), mixedToolCall{
+		CallID: "c1", Tool: "retrieve", Args: json.RawMessage(`{"query":"beta gate"}`),
+	})
+	if err := validateMixedCase(ok); err != nil {
+		t.Errorf("clean args: err = %v; want nil", err)
+	}
+}
+
+func TestMixedAnswerTurnIndexBinding(t *testing.T) {
+	// Required on conversation_only.
+	c := mixedConvCase("ati-req")
+	c.AnswerTurnIndex = nil
+	if err := validateMixedCase(c); err == nil || !strings.Contains(err.Error(), "answer_turn_index is required") {
+		t.Errorf("missing index on conversation_only: err = %v; want the required error", err)
+	}
+
+	// Control conversation_only cases carry the index too (no anchors to bind).
+	ctl := mixedControlCase("ati-ctl")
+	ctl.AnswerTurnIndex = nil
+	if err := validateMixedCase(ctl); err == nil || !strings.Contains(err.Error(), "answer_turn_index is required") {
+		t.Errorf("missing index on control conversation_only: err = %v; want the required error", err)
+	}
+
+	// The indexed turn must contain every conversation-domain anchor.
+	b := mixedConvCase("ati-bind")
+	b.AnswerTurnIndex = intPtr(1) // assistant ack turn; no flag-alpha-7
+	if err := validateMixedCase(b); err == nil ||
+		!strings.Contains(err.Error(), "answer_turn_index does not contain the conversation anchors") {
+		t.Errorf("unbound index: err = %v; want the conversation-anchors binding error", err)
+	}
+
+	// Other strata: still optional.
+	m := mixedMemCase("ati-opt")
+	m.AnswerTurnIndex = nil
+	if err := validateMixedCase(m); err != nil {
+		t.Errorf("memory_only without index: err = %v; want nil (optional outside conversation_only)", err)
+	}
+}
+
+func TestMixedTwinContract(t *testing.T) {
+	pair := func(tg, convID, memID string) (mixedCase, mixedCase) {
+		a := mixedConvCase(convID)
+		a.TwinGroup = tg
+		b := mixedMemCase(memID)
+		b.TwinGroup = tg
+		return a, b
+	}
+
+	// Valid: two twin pairs across conversation_only and memory_only, sharing
+	// the same rag paths and memory record ids.
+	a1, b1 := pair("tw-1", "twc-1", "twm-1")
+	a2, b2 := pair("tw-2", "twc-2", "twm-2")
+	if _, err := validateMixedFixture(mixedFixtureFor(a1, b1, a2, b2)); err != nil {
+		t.Fatalf("valid twin pairs: err = %v; want nil", err)
+	}
+
+	t.Run("fifth twin group rejected", func(t *testing.T) {
+		var cases []mixedCase
+		for i := 1; i <= 5; i++ {
+			a, b := pair(fmt.Sprintf("tw-%d", i), fmt.Sprintf("twc-%d", i), fmt.Sprintf("twm-%d", i))
+			cases = append(cases, a, b)
+		}
+		_, err := validateMixedFixture(mixedFixtureFor(cases...))
+		if err == nil || !strings.Contains(err.Error(), "at most 4") {
+			t.Errorf("5 twin groups: err = %v; want the at-most-4 rejection", err)
+		}
+	})
+
+	t.Run("single-member twin group rejected", func(t *testing.T) {
+		solo := mixedConvCase("tw-solo")
+		solo.TwinGroup = "tw-s"
+		_, err := validateMixedFixture(mixedFixtureFor(solo))
+		if err == nil || !strings.Contains(err.Error(), "2-3") {
+			t.Errorf("single-member twin: err = %v; want the 2-3 members rejection", err)
+		}
+	})
+
+	t.Run("same-stratum members rejected", func(t *testing.T) {
+		x := mixedConvCase("tw-x1")
+		x.TwinGroup = "tw-ss"
+		y := mixedConvCase("tw-x2")
+		y.TwinGroup = "tw-ss"
+		_, err := validateMixedFixture(mixedFixtureFor(x, y))
+		if err == nil || !strings.Contains(err.Error(), "stratum") {
+			t.Errorf("same-stratum twins: err = %v; want a different-strata rejection", err)
+		}
+	})
+
+	t.Run("stale_vs_fresh member rejected", func(t *testing.T) {
+		s := mixedStaleCase("tw-st")
+		s.TwinGroup = "tw-sf"
+		c := mixedConvCase("tw-cv")
+		c.TwinGroup = "tw-sf"
+		_, err := validateMixedFixture(mixedFixtureFor(s, c))
+		if err == nil || !strings.Contains(err.Error(), "stale_vs_fresh") {
+			t.Errorf("stale twin member: err = %v; want a rejection naming the illegal stratum", err)
+		}
+	})
+
+	t.Run("differing rag source paths rejected", func(t *testing.T) {
+		a := mixedConvCase("tw-p1")
+		a.TwinGroup = "tw-dp"
+		j := mixedJoinCase("tw-p2") // pkg/gw/gw.go, not pkg/cfg/cfg.go
+		j.TwinGroup = "tw-dp"
+		_, err := validateMixedFixture(mixedFixtureFor(a, j))
+		if err == nil || !strings.Contains(err.Error(), "rag_sources") {
+			t.Errorf("differing paths: err = %v; want a rag_sources mismatch rejection", err)
+		}
+	})
+
+	t.Run("differing memory record ids rejected", func(t *testing.T) {
+		a, b := pair("tw-mi", "tw-i1", "tw-i2")
+		b.MemoryRecords[0].ID = "rec-9"
+		_, err := validateMixedFixture(mixedFixtureFor(a, b))
+		if err == nil || !strings.Contains(err.Error(), "memory_records") {
+			t.Errorf("differing record ids: err = %v; want a memory_records mismatch rejection", err)
+		}
+	})
+}
+
+func TestMixedControlStratumCap(t *testing.T) {
+	ctl := func(id string) mixedCase { return mixedControlCase(id) }
+	// Two controls in one stratum: legal.
+	if _, err := validateMixedFixture(mixedFixtureFor(mixedConvCase("cc-p"), ctl("cc-1"), ctl("cc-2"))); err != nil {
+		t.Fatalf("two controls: err = %v; want nil", err)
+	}
+	// A third control in the same stratum: rejected.
+	_, err := validateMixedFixture(mixedFixtureFor(mixedConvCase("cc-p"), ctl("cc-1"), ctl("cc-2"), ctl("cc-3")))
+	if err == nil || !strings.Contains(err.Error(), "control") || !strings.Contains(err.Error(), "at most 2") {
+		t.Errorf("three controls in one stratum: err = %v; want the at-most-2 rejection", err)
+	}
+}
+
+func TestMixedToplineRegisteredSelection(t *testing.T) {
+	// The registered quotas, pinned by literal; they must sum to 12.
+	if mixedToplineConversationOnly != 3 || mixedToplineMemoryOnly != 2 ||
+		mixedToplineCrossDomainJoin != 3 || mixedToplineStaleVsFresh != 2 ||
+		mixedToplineChainRetention != 2 {
+		t.Fatalf("registered topline quotas changed; re-registration required")
+	}
+	if total := mixedToplineConversationOnly + mixedToplineMemoryOnly + mixedToplineCrossDomainJoin +
+		mixedToplineStaleVsFresh + mixedToplineChainRetention; total != 12 {
+		t.Fatalf("topline quota total = %d; want 12", total)
+	}
+
+	conv := func(id, fam, facts string) mixedCase {
+		c := mixedConvCase(id)
+		c.ScenarioFamily = fam
+		c.ToplineFacts = facts
+		return c
+	}
+	mem := func(id, fam, facts string) mixedCase {
+		c := mixedMemCase(id)
+		c.ScenarioFamily = fam
+		c.ToplineFacts = facts
+		return c
+	}
+	const convFacts = "For the beta rollout the team chose flag-alpha-7 as the gate."
+	const memFacts = "The trainer checkpoint recorded batch-size 512."
+
+	// FNV-1a-64 ascending (hand-computed):
+	//   conversation families: fam-d < fam-b < fam-c < fam-a, quota 3 selects
+	//   fam-d, fam-b, fam-c; within fam-d the lexicographically smallest id
+	//   (top-d1) carries.
+	//   memory families: fam-m1 < fam-m3 < fam-m2, quota 2 selects fam-m1 and
+	//   fam-m3.
+	corpus := func() []mixedCase {
+		return []mixedCase{
+			conv("top-d2", "fam-d", ""),
+			conv("top-d1", "fam-d", convFacts),
+			conv("top-b1", "fam-b", convFacts),
+			conv("top-c1", "fam-c", convFacts),
+			conv("top-a1", "fam-a", ""),
+			mem("top-m1", "fam-m1", memFacts),
+			mem("top-m2", "fam-m2", ""),
+			mem("top-m3", "fam-m3", memFacts),
+		}
+	}
+	if _, err := validateMixedFixture(mixedFixtureFor(corpus()...)); err != nil {
+		t.Fatalf("registered selection corpus: err = %v; want nil", err)
+	}
+
+	// Missing on a selected case: error naming the case.
+	miss := corpus()
+	miss[2].ToplineFacts = "" // top-b1, selected
+	_, err := validateMixedFixture(mixedFixtureFor(miss...))
+	if err == nil || !strings.Contains(err.Error(), "top-b1") || !strings.Contains(err.Error(), "topline_facts missing") {
+		t.Errorf("missing on selected: err = %v; want a topline_facts-missing error naming top-b1", err)
+	}
+
+	// Present on an unselected case: error naming the case.
+	extra := corpus()
+	extra[4].ToplineFacts = convFacts // top-a1, fam-a not selected
+	_, err = validateMixedFixture(mixedFixtureFor(extra...))
+	if err == nil || !strings.Contains(err.Error(), "top-a1") || !strings.Contains(err.Error(), "outside the registered topline selection") {
+		t.Errorf("present on unselected: err = %v; want an outside-selection error naming top-a1", err)
+	}
+
+	// Within a family the smallest id carries: facts on top-d2 instead of
+	// top-d1 must fail in BOTH directions (missing on d1 reported first, in
+	// declaration order).
+	swap := corpus()
+	swap[0].ToplineFacts = convFacts // top-d2
+	swap[1].ToplineFacts = ""        // top-d1
+	_, err = validateMixedFixture(mixedFixtureFor(swap...))
+	if err == nil || !strings.Contains(err.Error(), "top-d") {
+		t.Errorf("family carrier swap: err = %v; want a selection error naming a fam-d case", err)
 	}
 }
 

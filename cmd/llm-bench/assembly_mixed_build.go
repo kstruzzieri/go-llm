@@ -8,6 +8,7 @@ package main
 // assembly_mixed_state.go.
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -142,28 +143,62 @@ func mixedPressureGate(caseID string, control bool, legacy, mixed mixedArm) erro
 	return nil
 }
 
+// mixedMsgFieldDiff names the first differing model-visible field between two
+// messages, or "" when they are equal on every compared field: role, content,
+// tool_call_id, tool_name, and the tool_calls list (ID, Name, argument
+// bytes). Deliberately DEEP: two arms identical in role+content but differing
+// in a tool-call ID or argument bytes present different prompts to the model,
+// so a role+content compare would call them identical and mask real contrast
+// (or miss real control drift).
+func mixedMsgFieldDiff(a, b agent.Message) string {
+	switch {
+	case a.Role != b.Role:
+		return "role"
+	case a.Content != b.Content:
+		return "content"
+	case a.ToolCallID != b.ToolCallID:
+		return "tool_call_id"
+	case a.ToolName != b.ToolName:
+		return "tool_name"
+	}
+	if len(a.ToolCalls) != len(b.ToolCalls) {
+		return "tool_calls"
+	}
+	for i := range a.ToolCalls {
+		ta, tb := a.ToolCalls[i], b.ToolCalls[i]
+		if ta.ID != tb.ID || ta.Function.Name != tb.Function.Name ||
+			!bytes.Equal(ta.Function.Arguments, tb.Function.Arguments) {
+			return "tool_calls"
+		}
+	}
+	return ""
+}
+
 // mixedArmsFirstDiff returns the first index at which the two assembled
-// message sequences differ (role+content pairwise — the model-visible
-// sequence, which is what the experiment contrasts), or -1 when identical.
-// When one sequence is a strict prefix of the other, the diff index is the
-// shorter length (the first message present on only one side).
-func mixedArmsFirstDiff(a, b agent.State) int {
+// message sequences differ under mixedMsgFieldDiff plus the differing field
+// name, or (-1, "") when identical. When one sequence is a strict prefix of
+// the other, the diff index is the shorter length with field "presence" (the
+// first message present on only one side).
+func mixedArmsFirstDiff(a, b agent.State) (int, string) {
 	n := len(a.Messages)
 	if len(b.Messages) < n {
 		n = len(b.Messages)
 	}
 	for i := 0; i < n; i++ {
-		if a.Messages[i].Role != b.Messages[i].Role || a.Messages[i].Content != b.Messages[i].Content {
-			return i
+		if field := mixedMsgFieldDiff(a.Messages[i], b.Messages[i]); field != "" {
+			return i, field
 		}
 	}
 	if len(a.Messages) != len(b.Messages) {
-		return n
+		return n, "presence"
 	}
-	return -1
+	return -1, ""
 }
 
-func mixedArmMessagesEqual(a, b agent.State) bool { return mixedArmsFirstDiff(a, b) < 0 }
+func mixedArmMessagesEqual(a, b agent.State) bool {
+	idx, _ := mixedArmsFirstDiff(a, b)
+	return idx < 0
+}
 
 // mixedRoleAt names the role at index i, or "(absent)" past the end — the
 // prefix-diff case, where one arm simply has fewer messages.
@@ -181,16 +216,16 @@ func mixedRoleAt(st agent.State, i int) string {
 // unreachable, and the diff index below is the belt for a future tool that
 // slips past it).
 func mixedArmsDifferGate(caseID string, control bool, legacy, mixed agent.State) error {
-	idx := mixedArmsFirstDiff(legacy, mixed)
+	idx, field := mixedArmsFirstDiff(legacy, mixed)
 	if control {
 		if idx >= 0 {
-			return fmt.Errorf("case %q: control arms differ (role+content) first at message %d (legacy role %s, mixed role %s): control cases must be anchor-free and fully retained; a control case with differing arms is a fixture bug",
-				caseID, idx, mixedRoleAt(legacy, idx), mixedRoleAt(mixed, idx))
+			return fmt.Errorf("case %q: control arms differ first at message %d in field %s (legacy role %s, mixed role %s): control cases must be anchor-free and fully retained; a control case with differing arms is a fixture bug",
+				caseID, idx, field, mixedRoleAt(legacy, idx), mixedRoleAt(mixed, idx))
 		}
 		return nil
 	}
 	if idx < 0 {
-		return fmt.Errorf("case %q: legacy and mixed arms are identical (role+content): no assembly contrast to measure (fixture bug)", caseID)
+		return fmt.Errorf("case %q: legacy and mixed arms are identical (deep compare: role, content, tool ids/names, tool calls): no assembly contrast to measure (fixture bug)", caseID)
 	}
 	return nil
 }
@@ -221,7 +256,10 @@ func mixedPreview(s string) string {
 
 // mixedArmContains reports whether lit appears verbatim (case-SENSITIVE —
 // anchors are verbatim) in any assembled message EXCLUDING the final question
-// message. Per-message scan, no concatenation artifacts (mirrors
+// message. Scanned content per message is Content PLUS every tool call's
+// argument bytes: args ride the assistant tool-call turn, so they are exactly
+// as model-visible as content and an anchor reachable only through them still
+// reaches. Per-message scan, no concatenation artifacts (mirrors
 // mixedDomainScan); excluding the question mirrors 3a's assemblyAnswerReach —
 // a question that leaks its own literal must not count as evidence.
 func mixedArmContains(st agent.State, lit string) bool {
@@ -232,8 +270,103 @@ func mixedArmContains(st agent.State, lit string) bool {
 		if strings.Contains(m.Content, lit) {
 			return true
 		}
+		for _, tc := range m.ToolCalls {
+			if strings.Contains(string(tc.Function.Arguments), lit) {
+				return true
+			}
+		}
 	}
 	return false
+}
+
+// mixedPressureTargetGate (runs after evidence reachability, non-control
+// only) kills "pressure theater": both arms shedding only answer-irrelevant
+// filler while every message carrying the registered pressure target survives
+// byte-identical. Carriers are ALL full-State messages whose Content contains
+// the target literal (>= 1, else the fixture never put the target on a
+// model-visible message — loud fixture bug). The gate passes iff in AT LEAST
+// ONE arm at least one carrier is ABSENT or PRESENT-with-different-Content
+// (dropped, truncated, or re-rendered). "Unchanged" is the exact triple
+// (Role, ToolCallID, Content) — an anchor rewrite keeps Role and ToolCallID
+// but changes Content, so it counts as pressure on the carrier. Deliberately
+// direction-neutral: no requirement on WHICH arm moved.
+func mixedPressureTargetGate(caseID string, target mixedEvidence, full, legacy, mixed agent.State) error {
+	var carriers []agent.Message
+	for _, m := range full.Messages {
+		if strings.Contains(m.Content, target.Literal) {
+			carriers = append(carriers, m)
+		}
+	}
+	if len(carriers) == 0 {
+		return fmt.Errorf("case %q: pressure target %q (%s) appears in no built-State message content (fixture bug: the validated fixture containment never reached a model-visible message)",
+			caseID, target.Literal, target.Domain)
+	}
+	for _, arm := range []agent.State{legacy, mixed} {
+		for _, carrier := range carriers {
+			if !mixedCarrierUnchanged(arm, carrier) {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("case %q: pressure target %q (%s) survived unchanged in both arms: pressure theater (the budget shed only answer-irrelevant filler; move the target where assembly actually bites)",
+		caseID, target.Literal, target.Domain)
+}
+
+// mixedCarrierUnchanged reports whether the arm holds a byte-identical copy
+// of the carrier: same Role, ToolCallID, and Content.
+func mixedCarrierUnchanged(arm agent.State, carrier agent.Message) bool {
+	for _, m := range arm.Messages {
+		if m.Role == carrier.Role && m.ToolCallID == carrier.ToolCallID && m.Content == carrier.Content {
+			return true
+		}
+	}
+	return false
+}
+
+// mixedArmSubsequenceGate (both arms, every case, controls included) is
+// always-on drift protection for the frozen runtime: the assembled messages
+// must map to DISTINCT full-State indices in INCREASING order — no
+// reordering, no duplication, no synthesized messages. Matching identity per
+// message: Role must be equal; assistant tool-call messages match on their
+// ToolCalls' ID sequence (mixed may re-render around them); other messages
+// match on Content, except a tool message may instead match on ToolCallID
+// (mixed legally REWRITES anchor Content in place).
+func mixedArmSubsequenceGate(caseID string, mode AssemblyMode, full, assembled agent.State) error {
+	j := 0
+	for i, m := range assembled.Messages {
+		for j < len(full.Messages) && !mixedSubsequenceMatch(full.Messages[j], m) {
+			j++
+		}
+		if j >= len(full.Messages) {
+			return fmt.Errorf("case %q: %s arm: assembler reordered or duplicated messages: assembled message %d (role %s) maps to no remaining full-State message in order",
+				caseID, mode, i, m.Role)
+		}
+		j++
+	}
+	return nil
+}
+
+// mixedSubsequenceMatch is the per-message identity mixedArmSubsequenceGate
+// walks with (see there for the rule).
+func mixedSubsequenceMatch(full, asm agent.Message) bool {
+	if full.Role != asm.Role {
+		return false
+	}
+	if len(asm.ToolCalls) > 0 || len(full.ToolCalls) > 0 {
+		if len(asm.ToolCalls) != len(full.ToolCalls) {
+			return false
+		}
+		for i := range asm.ToolCalls {
+			if asm.ToolCalls[i].ID != full.ToolCalls[i].ID {
+				return false
+			}
+		}
+		return true
+	}
+	if full.Content == asm.Content {
+		return true
+	}
+	return asm.Role == "tool" && asm.ToolCallID != "" && full.ToolCallID == asm.ToolCallID
 }
 
 // mixedEvidenceGate (gate 4, non-control): every required-evidence anchor must
@@ -366,11 +499,12 @@ func mixedToplineTrace(c mixedCase) Trace {
 	}
 }
 
-// buildMixedCaseTraces runs one case end to end: budget, both arms, the four
-// gates in registered order, then the two (or three, with topline) validated
-// traces. A validateTrace failure on an assembled arm is a REAL finding — the
-// prefilled contract says assembled chains stay atomic — so it is a loud stop,
-// never a reason to loosen validation.
+// buildMixedCaseTraces runs one case end to end: budget, both arms, the
+// always-on subsequence invariant, the four gates in registered order, the
+// pressure-target carrier-change gate, then the two (or three, with topline)
+// validated traces. A validateTrace failure on an assembled arm is a REAL
+// finding — the prefilled contract says assembled chains stay atomic — so it
+// is a loud stop, never a reason to loosen validation.
 //
 // Precondition: built is c's own frozen State (emitMixedCorpus pairs them by
 // index), whose final message is the case's user question.
@@ -379,6 +513,11 @@ func buildMixedCaseTraces(ctx context.Context, c mixedCase, built mixedBuiltStat
 	legacy, mixed, err := buildMixedArms(ctx, built, budget)
 	if err != nil {
 		return nil, fmt.Errorf("case %q: %w", c.ID, err)
+	}
+	for _, arm := range []mixedArm{legacy, mixed} {
+		if err := mixedArmSubsequenceGate(c.ID, arm.mode, built.State, arm.state); err != nil {
+			return nil, err
+		}
 	}
 	if err := mixedPressureGate(c.ID, c.Control, legacy, mixed); err != nil {
 		return nil, err
@@ -394,6 +533,12 @@ func buildMixedCaseTraces(ctx context.Context, c mixedCase, built mixedBuiltStat
 	}
 	if !c.Control {
 		if err := mixedEvidenceGate(c.ID, c.RequiredEvidence, legacy.state, mixed.state, w); err != nil {
+			return nil, err
+		}
+		if c.PressureTarget == nil {
+			return nil, fmt.Errorf("case %q: non-control case reached the arm build without a pressure_target (validation bug)", c.ID)
+		}
+		if err := mixedPressureTargetGate(c.ID, *c.PressureTarget, built.State, legacy.state, mixed.state); err != nil {
 			return nil, err
 		}
 	}
