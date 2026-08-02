@@ -937,11 +937,15 @@ func TestMixedPressureTargetValidation(t *testing.T) {
 			wantErr: "pressure_target",
 		},
 		{
-			// stale_vs_fresh may target the stale carrier: the domain scan covers
-			// rag abstract/overview, so a summary-only literal validates.
-			name: "stale case may target the stale rag representation",
+			// stale_vs_fresh may target the stale rag representation, but ONLY
+			// the summary of the source whose CONTENT carries the fresh
+			// evidence (round-4 tightening): rag-home evidence in the content,
+			// the stale summary literal in that same source's abstract.
+			name: "stale case may target the stale summary of the evidence source",
 			c: func() mixedCase {
 				c := mixedStaleCase("pt-stale")
+				c.AnswerHome = "rag"
+				c.RequiredEvidence = []mixedEvidence{{Domain: "rag", Literal: "04:00 UTC"}}
 				c.RagSources[0].Abstract = "Stale deploy digest 0421 summary."
 				c.RagSources[0].Overview = "Deployment overview."
 				c.PressureTarget = &mixedEvidence{Domain: "rag", Literal: "digest 0421"}

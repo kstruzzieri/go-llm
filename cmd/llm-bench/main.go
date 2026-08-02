@@ -664,11 +664,17 @@ func main() {
 		}
 		// The hand-rolled -labels-out vs -artifacts checks above keep their
 		// pinned error strings; refuseOutputAlias covers the remaining pairs.
-		refuseOutputAlias("blind-ingest", "-labels-out", *labelsOut,
-			[][2]string{{"-worksheet", *worksheetPath}})
+		// The loaded block map is an input like the worksheet: either output
+		// aliasing it would truncate the only opaque-id join for this run.
+		labelsOutInputs := [][2]string{{"-worksheet", *worksheetPath}}
+		dupsOutInputs := [][2]string{{"-artifacts", *artifactsPath}, {"-labels-out", *labelsOut}, {"-worksheet", *worksheetPath}}
+		if strings.TrimSpace(*blindBlockmapPath) != "" {
+			labelsOutInputs = append(labelsOutInputs, [2]string{"-blind-blockmap", *blindBlockmapPath})
+			dupsOutInputs = append(dupsOutInputs, [2]string{"-blind-blockmap", *blindBlockmapPath})
+		}
+		refuseOutputAlias("blind-ingest", "-labels-out", *labelsOut, labelsOutInputs)
 		if strings.TrimSpace(*dupsOut) != "" {
-			refuseOutputAlias("blind-ingest", "-dups-out", *dupsOut,
-				[][2]string{{"-artifacts", *artifactsPath}, {"-labels-out", *labelsOut}, {"-worksheet", *worksheetPath}})
+			refuseOutputAlias("blind-ingest", "-dups-out", *dupsOut, dupsOutInputs)
 		}
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {

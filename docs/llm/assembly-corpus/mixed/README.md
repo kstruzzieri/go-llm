@@ -270,7 +270,7 @@ govern).
 | `rag_sources` | 3a source schema: `{path, content, language, abstract, overview}` with the atomic abstract/overview pair rule. |
 | `required_evidence` | `[{domain, literal}]` — domain-tagged verbatim anchors. Anchor them ("claimBatch = 25", not "25"). |
 | `forbidden_evidence` | Literals that must appear in NO domain. |
-| `pressure_target` | MANDATORY on non-control cases (illegal on controls): a registered `{domain, literal}` the budget must actually bite. The literal must appear case-sensitively in its declared domain's fixture content and be absent (case-insensitively) from the final question and the system prompt. ANSWER-RELEVANCE is validated mechanically: the target must EQUAL one of the case's `required_evidence` entries (domain AND literal), or — on `stale_vs_fresh` only — appear case-sensitively in a rag source's abstract/overview or a memory record's content (the stale carrier). The build's carrier-change gate (below) then requires that in at least one arm some built-State message carrying it is dropped, truncated, or re-rendered. |
+| `pressure_target` | MANDATORY on non-control cases (illegal on controls): a registered `{domain, literal}` the budget must actually bite. The literal must appear case-sensitively in its declared domain's fixture content and be absent (case-insensitively) from the final question and the system prompt. ANSWER-RELEVANCE is validated mechanically: the target must EQUAL one of the case's `required_evidence` entries (domain AND literal), or — on `stale_vs_fresh` only — appear case-sensitively in the abstract/overview of a rag source WHOSE CONTENT carries at least one `required_evidence` literal (the stale summary of the very source holding the fresh evidence; a summary on an evidence-free source is a decoy and rejected). Stale MEMORY carriers do not qualify: a stale-memory case registers its pressure on the fresh evidence instead. The build's carrier-change gate (below) then requires that in at least one arm some built-State message carrying it is dropped, truncated, or re-rendered. |
 | `required_domains` | Must be exactly the set {`conversation`, `memory`, `rag`} (any order) — every case carries all three domains; the non-home domains are competing distractors. |
 | `answer_turn_index` | REQUIRED on `conversation_only` cases (controls included), optional elsewhere. Must point at a turn event that is not the final question; on `conversation_only` the indexed turn must contain every conversation-domain `required_evidence` literal (case-sensitive) — the declared answer position and the anchors' actual home may not diverge. Feeds the answer-position-thirds balance bookkeeping. |
 | `topline_facts` | Present on EXACTLY the cases the registered topline rule selects (see below) — presence anywhere else, or absence on a selected case, is an authoring error. Must contain every `required_evidence` literal case-sensitively. Emits an unpaired `<id>-topline` ceiling trace: "Facts:\n...\n\nQuestion: ...". Only legal on non-control cases. |
@@ -348,10 +348,13 @@ error, never a silent under-fill.
   in at least one arm, at least one built-State message carrying the
   `pressure_target` literal must be dropped, truncated, or re-rendered.
   Both arms shedding only answer-irrelevant filler is "pressure theater"
-  and fails the build. Because the target is validated as answer-relevant
-  (a `required_evidence` anchor, or the stale carrier on `stale_vs_fresh`),
-  the changed carrier is by construction one the answer depends on — the
-  gate cannot be satisfied by shedding a decoy literal.
+  and fails the build. Precisely what the gate guarantees: the REGISTERED
+  target's carrier changes in at least one arm, and that target is
+  answer-relevant by the relevance rule above (an evidence anchor, or the
+  stale summary of the evidence-carrying source). It does NOT guarantee
+  that everything shed is answer-relevant — other dropped content may
+  still be decoys. The gate bounds irrelevant shedding (at least one
+  answer-relevant carrier moved); it does not eliminate it.
 - **Arms must differ** (non-control) or the case is dead weight — a
   guaranteed zero delta. The compare is deep: role, content, tool ids and
   names, tool-call argument bytes.

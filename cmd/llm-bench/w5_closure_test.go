@@ -51,11 +51,37 @@ func TestMixedPressureTargetAnswerRelevance(t *testing.T) {
 			t.Errorf("wrong-domain evidence literal = %v; want an answer-relevance rejection", err)
 		}
 	})
-	t.Run("stale_vs_fresh memory-content stale carrier accepted", func(t *testing.T) {
+	t.Run("stale_vs_fresh unrelated memory distractor rejected", func(t *testing.T) {
+		// Round-4 falsifier: "09:30 on wednesdays" is an unrelated memory
+		// distractor — the answer is flag-alpha-7. Any-carrier stale matching
+		// would accept it; the evidence-source tie must reject it.
 		c := mixedStaleCase("rel-stale-mem")
 		c.PressureTarget = &mixedEvidence{Domain: "memory", Literal: "09:30 on wednesdays"}
+		err := validateMixedPressureTarget(c)
+		if err == nil || !strings.Contains(err.Error(), "answer-relevant") {
+			t.Errorf("unrelated memory distractor target = %v; want an answer-relevance rejection", err)
+		}
+	})
+	t.Run("stale_vs_fresh stale summary of the evidence source accepted", func(t *testing.T) {
+		// The registered stale shape: the target rides the Abstract/Overview
+		// of the RAG SOURCE WHOSE CONTENT carries the fresh evidence.
+		c := mixedStaleRagSummaryCase("rel-stale-ok")
 		if err := validateMixedPressureTarget(c); err != nil {
-			t.Errorf("stale memory carrier target = %v; want nil", err)
+			t.Errorf("stale summary of the evidence source = %v; want nil", err)
+		}
+	})
+	t.Run("stale_vs_fresh summary of an evidence-free source rejected", func(t *testing.T) {
+		// Same summary literal, but the carrying source holds no fresh
+		// evidence: a stale summary of a distractor source is a decoy.
+		c := mixedStaleRagSummaryCase("rel-stale-decoy")
+		c.RagSources = append(c.RagSources, assemblySource{
+			Path: "pkg/other/other.go", Content: "package other\n\n// nothing relevant here\n",
+			Language: "go", Abstract: "Stale digest 0421 note.", Overview: "Distractor overview.",
+		})
+		c.RagSources[0].Abstract = "Plain summary."
+		err := validateMixedPressureTarget(c)
+		if err == nil || !strings.Contains(err.Error(), "answer-relevant") {
+			t.Errorf("summary of an evidence-free source = %v; want an answer-relevance rejection", err)
 		}
 	})
 	t.Run("stale_vs_fresh target outside evidence and stale carriers rejected", func(t *testing.T) {
@@ -66,6 +92,22 @@ func TestMixedPressureTargetAnswerRelevance(t *testing.T) {
 			t.Errorf("irrelevant stale-stratum target = %v; want an answer-relevance rejection", err)
 		}
 	})
+}
+
+// mixedStaleRagSummaryCase is the registered stale_vs_fresh authoring shape
+// for a summary-borne pressure target: rag-home evidence in the source's
+// CONTENT, the stale summary literal in that same source's Abstract, and the
+// target pointing at the summary literal.
+func mixedStaleRagSummaryCase(id string) mixedCase {
+	c := mixedConvCase(id)
+	c.Stratum = "stale_vs_fresh"
+	c.AnswerHome = "rag"
+	c.RequiredEvidence = []mixedEvidence{{Domain: "rag", Literal: "04:00 UTC"}}
+	c.RagSources[0].Abstract = "Stale deploy digest 0421 summary."
+	c.RagSources[0].Overview = "Deployment overview."
+	c.PressureTarget = &mixedEvidence{Domain: "rag", Literal: "digest 0421"}
+	c.Golden = Golden{FinalAnswerCriteria: "States the deploy window opens at 04:00 UTC."}
+	return c
 }
 
 // (3) scenario_family is mandatory at author time on non-control cases;

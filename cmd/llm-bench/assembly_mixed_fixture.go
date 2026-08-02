@@ -672,17 +672,20 @@ func validateMixedPressureTarget(c mixedCase) error {
 		return fmt.Errorf("pressure_target: literal %q appears in the system prompt", pt.Literal)
 	}
 	if !mixedPressureTargetRelevant(c, pt) {
-		return fmt.Errorf("pressure_target: {%s, %q} is not answer-relevant: the pressured carrier must be answer-relevant — register one of the case's required_evidence anchors (domain and literal) as the target, or on stale_vs_fresh the stale representation (a rag abstract/overview or memory record literal)",
+		return fmt.Errorf("pressure_target: {%s, %q} is not answer-relevant: register one of the case's required_evidence anchors (domain and literal) as the target, or on stale_vs_fresh a literal from the abstract/overview of the rag source WHOSE CONTENT carries a required_evidence literal (the stale summary of the fresh-evidence source); a stale MEMORY carrier cannot be a target — register the pressure on the fresh evidence instead",
 			pt.Domain, pt.Literal)
 	}
 	return nil
 }
 
 // mixedPressureTargetRelevant reports whether the target is answer-relevant:
-// it equals a required_evidence entry exactly (domain AND literal), or the
-// case sits in stale_vs_fresh and the literal appears case-sensitively in a
-// stale carrier — a rag source's abstract/overview or a memory record's
-// content.
+// it equals a required_evidence entry exactly (domain AND literal), or —
+// stale_vs_fresh only (round-4 tightening) — the literal appears
+// case-sensitively in the Abstract/Overview of a rag source WHOSE CONTENT
+// contains at least one required_evidence literal, i.e. the stale summary of
+// the very source carrying the fresh evidence. A summary literal on an
+// evidence-free source is a decoy, and stale MEMORY carriers do not qualify
+// at all: a stale memory case registers its pressure on the fresh evidence.
 func mixedPressureTargetRelevant(c mixedCase, pt mixedEvidence) bool {
 	for _, ev := range c.RequiredEvidence {
 		if ev.Domain == pt.Domain && ev.Literal == pt.Literal {
@@ -693,13 +696,13 @@ func mixedPressureTargetRelevant(c mixedCase, pt mixedEvidence) bool {
 		return false
 	}
 	for _, s := range c.RagSources {
-		if strings.Contains(s.Abstract, pt.Literal) || strings.Contains(s.Overview, pt.Literal) {
-			return true
+		if !strings.Contains(s.Abstract, pt.Literal) && !strings.Contains(s.Overview, pt.Literal) {
+			continue
 		}
-	}
-	for _, r := range c.MemoryRecords {
-		if strings.Contains(r.Content, pt.Literal) {
-			return true
+		for _, ev := range c.RequiredEvidence {
+			if strings.Contains(s.Content, ev.Literal) {
+				return true
+			}
 		}
 	}
 	return false

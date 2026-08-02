@@ -904,6 +904,12 @@ func TestMainWorksheetOutputAliasGuards(t *testing.T) {
 			[]string{"-adjudicate-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-labels", labelsPath, "-labels-out", labelsPath}},
 		{"dups-out aliasing artifacts", "-dups-out must differ from -artifacts",
 			[]string{"-blind-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-labels-out", filepath.Join(dir, "out.jsonl"), "-dups-out", artsPath}},
+		// Either blind-ingest output aliasing the loaded block map would
+		// truncate the run's only opaque-id join; both fire before any load.
+		{"labels-out aliasing blind-blockmap", "-labels-out must differ from -blind-blockmap",
+			[]string{"-blind-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-blind-blockmap", filepath.Join(dir, "bm.json"), "-labels-out", filepath.Join(dir, "bm.json")}},
+		{"dups-out aliasing blind-blockmap", "-dups-out must differ from -blind-blockmap",
+			[]string{"-blind-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-blind-blockmap", filepath.Join(dir, "bm.json"), "-labels-out", filepath.Join(dir, "out.jsonl"), "-dups-out", filepath.Join(dir, "bm.json")}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
