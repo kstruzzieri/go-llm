@@ -89,7 +89,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "Names the #dw-crow-watch channel as the destination for page escalations. Answers naming the general ops room or claiming the channel is only set in deployment config score 0."
+    "final_answer_criteria": "Names the #dw-crow-watch channel as the destination for page escalations. Answers naming the general ops room or claiming the channel is only set in deployment config score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "conv-pager-channel-mid",

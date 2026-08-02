@@ -54,7 +54,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "Control pair: the two arms are identical by construction. Any coherent recap of the template changes (trimmed to blockers, decisions, follow-ups; one-line decisions with links; posted and pinned) is acceptable; scores here measure decode and labeling noise, not assembly."
+    "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. Three changes were made: the template was trimmed to blockers, decisions, and follow-ups; decisions became one line per decision with a link; the template was posted and pinned in the team room. All three correctly recapped scores 1; exactly two scores 0.5; fewer than two, or any invented change, scores 0."
   },
   "assembly_eval": {
     "pair_id": "ctl-notes-recap",

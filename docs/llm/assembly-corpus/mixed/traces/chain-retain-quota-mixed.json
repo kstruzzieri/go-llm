@@ -73,7 +73,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "States the atlas tenant ingest quota is now 40 rps, per the stored memory note. Answers that only describe the tenants-file mechanism without the 40 rps figure score 0."
+    "final_answer_criteria": "States the atlas tenant ingest quota is now 40 rps. Answers that only describe the tenants-file mechanism without the 40 rps figure score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "chain-retain-quota",

@@ -30,7 +30,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "BOTH halves required: the nightly export kicks off at 02:15 UTC (from memory), AND each shard holds 250000 rows (exportShardRows, from retrieved code). Missing either half caps the score at 0.5."
+    "final_answer_criteria": "BOTH halves required: the nightly export kicks off at 02:15 UTC, AND each shard holds 250000 rows. A missing half caps the score at 0.5; a stated but incorrect half scores 0."
   },
   "assembly_eval": {
     "pair_id": "join-export-window",

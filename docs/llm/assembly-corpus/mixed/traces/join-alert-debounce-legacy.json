@@ -30,7 +30,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds (alertDebounce, from retrieved code), AND ops recorded a disk-pressure override of 150 seconds (from memory). Missing either half caps the score at 0.5."
+    "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds, AND the recorded disk-pressure override is 150 seconds. A missing half caps the score at 0.5; a stated but incorrect half scores 0."
   },
   "assembly_eval": {
     "pair_id": "join-alert-debounce",

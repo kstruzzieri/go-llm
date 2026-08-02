@@ -62,7 +62,7 @@
       "answer_turn_index": 0,
       "topline_facts": "The team agreed in conversation to hold the canary spool flush at 45 seconds through the weekend soak; the shipped default in internal/spool/spool.go stays at 30 seconds and profile overrides come from deployment config.",
       "golden": {
-        "final_answer_criteria": "States the canary spool flush cadence agreed in conversation is 45 seconds. The 30-second shipped default from the spool source is a distractor; answering 30 seconds (or twice a minute) scores 0."
+        "final_answer_criteria": "States the canary spool flush cadence is 45 seconds. Answering 30 seconds (or twice a minute, the shipped default) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -122,7 +122,7 @@
       "answer_turn_index": 4,
       "topline_facts": "The conversation settled page-escalation routing on the #dw-crow-watch channel, keeping the general ops room for non-paging chatter; the notifier itself reads its destination channel from deployment config.",
       "golden": {
-        "final_answer_criteria": "Names the #dw-crow-watch channel as the destination for page escalations. Answers naming the general ops room or claiming the channel is only set in deployment config score 0."
+        "final_answer_criteria": "Names the #dw-crow-watch channel as the destination for page escalations. Answers naming the general ops room or claiming the channel is only set in deployment config score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -185,7 +185,7 @@
       "answer_turn_index": 8,
       "topline_facts": "The conversation settled that freshly rotated ingest tokens carry the dwk2- prefix, with producers migrating before the edge flips preference; the auth code itself reads accepted prefixes from deployment config.",
       "golden": {
-        "final_answer_criteria": "States that freshly rotated ingest tokens carry the dwk2- prefix. Answers that only describe config-supplied prefixes without naming dwk2- score 0."
+        "final_answer_criteria": "States that rotated ingest tokens carry the dwk2- prefix. Answers that only describe config-supplied prefixes without naming dwk2- score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -243,7 +243,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "The stored memory note records that rotated ingest tokens carry the dwk2- prefix, with producers migrating first while legacy tokens drain; the auth code reads accepted prefixes from deployment config.",
       "golden": {
-        "final_answer_criteria": "States that rotated ingest tokens carry the dwk2- prefix, per the stored memory note. Answers that only describe config-supplied prefixes without naming dwk2- score 0."
+        "final_answer_criteria": "States that rotated ingest tokens carry the dwk2- prefix. Answers that only describe config-supplied prefixes without naming dwk2- score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -300,7 +300,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "The stored memory note records that the replay checkpoint cursor lives at spool/replay.cursor under the data directory, and that deleting it with the daemon running restarts replay from the oldest segment.",
       "golden": {
-        "final_answer_criteria": "States the replay checkpoint cursor lives at spool/replay.cursor (under the data directory), per the stored memory note. Answers that only say the cursor file is named by config score 0."
+        "final_answer_criteria": "States the replay checkpoint cursor lives at spool/replay.cursor (under the data directory). Answers that only say the cursor file is named by config score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -361,7 +361,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "Rotated ingest tokens carry the dwk2- prefix per the stored memory note, and internal/ingest/auth.go bounds the retiring generation with graceWindow = 72 * time.Hour after the flip.",
       "golden": {
-        "final_answer_criteria": "BOTH halves required: rotated ingest tokens carry the dwk2- prefix (from memory), AND the old-token grace window is 72 hours per graceWindow in internal/ingest/auth.go (from retrieved code). Missing either half caps the score at 0.5."
+        "final_answer_criteria": "BOTH halves required: rotated ingest tokens carry the dwk2- prefix, AND the old-token grace window is 72 hours. A missing half caps the score at 0.5; a stated but incorrect half scores 0."
       }
     },
     {
@@ -421,7 +421,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "internal/alert/rules.go sets the code default with alertDebounce = 90 * time.Second, and the stored memory note records that ops set the disk-pressure rule debounce override to 150 seconds after the flap storm.",
       "golden": {
-        "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds (alertDebounce, from retrieved code), AND ops recorded a disk-pressure override of 150 seconds (from memory). Missing either half caps the score at 0.5."
+        "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds, AND the recorded disk-pressure override is 150 seconds. A missing half caps the score at 0.5; a stated but incorrect half scores 0."
       }
     },
     {
@@ -481,7 +481,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "The stored memory note records the nightly export kicks off at 02:15 UTC after the warehouse maintenance window closes, and internal/export/parquet.go caps each shard with exportShardRows = 250000.",
       "golden": {
-        "final_answer_criteria": "BOTH halves required: the nightly export kicks off at 02:15 UTC (from memory), AND each shard holds 250000 rows (exportShardRows, from retrieved code). Missing either half caps the score at 0.5."
+        "final_answer_criteria": "BOTH halves required: the nightly export kicks off at 02:15 UTC, AND each shard holds 250000 rows. A missing half caps the score at 0.5; a stated but incorrect half scores 0."
       }
     },
     {
@@ -550,7 +550,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "internal/spool/spool.go now sets spoolMaxBytes = 512 << 20 (512 MiB per node), raised during the ingest surge work; the stored source summary still claims a 128 MiB cap and is stale.",
       "golden": {
-        "final_answer_criteria": "States the per-node spool ceiling is 512 MiB, per spoolMaxBytes = 512 << 20 in the retrieved source body. An answer of 128 MiB repeating the stale summary line scores 0."
+        "final_answer_criteria": "States the per-node spool ceiling is 512 MiB. 512 MiB, 512 << 20, and 536870912 bytes are equivalent correct forms. An answer of 128 MiB scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -615,7 +615,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "internal/alert/fanout.go sets fanoutWorkers = 12, widened after the pager consolidation load tests; the memory note claiming the fanout still runs 4 workers predates the widening and is stale.",
       "golden": {
-        "final_answer_criteria": "States the alert fanout runs 12 delivery workers, per fanoutWorkers = 12 in the retrieved source body. An answer of 4 workers following the stale memory note scores 0."
+        "final_answer_criteria": "States the alert fanout runs 12 delivery workers. An answer of 4 workers scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -667,7 +667,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "internal/retain/sweeper.go schedules retention passes with sweepEvery = 6 * time.Hour, and a pass that would overlap a still-running one defers rather than stacking.",
       "golden": {
-        "final_answer_criteria": "States the retention sweeper passes every 6 hours, per sweepEvery = 6 * time.Hour in the retrieved source body. The pasted log shows only a single pass and cannot yield the cadence; answers without the 6-hour figure score 0."
+        "final_answer_criteria": "States the retention sweeper passes every 6 hours. The pasted log shows only a single pass and cannot yield the cadence; answers without the 6-hour figure score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -727,7 +727,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "topline_facts": "The stored memory note records the atlas tenant quota lifted to 40 rps after their batching fix; the limiter code itself only resolves rates from the tenants file.",
       "golden": {
-        "final_answer_criteria": "States the atlas tenant ingest quota is now 40 rps, per the stored memory note. Answers that only describe the tenants-file mechanism without the 40 rps figure score 0."
+        "final_answer_criteria": "States the atlas tenant ingest quota is now 40 rps. Answers that only describe the tenants-file mechanism without the 40 rps figure score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
@@ -761,7 +761,7 @@
       "required_domains": ["conversation", "memory", "rag"],
       "answer_turn_index": 0,
       "golden": {
-        "final_answer_criteria": "Control pair: the two arms are identical by construction. Any coherent recap of the template changes (trimmed to blockers, decisions, follow-ups; one-line decisions with links; posted and pinned) is acceptable; scores here measure decode and labeling noise, not assembly."
+        "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. Three changes were made: the template was trimmed to blockers, decisions, and follow-ups; decisions became one line per decision with a link; the template was posted and pinned in the team room. All three correctly recapped scores 1; exactly two scores 0.5; fewer than two, or any invented change, scores 0."
       }
     }
   ]

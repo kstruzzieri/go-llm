@@ -48,7 +48,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "States the retention sweeper passes every 6 hours, per sweepEvery = 6 * time.Hour in the retrieved source body. The pasted log shows only a single pass and cannot yield the cadence; answers without the 6-hour figure score 0."
+    "final_answer_criteria": "States the retention sweeper passes every 6 hours. The pasted log shows only a single pass and cannot yield the cadence; answers without the 6-hour figure score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "chain-retain-sweep",

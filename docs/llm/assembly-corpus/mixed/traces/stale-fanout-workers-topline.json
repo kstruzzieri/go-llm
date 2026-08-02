@@ -12,7 +12,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "States the alert fanout runs 12 delivery workers, per fanoutWorkers = 12 in the retrieved source body. An answer of 4 workers following the stale memory note scores 0."
+    "final_answer_criteria": "States the alert fanout runs 12 delivery workers. An answer of 4 workers scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "stale-fanout-workers",
