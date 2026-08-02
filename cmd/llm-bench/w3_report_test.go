@@ -18,11 +18,29 @@ import (
 // parityFCSidemap builds a sidemap whose assignments EQUAL the legacy parity
 // rule for the given (pair, model) keys, so fixtures built around
 // fcSideIsLegacyA (fcRowFor, fcPairArtifacts) stay bindable while the code
-// under test resolves strictly through the map.
-func parityFCSidemap(model string, pairIDs ...string) fcSidemapFile {
+// under test resolves strictly through the map. W5: entries carry the arm
+// hashes in A/B order, derived from arts (the sidemap is the sidecar's only
+// hash carrier). An empty pairIDs list covers every complete pair in arts.
+func parityFCSidemap(arts []Artifact, model string, pairIDs ...string) fcSidemapFile {
+	want := map[string]bool{}
+	for _, p := range pairIDs {
+		want[p] = true
+	}
+	pairs, err := collectFCPairs(arts)
+	if err != nil {
+		panic("parityFCSidemap: " + err.Error())
+	}
 	m := fcSidemapFile{SchemaVersion: fcSidemapSchemaVersion, Pairs: map[string]fcSidemapEntry{}}
-	for _, pair := range pairIDs {
-		m.Pairs[fcSidemapKey(pair, model)] = fcSidemapEntry{LegacyIsA: fcSideIsLegacyA(pair, model)}
+	for _, p := range pairs {
+		if p.model != model || (len(pairIDs) > 0 && !want[p.pairID]) {
+			continue
+		}
+		legacyIsA := fcSideIsLegacyA(p.pairID, p.model)
+		hashA, hashB := p.legacy.ArtifactHash, p.mixed.ArtifactHash
+		if !legacyIsA {
+			hashA, hashB = hashB, hashA
+		}
+		m.Pairs[fcSidemapKey(p.pairID, p.model)] = fcSidemapEntry{LegacyIsA: legacyIsA, HashA: hashA, HashB: hashB}
 	}
 	return m
 }
@@ -33,8 +51,8 @@ func TestFCSidemapGenerateAndLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generateFCSidemap: %v", err)
 	}
-	if m.SchemaVersion != "fc-sidemap/v1" {
-		t.Errorf("schema_version = %q; want fc-sidemap/v1", m.SchemaVersion)
+	if m.SchemaVersion != "fc-sidemap/v2" {
+		t.Errorf("schema_version = %q; want fc-sidemap/v2", m.SchemaVersion)
 	}
 	if m.SealedDigest != "" {
 		t.Errorf("sealed_digest = %q; want empty (the seal is the printed file digest)", m.SealedDigest)
@@ -46,6 +64,22 @@ func TestFCSidemapGenerateAndLoad(t *testing.T) {
 	}
 	if len(m.Pairs) != 2 {
 		t.Errorf("sidemap pairs = %d; want exactly the 2 complete pairs", len(m.Pairs))
+	}
+	// W5: entries carry the arm hashes in A/B order — the assignment boolean
+	// and the hash order must agree, whichever way the coin landed.
+	armHashes := map[string][2]string{ // pair key -> {legacy, mixed}
+		"pair-alpha|c": {"sha256:al", "sha256:am"},
+		"pair-gamma|c": {"sha256:gl", "sha256:gm"},
+	}
+	for key, hashes := range armHashes {
+		e := m.Pairs[key]
+		wantA, wantB := hashes[0], hashes[1]
+		if !e.LegacyIsA {
+			wantA, wantB = wantB, wantA
+		}
+		if e.HashA != wantA || e.HashB != wantB {
+			t.Errorf("entry %q hashes = %q/%q; want %q/%q under legacy_is_a=%t", key, e.HashA, e.HashB, wantA, wantB, e.LegacyIsA)
+		}
 	}
 
 	path := filepath.Join(t.TempDir(), "sidemap.json")
@@ -95,6 +129,16 @@ func TestFCSidemapGenerateAndLoad(t *testing.T) {
 			t.Errorf("wrong schema version = %v; want a schema error", err)
 		}
 	})
+	t.Run("hash-free entry rejected at load", func(t *testing.T) {
+		bad := filepath.Join(t.TempDir(), "hashless.json")
+		body := `{"schema_version":"fc-sidemap/v2","pairs":{"p|c":{"legacy_is_a":true}},"sealed_digest":""}`
+		if err := os.WriteFile(bad, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := loadFCSidemap(bad); err == nil || !strings.Contains(err.Error(), "hash_a") {
+			t.Errorf("hash-free v2 entry = %v; want a missing-hash error", err)
+		}
+	})
 }
 
 func TestFCSidemapDigestVerification(t *testing.T) {
@@ -123,7 +167,7 @@ func TestFCSidemapDigestVerificationEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	sidemapPath := filepath.Join(dir, "sidemap.json")
-	digest, err := writeFCSidemap(sidemapPath, parityFCSidemap("c", "pair-alpha", "pair-beta", "pair-delta", "pair-gamma", "pair-ctl"))
+	digest, err := writeFCSidemap(sidemapPath, parityFCSidemap(arts, "c"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,61 +195,79 @@ func TestFCSidemapDigestVerificationEndToEnd(t *testing.T) {
 
 func TestFCRenderIngestRequireSidemapResolver(t *testing.T) {
 	arts := fcPairArtifacts()
-	if _, err := renderForcedChoiceWorksheet(arts, nil); err == nil || !strings.Contains(err.Error(), "fc-sidemap") {
-		t.Errorf("render without a resolver = %v; want the sidemap requirement", err)
+	if _, err := renderForcedChoiceWorksheet(arts, fcSidemapFile{}); err == nil || !strings.Contains(err.Error(), "fc-sidemap") {
+		t.Errorf("render without a sidemap = %v; want the sidemap requirement", err)
 	}
-	if _, _, err := ingestForcedChoiceWorksheet("", arts, "t", nil, false); err == nil || !strings.Contains(err.Error(), "fc-sidemap") {
-		t.Errorf("ingest without a resolver = %v; want the sidemap requirement", err)
+	if _, _, err := ingestForcedChoiceWorksheet("", arts, "t", fcSidemapFile{}, false); err == nil || !strings.Contains(err.Error(), "fc-sidemap") {
+		t.Errorf("ingest without a sidemap = %v; want the sidemap requirement", err)
 	}
 
 	// A sidemap missing one of the complete pairs aborts the render loudly.
-	partial := parityFCSidemap("c", "pair-alpha")
-	if _, err := renderForcedChoiceWorksheet(arts, partial.resolver()); err == nil || !strings.Contains(err.Error(), "pair-gamma") {
+	partial := parityFCSidemap(arts, "c", "pair-alpha")
+	if _, err := renderForcedChoiceWorksheet(arts, partial); err == nil || !strings.Contains(err.Error(), "pair-gamma") {
 		t.Errorf("render with a partial sidemap = %v; want a loud error naming pair-gamma", err)
 	}
 
 	// The map — not parity — decides sides: flip pair-alpha relative to
-	// parity (parity says legacy is A) and the mixed answer must render as A.
-	flipped := parityFCSidemap("c", "pair-alpha", "pair-gamma")
+	// parity (parity says legacy is A; hashes swap with the assignment) and
+	// the mixed answer must render as A.
+	flipped := parityFCSidemap(arts, "c", "pair-alpha", "pair-gamma")
 	entry := flipped.Pairs["pair-alpha|c"]
 	entry.LegacyIsA = !entry.LegacyIsA
+	entry.HashA, entry.HashB = entry.HashB, entry.HashA
 	flipped.Pairs["pair-alpha|c"] = entry
-	out, err := renderForcedChoiceWorksheet(arts, flipped.resolver())
+	out, err := renderForcedChoiceWorksheet(arts, flipped)
 	if err != nil {
 		t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 	}
-	if !strings.Contains(out, "=== PAIR pair-alpha c sha256:am sha256:al ===") {
+	alphaBlock := out[strings.Index(out, "=== PAIR pair-alpha c ==="):]
+	alphaBlock = alphaBlock[:strings.Index(alphaBlock, blindEndMarker)]
+	if !strings.Contains(alphaBlock, "[answer A]\nmixed alpha answer") {
 		t.Errorf("flipped sidemap did not flip pair-alpha sides:\n%s", out)
 	}
-	// Ingest under the SAME flipped map accepts the flipped hash order...
-	ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:am sha256:al ===", "prefer", "A")
-	if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", flipped.resolver(), false); err != nil {
+	// Ingest under the SAME flipped map accepts and binds the flipped order...
+	ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "A")
+	rows, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", flipped, false)
+	if err != nil {
 		t.Errorf("ingest under the rendering sidemap: %v", err)
+	} else if rows[0].ArtifactHashA != "sha256:am" || rows[0].ArtifactHashB != "sha256:al" {
+		t.Errorf("row hashes = %q/%q; want the flipped map's am/al order", rows[0].ArtifactHashA, rows[0].ArtifactHashB)
 	}
-	// ...and the parity resolver rejects it: the worksheet binds to its map.
-	if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", fcParityResolver, false); err == nil || !strings.Contains(err.Error(), "side assignment") {
-		t.Errorf("ingest under a different assignment = %v; want the hash-order rejection", err)
+	// ...while a map flipped WITHOUT swapping its hashes is internally
+	// inconsistent and rejected. The worksheet itself carries no hashes (W5),
+	// so ingest under a DIFFERENT self-consistent map cannot be detected
+	// structurally — the committed -fc-sidemap-digest is the registered guard
+	// that render and ingest used the same sealed map.
+	inconsistent := parityFCSidemap(arts, "c", "pair-alpha", "pair-gamma")
+	e2 := inconsistent.Pairs["pair-alpha|c"]
+	e2.LegacyIsA = !e2.LegacyIsA
+	inconsistent.Pairs["pair-alpha|c"] = e2
+	if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", inconsistent, false); err == nil || !strings.Contains(err.Error(), "side assignment") {
+		t.Errorf("ingest under an inconsistent map = %v; want the side-assignment rejection", err)
+	}
+	if _, err := renderForcedChoiceWorksheet(arts, inconsistent); err == nil || !strings.Contains(err.Error(), "side assignment") {
+		t.Errorf("render under an inconsistent map = %v; want the side-assignment rejection", err)
 	}
 }
 
 func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
 	arts := fcPairArtifacts()
-	sidemap := parityFCSidemap("c", "pair-alpha", "pair-gamma")
-	out, err := renderForcedChoiceWorksheet(arts, sidemap.resolver())
+	sidemap := parityFCSidemap(arts, "c", "pair-alpha", "pair-gamma")
+	out, err := renderForcedChoiceWorksheet(arts, sidemap)
 	if err != nil {
 		t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 	}
-	alphaHeader := "=== PAIR pair-alpha c sha256:al sha256:am ==="
-	gammaHeader := "=== PAIR pair-gamma c sha256:gm sha256:gl ==="
+	alphaHeader := "=== PAIR pair-alpha c ==="
+	gammaHeader := "=== PAIR pair-gamma c ==="
 
 	t.Run("require-complete lists blank pairs", func(t *testing.T) {
 		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
-		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), true)
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, true)
 		if err == nil || !strings.Contains(err.Error(), "pair-gamma/c") || !strings.Contains(err.Error(), "left blank") {
 			t.Errorf("require-complete on a half-filled worksheet = %v; want an error listing pair-gamma/c", err)
 		}
 		// Without the flag the same worksheet skips the blank block.
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), false)
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, false)
 		if err != nil || len(rows) != 1 || skipped != 1 {
 			t.Errorf("rows=%d skipped=%d err=%v; want 1/1/nil without the flag", len(rows), skipped, err)
 		}
@@ -215,7 +277,7 @@ func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
 		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
 		ws = fillWorksheetField(t, ws, alphaHeader, "arm_guess", "B")
 		ws = fillWorksheetField(t, ws, gammaHeader, "prefer", "tie")
-		rows, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), true)
+		rows, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, true)
 		if err != nil {
 			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
 		}
@@ -227,7 +289,7 @@ func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
 	t.Run("invalid arm_guess is a loud error", func(t *testing.T) {
 		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
 		ws = fillWorksheetField(t, ws, alphaHeader, "arm_guess", "legacy")
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), false); err == nil || !strings.Contains(err.Error(), "arm_guess") {
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap, false); err == nil || !strings.Contains(err.Error(), "arm_guess") {
 			t.Errorf("arm_guess legacy accepted = %v; want a loud domain error", err)
 		}
 	})
@@ -235,7 +297,7 @@ func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
 
 func TestAssemblyReportArmGuessAccuracy(t *testing.T) {
 	arts, labels := fcReportFixture()
-	sidemap := parityFCSidemap("c", "pair-alpha", "pair-beta", "pair-delta", "pair-gamma", "pair-ctl")
+	sidemap := parityFCSidemap(arts, "c")
 	// pair-alpha: legacy is A => a mixed-arm guess is "b"; pair-gamma: mixed
 	// is A => a mixed-arm guess is "a". One correct, one wrong, one blank.
 	alphaRow := fcRowFor(arts, "pair-alpha", "a")
@@ -318,9 +380,10 @@ func TestAssemblyReportArmGuessAccuracy(t *testing.T) {
 // back to parity would fail both arms of this test.
 func TestAssemblyReportSidemapReplacesParity(t *testing.T) {
 	arts, labels := fcReportFixture()
-	sidemap := parityFCSidemap("c", "pair-alpha")
+	sidemap := parityFCSidemap(arts, "c", "pair-alpha")
 	entry := sidemap.Pairs["pair-alpha|c"]
 	entry.LegacyIsA = !entry.LegacyIsA // parity says legacy is A; flip it
+	entry.HashA, entry.HashB = entry.HashB, entry.HashA
 	sidemap.Pairs["pair-alpha|c"] = entry
 
 	row := fcRowFor(arts, "pair-alpha", "a")
@@ -550,7 +613,7 @@ func TestLoadCaptureManifestForReport(t *testing.T) {
 func TestMainFCSidemapDigestGate(t *testing.T) {
 	dir := t.TempDir()
 	sidemapPath := filepath.Join(dir, "sidemap.json")
-	digest, err := writeFCSidemap(sidemapPath, parityFCSidemap("c", "pair-alpha"))
+	digest, err := writeFCSidemap(sidemapPath, parityFCSidemap(fcPairArtifacts(), "c", "pair-alpha"))
 	if err != nil {
 		t.Fatal(err)
 	}

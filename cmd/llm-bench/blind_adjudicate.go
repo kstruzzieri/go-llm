@@ -159,9 +159,11 @@ func ingestAdjudicationWorksheet(worksheet string, arts []Artifact, labels []Lab
 		return nil
 	}
 
-	grammar := worksheetGrammar{headerPrefix: "=== ARTIFACT ", fillMarker: blindFillMarker, fields: []string{"score", "reason"}}
+	// Adjudication blocks stay hash-addressed by design: this pass reveals
+	// the full prompt anyway, so an opaque id would hide nothing.
+	grammar := worksheetGrammar{headerPrefixes: []string{blindArtifactHeaderPrefix}, fillMarker: blindFillMarker, fields: []string{"score", "reason"}}
 	err := scanWorksheetBlocks(worksheet, grammar,
-		func(body string) error {
+		func(_, body string) error {
 			hash, score, reason = body, "", ""
 			return nil
 		},

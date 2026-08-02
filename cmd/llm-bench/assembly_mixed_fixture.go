@@ -503,6 +503,13 @@ func validateMixedCase(c mixedCase) error {
 	if !mixedStratumHomeOK(c.Stratum, c.AnswerHome) {
 		return fmt.Errorf("stratum %q does not permit answer_home %q", c.Stratum, c.AnswerHome)
 	}
+	// W5: every verdict pair must belong to a bootstrap cluster, so the
+	// family is mandatory at AUTHOR time on non-control cases — the report's
+	// missing-scenario-family exclusion stays as defense in depth. Controls
+	// never enter the verdict, so theirs stays optional.
+	if !c.Control && strings.TrimSpace(c.ScenarioFamily) == "" {
+		return fmt.Errorf("scenario_family is required on non-control cases (the cluster bootstrap resamples families; a family-free pair could only be excluded at report time)")
+	}
 	if err := validateMixedRequiredDomains(c.RequiredDomains); err != nil {
 		return err
 	}
@@ -625,9 +632,12 @@ func validateMixedCase(c mixedCase) error {
 // witness), mandatory on non-control cases, with a known domain, a non-blank
 // literal, and case-sensitive containment in that domain's fixture content
 // (the same scan as required_evidence containment, so on stale_vs_fresh a
-// stale rag abstract/overview literal counts). No further mechanical tie is
-// enforced; RECOMMENDED authoring is a required_evidence anchor or the stale
-// representation.
+// stale rag abstract/overview literal counts). W5 relevance rule: the target
+// must additionally EQUAL one of the case's required_evidence entries
+// (domain AND literal), or — on stale_vs_fresh only — appear case-
+// sensitively in a rag source's abstract/overview or a memory record's
+// content (the stale carrier); a target the answer never depends on lets
+// the carrier-change gate pass on answer-irrelevant shedding.
 func validateMixedPressureTarget(c mixedCase) error {
 	if c.Control {
 		if c.PressureTarget != nil {
@@ -661,7 +671,38 @@ func validateMixedPressureTarget(c mixedCase) error {
 	if strings.Contains(strings.ToLower(c.System), folded) {
 		return fmt.Errorf("pressure_target: literal %q appears in the system prompt", pt.Literal)
 	}
+	if !mixedPressureTargetRelevant(c, pt) {
+		return fmt.Errorf("pressure_target: {%s, %q} is not answer-relevant: the pressured carrier must be answer-relevant — register one of the case's required_evidence anchors (domain and literal) as the target, or on stale_vs_fresh the stale representation (a rag abstract/overview or memory record literal)",
+			pt.Domain, pt.Literal)
+	}
 	return nil
+}
+
+// mixedPressureTargetRelevant reports whether the target is answer-relevant:
+// it equals a required_evidence entry exactly (domain AND literal), or the
+// case sits in stale_vs_fresh and the literal appears case-sensitively in a
+// stale carrier — a rag source's abstract/overview or a memory record's
+// content.
+func mixedPressureTargetRelevant(c mixedCase, pt mixedEvidence) bool {
+	for _, ev := range c.RequiredEvidence {
+		if ev.Domain == pt.Domain && ev.Literal == pt.Literal {
+			return true
+		}
+	}
+	if c.Stratum != "stale_vs_fresh" {
+		return false
+	}
+	for _, s := range c.RagSources {
+		if strings.Contains(s.Abstract, pt.Literal) || strings.Contains(s.Overview, pt.Literal) {
+			return true
+		}
+	}
+	for _, r := range c.MemoryRecords {
+		if strings.Contains(r.Content, pt.Literal) {
+			return true
+		}
+	}
+	return false
 }
 
 // mixedStratumHomeOK is the PINNED stratum/answer_home coherence table.

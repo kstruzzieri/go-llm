@@ -527,11 +527,20 @@ func TestMixedPressureTargetGate(t *testing.T) {
 // the early filler sheds) must fail the whole build as pressure theater.
 func TestMixedPressureTargetGateEndToEnd(t *testing.T) {
 	p := mixedPressuredCase("theater-1")
+	// The target must be answer-relevant (W5), so the retained conversation
+	// turn is registered as a conversation anchor; stale_vs_fresh admits the
+	// join home and its topline quota (2) is met by the padding case below.
+	p.Stratum = "stale_vs_fresh"
+	p.RequiredEvidence = append(p.RequiredEvidence, mixedEvidence{Domain: "conversation", Literal: "gateway settings yesterday"})
 	p.PressureTarget = &mixedEvidence{Domain: "conversation", Literal: "gateway settings yesterday"}
+	p = withMixedFacts(p)
 	if err := validateMixedCase(p); err != nil {
 		t.Fatalf("theater fixture case invalid: %v", err)
 	}
-	raw, err := json.Marshal(mixedFixtureFor(p))
+	pad := mixedPressuredCase("theater-2")
+	pad.Stratum = "stale_vs_fresh"
+	pad = withMixedFacts(pad)
+	raw, err := json.Marshal(mixedFixtureFor(p, pad))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}

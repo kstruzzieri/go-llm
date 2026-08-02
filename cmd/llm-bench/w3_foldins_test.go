@@ -23,8 +23,11 @@ func TestMixedToplineQuotaFloor(t *testing.T) {
 
 	// A fixture with no eligible families anywhere never trips the floor
 	// (topline selection has nothing to select; the pre-label corpus gate
-	// owns global completeness).
-	if _, err := validateMixedFixture(mixedFixtureFor(mixedConvCase("qf-2"))); err != nil {
+	// owns global completeness). Controls are the only family-optional cases
+	// left now that scenario_family is mandatory on non-control cases.
+	ctl := mixedControlCase("qf-2")
+	ctl.ScenarioFamily = ""
+	if _, err := validateMixedFixture(mixedFixtureFor(ctl)); err != nil {
 		t.Errorf("family-free fixture = %v; want nil", err)
 	}
 }

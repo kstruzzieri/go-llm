@@ -20,10 +20,13 @@ import (
 
 func mixedConvCase(id string) mixedCase {
 	return mixedCase{
-		ID:         id,
-		Stratum:    "conversation_only",
-		AnswerHome: "conversation",
-		System:     "Answer using only the provided context.",
+		ID:      id,
+		Stratum: "conversation_only",
+		// W5: scenario_family is mandatory on non-control cases; the per-id
+		// singleton default keeps every helper case its own cluster.
+		ScenarioFamily: "fam-" + id,
+		AnswerHome:     "conversation",
+		System:         "Answer using only the provided context.",
 		Events: []mixedEvent{
 			{Turn: &mixedTurn{Role: "user", Content: "For the beta rollout we settled on flag-alpha-7 as the gate."}},
 			{Turn: &mixedTurn{Role: "assistant", Content: "Understood, I will keep that in mind."}},
@@ -135,6 +138,38 @@ func mixedFixtureFor(cases ...mixedCase) mixedFixture {
 	}
 }
 
+// withMixedFacts satisfies the registered topline placement mechanically for
+// fixture-level tests: facts restating every required literal (content is
+// irrelevant to validation beyond containment and non-blankness).
+func withMixedFacts(c mixedCase) mixedCase {
+	lits := make([]string, 0, len(c.RequiredEvidence))
+	for _, ev := range c.RequiredEvidence {
+		lits = append(lits, ev.Literal)
+	}
+	c.ToplineFacts = "Facts on record: " + strings.Join(lits, " and ") + "."
+	return c
+}
+
+// mixedConvQuorum returns quota-many conversation_only cases (distinct
+// per-id families, topline facts on each) so a fixture holding them clears
+// the conversation_only exact-quota floor with every family selected.
+func mixedConvQuorum(prefix string) []mixedCase {
+	out := make([]mixedCase, 0, mixedToplineConversationOnly)
+	for i := 1; i <= mixedToplineConversationOnly; i++ {
+		out = append(out, withMixedFacts(mixedConvCase(fmt.Sprintf("%s-%d", prefix, i))))
+	}
+	return out
+}
+
+// mixedMemQuorum is the memory_only twin of mixedConvQuorum (quota 2).
+func mixedMemQuorum(prefix string) []mixedCase {
+	out := make([]mixedCase, 0, mixedToplineMemoryOnly)
+	for i := 1; i <= mixedToplineMemoryOnly; i++ {
+		out = append(out, withMixedFacts(mixedMemCase(fmt.Sprintf("%s-%d", prefix, i))))
+	}
+	return out
+}
+
 func intPtr(v int) *int { return &v }
 
 func TestMixedFixtureParseDispatch(t *testing.T) {
@@ -159,7 +194,7 @@ func TestMixedFixtureParseDispatch(t *testing.T) {
 	})
 
 	t.Run("object routes to the mixed builder", func(t *testing.T) {
-		raw, err := json.Marshal(mixedFixtureFor(mixedConvCase("case-1")))
+		raw, err := json.Marshal(mixedFixtureFor(mixedConvQuorum("case")...))
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
@@ -253,7 +288,9 @@ func TestValidateMixedFixtureCorpus(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			f := mixedFixtureFor(mixedConvCase("case-1"), mixedMemCase("case-2"))
+			// Quorum-sized base: the W3 exact-quota floor requires each stratum
+			// with eligible families to hold its full topline quota.
+			f := mixedFixtureFor(append(mixedConvQuorum("case-c"), mixedMemQuorum("case-m")...)...)
 			tt.mutate(&f)
 			_, err := validateMixedFixture(f)
 			if tt.wantErr == "" {
@@ -301,6 +338,7 @@ func TestValidateMixedCase(t *testing.T) {
 				c.Stratum = "chain_retention"
 				c.AnswerHome = "rag"
 				c.RequiredEvidence = []mixedEvidence{{Domain: "rag", Literal: "04:00 UTC"}}
+				c.PressureTarget = &mixedEvidence{Domain: "rag", Literal: "04:00 UTC"}
 				return c
 			}(),
 		},
@@ -753,7 +791,7 @@ func TestValidateMixedCase(t *testing.T) {
 }
 
 func TestMixedFixtureBookkeeping(t *testing.T) {
-	early := mixedConvCase("bk-early")
+	early := withMixedFacts(mixedConvCase("bk-early"))
 	early.TwinGroup = "tw-pair"
 
 	late := mixedConvCase("bk-late")
@@ -766,24 +804,31 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 		late.Events[2],
 	}
 	late.AnswerTurnIndex = intPtr(2)
+	late = withMixedFacts(late)
 
-	mem := mixedMemCase("bk-mem")
+	// Third conversation family: the W3 exact-quota floor requires the full
+	// conversation_only topline quota once any family is eligible.
+	convPad := withMixedFacts(mixedConvCase("bk-pad"))
+
+	mem := withMixedFacts(mixedMemCase("bk-mem"))
 	mem.TwinGroup = "tw-pair"
+	memPad := withMixedFacts(mixedMemCase("bk-mem2"))
 
 	control := mixedControlCase("bk-control")
 
-	bk, err := validateMixedFixture(mixedFixtureFor(early, late, mem, control))
+	cases := []mixedCase{early, late, convPad, mem, memPad, control}
+	bk, err := validateMixedFixture(mixedFixtureFor(cases...))
 	if err != nil {
 		t.Fatalf("validateMixedFixture = %v; want nil", err)
 	}
-	if got := bk.stratumPrimary["conversation_only"]; got != 2 {
-		t.Errorf("conversation_only primary = %d; want 2", got)
+	if got := bk.stratumPrimary["conversation_only"]; got != 3 {
+		t.Errorf("conversation_only primary = %d; want 3", got)
 	}
 	if got := bk.stratumControls["conversation_only"]; got != 1 {
 		t.Errorf("conversation_only controls = %d; want 1", got)
 	}
-	if got := bk.stratumPrimary["memory_only"]; got != 1 {
-		t.Errorf("memory_only primary = %d; want 1", got)
+	if got := bk.stratumPrimary["memory_only"]; got != 2 {
+		t.Errorf("memory_only primary = %d; want 2", got)
 	}
 	if got := bk.stratumControls["memory_only"]; got != 0 {
 		t.Errorf("memory_only controls = %d; want 0", got)
@@ -791,18 +836,18 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 	if bk.controlCases != 1 {
 		t.Errorf("controlCases = %d; want 1", bk.controlCases)
 	}
-	if bk.toplineEligible != 3 {
-		t.Errorf("toplineEligible = %d; want 3", bk.toplineEligible)
+	if bk.toplineEligible != 5 {
+		t.Errorf("toplineEligible = %d; want 5", bk.toplineEligible)
 	}
-	if bk.answerThirds["early"] != 2 || bk.answerThirds["middle"] != 0 || bk.answerThirds["late"] != 1 {
-		t.Errorf("answerThirds = %v; want early=2 middle=0 late=1", bk.answerThirds)
+	if bk.answerThirds["early"] != 3 || bk.answerThirds["middle"] != 0 || bk.answerThirds["late"] != 1 {
+		t.Errorf("answerThirds = %v; want early=3 middle=0 late=1", bk.answerThirds)
 	}
 
 	// The mixed build path prints the bookkeeping summary and the built-state
 	// count before the arm build; these tiny cases retain everything under
 	// the minViable-floored budget, so the pressure-evidence gate then stops
 	// the build loudly.
-	raw, err := json.Marshal(mixedFixtureFor(early, late, mem, control))
+	raw, err := json.Marshal(mixedFixtureFor(cases...))
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -813,11 +858,11 @@ func TestMixedFixtureBookkeeping(t *testing.T) {
 	}
 	out := buf.String()
 	for _, want := range []string{
-		"mixed-assembly fixture: 4 case(s)",
-		"stratum conversation_only: primary=2 control=1",
-		"stratum memory_only: primary=1 control=0",
-		"early=2 middle=0 late=1",
-		"built 4 frozen state(s)",
+		"mixed-assembly fixture: 6 case(s)",
+		"stratum conversation_only: primary=3 control=1",
+		"stratum memory_only: primary=2 control=0",
+		"early=3 middle=0 late=1",
+		"built 6 frozen state(s)",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("summary missing %q; got:\n%s", want, out)
@@ -1001,10 +1046,15 @@ func TestMixedTwinContract(t *testing.T) {
 	}
 
 	// Valid: two twin pairs across conversation_only and memory_only, sharing
-	// the same rag paths and memory record ids.
+	// the same rag paths and memory record ids. Every non-control case
+	// carries topline facts and a third conversation family pads the fixture
+	// to the W3 exact quota floor (3 conversation, 2 memory).
 	a1, b1 := pair("tw-1", "twc-1", "twm-1")
 	a2, b2 := pair("tw-2", "twc-2", "twm-2")
-	if _, err := validateMixedFixture(mixedFixtureFor(a1, b1, a2, b2)); err != nil {
+	a1, b1 = withMixedFacts(a1), withMixedFacts(b1)
+	a2, b2 = withMixedFacts(a2), withMixedFacts(b2)
+	pad := withMixedFacts(mixedConvCase("twc-pad"))
+	if _, err := validateMixedFixture(mixedFixtureFor(a1, b1, a2, b2, pad)); err != nil {
 		t.Fatalf("valid twin pairs: err = %v; want nil", err)
 	}
 
@@ -1074,12 +1124,13 @@ func TestMixedTwinContract(t *testing.T) {
 
 func TestMixedControlStratumCap(t *testing.T) {
 	ctl := func(id string) mixedCase { return mixedControlCase(id) }
+	primaries := mixedConvQuorum("cc-p") // quota-satisfying non-control base
 	// Two controls in one stratum: legal.
-	if _, err := validateMixedFixture(mixedFixtureFor(mixedConvCase("cc-p"), ctl("cc-1"), ctl("cc-2"))); err != nil {
+	if _, err := validateMixedFixture(mixedFixtureFor(append(primaries, ctl("cc-1"), ctl("cc-2"))...)); err != nil {
 		t.Fatalf("two controls: err = %v; want nil", err)
 	}
 	// A third control in the same stratum: rejected.
-	_, err := validateMixedFixture(mixedFixtureFor(mixedConvCase("cc-p"), ctl("cc-1"), ctl("cc-2"), ctl("cc-3")))
+	_, err := validateMixedFixture(mixedFixtureFor(append(primaries, ctl("cc-1"), ctl("cc-2"), ctl("cc-3"))...))
 	if err == nil || !strings.Contains(err.Error(), "control") || !strings.Contains(err.Error(), "at most 2") {
 		t.Errorf("three controls in one stratum: err = %v; want the at-most-2 rejection", err)
 	}

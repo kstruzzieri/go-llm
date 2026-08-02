@@ -1,6 +1,9 @@
 package main
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"math"
@@ -22,33 +25,137 @@ const blindFillMarker = "--- fill below (score: 0 | 0.5 | 1) ---"
 // this literal, so it lives in one place.
 const blindEndMarker = "=== END ==="
 
+// Blind worksheet header prefixes. Non-promptless blocks stay hash-addressed
+// ("=== ARTIFACT <hash> ==="), byte-identical to the pre-3c grammar. W5:
+// promptless (legacy/mixed/topline) blocks are addressed by an OPAQUE id
+// instead ("=== BLOCK <opaqueID> ===") — an artifact hash in the header
+// joins the committed artifacts JSONL, whose AssemblyEval.Mode names the
+// arm, so a hash-headed promptless worksheet unblinds by inspection. The
+// opaque id resolves back to the hash only through the render-emitted block
+// map (-blind-blockmap-out / -blind-blockmap). The adjudication worksheet
+// deliberately keeps hashes: it reveals the full prompt anyway.
+const (
+	blindArtifactHeaderPrefix = "=== ARTIFACT "
+	blindBlockHeaderPrefix    = "=== BLOCK "
+)
+
+// blindBlockmapSchemaVersion pins the opaque block-map file schema (W5).
+const blindBlockmapSchemaVersion = "blind-blockmap/v1"
+
+// blindBlockmapFile is the sibling map a promptless -blind-render emits:
+// salt plus opaqueID -> artifact hash for every promptless block. It is the
+// ONLY join between worksheet BLOCK ids and artifacts, so -blind-ingest
+// requires it whenever the worksheet holds BLOCK headers.
+type blindBlockmapFile struct {
+	SchemaVersion string            `json:"schema_version"`
+	Salt          string            `json:"salt"`
+	Blocks        map[string]string `json:"blocks"`
+}
+
+// blindOpaqueID derives a block's opaque worksheet id:
+// sha256(artifactHash + "|" + salt), hex, truncated to 16 chars. The salt
+// keeps the id non-derivable from the artifact hash alone.
+func blindOpaqueID(artifactHash, salt string) string {
+	sum := sha256.Sum256([]byte(artifactHash + "|" + salt))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// newBlindBlockSalt draws a fresh random block salt (16 crypto/rand bytes,
+// hex).
+func newBlindBlockSalt() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("blind-blockmap: crypto/rand: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
+}
+
+// writeBlindBlockmap writes the opaque block map as indented JSON.
+func writeBlindBlockmap(path string, bm blindBlockmapFile) error {
+	raw, err := json.MarshalIndent(bm, "", "  ")
+	if err != nil {
+		return fmt.Errorf("blind-blockmap: marshal: %w", err)
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return fmt.Errorf("blind-blockmap: write: %w", err)
+	}
+	return nil
+}
+
+// loadBlindBlockmap reads and validates an opaque block map: schema version,
+// non-blank salt, non-empty blocks, and every id re-derivable from its hash
+// under the file's salt (a hand-edited or mismatched map cannot slip in).
+func loadBlindBlockmap(path string) (blindBlockmapFile, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return blindBlockmapFile{}, fmt.Errorf("blind-blockmap: read %q: %w", path, err)
+	}
+	var bm blindBlockmapFile
+	if err := json.Unmarshal(raw, &bm); err != nil {
+		return blindBlockmapFile{}, fmt.Errorf("blind-blockmap: decode %q: %w", path, err)
+	}
+	if bm.SchemaVersion != blindBlockmapSchemaVersion {
+		return blindBlockmapFile{}, fmt.Errorf("blind-blockmap: %q schema_version %q (want %q)", path, bm.SchemaVersion, blindBlockmapSchemaVersion)
+	}
+	if strings.TrimSpace(bm.Salt) == "" {
+		return blindBlockmapFile{}, fmt.Errorf("blind-blockmap: %q has a blank salt", path)
+	}
+	if len(bm.Blocks) == 0 {
+		return blindBlockmapFile{}, fmt.Errorf("blind-blockmap: %q has no blocks", path)
+	}
+	for id, hash := range bm.Blocks {
+		if want := blindOpaqueID(hash, bm.Salt); id != want {
+			return blindBlockmapFile{}, fmt.Errorf("blind-blockmap: %q block id %q does not derive from its hash under the file's salt (want %q); the map is corrupt or hand-edited", path, id, want)
+		}
+	}
+	return bm, nil
+}
+
 // worksheetGrammar describes one worksheet block dialect for
-// scanWorksheetBlocks: the header prefix that opens a block, the fill marker
-// that opens the human-fill region, and the recognized fill-region fields.
+// scanWorksheetBlocks: the header prefixes that open a block (the blind
+// grammar has two — hash-addressed ARTIFACT blocks and opaque-ID BLOCK
+// blocks), the fill marker that opens the human-fill region, and the
+// recognized fill-region fields.
 type worksheetGrammar struct {
-	headerPrefix string
-	fillMarker   string
-	fields       []string
+	headerPrefixes []string
+	fillMarker     string
+	fields         []string
+}
+
+// matchHeader reports the first grammar header prefix line starts with.
+func (g worksheetGrammar) matchHeader(line string) (string, bool) {
+	for _, p := range g.headerPrefixes {
+		if strings.HasPrefix(line, p) {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 // scanWorksheetBlocks is the single block scanner behind all three worksheet
 // parsers (blind, forced-choice, adjudication). Line rules: outside a block,
-// only a headerPrefix line opens one — so a forged header inside candidate
+// only a header-prefix line opens one — so a forged header inside candidate
 // output or an answer can never split a block; inside a block nothing is read
 // until fillMarker; inside the fill region every non-blank line must start
 // with a recognized field (loud error naming the block otherwise — this
 // catches multi-line notes/reason continuations, leading spaces, and
 // capitalized field typos that would otherwise silently drop data); a
 // blindEndMarker line flushes the block, and a block still open at end of
-// input is flushed once.
-func scanWorksheetBlocks(text string, g worksheetGrammar, open func(headerBody string) error, setField func(field, value string), flush func() error) error {
+// input is flushed once. open receives the matched prefix alongside the
+// header body so a two-prefix grammar can tell its block kinds apart.
+func scanWorksheetBlocks(text string, g worksheetGrammar, open func(prefix, body string) error, setField func(field, value string), flush func() error) error {
 	inBlock, afterMarker := false, false
 	blockID := ""
 	for _, line := range strings.Split(text, "\n") {
+		prefix, isHeader := "", false
+		if !inBlock {
+			prefix, isHeader = g.matchHeader(line)
+		}
 		switch {
-		case !inBlock && strings.HasPrefix(line, g.headerPrefix):
-			body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, g.headerPrefix), " ==="))
-			if err := open(body); err != nil {
+		case !inBlock && isHeader:
+			body := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(line, prefix), " ==="))
+			if err := open(prefix, body); err != nil {
 				return err
 			}
 			blockID = body
@@ -124,7 +231,12 @@ func blindDupSummary(pairs []blindDupPair) (agree, disagree int, meanAbsDelta fl
 
 // ingestBlindWorksheet parses a filled blind worksheet, rejoining trace_id +
 // candidate_model from arts on artifact_hash (R-D3 — the untouched artifacts
-// file is the join key, so no separate restore map). Blocks with a blank score
+// file is the join key, so no separate restore map). W5: promptless blocks
+// are opaque-ID addressed ("=== BLOCK <id> ==="); their hash resolves
+// through blockmap (-blind-blockmap), which is REQUIRED the moment any BLOCK
+// header appears — an unknown id, a BLOCK id resolving to a non-promptless
+// artifact, or an ARTIFACT header naming a promptless artifact (a pre-W5,
+// unblinded worksheet) are loud errors. Blocks with a blank score
 // are skipped (partial labeling allowed) and counted. A score outside
 // {0, 0.5, 1.0}, duplicate worksheet block, or hash absent from arts is a loud
 // error. labeler and labeled_at are stamped on every emitted label.
@@ -140,7 +252,7 @@ func blindDupSummary(pairs []blindDupPair) (agree, disagree int, meanAbsDelta fl
 // The block parser only recognizes "=== ARTIFACT " while outside a block, so
 // candidate output can contain worksheet-looking sentinel text without stealing
 // the human-entered score from the real artifact block.
-func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (blindIngestResult, error) {
+func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string, blockmap *blindBlockmapFile) (blindIngestResult, error) {
 	var res blindIngestResult
 	artByHash := make(map[string]Artifact, len(arts))
 	for _, a := range arts {
@@ -148,7 +260,7 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (bl
 	}
 
 	var hash, score, notes, flagVal string
-	isDup := false
+	isDup, isOpaque := false, false
 	seenWorksheetHash := map[string]struct{}{}
 	seenDupHash := map[string]struct{}{}
 	primaryScore := map[string]float64{}
@@ -159,11 +271,21 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (bl
 			return nil
 		}
 		defer func() {
-			hash, score, notes, flagVal, isDup = "", "", "", "", false
+			hash, score, notes, flagVal, isDup, isOpaque = "", "", "", "", false, false
 		}()
 		a, ok := artByHash[hash]
 		if !ok {
 			return fmt.Errorf("worksheet references unknown artifact_hash %q (not in -artifacts)", hash)
+		}
+		// Header-kind / artifact-kind coherence: promptless artifacts are
+		// worksheet-addressed by opaque BLOCK id only (a hash-headed
+		// promptless block is a pre-W5 worksheet, unblinded by inspection),
+		// and a BLOCK id must resolve to a promptless artifact.
+		if promptless := prefilledAssemblyMode(a.Trace); promptless != isOpaque {
+			if isOpaque {
+				return fmt.Errorf("BLOCK id resolves to non-promptless artifact %q; the block map is stale or mismatched", hash)
+			}
+			return fmt.Errorf("worksheet addresses promptless artifact %q by hash; promptless blocks are opaque BLOCK blocks (re-render the worksheet)", hash)
 		}
 		flag := strings.TrimSpace(flagVal)
 		if isDup {
@@ -235,11 +357,27 @@ func ingestBlindWorksheet(worksheet string, arts []Artifact, labeler string) (bl
 		return nil
 	}
 
-	grammar := worksheetGrammar{headerPrefix: "=== ARTIFACT ", fillMarker: blindFillMarker, fields: []string{"score", "notes", "flag"}}
+	grammar := worksheetGrammar{
+		headerPrefixes: []string{blindArtifactHeaderPrefix, blindBlockHeaderPrefix},
+		fillMarker:     blindFillMarker,
+		fields:         []string{"score", "notes", "flag"},
+	}
 	err := scanWorksheetBlocks(worksheet, grammar,
-		func(body string) error {
+		func(prefix, body string) error {
 			isDup = strings.HasSuffix(body, " DUP")
-			hash = strings.TrimSpace(strings.TrimSuffix(body, " DUP"))
+			isOpaque = prefix == blindBlockHeaderPrefix
+			id := strings.TrimSpace(strings.TrimSuffix(body, " DUP"))
+			if isOpaque {
+				if blockmap == nil {
+					return fmt.Errorf("worksheet holds opaque BLOCK blocks; -blind-blockmap (the render-emitted block map) is required to join them")
+				}
+				resolved, ok := blockmap.Blocks[id]
+				if !ok {
+					return fmt.Errorf("worksheet BLOCK id %q is not in the block map (wrong -blind-blockmap for this worksheet?)", id)
+				}
+				id = resolved
+			}
+			hash = id
 			score, notes, flagVal = "", "", ""
 			return nil
 		},
@@ -299,9 +437,15 @@ func parseBlindScore(s string) (float64, error) {
 // Prefilled-mode blocks (legacy/mixed/topline, #331 slice 3c) are PROMPTLESS:
 // they render [question] (the trace's final user turn) instead of [prompt] —
 // zero prompt bytes reach the primary labeler — and their fill region gains an
-// optional flag: line for marking a block grounding-check. Non-assembly and 3a
-// flat/progressive blocks stay byte-identical to the pre-3c rendering,
-// [prompt] sections included.
+// optional flag: line for marking a block grounding-check. W5: promptless
+// blocks are additionally addressed by OPAQUE id ("=== BLOCK <id> ===",
+// id = blindOpaqueID(hash, salt)) instead of the artifact hash — a header
+// hash joins the committed artifacts JSONL and names the arm — and the
+// returned block map (nil when no promptless block rendered) is the only
+// id->hash join; the caller MUST persist it (-blind-blockmap-out) for
+// ingest. salt "" draws a fresh random salt; tests pass a fixed one for
+// deterministic worksheets. Non-assembly and 3a flat/progressive blocks stay
+// byte-identical to the pre-3c rendering, [prompt] sections included.
 //
 // dupN > 0 appends that many DUP blocks (intra-rater controls) AFTER all
 // primary blocks: eligible artifacts (legacy/mixed only) sorted by hash,
@@ -317,7 +461,7 @@ func parseBlindScore(s string) (float64, error) {
 // line, so the ingest parser is responsible for not mis-splitting on a sentinel
 // embedded in candidate output; its unknown-artifact_hash check is the loud
 // backstop.
-func renderBlindWorksheet(arts []Artifact, dupN int) (string, error) {
+func renderBlindWorksheet(arts []Artifact, dupN int, salt string) (string, *blindBlockmapFile, error) {
 	ordered := make([]Artifact, len(arts))
 	copy(ordered, arts)
 	sort.SliceStable(ordered, func(i, j int) bool {
@@ -336,7 +480,7 @@ func renderBlindWorksheet(arts []Artifact, dupN int) (string, error) {
 	})
 	dups, err := selectBlindDups(ordered, dupN)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	hasPromptless := false
 	for _, a := range ordered {
@@ -348,7 +492,28 @@ func renderBlindWorksheet(arts []Artifact, dupN int) (string, error) {
 		// turn is not the user question (hand-built or corrupt artifact), the
 		// block would leak prompt bytes into the primary pass.
 		if turns := a.Trace.Turns; len(turns) == 0 || turns[len(turns)-1].Role != "user" {
-			return "", fmt.Errorf("promptless artifact %s: final turn must be a user question (worksheet would leak prompt bytes otherwise)", a.ArtifactHash)
+			return "", nil, fmt.Errorf("promptless artifact %s: final turn must be a user question (worksheet would leak prompt bytes otherwise)", a.ArtifactHash)
+		}
+	}
+	var bm *blindBlockmapFile
+	if hasPromptless {
+		if salt == "" {
+			if salt, err = newBlindBlockSalt(); err != nil {
+				return "", nil, err
+			}
+		}
+		bm = &blindBlockmapFile{SchemaVersion: blindBlockmapSchemaVersion, Salt: salt, Blocks: map[string]string{}}
+		for _, a := range ordered {
+			if !prefilledAssemblyMode(a.Trace) {
+				continue
+			}
+			id := blindOpaqueID(a.ArtifactHash, salt)
+			if prev, dup := bm.Blocks[id]; dup && prev != a.ArtifactHash {
+				// 64-bit truncated ids make this astronomically unlikely; a
+				// re-render draws a fresh salt.
+				return "", nil, fmt.Errorf("opaque block id collision between %s and %s; re-run -blind-render to draw a new salt", prev, a.ArtifactHash)
+			}
+			bm.Blocks[id] = a.ArtifactHash
 		}
 	}
 
@@ -365,35 +530,44 @@ func renderBlindWorksheet(arts []Artifact, dupN int) (string, error) {
 		fmt.Fprintln(&b, "# Blocks that show a [question] instead of a prompt are promptless: judge the")
 		fmt.Fprintln(&b, "# [candidate output] against the [question] and [rubric] alone. Their optional")
 		fmt.Fprintln(&b, "# flag: line marks a block for the prompt-visible adjudication pass — write")
-		fmt.Fprintln(&b, "# grounding-check to flag it, or leave it blank.")
+		fmt.Fprintln(&b, "# grounding-check to flag it, or leave it blank. Promptless blocks carry an")
+		fmt.Fprintln(&b, "# opaque id; pass the render-emitted block map to ingest via -blind-blockmap.")
 	}
 	if len(dups) > 0 {
-		fmt.Fprintln(&b, "# ARTIFACT blocks marked DUP are intra-rater duplicates: score them")
+		// Dup-eligible artifacts are legacy/mixed only, i.e. promptless BLOCK
+		// blocks — so this doc line names BLOCK, and it may not contain the
+		// literal " DUP ===" (the whole-worksheet DUP grammar is asserted).
+		fmt.Fprintln(&b, "# BLOCK blocks marked DUP are intra-rater duplicates: score them")
 		fmt.Fprintln(&b, "# independently; DUP scores never become labels.")
 	}
 	fmt.Fprintln(&b, "# Then run: llm-bench -blind-ingest -worksheet <this file> -artifacts <artifacts.jsonl> -labels-out <labels.jsonl>")
 	fmt.Fprintln(&b)
 	for _, a := range ordered {
-		writeBlindBlock(&b, a, false)
+		writeBlindBlock(&b, a, false, bm)
 	}
 	for _, a := range dups {
-		writeBlindBlock(&b, a, true)
+		writeBlindBlock(&b, a, true, bm)
 	}
-	return redactPaths(b.String()), nil
+	return redactPaths(b.String()), bm, nil
 }
 
 // writeBlindBlock renders one worksheet block. Promptless (prefilled-mode)
-// artifacts get [question] + a flag: fill line; everything else keeps the
-// pre-3c [prompt] body byte-for-byte. DUP blocks reuse the promptless body
-// under the DUP header minus the flag: line (only legacy/mixed artifacts are
-// dup-eligible, and flags belong on the primary block).
-func writeBlindBlock(b *strings.Builder, a Artifact, dup bool) {
-	if dup {
-		fmt.Fprintf(b, "=== ARTIFACT %s DUP ===\n", a.ArtifactHash)
-	} else {
-		fmt.Fprintf(b, "=== ARTIFACT %s ===\n", a.ArtifactHash)
-	}
+// artifacts get an opaque BLOCK header (W5), [question], and a flag: fill
+// line; everything else keeps the pre-3c hash-addressed [prompt] body
+// byte-for-byte. DUP blocks reuse the promptless body under the DUP header
+// minus the flag: line (only legacy/mixed artifacts are dup-eligible, and
+// flags belong on the primary block).
+func writeBlindBlock(b *strings.Builder, a Artifact, dup bool, bm *blindBlockmapFile) {
 	promptless := prefilledAssemblyMode(a.Trace)
+	header := blindArtifactHeaderPrefix + a.ArtifactHash
+	if promptless {
+		header = blindBlockHeaderPrefix + blindOpaqueID(a.ArtifactHash, bm.Salt)
+	}
+	if dup {
+		fmt.Fprintf(b, "%s DUP ===\n", header)
+	} else {
+		fmt.Fprintf(b, "%s ===\n", header)
+	}
 	if promptless {
 		fmt.Fprintln(b, "[question]")
 		fmt.Fprintln(b, strings.TrimSpace(blindQuestion(a.Trace)))

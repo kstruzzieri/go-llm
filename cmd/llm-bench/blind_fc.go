@@ -6,8 +6,11 @@ package main
 // NOT written into the rows so the sidecar stays blind-stable on disk: side
 // assignment comes from the sealed random side map (-fc-sidemap, W3 —
 // REQUIRED on render and ingest), whose committed digest seals it before
-// labeling. fcSideIsLegacyA remains ONLY as the report's default resolver
-// for pre-sidemap worksheets.
+// labeling. W5: the sidemap is also the ONLY hash carrier — worksheet PAIR
+// headers carry pairID and modelKey alone, because a header hash joins the
+// committed artifacts JSONL (whose AssemblyEval.Mode names the arm) and
+// unblinds without the map. fcSideIsLegacyA remains ONLY as the report's
+// default resolver for pre-sidemap worksheets.
 
 import (
 	"crypto/rand"
@@ -67,11 +70,15 @@ func fcParityResolver(pairID, modelKey string) (bool, error) {
 	return fcSideIsLegacyA(pairID, modelKey), nil
 }
 
-// fcSidemapSchemaVersion pins the sealed side-map file schema (#331 W3).
-const fcSidemapSchemaVersion = "fc-sidemap/v1"
+// fcSidemapSchemaVersion pins the sealed side-map file schema. v2 (#331 W5)
+// adds hash_a/hash_b per pair: the sidemap became the sidecar's ONLY hash
+// carrier when worksheet headers went hash-free, so a v1 map can no longer
+// drive render or ingest and is rejected at load.
+const fcSidemapSchemaVersion = "fc-sidemap/v2"
 
 // fcSidemapFile is the sealed random side map: one crypto/rand boolean per
-// complete legacy/mixed pair, keyed "<pairID>|<modelKey>". SealedDigest is
+// complete legacy/mixed pair, keyed "<pairID>|<modelKey>", plus the two arm
+// artifact hashes in the A/B order that boolean dictates. SealedDigest is
 // written empty — the seal is the file's OWN sha256, printed at generation
 // time for the operator to commit BEFORE labeling and to verify at report
 // time via -fc-sidemap-digest.
@@ -81,16 +88,32 @@ type fcSidemapFile struct {
 	SealedDigest  string                    `json:"sealed_digest"`
 }
 
+// fcSidemapEntry is one pair's sealed assignment: which arm renders as
+// answer A, and the artifact hashes in A/B order (HashA is the legacy arm's
+// hash iff LegacyIsA).
 type fcSidemapEntry struct {
-	LegacyIsA bool `json:"legacy_is_a"`
+	LegacyIsA bool   `json:"legacy_is_a"`
+	HashA     string `json:"hash_a"`
+	HashB     string `json:"hash_b"`
 }
 
 func fcSidemapKey(pairID, modelKey string) string {
 	return pairID + "|" + modelKey
 }
 
+// entry resolves one pair's sealed assignment; a pair absent from the map is
+// a loud error, never a fallback.
+func (m fcSidemapFile) entry(pairID, modelKey string) (fcSidemapEntry, error) {
+	e, ok := m.Pairs[fcSidemapKey(pairID, modelKey)]
+	if !ok {
+		return fcSidemapEntry{}, fmt.Errorf("fc-sidemap has no entry for pair %q model %q (regenerate the sidemap over the current artifacts)", pairID, modelKey)
+	}
+	return e, nil
+}
+
 // generateFCSidemap builds the sealed random side map over the complete
-// legacy/mixed pairs of arts, one crypto/rand boolean each.
+// legacy/mixed pairs of arts, one crypto/rand boolean each, recording each
+// pair's arm hashes in the drawn A/B order.
 func generateFCSidemap(arts []Artifact) (fcSidemapFile, error) {
 	pairs, err := collectFCPairs(arts)
 	if err != nil {
@@ -105,7 +128,12 @@ func generateFCSidemap(arts []Artifact) (fcSidemapFile, error) {
 	}
 	m := fcSidemapFile{SchemaVersion: fcSidemapSchemaVersion, Pairs: make(map[string]fcSidemapEntry, len(pairs))}
 	for i, p := range pairs {
-		m.Pairs[fcSidemapKey(p.pairID, p.model)] = fcSidemapEntry{LegacyIsA: random[i]&1 == 1}
+		legacyIsA := random[i]&1 == 1
+		hashA, hashB := p.legacy.ArtifactHash, p.mixed.ArtifactHash
+		if !legacyIsA {
+			hashA, hashB = hashB, hashA
+		}
+		m.Pairs[fcSidemapKey(p.pairID, p.model)] = fcSidemapEntry{LegacyIsA: legacyIsA, HashA: hashA, HashB: hashB}
 	}
 	return m, nil
 }
@@ -143,6 +171,16 @@ func loadFCSidemap(path string) (fcSidemapFile, fcSideResolver, string, error) {
 	if len(m.Pairs) == 0 {
 		return fcSidemapFile{}, nil, "", fmt.Errorf("fc-sidemap: %q has no pairs", path)
 	}
+	// v2 entries carry the pair's arm hashes (the only hash carrier for the
+	// forced-choice flow); a blank or duplicated hash cannot join anything.
+	for key, e := range m.Pairs {
+		if strings.TrimSpace(e.HashA) == "" || strings.TrimSpace(e.HashB) == "" {
+			return fcSidemapFile{}, nil, "", fmt.Errorf("fc-sidemap: %q entry %q is missing hash_a/hash_b (regenerate with -fc-sidemap-generate)", path, key)
+		}
+		if e.HashA == e.HashB {
+			return fcSidemapFile{}, nil, "", fmt.Errorf("fc-sidemap: %q entry %q has identical hash_a and hash_b", path, key)
+		}
+	}
 	sum := sha256.Sum256(raw)
 	return m, m.resolver(), hex.EncodeToString(sum[:]), nil
 }
@@ -152,9 +190,9 @@ func loadFCSidemap(path string) (fcSidemapFile, fcSideResolver, string, error) {
 // a stale sidemap unblind or mis-assign new pairs.
 func (m fcSidemapFile) resolver() fcSideResolver {
 	return func(pairID, modelKey string) (bool, error) {
-		e, ok := m.Pairs[fcSidemapKey(pairID, modelKey)]
-		if !ok {
-			return false, fmt.Errorf("fc-sidemap has no entry for pair %q model %q (regenerate the sidemap over the current artifacts)", pairID, modelKey)
+		e, err := m.entry(pairID, modelKey)
+		if err != nil {
+			return false, err
 		}
 		return e.LegacyIsA, nil
 	}
@@ -270,17 +308,18 @@ func collectFCPairs(arts []Artifact) ([]fcPair, error) {
 }
 
 // renderForcedChoiceWorksheet emits one A/B block per complete legacy/mixed
-// pair. The header line carries pairID, modelKey, and BOTH artifact hashes
-// (hashA then hashB) for the ingest join — hashes do not leak arm identity
-// because the side assignment lives only in the sealed sidemap the resolver
-// wraps. The question is the final turn content, identical across arms by
-// construction; a mismatch is fixture corruption and a loud error. No mode
-// names appear anywhere. resolve is REQUIRED (W3: the parity fallback is
-// retired for new worksheets); a pair the resolver cannot place is a loud
+// pair. The header line carries pairID and modelKey ONLY (W5): a header hash
+// would join the committed artifacts JSONL, whose AssemblyEval.Mode names
+// the arm, and unblind the block without the sealed map — so the sidemap is
+// the sole hash carrier and the ingest join runs through it. The question is
+// the final turn content, identical across arms by construction; a mismatch
+// is fixture corruption and a loud error. No mode names or hashes appear
+// anywhere. sidemap is REQUIRED; a pair it cannot place, or an entry whose
+// hashes disagree with the pair's arms under its own assignment, is a loud
 // error.
-func renderForcedChoiceWorksheet(arts []Artifact, resolve fcSideResolver) (string, error) {
-	if resolve == nil {
-		return "", fmt.Errorf("forced-choice: render requires a side resolver (-fc-sidemap)")
+func renderForcedChoiceWorksheet(arts []Artifact, sidemap fcSidemapFile) (string, error) {
+	if len(sidemap.Pairs) == 0 {
+		return "", fmt.Errorf("forced-choice: render requires the sealed side map (-fc-sidemap)")
 	}
 	pairs, err := collectFCPairs(arts)
 	if err != nil {
@@ -306,22 +345,29 @@ func renderForcedChoiceWorksheet(arts []Artifact, resolve fcSideResolver) (strin
 		if question != strings.TrimSpace(blindQuestion(p.mixed.Trace)) {
 			return "", fmt.Errorf("forced-choice: pair %q model %q: question differs across arms (fixture corruption)", p.pairID, p.model)
 		}
-		legacyIsA, err := resolve(p.pairID, p.model)
+		e, err := sidemap.entry(p.pairID, p.model)
 		if err != nil {
 			return "", fmt.Errorf("forced-choice: %w", err)
 		}
 		sideA, sideB := p.legacy, p.mixed
-		if !legacyIsA {
+		if !e.LegacyIsA {
 			sideA, sideB = p.mixed, p.legacy
+		}
+		// Integrity: the sealed entry's hashes must be exactly this pair's arm
+		// hashes in its own A/B order — a mismatch means the sidemap was
+		// generated over different artifacts (or hand-edited).
+		if e.HashA != sideA.ArtifactHash || e.HashB != sideB.ArtifactHash {
+			return "", fmt.Errorf("forced-choice: pair %q model %q: sidemap hashes %q/%q disagree with the pair's arms under its registered side assignment (want %q/%q); regenerate the sidemap over the current artifacts",
+				p.pairID, p.model, e.HashA, e.HashB, sideA.ArtifactHash, sideB.ArtifactHash)
 		}
 		// The PAIR header is space-delimited: any whitespace inside a field
 		// would shift the ingest join columns, so refuse it at render time.
-		for _, part := range []string{p.pairID, p.model, sideA.ArtifactHash, sideB.ArtifactHash} {
+		for _, part := range []string{p.pairID, p.model} {
 			if part == "" || strings.ContainsAny(part, " \t\r\n") {
 				return "", fmt.Errorf("forced-choice: pair %q model %q: header field %q is empty or contains whitespace (the PAIR header is space-delimited)", p.pairID, p.model, part)
 			}
 		}
-		fmt.Fprintf(&b, "=== PAIR %s %s %s %s ===\n", p.pairID, p.model, sideA.ArtifactHash, sideB.ArtifactHash)
+		fmt.Fprintf(&b, "=== PAIR %s %s ===\n", p.pairID, p.model)
 		fmt.Fprintln(&b, "[question]")
 		fmt.Fprintln(&b, question)
 		fmt.Fprintln(&b)
@@ -344,18 +390,20 @@ func renderForcedChoiceWorksheet(arts []Artifact, resolve fcSideResolver) (strin
 }
 
 // ingestForcedChoiceWorksheet parses a filled forced-choice worksheet into
-// sidecar rows, validating every block against arts: unknown hashes, artifacts
-// that do not belong to the header's (pair, model), hash order disagreeing
-// with the resolver's side assignment, an invalid prefer: or arm_guess:
-// value, or a duplicate pair block are loud errors. A blank prefer: skips
-// the block (partial labeling allowed) and is counted — unless
+// sidecar rows, resolving each block's A/B artifact hashes from the sealed
+// sidemap (W5: the worksheet carries none) and validating every block
+// against arts: a pair absent from the sidemap, sidemap hashes absent from
+// the artifacts or not belonging to the header's (pair, model), sidemap
+// hashes disagreeing with its own side assignment, an invalid prefer: or
+// arm_guess: value, or a duplicate pair block are loud errors. A blank
+// prefer: skips the block (partial labeling allowed) and is counted — unless
 // requireComplete is set (the registered workflow), which turns ANY blank
-// prefer: into a loud error listing the unfilled pairs. resolve is REQUIRED
-// (W3: parity fallback retired). labeler and labeled_at are stamped on every
-// row.
-func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler string, resolve fcSideResolver, requireComplete bool) (rows []FCPreference, skipped int, err error) {
-	if resolve == nil {
-		return nil, 0, fmt.Errorf("forced-choice worksheet: ingest requires a side resolver (-fc-sidemap)")
+// prefer: into a loud error listing the unfilled pairs. sidemap is REQUIRED
+// and -fc-sidemap-digest verification is the guard that render and ingest
+// used the SAME sealed map. labeler and labeled_at are stamped on every row.
+func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler string, sidemap fcSidemapFile, requireComplete bool) (rows []FCPreference, skipped int, err error) {
+	if len(sidemap.Pairs) == 0 {
+		return nil, 0, fmt.Errorf("forced-choice worksheet: ingest requires the sealed side map (-fc-sidemap)")
 	}
 	artByHash := make(map[string]Artifact, len(arts))
 	for _, a := range arts {
@@ -372,19 +420,24 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 			return nil
 		}
 		defer func() { header, prefer, armGuess = nil, "", "" }()
-		pairID, model, hashA, hashB := header[0], header[1], header[2], header[3]
+		pairID, model := header[0], header[1]
 		seenKey := pairID + "\x00" + model
 		if _, dup := seen[seenKey]; dup {
 			return fmt.Errorf("forced-choice worksheet: duplicate block for pair %q model %q", pairID, model)
 		}
 		seen[seenKey] = struct{}{}
+		e, err := sidemap.entry(pairID, model)
+		if err != nil {
+			return fmt.Errorf("forced-choice worksheet: %w", err)
+		}
+		hashA, hashB := e.HashA, e.HashB
 		sideA, okA := artByHash[hashA]
 		if !okA {
-			return fmt.Errorf("forced-choice worksheet: pair %q model %q: unknown artifact_hash_a %q (not in -artifacts)", pairID, model, hashA)
+			return fmt.Errorf("forced-choice worksheet: pair %q model %q: sidemap hash_a %q not in -artifacts", pairID, model, hashA)
 		}
 		sideB, okB := artByHash[hashB]
 		if !okB {
-			return fmt.Errorf("forced-choice worksheet: pair %q model %q: unknown artifact_hash_b %q (not in -artifacts)", pairID, model, hashB)
+			return fmt.Errorf("forced-choice worksheet: pair %q model %q: sidemap hash_b %q not in -artifacts", pairID, model, hashB)
 		}
 		for _, side := range []Artifact{sideA, sideB} {
 			ae := side.Trace.AssemblyEval
@@ -392,16 +445,12 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 				return fmt.Errorf("forced-choice worksheet: artifact %q does not belong to pair %q model %q", side.ArtifactHash, pairID, model)
 			}
 		}
-		legacyIsA, err := resolve(pairID, model)
-		if err != nil {
-			return fmt.Errorf("forced-choice worksheet: %w", err)
-		}
 		wantA, wantB := AssemblyMixed, AssemblyLegacy
-		if legacyIsA {
+		if e.LegacyIsA {
 			wantA, wantB = AssemblyLegacy, AssemblyMixed
 		}
 		if sideA.Trace.AssemblyEval.Mode != wantA || sideB.Trace.AssemblyEval.Mode != wantB {
-			return fmt.Errorf("forced-choice worksheet: pair %q model %q: hash order disagrees with the registered side assignment", pairID, model)
+			return fmt.Errorf("forced-choice worksheet: pair %q model %q: sidemap hashes disagree with the registered side assignment (regenerate the sidemap over the current artifacts)", pairID, model)
 		}
 		g := strings.ToLower(strings.TrimSpace(armGuess))
 		switch g {
@@ -433,12 +482,12 @@ func ingestForcedChoiceWorksheet(worksheet string, arts []Artifact, labeler stri
 		return nil
 	}
 
-	grammar := worksheetGrammar{headerPrefix: "=== PAIR ", fillMarker: fcFillMarker, fields: []string{"prefer", "arm_guess"}}
+	grammar := worksheetGrammar{headerPrefixes: []string{"=== PAIR "}, fillMarker: fcFillMarker, fields: []string{"prefer", "arm_guess"}}
 	err = scanWorksheetBlocks(worksheet, grammar,
-		func(body string) error {
+		func(_, body string) error {
 			fields := strings.Fields(body)
-			if len(fields) != 4 {
-				return fmt.Errorf("forced-choice worksheet: malformed header %q (want === PAIR <pair> <model> <hashA> <hashB> ===)", body)
+			if len(fields) != 2 {
+				return fmt.Errorf("forced-choice worksheet: malformed header %q (want === PAIR <pair> <model> ===)", body)
 			}
 			header, prefer, armGuess = fields, "", ""
 			return nil

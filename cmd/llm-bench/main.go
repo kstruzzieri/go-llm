@@ -94,6 +94,8 @@ func main() {
 	blindIngest := flag.Bool("blind-ingest", false, "Parse a filled blind worksheet (-worksheet) into labels.jsonl (-labels-out), rejoining model on artifact_hash from -artifacts; grounding-check flags and DUP intra-rater scores are summarized on stderr")
 	blindDups := flag.Int("blind-dups", 0, "With -blind-render: append this many duplicate promptless blocks (deterministic selection over legacy/mixed artifacts) as intra-rater controls")
 	dupsOut := flag.String("dups-out", "", "With -blind-ingest: optional JSONL output path for intra-rater dup pairs {artifact_hash, primary_score, dup_score}")
+	blindBlockmapOut := flag.String("blind-blockmap-out", "", "With -blind-render: output path for the opaque block map {schema_version, salt, blocks} — REQUIRED when any promptless (legacy/mixed/topline) block renders; the map is the only join from worksheet BLOCK ids to artifact hashes")
+	blindBlockmapPath := flag.String("blind-blockmap", "", "With -blind-ingest: the -blind-blockmap-out map the worksheet was rendered with; required when the worksheet holds opaque BLOCK blocks")
 	fcRender := flag.Bool("fc-render", false, "Render a forced-choice worksheet (complete legacy/mixed pairs, arm identity hidden behind the sealed -fc-sidemap A/B sides) from -artifacts to -report (#331 slice 3c)")
 	fcIngest := flag.Bool("fc-ingest", false, "Parse a filled forced-choice worksheet (-worksheet) into a preference sidecar JSONL (-fc-out), validating pairs against -artifacts and the sealed -fc-sidemap")
 	fcOut := flag.String("fc-out", "", "Output JSONL path for -fc-ingest preference rows (required with -fc-ingest)")
@@ -452,9 +454,31 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: blind-render: %v", err)
 		}
-		worksheet, err := renderBlindWorksheet(arts, *blindDups)
+		worksheet, blockmap, err := renderBlindWorksheet(arts, *blindDups, "")
 		if err != nil {
 			log.Fatalf("llm-bench: blind-render: %v", err)
+		}
+		// The block map is the only opaque-id join; a promptless render that
+		// discards it produces an un-ingestable worksheet, and the flag on a
+		// promptless-free render is operator confusion — both loud.
+		switch {
+		case blockmap != nil && strings.TrimSpace(*blindBlockmapOut) == "":
+			log.Fatalf("llm-bench: blind-render: promptless blocks rendered; -blind-blockmap-out is required (the block map is the only join from opaque BLOCK ids to artifact hashes)")
+		case blockmap == nil && strings.TrimSpace(*blindBlockmapOut) != "":
+			log.Fatalf("llm-bench: blind-render: no promptless blocks rendered; drop -blind-blockmap-out")
+		}
+		if blockmap != nil {
+			refuseOutputAlias("blind-render", "-blind-blockmap-out", *blindBlockmapOut,
+				[][2]string{{"-artifacts", *artifactsPath}})
+			// Two-output collision: the map is written first and the worksheet
+			// second, so an aliased -report would silently clobber the map.
+			if strings.TrimSpace(*reportPath) != "" && filepath.Clean(*blindBlockmapOut) == filepath.Clean(*reportPath) {
+				log.Fatalf("llm-bench: blind-render: -blind-blockmap-out must differ from -report (the worksheet would overwrite the block map)")
+			}
+			if err := writeBlindBlockmap(*blindBlockmapOut, *blockmap); err != nil {
+				log.Fatalf("llm-bench: blind-render: %v", err)
+			}
+			fmt.Fprintf(os.Stderr, "llm-bench: blind block map (%d block(s)) written to %s\n", len(blockmap.Blocks), *blindBlockmapOut)
 		}
 		if *reportPath == "" {
 			fmt.Print(worksheet)
@@ -495,7 +519,7 @@ func main() {
 		if strings.TrimSpace(*fcSidemapPath) == "" {
 			log.Fatalf("llm-bench: -fc-render requires -fc-sidemap (generate one with -fc-sidemap-generate)")
 		}
-		resolver := mustLoadVerifiedFCSidemap("fc-render", *fcSidemapPath, *fcSidemapDigest)
+		sidemap := mustLoadVerifiedFCSidemap("fc-render", *fcSidemapPath, *fcSidemapDigest)
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-render: load artifacts: %v", err)
@@ -504,7 +528,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: fc-render: %v", err)
 		}
-		worksheet, err := renderForcedChoiceWorksheet(arts, resolver)
+		worksheet, err := renderForcedChoiceWorksheet(arts, sidemap)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-render: %v", err)
 		}
@@ -531,7 +555,7 @@ func main() {
 		}
 		refuseOutputAlias("fc-ingest", "-fc-out", *fcOut,
 			[][2]string{{"-artifacts", *artifactsPath}, {"-worksheet", *worksheetPath}, {"-fc-sidemap", *fcSidemapPath}})
-		resolver := mustLoadVerifiedFCSidemap("fc-ingest", *fcSidemapPath, *fcSidemapDigest)
+		sidemap := mustLoadVerifiedFCSidemap("fc-ingest", *fcSidemapPath, *fcSidemapDigest)
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: read worksheet: %v", err)
@@ -540,7 +564,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: load artifacts: %v", err)
 		}
-		rows, skipped, err := ingestForcedChoiceWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName), resolver, *fcRequireComplete)
+		rows, skipped, err := ingestForcedChoiceWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName), sidemap, *fcRequireComplete)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: %v", err)
 		}
@@ -657,7 +681,15 @@ func main() {
 		if len(arts) == 0 {
 			log.Fatalf("llm-bench: blind-ingest: no artifacts in %q", *artifactsPath)
 		}
-		res, err := ingestBlindWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName))
+		var blockmap *blindBlockmapFile
+		if strings.TrimSpace(*blindBlockmapPath) != "" {
+			bm, err := loadBlindBlockmap(*blindBlockmapPath)
+			if err != nil {
+				log.Fatalf("llm-bench: blind-ingest: %v", err)
+			}
+			blockmap = &bm
+		}
+		res, err := ingestBlindWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName), blockmap)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-ingest: %v", err)
 		}
@@ -898,9 +930,10 @@ func main() {
 // and, when the operator supplied -fc-sidemap-digest, verifies the file
 // against the committed digest — the same gate -assembly-report applies, so
 // a swapped sidemap cannot slip into render or ingest either. Fatal on any
-// failure.
-func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSideResolver {
-	_, resolver, digest, err := loadFCSidemap(path)
+// failure. Returns the whole map: render and ingest resolve assignments AND
+// arm hashes through it (W5 — worksheet headers are hash-free).
+func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSidemapFile {
+	sidemap, _, digest, err := loadFCSidemap(path)
 	if err != nil {
 		log.Fatalf("llm-bench: %s: %v", mode, err)
 	}
@@ -909,7 +942,7 @@ func mustLoadVerifiedFCSidemap(mode, path, committedDigest string) fcSideResolve
 			log.Fatalf("llm-bench: %s: %v", mode, err)
 		}
 	}
-	return resolver
+	return sidemap
 }
 
 func refuseOutputAlias(mode, outFlag, outPath string, inputs [][2]string) {

@@ -89,13 +89,53 @@ func fillWorksheetField(t *testing.T, worksheet, blockHeader, field, value strin
 	return ""
 }
 
+// testBlindSalt is the fixed opaque-block salt every test render uses, so
+// opaque BLOCK ids (and therefore worksheets) are deterministic and headers
+// are computable via testBlockHeader.
+const testBlindSalt = "0123456789abcdef0123456789abcdef"
+
 func mustRenderBlind(t *testing.T, arts []Artifact, dupN int) string {
 	t.Helper()
-	out, err := renderBlindWorksheet(arts, dupN)
+	out, _, err := renderBlindWorksheet(arts, dupN, testBlindSalt)
 	if err != nil {
 		t.Fatalf("renderBlindWorksheet: %v", err)
 	}
 	return out
+}
+
+// testBlindBlockmap rebuilds the block map a testBlindSalt render emits for
+// arts (nil when no promptless artifact is present) — byte-equivalent to the
+// map renderBlindWorksheet returns under the same salt.
+func testBlindBlockmap(arts []Artifact) *blindBlockmapFile {
+	bm := &blindBlockmapFile{SchemaVersion: blindBlockmapSchemaVersion, Salt: testBlindSalt, Blocks: map[string]string{}}
+	for _, a := range arts {
+		if prefilledAssemblyMode(a.Trace) {
+			bm.Blocks[blindOpaqueID(a.ArtifactHash, testBlindSalt)] = a.ArtifactHash
+		}
+	}
+	if len(bm.Blocks) == 0 {
+		return nil
+	}
+	return bm
+}
+
+// testBlockHeader / testBlockDupHeader compute a promptless artifact's
+// worksheet header under testBlindSalt.
+func testBlockHeader(hash string) string {
+	return blindBlockHeaderPrefix + blindOpaqueID(hash, testBlindSalt) + " ==="
+}
+
+func testBlockDupHeader(hash string) string {
+	return blindBlockHeaderPrefix + blindOpaqueID(hash, testBlindSalt) + " DUP ==="
+}
+
+// blindTestPrimaryHeader is the primary-block header for any artifact:
+// opaque BLOCK for promptless, hash-addressed ARTIFACT otherwise.
+func blindTestPrimaryHeader(a Artifact) string {
+	if prefilledAssemblyMode(a.Trace) {
+		return testBlockHeader(a.ArtifactHash)
+	}
+	return blindArtifactHeaderPrefix + a.ArtifactHash + " ==="
 }
 
 func TestBlindWorksheetPromptlessPrimary(t *testing.T) {
@@ -103,7 +143,7 @@ func TestBlindWorksheetPromptlessPrimary(t *testing.T) {
 		art := testPromptlessArtifact("t-"+string(mode), "sha256:pl-"+string(mode), mode, "final question for "+string(mode)+"?", "answer body")
 		out := mustRenderBlind(t, []Artifact{art}, 0)
 		for _, want := range []string{
-			"=== ARTIFACT " + art.ArtifactHash + " ===",
+			testBlockHeader(art.ArtifactHash),
 			"[question]\nfinal question for " + string(mode) + "?",
 			"[rubric]\nrubric for t-" + string(mode),
 			"[candidate output]\nanswer body",
@@ -114,23 +154,45 @@ func TestBlindWorksheetPromptlessPrimary(t *testing.T) {
 			}
 		}
 		// ZERO prompt bytes anywhere in a promptless-only worksheet: no
-		// sentinel, no [prompt] section, no trace line.
-		for _, leaked := range []string{"PROMPT-SENTINEL", "[prompt]", "trace:"} {
+		// sentinel, no [prompt] section, no trace line — and (W5) no artifact
+		// hash either: "sha256:" is the unblinding-join sentinel, since a
+		// header hash resolves the arm through the committed artifacts JSONL.
+		for _, leaked := range []string{"PROMPT-SENTINEL", "[prompt]", "trace:", "sha256:", blindArtifactHeaderPrefix} {
 			if strings.Contains(out, leaked) {
 				t.Errorf("%s worksheet leaked %q:\n%s", mode, leaked, out)
 			}
 		}
 	}
 
-	// Non-assembly and 3a flat/progressive rendering is frozen byte-for-byte.
-	if got := mustRenderBlind(t, goldenBlindArtifacts(), 0); got != blindGoldenWorksheet {
+	// Non-assembly and 3a flat/progressive rendering is frozen byte-for-byte,
+	// and a promptless-free render emits no block map.
+	got, bm, err := renderBlindWorksheet(goldenBlindArtifacts(), 0, testBlindSalt)
+	if err != nil {
+		t.Fatalf("renderBlindWorksheet: %v", err)
+	}
+	if got != blindGoldenWorksheet {
 		t.Errorf("non-promptless worksheet drifted from pre-change golden:\ngot:\n%s\nwant:\n%s", got, blindGoldenWorksheet)
 	}
+	if bm != nil {
+		t.Errorf("promptless-free render returned a block map: %+v; want nil", bm)
+	}
+
+	t.Run("promptless render returns the id->hash block map", func(t *testing.T) {
+		art := testPromptlessArtifact("t-map", "sha256:pl-map", AssemblyMixed, "q?", "ans")
+		_, bm, err := renderBlindWorksheet([]Artifact{art}, 0, testBlindSalt)
+		if err != nil {
+			t.Fatalf("renderBlindWorksheet: %v", err)
+		}
+		if bm == nil || bm.SchemaVersion != blindBlockmapSchemaVersion || bm.Salt != testBlindSalt ||
+			bm.Blocks[blindOpaqueID(art.ArtifactHash, testBlindSalt)] != art.ArtifactHash {
+			t.Fatalf("block map = %+v; want the schema-versioned salt map holding the artifact", bm)
+		}
+	})
 
 	t.Run("final non-user turn is a loud render error", func(t *testing.T) {
 		art := testPromptlessArtifact("t-bad", "sha256:bad", AssemblyMixed, "q?", "ans")
 		art.Trace.Turns = append(art.Trace.Turns, Turn{Role: "assistant", Content: "assistant tail"})
-		if _, err := renderBlindWorksheet([]Artifact{art}, 0); err == nil {
+		if _, _, err := renderBlindWorksheet([]Artifact{art}, 0, testBlindSalt); err == nil {
 			t.Fatalf("promptless artifact with non-user final turn accepted; [question] would leak prompt bytes")
 		}
 	})
@@ -138,14 +200,16 @@ func TestBlindWorksheetPromptlessPrimary(t *testing.T) {
 
 func TestBlindIngestGroundingFlag(t *testing.T) {
 	art := testPromptlessArtifact("t1", "sha256:f1", AssemblyMixed, "q?", "ans")
-	header := "=== ARTIFACT " + art.ArtifactHash + " ==="
-	base := mustRenderBlind(t, []Artifact{art}, 0)
+	arts := []Artifact{art}
+	header := testBlockHeader(art.ArtifactHash)
+	base := mustRenderBlind(t, arts, 0)
+	bm := testBlindBlockmap(arts)
 
 	t.Run("grounding-check flag prefixes notes and is summarized", func(t *testing.T) {
 		ws := fillWorksheetField(t, base, header, "score", "1")
 		ws = fillWorksheetField(t, ws, header, "notes", "shaky claim")
 		ws = fillWorksheetField(t, ws, header, "flag", "grounding-check")
-		res, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester")
+		res, err := ingestBlindWorksheet(ws, arts, "tester", bm)
 		if err != nil {
 			t.Fatalf("ingestBlindWorksheet: %v", err)
 		}
@@ -159,7 +223,7 @@ func TestBlindIngestGroundingFlag(t *testing.T) {
 
 	t.Run("blank flag emits a normal label", func(t *testing.T) {
 		ws := fillWorksheetField(t, base, header, "score", "0.5")
-		res, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester")
+		res, err := ingestBlindWorksheet(ws, arts, "tester", bm)
 		if err != nil {
 			t.Fatalf("ingestBlindWorksheet: %v", err)
 		}
@@ -171,14 +235,14 @@ func TestBlindIngestGroundingFlag(t *testing.T) {
 	t.Run("unknown flag value is a loud error", func(t *testing.T) {
 		ws := fillWorksheetField(t, base, header, "score", "1")
 		ws = fillWorksheetField(t, ws, header, "flag", "verify-me")
-		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil || !strings.Contains(err.Error(), "flag") {
+		if _, err := ingestBlindWorksheet(ws, arts, "tester", bm); err == nil || !strings.Contains(err.Error(), "flag") {
 			t.Fatalf("err = %v; want loud unknown-flag error", err)
 		}
 	})
 
 	t.Run("flag on an unscored block is a loud error", func(t *testing.T) {
 		ws := fillWorksheetField(t, base, header, "flag", "grounding-check")
-		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil {
+		if _, err := ingestBlindWorksheet(ws, arts, "tester", bm); err == nil {
 			t.Fatalf("flag on unscored block accepted; want error")
 		}
 	})
@@ -186,7 +250,7 @@ func TestBlindIngestGroundingFlag(t *testing.T) {
 	t.Run("spoofed grounding-check notes prefix with blank flag is a loud error", func(t *testing.T) {
 		ws := fillWorksheetField(t, base, header, "score", "1")
 		ws = fillWorksheetField(t, ws, header, "notes", "grounding-check;sneaky")
-		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil {
+		if _, err := ingestBlindWorksheet(ws, arts, "tester", bm); err == nil {
 			t.Fatalf("spoofed grounding-check prefix in notes accepted; want error")
 		}
 	})
@@ -196,8 +260,33 @@ func TestBlindIngestGroundingFlag(t *testing.T) {
 		plain.ArtifactHash = artifactHash(plain)
 		ws := "=== ARTIFACT " + plain.ArtifactHash + " ===\n" +
 			blindFillMarker + "\nscore: 1\nflag: grounding-check\n" + blindEndMarker + "\n"
-		if _, err := ingestBlindWorksheet(ws, []Artifact{plain}, "tester"); err == nil || !strings.Contains(err.Error(), "flag") {
+		if _, err := ingestBlindWorksheet(ws, []Artifact{plain}, "tester", nil); err == nil || !strings.Contains(err.Error(), "flag") {
 			t.Fatalf("err = %v; want loud flag-on-non-promptless error", err)
+		}
+	})
+
+	t.Run("BLOCK header without a block map is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, base, header, "score", "1")
+		if _, err := ingestBlindWorksheet(ws, arts, "tester", nil); err == nil || !strings.Contains(err.Error(), "-blind-blockmap") {
+			t.Fatalf("err = %v; want the loud blockmap requirement", err)
+		}
+	})
+
+	t.Run("BLOCK id absent from the map is a loud error", func(t *testing.T) {
+		other := testBlindBlockmap([]Artifact{testPromptlessArtifact("t9", "sha256:f9", AssemblyMixed, "q?", "a")})
+		ws := fillWorksheetField(t, base, header, "score", "1")
+		if _, err := ingestBlindWorksheet(ws, arts, "tester", other); err == nil || !strings.Contains(err.Error(), "not in the block map") {
+			t.Fatalf("err = %v; want the loud unknown-BLOCK-id error", err)
+		}
+	})
+
+	t.Run("hash-addressed promptless block is a loud error", func(t *testing.T) {
+		// A pre-W5 worksheet spelled promptless headers with the artifact
+		// hash — unblinded by inspection; ingest must refuse it.
+		ws := "=== ARTIFACT " + art.ArtifactHash + " ===\n" +
+			blindFillMarker + "\nscore: 1\n" + blindEndMarker + "\n"
+		if _, err := ingestBlindWorksheet(ws, arts, "tester", bm); err == nil || !strings.Contains(err.Error(), "opaque BLOCK") {
+			t.Fatalf("err = %v; want the loud hash-addressed-promptless rejection", err)
 		}
 	})
 }
@@ -223,12 +312,13 @@ func blindDupPool() []Artifact {
 
 func TestBlindDupInjection(t *testing.T) {
 	arts := blindDupPool()
+	bm := testBlindBlockmap(arts)
 	out := mustRenderBlind(t, arts, 2)
 
 	if got := strings.Count(out, " DUP ==="); got != 2 {
 		t.Fatalf("DUP block count = %d; want 2:\n%s", got, out)
 	}
-	for _, want := range []string{"=== ARTIFACT sha256:d1 DUP ===", "=== ARTIFACT sha256:d4 DUP ==="} {
+	for _, want := range []string{testBlockDupHeader("sha256:d1"), testBlockDupHeader("sha256:d4")} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("worksheet missing %q (deterministic selection broken):\n%s", want, out)
 		}
@@ -240,7 +330,7 @@ func TestBlindDupInjection(t *testing.T) {
 		t.Fatalf("no DUP block in worksheet:\n%s", out)
 	}
 	for _, a := range arts {
-		idx := strings.Index(out, "=== ARTIFACT "+a.ArtifactHash+" ===")
+		idx := strings.Index(out, blindTestPrimaryHeader(a))
 		if idx < 0 {
 			t.Fatalf("primary block %s missing from worksheet", a.ArtifactHash)
 		}
@@ -257,13 +347,19 @@ func TestBlindDupInjection(t *testing.T) {
 	// Fill every primary; dup d1 agrees (1 vs 1), dup d4 disagrees (0.5 vs 1).
 	ws := out
 	scores := map[string]string{"sha256:d0": "0", "sha256:d1": "1", "sha256:d2": "0", "sha256:d3": "0.5", "sha256:d4": "0.5", "sha256:d5": "1", "sha256:zz-flat": "0"}
-	for hash, score := range scores {
-		ws = fillWorksheetField(t, ws, "=== ARTIFACT "+hash+" ===", "score", score)
+	headerFor := func(hash string) string {
+		if hash == "sha256:zz-flat" {
+			return "=== ARTIFACT " + hash + " ==="
+		}
+		return testBlockHeader(hash)
 	}
-	ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d1 DUP ===", "score", "1")
-	ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d4 DUP ===", "score", "1")
+	for hash, score := range scores {
+		ws = fillWorksheetField(t, ws, headerFor(hash), "score", score)
+	}
+	ws = fillWorksheetField(t, ws, testBlockDupHeader("sha256:d1"), "score", "1")
+	ws = fillWorksheetField(t, ws, testBlockDupHeader("sha256:d4"), "score", "1")
 
-	res, err := ingestBlindWorksheet(ws, arts, "tester")
+	res, err := ingestBlindWorksheet(ws, arts, "tester", bm)
 	if err != nil {
 		t.Fatalf("ingestBlindWorksheet: %v", err)
 	}
@@ -315,11 +411,11 @@ func TestBlindDupInjection(t *testing.T) {
 			if hash == "sha256:d1" {
 				continue // primary d1 left unscored
 			}
-			ws = fillWorksheetField(t, ws, "=== ARTIFACT "+hash+" ===", "score", score)
+			ws = fillWorksheetField(t, ws, headerFor(hash), "score", score)
 		}
-		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d1 DUP ===", "score", "1")
-		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d4 DUP ===", "score", "1")
-		res, err := ingestBlindWorksheet(ws, arts, "tester")
+		ws = fillWorksheetField(t, ws, testBlockDupHeader("sha256:d1"), "score", "1")
+		ws = fillWorksheetField(t, ws, testBlockDupHeader("sha256:d4"), "score", "1")
+		res, err := ingestBlindWorksheet(ws, arts, "tester", bm)
 		if err != nil {
 			t.Fatalf("ingestBlindWorksheet: %v", err)
 		}
@@ -334,19 +430,19 @@ func TestBlindDupInjection(t *testing.T) {
 	t.Run("flag on a DUP block is a loud error", func(t *testing.T) {
 		// DUP blocks render no flag: line, so a labeler would have to
 		// hand-write one; ingest must still reject it.
-		dupIdx := strings.Index(out, "=== ARTIFACT sha256:d1 DUP ===")
+		dupIdx := strings.Index(out, testBlockDupHeader("sha256:d1"))
 		if dupIdx < 0 {
 			t.Fatalf("missing d1 DUP block")
 		}
 		ws := out[:dupIdx] + strings.Replace(out[dupIdx:], "notes: ", "notes: \nflag: grounding-check", 1)
-		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:d1 DUP ===", "score", "1")
-		if _, err := ingestBlindWorksheet(ws, arts, "tester"); err == nil {
+		ws = fillWorksheetField(t, ws, testBlockDupHeader("sha256:d1"), "score", "1")
+		if _, err := ingestBlindWorksheet(ws, arts, "tester", bm); err == nil {
 			t.Fatalf("flag on DUP block accepted; want error")
 		}
 	})
 
 	t.Run("dup count exceeding eligible artifacts is a loud error", func(t *testing.T) {
-		if _, err := renderBlindWorksheet(arts, 6); err == nil {
+		if _, _, err := renderBlindWorksheet(arts, 6, testBlindSalt); err == nil {
 			t.Fatalf("blind-dups 6 over 5 eligible accepted; want error")
 		}
 	})
@@ -372,14 +468,17 @@ func fcPairArtifacts() []Artifact {
 
 func TestForcedChoiceRenderIngest(t *testing.T) {
 	arts := fcPairArtifacts()
-	out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
+	sidemap := parityFCSidemap(arts, "c")
+	out, err := renderForcedChoiceWorksheet(arts, sidemap)
 	if err != nil {
 		t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 	}
 
-	// pair-alpha: legacy is A (even parity), so hashA=sha256:al and answer A is
-	// the legacy answer. Block shape pinned exactly.
-	wantAlpha := "=== PAIR pair-alpha c sha256:al sha256:am ===\n" +
+	// pair-alpha: legacy is A (even parity in the parity-mirroring map), so
+	// answer A is the legacy answer. Block shape pinned exactly — the header
+	// carries pairID and modelKey ONLY (W5: hashes would unblind via the
+	// artifacts JSONL join).
+	wantAlpha := "=== PAIR pair-alpha c ===\n" +
 		"[question]\nalpha question?\n\n" +
 		"[rubric]\nrubric for pair-alpha\n\n" +
 		"[answer A]\nlegacy alpha answer\n\n" +
@@ -389,11 +488,16 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 		t.Errorf("worksheet missing exact pair-alpha block:\nwant:\n%s\ngot:\n%s", wantAlpha, out)
 	}
 	// pair-gamma: mixed is A (odd parity).
-	if want := "=== PAIR pair-gamma c sha256:gm sha256:gl ==="; !strings.Contains(out, want) {
+	if want := "=== PAIR pair-gamma c ==="; !strings.Contains(out, want) {
 		t.Errorf("worksheet missing %q (parity assignment broken):\n%s", want, out)
 	}
 	if !strings.Contains(out, "[answer A]\nmixed gamma answer") {
 		t.Errorf("pair-gamma answer A is not the mixed arm:\n%s", out)
+	}
+	// The unblinding-join sentinel: no artifact hash anywhere in the
+	// worksheet (headers were the only carrier).
+	if strings.Contains(out, "sha256:") {
+		t.Errorf("forced-choice worksheet leaks artifact hashes:\n%s", out)
 	}
 	for _, leaked := range []string{"legacy", "mixed", "topline"} {
 		for _, line := range strings.Split(out, "\n") {
@@ -407,7 +511,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 		bad := fcPairArtifacts()
 		bad[0].Trace.AssemblyEval.PairID = "pair alpha"
 		bad[1].Trace.AssemblyEval.PairID = "pair alpha"
-		if _, err := renderForcedChoiceWorksheet(bad, fcParityResolver); err == nil {
+		if _, err := renderForcedChoiceWorksheet(bad, parityFCSidemap(bad, "c")); err == nil {
 			t.Fatalf("whitespace pair id accepted; the space-delimited PAIR header would misparse")
 		}
 	})
@@ -415,7 +519,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	t.Run("question mismatch across arms is a loud error", func(t *testing.T) {
 		bad := fcPairArtifacts()
 		bad[1].Trace.Turns[len(bad[1].Trace.Turns)-1].Content = "different question?"
-		if _, err := renderForcedChoiceWorksheet(bad, fcParityResolver); err == nil {
+		if _, err := renderForcedChoiceWorksheet(bad, parityFCSidemap(bad, "c")); err == nil {
 			t.Fatalf("question mismatch accepted; want error")
 		}
 	})
@@ -428,7 +532,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 		blank.Trace.AssemblyEval.PairID = "pair-eps"
 		blankMixed.Trace.AssemblyEval.PairID = "pair-eps"
 		extra = append(extra, blank, blankMixed)
-		got, err := renderForcedChoiceWorksheet(extra, fcParityResolver)
+		got, err := renderForcedChoiceWorksheet(extra, parityFCSidemap(extra, "c"))
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
@@ -440,9 +544,9 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	})
 
 	t.Run("ingest happy path emits pinned preference rows", func(t *testing.T) {
-		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "A")
-		ws = fillWorksheetField(t, ws, "=== PAIR pair-gamma c sha256:gm sha256:gl ===", "prefer", "tie")
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "A")
+		ws = fillWorksheetField(t, ws, "=== PAIR pair-gamma c ===", "prefer", "tie")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", sidemap, false)
 		if err != nil {
 			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
 		}
@@ -481,8 +585,8 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	})
 
 	t.Run("blank prefer is skipped and counted", func(t *testing.T) {
-		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "B")
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "B")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", sidemap, false)
 		if err != nil {
 			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
 		}
@@ -492,32 +596,50 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	})
 
 	t.Run("invalid prefer value is a loud error", func(t *testing.T) {
-		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "C")
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil {
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "C")
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", sidemap, false); err == nil {
 			t.Fatalf("prefer C accepted; want error")
 		}
 	})
 
-	t.Run("unknown hash in header is a loud error", func(t *testing.T) {
-		ws := strings.Replace(out, "sha256:al", "sha256:forged", 1)
-		ws = fillWorksheetField(t, ws, "=== PAIR pair-alpha c sha256:forged sha256:am ===", "prefer", "A")
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil {
-			t.Fatalf("forged hash accepted; want error")
+	t.Run("unknown pair in header is a loud error", func(t *testing.T) {
+		ws := strings.Replace(out, "=== PAIR pair-alpha c ===", "=== PAIR pair-forged c ===", 1)
+		ws = fillWorksheetField(t, ws, "=== PAIR pair-forged c ===", "prefer", "A")
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", sidemap, false)
+		if err == nil || !strings.Contains(err.Error(), "pair-forged") {
+			t.Fatalf("forged pair id = %v; want a loud no-sidemap-entry error naming it", err)
 		}
 	})
 
-	t.Run("swapped A/B hashes are a loud error", func(t *testing.T) {
-		ws := strings.Replace(out, "=== PAIR pair-alpha c sha256:al sha256:am ===",
-			"=== PAIR pair-alpha c sha256:am sha256:al ===", 1)
-		ws = fillWorksheetField(t, ws, "=== PAIR pair-alpha c sha256:am sha256:al ===", "prefer", "A")
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil {
-			t.Fatalf("parity-swapped header accepted; want error")
+	t.Run("sidemap hashes disagreeing with its side assignment are a loud error", func(t *testing.T) {
+		// A tampered map (assignment flipped, hashes left) is internally
+		// inconsistent; ingest must refuse it rather than mis-assign sides.
+		tampered := parityFCSidemap(arts, "c")
+		e := tampered.Pairs["pair-alpha|c"]
+		e.LegacyIsA = !e.LegacyIsA
+		tampered.Pairs["pair-alpha|c"] = e
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "A")
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", tampered, false)
+		if err == nil || !strings.Contains(err.Error(), "side assignment") {
+			t.Fatalf("tampered sidemap = %v; want the side-assignment rejection", err)
+		}
+	})
+
+	t.Run("sidemap hash outside the artifacts is a loud error", func(t *testing.T) {
+		forged := parityFCSidemap(arts, "c")
+		e := forged.Pairs["pair-alpha|c"]
+		e.HashA = "sha256:forged"
+		forged.Pairs["pair-alpha|c"] = e
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "A")
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", forged, false)
+		if err == nil || !strings.Contains(err.Error(), "sha256:forged") {
+			t.Fatalf("forged sidemap hash = %v; want a loud not-in-artifacts error", err)
 		}
 	})
 
 	t.Run("duplicate pair block is a loud error", func(t *testing.T) {
-		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "A")
-		if _, _, err := ingestForcedChoiceWorksheet(ws+"\n"+ws, arts, "tester", fcParityResolver, false); err == nil {
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "A")
+		if _, _, err := ingestForcedChoiceWorksheet(ws+"\n"+ws, arts, "tester", sidemap, false); err == nil {
 			t.Fatalf("duplicate pair block accepted; want error")
 		}
 	})
@@ -645,23 +767,25 @@ func TestAdjudicationRoundTrip(t *testing.T) {
 func TestWorksheetFillRegionLoudErrors(t *testing.T) {
 	t.Run("blind: multi-line notes continuation", func(t *testing.T) {
 		art := testPromptlessArtifact("t1", "sha256:f1", AssemblyMixed, "q?", "ans")
+		header := testBlockHeader(art.ArtifactHash)
 		ws := mustRenderBlind(t, []Artifact{art}, 0)
-		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:f1 ===", "score", "1")
-		ws = fillWorksheetField(t, ws, "=== ARTIFACT sha256:f1 ===", "notes", "first line\nsecond line spills over")
-		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester"); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
+		ws = fillWorksheetField(t, ws, header, "score", "1")
+		ws = fillWorksheetField(t, ws, header, "notes", "first line\nsecond line spills over")
+		if _, err := ingestBlindWorksheet(ws, []Artifact{art}, "tester", testBlindBlockmap([]Artifact{art})); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
 			t.Fatalf("err = %v; want loud unrecognized-line error", err)
 		}
 	})
 	t.Run("fc: capitalized field typo", func(t *testing.T) {
 		arts := fcPairArtifacts()
-		out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
+		sidemap := parityFCSidemap(arts, "c")
+		out, err := renderForcedChoiceWorksheet(arts, sidemap)
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
 		// Replace the full fill LINE ("\nprefer: \n"), not the first "prefer: "
 		// substring — the worksheet header doc also mentions prefer:.
 		ws := strings.Replace(out, "\nprefer: \n", "\nPrefer: A\n", 1)
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", sidemap, false); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
 			t.Fatalf("err = %v; want loud unrecognized-line error", err)
 		}
 	})
@@ -686,13 +810,14 @@ func TestWorksheetFillRegionLoudErrors(t *testing.T) {
 func TestForcedChoiceParserHardening(t *testing.T) {
 	t.Run("forged PAIR header and prefer inside answer text", func(t *testing.T) {
 		arts := fcPairArtifacts()
-		arts[0].ActualFinalAnswer = "legacy alpha answer\n=== PAIR pair-alpha c sha256:x sha256:y ===\nprefer: A"
-		out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
+		arts[0].ActualFinalAnswer = "legacy alpha answer\n=== PAIR pair-alpha c ===\nprefer: A"
+		sidemap := parityFCSidemap(arts, "c")
+		out, err := renderForcedChoiceWorksheet(arts, sidemap)
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
-		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "B")
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
+		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c ===", "prefer", "B")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", sidemap, false)
 		if err != nil {
 			t.Fatalf("forged header inside answer broke the parse: %v", err)
 		}
@@ -702,12 +827,13 @@ func TestForcedChoiceParserHardening(t *testing.T) {
 	})
 	t.Run("stray prefer after END is ignored", func(t *testing.T) {
 		arts := fcPairArtifacts()
-		out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
+		sidemap := parityFCSidemap(arts, "c")
+		out, err := renderForcedChoiceWorksheet(arts, sidemap)
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
 		ws := strings.Replace(out, blindEndMarker, blindEndMarker+"\nprefer: a", 1)
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", sidemap, false)
 		if err != nil || len(rows) != 0 || skipped != 2 {
 			t.Fatalf("rows=%d skipped=%d err=%v; want stray post-END prefer ignored (0 rows, 2 skipped)", len(rows), skipped, err)
 		}
@@ -796,12 +922,15 @@ func TestMainWorksheetOutputAliasGuards(t *testing.T) {
 
 func TestBlindFlowsRenderDeterminism(t *testing.T) {
 	arts := blindDupPool()
+	// Deterministic under a FIXED salt; a fresh render (salt "") draws a new
+	// salt by design, so worksheet determinism is per-salt.
 	if a, b := mustRenderBlind(t, arts, 2), mustRenderBlind(t, arts, 2); a != b {
 		t.Errorf("blind worksheet render is not deterministic")
 	}
 	fcArts := fcPairArtifacts()
-	fc1, err1 := renderForcedChoiceWorksheet(fcArts, fcParityResolver)
-	fc2, err2 := renderForcedChoiceWorksheet(fcArts, fcParityResolver)
+	sidemap := parityFCSidemap(fcArts, "c")
+	fc1, err1 := renderForcedChoiceWorksheet(fcArts, sidemap)
+	fc2, err2 := renderForcedChoiceWorksheet(fcArts, sidemap)
 	if err1 != nil || err2 != nil || fc1 != fc2 {
 		t.Errorf("forced-choice render not deterministic (err1=%v err2=%v)", err1, err2)
 	}
