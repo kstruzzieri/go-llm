@@ -12,7 +12,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds, AND the recorded disk-pressure override is 150 seconds. A missing half caps the score at 0.5; a stated but incorrect half scores 0."
+    "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds, AND the recorded disk-pressure override is 150 seconds. A missing half caps the score at 0.5; a stated but incorrect half scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "join-alert-debounce",

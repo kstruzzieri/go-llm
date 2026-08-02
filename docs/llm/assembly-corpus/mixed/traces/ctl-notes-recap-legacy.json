@@ -54,7 +54,7 @@
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. Three changes were made: the template was trimmed to blockers, decisions, and follow-ups; decisions became one line per decision with a link; the template was posted and pinned in the team room. All three correctly recapped scores 1; exactly two scores 0.5; fewer than two, or any invented change, scores 0."
+    "final_answer_criteria": "Control pair: the two arms are identical by construction; scores here measure decode and labeling noise, not assembly. Three named changes determine the score: the template was trimmed to blockers, decisions, and follow-ups; decisions became one line per decision with a link; the template was posted and pinned in the team room. All three correctly recapped scores 1; exactly two scores 0.5; fewer than two scores 0. Extra details supported by the conversation neither earn nor lose credit; a claimed change not grounded in the conversation scores 0."
   },
   "assembly_eval": {
     "pair_id": "ctl-notes-recap",
