@@ -1,0 +1,124 @@
+{
+  "id": "conv-pager-channel-recheck-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Good, that clears the list, so let's call the routing decision: page escalations route to #dw-osprey-bridge from today, the general ops room goes back to chatter only, and the oncall doc gets updated to match before the evening handoff."
+    },
+    {
+      "role": "assistant",
+      "content": "Routing decision recorded and the oncall doc updated to match; the general room wiring stays in place for chatter only and I posted the change note in the handoff thread."
+    },
+    {
+      "role": "user",
+      "content": "The benchmark rig has been noisy since the lab kernel update. Rerun last week's baseline with pinned inputs so we are not comparing against a moving target."
+    },
+    {
+      "role": "assistant",
+      "content": "Baseline rerun queued with the same pinned inputs; the fresh numbers will attach to the perf tracking issue when it finishes."
+    },
+    {
+      "role": "user",
+      "content": "The docs mirror sync keeps skipping weekends because of the maintenance window overlap. Shift it an hour so it stops colliding, and make skipped runs visible."
+    },
+    {
+      "role": "assistant",
+      "content": "Shifted the mirror sync out of the maintenance window and added a failure notification so a skipped run is visible instead of silent."
+    },
+    {
+      "role": "user",
+      "content": "Quarterly access review is due: two contractors still have write access to the rules directory from the migration. Trim that back to read before the audit lands."
+    },
+    {
+      "role": "assistant",
+      "content": "Trimmed both contractor grants to read-only and noted the change in the access review sheet."
+    },
+    {
+      "role": "user",
+      "content": "Last one: the team room pins are a mess again, half of them point at retired boards. Sweep them and archive anything stale to the notes folder."
+    },
+    {
+      "role": "assistant",
+      "content": "Swept the pins, archived the stale ones to the notes folder, and left the active boards pinned in review order."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "alert escalation routing channel",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/alert/notify.go\"\npurpose: Chat webhook notifier; destination channel supplied by config.\noverview: notify.go posts fired alerts to the configured chat webhook. The destination channel is injected from deployment config, so routing decisions live outside the code.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/notify.go\" (lines 1-15, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"context\"\n4| \n5| // Notifier posts fired alerts to the configured chat webhook. The\n6| // destination channel comes from deployment config; the old hard-coded\n7| // #dw-crow-watch wiring is gone.\n8| type Notifier struct {\n9| \twebhook string\n10| \tchannel string\n11| }\n12| \n13| func (n *Notifier) Post(ctx context.Context, a Alert) error {\n14| \treturn n.post(ctx, n.channel, renderAlert(a))\n15| }\n\n### source: \"internal/alert/silence.go\"\npurpose: Calendar-declared alert silences; no ad-hoc muting.\noverview: silence.go mutes matching rules inside windows declared in the ops calendar feed, keeping quiet periods visible ahead of time.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/silence.go\" (lines 1-16, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // silence mutes matching rules for a declared window. Windows come\n6| // from the ops calendar feed; ad-hoc silences are deliberately not\n7| // supported so quiet periods are always visible ahead of time.\n8| type silence struct {\n9| \tmatcher string\n10| \tfrom    time.Time\n11| \tuntil   time.Time\n12| }\n13| \n14| func (s silence) active(now time.Time) bool {\n15| \treturn !now.Before(s.from) \u0026\u0026 now.Before(s.until)\n16| }\n\n### source: \"docs/alerting.md\"\npurpose: Alerting guide: rule reload, webhook routing, calendar silences.\noverview: alerting.md covers rule hot reload, chat webhook routing as deployment config, and calendar-declared silences for planned work.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/alerting.md\" (lines 1-15, similarity: 1.00) ---\n1| # driftwatch alerting\n2| \n3| Alert rules live in the rules directory and hot-reload on change;\n4| transitions out of pending are what page.\n5| \n6| ## Routing\n7| \n8| Fired alerts post to a chat webhook. The destination channel and the\n9| webhook token are deployment config: routing is an operator decision,\n10| not a code default.\n11| \n12| ## Silences\n13| \n14| Planned maintenance is declared in the ops calendar so silences are\n15| visible ahead of time and paging stays quiet during planned work.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-page-history · semantic · 2025-07-27 · page escalations landed in #dw-crow-watch before the incident-review reshuffle; the general room predates even that\nrec-silence-cal · working · 2025-07-27 · maintenance silences are pre-declared in the ops calendar so planned work stays quiet\nrec-webhook-rotate · semantic · 2025-07-27 · notifier webhook token rotates quarterly with the platform team; we only consume it from the secret store",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which channel do page escalations route to now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Names #dw-osprey-bridge as the destination for page escalations. Answers naming #dw-crow-watch (the pre-reshuffle channel from memory) or the general ops room score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-pager-channel-recheck",
+    "mode": "legacy",
+    "candidate_ids": [
+      "27a9b3d14a59ee3b5ed4880c39f6a526340d788dbc7a52d8bd00258f5be6b628",
+      "8f3435a04994c3109bc26f3c1cfec9fbd7d5e45b4def84a8325020eebf86183e",
+      "d719a963594845e05ced182c4bf1be640f85ca1a6e2d81395ff4cc0989841609",
+      "rec-page-history",
+      "rec-silence-cal",
+      "rec-webhook-rotate"
+    ],
+    "estimated_prompt_tokens": 1210,
+    "state_digest": "b743bf6599f2a84b4926653bf1f7b34879940eab34df6b58f531e210b21daeff",
+    "subjects": [
+      "(c1|rag|internal/alert/notify.go)",
+      "(c1|rag|internal/alert/silence.go)",
+      "(c1|rag|docs/alerting.md)",
+      "(c2|memory|rec-page-history)",
+      "(c2|memory|rec-silence-cal)",
+      "(c2|memory|rec-webhook-rotate)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "pager-escalation-channel",
+    "budget": 1290,
+    "raw_state_tokens": 2150,
+    "pressure_level": "critical",
+    "shed_messages": 10,
+    "shed_bytes": 2948
+  }
+}

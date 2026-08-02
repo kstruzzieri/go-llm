@@ -1,0 +1,92 @@
+{
+  "id": "conv-ingest-token-recheck-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Now the parked one, and let's decide it: the emergency revocation batch ships with the dwk3- prefix, reserved now and documented as break-glass only - the edge accepts it alongside the current set so an emergency cut does not wait on a config train. Checklist and runbook both get the entry."
+    },
+    {
+      "role": "assistant",
+      "content": "Recorded the emergency-lane decision in the rotation checklist and the runbook, marked break-glass only, with the edge acceptance note alongside the current set."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "ingest token prefix accepted set",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/auth.go\"\npurpose: Ingest token authentication; accepted prefixes come from config.\noverview: auth.go checks presented ingest tokens against the accepted prefixes supplied by deployment config, so rotations are staged through config rather than rebuilds.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/auth.go\" (lines 1-16, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"strings\"\n4| \n5| // authenticate checks the presented ingest token. Accepted prefixes\n6| // are supplied by deployment config so a rotation can be staged\n7| // without a rebuild; this file does not hard-code any prefix. Even\n8| // the dwk2- rollout shipped entirely through config for that reason.\n9| func (g *Gateway) authenticate(token string) bool {\n10| \tfor _, p := range g.cfg.AcceptedPrefixes {\n11| \t\tif strings.HasPrefix(token, p) {\n12| \t\t\treturn g.verify(token)\n13| \t\t}\n14| \t}\n15| \treturn false\n16| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\noverview: limits.go implements the per-tenant token buckets guarding ingest admission: lazy bucket creation, tick-based refill, and conservative defaults for tenants the tenants file does not name.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/limits.go\" (lines 1-51, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"sync\"\n5| \t\"time\"\n6| )\n7| \n8| // tenantLimiter is a per-tenant token bucket. Buckets are created\n9| // lazily on first sight of a tenant and refilled on a fixed tick; the\n10| // per-tenant rates come from the tenants file and hot-reload with it.\n11| type tenantLimiter struct {\n12| \tmu      sync.Mutex\n13| \tbuckets map[string]*bucket\n14| \ttick    time.Duration\n15| }\n16| \n17| type bucket struct {\n18| \ttokens float64\n19| \trate   float64\n20| \tburst  float64\n21| \tlast   time.Time\n22| }\n23| \n24| // allow reports whether one accepted batch fits the tenant's current\n25| // budget. Unknown tenants get the default rate until the tenants file\n26| // names them explicitly; the default is deliberately conservative so a\n27| // new integration cannot crowd out established ones.\n28| func (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n29| \tl.mu.Lock()\n30| \tdefer l.mu.Unlock()\n31| \tb, ok := l.buckets[tenant]\n32| \tif !ok {\n33| \t\tb = l.newBucket(tenant)\n34| \t\tl.buckets[tenant] = b\n35| \t}\n36| \tb.refill(now)\n37| \tif b.tokens \u003c 1 {\n38| \t\treturn false\n39| \t}\n40| \tb.tokens--\n41| \treturn true\n42| }\n43| \n44| func (b *bucket) refill(now time.Time) {\n45| \telapsed := now.Sub(b.last).Seconds()\n46| \tb.tokens += elapsed * b.rate\n47| \tif b.tokens \u003e b.burst {\n48| \t\tb.tokens = b.burst\n49| \t}\n50| \tb.last = now\n51| }\n\n### source: \"docs/operations.md\"\npurpose: Operations guide: process supervision, restart drain, staged credential rotation.\noverview: operations.md covers running the daemon under supervision, the SIGTERM drain behaviour, staged credential rotation through the accepted set, and per-tenant budget management in the tenants file.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/operations.md\" (lines 1-24, similarity: 1.00) ---\n1| # driftwatch operations\n2| \n3| driftwatch ships as a single static binary. Run it under a process\n4| supervisor with the spool on local disk, and point producers at a\n5| stable DNS name rather than an address.\n6| \n7| ## Restarts\n8| \n9| Send SIGTERM and wait. Ingest stops accepting, the spool drains for a\n10| bounded grace period, and anything still buffered is picked up on the\n11| next start. No manual intervention is required.\n12| \n13| ## Credential rotation\n14| \n15| Rotations are staged through config: add the incoming credential shape\n16| to the accepted set, migrate producers, then narrow the accepted set\n17| again once the drain completes. Never narrow first; producers signing\n18| with retired credentials are rejected at the edge.\n19| \n20| ## Tenants\n21| \n22| Per-tenant ingest budgets live in the tenants file and hot-reload on\n23| change. Prefer explicit entries for every production tenant; the\n24| built-in default exists for evaluation, not for steady state.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-checklist-home · working · 2025-07-27 · the rotation checklist lives in the deploy repo; the runbook mirrors its decision entries\nrec-rotation-history · semantic · 2025-07-27 · the last rotation introduced the dwk2- prefix; producers migrated first and the edge narrowed the accepted set after the drain\nrec-support-rota · semantic · 2025-07-27 · support channel questions rotate to whoever holds the integrations pager; escalate only real breakage",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix is reserved for the emergency revocation batch?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that the emergency revocation batch is reserved the dwk3- prefix. Answering dwk2- (the completed rotation's prefix from memory) or only describing config-supplied prefixes scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-ingest-token-recheck",
+    "mode": "legacy",
+    "candidate_ids": [
+      "524f76002d4e73828a49c8dd027719b83c1117ea3e662a667c10fac1feebd215",
+      "98a3bc1b2eea75c949207c1824c69dbf82761bb2d84616751ffa96f227394c8f",
+      "b0e0aeb52f72729936efafa42a6d6cae742557e98ef7472652ad5a94d395e206",
+      "rec-checklist-home",
+      "rec-rotation-history",
+      "rec-support-rota"
+    ],
+    "estimated_prompt_tokens": 1366,
+    "state_digest": "fc791d0ce277f0519dce7a047623dd727cc296b915ce370eba76e0cb42a37a07",
+    "subjects": [
+      "(c1|rag|internal/ingest/auth.go)",
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|docs/operations.md)",
+      "(c2|memory|rec-checklist-home)",
+      "(c2|memory|rec-rotation-history)",
+      "(c2|memory|rec-support-rota)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "ingest-token-conv",
+    "budget": 1433,
+    "raw_state_tokens": 2388,
+    "pressure_level": "critical",
+    "shed_messages": 14,
+    "shed_bytes": 3400
+  }
+}

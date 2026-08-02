@@ -1,0 +1,149 @@
+{
+  "id": "conv-tenant-rate-settle-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Item two: hot reload logs a warning for every unchanged stanza on every reload, which buries the one warning that matters when a stanza is actually malformed. Quiet the unchanged-stanza noise and keep the malformed warning loud enough to page on. While you are in the logging path, confirm the reload counter still increments on no-op reloads; the dashboard uses it as a liveness signal."
+    },
+    {
+      "role": "assistant",
+      "content": "Silenced the unchanged-stanza warnings and promoted malformed-stanza warnings in the log stream; reload logs are one line when nothing changed and loud when something is wrong."
+    },
+    {
+      "role": "user",
+      "content": "Item three: the admissions dashboard needs a per-tenant rejections breakdown for the release notes screenshot. The aggregate panel hides which tenants are actually hitting their buckets, and the release notes want the before picture. Use the same color mapping as the aggregate panel so the two read side by side without a legend hunt."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the per-tenant rejections breakdown beside the aggregate panel and pinned the board for the release-notes screenshot."
+    },
+    {
+      "role": "user",
+      "content": "Item four: the release notes draft promises the default question will be settled in this release. Make sure the wording matches whatever we decide today rather than promising a specific number before we have called it. The screenshot from the new breakdown panel goes in the same section, so crop it to the two panels."
+    },
+    {
+      "role": "assistant",
+      "content": "Reworded the release notes to reference today's decision without pre-committing a number; the entry fills itself in once we call it."
+    },
+    {
+      "role": "user",
+      "content": "List is clear, so calling it: the shipped unnamed-tenant default lands at 180 batches/min for this release, the surge-review proposal stays shelved with a revisit note next quarter, and the release notes entry fills in accordingly. Queue the change with the scope sheet linked."
+    },
+    {
+      "role": "assistant",
+      "content": "Queued the default change with the scope sheet linked, shelved the surge proposal with its revisit note, and filled in the release notes entry."
+    },
+    {
+      "role": "user",
+      "content": "Follow-on: the evaluation guide should say explicitly that the shipped default is not a production posture. New integrators keep treating it as a quota."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the explicit note to the evaluation guide with a pointer to the stanza template."
+    },
+    {
+      "role": "user",
+      "content": "The stanza template itself still carries the old cost-center field name. Sync it with the reorged schema before more copies spread."
+    },
+    {
+      "role": "assistant",
+      "content": "Synced the template with the current schema; old copies get a lint warning now."
+    },
+    {
+      "role": "user",
+      "content": "Capacity summary automation: last month's went out with a stale tenant list. Pin the generation to the merged tenants file, not the cached copy."
+    },
+    {
+      "role": "assistant",
+      "content": "Pinned summary generation to the merged tenants file; the cache is bypassed at generation time."
+    },
+    {
+      "role": "user",
+      "content": "And the ingest pager handoff notes need the default-change heads-up so next month's oncall is not surprised by new-tenant behaviour."
+    },
+    {
+      "role": "assistant",
+      "content": "Added the heads-up to the handoff notes with the release version and the revisit date."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "unnamed tenant default admission rate",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token buckets; unnamed tenants use the built-in default.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/limits.go\" (lines 1-17, similarity: 1.00) ---\n1| package ingest\n2| \n3| import \"time\"\n4| \n5| // tenantLimiter is a per-tenant token bucket. Buckets refill on a\n6| // fixed tick; per-tenant rates come from the tenants file and\n7| // hot-reload with it. Unknown tenants get the built-in default rate;\n8| // the surge-review pitch to lift that default to 300 batches/min was\n9| // never adopted here.\n10| type tenantLimiter struct {\n11| \tbuckets map[string]*bucket\n12| \ttick    time.Duration\n13| }\n14| \n15| func (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n16| \treturn l.bucket(tenant).take(now)\n17| }\n\n### source: \"internal/ingest/tenants.go\"\npurpose: Tenants-file stanzas with hot reload and loud parse errors.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/tenants.md\"\npurpose: Tenants guide: explicit stanzas and the onboarding-only built-in default.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-handoff-notes · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-surge-sheet · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-tenant-tags · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What shipped default rate did we land on for unnamed tenants?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the shipped unnamed-tenant default is 180 batches/min. Answering 300 batches/min (the shelved surge-review proposal from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-tenant-rate-settle",
+    "mode": "mixed",
+    "candidate_ids": [
+      "1b43847e19ceba18560f1dac6faa31a2e123773df07e288cb87e75e46fa13f81",
+      "ea483db80ebf858712e2406537d6166e4dfbeb535af17c115fb105da464f8754",
+      "f3f232a491429e7b3c77e71e304a7425e6e0abcae4802142a80d19b6bc09aac2",
+      "rec-handoff-notes",
+      "rec-surge-sheet",
+      "rec-tenant-tags"
+    ],
+    "estimated_prompt_tokens": 1160,
+    "state_digest": "a2a0a1e126b8f77e49fbb15706185f171caa3e02dce03ba7d741b4f644a0da08",
+    "subjects": [
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|internal/ingest/tenants.go)",
+      "(c1|rag|docs/tenants.md)",
+      "(c2|memory|rec-handoff-notes)",
+      "(c2|memory|rec-surge-sheet)",
+      "(c2|memory|rec-tenant-tags)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "tenant-default-rate-conv",
+    "budget": 1204,
+    "raw_state_tokens": 2007,
+    "pressure_level": "critical",
+    "shed_messages": 4,
+    "shed_bytes": 2582,
+    "omitted_subjects": 2
+  }
+}

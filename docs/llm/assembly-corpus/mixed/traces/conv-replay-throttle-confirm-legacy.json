@@ -1,0 +1,140 @@
+{
+  "id": "conv-replay-throttle-confirm-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Good, that closes the sharp edges, so decide it: overnight catch-up runs under its own profile with the replay cap at 9 MB/s starting tonight, the daytime profile stays untouched, and we revisit after two clean drains. Submit the pacer change and note the revisit condition in the runbook."
+    },
+    {
+      "role": "assistant",
+      "content": "Submitted the overnight profile change and noted the two-clean-drains revisit condition in the runbook."
+    },
+    {
+      "role": "user",
+      "content": "Also the replay lag panel legend still says segments on the bytes series after the panel fix. Correct the label before someone reads it wrong mid-incident?"
+    },
+    {
+      "role": "assistant",
+      "content": "Corrected the legend; the bytes series is labelled as bytes remaining now."
+    },
+    {
+      "role": "user",
+      "content": "Drill calendar: move next month's replay drill off the release week; the last overlap made both of them worse."
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the drill to the following Tuesday and notified the drill lead."
+    },
+    {
+      "role": "user",
+      "content": "The cursor backup note from the retro still has no owner. Take it yourself and give it a date, please."
+    },
+    {
+      "role": "assistant",
+      "content": "Taken; the cursor backup note is mine with a date inside the sprint."
+    },
+    {
+      "role": "user",
+      "content": "The ops channel is getting per-segment replay lines again since the log change. Summaries only, same treatment as the sweeps got."
+    },
+    {
+      "role": "assistant",
+      "content": "Routed per-segment replay lines to the file log; the channel keeps one summary per run."
+    },
+    {
+      "role": "user",
+      "content": "The quickstart still points at the old replay flag spelling. Fix it before the next onboarding batch trips over it."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the quickstart to the current flag spelling with a legacy-name note."
+    },
+    {
+      "role": "user",
+      "content": "And archive last night's drain thread into the incident folder so the timeline is not lost to channel scroll."
+    },
+    {
+      "role": "assistant",
+      "content": "Archived the thread with the timeline pinned at the top of the incident folder."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "replay pacer profile overnight",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/replay/replay.go\"\npurpose: Segment replay driven by the configured pacer profile.\noverview: replay.go replays rolled segments from the checkpoint cursor through the pacer profile supplied by deployment config.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/replay.go\" (lines 1-17, similarity: 1.00) ---\n1| package replay\n2| \n3| import \"context\"\n4| \n5| // Replayer walks rolled segments from the checkpoint cursor and feeds\n6| // batches back through the export pipeline. The walk rate comes from\n7| // the configured pacer profile; the drills that ran wide open at\n8| // 24 MB/s predate the pacer entirely.\n9| type Replayer struct {\n10| \tdir    string\n11| \tcursor *Cursor\n12| \tpace   Pace\n13| }\n14| \n15| func (r *Replayer) Run(ctx context.Context) error {\n16| \treturn r.walk(ctx, r.pace)\n17| }\n\n### source: \"internal/replay/cursor.go\"\npurpose: Durable replay checkpoint cursor with atomic advance.\noverview: cursor.go advances the replay checkpoint only after a completed segment, with an atomic write so crashes re-replay rather than skip.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/replay/cursor.go\" (lines 1-14, similarity: 1.00) ---\n1| package replay\n2| \n3| // Cursor is the durable replay checkpoint: the highest segment index\n4| // fully replayed. It advances only after a segment completes, and the\n5| // write is atomic via temp file and rename, so a crash mid-segment\n6| // replays that segment from its start rather than skipping records.\n7| type Cursor struct {\n8| \tpath string\n9| \tlast uint64\n10| }\n11| \n12| func (c *Cursor) advance(seg segmentRef) error {\n13| \treturn atomicWrite(c.path, seg.indexBytes())\n14| }\n\n### source: \"docs/replay.md\"\npurpose: Replay guide: pacer profiles chosen per window by operators.\noverview: replay.md explains catch-up replay pacing: profiles are deployment config, chosen per window, shared fairly with live ingest.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"docs/replay.md\" (lines 1-7, similarity: 1.00) ---\n1| # driftwatch replay\n2| \n3| Replay feeds rolled segments back through the export pipeline after an\n4| outage. Catch-up traffic shares disk with live ingest, so the release\n5| rate comes from the configured pacer profile: operators choose a pace\n6| per window, and business hours and maintenance windows may run\n7| different profiles.\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-compaction-note · semantic · 2025-07-27 · nightly compaction is IO-heavy on the slow volume; it defers to declared windows since the reconciliation\nrec-drain-watch · working · 2025-07-27 · watch the export backlog panel during any drain; starvation shows there before the node graphs move\nrec-drill-wideopen · semantic · 2025-07-27 · the March replay drill ran wide open at 24 MB/s and starved live ingest; the retro banned uncapped drills on production-shaped nodes",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What replay cap does the overnight profile run at?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the overnight replay cap is 9 MB/s. Answering 24 MB/s (the uncapped March drill rate from memory) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-replay-throttle-confirm",
+    "mode": "legacy",
+    "candidate_ids": [
+      "48fc090f04fc7ef3963a817ea2d3e466fb5e50118873e406aff365729c3116df",
+      "4d83c14fd78172aa302da2f25ab5a4aad4afcf5beaf544c19e6b7bdc1fff66db",
+      "917bac3558bf4188717f790d0d8543a51518535dde8e2dfcb955e0ab9d9ca6b7",
+      "rec-compaction-note",
+      "rec-drain-watch",
+      "rec-drill-wideopen"
+    ],
+    "estimated_prompt_tokens": 1208,
+    "state_digest": "c1c1dc80910eac564620f0c791eccd5f23bdaf00a456427babb64932b67e2cbb",
+    "subjects": [
+      "(c1|rag|internal/replay/replay.go)",
+      "(c1|rag|internal/replay/cursor.go)",
+      "(c1|rag|docs/replay.md)",
+      "(c2|memory|rec-compaction-note)",
+      "(c2|memory|rec-drain-watch)",
+      "(c2|memory|rec-drill-wideopen)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "replay-throttle-conv",
+    "budget": 1277,
+    "raw_state_tokens": 2129,
+    "pressure_level": "critical",
+    "shed_messages": 6,
+    "shed_bytes": 2874
+  }
+}

@@ -1,0 +1,147 @@
+{
+  "id": "conv-spool-flush-fleet-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Soak retro first thing: the weekend numbers look good and I am walking in leaning fleet spool flush at 40 seconds as the rollout target, but I do not want to call it until we clear the smaller items on the list and sanity-check the disk-pressure story on the two slow racks. The soak numbers themselves are already linked in the retro doc, so nobody needs to re-pull panels to follow along; what I want out of this session is the small items closed and the cadence called with a clean conscience."
+    },
+    {
+      "role": "assistant",
+      "content": "Noted as a leaning, not a decision. I queued the disk-pressure panels for the two slow racks and will keep the rollout checklist in draft until you call the cadence."
+    },
+    {
+      "role": "user",
+      "content": "First small item: the exporter lag panel lost its per-region split in the dashboard refactor, and the capacity review is going to want those regional numbers broken out. Can we get the split restored before Thursday so nobody hand-assembles regional figures from raw queries again? While you are in there, check whether the refactor also dropped the per-region legend colors, because the old board keyed region to color and the review slides reuse that convention."
+    },
+    {
+      "role": "assistant",
+      "content": "Restored the per-region split from the old panel definition, verified the series line up against last week's numbers, and pinned the refactored board so the capacity review links land on the right version."
+    },
+    {
+      "role": "user",
+      "content": "Retention sweep logs are spamming the ops channel again since the verbosity bump went out. Route the per-segment lines to the file log and keep only the sweep summaries in the channel, please - oncall keeps scrolling past real pages to get to the end of a sweep dump."
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the per-segment sweep lines to the file log; the channel now gets a single summary line per sweep with segment counts and duration, and I spot-checked that tonight's sweep rendered the new shape."
+    },
+    {
+      "role": "user",
+      "content": "Onboarding feedback from the last two starts: the quickstart never says where spool data actually lives on disk, and both new folks went hunting for it under the install prefix instead of the data directory. Can we add a layout note with the segment naming pattern? Ideally the note shows one real listing of a data directory so newcomers recognize what healthy looks like on disk."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a data-directory layout note to the quickstart with the segment naming pattern and a pointer into the spool guide for the retention story."
+    },
+    {
+      "role": "user",
+      "content": "The decommission of the old canary node is still half-finished; it keeps surfacing as a stale target in the scrape config warnings, and someone is going to get paged for a dead box at three in the morning. Can we finish pulling it out this week?"
+    },
+    {
+      "role": "assistant",
+      "content": "Removed the stale scrape target, archived the node's dashboards under a dated name, and confirmed the warning count is back to zero on the current config."
+    },
+    {
+      "role": "user",
+      "content": "Grafana folder sprawl again: three copies of the ingest overview live in personal folders and people keep linking the wrong one in incident threads. Consolidate to the ops folder, archive the personal copies, and leave breadcrumbs so old links do not dead-end. The incident from two weeks ago wasted ten minutes on someone reading a stale personal copy, so this is not just tidiness."
+    },
+    {
+      "role": "assistant",
+      "content": "Consolidated to the ops-folder board, archived the personal copies, and left redirect notes in their descriptions pointing at the canonical one."
+    },
+    {
+      "role": "user",
+      "content": "The weekly capacity report is still assembled by hand from four different panels every Monday morning. Can we script the pulls so the report stops depending on whoever remembered the export steps that week?"
+    },
+    {
+      "role": "assistant",
+      "content": "Scripted the four panel pulls into a single report job; it posts the draft to the capacity thread early Monday with the panels linked beneath it."
+    },
+    {
+      "role": "user",
+      "content": "Rack check came back clean, so calling the rollout: hold the fleet spool flush at 40 seconds everywhere, canary override retired with it. Put the cadence change in the rollout checklist and note the disk-pressure watch item for the first week of the rollout."
+    },
+    {
+      "role": "assistant",
+      "content": "Rollout checklist updated with the cadence decision and the first-week disk-pressure watch item; the canary override is marked for retirement in the same change."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "spool flush pacing default",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/spool/spool.go\"\npurpose: Shipped spool flush pacing and the buffered batch drain path.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/spool/spool.go\" (lines 1-14, similarity: 1.00) ---\n1| package spool\n2| \n3| import \"time\"\n4| \n5| // flushEvery is the shipped flush cadence. Deployments override it per\n6| // profile; profile overrides are applied by the config layer, not here.\n7| const flushEvery = 30 * time.Second\n8| \n9| // Flush drains buffered batches into the active segment.\n10| func (s *Spool) Flush() error {\n11| \ts.mu.Lock()\n12| \tdefer s.mu.Unlock()\n13| \treturn s.seg.write(s.buf.drain())\n14| }\n\n### source: \"internal/spool/segment.go\"\npurpose: Append-only spool segments: sequential naming, rollover, fsync policy.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/spool.md\"\npurpose: Operator guide to the spool: layout, drain pacing, sizing guidance.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-rack-watch · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-rollout-thread · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-soak-archive · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · weekend soak captures are archived to the fixture bucket Monday; prune after the retro signs off",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What flush cadence did we land on for the fleet spool rollout?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the fleet spool flush cadence is 40 seconds. Answering 30 seconds (or twice a minute, the shipped default) scores 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-spool-flush-fleet",
+    "mode": "mixed",
+    "candidate_ids": [
+      "369893efe3b24575095f9179f5ba6d12e3e12c6d1c2d8a65b463c2ddb0fcfcd2",
+      "4b956ef05666cf559f7477475a9aab42c11d35fd2e9cdb6999b22f678649f3e5",
+      "ca19c59c18a98aade574f6cb2a8d586a50597de85a395bc8800589ead76bd25b",
+      "rec-rack-watch",
+      "rec-rollout-thread",
+      "rec-soak-archive"
+    ],
+    "estimated_prompt_tokens": 1455,
+    "state_digest": "bd35b50d045c44bad80f97d22769c2a3973c4d13e355351611c9ac9bdc507868",
+    "subjects": [
+      "(c1|rag|internal/spool/spool.go)",
+      "(c1|rag|internal/spool/segment.go)",
+      "(c1|rag|docs/spool.md)",
+      "(c2|memory|rec-rack-watch)",
+      "(c2|memory|rec-rollout-thread)",
+      "(c2|memory|rec-soak-archive)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "spool-flush-window",
+    "budget": 1498,
+    "raw_state_tokens": 2497,
+    "pressure_level": "critical",
+    "shed_bytes": 3497
+  }
+}
