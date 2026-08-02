@@ -114,11 +114,11 @@ type mixedCase struct {
 	// carrier-change gate requires that in at least one arm some built-State
 	// message carrying the literal is dropped, truncated, or re-rendered —
 	// otherwise both arms shed only answer-irrelevant filler ("pressure
-	// theater") and the case measures nothing. RECOMMENDED authoring: one of
-	// the required_evidence anchors, or the stale representation on
-	// stale_vs_fresh (the domain scan covers rag abstract/overview, so a stale
-	// carrier literal validates); the only mechanical tie is case-sensitive
-	// containment in the declared domain's fixture content.
+	// theater") and the case measures nothing. The relevance rule is
+	// mechanical: the target must EQUAL one of the required_evidence entries,
+	// or — on stale_vs_fresh only — appear in the abstract/overview of a rag
+	// source whose Content carries a required_evidence literal (the stale
+	// summary of the evidence source). See validateMixedPressureTarget.
 	PressureTarget *mixedEvidence `json:"pressure_target,omitempty"`
 	// RequiredDomains is self-description, not choice: every case carries all
 	// three domains as competing distractors by design, so the field must be
@@ -631,13 +631,15 @@ func validateMixedCase(c mixedCase) error {
 // on controls (they assert ZERO shed — there is nothing for a target to
 // witness), mandatory on non-control cases, with a known domain, a non-blank
 // literal, and case-sensitive containment in that domain's fixture content
-// (the same scan as required_evidence containment, so on stale_vs_fresh a
-// stale rag abstract/overview literal counts). W5 relevance rule: the target
-// must additionally EQUAL one of the case's required_evidence entries
-// (domain AND literal), or — on stale_vs_fresh only — appear case-
-// sensitively in a rag source's abstract/overview or a memory record's
-// content (the stale carrier); a target the answer never depends on lets
-// the carrier-change gate pass on answer-irrelevant shedding.
+// (the same scan as required_evidence containment). Relevance rule (W5,
+// tightened in the round-4 closure): the target must additionally EQUAL one
+// of the case's required_evidence entries (domain AND literal), or — on
+// stale_vs_fresh only — appear case-sensitively in the abstract/overview of
+// a rag source WHOSE CONTENT contains a required_evidence literal (the
+// stale summary of the evidence source). A stale MEMORY carrier cannot be a
+// target; register pressure on the fresh evidence instead. Without the tie,
+// a target the answer never depends on would let the carrier-change gate
+// pass on answer-irrelevant shedding.
 func validateMixedPressureTarget(c mixedCase) error {
 	if c.Control {
 		if c.PressureTarget != nil {

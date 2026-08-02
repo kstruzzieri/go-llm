@@ -17,8 +17,10 @@ import (
 
 // (2) The pressure target must be answer-relevant: equal to one of the
 // case's required_evidence entries (domain AND literal), or — on
-// stale_vs_fresh only — present case-sensitively in a rag abstract/overview
-// or a memory record's content (the stale carrier).
+// stale_vs_fresh only — present case-sensitively in the abstract/overview
+// of a rag source whose Content carries a required_evidence literal (the
+// stale summary of the evidence source; stale memory carriers are not
+// valid targets).
 func TestMixedPressureTargetAnswerRelevance(t *testing.T) {
 	t.Run("non-evidence target rejected off stale_vs_fresh", func(t *testing.T) {
 		c := mixedConvCase("rel-conv")
