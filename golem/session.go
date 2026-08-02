@@ -69,6 +69,9 @@ func (r *Runtime) loadThread(ctx context.Context, id string) (*threadState, erro
 		}
 		return nil, fmt.Errorf("golem: load thread %q: %w", id, err)
 	}
+	if conv == nil || conv.ID != id {
+		return nil, fmt.Errorf("golem: load thread %q: session store returned invalid conversation", id)
+	}
 	return &threadState{conversation: *conv}, nil
 }
 

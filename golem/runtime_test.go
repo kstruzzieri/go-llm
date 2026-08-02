@@ -286,6 +286,16 @@ func (s *blockingCompressionStore) Save(ctx context.Context, conv conversation.C
 	return ctx.Err()
 }
 
+type malformedSessionStore struct {
+	conversation *conversation.Conversation
+}
+
+func (s malformedSessionStore) Load(context.Context, string) (*conversation.Conversation, error) {
+	return s.conversation, nil
+}
+
+func (malformedSessionStore) Save(context.Context, conversation.Conversation) error { return nil }
+
 type thinkingCaller struct{}
 
 func (thinkingCaller) Chat(_ context.Context, _ provider.ChatRequest, onToken func(provider.ChatResponse) error) (agent.ModelResult, error) {
@@ -1545,6 +1555,56 @@ func TestInjectedSessionStoreLoadFailurePreservesRunFailure(t *testing.T) {
 	}
 	if failed.Code != "internal" {
 		t.Fatalf("run.failed code = %q, want internal", failed.Code)
+	}
+}
+
+func TestInjectedSessionStoreRejectsMalformedLoadResult(t *testing.T) {
+	tests := []struct {
+		name         string
+		conversation *conversation.Conversation
+	}{
+		{name: "nil conversation"},
+		{name: "wrong conversation ID", conversation: &conversation.Conversation{ID: "thread-other"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			caller := &countingCaller{}
+			runtime, err := golem.New(context.Background(), golem.Options{
+				Root:         t.TempDir(),
+				SessionStore: malformedSessionStore{conversation: tt.conversation},
+				Orchestrator: agent.New(caller, agent.ContextManager{}),
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			t.Cleanup(func() { _ = runtime.Close() })
+
+			var events []golem.Event
+			var panicked any
+			func() {
+				defer func() { panicked = recover() }()
+				_, err = runtime.Run(context.Background(), golem.Turn{
+					ThreadID: "thread-requested",
+					RunID:    "run-malformed-load",
+					Message:  "hello",
+				}, func(event golem.Event) error {
+					events = append(events, event)
+					return nil
+				})
+			}()
+			if panicked != nil {
+				t.Fatalf("Run panicked: %v", panicked)
+			}
+			if err == nil {
+				t.Fatal("Run succeeded with malformed loaded conversation")
+			}
+			if caller.calls != 0 {
+				t.Fatalf("model calls = %d, want 0", caller.calls)
+			}
+			if got, want := eventTypes(events), []string{"run.started", "run.failed"}; !slices.Equal(got, want) {
+				t.Fatalf("event types = %v, want %v", got, want)
+			}
+		})
 	}
 }
 
