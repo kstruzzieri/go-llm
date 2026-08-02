@@ -141,6 +141,38 @@ func TestMixedCorpusRegeneration(t *testing.T) {
 	}
 }
 
+// TestReadmeRuleTextMatches is the pre-registration text gate (#331 W4): the
+// mixed corpus README's quoted decision rule must be BYTE-equal to the
+// rendered registered rule (assemblyMixedDecisionRuleText), so the frozen
+// pack can never drift from the constants that govern the report — the W1
+// review caught exactly this class of stale quote. The quote is the FIRST
+// blockquote in the README; its ">"-prefixed lines are soft-wrapped
+// markdown, so they join with single spaces before the compare.
+func TestReadmeRuleTextMatches(t *testing.T) {
+	root := corpusRepoRoot(t)
+	raw, err := os.ReadFile(filepath.Join(root, "docs", "llm", "assembly-corpus", "mixed", "README.md"))
+	if err != nil {
+		t.Fatalf("read mixed README: %v", err)
+	}
+	var quote []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		if strings.HasPrefix(line, ">") {
+			quote = append(quote, strings.TrimPrefix(strings.TrimPrefix(line, ">"), " "))
+			continue
+		}
+		if len(quote) > 0 {
+			break // first contiguous blockquote only
+		}
+	}
+	if len(quote) == 0 {
+		t.Fatal("mixed README holds no blockquote for the registered rule")
+	}
+	got := strings.Join(quote, " ")
+	if want := assemblyMixedDecisionRuleText(); got != want {
+		t.Fatalf("mixed README rule quote does not byte-match assemblyMixedDecisionRuleText()\n got: %s\nwant: %s", got, want)
+	}
+}
+
 // TestRegenGateDetectsDrift proves the comparator both regeneration gates
 // stand on, against a real corpus build in temp dirs (the committed corpus is
 // never touched): identical copies pass, and each simulated drift mode — a
