@@ -22,9 +22,10 @@ import (
 // AgentMemorySearch) over freshly seeded in-memory stores. This is the
 // deterministic rageval companion to cmd/llm-bench's human-labeled mixed
 // corpus: llm-bench measures answer quality on arms-differ-gated cases;
-// rageval measures assembly SHAPE across budget fractions, INCLUDING the
-// degenerate no-anchor cases (conversation_only, chain_retention) where both
-// arms take the legacy path and the mixed trace is the zero value.
+// rageval measures assembly SHAPE across budget fractions. Every case carries
+// at least one structured anchor so the mixed path engages and the two arms
+// differ at every sweep fraction — mirroring the llm-bench authoring rule
+// that a tool-free case always fails the arms-differ gate.
 
 const (
 	// mixedEvalFixedEpoch pins every store timestamp. It is llm-bench's
@@ -371,12 +372,14 @@ func mixedEvalMemorySearch(ctx context.Context, callID, query string, records []
 
 // --- the five cases --------------------------------------------------------
 
-// buildMixedEvalConversationOnly: plain turns only, the answer-bearing fact in
-// the FIRST exchange so budget pressure sheds it first. No tools => no
-// structured anchors => the mixed arm takes the legacy path and the trace is
-// the zero value; this case exists to keep the degenerate no-anchor shape in
-// the sweep.
-func buildMixedEvalConversationOnly(context.Context) (agent.State, error) {
+// buildMixedEvalConversationOnly: the answer-bearing fact lives ONLY in the
+// FIRST plain exchange so budget pressure sheds it first, while one
+// IRRELEVANT progressive retrieve chain (a real Retrieve over a distractor
+// store whose content has nothing to do with the migration goal) supplies the
+// structured anchors that engage the mixed path. The sweep records how each
+// arm trades a useless-but-structured anchor against the answer-bearing plain
+// turns — the companion shape of the stratum's retention question.
+func buildMixedEvalConversationOnly(ctx context.Context) (agent.State, error) {
 	exchanges := [][2]string{
 		{
 			"Before we start on the migration plan, note this down: our credential rotation interval is exactly 42 days, and the compliance team audits the rotation logs on the first business day of every quarter without exception.",
@@ -399,9 +402,42 @@ func buildMixedEvalConversationOnly(context.Context) (agent.State, error) {
 			"Got it — runbooks land the Friday before each Tuesday board review, with staging rollback rehearsal results and the on-call roster attached. I will fold those deadlines into the phase schedule for all three phases.",
 		},
 	}
+	// The distractor store is deliberately OFF-TOPIC (documentation style
+	// tooling, nothing about queues, credentials, or the migration): the
+	// anchors it yields are structurally attractive to mixed assembly but
+	// carry zero answer value, so retaining them competes directly with the
+	// answer-bearing first exchange.
+	distractors := []mixedEvalSource{
+		{
+			path:     "internal/docstyle/headings.go",
+			content:  "package docstyle\n\n// HeadingCase normalizes section headings to sentence case.\nfunc HeadingCase(title string) string {\n\treturn normalizeCase(title, sentenceCaseRules)\n}\n",
+			abstract: "Sentence-case normalization for section headings.",
+			overview: "HeadingCase applies the sentence-case rule table to documentation section titles.",
+		},
+		{
+			path:     "internal/docstyle/linkcheck.go",
+			content:  "package docstyle\n\n// CheckLinks verifies every relative link in a rendered page resolves.\nfunc CheckLinks(page Page) []Problem {\n\treturn resolveAll(page.Links)\n}\n",
+			abstract: "Relative-link resolution checks for rendered pages.",
+			overview: "CheckLinks walks a page's relative links and reports every one that fails to resolve.",
+		},
+		{
+			path:    "internal/docstyle/glossary.go",
+			content: "package docstyle\n\n// Glossary terms are matched whole-word and case-folded.\nfunc MatchTerm(text, term string) bool {\n\treturn wholeWordFold(text, term)\n}\n",
+		},
+	}
+	chain, err := mixedEvalRetrieve(ctx, "rag-call-03", "documentation heading and link style rules", distractors)
+	if err != nil {
+		return agent.State{}, err
+	}
 	st := agent.State{System: "You are a deterministic planning assistant for a queue-migration project. Answer strictly from the visible transcript; never invent numbers that were not stated."}
-	for _, e := range exchanges {
+	for i, e := range exchanges {
 		st.Messages = append(st.Messages, mixedEvalTurn("user", e[0]), mixedEvalTurn("assistant", e[1]))
+		if i == 1 {
+			// An off-topic side quest after the second exchange: the assistant
+			// consults the documentation style index for the runbook template —
+			// structured anchors, no answer content.
+			st.Messages = append(st.Messages, chain...)
+		}
 	}
 	st.Messages = append(st.Messages, mixedEvalGoal("What credential rotation interval did I state at the very start of this conversation? Answer with the exact number of days and nothing else."))
 	return st, nil
@@ -536,10 +572,11 @@ func buildMixedEvalStaleFresh(ctx context.Context) (agent.State, error) {
 
 // buildMixedEvalChainRetention: an UNSTRUCTURED echo-style chain (plain
 // Content, nil Context — constructed directly, no real tool) positioned
-// early so it is shed-eligible under pressure. No structured anchors => the
-// mixed arm takes the legacy path; the sweep records how both arms treat a
-// plain completed chain against later plain turns.
-func buildMixedEvalChainRetention(context.Context) (agent.State, error) {
+// early so it is shed-eligible under pressure — the stratum's point — PLUS a
+// structured retrieve chain later in the transcript so the mixed path
+// engages. The sweep records how each arm treats the plain completed chain
+// when structured anchors are competing for the same budget.
+func buildMixedEvalChainRetention(ctx context.Context) (agent.State, error) {
 	echoContent := "diagnostics snapshot: queue depth 4812 messages; oldest message age 96 seconds; consumer group lag by partition p0=311 p1=502 p2=1288 p3=44; broker heap 61 percent; last rebalance 14 minutes ago triggered by consumer c-17 restart; no under-replicated partitions; produce p99 latency 38 milliseconds; fetch p99 latency 21 milliseconds."
 	assistant := agent.Message{
 		ChatMessage: provider.ChatMessage{
@@ -559,12 +596,37 @@ func buildMixedEvalChainRetention(context.Context) (agent.State, error) {
 		Segment:   agent.Elastic,
 		OutputCap: mixedEvalOutputCap,
 	}
+	// A structured retrieve chain over the consumer-runbook sources: on-topic
+	// orientation material (rebalance and lag-recovery procedure), carrying
+	// none of the snapshot's answer literals, positioned AFTER the echo chain
+	// so the plain chain stays the oldest shed candidate.
+	runbooks := []mixedEvalSource{
+		{
+			path:     "internal/ops/rebalance.go",
+			content:  "package ops\n\n// RebalanceAfterRestart drains the restarted consumer's partitions gradually.\nfunc RebalanceAfterRestart(group string) error {\n\treturn drainGradually(group, defaultDrainWindow)\n}\n",
+			abstract: "Gradual partition drain after a consumer restart.",
+			overview: "RebalanceAfterRestart reassigns a restarted consumer's partitions over a drain window instead of all at once.",
+		},
+		{
+			path:     "internal/ops/lagrecovery.go",
+			content:  "package ops\n\n// RecoverLag raises the consumer fetch parallelism until lag clears.\nfunc RecoverLag(group string, target int) error {\n\treturn scaleFetchers(group, target)\n}\n",
+			abstract: "Fetch-parallelism scaling for lag recovery.",
+			overview: "RecoverLag scales a consumer group's fetchers toward a target until the partition lag clears.",
+		},
+	}
+	retrieveChain, err := mixedEvalRetrieve(ctx, "rag-call-04", "consumer rebalance and lag recovery runbook", runbooks)
+	if err != nil {
+		return agent.State{}, err
+	}
 	st := agent.State{System: "You are a deterministic operations assistant. Tool observations in the transcript are the only telemetry you have; say so when one has been dropped."}
 	st.Messages = append(st.Messages,
 		mixedEvalTurn("user", "Grab a diagnostics snapshot of the ingest queue before we discuss the consumer incident from this morning's alert storm."),
 		assistant, toolMsg,
 		mixedEvalTurn("user", "While that snapshot is fresh: the alerts fired between 06:40 and 06:55, mostly consumer-lag warnings on partition p2, with one broker heap warning that cleared on its own."),
 		mixedEvalTurn("assistant", "Understood — a fifteen-minute alert window dominated by p2 consumer lag plus one transient broker heap warning. The snapshot shows p2 lag well above its siblings, which is consistent with those alerts."),
+	)
+	st.Messages = append(st.Messages, retrieveChain...)
+	st.Messages = append(st.Messages,
 		mixedEvalTurn("user", "The consumer team suspects the c-17 restart caused the rebalance and the lag spike, but they want evidence from telemetry rather than a hunch before they roll anything back."),
 		mixedEvalTurn("assistant", "The snapshot records the last rebalance fourteen minutes ago triggered by the c-17 restart, and p2 lag at 1288 messages against double digits elsewhere — that is direct telemetry linking the restart to the spike."),
 	)

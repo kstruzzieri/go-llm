@@ -145,13 +145,71 @@ func TestMixedEvalShedsUnderSweep(t *testing.T) {
 	}
 	// Monotonicity spot-check on conversation_only: the f=0.8 assembly retains
 	// more messages than the f=0.4 one. Exact values pinned from the baseline:
-	// legacy retains 3 of 11 messages at f=0.4 and 9 of 11 at f=0.8.
+	// the state is 13 messages (5 exchanges = 10 turns, the 2-message
+	// distractor retrieve chain, the pinned goal); legacy retains only the
+	// goal (1 of 13) at f=0.4 and 9 of 13 at f=0.8.
 	conv := byName["conversation_only"]
-	if got := conv.Fractions[0].Legacy.Messages; got != 3 {
-		t.Fatalf("conversation_only f=0.4 legacy messages = %d, want 3", got)
+	if got := conv.Fractions[0].Legacy.Messages; got != 1 {
+		t.Fatalf("conversation_only f=0.4 legacy messages = %d, want 1", got)
 	}
 	if got := conv.Fractions[2].Legacy.Messages; got != 9 {
 		t.Fatalf("conversation_only f=0.8 legacy messages = %d, want 9", got)
+	}
+}
+
+// TestMixedEvalMixedPathEngagedEverywhere pins the de-degeneration (#331 W4):
+// every fixture case now carries at least one structured anchor, so the mixed
+// arm engages — non-empty decision histogram — and the two arms differ in
+// assembled shape at EVERY sweep fraction. conversation_only (irrelevant
+// distractor retrieve chain) and chain_retention (structured retrieve chain
+// alongside the plain echo chain) get their exact f=0.4 and f=0.6 histograms
+// pinned from the committed baseline read-through.
+func TestMixedEvalMixedPathEngagedEverywhere(t *testing.T) {
+	report := mixedEvalReport(t)
+	for _, c := range report.Cases {
+		for _, row := range c.Fractions {
+			if len(row.Mixed.DecisionHistogram) == 0 {
+				t.Errorf("%s f=%v: empty decision histogram (mixed path did not engage)", c.Name, row.Fraction)
+			}
+			if row.Legacy.ContextBytes == row.Mixed.ContextBytes && row.Legacy.Messages == row.Mixed.Messages {
+				t.Errorf("%s f=%v: arms identical in shape (bytes %d, messages %d)",
+					c.Name, row.Fraction, row.Legacy.ContextBytes, row.Legacy.Messages)
+			}
+		}
+	}
+	wantHists := map[string][2]map[string]int{
+		// conversation_only: 9 subjects at every fraction; at f=0.4 the mixed
+		// arm renders 5 (3 base + 2 upgrades) and omits 4, at f=0.6 it renders
+		// 7 and omits 2.
+		"conversation_only": {
+			{"base": 3, "omitted": 4, "upgrade": 2},
+			{"base": 5, "floor": 1, "omitted": 2, "upgrade": 1},
+		},
+		// chain_retention: 7 subjects at every fraction; the plain echo chain
+		// is among the omissions at f=0.4 and f=0.6 while the structured
+		// retrieve anchors persist.
+		"chain_retention": {
+			{"base": 2, "floor": 1, "omitted": 3, "upgrade": 1},
+			{"base": 4, "floor": 1, "omitted": 2},
+		},
+	}
+	for _, c := range report.Cases {
+		want, ok := wantHists[c.Name]
+		if !ok {
+			continue
+		}
+		for i, wantHist := range want {
+			row := c.Fractions[i]
+			hist := row.Mixed.DecisionHistogram
+			if len(hist) != len(wantHist) {
+				t.Fatalf("%s f=%v: histogram = %v, want %v", c.Name, row.Fraction, hist, wantHist)
+			}
+			for k, v := range wantHist {
+				if hist[k] != v {
+					t.Fatalf("%s f=%v: histogram[%q] = %d, want %d (full: %v)", c.Name, row.Fraction, k, hist[k], v, hist)
+				}
+			}
+		}
 	}
 }
 

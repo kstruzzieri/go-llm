@@ -4,75 +4,88 @@
     {
       "name": "conversation_only",
       "stratum": "conversation_only",
-      "raw_tokens": 696,
+      "raw_tokens": 1086,
       "fractions": [
         {
           "fraction": 0.4,
-          "budget": 278,
+          "budget": 434,
           "legacy": {
-            "context_tokens": 182,
-            "context_bytes": 724,
-            "messages": 3,
-            "shed_messages": 8,
-            "shed_bytes": 1693,
-            "pressure_level": "watch"
+            "context_tokens": 76,
+            "context_bytes": 301,
+            "messages": 1,
+            "shed_messages": 12,
+            "shed_bytes": 3609,
+            "pressure_level": "ok"
           },
           "mixed": {
-            "context_tokens": 182,
-            "context_bytes": 724,
-            "messages": 3,
+            "context_tokens": 405,
+            "context_bytes": 1613,
+            "messages": 5,
             "shed_messages": 8,
-            "shed_bytes": 1693,
-            "pressure_level": "watch",
-            "omitted_subjects": 0,
+            "shed_bytes": 2297,
+            "pressure_level": "critical",
+            "omitted_subjects": 4,
             "anchor_omissions": 0,
-            "decision_histogram": {}
+            "decision_histogram": {
+              "base": 3,
+              "omitted": 4,
+              "upgrade": 2
+            }
           }
         },
         {
           "fraction": 0.6,
-          "budget": 418,
+          "budget": 652,
           "legacy": {
-            "context_tokens": 392,
-            "context_bytes": 1561,
-            "messages": 7,
+            "context_tokens": 556,
+            "context_bytes": 2217,
+            "messages": 5,
+            "shed_messages": 8,
+            "shed_bytes": 1693,
+            "pressure_level": "warn"
+          },
+          "mixed": {
+            "context_tokens": 623,
+            "context_bytes": 2485,
+            "messages": 9,
+            "shed_messages": 4,
+            "shed_bytes": 1425,
+            "pressure_level": "critical",
+            "omitted_subjects": 2,
+            "anchor_omissions": 0,
+            "decision_histogram": {
+              "base": 5,
+              "floor": 1,
+              "omitted": 2,
+              "upgrade": 1
+            }
+          }
+        },
+        {
+          "fraction": 0.8,
+          "budget": 869,
+          "legacy": {
+            "context_tokens": 766,
+            "context_bytes": 3054,
+            "messages": 9,
             "shed_messages": 4,
             "shed_bytes": 856,
             "pressure_level": "critical"
           },
           "mixed": {
-            "context_tokens": 392,
-            "context_bytes": 1561,
-            "messages": 7,
-            "shed_messages": 4,
-            "shed_bytes": 856,
+            "context_tokens": 839,
+            "context_bytes": 3341,
+            "messages": 13,
+            "shed_messages": 0,
+            "shed_bytes": 569,
             "pressure_level": "critical",
             "omitted_subjects": 0,
             "anchor_omissions": 0,
-            "decision_histogram": {}
-          }
-        },
-        {
-          "fraction": 0.8,
-          "budget": 557,
-          "legacy": {
-            "context_tokens": 500,
-            "context_bytes": 1989,
-            "messages": 9,
-            "shed_messages": 2,
-            "shed_bytes": 428,
-            "pressure_level": "warn"
-          },
-          "mixed": {
-            "context_tokens": 500,
-            "context_bytes": 1989,
-            "messages": 9,
-            "shed_messages": 2,
-            "shed_bytes": 428,
-            "pressure_level": "warn",
-            "omitted_subjects": 0,
-            "anchor_omissions": 0,
-            "decision_histogram": {}
+            "decision_histogram": {
+              "base": 7,
+              "floor": 1,
+              "upgrade": 1
+            }
           }
         }
       ]
@@ -343,75 +356,87 @@
     {
       "name": "chain_retention",
       "stratum": "chain_retention",
-      "raw_tokens": 465,
+      "raw_tokens": 771,
       "fractions": [
         {
           "fraction": 0.4,
-          "budget": 186,
+          "budget": 308,
           "legacy": {
             "context_tokens": 95,
             "context_bytes": 378,
             "messages": 1,
-            "shed_messages": 7,
-            "shed_bytes": 1215,
+            "shed_messages": 9,
+            "shed_bytes": 2373,
             "pressure_level": "ok"
           },
           "mixed": {
-            "context_tokens": 95,
-            "context_bytes": 378,
-            "messages": 1,
-            "shed_messages": 7,
-            "shed_bytes": 1215,
-            "pressure_level": "ok",
-            "omitted_subjects": 0,
+            "context_tokens": 277,
+            "context_bytes": 1106,
+            "messages": 4,
+            "shed_messages": 6,
+            "shed_bytes": 1645,
+            "pressure_level": "critical",
+            "omitted_subjects": 3,
             "anchor_omissions": 0,
-            "decision_histogram": {}
+            "decision_histogram": {
+              "base": 2,
+              "floor": 1,
+              "omitted": 3,
+              "upgrade": 1
+            }
           }
         },
         {
           "fraction": 0.6,
-          "budget": 279,
+          "budget": 463,
           "legacy": {
-            "context_tokens": 179,
-            "context_bytes": 712,
+            "context_tokens": 385,
+            "context_bytes": 1536,
             "messages": 3,
-            "shed_messages": 5,
-            "shed_bytes": 881,
-            "pressure_level": "watch"
+            "shed_messages": 7,
+            "shed_bytes": 1215,
+            "pressure_level": "warn"
           },
           "mixed": {
-            "context_tokens": 179,
-            "context_bytes": 712,
-            "messages": 3,
-            "shed_messages": 5,
-            "shed_bytes": 881,
-            "pressure_level": "watch",
-            "omitted_subjects": 0,
+            "context_tokens": 412,
+            "context_bytes": 1640,
+            "messages": 7,
+            "shed_messages": 3,
+            "shed_bytes": 1111,
+            "pressure_level": "critical",
+            "omitted_subjects": 2,
             "anchor_omissions": 0,
-            "decision_histogram": {}
+            "decision_histogram": {
+              "base": 4,
+              "floor": 1,
+              "omitted": 2
+            }
           }
         },
         {
           "fraction": 0.8,
-          "budget": 372,
+          "budget": 617,
           "legacy": {
-            "context_tokens": 277,
-            "context_bytes": 1099,
-            "messages": 5,
+            "context_tokens": 567,
+            "context_bytes": 2257,
+            "messages": 7,
             "shed_messages": 3,
             "shed_bytes": 494,
-            "pressure_level": "warn"
+            "pressure_level": "critical"
           },
           "mixed": {
-            "context_tokens": 277,
-            "context_bytes": 1099,
-            "messages": 5,
-            "shed_messages": 3,
-            "shed_bytes": 494,
-            "pressure_level": "warn",
+            "context_tokens": 568,
+            "context_bytes": 2261,
+            "messages": 10,
+            "shed_messages": 0,
+            "shed_bytes": 490,
+            "pressure_level": "critical",
             "omitted_subjects": 0,
             "anchor_omissions": 0,
-            "decision_histogram": {}
+            "decision_histogram": {
+              "base": 5,
+              "upgrade": 2
+            }
           }
         }
       ]

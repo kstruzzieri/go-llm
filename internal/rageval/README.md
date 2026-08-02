@@ -267,12 +267,24 @@ producers (`agent/tools.Retrieve` in progressive mode over a seeded rag store,
 BOTH arms (legacy `ContextManager{}` and `ContextManager{Mixed: true}`) at
 budget fractions {0.4, 0.6, 0.8} of the registered raw state size.
 
-`conversation_only` and `chain_retention` are deliberately degenerate: neither
-carries a structured anchor (plain turns only; an echo-style chain with plain
-`Content` and nil `Context`), so the mixed arm takes the legacy path, both
-arms report byte-identical shapes, and the mixed-only fields are zero with an
-empty decision histogram. They keep the no-anchor shape in the sweep on
-purpose — they are not fixture bugs.
+Every case carries at least one structured anchor, so the mixed path engages
+and the two arms differ in assembled shape at every fraction (pinned by
+`TestMixedEvalMixedPathEngagedEverywhere`). The two cases that were
+degenerate before W4 now each exercise a distinct contrast:
+
+- `conversation_only` — the answer-bearing fact still lives ONLY in the
+  first plain exchange (shed first under pressure), but the transcript also
+  carries one IRRELEVANT progressive retrieve chain over an off-topic
+  distractor store. The sweep records how each arm trades the
+  useless-but-structured anchors against the answer-bearing plain turns: at
+  f=0.4 legacy keeps only the pinned goal while mixed renders 5 of 9
+  subjects.
+- `chain_retention` — the UNSTRUCTURED echo-style chain (plain `Content`,
+  nil `Context`) remains the stratum's point and stays the oldest
+  shed-eligible chain, but a structured retrieve chain later in the
+  transcript engages the mixed path, so the sweep shows how each arm treats
+  the plain completed chain when structured anchors compete for the same
+  budget.
 
 Budgets are `max(minViable, round(f*raw))` with `minViable = est(system) +
 est(final pinned goal) + 64` on the registered `est=(len+3)/4` basis — the
