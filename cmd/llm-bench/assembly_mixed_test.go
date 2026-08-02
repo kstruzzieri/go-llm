@@ -222,6 +222,17 @@ func TestAssemblyReportInvalidPairContract(t *testing.T) {
 	arts = append(arts, fl, fm)
 	labels = append(labels, labelFor(fl, 0.5), labelFor(fm, 0.5))
 
+	// TwinGroup mismatch across arms: twin drives the registered
+	// permutation grouping, so it pairs like stratum and family.
+	wl := mixedArtifact("pair-twin", AssemblyLegacy, "m", func(ae *AssemblyEval) {
+		ae.TwinGroup = "tg-a"
+	})
+	wm := mixedArtifact("pair-twin", AssemblyMixed, "m", func(ae *AssemblyEval) {
+		ae.TwinGroup = "tg-b"
+	})
+	arts = append(arts, wl, wm)
+	labels = append(labels, labelFor(wl, 0.5), labelFor(wm, 0.5))
+
 	rep := mustMixedReport(t, arts, labels)
 	lm := rep.LegacyMixedModels[0]
 	if lm.Pairs != 2 {
@@ -234,6 +245,7 @@ func TestAssemblyReportInvalidPairContract(t *testing.T) {
 		"pair-cand":    "candidate-ids-mismatch",
 		"pair-stratum": "stratum-mismatch",
 		"pair-family":  "scenario-family-mismatch",
+		"pair-twin":    "twin-group-mismatch",
 	}
 	got := map[string]string{}
 	for _, e := range lm.Exclusions {
@@ -1049,6 +1061,14 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 				t.Errorf("%s: want loud error naming pair-alpha, got %v", name, err)
 			}
 		}
+		// Binding applies to EXCLUDED pairs too whenever both arms exist:
+		// pair-beta is report-excluded (unlabeled) but fully built, so a
+		// swapped-hash row on it is corruption, not a skip.
+		exSwapped := fcRowFor(arts, "pair-beta", "a")
+		exSwapped.ArtifactHashA, exSwapped.ArtifactHashB = exSwapped.ArtifactHashB, exSwapped.ArtifactHashA
+		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{exSwapped}); err == nil || !strings.Contains(err.Error(), "pair-beta") {
+			t.Errorf("swapped hashes on excluded pair: want loud error naming pair-beta, got %v", err)
+		}
 	})
 
 	t.Run("cluster permutation p pins to 1 for a single group", func(t *testing.T) {
@@ -1083,10 +1103,11 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		// Three singleton groups, aggregates (+1,+1,+1), observed |sum| = 3.
 		// A permutation reaches |sum| >= 3 only when all three flips agree:
 		// 2 of the 8 equally likely patterns, so the exact expectation is
-		// 2/8 = 0.25 and p ~= (0.25*B+1)/(B+1). The pinned literal is the
-		// deterministic seed-1 Monte Carlo draw at the registered B = 10000:
-		// count = 2480, p = 2481/10001 ~= 0.2481.
-		if want := 2481.0 / 10001; fc.PClusterPermutation != want {
+		// 2/8 = 0.25 and p ~= (0.25*B+1)/(B+1). The permutation test shares
+		// the report's seed/B (this harness passes 1/200; production passes
+		// pairedBootstrapSeed/pairedBootstrapN), so the pinned literal is the
+		// deterministic seed-1 draw at B = 200: count = 48, p = 49/201.
+		if want := 49.0 / 201; fc.PClusterPermutation != want {
 			t.Fatalf("p_cluster_permutation = %v, want %v (seed-1 draw, expectation 0.25)", fc.PClusterPermutation, want)
 		}
 		// Deterministic across runs.
@@ -1105,8 +1126,8 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		// groups with aggregates (+2, +1), observed |sum| = 3. |±2 ±1| >= 3
 		// only when the two flips agree: exact expectation 2/4 = 0.5 — twice
 		// the unmerged three-group fraction, so merging observably weakens
-		// the evidence. Pinned literal: the deterministic seed-1 Monte Carlo
-		// draw at B = 10000 is count = 4987, p = 4988/10001 ~= 0.4988.
+		// the evidence. Pinned literal: the deterministic seed-1 draw at the
+		// harness's B = 200 is count = 91, p = 92/201.
 		var twinArts []Artifact
 		var twinLabels []Label
 		for _, pair := range []string{"tw-a", "tw-b", "tw-c"} {
@@ -1132,7 +1153,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		if fc == nil || fc.MixedWins != 3 {
 			t.Fatalf("fc = %+v; want three mixed wins", fc)
 		}
-		if want := 4988.0 / 10001; fc.PClusterPermutation != want {
+		if want := 92.0 / 201; fc.PClusterPermutation != want {
 			t.Fatalf("p_cluster_permutation = %v, want %v (twin-merged, expectation 0.5)", fc.PClusterPermutation, want)
 		}
 	})

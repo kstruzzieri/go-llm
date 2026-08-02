@@ -247,16 +247,19 @@ type fcGroupSign struct {
 // attachAssemblyForcedChoice attaches the forced-choice secondary analyses to
 // every legacy-mixed model section. Each preference row's a/b sides resolve
 // to arms through sideIsLegacyA (nil defaults to fcSideIsLegacyA, the
-// registered parity authority), and every row that enters the tests must
-// carry EXACTLY its pair's legacy/mixed arm hashes in the a/b order that
-// parity dictates — a mismatch is a loud error naming the pair. Rows on
-// pairs the primary analysis excluded (any Exclusions reason) or on
-// negative-control pairs are skipped and counted in SkippedExcluded (their
-// hashes are presence-checked only; a skipped pair may lack an arm to bind
-// against). Unknown model/pair/hash, a duplicate row, or an invalid
-// preference value is a loud error. Runs strictly after every Decision is
-// final and never writes one.
-func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPreference, pairs map[assemblyPairKey]*assemblyArmSet, artHashes map[string]struct{}, sideIsLegacyA func(pairID, modelKey string) bool) error {
+// registered parity authority), and every row whose pair has BOTH arms
+// present — excluded pairs included — must carry EXACTLY that pair's
+// legacy/mixed arm hashes in the a/b order that parity dictates; a mismatch
+// is a loud error naming the pair. Only rows on missing-arm pairs fall back
+// to presence-only hash validation (there is no second arm to bind against).
+// Rows on pairs the primary analysis excluded (any Exclusions reason) or on
+// negative-control pairs are skipped and counted in SkippedExcluded. Unknown
+// model/pair/hash, a duplicate row, or an invalid preference value is a loud
+// error. seed and bootstrapN drive the cluster permutation test and are the
+// SAME values the caller's CI uses, so a sensitivity rerun with a varied
+// seed moves both the CI and the permutation p together. Runs strictly after
+// every Decision is final and never writes one.
+func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPreference, pairs map[assemblyPairKey]*assemblyArmSet, artHashes map[string]struct{}, seed int64, bootstrapN int, sideIsLegacyA func(pairID, modelKey string) bool) error {
 	if sideIsLegacyA == nil {
 		sideIsLegacyA = fcSideIsLegacyA
 	}
@@ -294,6 +297,21 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 		}
 		seen[k] = struct{}{}
 		fc := m.ForcedChoice
+		legacyIsA := sideIsLegacyA(row.PairID, row.CandidateModel)
+		// Bind the row's a/b hashes to the pair's EXACT arms under the
+		// registered side assignment whenever BOTH arms exist — excluded
+		// pairs included. Only a missing-arm pair has nothing to bind
+		// against, leaving the presence check above as its whole validation.
+		if s.base != nil && s.treat != nil {
+			wantA, wantB := s.base.ArtifactHash, s.treat.ArtifactHash
+			if !legacyIsA {
+				wantA, wantB = wantB, wantA
+			}
+			if row.ArtifactHashA != wantA || row.ArtifactHashB != wantB {
+				return fmt.Errorf("fc-preference row %d (pair %q model %q): artifact_hash_a/b %q/%q do not match the pair's legacy/mixed arms under the registered side assignment (want %q/%q)",
+					i, row.PairID, row.CandidateModel, row.ArtifactHashA, row.ArtifactHashB, wantA, wantB)
+			}
+		}
 		if _, ex := excluded[row.CandidateModel][row.PairID]; ex {
 			fc.SkippedExcluded++
 			continue
@@ -301,18 +319,6 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 		if s.base != nil && s.base.Trace.AssemblyEval.Control {
 			fc.SkippedExcluded++ // negative controls never enter the verdict, so never the tests
 			continue
-		}
-		// A non-excluded non-control legacy-mixed pair is complete: both arms
-		// exist. Bind the row's a/b hashes to the pair's EXACT arms under the
-		// registered side assignment.
-		legacyIsA := sideIsLegacyA(row.PairID, row.CandidateModel)
-		wantA, wantB := s.base.ArtifactHash, s.treat.ArtifactHash
-		if !legacyIsA {
-			wantA, wantB = wantB, wantA
-		}
-		if row.ArtifactHashA != wantA || row.ArtifactHashB != wantB {
-			return fmt.Errorf("fc-preference row %d (pair %q model %q): artifact_hash_a/b %q/%q do not match the pair's legacy/mixed arms under the registered side assignment (want %q/%q)",
-				i, row.PairID, row.CandidateModel, row.ArtifactHashA, row.ArtifactHashB, wantA, wantB)
 		}
 		switch row.Preference {
 		case "tie":
@@ -338,7 +344,7 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 		fc := models[i].ForcedChoice
 		fc.NNonTie = fc.MixedWins + fc.LegacyWins
 		fc.PTwoSided = signTestTwoSidedP(fc.MixedWins, fc.NNonTie)
-		fc.PClusterPermutation = fcClusterPermutationP(signs[models[i].CandidateModel], pairedBootstrapSeed, pairedBootstrapN)
+		fc.PClusterPermutation = fcClusterPermutationP(signs[models[i].CandidateModel], seed, bootstrapN)
 	}
 	return nil
 }
@@ -482,9 +488,10 @@ type AssemblyLeaveOneGroupOut struct {
 }
 
 // assemblyMixedPair is one complete labeled non-control legacy-mixed pair.
-// twin is descriptive-only metadata (independence-group merging for the
-// diagnostics and the forced-choice permutation test), read from the legacy
-// arm; the fixture validator owns author-time cross-arm consistency.
+// twin drives independence-group merging (permutation grouping is
+// registered, so twin is a pair invariant like stratum and family); arms are
+// verified identical at pairing time, so reading it from the legacy arm is
+// exact.
 type assemblyMixedPair struct {
 	pairID  string
 	delta   float64
@@ -555,6 +562,9 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 			continue
 		case leg.ScenarioFamily != mix.ScenarioFamily:
 			exclude("scenario-family-mismatch")
+			continue
+		case leg.TwinGroup != mix.TwinGroup:
+			exclude("twin-group-mismatch")
 			continue
 		case leg.Control != mix.Control:
 			exclude("control-flag-mismatch")

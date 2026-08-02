@@ -911,7 +911,7 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		for i := range arts {
 			artHashes[arts[i].ArtifactHash] = struct{}{}
 		}
-		if err := attachAssemblyForcedChoice(rep.LegacyMixedModels, fcPrefs, pairs, artHashes, fcSideIsLegacyA); err != nil {
+		if err := attachAssemblyForcedChoice(rep.LegacyMixedModels, fcPrefs, pairs, artHashes, seed, bootstrapN, fcSideIsLegacyA); err != nil {
 			return nil, fmt.Errorf("assembly report: %w", err)
 		}
 	}
