@@ -5,12 +5,13 @@ mixed structured context assembly (`agent.ContextManager{Mixed: true}`)
 preserve answer quality better than the legacy assembly path at the same
 token budget, on transcripts that mix conversation, agent memory, and RAG?
 
-**Status**: the corpus fixture, built traces, capture artifacts, and labels
-are NOT YET AUTHORED — they land in Tasks 10–13 of the slice plan. Until the
-fixture exists, the regeneration gate (`TestMixedCorpusRegeneration`) skips
-loudly naming Task 10; it activates the moment `mixed-cases.json` is
-committed. The "Committed artifacts" and "Commit policy" lists below
-describe the registered END state of the run, not the current tree.
+**Status**: the Task 10 seed fixture (`mixed-cases.json`, 12 primary cases
+plus 1 control) and its built traces are COMMITTED, and the regeneration
+gate (`TestMixedCorpusRegeneration`) is ACTIVE — it rebuilds the corpus
+from the fixture and byte-compares every trace and the manifest. Capture
+artifacts and labels still land in Tasks 12–13. The "Committed artifacts"
+and "Commit policy" lists below describe the registered END state of the
+run, not the current tree.
 
 Every case is one frozen `agent.State` assembled twice — a `legacy` arm
 (`ContextManager.Assemble`, default compactor) and a `mixed` arm
