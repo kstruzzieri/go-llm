@@ -5,6 +5,13 @@ mixed structured context assembly (`agent.ContextManager{Mixed: true}`)
 preserve answer quality better than the legacy assembly path at the same
 token budget, on transcripts that mix conversation, agent memory, and RAG?
 
+**Status**: the corpus fixture, built traces, capture artifacts, and labels
+are NOT YET AUTHORED — they land in Tasks 10–13 of the slice plan. Until the
+fixture exists, the regeneration gate (`TestMixedCorpusRegeneration`) skips
+loudly naming Task 10; it activates the moment `mixed-cases.json` is
+committed. The "Committed artifacts" and "Commit policy" lists below
+describe the registered END state of the run, not the current tree.
+
 Every case is one frozen `agent.State` assembled twice — a `legacy` arm
 (`ContextManager.Assemble`, default compactor) and a `mixed` arm
 (`AssembleWithTrace`) — at an identical, formula-derived budget. Traces are
@@ -23,6 +30,8 @@ Committed artifacts of the registered run (see "Commit policy" below):
   <traces dir>`) and byte-gated in CI (`TestMixedCorpusRegeneration`)
 - capture artifacts JSONL + its sibling `.manifest.json` run manifest
 - the sealed forced-choice sidemap JSON + its committed sha256 digest
+- the blind worksheet block map (`-blind-blockmap-out`) — the only join
+  from opaque worksheet BLOCK ids back to artifact hashes
 - absolute labels JSONL, the duplicate-block audit (`-dups-out`), the
   adjudication worksheet and its logged corrections
 - `pair-preferences.jsonl` — the forced-choice sidecar labels
@@ -251,7 +260,7 @@ govern).
 | `id` | Unique lowercase ASCII `[a-z0-9][a-z0-9-]*`; becomes the trace filename prefix. |
 | `stratum` | One of the five strata below. |
 | `answer_home` | Where the answer truly lives: `conversation`, `memory`, `rag`, or `join`. Coherence with the stratum is validated (see strata). |
-| `scenario_family` | Cluster-bootstrap resampling unit. MUST stay within one stratum (validated at author time AND excluded at report time if violated). Use for template siblings inside one stratum. |
+| `scenario_family` | Cluster-bootstrap resampling unit. MANDATORY on non-control cases (a family-free pair could only be excluded at report time); optional on controls. MUST stay within one stratum (validated at author time AND excluded at report time if violated). Use for template siblings inside one stratum. |
 | `twin_group` | Descriptive label for counterfactual twins that SPAN strata. Contract, enforced corpus-wide: at most 4 distinct groups; each group 2–3 members; every member in a DIFFERENT stratum drawn from {`conversation_only`, `memory_only`, `cross_domain_join`}; all members share the identical `rag_sources` path set and `memory_records` id set (same distractor pool). Never a clustering unit for the CI — but the forced-choice permutation MERGES the scenario families a twin group touches into one independence group. |
 | `control` | Negative-control pair: generous budget, arms asserted byte-identical, ZERO shed asserted in both arms (the inverse of the pressure gate), excluded from the verdict and from both forced-choice tests. Anchor-free by rule: conversation turns + `fixture_echo` only, with small tool-call payloads (fat args overflow the generous budget and fail the build loudly). At most 2 controls per stratum. `pressure_target` is illegal on controls. |
 | `cap_stress` | Permits per-tool-call `output_cap` overrides (uniform: every tool call on the case carries one). |
@@ -261,7 +270,7 @@ govern).
 | `rag_sources` | 3a source schema: `{path, content, language, abstract, overview}` with the atomic abstract/overview pair rule. |
 | `required_evidence` | `[{domain, literal}]` — domain-tagged verbatim anchors. Anchor them ("claimBatch = 25", not "25"). |
 | `forbidden_evidence` | Literals that must appear in NO domain. |
-| `pressure_target` | MANDATORY on non-control cases (illegal on controls): a registered `{domain, literal}` the budget must actually bite. The literal must appear case-sensitively in its declared domain's fixture content and be absent (case-insensitively) from the final question and the system prompt. The build's carrier-change gate (below) requires that in at least one arm some built-State message carrying it is dropped, truncated, or re-rendered. Recommended authoring: one of the `required_evidence` anchors, or the stale representation on `stale_vs_fresh`. |
+| `pressure_target` | MANDATORY on non-control cases (illegal on controls): a registered `{domain, literal}` the budget must actually bite. The literal must appear case-sensitively in its declared domain's fixture content and be absent (case-insensitively) from the final question and the system prompt. ANSWER-RELEVANCE is validated mechanically: the target must EQUAL one of the case's `required_evidence` entries (domain AND literal), or — on `stale_vs_fresh` only — appear case-sensitively in a rag source's abstract/overview or a memory record's content (the stale carrier). The build's carrier-change gate (below) then requires that in at least one arm some built-State message carrying it is dropped, truncated, or re-rendered. |
 | `required_domains` | Must be exactly the set {`conversation`, `memory`, `rag`} (any order) — every case carries all three domains; the non-home domains are competing distractors. |
 | `answer_turn_index` | REQUIRED on `conversation_only` cases (controls included), optional elsewhere. Must point at a turn event that is not the final question; on `conversation_only` the indexed turn must contain every conversation-domain `required_evidence` literal (case-sensitive) — the declared answer position and the anchors' actual home may not diverge. Feeds the answer-position-thirds balance bookkeeping. |
 | `topline_facts` | Present on EXACTLY the cases the registered topline rule selects (see below) — presence anywhere else, or absence on a selected case, is an authoring error. Must contain every `required_evidence` literal case-sensitively. Emits an unpaired `<id>-topline` ceiling trace: "Facts:\n...\n\nQuestion: ...". Only legal on non-control cases. |
@@ -269,15 +278,18 @@ govern).
 
 ### Registered topline selection (the rule, not the author, chooses)
 
-Eligible: non-control cases with a non-empty `scenario_family`. Per
-stratum, the eligible families order by FNV-1a-64(family) ascending (family
-name breaks ties); the first `quota` families are selected; within each
-selected family the case with the lexicographically smallest id carries
-`topline_facts`. Quotas are the registered {3, 2, 3, 2, 2} split (12 total —
-the ceiling does not divide evenly over 5 strata, so the split is
-registered, not derived). A stratum with any eligible family must hold at
-least its quota of families — an author-time error, not a silent shortfall
-— so the registered corpus always emits exactly 12 topline traces.
+Eligible: non-control cases with a non-empty `scenario_family` (i.e. every
+non-control case — the family is mandatory). Per stratum, the eligible
+families order by FNV-1a-64(family) ascending (family name breaks ties);
+the first `quota` families are selected; within each selected family the
+case with the lexicographically smallest id carries `topline_facts`. Quotas
+are the registered {3, 2, 3, 2, 2} split (12 total — the ceiling does not
+divide evenly over 5 strata, so the split is registered, not derived).
+Precondition for "exactly 12": every stratum must hold at least its quota
+of eligible families. That holds for the registered 70-case corpus — each
+stratum carries 14 non-control family-bearing cases, far above every quota
+— and the validator's exact-quota floor makes any shortfall an author-time
+error, never a silent under-fill.
 
 ### Evidence contract (validated mechanically, not by author discipline)
 
@@ -336,7 +348,10 @@ least its quota of families — an author-time error, not a silent shortfall
   in at least one arm, at least one built-State message carrying the
   `pressure_target` literal must be dropped, truncated, or re-rendered.
   Both arms shedding only answer-irrelevant filler is "pressure theater"
-  and fails the build.
+  and fails the build. Because the target is validated as answer-relevant
+  (a `required_evidence` anchor, or the stale carrier on `stale_vs_fresh`),
+  the changed carrier is by construction one the answer depends on — the
+  gate cannot be satisfied by shedding a decoy literal.
 - **Arms must differ** (non-control) or the case is dead weight — a
   guaranteed zero delta. The compare is deep: role, content, tool ids and
   names, tool-call argument bytes.
@@ -346,7 +361,8 @@ least its quota of families — an author-time error, not a silent shortfall
   assembled messages must map to distinct full-State indices in increasing
   order — no reordering, no duplication, no synthesized messages. Mixed may
   rewrite a tool observation's content in place (matched by tool-call ID);
-  assistant tool-call turns must survive byte-identical.
+  assistant tool-call turns must survive byte-identical — content, per-call
+  IDs, tool names, and argument bytes are all compared.
 - **Control cases**: anchor-free, small payloads (tool-call args are priced
   by the runtime's estimator; fat args overflow the generous budget and the
   build fails loudly), arms asserted byte-identical, zero shed asserted in
@@ -361,9 +377,10 @@ least its quota of families — an author-time error, not a silent shortfall
   floor for invalidations.
 - 6 control pairs (noise floor; excluded from the verdict; at most 2 per
   stratum).
-- 12 topline traces, placed by the registered selection rule above — an
-  unpaired model-competence ceiling: if legacy ≈ mixed ≪ topline, assembly
-  is the bottleneck; if topline is low, the model is.
+- 12 topline traces, placed by the registered selection rule above (exact
+  on the registered corpus; see the precondition there) — an unpaired
+  model-competence ceiling: if legacy ≈ mixed ≪ topline, assembly is the
+  bottleneck; if topline is low, the model is.
 - Up to 4 twin groups (2–3 members each, spanning distinct strata among
   {`conversation_only`, `memory_only`, `cross_domain_join`}, identical
   distractor pools) for descriptive lane-bias analysis.
@@ -403,20 +420,31 @@ Seal the forced-choice sides BEFORE labeling:
 llm-bench -fc-sidemap-generate -artifacts <artifacts.jsonl> -fc-sidemap-out <sidemap.json>
 ```
 
-One crypto/rand boolean per complete pair; the printed sha256 digest is
-COMMITTED before any labeling starts and verified at every later step via
+One crypto/rand boolean per complete pair, plus the pair's two arm artifact
+hashes in the drawn A/B order — the sidemap is the forced-choice flow's
+ONLY hash carrier (worksheet PAIR headers carry pairID and modelKey alone,
+because a header hash would join the committed artifacts JSONL, whose
+`assembly_eval.mode` names the arm). The printed sha256 digest is COMMITTED
+before any labeling starts and verified at every later step via
 `-fc-sidemap-digest` (mismatch is a hard error). `-fc-render` and
 `-fc-ingest` refuse to run without `-fc-sidemap`.
 
 Labeling, three passes (use `-model` to restrict any worksheet to one
 candidate model — per-model worksheets keep sessions bounded):
 
-1. **Primary (promptless)** — `-blind-render -blind-dups 7`: blocks show
-   question, rubric, and candidate output only (no prompt bytes; model AND
-   arm identity hidden). Score 0 / 0.5 / 1 against the rubric; optionally
-   `flag: grounding-check` to queue a block for adjudication. Seven
-   duplicated blocks measure intra-rater consistency. Ingest with
-   `-blind-ingest -dups-out ...` (the duplicate audit is committed).
+1. **Primary (promptless)** — `-blind-render -blind-dups 7
+   -blind-blockmap-out <blockmap.json>`: blocks show question, rubric, and
+   candidate output only (no prompt bytes; model AND arm identity hidden).
+   Promptless blocks are addressed by an OPAQUE id (`=== BLOCK
+   sha256(hash|salt)[:16] ===`, DUP blocks included) instead of the
+   artifact hash — the render-emitted block map is the only id-to-hash
+   join, and it is REQUIRED whenever a promptless block renders.
+   Non-assembly and 3a flat/progressive blocks keep their hash-addressed
+   headers byte-identical to the established convention. Score 0 / 0.5 / 1
+   against the rubric; optionally `flag: grounding-check` to queue a block
+   for adjudication. Seven duplicated blocks measure intra-rater
+   consistency. Ingest with `-blind-ingest -blind-blockmap <blockmap.json>
+   -dups-out ...` (the duplicate audit is committed).
 2. **Forced choice** — `-fc-render -fc-sidemap ... -fc-sidemap-digest ...`
    / `-fc-ingest -fc-require-complete -fc-out pair-preferences.jsonl`: per
    pair, prefer A / B / tie; `-fc-require-complete` makes any blank block a
@@ -424,12 +452,21 @@ candidate model — per-model worksheets keep sessions bounded):
    `arm_guess` line (a/b) is the blinding audit: the report's descriptive
    `arm_guess_accuracy` section tallies how often the labeler correctly
    guessed the mixed arm's side under the sealed assignment — it feeds no
-   decision or test. The sidecar never records which side was which arm;
-   only the sealed sidemap resolves it.
+   decision or test. Neither the sidecar rows nor the worksheet record
+   which side was which arm — the worksheet carries no hashes at all, and
+   the sealed sidemap is the only artifact that resolves sides to arms.
 3. **Adjudication** — `-adjudicate-render` / `-adjudicate-ingest`: only
    flagged blocks, now WITH the prompt, prefilled score, required reason;
    every correction is logged in the label notes
-   (`adjudicated(old->new): reason`).
+   (`adjudicated(old->new): reason`). Adjudication blocks stay
+   hash-addressed by design: the pass deliberately reveals the full
+   prompt, so an opaque id would hide nothing.
+
+Blinding honesty: this scheme is STRUCTURAL protection against casual
+inference — no worksheet byte joins the committed artifacts or names an
+arm. It is not cryptographic protection against the operator, who owns the
+disk and can open the sidemap or block map at will; the `arm_guess` audit
+is the registered check that the blinding held in practice.
 
 Report (the registered invocation carries ALL verification inputs):
 
@@ -447,10 +484,13 @@ temperature; the report embeds the manifest's digest and artifact count.
 ### Commit policy
 
 The registered run commits ALL of: the capture artifacts and their
-manifest (digest included), the absolute labels, the duplicate-block audit
-(`-dups-out`), the adjudication worksheet and its logged corrections,
+manifest (digest included), the absolute labels, the blind worksheet block
+map (`-blind-blockmap-out`), the duplicate-block audit (`-dups-out`), the
+adjudication worksheet and its logged corrections,
 `pair-preferences.jsonl`, the sealed sidemap and its committed digest, and
-`report.json`. An uncommitted input is an unverifiable input.
+`report.json`. An uncommitted input is an unverifiable input. (This list is
+the registered END state; see the Status note — none of it exists before
+Tasks 10–13 run.)
 
 ## Provenance and limitations (stated before labels exist)
 
