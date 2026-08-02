@@ -481,6 +481,29 @@ func selectBlindDups(arts []Artifact, n int) ([]Artifact, error) {
 	return dups, nil
 }
 
+// filterArtifactsByModel narrows a worksheet render to one candidate model
+// (#331 W3, -model: the registered workflow labels one model at a time).
+// Matching is modelKey equality so bare and provider-prefixed spellings
+// agree. An empty selector keeps every artifact; a selector matching zero
+// artifacts is a loud error (a silently empty worksheet would read as "no
+// work left").
+func filterArtifactsByModel(arts []Artifact, selector string) ([]Artifact, error) {
+	if strings.TrimSpace(selector) == "" {
+		return arts, nil
+	}
+	key := modelKey(selector)
+	var out []Artifact
+	for _, a := range arts {
+		if modelKey(a.CandidateModel) == key {
+			out = append(out, a)
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("-model %q matches no artifacts", selector)
+	}
+	return out, nil
+}
+
 // writeLabelsJSONL writes labels as JSONL (one Label per line). LabeledAt
 // stamping is the caller's responsibility (ingestBlindWorksheet already stamps
 // it). Mirrors the artifacts/manifest writers.

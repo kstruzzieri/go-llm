@@ -2,7 +2,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -359,6 +362,105 @@ func TestPrefilledReplaySendsExactHistory(t *testing.T) {
 	})
 }
 
+// TestPrefilledToolArgByteFidelity (#331 W3): fixture tool-call argument
+// bytes must reach the wire without decode/re-encode wherever the frozen
+// types permit. The payload has DELIBERATELY unsorted keys and interior
+// whitespace: any map[string]any round-trip would sort the keys and strip
+// the spacing.
+//
+//   - openai-compat: provider.ToolCallFunction.Arguments and the wire's
+//     chatToolCallFunction.Arguments are json.RawMessage; the frozen
+//     encodeToolCallArguments wraps raw JSON verbatim (edge-trimmed) into
+//     OpenAI's string envelope. Byte-exactness is REQUIRED end to end.
+//   - ollama: ollama.ToolCallFunction.Arguments is map[string]any — the
+//     FROZEN wire struct itself — so bytes cannot survive past the decode in
+//     prefilledToolCalls. Semantic equality is the frozen-boundary ceiling,
+//     asserted here and documented on ollamaCandidateClient.Chat.
+func TestPrefilledToolArgByteFidelity(t *testing.T) {
+	const rawArgs = `{"zeta": 1,  "alpha": {"b": 2, "a": 1}, "query": "beta  gate"}`
+	trace := prefilledTestTrace(AssemblyMixed)
+	trace.Turns[1].ToolCalls[0].Arguments = json.RawMessage(rawArgs)
+
+	wireCall := func(t *testing.T, body map[string]any) map[string]any {
+		t.Helper()
+		msgs := body["messages"].([]any)
+		calls, ok := msgs[2].(map[string]any)["tool_calls"].([]any)
+		if !ok || len(calls) != 1 {
+			t.Fatalf("assistant tool_calls = %v; want 1 call", msgs[2])
+		}
+		fn, ok := calls[0].(map[string]any)["function"].(map[string]any)
+		if !ok {
+			t.Fatalf("tool call function missing: %v", calls[0])
+		}
+		return fn
+	}
+
+	t.Run("openai-compat wire carries the exact bytes", func(t *testing.T) {
+		log := &rawRequestLog{}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			body, readErr := io.ReadAll(r.Body)
+			if readErr != nil {
+				t.Errorf("read request body: %v", readErr)
+			}
+			log.append(body)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"c","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"ans"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+		}))
+		t.Cleanup(srv.Close)
+		tr, err := newCandidateTransport(ModelTarget{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}, candidateTransportOptions{
+			openAICompatBaseURL: srv.URL,
+			timeout:             5 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("newCandidateTransport: %v", err)
+		}
+		if _, err := replayWith(context.Background(), tr.chat, "m", trace, replayOptions{}); err != nil {
+			t.Fatalf("replayWith: %v", err)
+		}
+		bodies := log.snapshot()
+		if len(bodies) != 1 {
+			t.Fatalf("HTTP calls = %d; want 1", len(bodies))
+		}
+		fn := wireCall(t, decodeBody(t, bodies[0]))
+		// OpenAI's wire envelope is a JSON string whose decoded value must be
+		// the fixture bytes EXACTLY: key order and interior whitespace intact.
+		got, ok := fn["arguments"].(string)
+		if !ok {
+			t.Fatalf("wire arguments = %T (%v); want OpenAI's JSON-string envelope", fn["arguments"], fn["arguments"])
+		}
+		if got != rawArgs {
+			t.Fatalf("wire arguments = %q; want the byte-exact fixture payload %q", got, rawArgs)
+		}
+	})
+
+	t.Run("ollama wire is semantically equal (frozen map boundary)", func(t *testing.T) {
+		log := &rawRequestLog{}
+		srv := newOllamaCaptureServer(t, log, func() ollama.ChatResponse {
+			return ollama.ChatResponse{Model: "m", Done: true, Message: ollama.ChatMessage{Role: "assistant", Content: "ans"}}
+		})
+		client := ollama.NewClient(ollama.WithBaseURL(srv.URL))
+		if _, err := replayWith(context.Background(), ollamaCandidateClient{client: client}, "m", trace, replayOptions{}); err != nil {
+			t.Fatalf("replayWith: %v", err)
+		}
+		bodies := log.snapshot()
+		if len(bodies) != 1 {
+			t.Fatalf("HTTP calls = %d; want 1", len(bodies))
+		}
+		fn := wireCall(t, decodeBody(t, bodies[0]))
+		got, ok := fn["arguments"].(map[string]any)
+		if !ok {
+			t.Fatalf("ollama wire arguments = %T; the frozen type is a JSON object", fn["arguments"])
+		}
+		var want map[string]any
+		if err := json.Unmarshal([]byte(rawArgs), &want); err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("ollama wire arguments = %v; want the semantic payload %v", got, want)
+		}
+	})
+}
+
 func TestPrefilledReplayCandidateToolCallDivergence(t *testing.T) {
 	trace := prefilledTestTrace(AssemblyMixed)
 	respond := func(content string) func() ollama.ChatResponse {
@@ -622,11 +724,14 @@ func readArtifactsFile(t *testing.T, path string) []Artifact {
 }
 
 func TestAssemblyCaptureCounterbalance(t *testing.T) {
-	// FNV-1a 64 parities (computed independently of the implementation):
-	//   "p-a" -> 8681626274009790885 (odd)  => mixed-first
-	//   "p-b" -> 8681622975474906252 (even) => legacy-first
-	// Expected order: plain traces in input order, then pairs sorted by
-	// PairID with the parity-selected arm first, then topline sorted by ID.
+	// FNV-1a 64 hashes (computed independently of the implementation):
+	//   "p-b" -> 8681622975474906252
+	//   "p-a" -> 8681626274009790885
+	// Registered W3 scheme: pairs sort by hash ASCENDING — p-b (…622…) before
+	// p-a (…626…) — then the first arm ALTERNATES by position: position 0
+	// (p-b, even) => legacy-first, position 1 (p-a, odd) => mixed-first.
+	// Expected order: plain traces in input order, then the hash-ordered
+	// pairs with the alternation-selected arm first, then topline sorted by ID.
 	traces := []Trace{
 		{ID: "zz-plain", System: "sys", Turns: []Turn{{Role: "user", Content: "q"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
 		toplineCaptureTrace("top-b"),
@@ -636,7 +741,7 @@ func TestAssemblyCaptureCounterbalance(t *testing.T) {
 		pairedCaptureTrace("pb-legacy", "p-b", AssemblyLegacy),
 		toplineCaptureTrace("top-a"),
 	}
-	wantOrder := []string{"zz-plain", "pa-mixed", "pa-legacy", "pb-legacy", "pb-mixed", "top-a", "top-b"}
+	wantOrder := []string{"zz-plain", "pb-legacy", "pb-mixed", "pa-mixed", "pa-legacy", "top-a", "top-b"}
 	// Two targets: the same trace must get the SAME capture order index
 	// under every target (the index is the per-target replay position).
 	targets := []ModelTarget{
@@ -707,6 +812,44 @@ func TestAssemblyCaptureCounterbalance(t *testing.T) {
 	gotOrder2, _ := runOnce(t)
 	if !reflect.DeepEqual(gotOrder, gotOrder2) {
 		t.Fatalf("capture order not deterministic: %v vs %v", gotOrder, gotOrder2)
+	}
+}
+
+// TestCounterbalanceAlternationBalance proves the W3 counterbalance is
+// balanced BY CONSTRUCTION, not by hash luck: the five pair IDs below all
+// have ODD FNV-1a-64 hashes, so the retired parity rule would have run every
+// one of them mixed-first (5/0). Alternation over the hash-sorted order must
+// come out 3/2. Hashes (computed independently):
+//
+//	"p-3" -> 8681571298428380335   position 0 => legacy-first
+//	"p-1" -> 8681573497451636757   position 1 => mixed-first
+//	"p-e" -> 8681621875963278041   position 2 => legacy-first
+//	"p-c" -> 8681624074986534463   position 3 => mixed-first
+//	"p-a" -> 8681626274009790885   position 4 => legacy-first
+func TestCounterbalanceAlternationBalance(t *testing.T) {
+	pairIDs := []string{"p-a", "p-c", "p-e", "p-1", "p-3"}
+	var traces []Trace
+	for _, id := range pairIDs {
+		traces = append(traces,
+			pairedCaptureTrace(id+"-legacy", id, AssemblyLegacy),
+			pairedCaptureTrace(id+"-mixed", id, AssemblyMixed),
+		)
+	}
+	_, labels := counterbalanceCaptureTraces(traces)
+	want := map[string]string{
+		"p-3": "legacy-first", "p-1": "mixed-first", "p-e": "legacy-first",
+		"p-c": "mixed-first", "p-a": "legacy-first",
+	}
+	counts := map[string]int{}
+	for id, wantLabel := range want {
+		if got := labels[id]; got != wantLabel {
+			t.Errorf("pair %s captured order = %q; want %q (hash-sorted alternation)", id, got, wantLabel)
+		}
+		counts[labels[id]]++
+	}
+	if diff := counts["legacy-first"] - counts["mixed-first"]; diff < -1 || diff > 1 {
+		t.Errorf("first-arm counts legacy=%d mixed=%d; alternation must balance within 1",
+			counts["legacy-first"], counts["mixed-first"])
 	}
 }
 
@@ -804,6 +947,196 @@ func TestArtifactHashIgnoresCaptureProvenance(t *testing.T) {
 	with := artifactHash(base)
 	if without != with {
 		t.Fatalf("artifactHash changed with capture provenance: %s vs %s", without, with)
+	}
+}
+
+func TestCaptureManifestWritten(t *testing.T) {
+	// Fake openai-compat server: the /props probe answers with llama.cpp-ish
+	// build info. The replay itself is faked by orderRecordingRunner, so the
+	// server exists ONLY for the probe.
+	props := `{"build_info":"b9999","model_path":"/models/m.gguf","n_ctx":8192}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/props" {
+			t.Errorf("probe path = %q; want /props", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(props))
+	}))
+	t.Cleanup(srv.Close)
+
+	traces := []Trace{
+		pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy),
+		pairedCaptureTrace("pa-mixed", "p-a", AssemblyMixed),
+		{ID: "plain-t", System: "sys", Turns: []Turn{{Role: "user", Content: "q"}}, Golden: Golden{FinalAnswerCriteria: "c"}},
+	}
+	targets := []ModelTarget{{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}}
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	clock := func() time.Time { return time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC) }
+	var stdout bytes.Buffer
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner: &orderRecordingRunner{}, Targets: targets, Traces: traces, OutputPath: out,
+		Clock: clock, OpenAICompatBaseURL: srv.URL, Stdout: &stdout,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+
+	raw, err := os.ReadFile(out + ".manifest.json")
+	if err != nil {
+		t.Fatalf("manifest missing at sibling path: %v", err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if m.SchemaVersion != "mixed-capture-manifest/v1" {
+		t.Errorf("schema_version = %q; want mixed-capture-manifest/v1", m.SchemaVersion)
+	}
+	if !m.CreatedAt.Equal(clock()) {
+		t.Errorf("created_at = %v; want the injected clock %v", m.CreatedAt, clock())
+	}
+	if m.Endpoint != srv.URL || m.Transport != "openai-compat" {
+		t.Errorf("endpoint/transport = %q/%q; want %q/openai-compat", m.Endpoint, m.Transport, srv.URL)
+	}
+	if len(m.ModelTargets) != 1 || m.ModelTargets[0].Selector != "openai-compat/m" || m.ModelTargets[0].ResolvedDigest != "" {
+		t.Errorf("model_targets = %+v; want the one openai-compat selector with empty digest", m.ModelTargets)
+	}
+	// MarshalIndent re-indents the embedded RawMessage, so compare the probe
+	// record token-for-token (decoded), not byte-for-byte.
+	var gotProps, wantProps map[string]any
+	if err := json.Unmarshal(m.ServerProbe.Props, &gotProps); err != nil {
+		t.Fatalf("decode recorded props: %v", err)
+	}
+	if err := json.Unmarshal([]byte(props), &wantProps); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(gotProps, wantProps) || m.ServerProbe.Error != "" {
+		t.Errorf("server_probe = %+v; want the /props JSON content and no error", m.ServerProbe)
+	}
+	if m.Decoding.Temperature != 0 || m.Decoding.SeedSupported {
+		t.Errorf("decoding = %+v; want temperature 0, seed_supported false", m.Decoding)
+	}
+	if !strings.Contains(m.CounterbalanceScheme, "fnv1a64") || !strings.Contains(m.CounterbalanceScheme, "alternates") {
+		t.Errorf("counterbalance_scheme = %q; want the registered hash-order alternation description", m.CounterbalanceScheme)
+	}
+	if m.ArtifactCount != 3 || len(m.PerArtifact) != 3 {
+		t.Fatalf("artifact_count/per_artifact = %d/%d; want 3/3 (plain artifacts are listed too)", m.ArtifactCount, len(m.PerArtifact))
+	}
+	arts := readArtifactsFile(t, out)
+	hashByID := map[string]string{}
+	for _, a := range arts {
+		hashByID[a.TraceID] = a.ArtifactHash
+	}
+	for _, row := range m.PerArtifact {
+		if row.ArtifactHash != hashByID[row.TraceID] {
+			t.Errorf("row %s hash = %q; want the written artifact's %q", row.TraceID, row.ArtifactHash, hashByID[row.TraceID])
+		}
+		if !row.UsagePresent {
+			t.Errorf("row %s usage_present = false; the fake replay reports 10/2 tokens", row.TraceID)
+		}
+	}
+
+	// The manifest digest line reaches stdout and matches the file bytes.
+	sum := sha256.Sum256(raw)
+	wantLine := "manifest_digest sha256:" + hex.EncodeToString(sum[:])
+	if !strings.Contains(stdout.String(), wantLine) {
+		t.Errorf("stdout = %q; want it to carry %q", stdout.String(), wantLine)
+	}
+}
+
+// zeroUsageRunner is orderRecordingRunner minus token usage: every Result
+// reports 0/0, the "provider omitted usage" shape.
+type zeroUsageRunner struct{ inner orderRecordingRunner }
+
+func (f *zeroUsageRunner) RunAll(ctx context.Context, targets []ModelTarget, traces []Trace) ([]Result, error) {
+	results, err := f.inner.RunAll(ctx, targets, traces)
+	for i := range results {
+		results[i].Score.PromptEvalTokens = 0
+		results[i].Score.GenTokens = 0
+	}
+	return results, err
+}
+
+func TestCaptureManifestUsageAbsentRecordedFalse(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     &zeroUsageRunner{},
+		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces:     []Trace{pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy)},
+		OutputPath: out, Stdout: io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	raw, err := os.ReadFile(out + ".manifest.json")
+	if err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatal(err)
+	}
+	if len(m.PerArtifact) != 1 || m.PerArtifact[0].UsagePresent {
+		t.Fatalf("per_artifact = %+v; zero token counts must record usage_present false", m.PerArtifact)
+	}
+}
+
+func TestCaptureManifestProbeFailureRecordedNotFatal(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "no props here", http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     &orderRecordingRunner{},
+		Targets:    []ModelTarget{{Display: "openai-compat/m", Provider: "openai-compat", Model: "m"}},
+		Traces:     []Trace{pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy)},
+		OutputPath: out, OpenAICompatBaseURL: srv.URL, Stdout: io.Discard,
+	})
+	if err != nil {
+		t.Fatalf("runCalibrateCapture = %v; probe failure must not fail the capture", err)
+	}
+	raw, err := os.ReadFile(out + ".manifest.json")
+	if err != nil {
+		t.Fatalf("manifest missing: %v", err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode manifest: %v", err)
+	}
+	if m.ServerProbe.Props != nil || !strings.Contains(m.ServerProbe.Error, "404") {
+		t.Errorf("server_probe = %+v; want no props and a recorded status-404 error", m.ServerProbe)
+	}
+}
+
+func TestCaptureManifestWriteFailureFailsCapture(t *testing.T) {
+	dir := t.TempDir()
+	out := filepath.Join(dir, "artifacts.jsonl")
+	// Occupy the manifest's sibling path with a DIRECTORY so the write fails.
+	if err := os.Mkdir(out+".manifest.json", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     &orderRecordingRunner{},
+		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces:     []Trace{pairedCaptureTrace("pa-legacy", "p-a", AssemblyLegacy)},
+		OutputPath: out, Stdout: io.Discard,
+	})
+	if err == nil || !strings.Contains(err.Error(), "manifest") {
+		t.Fatalf("runCalibrateCapture = %v; want a loud manifest-write failure", err)
+	}
+}
+
+func TestCaptureManifestSkippedForNonAssemblyCaptures(t *testing.T) {
+	out := filepath.Join(t.TempDir(), "artifacts.jsonl")
+	if err := runCalibrateCapture(context.Background(), calibrateCaptureOptions{
+		Runner:     &orderRecordingRunner{},
+		Targets:    []ModelTarget{{Display: "m", Provider: "ollama", Model: "m"}},
+		Traces:     []Trace{{ID: "plain-t", System: "sys", Turns: []Turn{{Role: "user", Content: "q"}}, Golden: Golden{FinalAnswerCriteria: "c"}}},
+		OutputPath: out, Stdout: io.Discard,
+	}); err != nil {
+		t.Fatalf("runCalibrateCapture: %v", err)
+	}
+	if _, err := os.Stat(out + ".manifest.json"); !os.IsNotExist(err) {
+		t.Fatalf("manifest stat err = %v; a non-assembly capture must not write one", err)
 	}
 }
 

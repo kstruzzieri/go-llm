@@ -722,6 +722,17 @@ type AssemblyReport struct {
 	LegacyMixedDecisionRule string                     `json:"legacy_mixed_decision_rule,omitempty"`
 	LegacyMixedModels       []AssemblyMixedModelReport `json:"legacy_mixed_models,omitempty"`
 	Topline                 []AssemblyToplineReport    `json:"topline,omitempty"`
+	// CaptureManifest embeds the verified capture run manifest's identity
+	// (#331 W3, -capture-manifest). Omitted when the report ran without one —
+	// the W4 README requires it for the registered run.
+	CaptureManifest *AssemblyCaptureManifest `json:"capture_manifest,omitempty"`
+}
+
+// AssemblyCaptureManifest is the report's embedded capture-manifest
+// reference: the manifest FILE's sha256 digest and its artifact count.
+type AssemblyCaptureManifest struct {
+	Digest        string `json:"digest"`
+	ArtifactCount int    `json:"artifact_count"`
 }
 
 // AssemblyModelReport keeps assembly effects separate by candidate model.
@@ -740,6 +751,21 @@ type AssemblyModelReport struct {
 	Deltas               []float64 `json:"deltas"` // lexicographic pair-ID order ("case-10" < "case-2")
 }
 
+// assemblyReportExtras carries the optional W3 report inputs. The zero value
+// reproduces the pre-W3 report exactly.
+type assemblyReportExtras struct {
+	// capture is the -capture-manifest verification set (nil = no manifest);
+	// captureRef is the embedded {digest, artifact_count} reference.
+	capture    *captureVerification
+	captureRef *AssemblyCaptureManifest
+	// sideResolver resolves forced-choice A/B sides; nil defaults to the
+	// pre-sidemap parity rule (fcParityResolver). armGuess is set iff a
+	// sealed sidemap backed the resolver — it enables the descriptive
+	// arm-guess blinding audit and nothing else.
+	sideResolver fcSideResolver
+	armGuess     bool
+}
+
 // computeAssemblyReport pairs artifacts on (kind, PairID, CandidateModel) —
 // kind derives from each artifact's mode (flat/progressive => the 3a
 // flat-progressive kind, legacy/mixed => the 3c legacy-mixed kind) so one
@@ -748,7 +774,7 @@ type AssemblyModelReport struct {
 // never pair; they feed the descriptive ceiling section. Flat-progressive
 // cases with unequal candidate sets are invalid; cases missing an arm or a
 // label are pairing gaps. Both are excluded from the deltas and counted.
-func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int, fcPrefs []FCPreference) (*AssemblyReport, error) {
+func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstrapN int, fcPrefs []FCPreference, extras assemblyReportExtras) (*AssemblyReport, error) {
 	matched, _, err := matchLabels(labels, arts)
 	if err != nil {
 		return nil, fmt.Errorf("assembly report: match labels: %w", err)
@@ -897,11 +923,12 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		}
 		rep.Models = append(rep.Models, acc.report)
 	}
-	rep.LegacyMixedModels = computeAssemblyMixedSection(keys, pairs, quality, seed, bootstrapN)
+	rep.LegacyMixedModels = computeAssemblyMixedSection(keys, pairs, quality, seed, bootstrapN, extras.capture)
 	if len(rep.LegacyMixedModels) > 0 {
 		rep.LegacyMixedDecisionRule = assemblyMixedDecisionRuleText()
 	}
 	rep.Topline = computeAssemblyTopline(topline, quality)
+	rep.CaptureManifest = extras.captureRef
 	// Forced-choice is attached AFTER every Decision above is final: the
 	// registered sign test is a secondary analysis and must never feed the
 	// primary decision. fcPrefs == nil means -fc-preferences was not set (an
@@ -911,28 +938,42 @@ func computeAssemblyReport(arts []Artifact, labels []Label, seed int64, bootstra
 		for i := range arts {
 			artHashes[arts[i].ArtifactHash] = struct{}{}
 		}
-		if err := attachAssemblyForcedChoice(rep.LegacyMixedModels, fcPrefs, pairs, artHashes, seed, bootstrapN, fcSideIsLegacyA); err != nil {
+		if err := attachAssemblyForcedChoice(rep.LegacyMixedModels, fcPrefs, pairs, artHashes, seed, bootstrapN, extras.sideResolver, extras.armGuess); err != nil {
 			return nil, fmt.Errorf("assembly report: %w", err)
 		}
 	}
 	return rep, nil
 }
 
-// runAssemblyReport loads the (labels, artifacts) pair — plus, when
-// fcPrefsPath is set, the -fc-ingest preference sidecar — and renders the
-// assembly report as indented JSON.
-func runAssemblyReport(labelsPath, artifactsPath, fcPrefsPath string) (string, error) {
-	arts, err := loadArtifacts(artifactsPath)
+// assemblyReportOptions names the -assembly-report inputs. FCSidemapPath,
+// FCSidemapDigest, and CaptureManifestPath are the optional W3 verification
+// inputs; empty strings reproduce the pre-W3 report.
+type assemblyReportOptions struct {
+	LabelsPath          string
+	ArtifactsPath       string
+	FCPrefsPath         string
+	FCSidemapPath       string
+	FCSidemapDigest     string
+	CaptureManifestPath string
+}
+
+// runAssemblyReport loads the (labels, artifacts) pair — plus, when set, the
+// -fc-ingest preference sidecar, the sealed forced-choice sidemap (verified
+// against -fc-sidemap-digest when supplied; mismatch is a hard error), and
+// the capture run manifest — and renders the assembly report as indented
+// JSON.
+func runAssemblyReport(opts assemblyReportOptions) (string, error) {
+	arts, err := loadArtifacts(opts.ArtifactsPath)
 	if err != nil {
 		return "", err
 	}
-	labels, err := loadLabels(labelsPath)
+	labels, err := loadLabels(opts.LabelsPath)
 	if err != nil {
 		return "", err
 	}
 	var fcPrefs []FCPreference
-	if strings.TrimSpace(fcPrefsPath) != "" {
-		fcPrefs, err = loadFCPreferences(fcPrefsPath)
+	if strings.TrimSpace(opts.FCPrefsPath) != "" {
+		fcPrefs, err = loadFCPreferences(opts.FCPrefsPath)
 		if err != nil {
 			return "", err
 		}
@@ -940,7 +981,32 @@ func runAssemblyReport(labelsPath, artifactsPath, fcPrefsPath string) (string, e
 			fcPrefs = []FCPreference{} // empty sidecar still means "flag set"
 		}
 	}
-	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN, fcPrefs)
+	var extras assemblyReportExtras
+	if strings.TrimSpace(opts.FCSidemapDigest) != "" && strings.TrimSpace(opts.FCSidemapPath) == "" {
+		return "", fmt.Errorf("assembly report: -fc-sidemap-digest without -fc-sidemap (there is no file to verify the committed digest against)")
+	}
+	if strings.TrimSpace(opts.FCSidemapPath) != "" {
+		_, resolver, digest, err := loadFCSidemap(opts.FCSidemapPath)
+		if err != nil {
+			return "", err
+		}
+		if strings.TrimSpace(opts.FCSidemapDigest) != "" {
+			if err := verifyFCSidemapDigest(digest, opts.FCSidemapDigest); err != nil {
+				return "", err
+			}
+		}
+		extras.sideResolver = resolver
+		extras.armGuess = true
+	}
+	if strings.TrimSpace(opts.CaptureManifestPath) != "" {
+		ref, verify, err := loadCaptureManifestForReport(opts.CaptureManifestPath)
+		if err != nil {
+			return "", err
+		}
+		extras.captureRef = &ref
+		extras.capture = verify
+	}
+	report, err := computeAssemblyReport(arts, labels, pairedBootstrapSeed, pairedBootstrapN, fcPrefs, extras)
 	if err != nil {
 		return "", err
 	}

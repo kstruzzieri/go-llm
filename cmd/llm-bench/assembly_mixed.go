@@ -204,6 +204,18 @@ type AssemblyForcedChoice struct {
 	// consulted by the primary Decision.
 	PClusterPermutation float64 `json:"p_cluster_permutation"`
 	SkippedExcluded     int     `json:"skipped_excluded"`
+	// ArmGuessAccuracy is the descriptive blinding audit (#331 W3): how many
+	// rows carried a non-blank arm_guess and how many of those guessed the
+	// side the sealed sidemap assigns to the MIXED arm. Present only when the
+	// report ran with -fc-sidemap; NEVER consulted by any decision or test
+	// (mutation-checked).
+	ArmGuessAccuracy *AssemblyArmGuessAccuracy `json:"arm_guess_accuracy,omitempty"`
+}
+
+// AssemblyArmGuessAccuracy is the descriptive arm-guess tally.
+type AssemblyArmGuessAccuracy struct {
+	NGuessed int `json:"n_guessed"`
+	NCorrect int `json:"n_correct"`
 }
 
 // signTestTwoSidedP is the two-sided binomial sign test against p = 0.5 over
@@ -246,28 +258,35 @@ type fcGroupSign struct {
 
 // attachAssemblyForcedChoice attaches the forced-choice secondary analyses to
 // every legacy-mixed model section. Each preference row's a/b sides resolve
-// to arms through sideIsLegacyA (nil defaults to fcSideIsLegacyA, the
-// registered parity authority), and every row whose pair has BOTH arms
-// present — excluded pairs included — must carry EXACTLY that pair's
-// legacy/mixed arm hashes in the a/b order that parity dictates; a mismatch
-// is a loud error naming the pair. Only rows on missing-arm pairs fall back
-// to presence-only hash validation (there is no second arm to bind against).
-// Rows on pairs the primary analysis excluded (any Exclusions reason) or on
-// negative-control pairs are skipped and counted in SkippedExcluded. Unknown
-// model/pair/hash, a duplicate row, or an invalid preference value is a loud
-// error. seed and bootstrapN drive the cluster permutation test and are the
-// SAME values the caller's CI uses, so a sensitivity rerun with a varied
-// seed moves both the CI and the permutation p together. Runs strictly after
-// every Decision is final and never writes one.
-func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPreference, pairs map[assemblyPairKey]*assemblyArmSet, artHashes map[string]struct{}, seed int64, bootstrapN int, sideIsLegacyA func(pairID, modelKey string) bool) error {
-	if sideIsLegacyA == nil {
-		sideIsLegacyA = fcSideIsLegacyA
+// to arms through resolve (nil defaults to fcParityResolver, the pre-sidemap
+// default; a sidemap-backed resolver errors loudly on a missing pair), and
+// every row whose pair has BOTH arms present — excluded pairs included —
+// must carry EXACTLY that pair's legacy/mixed arm hashes in the a/b order
+// the resolver dictates; a mismatch is a loud error naming the pair. Only
+// rows on missing-arm pairs fall back to presence-only hash validation
+// (there is no second arm to bind against). Rows on pairs the primary
+// analysis excluded (any Exclusions reason) or on negative-control pairs are
+// skipped and counted in SkippedExcluded. Unknown model/pair/hash, a
+// duplicate row, or an invalid preference value is a loud error. seed and
+// bootstrapN drive the cluster permutation test and are the SAME values the
+// caller's CI uses, so a sensitivity rerun with a varied seed moves both the
+// CI and the permutation p together. armGuess (set iff the report ran with a
+// sidemap) additionally tallies the DESCRIPTIVE arm-guess blinding audit
+// over every row carrying a guess — resolved through the same resolver,
+// consulted by no decision or test. Runs strictly after every Decision is
+// final and never writes one.
+func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPreference, pairs map[assemblyPairKey]*assemblyArmSet, artHashes map[string]struct{}, seed int64, bootstrapN int, resolve fcSideResolver, armGuess bool) error {
+	if resolve == nil {
+		resolve = fcParityResolver
 	}
 	byModel := make(map[string]*AssemblyMixedModelReport, len(models))
 	excluded := make(map[string]map[string]struct{}, len(models))
 	for i := range models {
 		m := &models[i]
 		m.ForcedChoice = &AssemblyForcedChoice{PTwoSided: 1, PClusterPermutation: 1}
+		if armGuess {
+			m.ForcedChoice.ArmGuessAccuracy = &AssemblyArmGuessAccuracy{}
+		}
 		byModel[m.CandidateModel] = m
 		ex := make(map[string]struct{}, len(m.Exclusions))
 		for _, e := range m.Exclusions {
@@ -297,7 +316,18 @@ func attachAssemblyForcedChoice(models []AssemblyMixedModelReport, prefs []FCPre
 		}
 		seen[k] = struct{}{}
 		fc := m.ForcedChoice
-		legacyIsA := sideIsLegacyA(row.PairID, row.CandidateModel)
+		legacyIsA, err := resolve(row.PairID, row.CandidateModel)
+		if err != nil {
+			return fmt.Errorf("fc-preference row %d: %w", i, err)
+		}
+		if acc := fc.ArmGuessAccuracy; acc != nil && row.ArmGuess != "" {
+			// Descriptive blinding audit only: a guess is "correct" when the
+			// guessed SIDE is the mixed arm under the sealed assignment.
+			acc.NGuessed++
+			if (row.ArmGuess == "a") != legacyIsA {
+				acc.NCorrect++
+			}
+		}
 		// Bind the row's a/b hashes to the pair's EXACT arms under the
 		// registered side assignment whenever BOTH arms exist — excluded
 		// pairs included. Only a missing-arm pair has nothing to bind
@@ -502,19 +532,42 @@ type assemblyMixedPair struct {
 	mixed   *AssemblyEval
 }
 
+// captureVerification is the report-side view of a capture run manifest
+// (-capture-manifest, #331 W3): which artifact hashes the manifest lists
+// with usage_present true. Nil means no manifest was supplied.
+type captureVerification struct {
+	usagePresent map[string]bool // artifact_hash -> usage_present
+}
+
+// capturePairTemperaturesEqual reports whether both arms carry capture
+// provenance with an explicit, equal temperature. A missing provenance or
+// temperature fails: the manifest-verified workflow cannot vouch for a pair
+// whose decoding conditions it cannot compare.
+func capturePairTemperaturesEqual(base, treat *Artifact) bool {
+	if base.Capture == nil || treat.Capture == nil ||
+		base.Capture.Temperature == nil || treat.Capture.Temperature == nil {
+		return false
+	}
+	return *base.Capture.Temperature == *treat.Capture.Temperature
+}
+
 // computeAssemblyMixedSection builds the legacy-mixed per-model reports from
 // the already-keyed pairs. keys must be sorted (model, kind, pair) so deltas
 // land in lexicographic pair-ID order per model. Exclusions accumulate in
 // pair-ID-ordered phases, not one merged order: the per-pair loop appends
-// missing-arm / invariant / unregistered-stratum / missing-scenario-family /
-// unlabeled exclusions, then the per-model loop appends every
-// scenario-family-crosses-strata exclusion, then every oversized-cluster
-// exclusion. Invariant failures become Exclusions, never report-wide errors.
-// Decision gates run in registered order: incomplete-labeling (any
-// complete-built non-control pair missing a label on either arm), the pooled
-// floor, the per-stratum floor over the REGISTERED strata (an absent
-// registered stratum trips it too), then the cluster-diversity floor.
-func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairKey]*assemblyArmSet, quality map[string]float64, seed int64, bootstrapN int) []AssemblyMixedModelReport {
+// missing-arm / capture-verification / invariant / unregistered-stratum /
+// missing-scenario-family / unlabeled exclusions, then the per-model loop
+// appends every scenario-family-crosses-strata exclusion, then every
+// oversized-cluster exclusion. Invariant failures become Exclusions, never
+// report-wide errors. verify, when non-nil (-capture-manifest), excludes any
+// complete pair whose arms are absent from the manifest or lack reported
+// usage ("unverified-capture") or whose arms disagree on capture temperature
+// ("temperature-mismatch"). Decision gates run in registered order:
+// incomplete-labeling (any complete-built non-control pair missing a label
+// on either arm), the pooled floor, the per-stratum floor over the
+// REGISTERED strata (an absent registered stratum trips it too), then the
+// cluster-diversity floor.
+func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairKey]*assemblyArmSet, quality map[string]float64, seed int64, bootstrapN int, verify *captureVerification) []AssemblyMixedModelReport {
 	type acc struct {
 		report    AssemblyMixedModelReport
 		complete  []assemblyMixedPair
@@ -545,6 +598,18 @@ func computeAssemblyMixedSection(keys []assemblyPairKey, pairs map[assemblyPairK
 		if s.treat == nil {
 			exclude("missing-mixed-arm")
 			continue
+		}
+		if verify != nil {
+			// Manifest verification (#331 W3): both arms must be listed with
+			// usage_present, and their capture temperatures must agree.
+			if !verify.usagePresent[s.base.ArtifactHash] || !verify.usagePresent[s.treat.ArtifactHash] {
+				exclude("unverified-capture")
+				continue
+			}
+			if !capturePairTemperaturesEqual(s.base, s.treat) {
+				exclude("temperature-mismatch")
+				continue
+			}
 		}
 		leg, mix := s.base.Trace.AssemblyEval, s.treat.Trace.AssemblyEval
 		switch {

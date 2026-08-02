@@ -66,7 +66,7 @@ func appendMixedPairs(arts []Artifact, labels []Label, model string, start, n in
 
 func mustMixedReport(t *testing.T, arts []Artifact, labels []Label) *AssemblyReport {
 	t.Helper()
-	rep, err := computeAssemblyReport(arts, labels, 1, 10000, nil)
+	rep, err := computeAssemblyReport(arts, labels, 1, 10000, nil, assemblyReportExtras{})
 	if err != nil {
 		t.Fatalf("computeAssemblyReport: %v", err)
 	}
@@ -927,7 +927,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 	arts, labels := fcReportFixture()
 	report := func(prefs []FCPreference) *AssemblyReport {
 		t.Helper()
-		rep, err := computeAssemblyReport(arts, labels, 1, 200, prefs)
+		rep, err := computeAssemblyReport(arts, labels, 1, 200, prefs, assemblyReportExtras{})
 		if err != nil {
 			t.Fatalf("computeAssemblyReport: %v", err)
 		}
@@ -1014,7 +1014,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		for name, row := range map[string]FCPreference{
 			"unknown pair": unknownPair, "unknown model": unknownModel, "unknown hash": unknownHash,
 		} {
-			if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}); err == nil {
+			if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}, assemblyReportExtras{}); err == nil {
 				t.Errorf("%s accepted; want loud error", name)
 			}
 		}
@@ -1022,7 +1022,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 
 	t.Run("duplicate row is a loud error", func(t *testing.T) {
 		row := fcRowFor(arts, "pair-alpha", "a")
-		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row, row}); err == nil {
+		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row, row}, assemblyReportExtras{}); err == nil {
 			t.Fatalf("duplicate preference row accepted; want loud error")
 		}
 	})
@@ -1030,7 +1030,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 	t.Run("invalid preference value is a loud error", func(t *testing.T) {
 		row := fcRowFor(arts, "pair-alpha", "a")
 		row.Preference = "x"
-		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}); err == nil {
+		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}, assemblyReportExtras{}); err == nil {
 			t.Fatalf("preference %q accepted; want loud error", row.Preference)
 		}
 	})
@@ -1056,7 +1056,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		other := fcRowFor(arts, "pair-gamma", "a")
 		foreign.ArtifactHashA, foreign.ArtifactHashB = other.ArtifactHashA, other.ArtifactHashB
 		for name, row := range map[string]FCPreference{"swapped hashes": swapped, "foreign hashes": foreign} {
-			_, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row})
+			_, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}, assemblyReportExtras{})
 			if err == nil || !strings.Contains(err.Error(), "pair-alpha") {
 				t.Errorf("%s: want loud error naming pair-alpha, got %v", name, err)
 			}
@@ -1066,7 +1066,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		// swapped-hash row on it is corruption, not a skip.
 		exSwapped := fcRowFor(arts, "pair-beta", "a")
 		exSwapped.ArtifactHashA, exSwapped.ArtifactHashB = exSwapped.ArtifactHashB, exSwapped.ArtifactHashA
-		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{exSwapped}); err == nil || !strings.Contains(err.Error(), "pair-beta") {
+		if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{exSwapped}, assemblyReportExtras{}); err == nil || !strings.Contains(err.Error(), "pair-beta") {
 			t.Errorf("swapped hashes on excluded pair: want loud error naming pair-beta, got %v", err)
 		}
 	})
@@ -1145,7 +1145,7 @@ func TestAssemblyForcedChoiceSection(t *testing.T) {
 		for _, pair := range []string{"tw-a", "tw-b", "tw-c"} {
 			rows = append(rows, fcRowFor(twinArts, pair, fcMixedWinPref(pair, "c")))
 		}
-		rep, err := computeAssemblyReport(twinArts, twinLabels, 1, 200, rows)
+		rep, err := computeAssemblyReport(twinArts, twinLabels, 1, 200, rows, assemblyReportExtras{})
 		if err != nil {
 			t.Fatalf("computeAssemblyReport: %v", err)
 		}

@@ -704,13 +704,19 @@ func TestMixedToplineEmission(t *testing.T) {
 }
 
 func TestMixedBuildDeterminism(t *testing.T) {
+	// Two pressured cases in stale_vs_fresh (topline quota 2, which the W3
+	// exact-quota floor now enforces at author time): the registered rule
+	// selects both families, so both carry topline_facts.
 	p := mixedPressuredCase("det-press")
-	// The registered topline rule selects carriers by scenario family; the
-	// lone eligible family in its stratum is always selected.
+	p.Stratum = "stale_vs_fresh" // permits the join answer_home
 	p.ScenarioFamily = "fam-press"
 	p.ToplineFacts = "The gateway listens on port 7443 and its retry ceiling 6 is enforced."
+	p2 := mixedPressuredCase("det-press2")
+	p2.Stratum = "stale_vs_fresh"
+	p2.ScenarioFamily = "fam-press2"
+	p2.ToplineFacts = p.ToplineFacts
 	ctl := mixedControlCase("det-ctl")
-	fixture := mixedFixtureFor(p, ctl)
+	fixture := mixedFixtureFor(p, p2, ctl)
 	raw, err := json.Marshal(fixture)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -726,7 +732,7 @@ func TestMixedBuildDeterminism(t *testing.T) {
 		if !strings.Contains(out, "case det-press gated: budget=") {
 			t.Errorf("per-case gate summary missing from output:\n%s", out)
 		}
-		if !strings.Contains(out, "wrote 5 trace(s)") {
+		if !strings.Contains(out, "wrote 8 trace(s)") {
 			t.Errorf("trailing wrote-count line missing from output:\n%s", out)
 		}
 		entries, err := os.ReadDir(dir)
@@ -749,6 +755,7 @@ func TestMixedBuildDeterminism(t *testing.T) {
 
 	wantNames := []string{
 		"det-press-legacy.json", "det-press-mixed.json", "det-press-topline.json",
+		"det-press2-legacy.json", "det-press2-mixed.json", "det-press2-topline.json",
 		"det-ctl-legacy.json", "det-ctl-mixed.json", assemblyManifestName,
 	}
 	if len(files1) != len(wantNames) {

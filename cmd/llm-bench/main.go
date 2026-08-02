@@ -94,10 +94,17 @@ func main() {
 	blindIngest := flag.Bool("blind-ingest", false, "Parse a filled blind worksheet (-worksheet) into labels.jsonl (-labels-out), rejoining model on artifact_hash from -artifacts; grounding-check flags and DUP intra-rater scores are summarized on stderr")
 	blindDups := flag.Int("blind-dups", 0, "With -blind-render: append this many duplicate promptless blocks (deterministic selection over legacy/mixed artifacts) as intra-rater controls")
 	dupsOut := flag.String("dups-out", "", "With -blind-ingest: optional JSONL output path for intra-rater dup pairs {artifact_hash, primary_score, dup_score}")
-	fcRender := flag.Bool("fc-render", false, "Render a forced-choice worksheet (complete legacy/mixed pairs, arm identity hidden behind hash-parity A/B sides) from -artifacts to -report (#331 slice 3c)")
-	fcIngest := flag.Bool("fc-ingest", false, "Parse a filled forced-choice worksheet (-worksheet) into a preference sidecar JSONL (-fc-out), validating pairs against -artifacts")
+	fcRender := flag.Bool("fc-render", false, "Render a forced-choice worksheet (complete legacy/mixed pairs, arm identity hidden behind the sealed -fc-sidemap A/B sides) from -artifacts to -report (#331 slice 3c)")
+	fcIngest := flag.Bool("fc-ingest", false, "Parse a filled forced-choice worksheet (-worksheet) into a preference sidecar JSONL (-fc-out), validating pairs against -artifacts and the sealed -fc-sidemap")
 	fcOut := flag.String("fc-out", "", "Output JSONL path for -fc-ingest preference rows (required with -fc-ingest)")
 	fcPreferences := flag.String("fc-preferences", "", "With -assembly-report: optional -fc-ingest sidecar JSONL; adds the registered forced-choice sign-test secondary analysis to each legacy-mixed model section (never feeds the primary decision)")
+	fcSidemapGenerate := flag.Bool("fc-sidemap-generate", false, "Generate the sealed random forced-choice side map over the complete legacy/mixed pairs in -artifacts, write it to -fc-sidemap-out, and print its sha256 (commit the digest BEFORE labeling)")
+	fcSidemapOut := flag.String("fc-sidemap-out", "", "Output path for -fc-sidemap-generate (required with it)")
+	fcSidemapPath := flag.String("fc-sidemap", "", "Sealed side-map JSON path: REQUIRED with -fc-render and -fc-ingest; optional with -assembly-report, where it replaces the pre-sidemap parity side resolution and enables the descriptive arm-guess audit")
+	fcSidemapDigest := flag.String("fc-sidemap-digest", "", "With -assembly-report -fc-sidemap: the committed sha256 of the sidemap file; a mismatch is a hard error")
+	fcRequireComplete := flag.Bool("fc-require-complete", false, "With -fc-ingest: any rendered pair block left blank is a loud error listing the pairs (the registered workflow)")
+	captureManifestFlag := flag.String("capture-manifest", "", "With -assembly-report: the -calibrate-capture run manifest; embeds its digest and excludes legacy/mixed pairs it cannot verify (unverified-capture / temperature-mismatch)")
+	modelFilter := flag.String("model", "", "With -blind-render, -fc-render, or -adjudicate-render: only render artifacts whose candidate model matches this selector (the registered workflow labels one model at a time); empty renders all")
 	adjudicateRender := flag.Bool("adjudicate-render", false, "Render the grounding adjudication worksheet (full prompt shown) for labels flagged grounding-check, from -artifacts and -labels to -report (#331 slice 3c)")
 	adjudicateIngest := flag.Bool("adjudicate-ingest", false, "Parse a filled adjudication worksheet (-worksheet) and emit the full updated label set (-labels-out) from -artifacts and -labels; every flagged label must be adjudicated with a reason")
 	worksheetPath := flag.String("worksheet", "", "Path to a filled worksheet (required with -blind-ingest, -fc-ingest, -adjudicate-ingest)")
@@ -147,6 +154,9 @@ func main() {
 	if *fcIngest {
 		modes++
 	}
+	if *fcSidemapGenerate {
+		modes++
+	}
 	if *adjudicateRender {
 		modes++
 	}
@@ -163,7 +173,7 @@ func main() {
 		modes++
 	}
 	if modes > 1 {
-		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
+		log.Fatalf("llm-bench: -capture, -calibrate-capture, -calibrate, -manual-report, -paired-report, -assembly-report, -fim-latency, -blind-render, -blind-ingest, -fc-render, -fc-ingest, -fc-sidemap-generate, -adjudicate-render, -adjudicate-ingest, -discrimination-report, -import-xlam, -assembly-build are mutually exclusive")
 	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -261,11 +271,13 @@ func main() {
 			modelDigests = resolveCaptureModelDigests(ctx, *ollamaURL, targets)
 		}
 		if err := runCalibrateCapture(ctx, calibrateCaptureOptions{
-			Runner:       runner,
-			Targets:      targets,
-			Traces:       traces,
-			OutputPath:   *labelsOut,
-			ModelDigests: modelDigests,
+			Runner:              runner,
+			Targets:             targets,
+			Traces:              traces,
+			OutputPath:          *labelsOut,
+			ModelDigests:        modelDigests,
+			OllamaURL:           *ollamaURL,
+			OpenAICompatBaseURL: ct.baseURL,
 		}); err != nil {
 			log.Fatalf("llm-bench: calibrate-capture: %v", err)
 		}
@@ -376,7 +388,14 @@ func main() {
 	}
 
 	if *assemblyReport {
-		report, err := runAssemblyReport(*labelsPath, *artifactsPath, *fcPreferences)
+		report, err := runAssemblyReport(assemblyReportOptions{
+			LabelsPath:          *labelsPath,
+			ArtifactsPath:       *artifactsPath,
+			FCPrefsPath:         *fcPreferences,
+			FCSidemapPath:       *fcSidemapPath,
+			FCSidemapDigest:     *fcSidemapDigest,
+			CaptureManifestPath: *captureManifestFlag,
+		})
 		if err != nil {
 			log.Fatalf("llm-bench: assembly-report: %v", err)
 		}
@@ -429,6 +448,10 @@ func main() {
 		if len(arts) == 0 {
 			log.Fatalf("llm-bench: blind-render: no artifacts in %q", *artifactsPath)
 		}
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: blind-render: %v", err)
+		}
 		worksheet, err := renderBlindWorksheet(arts, *blindDups)
 		if err != nil {
 			log.Fatalf("llm-bench: blind-render: %v", err)
@@ -444,12 +467,47 @@ func main() {
 		return
 	}
 
+	if *fcSidemapGenerate {
+		if strings.TrimSpace(*fcSidemapOut) == "" {
+			log.Fatalf("llm-bench: -fc-sidemap-generate requires -fc-sidemap-out")
+		}
+		refuseOutputAlias("fc-sidemap-generate", "-fc-sidemap-out", *fcSidemapOut,
+			[][2]string{{"-artifacts", *artifactsPath}})
+		arts, err := loadArtifacts(*artifactsPath)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-sidemap-generate: load artifacts: %v", err)
+		}
+		sidemap, err := generateFCSidemap(arts)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-sidemap-generate: %v", err)
+		}
+		digest, err := writeFCSidemap(*fcSidemapOut, sidemap)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-sidemap-generate: %v", err)
+		}
+		fmt.Printf("fc-sidemap sha256:%s\n", digest)
+		fmt.Fprintf(os.Stderr, "llm-bench: fc-sidemap-generate wrote %d pair assignment(s) to %s\n", len(sidemap.Pairs), *fcSidemapOut)
+		fmt.Fprintln(os.Stderr, "llm-bench: commit this digest before labeling; reveal the map after preferences are ingested")
+		return
+	}
+
 	if *fcRender {
+		if strings.TrimSpace(*fcSidemapPath) == "" {
+			log.Fatalf("llm-bench: -fc-render requires -fc-sidemap (generate one with -fc-sidemap-generate)")
+		}
+		_, resolver, _, err := loadFCSidemap(*fcSidemapPath)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-render: %v", err)
+		}
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-render: load artifacts: %v", err)
 		}
-		worksheet, err := renderForcedChoiceWorksheet(arts)
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-render: %v", err)
+		}
+		worksheet, err := renderForcedChoiceWorksheet(arts, resolver)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-render: %v", err)
 		}
@@ -471,8 +529,15 @@ func main() {
 		if strings.TrimSpace(*fcOut) == "" {
 			log.Fatalf("llm-bench: -fc-ingest requires -fc-out")
 		}
+		if strings.TrimSpace(*fcSidemapPath) == "" {
+			log.Fatalf("llm-bench: -fc-ingest requires -fc-sidemap (the sealed map the worksheet was rendered under)")
+		}
 		refuseOutputAlias("fc-ingest", "-fc-out", *fcOut,
-			[][2]string{{"-artifacts", *artifactsPath}, {"-worksheet", *worksheetPath}})
+			[][2]string{{"-artifacts", *artifactsPath}, {"-worksheet", *worksheetPath}, {"-fc-sidemap", *fcSidemapPath}})
+		_, resolver, _, err := loadFCSidemap(*fcSidemapPath)
+		if err != nil {
+			log.Fatalf("llm-bench: fc-ingest: %v", err)
+		}
 		worksheet, err := os.ReadFile(*worksheetPath)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: read worksheet: %v", err)
@@ -481,7 +546,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: load artifacts: %v", err)
 		}
-		rows, skipped, err := ingestForcedChoiceWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName))
+		rows, skipped, err := ingestForcedChoiceWorksheet(string(worksheet), arts, strings.TrimSpace(*labelerName), resolver, *fcRequireComplete)
 		if err != nil {
 			log.Fatalf("llm-bench: fc-ingest: %v", err)
 		}
@@ -499,6 +564,10 @@ func main() {
 		arts, err := loadArtifacts(*artifactsPath)
 		if err != nil {
 			log.Fatalf("llm-bench: adjudicate-render: load artifacts: %v", err)
+		}
+		arts, err = filterArtifactsByModel(arts, *modelFilter)
+		if err != nil {
+			log.Fatalf("llm-bench: adjudicate-render: %v", err)
 		}
 		labels, err := loadLabels(*labelsPath)
 		if err != nil {

@@ -357,11 +357,11 @@ func validateMixedTwins(cases []mixedCase) error {
 		tg.members++
 		if got := mixedRagPathSet(c); got != tg.ragPaths {
 			return fmt.Errorf("twin_group %q: case %q rag_sources paths {%s} differ from twin %q {%s} (twins must share the same distractor pool)",
-				c.TwinGroup, c.ID, got, tg.firstID, tg.ragPaths)
+				c.TwinGroup, c.ID, mixedFingerprintDisplay(got), tg.firstID, mixedFingerprintDisplay(tg.ragPaths))
 		}
 		if got := mixedMemoryIDSet(c); got != tg.memIDs {
 			return fmt.Errorf("twin_group %q: case %q memory_records ids {%s} differ from twin %q {%s} (twins must share the same distractor pool)",
-				c.TwinGroup, c.ID, got, tg.firstID, tg.memIDs)
+				c.TwinGroup, c.ID, mixedFingerprintDisplay(got), tg.firstID, mixedFingerprintDisplay(tg.memIDs))
 		}
 	}
 	sort.Strings(order)
@@ -373,15 +373,20 @@ func validateMixedTwins(cases []mixedCase) error {
 	return nil
 }
 
-// mixedRagPathSet and mixedMemoryIDSet render sorted set fingerprints for the
-// twin distractor-pool identity checks.
+// mixedRagPathSet and mixedMemoryIDSet render sorted set fingerprints for
+// the twin distractor-pool identity checks. Joined with NUL (W3): a ", "
+// join let one element containing ", " alias a multi-element set — an ID
+// "rec-1, rec-2" would fingerprint identically to {rec-1, rec-2}. NUL
+// cannot appear in JSON string content that survives Go's decoder-to-scan
+// path as a separator collision risk the way printable joins can.
+// mixedFingerprintDisplay renders them readably for error messages.
 func mixedRagPathSet(c mixedCase) string {
 	paths := make([]string, 0, len(c.RagSources))
 	for _, s := range c.RagSources {
 		paths = append(paths, s.Path)
 	}
 	sort.Strings(paths)
-	return strings.Join(paths, ", ")
+	return strings.Join(paths, "\x00")
 }
 
 func mixedMemoryIDSet(c mixedCase) string {
@@ -390,7 +395,13 @@ func mixedMemoryIDSet(c mixedCase) string {
 		ids = append(ids, r.ID)
 	}
 	sort.Strings(ids)
-	return strings.Join(ids, ", ")
+	return strings.Join(ids, "\x00")
+}
+
+// mixedFingerprintDisplay renders a NUL-joined fingerprint for human error
+// messages.
+func mixedFingerprintDisplay(fp string) string {
+	return strings.ReplaceAll(fp, "\x00", ", ")
 }
 
 // mixedToplineSelection computes the REGISTERED author-independent topline
@@ -398,8 +409,10 @@ func mixedMemoryIDSet(c mixedCase) string {
 // Per stratum, order the eligible families by FNV-1a-64(family) ascending
 // (family name breaks the astronomically unlikely hash tie), take the first
 // mixedToplineQuotas[stratum] families, and within each selected family the
-// case with the lexicographically smallest id carries topline_facts.
-func mixedToplineSelection(cases []mixedCase) map[string]struct{} {
+// case with the lexicographically smallest id carries topline_facts. The
+// second return is the per-stratum ELIGIBLE family count backing the W3
+// exact-quota floor in validateMixedToplinePlacement.
+func mixedToplineSelection(cases []mixedCase) (map[string]struct{}, map[string]int) {
 	perStratum := map[string]map[string]string{} // stratum -> family -> smallest case id
 	for _, c := range cases {
 		if c.Control || c.ScenarioFamily == "" {
@@ -415,7 +428,9 @@ func mixedToplineSelection(cases []mixedCase) map[string]struct{} {
 		}
 	}
 	selected := map[string]struct{}{}
+	famCounts := map[string]int{}
 	for stratum, fams := range perStratum {
+		famCounts[stratum] = len(fams)
 		type famEntry struct {
 			hash   uint64
 			family string
@@ -437,14 +452,27 @@ func mixedToplineSelection(cases []mixedCase) map[string]struct{} {
 			selected[perStratum[stratum][entries[i].family]] = struct{}{}
 		}
 	}
-	return selected
+	return selected, famCounts
 }
 
 // validateMixedToplinePlacement enforces topline_facts on EXACTLY the
 // registered selection: missing on a selected case and present on an
 // unselected case are both authoring errors, reported in declaration order.
+// W3 exact-quota floor: a stratum with ANY eligible family must hold at
+// least its registered quota of families, so the topline ceiling always
+// fills to exactly 12 on the registered corpus — the count floor is now an
+// author-time error, not a silent shortfall. A stratum with zero eligible
+// families is skipped here (nothing was selected); global corpus
+// completeness belongs to the pre-label gate.
 func validateMixedToplinePlacement(cases []mixedCase) error {
-	selected := mixedToplineSelection(cases)
+	selected, famCounts := mixedToplineSelection(cases)
+	for _, stratum := range assemblyMixedRegisteredStrata {
+		n, present := famCounts[stratum]
+		if present && n < mixedToplineQuotas[stratum] {
+			return fmt.Errorf("stratum %q has %d eligible scenario family(ies); the registered topline quota is %d (author more families or drop scenario_family from the stratum)",
+				stratum, n, mixedToplineQuotas[stratum])
+		}
+	}
 	for _, c := range cases {
 		_, sel := selected[c.ID]
 		switch {
@@ -619,6 +647,19 @@ func validateMixedPressureTarget(c mixedCase) error {
 	}
 	if !mixedDomainContains(c, pt.Domain, pt.Literal) {
 		return fmt.Errorf("pressure_target: literal %q not found in %s content (case-sensitive)", pt.Literal, pt.Domain)
+	}
+	// W3 conservative tightening: the target literal must be absent from the
+	// final question turn and the system prompt, case-insensitively — the
+	// same fold scan the evidence contract applies. A target the question or
+	// system restates could survive shedding through them, hollowing out the
+	// carrier-change gate. Precondition: validateMixedEvents already ran, so
+	// the final event is the user-question turn.
+	folded := strings.ToLower(pt.Literal)
+	if strings.Contains(strings.ToLower(c.Events[len(c.Events)-1].Turn.Content), folded) {
+		return fmt.Errorf("pressure_target: literal %q appears in the final question", pt.Literal)
+	}
+	if strings.Contains(strings.ToLower(c.System), folded) {
+		return fmt.Errorf("pressure_target: literal %q appears in the system prompt", pt.Literal)
 	}
 	return nil
 }
@@ -877,19 +918,53 @@ func validateMixedEvidenceContract(c mixedCase) error {
 }
 
 // mixedToolArgsContainFold reports whether lit appears — case-insensitively,
-// the contamination convention — in any tool_call event's raw argument bytes,
+// the contamination convention — in any tool_call event's argument payload,
 // returning the first offending event index. Args are model-visible: the Task
 // 4 builder copies them verbatim onto the assistant tool-call turn, so a
 // literal hidden in a retrieve query or an echo payload is exactly as leaked
-// as one in a conversation turn.
+// as one in a conversation turn. W3: BOTH the raw bytes and the DECODED JSON
+// tree's strings (keys and values) are scanned, so a \uXXXX-escaped spelling
+// cannot smuggle a literal past the raw scan.
 func mixedToolArgsContainFold(c mixedCase, lit string) (int, bool) {
 	folded := strings.ToLower(lit)
+	contains := func(s string) bool { return strings.Contains(strings.ToLower(s), folded) }
 	for i, e := range c.Events {
-		if e.ToolCall != nil && strings.Contains(strings.ToLower(string(e.ToolCall.Args)), folded) {
+		if e.ToolCall == nil {
+			continue
+		}
+		if contains(string(e.ToolCall.Args)) {
+			return i, true
+		}
+		// Args were validated as JSON objects (validateMixedToolCall); a
+		// decode failure here just leaves the raw scan above as the coverage.
+		var tree any
+		if err := json.Unmarshal(e.ToolCall.Args, &tree); err == nil && jsonStringsContainFold(tree, contains) {
 			return i, true
 		}
 	}
 	return 0, false
+}
+
+// jsonStringsContainFold walks a decoded JSON tree and applies match to every
+// string it holds — object keys included.
+func jsonStringsContainFold(v any, match func(string) bool) bool {
+	switch t := v.(type) {
+	case string:
+		return match(t)
+	case []any:
+		for _, e := range t {
+			if jsonStringsContainFold(e, match) {
+				return true
+			}
+		}
+	case map[string]any:
+		for k, e := range t {
+			if match(k) || jsonStringsContainFold(e, match) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // mixedAnswerThird buckets the answering conversation turn's position among

@@ -347,13 +347,15 @@ func mixedArmSubsequenceGate(caseID string, mode AssemblyMode, full, assembled a
 }
 
 // mixedSubsequenceMatch is the per-message identity mixedArmSubsequenceGate
-// walks with (see there for the rule).
+// walks with (see there for the rule). W3 tightening: the assistant
+// tool-call branch ALSO requires Content equality — mixed never rewrites
+// tool-call turns, so a same-ID message with different Content is drift.
 func mixedSubsequenceMatch(full, asm agent.Message) bool {
 	if full.Role != asm.Role {
 		return false
 	}
 	if len(asm.ToolCalls) > 0 || len(full.ToolCalls) > 0 {
-		if len(asm.ToolCalls) != len(full.ToolCalls) {
+		if len(asm.ToolCalls) != len(full.ToolCalls) || full.Content != asm.Content {
 			return false
 		}
 		for i := range asm.ToolCalls {

@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -185,6 +187,177 @@ type calibrateCaptureOptions struct {
 	// Resolved by the caller (see resolveCandidateDigests); missing entries
 	// leave CaptureProvenance.ModelDigest empty.
 	ModelDigests map[string]string
+	// OllamaURL and OpenAICompatBaseURL are the capture endpoints, recorded
+	// on the run manifest (#331 W3) when the trace set contains assembly
+	// modes. OpenAICompatBaseURL additionally drives the /props server probe.
+	OllamaURL           string
+	OpenAICompatBaseURL string
+	// Stdout receives the manifest_digest line (the pack's committed report
+	// embeds it); nil defaults to os.Stdout.
+	Stdout io.Writer
+}
+
+// Capture run manifest (#331 W3). A -calibrate-capture over traces
+// containing assembly modes (legacy/mixed/topline) MUST also write
+// <artifacts-out>.manifest.json pinning the run conditions; the registered
+// -assembly-report run verifies pairs against it (-capture-manifest).
+const (
+	captureManifestSchemaVersion = "mixed-capture-manifest/v1"
+	// captureProbeMaxBytes bounds the recorded /props probe body.
+	captureProbeMaxBytes = 16 * 1024
+)
+
+// captureManifestPath is the manifest's sibling path for one artifacts
+// output path.
+func captureManifestPath(artifactsOut string) string {
+	return artifactsOut + ".manifest.json"
+}
+
+type captureManifest struct {
+	SchemaVersion        string                  `json:"schema_version"`
+	CreatedAt            time.Time               `json:"created_at"`
+	Endpoint             string                  `json:"endpoint"`
+	Transport            string                  `json:"transport"`
+	ModelTargets         []captureManifestTarget `json:"model_targets"`
+	ServerProbe          captureServerProbe      `json:"server_probe"`
+	Decoding             captureDecoding         `json:"decoding"`
+	CounterbalanceScheme string                  `json:"counterbalance_scheme"`
+	ArtifactCount        int                     `json:"artifact_count"`
+	PerArtifact          []captureManifestRow    `json:"per_artifact"`
+}
+
+type captureManifestTarget struct {
+	Selector string `json:"selector"`
+	// ResolvedDigest is the ollama ShowModel digest, or empty when the
+	// transport exposes none (openai-compat) or resolution degraded.
+	ResolvedDigest string `json:"resolved_digest"`
+}
+
+// captureServerProbe records what the capture could learn about the serving
+// stack: the raw (bounded) llama.cpp /props JSON for openai-compat targets —
+// or the probe error; probe failure never fails the capture but IS recorded —
+// plus the already-resolved ollama ShowModel digests for ollama targets.
+type captureServerProbe struct {
+	Props         json.RawMessage   `json:"props,omitempty"`
+	Error         string            `json:"error,omitempty"`
+	OllamaDigests map[string]string `json:"ollama_digests,omitempty"`
+}
+
+// captureDecoding pins the registered decoding controls. SeedSupported is
+// false today on both transports (see CaptureProvenance.Seed).
+type captureDecoding struct {
+	Temperature   float64 `json:"temperature"`
+	SeedSupported bool    `json:"seed_supported"`
+}
+
+// captureManifestRow is one written artifact's manifest entry. UsagePresent
+// reports whether the replay carried non-zero prompt AND gen token counts —
+// the report's -capture-manifest verification excludes pairs whose arms
+// lack it (a provider that omits usage decodes to 0, so zero is treated as
+// "not verified").
+type captureManifestRow struct {
+	TraceID      string `json:"trace_id"`
+	ArtifactHash string `json:"artifact_hash"`
+	OrderIndex   int    `json:"order_index"`
+	UsagePresent bool   `json:"usage_present"`
+}
+
+// captureEndpointTransport derives the manifest endpoint/transport pair from
+// the target set. Registered runs are single-transport; a mixed target set
+// records transport "mixed" with both URLs space-joined, ollama first.
+func captureEndpointTransport(targets []ModelTarget, ollamaURL, compatURL string) (endpoint, transport string) {
+	hasOllama, hasCompat := false, false
+	for _, t := range targets {
+		if normalizeModelSelector(t.Provider) == openAICompatTransport {
+			hasCompat = true
+		} else {
+			hasOllama = true
+		}
+	}
+	switch {
+	case hasCompat && hasOllama:
+		return strings.TrimSpace(ollamaURL) + " " + strings.TrimSpace(compatURL), "mixed"
+	case hasCompat:
+		return strings.TrimSpace(compatURL), openAICompatTransport
+	default:
+		return strings.TrimSpace(ollamaURL), defaultBenchProvider
+	}
+}
+
+// probeCaptureServer GETs <base>/props (llama.cpp exposes build/model/n_ctx
+// there) and returns the raw JSON body, or the error string to record.
+// Bounded at captureProbeMaxBytes; an over-cap, non-200, non-JSON, or
+// transport failure is recorded as the error — never a capture failure.
+func probeCaptureServer(baseURL string) (json.RawMessage, string) {
+	client := &http.Client{Timeout: digestResolutionTimeout}
+	resp, err := client.Get(strings.TrimRight(strings.TrimSpace(baseURL), "/") + "/props")
+	if err != nil {
+		return nil, err.Error()
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, captureProbeMaxBytes+1))
+	if err != nil {
+		return nil, err.Error()
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Sprintf("GET /props: status %d", resp.StatusCode)
+	}
+	if len(body) > captureProbeMaxBytes {
+		return nil, fmt.Sprintf("GET /props: response exceeds the %d-byte cap", captureProbeMaxBytes)
+	}
+	if !json.Valid(body) {
+		return nil, "GET /props: response is not valid JSON"
+	}
+	return json.RawMessage(body), ""
+}
+
+// loadCaptureManifestForReport reads a capture run manifest for
+// -assembly-report verification, returning the embedded reference (the
+// FILE's sha256 digest + artifact count) and the usage-present hash set the
+// pair verification consults.
+func loadCaptureManifestForReport(path string) (AssemblyCaptureManifest, *captureVerification, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: read %q: %w", path, err)
+	}
+	var m captureManifest
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: decode %q: %w", path, err)
+	}
+	if m.SchemaVersion != captureManifestSchemaVersion {
+		return AssemblyCaptureManifest{}, nil, fmt.Errorf("capture-manifest: %q schema_version %q (want %q)", path, m.SchemaVersion, captureManifestSchemaVersion)
+	}
+	usage := make(map[string]bool, len(m.PerArtifact))
+	for _, row := range m.PerArtifact {
+		usage[row.ArtifactHash] = row.UsagePresent
+	}
+	sum := sha256.Sum256(raw)
+	ref := AssemblyCaptureManifest{
+		Digest:        "sha256:" + hex.EncodeToString(sum[:]),
+		ArtifactCount: m.ArtifactCount,
+	}
+	return ref, &captureVerification{usagePresent: usage}, nil
+}
+
+// writeCaptureManifest marshals and writes the manifest, then emits the
+// manifest_digest line (sha256 of the file bytes) to stdout. Any failure
+// here fails the capture loudly — an assembly capture without its manifest
+// cannot be verified by the registered report.
+func writeCaptureManifest(path string, m captureManifest, stdout io.Writer) error {
+	raw, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return fmt.Errorf("calibrate-capture: marshal manifest: %w", err)
+	}
+	raw = append(raw, '\n')
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		return fmt.Errorf("calibrate-capture: write manifest: %w", err)
+	}
+	sum := sha256.Sum256(raw)
+	if stdout == nil {
+		stdout = os.Stdout
+	}
+	_, _ = fmt.Fprintf(stdout, "manifest_digest sha256:%s\n", hex.EncodeToString(sum[:]))
+	return nil
 }
 
 // runCalibrateCapture replays each (trace, candidate) and writes one
@@ -211,7 +384,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		}
 		traceByID[trace.ID] = trace
 	}
-	ordered := counterbalanceCaptureTraces(opts.Traces)
+	ordered, capturedOrders := counterbalanceCaptureTraces(opts.Traces)
 	orderIndex := make(map[string]int, len(ordered))
 	for i, trace := range ordered {
 		orderIndex[trace.ID] = i
@@ -225,6 +398,7 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 		now = opts.Clock
 	}
 	var artifacts []Artifact
+	var manifestRows []captureManifestRow
 	failed := 0
 	for _, r := range results {
 		if r.Err != nil {
@@ -247,10 +421,18 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			ActualToolCalls:   extractToolNames(r.Transcript),
 			ActualTranscript:  r.Transcript,
 			CapturedAt:        now(),
-			Capture:           captureProvenance(trace, r, orderIndex, opts.ModelDigests),
+			Capture:           captureProvenance(trace, r, orderIndex, capturedOrders, opts.ModelDigests),
 		}
 		artifact.ArtifactHash = artifactHash(artifact)
 		artifacts = append(artifacts, artifact)
+		manifestRows = append(manifestRows, captureManifestRow{
+			TraceID:      r.TraceID,
+			ArtifactHash: artifact.ArtifactHash,
+			OrderIndex:   orderIndex[r.TraceID],
+			// Zero counts mean "usage not reported" (see the KNOWN GAP on
+			// CaptureProvenance), so presence requires both counts non-zero.
+			UsagePresent: r.Score.PromptEvalTokens > 0 && r.Score.GenTokens > 0,
+		})
 	}
 	if len(artifacts) == 0 {
 		return fmt.Errorf("calibrate-capture: no artifacts written; %d results returned, %d failed", len(results), failed)
@@ -280,19 +462,53 @@ func runCalibrateCapture(ctx context.Context, opts calibrateCaptureOptions) (ret
 			return fmt.Errorf("calibrate-capture: encode artifact %s/%s: %w", artifact.TraceID, artifact.CandidateModel, err)
 		}
 	}
+	// Assembly captures REQUIRE the run manifest (#331 W3): the registered
+	// report verifies pairs against it, so a capture that cannot write it
+	// fails loudly. Non-assembly captures stay manifest-free.
+	if anyPrefilledAssemblyTrace(opts.Traces) {
+		endpoint, transport := captureEndpointTransport(opts.Targets, opts.OllamaURL, opts.OpenAICompatBaseURL)
+		probe := captureServerProbe{OllamaDigests: opts.ModelDigests}
+		if strings.Contains(transport, openAICompatTransport) || transport == "mixed" {
+			probe.Props, probe.Error = probeCaptureServer(opts.OpenAICompatBaseURL)
+		}
+		targets := make([]captureManifestTarget, 0, len(opts.Targets))
+		for _, target := range opts.Targets {
+			targets = append(targets, captureManifestTarget{
+				Selector:       target.Display,
+				ResolvedDigest: opts.ModelDigests[normalizeModelSelector(target.Display)],
+			})
+		}
+		manifest := captureManifest{
+			SchemaVersion:        captureManifestSchemaVersion,
+			CreatedAt:            now(),
+			Endpoint:             endpoint,
+			Transport:            transport,
+			ModelTargets:         targets,
+			ServerProbe:          probe,
+			Decoding:             captureDecoding{Temperature: assemblyCaptureTemperature, SeedSupported: false},
+			CounterbalanceScheme: captureCounterbalanceScheme,
+			ArtifactCount:        len(manifestRows),
+			PerArtifact:          manifestRows,
+		}
+		if err := writeCaptureManifest(captureManifestPath(opts.OutputPath), manifest, opts.Stdout); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 
 // counterbalanceCaptureTraces returns the deterministic capture order for a
-// mixed trace set: non-assembly traces (and 3a flat/progressive arms) first
-// in their input order, then legacy/mixed pairs sorted by PairID with the
-// FNV-1a-64(PairID)-parity-selected arm first (even => legacy first, odd =>
-// mixed first), then topline traces sorted by trace ID. A set with no
-// legacy/mixed/topline traces is returned untouched, preserving today's
-// capture order byte-for-byte.
-func counterbalanceCaptureTraces(traces []Trace) []Trace {
+// mixed trace set — non-assembly traces (and 3a flat/progressive arms) first
+// in their input order, then legacy/mixed pairs in the registered
+// counterbalance order (counterbalancePairOrder: FNV-1a-64(PairID) ascending,
+// first arm alternating), then topline traces sorted by trace ID — plus the
+// pair-ID -> captured-order label map the pair ordering was derived from, so
+// the recorded captured_order provenance can never disagree with the actual
+// order. A set with no legacy/mixed/topline traces is returned untouched,
+// preserving today's capture order byte-for-byte.
+func counterbalanceCaptureTraces(traces []Trace) ([]Trace, map[string]string) {
 	var plain, topline []Trace
-	var pairOrder []string
+	var pairIDs []string
 	pairs := map[string][]Trace{}
 	for _, t := range traces {
 		if !prefilledAssemblyMode(t) {
@@ -303,25 +519,23 @@ func counterbalanceCaptureTraces(traces []Trace) []Trace {
 		case AssemblyLegacy, AssemblyMixed:
 			id := t.AssemblyEval.PairID
 			if _, ok := pairs[id]; !ok {
-				pairOrder = append(pairOrder, id)
+				pairIDs = append(pairIDs, id)
 			}
 			pairs[id] = append(pairs[id], t)
 		default: // AssemblyTopline
 			topline = append(topline, t)
 		}
 	}
+	pairOrder, labels := counterbalancePairOrder(pairIDs)
 	if len(pairOrder) == 0 && len(topline) == 0 {
-		return traces
+		return traces, labels
 	}
-	sort.Strings(pairOrder)
 	sort.Slice(topline, func(i, j int) bool { return topline[i].ID < topline[j].ID })
 	out := make([]Trace, 0, len(traces))
 	out = append(out, plain...)
 	for _, id := range pairOrder {
-		// Derive the leading arm from capturedOrderLabel so the recorded
-		// captured_order provenance can never disagree with the actual order.
 		first := AssemblyLegacy
-		if capturedOrderLabel(id) == "mixed-first" {
+		if labels[id] == "mixed-first" {
 			first = AssemblyMixed
 		}
 		for _, t := range pairs[id] {
@@ -335,7 +549,7 @@ func counterbalanceCaptureTraces(traces []Trace) []Trace {
 			}
 		}
 	}
-	return append(out, topline...)
+	return append(out, topline...), labels
 }
 
 // pairIDHash is the registered counterbalance hash: FNV-1a 64 of the PairID.
@@ -345,20 +559,44 @@ func pairIDHash(pairID string) uint64 {
 	return h.Sum64()
 }
 
-// capturedOrderLabel names which arm of a legacy/mixed pair the
-// counterbalanced capture order runs first.
-func capturedOrderLabel(pairID string) string {
-	if pairIDHash(pairID)%2 == 1 {
-		return "mixed-first"
+// captureCounterbalanceScheme names the registered counterbalance rule for
+// the capture manifest. Single source: counterbalancePairOrder implements
+// exactly this sentence.
+const captureCounterbalanceScheme = "pairs sorted by fnv1a64(pair_id) ascending; first arm alternates by position (even=legacy-first, odd=mixed-first)"
+
+// counterbalancePairOrder is the REGISTERED balanced counterbalance (#331
+// W3): pair IDs sorted by FNV-1a-64(PairID) ascending (PairID breaks the
+// astronomically unlikely hash tie), then the first arm ALTERNATES by
+// position — even position => "legacy-first", odd => "mixed-first". Balanced
+// within 1 by construction, unlike the retired per-pair hash parity, which
+// could skew arbitrarily far on an unlucky ID set.
+func counterbalancePairOrder(pairIDs []string) ([]string, map[string]string) {
+	ordered := append([]string(nil), pairIDs...)
+	sort.Slice(ordered, func(i, j int) bool {
+		hi, hj := pairIDHash(ordered[i]), pairIDHash(ordered[j])
+		if hi != hj {
+			return hi < hj
+		}
+		return ordered[i] < ordered[j]
+	})
+	labels := make(map[string]string, len(ordered))
+	for i, id := range ordered {
+		if i%2 == 1 {
+			labels[id] = "mixed-first"
+		} else {
+			labels[id] = "legacy-first"
+		}
 	}
-	return "legacy-first"
+	return ordered, labels
 }
 
 // captureProvenance builds the controlled-capture provenance for one
 // result, or nil for non-assembly traces so their artifacts stay
 // byte-identical to the pre-3c shape. Prompt/gen tokens come from the
-// replay usage carried on Result.Score.
-func captureProvenance(trace Trace, r Result, orderIndex map[string]int, digests map[string]string) *CaptureProvenance {
+// replay usage carried on Result.Score; capturedOrders is the label map the
+// actual capture order was derived from (counterbalanceCaptureTraces), the
+// single source for CapturedOrder.
+func captureProvenance(trace Trace, r Result, orderIndex map[string]int, capturedOrders map[string]string, digests map[string]string) *CaptureProvenance {
 	if !prefilledAssemblyMode(trace) {
 		return nil
 	}
@@ -374,7 +612,7 @@ func captureProvenance(trace Trace, r Result, orderIndex map[string]int, digests
 	}
 	switch trace.AssemblyEval.Mode {
 	case AssemblyLegacy, AssemblyMixed:
-		prov.CapturedOrder = capturedOrderLabel(trace.AssemblyEval.PairID)
+		prov.CapturedOrder = capturedOrders[trace.AssemblyEval.PairID]
 	}
 	return prov
 }

@@ -291,7 +291,7 @@ func replayWith(ctx context.Context, client candidateChatClient, model string, t
 				i++
 			}
 
-			msg, actualTurn, latencyMs, usage, err := chatReplayTurn(ctx, client, model, messages, tools, opts)
+			msg, actualTurn, latencyMs, usage, err := chatReplayTurn(ctx, client, model, messages, tools, opts, nil)
 			out.TurnLatenciesMs = append(out.TurnLatenciesMs, latencyMs)
 			if err != nil {
 				return out, err
@@ -373,16 +373,21 @@ func replayPrefilled(ctx context.Context, client candidateChatClient, model stri
 
 	messages := make([]ollama.ChatMessage, 0, len(trace.Turns)+1)
 	messages = append(messages, ollama.ChatMessage{Role: "system", Content: trace.System})
+	// rawArgs mirrors messages (#331 W3): the fixture's byte-exact tool-call
+	// argument payloads ride alongside the decoded ollama shapes so a
+	// transport whose frozen types accept raw JSON can send them verbatim.
+	rawArgs := make([][]json.RawMessage, 1, len(trace.Turns)+1)
 	for i, turn := range trace.Turns {
 		msg, err := prefilledChatMessage(turn)
 		if err != nil {
 			return replayOutput{}, fmt.Errorf("trace %q turn %d: %w", trace.ID, i, err)
 		}
 		messages = append(messages, msg)
+		rawArgs = append(rawArgs, prefilledRawToolArgs(turn))
 	}
 
 	out := replayOutput{}
-	msg, actualTurn, latencyMs, usage, err := chatReplayTurn(ctx, client, model, messages, nil, opts)
+	msg, actualTurn, latencyMs, usage, err := chatReplayTurn(ctx, client, model, messages, nil, opts, rawArgs)
 	out.TurnLatenciesMs = append(out.TurnLatenciesMs, latencyMs)
 	if err != nil {
 		return out, err
@@ -426,6 +431,20 @@ func prefilledChatMessage(turn Turn) (ollama.ChatMessage, error) {
 	default:
 		return ollama.ChatMessage{}, fmt.Errorf("role %q: %w", turn.Role, errUnsupportedTurns)
 	}
+}
+
+// prefilledRawToolArgs collects the fixture's raw argument bytes for one
+// turn, aligned with prefilledToolCalls' output order. Nil for turns without
+// tool calls.
+func prefilledRawToolArgs(turn Turn) []json.RawMessage {
+	if turn.Role != "assistant" || len(turn.ToolCalls) == 0 {
+		return nil
+	}
+	raw := make([]json.RawMessage, len(turn.ToolCalls))
+	for i, call := range turn.ToolCalls {
+		raw[i] = call.Arguments
+	}
+	return raw
 }
 
 func prefilledToolCalls(calls []ToolCall) ([]ollama.ToolCall, error) {
@@ -485,7 +504,10 @@ func hasUserTurn(turns []Turn) bool {
 	return false
 }
 
-func chatReplayTurn(ctx context.Context, client candidateChatClient, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions) (ollama.ChatMessage, Turn, int64, tokenUsage, error) {
+// chatReplayTurn sends one chat round-trip. rawArgs (nil outside the
+// prefilled path) mirrors messages with the fixture's byte-exact tool-call
+// argument payloads; see candidateChatRequest.
+func chatReplayTurn(ctx context.Context, client candidateChatClient, model string, messages []ollama.ChatMessage, tools []ollama.Tool, opts replayOptions, rawArgs [][]json.RawMessage) (ollama.ChatMessage, Turn, int64, tokenUsage, error) {
 	turnCtx := ctx
 	if opts.PerTurnTimeout > 0 {
 		var cancel context.CancelFunc
@@ -493,11 +515,14 @@ func chatReplayTurn(ctx context.Context, client candidateChatClient, model strin
 		defer cancel()
 	}
 
-	req := ollama.ChatRequest{
-		Model:     model,
-		Messages:  messages,
-		Tools:     tools,
-		KeepAlive: benchKeepAlive,
+	req := candidateChatRequest{
+		ChatRequest: ollama.ChatRequest{
+			Model:     model,
+			Messages:  messages,
+			Tools:     tools,
+			KeepAlive: benchKeepAlive,
+		},
+		RawToolArgs: rawArgs,
 	}
 	if opts.NumCtx > 0 || opts.Temperature != nil {
 		req.Options = &ollama.ModelOptions{NumCtx: opts.NumCtx, Temperature: opts.Temperature}

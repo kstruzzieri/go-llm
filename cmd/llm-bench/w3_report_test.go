@@ -1,0 +1,540 @@
+package main
+
+// W3 round-2 consult adoptions (#331 slice 3c): sealed forced-choice side
+// map, arm-guess blinding audit, capture-manifest report verification, and
+// worksheet model filters.
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
+
+// parityFCSidemap builds a sidemap whose assignments EQUAL the legacy parity
+// rule for the given (pair, model) keys, so fixtures built around
+// fcSideIsLegacyA (fcRowFor, fcPairArtifacts) stay bindable while the code
+// under test resolves strictly through the map.
+func parityFCSidemap(model string, pairIDs ...string) fcSidemapFile {
+	m := fcSidemapFile{SchemaVersion: fcSidemapSchemaVersion, Pairs: map[string]fcSidemapEntry{}}
+	for _, pair := range pairIDs {
+		m.Pairs[fcSidemapKey(pair, model)] = fcSidemapEntry{LegacyIsA: fcSideIsLegacyA(pair, model)}
+	}
+	return m
+}
+
+func TestFCSidemapGenerateAndLoad(t *testing.T) {
+	arts := fcPairArtifacts()
+	m, err := generateFCSidemap(arts)
+	if err != nil {
+		t.Fatalf("generateFCSidemap: %v", err)
+	}
+	if m.SchemaVersion != "fc-sidemap/v1" {
+		t.Errorf("schema_version = %q; want fc-sidemap/v1", m.SchemaVersion)
+	}
+	if m.SealedDigest != "" {
+		t.Errorf("sealed_digest = %q; want empty (the seal is the printed file digest)", m.SealedDigest)
+	}
+	for _, key := range []string{"pair-alpha|c", "pair-gamma|c"} {
+		if _, ok := m.Pairs[key]; !ok {
+			t.Errorf("sidemap missing key %q; got %v", key, m.Pairs)
+		}
+	}
+	if len(m.Pairs) != 2 {
+		t.Errorf("sidemap pairs = %d; want exactly the 2 complete pairs", len(m.Pairs))
+	}
+
+	path := filepath.Join(t.TempDir(), "sidemap.json")
+	digest, err := writeFCSidemap(path, m)
+	if err != nil {
+		t.Fatalf("writeFCSidemap: %v", err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(raw)
+	if digest != hex.EncodeToString(sum[:]) {
+		t.Errorf("printed digest %q does not match the file bytes %q", digest, hex.EncodeToString(sum[:]))
+	}
+
+	loaded, resolver, loadedDigest, err := loadFCSidemap(path)
+	if err != nil {
+		t.Fatalf("loadFCSidemap: %v", err)
+	}
+	if loadedDigest != digest {
+		t.Errorf("load digest %q != write digest %q", loadedDigest, digest)
+	}
+	for key, want := range m.Pairs {
+		if loaded.Pairs[key] != want {
+			t.Errorf("round-trip entry %q = %v; want %v", key, loaded.Pairs[key], want)
+		}
+	}
+	if _, err := resolver("pair-alpha", "c"); err != nil {
+		t.Errorf("resolver on a present pair: %v", err)
+	}
+	if _, err := resolver("pair-unknown", "c"); err == nil || !strings.Contains(err.Error(), "pair-unknown") {
+		t.Errorf("resolver on a missing pair = %v; want a loud error naming it", err)
+	}
+
+	t.Run("no complete pairs is a loud error", func(t *testing.T) {
+		if _, err := generateFCSidemap(nil); err == nil {
+			t.Error("generateFCSidemap(nil) accepted; want error")
+		}
+	})
+	t.Run("wrong schema version rejected at load", func(t *testing.T) {
+		bad := filepath.Join(t.TempDir(), "bad.json")
+		if err := os.WriteFile(bad, []byte(`{"schema_version":"fc-sidemap/v0","pairs":{"p|c":{"legacy_is_a":true}},"sealed_digest":""}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, _, err := loadFCSidemap(bad); err == nil || !strings.Contains(err.Error(), "schema_version") {
+			t.Errorf("wrong schema version = %v; want a schema error", err)
+		}
+	})
+}
+
+func TestFCSidemapDigestVerification(t *testing.T) {
+	if err := verifyFCSidemapDigest("abc123", "abc123"); err != nil {
+		t.Errorf("matching digest rejected: %v", err)
+	}
+	if err := verifyFCSidemapDigest("abc123", "sha256:ABC123"); err != nil {
+		t.Errorf("case/prefix-tolerant match rejected: %v", err)
+	}
+	if err := verifyFCSidemapDigest("abc123", "def456"); err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("mismatched digest = %v; want a hard mismatch error", err)
+	}
+}
+
+// TestFCSidemapDigestVerificationEndToEnd drives -assembly-report's digest
+// gate through runAssemblyReport in both directions.
+func TestFCSidemapDigestVerificationEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	arts, labels := fcReportFixture()
+	artsPath := filepath.Join(dir, "artifacts.jsonl")
+	labelsPath := filepath.Join(dir, "labels.jsonl")
+	if err := writeJSONLRows(artsPath, "artifacts", arts); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeLabelsJSONL(labelsPath, labels); err != nil {
+		t.Fatal(err)
+	}
+	sidemapPath := filepath.Join(dir, "sidemap.json")
+	digest, err := writeFCSidemap(sidemapPath, parityFCSidemap("c", "pair-alpha", "pair-beta", "pair-delta", "pair-gamma", "pair-ctl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts := assemblyReportOptions{
+		LabelsPath: labelsPath, ArtifactsPath: artsPath,
+		FCSidemapPath: sidemapPath, FCSidemapDigest: digest,
+	}
+	if _, err := runAssemblyReport(opts); err != nil {
+		t.Fatalf("matching committed digest rejected: %v", err)
+	}
+	opts.FCSidemapDigest = strings.Repeat("0", 64)
+	if _, err := runAssemblyReport(opts); err == nil || !strings.Contains(err.Error(), "mismatch") {
+		t.Fatalf("wrong committed digest = %v; want a hard error", err)
+	}
+
+	// A committed digest with no sidemap to verify is operator confusion, not
+	// a silent no-op.
+	opts.FCSidemapPath = ""
+	opts.FCSidemapDigest = digest
+	if _, err := runAssemblyReport(opts); err == nil || !strings.Contains(err.Error(), "without -fc-sidemap") {
+		t.Fatalf("digest without sidemap = %v; want a loud error", err)
+	}
+}
+
+func TestFCRenderIngestRequireSidemapResolver(t *testing.T) {
+	arts := fcPairArtifacts()
+	if _, err := renderForcedChoiceWorksheet(arts, nil); err == nil || !strings.Contains(err.Error(), "fc-sidemap") {
+		t.Errorf("render without a resolver = %v; want the sidemap requirement", err)
+	}
+	if _, _, err := ingestForcedChoiceWorksheet("", arts, "t", nil, false); err == nil || !strings.Contains(err.Error(), "fc-sidemap") {
+		t.Errorf("ingest without a resolver = %v; want the sidemap requirement", err)
+	}
+
+	// A sidemap missing one of the complete pairs aborts the render loudly.
+	partial := parityFCSidemap("c", "pair-alpha")
+	if _, err := renderForcedChoiceWorksheet(arts, partial.resolver()); err == nil || !strings.Contains(err.Error(), "pair-gamma") {
+		t.Errorf("render with a partial sidemap = %v; want a loud error naming pair-gamma", err)
+	}
+
+	// The map — not parity — decides sides: flip pair-alpha relative to
+	// parity (parity says legacy is A) and the mixed answer must render as A.
+	flipped := parityFCSidemap("c", "pair-alpha", "pair-gamma")
+	entry := flipped.Pairs["pair-alpha|c"]
+	entry.LegacyIsA = !entry.LegacyIsA
+	flipped.Pairs["pair-alpha|c"] = entry
+	out, err := renderForcedChoiceWorksheet(arts, flipped.resolver())
+	if err != nil {
+		t.Fatalf("renderForcedChoiceWorksheet: %v", err)
+	}
+	if !strings.Contains(out, "=== PAIR pair-alpha c sha256:am sha256:al ===") {
+		t.Errorf("flipped sidemap did not flip pair-alpha sides:\n%s", out)
+	}
+	// Ingest under the SAME flipped map accepts the flipped hash order...
+	ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:am sha256:al ===", "prefer", "A")
+	if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", flipped.resolver(), false); err != nil {
+		t.Errorf("ingest under the rendering sidemap: %v", err)
+	}
+	// ...and the parity resolver rejects it: the worksheet binds to its map.
+	if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", fcParityResolver, false); err == nil || !strings.Contains(err.Error(), "side assignment") {
+		t.Errorf("ingest under a different assignment = %v; want the hash-order rejection", err)
+	}
+}
+
+func TestFCIngestRequireCompleteAndArmGuess(t *testing.T) {
+	arts := fcPairArtifacts()
+	sidemap := parityFCSidemap("c", "pair-alpha", "pair-gamma")
+	out, err := renderForcedChoiceWorksheet(arts, sidemap.resolver())
+	if err != nil {
+		t.Fatalf("renderForcedChoiceWorksheet: %v", err)
+	}
+	alphaHeader := "=== PAIR pair-alpha c sha256:al sha256:am ==="
+	gammaHeader := "=== PAIR pair-gamma c sha256:gm sha256:gl ==="
+
+	t.Run("require-complete lists blank pairs", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
+		_, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), true)
+		if err == nil || !strings.Contains(err.Error(), "pair-gamma/c") || !strings.Contains(err.Error(), "left blank") {
+			t.Errorf("require-complete on a half-filled worksheet = %v; want an error listing pair-gamma/c", err)
+		}
+		// Without the flag the same worksheet skips the blank block.
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), false)
+		if err != nil || len(rows) != 1 || skipped != 1 {
+			t.Errorf("rows=%d skipped=%d err=%v; want 1/1/nil without the flag", len(rows), skipped, err)
+		}
+	})
+
+	t.Run("arm_guess carried onto rows", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
+		ws = fillWorksheetField(t, ws, alphaHeader, "arm_guess", "B")
+		ws = fillWorksheetField(t, ws, gammaHeader, "prefer", "tie")
+		rows, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), true)
+		if err != nil {
+			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
+		}
+		if len(rows) != 2 || rows[0].ArmGuess != "b" || rows[1].ArmGuess != "" {
+			t.Fatalf("rows = %+v; want arm_guess b on pair-alpha, empty on pair-gamma", rows)
+		}
+	})
+
+	t.Run("invalid arm_guess is a loud error", func(t *testing.T) {
+		ws := fillWorksheetField(t, out, alphaHeader, "prefer", "A")
+		ws = fillWorksheetField(t, ws, alphaHeader, "arm_guess", "legacy")
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "t", sidemap.resolver(), false); err == nil || !strings.Contains(err.Error(), "arm_guess") {
+			t.Errorf("arm_guess legacy accepted = %v; want a loud domain error", err)
+		}
+	})
+}
+
+func TestAssemblyReportArmGuessAccuracy(t *testing.T) {
+	arts, labels := fcReportFixture()
+	sidemap := parityFCSidemap("c", "pair-alpha", "pair-beta", "pair-delta", "pair-gamma", "pair-ctl")
+	// pair-alpha: legacy is A => a mixed-arm guess is "b"; pair-gamma: mixed
+	// is A => a mixed-arm guess is "a". One correct, one wrong, one blank.
+	alphaRow := fcRowFor(arts, "pair-alpha", "a")
+	alphaRow.ArmGuess = "b" // correct: b is the mixed side
+	gammaRow := fcRowFor(arts, "pair-gamma", "tie")
+	gammaRow.ArmGuess = "b"                       // wrong: a is the mixed side
+	deltaRow := fcRowFor(arts, "pair-delta", "b") // no guess
+	prefs := []FCPreference{alphaRow, gammaRow, deltaRow}
+
+	rep, err := computeAssemblyReport(arts, labels, 1, 200, prefs,
+		assemblyReportExtras{sideResolver: sidemap.resolver(), armGuess: true})
+	if err != nil {
+		t.Fatalf("computeAssemblyReport: %v", err)
+	}
+	fc := rep.LegacyMixedModels[0].ForcedChoice
+	if fc.ArmGuessAccuracy == nil {
+		t.Fatal("arm_guess_accuracy missing with a sidemap-backed report")
+	}
+	if fc.ArmGuessAccuracy.NGuessed != 2 || fc.ArmGuessAccuracy.NCorrect != 1 {
+		t.Fatalf("arm_guess_accuracy = %+v; want n_guessed 2, n_correct 1", fc.ArmGuessAccuracy)
+	}
+
+	t.Run("absent without a sidemap", func(t *testing.T) {
+		rep, err := computeAssemblyReport(arts, labels, 1, 200, prefs, assemblyReportExtras{})
+		if err != nil {
+			t.Fatalf("computeAssemblyReport: %v", err)
+		}
+		if rep.LegacyMixedModels[0].ForcedChoice.ArmGuessAccuracy != nil {
+			t.Error("arm_guess_accuracy present without a sidemap; must stay omitted")
+		}
+	})
+
+	// Decision independence: neither the arm guesses nor the sidemap swap of
+	// the resolver may move ANY decision-adjacent number. Compare against a
+	// no-FC report and against the same rows with every guess changed.
+	t.Run("never consulted by any decision", func(t *testing.T) {
+		base, err := computeAssemblyReport(arts, labels, 1, 200, nil, assemblyReportExtras{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		reguessed := make([]FCPreference, len(prefs))
+		copy(reguessed, prefs)
+		reguessed[0].ArmGuess = "a"
+		reguessed[1].ArmGuess = ""
+		reguessed[2].ArmGuess = "a"
+		alt, err := computeAssemblyReport(arts, labels, 1, 200, reguessed,
+			assemblyReportExtras{sideResolver: sidemap.resolver(), armGuess: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, other := range []*AssemblyReport{alt, rep} {
+			for i := range base.LegacyMixedModels {
+				b, o := base.LegacyMixedModels[i], other.LegacyMixedModels[i]
+				if b.Decision != o.Decision || b.MeanDelta != o.MeanDelta ||
+					b.DeltaCILow != o.DeltaCILow || b.DeltaCIHigh != o.DeltaCIHigh || b.Pairs != o.Pairs {
+					t.Fatalf("decision-adjacent numbers moved with FC/arm-guess input:\nbase %+v\ngot  %+v", b, o)
+				}
+			}
+		}
+		// The guesses DID change the audit tally (proof this test could see a
+		// difference if one leaked into scope): alpha "a" is wrong (b is the
+		// mixed side there); delta "a" is correct iff mixed renders as A on
+		// pair-delta under the fixture assignment.
+		deltaCorrect := 0
+		if !fcSideIsLegacyA("pair-delta", "c") {
+			deltaCorrect = 1
+		}
+		got := alt.LegacyMixedModels[0].ForcedChoice.ArmGuessAccuracy
+		if got.NGuessed != 2 || got.NCorrect != deltaCorrect {
+			t.Fatalf("reguessed audit = %+v; want n_guessed 2, n_correct %d", got, deltaCorrect)
+		}
+	})
+}
+
+// TestAssemblyReportSidemapReplacesParity proves the report's side
+// resolution really flows through the sidemap: with pair-alpha FLIPPED
+// relative to parity, a preference row carrying the flipped a/b hashes binds
+// and resolves ("a" becomes a MIXED win), while the same rows under the
+// parity default are a loud hash-order error. A resolver that silently fell
+// back to parity would fail both arms of this test.
+func TestAssemblyReportSidemapReplacesParity(t *testing.T) {
+	arts, labels := fcReportFixture()
+	sidemap := parityFCSidemap("c", "pair-alpha")
+	entry := sidemap.Pairs["pair-alpha|c"]
+	entry.LegacyIsA = !entry.LegacyIsA // parity says legacy is A; flip it
+	sidemap.Pairs["pair-alpha|c"] = entry
+
+	row := fcRowFor(arts, "pair-alpha", "a")
+	row.ArtifactHashA, row.ArtifactHashB = row.ArtifactHashB, row.ArtifactHashA
+
+	rep, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row},
+		assemblyReportExtras{sideResolver: sidemap.resolver(), armGuess: true})
+	if err != nil {
+		t.Fatalf("computeAssemblyReport under the flipped sidemap: %v", err)
+	}
+	fc := rep.LegacyMixedModels[0].ForcedChoice
+	// Parity would have called "a" a LEGACY win on pair-alpha; the flipped
+	// map makes it a MIXED win.
+	if fc.MixedWins != 1 || fc.LegacyWins != 0 {
+		t.Fatalf("fc = %+v; want the flipped map to score a as a mixed win", fc)
+	}
+	if _, err := computeAssemblyReport(arts, labels, 1, 200, []FCPreference{row}, assemblyReportExtras{}); err == nil {
+		t.Fatal("flipped-hash row accepted under the parity default; the resolver seam is dead")
+	}
+}
+
+// withCaptureTemp stamps minimal capture provenance (temperature temp)
+// onto an artifact. ArtifactHash deliberately ignores Capture, so this stays
+// hash-stable.
+func withCaptureTemp(a Artifact, temp float64) Artifact {
+	a.Capture = &CaptureProvenance{Temperature: &temp, Transport: "ollama", Model: a.CandidateModel}
+	return a
+}
+
+func TestAssemblyReportCaptureManifestVerification(t *testing.T) {
+	// Three complete labeled pairs: pair-ok verified; pair-miss absent from
+	// the manifest; pair-cold listed but with usage_present false; pair-temp
+	// verified but with mismatched capture temperatures.
+	var arts []Artifact
+	var labels []Label
+	for _, pair := range []string{"pair-ok", "pair-miss", "pair-cold", "pair-temp"} {
+		l := withCaptureTemp(mixedArtifact(pair, AssemblyLegacy, "c", nil), 0)
+		m := withCaptureTemp(mixedArtifact(pair, AssemblyMixed, "c", nil), 0)
+		if pair == "pair-temp" {
+			m = withCaptureTemp(m, 0.7)
+		}
+		arts = append(arts, l, m)
+		labels = append(labels, labelFor(l, 0), labelFor(m, 1))
+	}
+	usage := map[string]bool{}
+	for _, a := range arts {
+		switch a.Trace.AssemblyEval.PairID {
+		case "pair-miss":
+			// absent from the manifest entirely
+		case "pair-cold":
+			usage[a.ArtifactHash] = false
+		default:
+			usage[a.ArtifactHash] = true
+		}
+	}
+	rep, err := computeAssemblyReport(arts, labels, 1, 200, nil,
+		assemblyReportExtras{
+			capture:    &captureVerification{usagePresent: usage},
+			captureRef: &AssemblyCaptureManifest{Digest: "sha256:feed", ArtifactCount: len(arts)},
+		})
+	if err != nil {
+		t.Fatalf("computeAssemblyReport: %v", err)
+	}
+	m := rep.LegacyMixedModels[0]
+	if m.Pairs != 1 {
+		t.Errorf("verified pairs = %d; want only pair-ok", m.Pairs)
+	}
+	reasons := map[string]string{}
+	for _, ex := range m.Exclusions {
+		reasons[ex.PairID] = ex.Reason
+	}
+	if reasons["pair-miss"] != "unverified-capture" {
+		t.Errorf("pair-miss reason = %q; want unverified-capture (absent from manifest)", reasons["pair-miss"])
+	}
+	if reasons["pair-cold"] != "unverified-capture" {
+		t.Errorf("pair-cold reason = %q; want unverified-capture (usage_present false)", reasons["pair-cold"])
+	}
+	if reasons["pair-temp"] != "temperature-mismatch" {
+		t.Errorf("pair-temp reason = %q; want temperature-mismatch", reasons["pair-temp"])
+	}
+	if rep.CaptureManifest == nil || rep.CaptureManifest.Digest != "sha256:feed" || rep.CaptureManifest.ArtifactCount != len(arts) {
+		t.Errorf("capture_manifest = %+v; want the embedded reference", rep.CaptureManifest)
+	}
+
+	t.Run("end to end through runAssemblyReport", func(t *testing.T) {
+		dir := t.TempDir()
+		artsPath := filepath.Join(dir, "artifacts.jsonl")
+		labelsPath := filepath.Join(dir, "labels.jsonl")
+		if err := writeJSONLRows(artsPath, "artifacts", arts); err != nil {
+			t.Fatal(err)
+		}
+		if err := writeLabelsJSONL(labelsPath, labels); err != nil {
+			t.Fatal(err)
+		}
+		rows := make([]captureManifestRow, 0, len(arts))
+		for i, a := range arts {
+			rows = append(rows, captureManifestRow{
+				TraceID: a.TraceID, ArtifactHash: a.ArtifactHash, OrderIndex: i,
+				UsagePresent: usage[a.ArtifactHash],
+			})
+		}
+		manifestRaw, err := json.Marshal(captureManifest{
+			SchemaVersion: captureManifestSchemaVersion, ArtifactCount: len(rows), PerArtifact: rows,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		manifestPath := filepath.Join(dir, "artifacts.jsonl.manifest.json")
+		if err := os.WriteFile(manifestPath, manifestRaw, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out, err := runAssemblyReport(assemblyReportOptions{
+			LabelsPath: labelsPath, ArtifactsPath: artsPath, CaptureManifestPath: manifestPath,
+		})
+		if err != nil {
+			t.Fatalf("runAssemblyReport: %v", err)
+		}
+		var got AssemblyReport
+		if err := json.Unmarshal([]byte(out), &got); err != nil {
+			t.Fatalf("decode report: %v", err)
+		}
+		sum := sha256.Sum256(manifestRaw)
+		if got.CaptureManifest == nil || got.CaptureManifest.Digest != "sha256:"+hex.EncodeToString(sum[:]) ||
+			got.CaptureManifest.ArtifactCount != len(rows) {
+			t.Errorf("capture_manifest = %+v; want the manifest file digest and count %d", got.CaptureManifest, len(rows))
+		}
+		found := false
+		for _, ex := range got.LegacyMixedModels[0].Exclusions {
+			if ex.PairID == "pair-miss" && ex.Reason == "unverified-capture" {
+				found = true
+			}
+		}
+		if !found {
+			t.Errorf("exclusions = %+v; want pair-miss excluded unverified-capture", got.LegacyMixedModels[0].Exclusions)
+		}
+	})
+
+	t.Run("no manifest keeps every pair and omits the key", func(t *testing.T) {
+		rep, err := computeAssemblyReport(arts, labels, 1, 200, nil, assemblyReportExtras{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rep.LegacyMixedModels[0].Pairs != 4 || len(rep.LegacyMixedModels[0].Exclusions) != 0 {
+			t.Errorf("without a manifest pairs=%d exclusions=%d; want 4/0",
+				rep.LegacyMixedModels[0].Pairs, len(rep.LegacyMixedModels[0].Exclusions))
+		}
+		raw, err := json.Marshal(rep)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(raw), "capture_manifest") {
+			t.Errorf("capture_manifest key present without -capture-manifest:\n%s", raw)
+		}
+	})
+}
+
+func TestLoadCaptureManifestForReport(t *testing.T) {
+	dir := t.TempDir()
+	manifest := captureManifest{
+		SchemaVersion: captureManifestSchemaVersion,
+		ArtifactCount: 2,
+		PerArtifact: []captureManifestRow{
+			{TraceID: "t1", ArtifactHash: "sha256:aa", OrderIndex: 0, UsagePresent: true},
+			{TraceID: "t2", ArtifactHash: "sha256:bb", OrderIndex: 1, UsagePresent: false},
+		},
+	}
+	raw, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "artifacts.jsonl.manifest.json")
+	if err := os.WriteFile(path, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ref, verify, err := loadCaptureManifestForReport(path)
+	if err != nil {
+		t.Fatalf("loadCaptureManifestForReport: %v", err)
+	}
+	sum := sha256.Sum256(raw)
+	if ref.Digest != "sha256:"+hex.EncodeToString(sum[:]) || ref.ArtifactCount != 2 {
+		t.Errorf("ref = %+v; want the file digest and count 2", ref)
+	}
+	if !verify.usagePresent["sha256:aa"] || verify.usagePresent["sha256:bb"] {
+		t.Errorf("usagePresent = %v; want aa true, bb false", verify.usagePresent)
+	}
+
+	t.Run("wrong schema version rejected", func(t *testing.T) {
+		bad := filepath.Join(dir, "bad.json")
+		if err := os.WriteFile(bad, []byte(`{"schema_version":"nope/v9"}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := loadCaptureManifestForReport(bad); err == nil || !strings.Contains(err.Error(), "schema_version") {
+			t.Errorf("wrong schema version = %v; want a schema error", err)
+		}
+	})
+}
+
+func TestFilterArtifactsByModel(t *testing.T) {
+	arts := []Artifact{
+		{CandidateModel: "ollama/qwen3:8b"},
+		{CandidateModel: "gemma4:31b"},
+		{CandidateModel: "qwen3:8b"},
+	}
+	got, err := filterArtifactsByModel(arts, "qwen3:8b")
+	if err != nil {
+		t.Fatalf("filterArtifactsByModel: %v", err)
+	}
+	// modelKey strips the bench provider prefix, so both qwen spellings match.
+	if len(got) != 2 || got[0].CandidateModel != "ollama/qwen3:8b" || got[1].CandidateModel != "qwen3:8b" {
+		t.Fatalf("filtered = %+v; want both qwen artifacts in order", got)
+	}
+	if all, err := filterArtifactsByModel(arts, ""); err != nil || len(all) != 3 {
+		t.Fatalf("empty selector = %d artifacts, err %v; want all 3", len(all), err)
+	}
+	if _, err := filterArtifactsByModel(arts, "missing:1b"); err == nil || !strings.Contains(err.Error(), "matches no artifacts") {
+		t.Fatalf("zero-match selector = %v; want a loud error", err)
+	}
+}

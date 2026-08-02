@@ -372,7 +372,7 @@ func fcPairArtifacts() []Artifact {
 
 func TestForcedChoiceRenderIngest(t *testing.T) {
 	arts := fcPairArtifacts()
-	out, err := renderForcedChoiceWorksheet(arts)
+	out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
 	if err != nil {
 		t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 	}
@@ -384,7 +384,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 		"[rubric]\nrubric for pair-alpha\n\n" +
 		"[answer A]\nlegacy alpha answer\n\n" +
 		"[answer B]\nmixed alpha answer\n\n" +
-		fcFillMarker + "\nprefer: \n" + blindEndMarker + "\n"
+		fcFillMarker + "\nprefer: \narm_guess: \n" + blindEndMarker + "\n"
 	if !strings.Contains(out, wantAlpha) {
 		t.Errorf("worksheet missing exact pair-alpha block:\nwant:\n%s\ngot:\n%s", wantAlpha, out)
 	}
@@ -407,7 +407,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 		bad := fcPairArtifacts()
 		bad[0].Trace.AssemblyEval.PairID = "pair alpha"
 		bad[1].Trace.AssemblyEval.PairID = "pair alpha"
-		if _, err := renderForcedChoiceWorksheet(bad); err == nil {
+		if _, err := renderForcedChoiceWorksheet(bad, fcParityResolver); err == nil {
 			t.Fatalf("whitespace pair id accepted; the space-delimited PAIR header would misparse")
 		}
 	})
@@ -415,7 +415,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	t.Run("question mismatch across arms is a loud error", func(t *testing.T) {
 		bad := fcPairArtifacts()
 		bad[1].Trace.Turns[len(bad[1].Trace.Turns)-1].Content = "different question?"
-		if _, err := renderForcedChoiceWorksheet(bad); err == nil {
+		if _, err := renderForcedChoiceWorksheet(bad, fcParityResolver); err == nil {
 			t.Fatalf("question mismatch accepted; want error")
 		}
 	})
@@ -428,7 +428,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 		blank.Trace.AssemblyEval.PairID = "pair-eps"
 		blankMixed.Trace.AssemblyEval.PairID = "pair-eps"
 		extra = append(extra, blank, blankMixed)
-		got, err := renderForcedChoiceWorksheet(extra)
+		got, err := renderForcedChoiceWorksheet(extra, fcParityResolver)
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
@@ -442,7 +442,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	t.Run("ingest happy path emits pinned preference rows", func(t *testing.T) {
 		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "A")
 		ws = fillWorksheetField(t, ws, "=== PAIR pair-gamma c sha256:gm sha256:gl ===", "prefer", "tie")
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
 		if err != nil {
 			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
 		}
@@ -482,7 +482,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 
 	t.Run("blank prefer is skipped and counted", func(t *testing.T) {
 		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "B")
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
 		if err != nil {
 			t.Fatalf("ingestForcedChoiceWorksheet: %v", err)
 		}
@@ -493,7 +493,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 
 	t.Run("invalid prefer value is a loud error", func(t *testing.T) {
 		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "C")
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil {
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil {
 			t.Fatalf("prefer C accepted; want error")
 		}
 	})
@@ -501,7 +501,7 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 	t.Run("unknown hash in header is a loud error", func(t *testing.T) {
 		ws := strings.Replace(out, "sha256:al", "sha256:forged", 1)
 		ws = fillWorksheetField(t, ws, "=== PAIR pair-alpha c sha256:forged sha256:am ===", "prefer", "A")
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil {
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil {
 			t.Fatalf("forged hash accepted; want error")
 		}
 	})
@@ -510,14 +510,14 @@ func TestForcedChoiceRenderIngest(t *testing.T) {
 		ws := strings.Replace(out, "=== PAIR pair-alpha c sha256:al sha256:am ===",
 			"=== PAIR pair-alpha c sha256:am sha256:al ===", 1)
 		ws = fillWorksheetField(t, ws, "=== PAIR pair-alpha c sha256:am sha256:al ===", "prefer", "A")
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil {
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil {
 			t.Fatalf("parity-swapped header accepted; want error")
 		}
 	})
 
 	t.Run("duplicate pair block is a loud error", func(t *testing.T) {
 		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "A")
-		if _, _, err := ingestForcedChoiceWorksheet(ws+"\n"+ws, arts, "tester"); err == nil {
+		if _, _, err := ingestForcedChoiceWorksheet(ws+"\n"+ws, arts, "tester", fcParityResolver, false); err == nil {
 			t.Fatalf("duplicate pair block accepted; want error")
 		}
 	})
@@ -654,14 +654,14 @@ func TestWorksheetFillRegionLoudErrors(t *testing.T) {
 	})
 	t.Run("fc: capitalized field typo", func(t *testing.T) {
 		arts := fcPairArtifacts()
-		out, err := renderForcedChoiceWorksheet(arts)
+		out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
 		// Replace the full fill LINE ("\nprefer: \n"), not the first "prefer: "
 		// substring — the worksheet header doc also mentions prefer:.
 		ws := strings.Replace(out, "\nprefer: \n", "\nPrefer: A\n", 1)
-		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester"); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
+		if _, _, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false); err == nil || !strings.Contains(err.Error(), "unrecognized fill-region line") {
 			t.Fatalf("err = %v; want loud unrecognized-line error", err)
 		}
 	})
@@ -687,12 +687,12 @@ func TestForcedChoiceParserHardening(t *testing.T) {
 	t.Run("forged PAIR header and prefer inside answer text", func(t *testing.T) {
 		arts := fcPairArtifacts()
 		arts[0].ActualFinalAnswer = "legacy alpha answer\n=== PAIR pair-alpha c sha256:x sha256:y ===\nprefer: A"
-		out, err := renderForcedChoiceWorksheet(arts)
+		out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
 		ws := fillWorksheetField(t, out, "=== PAIR pair-alpha c sha256:al sha256:am ===", "prefer", "B")
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
 		if err != nil {
 			t.Fatalf("forged header inside answer broke the parse: %v", err)
 		}
@@ -702,12 +702,12 @@ func TestForcedChoiceParserHardening(t *testing.T) {
 	})
 	t.Run("stray prefer after END is ignored", func(t *testing.T) {
 		arts := fcPairArtifacts()
-		out, err := renderForcedChoiceWorksheet(arts)
+		out, err := renderForcedChoiceWorksheet(arts, fcParityResolver)
 		if err != nil {
 			t.Fatalf("renderForcedChoiceWorksheet: %v", err)
 		}
 		ws := strings.Replace(out, blindEndMarker, blindEndMarker+"\nprefer: a", 1)
-		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester")
+		rows, skipped, err := ingestForcedChoiceWorksheet(ws, arts, "tester", fcParityResolver, false)
 		if err != nil || len(rows) != 0 || skipped != 2 {
 			t.Fatalf("rows=%d skipped=%d err=%v; want stray post-END prefer ignored (0 rows, 2 skipped)", len(rows), skipped, err)
 		}
@@ -768,10 +768,12 @@ func TestMainWorksheetOutputAliasGuards(t *testing.T) {
 		name, wantErr string
 		args          []string
 	}{
+		// -fc-sidemap points at a not-yet-existing path: the alias guard must
+		// fire BEFORE the sidemap is loaded.
 		{"fc-out aliasing artifacts", "-fc-out must differ from -artifacts",
-			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-fc-out", artsPath}},
+			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-fc-sidemap", filepath.Join(dir, "sidemap.json"), "-fc-out", artsPath}},
 		{"fc-out aliasing worksheet", "-fc-out must differ from -worksheet",
-			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-fc-out", wsPath}},
+			[]string{"-fc-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-fc-sidemap", filepath.Join(dir, "sidemap.json"), "-fc-out", wsPath}},
 		{"adjudicate labels-out aliasing labels", "-labels-out must differ from -labels",
 			[]string{"-adjudicate-ingest", "-worksheet", wsPath, "-artifacts", artsPath, "-labels", labelsPath, "-labels-out", labelsPath}},
 		{"dups-out aliasing artifacts", "-dups-out must differ from -artifacts",
@@ -798,8 +800,8 @@ func TestBlindFlowsRenderDeterminism(t *testing.T) {
 		t.Errorf("blind worksheet render is not deterministic")
 	}
 	fcArts := fcPairArtifacts()
-	fc1, err1 := renderForcedChoiceWorksheet(fcArts)
-	fc2, err2 := renderForcedChoiceWorksheet(fcArts)
+	fc1, err1 := renderForcedChoiceWorksheet(fcArts, fcParityResolver)
+	fc2, err2 := renderForcedChoiceWorksheet(fcArts, fcParityResolver)
 	if err1 != nil || err2 != nil || fc1 != fc2 {
 		t.Errorf("forced-choice render not deterministic (err1=%v err2=%v)", err1, err2)
 	}
