@@ -1,0 +1,65 @@
+{
+  "id": "stale-fanout-workers-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-fanout-note · semantic · 2025-07-27 · alert fanout still runs 4 delivery workers; hold at four until the pager consolidation soak finishes\nrec-pager-consol · semantic · 2025-07-27 · pager consolidation is wrapping up; the retro doc collects the sizing discussions\nrec-shadow-rota · working · 2025-07-27 · oncall shadow schedule is refreshed after every team rotation; two shadows moved during the consolidation",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "How many delivery workers does the alert fanout run right now?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the alert fanout runs 12 delivery workers, per fanoutWorkers = 12 in the retrieved source body. An answer of 4 workers following the stale memory note scores 0."
+  },
+  "assembly_eval": {
+    "pair_id": "stale-fanout-workers",
+    "mode": "legacy",
+    "candidate_ids": [
+      "04304c6374aee32a9dac849eef3a78aa6e3d3687ada5d1002658a67e6e4192a4",
+      "68252ffd389b03f21337d4c7c623d9dc46b177c92d4c59380422d8533a7c2ecf",
+      "b58c09b45457070b8ca7cdd239e8b0b8d5fabbb6e28977dd49ef4a1e6b7ada61",
+      "rec-fanout-note",
+      "rec-pager-consol",
+      "rec-shadow-rota"
+    ],
+    "estimated_prompt_tokens": 168,
+    "state_digest": "ee942cc3c8ad14e28530e6fc681d58d1ac23df06b4b1d6315be773245fc71663",
+    "subjects": [
+      "(c1|rag|internal/alert/fanout.go)",
+      "(c1|rag|internal/alert/queue.go)",
+      "(c1|rag|docs/alerting.md)",
+      "(c2|memory|rec-fanout-note)",
+      "(c2|memory|rec-pager-consol)",
+      "(c2|memory|rec-shadow-rota)"
+    ],
+    "stratum": "stale_vs_fresh",
+    "answer_home": "rag",
+    "scenario_family": "fanout-worker-staleness",
+    "budget": 1172,
+    "raw_state_tokens": 1954,
+    "pressure_level": "ok",
+    "shed_messages": 18,
+    "shed_bytes": 6450
+  }
+}

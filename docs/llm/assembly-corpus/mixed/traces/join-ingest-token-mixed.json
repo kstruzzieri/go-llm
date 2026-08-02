@@ -1,0 +1,124 @@
+{
+  "id": "join-ingest-token-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "While we are lining up the rotation logistics, a few unrelated items. The weekly ingest report job failed twice with a template error after the chart library bump; can you pin the old library until someone ports the templates properly?"
+    },
+    {
+      "role": "assistant",
+      "content": "Pinned the report job to the previous chart library and filed the template port as a tracked task so the pin does not become permanent by accident."
+    },
+    {
+      "role": "user",
+      "content": "The staging edge also needs its synthetic producer restarted; it wedged during the fixture cleanup and the canary comparison graphs have a hole in them since last night."
+    },
+    {
+      "role": "assistant",
+      "content": "Restarted the synthetic producer and backfilled the gap markers so the comparison graphs show the wedge window explicitly instead of a silent hole."
+    },
+    {
+      "role": "user",
+      "content": "Can we also get the tenants file linted in CI? The last bad merge shipped a duplicate tenant stanza and the hot reload just silently took the second one."
+    },
+    {
+      "role": "assistant",
+      "content": "Added a tenants-file lint to CI that rejects duplicate stanzas and unknown keys, and it runs before the deploy step so a bad merge cannot reach hot reload."
+    },
+    {
+      "role": "user",
+      "content": "The sdk examples repo still shows the old error-handling pattern too. Not urgent, but can you queue a cleanup pass so new integrators stop copying it?"
+    },
+    {
+      "role": "assistant",
+      "content": "Queued the examples cleanup and tagged the three files that still show the old pattern so the pass has a concrete scope."
+    },
+    {
+      "role": "user",
+      "content": "And the ops calendar needs the rotation window blocked out once we commit to it, with the platform observer invited so they can watch the edge metrics during the flip."
+    },
+    {
+      "role": "assistant",
+      "content": "Blocked the rotation window on the ops calendar and invited the platform observer; the invite links the edge metrics board for the flip."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "token rotation grace period",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/ingest/auth.go\"\npurpose: Token authentication with a bounded grace window for the retiring generation.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/ingest/auth.go\" (lines 1-25, similarity: 1.00) ---\n1| package ingest\n2| \n3| import (\n4| \t\"strings\"\n5| \t\"time\"\n6| )\n7| \n8| // graceWindow is how long tokens from the retiring generation stay\n9| // valid after a rotation flips the preferred prefix. The window gives\n10| // slow producers time to drain without reopening the edge to retired\n11| // credentials indefinitely.\n12| const graceWindow = 72 * time.Hour\n13| \n14| // authenticate checks the presented ingest token. The preferred\n15| // prefix is supplied by deployment config; tokens from the retiring\n16| // generation are accepted only inside the grace window.\n17| func (g *Gateway) authenticate(token string, now time.Time) bool {\n18| \tif strings.HasPrefix(token, g.cfg.PreferredPrefix) {\n19| \t\treturn g.verify(token)\n20| \t}\n21| \tif now.Before(g.rotatedAt.Add(graceWindow)) \u0026\u0026 strings.HasPrefix(token, g.cfg.RetiringPrefix) {\n22| \t\treturn g.verify(token)\n23| \t}\n24| \treturn false\n25| }\n\n### source: \"internal/ingest/limits.go\"\npurpose: Per-tenant token-bucket rate limiting with hot-reloaded rates.\noverview: limits.go implements the per-tenant token buckets guarding ingest admission: lazy bucket creation, tick-based refill, and conservative defaults for tenants the tenants file does not name.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/operations.md\"\npurpose: Operations guide: process supervision, restart drain, staged credential rotation.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-dash-refresh · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\nrec-oncall-handoff · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\nrec-token-rotation · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · rotated ingest tokens carry the dwk2- prefix; producers migrate first, then the edge narrows the accepted set",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix do rotated ingest tokens carry, and how long does the old-token grace window last?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: rotated ingest tokens carry the dwk2- prefix (from memory), AND the old-token grace window is 72 hours per graceWindow in internal/ingest/auth.go (from retrieved code). Missing either half caps the score at 0.5."
+  },
+  "assembly_eval": {
+    "pair_id": "join-ingest-token",
+    "mode": "mixed",
+    "candidate_ids": [
+      "0aa6153147dd8d47b090a6a12862393fd236e2c85400eb9c2ff2eefc2edbd74b",
+      "10029358e1c7924bb8a5233b05b852636f40cfd7b5b5af7e49de0216b39987f0",
+      "b0e0aeb52f72729936efafa42a6d6cae742557e98ef7472652ad5a94d395e206",
+      "rec-dash-refresh",
+      "rec-oncall-handoff",
+      "rec-token-rotation"
+    ],
+    "estimated_prompt_tokens": 1076,
+    "state_digest": "438d609264bab2ffa3a51e566399cedc509221338822e0730bf927c87b03d629",
+    "subjects": [
+      "(c1|rag|internal/ingest/auth.go)",
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|docs/operations.md)",
+      "(c2|memory|rec-dash-refresh)",
+      "(c2|memory|rec-oncall-handoff)",
+      "(c2|memory|rec-token-rotation)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "ingest-token-join",
+    "twin_group": "tw-ingest-token",
+    "budget": 1123,
+    "raw_state_tokens": 1871,
+    "pressure_level": "critical",
+    "shed_bytes": 2700
+  }
+}

@@ -1,0 +1,65 @@
+{
+  "id": "mem-replay-cursor-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-drill-cadence · semantic · 2025-07-27 · replay drills run monthly; the drill lead rotates with the oncall schedule\nrec-lab-scratch · working · 2025-07-27 · lab box scratch volume is shared with the benchmark rig; clear it before any drill or soak\nrec-replay-cursor · semantic · 2025-07-27 · replay checkpoint cursor lives at spool/replay.cursor under the data directory; delete it only with the daemon stopped or replay restarts from the oldest segment",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Where on disk does the replay checkpoint cursor live?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the replay checkpoint cursor lives at spool/replay.cursor (under the data directory), per the stored memory note. Answers that only say the cursor file is named by config score 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-replay-cursor",
+    "mode": "legacy",
+    "candidate_ids": [
+      "62c07df5d9bc968b1121519bb88dffecbee4fdbbaeaea44ceaaabb4763aabf8f",
+      "91f883214018d39943f18ec6bfa8dab28773c0c056cfdc34f5ead1af639a6653",
+      "d69a4f7273bf6bfa715e1f00a5ed6922ed089e328edc8790cf6de4085bf66c5c",
+      "rec-drill-cadence",
+      "rec-lab-scratch",
+      "rec-replay-cursor"
+    ],
+    "estimated_prompt_tokens": 177,
+    "state_digest": "09a96fbeae2888c66f03f4724db92b97b05408501726767232b6dd1909ab54d3",
+    "subjects": [
+      "(c1|rag|internal/replay/replay.go)",
+      "(c1|rag|internal/replay/window.go)",
+      "(c1|rag|docs/replay.md)",
+      "(c2|memory|rec-drill-cadence)",
+      "(c2|memory|rec-lab-scratch)",
+      "(c2|memory|rec-replay-cursor)"
+    ],
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "replay-cursor-note",
+    "budget": 971,
+    "raw_state_tokens": 1619,
+    "pressure_level": "ok",
+    "shed_messages": 10,
+    "shed_bytes": 5340
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "id": "mem-replay-cursor-topline",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Facts:\nThe stored memory note records that the replay checkpoint cursor lives at spool/replay.cursor under the data directory, and that deleting it with the daemon running restarts replay from the oldest segment.\n\nQuestion: Where on disk does the replay checkpoint cursor live?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States the replay checkpoint cursor lives at spool/replay.cursor (under the data directory), per the stored memory note. Answers that only say the cursor file is named by config score 0."
+  },
+  "assembly_eval": {
+    "pair_id": "mem-replay-cursor",
+    "mode": "topline",
+    "candidate_ids": null,
+    "estimated_prompt_tokens": 116,
+    "stratum": "memory_only",
+    "answer_home": "memory",
+    "scenario_family": "replay-cursor-note"
+  }
+}

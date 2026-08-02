@@ -1,0 +1,66 @@
+{
+  "id": "conv-ingest-token-late-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-dash-refresh · semantic · 2025-07-27 · ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible\nrec-oncall-handoff · working · 2025-07-27 · oncall handoff happens Friday afternoon; the summary template lives in the shared doc\nrec-token-rotation · semantic · 2025-07-27 · token rotation window opens Monday; producers migrate before the edge flips preference",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which prefix do freshly rotated ingest tokens carry?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "States that freshly rotated ingest tokens carry the dwk2- prefix. Answers that only describe config-supplied prefixes without naming dwk2- score 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-ingest-token-late",
+    "mode": "legacy",
+    "candidate_ids": [
+      "524f76002d4e73828a49c8dd027719b83c1117ea3e662a667c10fac1feebd215",
+      "9af13e034fe7ae78123e88d5b23af012ab45e65100e4ca481bb10fdb3927c002",
+      "b0e0aeb52f72729936efafa42a6d6cae742557e98ef7472652ad5a94d395e206",
+      "rec-dash-refresh",
+      "rec-oncall-handoff",
+      "rec-token-rotation"
+    ],
+    "estimated_prompt_tokens": 163,
+    "state_digest": "24c51573441b6a12b9c990ab2dc8af51adb4d5c54f1940b0d842636593ec8b12",
+    "subjects": [
+      "(c1|rag|internal/ingest/auth.go)",
+      "(c1|rag|internal/ingest/limits.go)",
+      "(c1|rag|docs/operations.md)",
+      "(c2|memory|rec-dash-refresh)",
+      "(c2|memory|rec-oncall-handoff)",
+      "(c2|memory|rec-token-rotation)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "ingest-token-conv",
+    "twin_group": "tw-ingest-token",
+    "budget": 1130,
+    "raw_state_tokens": 1883,
+    "pressure_level": "ok",
+    "shed_messages": 14,
+    "shed_bytes": 6315
+  }
+}

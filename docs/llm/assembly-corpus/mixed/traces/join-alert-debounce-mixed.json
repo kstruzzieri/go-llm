@@ -1,0 +1,123 @@
+{
+  "id": "join-alert-debounce-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Before we get to the paging tune-up: the nightly compaction job on the metrics store overran its window again and bled into the morning deploy slot. Can you stagger it earlier and cap its io so the overlap stops?"
+    },
+    {
+      "role": "assistant",
+      "content": "Moved the compaction start earlier and applied the io cap; last night's run finished well clear of the deploy slot."
+    },
+    {
+      "role": "user",
+      "content": "Also someone left the load-generator running against staging over the weekend and the ingest graphs there are useless now. Can you annotate the window so nobody mistakes it for organic growth?"
+    },
+    {
+      "role": "assistant",
+      "content": "Annotated the load-generator window on the staging boards and added a shutdown timer to the generator so a forgotten run stops itself."
+    },
+    {
+      "role": "user",
+      "content": "The alert rule repo could use a housekeeping pass too; there are three disabled rules from the old cluster that will never fire again and they clutter every review."
+    },
+    {
+      "role": "assistant",
+      "content": "Removed the three dead rules and left a tombstone note in the repo history explaining why, so an archaeologist does not resurrect them."
+    },
+    {
+      "role": "user",
+      "content": "Can you also check that the notifier retry queue drains after the chat outage yesterday? I want to be sure no fired alert is still parked."
+    },
+    {
+      "role": "assistant",
+      "content": "The retry queue drained completely about an hour after the outage ended; every parked notification was delivered and the queue depth panel is back to zero."
+    },
+    {
+      "role": "user",
+      "content": "Last chore: the runbook link in the paging footer points at the old wiki space. Fix it before the next incident makes someone chase a dead link under pressure."
+    },
+    {
+      "role": "assistant",
+      "content": "Updated the paging footer to the current runbook space and clicked through every link in the escalation section to confirm none are dead."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "alert debounce default",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/alert/rules.go\"\npurpose: Repeat-notification debounce: code default plus per-rule override.\noverview: rules.go holds the code default hold between repeat notifications and the shouldNotify check that prefers a per-rule override from the rules file when one is present.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/rules.go\" (lines 1-19, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"time\"\n4| \n5| // alertDebounce is the code default hold between repeat notifications\n6| // for the same firing rule. Per-rule overrides come from the rules\n7| // file and win over this default when present.\n8| const alertDebounce = 90 * time.Second\n9| \n10| // shouldNotify reports whether a firing rule may notify again, given\n11| // the last time it did. The effective debounce is the rule override\n12| // when set, else the code default above.\n13| func (e *Engine) shouldNotify(r Rule, last time.Time, now time.Time) bool {\n14| \td := alertDebounce\n15| \tif r.Debounce \u003e 0 {\n16| \t\td = r.Debounce\n17| \t}\n18| \treturn now.Sub(last) \u003e= d\n19| }\n\n### source: \"internal/alert/notify.go\"\npurpose: Webhook notifier with a parking retry queue for delivery failures.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/alerting.md\"\npurpose: Alerting guide: rule layout, repeat-notification debounce, routing, review.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-debounce-override · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · after the flap storm ops set the disk-pressure rule debounce override to 150 seconds; revisit once the noisy rack is drained\nrec-rule-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\nrec-silence-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What is the code default alert debounce, and what override did ops record for the disk-pressure rule?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds (alertDebounce, from retrieved code), AND ops recorded a disk-pressure override of 150 seconds (from memory). Missing either half caps the score at 0.5."
+  },
+  "assembly_eval": {
+    "pair_id": "join-alert-debounce",
+    "mode": "mixed",
+    "candidate_ids": [
+      "6b77975c3ad47a9a16e07dcfe41522ba02eb3f1c853a10e1408152864c5fa54d",
+      "db7fbd4311da6f613c518e7c5e73ff45527f57bb7fd60c8a43d63f42c7f93118",
+      "e59b6dd254c43c58b5596a3273176c6e93f06088e0f7f5ce6d88e733dc21aacd",
+      "rec-debounce-override",
+      "rec-rule-review",
+      "rec-silence-window"
+    ],
+    "estimated_prompt_tokens": 1010,
+    "state_digest": "9df56cc8b10da676807e6139a6077e74805073a25445c7bdcf37e162e7afd895",
+    "subjects": [
+      "(c1|rag|internal/alert/rules.go)",
+      "(c1|rag|internal/alert/notify.go)",
+      "(c1|rag|docs/alerting.md)",
+      "(c2|memory|rec-debounce-override)",
+      "(c2|memory|rec-rule-review)",
+      "(c2|memory|rec-silence-window)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "alert-debounce-override",
+    "budget": 1048,
+    "raw_state_tokens": 1747,
+    "pressure_level": "critical",
+    "shed_bytes": 2467
+  }
+}

@@ -1,0 +1,768 @@
+{
+  "version": 1,
+  "kind": "mixed-assembly",
+  "constants": {
+    "fraction": 0.6,
+    "envelope_tokens": 8,
+    "min_viable_slack": 64
+  },
+  "cases": [
+    {
+      "id": "conv-spool-flush-early",
+      "stratum": "conversation_only",
+      "answer_home": "conversation",
+      "scenario_family": "spool-flush-window",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Before we widen the canary any further: the disk-pressure spikes on ingest-03 were coming from over-eager spool writes, not from the exporter like we first guessed. Let's hold the canary spool flush at 45 seconds through the weekend soak and revisit on Monday. I already dropped the override into the canary profile so nothing else needs to change."}},
+        {"turn": {"role": "assistant", "content": "Understood. I will leave the canary profile pinned to that cadence and keep an eye on the disk-pressure panels while the soak runs, and I will flag anything that looks like write amplification."}},
+        {"turn": {"role": "user", "content": "Separate thing: the ingest lag board still shows the old per-tenant split. Can we fold those tiles into one stacked view so oncall stops getting paged about a single noisy tenant that is already rate limited?"}},
+        {"turn": {"role": "assistant", "content": "Yes. I will merge the per-tenant lag tiles into one stacked panel and keep a breakout link for the noisy tenants so the detail view is still one click away."}},
+        {"turn": {"role": "user", "content": "Also the deploy pipeline keeps warning that the staging fixture bucket is nearly full. Someone should prune the old soak captures before Thursday's cut or the next release build is going to fail on upload."}},
+        {"turn": {"role": "assistant", "content": "I pruned the captures older than two weeks and left a note in the runbook about rotating them automatically at the end of each soak window."}},
+        {"turn": {"role": "user", "content": "Last one from me: docs. The quickstart still tells people to run the collector with the legacy flag names and new folks keep tripping over it during onboarding."}},
+        {"turn": {"role": "assistant", "content": "I rewrote the quickstart around the current flag names and added a small migration table mapping the legacy spellings to the new ones."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "spool flush cadence default", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "What flush cadence did we settle on for the canary spool while the soak runs?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-canary-dash", "content": "canary comparison dashboard is pinned in the ops folder; refresh interval matches the main board", "kind": "semantic"},
+        {"id": "rec-export-lag", "content": "exporter lag alarms were retuned after the parquet writer upgrade; thresholds live in the alerting repo", "kind": "semantic"},
+        {"id": "rec-oncall-week", "content": "oncall handoff notes live in the shared doc; rotate the summary section every Friday", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/spool/spool.go",
+          "content": "package spool\n\nimport \"time\"\n\n// flushEvery is the shipped flush cadence. Deployments override it per\n// profile; profile overrides are applied by the config layer, not here.\nconst flushEvery = 30 * time.Second\n\n// Flush drains buffered batches into the active segment.\nfunc (s *Spool) Flush() error {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\treturn s.seg.write(s.buf.drain())\n}\n",
+          "language": "go",
+          "abstract": "Shipped spool flush pacing and the buffered batch drain path.",
+          "overview": "spool.go owns the flush ticker default and the drain into the active segment. Profile overrides for the cadence come from deployment config, not from this file."
+        },
+        {
+          "path": "internal/spool/segment.go",
+          "content": "package spool\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"path/filepath\"\n)\n\n// segment is one append-only spool file. A segment rolls when it fills;\n// rolled segments are immutable and are what the retention sweeper and\n// the replay path both consume.\ntype segment struct {\n\tdir    string\n\tindex  uint64\n\tf      *os.File\n\twritten int64\n}\n\n// openSegment creates the next segment file in dir. Naming is strictly\n// sequential so replay can walk segments without a manifest.\nfunc openSegment(dir string, index uint64) (*segment, error) {\n\tname := filepath.Join(dir, fmt.Sprintf(\"seg-%08d.dwspool\", index))\n\tf, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"spool: open segment: %w\", err)\n\t}\n\treturn &segment{dir: dir, index: index, f: f}, nil\n}\n\n// write appends one drained batch. The caller holds the spool lock, so\n// segments never see interleaved batches. Fsync policy is deliberate:\n// we sync on rollover, not on every batch, trading a bounded window of\n// loss for steady ingest throughput on spinning disks.\nfunc (g *segment) write(batch []byte) error {\n\tn, err := g.f.Write(batch)\n\tg.written += int64(n)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"spool: segment write: %w\", err)\n\t}\n\treturn nil\n}\n\n// roll fsyncs and closes the current file, then opens the successor.\nfunc (g *segment) roll() error {\n\tif err := g.f.Sync(); err != nil {\n\t\treturn err\n\t}\n\tif err := g.f.Close(); err != nil {\n\t\treturn err\n\t}\n\tnext, err := openSegment(g.dir, g.index+1)\n\tif err != nil {\n\t\treturn err\n\t}\n\t*g = *next\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Append-only spool segments: sequential naming, rollover, fsync policy.",
+          "overview": "segment.go implements the append-only segment files the spool drains into. It owns sequential naming for manifest-free replay, the write path under the spool lock, and the sync-on-rollover fsync policy."
+        },
+        {
+          "path": "docs/spool.md",
+          "content": "# driftwatch spool\n\nThe spool is the durable buffer between ingest and the exporter. Every\naccepted batch lands in the spool before the ingest response is sent,\nso an accepted write survives a crash or an exporter outage.\n\n## Layout\n\nSpool data lives under the data directory as numbered segment files.\nSegments are append-only; a segment that has rolled is immutable and\nis eligible for retention sweeps once exported.\n\n## Pacing\n\nBuffered batches drain to the active segment on a fixed cadence. The\nshipped default flushes twice a minute; deployments tune this per\nprofile through the config layer. Lowering the cadence smooths disk\npressure at the cost of a slightly larger replay window after a crash.\n\n## Sizing\n\nKeep the spool on local disk, not network storage. Size it for at\nleast a day of peak ingest so an exporter outage over a weekend does\nnot force retention sweeps to run early.\n",
+          "language": "markdown",
+          "abstract": "Operator guide to the spool: layout, drain pacing, sizing guidance.",
+          "overview": "spool.md explains the durable buffer between ingest and export: segment layout, the fixed drain cadence with per-profile tuning, and sizing guidance for exporter outages."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "flush at 45 seconds"}
+      ],
+      "pressure_target": {"domain": "conversation", "literal": "flush at 45 seconds"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "answer_turn_index": 0,
+      "topline_facts": "The team agreed in conversation to hold the canary spool flush at 45 seconds through the weekend soak; the shipped default in internal/spool/spool.go stays at 30 seconds and profile overrides come from deployment config.",
+      "golden": {
+        "final_answer_criteria": "States the canary spool flush cadence agreed in conversation is 45 seconds. The 30-second shipped default from the spool source is a distractor; answering 30 seconds (or twice a minute) scores 0."
+      }
+    },
+    {
+      "id": "conv-pager-channel-mid",
+      "stratum": "conversation_only",
+      "answer_home": "conversation",
+      "scenario_family": "pager-escalation-channel",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Morning. First order of business: the e2e suite flaked twice overnight on the segment rollover test. Can we quarantine it until someone has time to make the temp-dir handling hermetic? It keeps masking real failures in the merge queue."}},
+        {"turn": {"role": "assistant", "content": "Quarantined it and filed a ticket with the two failing runs linked. The rest of the suite is green, so the merge queue is unblocked."}},
+        {"turn": {"role": "user", "content": "Next: certificate renewal for the ingest edge is due soon and last time it was a manual scramble. Can we put the renewal on the automation calendar with a dry-run a week ahead so we are not doing it live again?"}},
+        {"turn": {"role": "assistant", "content": "Added the renewal with a dry-run reminder a week ahead, and I linked the runbook section that lists which services need a bounce after the swap."}},
+        {"turn": {"role": "user", "content": "Now the actual decision I wanted to make today. Paging is a mess: half the escalations land in the general ops room and drown. Let's route page escalations to #dw-crow-watch going forward, keep the general room for chatter, and update the oncall doc to match."}},
+        {"turn": {"role": "assistant", "content": "Done. I updated the oncall doc so escalations point at that channel, and I left the general room wiring in place for non-paging chatter only."}},
+        {"turn": {"role": "user", "content": "Also the benchmark rig numbers have been noisy since the kernel update on the lab box. Can you rerun last week's baseline so we are not comparing against a moving target?"}},
+        {"turn": {"role": "assistant", "content": "Rerunning the baseline now with the same pinned inputs; I will attach the fresh numbers to the perf tracking issue when it finishes."}},
+        {"turn": {"role": "user", "content": "One more: the mirror sync cron for the docs site has been silently skipping weekends because of the maintenance window overlap. Can you shift it an hour so it stops colliding?"}},
+        {"turn": {"role": "assistant", "content": "Shifted the mirror sync out of the maintenance window and added a failure notification so a skipped run is visible instead of silent."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "alert escalation channel config", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Which channel did we pick for page escalations?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-notify-token", "content": "notifier webhook token is rotated quarterly by the platform team; we only consume it from the secret store", "kind": "semantic"},
+        {"id": "rec-rule-review", "content": "alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first", "kind": "semantic"},
+        {"id": "rec-silence-window", "content": "maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/alert/notify.go",
+          "content": "package alert\n\nimport \"context\"\n\n// Notifier posts fired alerts to the configured chat webhook. The\n// destination channel comes from deployment config; this package does\n// not hard-code one.\ntype Notifier struct {\n\twebhook string\n\tchannel string\n}\n\nfunc (n *Notifier) Post(ctx context.Context, a Alert) error {\n\treturn n.post(ctx, n.channel, renderAlert(a))\n}\n",
+          "language": "go",
+          "abstract": "Chat webhook notifier; destination channel supplied by config.",
+          "overview": "notify.go posts fired alerts to the configured chat webhook. The destination channel is injected from deployment config, so routing decisions live outside the code."
+        },
+        {
+          "path": "internal/alert/rules.go",
+          "content": "package alert\n\nimport (\n\t\"context\"\n\t\"time\"\n)\n\n// Rule is one evaluated alerting condition. Rules are loaded from the\n// rules directory at start and hot-reloaded on change; evaluation is\n// per-rule so one broken expression cannot stall the loop.\ntype Rule struct {\n\tName     string\n\tExpr     string\n\tFor      time.Duration\n\tSeverity string\n}\n\n// evalLoop walks every loaded rule on the evaluation tick. A rule that\n// errors is skipped and counted; it does not abort the pass. Firing\n// decisions are handed to the pending tracker, which owns the For\n// window bookkeeping and the transition to the notifier.\nfunc (e *Engine) evalLoop(ctx context.Context) {\n\tt := time.NewTicker(e.every)\n\tdefer t.Stop()\n\tfor {\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn\n\t\tcase <-t.C:\n\t\t\tfor _, r := range e.rules() {\n\t\t\t\tif err := e.evalOne(ctx, r); err != nil {\n\t\t\t\t\te.metrics.evalErrors.Inc()\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t}\n\t\t}\n\t}\n}\n\n// evalOne evaluates a single rule against the current window and\n// updates the pending tracker. Transitions out of pending are what\n// actually page; a flapping series stays pending until its For window\n// is satisfied continuously.\nfunc (e *Engine) evalOne(ctx context.Context, r Rule) error {\n\tres, err := e.query(ctx, r.Expr)\n\tif err != nil {\n\t\treturn err\n\t}\n\te.pending.update(r, res, time.Now())\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Rule loading and the per-rule evaluation loop feeding the pending tracker.",
+          "overview": "rules.go defines alert rules and the evaluation loop: per-rule isolation on errors, the pending tracker that owns For-window bookkeeping, and the handoff to the notifier on transition."
+        },
+        {
+          "path": "docs/alerting.md",
+          "content": "# driftwatch alerting\n\nAlert rules live in the rules directory and hot-reload on change. Each\nrule names an expression, a hold window, and a severity; transitions\nout of pending are what page.\n\n## Routing\n\nFired alerts post to a chat webhook. The destination channel and the\nwebhook token are deployment config: routing is an operator decision,\nnot a code default, and teams point different severities at different\nrooms as they see fit.\n\n## Hygiene\n\nKeep rule expressions cheap; the evaluation loop walks every rule on\neach tick and a slow query delays the whole pass. Pre-declare planned\nmaintenance in the ops calendar so silences are visible ahead of time\nand paging stays quiet during planned work.\n\n## Reviewing\n\nRule changes go through the fortnightly ops sync. Bring a graph of the\nexpression over at least a week of history so hold windows are tuned\nagainst real flap behaviour rather than a single incident.\n",
+          "language": "markdown",
+          "abstract": "Operator guide to alerting: rule layout, webhook routing, review hygiene.",
+          "overview": "alerting.md covers rule structure and hot reload, chat webhook routing as deployment config, evaluation-loop hygiene, and the fortnightly review process for rule changes."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "#dw-crow-watch"}
+      ],
+      "pressure_target": {"domain": "conversation", "literal": "#dw-crow-watch"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "answer_turn_index": 4,
+      "topline_facts": "The conversation settled page-escalation routing on the #dw-crow-watch channel, keeping the general ops room for non-paging chatter; the notifier itself reads its destination channel from deployment config.",
+      "golden": {
+        "final_answer_criteria": "Names the #dw-crow-watch channel as the destination for page escalations. Answers naming the general ops room or claiming the channel is only set in deployment config score 0."
+      }
+    },
+    {
+      "id": "conv-ingest-token-late",
+      "stratum": "conversation_only",
+      "answer_home": "conversation",
+      "scenario_family": "ingest-token-conv",
+      "twin_group": "tw-ingest-token",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Kicking off the rotation planning thread. Before the token work itself: the staging environment still has last month's fixture tenants loaded and they are polluting the ingest graphs. Can we clear them out first so the before and after comparison is clean?"}},
+        {"turn": {"role": "assistant", "content": "Cleared the fixture tenants from staging and reset the ingest graphs so the comparison window starts from a clean baseline."}},
+        {"turn": {"role": "user", "content": "Good. Also the collector image build has been slow since we added the second architecture. Can we split the matrix so the common case ships fast and the other arch builds on a nightly schedule instead?"}},
+        {"turn": {"role": "assistant", "content": "Split the build matrix: the primary architecture publishes on every merge and the secondary one moved to the nightly pipeline with its own freshness badge."}},
+        {"turn": {"role": "user", "content": "On the producers side, the SDK release notes need a section about the upcoming credential change so integrators are not surprised. Nothing specific yet, just a heads-up entry with a link to the tracking issue."}},
+        {"turn": {"role": "assistant", "content": "Added a heads-up entry to the SDK release notes pointing at the tracking issue, worded so it does not commit to a date we have not agreed."}},
+        {"turn": {"role": "user", "content": "Also can someone look at the lab box disk again? The soak capture from last night filled the scratch volume and the morning benchmarks refused to start until I deleted things by hand."}},
+        {"turn": {"role": "assistant", "content": "Freed the scratch volume and capped soak captures with a size quota so a long night cannot starve the morning benchmark runs again."}},
+        {"turn": {"role": "user", "content": "Okay, the actual decision. We talked it over with the platform folks and the new ingest tokens will carry the dwk2- prefix, so the edge can tell rotated credentials from legacy ones at a glance during the drain. Producers migrate first, then the edge flips to prefer the new prefix."}},
+        {"turn": {"role": "assistant", "content": "Recorded. Producers migrate first, then the edge prefers the new prefix; I will fold that ordering into the rotation checklist."}},
+        {"turn": {"role": "user", "content": "Last item: the oncall doc still lists the old paging escalation ordering from before the reorg. Can you bring it in line with the current rota before the weekend handoff?"}},
+        {"turn": {"role": "assistant", "content": "Updated the oncall doc to the current rota and asked the two leads to sanity-check the escalation ordering before Friday."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "ingest token validation prefix", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Which prefix do freshly rotated ingest tokens carry?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-dash-refresh", "content": "ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible", "kind": "semantic"},
+        {"id": "rec-oncall-handoff", "content": "oncall handoff happens Friday afternoon; the summary template lives in the shared doc", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-token-rotation", "content": "token rotation window opens Monday; producers migrate before the edge flips preference", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/auth.go",
+          "content": "package ingest\n\nimport \"strings\"\n\n// authenticate checks the presented ingest token. Accepted prefixes\n// are supplied by deployment config so a rotation can be staged\n// without a rebuild; this file does not hard-code any prefix.\nfunc (g *Gateway) authenticate(token string) bool {\n\tfor _, p := range g.cfg.AcceptedPrefixes {\n\t\tif strings.HasPrefix(token, p) {\n\t\t\treturn g.verify(token)\n\t\t}\n\t}\n\treturn false\n}\n",
+          "language": "go",
+          "abstract": "Ingest token authentication; accepted prefixes come from config.",
+          "overview": "auth.go checks presented ingest tokens against the accepted prefixes supplied by deployment config, so rotations are staged through config rather than rebuilds."
+        },
+        {
+          "path": "internal/ingest/limits.go",
+          "content": "package ingest\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// tenantLimiter is a per-tenant token bucket. Buckets are created\n// lazily on first sight of a tenant and refilled on a fixed tick; the\n// per-tenant rates come from the tenants file and hot-reload with it.\ntype tenantLimiter struct {\n\tmu      sync.Mutex\n\tbuckets map[string]*bucket\n\ttick    time.Duration\n}\n\ntype bucket struct {\n\ttokens float64\n\trate   float64\n\tburst  float64\n\tlast   time.Time\n}\n\n// allow reports whether one accepted batch fits the tenant's current\n// budget. Unknown tenants get the default rate until the tenants file\n// names them explicitly; the default is deliberately conservative so a\n// new integration cannot crowd out established ones.\nfunc (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\tb, ok := l.buckets[tenant]\n\tif !ok {\n\t\tb = l.newBucket(tenant)\n\t\tl.buckets[tenant] = b\n\t}\n\tb.refill(now)\n\tif b.tokens < 1 {\n\t\treturn false\n\t}\n\tb.tokens--\n\treturn true\n}\n\nfunc (b *bucket) refill(now time.Time) {\n\telapsed := now.Sub(b.last).Seconds()\n\tb.tokens += elapsed * b.rate\n\tif b.tokens > b.burst {\n\t\tb.tokens = b.burst\n\t}\n\tb.last = now\n}\n",
+          "language": "go",
+          "abstract": "Per-tenant token-bucket rate limiting with hot-reloaded rates.",
+          "overview": "limits.go implements the per-tenant token buckets guarding ingest admission: lazy bucket creation, tick-based refill, and conservative defaults for tenants the tenants file does not name."
+        },
+        {
+          "path": "docs/operations.md",
+          "content": "# driftwatch operations\n\ndriftwatch ships as a single static binary. Run it under a process\nsupervisor with the spool on local disk, and point producers at a\nstable DNS name rather than an address.\n\n## Restarts\n\nSend SIGTERM and wait. Ingest stops accepting, the spool drains for a\nbounded grace period, and anything still buffered is picked up on the\nnext start. No manual intervention is required.\n\n## Credential rotation\n\nRotations are staged through config: add the incoming credential shape\nto the accepted set, migrate producers, then narrow the accepted set\nagain once the drain completes. Never narrow first; producers signing\nwith retired credentials are rejected at the edge.\n\n## Tenants\n\nPer-tenant ingest budgets live in the tenants file and hot-reload on\nchange. Prefer explicit entries for every production tenant; the\nbuilt-in default exists for evaluation, not for steady state.\n",
+          "language": "markdown",
+          "abstract": "Operations guide: process supervision, restart drain, staged credential rotation.",
+          "overview": "operations.md covers running the daemon under supervision, the SIGTERM drain behaviour, staged credential rotation through the accepted set, and per-tenant budget management in the tenants file."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "conversation", "literal": "dwk2-"}
+      ],
+      "pressure_target": {"domain": "conversation", "literal": "dwk2-"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "answer_turn_index": 8,
+      "topline_facts": "The conversation settled that freshly rotated ingest tokens carry the dwk2- prefix, with producers migrating before the edge flips preference; the auth code itself reads accepted prefixes from deployment config.",
+      "golden": {
+        "final_answer_criteria": "States that freshly rotated ingest tokens carry the dwk2- prefix. Answers that only describe config-supplied prefixes without naming dwk2- score 0."
+      }
+    },
+    {
+      "id": "mem-ingest-token",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "ingest-token-mem",
+      "twin_group": "tw-ingest-token",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Busy morning. The docs site search index is stale again and people keep landing on the pre-rename package pages. Can you kick a reindex and add it to the publish pipeline so it stops drifting?"}},
+        {"turn": {"role": "assistant", "content": "Reindexed the docs site and wired the reindex step into the publish pipeline so every deploy refreshes search."}},
+        {"turn": {"role": "user", "content": "Also the ingest edge dashboards got rearranged during the reorg and the latency heatmap ended up below the fold. Can you move it back up next to the error-rate panel where oncall expects it?"}},
+        {"turn": {"role": "assistant", "content": "Moved the latency heatmap back beside the error-rate panel and locked the row layout so future edits do not shuffle it again."}},
+        {"turn": {"role": "user", "content": "The weekly retro keeps colliding with the platform team's review. Can you find a slot that works for both groups and move the recurring invite?"}},
+        {"turn": {"role": "assistant", "content": "Moved the retro to a slot clear of the platform review and updated the recurring invite; both leads confirmed the new time works."}},
+        {"turn": {"role": "user", "content": "And the collector's debug logging is still at the verbose level from last week's incident. Can you drop it back to normal before the log budget alarms start firing?"}},
+        {"turn": {"role": "assistant", "content": "Dropped the collector logging back to the normal level and added a reminder to the incident checklist so verbose logging gets reverted at close-out."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "ingest token rotation handling", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Which prefix do rotated ingest tokens carry?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-dash-refresh", "content": "ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible", "kind": "semantic"},
+        {"id": "rec-oncall-handoff", "content": "oncall handoff happens Friday afternoon; the summary template lives in the shared doc", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-token-rotation", "content": "rotated ingest tokens carry the dwk2- prefix; producers migrate first and legacy tokens drain until the edge narrows the accepted set", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/auth.go",
+          "content": "package ingest\n\nimport \"strings\"\n\n// authenticate checks the presented ingest token against the accepted\n// prefixes from deployment config. Rotations are staged by widening\n// and later narrowing that set; no prefix is hard-coded here.\nfunc (g *Gateway) authenticate(token string) bool {\n\tfor _, p := range g.cfg.AcceptedPrefixes {\n\t\tif strings.HasPrefix(token, p) {\n\t\t\treturn g.verify(token)\n\t\t}\n\t}\n\treturn false\n}\n",
+          "language": "go",
+          "abstract": "Ingest token authentication against config-supplied accepted prefixes.",
+          "overview": "auth.go validates presented ingest tokens against the accepted prefix set from deployment config; rotations widen and later narrow that set without a rebuild."
+        },
+        {
+          "path": "internal/ingest/limits.go",
+          "content": "package ingest\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// tenantLimiter is a per-tenant token bucket. Buckets are created\n// lazily on first sight of a tenant and refilled on a fixed tick; the\n// per-tenant rates come from the tenants file and hot-reload with it.\ntype tenantLimiter struct {\n\tmu      sync.Mutex\n\tbuckets map[string]*bucket\n\ttick    time.Duration\n}\n\ntype bucket struct {\n\ttokens float64\n\trate   float64\n\tburst  float64\n\tlast   time.Time\n}\n\n// allow reports whether one accepted batch fits the tenant's current\n// budget. Unknown tenants get the default rate until the tenants file\n// names them explicitly; the default is deliberately conservative so a\n// new integration cannot crowd out established ones.\nfunc (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\tb, ok := l.buckets[tenant]\n\tif !ok {\n\t\tb = l.newBucket(tenant)\n\t\tl.buckets[tenant] = b\n\t}\n\tb.refill(now)\n\tif b.tokens < 1 {\n\t\treturn false\n\t}\n\tb.tokens--\n\treturn true\n}\n\nfunc (b *bucket) refill(now time.Time) {\n\telapsed := now.Sub(b.last).Seconds()\n\tb.tokens += elapsed * b.rate\n\tif b.tokens > b.burst {\n\t\tb.tokens = b.burst\n\t}\n\tb.last = now\n}\n",
+          "language": "go",
+          "abstract": "Per-tenant token-bucket rate limiting with hot-reloaded rates.",
+          "overview": "limits.go implements the per-tenant token buckets guarding ingest admission: lazy bucket creation, tick-based refill, and conservative defaults for tenants the tenants file does not name."
+        },
+        {
+          "path": "docs/operations.md",
+          "content": "# driftwatch operations\n\ndriftwatch ships as a single static binary. Run it under a process\nsupervisor with the spool on local disk, and point producers at a\nstable DNS name rather than an address.\n\n## Restarts\n\nSend SIGTERM and wait. Ingest stops accepting, the spool drains for a\nbounded grace period, and anything still buffered is picked up on the\nnext start. No manual intervention is required.\n\n## Credential rotation\n\nRotations are staged through config: add the incoming credential shape\nto the accepted set, migrate producers, then narrow the accepted set\nagain once the drain completes. Never narrow first; producers signing\nwith retired credentials are rejected at the edge.\n\n## Tenants\n\nPer-tenant ingest budgets live in the tenants file and hot-reload on\nchange. Prefer explicit entries for every production tenant; the\nbuilt-in default exists for evaluation, not for steady state.\n",
+          "language": "markdown",
+          "abstract": "Operations guide: process supervision, restart drain, staged credential rotation.",
+          "overview": "operations.md covers running the daemon under supervision, the SIGTERM drain behaviour, staged credential rotation through the accepted set, and per-tenant budget management in the tenants file."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "dwk2-"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "dwk2-"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "The stored memory note records that rotated ingest tokens carry the dwk2- prefix, with producers migrating first while legacy tokens drain; the auth code reads accepted prefixes from deployment config.",
+      "golden": {
+        "final_answer_criteria": "States that rotated ingest tokens carry the dwk2- prefix, per the stored memory note. Answers that only describe config-supplied prefixes without naming dwk2- score 0."
+      }
+    },
+    {
+      "id": "mem-replay-cursor",
+      "stratum": "memory_only",
+      "answer_home": "memory",
+      "scenario_family": "replay-cursor-note",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Couple of chores before the replay drill this afternoon. The staging exporter has been pointed at the throwaway bucket since the schema test; can you point it back at the normal staging bucket so the drill writes land somewhere we can inspect?"}},
+        {"turn": {"role": "assistant", "content": "Repointed the staging exporter at the normal staging bucket and verified a test batch landed there with the expected layout."}},
+        {"turn": {"role": "user", "content": "Also the drill runbook still references the old data directory layout from before the segment rename. Can you sweep it for stale paths so nobody follows a dead instruction mid-drill?"}},
+        {"turn": {"role": "assistant", "content": "Swept the runbook and replaced the stale paths with the current layout; I also added a note pointing at the layout doc for future renames."}},
+        {"turn": {"role": "user", "content": "The lab box needs its scratch volume cleared again too, the last soak capture is still sitting there and the drill will want the space."}},
+        {"turn": {"role": "assistant", "content": "Cleared the scratch volume and confirmed the drill has enough headroom for a full capture plus the replay working set."}},
+        {"turn": {"role": "user", "content": "And can you double-check the drill calendar invite includes the platform observer this time? They missed the last one because the invite went to the old alias."}},
+        {"turn": {"role": "assistant", "content": "Fixed the invite to use the current alias and the platform observer accepted; the drill roster is complete."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "replay checkpoint cursor", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Where on disk does the replay checkpoint cursor live?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-drill-cadence", "content": "replay drills run monthly; the drill lead rotates with the oncall schedule", "kind": "semantic"},
+        {"id": "rec-lab-scratch", "content": "lab box scratch volume is shared with the benchmark rig; clear it before any drill or soak", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-replay-cursor", "content": "replay checkpoint cursor lives at spool/replay.cursor under the data directory; delete it only with the daemon stopped or replay restarts from the oldest segment", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/replay/replay.go",
+          "content": "package replay\n\nimport \"context\"\n\n// Replayer re-reads rolled spool segments and feeds them to the\n// exporter. Progress is checkpointed through the cursor file named by\n// deployment config so a restart resumes instead of starting over.\ntype Replayer struct {\n\tcursor cursorFile\n\tsegs   segmentWalker\n}\n\nfunc (r *Replayer) Run(ctx context.Context) error {\n\tstart, err := r.cursor.load()\n\tif err != nil {\n\t\treturn err\n\t}\n\treturn r.walk(ctx, start)\n}\n",
+          "language": "go",
+          "abstract": "Segment replay with checkpointed progress through a config-named cursor file.",
+          "overview": "replay.go re-reads rolled segments and feeds the exporter, checkpointing progress through the cursor file named by deployment config so restarts resume rather than start over."
+        },
+        {
+          "path": "internal/replay/window.go",
+          "content": "package replay\n\nimport (\n\t\"fmt\"\n\t\"sort\"\n)\n\n// segmentWalker enumerates rolled segments in strictly ascending index\n// order. Naming is sequential, so the walk needs no manifest: it lists\n// the directory, filters to rolled segments, and sorts by index.\ntype segmentWalker struct {\n\tdir string\n}\n\nfunc (w *segmentWalker) list() ([]segRef, error) {\n\tentries, err := readSegmentDir(w.dir)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"replay: list segments: %w\", err)\n\t}\n\trefs := make([]segRef, 0, len(entries))\n\tfor _, e := range entries {\n\t\tif ref, ok := parseSegName(e); ok {\n\t\t\trefs = append(refs, ref)\n\t\t}\n\t}\n\tsort.Slice(refs, func(i, j int) bool { return refs[i].index < refs[j].index })\n\treturn refs, nil\n}\n\n// window bounds one replay pass. A pass never replays the active\n// segment: only rolled, immutable segments are eligible, which is what\n// makes concurrent ingest safe during a replay.\ntype window struct {\n\tfrom, to uint64\n}\n\nfunc (w *segmentWalker) window(fromCursor uint64) (window, error) {\n\trefs, err := w.list()\n\tif err != nil {\n\t\treturn window{}, err\n\t}\n\tif len(refs) == 0 {\n\t\treturn window{}, errNoSegments\n\t}\n\treturn window{from: fromCursor, to: refs[len(refs)-1].index}, nil\n}\n",
+          "language": "go",
+          "abstract": "Manifest-free segment enumeration and replay window bounding.",
+          "overview": "window.go walks rolled segments in ascending index order without a manifest and bounds each replay pass to immutable segments only, keeping concurrent ingest safe during replay."
+        },
+        {
+          "path": "docs/replay.md",
+          "content": "# driftwatch replay\n\nReplay re-reads rolled spool segments and hands them to the exporter.\nIt exists for exporter outages and for backfills after a schema\nchange; it never touches the active segment, so ingest keeps running\nwhile a replay is in flight.\n\n## Running a replay\n\nStart the daemon with the replay subcommand and a segment range, or\nomit the range to resume from the checkpoint. Progress is\ncheckpointed continuously, so an interrupted replay resumes where it\nleft off rather than re-reading from the start.\n\n## Drills\n\nRun the monthly drill against staging with a bounded range first.\nWatch the exporter lag panel during the drill; replay deliberately\nyields to live ingest when the exporter falls behind, so a slow drill\nis usually a sign of exporter pressure, not replay trouble.\n",
+          "language": "markdown",
+          "abstract": "Replay guide: purpose, resume semantics, drill practice.",
+          "overview": "replay.md explains what replay is for, how checkpointed progress makes interrupted replays resume, and how monthly drills should be run and observed against staging."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "spool/replay.cursor"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "spool/replay.cursor"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "The stored memory note records that the replay checkpoint cursor lives at spool/replay.cursor under the data directory, and that deleting it with the daemon running restarts replay from the oldest segment.",
+      "golden": {
+        "final_answer_criteria": "States the replay checkpoint cursor lives at spool/replay.cursor (under the data directory), per the stored memory note. Answers that only say the cursor file is named by config score 0."
+      }
+    },
+    {
+      "id": "join-ingest-token",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "ingest-token-join",
+      "twin_group": "tw-ingest-token",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "While we are lining up the rotation logistics, a few unrelated items. The weekly ingest report job failed twice with a template error after the chart library bump; can you pin the old library until someone ports the templates properly?"}},
+        {"turn": {"role": "assistant", "content": "Pinned the report job to the previous chart library and filed the template port as a tracked task so the pin does not become permanent by accident."}},
+        {"turn": {"role": "user", "content": "The staging edge also needs its synthetic producer restarted; it wedged during the fixture cleanup and the canary comparison graphs have a hole in them since last night."}},
+        {"turn": {"role": "assistant", "content": "Restarted the synthetic producer and backfilled the gap markers so the comparison graphs show the wedge window explicitly instead of a silent hole."}},
+        {"turn": {"role": "user", "content": "Can we also get the tenants file linted in CI? The last bad merge shipped a duplicate tenant stanza and the hot reload just silently took the second one."}},
+        {"turn": {"role": "assistant", "content": "Added a tenants-file lint to CI that rejects duplicate stanzas and unknown keys, and it runs before the deploy step so a bad merge cannot reach hot reload."}},
+        {"turn": {"role": "user", "content": "The sdk examples repo still shows the old error-handling pattern too. Not urgent, but can you queue a cleanup pass so new integrators stop copying it?"}},
+        {"turn": {"role": "assistant", "content": "Queued the examples cleanup and tagged the three files that still show the old pattern so the pass has a concrete scope."}},
+        {"turn": {"role": "user", "content": "And the ops calendar needs the rotation window blocked out once we commit to it, with the platform observer invited so they can watch the edge metrics during the flip."}},
+        {"turn": {"role": "assistant", "content": "Blocked the rotation window on the ops calendar and invited the platform observer; the invite links the edge metrics board for the flip."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "token rotation grace period", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "Which prefix do rotated ingest tokens carry, and how long does the old-token grace window last?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-dash-refresh", "content": "ingest overview dashboard auto-refreshes on the short interval; leave it be, the load is negligible", "kind": "semantic"},
+        {"id": "rec-oncall-handoff", "content": "oncall handoff happens Friday afternoon; the summary template lives in the shared doc", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-token-rotation", "content": "rotated ingest tokens carry the dwk2- prefix; producers migrate first, then the edge narrows the accepted set", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/auth.go",
+          "content": "package ingest\n\nimport (\n\t\"strings\"\n\t\"time\"\n)\n\n// graceWindow is how long tokens from the retiring generation stay\n// valid after a rotation flips the preferred prefix. The window gives\n// slow producers time to drain without reopening the edge to retired\n// credentials indefinitely.\nconst graceWindow = 72 * time.Hour\n\n// authenticate checks the presented ingest token. The preferred\n// prefix is supplied by deployment config; tokens from the retiring\n// generation are accepted only inside the grace window.\nfunc (g *Gateway) authenticate(token string, now time.Time) bool {\n\tif strings.HasPrefix(token, g.cfg.PreferredPrefix) {\n\t\treturn g.verify(token)\n\t}\n\tif now.Before(g.rotatedAt.Add(graceWindow)) && strings.HasPrefix(token, g.cfg.RetiringPrefix) {\n\t\treturn g.verify(token)\n\t}\n\treturn false\n}\n",
+          "language": "go",
+          "abstract": "Token authentication with a bounded grace window for the retiring generation.",
+          "overview": "auth.go accepts the preferred-prefix tokens from config and tokens of the retiring generation only inside the fixed grace window after a rotation, so slow producers can drain without leaving the edge open."
+        },
+        {
+          "path": "internal/ingest/limits.go",
+          "content": "package ingest\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// tenantLimiter is a per-tenant token bucket. Buckets are created\n// lazily on first sight of a tenant and refilled on a fixed tick; the\n// per-tenant rates come from the tenants file and hot-reload with it.\ntype tenantLimiter struct {\n\tmu      sync.Mutex\n\tbuckets map[string]*bucket\n\ttick    time.Duration\n}\n\ntype bucket struct {\n\ttokens float64\n\trate   float64\n\tburst  float64\n\tlast   time.Time\n}\n\n// allow reports whether one accepted batch fits the tenant's current\n// budget. Unknown tenants get the default rate until the tenants file\n// names them explicitly; the default is deliberately conservative so a\n// new integration cannot crowd out established ones.\nfunc (l *tenantLimiter) allow(tenant string, now time.Time) bool {\n\tl.mu.Lock()\n\tdefer l.mu.Unlock()\n\tb, ok := l.buckets[tenant]\n\tif !ok {\n\t\tb = l.newBucket(tenant)\n\t\tl.buckets[tenant] = b\n\t}\n\tb.refill(now)\n\tif b.tokens < 1 {\n\t\treturn false\n\t}\n\tb.tokens--\n\treturn true\n}\n\nfunc (b *bucket) refill(now time.Time) {\n\telapsed := now.Sub(b.last).Seconds()\n\tb.tokens += elapsed * b.rate\n\tif b.tokens > b.burst {\n\t\tb.tokens = b.burst\n\t}\n\tb.last = now\n}\n",
+          "language": "go",
+          "abstract": "Per-tenant token-bucket rate limiting with hot-reloaded rates.",
+          "overview": "limits.go implements the per-tenant token buckets guarding ingest admission: lazy bucket creation, tick-based refill, and conservative defaults for tenants the tenants file does not name."
+        },
+        {
+          "path": "docs/operations.md",
+          "content": "# driftwatch operations\n\ndriftwatch ships as a single static binary. Run it under a process\nsupervisor with the spool on local disk, and point producers at a\nstable DNS name rather than an address.\n\n## Restarts\n\nSend SIGTERM and wait. Ingest stops accepting, the spool drains for a\nbounded grace period, and anything still buffered is picked up on the\nnext start. No manual intervention is required.\n\n## Credential rotation\n\nRotations are staged through config: flip the preferred credential\nshape, let the retiring generation drain, then narrow the accepted\nset once the drain completes. Never narrow first; producers signing\nwith retired credentials are rejected at the edge.\n\n## Tenants\n\nPer-tenant ingest budgets live in the tenants file and hot-reload on\nchange. Prefer explicit entries for every production tenant; the\nbuilt-in default exists for evaluation, not for steady state.\n",
+          "language": "markdown",
+          "abstract": "Operations guide: process supervision, restart drain, staged credential rotation.",
+          "overview": "operations.md covers running the daemon under supervision, the SIGTERM drain behaviour, staged credential rotation through the preferred and retiring shapes, and tenant budget management."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "dwk2-"},
+        {"domain": "rag", "literal": "graceWindow = 72 * time.Hour"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "dwk2-"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "Rotated ingest tokens carry the dwk2- prefix per the stored memory note, and internal/ingest/auth.go bounds the retiring generation with graceWindow = 72 * time.Hour after the flip.",
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: rotated ingest tokens carry the dwk2- prefix (from memory), AND the old-token grace window is 72 hours per graceWindow in internal/ingest/auth.go (from retrieved code). Missing either half caps the score at 0.5."
+      }
+    },
+    {
+      "id": "join-alert-debounce",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "alert-debounce-override",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Before we get to the paging tune-up: the nightly compaction job on the metrics store overran its window again and bled into the morning deploy slot. Can you stagger it earlier and cap its io so the overlap stops?"}},
+        {"turn": {"role": "assistant", "content": "Moved the compaction start earlier and applied the io cap; last night's run finished well clear of the deploy slot."}},
+        {"turn": {"role": "user", "content": "Also someone left the load-generator running against staging over the weekend and the ingest graphs there are useless now. Can you annotate the window so nobody mistakes it for organic growth?"}},
+        {"turn": {"role": "assistant", "content": "Annotated the load-generator window on the staging boards and added a shutdown timer to the generator so a forgotten run stops itself."}},
+        {"turn": {"role": "user", "content": "The alert rule repo could use a housekeeping pass too; there are three disabled rules from the old cluster that will never fire again and they clutter every review."}},
+        {"turn": {"role": "assistant", "content": "Removed the three dead rules and left a tombstone note in the repo history explaining why, so an archaeologist does not resurrect them."}},
+        {"turn": {"role": "user", "content": "Can you also check that the notifier retry queue drains after the chat outage yesterday? I want to be sure no fired alert is still parked."}},
+        {"turn": {"role": "assistant", "content": "The retry queue drained completely about an hour after the outage ended; every parked notification was delivered and the queue depth panel is back to zero."}},
+        {"turn": {"role": "user", "content": "Last chore: the runbook link in the paging footer points at the old wiki space. Fix it before the next incident makes someone chase a dead link under pressure."}},
+        {"turn": {"role": "assistant", "content": "Updated the paging footer to the current runbook space and clicked through every link in the escalation section to confirm none are dead."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "alert debounce default", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "What is the code default alert debounce, and what override did ops record for the disk-pressure rule?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-debounce-override", "content": "after the flap storm ops set the disk-pressure rule debounce override to 150 seconds; revisit once the noisy rack is drained", "kind": "semantic"},
+        {"id": "rec-rule-review", "content": "alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first", "kind": "semantic"},
+        {"id": "rec-silence-window", "content": "maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/alert/rules.go",
+          "content": "package alert\n\nimport \"time\"\n\n// alertDebounce is the code default hold between repeat notifications\n// for the same firing rule. Per-rule overrides come from the rules\n// file and win over this default when present.\nconst alertDebounce = 90 * time.Second\n\n// shouldNotify reports whether a firing rule may notify again, given\n// the last time it did. The effective debounce is the rule override\n// when set, else the code default above.\nfunc (e *Engine) shouldNotify(r Rule, last time.Time, now time.Time) bool {\n\td := alertDebounce\n\tif r.Debounce > 0 {\n\t\td = r.Debounce\n\t}\n\treturn now.Sub(last) >= d\n}\n",
+          "language": "go",
+          "abstract": "Repeat-notification debounce: code default plus per-rule override.",
+          "overview": "rules.go holds the code default hold between repeat notifications and the shouldNotify check that prefers a per-rule override from the rules file when one is present."
+        },
+        {
+          "path": "internal/alert/notify.go",
+          "content": "package alert\n\nimport (\n\t\"context\"\n\t\"time\"\n)\n\n// Notifier posts fired alerts to the configured chat webhook and owns\n// the retry queue for delivery failures. Retries back off and park\n// rather than drop: an alert that fired must eventually reach a\n// human, even through a chat outage.\ntype Notifier struct {\n\twebhook string\n\tchannel string\n\tqueue   *retryQueue\n}\n\nfunc (n *Notifier) Post(ctx context.Context, a Alert) error {\n\tif err := n.post(ctx, n.channel, renderAlert(a)); err != nil {\n\t\tn.queue.park(a, time.Now())\n\t\treturn err\n\t}\n\treturn nil\n}\n\n// drain retries parked notifications oldest-first. A retry that fails\n// re-parks with a longer backoff; the queue is drained by the same\n// loop that posts fresh alerts, so recovery needs no operator action.\nfunc (n *Notifier) drain(ctx context.Context, now time.Time) {\n\tfor {\n\t\ta, ok := n.queue.next(now)\n\t\tif !ok {\n\t\t\treturn\n\t\t}\n\t\tif err := n.post(ctx, n.channel, renderAlert(a.Alert)); err != nil {\n\t\t\tn.queue.repark(a, now)\n\t\t\treturn\n\t\t}\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Webhook notifier with a parking retry queue for delivery failures.",
+          "overview": "notify.go posts fired alerts to the chat webhook and parks failures in a retry queue that drains oldest-first with backoff, so alerts survive chat outages without operator action."
+        },
+        {
+          "path": "docs/alerting.md",
+          "content": "# driftwatch alerting\n\nAlert rules live in the rules directory and hot-reload on change. Each\nrule names an expression, a hold window, and a severity; transitions\nout of pending are what page.\n\n## Repeat notifications\n\nA rule that keeps firing does not page continuously. Repeat\nnotifications are held back by a debounce; the shipped default lives\nin the alert engine and individual rules may override it in the rules\nfile when a signal needs faster or slower repeats.\n\n## Routing\n\nFired alerts post to a chat webhook. The destination channel and the\nwebhook token are deployment config, and delivery failures park in a\nretry queue that drains automatically after an outage.\n\n## Reviewing\n\nRule changes go through the fortnightly ops sync. Bring history with\nthe proposal so hold windows and debounce overrides are tuned against\nreal flap behaviour rather than a single incident.\n",
+          "language": "markdown",
+          "abstract": "Alerting guide: rule layout, repeat-notification debounce, routing, review.",
+          "overview": "alerting.md covers rule structure, the debounce that holds back repeat notifications with per-rule overrides, webhook routing as deployment config, and the review cadence for rule changes."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "alertDebounce = 90 * time.Second"},
+        {"domain": "memory", "literal": "override to 150 seconds"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "alertDebounce = 90 * time.Second"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "internal/alert/rules.go sets the code default with alertDebounce = 90 * time.Second, and the stored memory note records that ops set the disk-pressure rule debounce override to 150 seconds after the flap storm.",
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds (alertDebounce, from retrieved code), AND ops recorded a disk-pressure override of 150 seconds (from memory). Missing either half caps the score at 0.5."
+      }
+    },
+    {
+      "id": "join-export-window",
+      "stratum": "cross_domain_join",
+      "answer_home": "join",
+      "scenario_family": "export-shard-schedule",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "A few things before we look at the export sizing. The warehouse loader complained about mixed-case column names after the last schema tweak; can you normalize the header casing in the writer so the loader stops special-casing us?"}},
+        {"turn": {"role": "assistant", "content": "Normalized the column header casing in the writer and ran the loader's validation suite against a sample shard; it passes clean now."}},
+        {"turn": {"role": "user", "content": "The export dashboard also lost its shard-duration panel in the reshuffle. Can you restore it next to the row-count panel so we can see both when tuning?"}},
+        {"turn": {"role": "assistant", "content": "Restored the shard-duration panel beside the row-count panel and pinned the pair so future board edits keep them together."}},
+        {"turn": {"role": "user", "content": "Somebody should also archive the old warehouse credentials from the secret store; the loader moved to the new service account last month and the stale entry keeps showing up in audits."}},
+        {"turn": {"role": "assistant", "content": "Archived the old credentials with an expiry note and confirmed the loader only references the new service account in its config."}},
+        {"turn": {"role": "user", "content": "The staging export bucket lifecycle rule expired too, so test shards from months ago are still sitting there paying storage. Can you reapply the cleanup rule?"}},
+        {"turn": {"role": "assistant", "content": "Reapplied the lifecycle rule on the staging bucket and the backlog of old test shards is queued for deletion over the next day."}},
+        {"turn": {"role": "user", "content": "And note somewhere that the warehouse team wants a heads-up before we change shard sizing again; their ingestion pipeline tunes its parallelism to our layout."}},
+        {"turn": {"role": "assistant", "content": "Noted, and I added the warehouse team as a required reviewer on the export config directory so sizing changes ping them automatically."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "export shard sizing schedule", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "When does the nightly export kick off, and how many rows go into each shard?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-export-window", "content": "nightly export kicks off at 02:15 UTC, after the warehouse maintenance window closes; do not move it earlier", "kind": "semantic"},
+        {"id": "rec-loader-contact", "content": "warehouse loader questions go to the data platform channel; they watch it during business hours", "kind": "semantic"},
+        {"id": "rec-shard-review", "content": "shard sizing changes need a heads-up to the warehouse team; their pipeline tunes parallelism to our layout", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/export/parquet.go",
+          "content": "package export\n\n// exportShardRows caps how many rows the writer packs into one\n// parquet shard. The cap bounds warehouse loader memory and keeps\n// shard-level retries cheap; the schedule that triggers an export run\n// lives in the scheduler, not here.\nconst exportShardRows = 250000\n\n// writeShard streams rows into one shard file until the cap is hit or\n// the batch ends, then finalizes the footer and hands the path to the\n// uploader.\nfunc (w *Writer) writeShard(rows RowIter) (string, error) {\n\tn := 0\n\tfor rows.Next() && n < exportShardRows {\n\t\tif err := w.append(rows.Row()); err != nil {\n\t\t\treturn \"\", err\n\t\t}\n\t\tn++\n\t}\n\treturn w.finalize()\n}\n",
+          "language": "go",
+          "abstract": "Parquet shard writer with a fixed row cap per shard.",
+          "overview": "parquet.go streams rows into shard files up to the fixed per-shard row cap, finalizes footers, and hands completed shards to the uploader; run scheduling lives elsewhere."
+        },
+        {
+          "path": "internal/export/schedule.go",
+          "content": "package export\n\nimport (\n\t\"context\"\n\t\"time\"\n)\n\n// Scheduler triggers export runs from the cron expression supplied by\n// deployment config. The code carries no default schedule: an export\n// window is an operational decision made against the warehouse\n// maintenance calendar, not something the binary should guess.\ntype Scheduler struct {\n\tspec cronSpec\n\trun  func(context.Context) error\n}\n\nfunc (s *Scheduler) loop(ctx context.Context) {\n\tfor {\n\t\tnext := s.spec.next(time.Now())\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\treturn\n\t\tcase <-time.After(time.Until(next)):\n\t\t\tif err := s.run(ctx); err != nil {\n\t\t\t\ts.metrics.runFailures.Inc()\n\t\t\t}\n\t\t}\n\t}\n}\n\n// A run that overlaps the previous one is skipped and counted rather\n// than queued: two concurrent exports would double the warehouse load\n// precisely when it is already behind.\nfunc (s *Scheduler) tryRun(ctx context.Context) {\n\tif !s.mu.TryLock() {\n\t\ts.metrics.overlapSkips.Inc()\n\t\treturn\n\t}\n\tdefer s.mu.Unlock()\n\t_ = s.run(ctx)\n}\n",
+          "language": "go",
+          "abstract": "Cron-driven export scheduling with overlap-skip semantics; window from config.",
+          "overview": "schedule.go triggers export runs from the config-supplied cron expression, skips overlapping runs instead of queueing them, and deliberately ships no default window."
+        },
+        {
+          "path": "docs/export.md",
+          "content": "# driftwatch export\n\nThe exporter walks rolled spool segments and writes parquet shards for\nthe warehouse. Shards are the unit of retry and of loader\nparallelism, so their sizing is a contract with the warehouse team as\nmuch as a local tuning knob.\n\n## Scheduling\n\nExport runs are cron-driven from deployment config. Pick the window\nagainst the warehouse maintenance calendar; the exporter skips a run\nthat would overlap the previous one rather than stacking load on a\nwarehouse that is already behind.\n\n## Failure handling\n\nA failed shard retries independently; a failed run resumes from the\nlast completed shard on the next trigger. Watch the run-failure and\noverlap-skip counters after any schedule change.\n",
+          "language": "markdown",
+          "abstract": "Export guide: shard contract with the warehouse, scheduling, retries.",
+          "overview": "export.md describes parquet shard export as a warehouse contract, cron-driven scheduling picked against the maintenance calendar, overlap-skip behaviour, and per-shard retry semantics."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "02:15 UTC"},
+        {"domain": "rag", "literal": "exportShardRows = 250000"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "02:15 UTC"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "The stored memory note records the nightly export kicks off at 02:15 UTC after the warehouse maintenance window closes, and internal/export/parquet.go caps each shard with exportShardRows = 250000.",
+      "golden": {
+        "final_answer_criteria": "BOTH halves required: the nightly export kicks off at 02:15 UTC (from memory), AND each shard holds 250000 rows (exportShardRows, from retrieved code). Missing either half caps the score at 0.5."
+      }
+    },
+    {
+      "id": "stale-spool-cap",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "rag",
+      "scenario_family": "spool-cap-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Some follow-ups from the ingest surge review. The surge dashboards we threw together during the incident are still marked temporary; can you promote the useful ones into the main folder and delete the rest before they fossilize?"}},
+        {"turn": {"role": "assistant", "content": "Promoted the two boards oncall actually used into the main folder and deleted the other temporaries; the folder README now links both."}},
+        {"turn": {"role": "user", "content": "The incident timeline doc also needs its action items copied into the tracker; half of them are still only prose in the doc and they will get lost there."}},
+        {"turn": {"role": "assistant", "content": "Copied every action item into the tracker with owners and linked each one back to the timeline section it came from."}},
+        {"turn": {"role": "user", "content": "Can you also schedule the post-surge capacity review with the platform folks? Their quarterly planning starts soon and I want our numbers in front of them before that locks."}},
+        {"turn": {"role": "assistant", "content": "Scheduled the capacity review for early next week and attached the surge ingest numbers so the discussion starts from data."}},
+        {"turn": {"role": "user", "content": "The surge also left a pile of oversized soak captures on the lab box again. Clear them, and this time set the capture quota lower so a surge cannot fill the volume."}},
+        {"turn": {"role": "assistant", "content": "Cleared the captures and lowered the capture quota; the lab box now refuses new captures before the volume can fill."}},
+        {"turn": {"role": "user", "content": "Last one: the surge retro is missing a scribe. Can you find a volunteer who was not oncall during the incident so the notes are not written from memory of the pager?"}},
+        {"turn": {"role": "assistant", "content": "Found a volunteer from the platform side who observed the surge but was not paged; they have the retro template and the timeline doc."}},
+        {"turn": {"role": "user", "content": "Two more while I have you. The surge chat archive should be linked from the timeline doc before the channel history rolls off; can you export it and attach the export where the timeline references it?"}},
+        {"turn": {"role": "assistant", "content": "Exported the surge channel history and attached it to the timeline doc at the point where the paging sequence is discussed, so the references resolve even after the history rolls off."}},
+        {"turn": {"role": "user", "content": "The status page postmortem entry is still marked draft as well; legal signed off yesterday, so it can go public whenever someone presses the button."}},
+        {"turn": {"role": "assistant", "content": "Published the status page entry and archived the draft banner; the public copy matches the version legal reviewed."}},
+        {"turn": {"role": "user", "content": "And check whether the exporter alert that fired mid-surge ever got its threshold reviewed; it felt late relative to when the graphs went vertical."}},
+        {"turn": {"role": "assistant", "content": "Reviewed it with the alerting folks: the threshold was fine but the hold window ate the early warning, and they are proposing a tighter hold for surge-class signals at the next rule review."}},
+        {"turn": {"role": "user", "content": "Oh, and the loaner hardware we borrowed from the platform lab during the surge needs to go back this week; check nothing is still scheduled against those nodes before you release them."}},
+        {"turn": {"role": "assistant", "content": "Drained the two loaner nodes, moved the one lingering scheduled job back to our own pool, and told the platform lab they are free to reclaim the hardware."}},
+        {"turn": {"role": "user", "content": "Finally, the surge cost estimate the finance side asked about should go out with the capacity review invite, so the meeting starts with the number already on the table."}},
+        {"turn": {"role": "assistant", "content": "Attached the cost estimate to the capacity review invite with a one-paragraph summary of where the spend concentrated during the surge."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "spool size cap per node", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How large may the on-disk spool grow per node?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-surge-review", "content": "post-surge capacity review is with the platform team; bring the ingest peak numbers and the spool growth graph", "kind": "semantic"},
+        {"id": "rec-capture-quota", "content": "lab box capture quota was lowered after the surge filled the volume; captures now refuse before the disk fills", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-retro-scribe", "content": "surge retro scribe is from the platform side; notes go in the shared retro folder", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/spool/spool.go",
+          "content": "package spool\n\n// spoolMaxBytes is the per-node ceiling on total spool size. When the\n// ceiling is reached, ingest applies backpressure rather than letting\n// the spool eat the volume; the ceiling was raised during the ingest\n// surge work so weekend exporter outages no longer force early\n// retention sweeps.\nconst spoolMaxBytes = 512 << 20\n\n// hasRoom reports whether one more batch fits under the ceiling.\nfunc (s *Spool) hasRoom(batch int64) bool {\n\treturn s.size+batch <= spoolMaxBytes\n}\n",
+          "language": "go",
+          "abstract": "Spool sizing: the on-disk spool is capped at 128 MiB per node, with backpressure at the ceiling.",
+          "overview": "spool.go enforces the per-node spool ceiling and applies ingest backpressure when the spool reaches it. Segment rollover and the flush path live in the sibling files; this file owns the cap constant itself."
+        },
+        {
+          "path": "internal/spool/segment.go",
+          "content": "package spool\n\nimport (\n\t\"fmt\"\n\t\"os\"\n\t\"path/filepath\"\n)\n\n// segment is one append-only spool file. A segment rolls when it fills;\n// rolled segments are immutable and are what the retention sweeper and\n// the replay path both consume.\ntype segment struct {\n\tdir     string\n\tindex   uint64\n\tf       *os.File\n\twritten int64\n}\n\n// openSegment creates the next segment file in dir. Naming is strictly\n// sequential so replay can walk segments without a manifest.\nfunc openSegment(dir string, index uint64) (*segment, error) {\n\tname := filepath.Join(dir, fmt.Sprintf(\"seg-%08d.dwspool\", index))\n\tf, err := os.OpenFile(name, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"spool: open segment: %w\", err)\n\t}\n\treturn &segment{dir: dir, index: index, f: f}, nil\n}\n\n// write appends one drained batch. The caller holds the spool lock, so\n// segments never see interleaved batches. Fsync policy is deliberate:\n// we sync on rollover, not on every batch, trading a bounded window of\n// loss for steady ingest throughput on spinning disks.\nfunc (g *segment) write(batch []byte) error {\n\tn, err := g.f.Write(batch)\n\tg.written += int64(n)\n\tif err != nil {\n\t\treturn fmt.Errorf(\"spool: segment write: %w\", err)\n\t}\n\treturn nil\n}\n",
+          "language": "go",
+          "abstract": "Append-only spool segments: sequential naming, locked writes, fsync on rollover.",
+          "overview": "segment.go implements the append-only segment files the spool drains into, with sequential naming for manifest-free replay and the sync-on-rollover fsync policy."
+        },
+        {
+          "path": "docs/spool.md",
+          "content": "# driftwatch spool\n\nThe spool is the durable buffer between ingest and the exporter. Every\naccepted batch lands in the spool before the ingest response is sent,\nso an accepted write survives a crash or an exporter outage.\n\n## Layout\n\nSpool data lives under the data directory as numbered segment files.\nSegments are append-only; a segment that has rolled is immutable and\nis eligible for retention sweeps once exported.\n\n## Sizing and backpressure\n\nThe spool has a per-node size ceiling; at the ceiling, ingest applies\nbackpressure instead of eating the volume. Size the underlying disk\nwith headroom above the ceiling so segment rollover and replay\nworking space never compete with live ingest for the last bytes.\n",
+          "language": "markdown",
+          "abstract": "Spool guide: durable buffer role, segment layout, ceiling and backpressure.",
+          "overview": "spool.md explains the spool's durable-buffer role, the numbered segment layout, and the per-node ceiling with ingest backpressure, plus disk headroom guidance."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "spoolMaxBytes = 512 << 20"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "capped at 128 MiB"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "internal/spool/spool.go now sets spoolMaxBytes = 512 << 20 (512 MiB per node), raised during the ingest surge work; the stored source summary still claims a 128 MiB cap and is stale.",
+      "golden": {
+        "final_answer_criteria": "States the per-node spool ceiling is 512 MiB, per spoolMaxBytes = 512 << 20 in the retrieved source body. An answer of 128 MiB repeating the stale summary line scores 0."
+      }
+    },
+    {
+      "id": "stale-fanout-workers",
+      "stratum": "stale_vs_fresh",
+      "answer_home": "rag",
+      "scenario_family": "fanout-worker-staleness",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Post-consolidation cleanup list. The pager consolidation left duplicate escalation policies in the paging service; can you merge them down to the one canonical policy before someone edits the wrong copy?"}},
+        {"turn": {"role": "assistant", "content": "Merged the duplicates into the canonical policy and locked the retired copies read-only with a pointer to the survivor."}},
+        {"turn": {"role": "user", "content": "The consolidation dashboard can be retired too, but archive the burn-down panel somewhere first; it is a nice record of the migration actually finishing."}},
+        {"turn": {"role": "assistant", "content": "Archived the burn-down panel into the migrations folder and retired the rest of the consolidation dashboard."}},
+        {"turn": {"role": "user", "content": "Can you also sweep the alert annotations for links to the old paging service? Anything that still deep-links there will break when it is decommissioned next month."}},
+        {"turn": {"role": "assistant", "content": "Swept the annotations and rewrote the deep links to the new paging service; the decommission checklist now shows zero inbound references from alerting."}},
+        {"turn": {"role": "user", "content": "The oncall shadow program needs its schedule refreshed as well; two of the listed shadows rotated teams during the consolidation."}},
+        {"turn": {"role": "assistant", "content": "Refreshed the shadow schedule with two replacements and confirmed both have paging access in the new service."}},
+        {"turn": {"role": "user", "content": "Finally, make sure the consolidation retro captures the fanout sizing discussion; people keep relitigating it from memory and the numbers deserve a written home."}},
+        {"turn": {"role": "assistant", "content": "Added a fanout sizing section to the retro doc summarizing the discussion and linking the load test results that settled it."}},
+        {"turn": {"role": "user", "content": "A few stragglers too. The paging test rotation that ran during the consolidation is still sending its weekly synthetic page to the old service; retarget it before someone treats a synthetic as real."}},
+        {"turn": {"role": "assistant", "content": "Retargeted the synthetic page at the new service and labelled it clearly as synthetic in the alert body so a half-awake responder cannot mistake it."}},
+        {"turn": {"role": "user", "content": "The escalation training doc for new oncallers predates the consolidation as well; it walks through screenshots of the old service and will just confuse the next cohort."}},
+        {"turn": {"role": "assistant", "content": "Rewrote the training doc against the new service with fresh screenshots, and the next cohort's session is already booked to use it."}},
+        {"turn": {"role": "user", "content": "And confirm the old paging service's data export completed before the decommission date; the compliance folks want the acknowledgement trail preserved."}},
+        {"turn": {"role": "assistant", "content": "The export completed and the acknowledgement trail is archived in the compliance bucket with a retention hold; I sent the confirmation to the compliance folks."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "alert fanout worker pool", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How many delivery workers does the alert fanout run right now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-fanout-note", "content": "alert fanout still runs 4 delivery workers; hold at four until the pager consolidation soak finishes", "kind": "semantic"},
+        {"id": "rec-pager-consol", "content": "pager consolidation is wrapping up; the retro doc collects the sizing discussions", "kind": "semantic"},
+        {"id": "rec-shadow-rota", "content": "oncall shadow schedule is refreshed after every team rotation; two shadows moved during the consolidation", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/alert/fanout.go",
+          "content": "package alert\n\nimport \"sync\"\n\n// fanoutWorkers is the delivery pool size. Widened after the pager\n// consolidation load tests: the old four-worker pool saturated when\n// every team's paging moved onto this daemon, and the soak confirmed\n// the wider pool holds the consolidated load.\nconst fanoutWorkers = 12\n\n// Fanout drains fired alerts to the notifier through the worker pool.\ntype Fanout struct {\n\tq  chan Alert\n\twg sync.WaitGroup\n}\n\nfunc (f *Fanout) Run() {\n\tfor i := 0; i < fanoutWorkers; i++ {\n\t\tf.wg.Add(1)\n\t\tgo f.worker()\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Alert delivery fanout pool sizing and worker lifecycle.",
+          "overview": "fanout.go sizes the alert delivery worker pool and owns worker startup and shutdown draining; the pool size constant lives here beside the drain loop it feeds."
+        },
+        {
+          "path": "internal/alert/queue.go",
+          "content": "package alert\n\nimport (\n\t\"sync\"\n\t\"time\"\n)\n\n// retryQueue parks notifications that failed to deliver. Entries are\n// ordered by next-attempt time; the drain loop pops due entries and\n// re-parks failures with a longer backoff. The queue is bounded: when\n// full, the oldest parked entry is dropped and counted, because an\n// unbounded queue during a long chat outage would eat the heap.\ntype retryQueue struct {\n\tmu      sync.Mutex\n\tentries []parked\n\tmax     int\n}\n\ntype parked struct {\n\tAlert Alert\n\tnext  time.Time\n\ttries int\n}\n\nfunc (q *retryQueue) park(a Alert, now time.Time) {\n\tq.mu.Lock()\n\tdefer q.mu.Unlock()\n\tif len(q.entries) >= q.max {\n\t\tq.entries = q.entries[1:]\n\t\tq.metricsDropped.Inc()\n\t}\n\tq.entries = append(q.entries, parked{Alert: a, next: now.Add(q.backoff(0)), tries: 1})\n}\n\nfunc (q *retryQueue) next(now time.Time) (parked, bool) {\n\tq.mu.Lock()\n\tdefer q.mu.Unlock()\n\tfor i, e := range q.entries {\n\t\tif e.next.Before(now) {\n\t\t\tq.entries = append(q.entries[:i], q.entries[i+1:]...)\n\t\t\treturn e, true\n\t\t}\n\t}\n\treturn parked{}, false\n}\n",
+          "language": "go",
+          "abstract": "Bounded retry queue for failed alert deliveries with backoff ordering.",
+          "overview": "queue.go parks failed deliveries in a bounded, next-attempt-ordered queue: due entries pop for retry, failures re-park with longer backoff, and overflow drops the oldest entry with a counter."
+        },
+        {
+          "path": "docs/alerting.md",
+          "content": "# driftwatch alerting\n\nAlert rules live in the rules directory and hot-reload on change.\nTransitions out of pending are what page; the delivery path from a\nfiring rule to a human runs through the fanout pool and the notifier.\n\n## Delivery\n\nFired alerts fan out through a fixed worker pool to the notifier.\nPool sizing is a code constant tuned against load tests, not runtime\nconfig: delivery capacity is a property the team reasons about at\nreview time, and silent config drift here would be a paging outage\nwaiting to happen.\n\n## Failure handling\n\nDelivery failures park in a bounded retry queue that drains\nautomatically with backoff. Watch the dropped-entry counter after any\nlong chat outage; a nonzero value means the outage outlived the\nqueue's memory.\n",
+          "language": "markdown",
+          "abstract": "Alerting delivery guide: fanout pool, notifier path, bounded retries.",
+          "overview": "alerting.md describes the delivery path through the fixed fanout pool and notifier, why pool sizing is a reviewed code constant rather than config, and the bounded retry queue's failure semantics."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "fanoutWorkers = 12"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "fanoutWorkers = 12"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "internal/alert/fanout.go sets fanoutWorkers = 12, widened after the pager consolidation load tests; the memory note claiming the fanout still runs 4 workers predates the widening and is stale.",
+      "golden": {
+        "final_answer_criteria": "States the alert fanout runs 12 delivery workers, per fanoutWorkers = 12 in the retrieved source body. An answer of 4 workers following the stale memory note scores 0."
+      }
+    },
+    {
+      "id": "chain-retain-sweep",
+      "stratum": "chain_retention",
+      "answer_home": "rag",
+      "scenario_family": "retention-sweep-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "I am writing the capacity note for the retention tier review and I want the sweep mechanics fresh before I paste the overnight logs in here."}},
+        {"turn": {"role": "assistant", "content": "Makes sense. Pull the sweeper source first, then paste the overnight run and we can sanity-check the pass timings against it."}},
+        {"tool_call": {"call_id": "c1", "tool": "retrieve", "args": {"query": "retention sweep cadence", "k": 3}}},
+        {"tool_call": {"call_id": "c2", "tool": "fixture_echo", "args": {"content": "one overnight sweep pass from the lab box, pasted verbatim:\n2025-07-26T00:12:03Z sweep pass begin tier=warm segments=141\n2025-07-26T00:12:07Z tier=warm shard=00 scanned=24160 removed=655 kept=23505\n2025-07-26T00:12:11Z tier=warm shard=01 scanned=24051 removed=629 kept=23422\n2025-07-26T00:12:11Z tier=warm done scanned=48211 removed=1284 kept=46927 dur=8.4s\n2025-07-26T00:12:11Z sweep pass begin tier=cold segments=87\n2025-07-26T00:12:20Z tier=cold done scanned=30556 removed=922 kept=29634 dur=9.1s iocap=engaged\n2025-07-26T00:12:20Z sweep pass end freed_mb=2411 deferrals=0 watermark_holds=0\nnote: single clean pass, io cap engaged on the cold volume, no deferrals and no watermark holds."}}},
+        {"tool_call": {"call_id": "c3", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "How often does the retention sweeper make a pass?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-tier-review", "content": "retention tier review is scheduled with the platform team; capacity note goes out beforehand", "kind": "semantic"},
+        {"id": "rec-cold-tier", "content": "cold tier lives on the slow volume; sweeps there are io-capped so live ingest never contends", "kind": "semantic"},
+        {"id": "rec-lab-logs", "content": "overnight lab logs rotate weekly; pull them before Friday or they are gone", "kind": "working", "workspace_id": "ws-driftwatch"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/retain/sweeper.go",
+          "content": "package retain\n\nimport \"time\"\n\n// sweepEvery is the pass cadence for the retention sweeper. Passes\n// walk every tier; a pass that would overlap a still-running one is\n// deferred rather than stacked, so a slow cold-tier volume cannot\n// pile up concurrent sweeps.\nconst sweepEvery = 6 * time.Hour\n\n// loop runs sweep passes on the fixed cadence until ctx ends.\nfunc (s *Sweeper) loop() {\n\tt := time.NewTicker(sweepEvery)\n\tdefer t.Stop()\n\tfor range t.C {\n\t\ts.tryPass()\n\t}\n}\n",
+          "language": "go",
+          "abstract": "Retention sweeper cadence and the non-stacking pass loop.",
+          "overview": "sweeper.go owns the fixed sweep cadence and the pass loop that defers instead of stacking when a previous pass is still running on a slow volume."
+        },
+        {
+          "path": "internal/retain/tiers.go",
+          "content": "package retain\n\nimport (\n\t\"fmt\"\n\t\"time\"\n)\n\n// tier describes one retention class. Segments age from warm to cold\n// to deleted; each transition is driven by the segment's age against\n// the tier's keep duration, and the durations come from deployment\n// config because retention is a policy decision, not a code default.\ntype tier struct {\n\tname string\n\tkeep time.Duration\n\tdir  string\n}\n\n// eligible returns the segments in t older than the keep duration.\n// Only rolled, exported segments are ever eligible: the sweeper must\n// never race the exporter, so eligibility checks the export watermark\n// before age.\nfunc (t *tier) eligible(now time.Time, watermark uint64) ([]segRef, error) {\n\trefs, err := listSegments(t.dir)\n\tif err != nil {\n\t\treturn nil, fmt.Errorf(\"retain: list %s tier: %w\", t.name, err)\n\t}\n\tout := refs[:0]\n\tfor _, r := range refs {\n\t\tif r.index > watermark {\n\t\t\tcontinue\n\t\t}\n\t\tif now.Sub(r.rolledAt) > t.keep {\n\t\t\tout = append(out, r)\n\t\t}\n\t}\n\treturn out, nil\n}\n\n// demote moves an eligible warm segment to the cold tier directory.\n// Moves are rename-based and idempotent: a crash between rename and\n// bookkeeping is healed on the next pass, which re-lists both tiers.\nfunc (t *tier) demote(r segRef, cold *tier) error {\n\treturn renameSegment(r, t.dir, cold.dir)\n}\n",
+          "language": "go",
+          "abstract": "Retention tiers: config-driven keep durations, export-watermark safety, idempotent demotion.",
+          "overview": "tiers.go models warm and cold retention classes with config-supplied keep durations, gates eligibility on the export watermark so sweeps never race the exporter, and demotes segments with idempotent renames."
+        },
+        {
+          "path": "docs/retention.md",
+          "content": "# driftwatch retention\n\nRetention manages rolled spool segments across the warm and cold\ntiers and deletes what has aged out of both. Keep durations are\ndeployment config; the sweep machinery and its pacing are code.\n\n## Sweeps\n\nThe sweeper makes regular passes over every tier. Passes are spaced\nso a slow volume cannot pile up concurrent sweeps: a pass that would\noverlap a still-running one is deferred, and the deferral shows up in\nthe pass logs rather than in a stuck queue.\n\n## Safety\n\nA segment is only ever swept after the exporter's watermark has\npassed it, so retention can never delete data the warehouse has not\nseen. If sweeps and exports fight over io, cap the sweep io on the\ncold volume rather than widening the sweep spacing.\n",
+          "language": "markdown",
+          "abstract": "Retention guide: tiers, deferred sweep pacing, export-watermark safety.",
+          "overview": "retention.md explains the warm and cold tier model with config-driven keep durations, deferred (never stacked) sweep passes, and the export watermark rule that keeps deletion behind the warehouse."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "rag", "literal": "sweepEvery = 6 * time.Hour"}
+      ],
+      "pressure_target": {"domain": "rag", "literal": "sweepEvery = 6 * time.Hour"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "internal/retain/sweeper.go schedules retention passes with sweepEvery = 6 * time.Hour, and a pass that would overlap a still-running one defers rather than stacking.",
+      "golden": {
+        "final_answer_criteria": "States the retention sweeper passes every 6 hours, per sweepEvery = 6 * time.Hour in the retrieved source body. The pasted log shows only a single pass and cannot yield the cadence; answers without the 6-hour figure score 0."
+      }
+    },
+    {
+      "id": "chain-retain-quota",
+      "stratum": "chain_retention",
+      "answer_home": "memory",
+      "scenario_family": "tenant-quota-chain",
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Prepping the tenant capacity summary for tomorrow. Check your notes first, then pull the limiter code so the summary quotes mechanics, not folklore."}},
+        {"turn": {"role": "assistant", "content": "Will do; notes first, then the limiter source, and I will flag anything where the two disagree."}},
+        {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
+        {"turn": {"role": "user", "content": "While you have it open: the burst review from last quarter never got its follow-up scheduled, and the tenants file lint we discussed is still only half-rolled-out. Add both to the summary's open-items section so they stop slipping."}},
+        {"turn": {"role": "assistant", "content": "Added both to the open items with owners; the lint rollout has a target sprint now and the burst follow-up is on the review calendar."}},
+        {"turn": {"role": "user", "content": "Good. One more for the open items: the standby node's config drift check has been red for two days and nobody claimed it."}},
+        {"turn": {"role": "assistant", "content": "Claimed it myself, resynced the standby node's config, and the drift check is green again; I noted the root cause in the open items too."}},
+        {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "tenant ingest rate limits", "k": 3}}},
+        {"turn": {"role": "user", "content": "What ingest rate is the atlas tenant allowed now?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-atlas-quota", "content": "atlas tenant quota lifted to 40 rps after their batching fix", "kind": "semantic"},
+        {"id": "rec-burst-review", "content": "burst multiplier review from last quarter still needs a follow-up session; the sheet has the proposed per-tier values and the load test links", "kind": "semantic"},
+        {"id": "rec-ingest-drill", "content": "ingest failover drill notes live in the drills folder; the last drill exposed a slow tenants-file reload on the standby node and the fix is verified", "kind": "semantic"},
+        {"id": "rec-lint-rollout", "content": "tenants file lint is live in CI for the main repo but the infra repo still bypasses it; rollout finishes when both repos gate on it", "kind": "semantic"},
+        {"id": "rec-oncall-cycle", "content": "ingest oncall cycle rotates monthly; the capacity summary goes to whoever holds the pager next", "kind": "working", "workspace_id": "ws-driftwatch"},
+        {"id": "rec-standby-node", "content": "standby ingest node runs one release behind on purpose; promote it only after the primary has soaked a release for a week", "kind": "semantic"},
+        {"id": "rec-tenant-tags", "content": "tenant stanzas carry team and cost-center tags now; the capacity summary groups by team tag since the reorg", "kind": "semantic"},
+        {"id": "rec-warehouse-sync", "content": "warehouse team gets the capacity summary too; their loader parallelism assumptions depend on our tenant mix staying roughly stable", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "internal/ingest/limiter.go",
+          "content": "package ingest\n\n// Per-tenant rates come exclusively from the tenants file; the code\n// carries only the conservative default for tenants the file does not\n// name. Rate changes are config deploys, never rebuilds.\nfunc (l *tenantLimiter) rateFor(tenant string) float64 {\n\tif r, ok := l.rates[tenant]; ok {\n\t\treturn r\n\t}\n\treturn l.defaultRate\n}\n",
+          "language": "go",
+          "abstract": "Per-tenant rate lookup backed by the tenants file, with a conservative default.",
+          "overview": "limiter.go resolves each tenant's ingest rate from the hot-reloaded tenants file and falls back to the conservative built-in default for unnamed tenants."
+        },
+        {
+          "path": "internal/ingest/admission.go",
+          "content": "package ingest\n\nimport (\n\t\"context\"\n\t\"fmt\"\n)\n\n// admit is the single admission gate every accepted batch passes:\n// authentication, then the per-tenant limiter, then spool room. The\n// ordering is deliberate: reject the unauthenticated cheaply, then\n// the over-quota, and only then consult the spool, so backpressure\n// from a full spool is the last resort rather than the first signal.\nfunc (g *Gateway) admit(ctx context.Context, b Batch) error {\n\tif !g.authenticate(b.Token) {\n\t\tg.metrics.authRejects.Inc()\n\t\treturn errUnauthenticated\n\t}\n\tif !g.limiter.allow(b.Tenant, g.clock.Now()) {\n\t\tg.metrics.quotaRejects.Inc()\n\t\treturn fmt.Errorf(\"ingest: tenant %s over quota\", b.Tenant)\n\t}\n\tif !g.spool.hasRoom(b.Size()) {\n\t\tg.metrics.backpressure.Inc()\n\t\treturn errSpoolFull\n\t}\n\treturn g.spool.accept(ctx, b)\n}\n\n// Rejections are counted per cause. The quota counter is per-tenant\n// labelled so a single noisy tenant is visible without log diving,\n// and the backpressure counter is global because a full spool is a\n// node condition, not a tenant one.\n",
+          "language": "go",
+          "abstract": "Ingest admission gate: auth, per-tenant quota, then spool backpressure.",
+          "overview": "admission.go orders the admission checks so unauthenticated batches reject cheapest, over-quota tenants next, and spool backpressure last, with per-cause rejection counters."
+        },
+        {
+          "path": "docs/tenants.md",
+          "content": "# driftwatch tenants\n\nEvery producer maps to a tenant, and every tenant maps to a stanza in\nthe tenants file: an ingest rate, a burst allowance, and the team and\ncost-center tags the capacity reports group by.\n\n## Changing a rate\n\nRate changes are config deploys. Edit the stanza, let the lint pass,\nand the hot reload applies it without a restart; the limiter picks up\nthe new rate on its next refill tick. Keep the change and its\nrationale in the commit message, because the capacity summary links\nstanza history when quotas are questioned.\n\n## Defaults\n\nTenants the file does not name get the conservative built-in default.\nThat default is for evaluation traffic only; production tenants get\nexplicit stanzas, reviewed with the team tag owner.\n",
+          "language": "markdown",
+          "abstract": "Tenants guide: stanza layout, config-deploy rate changes, default policy.",
+          "overview": "tenants.md maps producers to tenant stanzas with rates, bursts, and reporting tags, explains hot-reloaded config-deploy rate changes, and restricts the built-in default to evaluation traffic."
+        }
+      ],
+      "required_evidence": [
+        {"domain": "memory", "literal": "lifted to 40 rps"}
+      ],
+      "pressure_target": {"domain": "memory", "literal": "lifted to 40 rps"},
+      "required_domains": ["conversation", "memory", "rag"],
+      "topline_facts": "The stored memory note records the atlas tenant quota lifted to 40 rps after their batching fix; the limiter code itself only resolves rates from the tenants file.",
+      "golden": {
+        "final_answer_criteria": "States the atlas tenant ingest quota is now 40 rps, per the stored memory note. Answers that only describe the tenants-file mechanism without the 40 rps figure score 0."
+      }
+    },
+    {
+      "id": "ctl-notes-recap",
+      "stratum": "conversation_only",
+      "answer_home": "conversation",
+      "control": true,
+      "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+      "events": [
+        {"turn": {"role": "user", "content": "Quick housekeeping thread. The standup notes template has grown three redundant sections; let's cut it back to blockers, decisions, and follow-ups."}},
+        {"turn": {"role": "assistant", "content": "Agreed. I trimmed the template to those three sections and archived the old one for reference."}},
+        {"turn": {"role": "user", "content": "Also let's keep the decisions section to one line per decision with a link, instead of the paragraph-style entries people have been writing."}},
+        {"turn": {"role": "assistant", "content": "Done. The template now shows a one-line example with a link placeholder, and I noted the style in the header comment."}},
+        {"turn": {"role": "user", "content": "Good. Post the updated template in the team room when you get a chance."}},
+        {"turn": {"role": "assistant", "content": "Posted it, and I pinned it so it does not scroll away before Monday."}},
+        {"tool_call": {"call_id": "c1", "tool": "fixture_echo", "args": {"content": "template lint: three sections found, header comment present, pinned copy matches repo copy."}}},
+        {"turn": {"role": "user", "content": "Can you recap what we changed about the standup notes template?"}}
+      ],
+      "memory_records": [
+        {"id": "rec-room-pins", "content": "team room pins are curated monthly; stale pins get archived to the notes folder", "kind": "semantic"}
+      ],
+      "rag_sources": [
+        {
+          "path": "docs/team-notes.md",
+          "content": "# team notes\n\nShared conventions for standup and planning notes live here. Keep\nentries short and link out to trackers rather than duplicating them.\n",
+          "language": "markdown",
+          "abstract": "",
+          "overview": ""
+        }
+      ],
+      "required_domains": ["conversation", "memory", "rag"],
+      "answer_turn_index": 0,
+      "golden": {
+        "final_answer_criteria": "Control pair: the two arms are identical by construction. Any coherent recap of the template changes (trimmed to blockers, decisions, follow-ups; one-line decisions with links; posted and pinned) is acceptable; scores here measure decode and labeling noise, not assembly."
+      }
+    }
+  ]
+}

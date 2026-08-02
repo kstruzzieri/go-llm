@@ -1,0 +1,65 @@
+{
+  "id": "join-alert-debounce-legacy",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-debounce-override · semantic · 2025-07-27 · after the flap storm ops set the disk-pressure rule debounce override to 150 seconds; revisit once the noisy rack is drained\nrec-rule-review · semantic · 2025-07-27 · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\nrec-silence-window · working · 2025-07-27 · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "What is the code default alert debounce, and what override did ops record for the disk-pressure rule?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "BOTH halves required: the code default debounce is 90 seconds (alertDebounce, from retrieved code), AND ops recorded a disk-pressure override of 150 seconds (from memory). Missing either half caps the score at 0.5."
+  },
+  "assembly_eval": {
+    "pair_id": "join-alert-debounce",
+    "mode": "legacy",
+    "candidate_ids": [
+      "6b77975c3ad47a9a16e07dcfe41522ba02eb3f1c853a10e1408152864c5fa54d",
+      "db7fbd4311da6f613c518e7c5e73ff45527f57bb7fd60c8a43d63f42c7f93118",
+      "e59b6dd254c43c58b5596a3273176c6e93f06088e0f7f5ce6d88e733dc21aacd",
+      "rec-debounce-override",
+      "rec-rule-review",
+      "rec-silence-window"
+    ],
+    "estimated_prompt_tokens": 188,
+    "state_digest": "9df56cc8b10da676807e6139a6077e74805073a25445c7bdcf37e162e7afd895",
+    "subjects": [
+      "(c1|rag|internal/alert/rules.go)",
+      "(c1|rag|internal/alert/notify.go)",
+      "(c1|rag|docs/alerting.md)",
+      "(c2|memory|rec-debounce-override)",
+      "(c2|memory|rec-rule-review)",
+      "(c2|memory|rec-silence-window)"
+    ],
+    "stratum": "cross_domain_join",
+    "answer_home": "join",
+    "scenario_family": "alert-debounce-override",
+    "budget": 1048,
+    "raw_state_tokens": 1747,
+    "pressure_level": "ok",
+    "shed_messages": 12,
+    "shed_bytes": 5742
+  }
+}

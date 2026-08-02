@@ -1,0 +1,123 @@
+{
+  "id": "conv-pager-channel-mid-mixed",
+  "source": "assembly-corpus-mixed",
+  "captured_at": "0001-01-01T00:00:00Z",
+  "system": "You are the driftwatch assistant. driftwatch is a self-hosted telemetry ingest and alerting daemon. Answer using only the provided conversation, memory records, and retrieved context.",
+  "tools": null,
+  "turns": [
+    {
+      "role": "user",
+      "content": "Morning. First order of business: the e2e suite flaked twice overnight on the segment rollover test. Can we quarantine it until someone has time to make the temp-dir handling hermetic? It keeps masking real failures in the merge queue."
+    },
+    {
+      "role": "assistant",
+      "content": "Quarantined it and filed a ticket with the two failing runs linked. The rest of the suite is green, so the merge queue is unblocked."
+    },
+    {
+      "role": "user",
+      "content": "Next: certificate renewal for the ingest edge is due soon and last time it was a manual scramble. Can we put the renewal on the automation calendar with a dry-run a week ahead so we are not doing it live again?"
+    },
+    {
+      "role": "assistant",
+      "content": "Added the renewal with a dry-run reminder a week ahead, and I linked the runbook section that lists which services need a bounce after the swap."
+    },
+    {
+      "role": "user",
+      "content": "Now the actual decision I wanted to make today. Paging is a mess: half the escalations land in the general ops room and drown. Let's route page escalations to #dw-crow-watch going forward, keep the general room for chatter, and update the oncall doc to match."
+    },
+    {
+      "role": "assistant",
+      "content": "Done. I updated the oncall doc so escalations point at that channel, and I left the general room wiring in place for non-paging chatter only."
+    },
+    {
+      "role": "user",
+      "content": "Also the benchmark rig numbers have been noisy since the kernel update on the lab box. Can you rerun last week's baseline so we are not comparing against a moving target?"
+    },
+    {
+      "role": "assistant",
+      "content": "Rerunning the baseline now with the same pinned inputs; I will attach the fresh numbers to the perf tracking issue when it finishes."
+    },
+    {
+      "role": "user",
+      "content": "One more: the mirror sync cron for the docs site has been silently skipping weekends because of the maintenance window overlap. Can you shift it an hour so it stops colliding?"
+    },
+    {
+      "role": "assistant",
+      "content": "Shifted the mirror sync out of the maintenance window and added a failure notification so a skipped run is visible instead of silent."
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c1",
+          "name": "retrieve",
+          "arguments": {
+            "query": "alert escalation channel config",
+            "k": 3
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "### source: \"internal/alert/notify.go\"\npurpose: Chat webhook notifier; destination channel supplied by config.\noverview: notify.go posts fired alerts to the configured chat webhook. The destination channel is injected from deployment config, so routing decisions live outside the code.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n--- source: \"internal/alert/notify.go\" (lines 1-15, similarity: 1.00) ---\n1| package alert\n2| \n3| import \"context\"\n4| \n5| // Notifier posts fired alerts to the configured chat webhook. The\n6| // destination channel comes from deployment config; this package does\n7| // not hard-code one.\n8| type Notifier struct {\n9| \twebhook string\n10| \tchannel string\n11| }\n12| \n13| func (n *Notifier) Post(ctx context.Context, a Alert) error {\n14| \treturn n.post(ctx, n.channel, renderAlert(a))\n15| }\n\n### source: \"internal/alert/rules.go\"\npurpose: Rule loading and the per-rule evaluation loop feeding the pending tracker.\nlanguage: go\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n\n### source: \"docs/alerting.md\"\npurpose: Operator guide to alerting: rule layout, webhook routing, review hygiene.\noverview: alerting.md covers rule structure and hot reload, chat webhook routing as deployment config, evaluation-loop hygiene, and the fortnightly review process for rule changes.\nlanguage: markdown\nindexed: 2025-07-27T00:00:00Z\nsummary: assembly-fixture @ 2025-07-27T00:00:00Z\n",
+      "tool_call_id": "c1",
+      "name": "retrieve"
+    },
+    {
+      "role": "assistant",
+      "tool_calls": [
+        {
+          "id": "c2",
+          "name": "agent_memory_search",
+          "arguments": {
+            "query": ""
+          }
+        }
+      ]
+    },
+    {
+      "role": "tool",
+      "content": "rec-notify-token · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · notifier webhook token is rotated quarterly by the platform team; we only consume it from the secret store\nrec-rule-review · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · alert rule review happens in the fortnightly ops sync; proposals go in the shared sheet first\nrec-silence-window · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src: · maintenance silences are pre-declared in the ops calendar so paging stays quiet during planned work",
+      "tool_call_id": "c2",
+      "name": "agent_memory_search"
+    },
+    {
+      "role": "user",
+      "content": "Which channel did we pick for page escalations?"
+    }
+  ],
+  "golden": {
+    "tool_calls": null,
+    "final_answer_criteria": "Names the #dw-crow-watch channel as the destination for page escalations. Answers naming the general ops room or claiming the channel is only set in deployment config score 0."
+  },
+  "assembly_eval": {
+    "pair_id": "conv-pager-channel-mid",
+    "mode": "mixed",
+    "candidate_ids": [
+      "03dd888b2a77c73846317cc98b403e9e2cb33986912e98f16a2747d0d63b9a79",
+      "bab4d981833ad2176633305d3111c1e071e6b06744c473d6a546b815f4f68d62",
+      "f2819da12f2f10897c00c2d1c8e5af1fbaa0c6464678d6b166fe40dd4f22856d",
+      "rec-notify-token",
+      "rec-rule-review",
+      "rec-silence-window"
+    ],
+    "estimated_prompt_tokens": 1019,
+    "state_digest": "710b14c0cfd5c80244b02cc2fad22ef81057f451ce958be5701ddfb04a043fb8",
+    "subjects": [
+      "(c1|rag|internal/alert/notify.go)",
+      "(c1|rag|internal/alert/rules.go)",
+      "(c1|rag|docs/alerting.md)",
+      "(c2|memory|rec-notify-token)",
+      "(c2|memory|rec-rule-review)",
+      "(c2|memory|rec-silence-window)"
+    ],
+    "stratum": "conversation_only",
+    "answer_home": "conversation",
+    "scenario_family": "pager-escalation-channel",
+    "budget": 1086,
+    "raw_state_tokens": 1810,
+    "pressure_level": "critical",
+    "shed_bytes": 2684
+  }
+}
