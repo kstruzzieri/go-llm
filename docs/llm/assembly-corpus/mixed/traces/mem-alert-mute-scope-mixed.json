@@ -51,7 +51,7 @@
     },
     {
       "role": "tool",
-      "content": "rec-digest-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-kernel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-mute-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · maintenance mutes cover dashboard alerts only; pager escalations keep firing\nrec-threshold-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
+      "content": "rec-digest-notes · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:\nrec-lab-kernel · working · created:2025-07-27 · updated:2025-07-27 · scope:session · ns: · src:\nrec-mute-scope · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src: · a maintenance mute suppresses the dashboard destination only; digest and pager keep flowing\nrec-threshold-history · semantic · created:2025-07-27 · updated:2025-07-27 · scope:global · ns: · src:",
       "tool_call_id": "c1",
       "name": "agent_memory_search"
     },
@@ -76,12 +76,12 @@
     },
     {
       "role": "user",
-      "content": "While a maintenance mute is active, do pager escalations still fire?"
+      "content": "Which alert destinations does a maintenance mute suppress?"
     }
   ],
   "golden": {
     "tool_calls": null,
-    "final_answer_criteria": "States that pager escalations still fire while a maintenance mute is active (mutes cover dashboard alerts only). An answer claiming a mute silences the pager, as pre-1.0 behaviour did, scores 0. Answers that only describe per-destination gating without committing score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+    "final_answer_criteria": "States a maintenance mute suppresses the dashboard destination only, with the fleet digest and pager destinations unaffected. Answering that the pager (or all destinations) is silenced, as pre-1.0 behaviour did, scores 0. Answers that only describe per-destination gating without naming the suppressed set score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
   },
   "assembly_eval": {
     "pair_id": "mem-alert-mute-scope",
@@ -95,8 +95,8 @@
       "rec-mute-scope",
       "rec-threshold-history"
     ],
-    "estimated_prompt_tokens": 954,
-    "state_digest": "340bed349ab8a9b0f9259a7aa7a9c6cce9d6a55c8a2474c1b9deffaed1007bba",
+    "estimated_prompt_tokens": 956,
+    "state_digest": "7c3cc068ff6f451872174fd6109de17b5c74f71a4d3217bf160a31b45163f90c",
     "subjects": [
       "(c1|memory|rec-digest-notes)",
       "(c1|memory|rec-lab-kernel)",
@@ -109,8 +109,8 @@
     "stratum": "memory_only",
     "answer_home": "memory",
     "scenario_family": "alert-mute-mem",
-    "budget": 1022,
-    "raw_state_tokens": 1703,
+    "budget": 1023,
+    "raw_state_tokens": 1705,
     "pressure_level": "critical",
     "shed_bytes": 2578
   }

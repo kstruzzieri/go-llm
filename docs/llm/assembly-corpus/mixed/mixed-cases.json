@@ -1314,10 +1314,10 @@
         {"turn": {"role": "assistant", "content": "Re-derived the disk-pressure threshold against the corrected accounting so the effective headroom matches what the review originally signed off on; the change is staged with the threshold history linked for the next alerting review."}},
         {"tool_call": {"call_id": "c1", "tool": "agent_memory_search", "args": {"query": ""}}},
         {"tool_call": {"call_id": "c2", "tool": "retrieve", "args": {"query": "maintenance mute pager escalation scope", "k": 3}}},
-        {"turn": {"role": "user", "content": "While a maintenance mute is active, do pager escalations still fire?"}}
+        {"turn": {"role": "user", "content": "Which alert destinations does a maintenance mute suppress?"}}
       ],
       "memory_records": [
-        {"id": "rec-mute-scope", "content": "maintenance mutes cover dashboard alerts only; pager escalations keep firing", "kind": "semantic"},
+        {"id": "rec-mute-scope", "content": "a maintenance mute suppresses the dashboard destination only; digest and pager keep flowing", "kind": "semantic"},
         {"id": "rec-threshold-history", "content": "alert threshold changes stage through the alerting review with their derivation linked; unexplained thresholds get reverted on sight", "kind": "semantic"},
         {"id": "rec-lab-kernel", "content": "lab collector runs the new kernel with corrected free-space accounting; prod rollout is gated on the calculation fix landing first", "kind": "working", "workspace_id": "ws-driftwatch"},
         {"id": "rec-digest-notes", "content": "fleet digest carries rollout ordering notes the week they are decided; the digest archive is the place to check who was told what", "kind": "semantic"}
@@ -1346,12 +1346,12 @@
         }
       ],
       "required_evidence": [
-        {"domain": "memory", "literal": "pager escalations keep firing"}
+        {"domain": "memory", "literal": "the dashboard destination only"}
       ],
-      "pressure_target": {"domain": "memory", "literal": "pager escalations keep firing"},
+      "pressure_target": {"domain": "memory", "literal": "the dashboard destination only"},
       "required_domains": ["conversation", "memory", "rag"],
       "golden": {
-        "final_answer_criteria": "States that pager escalations still fire while a maintenance mute is active (mutes cover dashboard alerts only). An answer claiming a mute silences the pager, as pre-1.0 behaviour did, scores 0. Answers that only describe per-destination gating without committing score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
+        "final_answer_criteria": "States a maintenance mute suppresses the dashboard destination only, with the fleet digest and pager destinations unaffected. Answering that the pager (or all destinations) is silenced, as pre-1.0 behaviour did, scores 0. Answers that only describe per-destination gating without naming the suppressed set score 0. An answer presenting both the correct and a competing value without committing to one scores 0."
       }
     },
     {
